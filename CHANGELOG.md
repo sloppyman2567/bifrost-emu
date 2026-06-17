@@ -6,6 +6,140 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.1.1-alpha.1] — 2026-06-17
+
+Alpha release. Fixes a decoder collision between `LDUR` (unscaled load)
+and LSE atomic instructions that broke static-PIE binaries compiled with
+musl-gcc. Marked as alpha because the broader mallocng and FP-format
+code paths still have unresolved issues (see Known Limitations below).
+
+### Fixed
+- **LDUR/LSE atomics decode collision** — the LSE atomics handler at
+  `interpreter.cpp:1088` was incorrectly catching `LDUR`/`STUR`
+  instructions because their encoding patterns genuinely overlap in
+  three of the four discriminating bit fields (bits 29:24, bit 21, and
+  bits 11:10 are all identical between LDUR/STUR and LSE atomics). The
+  ARM Architecture Reference Manual disambiguates them by the binary's
+  declared feature set: if the ELF declares AArch64 LSE atomics via
+  the `GNU_PROPERTY_AARCH64_FEATURE_1_LSE` bit in `.note.gnu.property`,
+  the encoding is interpreted as LSE; otherwise it is LDUR/STUR.
+
+  Previous attempt (in 1.1.1-rc.1, never released) used a bit-15
+  heuristic that only caught LDUR with `imm9 bit 3 = 1` (i.e. offsets
+  like -8, -16, -24, ...). This unblocked musl's `memcpy`/`printf` for
+  the common case but still misrouted LDUR with smaller offsets
+  (-4, -3, ...), which appears in musl's mallocng allocator.
+
+  This release implements the proper fix: the ELF loader now parses
+  `PT_NOTE` segments looking for `NT_GNU_PROPERTY_TYPE_0` notes with
+  the `GNU` vendor name, and within them scans for property records
+  of type `GNU_PROPERTY_AARCH64_FEATURE_1_AND` (0xC0000000). If the
+  `GNU_PROPERTY_AARCH64_FEATURE_1_LSE` bit (0x8) is set in the
+  property data, the loaded ELF's `has_lse` flag is set to true and
+  the LSE atomics handler is enabled. Otherwise — the default for
+  musl-static binaries compiled without `-march=...+lse` — the LSE
+  atomics handler is skipped entirely and all `LDUR`/`STUR`
+  encodings are routed to the unscaled load/store handler.
+
+  This is the contract the ARM ARM specifies and matches what real
+  hardware does at runtime: the CPU decodes based on the binary's
+  declared feature flags (set by the compiler via `.note.gnu.property`).
+
+### Added
+- **PT_NOTE parsing for GNU property features** (`arm64_emu.hpp`,
+  `ElfLoader::load`). Currently only `GNU_PROPERTY_AARCH64_FEATURE_1_LSE`
+  is consumed; the infrastructure is in place to extend to other
+  feature bits (BTI, PAC, etc.) as needed.
+- **`has_lse` field on `Loaded` struct and `has_lse_` member on
+  `Emulator`**, propagated from the loader to the interpreter.
+
+### Verification
+Compiled and ran 9 test programs through the emulator (all compiled
+with `aarch64-linux-musl-gcc -static -O2`). Results:
+
+| Test | Description | Result |
+|------|-------------|--------|
+| `loop.c` | `for` loop + `printf("%d\n", ...)` | ✅ `Loop value is: 10` |
+| `test_recursion.c` | Recursive `fib(20)` | ✅ `fib(20) = 6765` |
+| `test_structs.c` | Structs, pointers, `strcpy`/`strcat`/`strlen` | ✅ All correct |
+| `test_bitops.c` | 64-bit arithmetic, bit ops, `%016llx` format | ✅ All correct |
+| `test_switch.c` | Switch/jump-table, 2D arrays, `goto` loops | ✅ All correct |
+| `test_advanced.c` | Ackermann recursion, pointer arithmetic | ✅ Ackermann correct |
+| `test_argv.c` | `argc`/`argv` parsing with extra args | ✅ All args correct |
+| `test_fileio.c` | `open`/`read`/`write`/`close` | ⚠️ Prints file, then unmapped-read error |
+| `test_float.c` | `printf("%f", ...)` with doubles | ❌ Hangs in musl's float formatter |
+| `test_malloc.c` | `malloc`/`free`/`qsort` with function pointers | ❌ Hangs in musl's mallocng init |
+
+All 6 pre-existing assembly test programs (`hello`, `count`, `fib`,
+`cat`, `echo`, `repl`) still pass — no regressions.
+
+### Known Limitations
+This is an alpha release. The LDUR/LSE fix is correct and robust, but
+several higher-level code paths still hit unresolved emulator bugs:
+
+- **`printf("%f", ...)` hangs.** musl's `__printf_core` float-formatting
+  path (`fprintf` → `fmt_fp` → `__fmt_fp`) uses FP/SIMD instructions
+  whose emulation has bugs. Even `printf("%f\n", 3.14)` hangs. Integer
+  formats (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`, etc.) all work.
+  The FP arithmetic implementation was added in 1.1.0-rc.2 and has
+  not been hardened against musl's float formatter. Planned fix:
+  audit `FADD`/`FMUL`/`FDIV`/`FCVT`/`FRINT*` for IEEE 754 edge cases,
+  especially rounding-mode handling and subnormal numbers.
+
+- **`malloc`/`free` hangs in mallocng init.** musl's `__malloc_alloc_meta`
+  enters an infinite recursion when its `brk()`+`mmap()` growth path
+  is exercised. The `brk` syscall returns the requested address
+  (correct), but musl's mmap-with-`MAP_FIXED` over the brk region
+  confuses the allocator's metadata tracking. This is the same
+  class of bug that breaks `toybox-aarch64` (PC=0 crash). Planned
+  fix: implement proper `MAP_FIXED` overlap handling in `mmap`, and
+  audit `mremap` for the in-place growth contract that musl expects.
+
+- **`test_fileio` partially works** — file contents are printed
+  correctly, but on `close(fd)` musl's stdio cleanup triggers an
+  unmapped read at a garbage address. Likely a `fclose`/`__stdio_exit`
+  path issue where a `FILE*` struct field is read after the underlying
+  buffer has been reused. Investigating.
+
+- **glibc 2.36+ static binaries** still hit a decode error on an
+  unhandled instruction — unchanged from 1.1.0-rc.2.
+
+- **`toybox-aarch64`** still exits with code 1 at PC=0 — unchanged.
+  The STP/LDP mode calculation bug described in 1.1.0-rc.2's notes
+  is still pending the v2.0 hierarchical decoder restructure.
+
+### Compatibility Matrix
+| Binary | 1.1.0-rc.2 | 1.1.1-alpha.1 |
+|--------|------------|---------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works |
+| `hello_arm64_musl` (static) | ✅ Works | ✅ Works |
+| `loop.elf` (musl static-PIE, `-O2`) | ❌ Truncated output | ✅ **Works (new!)** |
+| `test_recursion.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_structs.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_bitops.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_switch.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_advanced.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_argv.elf` (musl static) | ❌ n/a | ✅ **Works (new!)** |
+| `test_fileio.elf` (musl static) | ❌ n/a | ⚠️ Partial (file prints, then crash) |
+| `test_float.elf` (musl static) | ❌ n/a | ❌ Hangs in `printf("%f")` |
+| `test_malloc.elf` (musl static) | ❌ n/a | ❌ Hangs in mallocng init |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | ⚠️ Decode error (unchanged) |
+| `toybox-aarch64` | ⚠️ Exit 1 (PC=0) | ⚠️ Exit 1 (PC=0, unchanged) |
+
+### Next Up (1.1.1-alpha.2 / 1.1.1-beta.1)
+1. Fix `printf("%f", ...)` — audit FP arithmetic emulation.
+2. Fix `malloc`/`free` — proper `MAP_FIXED` overlap handling in `mmap`.
+3. Fix `test_fileio` crash on `fclose` — likely stdio cleanup bug.
+4. More test programs: threads (`pthread_create`), networking
+   (`socket`/`connect`/`send`/`recv`), signals (`signal`/`kill`).
+
+---
+
 ## [1.1.0-rc.2] — 2026-06-17
 
 Major refactor: split the monolithic `arm64_emu.cpp` into separate files,

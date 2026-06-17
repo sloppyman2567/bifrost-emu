@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.1.0-rc.1
+  bifrost-emu  v1.1.1-alpha.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: beta](https://img.shields.io/badge/version-1.0.0--beta.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.1.1-alpha.1](https://img.shields.io/badge/version-1.1.1--alpha.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -122,9 +122,19 @@ python3 mini_arm64_asm.py prog.s -o prog.elf
 | `cat.elf` (assembled) | ✅ Works | |
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
-| `hello_arm64_musi` | ✅ Works | Full musl static |
-| `hello_arm64_static` (glibc) | ⚠️ Decode error | Gets past mallocng, unhandled instruction |
-| `toybox-aarch64` | ⚠️ Exit 1 | **Gets past mallocng init!** PC=0 (STP/LDP mode bug) |
+| `hello_arm64_musl` (static) | ✅ Works | Full musl static |
+| `loop.elf` (musl static-PIE, `-O2`) | ✅ Works | `for` loop + `printf("%d")` |
+| `test_recursion.elf` (musl static) | ✅ Works | Recursive `fib(20)` |
+| `test_structs.elf` (musl static) | ✅ Works | Structs, pointers, `strcat`/`strlen` |
+| `test_bitops.elf` (musl static) | ✅ Works | 64-bit arithmetic, `%016llx` |
+| `test_switch.elf` (musl static) | ✅ Works | Switch/jump-table, 2D arrays, `goto` |
+| `test_advanced.elf` (musl static) | ✅ Works | Ackermann recursion |
+| `test_argv.elf` (musl static) | ✅ Works | `argc`/`argv` with extra args |
+| `test_fileio.elf` (musl static) | ⚠️ Partial | File prints, then crash on `fclose` |
+| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f", ...)` triggers FP bug |
+| `test_malloc.elf` (musl static) | ❌ Hangs | mallocng init recursion loop |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
+| `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
 
 ## What's Implemented
 
@@ -164,6 +174,33 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
+## What's New in 1.1.1-alpha.1
+
+Alpha release. Fixes a decoder collision between `LDUR` (unscaled load)
+and LSE atomic instructions that broke static-PIE binaries compiled with
+musl-gcc, including the common `memcpy`/`printf` code path.
+
+- **Proper LDUR/LSE disambiguation via PT_NOTE parsing** — the LDUR/STUR
+  unscaled load/store encoding genuinely overlaps with LSE atomics in
+  three of four discriminating bit fields. The ARM ARM disambiguates
+  them by the binary's declared feature set: `GNU_PROPERTY_AARCH64_FEATURE_1_LSE`
+  in `.note.gnu.property`. The ELF loader now parses `PT_NOTE` segments
+  to detect this bit, and the LSE atomics handler is only enabled when
+  the binary actually declared LSE usage. Binaries compiled without
+  `+lse` (the default for musl-static) always route the ambiguous
+  encoding to LDUR/STUR — matching real hardware behavior.
+- **Tested with 9 musl-static C programs** — loops, recursion, structs,
+  64-bit arithmetic, switch/jump-tables, Ackermann, argv parsing all
+  work. See the compatibility matrix below for known failures
+  (`printf("%f")`, `malloc`/`free`, `fclose`).
+
+Also includes all fixes from 1.1.0-rc.2 (FP/SIMD arithmetic, VFS, file
+split, readv fix, SIMD STP/LDP) and 1.1.0-beta.1 (LSE atomics, CAS
+argument order, exclusive monitor, mremap in-place, mmap MAP_FIXED,
+getppid, stack 64MB).
+
+Full release notes in [CHANGELOG.md](CHANGELOG.md).
+
 ## What's New in 1.1.0-rc.2
 
 Major refactor: split the monolithic `arm64_emu.cpp` into separate files,
@@ -186,21 +223,41 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
-- No signal delivery (`rt_sigaction` is a no-op) — planned for 1.2.0
-- No dynamic linking (static binaries only)
-- No ASLR (binaries load at their preferred vaddr)
-- toybox crashes at PC=0 (STP/LDP mode calc bug — fix requires hierarchical
-  decoder restructure, planned for v2.0 alongside JIT)
-- glibc 2.36+ static binaries hit a decode error on an unhandled instruction
+This is alpha-quality software. Known issues:
 
-## Roadmap (v2.0+)
+- **`printf("%f", ...)` hangs.** musl's float-formatting path triggers bugs
+  in the FP arithmetic emulation (added in 1.1.0-rc.2). Integer formats
+  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **`malloc`/`free` hangs in musl's mallocng init.** The `brk`+`mmap`
+  growth path enters an infinite recursion. This also blocks toybox and
+  any binary that does nontrivial heap allocation. Planned fix: proper
+  `MAP_FIXED` overlap handling in `mmap`.
+- **No signal delivery** — `rt_sigaction` is a no-op. Planned for 1.2.0.
+- **No dynamic linking** — static binaries only.
+- **No ASLR** — binaries load at their preferred vaddr.
+- **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation bug.
+  Fix requires hierarchical decoder restructure, planned for v2.0.
+- **glibc 2.36+ static binaries** hit a decode error on an unhandled
+  instruction.
 
+## Roadmap
+
+**Short-term (1.1.1-beta.1 / 1.1.1):**
+1. Fix `printf("%f", ...)` — audit FP arithmetic for IEEE 754 edge cases.
+2. Fix `malloc`/`free` — proper `MAP_FIXED` overlap handling.
+3. Fix `fclose` crash in `test_fileio`.
+4. More test coverage: threads, networking, signals.
+
+**Medium-term (1.2.0):**
+1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page).
+2. SDL2 rendering for the graphics backend (1.3.0).
+
+**Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
    interpreter. Target: 100-500 MIPS.
-2. **FP/SIMD arithmetic** — `FADD`, `FMUL`, `FMLA`, `FCVT`, etc.
-3. **Exclusive monitor** — proper LL/SC semantics for `LDXR`/`STXR`.
-4. **Signal delivery** — real `rt_sigaction` + `rt_sigreturn`.
-5. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
+2. **Hierarchical decoder restructure** — fixes the STP/LDP mode bug
+   that breaks toybox.
+3. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
    statically-linked ARM64 SDL2 games at playable framerates.
 
 ## Forking

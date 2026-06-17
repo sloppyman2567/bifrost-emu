@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.0.0-beta.1)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.1.1-alpha.1)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -67,7 +67,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.1.0-rc.2";
+constexpr const char* VERSION = "1.1.1-alpha.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -313,6 +313,7 @@ public:
         uint64_t phnum;
         uint64_t phent;
         uint64_t end_addr;   // highest mapped addr (for brk baseline)
+        bool     has_lse;    // ELF declared AArch64 LSE atomic feature (NT_GNU_PROPERTY type 5)
     };
 
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data) {
@@ -370,6 +371,7 @@ public:
         info.phnum = e_phnum;
         info.phdr_addr = 0;
         info.end_addr  = 0;
+        info.has_lse   = false;
 
         for (auto& h : phdrs) {
             if (h.p_type == 6) { // PT_PHDR
@@ -398,6 +400,60 @@ public:
                     break;
                 }
             }
+        }
+
+        // Parse PT_NOTE segments to detect the GNU property AArch64 LSE feature.
+        // We look for NT_GNU_PROPERTY_TYPE_0 notes (n_type == 5) with the
+        // GNU vendor name "GNU\0", and within them search for property record
+        // type GNU_PROPERTY_AARCH64_FEATURE_1_AND (0xc0000000). If the
+        // GNU_PROPERTY_AARCH64_FEATURE_1_LSE bit (0x8) is set in the property
+        // data, the binary was compiled with LSE atomics enabled and we can
+        // safely route the ambiguous LDUR/LSE encoding group to the LSE
+        // atomic handler. Otherwise we route to LDUR/STUR (the common case
+        // for static binaries compiled without +lse, where musl's memcpy
+        // and printf paths rely on LDUR with negative offsets like -8).
+        for (auto& h : phdrs) {
+            if (h.p_type != 4) continue; // PT_NOTE
+            if (h.p_offset + h.p_filesz > data.size()) continue;
+            const uint8_t* note_base = data.data() + h.p_offset;
+            uint64_t note_size = h.p_filesz;
+            uint64_t off = 0;
+            while (off + 12 <= note_size) {
+                uint32_t n_namesz, n_descsz, n_type;
+                memcpy(&n_namesz, note_base + off + 0, 4);
+                memcpy(&n_descsz, note_base + off + 4, 4);
+                memcpy(&n_type,   note_base + off + 8, 4);
+                // Notes have 4-byte aligned name and desc.
+                uint32_t name_pad = (4 - (n_namesz & 3)) & 3;
+                uint32_t desc_pad = (4 - (n_descsz & 3)) & 3;
+                if (off + 12 + n_namesz + name_pad + n_descsz + desc_pad > note_size) break;
+                const uint8_t* name = note_base + off + 12;
+                const uint8_t* desc = name + n_namesz + name_pad;
+                // NT_GNU_PROPERTY_TYPE_0 (5) with vendor "GNU\0"
+                if (n_type == 5 && n_namesz >= 4 &&
+                    name[0]=='G' && name[1]=='N' && name[2]=='U' && name[3]==0) {
+                    // The descriptor is a list of property records:
+                    //   uint32_t pr_type, uint32_t pr_datasz, uint8_t pr_data[pr_datasz]
+                    uint32_t d_off = 0;
+                    while (d_off + 8 <= n_descsz) {
+                        uint32_t pr_type, pr_datasz;
+                        memcpy(&pr_type,   desc + d_off + 0, 4);
+                        memcpy(&pr_datasz, desc + d_off + 4, 4);
+                        if (d_off + 8 + pr_datasz > n_descsz) break;
+                        // GNU_PROPERTY_AARCH64_FEATURE_1_AND = 0xC0000000
+                        if (pr_type == 0xC0000000 && pr_datasz >= 4) {
+                            uint32_t features;
+                            memcpy(&features, desc + d_off + 8, 4);
+                            // GNU_PROPERTY_AARCH64_FEATURE_1_LSE = 0x8
+                            if (features & 0x8) info.has_lse = true;
+                        }
+                        uint32_t pr_pad = (4 - (pr_datasz & 3)) & 3;
+                        d_off += 8 + pr_datasz + pr_pad;
+                    }
+                }
+                off += 12 + n_namesz + name_pad + n_descsz + desc_pad;
+            }
+            if (info.has_lse) break; // no need to scan more PT_NOTE segments
         }
 
         // Process RELA relocations (.rela.plt and .rela.dyn if present).
@@ -594,6 +650,7 @@ public:
         phdr_addr_ = info.phdr_addr;
         phnum_ = info.phnum;
         phent_ = info.phent;
+        has_lse_ = info.has_lse;
 
         // brk starts just above the loaded image, page-aligned up
         brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
@@ -692,6 +749,7 @@ private:
     uint64_t phdr_addr_ = 0;
     uint64_t phnum_ = 0;
     uint64_t phent_ = 0;
+    bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;
     bool brk_verbose_ = true;

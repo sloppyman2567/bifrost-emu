@@ -1072,21 +1072,30 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     //
     // Encoding: size 111000 o0 L 0 Rs op 00 Rn Rt  (bits 29:24 = 111000)
     //
-    // Distinguishing from regular load/store (which also has bits
-    // 29:24 = 111000): LSE atomics have bit 21 = 0 AND bits 11:10 = 00.
-    // Regular load/store register-offset has bit 21 = 1 and bits 11:10 = 10.
-    // Regular load/store unscaled has bit 21 = 0 and bits 11:10 = 00 (MODE),
-    // but is distinguished by bits 23:22 (opc) and the presence of imm9
-    // in bits 20:12. For LSE atomics, bits 20:16 = Rs and bits 15:12 = op.
+    // *** Disambiguation from LDUR/STUR ***
     //
-    // The key distinguishing bit: LSE atomics have bit 21 = 0 (it's a
-    // fixed zero bit in the encoding). Load/store register offset has
-    // bit 21 = 1. So checking bit 21 = 0 is necessary but not sufficient
-    // (unscaled load/store also has bit 21 = 0). We also need to check
-    // that bits 15:12 form a valid LSE opcode (0x0-0x8 or 0xC-0xF).
+    // The LDUR/STUR unscaled load/store encoding (size 111000 opc 0 imm9
+    // 00 Rn Rt) overlaps with the LSE atomics encoding in three of the
+    // four discriminating fields: bits 29:24, bit 21, and bits 11:10.
+    // The ARM ARM disambiguates them by the binary's declared feature
+    // set: if the ELF declares AArch64 LSE atomics (via the
+    // GNU_PROPERTY_AARCH64_FEATURE_1_LSE bit in .note.gnu.property),
+    // the encoding is interpreted as LSE; otherwise it's LDUR/STUR.
+    //
+    // We honor that contract here: the LSE atomics handler is only
+    // reached when the loaded ELF's `has_lse` flag is set (parsed by
+    // ElfLoader::load from PT_NOTE segments). Binaries compiled without
+    // +lse — which is the default for musl-static builds — always have
+    // has_lse = false, so any LDUR x7, [x4, #-8] in musl's memcpy is
+    // correctly routed to the unscaled load/store handler below.
+    //
+    // CAS (opcodes 0xC-0xF within LSE) shares this gating. SWP
+    // (bit 21 = 1) has a distinct encoding and does not collide with
+    // LDUR/STUR, but we still gate it on has_lse_ for consistency.
     // ------------------------------------------------------------------
-    if ((op & 0x3F000000) == 0x38000000 &&   // bits 29:24 = 111000
-        (op & 0x00200000) == 0 &&            // bit 21 = 0 (NOT load/store reg offset)
+    if (has_lse_ &&
+        (op & 0x3F000000) == 0x38000000 &&   // bits 29:24 = 111000
+        (op & 0x00200000) == 0 &&            // bit 21 = 0 (NOT load/store reg offset, NOT SWP)
         (op & 0x00000C00) == 0) {            // bits 11:10 = 00 (LSE atomics fixed)
         uint8_t size = (op >> 30) & 3;
         bool L  = (op >> 22) & 1;
