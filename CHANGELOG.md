@@ -6,6 +6,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.1.0-rc.2] — 2026-06-17
+
+Major refactor: split the monolithic `arm64_emu.cpp` into separate files,
+added real FP/SIMD arithmetic, VFS, and a public API header. The codebase
+is now structured for the v2.0 JIT (shared decoder between interpreter
+and future JIT compiler).
+
+### Added
+- **Real FP/SIMD arithmetic** — previously all FP ops were stubbed as NOP.
+  Now implements:
+  - **Arithmetic**: FADD, FSUB, FMUL, FDIV, FMAX, FMIN, FNMUL
+  - **1-source**: FABS, FNEG, FSQRT, FRINTN/P/M/Z/A/X/I (all rounding modes)
+  - **Convert**: FCVT (S↔D), FCVTZS/FCVTZU (FP→int), SCVTF/UCVTF (int→FP)
+  - **Compare**: FCMP/FCMPE with NaN handling, FCMP #0.0
+  - **Other**: FMOV (immediate decode), FCSEL, FMADD/FMSUB (fused multiply-accumulate)
+  - All use C++ native double/float with IEEE 754 semantics, both S and D registers.
+- **VFS (Virtual File System)** — synthetic `/proc` and `/dev` entries:
+  - `/proc/self/{exe,cmdline,maps,status,auxv,environ}`
+  - `/proc/{meminfo,cpuinfo,version}`
+  - `/proc/sys/kernel/osrelease`
+  - `/dev/{null,zero,urandom,random}`
+  - Uses `memfd_create` for seekable virtual file descriptors.
+- **File split** — `arm64_emu.cpp` split into:
+  - `decoder.hpp` / `decoder.cpp` — pure instruction decode (shared with future JIT)
+  - `interpreter.cpp` — `Emulator::execute()` (instruction execution)
+  - `syscalls.cpp` — `Emulator::syscall()` (all syscall handlers + VFS + threads)
+  - `graphics.hpp` / `graphics.cpp` — `GraphicsBackend` (framebuffer stub for 1.3.0)
+  - `api/bifrost.h` — public C API for `libbifrost`
+- **SIMD STP/LDP** — 32/64/128-bit pair store/load now handled (was silently dropped)
+- **STP/LDP handler** moved before logical handler (prevents ORR collision)
+- **Trace** now includes x29 (FP) and x30 (LR) in debug output
+
+### Fixed
+- **readv syscall number** — was case 73 (pselect6!), now case 67 (readv). This
+  was a pre-existing bug: musl calls pselect6 (73) and our code ran the readv
+  handler with wrong args, causing unmapped reads at 0x1000.
+- **CAS argument order** — Rs is the comparand, Rt is the new value (was swapped).
+- **LSE atomics handler** — moved to top level (was nested inside exclusive
+  load/store handler, unreachable due to encoding group mismatch).
+- **LSE atomics opcode table** — each opcode is a distinct operation
+  (0=LDADD, 1=LDCLR, 2=LDEOR, 3=LDSET, 4-7=SMAX/SMIN/UMAX/UMIN, 8=SWP, C-F=CAS).
+- **mmap MAP_FIXED** — hint only honored when MAP_FIXED is set; replaced pages zeroed.
+- **mremap** — grows mappings in-place (critical for musl's meta_area tracking).
+- **getppid** syscall added (was missing entirely).
+- **set_tid_address / gettid** — now properly per-thread.
+
+### Known Issues
+- **toybox** crashes at PC=0 due to STP/LDP mode calculation bug. The "correct"
+  mode calc (bits 25:24) breaks musl hello (exits 133). The old "buggy" mode
+  calc (bits 24:23) works for musl but corrupts toybox's stack. Proper fix
+  requires hierarchical decoder restructuring — planned for v2.0 alongside JIT.
+- **glibc 2.36+ static binaries** hit a decode error on an unhandled instruction.
+- **No signal delivery** — `rt_sigaction` is a no-op. Planned for 1.2.0.
+- **No dynamic linking** — static binaries only.
+
+### Compatibility Matrix
+| Binary | 1.0.0-beta.1 | 1.1.0-beta.1 | 1.1.0-rc.2 |
+|--------|--------------|---------------|------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `hello_arm64_musi` | ✅ Works | ✅ Works | ✅ Works |
+| `hello_arm64_static` (glibc) | ⚠️ Exits 133 | ⚠️ Exit 1 | ⚠️ Decode error |
+| `toybox-aarch64` | ❌ Hangs (atomics) | ⚠️ Exit 1 (past mallocng) | ⚠️ Exit 1 (PC=0) |
+
+### File Structure
+```
+bifrost-emu/
+├── arm64_emu.hpp         Emulator class (CPU, Memory, ElfLoader, threads)
+├── decoder.hpp           Shared decode tables (interpreter + future JIT)
+├── decoder.cpp           Pure instruction decode
+├── interpreter.cpp       Emulator::execute() — instruction execution
+├── syscalls.cpp          Emulator::syscall() — all syscalls + VFS + threads
+├── graphics.hpp          GraphicsBackend class (framebuffer)
+├── graphics.cpp          Graphics impl (stub for 1.3.0)
+├── api/bifrost.h         Public C API for libbifrost
+├── main.cpp              CLI entry point
+├── mini_arm64_asm.py     Built-in ARM64 assembler
+├── test/                 Sample ARM64 programs
+├── Makefile              Build, test, install targets
+├── CHANGELOG.md          This file
+├── README.md             Project documentation
+└── LICENSE               Public domain (Unlicense)
+```
+
+---
+
 ## [1.1.0-beta.1] — 2026-06-17
 
 **The mallocng loop is broken.** Toybox now gets past musl's mallocng

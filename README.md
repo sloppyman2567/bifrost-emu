@@ -123,23 +123,26 @@ python3 mini_arm64_asm.py prog.s -o prog.elf
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
 | `hello_arm64_musi` | ✅ Works | Full musl static |
-| `hello_arm64_static` (glibc) | ⚠️ Exit 1 | Gets past mallocng, hits null ptr |
-| `toybox-aarch64` | ⚠️ Exit 1 | **Gets past mallocng init!** Hits null ptr |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | Gets past mallocng, unhandled instruction |
+| `toybox-aarch64` | ⚠️ Exit 1 | **Gets past mallocng init!** PC=0 (STP/LDP mode bug) |
 
 ## What's Implemented
 
-**Instructions** — ~100 ARM64 instructions covering data processing
+**Instructions** — ~120 ARM64 instructions covering data processing
 (MOVZ/K/N, ADD/SUB/CMP family, AND/ORR/EOR, bitfield, conditional
 select, MUL/MADD/MSUB, UDIV/SDIV, RBIT/REV/CLZ), branches (B/BL/BR/
 BLR/RET, B.cond, CBZ/CBNZ, TBZ/TBNZ), load/store (immediate, register,
-pair, sign-extended), LSE atomics (LDADD/LDCLR/LDEOR/LDSET/CAS/SWP),
-acquire/release (STLR/LDAR), a subset of SIMD/NEON (DUP, LD1/ST1, CNT,
-CMEQ, UMAXP, SHL, USHR, EOR, REV16/32/64, FMOV), and system (SVC, MRS/
-MSR, BRK, barriers).
+pair, sign-extended), LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/
+UMAX/UMIN/SWP/CAS), acquire/release (STLR/LDAR), exclusive monitor
+(LDXR/STXR/CLREX), **full FP arithmetic** (FADD/FSUB/FMUL/FDIV/FSQRT/
+FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/FCSEL, both S and D
+registers with IEEE 754 semantics), a subset of SIMD/NEON (DUP, LD1/ST1,
+CNT, CMEQ, UMAXP, SHL, USHR, EOR, REV16/32/64, STP/LDP pairs), and
+system (SVC, MRS/MSR, BRK, barriers, CLREX).
 
-**Syscalls** — ~50 Linux AArch64 syscalls including the basics
+**Syscalls** — ~60 Linux AArch64 syscalls including the basics
 (read/write/openat/close/exit/exit_group/brk/mmap/mprotect/mremap),
-file I/O (lseek/fstat/statx/fstatat/readlinkat/statfs/fstatfs),
+file I/O (lseek/fstat/statx/fstatat/readlinkat/statfs/fstatfs/readv/writev),
 process info (getpid/gettid/getuid/geteuid/getgid/getegid/uname/
 prlimit64), timing (clock_gettime/gettimeofday/nanosleep/
 clock_nanosleep), threading (clone, futex with WAIT/WAKE/REQUEUE,
@@ -161,40 +164,34 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
-## What's New in 1.1.0-rc.1
+## What's New in 1.1.0-rc.2
 
-**The mallocng loop is broken.** Toybox now gets past musl's mallocng
-initialization — no more infinite `brk()` loop. The root cause was a
-structural bug in the instruction decoder: the entire LSE atomics
-handler (CAS, LDADD, LDCLR, SWP, etc.) was unreachable because it was
-nested inside the exclusive load/store handler, which checks a different
-encoding group (`bits 29:24 == 001000` vs LSE atomics' `111000`).
-Every LSE atomic was silently a NOP, which broke musl's lock acquisition.
+Major refactor: split the monolithic `arm64_emu.cpp` into separate files,
+added real FP/SIMD arithmetic, VFS, and a public API header.
 
-- **LSE atomics fixed** — handler moved to top level with proper bit
-  checks. CAS argument order corrected (Rs = comparand, Rt = new value).
-- **Exclusive monitor** — proper LL/SC semantics for `LDXR`/`STXR`/
-  `LDAXR`/`STLXR`/`CLREX`.
-- **mremap in-place growth** — critical for musl's meta_area tracking.
-- **mmap MAP_FIXED** — hint only honored when MAP_FIXED is set; replaced
-  pages are zeroed (Linux semantics).
-- **Stack** — 64 MB (was 8 MB), moved to `0x8000000000`.
-- **getppid** added, **set_tid_address** / **gettid** per-thread.
+- **FP/SIMD arithmetic** — FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/
+  SCVTF/FCVTZS/FMADD/FMSUB/FCSEL, all with IEEE 754 semantics (both S and D
+  registers). Previously all FP was stubbed as NOP.
+- **VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
+  `/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random}`.
+- **File split** — `decoder.hpp/cpp`, `interpreter.cpp`, `syscalls.cpp`,
+  `graphics.hpp/cpp`, `api/bifrost.h`. Decoder is shared with future JIT.
+- **readv fix** — was case 73 (pselect6!), now case 67 (readv).
+- **SIMD STP/LDP** — 32/64/128-bit pair store/load (was silently dropped).
 
-Toybox now exits 1 on a null pointer dereference (PC=0) — a different,
-simpler bug than the mallocng loop. Investigation continues in 1.1.0-rc.1.
+Also includes all fixes from 1.1.0-beta.1 (LSE atomics, CAS argument order,
+exclusive monitor, mremap in-place, mmap MAP_FIXED, getppid, stack 64MB).
 
-Full release notes and known issues in [CHANGELOG.md](CHANGELOG.md).
+Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
-- No FP/SIMD arithmetic (loads/stores work, but FADD/FMUL etc. are stubbed)
-- No signal delivery (`rt_sigaction` is a no-op)
+- No signal delivery (`rt_sigaction` is a no-op) — planned for 1.2.0
 - No dynamic linking (static binaries only)
 - No ASLR (binaries load at their preferred vaddr)
-- toybox and glibc-static binaries get past mallocng but hit a null
-  pointer dereference (PC=0) — likely a signal delivery or function
-  return issue
+- toybox crashes at PC=0 (STP/LDP mode calc bug — fix requires hierarchical
+  decoder restructure, planned for v2.0 alongside JIT)
+- glibc 2.36+ static binaries hit a decode error on an unhandled instruction
 
 ## Roadmap (v2.0+)
 
