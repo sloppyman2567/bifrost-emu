@@ -5,7 +5,7 @@
 // memory region; a host-side SDL2 window (when available) displays the
 // contents in real-time.
 //
-// In 1.1.5-alpha.1, this is a STUB — the framebuffer memory is allocated
+// In 1.3.0-alpha.1, this is a STUB — the framebuffer memory is allocated
 // and mmap-able, but no SDL2 window is opened (we're headless). The
 // real SDL2 rendering is planned for 1.3.0.
 //
@@ -43,7 +43,7 @@ public:
     uint32_t height() const { return height_; }
     size_t   size()   const { return (size_t)width_ * height_ * 4; }
 
-    // Refresh the display. In 1.1.5-alpha.1 this is a no-op.
+    // Refresh the display. In 1.3.0-alpha.1 this is a no-op.
     // In 1.3.0 this will push the framebuffer to an SDL2 window.
     void refresh();
 

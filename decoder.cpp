@@ -409,6 +409,20 @@ bool decode(DecodedInst& d, uint32_t inst) {
         return true;
     }
 
+    // Add/subtract with carry (ADC/ADCS/SBC/SBCS)
+    // Encoding: sf op 1 1010000 Rm 000000 Rn Rd
+    if ((inst & 0x1FE00000) == 0x1A000000) {
+        bool S = (inst >> 29) & 1;
+        bool sub = (inst >> 30) & 1;
+        if (sub) {
+            d.cls = S ? InstClass::SBCS_REG : InstClass::SBC_REG;
+        } else {
+            d.cls = S ? InstClass::ADCS_REG : InstClass::ADC_REG;
+        }
+        d.set_flags = S;
+        return true;
+    }
+
     // Conditional select (CSEL/CSINC/CSINV/CSNEG)
     if ((inst & 0x1FE00000) == 0x1A800000) {
         uint8_t op = (inst >> 10) & 3;
@@ -468,6 +482,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
 
     // ── SIMD / FP (subset — full implementation in 1.2.0) ───────────
     // For now, just recognize the categories so we don't crash.
+
+    // FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] (general ↔ FP, 64-bit with index)
+    // Encoding: 1001 1110 1010 1111 0000 00 Rn Rd (to FP, high half)
+    //           1001 1110 1011 1111 0000 00 Rn Rd (from FP, high half)
+    if ((inst & 0xFFE0FC00) == 0x9EA00000) {
+        bool to_fp = (inst >> 16) & 1;
+        d.cls = to_fp ? InstClass::FMOV_VD1 : InstClass::FMOV_RVD1;
+        d.is_vec = true;
+        return true;
+    }
+
     if ((inst & 0xBE000000) == 0x0C000000) {
         // SIMD load/store
         d.cls = ((inst >> 22) & 1) ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;

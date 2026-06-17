@@ -76,6 +76,10 @@ enum class InstClass : uint16_t {
     SUB_REG,        // subtract (shifted register)
     ADDS_REG,       // add setting flags (shifted register)
     SUBS_REG,       // subtract setting flags (shifted register)
+    ADC_REG,        // add with carry
+    ADCS_REG,       // add with carry setting flags
+    SBC_REG,        // subtract with carry
+    SBCS_REG,       // subtract with carry setting flags
     AND_REG,        // AND (shifted register)
     ORR_REG,        // OR (shifted register)
     EOR_REG,        // EOR (shifted register)
@@ -132,13 +136,31 @@ enum class InstClass : uint16_t {
     SIMD_DUP,       // vector duplicate
     SIMD_CNT,       // vector count
     SIMD_REV,       // vector byte reverse
-    FMOV,           // FP move
-    FADD,           // FP add (stub in 1.x, real in 1.2.0)
-    FSUB,           // FP subtract (stub)
-    FMUL,           // FP multiply (stub)
-    FDIV,           // FP divide (stub)
-    FCMP,           // FP compare (stub)
-    FCVT,           // FP convert (stub)
+    FMOV,           // FP move (register or general)
+    FMOV_IMM,       // FP move immediate
+    FMOV_VD1,       // FMOV Vd.D[1], Rn (move GPR to high 64 bits)
+    FMOV_RVD1,      // FMOV Rn, Vm.D[1] (move high 64 bits to GPR)
+    FADD,           // FP add
+    FSUB,           // FP subtract
+    FMUL,           // FP multiply
+    FDIV,           // FP divide
+    FMAX,           // FP max
+    FMIN,           // FP min
+    FNMUL,          // FP negative multiply
+    FMADD,          // FP fused multiply-add
+    FMSUB,          // FP fused multiply-subtract
+    FABS,           // FP absolute value
+    FNEG,           // FP negate
+    FSQRT,          // FP square root
+    FCMP,           // FP compare
+    FCMPE,          // FP compare with exception
+    FCVT,           // FP convert (S↔D)
+    FCVTZS,         // FP to signed int (toward zero)
+    FCVTZU,         // FP to unsigned int (toward zero)
+    SCVTF,          // signed int to FP
+    UCVTF,          // unsigned int to FP
+    FRINT,          // FP round to integer (all modes)
+    FCSEL,          // FP conditional select
 };
 
 // ── Decoded instruction ─────────────────────────────────────────────────

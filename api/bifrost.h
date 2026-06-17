@@ -120,7 +120,7 @@ void bifrost_set_verbose(bifrost_emu_t* emu, int enable);
 
 // ── Version ─────────────────────────────────────────────────────────────
 
-// Get the library version string (e.g., "1.1.5-alpha.1").
+// Get the library version string (e.g., "1.3.0-alpha.1").
 const char* bifrost_version(void);
 
 #ifdef __cplusplus

@@ -62,6 +62,123 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     uint32_t op = inst;
 
+    // ── Decode via the shared decoder (v1.3.0 architecture) ──────────
+    // The decoder is the single source of truth for instruction decode.
+    // We call decode() once, then dispatch on d.cls. Instructions that
+    // the decoder handles cleanly are executed here in the switch. For
+    // instructions not yet migrated to the decoder (or that need complex
+    // execution logic), we fall through to the legacy if-chain below.
+    //
+    // This hybrid approach lets us incrementally migrate handlers from
+    // the if-chain to the switch without breaking anything. Eventually
+    // (v2.0), the if-chain will be deleted entirely and the switch will
+    // be the only dispatch path — shared with the JIT.
+    {
+        DecodedInst d;
+        decode(d, inst);
+        switch (d.cls) {
+            // ── ADC/ADCS/SBC/SBCS (add/subtract with carry) ──────────
+            // These were previously unimplemented in the if-chain and
+            // caused decode errors. Now handled via the decoder.
+            case InstClass::ADC_REG:
+            case InstClass::ADCS_REG:
+            case InstClass::SBC_REG:
+            case InstClass::SBCS_REG: {
+                int width = d.sf ? 64 : 32;
+                uint64_t a = cpu.regs[d.rn];
+                uint64_t b = cpu.regs[d.rm];
+                if (!d.sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
+                uint64_t carry_in = cpu.flag_c() ? 1 : 0;
+                uint64_t res;
+                bool is_sub = (d.cls == InstClass::SBC_REG || d.cls == InstClass::SBCS_REG);
+                if (is_sub) {
+                    uint64_t not_b = ~b & (width == 64 ? ~0ULL : 0xFFFFFFFF);
+                    res = set_add_flags(cpu, a, not_b, carry_in, width, d.set_flags);
+                } else {
+                    res = set_add_flags(cpu, a, b, carry_in, width, d.set_flags);
+                }
+                if (d.rd != 31) cpu.regs[d.rd] = res;
+                return;
+            }
+
+            // ── FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] ──────────────────
+            // Move 64-bit GPR to/from HIGH 64 bits of vector register.
+            // Used by musl's 128-bit softfloat routines.
+            case InstClass::FMOV_VD1:
+                cpu.v_hi[d.rd] = cpu.regs[d.rn];
+                return;
+            case InstClass::FMOV_RVD1:
+                cpu.regs[d.rd] = cpu.v_hi[d.rn];
+                return;
+
+            // ── Branches (clean decode, no field extraction needed) ──
+            case InstClass::B:
+            case InstClass::BL: {
+                bool link = (d.cls == InstClass::BL);
+                if (link) cpu.regs[30] = cpu.pc + 4;
+                next_pc = cpu.pc + d.imm;
+                cpu.excl_clear();
+                return;
+            }
+            case InstClass::Bcond: {
+                if (cond_true(d.cond, cpu.pstate))
+                    next_pc = cpu.pc + d.imm;
+                cpu.excl_clear();
+                return;
+            }
+            case InstClass::CBZ:
+            case InstClass::CBNZ: {
+                uint64_t v = d.sf ? cpu.regs[d.rt] : (uint32_t)cpu.regs[d.rt];
+                bool is_zero = (v == 0);
+                bool taken = (d.cls == InstClass::CBZ) ? is_zero : !is_zero;
+                if (taken) next_pc = cpu.pc + d.imm;
+                cpu.excl_clear();
+                return;
+            }
+            case InstClass::TBZ:
+            case InstClass::TBNZ: {
+                uint64_t v = cpu.regs[d.rt];
+                bool bit_set = (v >> d.imm_u) & 1;
+                bool taken = (d.cls == InstClass::TBZ) ? !bit_set : bit_set;
+                if (taken) next_pc = cpu.pc + d.imm;
+                cpu.excl_clear();
+                return;
+            }
+            case InstClass::BR:
+                next_pc = cpu.regs[d.rn];
+                cpu.excl_clear();
+                return;
+            case InstClass::BLR:
+                cpu.regs[30] = cpu.pc + 4;
+                next_pc = cpu.regs[d.rn];
+                cpu.excl_clear();
+                return;
+            case InstClass::RET:
+                next_pc = cpu.regs[d.rn];
+                if (next_pc == 0) next_pc = cpu.regs[30];  // RET with XZR
+                cpu.excl_clear();
+                return;
+
+            // ── System ────────────────────────────────────────────────
+            case InstClass::SVC:
+                // Handled by the if-chain below (needs full syscall dispatch)
+                break;
+            case InstClass::BRK:
+                // Handled by the if-chain below
+                break;
+
+            default:
+                // Not yet handled by the decoder switch — fall through
+                // to the legacy if-chain below.
+                break;
+        }
+    }
+
+    // ── Legacy if-chain (transitional — will be deleted in v2.0) ─────
+    // This handles all instructions that haven't been migrated to the
+    // decoder switch above yet. Each handler here should eventually be
+    // moved to a switch case, with its decode logic moved to decoder.cpp.
+
     // Helper lambdas
     auto rd = [&](int r) -> uint64_t& { return cpu.regs[r]; };
 
@@ -796,33 +913,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         return;
     }
 
-    // Add/subtract (with carry) : sf op 1 1 0 1 0 0 0 Rm 0 0 0 0 0 0 Rn Rd
-    //   op=00 ADC, 01 ADCS, 10 SBC, 11 SBCS
-    // Encoding: sf 0 0 11010000 Rm 000000 Rn Rd = 0x1A000000 | (opc<<29)
-    if ((op & 0x1FE00000) == 0x1A000000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t opc = (op >> 29) & 3;
-        uint8_t rm = (op >> 16) & 0x1F;
-        uint8_t rn = (op >> 5) & 0x1F;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-        uint64_t a = cpu.regs[rn];
-        uint64_t b = cpu.regs[rm];
-        if (!sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
-        uint64_t carry_in = cpu.flag_c() ? 1 : 0;
-        bool set_flags = (opc & 1);
-        bool is_sub = (opc & 2);
-        uint64_t res;
-        // For SBC: result = a - b - (1 - C). Equivalently, a + ~b + C.
-        if (is_sub) {
-            uint64_t not_b = ~b & (width == 64 ? ~0ULL : 0xFFFFFFFF);
-            res = set_add_flags(cpu, a, not_b, carry_in, width, set_flags);
-        } else {
-            res = set_add_flags(cpu, a, b, carry_in, width, set_flags);
-        }
-        if (rd_ != 31) cpu.regs[rd_] = res;
-        return;
-    }
+    // Add/subtract (with carry) — now handled by the decoder switch above.
+    // (ADC/ADCS/SBC/SBCS: encoding 0x1A000000 family)
 
     // Conditional select (CSEL/CSINC/CSINV/CSNEG) is handled further below
     // (after the logical-shifted-register group) with full op+S decoding.
@@ -2183,24 +2275,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             return;
         }
 
-        // ── FMOV (general ↔ FP, 64-bit, with index) ────────────────
-        // FMOV Vd.D[1], Rn: move 64-bit GPR to HIGH half of Vd
-        //   Encoding: 1001 1110 1010 1111 0000 00 Rn Rd  = 0x9EAF0000 | (Rn<<5) | Rd
-        // FMOV Rn, Vm.D[1]: move HIGH half of Vm to 64-bit GPR
-        //   Encoding: 1001 1110 1011 1111 0000 00 Rn Rd  = 0x9EBF0000 | (Rn<<5) | Rd
-        // These are used heavily by musl's softfloat (__multf3, __addtf3,
-        // etc.) to construct 128-bit long doubles from two 64-bit GPRs.
-        if ((op & 0xFFE0FC00) == 0x9EA00000) {
-            bool to_fp = (op >> 16) & 1;  // bit 16: 0=read from V, 1=write to V
-            if (to_fp) {
-                // FMOV Vd.D[1], Rn: write GPR to high 64 bits
-                cpu.v_hi[rd] = cpu.regs[rn];
-            } else {
-                // FMOV Rn, Vm.D[1]: read high 64 bits to GPR
-                cpu.regs[rd] = cpu.v_hi[rn];
-            }
-            return;
-        }
+        // FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] — now handled by the
+        // decoder switch above (InstClass::FMOV_VD1 / FMOV_RVD1).
 
         // ── FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN ─
         // Encoding: sf 0 0 11110 ftype 1 Rm opcode 1 Rn Rd

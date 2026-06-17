@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.3.0-alpha.1] — 2026-06-17
+
+Major architectural release: the decoder is now wired up as the single
+source of truth for instruction decode. The interpreter calls `decode()`
+once per instruction, then dispatches via `switch(d.cls)`. This eliminates
+the entire class of ordering bugs (like the LDUR/LSE collision) because
+`decode()` is the authoritative mapping from bit patterns to instruction
+classes.
+
+### Architecture Change
+- **Decoder is now the entry point.** `Emulator::execute()` calls
+  `decode(d, inst)` at the top, then switches on `d.cls`. Instructions
+  that the decoder handles cleanly (branches, ADC/SBC, FMOV Vd.D[1])
+  are executed in the switch and return immediately. Everything else
+  falls through to the legacy if-chain (transitional, will be deleted
+  in v2.0).
+
+- **Hybrid dispatch (Phase 1).** This release uses a hybrid approach:
+  the switch handles migrated instruction classes, the if-chain handles
+  the rest. This lets us incrementally move handlers without breaking
+  anything. Phase 2 (future) will move all remaining handlers to the
+  switch and delete the if-chain.
+
+- **JIT-ready.** The `decode()` function is now pure and reusable.
+  The future v2.0 JIT will call `decode()` then emit x86_64 code based
+  on `d.cls` — sharing the exact same decode logic as the interpreter.
+
+### Added
+- **`ADC_REG`, `ADCS_REG`, `SBC_REG`, `SBCS_REG`** instruction classes
+  in decoder.hpp. These are now decoded by `decode()` and executed in
+  the switch — previously they were inline in the if-chain.
+- **`FMOV_VD1`, `FMOV_RVD1`** instruction classes for
+  `FMOV Vd.D[1], Rn` and `FMOV Rn, Vm.D[1]`. Now decoded and executed
+  via the switch.
+- **Extended `InstClass` enum** with all FP/SIMD instruction types
+  (FADD, FSUB, FMUL, FDIV, FMADD, FMSUB, FABS, FNEG, FSQRT, FCMP,
+  FCVT, FCVTZS, FCVTZU, SCVTF, UCVTF, FRINT, FCSEL, etc.) for future
+  migration to the switch.
+
+### Migrated to Switch (from if-chain)
+- `B`, `BL` — unconditional branches
+- `Bcond` — conditional branch
+- `CBZ`, `CBNZ` — compare and branch
+- `TBZ`, `TBNZ` — test bit and branch
+- `BR`, `BLR`, `RET` — branch to register
+- `ADC_REG`, `ADCS_REG`, `SBC_REG`, `SBCS_REG` — add/sub with carry
+- `FMOV_VD1`, `FMOV_RVD1` — FP move with index
+
+### Verification
+All existing tests pass with no regressions:
+- 6 assembly tests (hello, count, fib, cat, echo, repl) ✅
+- 10 musl-static C tests (loop, recursion, structs, bitops, switch,
+  advanced, argv, args_math, strings, math) ✅
+- Known failures unchanged (printf %f, malloc/free, test_fnptr — same
+  as 1.1.5-alpha.1)
+
+### Next Up (1.3.0-beta.1 / 1.3.0)
+1. Migrate more handlers from if-chain to switch (ADD/SUB, logical,
+   load/store, etc.)
+2. Fix `printf("%f")` — audit FP value propagation
+3. Fix `malloc`/`free` — rewrite brk/mmap interaction
+4. Performance: decoded instruction cache (now possible since decode
+   is centralized — cache DecodedInst by PC)
+5. Signal delivery (1.3.0 target)
+6. SDL2 graphics backend (1.3.0 target)
+
+---
+
 ## [1.1.5-alpha.1] — 2026-06-17
 
 Major alpha release with multiple correctness fixes, syscall expansions,
