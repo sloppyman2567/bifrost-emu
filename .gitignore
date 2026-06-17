@@ -1,0 +1,26 @@
+# Build artifacts
+bifrost-emu
+bifrost-emu-dbg
+*.o
+*.a
+*.so
+*.dSYM/
+
+# Test binaries (regenerated from .s)
+test/*.elf
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake (if added later)
+build/
+cmake-build-*/
+
+# Logs
+*.log
+trace-*.txt
