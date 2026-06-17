@@ -813,7 +813,7 @@ private:
     // ------------------------------------------------------------------
     void step(CPU& cpu) {
         if (trace_) {
-            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx pstate=0x%x sp=0x%llx\n",
+            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x sp=0x%llx\n",
                     cpu.tid,
                     (unsigned long long)cpu.pc,
                     (unsigned long long)cpu.regs[0],
@@ -833,6 +833,8 @@ private:
                     (unsigned long long)cpu.regs[26],
                     (unsigned long long)cpu.regs[27],
                     (unsigned long long)cpu.regs[28],
+                    (unsigned long long)cpu.regs[29],
+                    (unsigned long long)cpu.regs[30],
                     cpu.pstate,
                     (unsigned long long)cpu.sp);
         }
