@@ -129,6 +129,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         int32_t imm = sign_extend(op & 0x03FFFFFF, 26) << 2;
         if (link) cpu.regs[30] = cpu.pc + 4;
         next_pc = cpu.pc + imm;
+        cpu.excl_clear();
         return;
     }
 
@@ -141,6 +142,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         int32_t imm = sign_extend((op >> 5) & 0x7FFFF, 19) << 2;
         if (cond_true(cond, cpu.pstate)) {
             next_pc = cpu.pc + imm;
+            cpu.excl_clear();
         }
         return;
     }
@@ -159,6 +161,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         bool zero = (v == 0);
         if (zero != nz) { // CBZ: zero -> branch; CBNZ: !zero -> branch
             next_pc = cpu.pc + imm;
+            cpu.excl_clear();
         }
         return;
     }
@@ -182,6 +185,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // TBNZ (nz=1): branch when set == 1, i.e., set == nz
         if (set == nz) {
             next_pc = cpu.pc + imm;
+            cpu.excl_clear();
         }
         return;
     }
@@ -193,18 +197,21 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     if ((op & 0xFFFFFC00) == 0xD61F0000) { // BR
         uint8_t rn = (op >> 5) & 0x1F;
         next_pc = cpu.regs[rn];
+        cpu.excl_clear();
         return;
     }
     if ((op & 0xFFFFFC00) == 0xD63F0000) { // BLR
         uint8_t rn = (op >> 5) & 0x1F;
         cpu.regs[30] = cpu.pc + 4;
         next_pc = cpu.regs[rn];
+        cpu.excl_clear();
         return;
     }
     if ((op & 0xFFFFFC1F) == 0xD65F0000) { // RET [Rn=LR by default]
         uint8_t rn = (op >> 5) & 0x1F;
         uint8_t r  = rn ? rn : 30;
         next_pc = cpu.regs[r];
+        cpu.excl_clear();
         return;
     }
 
@@ -213,6 +220,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     //   1101 0100 000 imm16 000 00001
     // ------------------------------------------------------------------
     if ((op & 0xFFE0001F) == 0xD4000001) { // SVC
+        cpu.excl_clear();
         syscall(cpu);
         return;
     }
@@ -388,8 +396,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             return;
         }
 
-        // Everything else: NOP. Covers HINT space, barriers, CLREX,
+        // Everything else: NOP. Covers HINT space, barriers,
         // SYS/AT/DC/IC/TLBI (all EL1+), MSR to EL1+ sysregs.
+        //
+        // CLREX is encoded as 0xD503305F (System, L=0, op0=3, op1=3,
+        // CRn=0101, CRm=0000, op2=010, Rt=11111). Handle it explicitly
+        // because we need to clear the local exclusive monitor.
+        if (op == 0xD503305F) {
+            cpu.excl_clear();
+            return;
+        }
         return;
     }
 
@@ -1249,17 +1265,25 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // STXR/LDXR/STLXR/LDAXR with Rs (0x0F for non-acquire,
             // 0x1F for acquire/release variants like STLXR)
             if (L == 0) {
-                // Store: write Wt to [Xn], set Ws = 0 (success)
-                uint64_t v = cpu.regs[rt];
-                uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
-                v &= mask;
-                mem_.write(base, &v, width_bytes);
-                if (rs != 31) cpu.regs[rs] = 0;  // always succeed
+                // Store-exclusive: write Wt to [Xn] only if the monitor
+                // is still tagged for this address; set Ws = 0 on success,
+                // Ws = 1 on failure. Either way, clear the monitor.
+                bool ok = cpu.excl_check(base, width_bytes);
+                if (ok) {
+                    uint64_t v = cpu.regs[rt];
+                    uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
+                    v &= mask;
+                    mem_.write(base, &v, width_bytes);
+                }
+                if (rs != 31) cpu.regs[rs] = ok ? 0 : 1;
+                cpu.excl_clear();
             } else {
-                // Load: read from [Xn] into Wt
+                // Load-exclusive: read from [Xn] into Wt, mark the
+                // monitor for this address+size.
                 uint64_t v = 0;
                 mem_.read(base, &v, width_bytes);
                 cpu.regs[rt] = v;
+                cpu.excl_mark(base, width_bytes);
             }
             return;
         }
@@ -1279,15 +1303,24 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             return;
         }
 
-        // LSE atomic ops (LDADD, LDCLR, LDEOR, LDSET, CAS, SWP, etc).
-        // These have bit 23 = 1 (i.e. bits 27:23 = 11100 or similar).
-        // For our purposes: any LSE atomic is implemented as
-        // load + op + store + return old value (which is what they do).
-        if ((op & 0x3B200000) == 0x32000000 ||
-            (op & 0x3B200C00) == 0x38000800) {
-            // CAS family: compare-and-swap
-            // size 0010001 o0 L 0 s 0 0 0 0 0 Rs Rn Rt
-            // Rt = comparand, Rs = new value
+        // ── CAS family (compare-and-swap) ─────────────────────────────
+        // CAS is encoded within the LSE atomic ops space with opcodes
+        // 0xC (CAS), 0xD (CASA), 0xE (CASL), 0xF (CASAL). The A/L
+        // suffixes are just memory ordering hints we ignore.
+        //
+        // CAS semantics:
+        //   - Rt = comparand (compared against [Rn])
+        //   - Rs = new value (stored to [Rn] if comparand matched)
+        //   - Rt receives old memory value (always, success or failure)
+        //
+        // The encoding shape is the same as LDADD family:
+        //   size 111000 o0 L Rs opcode Rn Rt
+        // The opcode distinguishes which atomic op (ADD/CLR/EOR/.../CAS).
+        //
+        // We detect CAS by checking opcode bits 15:12 == 11xx (0xC-0xF).
+        // This must come BEFORE the LSE atomics switch below.
+        uint8_t atom_opcode_check = (op >> 12) & 0xF;
+        if (atom_opcode_check >= 0xC) {
             uint64_t old = 0;
             mem_.read(base, &old, width_bytes);
             uint64_t cmp = cpu.regs[rt];
@@ -1298,13 +1331,29 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t newv = cpu.regs[rs] & mask;
                 mem_.write(base, &newv, width_bytes);
             }
-            cpu.regs[rt] = old;  // return old value
+            // CAS always returns the old value in Rt, whether or not
+            // the swap succeeded. Callers detect failure by comparing
+            // Rt to the comparand they passed in.
+            if (rt != 31) cpu.regs[rt] = old;
             return;
         }
 
         if ((op & 0x3B000000) == 0x38000000) {
-            // LSE atomic memory ops (LDADD/LDCLR/LDEOR/LDSET/SWP/etc)
-            // size 111000 o0 L Rs opcode Rn Rt
+            // LSE atomic memory ops (LDADD/LDCLR/LDEOR/LDSET/SWP/etc).
+            // Encoding: size 111000 o0 L Rs opcode Rn Rt
+            //   - size = bits 31:30 (1/2/4/8 bytes)
+            //   - o0 = bit 23 (acquire-release hint, ignored for semantics)
+            //   - L  = bit 22 (load variant: write old value to Rt)
+            //   - Rs = bits 21:16 (source operand for the atomic op)
+            //   - opcode = bits 15:12 (the actual op: ADD/CLR/EOR/SET/SWP/etc)
+            //   - Rn = bits 9:5 (base address)
+            //   - Rt = bits 4:0 (destination for old value, when L=1)
+            //
+            // IMPORTANT: the AArch64 LSE opcode field encodes the
+            // *operation*, not the A/L ordering suffix. The ordering
+            // suffixes are encoded in o0 (bit 23) and L (bit 22) and
+            // don't change the semantics for us (we're sequentially
+            // consistent anyway).
             uint8_t atom_op = (op >> 12) & 0xF;
             uint64_t a = 0, b = cpu.regs[rs];
             mem_.read(base, &a, width_bytes);
@@ -1314,31 +1363,29 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             uint64_t newv = 0;
             switch (atom_op) {
                 case 0x0: newv = (a + b) & mask; break;       // LDADD
-                case 0x1: newv = (a + b) & mask; break;       // LDADDA
-                case 0x2: newv = (a + b) & mask; break;       // LDADDL
-                case 0x3: newv = (a + b) & mask; break;       // LDADDAL
-                case 0x4: newv = (a & b) & mask; break;       // LDCLR
-                case 0x5: newv = (a & b) & mask; break;       // LDCLRA
-                case 0x6: newv = (a & b) & mask; break;       // LDCLRL
-                case 0x7: newv = (a & b) & mask; break;       // LDCLRAL
-                case 0x8: newv = (a ^ b) & mask; break;       // LDEOR
-                case 0x9: newv = (a ^ b) & mask; break;       // LDEORA
-                case 0xA: newv = (a ^ b) & mask; break;       // LDEORL
-                case 0xB: newv = (a ^ b) & mask; break;       // LDEORAL
-                case 0xC: newv = (a | b) & mask; break;       // LDSET
-                case 0xD: newv = (a | b) & mask; break;       // LDSETA
-                case 0xE: newv = (a | b) & mask; break;       // LDSETL
-                case 0xF: newv = (a | b) & mask; break;       // LDSETAL
+                case 0x1: newv = (a & ~b) & mask; break;      // LDCLR
+                case 0x2: newv = (a ^ b) & mask; break;       // LDEOR
+                case 0x3: newv = (a | b) & mask; break;       // LDSET
+                case 0x4: { // SMAX (signed)
+                    int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                    int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                    newv = (sa > sb ? sa : sb) & mask; break;
+                }
+                case 0x5: { // SMIN
+                    int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                    int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                    newv = (sa < sb ? sa : sb) & mask; break;
+                }
+                case 0x6: newv = (a > b ? a : b) & mask; break;   // UMAX
+                case 0x7: newv = (a < b ? a : b) & mask; break;   // UMIN
+                case 0x8: newv = b & mask; break;                  // SWP (swap)
+                default:  newv = a & mask; break;                  // unknown → no-op
             }
-            // For S variants (no L bit), store newv and return old in Rs.
-            // For L variants (load), return old in Rt and store newv.
             mem_.write(base, &newv, width_bytes);
-            if (L) {
-                // load variant: return old value in Rt
+            // L=1 (load variants LDADD/LDCLR/etc.): return old value in Rt.
+            // L=0 (store variants STADD/STCLR/etc.): Rt is not written.
+            if (L && rt != 31) {
                 cpu.regs[rt] = a;
-            } else {
-                // store variant: return old value in Rs
-                if (rs != 31) cpu.regs[rs] = a;
             }
             return;
         }
@@ -2153,9 +2200,24 @@ void Emulator::syscall(CPU& cpu) {
             // a0=addr, a1=length, a2=prot, a3=flags, a4=fd, a5=offset
             uint64_t addr = a0;
             uint64_t length = a1;
+            uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = (uint64_t)-22; return; } // EINVAL
-            // Map anonymous memory only for simplicity
-            uint64_t mapped = mem_.mmap_alloc(length, addr);
+
+            // MAP_FIXED (0x10): kernel MUST map at exactly `addr`,
+            // replacing any existing mapping. Without MAP_FIXED, `addr`
+            // is just a hint — the kernel can (and usually does) ignore
+            // it and pick a fresh address.
+            //
+            // The previous code honored the hint unconditionally, which
+            // broke musl's malloc: musl calls mmap(addr=heap_end, ...)
+            // as a hint, and our mmap_alloc returned the same address
+            // every time, causing musl to think each mmap succeeded
+            // without actually getting new memory.
+            constexpr uint64_t MAP_FIXED = 0x10;
+            uint64_t effective_hint = (flags & MAP_FIXED) ? addr : 0;
+
+            uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
+
             // If a file fd is given, read its contents in
             if ((int64_t)a4 != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {
                 struct stat st;

@@ -6,6 +6,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.1.0-alpha.1] — 2026-06-17
+
+First alpha toward the 1.1 "stability" release. Three real bugs in the
+atomic / memory subsystem are fixed, but glibc-static and toybox still
+don't run end-to-end (they get past the previous failure points but hit
+a deeper musl-mallocng recursion issue that needs investigation).
+
+### Added
+- **Local exclusive monitor** for `LDXR`/`STXR`/`LDAXR`/`STLXR`/`CLREX`.
+  Per-CPU monitor state (`excl_tag_valid`, `excl_tag_addr`,
+  `excl_tag_size`) tracks the most recent exclusive load. `STXR` now
+  succeeds only if the monitor is tagged for an overlapping address
+  range, and clears the monitor either way. Any branch, SVC, or
+  non-exclusive store also clears the monitor (conservative — real HW
+  only clears on conflicting access, but clearing more often is always
+  safe). `CLREX` (encoding `0xD503305F`) is now explicitly decoded
+  instead of being treated as a NOP.
+
+### Fixed
+- **LSE atomics opcode table** (major). The previous code mapped
+  opcodes 0-3 to LDADD variants, 4-7 to LDCLR variants, 8-11 to LDEOR
+  variants, and 12-15 to LDSET variants — treating the 4-bit opcode
+  as if it encoded the A/L ordering suffix. In reality, each opcode is
+  a different operation: 0=LDADD, 1=LDCLR, 2=LDEOR, 3=LDSET, 4-7=
+  SMAX/SMIN/UMAX/UMIN, 8=SWP, 12-15=CAS variants. The old code
+  computed `a + b` for what should have been `a & ~b` (LDCLR), causing
+  musl's lock bit to never be properly cleared.
+- **CAS detection**. The old code used a partial mask that never
+  matched real CAS instructions. CAS is encoded within the LSE atomic
+  ops space (bits 29:24 = 111000) with opcodes 0xC-0xF. Now detected
+  by checking `atom_opcode >= 0xC` before the LSE switch. CAS
+  semantics: load old value, compare against Rt, store Rs if matched,
+  always return old value in Rt.
+- **mmap MAP_FIXED handling**. The previous code honored the `addr`
+  hint unconditionally, returning the same address musl asked for even
+  when `MAP_FIXED` wasn't set. This caused musl's malloc to think each
+  `mmap(heap_end, ...)` succeeded without actually getting new memory,
+  leading to a 4KB-at-a-time heap growth loop. Now: `addr` is only
+  honored when `MAP_FIXED` (0x10) is set; otherwise we ignore the
+  hint and use the bump allocator (matching Linux kernel behavior).
+
+### Changed
+- `set_tid_address` now stores the pointer per-thread and returns the
+  calling thread's TID (was returning 1 unconditionally).
+- `gettid` returns the guest TID of the calling thread (was returning
+  `getpid()`).
+
+### Known Issues
+- **musl-static toybox** still hangs. The previous failure (LDXR/STXR
+  always succeeding) is fixed, but toybox now hits a different bug:
+  musl's mallocng enters a deep recursion (SP drops ~54KB per
+  iteration) when allocating memory during `__libc_start_main`. Each
+  iteration calls `brk()` to extend the heap by 4KB and recurses
+  further. Likely cause: musl's "growable array" tracking structure
+  isn't being updated correctly, possibly due to a subtle memory
+  ordering or atomic semantics issue we haven't pinned down yet.
+- **glibc 2.36+ static binaries** now hang instead of exiting 133.
+  The mmap MAP_FIXED fix changed the address glibc receives, and the
+  getrandom vDSO assertion is no longer triggered — but glibc enters
+  its own brk loop before reaching main(). Probably related to the
+  same mallocng-style issue as toybox.
+- **No FP/SIMD arithmetic**, **no signal delivery**, **no dynamic
+  linking** — unchanged from 1.0.0-beta.1.
+
+### Compatibility Matrix
+| Binary | 1.0.0-beta.1 | 1.1.0-alpha.1 |
+|--------|--------------|---------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works |
+| `hello_arm64_musi` | ✅ Works | ✅ Works |
+| `hello_arm64_static` (glibc) | ⚠️ Exits 133 | ❌ Hangs (brk loop) |
+| `toybox-aarch64` | ❌ Hangs (LDXR/STXR) | ❌ Hangs (mallocng recursion) |
+
+### Next up (1.1.0-beta.1)
+- Investigate the musl mallocng recursion — likely needs proper
+  memory ordering semantics or a fix to how we handle `mremap` /
+  `MAP_ANONYMOUS | MAP_FIXED` combos that musl uses to grow the
+  tracking array.
+- Audit existing 100 instructions for correctness bugs (NZCV flag
+  edge cases, sign-extension issues).
+- Implement signal delivery (`rt_sigaction` + `rt_sigreturn` +
+  trampoline page).
+- Implement FP/SIMD arithmetic (`FADD`/`FMUL`/`FCVT`/`FCMP`).
+
+---
+
 ## [1.0.0-beta.1] — 2026-06-17
 
 First tagged release. The interpreter is stable enough to run musl-static

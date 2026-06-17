@@ -66,7 +66,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.0.0-beta.1";
+constexpr const char* VERSION = "1.1.0-alpha.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -488,6 +488,50 @@ public:
     // When this thread exits, the word at this address is zeroed and a
     // futex wake is performed on it. Required for pthread_join to work.
     uint64_t clear_child_tid = 0;
+
+    // ── Local Exclusive Monitor ───────────────────────────────────────
+    // AArch64 LL/SC atomics use an "exclusive monitor" — a single-entry
+    // hardware tag that records the address of the most recent LDXR/LDAXR.
+    // STXR succeeds only if the monitor is still tagged for that address,
+    // and clears the tag. Any other memory access, branch, or exception
+    // also clears the tag.
+    //
+    // For a single-threaded emulator we could in principle skip this and
+    // always-succeed STXR, but musl's malloc uses LDXR/STXR in a loop and
+    // relies on the monitor being cleared between iterations when something
+    // else touches the same memory — without that, the loop never makes
+    // progress and the program hangs forever (toybox).
+    //
+    // Per-thread monitor state (each thread has its own, like real hardware).
+    bool     excl_tag_valid = false;   // is the monitor tagged?
+    uint64_t excl_tag_addr  = 0;       // tagged address (byte-granular)
+    uint32_t excl_tag_size  = 0;       // bytes covered (1/2/4/8)
+
+    // Mark the monitor as tagged for [addr, addr+size). Called from LDXR/LDAXR.
+    void excl_mark(uint64_t addr, uint32_t size) {
+        excl_tag_valid = true;
+        excl_tag_addr  = addr;
+        excl_tag_size  = size;
+    }
+    // Clear the monitor. Called on STXR (success or fail), on any non-excl
+    // store, on branch, on SVC, etc. Conservative: also clear on any load
+    // that isn't an LDXR (real HW only clears on same-address conflict,
+    // but clearing more often is always safe — it just makes STXR fail
+    // more often, which the guest must handle anyway).
+    void excl_clear() {
+        excl_tag_valid = false;
+    }
+    // Check whether a store at [addr, addr+size) would succeed given the
+    // current monitor state. True iff the ranges overlap (real HW checks
+    // exact match; we check overlap for robustness).
+    bool excl_check(uint64_t addr, uint32_t size) const {
+        if (!excl_tag_valid) return false;
+        uint64_t a_lo = excl_tag_addr;
+        uint64_t a_hi = excl_tag_addr + excl_tag_size;
+        uint64_t b_lo = addr;
+        uint64_t b_hi = addr + size;
+        return (a_lo < b_hi) && (b_lo < a_hi);
+    }
 
     void set_flag_n(bool v) { if (v) pstate |= (1u<<31); else pstate &= ~(1u<<31); }
     void set_flag_z(bool v) { if (v) pstate |= (1u<<30); else pstate &= ~(1u<<30); }
