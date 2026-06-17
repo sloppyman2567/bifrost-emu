@@ -2437,13 +2437,45 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 227: { // mremap - just allocate new
-            uint64_t new_addr = mem_.mmap_alloc(a2, 0);
-            // copy contents
-            std::vector<uint8_t> tmp(std::min<uint64_t>(a1, a2));
-            mem_.read(a0, tmp.data(), tmp.size());
-            mem_.write(new_addr, tmp.data(), tmp.size());
-            ret_host(new_addr);
+        case 227: { // mremap(old_addr, old_size, new_size, flags, new_addr)
+            // a0 = old_address, a1 = old_size, a2 = new_size, a3 = flags
+            //
+            // musl's mallocng uses mremap to grow the meta_area (the
+            // page that holds malloc metadata). It expects mremap to
+            // grow the mapping IN PLACE when possible — if mremap
+            // returns a different address, musl's metadata pointers
+            // become invalid and it enters an infinite allocation
+            // loop trying to rebuild them.
+            //
+            // We handle two cases:
+            //   1. If new_size <= old_size: shrink is a no-op, return old_addr.
+            //   2. If new_size > old_size: try to extend in-place by
+            //      mapping the pages [old_addr+old_size, old_addr+new_size).
+            //      This always succeeds in our sparse memory model
+            //      (no other mappings to conflict with), so we return
+            //      old_addr.
+            uint64_t old_addr = a0;
+            uint64_t old_size = a1;
+            uint64_t new_size = a2;
+
+            if (new_size <= old_size) {
+                // Shrink: just return the old address. (We don't
+                // actually unmap the freed pages, but that's fine —
+                // the guest won't access them.)
+                ret_host(old_addr);
+                return;
+            }
+
+            // Grow: map the additional pages in-place.
+            uint64_t extra_start = old_addr + old_size;
+            uint64_t extra_end   = old_addr + new_size;
+            // Round up to page boundary
+            extra_start = (extra_start + 0xFFF) & ~0xFFFULL;
+            extra_end   = (extra_end + 0xFFF) & ~0xFFFULL;
+            if (extra_end > extra_start) {
+                mem_.map_range(extra_start, extra_end - extra_start);
+            }
+            ret_host(old_addr);
             return;
         }
         case 233: { // madvise - no-op
@@ -2669,6 +2701,10 @@ void Emulator::syscall(CPU& cpu) {
         }
         case 172: { // getpid
             ret_host(::getpid());
+            return;
+        }
+        case 173: { // getppid
+            ret_host(::getppid());
             return;
         }
         case 174: { // getuid

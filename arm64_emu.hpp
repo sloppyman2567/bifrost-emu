@@ -215,6 +215,11 @@ public:
 
     // Allocate a chunk of fresh memory; returns starting address.
     // Simple bump allocator over a high address range. Thread-safe.
+    //
+    // When `hint` is non-zero, the allocation is placed at exactly `hint`
+    // (this is the MAP_FIXED semantic). Existing pages at that address
+    // are REPLACED with fresh zeroed pages — this matches Linux kernel
+    // behavior, where mmap(MAP_FIXED) unmaps any existing mapping first.
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0) {
         if (size == 0) size = PAGE_SIZE;
         std::lock_guard<std::mutex> g(mu_);
@@ -229,9 +234,15 @@ public:
         uint64_t start = base & ~PAGE_MASK;
         uint64_t end = base + size;
         for (; start < end; start += PAGE_SIZE) {
-            if (!pages_.count(start / PAGE_SIZE)) {
+            auto it = pages_.find(start / PAGE_SIZE);
+            if (it == pages_.end()) {
+                // New page — create zeroed.
                 pages_.emplace(start / PAGE_SIZE,
                                std::vector<uint8_t>(PAGE_SIZE, 0));
+            } else {
+                // Existing page — zero it out (MAP_FIXED semantics:
+                // the old mapping is replaced with a fresh anonymous one).
+                std::fill(it->second.begin(), it->second.end(), 0);
             }
         }
         return base;
