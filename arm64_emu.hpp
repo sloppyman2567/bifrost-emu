@@ -56,6 +56,7 @@
 #include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/sendfile.h>
+#include <sys/mman.h>
 #include <poll.h>
 #include <signal.h>
 #include <errno.h>
@@ -66,7 +67,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.1.0-beta.1";
+constexpr const char* VERSION = "1.1.0-rc.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------

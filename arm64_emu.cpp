@@ -2176,6 +2176,110 @@ void Emulator::syscall(CPU& cpu) {
             std::vector<uint8_t> path_bytes(off);
             mem_.read(a1, path_bytes.data(), off);
             std::string path_str((const char*)path_bytes.data(), off);
+
+            // ── VFS: virtual files ──────────────────────────────────
+            // Intercept specific paths and serve synthetic content.
+            // Uses memfd_create to create a seekable fd with the content.
+            auto serve_virtual = [&](const std::string& content) -> int {
+                int fd = memfd_create("bifrost-vfs", 0);
+                if (fd < 0) return -errno;
+                ssize_t w = ::write(fd, content.data(), content.size());
+                if (w < 0) { ::close(fd); return -errno; }
+                ::lseek(fd, 0, SEEK_SET);
+                return fd;
+            };
+
+            // /proc/self/exe → symlink to the ELF path
+            if (path_str == "/proc/self/exe" || path_str == "/proc/self/exe/") {
+                int fd = serve_virtual(elf_path_);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/self/cmdline → argv[0]\0argv[1]\0...
+            else if (path_str == "/proc/self/cmdline") {
+                std::string cmdline;
+                // We don't have argv here, but we can use elf_path_
+                cmdline = elf_path_ + '\0';
+                int fd = serve_virtual(cmdline);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/self/maps → basic memory map
+            else if (path_str == "/proc/self/maps") {
+                std::string maps = "";
+                maps += "00400000-004bf000 r-xp 00000000 00:00 0\n";
+                maps += "004bf000-004ce000 r--p 00000000 00:00 0\n";
+                maps += "004ce000-004df000 rw-p 00000000 00:00 0\n";
+                maps += "5000000000-5001000000 rw-p 00000000 00:00 0\n";
+                maps += "7fff000000-8000000000 rw-p 00000000 00:00 0 [stack]\n";
+                int fd = serve_virtual(maps);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/self/status → basic process info
+            else if (path_str == "/proc/self/status") {
+                std::string status = "";
+                status += "Name:\tbifrost-emu\n";
+                status += "State:\tR (running)\n";
+                status += "Tgid:\t1\n";
+                status += "Pid:\t1\n";
+                status += "PPid:\t0\n";
+                status += "Uid:\t0\t0\t0\t0\n";
+                status += "Gid:\t0\t0\t0\t0\n";
+                status += "VmSize:\t  8192 kB\n";
+                status += "VmRSS:\t  4096 kB\n";
+                status += "Threads:\t1\n";
+                int fd = serve_virtual(status);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/meminfo → basic memory info
+            else if (path_str == "/proc/meminfo") {
+                std::string mi = "";
+                mi += "MemTotal:       16777216 kB\n";
+                mi += "MemFree:         8388608 kB\n";
+                mi += "MemAvailable:   12582912 kB\n";
+                mi += "Buffers:               0 kB\n";
+                mi += "Cached:          4194304 kB\n";
+                int fd = serve_virtual(mi);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/cpuinfo → basic CPU info
+            else if (path_str == "/proc/cpuinfo") {
+                std::string ci = "";
+                ci += "processor\t: 0\n";
+                ci += "BogoMIPS\t: 100.00\n";
+                ci += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\n";
+                ci += "CPU implementer\t: 0x41\n";
+                ci += "CPU architecture: 8\n";
+                int fd = serve_virtual(ci);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/self/auxv → empty (we provide auxv on the stack)
+            else if (path_str == "/proc/self/auxv") {
+                int fd = serve_virtual("");
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/self/environ → just PATH
+            else if (path_str == "/proc/self/environ") {
+                int fd = serve_virtual("PATH=/bin:/usr/bin\0");
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/version
+            else if (path_str == "/proc/version") {
+                std::string pv = "Linux version 6.5.0 (bifrost-emu) (gcc) #1 SMP\n";
+                int fd = serve_virtual(pv);
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /proc/sys/kernel/osrelease
+            else if (path_str == "/proc/sys/kernel/osrelease") {
+                int fd = serve_virtual("6.5.0\n");
+                if (fd >= 0) { ret_host(fd); return; }
+            }
+            // /dev/null, /dev/zero, /dev/urandom → open host device
+            else if (path_str == "/dev/null" || path_str == "/dev/zero" ||
+                     path_str == "/dev/urandom" || path_str == "/dev/random") {
+                int host_fd = ::openat(AT_FDCWD, path_str.c_str(), (int)a2, (mode_t)a3);
+                if (host_fd >= 0) { ret_host(host_fd); return; }
+            }
+
+            // Normal file: pass through to host
             int host_fd = ::openat(AT_FDCWD, path_str.c_str(), (int)a2, (mode_t)a3);
             if (host_fd < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
             ret_host(host_fd);
@@ -2275,8 +2379,8 @@ void Emulator::syscall(CPU& cpu) {
             // as a hint, and our mmap_alloc returned the same address
             // every time, causing musl to think each mmap succeeded
             // without actually getting new memory.
-            constexpr uint64_t MAP_FIXED = 0x10;
-            uint64_t effective_hint = (flags & MAP_FIXED) ? addr : 0;
+            constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
+            uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
 
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
 
