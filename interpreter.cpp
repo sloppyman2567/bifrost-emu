@@ -11,6 +11,9 @@
 
 #include "arm64_emu.hpp"
 #include "decoder.hpp"
+#include <cmath>
+#include <cstring>
+#include <algorithm>
 
 namespace arm64emu {
 
@@ -1984,96 +1987,363 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     }
 
     // ------------------------------------------------------------------
-    // Group: scalar FP/SIMD (FMOV, FADD, FSUB, FMUL, FCMP, etc.)
-    // Mostly stubbed - just enough to not crash.
+    // Group: scalar FP/SIMD (FMOV, FADD, FSUB, FMUL, FDIV, FCMP, etc.)
+    //
+    // FP register file: v_lo[0..31] holds bits 63:0, v_hi[0..31] holds
+    // bits 127:64. For scalar FP:
+    //   - S registers (32-bit float):  v_lo[n] bits 31:0
+    //   - D registers (64-bit double): v_lo[n] bits 63:0
+    //
+    // We use C++ native float/double for the actual arithmetic, converting
+    // to/from the bit representation.
     // ------------------------------------------------------------------
     if ((op & 0xFFE00000) == 0x1E200000 ||  // FP scalar (various)
-        (op & 0xFF000000) == 0x1E000000 ||  // FP data-processing (32-bit FP)
-        (op & 0xFF000000) == 0x9E000000 ||  // FP data-processing (64-bit FP, sf=1)
-        (op & 0xFF000000) == 0x1E000000) {
+        (op & 0xFF000000) == 0x1E000000 ||  // FP data-processing (32-bit)
+        (op & 0xFF000000) == 0x9E000000) {  // FP data-processing (64-bit)
         uint8_t rn = (op >> 5) & 0x1F;
         uint8_t rd = op & 0x1F;
+        uint8_t rm = (op >> 16) & 0x1F;
         bool sf = (op >> 31) & 1;
-        // FMOV (general, D register): sf 0 0 11110 01 1 00 111 000000 ftype Rn Rd
-        // For 64-bit D register (sf=1, ftype=1): 0x9E670000 | (Rn<<5) | Rd
-        // FMOV (general, D register): sf 0 0 11110 01 1 00 111 000000 ftype Rn Rd
-        // For 64-bit D register (sf=1, ftype=1):
-        //   FMOV Dd, Rn (GP to FP): 0x9E670000 | (Rn<<5) | Rd (bit 16=1)
-        //   FMOV Rd, Dn (FP to GP): 0x9E660000 | (Rn<<5) | Rd (bit 16=0)
-        // After mask 0xFFE0FC00, both become 0x9E600000. Check bit 16 for direction.
+        bool ftype = (op >> 22) & 1;  // 0=S(32-bit), 1=D(64-bit)
+
+        // Helper: read FP register as double
+        auto read_fp_d = [&](int r) -> double {
+            uint64_t bits = cpu.v_lo[r];
+            double d;
+            memcpy(&d, &bits, 8);
+            return d;
+        };
+        // Helper: read FP register as float
+        auto read_fp_s = [&](int r) -> float {
+            uint32_t bits = (uint32_t)cpu.v_lo[r];
+            float f;
+            memcpy(&f, &bits, 4);
+            return f;
+        };
+        // Helper: write double to FP register
+        auto write_fp_d = [&](int r, double d) {
+            uint64_t bits;
+            memcpy(&bits, &d, 8);
+            cpu.v_lo[r] = bits;
+            cpu.v_hi[r] = 0;
+        };
+        // Helper: write float to FP register
+        auto write_fp_s = [&](int r, float f) {
+            uint32_t bits;
+            memcpy(&bits, &f, 4);
+            cpu.v_lo[r] = bits;
+            cpu.v_hi[r] = 0;
+        };
+
+        // ── FMOV (general ↔ FP) ──────────────────────────────────────
+        // FMOV Dd, Rn: 0x9E670000 | (Rn<<5) | Rd
+        // FMOV Rd, Dn: 0x9E660000 | (Rn<<5) | Rd
         if ((op & 0xFFE0FC00) == 0x9E600000) {
             bool to_fp = (op >> 16) & 1;
-            if (to_fp) {
-                // FMOV Dd, Rn
-                cpu.v_lo[rd] = cpu.regs[rn];
-                cpu.v_hi[rd] = 0;
-            } else {
-                // FMOV Rd, Dn
-                cpu.regs[rd] = cpu.v_lo[rn];
-            }
+            if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }
+            else       { cpu.regs[rd] = cpu.v_lo[rn]; }
             return;
         }
-        // FMOV (general, S register): 0 0 0 11110 00 1 00 111 000000 0 0 Rn Rd
-        // For 32-bit S register (sf=0, ftype=0):
-        //   FMOV Sd, Wn (GP to FP): 0x1E270000 | (Rn<<5) | Rd (bit 16=1)
-        //   FMOV Wd, Sn (FP to GP): 0x1E260000 | (Rn<<5) | Rd (bit 16=0)
-        // After mask 0xFFE0FC00, both become 0x1E200000.
+        // FMOV Sd, Wn: 0x1E270000 | (Rn<<5) | Rd
+        // FMOV Wd, Sn: 0x1E260000 | (Rn<<5) | Rd
         if ((op & 0xFFE0FC00) == 0x1E200000) {
             bool to_fp = (op >> 16) & 1;
-            if (to_fp) {
-                // FMOV Sd, Wn
-                cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF;
-                cpu.v_hi[rd] = 0;
+            if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
+            else       { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
+            return;
+        }
+
+        // ── FMOV (scalar, immediate) ─────────────────────────────────
+        // FMOV Dd, #imm: 0x1E601000 | (imm8<<13) | Rd
+        if ((op & 0xFFE0001F) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
+            // Decode 8-bit immediate to double
+            uint8_t imm8 = (op >> 13) & 0xFF;
+            // ARM64 FP immediate encoding: sign(1) | exp(4) | mantissa(3)
+            // Reconstruct double: sign << 63 | (exp << 52) | (mantissa << 48)
+            uint64_t sign = ((uint64_t)(imm8 >> 7)) & 1;
+            uint64_t exp = ((uint64_t)(imm8 >> 3)) & 0xF;
+            uint64_t mant = ((uint64_t)imm8) & 0x7;
+            // Exponent: if all 4 bits set → inf/nan, else exp = (bits ^ 0x8) + 1023
+            uint64_t exp_field;
+            if ((exp & 0xF) == 0xF) {
+                exp_field = 0x7FF;
             } else {
-                // FMOV Wd, Sn
-                cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF;
+                exp_field = ((exp ^ 0x8) & 0xF) + 1023;
+            }
+            uint64_t bits = (sign << 63) | (exp_field << 52) | (mant << 49);
+            if (ftype) { // D register
+                cpu.v_lo[rd] = bits;
+                cpu.v_hi[rd] = 0;
+            } else { // S register
+                // For S register, use 32-bit version
+                uint32_t sign32 = (uint32_t)sign;
+                uint32_t exp32;
+                if ((exp & 0xF) == 0xF) exp32 = 0xFF;
+                else exp32 = ((exp ^ 0x8) & 0xF) + 127;
+                uint32_t mant32 = mant;
+                uint32_t bits32 = (sign32 << 31) | (exp32 << 23) | (mant32 << 20);
+                cpu.v_lo[rd] = bits32;
+                cpu.v_hi[rd] = 0;
             }
             return;
         }
-        // FMOV (scalar, immediate): sf 0 0 11110 00 1 imm8 100 00000 Rd
-        // For 64-bit D: 0x1E601000 | (imm8<<13) | Rd
-        // We don't support FP immediates well; just zero the destination.
-        if ((op & 0xFFE00000) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
-            // FMOV Dd, #imm
-            cpu.v_lo[rd] = 0;
-            cpu.v_hi[rd] = 0;
-            return;
-        }
-        // FMOV (register, FP to FP)
-        // For D: 0x1E604000 | (Rn<<5) | Rd
-        // For S: 0x1E204000 | (Rn<<5) | Rd
+
+        // ── FMOV (register, FP to FP) ────────────────────────────────
         if ((op & 0xFFFFFC00) == 0x1E604000 ||  // FMOV Dd, Dn
             (op & 0xFFFFFC00) == 0x1E204000) {  // FMOV Sd, Sn
             cpu.v_lo[rd] = cpu.v_lo[rn];
-            cpu.v_hi[rd] = 0;
+            if (ftype) cpu.v_hi[rd] = 0;
+            else { cpu.v_lo[rd] &= 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
             return;
         }
-        // FABS/FCVT (scalar 1-source): sf 0 0 11110 11 1 opcode 10000 Rn Rd
-        // For FABS D: 0x1E60C000
-        // For FNEG D: 0x1E614000
-        // We stub these as identity (since FP value doesn't matter for most
-        // integer programs that just probe FP support).
-        if ((op & 0xFF3F0000) == 0x1E200000 && ((op >> 15) & 1) == 1) {
-            // Scalar 1-source FP op
-            cpu.v_lo[rd] = cpu.v_lo[rn];
-            cpu.v_hi[rd] = 0;
+
+        // ── FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN ─
+        // Encoding: sf 0 0 11110 ftype 1 Rm opcode 1 Rn Rd
+        //   opcode: 0010=FADD, 0011=FSUB, 0000=FMUL, 0001=FDIV,
+        //           0100=FMAX, 0101=FMIN, 0110=FNMUL
+        if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1) {
+            uint8_t opcode = (op >> 12) & 0xF;
+            if (ftype) { // 64-bit double
+                double a = read_fp_d(rn), b = read_fp_d(rm), r = 0;
+                switch (opcode) {
+                    case 0x2: r = a + b; break;                    // FADD
+                    case 0x3: r = a - b; break;                    // FSUB
+                    case 0x0: r = a * b; break;                    // FMUL
+                    case 0x1: r = a / b; break;                    // FDIV
+                    case 0x4: r = (a > b) ? a : b; break;          // FMAX
+                    case 0x5: r = (a < b) ? a : b; break;          // FMIN
+                    case 0x6: r = -(a * b); break;                 // FNMUL
+                    default: r = 0; break;
+                }
+                write_fp_d(rd, r);
+            } else { // 32-bit float
+                float a = read_fp_s(rn), b = read_fp_s(rm), r = 0;
+                switch (opcode) {
+                    case 0x2: r = a + b; break;                    // FADD
+                    case 0x3: r = a - b; break;                    // FSUB
+                    case 0x0: r = a * b; break;                    // FMUL
+                    case 0x1: r = a / b; break;                    // FDIV
+                    case 0x4: r = (a > b) ? a : b; break;          // FMAX
+                    case 0x5: r = (a < b) ? a : b; break;          // FMIN
+                    case 0x6: r = -(a * b); break;                 // FNMUL
+                    default: r = 0; break;
+                }
+                write_fp_s(rd, r);
+            }
             return;
         }
-        if ((op & 0xFF3F0000) == 0x9E600000 && ((op >> 15) & 1) == 1) {
-            // Scalar 1-source FP op (64-bit D)
-            cpu.v_lo[rd] = cpu.v_lo[rn];
-            cpu.v_hi[rd] = 0;
+
+        // ── FP 1-source: FABS/FNEG/FSQRT/FRINT ───────────────────────
+        // Encoding: sf 0 0 11110 ftype 1 opcode 10000 Rn Rd
+        //   opcode: 0001=FABS, 0010=FNEG, 0011=FSQRT,
+        //           0100=FRINTN, 0101=FRINTP, 0110=FRINTM, 0111=FRINTZ,
+        //           1100=FRINTA, 1110=FRINTX, 1111=FRINTI
+        if ((op & 0xFF3F0000) == 0x1E200000 && ((op >> 15) & 1) == 1 &&
+            ((op >> 14) & 1) == 0 && ((op >> 13) & 1) == 0) {
+            // Actually this is: bits 15:10 = 1xxxxx where bit 15=1
+            // Let me check more carefully
+        }
+        // Simpler: check for the 1-source pattern directly
+        // sf 0 0 11110 ftype 1 opcode 10000 Rn Rd
+        // mask: bits 31:24 = x0 11110 x, bits 21=1, bits 15:10 = 10000
+        if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) == 0x10) {
+            uint8_t opcode = (op >> 12) & 0xF;
+            if (ftype) { // 64-bit double
+                double a = read_fp_d(rn), r = 0;
+                switch (opcode) {
+                    case 0x0: r = a; break;                        // FMOV (already handled, but just in case)
+                    case 0x1: r = std::fabs(a); break;                  // FABS
+                    case 0x2: r = -a; break;                       // FNEG
+                    case 0x3: r = std::sqrt(a); break;                  // FSQRT
+                    case 0x4: r = std::rint(a); break;                  // FRINTN (round to nearest even)
+                    case 0x5: r = std::ceil(a); break;                  // FRINTP (round toward +inf)
+                    case 0x6: r = std::floor(a); break;                 // FRINTM (round toward -inf)
+                    case 0x7: r = std::trunc(a); break;                 // FRINTZ (round toward 0)
+                    case 0xC: r = std::rint(a); break;                  // FRINTA
+                    case 0xE: r = std::rint(a); break;                  // FRINTX
+                    case 0xF: r = std::rint(a); break;                  // FRINTI
+                    default: r = a; break;
+                }
+                write_fp_d(rd, r);
+            } else { // 32-bit float
+                float a = read_fp_s(rn), r = 0;
+                switch (opcode) {
+                    case 0x0: r = a; break;
+                    case 0x1: r = std::fabsf(a); break;                 // FABS
+                    case 0x2: r = -a; break;                       // FNEG
+                    case 0x3: r = std::sqrtf(a); break;                 // FSQRT
+                    case 0x4: r = std::rintf(a); break;                 // FRINTN
+                    case 0x5: r = std::ceilf(a); break;                 // FRINTP
+                    case 0x6: r = std::floorf(a); break;                // FRINTM
+                    case 0x7: r = std::truncf(a); break;                // FRINTZ
+                    case 0xC: r = std::rintf(a); break;                 // FRINTA
+                    default: r = a; break;
+                }
+                write_fp_s(rd, r);
+            }
             return;
         }
-        // FCVTZS/FCVTZU (int from FP): treat as 0
-        if ((op & 0xFF000000) == 0x9E000000 || (op & 0xFF000000) == 0x1E000000) {
-            // Could be SCVTF, FCVTZS, FCVTZU, etc. For now, stub as 0.
-            // But only if it looks like a FP-to-int conversion.
-            // We'll just leave Rd unchanged for safety.
+
+        // ── FCVT (convert between S and D) ──────────────────────────
+        // FCVT Sd, Dn: 0x1E624000 | (Rn<<5) | Rd
+        // FCVT Dd, Sn: 0x1E22C000 | (Rn<<5) | Rd
+        if ((op & 0xFFFFFC00) == 0x1E624000) { // FCVT Sd, Dn (double→float)
+            double d = read_fp_d(rn);
+            write_fp_s(rd, (float)d);
             return;
         }
-        // Other FP ops: NOP for now.
-        (void)sf;
+        if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn (float→double)
+            float f = read_fp_s(rn);
+            write_fp_d(rd, (double)f);
+            return;
+        }
+
+        // ── FCMP/FCMPE (compare) ────────────────────────────────────
+        // FCMP Dn, Dm: 0x1E602000 | (Rm<<16) | (Rn<<5)
+        // Sets NZCV flags in PSTATE.
+        if ((op & 0xFFE0FC1F) == 0x1E602000) {
+            if (ftype) { // 64-bit
+                double a = read_fp_d(rn), b = read_fp_d(rm);
+                if (std::isnan(a) || std::isnan(b)) {
+                    cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
+                } else if (a == b) {
+                    cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                } else if (a < b) {
+                    cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                } else {
+                    cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                }
+            } else { // 32-bit
+                float a = read_fp_s(rn), b = read_fp_s(rm);
+                if (std::isnan(a) || std::isnan(b)) {
+                    cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
+                } else if (a == b) {
+                    cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                } else if (a < b) {
+                    cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                } else {
+                    cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                }
+            }
+            return;
+        }
+        // FCMP with #0.0: 0x1E602008 | (Rn<<5)
+        if ((op & 0xFFE0FC1F) == 0x1E602008) {
+            if (ftype) {
+                double a = read_fp_d(rn);
+                if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
+                else if (a == 0.0) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
+                else if (a < 0.0) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
+                else { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0); }
+            } else {
+                float a = read_fp_s(rn);
+                if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
+                else if (a == 0.0f) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
+                else if (a < 0.0f) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
+                else { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0); }
+            }
+            return;
+        }
+
+        // ── FCVTZS/FCVTZU (FP → signed/unsigned int) ────────────────
+        // FCVTZS Wd, Dn: 0x1E780000 | (Rn<<5) | Rd
+        // FCVTZS Xd, Dn: 0x9E780000 | (Rn<<5) | Rd
+        // FCVTZU Wd, Dn: 0x1E790000 | (Rn<<5) | Rd
+        // FCVTZU Xd, Dn: 0x9E790000 | (Rn<<5) | Rd
+        if ((op & 0x7F3F0000) == 0x1E780000 ||  // FCVTZS
+            (op & 0x7F3F0000) == 0x1E790000) {  // FCVTZU
+            bool is_unsigned = ((op >> 16) & 1);
+            bool is_64bit = sf;
+            if (ftype) { // double
+                double a = read_fp_d(rn);
+                if (is_unsigned) {
+                    uint64_t v = (a < 0) ? 0 : (uint64_t)a;
+                    if (is_64bit) cpu.regs[rd] = v;
+                    else cpu.regs[rd] = (uint32_t)v;
+                } else {
+                    int64_t v = (int64_t)a;
+                    if (is_64bit) cpu.regs[rd] = (uint64_t)v;
+                    else cpu.regs[rd] = (uint32_t)(int32_t)v;
+                }
+            } else { // float
+                float a = read_fp_s(rn);
+                if (is_unsigned) {
+                    uint64_t v = (a < 0) ? 0 : (uint64_t)a;
+                    if (is_64bit) cpu.regs[rd] = v;
+                    else cpu.regs[rd] = (uint32_t)v;
+                } else {
+                    int64_t v = (int64_t)a;
+                    if (is_64bit) cpu.regs[rd] = (uint64_t)v;
+                    else cpu.regs[rd] = (uint32_t)(int32_t)v;
+                }
+            }
+            return;
+        }
+
+        // ── SCVTF/UCVTF (int → FP) ──────────────────────────────────
+        // SCVTF Dd, Wn: 0x1E620000 | (Rn<<5) | Rd
+        // SCVTF Dd, Xn: 0x9E620000 | (Rn<<5) | Rd
+        // UCVTF Dd, Wn: 0x1E630000 | (Rn<<5) | Rd
+        // UCVTF Dd, Xn: 0x9E630000 | (Rn<<5) | Rd
+        if ((op & 0x7F3F0000) == 0x1E620000 ||  // SCVTF
+            (op & 0x7F3F0000) == 0x1E630000) {  // UCVTF
+            bool is_unsigned = ((op >> 16) & 1);
+            bool is_64bit = sf;
+            if (ftype) { // double
+                if (is_unsigned) {
+                    uint64_t v = is_64bit ? cpu.regs[rn] : (uint32_t)cpu.regs[rn];
+                    write_fp_d(rd, (double)v);
+                } else {
+                    int64_t v = is_64bit ? (int64_t)cpu.regs[rn] : (int32_t)cpu.regs[rn];
+                    write_fp_d(rd, (double)v);
+                }
+            } else { // float
+                if (is_unsigned) {
+                    uint64_t v = is_64bit ? cpu.regs[rn] : (uint32_t)cpu.regs[rn];
+                    write_fp_s(rd, (float)v);
+                } else {
+                    int64_t v = is_64bit ? (int64_t)cpu.regs[rn] : (int32_t)cpu.regs[rn];
+                    write_fp_s(rd, (float)v);
+                }
+            }
+            return;
+        }
+
+        // ── FSEL (conditional select) ───────────────────────────────
+        // FCSel Dd, Dn, Dm, cond: 0x1E600C00 | (cond<<12) | (Rm<<16) | (Rn<<5) | Rd
+        if ((op & 0xFF200C00) == 0x1E200000 && ((op >> 21) & 1) == 0 &&
+            ((op >> 10) & 0xF) == 0xC) {
+            uint8_t cond = (op >> 12) & 0xF;
+            if (ftype) {
+                double r = cond_true(cond, cpu.pstate) ? read_fp_d(rn) : read_fp_d(rm);
+                write_fp_d(rd, r);
+            } else {
+                float r = cond_true(cond, cpu.pstate) ? read_fp_s(rn) : read_fp_s(rm);
+                write_fp_s(rd, r);
+            }
+            return;
+        }
+
+        // ── FMADD/FMSUB (fused multiply-accumulate) ─────────────────
+        // FMADD Dd, Dn, Dm, Da: 0x1F000000 | (Rm<<16) | (Ra<<10) | (Rn<<5) | Rd
+        // FMSUB Dd, Dn, Dm, Da: 0x1F008000 | (Rm<<16) | (Ra<<10) | (Rn<<5) | Rd
+        if ((op & 0xFF200000) == 0x1F000000) {
+            uint8_t ra = (op >> 10) & 0x1F;
+            bool sub = (op >> 15) & 1;  // 0=FMADD, 1=FMSUB
+            if (ftype) { // double
+                double a = read_fp_d(rn), b = read_fp_d(rm), c = read_fp_d(ra);
+                double r = sub ? (c - a * b) : (c + a * b);
+                write_fp_d(rd, r);
+            } else { // float
+                float a = read_fp_s(rn), b = read_fp_s(rm), c = read_fp_s(ra);
+                float r = sub ? (c - a * b) : (c + a * b);
+                write_fp_s(rd, r);
+            }
+            return;
+        }
+
+        // Unknown FP instruction — don't crash, just NOP
+        (void)sf; (void)rm;
         return;
     }
 
