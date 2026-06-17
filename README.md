@@ -123,8 +123,8 @@ python3 mini_arm64_asm.py prog.s -o prog.elf
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
 | `hello_arm64_musi` | ✅ Works | Full musl static |
-| `hello_arm64_static` (glibc) | ⚠️ Exits 133 | getrandom vDSO assertion |
-| `toybox-aarch64` | ❌ Hangs | musl malloc loop (atomics) |
+| `hello_arm64_static` (glibc) | ⚠️ Exit 1 | Gets past mallocng, hits null ptr |
+| `toybox-aarch64` | ⚠️ Exit 1 | **Gets past mallocng init!** Hits null ptr |
 
 ## What's Implemented
 
@@ -163,14 +163,26 @@ on each syscall and known issues.
 
 ## What's New in 1.1.0-beta.1
 
-- **Threading** — `clone()` and `futex()` are now real implementations
-  using OS threads and condition variables. `pthread`-based code should
-  work (caveat: no signal delivery yet, so `pthread_kill` won't).
-- **Event-loop syscalls** — epoll, timerfd, eventfd, ppoll, pselect6,
-  socketpair all delegate to the host kernel.
-- **Thread-safe memory** — per-page mutex on every access.
-- **BRK is fatal** — matches real Linux `SIGTRAP` semantics (exit 133).
-- **Versioning** — `1.1.0-beta.1` semver string, `--version` flag.
+**The mallocng loop is broken.** Toybox now gets past musl's mallocng
+initialization — no more infinite `brk()` loop. The root cause was a
+structural bug in the instruction decoder: the entire LSE atomics
+handler (CAS, LDADD, LDCLR, SWP, etc.) was unreachable because it was
+nested inside the exclusive load/store handler, which checks a different
+encoding group (`bits 29:24 == 001000` vs LSE atomics' `111000`).
+Every LSE atomic was silently a NOP, which broke musl's lock acquisition.
+
+- **LSE atomics fixed** — handler moved to top level with proper bit
+  checks. CAS argument order corrected (Rs = comparand, Rt = new value).
+- **Exclusive monitor** — proper LL/SC semantics for `LDXR`/`STXR`/
+  `LDAXR`/`STLXR`/`CLREX`.
+- **mremap in-place growth** — critical for musl's meta_area tracking.
+- **mmap MAP_FIXED** — hint only honored when MAP_FIXED is set; replaced
+  pages are zeroed (Linux semantics).
+- **Stack** — 64 MB (was 8 MB), moved to `0x8000000000`.
+- **getppid** added, **set_tid_address** / **gettid** per-thread.
+
+Toybox now exits 1 on a null pointer dereference (PC=0) — a different,
+simpler bug than the mallocng loop. Investigation continues in 1.1.0-rc.1.
 
 Full release notes and known issues in [CHANGELOG.md](CHANGELOG.md).
 
@@ -178,10 +190,11 @@ Full release notes and known issues in [CHANGELOG.md](CHANGELOG.md).
 
 - No FP/SIMD arithmetic (loads/stores work, but FADD/FMUL etc. are stubbed)
 - No signal delivery (`rt_sigaction` is a no-op)
-- No exclusive monitor (`STXR` always succeeds — see CHANGELOG)
 - No dynamic linking (static binaries only)
 - No ASLR (binaries load at their preferred vaddr)
-- glibc 2.36+ static binaries hit a getrandom vDSO assertion (musl works)
+- toybox and glibc-static binaries get past mallocng but hit a null
+  pointer dereference (PC=0) — likely a signal delivery or function
+  return issue
 
 ## Roadmap (v2.0+)
 

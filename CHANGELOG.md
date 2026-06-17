@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.1.0-beta.1] — 2026-06-17
+
+**The mallocng loop is broken.** Toybox now gets past musl's mallocng
+initialization — no more infinite `brk()` loop — and exits with code 1
+on a null pointer dereference (a different, much simpler bug). glibc
+static hello also gets further (exit 1 instead of hanging or 133).
+
+The root cause turned out to be a structural bug in the instruction
+decoder: the entire LSE atomics handler was unreachable, so every
+CAS / LDADD / LDCLR / SWP / etc. was silently treated as a NOP.
+This broke musl's lock acquisition, which caused the mallocng loop.
+
+### Fixed (major)
+- **LSE atomics handler was unreachable** (the big one). The LSE
+  atomics block (CAS, LDADD, LDCLR, LDEOR, LDSET, SMAX, SMIN, UMAX,
+  UMIN, SWP) was nested inside the exclusive load/store handler,
+  which checks `bits 29:24 == 001000`. But LSE atomics have
+  `bits 29:24 == 111000` — a completely different encoding group.
+  The LSE atomics code was never reached; every LSE atomic was a NOP.
+
+  Fix: moved the LSE atomics handler to the top level (before all
+  load/store handlers), with proper bit checks to distinguish LSE
+  atomics from regular load/store encodings that share bits 29:24 ==
+  111000:
+    - `bit 21 = 0` (load/store reg-offset has bit 21 = 1)
+    - `bits 11:10 = 00` (LSE atomics fixed bits)
+
+- **CAS argument order**. In `CAS <Rs>, <Rt>, [<Rn>]`, **Rs** is the
+  comparand and **Rt** is the new value. The previous code had these
+  swapped (used Rt as comparand, Rs as new value), which would have
+  broken every CAS even if the handler had been reachable.
+
+### Fixed (minor, from 1.1.0-alpha.1 carryover)
+- **mremap** now grows mappings in-place by mapping additional pages
+  at `old_addr + old_size`. Previously, mremap always allocated new
+  memory + copied, which broke musl's meta_area tracking (musl expects
+  mremap to grow mappings in-place when possible).
+- **mmap MAP_FIXED zeroing**: when mmap is called with MAP_FIXED over
+  existing pages, the old data is now zeroed out (matching Linux kernel
+  behavior).
+- **mmap MAP_FIXED hint handling**: the `addr` hint is now only honored
+  when `MAP_FIXED` (0x10) is set. Without MAP_FIXED, the bump allocator
+  picks a fresh address.
+- **getppid** syscall added (was missing entirely, returned -ENOSYS).
+- **set_tid_address** / **gettid** now properly per-thread.
+
+### Changed
+- **Stack size** increased from 8 MB to 64 MB.
+- **Stack top** moved from `0x7ff0000000` to `0x8000000000` (avoids
+  a 1-page guard-region conflict that was causing unmapped reads
+  during deep musl recursion).
+- **LSE atomics opcode table** corrected: each opcode is a distinct
+  operation (0=LDADD, 1=LDCLR, 2=LDEOR, 3=LDSET, 4-7=SMAX/SMIN/
+  UMAX/UMIN, 8=SWP, C-F=CAS variants). Previously, opcodes 0-3 were
+  all treated as LDADD, 4-7 as LDCLR, etc.
+
+### Known Issues
+- **musl-static toybox** now gets past mallocng init but exits with
+  code 1 on a null pointer dereference (PC=0). This is a different,
+  simpler bug than the mallocng loop — likely a signal delivery or
+  function-return issue. Investigation in 1.1.0-rc.1.
+- **glibc 2.36+ static binaries** exit 1 instead of hanging or
+  exiting 133. Same root cause as toybox — gets further but hits a
+  null pointer.
+- **No FP/SIMD arithmetic**, **no signal delivery**, **no dynamic
+  linking** — unchanged.
+
+### Compatibility Matrix
+| Binary | 1.0.0-beta.1 | 1.1.0-alpha.1 | 1.1.0-beta.1 |
+|--------|--------------|---------------|--------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `hello_arm64_musi` | ✅ Works | ✅ Works | ✅ Works |
+| `hello_arm64_static` (glibc) | ⚠️ Exits 133 | ❌ Hangs (brk loop) | ⚠️ Exit 1 (gets further) |
+| `toybox-aarch64` | ❌ Hangs (atomics) | ❌ Hangs (mallocng) | ⚠️ Exit 1 (**past mallocng!**) |
+
+### Next up (1.1.0-rc.1)
+- Debug the PC=0 crash in toybox. Likely a function return issue —
+  trace what's at the top of the stack when PC becomes 0, check if
+  a `RET` is reading a corrupted LR or if a function pointer is NULL.
+- Implement signal delivery (`rt_sigaction` + `rt_sigreturn` +
+  trampoline page). Some musl init paths install signal handlers
+  and expect them to work for SIGSEGV / SIGSYS.
+- Audit existing 100 instructions for correctness bugs (NZCV flag
+  edge cases, sign-extension issues).
+- Implement FP/SIMD arithmetic (`FADD`/`FMUL`/`FCVT`/`FCMP`).
+
+---
+
 ## [1.1.0-alpha.1] — 2026-06-17
 
 First alpha toward the 1.1 "stability" release. Three real bugs in the
@@ -83,16 +176,15 @@ a deeper musl-mallocng recursion issue that needs investigation).
 | `hello_arm64_static` (glibc) | ⚠️ Exits 133 | ❌ Hangs (brk loop) |
 | `toybox-aarch64` | ❌ Hangs (LDXR/STXR) | ❌ Hangs (mallocng recursion) |
 
-### Next up (1.1.0-beta.1)
-- Investigate the musl mallocng recursion — likely needs proper
-  memory ordering semantics or a fix to how we handle `mremap` /
-  `MAP_ANONYMOUS | MAP_FIXED` combos that musl uses to grow the
-  tracking array.
+### Next up (1.1.0-beta.1) — *completed in 1.1.0-beta.1*
+- ~~Investigate the musl mallocng recursion~~ — root cause found:
+  the LSE atomics handler was unreachable due to an encoding-group
+  mismatch (bits 29:24 == 001000 vs 111000). Fixed in 1.1.0-beta.1.
 - Audit existing 100 instructions for correctness bugs (NZCV flag
-  edge cases, sign-extension issues).
+  edge cases, sign-extension issues). — *still pending*
 - Implement signal delivery (`rt_sigaction` + `rt_sigreturn` +
-  trampoline page).
-- Implement FP/SIMD arithmetic (`FADD`/`FMUL`/`FCVT`/`FCMP`).
+  trampoline page). — *still pending*
+- Implement FP/SIMD arithmetic (`FADD`/`FMUL`/`FCVT`/`FCMP`). — *still pending*
 
 ---
 
