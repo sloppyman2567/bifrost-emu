@@ -12,7 +12,7 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.1.0-beta.1
+  bifrost-emu  v1.1.0-rc.1
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -161,7 +161,7 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
-## What's New in 1.1.0-beta.1
+## What's New in 1.1.0-rc.1
 
 **The mallocng loop is broken.** Toybox now gets past musl's mallocng
 initialization — no more infinite `brk()` loop. The root cause was a

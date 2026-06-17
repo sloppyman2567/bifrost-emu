@@ -6,15 +6,23 @@ CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra
 LDFLAGS  ?= -pthread
 
 TARGET   := bifrost-emu
-SOURCES  := main.cpp arm64_emu.cpp
-HEADERS  := arm64_emu.hpp
+LIB      := libbifrost.a
+SOURCES  := main.cpp interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp
+HEADERS  := arm64_emu.hpp decoder.hpp graphics.hpp api/bifrost.h
 
-.PHONY: all test clean install uninstall
+.PHONY: all test clean install uninstall lib
 
 all: $(TARGET)
 
 $(TARGET): $(SOURCES) $(HEADERS)
 	$(CXX) $(CXXFLAGS) -o $@ $(SOURCES) $(LDFLAGS)
+
+# Build the static library (libbifrost.a) for API consumers
+lib: $(LIB)
+
+$(LIB): interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp arm64_emu.hpp decoder.hpp graphics.hpp
+	ar rcs $@ interpreter.o syscalls.o decoder.o graphics.o
+	@echo "Note: run 'make lib' after building object files with 'make objects'"
 
 # Debug build with sanitizers
 debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined
@@ -47,4 +55,4 @@ uninstall:
 	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
 
 clean:
-	rm -f $(TARGET) $(TARGET)-dbg *.o
+	rm -f $(TARGET) $(TARGET)-dbg *.o $(LIB)
