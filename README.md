@@ -12,7 +12,7 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.1.0-alpha.1
+  bifrost-emu  v1.1.0-beta.1
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -161,7 +161,7 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
-## What's New in 1.1.0-alpha.1
+## What's New in 1.1.0-beta.1
 
 - **Threading** — `clone()` and `futex()` are now real implementations
   using OS threads and condition variables. `pthread`-based code should
@@ -170,7 +170,7 @@ on each syscall and known issues.
   socketpair all delegate to the host kernel.
 - **Thread-safe memory** — per-page mutex on every access.
 - **BRK is fatal** — matches real Linux `SIGTRAP` semantics (exit 133).
-- **Versioning** — `1.1.0-alpha.1` semver string, `--version` flag.
+- **Versioning** — `1.1.0-beta.1` semver string, `--version` flag.
 
 Full release notes and known issues in [CHANGELOG.md](CHANGELOG.md).
 

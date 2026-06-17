@@ -1024,6 +1024,81 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     }
 
     // ------------------------------------------------------------------
+    // Group: LSE atomic memory operations (LDADD/LDCLR/LDEOR/LDSET/
+    //        SMAX/SMIN/UMAX/UMIN/SWP/CAS/CASA/CASL/CASAL)
+    //
+    // Encoding: size 111000 o0 L 0 Rs op 00 Rn Rt  (bits 29:24 = 111000)
+    //
+    // Distinguishing from regular load/store (which also has bits
+    // 29:24 = 111000): LSE atomics have bit 21 = 0 AND bits 11:10 = 00.
+    // Regular load/store register-offset has bit 21 = 1 and bits 11:10 = 10.
+    // Regular load/store unscaled has bit 21 = 0 and bits 11:10 = 00 (MODE),
+    // but is distinguished by bits 23:22 (opc) and the presence of imm9
+    // in bits 20:12. For LSE atomics, bits 20:16 = Rs and bits 15:12 = op.
+    //
+    // The key distinguishing bit: LSE atomics have bit 21 = 0 (it's a
+    // fixed zero bit in the encoding). Load/store register offset has
+    // bit 21 = 1. So checking bit 21 = 0 is necessary but not sufficient
+    // (unscaled load/store also has bit 21 = 0). We also need to check
+    // that bits 15:12 form a valid LSE opcode (0x0-0x8 or 0xC-0xF).
+    // ------------------------------------------------------------------
+    if ((op & 0x3F000000) == 0x38000000 &&   // bits 29:24 = 111000
+        (op & 0x00200000) == 0 &&            // bit 21 = 0 (NOT load/store reg offset)
+        (op & 0x00000C00) == 0) {            // bits 11:10 = 00 (LSE atomics fixed)
+        uint8_t size = (op >> 30) & 3;
+        bool L  = (op >> 22) & 1;
+        uint8_t rs = (op >> 16) & 0x1F;
+        uint8_t rn = (op >> 5) & 0x1F;
+        uint8_t rt = op & 0x1F;
+        int width_bytes = 1 << size;
+        uint64_t base = (rn == 31) ? cpu.sp : cpu.regs[rn];
+        uint8_t atom_op = (op >> 12) & 0xF;
+
+        // CAS family (opcodes 0xC-0xF): compare-and-swap.
+        if (atom_op >= 0xC) {
+            uint64_t old = 0;
+            mem_.read(base, &old, width_bytes);
+            uint64_t cmp = cpu.regs[rs];
+            uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
+            cmp &= mask;
+            old &= mask;
+            if (old == cmp) {
+                uint64_t newv = cpu.regs[rt] & mask;
+                mem_.write(base, &newv, width_bytes);
+            }
+            if (rt != 31) cpu.regs[rt] = old;
+            return;
+        }
+
+        // Other LSE atomics
+        uint64_t a = 0, b = cpu.regs[rs];
+        mem_.read(base, &a, width_bytes);
+        uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
+        a &= mask;
+        b &= mask;
+        uint64_t newv = 0;
+        switch (atom_op) {
+            case 0x0: newv = (a + b) & mask; break;
+            case 0x1: newv = (a & ~b) & mask; break;
+            case 0x2: newv = (a ^ b) & mask; break;
+            case 0x3: newv = (a | b) & mask; break;
+            case 0x4: { int64_t sa=(int64_t)(a<<(64-width_bytes*8))>>(64-width_bytes*8);
+                        int64_t sb=(int64_t)(b<<(64-width_bytes*8))>>(64-width_bytes*8);
+                        newv=(sa>sb?sa:sb)&mask; break; }
+            case 0x5: { int64_t sa=(int64_t)(a<<(64-width_bytes*8))>>(64-width_bytes*8);
+                        int64_t sb=(int64_t)(b<<(64-width_bytes*8))>>(64-width_bytes*8);
+                        newv=(sa<sb?sa:sb)&mask; break; }
+            case 0x6: newv = (a > b ? a : b) & mask; break;
+            case 0x7: newv = (a < b ? a : b) & mask; break;
+            case 0x8: newv = b & mask; break;
+            default:  newv = a & mask; break;
+        }
+        mem_.write(base, &newv, width_bytes);
+        if (L && rt != 31) cpu.regs[rt] = a;
+        return;
+    }
+
+    // ------------------------------------------------------------------
     // Group: load/store
     // ------------------------------------------------------------------
 
@@ -1234,6 +1309,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     //          size 111000 o0 L Rs opcode Rn Rt        (LDADD/LDCLR/etc - LSE)
     // We implement them all as non-atomic load/store + (for STXR) success=0.
     // ------------------------------------------------------------------
+    // (LSE atomics handler was here but has been moved earlier, before
+    // the load/store handlers, to prevent CAS/atomics being caught by
+    // the regular load/store register-offset handler.)
+
+    // ------------------------------------------------------------------
+    // Group: Load/Store exclusive (STXR/LDXR/STLR/LDAR/etc)
+    //
+    // Encoding: size 001000 o0 L Rs 0 0 1 1 1 Rn Rt  (STXR/LDXR/STLXR/LDAXR)
+    //          size 001000 1 1 L 0 0 0 1 1 1 1 Rn Rt  (STLR/LDAR)
+    // ------------------------------------------------------------------
     if ((op & 0x3F000000) == 0x08000000) {
         // Various load/store exclusive and atomic encodings.
         // Common shape: size 001000 ... Rn Rt.
@@ -1313,82 +1398,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         //   - Rs = new value (stored to [Rn] if comparand matched)
         //   - Rt receives old memory value (always, success or failure)
         //
-        // The encoding shape is the same as LDADD family:
-        //   size 111000 o0 L Rs opcode Rn Rt
-        // The opcode distinguishes which atomic op (ADD/CLR/EOR/.../CAS).
-        //
-        // We detect CAS by checking opcode bits 15:12 == 11xx (0xC-0xF).
-        // This must come BEFORE the LSE atomics switch below.
-        uint8_t atom_opcode_check = (op >> 12) & 0xF;
-        if (atom_opcode_check >= 0xC) {
-            uint64_t old = 0;
-            mem_.read(base, &old, width_bytes);
-            uint64_t cmp = cpu.regs[rt];
-            uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
-            cmp &= mask;
-            old &= mask;
-            if (old == cmp) {
-                uint64_t newv = cpu.regs[rs] & mask;
-                mem_.write(base, &newv, width_bytes);
-            }
-            // CAS always returns the old value in Rt, whether or not
-            // the swap succeeded. Callers detect failure by comparing
-            // Rt to the comparand they passed in.
-            if (rt != 31) cpu.regs[rt] = old;
-            return;
-        }
-
-        if ((op & 0x3B000000) == 0x38000000) {
-            // LSE atomic memory ops (LDADD/LDCLR/LDEOR/LDSET/SWP/etc).
-            // Encoding: size 111000 o0 L Rs opcode Rn Rt
-            //   - size = bits 31:30 (1/2/4/8 bytes)
-            //   - o0 = bit 23 (acquire-release hint, ignored for semantics)
-            //   - L  = bit 22 (load variant: write old value to Rt)
-            //   - Rs = bits 21:16 (source operand for the atomic op)
-            //   - opcode = bits 15:12 (the actual op: ADD/CLR/EOR/SET/SWP/etc)
-            //   - Rn = bits 9:5 (base address)
-            //   - Rt = bits 4:0 (destination for old value, when L=1)
-            //
-            // IMPORTANT: the AArch64 LSE opcode field encodes the
-            // *operation*, not the A/L ordering suffix. The ordering
-            // suffixes are encoded in o0 (bit 23) and L (bit 22) and
-            // don't change the semantics for us (we're sequentially
-            // consistent anyway).
-            uint8_t atom_op = (op >> 12) & 0xF;
-            uint64_t a = 0, b = cpu.regs[rs];
-            mem_.read(base, &a, width_bytes);
-            uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
-            a &= mask;
-            b &= mask;
-            uint64_t newv = 0;
-            switch (atom_op) {
-                case 0x0: newv = (a + b) & mask; break;       // LDADD
-                case 0x1: newv = (a & ~b) & mask; break;      // LDCLR
-                case 0x2: newv = (a ^ b) & mask; break;       // LDEOR
-                case 0x3: newv = (a | b) & mask; break;       // LDSET
-                case 0x4: { // SMAX (signed)
-                    int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                    int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                    newv = (sa > sb ? sa : sb) & mask; break;
-                }
-                case 0x5: { // SMIN
-                    int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                    int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                    newv = (sa < sb ? sa : sb) & mask; break;
-                }
-                case 0x6: newv = (a > b ? a : b) & mask; break;   // UMAX
-                case 0x7: newv = (a < b ? a : b) & mask; break;   // UMIN
-                case 0x8: newv = b & mask; break;                  // SWP (swap)
-                default:  newv = a & mask; break;                  // unknown → no-op
-            }
-            mem_.write(base, &newv, width_bytes);
-            // L=1 (load variants LDADD/LDCLR/etc.): return old value in Rt.
-            // L=0 (store variants STADD/STCLR/etc.): Rt is not written.
-            if (L && rt != 31) {
-                cpu.regs[rt] = a;
-            }
-            return;
-        }
+        // Old CAS and LSE atomics handlers were here but have been
+        // moved to the top-level LSE atomics handler above (since LSE
+        // atomics have bits 29:24 = 111000, not 001000, and were never
+        // reaching this nested code). This block now only handles
+        // exclusive load/store (STXR/LDXR/STLR/LDAR) and unknown
+        // sub-forms of the 001000 encoding group.
 
         // Unknown sub-form; treat as NOP to avoid crashing
         return;

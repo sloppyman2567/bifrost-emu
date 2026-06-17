@@ -66,7 +66,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.1.0-alpha.1";
+constexpr const char* VERSION = "1.1.0-beta.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -598,10 +598,10 @@ public:
         brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
 
         // Set up the initial stack image
-        const uint64_t STACK_TOP = 0x7ff0000000ULL;
-        const uint64_t STACK_SIZE = 8 * 1024 * 1024; // 8 MB
+        const uint64_t STACK_TOP = 0x8000000000ULL;
+        const uint64_t STACK_SIZE = 64 * 1024 * 1024; // 64 MB
         uint64_t stack_base = STACK_TOP - STACK_SIZE;
-        mem_.map_range(stack_base, STACK_SIZE);
+        mem_.map_range(stack_base, STACK_SIZE + 4096); // +1 page guard at top
         main_cpu_.sp = build_initial_stack(STACK_TOP, argv, info);
 
         // Pre-allocate a TLS scratch area and set TPIDR_EL0 to point into
