@@ -41,7 +41,7 @@ multi-threaded workloads.
 - **Memory atomicity primitives**: `Memory::atomic_cas_32` and
   `atomic_cas_64` for use by LSE atomics and futex implementations.
 - **GitHub-ready**: `LICENSE` (public domain / Unlicense), `.gitignore`,
-  `CHANGELOG.md`, `CONTRIBUTING.md`.
+  `CHANGELOG.md`.
 - **Build**: Now requires `-pthread` (already in the documented build
   command).
 
