@@ -1,6 +1,6 @@
-// graphics.cpp — Graphics backend implementation (stub for 1.1.1-alpha.1).
+// graphics.cpp — Graphics backend implementation (stub for 1.1.5-alpha.1).
 //
-// In 1.1.1-alpha.1, the framebuffer is just a chunk of memory that the
+// In 1.1.5-alpha.1, the framebuffer is just a chunk of memory that the
 // guest can mmap and write to. No actual rendering happens — we're
 // headless. The SDL2 window support is planned for 1.3.0.
 //
@@ -74,7 +74,7 @@ uint64_t GraphicsBackend::init(uint32_t width, uint32_t height) {
 }
 
 void GraphicsBackend::refresh() {
-    // Stub: no rendering in 1.1.1-alpha.1.
+    // Stub: no rendering in 1.1.5-alpha.1.
     // In 1.3.0, this will:
     //   1. Copy fb_data_ to an SDL2 surface
     //   2. SDL_UpdateTexture / SDL_RenderCopy / SDL_RenderPresent

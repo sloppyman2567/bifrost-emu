@@ -6,6 +6,171 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.1.5-alpha.1] — 2026-06-17
+
+Major alpha release with multiple correctness fixes, syscall expansions,
+and broader test coverage. The headline fix is the SIMD load/store bug
+that broke 128-bit (`str q0`/`ldr q0`) operations — this was silently
+corrupting softfloat values on the stack and broke musl's `printf("%f")`
+path. Several other instructions used by musl's 128-bit softfloat
+routines (`__multf3`, `__addtf3`, `__eqtf2`, etc.) are also now
+implemented.
+
+### Fixed
+- **SIMD LDR/STR Q-form (128-bit) decode** — the previous handler
+  interpreted `opc` incorrectly for SIMD loads/stores. The correct
+  encoding per the ARM ARM:
+    - `opc=00, size=xx` → STR B/H/S/D form (1/2/4/8 bytes)
+    - `opc=01, size=xx` → LDR B/H/S/D form (1/2/4/8 bytes)
+    - `opc=10, size=00` → STR Q form (128-bit / 16 bytes)
+    - `opc=11, size=00` → LDR Q form (128-bit / 16 bytes)
+  The old code treated `opc=10` as a load (because `(opc & 2) || (opc & 1)`
+  was the load test), so `str q0` was silently dropped and `ldr q0`
+  only transferred 1 byte. This corrupted 128-bit long doubles on the
+  stack, breaking musl's `__multf3` and the entire `printf("%f")` code
+  path. Fixed in all three load/store handlers (unsigned-offset,
+  pre/post-indexed, register-offset).
+
+- **`FMOV Vd.D[1], Rn` and `FMOV Rn, Vm.D[1]`** — these instructions
+  move a 64-bit GPR to/from the HIGH 64 bits of a vector register
+  (encoding `0x9EA00000` family). Previously unimplemented; musl's
+  softfloat routines use them heavily to construct 128-bit long doubles
+  from two 64-bit GPRs.
+
+- **`BFM` (bitfield move) destination position** — the previous BFM
+  implementation inserted source bits at position 0 of the destination,
+  instead of at the field position `[immr..imms]`. This broke `bfi`
+  (bitfield insert), which musl uses to assemble FP exponent and
+  mantissa fields. Fixed both the non-wraparound case (imms >= immr)
+  and the wraparound case (imms < immr).
+
+- **`ADC`/`ADCS`/`SBC`/`SBCS`** — add/subtract with carry. Encoding
+  `0x1A000000` family. Previously unimplemented; caused decode errors
+  in softfloat routines that use multi-precision arithmetic (e.g.
+  `__multf3` uses `adc` to propagate carry between 64-bit limbs).
+
+### Added
+- **New syscalls** (~10 more, total ~88):
+  - `dup` (23), `dup2` (33) — file descriptor duplication
+  - `pipe2` (59) — pipe creation with flags
+  - `mkdirat` (34), `unlinkat` (35), `renameat` (38) — filesystem ops
+  - `utimensat` (88) — file timestamps
+  - `fstatat` (79) — file stat by path (was already there but improved)
+- **`read_path` helper** in syscalls.cpp for reading NUL-terminated
+  path strings from guest memory (used by the new filesystem syscalls).
+- **`brk_start_` member** on `Emulator` to track the initial brk
+  address, needed for the MAP_FIXED overlap fix below.
+
+### Changed
+- **`MAP_FIXED` overlap handling** — when musl's mallocng calls
+  `mmap` with `MAP_FIXED` on an address inside the brk region (which
+  it does to carve out memory for its metadata arena), the brk is now
+  pushed forward past the mmap'd area. This prevents the MAP_FIXED
+  mmap from zeroing out brk-managed pages and corrupting mallocng's
+  metadata. (Partial fix — see Known Limitations.)
+
+### Verification
+Compiled and ran 13 musl-static C test programs (all compiled with
+`aarch64-linux-musl-gcc -static -O2`). Results:
+
+| Test | Description | Result |
+|------|-------------|--------|
+| `loop.c` | `for` loop + `printf("%d\n", ...)` | ✅ |
+| `test_recursion.c` | Recursive `fib(20)` | ✅ |
+| `test_structs.c` | Structs, pointers, `strcpy`/`strcat`/`strlen` | ✅ |
+| `test_bitops.c` | 64-bit arithmetic, bit ops, `%016llx` | ✅ |
+| `test_switch.c` | Switch/jump-table, 2D arrays, `goto` loops | ✅ |
+| `test_advanced.c` | Ackermann recursion, pointer arithmetic | ✅ |
+| `test_argv.c` | `argc`/`argv` parsing | ✅ |
+| `test_args_math.c` | `strtol`, sum/product of argv | ✅ (new) |
+| `test_strings.c` | `strcmp`/`strchr`/`strrchr`/`memset`/`memcpy` | ✅ (new) |
+| `test_math.c` | 64-bit mul/div, shifts, ternary | ✅ (new) |
+| `test_fnptr.c` | Function pointer table dispatch | ⚠️ Decode error (relocation) |
+| `test_fileio.c` | `open`/`read`/`write`/`close` | ⚠️ Partial (`fclose` crash) |
+| `test_float.c` | `printf("%f", ...)` with doubles | ❌ Still hangs (partial fix) |
+| `test_malloc.c` | `malloc`/`free`/`qsort` | ❌ Still hangs (partial fix) |
+
+All 6 pre-existing assembly test programs (`hello`, `count`, `fib`,
+`cat`, `echo`, `repl`) still pass — no regressions.
+
+### Known Limitations
+This is an alpha release. The SIMD/BFM/ADC fixes unblock many more code
+paths, but several issues remain:
+
+- **`printf("%f", ...)` still hangs in some cases.** The SIMD LDR/STR
+  fix resolved the stack corruption that caused the original infinite
+  recursion in `__multf3`. However, musl's `__fmt_fp` (the float
+  formatter) now enters a different loop involving `__fixunstfsi`
+  (long double → unsigned int conversion). The root cause appears to
+  be incorrect FP value propagation through the softfloat chain.
+  Investigating. Integer printf formats (`%d`, `%x`, `%c`, `%s`, `%ld`,
+  `%llx`) all work correctly.
+
+- **`malloc`/`free` still hangs in mallocng init.** The `MAP_FIXED`
+  overlap fix helps, but musl's `__malloc_alloc_meta` still enters an
+  infinite recursion when its `brk()`+`mmap()` growth path is
+  exercised. The brk syscall works correctly, but musl's metadata
+  tracking gets confused by the interaction between brk extension and
+  MAP_FIXED mmap carving. This is the same class of bug that blocks
+  `toybox-aarch64`. Planned fix: rewrite the brk/mmap interaction to
+  more closely match Linux kernel semantics.
+
+- **`test_fnptr` decode error.** Function pointer tables in static-PIE
+  binaries aren't being relocated correctly. The function pointer ends
+  up pointing at a `.rodata` string instead of the function entry
+  point. Likely a `R_AARCH64_RELATIVE` relocation issue where musl's
+  self-relocator conflicts with our pre-applied relocations.
+
+- **`test_fileio` `fclose` crash.** File contents print correctly,
+  but on `fclose`/`__stdio_exit`, musl calls `memchr` on a `FILE*`
+  struct field that contains a garbage pointer. Likely a stdio
+  cleanup path issue where a `FILE*` struct field is read after the
+  underlying buffer has been reused.
+
+- **`toybox-aarch64` still exits with code 1 at PC=0.** The STP/LDP
+  mode calculation bug described in 1.1.0-rc.2's notes is still
+  pending the v2.0 hierarchical decoder restructure.
+
+- **glibc 2.36+ static binaries** still hit a decode error — unchanged.
+
+### Compatibility Matrix
+| Binary | 1.1.1-alpha.1 | 1.1.5-alpha.1 |
+|--------|---------------|---------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works |
+| `hello_arm64_musl` (static) | ✅ Works | ✅ Works |
+| `loop.elf` (musl static-PIE) | ✅ Works | ✅ Works |
+| `test_recursion.elf` | ✅ Works | ✅ Works |
+| `test_structs.elf` | ✅ Works | ✅ Works |
+| `test_bitops.elf` | ✅ Works | ✅ Works |
+| `test_switch.elf` | ✅ Works | ✅ Works |
+| `test_advanced.elf` | ✅ Works | ✅ Works |
+| `test_argv.elf` | ✅ Works | ✅ Works |
+| `test_args_math.elf` | ❌ n/a | ✅ **Works (new!)** |
+| `test_strings.elf` | ❌ n/a | ✅ **Works (new!)** |
+| `test_math.elf` | ❌ n/a | ✅ **Works (new!)** |
+| `test_fnptr.elf` | ❌ n/a | ⚠️ Decode error (new) |
+| `test_fileio.elf` | ⚠️ Partial | ⚠️ Partial (unchanged) |
+| `test_float.elf` | ❌ Hangs | ❌ Hangs (partial fix) |
+| `test_malloc.elf` | ❌ Hangs | ❌ Hangs (partial fix) |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | ⚠️ Decode error (unchanged) |
+| `toybox-aarch64` | ⚠️ Exit 1 (PC=0) | ⚠️ Exit 1 (PC=0, unchanged) |
+
+### Next Up (1.1.5-alpha.2 / 1.1.5-beta.1)
+1. Fix `printf("%f")` — audit `__fixunstfsi` and FP value propagation.
+2. Fix `malloc`/`free` — rewrite brk/mmap interaction.
+3. Fix `test_fnptr` — investigate static-PIE self-relocation conflict.
+4. Fix `test_fileio` `fclose` crash — stdio cleanup bug.
+5. Performance: decoded instruction cache (avoid re-decoding each step).
+6. More test programs: threads (`pthread_create`), signals.
+7. toybox stable — requires the v2.0 hierarchical decoder restructure.
+
+---
+
 ## [1.1.1-alpha.1] — 2026-06-17
 
 Alpha release. Fixes a decoder collision between `LDUR` (unscaled load)

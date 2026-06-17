@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.1.1-alpha.1)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.1.5-alpha.1)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -67,7 +67,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.1.1-alpha.1";
+constexpr const char* VERSION = "1.1.5-alpha.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -654,6 +654,7 @@ public:
 
         // brk starts just above the loaded image, page-aligned up
         brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
+        brk_start_ = brk_;
 
         // Set up the initial stack image
         const uint64_t STACK_TOP = 0x8000000000ULL;
@@ -745,6 +746,7 @@ private:
     uint64_t entry_ = 0;
     uint64_t end_addr_ = 0;
     uint64_t brk_ = 0;
+    uint64_t brk_start_ = 0;   // initial brk (set at ELF load time)
     std::mutex brk_mu_;        // serializes concurrent brk() calls
     uint64_t phdr_addr_ = 0;
     uint64_t phnum_ = 0;

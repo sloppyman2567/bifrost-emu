@@ -483,14 +483,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (rd_ != 31) cpu.regs[rd_] = extracted;
             } else if (opc == 2) { // UBFM
                 if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else {                // BFM
+            } else {                // BFM — insert at bits [immr..imms] of dst
                 uint64_t cur = cpu.regs[rd_];
                 if (!sf) cur &= 0xFFFFFFFF;
-                uint64_t dst_mask = mask << 0; // bits to overwrite (LSB-justified)
-                // The destination field is bits [imms..immr] (wrapped)
-                // For non-wraparound (imms>=immr), bits [0..len-1]
+                uint64_t dst_mask = mask << immr;  // shifted to field position [immr..imms]
                 uint64_t keep = cur & ~dst_mask;
-                if (rd_ != 31) cpu.regs[rd_] = keep | (extracted & dst_mask);
+                if (rd_ != 31) cpu.regs[rd_] = keep | ((extracted << immr) & dst_mask);
             }
         } else {
             // ROR-based: imms < immr -> field wraps.
@@ -510,11 +508,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (rd_ != 31) cpu.regs[rd_] = extracted;
             } else if (opc == 2) {
                 if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else {
+            } else {                // BFM — wrap-around case
+                // Destination field is bits[imms:0] ∪ bits[width-1:immr].
+                // The rotated source preserves the field positions, so we
+                // just merge the rotated value's field bits into dst.
+                uint64_t hi_mask = ~((1ULL << immr) - 1);  // bits [width-1..immr]
+                if (datasize == 32) hi_mask &= 0xFFFFFFFF;
+                uint64_t field_mask = mask | hi_mask;
                 uint64_t cur = cpu.regs[rd_];
-                uint64_t dst_mask = mask;
-                uint64_t keep = cur & ~dst_mask;
-                if (rd_ != 31) cpu.regs[rd_] = keep | (extracted & dst_mask);
+                if (!sf) cur &= 0xFFFFFFFF;
+                uint64_t rotated_w = (datasize == 64) ? rotated : (uint32_t)rotated;
+                if (rd_ != 31) cpu.regs[rd_] = (cur & ~field_mask) | (rotated_w & field_mask);
             }
         }
         if (!sf) cpu.regs[rd_] &= 0xFFFFFFFF;
@@ -791,6 +795,38 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         if (rd_ != 31) cpu.regs[rd_] = res;
         return;
     }
+
+    // Add/subtract (with carry) : sf op 1 1 0 1 0 0 0 Rm 0 0 0 0 0 0 Rn Rd
+    //   op=00 ADC, 01 ADCS, 10 SBC, 11 SBCS
+    // Encoding: sf 0 0 11010000 Rm 000000 Rn Rd = 0x1A000000 | (opc<<29)
+    if ((op & 0x1FE00000) == 0x1A000000) {
+        bool sf = (op >> 31) & 1;
+        uint8_t opc = (op >> 29) & 3;
+        uint8_t rm = (op >> 16) & 0x1F;
+        uint8_t rn = (op >> 5) & 0x1F;
+        uint8_t rd_ = op & 0x1F;
+        int width = sf ? 64 : 32;
+        uint64_t a = cpu.regs[rn];
+        uint64_t b = cpu.regs[rm];
+        if (!sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
+        uint64_t carry_in = cpu.flag_c() ? 1 : 0;
+        bool set_flags = (opc & 1);
+        bool is_sub = (opc & 2);
+        uint64_t res;
+        // For SBC: result = a - b - (1 - C). Equivalently, a + ~b + C.
+        if (is_sub) {
+            uint64_t not_b = ~b & (width == 64 ? ~0ULL : 0xFFFFFFFF);
+            res = set_add_flags(cpu, a, not_b, carry_in, width, set_flags);
+        } else {
+            res = set_add_flags(cpu, a, b, carry_in, width, set_flags);
+        }
+        if (rd_ != 31) cpu.regs[rd_] = res;
+        return;
+    }
+
+    // Conditional select (CSEL/CSINC/CSINV/CSNEG) is handled further below
+    // (after the logical-shifted-register group) with full op+S decoding.
+
 
     // Logical (shifted register) : sf opc 01010 shift N Rm imm6 Rn Rd
     if ((op & 0x1F000000) == 0x0A000000) {
@@ -1163,38 +1199,39 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         uint16_t imm12 = (op >> 10) & 0xFFF;
         uint8_t rn     = (op >> 5) & 0x1F;
         uint8_t rt     = op & 0x1F;
-        bool is_load = (opc & 2) || (opc & 1);  // opc=0 STR, opc=1 LDR, opc=2 LDRSW (load), opc=3 LDR
         uint64_t base = (rn == 31) ? cpu.sp : cpu.regs[rn];
-        uint64_t addr = base + (imm12 << size);
         if (v) {
-            // SIMD load/store. size indicates element size; we always
-            // load/store the full vector register up to 16 bytes.
-            // For Q-form (128-bit) the implicit size field is 16 bytes.
-            // The actual encoded `size` for SIMD LDR/STR is 0=B, 1=H, 2=S, 3=D.
-            // We treat the access as a 1<<size byte load/store to the LOW
-            // bits of V_rt, zero-extending on load.
-            int nbytes = 1 << size;
+            // SIMD LDR/STR encoding (per ARM ARM):
+            //   opc=00 size=xx → STR B/H/S/D form (1/2/4/8 bytes)
+            //   opc=01 size=xx → LDR B/H/S/D form (1/2/4/8 bytes)
+            //   opc=10 size=00 → STR Q form (128-bit / 16 bytes)
+            //   opc=11 size=00 → LDR Q form (128-bit / 16 bytes)
+            // The imm12 field is scaled by the access size:
+            //   B/H/S/D → scaled by 1<<size
+            //   Q       → scaled by 16
+            bool is_load = opc & 1;
+            bool is_q    = (opc & 2) && size == 0;
+            int nbytes = is_q ? 16 : (1 << size);
+            uint64_t scale = is_q ? 4 : size;  // log2 of access size
+            uint64_t addr = base + ((uint64_t)imm12 << scale);
             if (is_load) {
-                uint64_t v = 0;
-                mem_.read(addr, &v, nbytes);
-                cpu.v_lo[rt] = v;
-                if (nbytes == 16) {
-                    uint64_t hi = 0;
-                    mem_.read(addr + 8, &hi, 8);
-                    cpu.v_hi[rt] = hi;
-                } else {
-                    cpu.v_hi[rt] = 0;
-                }
+                uint64_t lo = 0, hi = 0;
+                mem_.read(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                cpu.v_lo[rt] = lo;
+                cpu.v_hi[rt] = (nbytes >= 16) ? hi : 0;
             } else {
-                uint64_t v = cpu.v_lo[rt];
-                mem_.write(addr, &v, nbytes);
-                if (nbytes == 16) {
+                uint64_t lo = cpu.v_lo[rt];
+                mem_.write(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) {
                     uint64_t hi = cpu.v_hi[rt];
-                    mem_.write(addr + 8, &hi, 8);
+                    mem_.write(addr + 8, &hi, nbytes - 8);
                 }
             }
             return;
         }
+        bool is_load = (opc & 2) || (opc & 1);  // opc=0 STR, opc=1 LDR, opc=2 LDRSW (load), opc=3 LDR
+        uint64_t addr = base + (imm12 << size);
         int width_bytes = 1 << size;
         if (is_load) {
             uint64_t v = 0;
@@ -1228,15 +1265,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         int16_t imm9  = sign_extend((op >> 12) & 0x1FF, 9);
         uint8_t rn    = (op >> 5) & 0x1F;
         uint8_t rt    = op & 0x1F;
-        bool is_load = (opc & 2) || (opc & 1);  // opc=0 STR, opc=1 LDR, opc=2 LDRSW (load), opc=3 LDR
+        bool is_load = (opc & 2) || (opc & 1);
         // bits 11:10 = MODE
         // 00 = unscaled (no writeback)
         // 01 = post-index (writeback after access)
         // 11 = pre-index (writeback before access)
         bool pre_index  = ((op >> 10) & 3) == 3;
         bool post_index = ((op >> 10) & 3) == 1;
-        // For LDUR/STUR (both bits clear) we use the immediate directly.
-        if (is_vec) return; // ignore SIMD
         uint64_t base = (rn == 31) ? cpu.sp : cpu.regs[rn];
         uint64_t addr;
         if (post_index) {
@@ -1249,6 +1284,29 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t new_base = base + imm9;
                 if (rn == 31) cpu.sp = new_base; else cpu.regs[rn] = new_base;
             }
+        }
+        if (is_vec) {
+            // SIMD LDUR/STUR. Same opc encoding as unsigned-offset:
+            //   opc=00 → STR B/H/S/D, opc=01 → LDR B/H/S/D
+            //   opc=10 → STR Q (128-bit), opc=11 → LDR Q (128-bit)
+            bool is_load_v = opc & 1;
+            bool is_q = (opc & 2) && size == 0;
+            int nbytes = is_q ? 16 : (1 << size);
+            if (is_load_v) {
+                uint64_t lo = 0, hi = 0;
+                mem_.read(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                cpu.v_lo[rt] = lo;
+                cpu.v_hi[rt] = (nbytes >= 16) ? hi : 0;
+            } else {
+                uint64_t lo = cpu.v_lo[rt];
+                mem_.write(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) {
+                    uint64_t hi = cpu.v_hi[rt];
+                    mem_.write(addr + 8, &hi, nbytes - 8);
+                }
+            }
+            return;
         }
         int width_bytes = 1 << size;
         if (is_load) {
@@ -1281,11 +1339,30 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         uint8_t S      = (op >> 12) & 1;
         uint8_t rn     = (op >> 5) & 0x1F;
         uint8_t rt     = op & 0x1F;
-        if (is_vec) return;
-        bool is_load = (opc & 2) || (opc & 1);  // opc=0 STR, opc=1 LDR, opc=2 LDRSW (load), opc=3 LDR
+        bool is_load = (opc & 2) || (opc & 1);
         uint64_t base = (rn == 31) ? cpu.sp : cpu.regs[rn];
         uint64_t off = extend_reg(cpu.regs[rm], option, S ? size : 0, true);
         uint64_t addr = base + off;
+        if (is_vec) {
+            bool is_load_v = opc & 1;
+            bool is_q = (opc & 2) && size == 0;
+            int nbytes = is_q ? 16 : (1 << size);
+            if (is_load_v) {
+                uint64_t lo = 0, hi = 0;
+                mem_.read(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                cpu.v_lo[rt] = lo;
+                cpu.v_hi[rt] = (nbytes >= 16) ? hi : 0;
+            } else {
+                uint64_t lo = cpu.v_lo[rt];
+                mem_.write(addr, &lo, std::min(nbytes, 8));
+                if (nbytes > 8) {
+                    uint64_t hi = cpu.v_hi[rt];
+                    mem_.write(addr + 8, &hi, nbytes - 8);
+                }
+            }
+            return;
+        }
         int width_bytes = 1 << size;
         if (is_load) {
             uint64_t v = 0;
@@ -2103,6 +2180,25 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             cpu.v_lo[rd] = cpu.v_lo[rn];
             if (ftype) cpu.v_hi[rd] = 0;
             else { cpu.v_lo[rd] &= 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
+            return;
+        }
+
+        // ── FMOV (general ↔ FP, 64-bit, with index) ────────────────
+        // FMOV Vd.D[1], Rn: move 64-bit GPR to HIGH half of Vd
+        //   Encoding: 1001 1110 1010 1111 0000 00 Rn Rd  = 0x9EAF0000 | (Rn<<5) | Rd
+        // FMOV Rn, Vm.D[1]: move HIGH half of Vm to 64-bit GPR
+        //   Encoding: 1001 1110 1011 1111 0000 00 Rn Rd  = 0x9EBF0000 | (Rn<<5) | Rd
+        // These are used heavily by musl's softfloat (__multf3, __addtf3,
+        // etc.) to construct 128-bit long doubles from two 64-bit GPRs.
+        if ((op & 0xFFE0FC00) == 0x9EA00000) {
+            bool to_fp = (op >> 16) & 1;  // bit 16: 0=read from V, 1=write to V
+            if (to_fp) {
+                // FMOV Vd.D[1], Rn: write GPR to high 64 bits
+                cpu.v_hi[rd] = cpu.regs[rn];
+            } else {
+                // FMOV Rn, Vm.D[1]: read high 64 bits to GPR
+                cpu.regs[rd] = cpu.v_hi[rn];
+            }
             return;
         }
 

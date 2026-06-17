@@ -13,6 +13,22 @@
 
 namespace arm64emu {
 
+// Helper: read a NUL-terminated path string from guest memory at `addr`.
+// Returns the path as a std::string (without the NUL). Reads at most 4096
+// bytes to prevent runaway reads from bad pointers.
+static std::string read_path(Memory& mem, uint64_t addr) {
+    if (addr == 0) return std::string();
+    std::string s;
+    s.reserve(64);
+    for (uint64_t off = 0; off < 4096; off++) {
+        uint8_t c = 0;
+        try { c = mem.load<uint8_t>(addr + off); } catch (...) { break; }
+        if (c == 0) break;
+        s.push_back((char)c);
+    }
+    return s;
+}
+
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
@@ -163,6 +179,49 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
+        case 23: { // dup
+            int r = ::dup((int)a0);
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            ret_host(r);
+            return;
+        }
+        case 33: { // dup2
+            int r = ::dup2((int)a0, (int)a1);
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            ret_host(r);
+            return;
+        }
+        case 59: { // pipe2
+            int fds[2];
+            int r = ::pipe2(fds, (int)a1);
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            mem_.write(a0, fds, sizeof(fds));
+            ret_host(0);
+            return;
+        }
+        case 34: { // mkdirat
+            std::string path = read_path(mem_, a1);
+            int r = ::mkdirat((int)a0, path.c_str(), (mode_t)a2);
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            ret_host(0);
+            return;
+        }
+        case 35: { // unlinkat
+            std::string path = read_path(mem_, a1);
+            int r = ::unlinkat((int)a0, path.c_str(), (int)a2);
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            ret_host(0);
+            return;
+        }
+        case 38: { // renameat
+            std::string oldp = read_path(mem_, a1);
+            std::string newp = read_path(mem_, a3);
+            int r = ::renameat((int)a0, oldp.c_str(), (int)a2, newp.c_str());
+            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+            ret_host(0);
+            return;
+        }
+
         case 66: { // writev
             // a0=fd, a1=iovec ptr, a2=count
             uint64_t iov = a1;
@@ -242,18 +301,26 @@ void Emulator::syscall(CPU& cpu) {
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = (uint64_t)-22; return; } // EINVAL
 
-            // MAP_FIXED (0x10): kernel MUST map at exactly `addr`,
-            // replacing any existing mapping. Without MAP_FIXED, `addr`
-            // is just a hint — the kernel can (and usually does) ignore
-            // it and pick a fresh address.
-            //
-            // The previous code honored the hint unconditionally, which
-            // broke musl's malloc: musl calls mmap(addr=heap_end, ...)
-            // as a hint, and our mmap_alloc returned the same address
-            // every time, causing musl to think each mmap succeeded
-            // without actually getting new memory.
             constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
+
+            // If MAP_FIXED overlaps the brk region, push brk past the
+            // mmap'd area. musl's mallocng sometimes calls mmap with
+            // MAP_FIXED on addresses inside the brk region when it grows
+            // its metadata arena; without this adjustment, the MAP_FIXED
+            // mmap zeroes out brk-managed pages, corrupting mallocng's
+            // metadata and causing an infinite recursion in
+            // __malloc_alloc_meta.
+            if (effective_hint) {
+                uint64_t mmap_end = effective_hint + ((length + 0xFFF) & ~0xFFFULL);
+                std::lock_guard<std::mutex> g(brk_mu_);
+                if (effective_hint < brk_ && mmap_end > brk_start_) {
+                    // Overlap detected: move brk forward past the mmap'd area.
+                    brk_ = std::max(brk_, mmap_end);
+                    // Re-extend the brk mapping to cover the new region.
+                    mem_.map_range(brk_start_, brk_ - brk_start_);
+                }
+            }
 
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
 

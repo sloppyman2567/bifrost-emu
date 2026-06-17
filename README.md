@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.1.1-alpha.1
+  bifrost-emu  v1.1.5-alpha.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.1.1-alpha.1](https://img.shields.io/badge/version-1.1.1--alpha.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.1.5-alpha.1](https://img.shields.io/badge/version-1.1.5--alpha.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -130,9 +130,13 @@ python3 mini_arm64_asm.py prog.s -o prog.elf
 | `test_switch.elf` (musl static) | ✅ Works | Switch/jump-table, 2D arrays, `goto` |
 | `test_advanced.elf` (musl static) | ✅ Works | Ackermann recursion |
 | `test_argv.elf` (musl static) | ✅ Works | `argc`/`argv` with extra args |
+| `test_args_math.elf` (musl static) | ✅ Works | `strtol`, sum/product of args |
+| `test_strings.elf` (musl static) | ✅ Works | `strcmp`/`strchr`/`strrchr`/`memset` |
+| `test_math.elf` (musl static) | ✅ Works | 64-bit mul/div, shifts, ternary |
+| `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function pointer table relocation issue |
 | `test_fileio.elf` (musl static) | ⚠️ Partial | File prints, then crash on `fclose` |
-| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f", ...)` triggers FP bug |
-| `test_malloc.elf` (musl static) | ❌ Hangs | mallocng init recursion loop |
+| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f")` → `__multf3` recursion (partial fix) |
+| `test_malloc.elf` (musl static) | ❌ Hangs | mallocng init recursion (partial `MAP_FIXED` fix) |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
 | `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
 
@@ -174,30 +178,41 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
-## What's New in 1.1.1-alpha.1
+## What's New in 1.1.5-alpha.1
 
-Alpha release. Fixes a decoder collision between `LDUR` (unscaled load)
-and LSE atomic instructions that broke static-PIE binaries compiled with
-musl-gcc, including the common `memcpy`/`printf` code path.
+Significant alpha release with multiple correctness fixes and syscall
+expansions. The headline fix is the SIMD load/store bug that broke
+128-bit (`str q0`/`ldr q0`) operations — this was silently corrupting
+softfloat values on the stack and broke musl's `printf("%f")` path.
 
-- **Proper LDUR/LSE disambiguation via PT_NOTE parsing** — the LDUR/STUR
-  unscaled load/store encoding genuinely overlaps with LSE atomics in
-  three of four discriminating bit fields. The ARM ARM disambiguates
-  them by the binary's declared feature set: `GNU_PROPERTY_AARCH64_FEATURE_1_LSE`
-  in `.note.gnu.property`. The ELF loader now parses `PT_NOTE` segments
-  to detect this bit, and the LSE atomics handler is only enabled when
-  the binary actually declared LSE usage. Binaries compiled without
-  `+lse` (the default for musl-static) always route the ambiguous
-  encoding to LDUR/STUR — matching real hardware behavior.
-- **Tested with 9 musl-static C programs** — loops, recursion, structs,
-  64-bit arithmetic, switch/jump-tables, Ackermann, argv parsing all
-  work. See the compatibility matrix below for known failures
-  (`printf("%f")`, `malloc`/`free`, `fclose`).
+- **SIMD LDR/STR Q-form (128-bit) fix** — `str q0`/`ldr q0` were
+  incorrectly decoded as 1-byte (B-form) transfers because the LSE
+  handler's `opc` field interpretation was wrong. The correct encoding:
+  `opc=10` → STR Q (128-bit), `opc=11` → LDR Q (128-bit), `opc=00`/`01`
+  with size → B/H/S/D forms. Fixed in all three load/store handlers
+  (unsigned-offset, pre/post-indexed, register-offset).
+- **`FMOV Vd.D[1], Rn` / `FMOV Rn, Vm.D[1]`** — these move a 64-bit GPR
+  to/from the HIGH 64 bits of a vector register. Used heavily by musl's
+  128-bit softfloat routines (`__multf3`, `__addtf3`, `__eqtf2`, etc.)
+  to construct long doubles from two GPRs. Previously unimplemented.
+- **`BFM` (bitfield move) fix** — the destination field position was
+  wrong: BFM was inserting source bits at position 0 instead of at the
+  `[immr..imms]` field position. This broke `bfi` (bitfield insert),
+  which musl uses to assemble FP exponent/mantissa fields.
+- **`ADC`/`ADCS`/`SBC`/`SBCS`** — add/subtract with carry. Previously
+  unimplemented; caused decode errors in softfloat routines that use
+  multi-precision arithmetic.
+- **More syscalls** — added `dup` (23), `dup2` (33), `pipe2` (59),
+  `mkdirat` (34), `unlinkat` (35), `renameat` (38), `utimensat` (88),
+  `fstatat` (79). Total syscall count now ~88.
+- **`MAP_FIXED` overlap handling** — when musl's mallocng uses `MAP_FIXED`
+  on an address inside the brk region, the brk is now pushed past the
+  mmap'd area to avoid corrupting heap metadata. (Partial fix — see
+  Known Limitations.)
 
-Also includes all fixes from 1.1.0-rc.2 (FP/SIMD arithmetic, VFS, file
-split, readv fix, SIMD STP/LDP) and 1.1.0-beta.1 (LSE atomics, CAS
-argument order, exclusive monitor, mremap in-place, mmap MAP_FIXED,
-getppid, stack 64MB).
+Also includes all fixes from 1.1.1-alpha.1 (PT_NOTE-based LDUR/LSE
+disambiguation), 1.1.0-rc.2 (FP/SIMD arithmetic, VFS, file split,
+readv fix, SIMD STP/LDP) and earlier releases.
 
 Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
@@ -225,13 +240,20 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 This is alpha-quality software. Known issues:
 
-- **`printf("%f", ...)` hangs.** musl's float-formatting path triggers bugs
-  in the FP arithmetic emulation (added in 1.1.0-rc.2). Integer formats
-  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
-- **`malloc`/`free` hangs in musl's mallocng init.** The `brk`+`mmap`
-  growth path enters an infinite recursion. This also blocks toybox and
-  any binary that does nontrivial heap allocation. Planned fix: proper
-  `MAP_FIXED` overlap handling in `mmap`.
+- **`printf("%f", ...)` still hangs in some cases.** The SIMD LDR/STR
+  fix resolved the stack corruption that caused the original infinite
+  recursion in `__multf3`. However, musl's `__fmt_fp` (float formatter)
+  now enters a different loop involving `__fixunstfsi`. Investigating.
+  Integer printf formats (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **`malloc`/`free` hangs in musl's mallocng init.** The `MAP_FIXED`
+  overlap fix helps, but the brk/mmap interaction still confuses
+  musl's metadata tracking. This also blocks toybox and any binary
+  that does nontrivial heap allocation.
+- **Function pointer tables in static-PIE binaries** may not relocate
+  correctly. Test `test_fnptr` hits a decode error because the function
+  pointer ends up pointing at `.rodata` instead of the function.
+- **`fclose` crash** in `test_fileio` — file contents print correctly
+  but `__stdio_exit` calls `memchr` on a garbage pointer.
 - **No signal delivery** — `rt_sigaction` is a no-op. Planned for 1.2.0.
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
@@ -242,11 +264,13 @@ This is alpha-quality software. Known issues:
 
 ## Roadmap
 
-**Short-term (1.1.1-beta.1 / 1.1.1):**
-1. Fix `printf("%f", ...)` — audit FP arithmetic for IEEE 754 edge cases.
-2. Fix `malloc`/`free` — proper `MAP_FIXED` overlap handling.
-3. Fix `fclose` crash in `test_fileio`.
-4. More test coverage: threads, networking, signals.
+**Short-term (1.1.5-beta.1 / 1.1.5):**
+1. Fix `printf("%f")` — audit `__fixunstfsi` and FP value propagation.
+2. Fix `malloc`/`free` — rewrite brk/mmap interaction.
+3. Fix `test_fnptr` — investigate static-PIE self-relocation conflict.
+4. Fix `test_fileio` `fclose` crash — stdio cleanup bug.
+5. Performance: decoded instruction cache.
+6. More test coverage: threads, signals.
 
 **Medium-term (1.2.0):**
 1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page).
