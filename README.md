@@ -147,9 +147,9 @@ instructions in under 0.1ms. A JIT is planned for v2.0 (target:
   The future JIT will share the same decoder.
 - **Hang watchdog.** A safety net in the run loop catches infinite
   loops (e.g. `b .` self-branches) and aborts with a diagnostic instead
-  of spinning forever. Combined with the mallocng MAP_FIXED fix, this
-  means malloc/free hangs now either work or fail fast — they no longer
-  wedge the emulator.
+  of spinning forever. With the UBFM rotation fix in beta.3, mallocng
+  no longer hangs — but the watchdog remains as a safety net for any
+  future regressions.
 
 ## Usage
 
@@ -244,9 +244,9 @@ aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 | `test_math.elf` (musl static) | ✅ Works | 64-bit mul/div, shifts, ternary |
 | `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function pointer table relocation issue |
 | `test_fileio.elf` (musl static) | ✅ Works | File I/O + `fclose` cleanup (fixed in beta.1) |
-| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f")` → softfloat recursion (partial fix) |
-| `test_malloc.elf` (musl static) | ⚠️ Watchdog abort | mallocng init recursion (partial fix in beta.3) |
-| `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Gets past atomics, hangs in mallocng init |
+| `test_float.elf` (musl static) | ⚠️ Decode error | `printf("%f")` — no longer hangs (fixed in beta.3); now fails fast on an unhandled FP instruction in the softfloat path |
+| `test_malloc.elf` (musl static) | ✅ Works | `malloc`/`free`/`qsort` all succeed; exit 133 is the known `fclose` cleanup crash, NOT a malloc bug (fixed in beta.3) |
+| `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Gets past atomics + mallocng init; hangs later in SDL2 setup |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
 | `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
 
@@ -307,7 +307,19 @@ See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
 ## What's New in 1.3.0-beta.3
 
-**The big one: decoder switch is complete, legacy if-chain is deleted.**
+**The big one: the mallocng hang is fixed.** The root cause was a
+32-bit rotation bug in the UBFM/SBFM/BFM instruction handler. When
+executing `lsl w24, w26, #4` (which the compiler encodes as
+`ubfm w24, w26, #28, #27`), the emulator used `ror64` followed by a
+`uint32_t` cast, which lost the wrapped bits — `ror64(0x2, 28)` puts
+the wrapped bits at position 36, and `(uint32_t)0x2000000000 = 0x0`
+instead of the correct `0x20` (= 32). This made musl's mallocng stride
+0, which caused `alloc_slot` to infinitely recurse because no group size
+class could satisfy the `stride * nslots + 16 <= pagesize/2` check.
+`malloc`/`free`/`qsort` all work now. This was THE #1 blocker since
+v1.1.5-alpha.1.
+
+**The decoder switch is complete, the legacy if-chain is deleted.**
 Every instruction handler — branches, system, data processing (immediate
 and register), load/store, atomics, SIMD data-processing, and FP scalar —
 now lives in the `switch(d.cls)` block in `interpreter.cpp`. The
@@ -316,14 +328,26 @@ gone. The interpreter now does a single `decode()` call per instruction
 and dispatches purely on `d.cls`. The decoder is the true single source
 of truth, no exceptions.
 
-**mallocng MAP_FIXED overlap fix.** When musl's mallocng calls
+**FP scalar decoder fix.** The FP scalar decoder only matched
+`0x1E200000` (32-bit single-precision). It missed all 64-bit
+(`sf=1`, top byte `0x9E`) and double-precision (`ftype=01`) FP
+instructions, causing decode errors on any binary using D registers.
+Fixed by adding the broad `0x1E000000` and `0x9E000000` top-byte masks,
+matching the original if-chain's three-way check. `test_float` no
+longer hangs — it now fails fast with a decode error on an unhandled
+FP instruction in the softfloat path (an improvement over the infinite
+hang).
+
+**mallocng MAP_FIXED overlap handling.** When musl's mallocng calls
 `mmap(MAP_FIXED, addr, ...)` inside the brk region (which it does to
 carve out guard pages and meta_area slots), the brk is now pushed
 forward past the mmap'd region. This prevents a subsequent `brk(new)`
 extension from re-mapping the same pages via `map_range` and corrupting
-musl's metadata. The fix matches the existing changelog description
-from 1.1.5-alpha.1 — the description was there but the actual code was
-missing. Now it's not.
+musl's metadata. The 1.1.5-alpha.1 changelog described this fix but the
+actual code was missing; this release finally implements it. (Note: this
+was NOT the root cause of the mallocng hang — the UBFM rotation bug was.
+But this fix is still correct and necessary for long-running malloc
+workloads.)
 
 **Hang watchdog.** The run loop tracks the last PC and counts how many
 times it's been executed consecutively. If the same PC is hit more than
@@ -382,17 +406,17 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 This is beta-quality software. Known issues:
 
-- **`malloc`/`free` may still hang in mallocng init for some binaries.**
-  The MAP_FIXED overlap fix (beta.3) handles the common case, but
-  musl's metadata tracking can still enter an infinite recursion in
-  deeper code paths. The hang watchdog catches `b .` self-loops but
-  NOT recursion (where SP keeps dropping). Workaround: re-run with
-  `-v` to see how many instructions executed before the hang, then
-  use `-d` to trace the last few hundred. **The watchdog will at
-  least prevent the emulator from wedging forever on a tight loop.**
-- **`printf("%f", ...)` hangs.** musl's float formatter enters an
-  infinite loop in `__multf3`/`__fixunstfsi`. Integer printf formats
-  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **`printf("%f", ...)` fails with a decode error.** musl's float
+  formatter uses 128-bit softfloat routines that hit FP instructions we
+  don't yet model. This is an improvement over beta.2 (which hung
+  forever); the failure is now fast. Integer printf formats (`%d`,
+  `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **`fclose` / `__stdio_exit` cleanup crash (exit 133).** When musl's
+  `exit()` calls `__stdio_exit()`, stale FILE buffer pointers can cause
+  unmapped reads. The run loop catches `UnmappedMemory` exceptions and
+  breaks gracefully — program output is already complete by this point,
+  so the exit code (133) is cosmetic. `test_malloc` and
+  `test_simple_malloc` both exit 133 but produce correct output.
 - **Function pointer tables in static-PIE binaries** may not relocate
   correctly (`test_fnptr` hits a decode error).
 - **No signal delivery** — `rt_sigaction` is a no-op.
@@ -407,17 +431,25 @@ This is beta-quality software. Known issues:
   This is a long-standing bug noted in the legacy if-chain comments;
   it's preserved verbatim in the new switch. Proper fix requires
   hierarchical decoder restructure (v2.0).
+- **`test_sdl2.elf`** gets past atomics and mallocng init (thanks to
+  the beta.3 fixes) but hangs later in SDL2 setup. The hang watchdog
+  catches it as a fast-fail.
 
 ## Roadmap
 
 **Short-term (1.3.0 final):**
-1. More test coverage: threads, signals
+1. Fix `printf("%f")` — audit the softfloat FP instruction path and
+   implement the missing FP ops
 2. Fix `test_fnptr` — investigate static-PIE self-relocation
-3. Audit remaining `printf("%f")` softfloat path
+3. Fix the `fclose`/`__stdio_exit` exit-133 crash (stale FILE buffer
+   pointers)
+4. More test coverage: threads, signals
 
 **Medium-term (1.4.0):**
 1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page)
-2. SDL2 rendering for the graphics backend (video/audio/input)
+2. SDL2 rendering for the graphics backend (video/audio/input) — the
+   mallocng fix in beta.3 unblocks this; SDL2 init now gets past the
+   allocator
 3. Pre-index STP/LDP proper fix (hierarchical decoder)
 
 **Long-term (2.0+):**
