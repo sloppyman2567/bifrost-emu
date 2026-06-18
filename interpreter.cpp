@@ -74,8 +74,21 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // (v2.0), the if-chain will be deleted entirely and the switch will
     // be the only dispatch path — shared with the JIT.
     {
+        // ── Instruction decode cache ──────────────────────────────
+        // Since guest code is not self-modifying (static binaries only),
+        // each PC always decodes to the same instruction. Cache the
+        // DecodedInst by PC to skip the decode() if-chain on repeated
+        // executions of the same PC (e.g. tight loops).
         DecodedInst d;
-        decode(d, inst);
+        auto cache_it = decode_cache_.find(cpu.pc);
+        if (cache_it != decode_cache_.end()) {
+            d = cache_it->second;
+            decode_cache_hits_++;
+        } else {
+            decode(d, inst);
+            decode_cache_[cpu.pc] = d;
+            decode_cache_misses_++;
+        }
         switch (d.cls) {
             // ── ADC/ADCS/SBC/SBCS (add/subtract with carry) ──────────
             // These were previously unimplemented in the if-chain and
@@ -1298,9 +1311,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             //   opc=01 size=xx → LDR B/H/S/D form (1/2/4/8 bytes)
             //   opc=10 size=00 → STR Q form (128-bit / 16 bytes)
             //   opc=11 size=00 → LDR Q form (128-bit / 16 bytes)
-            // The imm12 field is scaled by the access size:
-            //   B/H/S/D → scaled by 1<<size
-            //   Q       → scaled by 16
             bool is_load = opc & 1;
             bool is_q    = (opc & 2) && size == 0;
             int nbytes = is_q ? 16 : (1 << size);
@@ -1314,9 +1324,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 cpu.v_hi[rt] = (nbytes >= 16) ? hi : 0;
             } else {
                 uint64_t lo = cpu.v_lo[rt];
+                uint64_t hi = cpu.v_hi[rt];
                 mem_.write(addr, &lo, std::min(nbytes, 8));
                 if (nbytes > 8) {
-                    uint64_t hi = cpu.v_hi[rt];
                     mem_.write(addr + 8, &hi, nbytes - 8);
                 }
             }
@@ -1886,16 +1896,33 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         }
 
         // MOVI (vector immediate) - move immediate to vector
-        // 0 Q 0 0 11110 00 a b c d e f g h defg h Rn Rd (various forms)
-        // Simplest: 0 Q 0 0 11110 00 0 imm8 0 1 1 1 0 0 Rn Rd
-        //          (MOVI Vd.16B/8B, #imm8 - byte broadcast)
-        if ((op & 0xBF8FFC00) == 0x0F00E400) {
+        // Multiple forms based on cmode:
+        //   cmode=1110, Q=1: MOVI Vd.2D, #imm8 (64-bit, each lane = imm8)
+        //   cmode=1110, Q=0: MOVI Vd.1D, #imm8
+        //   cmode=1111: MOVI Vd.16B/8B, #imm8 (byte broadcast)
+        // The 2D form (cmode=1110) is used heavily by musl to zero 128-bit
+        // vector registers (movi v1.2d, #0x0). Without this, softfloat
+        // routines get garbage in comparison operands.
+        if ((op & 0x3F8FFC00) == 0x0F00E400) {
+            bool Q = (op >> 30) & 1;
+            uint8_t cmode = (op >> 12) & 0xF;
+            // Extract imm8: bits 20:16 (abcde) and bits 7:5 (fgh) → 8-bit
             uint8_t imm8 = ((op >> 16) & 0x1F) << 3 | ((op >> 5) & 0x7);
-            uint8_t buf[16];
-            memset(buf, imm8, Q ? 16 : 8);
-            memcpy(&cpu.v_lo[rd], buf, 8);
-            if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-            else cpu.v_hi[rd] = 0;
+
+            if (cmode == 0xE) {
+                // 64-bit form: each 64-bit lane = imm8 (zero-extended)
+                uint64_t val = imm8;  // zero-extended to 64 bits
+                cpu.v_lo[rd] = val;
+                if (Q) cpu.v_hi[rd] = val;
+                else cpu.v_hi[rd] = 0;
+            } else {
+                // Byte broadcast form (cmode=0xF)
+                uint8_t buf[16];
+                memset(buf, imm8, Q ? 16 : 8);
+                memcpy(&cpu.v_lo[rd], buf, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                else cpu.v_hi[rd] = 0;
+            }
             return;
         }
 

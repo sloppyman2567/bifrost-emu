@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-alpha.1
+  bifrost-emu  v1.3.0-alpha.2
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-alpha.1](https://img.shields.io/badge/version-1.3.0--alpha.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.3.0-alpha.2](https://img.shields.io/badge/version-1.3.0--alpha.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -178,7 +178,7 @@ AT_RANDOM, AT_HWCAP, etc.).
 See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
 on each syscall and known issues.
 
-## What's New in 1.3.0-alpha.1
+## What's New in 1.3.0-alpha.2
 
 Significant alpha release with multiple correctness fixes and syscall
 expansions. The headline fix is the SIMD load/store bug that broke

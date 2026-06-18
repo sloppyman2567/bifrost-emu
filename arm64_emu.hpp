@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-alpha.1)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-alpha.2)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -26,6 +26,7 @@
 // state beyond `cpu_` and `mem_`).
 #pragma once
 
+#include "decoder.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -67,7 +68,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.3.0-alpha.1";
+constexpr const char* VERSION = "1.3.0-alpha.2";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -756,6 +757,19 @@ private:
     bool trace_ = false;
     bool brk_verbose_ = true;
     std::string elf_path_;
+
+    // ── Instruction decode cache ──────────────────────────────────────
+    // Maps PC -> DecodedInst. Since guest code is not self-modifying
+    // (static binaries only, no mmap'd executable code), each PC always
+    // decodes to the same instruction. Caching avoids re-running the
+    // decode() if-chain on every execution of the same PC.
+    //
+    // For tight loops (e.g. fib's inner loop), the same ~10 PCs are hit
+    // millions of times — the cache turns those millions of decode()
+    // calls into hash-map lookups.
+    std::unordered_map<uint64_t, DecodedInst> decode_cache_;
+    uint64_t decode_cache_hits_ = 0;
+    uint64_t decode_cache_misses_ = 0;
 
     // Thread management (for clone())
     struct GuestThread {

@@ -161,18 +161,34 @@ enum class InstClass : uint16_t {
     UCVTF,          // unsigned int to FP
     FRINT,          // FP round to integer (all modes)
     FCSEL,          // FP conditional select
+
+    // System
+    SVC_IMM,        // SVC #imm
+    HVC_IMM,        // HVC #imm (error in user mode)
+    SMC_IMM,        // SMC #imm (error in user mode)
+    BRK_IMM,        // BRK #imm
+    HLT_IMM,        // HLT #imm
+    MSR_SYS,        // MSR <sysreg>, Xt
+    MRS_SYS,        // MRS Xt, <sysreg>
+    HINT,           // NOP/WFE/WFI/SEV/YIELD
+    // BARRIER already declared above
+    CLREX_INST,     // CLREX
+    SYS_NOP,        // Other system instructions (NOP)
+
+    // SIMD data processing (sub-dispatched within the case)
+    SIMD_DP,        // Generic SIMD data processing (sub-dispatch by raw bits)
+    FP_SCALAR,      // Generic FP scalar (sub-dispatch by raw bits)
 };
 
 // ── Decoded instruction ─────────────────────────────────────────────────
-// All fields extracted from a 32-bit ARM64 instruction word. Not all
-// fields are valid for all instruction classes; the interpreter/JIT
-// should only read fields relevant to InstClass.
+// All fields extracted from a 32-bit ARM64 instruction word. The decoder
+// fills these; the interpreter reads them. The interpreter NEVER does bit
+// extraction — it only reads d.* fields and executes.
 struct DecodedInst {
     InstClass cls = InstClass::UNKNOWN;
     uint32_t  raw = 0;          // the original 32-bit word
 
-    // Common register fields (positions vary by class, but we extract
-    // them into a uniform layout for easy access).
+    // ── Common register fields ──
     uint8_t  rd  = 0;           // destination register
     uint8_t  rn  = 0;           // first source register (often base)
     uint8_t  rm  = 0;           // second source register
@@ -182,28 +198,71 @@ struct DecodedInst {
     uint8_t  rs  = 0;           // status register (STXR) / source (atomic)
     uint8_t  cond = 0;          // condition code (0-15)
 
-    // Width / size
+    // ── Width / size ──
     uint8_t  size = 0;          // 0=8bit, 1=16bit, 2=32bit, 3=64bit
     bool     sf = false;        // 64-bit (vs 32-bit) for data processing
     bool     is_load = false;   // true for LDR/LDP, false for STR/STP
     bool     is_vec = false;    // true for SIMD/FP, false for GP
     bool     set_flags = false; // true for ADDS/SUBS/ANDS
 
-    // Immediates
+    // ── SP / XZR disambiguation ──
+    // For ADD/SUB immediate: Rn==31 reads SP (not XZR) when !set_flags.
+    // Rd==31 writes SP (not XZR) when !set_flags.
+    bool     reads_sp = false;  // source Rn is SP (not XZR)
+    bool     writes_sp = false; // destination Rd is SP (not XZR)
+
+    // ── Immediates ──
     int64_t  imm = 0;           // signed immediate (various forms)
     uint64_t imm_u = 0;         // unsigned immediate
-    uint8_t  shift = 0;         // shift amount
+    uint16_t imm16 = 0;         // 16-bit immediate (MOVZ/MOVK/etc.)
+    uint8_t  shift = 0;         // shift amount (already computed)
     uint8_t  shift_type = 0;    // 0=LSL, 1=LSR, 2=ASR, 3=ROR
     uint8_t  extend = 0;        // extend type for extended register
+    uint8_t  hw = 0;            // half-word selector (MOVZ/MOVK: shift = hw*16)
 
-    // Memory addressing
-    int64_t  disp = 0;          // displacement for load/store
+    // ── Bitfield (SBFM/BFM/UBFM/EXTR) ──
+    uint8_t  immr = 0;          // bitfield rotate amount
+    uint8_t  imms = 0;          // bitfield width selector
+    bool     N = false;         // bit 22 (bitfield / logical imm)
+
+    // ── Logical immediate ──
+    // The bitmask is pre-decoded by the decoder into `imm_u` (64-bit value).
+    // The interpreter just uses it directly.
+
+    // ── Memory addressing ──
+    int64_t  disp = 0;          // displacement (already computed, includes scale)
     uint8_t  mode = 0;          // 0=offset, 1=post-index, 2=pre-index
     bool     writeback = false; // true if base register is written back
+    uint8_t  opc_ls = 0;        // load/store opc field (0=STR,1=LDR,2=STRQ/LDRSW,3=LDRQ/LDR)
 
-    // Atomics
+    // ── Atomics ──
     uint8_t  atom_op = 0;       // LSE atomic opcode (0-15)
     bool     acquire = false;   // acquire-release hint
+    uint8_t  excl_low6 = 0;     // exclusive load/store low 6 bits
+
+    // ── Data processing (1-source, 2-source, 3-source) ──
+    uint8_t  dp_opcode = 0;     // sub-opcode for 1/2/3-source data proc
+    bool     o0 = false;        // bit 21 (MADD vs MSUB, etc.)
+
+    // ── Conditional compare (CCMP/CCMN) ──
+    uint8_t  nzcv_field = 0;    // NZCV to set if condition is false
+    bool     is_register = false; // CCMP reg vs imm
+
+    // ── SIMD / FP ──
+    bool     Q = false;         // 128-bit (Q form) vs 64-bit (D form)
+    uint8_t  ftype = 0;         // 0=S, 1=D, 3=H
+    uint8_t  cmode = 0;         // SIMD immediate cmode field
+    uint8_t  fp_opcode = 0;     // FP arithmetic opcode
+    uint8_t  rmode = 0;         // FP rounding mode
+    bool     is_sub = false;    // SUB vs ADD (various groups)
+
+    // ── System registers (MSR/MRS) ──
+    uint8_t  sys_op0 = 0;
+    uint8_t  sys_op1 = 0;
+    uint8_t  sys_crn = 0;
+    uint8_t  sys_crm = 0;
+    uint8_t  sys_op2 = 0;
+    bool     sys_L = false;     // 0=MSR (write), 1=MRS (read)
 };
 
 // ── Decode function ─────────────────────────────────────────────────────
