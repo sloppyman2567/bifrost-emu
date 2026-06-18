@@ -2,7 +2,7 @@
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
 //
-// Version: 1.3.0-beta.3
+// Version: 1.3.0-beta.4
 //
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]

@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.3)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.4)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -69,7 +69,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.3.0-beta.3";
+constexpr const char* VERSION = "1.3.0-beta.4";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
