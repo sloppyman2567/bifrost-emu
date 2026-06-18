@@ -1396,8 +1396,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // MOVI (vector immediate)
-                if ((op & 0x3F8FFC00) == 0x0F00E400) {
+                // MOVI (vector immediate) — mask excludes bit 30 (Q) so both
+                // Q=0 (8B/4H/2S/1D) and Q=1 (16B/8H/4S/2D) forms match.
+                if ((op & 0x1F8FFC00) == 0x0F00E400) {
                     uint8_t cmode = (op >> 12) & 0xF;
                     uint8_t imm8 = ((op >> 16) & 0x1F) << 3 | ((op >> 5) & 0x7);
                     if (cmode == 0xE) {
