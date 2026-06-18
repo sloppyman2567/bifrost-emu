@@ -488,40 +488,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint8_t immr = (d.raw >> 16) & 0x3F;
                 uint8_t imms = (d.raw >> 10) & 0x3F;
                 int width = d.sf ? 64 : 32;
-                // Decode bitmask (same logic as the if-chain)
-                uint8_t combined = (Nbit << 6) | imms;
-                uint64_t imm_val;
-                if (combined == 0) {
-                    imm_val = 0;
-                } else {
-                    int hsbit = 0;
-                    for (int i = 6; i >= 0; i--) {
-                        if (combined & (1 << i)) { hsbit = i; break; }
-                    }
-                    int esize;
-                    if (Nbit) { esize = 64; }
-                    else { esize = 1 << (hsbit + 1); }
-                    int levels = esize - 1;
-                    int S = imms & levels;
-                    int R = immr & levels;
-                    uint64_t ones = (S + 1 >= 64) ? ~0ULL : ((1ULL << (S + 1)) - 1);
-                    uint64_t element;
-                    if (esize == 64) { element = ones; }
-                    else {
-                        element = ones << (esize - 1 - S);
-                        element &= (1ULL << esize) - 1;
-                    }
-                    if (esize < 64) {
-                        element = ((element >> R) | (element << (esize - R)))
-                                  & ((1ULL << esize) - 1);
-                    } else {
-                        if (R != 0) element = (element >> R) | (element << (64 - R));
-                    }
-                    imm_val = 0;
-                    for (int off = 0; off < width; off += esize)
-                        imm_val |= element << off;
-                    if (!d.sf) imm_val &= 0xFFFFFFFF;
-                }
+                // Use the decoder's pre-decoded bitmask (d.imm_u).
+                // The decoder's decode_bitmask_imm is now correct (fixed
+                // the esize==64 case to use width instead of ~0).
+                uint64_t imm_val = d.imm_u;
                 uint64_t a = cpu.regs[d.rn];
                 if (!d.sf) a &= 0xFFFFFFFF;
                 uint64_t res;
@@ -600,13 +570,15 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 if (!d.sf) b &= 0xFFFFFFFF;
                 uint8_t opc = (d.raw >> 29) & 3;
+                bool N_bit = (d.raw >> 21) & 1;  // N bit: inverts b (BIC/ORN/EON/BICS)
+                if (N_bit) b = ~b;
                 uint64_t res;
                 bool set_flags = false;
                 switch (opc) {
-                    case 0: res = a & b; break;
-                    case 1: res = a | b; break;
-                    case 2: res = a ^ b; break;
-                    case 3: res = a & b; set_flags = true; break;
+                    case 0: res = a & b; break;   // AND (N=0) or BIC (N=1)
+                    case 1: res = a | b; break;   // ORR (N=0) or ORN (N=1)
+                    case 2: res = a ^ b; break;   // EOR (N=0) or EON (N=1)
+                    case 3: res = a & b; set_flags = true; break; // ANDS (N=0) or BICS (N=1)
                     default: throw DecodeError(cpu.pc, inst);
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;

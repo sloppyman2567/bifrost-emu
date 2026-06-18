@@ -88,7 +88,7 @@ static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) 
     int width = S + 1;
     if (width > esize) return 0; // reserved
     // Build the element: `width` ones at the bottom
-    uint64_t elem = (esize == 64) ? ~0ULL : ((1ULL << width) - 1);
+    uint64_t elem = (width >= 64) ? ~0ULL : ((1ULL << width) - 1);
     // Rotate right by R within esize bits
     elem = (elem >> R) | (elem << (esize - R));
     elem &= (esize == 64) ? ~0ULL : ((1ULL << esize) - 1);
