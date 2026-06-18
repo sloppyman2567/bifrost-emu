@@ -84,8 +84,14 @@ enum class InstClass : uint16_t {
     ORR_REG,        // OR (shifted register)
     EOR_REG,        // EOR (shifted register)
     ANDS_REG,       // AND setting flags (shifted register)
-    MADD,           // multiply-accumulate
-    MSUB,           // multiply-subtract
+    MADD,           // multiply-accumulate (sub_op=0, o0=0)
+    MSUB,           // multiply-subtract (sub_op=0, o0=1)
+    SMADDL,         // signed multiply-add long (sub_op=1, o0=0)
+    SMSUBL,         // signed multiply-sub long (sub_op=1, o0=1)
+    UMADDL,         // unsigned multiply-add long (sub_op=5, o0=0)
+    UMSUBL,         // unsigned multiply-sub long (sub_op=5, o0=1)
+    SMULH,          // signed multiply high (sub_op=7)
+    UMULH,          // unsigned multiply high (sub_op=6)
     UDIV,           // unsigned divide
     SDIV,           // signed divide
     LSL,            // logical shift left (alias of LSLV)
@@ -125,8 +131,8 @@ enum class InstClass : uint16_t {
     STLXR,          // store release exclusive
     STLR,           // store release
     LDAR,           // load acquire
-    LSE_ATOMIC,     // LSE atomic (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP)
-    CAS,            // compare and swap (LSE)
+    LSE_ATOMIC,     // LSE atomic (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS — sub-dispatched on atom_op)
+    CAS,            // (legacy alias — LSE_ATOMIC now covers CAS via atom_op>=0xC; kept for source compatibility)
 
     // SIMD/FP (subset)
     SIMD_LD1,       // vector load single structure
@@ -241,8 +247,9 @@ struct DecodedInst {
     uint8_t  excl_low6 = 0;     // exclusive load/store low 6 bits
 
     // ── Data processing (1-source, 2-source, 3-source) ──
-    uint8_t  dp_opcode = 0;     // sub-opcode for 1/2/3-source data proc
-    bool     o0 = false;        // bit 21 (MADD vs MSUB, etc.)
+    uint8_t  dp_opcode = 0;     // sub-opcode for 1/2-source data proc
+    bool     o0 = false;        // bit 15 (MADD vs MSUB, etc.)
+    uint8_t  sub_op = 0;        // bits 23:21 for 3-source data proc (0=MADD/MSUB, 1=SMADDL/SMSUBL, 5=UMADDL/UMSUBL, 6=UMULH, 7=SMULH)
 
     // ── Conditional compare (CCMP/CCMN) ──
     uint8_t  nzcv_field = 0;    // NZCV to set if condition is false

@@ -302,6 +302,44 @@ void Emulator::syscall(CPU& cpu) {
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = (uint64_t)-22; return; } // EINVAL
 
+            constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
+
+            // ── MAP_FIXED overlap with brk region ──────────────────────
+            // musl's mallocng uses MAP_FIXED to carve pages out of the brk
+            // region for its meta_area slots. The pattern is:
+            //
+            //   brk(0)                  → returns B (initial brk)
+            //   brk(B + 2*pagesize)     → extends brk to [B, B+2*pagesize)
+            //   mmap(B, pagesize, PROT_NONE, MAP_FIXED|MAP_ANON, ...)
+            //       → marks [B, B+pagesize) as a guard page
+            //   mprotect(B+pagesize, pagesize, PROT_READ|PROT_WRITE)
+            //       → makes [B+pagesize, B+2*pagesize) the meta area
+            //
+            // If we let the MAP_FIXED mmap "own" those pages but leave
+            // brk_ pointing past them, a later brk(new) call could
+            // re-map the same pages via map_range and corrupt musl's
+            // metadata. To prevent that, when a MAP_FIXED mmap lands
+            // inside [brk_start_, brk_), we push brk_ forward past the
+            // mmap'd region. This is the same behavior the Linux kernel
+            // exhibits: a MAP_FIXED mmap inside the brk region implicitly
+            // shrinks the brk to just below the mmap'd area, and any
+            // future brk() growth must start above the mmap'd region.
+            if ((flags & BIFROST_MAP_FIXED) && addr >= brk_start_ && addr < brk_) {
+                uint64_t mmap_end = addr + length;
+                if (mmap_end > brk_) {
+                    // The mmap'd region extends past the current brk —
+                    // push brk_ forward to cover it. (Note: this does
+                    // NOT match kernel semantics exactly — the kernel
+                    // would shrink brk_ to addr. But musl tracks its
+                    // own ctx.brk separately and re-extends it via
+                    // brk(new) calls, so pushing forward is safer
+                    // because it avoids losing pages that musl might
+                    // still reference.)
+                    std::lock_guard<std::mutex> g(brk_mu_);
+                    brk_ = mmap_end;
+                }
+            }
+
             // PROT_NONE with MAP_FIXED: these are guard pages. Don't
             // zero existing pages (preserves musl's metadata). Just
             // return success.
@@ -310,15 +348,14 @@ void Emulator::syscall(CPU& cpu) {
                 return;
             }
 
-            constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
 
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
-            // Debug removed — mmap returns correct address.
-            // The issue is deeper: musl's mallocng uses MAP_FIXED with
-            // PROT_NONE to carve pages from the brk region, then calls
-            // mprotect to make them usable. The MAP_FIXED zeroing
-            // corrupts existing metadata.
+            // Note: musl's mallocng uses MAP_FIXED with PROT_NONE to carve
+            // pages from the brk region, then calls mprotect to make them
+            // usable. The mmap_alloc above preserves existing pages on
+            // MAP_FIXED (see Memory::mmap_alloc), so musl's metadata
+            // written via the brk extension is not zeroed out.
 
             // If a file fd is given, read its contents in
             if ((int64_t)a4 != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {

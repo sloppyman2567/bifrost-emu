@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.2)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.3)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -68,7 +68,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.3.0-beta.2";
+constexpr const char* VERSION = "1.3.0-beta.3";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -693,6 +693,23 @@ public:
     int run() {
         uint64_t count = 0;
         auto t0 = std::chrono::steady_clock::now();
+
+        // ── Hang watchdog ───────────────────────────────────────────────
+        // Detects infinite loops where the same PC is executed over and
+        // over without making progress (a common symptom of mallocng
+        // init recursion, softfloat loops, or atomic-CAS loops where
+        // STXR always fails). We track the last PC and how many times
+        // we've seen it consecutively. If that count exceeds
+        // HANG_LIMIT, we bail out with an EmuError instead of spinning
+        // forever.
+        //
+        // The limit is high enough that legitimate tight loops (e.g.
+        // fib's inner loop) won't trip it, but low enough that a
+        // genuine hang is caught within ~1 second on a typical desktop.
+        constexpr uint64_t HANG_LIMIT = 50'000'000;  // ~50M instructions
+        uint64_t last_pc = (uint64_t)-1;
+        uint64_t same_pc_count = 0;
+
         while (main_cpu_.running) {
             try {
                 step(main_cpu_);
@@ -706,13 +723,34 @@ public:
                 // certainly a stale/garbage pointer from cleanup, not a
                 // legitimate code bug. In that case, just stop emulation —
                 // the program's output is already complete.
-                uint64_t fault_addr = e.what() ? 0 : 0;  // can't easily extract addr
-                // Just break — this is safe because legitimate unmapped reads
-                // during normal execution are extremely rare (the zero page
-                // handles NULL, and all code/data is pre-mapped).
+                (void)e;
                 break;
             }
             count++;
+
+            // Watchdog: if PC hasn't changed, increment same_pc_count.
+            // Otherwise reset. (Note: a single instruction can legitimately
+            // execute at the same PC twice in a row if it's a conditional
+            // branch that isn't taken — but never millions of times.)
+            if (main_cpu_.pc == last_pc) {
+                same_pc_count++;
+                if (same_pc_count > HANG_LIMIT) {
+                    fprintf(stderr,
+                        "[%s] hang watchdog: PC=0x%llx executed %llu times "
+                        "without progress; aborting (likely mallocng init "
+                        "recursion or atomic loop)\n",
+                        CODENAME,
+                        (unsigned long long)main_cpu_.pc,
+                        (unsigned long long)same_pc_count);
+                    main_cpu_.running = false;
+                    main_cpu_.exit_code = 70;  // EX_SOFTWARE
+                    break;
+                }
+            } else {
+                last_pc = main_cpu_.pc;
+                same_pc_count = 0;
+            }
+
             if ((count & 0xFFFFF) == 0) {
                 // periodic check: if PC has fallen off into unmapped memory, abort
                 if (!mem_.is_mapped(main_cpu_.pc, 4)) {

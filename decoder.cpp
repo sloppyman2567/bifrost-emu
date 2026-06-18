@@ -49,7 +49,10 @@ bool cond_true(uint32_t cond, uint32_t pstate) {
 }
 
 // ── Register extend ─────────────────────────────────────────────────────
-uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool sf) {
+// `sf` is currently unused — extend_reg produces a full 64-bit value and the
+// caller is responsible for masking to the operand width. Kept in the
+// signature so the future JIT can specialize on sf without an API change.
+uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
     switch (option & 7) {
         case 0: val = val & 0xFF; break;
         case 1: val = val & 0xFFFF; break;
@@ -206,8 +209,10 @@ bool decode(DecodedInst& d, uint32_t inst) {
     }
 
     // Hints / barriers (DSB/DMB/ISB/NOP/YIELD)
-    if ((inst & 0xFFFFF010) == 0xD5033090 ||
-        (inst & 0xFFFFF0E0) == 0xD5033000) {
+    // The hint space is encoded as 0xD503.3xxx with CRm selecting the hint.
+    // Mask 0xFFFFF000 catches all hint variants (NOP, YIELD, WFE, WFI, SEV,
+    // SEVL, DSB, DMB, ISB, etc.) without listing each constant individually.
+    if ((inst & 0xFFFFF000) == 0xD5033000) {
         d.cls = InstClass::HINT;
         return true;
     }
@@ -444,14 +449,36 @@ bool decode(DecodedInst& d, uint32_t inst) {
         return true;
     }
 
-    // Data processing (3-source): MADD/MSUB
+    // Data processing (3-source): MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/UMULH/SMULH
+    //
+    // Encoding (verified against the ARM ARM pseudocode at
+    // https://www.scs.stanford.edu/~zyedidia/arm64/):
+    //
+    //   bits 31:24 = sf 0 0 1 1 0 1 1   (constant 0x1B prefix; sf selects 32/64-bit)
+    //   bits 23:21 = sub_op (the "op31" field in the ARM ARM)
+    //     000 = MADD/MSUB       (32x32→32 or 64x64→64)
+    //     001 = SMADDL/SMSUBL   (32x32→64 signed)
+    //     010 = SMULH           (64x64→high 64 signed)
+    //     101 = UMADDL/UMSUBL   (32x32→64 unsigned)
+    //     110 = UMULH           (64x64→high 64 unsigned)
+    //   bit 15 = o0 (0=add variant, 1=sub variant; ignored for UMULH/SMULH)
+    //
+    // (sub_op values 011 and 111 are reserved.)
     if ((inst & 0x1F000000) == 0x1B000000) {
-        d.o0 = (inst >> 21) & 1;
+        d.sub_op = (inst >> 21) & 0x7;
+        d.o0 = (inst >> 15) & 1;
         d.rm = (inst >> 16) & 0x1F;
         d.ra = (inst >> 10) & 0x1F;
         d.rn = (inst >> 5) & 0x1F;
         d.rd = inst & 0x1F;
-        d.cls = d.o0 ? InstClass::MSUB : InstClass::MADD;
+        switch (d.sub_op) {
+            case 0: d.cls = d.o0 ? InstClass::MSUB   : InstClass::MADD;   break;
+            case 1: d.cls = d.o0 ? InstClass::SMSUBL : InstClass::SMADDL; break;
+            case 2: d.cls = InstClass::SMULH; break;
+            case 5: d.cls = d.o0 ? InstClass::UMSUBL : InstClass::UMADDL; break;
+            case 6: d.cls = InstClass::UMULH; break;
+            default: d.cls = InstClass::UNKNOWN; return false;
+        }
         return true;
     }
 
@@ -459,30 +486,49 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // Group: Load/Store
     // ════════════════════════════════════════════════════════════════
 
-    // ── LSE atomics (only if binary declared LSE) ──
-    // NOTE: This check is gated on has_lse_ in the interpreter.
-    // The decoder just classifies; the interpreter decides whether to
-    // treat it as LSE or LDUR based on the ELF's feature flags.
-    // We put LSE atomics decode here, but the interpreter's has_lse_
-    // check happens BEFORE calling decode() for this encoding group.
-    // Actually, the cleaner approach: decode() doesn't know about
-    // has_lse_. The interpreter checks has_lse_ first, and if true,
-    // calls a separate decode path. But that breaks the "single source
-    // of truth" principle.
+    // ── LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS) ──
     //
-    // Solution: the decoder always decodes based on bit patterns. If
-    // the binary doesn't have LSE, the interpreter's has_lse_ check
-    // happens in the LSE_ATOMIC case and falls through to LDUR/STUR
-    // if has_lse_ is false. But that's messy.
+    // Encoding (verified against the ARM ARM pseudocode at
+    // https://www.scs.stanford.edu/~zyedidia/arm64/):
     //
-    // Better solution: the decoder doesn't decode LSE atomics at all
-    // (since they overlap with LDUR/STUR). The LSE check is done by
-    // the interpreter BEFORE decode(), and if has_lse_, the interpreter
-    // handles LSE atomics specially. This is a known exception to the
-    // "decoder is single source" rule, documented here.
+    //   bits 31:24 = 1x 111000      (size + 111000 constant)
+    //   bit  23    = A              (acquire hint)
+    //   bit  22    = R              (release hint / load-store direction)
+    //   bit  21    = 1              (constant 1 — distinguishes from LDUR/STUR
+    //                                which have bit 21 = 0)
+    //   bits 20:16 = Rs             (source register)
+    //   bits 15:12 = opc            (operation: 0=LDADD, 1=LDCLR, 2=LDEOR,
+    //                                 3=LDSET, 4-7=SMAX/SMIN/UMAX/UMIN,
+    //                                 8=SWP, C-F=CAS family)
+    //   bits 11:10 = 00             (constant — distinguishes LSE atomics
+    //                                from load/store register-offset which
+    //                                has bits 11:10 = 10)
+    //   bits  9:5  = Rn             (base register)
+    //   bits  4:0  = Rt             (destination register)
     //
-    // For now, we DON'T decode LSE atomics in decode(). The interpreter
-    // handles them with a pre-decode has_lse_ check.
+    // *** Disambiguation from LDUR/STUR ***
+    //
+    // LDUR/STUR share bits 29:24 = 111000 and bits 11:10 = 00 with LSE
+    // atomics. The two are distinguished by bit 21 (LDUR=0, LSE=1) AND by
+    // the binary's declared feature set (GNU_PROPERTY_AARCH64_FEATURE_1_LSE).
+    // We classify any bit-21=1 encoding here as LSE_ATOMIC; the interpreter's
+    // LSE_ATOMIC case checks has_lse_ at execution time and falls through to
+    // LDUR/STUR execution if the binary doesn't declare LSE.
+    //
+    // Note: technically SWP and CAS are sub-cases of LSE_ATOMIC, distinguished
+    // by the opc field. We keep them all as LSE_ATOMIC here and let the
+    // interpreter dispatch on d.atom_op.
+    if ((inst & 0x3F200C00) == 0x38200000) {  // bits 29:24=111000, bit 21=1, bits 11:10=00
+        d.size = (inst >> 30) & 3;
+        d.acquire = (inst >> 23) & 1;  // A bit (acquire)
+        d.is_load = (inst >> 22) & 1;  // R bit (release / store→load direction)
+        d.rs = (inst >> 16) & 0x1F;
+        d.atom_op = (inst >> 12) & 0xF;
+        d.rn = (inst >> 5) & 0x1F;
+        d.rt = inst & 0x1F;
+        d.cls = InstClass::LSE_ATOMIC;
+        return true;
+    }
 
     // ── Load/store pair (STP/LDP) ──
     // Encoding: opc 101 V mode L imm7 Rt2 Rn Rt
@@ -543,7 +589,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt = inst & 0x1F;
         // Compute addressing
         bool is_q = (d.opc_ls & 2) && d.size == 0;
-        int nbytes = is_q ? 16 : (1 << d.size);
         uint64_t scale = is_q ? 4 : d.size;
         d.disp = (int64_t)(imm12 << scale);
         // For GP: opc=00=STR, 01=LDR, 10=LDRSW, 11=LDR → is_load = (opc != 0)
@@ -630,7 +675,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
     }
 
     // FP scalar — catch-all, sub-dispatched in interpreter
-    if ((inst & 0xFFE00000) == 0x1E200000) {
+    // The FP scalar encoding space uses top byte 0x1E (sf=0, 32-bit)
+    // or 0x9E (sf=1, 64-bit). Both are distinct from SIMD DP
+    // (0x0E/0x2E/0x4E/0x6E, which have bit 28=0 vs FP's bit 28=1).
+    // We need three masks to catch all variants: the narrow 0x1E2
+    // mask for the common case, plus the broad 0x1E and 0x9E top-byte
+    // masks for ftype=01 (double) and sf=1 (64-bit) variants.
+    if ((inst & 0xFFE00000) == 0x1E200000 ||
+        (inst & 0xFF000000) == 0x1E000000 ||
+        (inst & 0xFF000000) == 0x9E000000) {
         d.is_vec = true;
         d.cls = InstClass::FP_SCALAR;
         d.ftype = (inst >> 22) & 3;

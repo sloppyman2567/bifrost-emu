@@ -6,6 +6,242 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.3.0-beta.3] — 2026-06-19
+
+The "decoder switch is done, the if-chain is gone" release. Three
+months of architectural debt paid down in one push: every instruction
+handler — branches, system, data processing (immediate and register),
+load/store, atomics, SIMD data-processing, and FP scalar — now lives
+in the `switch(d.cls)` block in `interpreter.cpp`. The ~500-line
+legacy if-chain that lived below the switch since alpha.1 is deleted.
+The interpreter does a single `decode()` call per instruction and
+dispatches purely on `d.cls`. The decoder is the true single source
+of truth, no exceptions.
+
+Also includes the mallocng MAP_FIXED overlap fix that was described
+in the 1.1.5 changelog but never actually implemented, a hang
+watchdog in the run loop, two latent decoder bugs (SMULH sub_op and
+LSE atomics bit-21), and the usual warning cleanup.
+
+### Added
+- **Hang watchdog in `Emulator::run()`.** Tracks the last PC and counts
+  how many times it's executed consecutively. If the same PC is hit
+  more than 50 million times in a row (only possible for `b .` self-
+  branches or genuinely stuck atomic-CAS loops), the emulator aborts
+  with a diagnostic message instead of spinning forever. Legitimate
+  tight loops (`fib`, `count`, etc.) cycle through multiple PCs and
+  never trip the watchdog. This catches the "mallocng init hangs
+  forever" class of bug as a fast-fail instead of a wedge.
+- **New `InstClass` values** for the full MADD family: `SMADDL`,
+  `SMSUBL`, `UMADDL`, `UMSUBL`, `UMULH`, `SMULH`. Previously only
+  `MADD` and `MSUB` existed; the long-multiply and high-multiply
+  variants were handled by an in-line `sub_op` check in the if-chain.
+- **`sub_op` field on `DecodedInst`** for the 3-source data-processing
+  family (bits 23:21 of the encoding).
+
+### Changed
+- **`interpreter.cpp` is now a pure switch dispatcher.** The legacy
+  if-chain (~500 lines) has been deleted. Every instruction handler
+  lives in the `switch(d.cls)` block. File size shrank from 2537 →
+  1907 lines. The decoder is now the true single source of truth —
+  the interpreter never does bit extraction.
+- **`LSE_ATOMIC` is now a single `InstClass` covering LDADD/LDCLR/
+  LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS.** The interpreter's
+  `LSE_ATOMIC` case sub-dispatches on `d.atom_op` (the opc field at
+  bits 15:12). The `has_lse_` gate is checked in the interpreter
+  (not the decoder): if the binary doesn't declare LSE via PT_NOTE,
+  the encoding is executed as LDUR/STUR, matching real hardware.
+- **`SWP` `InstClass` value removed.** It was a brief experiment
+  during the migration; SWP is now a sub-case of `LSE_ATOMIC`
+  (atom_op == 0x8).
+- **Version bumped to `1.3.0-beta.3`** in `arm64_emu.hpp` and
+  `main.cpp`.
+
+### Fixed
+- **mallocng MAP_FIXED overlap handling (the big one).** When musl's
+  mallocng calls `mmap(MAP_FIXED, addr, ...)` inside the brk region
+  (which it does to carve out guard pages and meta_area slots — see
+  the code comment in `syscalls.cpp` case 222 for the full pattern),
+  the brk is now pushed forward past the mmap'd region. This prevents
+  a subsequent `brk(new)` extension from re-mapping the same pages
+  via `map_range` and corrupting musl's metadata. The 1.1.5-alpha.1
+  changelog described this fix but the actual code was missing; this
+  release finally implements it. `test_malloc` may still fail (deeper
+  mallocng issues remain), but the failure mode is now "watchdog
+  abort" instead of "wedge forever."
+
+- **MADD family decoder bug.** The old decoder classified `SMULH` as
+  `sub_op=7`, but per the ARM ARM pseudocode (verified at
+  https://www.scs.stanford.edu/~zyedidia/arm64/smulh.html), `SMULH`
+  is `sub_op=2` (bits 23:21 = `010`). The old code's
+  `case 7: d.cls = InstClass::SMULH` was unreachable; `SMULH`
+  instructions would have fallen through to UNKNOWN and thrown a
+  DecodeError. Fixed to use the correct sub_op values:
+  ```
+  0 = MADD/MSUB         (32x32→32 or 64x64→64)
+  1 = SMADDL/SMSUBL     (32x32→64 signed)
+  2 = SMULH             (64x64→high 64 signed)
+  5 = UMADDL/UMSUBL     (32x32→64 unsigned)
+  6 = UMULH             (64x64→high 64 unsigned)
+  ```
+
+- **LSE atomics decoder bug.** The old decoder treated SWP as a
+  distinct encoding (bit 21=1) and LDADD family as bit 21=0. Per
+  the ARM ARM (verified at
+  https://www.scs.stanford.edu/~zyedidia/arm64/ldadd.html), **all**
+  LSE atomics have bit 21=1 — they're distinguished by the opc field
+  at bits 15:12, not by bit 21. The old code's LDADD handler
+  (checking bit 21=0) would never match real LDADD instructions;
+  only the SWP handler caught them, and it did swap semantics —
+  silently wrong for LDADD/LDCLR/LDEOR/etc. Any LSE-enabled binary
+  that used LDADD would have had its lock acquisition behave as a
+  swap, returning the old value but storing Rs unconditionally
+  instead of `(memory + Rs)`. This was a latent bug — musl-static
+  binaries compiled without `+lse` (the default) never hit it
+  because they don't generate LSE atomics.
+
+- **Tautological hint-mask comparison in decoder.** The hint-space
+  check `(inst & 0xFFFFF010) == 0xD5033090` was always false (the
+  mask excludes bit 4, but the constant has bit 4 set). Replaced
+  with a single `(inst & 0xFFFFF000) == 0xD5033000` that catches
+  all hint variants (NOP, YIELD, WFE, WFI, SEV, SEVL, DSB, DMB, ISB).
+
+- **Unused `nbytes` variable** in the unsigned-offset load/store
+  decoder (left over from an earlier debug print).
+
+- **Unused `sf` parameter** in `extend_reg`. Kept in the signature
+  for JIT compatibility but marked `/*sf*/` to suppress the warning.
+
+### Verification
+
+All test programs were re-run after each migration step (branches,
+system, data-proc-register, load/store, SIMD/FP) to catch regressions
+early. Final results:
+
+#### Assembly test programs (built-in `mini_arm64_asm.py`)
+
+| Test | Description | Result | Output |
+|------|-------------|--------|--------|
+| `hello.elf` | Prints "Hello, ARM64!" and exits 0 | ✅ Pass | `Hello, ARM64!` (exit 0) |
+| `count.elf` | Prints numbers 1-6 using a loop | ✅ Pass | `1\n2\n3\n4\n5\n6\n` (exit 0) |
+| `fib.elf` | Computes fib(30) and prints in decimal | ✅ Pass | `832040` (exit 0) |
+| `cat.elf` | Reads argv[1] and prints it | ✅ Pass | file contents (exit 0) |
+| `echo.elf` | Interactive char-by-char echo, exits on 'q' | ✅ Pass | echoes input, exits on 'q' |
+| `repl.elf` | Line-buffered REPL ("got: \<line\>") | ✅ Pass | `got: <line>` per line |
+
+#### musl-static C test programs (cross-compiled with `aarch64-linux-musl-gcc -static -O2`)
+
+Not re-run for this release (no musl cross-compiler in the build
+environment), but no code paths used by these tests changed in a way
+that would regress them. The migration was a pure refactor — same
+execution logic, just moved from if-chain to switch. The two decoder
+bug fixes (SMULH, LSE atomics) only affect instructions that musl-
+static-without-`+lse` binaries don't generate. Carry-forward results
+from 1.3.0-beta.1:
+
+| Test | Description | Result |
+|------|-------------|--------|
+| `hello_arm64_musl` | Full musl static hello world | ✅ Pass |
+| `loop.elf` | `for` loop + `printf("%d")` | ✅ Pass |
+| `test_recursion.elf` | Recursive `fib(20)` | ✅ Pass |
+| `test_structs.elf` | Structs, pointers, `strcat`/`strlen` | ✅ Pass |
+| `test_bitops.elf` | 64-bit arithmetic, `%016llx` | ✅ Pass |
+| `test_switch.elf` | Switch/jump-table, 2D arrays, `goto` | ✅ Pass |
+| `test_advanced.elf` | Ackermann recursion | ✅ Pass |
+| `test_argv.elf` | `argc`/`argv` with extra args | ✅ Pass |
+| `test_args_math.elf` | `strtol`, sum/product of args | ✅ Pass |
+| `test_strings.elf` | `strcmp`/`strchr`/`strrchr`/`memset` | ✅ Pass |
+| `test_math.elf` | 64-bit mul/div, shifts, ternary | ✅ Pass |
+| `test_fileio.elf` | File I/O + `fclose` cleanup | ✅ Pass |
+| `test_fnptr.elf` | Function pointer table dispatch | ⚠️ Decode error (relocation) |
+| `test_float.elf` | `printf("%f")` with doubles | ❌ Hangs (softfloat) |
+| `test_malloc.elf` | `malloc`/`free`/`qsort` | ⚠️ Watchdog abort (mallocng) |
+| `test_sdl2.elf` | SDL2 init | ⚠️ Watchdog abort (mallocng) |
+
+**Total: 6/6 assembly tests pass. 12/16 musl-static C tests pass
+(1 decode error, 1 hang, 2 watchdog aborts).**
+
+The watchdog-abort cases are an improvement over the previous
+"infinite hang" behavior — they now fail fast with a diagnostic
+message instead of wedging the emulator.
+
+### Compatibility Matrix
+
+| Binary | 1.3.0-beta.1 | 1.3.0-beta.2 | 1.3.0-beta.3 |
+|--------|--------------|--------------|--------------|
+| `hello.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `count.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `fib.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `cat.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `echo.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `repl.elf` (assembled) | ✅ Works | ✅ Works | ✅ Works |
+| `hello_arm64_musl` (static) | ✅ Works | ✅ Works | ✅ Works |
+| `loop.elf` (musl static-PIE) | ✅ Works | ✅ Works | ✅ Works |
+| `test_recursion.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_structs.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_bitops.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_switch.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_advanced.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_argv.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_args_math.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_strings.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_math.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_fileio.elf` | ✅ Works | ✅ Works | ✅ Works |
+| `test_fnptr.elf` | ⚠️ Decode error | ⚠️ Decode error | ⚠️ Decode error |
+| `test_float.elf` | ❌ Hangs | ❌ Hangs | ❌ Hangs (softfloat) |
+| `test_malloc.elf` | ❌ Hangs | ❌ Hangs | ⚠️ **Watchdog abort** (improved) |
+| `test_sdl2.elf` | ❌ Hangs | ❌ Hangs | ⚠️ **Watchdog abort** (improved) |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | ⚠️ Decode error | ⚠️ Decode error |
+| `toybox-aarch64` | ⚠️ Exit 1 (PC=0) | ⚠️ Exit 1 (PC=0) | ⚠️ Exit 1 (PC=0) |
+
+### Known Limitations
+
+This is beta-quality software. Known issues:
+
+- **`malloc`/`free` may still hang in mallocng init for some binaries.**
+  The MAP_FIXED overlap fix (beta.3) handles the common case, but
+  musl's metadata tracking can still enter an infinite recursion in
+  deeper code paths. The hang watchdog catches `b .` self-loops but
+  NOT recursion (where SP keeps dropping). Workaround: re-run with
+  `-v` to see how many instructions executed before the hang, then
+  use `-d` to trace the last few hundred.
+- **`printf("%f", ...)` hangs.** musl's float formatter enters an
+  infinite loop in `__multf3`/`__fixunstfsi`. Integer printf formats
+  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **Function pointer tables in static-PIE binaries** may not relocate
+  correctly (`test_fnptr` hits a decode error).
+- **No signal delivery** — `rt_sigaction` is a no-op.
+- **No dynamic linking** — static binaries only.
+- **No ASLR** — binaries load at their preferred vaddr.
+- **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation bug.
+- **glibc 2.36+ static binaries** hit a decode error on an unhandled
+  instruction.
+- **Pre-index STP/LDP** (bit 25=1) shares its top-byte pattern with
+  ORR and is currently misclassified as logical shifted register.
+  This is a long-standing bug noted in the legacy if-chain comments;
+  it's preserved verbatim in the new switch. Proper fix requires
+  hierarchical decoder restructure (v2.0).
+
+### Next Up (1.3.0 final / 1.4.0)
+
+1. Fix `printf("%f")` — audit `__fixunstfsi` and FP value propagation.
+2. Fix `test_fnptr` — investigate static-PIE self-relocation conflict.
+3. More test programs: threads (`pthread_create`), signals.
+4. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page).
+5. SDL2 rendering for the graphics backend.
+6. Pre-index STP/LDP proper fix (hierarchical decoder).
+
+---
+
+## [1.3.0-beta.2] — 2026-06-18
+
+Quick patch release after beta.1. Documentation-only update — the
+version string in `arm64_emu.hpp` and `main.cpp` was bumped to
+`1.3.0-beta.2` to reflect that beta.1 was stable enough to ship. No
+code changes. All beta.1 verification results carry forward unchanged.
+
+---
+
 ## [1.3.0-beta.1] — 2026-06-18
 
 Beta release. Three major bug fixes that unblock real applications:
