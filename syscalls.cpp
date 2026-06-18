@@ -350,11 +350,13 @@ void Emulator::syscall(CPU& cpu) {
         case 93: { // exit
             cpu.running = false;
             cpu.exit_code = (int)a0;
+            exiting_ = true;
             return;
         }
         case 94: { // exit_group
             cpu.running = false;
             cpu.exit_code = (int)a0;
+            exiting_ = true;
             return;
         }
         case 96: { // set_tid_address

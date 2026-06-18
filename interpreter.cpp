@@ -17,33 +17,8 @@
 
 namespace arm64emu {
 
-// ── Decode logical immediate bitmask ────────────────────────────────────
-static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) {
-    int len = 0;
-    if (N) len = 6;
-    else {
-        uint8_t combined = (~imms) & 0x3F;
-        if (combined == 0) return 0;
-        for (int i = 5; i >= 0; i--) {
-            if (combined & (1 << i)) { len = i; break; }
-        }
-    }
-    int esize = 1 << len;
-    int levels = esize - 1;
-    int S = imms & levels;
-    int R = immr & levels;
-    int width = S + 1;
-    if (width > esize) return 0;
-    uint64_t elem = (esize == 64) ? ~0ULL : ((1ULL << width) - 1);
-    elem = (elem >> R) | (elem << (esize - R));
-    elem &= (esize == 64) ? ~0ULL : ((1ULL << esize) - 1);
-    uint64_t result = 0;
-    for (int i = 0; i < 64; i += esize) {
-        result |= elem << i;
-    }
-    if (!sf) result &= 0xFFFFFFFF;
-    return result;
-}
+// (decode_bitmask_imm was moved to the logical immediate switch case
+//  inline — no longer needed as a separate function.)
 
 // Set NZCV from a 64-bit add-with-carry result.
 static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_in,
