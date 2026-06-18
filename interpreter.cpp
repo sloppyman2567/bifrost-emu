@@ -519,7 +519,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // re-check the encoding to disambiguate.
                 bool extended = ((d.raw & 0x1FE00000) == 0x0B200000);
                 int width = d.sf ? 64 : 32;
-                uint64_t a = cpu.regs[d.rn];
+                // For extended register: Rn=31 reads SP (not XZR).
+                // For shifted register: Rn=31 reads XZR (regs[31]=0).
+                uint64_t a = (extended && d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 uint64_t b;
                 if (extended) {
                     b = extend_reg(cpu.regs[d.rm], d.extend, d.shift, d.sf);
