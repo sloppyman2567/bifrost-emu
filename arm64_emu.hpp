@@ -173,6 +173,12 @@ public:
 
     void read(uint64_t addr, void* dst, size_t n) const {
         if (n == 0) return;
+        // Debug: watch reads from 0x19158
+        if (addr <= 0x19158 && addr + n > 0x19158) {
+            uint64_t val = 0;
+            // Can't easily read from pages_ here without locking, but
+            // the read will fill dst, so we can check after.
+        }
         uint8_t* p = (uint8_t*)dst;
         uint64_t cur = addr;
         size_t remaining = n;

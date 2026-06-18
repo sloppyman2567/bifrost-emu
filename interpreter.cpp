@@ -1169,9 +1169,35 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // (bit 21 = 1) has a distinct encoding and does not collide with
     // LDUR/STUR, but we still gate it on has_lse_ for consistency.
     // ------------------------------------------------------------------
+    // ── SWP (swap) — LSE atomic, bit 21=1 ──────────────────────
+    // SWP has a distinct encoding from LDUR/STUR (bit 21=1 vs 0),
+    // so it doesn't collide and can be handled unconditionally
+    // (no has_lse_ gate needed).
+    if ((op & 0x3F200C00) == 0x38200000) {  // bits 29:24=111000, bit 21=1, bits 11:10=00
+        uint8_t size = (op >> 30) & 3;
+        bool L  = (op >> 22) & 1;
+        uint8_t rs = (op >> 16) & 0x1F;
+        uint8_t rn = (op >> 5) & 0x1F;
+        uint8_t rt = op & 0x1F;
+        int width_bytes = 1 << size;
+        uint64_t base = (rn == 31) ? cpu.sp : cpu.regs[rn];
+        uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
+        // SWP: atomically swap Rs→memory, return old value in Rt
+        uint64_t old = 0;
+        mem_.read(base, &old, width_bytes);
+        old &= mask;
+        uint64_t newv = cpu.regs[rs] & mask;
+        mem_.write(base, &newv, width_bytes);
+        if (L && rt != 31) cpu.regs[rt] = old;
+        return;
+    }
+
+    // ── LDADD-family LSE atomics — bit 21=0, gated on has_lse_ ──
+    // These collide with LDUR/STUR, so we only handle them when the
+    // binary declared LSE via PT_NOTE.
     if (has_lse_ &&
         (op & 0x3F000000) == 0x38000000 &&   // bits 29:24 = 111000
-        (op & 0x00200000) == 0 &&            // bit 21 = 0 (NOT load/store reg offset, NOT SWP)
+        (op & 0x00200000) == 0 &&            // bit 21 = 0 (NOT SWP, NOT reg offset)
         (op & 0x00000C00) == 0) {            // bits 11:10 = 00 (LSE atomics fixed)
         uint8_t size = (op >> 30) & 3;
         bool L  = (op >> 22) & 1;
