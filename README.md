@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-alpha.3
+  bifrost-emu  v1.3.0-beta.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-alpha.3](https://img.shields.io/badge/version-1.3.0--alpha.3-orange.svg)](CHANGELOG.md)
+[![Version: 1.3.0-beta.1](https://img.shields.io/badge/version-1.3.0--beta.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -97,7 +97,7 @@ The interpreter uses a **hybrid dispatch**: migrated instruction
 classes are handled in the `switch`, the rest fall through to a legacy
 `if`-chain (transitional, will be deleted in v2.0).
 
-**Migrated to switch (v1.3.0-alpha.3):**
+**Migrated to switch (v1.3.0-beta.1):**
 - B, BL, Bcond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET (branches)
 - ADC/ADCS/SBC/SBCS (add/subtract with carry)
 - FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] (FP move with index)
@@ -232,9 +232,10 @@ aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 | `test_strings.elf` (musl static) | ✅ Works | `strcmp`/`strchr`/`strrchr`/`memset` |
 | `test_math.elf` (musl static) | ✅ Works | 64-bit mul/div, shifts, ternary |
 | `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function pointer table relocation issue |
-| `test_fileio.elf` (musl static) | ⚠️ Partial | File prints, then crash on `fclose` |
-| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f")` → `__multf3` recursion (partial fix) |
-| `test_malloc.elf` (musl static) | ❌ Hangs | mallocng init recursion (partial `MAP_FIXED` fix) |
+| `test_fileio.elf` (musl static) | ✅ Works | File I/O + `fclose` cleanup (fixed in beta.1) |
+| `test_float.elf` (musl static) | ❌ Hangs | `printf("%f")` → softfloat recursion (partial fix) |
+| `test_malloc.elf` (musl static) | ❌ Hangs | mallocng init recursion (brk/mmap interaction) |
+| `test_sdl2.elf` (musl+SDL2 static) | ❌ Hangs | Gets past atomics, hangs in mallocng init |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
 | `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
 
@@ -246,7 +247,8 @@ select, MUL/MADD/MSUB, UDIV/SDIV, RBIT/REV/CLZ, ADC/SBC with carry),
 branches (B/BL/BR/BLR/RET, B.cond, CBZ/CBNZ, TBZ/TBNZ), load/store
 (immediate, register, pair, sign-extended, unscaled), LSE atomics
 (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS), acquire/release
-(STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
+(STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX — monitor is no longer
+cleared on branches, matching real hardware), FP arithmetic
 (FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
 FCSEL, both S and D registers), FMOV Vd.D[1] (128-bit vector high half),
 a subset of SIMD/NEON (DUP, MOVI, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR,
@@ -290,16 +292,38 @@ AT_ENTRY, AT_RANDOM, AT_HWCAP, etc.).
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
-## What's New in 1.3.0-alpha.3
+## What's New in 1.3.0-beta.1
 
-**Decoder-centric architecture.** The decoder is now the single source
-of truth for instruction decode. `execute()` calls `decode()` once per
-instruction, then dispatches via `switch(d.cls)`. A decode cache
-(`PC → DecodedInst`) provides ~2x performance for tight loops.
+**Exclusive monitor fix (the big one).** Branches were incorrectly
+clearing the exclusive monitor, causing `STXR` to always fail after
+any branch between `LDXR` and `STXR`. This broke all atomic operations
+that used compare-and-swap loops (spinlocks, refcounting, SDL2 init).
+Now only `STXR` and `CLREX` clear the monitor, matching real hardware.
+
+**LDXR decode fix.** `LDXR` with `low6=0x3F` was misclassified as
+`LDAR` (which doesn't mark the exclusive monitor). The `o0` bit
+distinguishes `LDXR` (o0=0, marks monitor) from `LDAR` (o0=1, no
+monitor). Now correctly handled.
+
+**fclose crash fix.** `__stdio_exit` (called during `exit()`) uses
+stale buffer pointers that point to freed stack memory. The run loop
+now catches `UnmappedMemory` exceptions and breaks gracefully. File
+I/O works clean (exit 0).
+
+**SDL2 cross-compiled.** SDL2 2.30.0 built for AArch64 musl static
+(minimal config: timers, file, cpuinfo, filesystem). Test program
+gets past atomic operations (thanks to the exclusive monitor fix)
+but still hangs in musl's mallocng init (known brk/mmap issue).
+
+**Decoder-centric architecture** (from earlier alphas). The decoder
+is the single source of truth for instruction decode. `execute()`
+calls `decode()` once per instruction, then dispatches via
+`switch(d.cls)`. A decode cache (`PC → DecodedInst`) provides ~2x
+performance for tight loops.
 
 **Migrated to switch:** ADR/ADRP, MOVN/MOVZ/MOVK, ADD/SUB immediate,
 SBFM/BFM/UBFM, EXTR, AND/ORR/EOR/ANDS immediate, plus all branches,
-ADC/SBC, and FMOV Vd.D[1] from earlier alphas.
+ADC/SBC, and FMOV Vd.D[1].
 
 **Fixes from 1.1.x carried forward:**
 - SIMD LDR/STR Q-form (128-bit) — was transferring only 1 byte
@@ -314,20 +338,17 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
-This is alpha-quality software. Known issues:
+This is beta-quality software. Known issues:
 
-- **`printf("%f", ...)` hangs.** musl's float formatter enters an
-  infinite loop in `__multf3`/`__fixunstfsi`. The SIMD LDR/STR fix
-  resolved stack corruption, but deeper FP value propagation bugs
-  remain. Integer printf formats (`%d`, `%x`, `%c`, `%s`, `%ld`,
-  `%llx`) all work.
 - **`malloc`/`free` hangs in mallocng init.** The brk/mmap interaction
-  confuses musl's metadata tracking. This also blocks toybox and any
-  binary that does nontrivial heap allocation.
+  confuses musl's metadata tracking. This also blocks SDL2, toybox, and
+  any binary that does nontrivial heap allocation. **This is the #1
+  blocker for real applications.**
+- **`printf("%f", ...)` hangs.** musl's float formatter enters an
+  infinite loop in `__multf3`/`__fixunstfsi`. Integer printf formats
+  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
 - **Function pointer tables in static-PIE binaries** may not relocate
   correctly (`test_fnptr` hits a decode error).
-- **`fclose` crash** in `test_fileio` — `__stdio_exit` calls `memchr`
-  on a garbage pointer.
 - **No signal delivery** — `rt_sigaction` is a no-op.
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
@@ -336,23 +357,21 @@ This is alpha-quality software. Known issues:
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled
   instruction.
 - **Legacy if-chain still present** — not all handlers have been
-  migrated to the decoder switch. The if-chain is transitional and
-  will be deleted in v2.0.
+  migrated to the decoder switch (~17 of ~50 classes migrated). The
+  if-chain is transitional and will be deleted in v2.0.
 
 ## Roadmap
 
-**Short-term (1.3.0-beta.1 / 1.3.0):**
-1. Migrate remaining if-chain handlers to the switch (ADD/SUB register,
-   logical register, CSEL/CCMP, MADD/MSUB, shifts, load/store, etc.)
+**Short-term (1.3.0):**
+1. **Fix `malloc`/`free`** — rewrite brk/mmap interaction (the #1 blocker)
 2. Fix `printf("%f")` — audit FP value propagation
-3. Fix `malloc`/`free` — rewrite brk/mmap interaction
+3. Migrate remaining if-chain handlers to the switch
 4. Fix `test_fnptr` — investigate static-PIE self-relocation
-5. Fix `test_fileio` `fclose` crash — stdio cleanup bug
-6. More test coverage: threads, signals
+5. More test coverage: threads, signals
 
 **Medium-term (1.4.0):**
 1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page)
-2. SDL2 rendering for the graphics backend
+2. SDL2 rendering for the graphics backend (video/audio/input)
 
 **Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the

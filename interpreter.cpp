@@ -133,13 +133,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool link = (d.cls == InstClass::BL);
                 if (link) cpu.regs[30] = cpu.pc + 4;
                 next_pc = cpu.pc + d.imm;
-                cpu.excl_clear();
+                
                 return;
             }
             case InstClass::Bcond: {
                 if (cond_true(d.cond, cpu.pstate))
                     next_pc = cpu.pc + d.imm;
-                cpu.excl_clear();
+                
                 return;
             }
             case InstClass::CBZ:
@@ -148,7 +148,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool is_zero = (v == 0);
                 bool taken = (d.cls == InstClass::CBZ) ? is_zero : !is_zero;
                 if (taken) next_pc = cpu.pc + d.imm;
-                cpu.excl_clear();
+                
                 return;
             }
             case InstClass::TBZ:
@@ -157,22 +157,22 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool bit_set = (v >> d.imm_u) & 1;
                 bool taken = (d.cls == InstClass::TBZ) ? !bit_set : bit_set;
                 if (taken) next_pc = cpu.pc + d.imm;
-                cpu.excl_clear();
+                
                 return;
             }
             case InstClass::BR:
                 next_pc = cpu.regs[d.rn];
-                cpu.excl_clear();
+                
                 return;
             case InstClass::BLR:
                 cpu.regs[30] = cpu.pc + 4;
                 next_pc = cpu.regs[d.rn];
-                cpu.excl_clear();
+                
                 return;
             case InstClass::RET:
                 next_pc = cpu.regs[d.rn];
                 if (next_pc == 0) next_pc = cpu.regs[30];  // RET with XZR
-                cpu.excl_clear();
+                
                 return;
 
             // ── System ────────────────────────────────────────────────
@@ -425,7 +425,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         int32_t imm = sign_extend(op & 0x03FFFFFF, 26) << 2;
         if (link) cpu.regs[30] = cpu.pc + 4;
         next_pc = cpu.pc + imm;
-        cpu.excl_clear();
         return;
     }
 
@@ -438,7 +437,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         int32_t imm = sign_extend((op >> 5) & 0x7FFFF, 19) << 2;
         if (cond_true(cond, cpu.pstate)) {
             next_pc = cpu.pc + imm;
-            cpu.excl_clear();
         }
         return;
     }
@@ -457,7 +455,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         bool zero = (v == 0);
         if (zero != nz) { // CBZ: zero -> branch; CBNZ: !zero -> branch
             next_pc = cpu.pc + imm;
-            cpu.excl_clear();
         }
         return;
     }
@@ -481,7 +478,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // TBNZ (nz=1): branch when set == 1, i.e., set == nz
         if (set == nz) {
             next_pc = cpu.pc + imm;
-            cpu.excl_clear();
         }
         return;
     }
@@ -493,21 +489,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     if ((op & 0xFFFFFC00) == 0xD61F0000) { // BR
         uint8_t rn = (op >> 5) & 0x1F;
         next_pc = cpu.regs[rn];
-        cpu.excl_clear();
         return;
     }
     if ((op & 0xFFFFFC00) == 0xD63F0000) { // BLR
         uint8_t rn = (op >> 5) & 0x1F;
         cpu.regs[30] = cpu.pc + 4;
         next_pc = cpu.regs[rn];
-        cpu.excl_clear();
         return;
     }
     if ((op & 0xFFFFFC1F) == 0xD65F0000) { // RET [Rn=LR by default]
         uint8_t rn = (op >> 5) & 0x1F;
         uint8_t r  = rn ? rn : 30;
         next_pc = cpu.regs[r];
-        cpu.excl_clear();
         return;
     }
 
@@ -516,7 +509,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     //   1101 0100 000 imm16 000 00001
     // ------------------------------------------------------------------
     if ((op & 0xFFE0001F) == 0xD4000001) { // SVC
-        cpu.excl_clear();
         syscall(cpu);
         return;
     }
@@ -699,7 +691,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // CRn=0101, CRm=0000, op2=010, Rt=11111). Handle it explicitly
         // because we need to clear the local exclusive monitor.
         if (op == 0xD503305F) {
-            cpu.excl_clear();
             return;
         }
         return;
@@ -1480,44 +1471,43 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // CAS family: bits 15:12 = 1111 with bit 21 set
         uint8_t low6 = (op >> 10) & 0x3F;
 
-        if (low6 == 0x0F || low6 == 0x1F) {
-            // STXR/LDXR/STLXR/LDAXR with Rs (0x0F for non-acquire,
-            // 0x1F for acquire/release variants like STLXR)
+        if (low6 == 0x0F || low6 == 0x1F || low6 == 0x3F) {
+            // Exclusive load/store. The low6 field distinguishes sub-forms:
+            //   0x0F: STXR/LDXR (non-acquire, with Rs)
+            //   0x1F: STLXR/LDAXR (acquire/release, with Rs)
+            //   0x3F: STLR/LDAR (no Rs) OR LDXR/LDAXR (no Rs, o0=0)
+            // The key insight: when o0=0 and L=1, it's LDXR (mark monitor).
+            // When o0=1, it's acquire/release (STLR/LDAR).
+            bool use_monitor = (o0 == 0) || (low6 != 0x3F);
             if (L == 0) {
                 // Store-exclusive: write Wt to [Xn] only if the monitor
                 // is still tagged for this address; set Ws = 0 on success,
                 // Ws = 1 on failure. Either way, clear the monitor.
-                bool ok = cpu.excl_check(base, width_bytes);
-                if (ok) {
+                if (use_monitor) {
+                    bool ok = cpu.excl_check(base, width_bytes);
+                    if (ok) {
+                        uint64_t v = cpu.regs[rt];
+                        uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
+                        v &= mask;
+                        mem_.write(base, &v, width_bytes);
+                    }
+                    if (rs != 31) cpu.regs[rs] = ok ? 0 : 1;
+                    cpu.excl_clear();
+                } else {
+                    // STLR: store-release (no monitor check, always succeeds)
                     uint64_t v = cpu.regs[rt];
                     uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
                     mem_.write(base, &v, width_bytes);
                 }
-                if (rs != 31) cpu.regs[rs] = ok ? 0 : 1;
-                cpu.excl_clear();
             } else {
-                // Load-exclusive: read from [Xn] into Wt, mark the
-                // monitor for this address+size.
+                // Load-exclusive: read from [Xn] into Wt
                 uint64_t v = 0;
                 mem_.read(base, &v, width_bytes);
                 cpu.regs[rt] = v;
-                cpu.excl_mark(base, width_bytes);
-            }
-            return;
-        }
-
-        if (low6 == 0x3F) {
-            // STLR/LDAR (no Rs)
-            if (L == 0) {
-                uint64_t v = cpu.regs[rt];
-                uint64_t mask = (width_bytes == 8) ? ~0ULL : ((1ULL << (width_bytes * 8)) - 1);
-                v &= mask;
-                mem_.write(base, &v, width_bytes);
-            } else {
-                uint64_t v = 0;
-                mem_.read(base, &v, width_bytes);
-                cpu.regs[rt] = v;
+                if (use_monitor) {
+                    cpu.excl_mark(base, width_bytes);
+                }
             }
             return;
         }

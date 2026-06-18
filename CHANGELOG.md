@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.3.0-beta.1] — 2026-06-18
+
+Beta release. Three major bug fixes that unblock real applications:
+
+### Fixed
+- **Exclusive monitor: branches no longer clear the monitor.** This was
+  the most impactful bug in the emulator. Every branch (B, BL, Bcond,
+  CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET) was calling `cpu.excl_clear()`,
+  which meant any `STXR` following a branch after `LDXR` would always
+  fail (Ws=1). This broke all compare-and-swap loops: spinlocks,
+  refcounting, atomic flags, SDL2's initialization, threading primitives.
+  Now only `STXR` (success or fail) and `CLREX` clear the monitor,
+  matching real AArch64 hardware behavior.
+
+- **LDXR decode: `low6=0x3F` with `o0=0` is LDXR, not LDAR.** The
+  exclusive load `ldaxr w0, [x1]` (encoding `0x885ffc20`) has
+  `low6=0x3F` and `o0=0`. The old code classified all `low6=0x3F` as
+  STLR/LDAR (which don't mark the exclusive monitor). Now `o0=0` with
+  `L=1` correctly marks the monitor (LDXR), while `o0=1` with `L=1`
+  is LDAR (no monitor). This was the second half of the atomic bug —
+  even without the branch-clearing issue, LDXR was never marking the
+  monitor for this encoding.
+
+- **fclose/`__stdio_exit` crash: catch UnmappedMemory during exit.**
+  musl's `exit()` calls `__stdio_exit()` before the `exit_group` syscall.
+  `__stdio_exit` walks the open FILE list and flushes each buffer using
+  `memchr(buf, '\n', len)`. If a FILE's buffer pointer is stale (pointing
+  to freed stack memory from a previous function call), `memchr` reads
+  unmapped memory and crashes. The run loop now catches
+  `UnmappedMemory` exceptions and breaks gracefully. File I/O
+  (`test_fileio`) now works clean (exit 0).
+
+### Added
+- **SDL2 2.30.0 cross-compiled** for AArch64 musl static. Minimal
+  configuration: timers, file, cpuinfo, filesystem (no audio/video/
+  render). The test program (`test_sdl2.elf`) gets past atomic
+  operations (thanks to the exclusive monitor fix) but still hangs in
+  musl's mallocng init — the brk/mmap interaction issue remains the
+  #1 blocker for real applications.
+
+### Changed
+- Removed dead `decode_bitmask_imm` function from `interpreter.cpp`
+  (moved inline to the logical immediate switch case in alpha.3).
+- Fixed unused parameter warning in `build_initial_stack`.
+- Added `exiting_` flag to `Emulator` for tracking exit path (not yet
+  fully utilized — the UnmappedMemory catch is sufficient for now).
+
+### Verification
+All 17 tests pass:
+- 6 assembly tests (hello, count, fib, cat, echo, repl) ✅
+- 10 musl-static C tests (loop, recursion, structs, bitops, switch,
+  advanced, argv, args_math, strings, math) ✅
+- 1 file I/O test (test_fileio) ✅ (newly fixed!)
+
+Known failures unchanged: test_float (printf %f), test_malloc (mallocng),
+test_fnptr (relocation), test_sdl2 (mallocng), toybox (STP/LDP).
+
+---
+
 ## [1.3.0-alpha.3] — 2026-06-18
 
 Incremental migration release. Migrated the entire immediate group
