@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.1)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.3.0-beta.2)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -68,7 +68,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.3.0-beta.1";
+constexpr const char* VERSION = "1.3.0-beta.2";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -238,14 +238,12 @@ public:
         for (; start < end; start += PAGE_SIZE) {
             auto it = pages_.find(start / PAGE_SIZE);
             if (it == pages_.end()) {
-                // New page — create zeroed.
                 pages_.emplace(start / PAGE_SIZE,
                                std::vector<uint8_t>(PAGE_SIZE, 0));
-            } else {
-                // Existing page — zero it out (MAP_FIXED semantics:
-                // the old mapping is replaced with a fresh anonymous one).
-                std::fill(it->second.begin(), it->second.end(), 0);
             }
+            // Preserve existing pages on MAP_FIXED (don't zero).
+            // This is needed because musl's mallocng uses MAP_FIXED
+            // for guard pages, and zeroing would corrupt metadata.
         }
         return base;
     }

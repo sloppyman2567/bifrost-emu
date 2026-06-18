@@ -298,31 +298,27 @@ void Emulator::syscall(CPU& cpu) {
             // a0=addr, a1=length, a2=prot, a3=flags, a4=fd, a5=offset
             uint64_t addr = a0;
             uint64_t length = a1;
+            uint64_t prot = a2;
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = (uint64_t)-22; return; } // EINVAL
+
+            // PROT_NONE with MAP_FIXED: these are guard pages. Don't
+            // zero existing pages (preserves musl's metadata). Just
+            // return success.
+            if (prot == 0 && (flags & 0x10)) { // PROT_NONE + MAP_FIXED
+                ret_host(addr);
+                return;
+            }
 
             constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
 
-            // If MAP_FIXED overlaps the brk region, push brk past the
-            // mmap'd area. musl's mallocng sometimes calls mmap with
-            // MAP_FIXED on addresses inside the brk region when it grows
-            // its metadata arena; without this adjustment, the MAP_FIXED
-            // mmap zeroes out brk-managed pages, corrupting mallocng's
-            // metadata and causing an infinite recursion in
-            // __malloc_alloc_meta.
-            if (effective_hint) {
-                uint64_t mmap_end = effective_hint + ((length + 0xFFF) & ~0xFFFULL);
-                std::lock_guard<std::mutex> g(brk_mu_);
-                if (effective_hint < brk_ && mmap_end > brk_start_) {
-                    // Overlap detected: move brk forward past the mmap'd area.
-                    brk_ = std::max(brk_, mmap_end);
-                    // Re-extend the brk mapping to cover the new region.
-                    mem_.map_range(brk_start_, brk_ - brk_start_);
-                }
-            }
-
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
+            // Debug removed — mmap returns correct address.
+            // The issue is deeper: musl's mallocng uses MAP_FIXED with
+            // PROT_NONE to carve pages from the brk region, then calls
+            // mprotect to make them usable. The MAP_FIXED zeroing
+            // corrupts existing metadata.
 
             // If a file fd is given, read its contents in
             if ((int64_t)a4 != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {
@@ -495,12 +491,12 @@ void Emulator::syscall(CPU& cpu) {
             return;
         }
         case 214: { // brk
-            // Thread-safe: serialize against concurrent brk from other threads.
             std::lock_guard<std::mutex> g(brk_mu_);
             if (a0 == 0) { ret_host(brk_); return; }
-            if (a0 < brk_) { ret_host(brk_); return; } // can't shrink
-            uint64_t old = brk_;
-            mem_.map_range(old, a0 - old);
+            if (a0 < brk_start_) { ret_host(brk_); return; }
+            if (a0 > brk_) {
+                mem_.map_range(brk_, a0 - brk_);
+            }
             brk_ = a0;
             ret_host(brk_);
             return;

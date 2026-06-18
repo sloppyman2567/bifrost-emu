@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-beta.1
+  bifrost-emu  v1.3.0-beta.2
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-beta.1](https://img.shields.io/badge/version-1.3.0--beta.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.3.0-beta.2](https://img.shields.io/badge/version-1.3.0--beta.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -97,7 +97,7 @@ The interpreter uses a **hybrid dispatch**: migrated instruction
 classes are handled in the `switch`, the rest fall through to a legacy
 `if`-chain (transitional, will be deleted in v2.0).
 
-**Migrated to switch (v1.3.0-beta.1):**
+**Migrated to switch (v1.3.0-beta.2):**
 - B, BL, Bcond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET (branches)
 - ADC/ADCS/SBC/SBCS (add/subtract with carry)
 - FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] (FP move with index)
@@ -292,7 +292,7 @@ AT_ENTRY, AT_RANDOM, AT_HWCAP, etc.).
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
-## What's New in 1.3.0-beta.1
+## What's New in 1.3.0-beta.2
 
 **Exclusive monitor fix (the big one).** Branches were incorrectly
 clearing the exclusive monitor, causing `STXR` to always fail after

@@ -490,14 +490,11 @@ bool decode(DecodedInst& d, uint32_t inst) {
         uint8_t opc = (inst >> 30) & 3;
         d.is_vec = (inst >> 26) & 1;
         d.is_load = (inst >> 22) & 1;
-        // Mode is in bits 25:23 (NOT 25:24 as I previously thought).
+        // Per ARM ARM: mode is in bits 25:23.
+        // 001 = post-index, 010 = signed offset, 011 = pre-index
         // (inst >> 23) & 3 gives: 1=post, 2=offset, 3=pre
         d.mode = (inst >> 23) & 3;
-        // Map to our uniform mode: 0=post, 1=offset, 2=pre
-        if (d.mode == 1) d.mode = 0;      // post-index
-        else if (d.mode == 3) d.mode = 2;  // pre-index
-        else d.mode = 1;                    // offset (mode 2 or 0)
-        d.writeback = (d.mode == 0 || d.mode == 2);
+        d.writeback = (d.mode == 1 || d.mode == 3);
         int16_t imm7 = arm64emu::sign_extend((inst >> 15) & 0x7F, 7);
         d.rt2 = (inst >> 10) & 0x1F;
         d.rn = (inst >> 5) & 0x1F;
