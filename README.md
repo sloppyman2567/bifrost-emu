@@ -245,7 +245,7 @@ aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 | `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function pointer table relocation issue |
 | `test_fileio.elf` (musl static) | ✅ Works | File I/O + `fclose` cleanup (fixed in beta.1) |
 | `test_float.elf` (musl static) | ⚠️ Decode error | `printf("%f")` — no longer hangs (fixed in beta.3); now fails fast on an unhandled FP instruction in the softfloat path |
-| `test_malloc.elf` (musl static) | ✅ Works | `malloc`/`free`/`qsort` all succeed; exit 133 is the known `fclose` cleanup crash, NOT a malloc bug (fixed in beta.3) |
+| `test_malloc.elf` (musl static) | ✅ Works | `malloc`/`free`/`qsort` all succeed; exit 0 (fixed in beta.3) |
 | `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Gets past atomics + mallocng init; hangs later in SDL2 setup |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
 | `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
@@ -318,6 +318,32 @@ instead of the correct `0x20` (= 32). This made musl's mallocng stride
 class could satisfy the `stride * nslots + 16 <= pagesize/2` check.
 `malloc`/`free`/`qsort` all work now. This was THE #1 blocker since
 v1.1.5-alpha.1.
+
+**BIC/ORN/EON/BICS fix (the printf/fclose root cause).** The logical
+shifted register group has an N bit (bit 21) that inverts the second
+operand: AND→BIC, ORR→ORN, EOR→EON, ANDS→BICS. The interpreter was
+ignoring N entirely — BIC was treated as AND. This broke musl's `strlen`
+zero-byte detection (`bic x2, x3, x2` computed `x3 & x2` instead of
+`x3 & ~x2`), causing strlen to scan past NUL terminators, which
+corrupted stdio buffer management, producing garbled printf output and
+the exit-133 fclose crash. With the fix, all printf formats (`%s %d %u
+%x %c %ld %llx`), puts, fwrite, and qsort produce correct output, and
+programs exit cleanly (exit 0, no fclose crash).
+
+**Bitmask immediate decode fix.** The decoder's `decode_bitmask_imm` used
+`~0` for `esize==64` regardless of `S`, producing all-ones instead of
+the correct mask for masks like `0xFFFFFFFFFFFFFFF0`. The interpreter's
+inline bitmask decode had a separate bug (shifted ones to `esize-1-S`
+instead of bit 0, producing `0xf8f8f8f8` for `0x1f`). Both fixed: the
+decoder uses `(1ULL << width) - 1`, and the interpreter uses `d.imm_u`
+from the decoder.
+
+**Hierarchical STP/LDP decoder fix.** The decoder now checks Load/Store
+pair (STP/LDP) before logical shifted register, preventing the pre-index
+STP/LDP vs ORR encoding collision. The STP/LDP mask was expanded to
+catch all three addressing modes (post-index, signed offset, pre-index)
+for both GP and SIMD registers, with a mode validation check to reject
+LDUR/STUR that shares the same top bits.
 
 **The decoder switch is complete, the legacy if-chain is deleted.**
 Every instruction handler — branches, system, data processing (immediate
@@ -411,12 +437,7 @@ This is beta-quality software. Known issues:
   don't yet model. This is an improvement over beta.2 (which hung
   forever); the failure is now fast. Integer printf formats (`%d`,
   `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
-- **`fclose` / `__stdio_exit` cleanup crash (exit 133).** When musl's
-  `exit()` calls `__stdio_exit()`, stale FILE buffer pointers can cause
-  unmapped reads. The run loop catches `UnmappedMemory` exceptions and
-  breaks gracefully — program output is already complete by this point,
-  so the exit code (133) is cosmetic. `test_malloc` and
-  `test_simple_malloc` both exit 133 but produce correct output.
+
 - **Function pointer tables in static-PIE binaries** may not relocate
   correctly (`test_fnptr` hits a decode error).
 - **No signal delivery** — `rt_sigaction` is a no-op.
@@ -441,9 +462,7 @@ This is beta-quality software. Known issues:
 1. Fix `printf("%f")` — audit the softfloat FP instruction path and
    implement the missing FP ops
 2. Fix `test_fnptr` — investigate static-PIE self-relocation
-3. Fix the `fclose`/`__stdio_exit` exit-133 crash (stale FILE buffer
-   pointers)
-4. More test coverage: threads, signals
+3. More test coverage: threads, signals
 
 **Medium-term (1.4.0):**
 1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page)

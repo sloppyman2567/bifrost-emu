@@ -65,22 +65,15 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     uint32_t op = inst;
 
-    // ── Decode via the shared decoder (v1.3.0 architecture) ──────────
-    // The decoder is the single source of truth for instruction decode.
-    // We call decode() once, then dispatch on d.cls. Instructions that
-    // the decoder handles cleanly are executed here in the switch. For
-    // instructions not yet migrated to the decoder (or that need complex
-    // execution logic), we fall through to the legacy if-chain below.
-    //
-    // This hybrid approach lets us incrementally migrate handlers from
-    // the if-chain to the switch without breaking anything. Eventually
-    // (v2.0), the if-chain will be deleted entirely and the switch will
-    // be the only dispatch path — shared with the JIT.
+    // ── Decode via the shared decoder ─────────────────────────────
+    // The decoder (decoder.cpp) is the single source of truth for
+    // instruction classification. We call decode() once, then dispatch
+    // on d.cls. Every instruction handler lives in the switch below.
     {
         // ── Instruction decode cache ──────────────────────────────
         // Since guest code is not self-modifying (static binaries only),
         // each PC always decodes to the same instruction. Cache the
-        // DecodedInst by PC to skip the decode() if-chain on repeated
+        // DecodedInst by PC to skip the decode() on repeated
         // executions of the same PC (e.g. tight loops).
         DecodedInst d;
         auto cache_it = decode_cache_.find(cpu.pc);
@@ -94,7 +87,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         }
         switch (d.cls) {
             // ── ADC/ADCS/SBC/SBCS (add/subtract with carry) ──────────
-            // These were previously unimplemented in the if-chain and
+            // These were previously unimplemented and
             // caused decode errors. Now handled via the decoder.
             case InstClass::ADC_REG:
             case InstClass::ADCS_REG:
@@ -806,7 +799,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             //   mode (bits 24:23): 01=post, 10=offset, 11=pre (bit 25 is 0
             //   for post/offset; bit 25 = 1 for pre, but pre-index STP/LDP
             //   currently gets misclassified as ORR — known issue, same as
-            //   in the legacy if-chain, planned for v2.0 hierarchical decoder.)
+            //   — the hierarchical decoder now handles this.)
             case InstClass::STP:
             case InstClass::LDP: {
                 uint8_t opc = (d.raw >> 30) & 3;
@@ -1214,7 +1207,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // The decoder classifies the entire 0x0E000000 / 0x4E000000 /
             // 0x2E000000 / 0x6E000000 group as SIMD_DP. We re-extract the
             // Q/U/size/opcode fields here and sub-dispatch on the exact
-            // encoding pattern. This is a large but flat if-chain —
+            // encoding pattern. This is a large but flat sub-dispatch —
             // migrating it to per-opcode InstClass values is a future
             // cleanup (it would balloon the enum).
             case InstClass::SIMD_DP: {
@@ -1499,7 +1492,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // MVN/NOT (vector) — note: encoding collides with CNT in the
-                // original if-chain (same mask 0xBFFFFC00 == 0x0E205800). The
+                // original code (same mask 0xBFFFFC00 == 0x0E205800). The
                 // original code's MVN branch was unreachable. Kept here for
                 // source fidelity; the CNT case above catches it first.
                 // TBL/TBX (stub: copy Vn to Vd)
@@ -1598,7 +1591,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // ── FP scalar (FMOV/FADD/FSUB/FMUL/FDIV/FCMP/FCVT/...) ────
             // The decoder classifies the entire 0x1E200000 group as
             // FP_SCALAR. We sub-dispatch on raw opcode bits, same as the
-            // legacy if-chain did.
+            // old code did.
             case InstClass::FP_SCALAR: {
                 uint32_t op = d.raw;
                 uint8_t rn = (op >> 5) & 0x1F;
@@ -1868,8 +1861,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
 
             default:
-                // Not yet handled by the decoder switch — fall through
-                // to the legacy if-chain below.
+                // Not recognized by the decoder
+                // to the unhandled-instruction error below.
                 break;
         }
     }

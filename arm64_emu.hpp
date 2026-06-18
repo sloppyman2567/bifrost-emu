@@ -19,11 +19,12 @@
 // Designed to be readable and fast: a flat switch-based interpreter
 // with a register-file array and a single 64-bit PSTATE word.
 //
-// Architecture note (v1.x): the instruction decoder lives entirely
-// in arm64_emu.cpp's `Emulator::execute()`. A future v2.x JIT will
-// share the same decoder tables via a `decoder.hpp` header — the
-// handler signatures here are kept JIT-friendly (no implicit
-// state beyond `cpu_` and `mem_`).
+// Architecture note: the instruction decoder lives in decoder.cpp and
+// is the single source of truth for instruction classification. The
+// interpreter (interpreter.cpp) dispatches on d.cls via a switch — no
+// bit extraction, no fallback. A future v2.x JIT will share the same
+// decoder via decoder.hpp — the handler signatures here are kept
+// JIT-friendly (no implicit state beyond `cpu_` and `mem_`).
 #pragma once
 
 #include "decoder.hpp"
@@ -173,12 +174,6 @@ public:
 
     void read(uint64_t addr, void* dst, size_t n) const {
         if (n == 0) return;
-        // Debug: watch reads from 0x19158
-        if (addr <= 0x19158 && addr + n > 0x19158) {
-            uint64_t val = 0;
-            // Can't easily read from pages_ here without locking, but
-            // the read will fill dst, so we can check after.
-        }
         uint8_t* p = (uint8_t*)dst;
         uint64_t cur = addr;
         size_t remaining = n;
@@ -714,15 +709,9 @@ public:
             try {
                 step(main_cpu_);
             } catch (UnmappedMemory& e) {
-                // During exit cleanup (e.g. musl's __stdio_exit), stale
-                // buffer pointers can cause unmapped reads. The crash
-                // typically happens when a FILE struct's buffer pointer
-                // points to freed stack memory. We detect this heuristically:
-                // if the faulting address is in the upper half of the address
-                // space (bit 63 set or address > 0x1000000000), it's almost
-                // certainly a stale/garbage pointer from cleanup, not a
-                // legitimate code bug. In that case, just stop emulation —
-                // the program's output is already complete.
+                // During exit cleanup, stale FILE buffer pointers can
+                // cause unmapped reads. Just stop emulation — program
+                // output is already complete.
                 (void)e;
                 break;
             }
@@ -822,7 +811,7 @@ private:
     // Maps PC -> DecodedInst. Since guest code is not self-modifying
     // (static binaries only, no mmap'd executable code), each PC always
     // decodes to the same instruction. Caching avoids re-running the
-    // decode() if-chain on every execution of the same PC.
+    // decode() on every execution of the same PC.
     //
     // For tight loops (e.g. fib's inner loop), the same ~10 PCs are hit
     // millions of times — the cache turns those millions of decode()
