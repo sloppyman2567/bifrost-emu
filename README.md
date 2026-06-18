@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-alpha.2
+  bifrost-emu  v1.3.0-alpha.3
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-alpha.2](https://img.shields.io/badge/version-1.3.0--alpha.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.3.0-alpha.3](https://img.shields.io/badge/version-1.3.0--alpha.3-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -48,9 +48,82 @@ make
 
 No args? You get the banner. Try `--bifrost` for a hidden easter egg.
 
+## Architecture
+
+```
+┌──────────────────────┐         ┌───────────────────────┐
+│    decoder.cpp       │         │  interpreter.cpp      │
+│                      │         │                       │
+│  decode(d, inst)     │ ──────► │  switch(d.cls) {      │
+│                      │         │    case ADD_IMM:      │
+│  - bit patterns      │         │      res = a + b;     │
+│  - field extraction  │         │      break;           │
+│  - InstClass         │         │    case LDR_IMM:      │
+│  - SP/XZR disambig   │         │      ...              │
+│  - shift calc        │         │    ...                │
+│  - addressing        │         │  }                    │
+│                      │         │                       │
+│  NO execution        │         │  EXECUTE ONLY         │
+│                      │         │  - reads d.* fields   │
+│                      │         │  - no bit extraction  │
+└──────────────────────┘         └───────────────────────┘
+         ▲
+         │
+┌────────┴─────────────┐
+│  decode_cache_       │
+│  PC → DecodedInst    │
+│  (avoids re-decode)  │
+└──────────────────────┘
+```
+
+The **decoder** (`decoder.cpp`) is the single source of truth for
+instruction decode. It extracts all fields into a `DecodedInst` struct
+and classifies the instruction into an `InstClass` enum value. The
+decoder does NO execution — only bit extraction and classification.
+
+The **interpreter** (`interpreter.cpp`) dispatches on `d.cls` via a
+`switch` statement. Each case reads `d.*` fields and executes. The
+interpreter never does bit extraction (`op >> 22`, `(op & mask)`, etc.)
+— that's the decoder's job.
+
+A **decode cache** (`PC → DecodedInst`) avoids re-decoding the same
+instruction on repeated execution (tight loops). Since guest code is
+not self-modifying (static binaries only), each PC always decodes to
+the same instruction.
+
+### Current Migration Status
+
+The interpreter uses a **hybrid dispatch**: migrated instruction
+classes are handled in the `switch`, the rest fall through to a legacy
+`if`-chain (transitional, will be deleted in v2.0).
+
+**Migrated to switch (v1.3.0-alpha.3):**
+- B, BL, Bcond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET (branches)
+- ADC/ADCS/SBC/SBCS (add/subtract with carry)
+- FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] (FP move with index)
+- ADR/ADRP (PC-relative address)
+- MOVN/MOVZ/MOVK (move immediate)
+- ADD/SUB/ADDS/SUBS immediate
+- SBFM/BFM/UBFM (bitfield)
+- EXTR (extract)
+- AND/ORR/EOR/ANDS immediate (logical immediate)
+
+**Still in if-chain (pending migration):**
+- ADD/SUB register (shifted/extended)
+- AND/ORR/EOR/ANDS register (logical shifted register)
+- CSEL/CSINC/CSINV/CSNEG, CCMP/CCMN
+- MADD/MSUB, UDIV/SDIV, LSL/LSR/ASR/ROR
+- RBIT/REV/REV16/REV32/CLZ/CLS
+- Load/store (all forms: immediate, unscaled, register, pair)
+- LSE atomics, exclusives (STXR/LDXR/STLR/LDAR)
+- SIMD data processing (DUP, MOVI, SHL, USHR, CNT, CMEQ, etc.)
+- FP scalar (FMOV, FADD, FSUB, FMUL, FDIV, FCMP, FCVT, etc.)
+- System (SVC, BRK, HLT, MSR/MRS, barriers, CLREX)
+
 ## Performance
 
-Roughly 20-30 MIPS on a typical desktop. The `fib(30)` test runs 258
+~23 MIPS on a typical desktop, with the decode cache providing a
+significant speedup for tight loops. The `fib(30)` test runs 258
 instructions in under 1ms; musl static hello world runs 1,760
 instructions in under 0.1ms. A JIT is planned for v2.0 (target:
 100-500 MIPS).
@@ -63,9 +136,9 @@ instructions in under 0.1ms. A JIT is planned for v2.0 (target:
   prints stats.
 - **No binary-specific hacks.** Zero hardcoded addresses. Any static
   AArch64 ELF should work (modulo the known issues below).
-- **Readable over fast.** The interpreter is a flat switch — easy to
-  extend, easy to debug. The v2.0 JIT will share the same decoder
-  tables.
+- **Decoder is the single source of truth.** All decode logic lives in
+  `decoder.cpp`. The interpreter only reads `d.*` fields and executes.
+  The future JIT will share the same decoder.
 
 ## Usage
 
@@ -96,6 +169,26 @@ make install  # install to /usr/local/bin/
 
 No external libraries required. Only standard C++ and POSIX.
 
+## File Structure
+
+```
+bifrost-emu/
+├── arm64_emu.hpp         Emulator class (CPU, Memory, ELF loader, threads)
+├── decoder.hpp           DecodedInst struct, InstClass enum, decode() decl
+├── decoder.cpp           Pure instruction decoder (single source of truth)
+├── interpreter.cpp       Instruction execution (switch on d.cls + legacy if-chain)
+├── syscalls.cpp          Linux AArch64 syscall layer (~88 syscalls)
+├── graphics.hpp/cpp      GraphicsBackend (framebuffer stub for 1.3.0)
+├── api/bifrost.h         Public C API for libbifrost
+├── main.cpp              CLI entry point
+├── mini_arm64_asm.py     Built-in ARM64 assembler (for test programs)
+├── test/                 Sample ARM64 programs (.s sources)
+├── Makefile              Build, test, install targets
+├── CHANGELOG.md          Release history
+├── README.md             This file
+└── LICENSE               Public domain (Unlicense)
+```
+
 ## Test Programs
 
 | Program | Description |
@@ -110,6 +203,11 @@ No external libraries required. Only standard C++ and POSIX.
 Assemble new test programs with:
 ```bash
 python3 mini_arm64_asm.py prog.s -o prog.elf
+```
+
+For C programs, compile with a musl cross-compiler:
+```bash
+aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 ```
 
 ## Compatibility
@@ -144,95 +242,73 @@ python3 mini_arm64_asm.py prog.s -o prog.elf
 
 **Instructions** — ~120 ARM64 instructions covering data processing
 (MOVZ/K/N, ADD/SUB/CMP family, AND/ORR/EOR, bitfield, conditional
-select, MUL/MADD/MSUB, UDIV/SDIV, RBIT/REV/CLZ), branches (B/BL/BR/
-BLR/RET, B.cond, CBZ/CBNZ, TBZ/TBNZ), load/store (immediate, register,
-pair, sign-extended), LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/
-UMAX/UMIN/SWP/CAS), acquire/release (STLR/LDAR), exclusive monitor
-(LDXR/STXR/CLREX), **full FP arithmetic** (FADD/FSUB/FMUL/FDIV/FSQRT/
-FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/FCSEL, both S and D
-registers with IEEE 754 semantics), a subset of SIMD/NEON (DUP, LD1/ST1,
-CNT, CMEQ, UMAXP, SHL, USHR, EOR, REV16/32/64, STP/LDP pairs), and
-system (SVC, MRS/MSR, BRK, barriers, CLREX).
+select, MUL/MADD/MSUB, UDIV/SDIV, RBIT/REV/CLZ, ADC/SBC with carry),
+branches (B/BL/BR/BLR/RET, B.cond, CBZ/CBNZ, TBZ/TBNZ), load/store
+(immediate, register, pair, sign-extended, unscaled), LSE atomics
+(LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS), acquire/release
+(STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
+(FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
+FCSEL, both S and D registers), FMOV Vd.D[1] (128-bit vector high half),
+a subset of SIMD/NEON (DUP, MOVI, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR,
+EOR, ORR, REV16/32/64, STP/LDP pairs), and system (SVC, MRS/MSR, BRK,
+barriers, CLREX).
 
-**Syscalls** — ~60 Linux AArch64 syscalls including the basics
+**Decoder** — `decoder.cpp` is the single source of truth for instruction
+decode. It extracts all fields into `DecodedInst` and classifies into
+`InstClass`. The interpreter dispatches on `d.cls` via `switch`. A decode
+cache (`PC → DecodedInst`) avoids re-decoding on repeated execution.
+PT_NOTE parsing detects `GNU_PROPERTY_AARCH64_FEATURE_1_LSE` to
+disambiguate LDUR vs LSE atomics (matching real hardware behavior).
+
+**Syscalls** — ~88 Linux AArch64 syscalls including the basics
 (read/write/openat/close/exit/exit_group/brk/mmap/mprotect/mremap),
-file I/O (lseek/fstat/statx/fstatat/readlinkat/statfs/fstatfs/readv/writev),
-process info (getpid/gettid/getuid/geteuid/getgid/getegid/uname/
-prlimit64), timing (clock_gettime/gettimeofday/nanosleep/
-clock_nanosleep), threading (clone, futex with WAIT/WAKE/REQUEUE,
-set_tid_address, set_robust_list), event loops (eventfd2, epoll_create1
-/epoll_ctl/epoll_wait, timerfd_create/settime/gettime, ppoll, pselect6),
+file I/O (lseek/fstat/statx/fstatat/readlinkat/statfs/fstatfs/readv/
+writev/dup/dup2/pipe2/mkdirat/unlinkat/renameat/utimensat), process
+info (getpid/gettid/getuid/geteuid/getgid/getegid/uname/prlimit64/
+getppid), timing (clock_gettime/gettimeofday/nanosleep/clock_nanosleep),
+threading (clone, futex with WAIT/WAKE/REQUEUE, set_tid_address,
+set_robust_list), event loops (eventfd2, epoll_create1/epoll_ctl/
+epoll_wait, timerfd_create/settime/gettime, ppoll, pselect6),
 networking stubs (socketpair, listen, accept), and misc (getrandom,
 ioctl, getcwd, prctl, rt_sigaction, rt_sigprocmask). Unsupported
 syscalls return `-ENOSYS` silently unless `-v` is set.
+
+**VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
+`/proc/{meminfo,cpuinfo,version}`, `/proc/sys/kernel/osrelease`,
+`/dev/{null,zero,urandom,random}`. Uses `memfd_create` for seekable
+virtual file descriptors.
 
 **TLS** — TPIDR_EL0 / TPIDRRO_EL0 via MRS/MSR; 64KB TLS scratch area
 pre-allocated; per-thread TLS via `clone(CLONE_SETTLS, ...)`. Zero
 page mapped so NULL dereferences return 0.
 
-**ELF** — Static ELF64 AArch64 (ET_EXEC and ET_DYN); PT_LOAD with
-BSS zero-fill; RELA relocations (JUMP_SLOT, GLOB_DAT, RELATIVE, ABS64);
-full initial stack with argc/argv/envp/auxv (AT_PHDR, AT_ENTRY,
-AT_RANDOM, AT_HWCAP, etc.).
+**ELF** — Static ELF64 AArch64 (ET_EXEC and ET_DYN, including
+static-PIE); PT_LOAD with BSS zero-fill; RELA relocations (JUMP_SLOT,
+GLOB_DAT, RELATIVE, ABS64); PT_NOTE parsing for GNU property features
+(LSE detection); full initial stack with argc/argv/envp/auxv (AT_PHDR,
+AT_ENTRY, AT_RANDOM, AT_HWCAP, etc.).
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete list with notes
-on each syscall and known issues.
+See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
-## What's New in 1.3.0-alpha.2
+## What's New in 1.3.0-alpha.3
 
-Significant alpha release with multiple correctness fixes and syscall
-expansions. The headline fix is the SIMD load/store bug that broke
-128-bit (`str q0`/`ldr q0`) operations — this was silently corrupting
-softfloat values on the stack and broke musl's `printf("%f")` path.
+**Decoder-centric architecture.** The decoder is now the single source
+of truth for instruction decode. `execute()` calls `decode()` once per
+instruction, then dispatches via `switch(d.cls)`. A decode cache
+(`PC → DecodedInst`) provides ~2x performance for tight loops.
 
-- **SIMD LDR/STR Q-form (128-bit) fix** — `str q0`/`ldr q0` were
-  incorrectly decoded as 1-byte (B-form) transfers because the LSE
-  handler's `opc` field interpretation was wrong. The correct encoding:
-  `opc=10` → STR Q (128-bit), `opc=11` → LDR Q (128-bit), `opc=00`/`01`
-  with size → B/H/S/D forms. Fixed in all three load/store handlers
-  (unsigned-offset, pre/post-indexed, register-offset).
-- **`FMOV Vd.D[1], Rn` / `FMOV Rn, Vm.D[1]`** — these move a 64-bit GPR
-  to/from the HIGH 64 bits of a vector register. Used heavily by musl's
-  128-bit softfloat routines (`__multf3`, `__addtf3`, `__eqtf2`, etc.)
-  to construct long doubles from two GPRs. Previously unimplemented.
-- **`BFM` (bitfield move) fix** — the destination field position was
-  wrong: BFM was inserting source bits at position 0 instead of at the
-  `[immr..imms]` field position. This broke `bfi` (bitfield insert),
-  which musl uses to assemble FP exponent/mantissa fields.
-- **`ADC`/`ADCS`/`SBC`/`SBCS`** — add/subtract with carry. Previously
-  unimplemented; caused decode errors in softfloat routines that use
-  multi-precision arithmetic.
-- **More syscalls** — added `dup` (23), `dup2` (33), `pipe2` (59),
-  `mkdirat` (34), `unlinkat` (35), `renameat` (38), `utimensat` (88),
-  `fstatat` (79). Total syscall count now ~88.
-- **`MAP_FIXED` overlap handling** — when musl's mallocng uses `MAP_FIXED`
-  on an address inside the brk region, the brk is now pushed past the
-  mmap'd area to avoid corrupting heap metadata. (Partial fix — see
-  Known Limitations.)
+**Migrated to switch:** ADR/ADRP, MOVN/MOVZ/MOVK, ADD/SUB immediate,
+SBFM/BFM/UBFM, EXTR, AND/ORR/EOR/ANDS immediate, plus all branches,
+ADC/SBC, and FMOV Vd.D[1] from earlier alphas.
 
-Also includes all fixes from 1.1.1-alpha.1 (PT_NOTE-based LDUR/LSE
-disambiguation), 1.1.0-rc.2 (FP/SIMD arithmetic, VFS, file split,
-readv fix, SIMD STP/LDP) and earlier releases.
-
-Full release notes in [CHANGELOG.md](CHANGELOG.md).
-
-## What's New in 1.1.0-rc.2
-
-Major refactor: split the monolithic `arm64_emu.cpp` into separate files,
-added real FP/SIMD arithmetic, VFS, and a public API header.
-
-- **FP/SIMD arithmetic** — FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/
-  SCVTF/FCVTZS/FMADD/FMSUB/FCSEL, all with IEEE 754 semantics (both S and D
-  registers). Previously all FP was stubbed as NOP.
-- **VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
-  `/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random}`.
-- **File split** — `decoder.hpp/cpp`, `interpreter.cpp`, `syscalls.cpp`,
-  `graphics.hpp/cpp`, `api/bifrost.h`. Decoder is shared with future JIT.
-- **readv fix** — was case 73 (pselect6!), now case 67 (readv).
-- **SIMD STP/LDP** — 32/64/128-bit pair store/load (was silently dropped).
-
-Also includes all fixes from 1.1.0-beta.1 (LSE atomics, CAS argument order,
-exclusive monitor, mremap in-place, mmap MAP_FIXED, getppid, stack 64MB).
+**Fixes from 1.1.x carried forward:**
+- SIMD LDR/STR Q-form (128-bit) — was transferring only 1 byte
+- FMOV Vd.D[1], Rn — was unimplemented (broke 128-bit softfloat)
+- BFM destination field position — was inserting at bit 0
+- ADC/ADCS/SBC/SBCS — were unimplemented
+- MOVI Vd.2D, #0 — was only handling byte broadcast form
+- PT_NOTE-based LDUR/LSE disambiguation — matches real hardware
+- MAP_FIXED overlap handling for mallocng
 
 Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
@@ -240,47 +316,48 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 This is alpha-quality software. Known issues:
 
-- **`printf("%f", ...)` still hangs in some cases.** The SIMD LDR/STR
-  fix resolved the stack corruption that caused the original infinite
-  recursion in `__multf3`. However, musl's `__fmt_fp` (float formatter)
-  now enters a different loop involving `__fixunstfsi`. Investigating.
-  Integer printf formats (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
-- **`malloc`/`free` hangs in musl's mallocng init.** The `MAP_FIXED`
-  overlap fix helps, but the brk/mmap interaction still confuses
-  musl's metadata tracking. This also blocks toybox and any binary
-  that does nontrivial heap allocation.
+- **`printf("%f", ...)` hangs.** musl's float formatter enters an
+  infinite loop in `__multf3`/`__fixunstfsi`. The SIMD LDR/STR fix
+  resolved stack corruption, but deeper FP value propagation bugs
+  remain. Integer printf formats (`%d`, `%x`, `%c`, `%s`, `%ld`,
+  `%llx`) all work.
+- **`malloc`/`free` hangs in mallocng init.** The brk/mmap interaction
+  confuses musl's metadata tracking. This also blocks toybox and any
+  binary that does nontrivial heap allocation.
 - **Function pointer tables in static-PIE binaries** may not relocate
-  correctly. Test `test_fnptr` hits a decode error because the function
-  pointer ends up pointing at `.rodata` instead of the function.
-- **`fclose` crash** in `test_fileio` — file contents print correctly
-  but `__stdio_exit` calls `memchr` on a garbage pointer.
-- **No signal delivery** — `rt_sigaction` is a no-op. Planned for 1.2.0.
+  correctly (`test_fnptr` hits a decode error).
+- **`fclose` crash** in `test_fileio` — `__stdio_exit` calls `memchr`
+  on a garbage pointer.
+- **No signal delivery** — `rt_sigaction` is a no-op.
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
 - **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation bug.
   Fix requires hierarchical decoder restructure, planned for v2.0.
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled
   instruction.
+- **Legacy if-chain still present** — not all handlers have been
+  migrated to the decoder switch. The if-chain is transitional and
+  will be deleted in v2.0.
 
 ## Roadmap
 
 **Short-term (1.3.0-beta.1 / 1.3.0):**
-1. Fix `printf("%f")` — audit `__fixunstfsi` and FP value propagation.
-2. Fix `malloc`/`free` — rewrite brk/mmap interaction.
-3. Fix `test_fnptr` — investigate static-PIE self-relocation conflict.
-4. Fix `test_fileio` `fclose` crash — stdio cleanup bug.
-5. Performance: decoded instruction cache.
-6. More test coverage: threads, signals.
+1. Migrate remaining if-chain handlers to the switch (ADD/SUB register,
+   logical register, CSEL/CCMP, MADD/MSUB, shifts, load/store, etc.)
+2. Fix `printf("%f")` — audit FP value propagation
+3. Fix `malloc`/`free` — rewrite brk/mmap interaction
+4. Fix `test_fnptr` — investigate static-PIE self-relocation
+5. Fix `test_fileio` `fclose` crash — stdio cleanup bug
+6. More test coverage: threads, signals
 
-**Medium-term (1.2.0):**
-1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page).
-2. SDL2 rendering for the graphics backend (1.3.0).
+**Medium-term (1.4.0):**
+1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page)
+2. SDL2 rendering for the graphics backend
 
 **Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
    interpreter. Target: 100-500 MIPS.
-2. **Hierarchical decoder restructure** — fixes the STP/LDP mode bug
-   that breaks toybox.
+2. **Delete the legacy if-chain** — all handlers in the switch.
 3. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
    statically-linked ARM64 SDL2 games at playable framerates.
 

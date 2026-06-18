@@ -17,6 +17,34 @@
 
 namespace arm64emu {
 
+// ── Decode logical immediate bitmask ────────────────────────────────────
+static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) {
+    int len = 0;
+    if (N) len = 6;
+    else {
+        uint8_t combined = (~imms) & 0x3F;
+        if (combined == 0) return 0;
+        for (int i = 5; i >= 0; i--) {
+            if (combined & (1 << i)) { len = i; break; }
+        }
+    }
+    int esize = 1 << len;
+    int levels = esize - 1;
+    int S = imms & levels;
+    int R = immr & levels;
+    int width = S + 1;
+    if (width > esize) return 0;
+    uint64_t elem = (esize == 64) ? ~0ULL : ((1ULL << width) - 1);
+    elem = (elem >> R) | (elem << (esize - R));
+    elem &= (esize == 64) ? ~0ULL : ((1ULL << esize) - 1);
+    uint64_t result = 0;
+    for (int i = 0; i < 64; i += esize) {
+        result |= elem << i;
+    }
+    if (!sf) result &= 0xFFFFFFFF;
+    return result;
+}
+
 // Set NZCV from a 64-bit add-with-carry result.
 static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_in,
                               int width, bool set_flags) {
@@ -179,6 +207,223 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::BRK:
                 // Handled by the if-chain below
                 break;
+
+            // ── ADR / ADRP ────────────────────────────────────────────
+            case InstClass::ADR:
+            case InstClass::ADRP: {
+                bool adrp = (d.cls == InstClass::ADRP);
+                uint32_t immlo = (d.raw >> 29) & 3;
+                uint32_t immhi = (d.raw >> 5) & 0x7FFFF;
+                uint64_t imm = (immhi << 2) | immlo;
+                if (adrp) {
+                    uint64_t base = cpu.pc & ~0xFFFULL;
+                    uint64_t v = sign_extend(imm, 21) << 12;
+                    if (d.rd != 31) cpu.regs[d.rd] = base + v;
+                } else {
+                    uint64_t v = sign_extend(imm, 21);
+                    if (d.rd != 31) cpu.regs[d.rd] = cpu.pc + v;
+                }
+                return;
+            }
+
+            // ── MOVN / MOVZ / MOVK ────────────────────────────────────
+            case InstClass::MOVN:
+            case InstClass::MOVZ:
+            case InstClass::MOVK: {
+                uint8_t hw = (d.raw >> 21) & 3;
+                uint16_t imm16 = (d.raw >> 5) & 0xFFFF;
+                int width = d.sf ? 64 : 32;
+                int shift = hw * 16;
+                uint64_t v;
+                if (d.cls == InstClass::MOVN) {
+                    v = ~((uint64_t)imm16 << shift);
+                    if (!d.sf) v &= 0xFFFFFFFF;
+                    if (d.rd != 31) cpu.regs[d.rd] = v;
+                } else if (d.cls == InstClass::MOVZ) {
+                    v = (uint64_t)imm16 << shift;
+                    if (!d.sf) v &= 0xFFFFFFFF;
+                    if (d.rd != 31) cpu.regs[d.rd] = v;
+                } else { // MOVK
+                    uint64_t mask = (width == 64)
+                        ? (0xFFFFULL << shift)
+                        : (0xFFFFULL << shift) & 0xFFFFFFFFULL;
+                    uint64_t cur = cpu.regs[d.rd];
+                    if (!d.sf) cur &= 0xFFFFFFFF;
+                    v = (cur & ~mask) | ((uint64_t)imm16 << shift);
+                    if (!d.sf) v &= 0xFFFFFFFF;
+                    if (d.rd != 31) cpu.regs[d.rd] = v;
+                }
+                return;
+            }
+
+            // ── ADD/SUB immediate ─────────────────────────────────────
+            case InstClass::ADD_IMM:
+            case InstClass::ADDS_IMM:
+            case InstClass::SUB_IMM:
+            case InstClass::SUBS_IMM: {
+                bool sh = (d.raw >> 22) & 1;
+                uint16_t imm12 = (d.raw >> 10) & 0xFFF;
+                int width = d.sf ? 64 : 32;
+                bool set_flags = d.set_flags;
+                bool is_sub = d.is_sub;
+                uint64_t a = (d.rn == 31 && !set_flags) ? cpu.sp : cpu.regs[d.rn];
+                if (!d.sf && !(d.rn == 31 && !set_flags)) a &= 0xFFFFFFFF;
+                uint64_t b = (uint64_t)imm12 << (sh ? 12 : 0);
+                uint64_t res;
+                if (is_sub) res = set_sub_flags(cpu, a, b, width, set_flags);
+                else        res = set_add_flags(cpu, a, b, 0, width, set_flags);
+                if (!d.sf) res &= 0xFFFFFFFF;
+                if (d.rd == 31) {
+                    if (!set_flags) cpu.sp = res;
+                } else {
+                    cpu.regs[d.rd] = res;
+                }
+                return;
+            }
+
+            // ── Bitfield (SBFM/BFM/UBFM) ─────────────────────────────
+            case InstClass::SBFM:
+            case InstClass::BFM:
+            case InstClass::UBFM: {
+                uint8_t opc = (d.raw >> 29) & 3;
+                uint8_t immr = (d.raw >> 16) & 0x3F;
+                uint8_t imms = (d.raw >> 10) & 0x3F;
+                int width = d.sf ? 64 : 32;
+                if (!d.sf && (immr & 0x20 || imms & 0x20))
+                    throw DecodeError(cpu.pc, inst);
+                uint64_t src = cpu.regs[d.rn];
+                if (!d.sf) src &= 0xFFFFFFFF;
+                int datasize = width;
+                if (imms >= immr) {
+                    int len = imms - immr + 1;
+                    uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+                    uint64_t extracted = (src >> immr) & mask;
+                    if (opc == 0) {
+                        uint64_t m = (1ULL << (len - 1));
+                        if (extracted & m) {
+                            uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
+                            extracted |= high;
+                        }
+                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                    } else if (opc == 2) {
+                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                    } else {
+                        uint64_t cur = cpu.regs[d.rd];
+                        if (!d.sf) cur &= 0xFFFFFFFF;
+                        uint64_t dst_mask = mask << immr;
+                        uint64_t keep = cur & ~dst_mask;
+                        if (d.rd != 31) cpu.regs[d.rd] = keep | ((extracted << immr) & dst_mask);
+                    }
+                } else {
+                    int len = imms + 1;
+                    uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+                    uint64_t rotated = (width == 64) ? ror64(src, immr)
+                                                      : ((uint32_t)ror64(src, immr));
+                    uint64_t extracted = rotated & mask;
+                    if (opc == 0) {
+                        uint64_t m = (1ULL << (len - 1));
+                        if (extracted & m) {
+                            uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
+                            extracted |= high;
+                        }
+                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                    } else if (opc == 2) {
+                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                    } else {
+                        uint64_t hi_mask = ~((1ULL << immr) - 1);
+                        if (datasize == 32) hi_mask &= 0xFFFFFFFF;
+                        uint64_t field_mask = mask | hi_mask;
+                        uint64_t cur = cpu.regs[d.rd];
+                        if (!d.sf) cur &= 0xFFFFFFFF;
+                        uint64_t rotated_w = (datasize == 64) ? rotated : (uint32_t)rotated;
+                        if (d.rd != 31) cpu.regs[d.rd] = (cur & ~field_mask) | (rotated_w & field_mask);
+                    }
+                }
+                if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
+                return;
+            }
+
+            // ── EXTR ─────────────────────────────────────────────────
+            case InstClass::EXTR: {
+                uint8_t immr = (d.raw >> 10) & 0x3F;
+                int width = d.sf ? 64 : 32;
+                uint64_t lo = cpu.regs[d.rn];
+                uint64_t hi = cpu.regs[d.rm];
+                if (!d.sf) { lo &= 0xFFFFFFFF; hi &= 0xFFFFFFFF; }
+                // EXTR: concatenate hi:lo (128-bit), shift right by immr, take lower width bits
+                uint64_t combined = (hi << width) | lo;
+                uint64_t v = (combined >> immr) & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
+                if (!d.sf) v &= 0xFFFFFFFF;
+                if (d.rd != 31) cpu.regs[d.rd] = v;
+                return;
+            }
+
+            // ── Logical immediate (AND/ORR/EOR/ANDS) ────────────────
+            case InstClass::AND_IMM:
+            case InstClass::ORR_IMM:
+            case InstClass::EOR_IMM:
+            case InstClass::ANDS_IMM: {
+                uint8_t opc = (d.raw >> 29) & 3;
+                bool Nbit = (d.raw >> 22) & 1;
+                uint8_t immr = (d.raw >> 16) & 0x3F;
+                uint8_t imms = (d.raw >> 10) & 0x3F;
+                int width = d.sf ? 64 : 32;
+                // Decode bitmask (same logic as the if-chain)
+                uint8_t combined = (Nbit << 6) | imms;
+                uint64_t imm_val;
+                if (combined == 0) {
+                    imm_val = 0;
+                } else {
+                    int hsbit = 0;
+                    for (int i = 6; i >= 0; i--) {
+                        if (combined & (1 << i)) { hsbit = i; break; }
+                    }
+                    int esize;
+                    if (Nbit) { esize = 64; }
+                    else { esize = 1 << (hsbit + 1); }
+                    int levels = esize - 1;
+                    int S = imms & levels;
+                    int R = immr & levels;
+                    uint64_t ones = (S + 1 >= 64) ? ~0ULL : ((1ULL << (S + 1)) - 1);
+                    uint64_t element;
+                    if (esize == 64) { element = ones; }
+                    else {
+                        element = ones << (esize - 1 - S);
+                        element &= (1ULL << esize) - 1;
+                    }
+                    if (esize < 64) {
+                        element = ((element >> R) | (element << (esize - R)))
+                                  & ((1ULL << esize) - 1);
+                    } else {
+                        if (R != 0) element = (element >> R) | (element << (64 - R));
+                    }
+                    imm_val = 0;
+                    for (int off = 0; off < width; off += esize)
+                        imm_val |= element << off;
+                    if (!d.sf) imm_val &= 0xFFFFFFFF;
+                }
+                uint64_t a = cpu.regs[d.rn];
+                if (!d.sf) a &= 0xFFFFFFFF;
+                uint64_t res;
+                bool set_flags = false;
+                switch (opc) {
+                    case 0: res = a & imm_val; break;
+                    case 1: res = a | imm_val; break;
+                    case 2: res = a ^ imm_val; break;
+                    case 3: res = a & imm_val; set_flags = true; break;
+                    default: throw DecodeError(cpu.pc, inst);
+                }
+                if (!d.sf) res &= 0xFFFFFFFF;
+                if (d.rd != 31) cpu.regs[d.rd] = res;
+                else if (opc == 1) cpu.sp = res;  // ORR to SP
+                if (set_flags) {
+                    cpu.set_flag_n((res >> (width - 1)) & 1);
+                    cpu.set_flag_z(res == 0);
+                    cpu.set_flag_c(false);
+                    cpu.set_flag_v(false);
+                }
+                return;
+            }
 
             default:
                 // Not yet handled by the decoder switch — fall through
@@ -485,296 +730,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         return;
     }
 
-    // ------------------------------------------------------------------
-    // Group: ADR / ADRP
-    //   0 immlo 10000 immhi Rd    (ADR)
-    //   1 immlo 10000 immhi Rd    (ADRP)
-    // ------------------------------------------------------------------
-    if ((op & 0x1F000000) == 0x10000000) {
-        bool adrp = (op >> 31) & 1;
-        uint8_t rd_ = op & 0x1F;
-        uint32_t immlo = (op >> 29) & 3;
-        uint32_t immhi = (op >> 5) & 0x7FFFF;
-        uint64_t imm = (immhi << 2) | immlo;
-        if (adrp) {
-            uint64_t base = cpu.pc & ~0xFFFULL;
-            uint64_t v = sign_extend(imm, 21) << 12;
-            if (rd_ != 31) cpu.regs[rd_] = base + v;
-        } else {
-            uint64_t v = sign_extend(imm, 21);
-            if (rd_ != 31) cpu.regs[rd_] = cpu.pc + v;
-        }
-        return;
-    }
+    // ADR/ADRP — handled by the decoder switch above.
 
     // ------------------------------------------------------------------
     // Group: data processing - immediate
     // ------------------------------------------------------------------
 
-    // MOVZ / MOVK / MOVN : sf 10 100101 hw imm16 Rd
-    if ((op & 0x1F800000) == 0x12800000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t opc = (op >> 29) & 3; // 00 MOVN, 10 MOVZ, 11 MOVK
-        uint8_t hw = (op >> 21) & 3;
-        uint16_t imm16 = (op >> 5) & 0xFFFF;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-        int shift = hw * 16;
-        uint64_t v;
-        switch (opc) {
-            case 0: { // MOVN
-                v = ~((uint64_t)imm16 << shift);
-                if (!sf) v &= 0xFFFFFFFF;
-                if (rd_ != 31) cpu.regs[rd_] = v;
-                break;
-            }
-            case 2: { // MOVZ
-                v = (uint64_t)imm16 << shift;
-                if (!sf) v &= 0xFFFFFFFF;
-                if (rd_ != 31) cpu.regs[rd_] = v;
-                break;
-            }
-            case 3: { // MOVK
-                uint64_t mask = (width == 64)
-                    ? (0xFFFFULL << shift)
-                    : (0xFFFFULL << shift) & 0xFFFFFFFFULL;
-                uint64_t cur = cpu.regs[rd_];
-                if (!sf) cur &= 0xFFFFFFFF;
-                v = (cur & ~mask) | ((uint64_t)imm16 << shift);
-                if (!sf) v &= 0xFFFFFFFF;
-                if (rd_ != 31) cpu.regs[rd_] = v;
-                break;
-            }
-            default: throw DecodeError(cpu.pc, inst);
-        }
-        return;
-    }
+    // MOVZ / MOVK / MOVN — handled by the decoder switch above.
 
-    // Add/subtract (immediate) : sf op 1 00010 sh imm12 Rn Rd
-    if ((op & 0x1F000000) == 0x11000000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t opc = (op >> 29) & 3; // 00 ADD, 01 ADDS, 10 SUB, 11 SUBS
-        bool sh = (op >> 22) & 1;
-        uint16_t imm12 = (op >> 10) & 0xFFF;
-        uint8_t rn = (op >> 5) & 0x1F;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-        // For ADD/SUB immediate, Rn=31 reads SP, Rd=31 writes SP (unless ADDS/SUBS where it's XZR).
-        bool set_flags = (opc & 1);
-        bool is_sub = (opc & 2);
-        // Source: SP if rn==31 and !set_flags (ADD/SUB), else regs[rn] (XZR=0 if 31).
-        uint64_t a = (rn == 31 && !set_flags) ? cpu.sp : cpu.regs[rn];
-        if (!sf && !(rn == 31 && !set_flags)) a &= 0xFFFFFFFF;
-        uint64_t b = (uint64_t)imm12 << (sh ? 12 : 0);
-        uint64_t res;
-        if (is_sub) res = set_sub_flags(cpu, a, b, width, set_flags);
-        else        res = set_add_flags(cpu, a, b, 0, width, set_flags);
-        if (!sf) res &= 0xFFFFFFFF;
-        if (rd_ == 31) {
-            // Write SP only for plain ADD/SUB (not ADDS/SUBS which write XZR).
-            if (!set_flags) cpu.sp = res;
-            // else: discard (write to XZR)
-        } else {
-            cpu.regs[rd_] = res;
-        }
-        return;
-    }
+    // Add/subtract (immediate) — handled by the decoder switch above.
 
-    // Bitfield operations (BFM, SBFM, UBFM) : sf opc 100110 N immr imms Rn Rd
-    if ((op & 0x1F000000) == 0x13000000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t opc = (op >> 29) & 3; // 00 SBFM, 01BFM, 10 UBFM
-        uint8_t immr = (op >> 16) & 0x3F;
-        uint8_t imms = (op >> 10) & 0x3F;
-        uint8_t rn = (op >> 5) & 0x1F;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-        if (!sf && (immr & 0x20 || imms & 0x20))
-            throw DecodeError(cpu.pc, inst);
-        uint64_t src = cpu.regs[rn];
-        if (!sf) src &= 0xFFFFFFFF;
-        // Replicate semantics: bitfield extract/insert/move
-        // For simplicity, handle the common idioms.
-        int datasize = width;
-        uint64_t bot, top;
-        // If imms >= immr, this is a standard bitfield.
-        if (imms >= immr) {
-            int len = imms - immr + 1;
-            uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
-            uint64_t extracted = (src >> immr) & mask;
-            if (opc == 0) {        // SBFM
-                // sign extend from extracted bit len-1
-                uint64_t m = (1ULL << (len - 1));
-                uint64_t sign = extracted & m;
-                if (sign) {
-                    uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
-                    extracted |= high;
-                }
-                if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else if (opc == 2) { // UBFM
-                if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else {                // BFM — insert at bits [immr..imms] of dst
-                uint64_t cur = cpu.regs[rd_];
-                if (!sf) cur &= 0xFFFFFFFF;
-                uint64_t dst_mask = mask << immr;  // shifted to field position [immr..imms]
-                uint64_t keep = cur & ~dst_mask;
-                if (rd_ != 31) cpu.regs[rd_] = keep | ((extracted << immr) & dst_mask);
-            }
-        } else {
-            // ROR-based: imms < immr -> field wraps.
-            // We implement by rotating the source right by immr, then
-            // taking bits [0..imms] (i.e. len = imms+1).
-            int len = imms + 1;
-            uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
-            uint64_t rotated = (width == 64) ? ror64(src, immr)
-                                              : ((uint32_t)ror64(src, immr));
-            uint64_t extracted = rotated & mask;
-            if (opc == 0) {        // SBFM
-                uint64_t m = (1ULL << (len - 1));
-                if (extracted & m) {
-                    uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
-                    extracted |= high;
-                }
-                if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else if (opc == 2) {
-                if (rd_ != 31) cpu.regs[rd_] = extracted;
-            } else {                // BFM — wrap-around case
-                // Destination field is bits[imms:0] ∪ bits[width-1:immr].
-                // The rotated source preserves the field positions, so we
-                // just merge the rotated value's field bits into dst.
-                uint64_t hi_mask = ~((1ULL << immr) - 1);  // bits [width-1..immr]
-                if (datasize == 32) hi_mask &= 0xFFFFFFFF;
-                uint64_t field_mask = mask | hi_mask;
-                uint64_t cur = cpu.regs[rd_];
-                if (!sf) cur &= 0xFFFFFFFF;
-                uint64_t rotated_w = (datasize == 64) ? rotated : (uint32_t)rotated;
-                if (rd_ != 31) cpu.regs[rd_] = (cur & ~field_mask) | (rotated_w & field_mask);
-            }
-        }
-        if (!sf) cpu.regs[rd_] &= 0xFFFFFFFF;
-        return;
-    }
+    // Bitfield/EXTR/Logical immediate — handled by the decoder switch above.
 
-    // Extract (EXTR): sf 00 100111 0 N immr Rm Rn Rd
-    // Encoding: bits[31]=sf, [30:29]=00, [28:23]=100111, [22]=N,
-    //           [21]=o0(=0), [20:16]=Rm, [15:10]=imms, [9:5]=Rn, [4:0]=Rd
-    if ((op & 0x1F800000) == 0x13800000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t immr = (op >> 10) & 0x3F;
-        uint8_t rm = (op >> 16) & 0x1F;
-        uint8_t rn = (op >> 5) & 0x1F;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-        uint64_t lo = cpu.regs[rn];
-        uint64_t hi = cpu.regs[rm];
-        if (!sf) { lo &= 0xFFFFFFFF; hi &= 0xFFFFFFFF; }
-        uint64_t combined = (hi << width) | lo;
-        uint64_t v = (combined >> immr) & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
-        if (!sf) v &= 0xFFFFFFFF;
-        if (rd_ != 31) cpu.regs[rd_] = v;
-        return;
-    }
+    // EXTR and Logical immediate — handled by the decoder switch above.
 
-    // Logical (immediate): sf opc 100100 N immr imms Rn Rd
-    if ((op & 0x1F800000) == 0x12000000) {
-        bool sf = (op >> 31) & 1;
-        uint8_t opc = (op >> 29) & 3; // 00 AND, 01 ORR, 10 EOR, 11 ANDS
-        uint8_t Nbit = (op >> 22) & 1;
-        uint8_t immr = (op >> 16) & 0x3F;
-        uint8_t imms = (op >> 10) & 0x3F;
-        uint8_t rn = (op >> 5) & 0x1F;
-        uint8_t rd_ = op & 0x1F;
-        int width = sf ? 64 : 32;
-
-        // Combine into 7-bit (N:imms) and find highest set bit -> len
-        // Per ARM ARM `DecodeBitMasks`:
-        //   len = HighestSetBit(N:imms)  -- 0-indexed position (0..6)
-        //   - For N=1: esize = 1 << len = 64 (when len=6)
-        //   - For N=0: esize = 1 << (len + 1) -- so esize doubles
-        //     because the leading '0' means we need one more bit to
-        //     identify the element size.
-        //   levels = esize - 1
-        //   S = imms & levels
-        //   R = immr & levels
-        //
-        // Special case: N:imms = 0 is officially UNDEFINED, but some
-        // toolchains emit AND-imm with all-zero immediate fields as a
-        // canonical way to write AND with 0 (mask = 0). We treat that
-        // case as mask = 0 to be lenient.
-        uint8_t combined = (Nbit << 6) | imms;
-        uint64_t imm_val;
-        if (combined == 0) {
-            imm_val = 0;  // lenient: treat as zero mask
-        } else {
-            int hsbit = 0;  // highest set bit position (0-indexed)
-            for (int i = 6; i >= 0; i--) {
-                if (combined & (1 << i)) { hsbit = i; break; }
-            }
-            int esize;
-            if (Nbit) {
-                // 64-bit element. hsbit must be 6.
-                if (hsbit != 6) throw DecodeError(cpu.pc, inst);
-                esize = 64;
-            } else {
-                // 32-bit or smaller. esize = 1 << (hsbit + 1).
-                esize = 1 << (hsbit + 1);
-                if (esize > 32 && !sf) throw DecodeError(cpu.pc, inst);
-                if (esize > 64) throw DecodeError(cpu.pc, inst);
-            }
-            int levels = esize - 1;
-            if (imms > (uint8_t)levels) throw DecodeError(cpu.pc, inst);
-            int S = imms & levels;
-            int R = immr & levels;
-
-            // Build the element: (S+1) ones at the top of an esize-bit field,
-            // then rotate right by R within esize, then replicate to width.
-            // For TST/ANDS, the immediate field is the AND mask.
-            uint64_t ones = (S + 1 >= 64) ? ~0ULL : ((1ULL << (S + 1)) - 1);
-            uint64_t element;
-            if (esize == 64) {
-                element = ones;  // already full width
-            } else {
-                element = ones << (esize - 1 - S);
-                element &= (1ULL << esize) - 1;
-            }
-            // rotate right by R within esize bits
-            if (esize < 64) {
-                element = ((element >> R) | (element << (esize - R)))
-                          & ((1ULL << esize) - 1);
-            } else {
-                if (R != 0)
-                    element = (element >> R) | (element << (64 - R));
-            }
-            // replicate to width
-            imm_val = 0;
-            for (int off = 0; off < width; off += esize)
-                imm_val |= element << off;
-            if (!sf) imm_val &= 0xFFFFFFFF;
-        }
-
-        uint64_t a = cpu.regs[rn];
-        if (!sf) a &= 0xFFFFFFFF;
-        uint64_t res;
-        bool set_flags = false;
-        switch (opc) {
-            case 0: res = a & imm_val; break;          // AND
-            case 1: res = a | imm_val; break;          // ORR
-            case 2: res = a ^ imm_val; break;          // EOR
-            case 3: res = a & imm_val; set_flags = true; break; // ANDS
-            default: throw DecodeError(cpu.pc, inst);
-        }
-        if (!sf) res &= 0xFFFFFFFF;
-        if (rd_ != 31) cpu.regs[rd_] = res;
-        if (set_flags) {
-            cpu.set_flag_n((res >> (width - 1)) & 1);
-            cpu.set_flag_z(res == 0);
-            cpu.set_flag_c(false);
-            cpu.set_flag_v(false);
-        }
-        return;
-    }
-
-    // ------------------------------------------------------------------
     // ------------------------------------------------------------------
     // Group: Load/store pair (ALL modes: post, offset, pre)
     //

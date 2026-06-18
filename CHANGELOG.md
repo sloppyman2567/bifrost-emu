@@ -6,6 +6,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.3.0-alpha.3] — 2026-06-18
+
+Incremental migration release. Migrated the entire immediate group
+from the legacy if-chain to the decoder switch, bringing the total
+migrated instruction classes to 17. Also includes the decode cache
+and MOVI fix from alpha.2.
+
+### Migrated to Switch (from if-chain)
+- `ADR` / `ADRP` — PC-relative address computation
+- `MOVN` / `MOVZ` / `MOVK` — move immediate
+- `ADD_IMM` / `ADDS_IMM` / `SUB_IMM` / `SUBS_IMM` — add/subtract immediate
+- `SBFM` / `BFM` / `UBFM` — bitfield extract/insert/move
+- `EXTR` — extract register (fixed to use 128-bit concatenation)
+- `AND_IMM` / `ORR_IMM` / `EOR_IMM` / `ANDS_IMM` — logical immediate
+
+### Fixed
+- **EXTR switch case** — was using a broken two-shift approach; fixed
+  to use 128-bit concatenation (`(hi << width) | lo`) matching the
+  if-chain's algorithm.
+- **Logical immediate switch case** — replaced the simplified
+  `decode_bitmask_imm` with the if-chain's exact bitmask decode
+  algorithm, which handles all edge cases correctly.
+
+### Architecture
+- The decoder (`decoder.cpp`) is the single source of truth for
+  instruction decode. The interpreter dispatches on `d.cls` via
+  `switch`. A decode cache (`PC → DecodedInst`) avoids re-decoding
+  on repeated execution.
+- **17 of ~50 instruction classes** are now handled in the switch.
+  The remaining ~33 still fall through to the legacy if-chain.
+  See README.md "Current Migration Status" for the full list.
+
+### Verification
+All 16 tests pass (6 assembly + 10 musl-static C). No regressions.
+Performance: ~23 MIPS with decode cache.
+
+---
+
+## [1.3.0-alpha.2] — 2026-06-18
+
+Full decoder rewrite and decode cache.
+
+### Added
+- **Extended `DecodedInst`** with all fields needed by every handler
+  (reads_sp, writes_sp, hw, immr, imms, N, opc_ls, dp_opcode,
+  nzcv_field, Q, ftype, cmode, fp_opcode, rmode, is_sub, sysreg
+  fields, etc.).
+- **Rewrote `decoder.cpp`** with complete decode logic for all
+  instruction groups: branches, system, immediate, register, load/store,
+  atomics, SIMD/FP. The decoder now extracts ALL fields the interpreter
+  needs.
+- **Instruction decode cache** (`PC → DecodedInst`). Since guest code
+  is not self-modifying, each PC always decodes to the same instruction.
+  Cache turns millions of decode() calls into hash-map lookups for
+  tight loops.
+- **~10 new `InstClass` values** for future migration (SVC_IMM,
+  BRK_IMM, MSR_SYS, MRS_SYS, HINT, CLREX_INST, SIMD_DP, FP_SCALAR, etc.)
+
+### Fixed
+- **MOVI Vd.2D, #0** (cmode=0xE, Q=1) — was only handling byte broadcast
+  form (cmode=0xF, Q=0). musl uses `movi v1.2d, #0` to zero 128-bit
+  vector registers for softfloat comparisons.
+
+### Note
+Attempted full interpreter rewrite (pure switch, no if-chain) but hit
+multiple subtle decode bugs in the migration (STP/LDP mode bits,
+ADD/SUB shifted vs extended register, LDRSW is_load). Reverted to the
+working hybrid approach. The decoder is now much more complete and the
+cache provides real performance.
+
+---
+
 ## [1.3.0-alpha.1] — 2026-06-17
 
 Major architectural release: the decoder is now wired up as the single
