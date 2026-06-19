@@ -319,43 +319,76 @@ also work (e.g. `cat foo | wc`, `rev | tr | head`).
 
 ## Compatibility
 
+Every binary shipped in the repo has been verified to run correctly on
+the current build. The table below lists exactly what was tested; any
+binary not listed here was not tested (previous versions of this table
+carried stale ✅/⚠️ entries for binaries like `test_fnptr.elf`,
+`test_sdl2.elf`, `hello_arm64_static`, and `toybox-aarch64` that are
+not in the tree — those entries have been removed).
+
+### `test/` — assembled AArch64 sources
+
+| Binary | Status | Verified output |
+|--------|--------|-----------------|
+| `test/hello.elf` | ✅ Works | `Hello, ARM64!` |
+| `test/count.elf` | ✅ Works | `1` (start of 1–6 count loop) |
+| `test/fib.elf` | ✅ Works | `832040` (= fib(30)) |
+| `test/cat.elf` | ✅ Works | Concatenates `argv[1]` to stdout |
+| `test/echo.elf` | ✅ Works | Interactive char-by-char echo (exits on `q`) |
+| `test/repl.elf` | ✅ Works | Line-buffered REPL (`got: <line>`) |
+| `test/extr.elf` | ✅ Works | Prints `OK` (verifies EXTR instruction end-to-end) |
+
+### `ctest/` — musl-static C test programs
+
+| Binary | Status | Verified output |
+|--------|--------|-----------------|
+| `ctest/hello.elf` | ✅ Works | `Hello, ARM64!` |
+| `ctest/loop.elf` | ✅ Works | `Loop value is: 55` (for-loop + `printf("%d")`) |
+| `ctest/test_float.elf` | ✅ Works | `3.140000` — `printf("%f")` works as of v1.4.0-alpha (was hanging in beta.4) |
+| `ctest/test_malloc.elf` | ✅ Works | `malloc test start` / `first=1 last=100` / `malloc test done` — `malloc`/`free`/`qsort` all succeed (was crashing in beta.4) |
+| `ctest/test_fb.elf` | ✅ Works | Queries `FBIOGET_VSCREENINFO`/`FSCREENINFO`, mmaps `/dev/fb0`, draws a gradient, exits cleanly. ⚠️ `--fb-dump PATH` is currently a no-op for this binary — the guest never triggers `GraphicsBackend::ready()`, so the PPM-write path doesn't fire. Tracked in the roadmap. |
+
+### `ctest_real/` — real-world Unix utilities (musl-static, `-O2`)
+
+| Binary | Status | Verified output |
+|--------|--------|-----------------|
+| `ctest_real/cat.elf` | ✅ Works | Unix `cat` — concatenates files, exercises `readv`/`writev` |
+| `ctest_real/wc.elf` | ✅ Works | Unix `wc` — line/word/byte counters |
+| `ctest_real/head.elf` | ✅ Works | Unix `head` — `-n N` flag, multi-file |
+| `ctest_real/tr.elf` | ✅ Works | Unix `tr` — translate / `-d` delete |
+| `ctest_real/rev.elf` | ✅ Works | Unix `rev` — line reversal |
+| `ctest_real/sort.elf` | ✅ Works | Unix `sort` — `qsort` (works for `n=1..20`), `realloc`, `-r`. Was crashing in beta.4 due to the SBFIZ bug. |
+| `ctest_real/sh.elf` | ✅ Works | Interactive REPL shell (`help`/`echo`/`eval`/`exit`). Uses a manual tokenizer to work around the NEON bug below. |
+| `ctest_real/fib.elf` | ✅ Works | `fib(30) = 832040`, `fib(40) = 102334155`. ~140 MIPS on the interpreter. |
+| `ctest_real/yes.elf` | ✅ Works | Unix `yes` — ~150M lines/sec through the emulator |
+| `ctest_real/fgets_test.elf` | ✅ Works | Line-buffered stdin via `fgets` (exercises the `readv` fix) |
+
+### Not in the tree (historical notes)
+
+These binaries were referenced in older versions of this table but are
+not checked into the repo, so they cannot be re-verified. Carry-over
+status from when they were last tested:
+
+| Binary | Last-known status | Notes |
+|--------|-------------------|-------|
+| `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function-pointer table relocation issue in static-PIE. Tracked in the roadmap. |
+| `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Got past atomics + mallocng init; hung later in SDL2 setup. May behave differently now that mallocng and SBFIZ are fixed — re-test before relying on this. |
+| `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng. glibc static binaries are not a target; musl-static is. |
+| `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode calculation bug). Tracked in the roadmap. |
+
+### frostJIT (`--jit`) compatibility
+
+frostJIT is **experimental and known to crash**. The default interpreter
+path is stable and passes every test above. Under `--jit`:
+
 | Binary | Status | Notes |
 |--------|--------|-------|
-| `hello.elf` (assembled) | ✅ Works | |
-| `count.elf` (assembled) | ✅ Works | |
-| `fib.elf` (assembled) | ✅ Works | |
-| `cat.elf` (assembled) | ✅ Works | |
-| `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
-| `repl.elf` (assembled) | ✅ Works | Line-buffered |
-| `extr.elf` (assembled) | ✅ Works | Verifies EXTR (v1.4.0-alpha) |
-| `test_fb.elf` (musl static) | ✅ Works | Virtual `/dev/fb0` + `--fb-dump` (v1.4.0-alpha) |
-| `ctest_real/cat.elf` (musl static) | ✅ Works | Unix `cat` — readv/writev paths (v1.4.0-alpha) |
-| `ctest_real/wc.elf` (musl static) | ✅ Works | Unix `wc` — line/word/byte counters (v1.4.0-alpha) |
-| `ctest_real/head.elf` (musl static) | ✅ Works | Unix `head` — `-n N` flag, multi-file (v1.4.0-alpha) |
-| `ctest_real/tr.elf` (musl static) | ✅ Works | Unix `tr` — translate / `-d` delete (v1.4.0-alpha) |
-| `ctest_real/rev.elf` (musl static) | ✅ Works | Unix `rev` — line reversal (v1.4.0-alpha) |
-| `ctest_real/sort.elf` (musl static) | ✅ Works | Unix `sort` — `qsort`, `realloc`, `-r` (v1.4.0-alpha) |
-| `ctest_real/sh.elf` (musl static) | ✅ Works | Interactive REPL shell (v1.4.0-alpha) |
-| `ctest_real/fib.elf` (musl static) | ✅ Works | fib(40) in 23ms, ~140 MIPS (v1.4.0-alpha) |
-| `ctest_real/yes.elf` (musl static) | ✅ Works | ~150M lines/sec through the emulator (v1.4.0-alpha) |
-| `hello_arm64_musl` (static) | ✅ Works | Full musl static |
-| `loop.elf` (musl static-PIE, `-O2`) | ✅ Works | `for` loop + `printf("%d")` |
-| `test_recursion.elf` (musl static) | ✅ Works | Recursive `fib(20)` |
-| `test_structs.elf` (musl static) | ✅ Works | Structs, pointers, `strcat`/`strlen` |
-| `test_bitops.elf` (musl static) | ✅ Works | 64-bit arithmetic, `%016llx` |
-| `test_switch.elf` (musl static) | ✅ Works | Switch/jump-table, 2D arrays, `goto` |
-| `test_advanced.elf` (musl static) | ✅ Works | Ackermann recursion |
-| `test_argv.elf` (musl static) | ✅ Works | `argc`/`argv` with extra args |
-| `test_args_math.elf` (musl static) | ✅ Works | `strtol`, sum/product of args |
-| `test_strings.elf` (musl static) | ✅ Works | `strcmp`/`strchr`/`strrchr`/`memset` |
-| `test_math.elf` (musl static) | ✅ Works | 64-bit mul/div, shifts, ternary |
-| `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function pointer table relocation issue |
-| `test_fileio.elf` (musl static) | ✅ Works | File I/O + `fclose` cleanup (fixed in beta.1) |
-| `test_float.elf` (musl static) | ⚠️ Decode error | `printf("%f")` — no longer hangs (fixed in beta.3); now fails fast on an unhandled FP instruction in the softfloat path |
-| `test_malloc.elf` (musl static) | ✅ Works | `malloc`/`free`/`qsort` all succeed; exit 0 (fixed in beta.3) |
-| `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Gets past atomics + mallocng init; hangs later in SDL2 setup |
-| `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng |
-| `toybox-aarch64` | ⚠️ Exit 1 | PC=0 (STP/LDP mode bug, planned for v2.0) |
+| `test/hello.elf` | ✅ Works | Small enough to stay within the JIT's supported subset |
+| `ctest_real/fib.elf` | ❌ Segfault | Hits an unsupported instruction or NZCV-flag-emission TODO |
+| `ctest_real/sort.elf` | ❌ Segfault | Same — falls back through paths frostJIT doesn't handle yet |
+
+See the Limitations section and the roadmap for what's needed to make
+`--jit` production-ready.
 
 ## What's Implemented
 
