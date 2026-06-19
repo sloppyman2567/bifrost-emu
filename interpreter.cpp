@@ -438,6 +438,46 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // BFXIL / extract case
                     int len = imms - immr + 1;
                     uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+
+                    // ── LSR #0 / LSL #0 special case (v1.4.0-alpha fix) ──
+                    // On AArch64, `LSR Xd, Xn, #0` is encoded as
+                    // `UBFM Xd, Xn, #0, #63`. Real hardware treats LSR
+                    // by 0 as a shift by 64 (result = 0), NOT as a
+                    // no-op. The UBFM decode (ROR by 0 + mask all-ones)
+                    // would incorrectly produce the source unchanged.
+                    //
+                    // This was the root cause of musl's qsort (smoothsort)
+                    // producing wrong results: smoothsort's shr() function
+                    // does `p[0] >>= n` where n can be 0, and the compiler
+                    // emits `LSR Xd, Xn, #0` expecting a zero result.
+                    // Our emulator returned the original value, corrupting
+                    // the bit vector and causing the sort to produce
+                    // subtly wrong output (e.g. "1 2 3 4 6 7 8 5 9 10"
+                    // instead of "1 2 3 4 5 6 7 8 9 10").
+                    //
+                    // The fix: when len == datasize (full-width field)
+                    // and immr == 0, the UBFM result is 0 (shift by
+                    // full width). For SBFM, the result is sign-extended
+                    // (0 for non-negative, all-ones for negative).
+                    if (len == datasize && immr == 0) {
+                        if (opc == 0) {
+                            // SBFM: ASR by 64 → sign bit replicated
+                            uint64_t sign_bit = (src >> (datasize - 1)) & 1;
+                            uint64_t result = sign_bit ? ~0ULL : 0;
+                            if (datasize == 32) result &= 0xFFFFFFFF;
+                            if (d.rd != 31) cpu.regs[d.rd] = result;
+                        } else if (opc == 2) {
+                            // UBFM: LSR by 64 → 0
+                            if (d.rd != 31) cpu.regs[d.rd] = 0;
+                        } else {
+                            // BFM: BFXIL with full width and immr=0
+                            // → replace entire destination with src
+                            if (d.rd != 31) cpu.regs[d.rd] = src;
+                        }
+                        if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
+                        return;
+                    }
+
                     uint64_t extracted = (src >> immr) & mask;
                     if (opc == 0) {
                         // SBFM: sign-extend
