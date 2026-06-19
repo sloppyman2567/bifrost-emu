@@ -487,6 +487,17 @@ def encode(addr, mnem, ops, labels):
         return enc_blr(reg(ops[0]))
     if mnem == "svc":
         return enc_svc(imm(ops[0]) if ops else 0)
+    if mnem == "extr":
+        # EXTR Xd, Xn, Xm, #lsb
+        # Encoding: sf 00 100111 N Rm imms Rn Rd
+        # (bits[28:23] = 100111, N matches sf for EXTR)
+        # For 64-bit (sf=1, N=1); for 32-bit (sf=0, N=0).
+        rd = reg(ops[0]); rn = reg(ops[1]); rm = reg(ops[2])
+        sf = 0 if is_w(ops[0]) else 1
+        n = sf  # N matches sf for EXTR
+        imms = imm(ops[3]) & 0x3F
+        return (sf << 31) | (0b00 << 29) | (0b100111 << 23) | (n << 22) | \
+               (rm << 16) | (imms << 10) | (rn << 5) | rd
     if mnem == "adr":
         rd = reg(ops[0])
         target = labels[ops[1]]
