@@ -68,21 +68,23 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // instruction classification. We call decode() once, then dispatch
     // on d.cls. Every instruction handler lives in the switch below.
     {
-        // ── Instruction decode cache ──────────────────────────────
-        // Since guest code is not self-modifying (static binaries only),
-        // each PC always decodes to the same instruction. Cache the
-        // DecodedInst by PC to skip the decode() on repeated
-        // executions of the same PC (e.g. tight loops).
-        DecodedInst d;
-        auto cache_it = decode_cache_.find(cpu.pc);
-        if (cache_it != decode_cache_.end()) {
-            d = cache_it->second;
+        // ── Direct-mapped decode cache ────────────────────────────
+        // Hash PC to a cache index, check tag. On hit, skip decode().
+        // This is the hot path — ~100% hit rate for tight loops.
+        // Using a const reference avoids copying the 88-byte DecodedInst.
+        size_t idx = (cpu.pc >> 2) & DECODE_CACHE_MASK;
+        CacheEntry& ce = decode_cache_[idx];
+        const DecodedInst* dp;
+        if (__builtin_expect(ce.tag == cpu.pc, 1)) {
+            dp = &ce.d;
             decode_cache_hits_++;
         } else {
-            decode(d, inst);
-            decode_cache_[cpu.pc] = d;
+            decode(ce.d, inst);
+            ce.tag = cpu.pc;
+            dp = &ce.d;
             decode_cache_misses_++;
         }
+        const DecodedInst& d = *dp;
         switch (d.cls) {
             // ── ADC/ADCS/SBC/SBCS (add/subtract with carry) ──────────
             // These were previously unimplemented and
