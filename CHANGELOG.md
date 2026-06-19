@@ -19,7 +19,78 @@ release. Three major areas of improvement:
    Q-form, BFM BFI) that blocked musl's 128-bit long double routines,
    partially unblocking `printf("%f")`.
 
-### Added
+### Added (post-release audit fixes)
+- **Per-vCPU decode cache.** Moved the decode cache from the shared
+  `Emulator` into each `CPU`, eliminating a data race between
+  concurrently-running guest threads. Verbose stats now aggregate hits
+  and misses across all vCPUs.
+- **ELF loader bounds checks.** Program-header table is now validated
+  against `data.size()` before indexing, preventing OOB reads on
+  truncated or hostile ELF files.
+- **Correct AArch64 syscall numbers.** Verified every `case N` against
+  the asm-generic syscall table and renumbered: `nanosleep` (100→101),
+  `clock_nanosleep` (206→115), `rt_sigreturn` (133→139), `mremap`
+  (227→216), `ppoll` (168→73), `getcwd` (165→17), `sendfile` (40→71),
+  `epoll_pwait` (22, was wrongly pipe2), `mincore` (232, was wrongly
+  epoll_wait), `getrlimit` (163, was wrongly acct), `getrusage` (165,
+  was wrongly getcwd), `getcpu` (168, was wrongly ppoll), `msync`
+  (227, was wrongly mremap), `mount` (40, was wrongly sendfile), and
+  `process_vm_readv` (270, was wrongly an eventfd2 alt entry). Old
+  case labels that were wrong-but-harmless are now correct stubs.
+- **Futex liveness fix.** `*uaddr == val` check moved inside the slot
+  lock so a concurrent waker can no longer slip in between the check
+  and the waiter increment, eliminating a "wait forever" race.
+- **`fb_fix_screeninfo` size fix.** Hardcoded `out_sz = 72` corrected
+  to `80` (matches `sizeof(fb_fix_screeninfo)` on LP64), so the guest
+  no longer reads a truncated struct missing `capabilities` and
+  `reserved[2]`.
+- **`getrandom` non-fallback.** Removed the `rand()` fallback path
+  (which was unseeded, non-thread-safe, and predictable). Now returns
+  `-ENOSYS` if `/dev/urandom` cannot be opened.
+- **`getcwd`, `getrusage`, `getrlimit`** now return correctly-shaped
+  responses instead of writing tiny stubs into the wrong struct.
+- **`ppoll` (73)** and **`clock_nanosleep` (115)** actually work
+  now — previously guests calling the real syscall numbers fell
+  through to the default `-ENOSYS` handler.
+- **`msync` (227) stub** added (no-op; sparse pages always in sync).
+- **`getcpu` (168) stub** added (returns CPU 0, NUMA node 0).
+- **`mount` (40) stub** added (returns `-EPERM`, sandbox).
+- **`process_vm_readv` (270) stub** added (returns `-ENOSYS`).
+- **Decoder UB fix.** `decode_bitfield_imm`'s rotation step
+  `elem << (esize - R)` was UB when `R == 0` and `esize == 64`
+  (shift by 64). Now guarded with `if (R != 0)`.
+- **PageCache sentinel.** `Memory::PageCache` default `read_page = 0`
+  matched any real access to page 0 (e.g. a null-deref at offset
+  0x480), causing `read_ptr = nullptr` to be dereferenced. Default is
+  now `UINT64_MAX` (an unreachable page number).
+
+### Changed (post-release audit fixes)
+- **Decode cache moved to `CPU`.** Each vCPU gets a lock-free 16K-entry
+  cache; the shared `Emulator::decode_cache_` field is gone. Verbose
+  stats aggregate across all vCPUs.
+- **`getrandom` no longer uses `rand()` fallback.** Returns `-ENOSYS`
+  if `/dev/urandom` is unavailable, instead of predictable pseudo-
+  random data.
+- **`GuestThread::done` flag removed.** Write-only since 1.3.0-beta.1;
+  thread completion is observed via `host_thread::join()`.
+- **`GuestThread::set_tid_address_ptr` removed.** Duplicated the
+  per-thread pointer already stored on `CPU`; only the `CPU` field is
+  read by `set_tid_address`.
+- **`Emulator::exiting_` flag removed.** Write-only since 1.3.0-beta.1.
+- **`api/bifrost.h` version comment** updated to `1.3.0-beta.4`
+  (was stale at `1.3.0-beta.2`).
+- **Duplicate pipe2 handler at case 22** removed; case 22 now correctly
+  implements `epoll_pwait` (the only AArch64 syscall with that number).
+- **Empty `CLONE_CHILD_SETTID` if-block** in `spawn_thread` removed
+  (the actual write happens after TID allocation below).
+- **Stale comment** in syscalls.cpp claiming `case 73 above is already
+  used for readv` removed — readv is at 65, not 73.
+- **All compiler warnings cleaned.** `make` now builds with zero
+  warnings under `-Wall -Wextra` (was 24+ missing-field-initializer
+  warnings on the local `struct statfs = {0}` plus three unused
+  parameter/variable warnings).
+
+
 - **Direct-mapped decode cache.** 4096-entry flat array replacing
   `std::unordered_map`. Gives 2.17x speedup alone (37 → 80 MIPS).
   100% hit rate for tight loops. Uses `__builtin_expect` for branch

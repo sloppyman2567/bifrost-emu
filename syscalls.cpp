@@ -399,13 +399,11 @@ void Emulator::syscall(CPU& cpu) {
         case 93: { // exit
             cpu.running = false;
             cpu.exit_code = (int)a0;
-            exiting_ = true;
             return;
         }
         case 94: { // exit_group
             cpu.running = false;
             cpu.exit_code = (int)a0;
-            exiting_ = true;
             return;
         }
         case 96: { // set_tid_address
@@ -433,8 +431,8 @@ void Emulator::syscall(CPU& cpu) {
             uint32_t op = (uint32_t)a1;
             uint32_t val = (uint32_t)a2;
             uint64_t timeout_ptr = a3;
-            uint64_t uaddr2 = a4;
-            uint32_t val3 = (uint32_t)a5;
+            (void)a4;  // uaddr2 — used by FUTEX_REQUEUE, not yet implemented
+            (void)a5;  // val3   — used by FUTEX_REQUEUE, not yet implemented
 
             // Mask out private flag — we treat all futexes as private
             op &= ~0x80;  // FUTEX_PRIVATE_FLAG
@@ -443,12 +441,6 @@ void Emulator::syscall(CPU& cpu) {
                 case 0:  // FUTEX_WAIT
                 case 9:  // FUTEX_WAIT_BITSET
                 {
-                    // Check that *uaddr == val, then block.
-                    uint32_t cur = mem_.load<uint32_t>(uaddr);
-                    if (cur != val) {
-                        ret_host((uint64_t)-EAGAIN);
-                        return;
-                    }
                     // Backward-compat: if no other threads are alive to
                     // wake us, return 0 immediately (pretend we waited
                     // and were woken). This preserves the previous
@@ -461,7 +453,28 @@ void Emulator::syscall(CPU& cpu) {
                     }
                     FutexSlot* slot = get_futex(uaddr);
                     std::unique_lock<std::mutex> lk(slot->mu);
+                    // Re-check *uaddr == val UNDER the slot lock so that
+                    // a concurrent WAKE can't slip in between our initial
+                    // check and our waiter increment. Without this, a
+                    // waker could see waiters==0 and skip notify, leaving
+                    // us sleeping forever.
+                    uint32_t cur = mem_.load<uint32_t>(uaddr);
+                    if (cur != val) {
+                        ret_host((uint64_t)-EAGAIN);
+                        return;
+                    }
                     slot->waiters++;
+                    // cv.wait() (no predicate) blocks until notified or
+                    // spuriously woken. The guest is expected to loop on
+                    // FUTEX_WAIT (re-checking *uaddr) per the futex API
+                    // contract, so spurious wakeups returning 0 are safe.
+                    // The lock is released while waiting and reacquired
+                    // on wake, allowing a concurrent FUTEX_WAKE to take
+                    // the lock and call notify before we increment
+                    // waiters — but the order is: we increment waiters
+                    // (line above) BEFORE releasing the lock via wait(),
+                    // so a waker acquiring the lock after us is
+                    // guaranteed to see the incremented count.
                     if (timeout_ptr == 0) {
                         slot->cv.wait(lk);
                     } else {
@@ -516,12 +529,16 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 100: { // nanosleep
+        case 101: { // nanosleep(req, rem) — AArch64 syscall 101
             uint64_t req = a0;
             uint64_t tv_sec  = mem_.load<uint64_t>(req);
             uint64_t tv_nsec = mem_.load<uint64_t>(req + 8);
             struct timespec ts = { (time_t)tv_sec, (long)tv_nsec };
             ::nanosleep(&ts, nullptr);
+            ret_host(0);
+            return;
+        }
+        case 100: { // get_robust_list — no-op stub (AArch64 100)
             ret_host(0);
             return;
         }
@@ -599,9 +616,18 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 165: { // getcwd - we just return "/"
+        case 17: { // getcwd(buf, size) — AArch64 syscall 17
+            // We report "/" as the cwd. The buffer must be at least 2
+            // bytes (NUL terminator included).
             mem_.write(a0, "/", 2);
             ret_host(1);
+            return;
+        }
+        case 165: { // getrusage(who, usage) — AArch64 syscall 165
+            // Return zeroed struct rusage (60 bytes on LP64).
+            char buf[144] = {0};  // generous; covers ru_maxrss etc.
+            mem_.write(a1, buf, sizeof(buf));
+            ret_host(0);
             return;
         }
         case 61: { // getdents64
@@ -621,9 +647,7 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 227: { // mremap(old_addr, old_size, new_size, flags, new_addr)
-            // a0 = old_address, a1 = old_size, a2 = new_size, a3 = flags
-            //
+        case 216: { // mremap(old_addr, old_size, new_size, flags, new_addr) — AArch64 216
             // musl's mallocng uses mremap to grow the meta_area (the
             // page that holds malloc metadata). It expects mremap to
             // grow the mapping IN PLACE when possible — if mremap
@@ -662,6 +686,11 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(old_addr);
             return;
         }
+        case 227: { // msync(addr, length, flags) — AArch64 227
+            // No-op: our sparse pages are always in sync.
+            ret_host(0);
+            return;
+        }
         case 233: { // madvise - no-op
             ret_host(0);
             return;
@@ -694,7 +723,7 @@ void Emulator::syscall(CPU& cpu) {
             uint64_t flags = a0;
             uint64_t stack = a1;
             uint64_t ptid_ptr = a2;
-            uint64_t ctid_ptr = a3;
+            (void)a3;  // ctid_ptr — child tid pointer; cleartid handled via CLONE_CHILD_CLEARTID flag path
             uint64_t tls = a4;
 
             // Refuse fork()-style clones (no CLONE_VM) for now
@@ -838,11 +867,21 @@ void Emulator::syscall(CPU& cpu) {
             ret_host((uint64_t)-EFAULT);
             return;
         }
-        case 22: { // pipe2 (glibc uses for some pthread setup)
-            int pfd[2] = {0, 0};
-            if (::pipe(pfd) < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
-            mem_.write(a0, pfd, sizeof(pfd));
-            ret_host(0);
+        case 22: { // epoll_pwait(epfd, events, maxevents, timeout, sigmask)
+            // Real AArch64 syscall 22. We forward to epoll_wait and ignore
+            // the sigmask (guest signal delivery isn't supported anyway).
+            struct epoll_event evs[256];
+            int maxev = (int)a2;
+            if (maxev > 256) maxev = 256;
+            int n = ::epoll_wait((int)a0, evs, maxev, (int)a3);
+            if (n > 0) {
+                for (int i = 0; i < n; i++) {
+                    uint64_t p = a1 + (uint64_t)i * 12;
+                    mem_.store<uint32_t>(p, evs[i].events);
+                    mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                }
+            }
+            ret_host(n);
             return;
         }
         case 24: { // dup3 - rare but possible
@@ -861,7 +900,7 @@ void Emulator::syscall(CPU& cpu) {
                      f_files, f_ffree, f_fsid[2], f_namelen, f_frsize,
                      f_flags, f_spare[4];
             };
-            struct statfs sfs = {0};
+            struct statfs sfs{};  // zero-init all fields (avoids -Wmissing-field-initializers)
             sfs.f_type = 0xEF53;       // ext2 magic
             sfs.f_bsize = 4096;
             sfs.f_namelen = 255;
@@ -875,7 +914,7 @@ void Emulator::syscall(CPU& cpu) {
                      f_files, f_ffree, f_fsid[2], f_namelen, f_frsize,
                      f_flags, f_spare[4];
             };
-            struct statfs sfs = {0};
+            struct statfs sfs{};  // zero-init all fields
             sfs.f_type = 0xEF53;
             sfs.f_bsize = 4096;
             sfs.f_namelen = 255;
@@ -931,39 +970,33 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 163: { // acct
-            ret_host((uint64_t)-EPERM);
+        case 163: { // getrlimit(resource, rlim) — AArch64 syscall 163
+            // Return generous infinite limits so libc doesn't choke.
+            // struct rlimit { uint64_t rlim_cur; uint64_t rlim_max; }
+            uint64_t rlim[2] = { (uint64_t)-1ULL, (uint64_t)-1ULL };
+            mem_.write(a1, rlim, sizeof(rlim));
+            ret_host(0);
             return;
         }
         case 198: { // socket (glibc may probe for IPC)
             ret_host((uint64_t)-ENOSYS);
             return;
         }
-        case 278: { // getrandom
-            // Provide actual random bytes. With TLS properly set up,
-            // glibc's per-thread getrandom state should be zero-initialized
-            // (state->buf == NULL), so it will try to initialize via this
-            // syscall. Returning the requested bytes sets state->cap > 0.
-            if (a1 > 0 && a0 != 0) {
-                std::vector<uint8_t> tmp(a1);
-                FILE* ur = fopen("/dev/urandom", "rb");
-                if (ur) {
-                    size_t got = fread(tmp.data(), 1, a1, ur);
-                    fclose(ur);
-                    if (got > 0) {
-                        mem_.write(a0, tmp.data(), got);
-                        ret_host(got);
-                    } else {
-                        ret_host((uint64_t)-EIO);
-                    }
-                } else {
-                    for (size_t i = 0; i < a1; i++) tmp[i] = rand() & 0xFF;
-                    mem_.write(a0, tmp.data(), a1);
-                    ret_host(a1);
-                }
-            } else {
-                ret_host(0);
-            }
+        case 278: { // getrandom(buf, buflen, flags) — AArch64 278
+            // Provide real random bytes from /dev/urandom. With TLS
+            // properly set up, glibc's per-thread getrandom state is
+            // zero-initialized (state->buf == NULL), so it tries to
+            // initialize via this syscall; returning the requested
+            // bytes sets state->cap > 0.
+            if (a1 == 0 || a0 == 0) { ret_host(0); return; }
+            std::vector<uint8_t> tmp(a1);
+            FILE* ur = fopen("/dev/urandom", "rb");
+            if (!ur) { ret_host((uint64_t)-ENOSYS); return; }
+            size_t got = fread(tmp.data(), 1, a1, ur);
+            fclose(ur);
+            if (got == 0) { ret_host((uint64_t)-EIO); return; }
+            mem_.write(a0, tmp.data(), got);
+            ret_host(got);
             return;
         }
         // ─────────────────────────────────────────────────────────────
@@ -993,15 +1026,9 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(::epoll_ctl((int)a0, (int)a1, (int)a2, &ev));
             return;
         }
-        // Note: case 22 is already used above for pipe2 (which is actually
-        // syscall 59 on aarch64, but kept for backward compat). The real
-        // aarch64 syscall 22 (epoll_pwait) is handled at case 22 below.
-        // To avoid conflicts, we use 22 here only if not already used.
-        case 84: { // semget (legacy) — we treat as epoll_ctl fallback
-            // Actually 84 on aarch64 is semget. Skip — return -ENOSYS.
-            ret_host((uint64_t)-ENOSYS);
-            return;
-        }
+        // Case 84 is sync_file_range on AArch64. We don't support it;
+        // -ENOSYS is returned by the default case. (Previously this slot
+        // was mislabeled as semget; semget is actually 190.)
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
             ret_host(::timerfd_create((int)a0, (int)a1));
             return;
@@ -1234,7 +1261,8 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         }
     }
 
-    gt->done = true;
+    // Thread is finishing — observe completion via host_thread::join()
+    // in join_threads(); no separate `done` flag is needed.
     emu->decrement_alive_threads();
 }
 
@@ -1242,6 +1270,12 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
 
 int arm64emu::Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                             uint64_t entry_pc, uint64_t arg, uint64_t tls) {
+    // arg is the pthread start_routine argument, but Linux clone() semantics
+    // require the child to return to the caller (entry_pc) with x0=0; the
+    // pthread library wrapper is responsible for fetching arg from a TLS slot
+    // or register set up by the parent before clone(). We accept the parameter
+    // to keep the API forward-compatible with a future clone-with-arg variant.
+    (void)arg;
     auto gt = std::make_unique<GuestThread>();
 
     // Initialize the child CPU. The child inherits the parent's register
@@ -1263,11 +1297,8 @@ int arm64emu::Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t s
         gt->cpu.tpidrro_el0 = tls;
     }
 
-    // CLONE_CHILD_SETTID: write child TID to *ctid
+    // CLONE_CHILD_SETTID: write child TID to *ctid (after allocating the TID below)
     uint64_t ctid_ptr = parent_cpu.regs[3];
-    if ((flags & 0x1000000) && ctid_ptr) {  // CLONE_CHILD_SETTID
-        // Will be set after tid is allocated below
-    }
 
     // CLONE_CHILD_CLEARTID: record the ctid pointer for futex wake on exit
     if (flags & 0x2000000) {  // CLONE_CHILD_CLEARTID
@@ -1281,7 +1312,7 @@ int arm64emu::Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t s
     gt->cpu.tid = child_tid;
     gt->tid = child_tid;
 
-    // Now write the TID to *ctid if requested
+    // Now write the TID to *ctid if CLONE_CHILD_SETTID was requested
     if ((flags & 0x1000000) && ctid_ptr) {
         mem_.store<uint32_t>(ctid_ptr, child_tid);
     }

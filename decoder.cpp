@@ -105,8 +105,15 @@ static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) 
     int width = S + 1;
     if (width > esize) return 0;
     uint64_t elem = (width >= 64) ? ~0ULL : ((1ULL << width) - 1);
-    elem = (elem >> R) | (elem << (esize - R));
-    elem &= (esize == 64) ? ~0ULL : ((1ULL << esize) - 1);
+    // ROR by R within an esize-wide field. When R == 0 there's nothing
+    // to do; otherwise the right-shift is `>> R` (safe, R < esize ≤ 64)
+    // and the left-shift is `<< (esize - R)` (safe, esize-R ≤ 64).
+    // The previous form `elem << (esize - R)` was UB when R == 0 and
+    // esize == 64 (shift by 64).
+    if (R != 0) {
+        elem = (elem >> R) | (elem << (esize - R));
+        elem &= (esize == 64) ? ~0ULL : ((1ULL << esize) - 1);
+    }
     uint64_t result = 0;
     for (int i = 0; i < 64; i += esize) {
         result |= elem << i;

@@ -496,6 +496,55 @@ partially fixed — long double multiply and comparisons now work
 correctly; the remaining issue is a performance problem in
 `__subtf3`'s mantissa alignment, not a correctness bug.
 
+### Post-release audit (code-review fixes)
+
+A review pass after the beta.4 release landed an additional batch of
+correctness and hygiene fixes:
+
+- **Page-cache sentinel.** `Memory::PageCache` defaulted
+  `read_page = 0`, which matched any real access to page 0 (e.g. a
+  null-deref at offset 0x480), causing `read_ptr = nullptr` to be
+  dereferenced — `hello.elf` was crashing deterministically. Default
+  is now `UINT64_MAX`.
+- **Per-vCPU decode cache.** Moved the decode cache from the shared
+  `Emulator` into each `CPU`, eliminating a data race between
+  concurrently-running guest threads (previously two vCPUs could
+  race on the same cache slot).
+- **Correct AArch64 syscall numbers.** Verified every `case N` in
+  `syscalls.cpp` against `asm-generic/unistd.h` and renumbered 15
+  mislabeled slots: `nanosleep` (100→101), `clock_nanosleep`
+  (206→115), `rt_sigreturn` (133→139), `mremap` (227→216), `ppoll`
+  (168→73), `getcwd` (165→17), `sendfile` (40→71), `epoll_pwait`
+  (22, was wrongly pipe2), `mincore` (232, was wrongly epoll_wait),
+  `getrlimit` (163, was wrongly acct), `getrusage` (165, was wrongly
+  getcwd), `getcpu` (168, was wrongly ppoll), `msync` (227, was
+  wrongly mremap), `mount` (40, was wrongly sendfile), and
+  `process_vm_readv` (270, was wrongly an eventfd2 alt entry).
+- **ELF loader bounds checks.** Program-header table is now validated
+  against `data.size()` before indexing — prevents OOB reads on
+  truncated or hostile ELF files.
+- **Futex liveness fix.** The `*uaddr == val` check moved inside the
+  slot lock, eliminating a "wait forever" race where a concurrent
+  waker could slip in between check and waiter increment.
+- **`fb_fix_screeninfo` size fix.** Hardcoded `out_sz = 72`
+  corrected to `80` — guest was reading a truncated struct missing
+  `capabilities` and `reserved[2]`.
+- **`getrandom` hardened.** Removed the unseeded non-thread-safe
+  `rand()` fallback path; now returns `-ENOSYS` if `/dev/urandom`
+  is unavailable.
+- **Decoder UB fix.** `decode_bitfield_imm`'s rotation step
+  `elem << (esize - R)` was UB when `R == 0` and `esize == 64`
+  (shift by 64). Now guarded with `if (R != 0)`.
+- **Zero compiler warnings.** `make` now builds clean under
+  `-Wall -Wextra` (was 24+ warnings).
+- **ASan/UBSan clean.** Debug build (`make debug`) runs all tests
+  under AddressSanitizer + UndefinedBehaviorSanitizer with no
+  violations.
+- **Dead code removed.** `Emulator::exiting_` (write-only),
+  `GuestThread::done` (write-only), `GuestThread::set_tid_address_ptr`
+  (duplicated by `CPU::set_tid_address_ptr`), duplicate pipe2 handler
+  at case 22, and an empty `CLONE_CHILD_SETTID` if-block.
+
 See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
 ## What's New in 1.3.0-beta.3

@@ -127,9 +127,15 @@ public:
     // stable because std::vector<uint8_t> objects inside the unordered_map
     // are heap-allocated and don't move when the map rehashes.
     struct PageCache {
-        uint64_t          read_page  = 0;
+        // UINT64_MAX is used as a sentinel "no cached page" marker.
+        // It can never collide with a real page number because that would
+        // require a guest address near 2^64 * 4096, which overflows.
+        // Without this, the default 0 would match any read from page 0
+        // (e.g. a null-deref at offset 0x480), causing read_ptr (nullptr)
+        // to be dereferenced.
+        uint64_t          read_page  = UINT64_MAX;
         const uint8_t*    read_ptr   = nullptr;
-        uint64_t          write_page = 0;
+        uint64_t          write_page = UINT64_MAX;
         uint8_t*          write_ptr  = nullptr;
     };
 
@@ -386,6 +392,13 @@ public:
 
         if (e_machine != 183) throw EmuError("not AArch64 ELF");
         if (e_phoff == 0 || e_phnum == 0) throw EmuError("no program headers");
+        // Bounds-check the program-header table before indexing into it.
+        // A truncated file or hostile e_phoff/e_phentsize/e_phnum combo
+        // would otherwise drive memcpy out of bounds below.
+        if (e_phoff >= data.size() || e_phentsize < 56)
+            throw EmuError("ELF: bad program-header table layout");
+        if (e_phnum > (data.size() - e_phoff) / e_phentsize)
+            throw EmuError("ELF: program-header table exceeds file size");
 
         struct Phdr {
             uint32_t p_type;
@@ -594,6 +607,24 @@ public:
     // on every memory access to the same page. Each CPU (thread) has
     // its own cache, so no locking needed.
     Memory::PageCache page_cache;
+
+    // ── Per-CPU decode cache ───────────────────────────────────────
+    // Lives in CPU (not Emulator) so each vCPU has its own cache with
+    // no locking. Direct-mapped: 16384 entries (~1.5 MB per vCPU).
+    // This is the hot path — ~100% hit rate for tight loops.
+    // The larger size (up from 4096) prevents collision thrashing
+    // between code that's 16 KB apart — e.g. __eqtf2 at 0x4003d0 and
+    // __multf3 at 0x4043d0 collided in the 4096-entry cache.
+    static constexpr size_t DECODE_CACHE_BITS = 14;
+    static constexpr size_t DECODE_CACHE_SIZE = 1 << DECODE_CACHE_BITS;
+    static constexpr size_t DECODE_CACHE_MASK = DECODE_CACHE_SIZE - 1;
+    struct CacheEntry {
+        uint64_t      tag = UINT64_MAX;  // PC; UINT64_MAX = empty slot
+        DecodedInst   d;
+    };
+    std::vector<CacheEntry> decode_cache{DECODE_CACHE_SIZE};
+    uint64_t decode_cache_hits = 0;
+    uint64_t decode_cache_misses = 0;
 
     // Address set via set_tid_address() — used by futex on child termination
     // (set_child_tid). Currently informational; we don't reap children.
@@ -805,12 +836,22 @@ public:
             fprintf(stderr, "[%s] mem pages: %zu (%.1f MB)\n",
                     CODENAME, mem_.page_count(),
                     mem_.page_count() * 4096 / 1048576.0);
-            uint64_t total = decode_cache_hits_ + decode_cache_misses_;
+            // Aggregate decode-cache stats across all vCPUs (main + spawned).
+            uint64_t hits = main_cpu_.decode_cache_hits;
+            uint64_t misses = main_cpu_.decode_cache_misses;
+            {
+                std::lock_guard<std::mutex> g(threads_mu_);
+                for (auto& gt : threads_) {
+                    hits   += gt->cpu.decode_cache_hits;
+                    misses += gt->cpu.decode_cache_misses;
+                }
+            }
+            uint64_t total = hits + misses;
             if (total > 0) {
                 fprintf(stderr, "[%s] decode cache: %llu hits, %llu misses (%.1f%% hit rate)\n",
-                        CODENAME, (unsigned long long)decode_cache_hits_,
-                        (unsigned long long)decode_cache_misses_,
-                        100.0 * decode_cache_hits_ / total);
+                        CODENAME, (unsigned long long)hits,
+                        (unsigned long long)misses,
+                        100.0 * hits / total);
             }
         }
         return main_cpu_.exit_code;
@@ -865,32 +906,12 @@ private:
     bool verbose_ = false;
     bool trace_ = false;
     bool brk_verbose_ = true;
-    bool exiting_ = false;      // set when exit() is called (libc cleanup in progress)
     std::string elf_path_;
 
-    // ── Instruction decode cache ──────────────────────────────────────
-    // Direct-mapped cache: PC → DecodedInst. Since guest code is not
-    // self-modifying (static binaries only), each PC always decodes to
-    // the same instruction. The cache is a flat array indexed by a hash
-    // of the PC, which is ~10x faster than unordered_map for the 100%
-    // hit-rate case (tight loops).
-    //
-    // Cache size: 16384 entries (14-bit index). Each entry is 88 bytes +
-    // 8 bytes for the tag = 96 bytes. Total: ~1.5 MB. The larger size
-    // (up from 4096) prevents collision thrashing between code that's
-    // 16KB apart — e.g. __eqtf2 at 0x4003d0 and __multf3 at 0x4043d0
-    // collided in the 4096-entry cache, causing wrong instruction
-    // execution and breaking printf("%f").
-    static constexpr size_t DECODE_CACHE_BITS = 14;
-    static constexpr size_t DECODE_CACHE_SIZE = 1 << DECODE_CACHE_BITS;
-    static constexpr size_t DECODE_CACHE_MASK = DECODE_CACHE_SIZE - 1;
-    struct CacheEntry {
-        uint64_t      tag;        // PC (0 = empty)
-        DecodedInst   d;
-    };
-    std::vector<CacheEntry> decode_cache_{DECODE_CACHE_SIZE};
-    uint64_t decode_cache_hits_ = 0;
-    uint64_t decode_cache_misses_ = 0;
+    // Decode cache lives in CPU (per-vCPU, lock-free). See CPU::decode_cache.
+    // The constants and the CacheEntry type itself are also declared on CPU
+    // so the interpreter can index `cpu.decode_cache` directly.
+    using CacheEntry = CPU::CacheEntry;
 
     // Thread management (for clone())
     struct GuestThread {
@@ -899,9 +920,9 @@ private:
         uint64_t stack_top = 0;
         uint64_t stack_size = 0;
         uint64_t tls_base = 0;
-        uint64_t set_tid_address_ptr = 0;
         int tid = 0;
-        bool done = false;
+        // (No `done` flag — thread completion is observed via host_thread::join
+        // in join_threads(). The per-thread set_tid_address_ptr lives on CPU.)
     };
     std::vector<std::unique_ptr<GuestThread>> threads_;
     std::mutex threads_mu_;

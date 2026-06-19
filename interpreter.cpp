@@ -69,21 +69,22 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // instruction classification. We call decode() once, then dispatch
     // on d.cls. Every instruction handler lives in the switch below.
     {
-        // ── Direct-mapped decode cache ────────────────────────────
+        // ── Per-vCPU direct-mapped decode cache ──────────────────
         // Hash PC to a cache index, check tag. On hit, skip decode().
         // This is the hot path — ~100% hit rate for tight loops.
         // Using a const reference avoids copying the 88-byte DecodedInst.
-        size_t idx = (cpu.pc >> 2) & DECODE_CACHE_MASK;
-        CacheEntry& ce = decode_cache_[idx];
+        // The cache lives on `cpu` so each vCPU gets a lock-free cache.
+        size_t idx = (cpu.pc >> 2) & CPU::DECODE_CACHE_MASK;
+        CPU::CacheEntry& ce = cpu.decode_cache[idx];
         const DecodedInst* dp;
         if (__builtin_expect(ce.tag == cpu.pc, 1)) {
             dp = &ce.d;
-            decode_cache_hits_++;
+            cpu.decode_cache_hits++;
         } else {
             decode(ce.d, inst);
             ce.tag = cpu.pc;
             dp = &ce.d;
-            decode_cache_misses_++;
+            cpu.decode_cache_misses++;
         }
         const DecodedInst& d = *dp;
         switch (d.cls) {
