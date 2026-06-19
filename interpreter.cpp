@@ -63,8 +63,6 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
 }
 
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
-    uint32_t op = inst;
-
     // ── Decode via the shared decoder ─────────────────────────────
     // The decoder (decoder.cpp) is the single source of truth for
     // instruction classification. We call decode() once, then dispatch
@@ -539,9 +537,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::EOR_IMM:
             case InstClass::ANDS_IMM: {
                 uint8_t opc = (d.raw >> 29) & 3;
-                bool Nbit = (d.raw >> 22) & 1;
-                uint8_t immr = (d.raw >> 16) & 0x3F;
-                uint8_t imms = (d.raw >> 10) & 0x3F;
                 int width = d.sf ? 64 : 32;
                 // Use the decoder's pre-decoded bitmask (d.imm_u).
                 // The decoder's decode_bitmask_imm is now correct (fixed
@@ -655,7 +650,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::CSINC:
             case InstClass::CSINV:
             case InstClass::CSNEG: {
-                int width = d.sf ? 64 : 32;
                 uint64_t a = cpu.regs[d.rn];
                 uint64_t b = cpu.regs[d.rm];
                 if (!d.sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
@@ -1328,7 +1322,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // ── INS (general): sf 0 0 11110 10 0 imm5 0000 0 1 Rn Rd ──
-                case 0x4E000C00: {
+                // v0 case label 0x4E000C00 was unreachable (it's DUP with
+                // Q=1, which strips to the same sub_noq as DUP Q=0).
+                // Real INS has bits[23:22]=10, giving sub_noq=0x0E001C00.
+                case 0x0E001C00: {
                     uint8_t imm5 = (op >> 16) & 0x1F;
                     int esize = 0, idx = 0;
                     for (int b = 0; b < 5; b++) {

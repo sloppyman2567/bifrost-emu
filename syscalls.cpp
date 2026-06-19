@@ -587,9 +587,9 @@ void Emulator::syscall(CPU& cpu) {
                 if (r < 0) {
                     cpu.regs[0] = (uint64_t)(int64_t)r;
                 } else {
-                    size_t out_sz = (a1 == FBIOGET_VSCREENINFO)
-                        ? 160   // sizeof(struct fb_var_screeninfo)
-                        : 80;   // sizeof(struct fb_fix_screeninfo) approx
+                    // sizeof(struct fb_var_screeninfo) = 160
+                    // sizeof(struct fb_fix_screeninfo) = 72
+                    size_t out_sz = (a1 == FBIOGET_VSCREENINFO) ? 160 : 72;
                     mem_.write(a2, host_buf, out_sz);
                     ret_host(0);
                 }
