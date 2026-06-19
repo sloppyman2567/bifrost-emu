@@ -248,7 +248,7 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(total);
             return;
         }
-        case 67: { // readv (AArch64 syscall 67, NOT 73)
+        case 65: { // readv(fd, iov, iovcnt) — AArch64 syscall 65
             uint64_t iov = a1;
             uint64_t cnt = a2;
             ssize_t total = 0;
@@ -263,6 +263,32 @@ void Emulator::syscall(CPU& cpu) {
                 total += n;
                 if ((size_t)n < len) break;
             }
+            ret_host(total);
+            return;
+        }
+        case 67: { // preadv64(fd, iov, iovcnt, offset) — AArch64 syscall 67
+            // Same as readv but with explicit file offset. We handle the
+            // common case by calling preadv if available; otherwise fall
+            // back to lseek+readv+lseek.
+            uint64_t iov = a1;
+            uint64_t cnt = a2;
+            off_t offset = (off_t)a3;
+            ssize_t total = 0;
+            off_t saved = ::lseek((int)a0, 0, SEEK_CUR);
+            if (saved < 0) saved = 0;
+            ::lseek((int)a0, offset, SEEK_SET);
+            for (uint64_t i = 0; i < cnt; i++) {
+                uint64_t base = mem_.load<uint64_t>(iov + i * 16);
+                uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
+                if (len == 0) continue;
+                std::vector<uint8_t> tmp(len);
+                ssize_t n = ::read((int)a0, tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+                if (n > 0) mem_.write(base, tmp.data(), n);
+                total += n;
+                if ((size_t)n < len) break;
+            }
+            ::lseek((int)a0, saved, SEEK_SET);
             ret_host(total);
             return;
         }
