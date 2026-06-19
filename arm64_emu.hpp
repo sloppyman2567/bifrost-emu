@@ -852,10 +852,13 @@ private:
     // of the PC, which is ~10x faster than unordered_map for the 100%
     // hit-rate case (tight loops).
     //
-    // Cache size: 4096 entries (12-bit index). Each entry is 88 bytes +
-    // 8 bytes for the tag = 96 bytes. Total: 384 KB. This fits in L2
-    // cache and gives >99% hit rate for typical loops.
-    static constexpr size_t DECODE_CACHE_BITS = 12;
+    // Cache size: 16384 entries (14-bit index). Each entry is 88 bytes +
+    // 8 bytes for the tag = 96 bytes. Total: ~1.5 MB. The larger size
+    // (up from 4096) prevents collision thrashing between code that's
+    // 16KB apart — e.g. __eqtf2 at 0x4003d0 and __multf3 at 0x4043d0
+    // collided in the 4096-entry cache, causing wrong instruction
+    // execution and breaking printf("%f").
+    static constexpr size_t DECODE_CACHE_BITS = 14;
     static constexpr size_t DECODE_CACHE_SIZE = 1 << DECODE_CACHE_BITS;
     static constexpr size_t DECODE_CACHE_MASK = DECODE_CACHE_SIZE - 1;
     struct CacheEntry {
@@ -990,7 +993,7 @@ private:
     // ------------------------------------------------------------------
     void step(CPU& cpu) {
         if (trace_) {
-            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x sp=0x%llx\n",
+            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x sp=0x%llx v0lo=0x%llx v0hi=0x%llx\n",
                     cpu.tid,
                     (unsigned long long)cpu.pc,
                     (unsigned long long)cpu.regs[0],
@@ -1013,7 +1016,9 @@ private:
                     (unsigned long long)cpu.regs[29],
                     (unsigned long long)cpu.regs[30],
                     cpu.pstate,
-                    (unsigned long long)cpu.sp);
+                    (unsigned long long)cpu.sp,
+                    (unsigned long long)cpu.v_lo[0],
+                    (unsigned long long)cpu.v_hi[0]);
         }
         uint32_t inst = mem_.fetch_inst(cpu.pc);
         uint64_t next_pc = cpu.pc + 4;
