@@ -90,6 +90,64 @@ release. Three major areas of improvement:
   warnings on the local `struct statfs = {0}` plus three unused
   parameter/variable warnings).
 
+### Added (real-world testing)
+
+- **9 real-world Unix utility programs** in `ctest_real/`, all built
+  with `aarch64-linux-musl-gcc -O2 -static`:
+  - `cat.c` — concatenate files (Unix `cat` subset, with `-` for stdin)
+  - `wc.c` — count lines/words/bytes (Unix `wc` subset, with totals)
+  - `head.c` — first N lines (Unix `head` subset, with `-n N` and
+    multi-file headers)
+  - `tr.c` — character translator (Unix `tr` subset, with `-d` delete)
+  - `rev.c` — reverse each line (Unix `rev`)
+  - `sort.c` — line sort (Unix `sort` subset, with `-r` reverse)
+  - `sh.c` — interactive REPL shell (`help`/`echo`/`eval`/`exit`)
+  - `fib.c` — fibonacci benchmark, takes N on command line
+  - `yes.c` — emit a string forever (Unix `yes`)
+
+- **`readv` syscall (65) handler.** Previously missing — musl's
+  `fgets` uses `readv` with 2 iovecs for buffered stdin reads, so
+  any program using `fgets()` on non-tty stdin silently dropped the
+  first byte of every read. Without this, `cat` produced no output.
+
+- **`preadv64` syscall (67) handler.** Previously mislabeled as
+  `readv` (case 67 is actually `preadv64` on AArch64). Implemented
+  via `lseek` + `read` + `lseek`-back fallback.
+
+### Fixed (real-world testing)
+
+- **`readv` was at the wrong syscall number.** Case 67 was labeled
+  `readv` but is actually `preadv64`; the real `readv` is syscall
+  65. This silently broke musl's `fgets` on non-tty stdin, which
+  uses `readv` with 2 iovecs (putback area + user buffer). Added
+  case 65 (readv) and correctly relabeled case 67 (preadv64).
+
+### Known issues (real-world testing)
+
+- **NEON bug in `strtok`/`strtok_r` path.** musl's `strtok` and
+  `strtok_r` call `strspn`/`strcspn`, which build a 256-bit bitset
+  using NEON/SIMD instructions. After a successful `fgets` of "hi\n",
+  calling `strtok_r` corrupts registers `x21`/`x22` with garbage
+  values like `0xffff98f000000108` (top 16 bits set — invalid
+  user-space addresses on AArch64). The `ctest_real/sh.elf` shell
+  works around this by using a manual tokenizer. Programs that avoid
+  `strtok` family functions work correctly. **Likely root cause:**
+  an ORR (vector) handler that writes `v_lo`/`v_hi` in a different
+  byte order than `STR Qn`/`LDR Qn` reads them, or a 128-bit
+  shift/extract instruction whose high-half handling is wrong.
+  Investigation pending.
+
+### Verified (real-world testing)
+
+- All 9 `ctest_real/` programs run correctly end-to-end.
+- Pipelines: `cat foo | wc`, `rev | tr | head`, `sort` with stdin.
+- Throughput: `fib(40)` = 102334155 in ~23ms (~140 MIPS); `yes`
+  emits ~150M lines/sec through the emulator.
+- Interactive shell (`sh.elf`): `help`, `echo hello world`,
+  `eval 6*7` → `= 42`, `exit` all work.
+- No regressions on the original `test/*.elf` and `ctest/*.elf`
+  test suites.
+
 
 - **Direct-mapped decode cache.** 4096-entry flat array replacing
   `std::unordered_map`. Gives 2.17x speedup alone (37 → 80 MIPS).
