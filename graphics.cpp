@@ -1,13 +1,15 @@
-// graphics.cpp — Headless graphics backend for bifrost-emu (1.3.0-beta.4).
+// graphics.cpp — Graphics backend for bifrost-emu (v1.4.0).
 //
 // Provides a virtual /dev/fb0 backed by a memfd_create'd file
 // descriptor. The guest mmaps the fd and writes pixels directly into
-// it. The host can dump the framebuffer to a PPM file for headless
-// debugging.
+// it. The host can:
+//   - dump the framebuffer to a PPM file (always available)
+//   - display the framebuffer in an SDL2 window (build with USE_SDL2=1)
 //
-// This is intentionally SDL2-free so it builds and runs on any Linux
-// host without extra dev dependencies. SDL2 window support is planned
-// for 1.4.0.
+// The SDL2 backend is opt-in: by default the emulator builds headless
+// (no third-party deps). When built with USE_SDL2=1, the refresh()
+// method opens an SDL2 window and pushes the framebuffer to it on
+// every call, allowing graphical guest programs to run interactively.
 
 #include "graphics.hpp"
 #include <cstdio>
@@ -21,7 +23,27 @@
 #include <errno.h>
 #include <string>
 
+#if defined(BIFROST_USE_SDL2)
+#  include <SDL2/SDL.h>
+#endif
+
 namespace arm64emu {
+
+#if defined(BIFROST_USE_SDL2)
+// ── SDL2 backend state ──────────────────────────────────────────────────
+// All SDL2 state is kept in this struct so the header doesn't need to
+// include SDL2/SDL.h (which is large and platform-specific).
+struct SDLWindowState {
+    SDL_Window*   window   = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    SDL_Texture*  texture  = nullptr;
+    bool          want_close = false;
+};
+
+static SDLWindowState* sdl_state(void* p) {
+    return static_cast<SDLWindowState*>(p);
+}
+#endif
 
 // ── Linux framebuffer structs (sufficient subset) ──────────────────────
 // These match the kernel's struct fb_var_screeninfo and struct
@@ -80,6 +102,20 @@ struct fb_fix_screeninfo {
 
 // ── Destructor ─────────────────────────────────────────────────────────
 GraphicsBackend::~GraphicsBackend() {
+#if defined(BIFROST_USE_SDL2)
+    if (sdl_state_) {
+        auto* s = sdl_state(sdl_state_);
+        if (s->texture)  SDL_DestroyTexture(s->texture);
+        if (s->renderer) SDL_DestroyRenderer(s->renderer);
+        if (s->window)   SDL_DestroyWindow(s->window);
+        delete s;
+        sdl_state_ = nullptr;
+    }
+    if (sdl_init_done_) {
+        SDL_Quit();
+        sdl_init_done_ = false;
+    }
+#endif
     if (fb_data_ && fb_data_ != MAP_FAILED) {
         munmap(fb_data_, size());
     }
@@ -146,10 +182,66 @@ bool GraphicsBackend::init(uint32_t width, uint32_t height) {
     // Clear to black (BGRA 0,0,0,0).
     memset(fb_data_, 0, fb_size);
 
+#if defined(BIFROST_USE_SDL2)
+    // Initialize SDL2 (only video subsystem). If this fails, we silently
+    // fall back to headless mode — the framebuffer still works for
+    // dump_to_ppm() etc., just without a live window.
+    if (!sdl_init_done_) {
+        if (SDL_Init(SDL_INIT_VIDEO) == 0) {
+            sdl_init_done_ = true;
+        } else if (getenv("BIFROST_GRAPHICS_VERBOSE")) {
+            fprintf(stderr, "[graphics] SDL_Init failed: %s (falling back to headless)\n",
+                    SDL_GetError());
+        }
+    }
+    if (sdl_init_done_ && !sdl_state_) {
+        auto* s = new SDLWindowState();
+        s->window = SDL_CreateWindow(
+            "bifrost-emu /dev/fb0",
+            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            (int)width_, (int)height_,
+            SDL_WINDOW_SHOWN);
+        if (s->window) {
+            s->renderer = SDL_CreateRenderer(
+                s->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            if (!s->renderer) {
+                s->renderer = SDL_CreateRenderer(s->window, -1, SDL_RENDERER_SOFTWARE);
+            }
+            if (s->renderer) {
+                s->texture = SDL_CreateTexture(
+                    s->renderer,
+                    SDL_PIXELFORMAT_BGRA8888,
+                    SDL_TEXTUREACCESS_STREAMING,
+                    (int)width_, (int)height_);
+            }
+        }
+        if (!s->window || !s->renderer || !s->texture) {
+            fprintf(stderr, "[graphics] SDL2 window creation failed: %s (headless mode)\n",
+                    SDL_GetError());
+            if (s->texture)  SDL_DestroyTexture(s->texture);
+            if (s->renderer) SDL_DestroyRenderer(s->renderer);
+            if (s->window)   SDL_DestroyWindow(s->window);
+            delete s;
+            // Don't set sdl_state_; fall through to headless mode.
+        } else {
+            sdl_state_ = s;
+            SDL_SetRenderDrawColor(s->renderer, 0, 0, 0, 255);
+            SDL_RenderClear(s->renderer);
+            SDL_RenderPresent(s->renderer);
+        }
+    }
+#endif
+
     if (getenv("BIFROST_GRAPHICS_VERBOSE")) {
         fprintf(stderr,
-            "[graphics] framebuffer initialized: %ux%u, %zu bytes, fd=%d\n",
-            width_, height_, fb_size, fb_fd_);
+            "[graphics] framebuffer initialized: %ux%u, %zu bytes, fd=%d%s\n",
+            width_, height_, fb_size, fb_fd_,
+#if defined(BIFROST_USE_SDL2)
+            sdl_state_ ? " (+SDL2 window)" : " (headless)"
+#else
+            " (headless, no SDL2 in build)"
+#endif
+            );
     }
     return true;
 }
@@ -243,18 +335,58 @@ void GraphicsBackend::sync_from(const void* src) {
     }
 }
 
+// ── poll_events() ──────────────────────────────────────────────────────
+// Pumps the SDL2 event loop. Returns false if the user has requested
+// window close (caller may terminate the guest). No-op in headless mode.
+bool GraphicsBackend::poll_events() {
+#if defined(BIFROST_USE_SDL2)
+    if (!sdl_state_) return true;
+    auto* s = sdl_state(sdl_state_);
+    SDL_Event ev;
+    while (SDL_PollEvent(&ev)) {
+        if (ev.type == SDL_QUIT) {
+            s->want_close = true;
+        } else if (ev.type == SDL_WINDOWEVENT &&
+                   ev.window.event == SDL_WINDOWEVENT_CLOSE) {
+            s->want_close = true;
+        }
+    }
+    return !s->want_close;
+#else
+    return true;
+#endif
+}
+
 // ── refresh() ──────────────────────────────────────────────────────────
 void GraphicsBackend::refresh() {
     if (!ready()) {
         return;  // nothing to refresh
     }
+
+#if defined(BIFROST_USE_SDL2)
+    // SDL2 path: push the framebuffer to the window.
+    if (sdl_state_) {
+        auto* s = sdl_state(sdl_state_);
+        if (s->texture && s->renderer) {
+            // Sync the host's fb_data_ from the guest's pages first.
+            // (The caller is responsible for calling sync_from() before
+            // refresh(); if they didn't, we just show whatever's in
+            // fb_data_, which is the last-synced state.)
+            SDL_UpdateTexture(s->texture, nullptr, fb_data_, (int)width_ * 4);
+            SDL_RenderClear(s->renderer);
+            SDL_RenderCopy(s->renderer, s->texture, nullptr, nullptr);
+            SDL_RenderPresent(s->renderer);
+        }
+        poll_events();
+        return;
+    }
+    // Fall through to headless path if SDL2 init failed at build time
+    // or SDL_CreateWindow failed at runtime.
+#endif
+
     // Headless refresh: dump to PPM if the framebuffer has any
     // non-zero pixel (avoids creating empty PPM files for programs
     // that never wrote to the fb).
-    //
-    // In 1.4.0 (with SDL2), this will instead push the framebuffer
-    // to an SDL2 window via SDL_UpdateTexture / SDL_RenderCopy /
-    // SDL_RenderPresent.
     const uint8_t* p = (const uint8_t*)fb_data_;
     size_t n = size();
     bool any_pixel = false;

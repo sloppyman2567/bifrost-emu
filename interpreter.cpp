@@ -459,9 +459,30 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (d.rd != 31) cpu.regs[d.rd] = keep | ((extracted << immr) & dst_mask);
                     }
                 } else {
-                    // BFI / rotate case (imms < immr)
+                    // BFI / rotate case (imms < immr).
+                    //
+                    // This is the LSL / UBFIZ / SBFIZ / BFI alias group.
+                    // In all of these, the destination field lives in the
+                    // HIGH bits of the register (not the low bits), because
+                    // ROR(src, immr) brings src[imms:0] up to the top of
+                    // the rotated value.
+                    //
+                    // The correct mask is therefore tmask =
+                    //   ones(imms+1) << (datasize-1-imms)
+                    // NOT the low-bits wmask that the v0 code used. Using
+                    // the low-bits mask produced 0 for LSL (since the low
+                    // imms+1 bits of ROR(src, immr) come from src[imms+immr:immr],
+                    // which is unrelated to the shift result). This broke
+                    // musl's 128-bit softfloat helpers (__extenddftf2,
+                    // __fixunstfsi, …) which use `lsl x0, x0, #60` to
+                    // left-align an IEEE-754 mantissa, and was the root
+                    // cause of printf("%f", …) hanging forever.
                     int len = imms + 1;
-                    uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+                    uint64_t low_mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+                    // tmask: the field occupies bits [datasize-1 : datasize-1-imms].
+                    int top_shift = datasize - 1 - imms;
+                    uint64_t high_mask = low_mask << top_shift;
+                    if (datasize == 32) high_mask &= 0xFFFFFFFFULL;
                     uint64_t rotated;
                     if (width == 64) {
                         rotated = ror64(src, immr);
@@ -470,17 +491,27 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint8_t r = immr & 31;
                         rotated = (r == 0) ? s32 : ((s32 >> r) | (s32 << (32 - r)));
                     }
-                    uint64_t extracted = rotated & mask;
                     if (opc == 0) {
-                        // SBFM: sign-extend
-                        uint64_t m = (1ULL << (len - 1));
-                        if (extracted & m) {
-                            uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
-                            extracted |= high;
+                        // SBFM (SBFIZ): place field at high bits, sign-extend
+                        // the field's sign bit (bit datasize-1 of rotated,
+                        // which corresponds to bit imms of src) DOWNWARD
+                        // into the bits BELOW the field (bits [datasize-1-imms-1 : 0]).
+                        uint64_t extracted = rotated & high_mask;
+                        uint64_t sign_bit = 1ULL << (datasize - 1);
+                        if (rotated & sign_bit) {
+                            // Bits below the field get sign-extended to 1.
+                            int below_bits = datasize - 1 - imms;  // count of bits below field
+                            if (below_bits > 0) {
+                                uint64_t below_mask = (below_bits >= 64)
+                                    ? ~0ULL : ((1ULL << below_bits) - 1);
+                                if (datasize == 32) below_mask &= 0xFFFFFFFFULL;
+                                extracted |= below_mask;
+                            }
                         }
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else if (opc == 2) {
-                        // UBFM
+                        // UBFM (LSL / UBFIZ): just the field, zero everywhere else.
+                        uint64_t extracted = rotated & high_mask;
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else {
                         // BFM (BFI): insert src[width-1:0] into dst[lsb+width-1:lsb]
@@ -495,12 +526,15 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         //   So we replace bits[63:48] of dst with bits[15:0] of src.
                         //
                         // The v0 bug: field_mask = mask | hi_mask was wrong.
-                        // Correct: dst_mask = mask << lsb, where lsb = (datasize - immr) % datasize.
+                        // Correct: dst_mask = low_mask << lsb, where lsb = (datasize - immr) % datasize.
+                        // (Note: dst_mask == high_mask when lsb == top_shift, but BFI
+                        // allows the field to live anywhere in the register, not just
+                        // at the very top, so we recompute it from low_mask here.)
                         int lsb = (datasize - immr) % datasize;
                         uint64_t dst_mask = (datasize == 64)
-                            ? (mask << lsb)
-                            : ((mask << lsb) & 0xFFFFFFFF);
-                        uint64_t src_field = (datasize == 64) ? (src & mask) : ((uint32_t)src & mask);
+                            ? (low_mask << lsb)
+                            : ((low_mask << lsb) & 0xFFFFFFFF);
+                        uint64_t src_field = (datasize == 64) ? (src & low_mask) : ((uint32_t)src & low_mask);
                         uint64_t cur = cpu.regs[d.rd];
                         if (!d.sf) cur &= 0xFFFFFFFF;
                         uint64_t keep = cur & ~dst_mask;
@@ -1756,6 +1790,61 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
                 };
 
+                // ── Half-precision (FP16) helpers ──────────────────────────
+                // IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa.
+                // We store half values in the low 16 bits of v_lo, matching
+                // what real AArch64 hardware does for the H register alias.
+                auto h2f = [&](uint16_t h) -> float {
+                    uint32_t sign = (h >> 15) & 1;
+                    uint32_t exp  = (h >> 10) & 0x1F;
+                    uint32_t mant = h & 0x3FF;
+                    uint32_t fbits;
+                    if (exp == 0) {
+                        if (mant == 0) {
+                            fbits = sign << 31;
+                        } else {
+                            // Denormal → normalize
+                            int e = -1;
+                            while (!(mant & 0x400)) { mant <<= 1; e--; }
+                            mant &= 0x3FF;
+                            fbits = (sign << 31) | ((127 + e - 14) << 23) | (mant << 13);
+                        }
+                    } else if (exp == 0x1F) {
+                        // Inf / NaN
+                        fbits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+                    } else {
+                        // Normal: re-bias from 15 to 127
+                        fbits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+                    }
+                    float f; memcpy(&f, &fbits, 4); return f;
+                };
+                auto f2h = [&](float f) -> uint16_t {
+                    uint32_t fbits; memcpy(&fbits, &f, 4);
+                    uint32_t sign = (fbits >> 31) & 1;
+                    int32_t  exp  = (int32_t)((fbits >> 23) & 0xFF) - 127 + 15;
+                    uint32_t mant = (fbits & 0x7FFFFF) >> 13;  // top 10 bits
+                    if (exp <= 0) {
+                        // Denormal or zero
+                        if (exp < -10) {
+                            // Underflow to zero
+                            return (uint16_t)(sign << 15);
+                        }
+                        // Subnormal: implicit leading 1 + exp adjustment
+                        mant |= 0x400;  // add implicit leading bit
+                        mant >>= (1 - exp);
+                        return (uint16_t)((sign << 15) | mant);
+                    } else if (exp >= 0x1F) {
+                        // Overflow to Inf
+                        return (uint16_t)((sign << 15) | (0x1F << 10));
+                    }
+                    return (uint16_t)((sign << 15) | (exp << 10) | mant);
+                };
+                auto d2h = [&](double d) -> uint16_t {
+                    // Reuse f2h after downcasting to float — small precision loss
+                    // but adequate for the printf hex-float path that uses FCVT H.
+                    return f2h((float)d);
+                };
+
                 // FMOV (general ↔ FP, 64-bit)
                 if ((op & 0xFFE0FC00) == 0x9E600000) {
                     bool to_fp = (op >> 16) & 1;
@@ -1771,24 +1860,73 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FMOV (scalar, immediate)
+                // The 8-bit immediate is decoded via VFPExpandImm (ARM ARM):
+                //   imm = sign : NOT(imm8[6]) : Replicate(imm8[6], K) : imm8[5:0] : Zeros(M)
+                // where K and M depend on FP precision:
+                //   single (32): K=5,  M=19  (1+1+5+6+19 = 32)
+                //   double (64): K=8,  M=48  (1+1+8+6+48 = 64)
+                //   half   (16): K=2,  M=6   (1+1+2+6+6  = 16)
+                //
+                // The previous code used the "aBbb bccc" layout (sign:exp4:mant3)
+                // which is wrong — it mis-computed every FMOV imm. That broke
+                // `fmov d0, #2.5` (which produces 0x4078… instead of 0x4004…),
+                // corrupting every `printf("%f", float_var)` because the variadic
+                // arg-promoted float was being loaded with the wrong immediate.
                 if ((op & 0xFFE0001F) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
                     uint8_t imm8 = (op >> 13) & 0xFF;
-                    uint64_t sign = ((uint64_t)(imm8 >> 7)) & 1;
-                    uint64_t exp = ((uint64_t)(imm8 >> 3)) & 0xF;
-                    uint64_t mant = ((uint64_t)imm8) & 0x7;
-                    uint64_t exp_field;
-                    if ((exp & 0xF) == 0xF) exp_field = 0x7FF;
-                    else exp_field = ((exp ^ 0x8) & 0xF) + 1023;
-                    uint64_t bits = (sign << 63) | (exp_field << 52) | (mant << 49);
-                    if (ftype) {
+                    uint64_t sign = (imm8 >> 7) & 1;
+                    uint64_t b     = (imm8 >> 6) & 1;
+                    uint64_t not_b = b ^ 1;
+                    uint64_t imm6  = imm8 & 0x3F;
+                    if (ftype == 1) {  // double precision (ftype=01 → D)
+                        uint64_t rep_b = b * 0xFFULL;          // Replicate(b, 8)
+                        uint64_t bits = (sign << 63)
+                                      | (not_b << 62)
+                                      | (rep_b << 54)
+                                      | (imm6 << 48);
+                        cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
+                    } else if (ftype == 0) {  // single precision (ftype=00 → S)
+                        uint32_t rep_b = (uint32_t)(b * 0x1Fu);  // Replicate(b, 5)
+                        uint32_t bits = (uint32_t)((sign << 31)
+                                      | (not_b << 30)
+                                      | (rep_b << 25)
+                                      | (imm6 << 19));
                         cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
                     } else {
-                        uint32_t sign32 = (uint32_t)sign;
-                        uint32_t exp32;
-                        if ((exp & 0xF) == 0xF) exp32 = 0xFF;
-                        else exp32 = ((exp ^ 0x8) & 0xF) + 127;
-                        uint32_t bits32 = (sign32 << 31) | (exp32 << 23) | (((uint32_t)mant) << 20);
-                        cpu.v_lo[rd] = bits32; cpu.v_hi[rd] = 0;
+                        // ftype == 3 → half precision (H). We don't model 16-bit FP
+                        // natively, so expand to single-precision bits via the
+                        // standard half→single conversion of the immediate value.
+                        // For the immediate, VFPExpandImm with N=16 gives a 16-bit
+                        // half value; we then convert that to single precision.
+                        uint16_t rep_b = (uint16_t)(b * 0x3u);   // Replicate(b, 2)
+                        uint16_t hbits = (uint16_t)((sign << 15)
+                                      | (not_b << 14)
+                                      | (rep_b << 12)
+                                      | (imm6 << 6));
+                        // Half→single expansion (no Inf/NaN special handling needed
+                        // for the small set of values representable as FMOV imm).
+                        uint32_t sexp = (hbits >> 10) & 0x1F;
+                        uint32_t smant = hbits & 0x3FF;
+                        uint32_t sbits;
+                        if (sexp == 0) {
+                            // Denormal/zero — normalize to single
+                            if (smant == 0) sbits = (uint32_t)sign << 31;
+                            else {
+                                int e = -1;
+                                while (!(smant & 0x400)) { smant <<= 1; e--; }
+                                smant &= 0x3FF;
+                                sbits = ((uint32_t)sign << 31)
+                                      | (((uint32_t)(127 + e - 14)) << 23)
+                                      | (smant << 13);
+                            }
+                        } else if (sexp == 0x1F) {
+                            sbits = ((uint32_t)sign << 31) | (0xFFu << 23) | (smant << 13);
+                        } else {
+                            sbits = ((uint32_t)sign << 31)
+                                  | ((sexp - 15 + 127) << 23)
+                                  | (smant << 13);
+                        }
+                        cpu.v_lo[rd] = sbits; cpu.v_hi[rd] = 0;
                     }
                     return;
                 }
@@ -1869,12 +2007,42 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // FCVT (S↔D)
+                // FCVT (between FP precisions)
                 if ((op & 0xFFFFFC00) == 0x1E624000) { // FCVT Sd, Dn
                     write_fp_s(rd, (float)read_fp_d(rn)); return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn
                     write_fp_d(rd, (double)read_fp_s(rn)); return;
+                }
+                // FCVT H — half-precision conversions. We don't model 16-bit FP
+                // natively, but we can route H↔S via host __gnu_f2h_ieee / __gnu_h2f_ieee
+                // (or std::floor of a manual conversion) so at least the value
+                // survives round-tripping. Common case is musl's printf path,
+                // which sometimes uses FCVT Hn, Dn for hex-float formatting.
+                if ((op & 0xFFFFFC00) == 0x1E63C000) { // FCVT Hd, Dn (D → H)
+                    // Half is stored in low 16 bits of v_lo.
+                    double d = read_fp_d(rn);
+                    uint16_t hbits = d2h(d);
+                    cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
+                    return;
+                }
+                if ((op & 0xFFFFFC00) == 0x1E23C000) { // FCVT Hn, Sn (S → H)
+                    float f = read_fp_s(rn);
+                    uint16_t hbits = f2h(f);
+                    cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
+                    return;
+                }
+                if ((op & 0xFFFFFC00) == 0x1E634000) { // FCVT Sn, Hn (H → S)
+                    uint16_t hbits = (uint16_t)(cpu.v_lo[rn] & 0xFFFF);
+                    float f = h2f(hbits);
+                    write_fp_s(rd, f);
+                    return;
+                }
+                if ((op & 0xFFFFFC00) == 0x1E224000) { // FCVT Dd, Hn (H → D)
+                    uint16_t hbits = (uint16_t)(cpu.v_lo[rn] & 0xFFFF);
+                    double d = (double)h2f(hbits);
+                    write_fp_d(rd, d);
+                    return;
                 }
                 // FCMP/FCMPE
                 if ((op & 0xFFE0FC1F) == 0x1E602000) {

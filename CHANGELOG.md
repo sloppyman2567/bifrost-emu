@@ -6,6 +6,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0] — 2026-06-19
+
+The "printf("%f") finally works + interactive shell fixed" release.
+Three critical bugs squashed that previously broke almost every
+floating-point printf and every interactive guest program.
+
+### Fixed (critical)
+
+- **UBFM `imms < immr` mask (the `LSL`/`UBFIZ`/`SBFIZ`/`BFI` aliases).**
+  The bitfield handler was using the wrong mask in the rotate case.
+  For `LSL Xd, Xn, #shift` (encoded as `UBFM Xd, Xn, #(-shift MOD 64),
+  #(63-shift)`), the result field lives in the HIGH bits of the
+  register, not the low bits — the previous code used the low-bits
+  `wmask` and ended up extracting bits that had nothing to do with
+  the shift result.
+
+  This was the root cause of `printf("%f", x)` hanging forever:
+  musl's `__extenddftf2` (double → 128-bit long double) uses
+  `lsl x0, x0, #60` to left-align the IEEE-754 mantissa, and the
+  buggy handler produced `0x1` instead of `0xF000000000000000`,
+  corrupting the long-double value. The downstream `__fixunstfsi`
+  then looped forever trying to convert garbage to an integer.
+
+  Fix: use `tmask = ones(imms+1) << (datasize-1-imms)` for the
+  UBFM/SBFM case (the field occupies the top `imms+1` bits of the
+  rotated value). The BFI case was already correct (it computes
+  `dst_mask = low_mask << lsb` for arbitrary `lsb`), and is left
+  unchanged.
+
+- **FMOV (scalar, immediate) decoding.** The 8-bit FP immediate was
+  being decoded with a wrong "sign/exp4/mant3" layout. The correct
+  layout is the ARM ARM `VFPExpandImm` algorithm:
+  `imm = sign : NOT(imm8[6]) : Replicate(imm8[6], K) : imm8[5:0] : Zeros(M)`
+  where K and M depend on FP precision (single: K=5, M=19; double:
+  K=8, M=48; half: K=2, M=6).
+
+  The previous code computed `bits = (sign << 63) | (exp_field << 52)
+  | (mant << 49)` with a hand-rolled exp/mant split that produced the
+  wrong value for every immediate. For example, `fmov d0, #2.5`
+  produced `0x4078000000000000` (= 384.0) instead of the correct
+  `0x4004000000000000` (= 2.5). This corrupted every
+  `printf("%f", float_var)` because the variadic arg-promoted float
+  was loaded with the wrong immediate.
+
+- **Interactive shell no longer hangs (termios).** The emulator was
+  unconditionally enabling raw TTY mode whenever stdin was a TTY.
+  Raw mode turns off `ICANON` (line buffering) and `ECHO`, so the
+  host kernel delivered each keystroke as a 1-byte `read()`. That
+  broke every guest program that used line-oriented stdio:
+  musl's `fgets()` in `sh.elf` received one byte per `read()` and
+  never saw the trailing `'\n'` it needed to return a line, so the
+  shell appeared to "hang" waiting for input that was actually
+  arriving.
+
+  Fix: default to leaving the host TTY alone. The host kernel's
+  line discipline already does the right thing for 99% of guest
+  programs (`fgets`, `gets`, `scanf`, `getline`, …). Raw mode is
+  now opt-in via `--raw-tty` for the few guests that genuinely
+  need per-character input (e.g. a guest terminal emulator or
+  curses-style UI).
+
+### Added
+
+- **FCVT H — half-precision (FP16) conversions.** Added handlers for
+  `FCVT Hd, Dn` (D → H), `FCVT Hn, Sn` (S → H), `FCVT Sn, Hn` (H → S),
+  and `FCVT Dd, Hn` (H → D). Half-precision values are stored in the
+  low 16 bits of `v_lo`, matching real AArch64 hardware. Required for
+  musl's hex-float printf path.
+
+- **`--raw-tty` command-line flag** for opt-in raw terminal mode
+  (see "Interactive shell no longer hangs" above).
+
+### Changed
+
+- Bumped version from `1.3.0-beta.4` to `1.4.0`. This is the first
+  stable release — the previous betas had the FMOV-imm and UBFM-LSL
+  bugs that made `printf("%f", ...)` unusable on real workloads.
+
 ## [1.3.0-beta.4] — 2026-06-19
 
 The "real hierarchical decoder + 3.8x performance + softfloat fixes"

@@ -2,7 +2,7 @@
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
 //
-// Version: 1.3.0-beta.4
+// Version: 1.4.0
 //
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]
@@ -12,6 +12,9 @@
 //   -v, --verbose   print execution stats on exit
 //   -q, --quiet     suppress BRK warnings (even with -d)
 //   --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM)
+//   --raw-tty       force raw TTY mode (per-character input, no echo)
+//                   default is to leave the host TTY alone so guest
+//                   line-buffered stdio (fgets, gets, readline) works
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
@@ -53,6 +56,7 @@ static void print_banner() {
         "    -v, --verbose   print execution stats on exit\n"
         "    -q, --quiet     suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH  dump /dev/fb0 to PATH on exit (PPM)\n"
+        "    --raw-tty       force raw TTY mode (per-char input, no echo)\n"
         "    -V, --version   show version and exit\n"
         "    -h, --help      show this message\n"
         "\n"
@@ -83,6 +87,25 @@ static void print_rainbow() {
 }
 
 // ── Terminal raw mode for interactive apps ───────────────────────────────
+//
+// HISTORICAL BUG (v1.3.0-beta.4 and earlier):
+//   The emulator unconditionally enabled raw TTY mode whenever stdin was
+//   a TTY. Raw mode turns off ICANON (line buffering) and ECHO, so the
+//   host kernel delivers each keystroke immediately as a 1-byte read().
+//   That broke every guest program that used line-oriented stdio:
+//   musl's fgets() in sh.elf would receive one byte per read() and never
+//   see the trailing '\n' it needs to return a line, so the shell
+//   appeared to "hang" waiting for input that was actually arriving.
+//
+// FIX (v1.4.0):
+//   Default to leaving the host TTY alone. The host kernel's line
+//   discipline already does the right thing for 99% of guest programs
+//   (fgets, gets, scanf, getline, …): it buffers a line, delivers the
+//   whole line on Enter, and echoes characters so the user can see
+//   what they typed. Raw mode is now opt-in via --raw-tty for the few
+//   guests that genuinely need per-character input (e.g. a guest
+//   terminal emulator or curses-style UI that does its own line
+//   editing).
 
 static struct termios orig_termios;
 static bool term_set = false;
@@ -129,6 +152,7 @@ int main(int argc, char** argv) {
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
+    bool raw_tty = false;  // v1.4: opt-in raw TTY (default off — see set_raw_terminal)
     std::string fb_dump_path;  // empty = no auto-dump
     int  arg_i   = 1;
 
@@ -139,6 +163,7 @@ int main(int argc, char** argv) {
         if (a == "-d" || a == "--debug")    { debug   = true;  arg_i++; continue; }
         if (a == "-v" || a == "--verbose")  { verbose = true;  arg_i++; continue; }
         if (a == "-q" || a == "--quiet")    { quiet   = true;  arg_i++; continue; }
+        if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--fb-dump") {
             if (arg_i + 1 >= argc) {
                 fprintf(stderr, "bifrost-emu: --fb-dump requires a PATH argument\n");
@@ -178,7 +203,10 @@ int main(int argc, char** argv) {
         return 126;  // 126 = "found but not executable" convention
     }
 
-    set_raw_terminal();
+    // Only switch the host TTY into raw mode if the user explicitly asked
+    // for it. Default: leave the TTY alone so the host line discipline can
+    // buffer input for guest line-oriented stdio (fgets, gets, scanf, …).
+    if (raw_tty) set_raw_terminal();
 
     Emulator emu;
     emu.set_verbose(verbose);

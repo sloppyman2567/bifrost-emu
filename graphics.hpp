@@ -4,24 +4,24 @@
 // can mmap and write pixels to. The framebuffer is backed by a memfd
 // (so the guest can mmap it directly into its address space).
 //
-// In 1.3.0-beta.4, this is a HEADLESS backend:
-//   - The framebuffer memory is allocated and mmap-able.
-//   - FBIOGET_VSCREENINFO / FBIOGET_FSCREENINFO ioctls are supported
-//     (so guest programs can query the mode).
-//   - refresh() dumps the framebuffer to a PPM file when invoked
-//     (headless-friendly; no SDL2 dependency).
-//   - dump_to_ppm(path) can be called explicitly to snapshot the fb.
+// Two display backends are supported, selectable at BUILD time:
 //
-// SDL2 window support is planned for 1.4.0 (requires SDL2 dev headers,
-// which are not always available on the build host).
+//   1. HEADLESS (default) — fb memory is allocated and mmap-able,
+//      FBIOGET_VSCREENINFO/FSCREENINFO ioctls work, and `refresh()`
+//      dumps the framebuffer to a PPM file. No third-party deps.
+//
+//   2. SDL2 (build with `make USE_SDL2=1`) — opens a real SDL2 window,
+//      pushes the framebuffer to it on `refresh()`. Useful for running
+//      graphical guest programs interactively. SDL2 dev headers must
+//      be available on the build host.
 //
 // Usage from the emulator:
 //   GraphicsBackend gfx;
 //   gfx.init(640, 480);          // 640x480, 32-bit BGRA
 //   int fb_fd = gfx.open_dev_fb0();  // guest-visible fd (memfd-backed)
 //   // ... guest mmaps fb_fd and writes pixels ...
-//   gfx.refresh();               // dump to "bifrost-fb.ppm" by default
-//   gfx.dump_to_ppm("out.ppm");  // explicit dump
+//   gfx.refresh();               // dump to PPM (headless) or SDL present
+//   gfx.dump_to_ppm("out.ppm");  // explicit dump (always available)
 //
 // Integration: the Emulator class owns a GraphicsBackend instance and
 // wires /dev/fb0 openat() and FBIOGET_* ioctls in syscalls.cpp to it.
@@ -58,6 +58,10 @@ public:
     // width x height pixels, 32 bits per pixel (BGRA/XRGB).
     // Returns true on success, false on failure (errno-style: check
     // stderr for the diagnostic).
+    //
+    // With SDL2 backend: also opens an SDL2 window of the requested
+    // size. If SDL_Init fails, falls back to headless mode (memory
+    // fb only, no window).
     bool init(uint32_t width, uint32_t height);
 
     // Get a guest-visible file descriptor (memfd-backed) for the
@@ -108,11 +112,16 @@ public:
     void     set_guest_fb_addr(uint64_t addr) { guest_fb_addr_ = addr; }
     uint64_t guest_fb_addr() const { return guest_fb_addr_; }
 
-    // Refresh the display. In 1.3.0-beta.4 (headless), this dumps
-    // the framebuffer to the default path "bifrost-fb.ppm" if the
-    // framebuffer is non-empty (any non-zero pixel). In 1.4.0 (with
-    // SDL2), this will push the framebuffer to an SDL2 window.
+    // Refresh the display. In headless mode, this dumps the framebuffer
+    // to the default PPM path. In SDL2 mode, this pushes the framebuffer
+    // to the SDL2 window (creating one if needed) and pumps the SDL
+    // event loop so the window remains responsive.
     void refresh();
+
+    // Pump the SDL2 event loop without presenting. No-op in headless mode.
+    // Returns false if the user has closed the SDL2 window (caller may
+    // decide to terminate the guest); true otherwise.
+    bool poll_events();
 
     // Set the default dump path for refresh(). Defaults to
     // "bifrost-fb.ppm" in the current working directory.
@@ -136,6 +145,11 @@ private:
     void*         fb_data_       = nullptr;
     std::string   dump_path_     = "bifrost-fb.ppm";
     uint64_t      guest_fb_addr_ = 0;    // guest address of the fb mmap
+
+    // SDL2 backend state (opaque to header — defined in graphics.cpp).
+    // Stored as void* to avoid pulling SDL2.h into this header.
+    void*         sdl_state_     = nullptr;  // struct SDLWindowState*
+    bool          sdl_init_done_ = false;    // SDL_Init succeeded
 };
 
 } // namespace arm64emu

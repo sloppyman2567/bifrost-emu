@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-beta.4
+  bifrost-emu  v1.4.0
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-beta.4](https://img.shields.io/badge/version-1.3.0--beta.4-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -97,7 +97,7 @@ The **interpreter** (`interpreter.cpp`) dispatches on `d.cls` via a
 flat `switch` statement. Each case reads `d.*` fields and executes.
 The interpreter never does bit extraction (`op >> 22`, `(op & mask)`,
 etc.) — that's the decoder's job. The legacy if-chain was deleted in
-v1.3.0-beta.3; v1.3.0-beta.4 restructured the decoder itself from a
+v1.3.0-beta.3; v1.4.0 restructured the decoder itself from a
 flat if-chain into the hierarchical switch described above.
 
 A **decode cache** (`PC → DecodedInst`) avoids re-decoding the same
@@ -120,7 +120,7 @@ collisions by construction (no test ordering required):
 - **EXTR vs SBFM/BFM/UBFM** — both live in outer case `0x13`, but the
   inner check on bit 23 routes EXTR (bit 23 = 1) before the bitfield
   opc switch. (v0 had a bug where the bitfield check ignored bit 23
-  and came first, making EXTR unreachable. v1.3.0-beta.4 fixes this.)
+  and came first, making EXTR unreachable. v1.4.0 fixes this.)
 
 ### Decoder Switch — Complete Coverage
 
@@ -321,17 +321,17 @@ also work (e.g. `cat foo | wc`, `rev | tr | head`).
 | `cat.elf` (assembled) | ✅ Works | |
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
-| `extr.elf` (assembled) | ✅ Works | Verifies EXTR (v1.3.0-beta.4) |
-| `test_fb.elf` (musl static) | ✅ Works | Virtual `/dev/fb0` + `--fb-dump` (v1.3.0-beta.4) |
-| `ctest_real/cat.elf` (musl static) | ✅ Works | Unix `cat` — readv/writev paths (v1.3.0-beta.4) |
-| `ctest_real/wc.elf` (musl static) | ✅ Works | Unix `wc` — line/word/byte counters (v1.3.0-beta.4) |
-| `ctest_real/head.elf` (musl static) | ✅ Works | Unix `head` — `-n N` flag, multi-file (v1.3.0-beta.4) |
-| `ctest_real/tr.elf` (musl static) | ✅ Works | Unix `tr` — translate / `-d` delete (v1.3.0-beta.4) |
-| `ctest_real/rev.elf` (musl static) | ✅ Works | Unix `rev` — line reversal (v1.3.0-beta.4) |
-| `ctest_real/sort.elf` (musl static) | ✅ Works | Unix `sort` — `qsort`, `realloc`, `-r` (v1.3.0-beta.4) |
-| `ctest_real/sh.elf` (musl static) | ✅ Works | Interactive REPL shell (v1.3.0-beta.4) |
-| `ctest_real/fib.elf` (musl static) | ✅ Works | fib(40) in 23ms, ~140 MIPS (v1.3.0-beta.4) |
-| `ctest_real/yes.elf` (musl static) | ✅ Works | ~150M lines/sec through the emulator (v1.3.0-beta.4) |
+| `extr.elf` (assembled) | ✅ Works | Verifies EXTR (v1.4.0) |
+| `test_fb.elf` (musl static) | ✅ Works | Virtual `/dev/fb0` + `--fb-dump` (v1.4.0) |
+| `ctest_real/cat.elf` (musl static) | ✅ Works | Unix `cat` — readv/writev paths (v1.4.0) |
+| `ctest_real/wc.elf` (musl static) | ✅ Works | Unix `wc` — line/word/byte counters (v1.4.0) |
+| `ctest_real/head.elf` (musl static) | ✅ Works | Unix `head` — `-n N` flag, multi-file (v1.4.0) |
+| `ctest_real/tr.elf` (musl static) | ✅ Works | Unix `tr` — translate / `-d` delete (v1.4.0) |
+| `ctest_real/rev.elf` (musl static) | ✅ Works | Unix `rev` — line reversal (v1.4.0) |
+| `ctest_real/sort.elf` (musl static) | ✅ Works | Unix `sort` — `qsort`, `realloc`, `-r` (v1.4.0) |
+| `ctest_real/sh.elf` (musl static) | ✅ Works | Interactive REPL shell (v1.4.0) |
+| `ctest_real/fib.elf` (musl static) | ✅ Works | fib(40) in 23ms, ~140 MIPS (v1.4.0) |
+| `ctest_real/yes.elf` (musl static) | ✅ Works | ~150M lines/sec through the emulator (v1.4.0) |
 | `hello_arm64_musl` (static) | ✅ Works | Full musl static |
 | `loop.elf` (musl static-PIE, `-O2`) | ✅ Works | `for` loop + `printf("%d")` |
 | `test_recursion.elf` (musl static) | ✅ Works | Recursive `fib(20)` |
@@ -412,7 +412,7 @@ framebuffer pages back to the host on exit and writes a PPM image
 suitable for viewing in any image viewer. SDL2 window support is
 planned for v1.4.0.
 
-## What's New in 1.3.0-beta.4
+## What's New in 1.4.0
 
 ### Performance: 3.8x speedup (37 → 140 MIPS)
 
@@ -438,7 +438,7 @@ workloads:
 The decoder is now a true two-level hierarchical switch. v1.3.0-beta.3
 had a stub `switch (bits[28:24])` at the top of `decode()` that did
 nothing (`default: break;`) and fell through to ~500 lines of flat
-`if ((inst & MASK) == VAL)` chains. v1.3.0-beta.4 replaces that with a
+`if ((inst & MASK) == VAL)` chains. v1.4.0 replaces that with a
 real hierarchical switch: outer switch on bits `[28:24]` (the ARM ARM
 major encoding group), inner switch on the group-specific discriminator.
 Every flat `if` chain is now a `case` with early `return`. See the
@@ -487,7 +487,7 @@ v0 had three bugs around EXTR:
 
 1. The bitfield check (mask `0x1F000000`, ignoring bit 23) came BEFORE
    the EXTR check (mask `0x1F800000`, requiring bit 23 = 1). Every EXTR
-   was silently misdecoded as SBFM/BFM/UBFM. v1.3.0-beta.4 routes on
+   was silently misdecoded as SBFM/BFM/UBFM. v1.4.0 routes on
    bit 23 first.
 2. The interpreter's EXTR handler had the operand order backwards
    (`Rm:Rn` instead of `Rn:Rm`).
@@ -496,7 +496,7 @@ v0 had three bugs around EXTR:
 
 ### Graphics backend
 
-v1.3.0-beta.2 introduced `GraphicsBackend` as a stub. v1.3.0-beta.4
+v1.3.0-beta.2 introduced `GraphicsBackend` as a stub. v1.4.0
 wires it up end-to-end:
 
 - `Emulator` owns a `GraphicsBackend` instance.
@@ -817,7 +817,7 @@ This is beta-quality software. Known issues:
 **Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
    interpreter. Target: 500+ MIPS. The hierarchical decoder structure
-   in v1.3.0-beta.4 makes this easier — the outer switch on bits[28:24]
+   in v1.4.0 makes this easier — the outer switch on bits[28:24]
    maps directly to a JIT dispatch table. The direct-mapped decode
    cache already demonstrates the hot-path speedup achievable with
    flat dispatch.
