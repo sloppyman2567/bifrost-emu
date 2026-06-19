@@ -1441,6 +1441,41 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
+                // ── UMOV (vector element to GPR) / INS (element, vector to vector) ──
+                // Encoding: Q 0 0 11110 size 1 imm5 0 0 1 1 Rn Rd
+                // Q=0 → 32-bit GPR dest, Q=1 → 64-bit GPR dest (UMOV only)
+                // For INS(element), Rd is a vector register.
+                // imm5 encodes element size and index.
+                case 0x0E003C00: {
+                    uint8_t imm5 = (op >> 16) & 0x1F;
+                    // Find lowest set bit → element size
+                    int esize_log2 = 0;
+                    for (int b = 0; b < 5; b++) {
+                        if (imm5 & (1 << b)) { esize_log2 = b; break; }
+                    }
+                    int esize = 1 << esize_log2;  // bytes: 1, 2, 4, or 8
+                    int index = imm5 >> (esize_log2 + 1);
+                    // UMOV: read from vector element, write to GPR
+                    // For 64-bit elements (D form), v_lo holds element 0,
+                    // v_hi holds element 1.
+                    if (esize == 8) {
+                        uint64_t val = (index == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
+                        if (rd != 31) cpu.regs[rd] = val;
+                    } else if (esize == 4) {
+                        uint32_t* v = (uint32_t*)&cpu.v_lo[rn];
+                        uint64_t val = v[index];
+                        if (rd != 31) cpu.regs[rd] = val;
+                    } else if (esize == 2) {
+                        uint16_t* v = (uint16_t*)&cpu.v_lo[rn];
+                        uint64_t val = v[index];
+                        if (rd != 31) cpu.regs[rd] = val;
+                    } else {  // esize == 1
+                        uint8_t* v = (uint8_t*)&cpu.v_lo[rn];
+                        uint64_t val = v[index];
+                        if (rd != 31) cpu.regs[rd] = val;
+                    }
+                    return;
+                }
                 // ── CMEQ two registers ──
                 case 0x2E208C00: {
                     int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
@@ -1576,12 +1611,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // MOVI (vector immediate) — mask excludes Q already (0x1F8FFC00).
-                if ((op & 0x1F8FFC00) == 0x0F00E400) {
+                // MOVI (vector immediate) — strip Q and imm8 fields.
+                // Mask 0xFF00FC00 covers top byte + cmode + fixed bits,
+                // excludes Q (bit 30) and imm8 (bits 23:16).
+                if (((op & ~(1u << 30)) & 0xFF00FC00) == 0x0F00E400) {
                     uint8_t cmode = (op >> 12) & 0xF;
-                    uint8_t imm8 = ((op >> 16) & 0x1F) << 3 | ((op >> 5) & 0x7);
+                    uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                     if (cmode == 0xE) {
-                        uint64_t val = imm8;
+                        // cmode=0xE: broadcast imm8 to all bytes
+                        uint64_t val = 0;
+                        for (int i = 0; i < 8; i++) val |= ((uint64_t)imm8) << (i * 8);
                         cpu.v_lo[rd] = val;
                         if (Q) cpu.v_hi[rd] = val;
                         else cpu.v_hi[rd] = 0;
