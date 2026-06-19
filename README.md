@@ -190,13 +190,23 @@ Options:
   -v, --verbose   print execution stats on exit
   -V, --version   show version and exit
   -h, --help      show help
+  --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM format)
+  -q, --quiet     suppress BRK warnings (even with -d)
 
 Examples:
   bifrost-emu hello.elf
   bifrost-emu -d hello.elf
   bifrost-emu cat.elf /etc/hosts
   bifrost-emu -v echo.elf hello
+  bifrost-emu -v --fb-dump out.ppm ctest/test_fb.elf
 ```
+
+The `--fb-dump PATH` option syncs the guest's `/dev/fb0` writes back
+to the host and writes a PPM image to `PATH` on exit. Useful for
+headless debugging of programs that draw to the framebuffer. If the
+guest never opened `/dev/fb0`, no PPM is created (no error). View the
+PPM with any image viewer, or convert with
+`convert out.ppm out.png` (ImageMagick).
 
 ## Build
 
@@ -240,6 +250,7 @@ bifrost-emu/
 | `cat.elf` | Reads a file path from argv[1] and prints it |
 | `fib.elf` | Computes fib(30) and prints it in decimal |
 | `extr.elf` | Verifies EXTR instruction decode and execute |
+| `ctest/test_fb.elf` | Virtual `/dev/fb0` framebuffer test (musl static) |
 
 Assemble new test programs with:
 ```bash
@@ -262,6 +273,7 @@ aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
 | `extr.elf` (assembled) | ✅ Works | Verifies EXTR (v1.3.0-beta.4) |
+| `test_fb.elf` (musl static) | ✅ Works | Virtual `/dev/fb0` + `--fb-dump` (v1.3.0-beta.4) |
 | `hello_arm64_musl` (static) | ✅ Works | Full musl static |
 | `loop.elf` (musl static-PIE, `-O2`) | ✅ Works | `for` loop + `printf("%d")` |
 | `test_recursion.elf` (musl static) | ✅ Works | Recursive `fib(20)` |
@@ -334,6 +346,14 @@ GLOB_DAT, RELATIVE, ABS64); PT_NOTE parsing for GNU property features
 (LSE detection); full initial stack with argc/argv/envp/auxv (AT_PHDR,
 AT_ENTRY, AT_RANDOM, AT_HWCAP, etc.).
 
+**Graphics** — Virtual `/dev/fb0` framebuffer (memfd-backed, mmap-able
+by the guest). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls
+supported (any real fb program can query the mode). Default mode
+640x480@32bpp BGRA. Headless: `--fb-dump PATH` syncs the guest's
+framebuffer pages back to the host on exit and writes a PPM image
+suitable for viewing in any image viewer. SDL2 window support is
+planned for v1.4.0.
+
 ## What's New in 1.3.0-beta.4
 
 **The decoder is now a true hierarchical switch.** v1.3.0-beta.3 had a
@@ -343,7 +363,7 @@ stub `switch (bits[28:24])` at the top of `decode()` that did nothing
 a real two-level hierarchical switch: outer switch on bits `[28:24]`
 (the ARM ARM major encoding group), inner switch on the group-specific
 discriminator. Every flat `if` chain is now a `case` with early
-`return`.
+`return`. See the Architecture section above for details.
 
 **EXTR is now actually decoded.** v0 had two dead-code bugs around
 EXTR:
@@ -366,6 +386,27 @@ EXTR:
 The interpreter already had an `EXTR` case (it was just never
 reached). With the decoder fix, EXTR now works end-to-end. A new
 test program (`test/extr.s`) verifies the behavior.
+
+**The graphics backend is now actually wired up.** v1.3.0-beta.2
+introduced `GraphicsBackend` as a stub, but it was never instantiated
+by `Emulator`, `/dev/fb0` was not in the VFS, no fb ioctls were
+handled, and `refresh()` was a no-op. v1.3.0-beta.4 makes it work
+end-to-end:
+
+- `Emulator` now owns a `GraphicsBackend` instance.
+- `openat("/dev/fb0")` returns a memfd-backed fd that the guest can
+  `mmap` and write pixels to.
+- `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls are
+  supported (required for any real fb program to query the mode).
+- `--fb-dump PATH` command-line option syncs the guest's framebuffer
+  pages back to the host on exit and writes a PPM file. Useful for
+  headless debugging of programs that draw to `/dev/fb0`.
+- New `ctest/test_fb.c` verifies the full pipeline: opens `/dev/fb0`,
+  queries the mode, mmaps, draws a gradient, exits. The PPM dump is
+  verified pixel-by-pixel.
+
+This is still a **headless** backend (no SDL2 window). SDL2 window
+support is planned for v1.4.0.
 
 **Additional decoder correctness fixes:**
 

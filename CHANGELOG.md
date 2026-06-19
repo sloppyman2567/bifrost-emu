@@ -25,6 +25,13 @@ hierarchical version routes on bit 23 first, so EXTR is correctly
 decoded. The interpreter's EXTR handler was also fixed (operand order
 and undefined behavior — see below).
 
+This release also wires up the graphics backend end-to-end: the
+`GraphicsBackend` class (a stub since 1.3.0-beta.2) is now owned by
+`Emulator`, `/dev/fb0` is in the VFS, `FBIOGET_VSCREENINFO` /
+`FBIOGET_FSCREENINFO` ioctls are handled, and `--fb-dump PATH` writes
+a PPM image on exit. Still headless (no SDL2 window) — SDL2 support
+is planned for v1.4.0.
+
 ### Added
 - **`extr` mnemonic in `mini_arm64_asm.py`** so test programs can use
   EXTR directly. Encoding: `sf 00 100111 N Rm imms Rn Rd` (bits[28:23]
@@ -35,6 +42,42 @@ and undefined behavior — see below).
   compares against the expected value, and prints `OK` or `NO`. This
   test would have failed silently on every prior version (EXTR was
   misdecoded as SBFM).
+- **`ctest/test_fb.c`** — new test program that opens `/dev/fb0`,
+  queries the mode via both `FBIOGET_VSCREENINFO` and
+  `FBIOGET_FSCREENINFO`, mmaps the framebuffer, draws a horizontal
+  RGB gradient, and exits. The PPM dump is verified pixel-by-pixel.
+- **`--fb-dump PATH` command-line option** in `main.cpp`. On exit,
+  if the guest opened `/dev/fb0`, syncs the guest's framebuffer
+  pages back to the host and writes a PPM image to PATH. Useful for
+  headless debugging of programs that draw to the framebuffer.
+- **`FBIOGET_VSCREENINFO` (0x4600) and `FBIOGET_FSCREENINFO` (0x4602)
+  ioctl support** in the syscall layer. Routes to
+  `GraphicsBackend::ioctl()` and copies the response struct to the
+  guest buffer. Without these, no real fb program can query the
+  mode.
+- **`/dev/fb0` in the VFS** — `openat("/dev/fb0")` returns a
+  memfd-backed fd (via `GraphicsBackend::open_dev_fb0()`) that the
+  guest can mmap and write pixels to. Auto-inits to 640x480@32bpp
+  BGRA on first open.
+- **`GraphicsBackend` wired into `Emulator`** — `Emulator` now owns
+  a `GraphicsBackend` instance (was a disconnected stub since
+  1.3.0-beta.2). Accessible via `emu.graphics()`.
+- **`GraphicsBackend::dump_to_ppm(path)`** — writes a P6 PPM file
+  from the framebuffer (32-bit BGRA → 24-bit RGB with B/R swap).
+- **`GraphicsBackend::sync_from(src)`** — copies `size()` bytes from
+  a guest-side buffer into the host's `fb_data_`. Needed because
+  the emulator's mmap handler allocates separate pages for the
+  guest and does NOT propagate writes back to the host memfd.
+- **`GraphicsBackend::owns_fd(fd)`** — uses fstat to compare file
+  identity (st_ino + st_dev), so it works across dup'd fds. The
+  mmap handler uses this to detect when the guest is mmap'ing the
+  fb (`open_dev_fb0()` returns `dup(fb_fd_)`, not `fb_fd_` itself).
+- **`GraphicsBackend::refresh()`** — dumps the framebuffer to a PPM
+  file (default path `bifrost-fb.ppm`) if the framebuffer has any
+  non-zero pixel. Avoids creating empty PPM files for programs
+  that never wrote to the fb.
+- **`BIFROST_GRAPHICS_VERBOSE` environment variable** — enables
+  diagnostic messages from the graphics backend.
 
 ### Changed
 - **`decoder.cpp` rewritten as a true two-level hierarchical switch.**
@@ -48,6 +91,10 @@ and undefined behavior — see below).
   (imm, disp, atom_op, cmode, ...) are pulled out only in the case
   that needs them.
 - **`interpreter.cpp` EXTR handler fixed** (see Fixed below).
+- **`GraphicsBackend::init()` now returns `bool`** (was `uint64_t`
+  returning 0 on success, which was confused with the guest
+  address). Added explicit error paths and idempotent re-init.
+- **`GraphicsBackend` is now non-copyable** (it owns a memfd + mmap).
 
 ### Fixed
 - **EXTR was unreachable in v0.** The bitfield check (mask
