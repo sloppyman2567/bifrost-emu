@@ -11,6 +11,7 @@
 //   -d, --debug     trace every instruction to stderr
 //   -v, --verbose   print execution stats on exit
 //   -q, --quiet     suppress BRK warnings (even with -d)
+//   --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM)
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
@@ -51,6 +52,7 @@ static void print_banner() {
         "    -d, --debug     trace every instruction to stderr\n"
         "    -v, --verbose   print execution stats on exit\n"
         "    -q, --quiet     suppress BRK warnings (even with -d)\n"
+        "    --fb-dump PATH  dump /dev/fb0 to PATH on exit (PPM)\n"
         "    -V, --version   show version and exit\n"
         "    -h, --help      show this message\n"
         "\n"
@@ -127,6 +129,7 @@ int main(int argc, char** argv) {
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
+    std::string fb_dump_path;  // empty = no auto-dump
     int  arg_i   = 1;
 
     while (arg_i < argc) {
@@ -136,6 +139,15 @@ int main(int argc, char** argv) {
         if (a == "-d" || a == "--debug")    { debug   = true;  arg_i++; continue; }
         if (a == "-v" || a == "--verbose")  { verbose = true;  arg_i++; continue; }
         if (a == "-q" || a == "--quiet")    { quiet   = true;  arg_i++; continue; }
+        if (a == "--fb-dump") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --fb-dump requires a PATH argument\n");
+                return 2;
+            }
+            fb_dump_path = argv[arg_i + 1];
+            arg_i += 2;
+            continue;
+        }
         if (a == "--bifrost" || a == "--rainbow") { print_rainbow(); arg_i++; continue; }
         if (a.size() >= 1 && a[0] == '-' && a.size() > 1) {
             fprintf(stderr, "bifrost-emu: unknown option: %s (try --help)\n", a.c_str());
@@ -177,6 +189,34 @@ int main(int argc, char** argv) {
         emu.load_elf_file(elf_path, guest_argv);
         int code = emu.run();
         restore_terminal();
+
+        // Optional framebuffer dump on exit. Useful for headless
+        // debugging of programs that draw to /dev/fb0.
+        if (!fb_dump_path.empty() && emu.graphics().ready()) {
+            // Sync the guest's framebuffer writes back to the host's
+            // fb_data_ before dumping. The emulator's mmap handler
+            // allocates separate pages for the guest and does NOT
+            // propagate writes back to the host memfd, so we have to
+            // copy the guest's pages here.
+            uint64_t gaddr = emu.graphics().guest_fb_addr();
+            if (gaddr != 0) {
+                std::vector<uint8_t> buf(emu.graphics().size());
+                try {
+                    emu.mem().read(gaddr, buf.data(), buf.size());
+                    emu.graphics().sync_from(buf.data());
+                } catch (const std::exception&) {
+                    // guest address no longer mapped — skip sync
+                }
+            }
+            if (emu.graphics().dump_to_ppm(fb_dump_path)) {
+                if (verbose) {
+                    fprintf(stderr, "[emu] framebuffer dumped to '%s'\n",
+                            fb_dump_path.c_str());
+                }
+            } else {
+                fprintf(stderr, "[emu] framebuffer dump failed\n");
+            }
+        }
         return code;
     } catch (const std::exception& e) {
         restore_terminal();

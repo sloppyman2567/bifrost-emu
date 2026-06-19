@@ -167,6 +167,13 @@ void Emulator::syscall(CPU& cpu) {
                 int host_fd = ::openat(AT_FDCWD, path_str.c_str(), (int)a2, (mode_t)a3);
                 if (host_fd >= 0) { ret_host(host_fd); return; }
             }
+            // /dev/fb0 → virtual framebuffer (memfd-backed)
+            else if (path_str == "/dev/fb0") {
+                int guest_fd = graphics_.open_dev_fb0();
+                if (guest_fd >= 0) { ret_host(guest_fd); return; }
+                cpu.regs[0] = (uint64_t)(int64_t)-ENODEV;
+                return;
+            }
 
             // Normal file: pass through to host
             int host_fd = ::openat(AT_FDCWD, path_str.c_str(), (int)a2, (mode_t)a3);
@@ -368,6 +375,15 @@ void Emulator::syscall(CPU& cpu) {
                     ::lseek((int)a4, old, SEEK_SET);
                     if (n > 0) mem_.write(mapped, buf.data(), n);
                 }
+                // If the guest is mmap'ing the graphics framebuffer fd,
+                // record the guest address so the host can sync the
+                // pixels back from the guest's pages on demand (for
+                // dump_to_ppm / refresh). Use owns_fd() (which does
+                // fstat comparison) because open_dev_fb0() returns a
+                // dup'd fd, not the original fb_fd_.
+                if (graphics_.ready() && graphics_.owns_fd((int)a4)) {
+                    graphics_.set_guest_fb_addr(mapped);
+                }
             }
             ret_host(mapped);
             return;
@@ -538,7 +554,7 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(brk_);
             return;
         }
-        case 29: { // ioctl - handle TIOCGWINSZ etc.
+        case 29: { // ioctl - handle TIOCGWINSZ, FBIOGET_* etc.
             // Return a sane window size for interactive use.
             if (a1 == 0x5413 /*TIOCGWINSZ*/) {
                 struct winsize ws;
@@ -548,6 +564,33 @@ void Emulator::syscall(CPU& cpu) {
                 } else {
                     struct winsize def { 24, 80, 0, 0 };
                     mem_.write(a2, &def, sizeof(def));
+                    ret_host(0);
+                }
+                return;
+            }
+            // Framebuffer ioctls: route to the graphics backend.
+            // FBIOGET_VSCREENINFO (0x4600) and FBIOGET_FSCREENINFO
+            // (0x4602) are the two that real fb programs query at
+            // startup to learn the mode. We allocate a host-side
+            // struct, let GraphicsBackend::ioctl fill it, then copy
+            // it to the guest buffer.
+            if (a1 == FBIOGET_VSCREENINFO || a1 == FBIOGET_FSCREENINFO) {
+                if (!graphics_.ready()) {
+                    cpu.regs[0] = (uint64_t)(int64_t)-ENODEV;
+                    return;
+                }
+                // The two structs are different sizes; we use the
+                // larger one as the host buffer to be safe.
+                char host_buf[192];  // ample for either struct
+                memset(host_buf, 0, sizeof(host_buf));
+                int r = graphics_.ioctl((uint32_t)a1, host_buf);
+                if (r < 0) {
+                    cpu.regs[0] = (uint64_t)(int64_t)r;
+                } else {
+                    size_t out_sz = (a1 == FBIOGET_VSCREENINFO)
+                        ? 160   // sizeof(struct fb_var_screeninfo)
+                        : 80;   // sizeof(struct fb_fix_screeninfo) approx
+                    mem_.write(a2, host_buf, out_sz);
                     ret_host(0);
                 }
                 return;

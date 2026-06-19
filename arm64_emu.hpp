@@ -28,6 +28,7 @@
 #pragma once
 
 #include "decoder.hpp"
+#include "graphics.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -766,6 +767,13 @@ public:
     void set_trace(bool v)   { trace_  = v; }
     void set_brk_verbose(bool v) { brk_verbose_ = v; }
 
+    // Graphics backend access. The Emulator owns a GraphicsBackend
+    // (virtual /dev/fb0) and wires it into the syscall layer. Guest
+    // programs open("/dev/fb0") and mmap() it; the framebuffer is
+    // backed by a memfd. Call refresh() or dump_to_ppm() to snapshot
+    // the framebuffer to a PPM file for headless debugging.
+    GraphicsBackend& graphics() { return graphics_; }
+
     // Public so syscall handlers in arm64_emu.cpp can use it
     Memory& mem() { return mem_; }
     const std::string& elf_path() const { return elf_path_; }
@@ -839,6 +847,12 @@ private:
     // Futex table
     std::mutex futex_table_mu_;
     std::unordered_map<uint64_t, FutexSlot> futex_table_;
+
+    // ── Graphics backend (virtual /dev/fb0) ────────────────────────────
+    // Owned by the Emulator. Wired into syscalls.cpp's openat() and
+    // ioctl() handlers (see case 56 for /dev/fb0, case 29 for
+    // FBIOGET_VSCREENINFO / FBIOGET_FSCREENINFO).
+    GraphicsBackend graphics_;
 
     // Friend declaration must come AFTER GuestThread is defined
     friend void thread_entry(Emulator* emu, GuestThread* gt);
