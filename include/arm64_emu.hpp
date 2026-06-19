@@ -858,6 +858,30 @@ public:
                     throw EmuError("PC ran into unmapped memory at 0x"
                         + to_hex(main_cpu_.pc));
                 }
+                // ── SDL2 real-time refresh ────────────────────────────
+                // Every ~1M instructions, if the guest has mmap'd the
+                // framebuffer, sync its pages back to the host and push
+                // to the SDL2 window. This gives ~6 fps at 6 MIPS, which
+                // is enough for interactive graphics without killing
+                // performance. The headless path (no SDL2) just skips
+                // this — the PPM dump on exit still works.
+                if (graphics_.ready() && graphics_.guest_fb_addr() != 0) {
+                    uint64_t gaddr = graphics_.guest_fb_addr();
+                    std::vector<uint8_t> buf(graphics_.size());
+                    try {
+                        mem_.read(gaddr, buf.data(), buf.size());
+                        graphics_.sync_from(buf.data());
+                        graphics_.refresh();
+                        // If the user closed the SDL2 window, terminate.
+                        if (!graphics_.poll_events()) {
+                            main_cpu_.running = false;
+                            main_cpu_.exit_code = 0;
+                            break;
+                        }
+                    } catch (const std::exception&) {
+                        // guest fb address no longer mapped — skip
+                    }
+                }
             }
         }
         // Wait for any spawned threads to exit

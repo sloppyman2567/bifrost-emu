@@ -404,6 +404,7 @@ bool FrostJIT::can_translate(const DecodedInst& d) const {
 //
 // Returns a function pointer to the translated block.
 uint64_t (*FrostJIT::translate_block(CPU& cpu, Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
+    (void)cpu;  // cpu state is read from the CPU* passed to the emitted code
     if (!code_buf_) return nullptr;
 
     size_t block_start_off = code_buf_used_;
@@ -540,7 +541,7 @@ uint64_t (*FrostJIT::translate_block(CPU& cpu, Emulator& emu, uint64_t start_pc)
                     emit_load(0, CPU_REG, REGS_OFF + 8 * d.rn);
                 }
                 // Load Rm → RCX (for register forms)
-                int rm_reg = 1;  // RCX
+                (void)0; // RCX handled above
                 if (d.cls != InstClass::ADD_IMM && d.cls != InstClass::SUB_IMM &&
                     d.cls != InstClass::ADDS_IMM && d.cls != InstClass::SUBS_IMM &&
                     d.cls != InstClass::AND_IMM && d.cls != InstClass::ORR_IMM &&
@@ -731,7 +732,7 @@ uint64_t (*FrostJIT::translate_block(CPU& cpu, Emulator& emu, uint64_t start_pc)
 
             case InstClass::RET: {
                 // RET Xn (default X30). Load Xn → RAX, end block.
-                int reg = (d.rn == 0 && false) ? 30 : d.rn;  // default X30
+                (void)d.rn;  // RET uses Rn
                 // Actually decoder sets d.rn for RET. If 0, it's X0...
                 // No: RET defaults to X30 when Rn=30. The decoder
                 // should set d.rn=30 for the default form.
