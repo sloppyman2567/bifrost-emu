@@ -460,12 +460,21 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::EXTR: {
                 uint8_t immr = (d.raw >> 10) & 0x3F;
                 int width = d.sf ? 64 : 32;
-                uint64_t lo = cpu.regs[d.rn];
-                uint64_t hi = cpu.regs[d.rm];
-                if (!d.sf) { lo &= 0xFFFFFFFF; hi &= 0xFFFFFFFF; }
-                // EXTR: concatenate hi:lo (128-bit), shift right by immr, take lower width bits
-                uint64_t combined = (hi << width) | lo;
-                uint64_t v = (combined >> immr) & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
+                // Per ARM ARM: EXTR Xd, Xn, Xm, #lsb extracts a width-bit
+                // field from the 2*width-bit concatenation (Xn:Xm).
+                //   Xd = ((Xn << width) | Xm) >> lsb   [masked to width]
+                // v0 had two bugs:
+                //   1. Concatenated Rm:Rn instead of Rn:Rm (operand order)
+                //   2. Used (rn << width) which is UB when width == 64
+                //      (shifting a uint64_t by its full width is UB in C++)
+                // Both are now fixed: we use __uint128_t for the 128-bit
+                // concatenation to avoid the UB.
+                uint64_t rn = cpu.regs[d.rn];
+                uint64_t rm = cpu.regs[d.rm];
+                if (!d.sf) { rn &= 0xFFFFFFFF; rm &= 0xFFFFFFFF; }
+                __uint128_t combined = ((__uint128_t)rn << width) | rm;
+                __uint128_t shifted = combined >> immr;
+                uint64_t v = (uint64_t)shifted & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
                 if (!d.sf) v &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = v;
                 return;
