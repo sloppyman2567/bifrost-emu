@@ -941,7 +941,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (is_load) {
                             uint64_t lo = 0, hi = 0;
                             mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                            if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                            if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
                             cpu.v_lo[d.rt] = lo;
                             cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                         } else {
@@ -949,7 +949,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                             if (nbytes > 8) {
                                 uint64_t hi = cpu.v_hi[d.rt];
-                                mem_.write(addr + 8, &hi, nbytes - 8);
+                                mem_.write(addr + 8, &hi, nbytes - 8, pcache);
                             }
                         }
                     } else {
@@ -1046,14 +1046,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
                         uint64_t hi = cpu.v_hi[d.rt];
                         mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8);
+                        if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8, pcache);
                     }
                     return;
                 }
@@ -1102,7 +1102,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
@@ -1110,7 +1110,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
-                            mem_.write(addr + 8, &hi, nbytes - 8);
+                            mem_.write(addr + 8, &hi, nbytes - 8, pcache);
                         }
                     }
                     return;
@@ -1149,7 +1149,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
+                        if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
@@ -1157,7 +1157,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
-                            mem_.write(addr + 8, &hi, nbytes - 8);
+                            mem_.write(addr + 8, &hi, nbytes - 8, pcache);
                         }
                     }
                     return;
@@ -1612,10 +1612,23 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // MOVI (vector immediate) — strip Q and imm8 fields.
-                // Mask 0xFF00FC00 covers top byte + cmode + fixed bits,
-                // excludes Q (bit 30) and imm8 (bits 23:16).
-                if (((op & ~(1u << 30)) & 0xFF00FC00) == 0x0F00E400) {
+                // MOVI (vector immediate, MSL form)
+                // Top byte 0x2F/0x6F. Strip Q (bit 30) and U (bit 29).
+                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF001C00) == 0x0F001C00) {
+                    uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
+                    uint8_t msl = (op >> 13) & 3;
+                    uint64_t val = 0;
+                    for (int i = 0; i < 8; i++) val |= ((uint64_t)imm8) << (i * 8);
+                    val <<= (8 * msl);
+                    cpu.v_lo[rd] = val;
+                    if (Q) cpu.v_hi[rd] = val;
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // MOVI (vector immediate, cmode form) — top byte 0x0F/0x4F/0x6F
+                // For 64-bit element form (cmode=0xE), U=1 (0x6F) is used.
+                // Strip Q (bit 30) and U (bit 29) to match all forms.
+                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF00FC00) == 0x0F00E400) {
                     uint8_t cmode = (op >> 12) & 0xF;
                     uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                     if (cmode == 0xE) {

@@ -1016,7 +1016,7 @@ private:
     // ------------------------------------------------------------------
     void step(CPU& cpu) {
         if (trace_) {
-            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x sp=0x%llx v0lo=0x%llx v0hi=0x%llx\n",
+            fprintf(stderr, "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x8=0x%llx x19=0x%llx x20=0x%llx x21=0x%llx x22=0x%llx x23=0x%llx x24=0x%llx x25=0x%llx x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x sp=0x%llx v0lo=0x%llx v0hi=0x%llx v1lo=0x%llx v1hi=0x%llx v2lo=0x%llx v2hi=0x%llx\n",
                     cpu.tid,
                     (unsigned long long)cpu.pc,
                     (unsigned long long)cpu.regs[0],
@@ -1041,7 +1041,11 @@ private:
                     cpu.pstate,
                     (unsigned long long)cpu.sp,
                     (unsigned long long)cpu.v_lo[0],
-                    (unsigned long long)cpu.v_hi[0]);
+                    (unsigned long long)cpu.v_hi[0],
+                    (unsigned long long)cpu.v_lo[1],
+                    (unsigned long long)cpu.v_hi[1],
+                    (unsigned long long)cpu.v_lo[2],
+                    (unsigned long long)cpu.v_hi[2]);
         }
         uint32_t inst = mem_.fetch_inst(cpu.pc, &cpu.page_cache);
         uint64_t next_pc = cpu.pc + 4;
