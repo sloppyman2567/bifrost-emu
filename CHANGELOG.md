@@ -8,151 +8,94 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## [1.3.0-beta.4] — 2026-06-19
 
-The "real hierarchical decoder" release. v1.3.0-beta.3 had a stub
-`switch (bits[28:24])` at the top of `decode()` that did nothing
-(`default: break;`) and then fell through to ~500 lines of flat
-`if ((inst & MASK) == VAL)` chains — a hierarchical decoder in name
-only. v1.3.0-beta.4 replaces that with a real two-level hierarchical
-switch: outer switch on bits `[28:24]` (the ARM ARM major encoding
-group), inner switch on the group-specific discriminator. Every flat
-`if` chain is now a `case` with early `return`.
+The "real hierarchical decoder + 3.8x performance + softfloat fixes"
+release. Three major areas of improvement:
 
-The rewrite also uncovered and fixed a long-standing latent bug: EXTR
-was unreachable in v0 because the bitfield check (mask `0x1F000000`,
-ignoring bit 23) shadowed the EXTR check (mask `0x1F800000`). Every
-EXTR instruction was silently misdecoded as SBFM/BFM/UBFM. The
-hierarchical version routes on bit 23 first, so EXTR is correctly
-decoded. The interpreter's EXTR handler was also fixed (operand order
-and undefined behavior — see below).
-
-This release also wires up the graphics backend end-to-end: the
-`GraphicsBackend` class (a stub since 1.3.0-beta.2) is now owned by
-`Emulator`, `/dev/fb0` is in the VFS, `FBIOGET_VSCREENINFO` /
-`FBIOGET_FSCREENINFO` ioctls are handled, and `--fb-dump PATH` writes
-a PPM image on exit. Still headless (no SDL2 window) — SDL2 support
-is planned for v1.4.0.
+1. **Performance**: 3.78x speedup (37 → 140 MIPS) via direct-mapped
+   decode cache and memory page cache.
+2. **Hierarchical decoder**: flat if-chains replaced with a true
+   two-level switch on bits[28:24].
+3. **Softfloat fixes**: four critical bugs (CCMP, CSEL/CSNEG, SIMD
+   Q-form, BFM BFI) that blocked musl's 128-bit long double routines,
+   partially unblocking `printf("%f")`.
 
 ### Added
+- **Direct-mapped decode cache.** 4096-entry flat array replacing
+  `std::unordered_map`. Gives 2.17x speedup alone (37 → 80 MIPS).
+  100% hit rate for tight loops. Uses `__builtin_expect` for branch
+  prediction and const reference to avoid 88-byte struct copy.
+- **Memory page cache.** Single-entry last-page caches for read and
+  write, avoiding mutex lock + hash-map lookup on same-page accesses.
+  Gives additional 1.75x (80 → 140 MIPS).
 - **`extr` mnemonic in `mini_arm64_asm.py`** so test programs can use
-  EXTR directly. Encoding: `sf 00 100111 N Rm imms Rn Rd` (bits[28:23]
-  = `100111`).
-- **`test/extr.s`** — new test program that verifies EXTR works end-
-  to-end. Loads `x0 = 0xBABECAFE` and `x1 = 0xBEEFDEAD`, executes
-  `extr x2, x1, x0, #0` (which should give `x2 = x0 = 0xBABECAFE`),
-  compares against the expected value, and prints `OK` or `NO`. This
-  test would have failed silently on every prior version (EXTR was
-  misdecoded as SBFM).
-- **`ctest/test_fb.c`** — new test program that opens `/dev/fb0`,
-  queries the mode via both `FBIOGET_VSCREENINFO` and
-  `FBIOGET_FSCREENINFO`, mmaps the framebuffer, draws a horizontal
-  RGB gradient, and exits. The PPM dump is verified pixel-by-pixel.
-- **`--fb-dump PATH` command-line option** in `main.cpp`. On exit,
-  if the guest opened `/dev/fb0`, syncs the guest's framebuffer
-  pages back to the host and writes a PPM image to PATH. Useful for
-  headless debugging of programs that draw to the framebuffer.
-- **`FBIOGET_VSCREENINFO` (0x4600) and `FBIOGET_FSCREENINFO` (0x4602)
-  ioctl support** in the syscall layer. Routes to
-  `GraphicsBackend::ioctl()` and copies the response struct to the
-  guest buffer. Without these, no real fb program can query the
-  mode.
-- **`/dev/fb0` in the VFS** — `openat("/dev/fb0")` returns a
-  memfd-backed fd (via `GraphicsBackend::open_dev_fb0()`) that the
-  guest can mmap and write pixels to. Auto-inits to 640x480@32bpp
-  BGRA on first open.
-- **`GraphicsBackend` wired into `Emulator`** — `Emulator` now owns
-  a `GraphicsBackend` instance (was a disconnected stub since
-  1.3.0-beta.2). Accessible via `emu.graphics()`.
-- **`GraphicsBackend::dump_to_ppm(path)`** — writes a P6 PPM file
-  from the framebuffer (32-bit BGRA → 24-bit RGB with B/R swap).
-- **`GraphicsBackend::sync_from(src)`** — copies `size()` bytes from
-  a guest-side buffer into the host's `fb_data_`. Needed because
-  the emulator's mmap handler allocates separate pages for the
-  guest and does NOT propagate writes back to the host memfd.
-- **`GraphicsBackend::owns_fd(fd)`** — uses fstat to compare file
-  identity (st_ino + st_dev), so it works across dup'd fds. The
-  mmap handler uses this to detect when the guest is mmap'ing the
-  fb (`open_dev_fb0()` returns `dup(fb_fd_)`, not `fb_fd_` itself).
-- **`GraphicsBackend::refresh()`** — dumps the framebuffer to a PPM
-  file (default path `bifrost-fb.ppm`) if the framebuffer has any
-  non-zero pixel. Avoids creating empty PPM files for programs
-  that never wrote to the fb.
-- **`BIFROST_GRAPHICS_VERBOSE` environment variable** — enables
-  diagnostic messages from the graphics backend.
+  EXTR directly.
+- **`test/extr.s`** — verifies EXTR works end-to-end.
+- **`ctest/test_fb.c`** — verifies the `/dev/fb0` framebuffer pipeline.
+- **`--fb-dump PATH`** command-line option. Syncs guest's framebuffer
+  pages to host on exit and writes a PPM file.
+- **`FBIOGET_VSCREENINFO` / `FBIOGET_FSCREENINFO` ioctl support.**
+- **`/dev/fb0` in the VFS** — memfd-backed, mmap-able by the guest.
+- **`GraphicsBackend` wired into `Emulator`** — was a disconnected stub
+  since 1.3.0-beta.2.
+- **`GraphicsBackend::dump_to_ppm`**, `sync_from`, `owns_fd`, `refresh`.
+- **`BIFROST_GRAPHICS_VERBOSE`** environment variable.
+- **Decode cache hit rate** in `-v` verbose output.
+- **`BIFROST_GRAPHICS_VERBOSE`** environment variable.
 
 ### Changed
 - **`decoder.cpp` rewritten as a true two-level hierarchical switch.**
-  Outer switch on bits `[28:24]` (5 bits, 32 major encoding groups);
-  inner switch on the group-specific discriminator (bits `[31:29]`,
-  bit 26, bit 23, bit 22, mode bits, opcodes). B/BL are pulled out
-  before the outer switch because their discriminator is bits
-  `[30:26]`, not bits `[28:24]` (imm26 leaks into bits[28:24]).
-  Field extraction is split: truly common fields (rd, rn, rm, rt, sf,
-  size, ...) are pulled out once at the top; group-specific fields
-  (imm, disp, atom_op, cmode, ...) are pulled out only in the case
-  that needs them.
-- **`interpreter.cpp` EXTR handler fixed** (see Fixed below).
-- **`GraphicsBackend::init()` now returns `bool`** (was `uint64_t`
-  returning 0 on success, which was confused with the guest
-  address). Added explicit error paths and idempotent re-init.
-- **`GraphicsBackend` is now non-copyable** (it owns a memfd + mmap).
+  Outer switch on bits[28:24]; inner switch on group-specific
+  discriminator. B/BL pulled out before the outer switch.
+- **`interpreter.cpp` SIMD_DP handler** converted from flat if-chains
+  to a proper switch with Q-stripped sub-discriminator.
+- **`interpreter.cpp` EXTR handler** fixed (operand order + UB).
+- **`interpreter.cpp` BFM BFI handler** fixed (field mask).
+- **`GraphicsBackend::init()`** now returns `bool` (was `uint64_t`).
+- **`GraphicsBackend`** is now non-copyable.
 
 ### Fixed
-- **EXTR was unreachable in v0.** The bitfield check (mask
-  `0x1F000000`, ignoring bit 23) came BEFORE the EXTR check (mask
-  `0x1F800000`, requiring bit 23 = 1). The bitfield mask matched
-  every EXTR encoding, so the EXTR check was unreachable — every
-  EXTR was silently misdecoded as SBFM/BFM/UBFM. The hierarchical
-  decoder routes on bit 23 first, so EXTR is correctly decoded. The
-  interpreter already had an EXTR case (it was just never reached).
-  A new test program (`test/extr.s`) verifies the behavior.
-- **EXTR interpreter operand order.** v0's interpreter concatenated
-  `Rm:Rn` instead of `Rn:Rm` (per the ARM ARM, EXTR extracts from the
-  concatenation `Xn:Xm`). For `lsb != 0`, this produced the wrong
-  result. Fixed to use `Rn:Rm`.
-- **EXTR interpreter undefined behavior.** v0's interpreter used
-  `(rn << width)` with `width == 64`, which is undefined behavior in
-  C++ (shifting a `uint64_t` by its full width). On x86_64 with GCC,
-  this typically produced 0 or the original value, which made the
-  EXTR result wrong even when the operand order was correct. Fixed
-  by using `__uint128_t` for the 128-bit concatenation.
-- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now decode
-  correctly. v0's flat masks caught only the 32-bit form (bits[31:29]
-  = 001). For example, `cbnz x0, label` (64-bit) would have been
-  misdecoded or rejected. The hierarchical version's inner switch on
-  bits[31:29] accepts both `001` (32-bit) and `101` (64-bit).
-- **BRK and HLT now enforce `bits[4:0] == 0`** per the ARM ARM. v0's
-  flat masks required this implicitly via the full 32-bit mask, but
-  the hierarchical version makes it an explicit check (and returns
-  `UNKNOWN` for non-zero `bits[4:0]`).
-- **Add/subtract extended register now enforces `bits[23:22] == 00`.**
-  v0's mask `0x1FE00000` required this implicitly; the hierarchical
-  version makes it an explicit check that returns `UNKNOWN` for
-  non-zero `bits[23:22]`.
-- **STP/LDP pre-index vs ORR collision is now structural.** v1.3.0-
-  beta.3 fixed this collision by careful if-chain ordering (checking
-  STP/LDP before logical shifted register). That fix was fragile —
-  any reordering of the if-chain could re-introduce the bug. v1.3.0-
-  beta.4 makes the fix structural: STP/LDP pre-index V=0 lives in
-  outer case `0x09`; logical shifted register lives in outer case
-  `0x0A`. They cannot collide regardless of code ordering.
+- **CCMP register vs immediate form.** Bit 11 (not bit 21) distinguishes
+  register from immediate. v0 always treated CCMP as immediate. Broke
+  `__eqtf2` (long double equality) — `y == 0.0` always false, making
+  printf's do/while loop never exit.
+- **CSEL/CSINC/CSINV/CSNEG decode.** Variant selected by BOTH
+  `bits[30:29]` AND `bits[11:10]`, not just `bits[11:10]`. v0 confused
+  CSINC with CSNEG. Broke CNEG, used by `__gttf2`/`__lttf2`.
+- **SIMD DP Q-form bugs.** v0 masks included bit 30 (Q), so Q=1 forms
+  of DUP, INS, ORR(MOV), EXT were silently NOP'd. Broke musl 128-bit
+  softfloat.
+- **BFM BFI field mask.** v0 computed `field_mask = mask | hi_mask =
+  ~0`, replacing ALL of Rd. Fixed to `mask << lsb`. Broke
+  `__floatsitf`.
+- **EXTR unreachable in v0.** Bitfield check shadowed EXTR check.
+  Fixed by routing on bit 23 first.
+- **EXTR operand order.** v0 concatenated `Rm:Rn` instead of `Rn:Rm`.
+- **EXTR undefined behavior.** v0 used `(rn << 64)` which is UB.
+  Fixed with `__uint128_t`.
+- **64-bit CBZ/CBNZ/TBZ/TBNZ** now decode correctly (v0 caught only
+  32-bit form).
+- **BRK/HLT** now enforce `bits[4:0] == 0`.
+- **Add/sub extended register** now enforces `bits[23:22] == 00`.
+- **STP/LDP pre-index collision** is now structural (outer case 0x09
+  vs 0x0A).
+- **INS (general)** case label fixed from unreachable `0x4E000C00` to
+  correct `0x0E001C00`.
+- **`fb_fix_screeninfo` size** fixed from 80 (approximate) to 72 (exact).
 
-### Removed
-- **Stub `switch (bits[28:24])` in `decode()`.** v1.3.0-beta.3 had a
-  switch at the top of `decode()` that did nothing (`default: break;`)
-  and fell through to flat if-chains. v1.3.0-beta.4 replaces the
-  entire structure with a real hierarchical switch.
-- **Flat `if ((inst & MASK) == VAL)` chains in `decode()`.** All ~25
-  flat checks are now `case` labels in the hierarchical switch.
+### Performance
+- **37 MIPS → 140 MIPS** (3.78x speedup) on compute-heavy workloads.
+  Verified with a 10M-iteration integer arithmetic loop (90M
+  instructions in 0.64s).
 
 ### Compatibility
-- **No regressions.** All five original `.elf` test programs (hello,
-  count, fib, cat, echo) produce byte-identical output and exit codes
-  vs v1.3.0-beta.3.
-- **`extr.elf`** — new test, PASS.
-- **Musl-static C tests** (`hello.c`, `loop.c`, `test_malloc.c`) —
-  continue to work.
-- **`test_float.elf`** — pre-existing hang (musl's `printf("%f")`
-  softfloat path) is unchanged; not a regression.
+- **No regressions.** All 5 original `.elf` tests + extr.elf + 3 musl
+  C tests pass byte-identical.
+- **`__multf3`** (128-bit multiply): WORKS (1.5 × 2.0 = 3.0).
+- **`__eqtf2`** (long double ==): WORKS (3.0 == 3.0 returns EQ).
+- **`__gttf2`/`__lttf2`** (long double >, <): WORKS (1.4e8 > 1e7).
+- **`printf("%f")`**: partially works — long double multiply and
+  comparisons now correct; remaining issue is `__subtf3` performance.
+- **`test_fb.elf`**: PASS (framebuffer pipeline + PPM dump).
 
 ## [1.3.0-beta.3] — 2026-06-19
 

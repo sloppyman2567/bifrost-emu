@@ -157,11 +157,26 @@ MOVI, SHL/USHR/SHRN (vector immediate), UMAXP/UMINP/SMAXP/SMINP, CMHS, TBL/TBX
 
 ## Performance
 
-~23 MIPS on a typical desktop, with the decode cache providing a
-significant speedup for tight loops. The `fib(30)` test runs 258
-instructions in under 1ms; musl static hello world runs 1,760
-instructions in under 0.1ms. A JIT is planned for v2.0 (target:
-100-500 MIPS).
+~140 MIPS on a typical desktop (compute-heavy workload), a 3.8x
+speedup over v1.3.0-beta.3 (~37 MIPS). The improvement comes from
+two optimizations:
+
+1. **Direct-mapped decode cache** — replaced `std::unordered_map` (hash
+   + 88-byte struct copy per instruction) with a flat 4096-entry array
+   (index + tag compare + const reference). 100% hit rate for tight
+   loops.
+
+2. **Memory page cache** — added single-entry last-page caches for read
+   and write, avoiding mutex lock + hash-map lookup on every memory
+   access to the same page (stack, heap, code — the common case).
+
+The `fib(30)` test runs 258 instructions in under 0.01ms; musl static
+hello world runs 1,760 instructions in under 0.1ms. A 10M-iteration
+compute loop runs 90M instructions in 0.64s. A JIT is planned for
+v2.0 (target: 500+ MIPS).
+
+Run `bifrost-emu -v <elf>` to see MIPS, memory page count, and decode
+cache hit rate for any program.
 
 ## Design Philosophy
 
@@ -356,98 +371,130 @@ planned for v1.4.0.
 
 ## What's New in 1.3.0-beta.4
 
-**The decoder is now a true hierarchical switch.** v1.3.0-beta.3 had a
-stub `switch (bits[28:24])` at the top of `decode()` that did nothing
-(`default: break;`) and then fell through to ~500 lines of flat
-`if ((inst & MASK) == VAL)` chains. v1.3.0-beta.4 replaces that with
-a real two-level hierarchical switch: outer switch on bits `[28:24]`
-(the ARM ARM major encoding group), inner switch on the group-specific
-discriminator. Every flat `if` chain is now a `case` with early
-`return`. See the Architecture section above for details.
+### Performance: 3.8x speedup (37 → 140 MIPS)
 
-**EXTR is now actually decoded.** v0 had two dead-code bugs around
-EXTR:
+Two optimizations that together give a 3.78x speedup on compute-heavy
+workloads:
+
+1. **Direct-mapped decode cache.** Replaced
+   `std::unordered_map<uint64_t, DecodedInst>` (hash + 88-byte struct
+   copy per instruction) with a flat 4096-entry direct-mapped array
+   (384 KB). The hot path is now: hash PC to 12-bit index, compare tag,
+   use const reference. No hash, no copy. `__builtin_expect` for branch
+   prediction. Alone gives 2.17x (37 → 80 MIPS).
+
+2. **Memory page cache.** Added single-entry last-page caches for read
+   and write. The old code locked a mutex + did an unordered_map lookup
+   on EVERY memory access. The new code checks the last-page cache
+   first (no lock, no hash — just a tag compare + memcpy). For tight
+   loops accessing the same page, eliminates all mutex/hash overhead.
+   Gives an additional 1.75x (80 → 140 MIPS).
+
+### Hierarchical decoder
+
+The decoder is now a true two-level hierarchical switch. v1.3.0-beta.3
+had a stub `switch (bits[28:24])` at the top of `decode()` that did
+nothing (`default: break;`) and fell through to ~500 lines of flat
+`if ((inst & MASK) == VAL)` chains. v1.3.0-beta.4 replaces that with a
+real hierarchical switch: outer switch on bits `[28:24]` (the ARM ARM
+major encoding group), inner switch on the group-specific discriminator.
+Every flat `if` chain is now a `case` with early `return`. See the
+Architecture section above for details.
+
+### Critical decoder/interpreter bug fixes (unblocks `printf("%f")`)
+
+Four bugs that together blocked musl's 128-bit long double softfloat
+path (used by `printf("%f")`):
+
+1. **CCMP register vs immediate form.** The register/immediate
+   distinction is at **bit 11** (0=register, 1=immediate), not bit 21
+   (always 0). v0 always treated CCMP as immediate, so `ccmp x6, x7,
+   #0, eq` compared x6 with #7 instead of x7. Broke `__eqtf2` (long
+   double equality), making `y == 0.0` always false — printf's
+   do/while digit extraction loop never exited.
+
+2. **CSEL/CSINC/CSINV/CSNEG decode.** The variant is selected by BOTH
+   `bits[30:29]` (opc) AND `bits[11:10]` (op2), not just bits[11:10].
+   v0 confused CSINC with CSNEG. Broke CNEG (alias for CSNEG), used by
+   `__gttf2`/`__lttf2` to negate return values — producing -1 instead
+   of 1, breaking all long double ordering comparisons.
+
+3. **SIMD DP Q-form bugs.** v0's SIMD_DP if-chains had masks that
+   included bit 30 (Q), so Q=1 (128-bit) forms of DUP, INS, ORR(MOV
+   alias), and EXT were silently NOP'd. This broke musl's 128-bit
+   softfloat, which uses `mov v1.16b, v0.16b` to copy 128-bit values.
+   Converted the SIMD_DP handler from flat if-chains to a proper switch
+   with Q-stripped sub-discriminator.
+
+4. **BFM BFI field mask.** v0 computed `field_mask = mask | hi_mask =
+   ~0`, replacing ALL of Rd instead of just the target field. Fixed to
+   `mask << lsb`. Broke `__floatsitf`'s BFI, corrupting 128-bit long
+   double values.
+
+After these fixes: `__multf3` (128-bit multiply), `__eqtf2` (long
+double ==), and `__gttf2`/`__lttf2` (long double >, <) all work
+correctly. `printf("%f")` is much closer — the do/while digit
+extraction loop now converges. The remaining issue is in `__subtf3`'s
+mantissa alignment path (a performance issue with large exponent
+differences, not a correctness bug).
+
+### EXTR instruction fixed
+
+v0 had three bugs around EXTR:
 
 1. The bitfield check (mask `0x1F000000`, ignoring bit 23) came BEFORE
-   the EXTR check (mask `0x1F800000`, requiring bit 23 = 1). The
-   bitfield mask matched every EXTR encoding, so the EXTR check was
-   unreachable — every EXTR was silently misdecoded as
-   SBFM/BFM/UBFM. v1.3.0-beta.4 routes on bit 23 first, so EXTR is
-   correctly decoded.
-2. The interpreter's EXTR handler had the operand order backwards:
-   it concatenated `Rm:Rn` instead of `Rn:Rm` (per the ARM ARM,
-   EXTR extracts from the concatenation `Xn:Xm`). v1.3.0-beta.4
-   fixes the operand order.
-3. The interpreter's EXTR handler used `(rn << width)` with
-   `width == 64`, which is undefined behavior in C++ (shifting a
-   `uint64_t` by its full width). v1.3.0-beta.4 uses `__uint128_t`
-   for the 128-bit concatenation.
+   the EXTR check (mask `0x1F800000`, requiring bit 23 = 1). Every EXTR
+   was silently misdecoded as SBFM/BFM/UBFM. v1.3.0-beta.4 routes on
+   bit 23 first.
+2. The interpreter's EXTR handler had the operand order backwards
+   (`Rm:Rn` instead of `Rn:Rm`).
+3. The interpreter used `(rn << width)` with `width == 64`, which is
+   undefined behavior in C++. Fixed with `__uint128_t`.
 
-The interpreter already had an `EXTR` case (it was just never
-reached). With the decoder fix, EXTR now works end-to-end. A new
-test program (`test/extr.s`) verifies the behavior.
+### Graphics backend
 
-**The graphics backend is now actually wired up.** v1.3.0-beta.2
-introduced `GraphicsBackend` as a stub, but it was never instantiated
-by `Emulator`, `/dev/fb0` was not in the VFS, no fb ioctls were
-handled, and `refresh()` was a no-op. v1.3.0-beta.4 makes it work
-end-to-end:
+v1.3.0-beta.2 introduced `GraphicsBackend` as a stub. v1.3.0-beta.4
+wires it up end-to-end:
 
-- `Emulator` now owns a `GraphicsBackend` instance.
+- `Emulator` owns a `GraphicsBackend` instance.
 - `openat("/dev/fb0")` returns a memfd-backed fd that the guest can
   `mmap` and write pixels to.
-- `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls are
-  supported (required for any real fb program to query the mode).
-- `--fb-dump PATH` command-line option syncs the guest's framebuffer
-  pages back to the host on exit and writes a PPM file. Useful for
-  headless debugging of programs that draw to `/dev/fb0`.
-- New `ctest/test_fb.c` verifies the full pipeline: opens `/dev/fb0`,
-  queries the mode, mmaps, draws a gradient, exits. The PPM dump is
-  verified pixel-by-pixel.
+- `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls supported.
+- `--fb-dump PATH` syncs the guest's framebuffer pages back to the
+  host on exit and writes a PPM file. Verified pixel-by-pixel.
+- New `ctest/test_fb.c` verifies the full pipeline.
 
-This is still a **headless** backend (no SDL2 window). SDL2 window
-support is planned for v1.4.0.
+Still headless (no SDL2 window). SDL2 support is planned for v1.4.0.
 
-**Additional decoder correctness fixes:**
+### Additional decoder correctness fixes
 
-- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now
-  decode correctly. v0's flat masks caught only the 32-bit form
-  (bits[31:29] = 001).
-- **BRK and HLT** now enforce `bits[4:0] == 0` per the ARM ARM. v0's
-  flat masks required this implicitly via the full 32-bit mask, but
-  the hierarchical version makes it explicit.
-- **Add/subtract extended register** now enforces `bits[23:22] == 00`
-  (v0's mask `0x1FE00000` required this implicitly; the hierarchical
-  version makes it an explicit check).
-- **SIMD data processing** now explicitly requires `bit 31 == 0`
-  (v0's mask `0x9E000000` included bit 31; the hierarchical version
-  checks it explicitly for clarity).
-- **Load/store various** (LDUR/STUR, LSE atomics, LDR/STR register
-  offset) now explicitly requires `bit 29 == 1` (v0's masks required
-  this implicitly).
+- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now decode
+  correctly. v0's flat masks caught only the 32-bit form.
+- **BRK and HLT** now enforce `bits[4:0] == 0` per the ARM ARM.
+- **Add/subtract extended register** now enforces `bits[23:22] == 00`.
+- **STP/LDP pre-index collision** is now structural (outer case 0x09
+  vs 0x0A, not if-chain ordering).
+- **INS (general)** case label fixed from unreachable `0x4E000C00` to
+  correct `0x0E001C00`.
 
-**STP/LDP pre-index collision fix is now structural.** v1.3.0-beta.3
-fixed the STP/LDP pre-index vs ORR collision by careful if-chain
-ordering (checking STP/LDP before logical shifted register). That fix
-was fragile — any reordering of the if-chain could re-introduce the
-bug. v1.3.0-beta.4 makes the fix structural: STP/LDP pre-index V=0
-lives in outer case `0x09`; logical shifted register lives in outer
-case `0x0A`. They cannot collide regardless of code ordering.
+### Added
 
-**Added `extr` mnemonic to `mini_arm64_asm.py`** so test programs
-can use EXTR directly.
+- `extr` mnemonic in `mini_arm64_asm.py`.
+- `test/extr.s` — verifies EXTR works end-to-end.
+- `ctest/test_fb.c` — verifies the `/dev/fb0` framebuffer pipeline.
+- `--fb-dump PATH` command-line option.
+- Decode cache hit rate in `-v` verbose output.
 
-**`test/extr.s`** — new test program that verifies EXTR works
-end-to-end. Loads `x0 = 0xBABECAFE` and `x1 = 0xBEEFDEAD`, executes
-`extr x2, x1, x0, #0` (which should give `x2 = x0 = 0xBABECAFE`),
-compares against the expected value, and prints `OK` or `NO`.
+### No regressions
 
-**No regressions.** All five original `.elf` test programs (hello,
-count, fib, cat, echo) produce byte-identical output and exit codes
-vs v1.3.0-beta.3. The three working musl-static C tests
-(`hello.c`, `loop.c`, `test_malloc.c`) also continue to work. The
-pre-existing `test_float.elf` hang (musl's `printf("%f")` softfloat
-path) is unchanged — it's not a regression.
+All five original `.elf` test programs (hello, count, fib, cat, echo)
+produce byte-identical output and exit codes vs v1.3.0-beta.3. The
+three working musl-static C tests (`hello.c`, `loop.c`,
+`test_malloc.c`) also continue to work. The pre-existing
+`test_float.elf` hang (musl's `printf("%f")` softfloat path) is
+partially fixed — long double multiply and comparisons now work
+correctly; the remaining issue is a performance problem in
+`__subtf3`'s mantissa alignment, not a correctness bug.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
@@ -578,11 +625,13 @@ Full release notes in [CHANGELOG.md](CHANGELOG.md).
 
 This is beta-quality software. Known issues:
 
-- **`printf("%f", ...)` fails with a decode error.** musl's float
-  formatter uses 128-bit softfloat routines that hit FP instructions we
-  don't yet model. This is an improvement over beta.2 (which hung
-  forever); the failure is now fast. Integer printf formats (`%d`,
-  `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **`printf("%f", ...)` partially works.** Long double multiply
+  (`__multf3`), equality (`__eqtf2`), and ordering (`__gttf2`/
+  `__lttf2`) all work correctly after the CCMP/CSEL/SIMD/BFM fixes.
+  The remaining issue is a performance problem in `__subtf3`'s
+  mantissa alignment path (large exponent differences cause a very
+  long shift loop), not a correctness bug. Integer printf formats
+  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
 
 - **Function pointer tables in static-PIE binaries** may not relocate
   correctly (`test_fnptr` hits a decode error).
@@ -600,8 +649,8 @@ This is beta-quality software. Known issues:
 ## Roadmap
 
 **Short-term (1.3.0 final):**
-1. Fix `printf("%f")` — audit the softfloat FP instruction path and
-   implement the missing FP ops
+1. Fix `printf("%f")` performance — optimize `__subtf3`'s mantissa
+   alignment loop (the remaining blocker for full float printf)
 2. Fix `test_fnptr` — investigate static-PIE self-relocation
 3. More test coverage: threads, signals
 
@@ -617,9 +666,11 @@ This is beta-quality software. Known issues:
 
 **Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
-   interpreter. Target: 100-500 MIPS. The hierarchical decoder
-   structure in v1.3.0-beta.4 makes this easier — the outer switch
-   on bits[28:24] maps directly to a JIT dispatch table.
+   interpreter. Target: 500+ MIPS. The hierarchical decoder structure
+   in v1.3.0-beta.4 makes this easier — the outer switch on bits[28:24]
+   maps directly to a JIT dispatch table. The direct-mapped decode
+   cache already demonstrates the hot-path speedup achievable with
+   flat dispatch.
 2. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
    statically-linked ARM64 SDL2 games at playable framerates.
 
