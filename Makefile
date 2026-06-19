@@ -15,14 +15,18 @@
 #   LDFLAGS        Linker flags
 
 CXX      ?= g++
-CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra
+SRCDIR   := src
+INCDIR   := include
+CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR)
 LDFLAGS  ?= -pthread
 
 TARGET   := bifrost-emu
 LIB      := libbifrost.a
-SOURCES  := main.cpp interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp \
-    signal.cpp frostjit.cpp jit_glue.cpp
-HEADERS  := arm64_emu.hpp decoder.hpp graphics.hpp signal.hpp frostjit.hpp api/bifrost.h
+SOURCES  := $(SRCDIR)/main.cpp $(SRCDIR)/interpreter.cpp $(SRCDIR)/syscalls.cpp \
+            $(SRCDIR)/decoder.cpp $(SRCDIR)/graphics.cpp $(SRCDIR)/signal.cpp \
+            $(SRCDIR)/frostjit.cpp $(SRCDIR)/jit_glue.cpp
+HEADERS  := $(INCDIR)/arm64_emu.hpp $(INCDIR)/decoder.hpp $(INCDIR)/graphics.hpp \
+            $(INCDIR)/signal.hpp $(INCDIR)/frostjit.hpp api/bifrost.h
 
 # ── SDL2 backend (opt-in) ────────────────────────────────────────────────
 ifeq ($(USE_SDL2),1)
@@ -42,20 +46,19 @@ $(TARGET): $(SOURCES) $(HEADERS)
 # Build the static library (libbifrost.a) for API consumers
 lib: $(LIB)
 
-$(LIB): interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp signal.cpp frostjit.cpp jit_glue.cpp \
-    arm64_emu.hpp decoder.hpp graphics.hpp signal.hpp frostjit.hpp
-	$(CXX) $(CXXFLAGS) -c interpreter.cpp -o interpreter.o
-	$(CXX) $(CXXFLAGS) -c syscalls.cpp   -o syscalls.o
-	$(CXX) $(CXXFLAGS) -c decoder.cpp    -o decoder.o
-	$(CXX) $(CXXFLAGS) -c graphics.cpp   -o graphics.o
-	$(CXX) $(CXXFLAGS) -c signal.cpp     -o signal.o
-	$(CXX) $(CXXFLAGS) -c frostjit.cpp   -o frostjit.o
-	$(CXX) $(CXXFLAGS) -c jit_glue.cpp   -o jit_glue.o
+$(LIB): $(SOURCES) $(HEADERS)
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/interpreter.cpp -o interpreter.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/syscalls.cpp   -o syscalls.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/decoder.cpp    -o decoder.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/graphics.cpp   -o graphics.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/signal.cpp     -o signal.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/frostjit.cpp   -o frostjit.o
+	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/jit_glue.cpp   -o jit_glue.o
 	ar rcs $@ interpreter.o syscalls.o decoder.o graphics.o signal.o frostjit.o jit_glue.o
 	@echo "Built $@ (note: this skips main.cpp; link your own driver)"
 
 # Debug build with sanitizers
-debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined
+debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR)
 debug: LDFLAGS = -pthread -fsanitize=address,undefined
 debug: $(SOURCES) $(HEADERS)
 	$(CXX) $(CXXFLAGS) -o $(TARGET)-dbg $(SOURCES) $(LDFLAGS)
@@ -64,16 +67,8 @@ debug: $(SOURCES) $(HEADERS)
 test: $(TARGET)
 	@echo "--- Running test suite ---"
 	@for f in test/*.elf; do \
-	echo "--- $$f ---"; \
-	./$(TARGET) $$f || echo "FAILED: $$f"; \
-	done
-
-# Assemble test programs from .s sources
-tests-assemble:
-	@for f in test/*.s; do \
-	out="$${f%.s}.elf"; \
-	echo "Assembling $$f -> $$out"; \
-	python3 mini_arm64_asm.py $$f -o $$out; \
+	    echo "--- $$f ---"; \
+	    ./$(TARGET) $$f || echo "FAILED: $$f"; \
 	done
 
 # Install to /usr/local/bin
