@@ -501,84 +501,50 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 } else {
                     // BFI / rotate case (imms < immr).
                     //
-                    // This is the LSL / UBFIZ / SBFIZ / BFI alias group.
-                    // In all of these, the destination field lives in the
-                    // HIGH bits of the register (not the low bits), because
-                    // ROR(src, immr) brings src[imms:0] up to the top of
-                    // the rotated value.
+                    // This covers SBFIZ, UBFIZ, BFI, LSL (when shift > 0),
+                    // and the imms < immr form of SBFM/UBFM/BFM.
                     //
-                    // The correct mask is therefore tmask =
-                    //   ones(imms+1) << (datasize-1-imms)
-                    // NOT the low-bits wmask that the v0 code used. Using
-                    // the low-bits mask produced 0 for LSL (since the low
-                    // imms+1 bits of ROR(src, immr) come from src[imms+immr:immr],
-                    // which is unrelated to the shift result). This broke
-                    // musl's 128-bit softfloat helpers (__extenddftf2,
-                    // __fixunstfsi, …) which use `lsl x0, x0, #60` to
-                    // left-align an IEEE-754 mantissa, and was the root
-                    // cause of printf("%f", …) hanging forever.
-                    int len = imms + 1;
-                    uint64_t low_mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
-                    // tmask: the field occupies bits [datasize-1 : datasize-1-imms].
-                    int top_shift = datasize - 1 - imms;
-                    uint64_t high_mask = low_mask << top_shift;
-                    if (datasize == 32) high_mask &= 0xFFFFFFFFULL;
-                    uint64_t rotated;
-                    if (width == 64) {
-                        rotated = ror64(src, immr);
-                    } else {
-                        uint32_t s32 = (uint32_t)src;
-                        uint8_t r = immr & 31;
-                        rotated = (r == 0) ? s32 : ((s32 >> r) | (s32 << (32 - r)));
-                    }
+                    // The operation is: take the low (imms+1) bits of src,
+                    // optionally sign-extend (SBFM), and shift left by
+                    // (datasize - immr) to place them at the correct
+                    // position in the result.
+                    //
+                    // v1.4.0-alpha fix: the previous code used `high_mask`
+                    // (top bits) which was correct for LSL but WRONG for
+                    // SBFIZ/UBFIZ where the field is NOT at the top of
+                    // the register. This broke musl's smoothsort which
+                    // uses `sbfiz x3, x19, #3, #32` to compute
+                    // pshift * 8 for lp[] indexing — the result was 0
+                    // instead of the correct value, causing qsort to
+                    // produce wrong output for n >= 8.
+                    int width = imms + 1;
+                    int lsb = datasize - immr;
+                    uint64_t field = src & ((width >= 64) ? ~0ULL : ((1ULL << width) - 1));
                     if (opc == 0) {
-                        // SBFM (SBFIZ): place field at high bits, sign-extend
-                        // the field's sign bit (bit datasize-1 of rotated,
-                        // which corresponds to bit imms of src) DOWNWARD
-                        // into the bits BELOW the field (bits [datasize-1-imms-1 : 0]).
-                        uint64_t extracted = rotated & high_mask;
-                        uint64_t sign_bit = 1ULL << (datasize - 1);
-                        if (rotated & sign_bit) {
-                            // Bits below the field get sign-extended to 1.
-                            int below_bits = datasize - 1 - imms;  // count of bits below field
-                            if (below_bits > 0) {
-                                uint64_t below_mask = (below_bits >= 64)
-                                    ? ~0ULL : ((1ULL << below_bits) - 1);
-                                if (datasize == 32) below_mask &= 0xFFFFFFFFULL;
-                                extracted |= below_mask;
-                            }
+                        // SBFM (SBFIZ): sign-extend from bit width-1
+                        if (width < 64 && (field & (1ULL << (width - 1)))) {
+                            uint64_t high_bits = ~((1ULL << width) - 1);
+                            if (datasize == 32) high_bits &= 0xFFFFFFFFULL;
+                            field |= high_bits;
                         }
-                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                    }
+                    uint64_t result = (lsb >= 64) ? 0 : (field << lsb);
+                    if (datasize == 32) result &= 0xFFFFFFFFULL;
+                    if (opc == 0) {
+                        // SBFM
+                        if (d.rd != 31) cpu.regs[d.rd] = result;
                     } else if (opc == 2) {
-                        // UBFM (LSL / UBFIZ): just the field, zero everywhere else.
-                        uint64_t extracted = rotated & high_mask;
-                        if (d.rd != 31) cpu.regs[d.rd] = extracted;
+                        // UBFM
+                        if (d.rd != 31) cpu.regs[d.rd] = result;
                     } else {
-                        // BFM (BFI): insert src[width-1:0] into dst[lsb+width-1:lsb]
-                        // where lsb = (datasize - immr) MOD datasize, width = imms+1.
-                        // The field to replace is bits[lsb+width-1:lsb].
-                        // For 64-bit BFI: lsb = 64 - immr, so bits[64-immr+imms : 64-immr]
-                        //   = bits[imms-immr+64 mod 64 ... ] — but since imms < immr,
-                        //   the field wraps. Actually no: BFI doesn't wrap.
-                        //   The field is bits[lsb+width-1 : lsb] = bits[64-immr+imms : 64-immr]
-                        //   For BFI x3, x0, #48, #16: lsb=48, width=16, field = bits[63:48]
-                        //   mask<<lsb = 0xFFFF << 48 = 0xFFFF000000000000
-                        //   So we replace bits[63:48] of dst with bits[15:0] of src.
-                        //
-                        // The v0 bug: field_mask = mask | hi_mask was wrong.
-                        // Correct: dst_mask = low_mask << lsb, where lsb = (datasize - immr) % datasize.
-                        // (Note: dst_mask == high_mask when lsb == top_shift, but BFI
-                        // allows the field to live anywhere in the register, not just
-                        // at the very top, so we recompute it from low_mask here.)
-                        int lsb = (datasize - immr) % datasize;
-                        uint64_t dst_mask = (datasize == 64)
-                            ? (low_mask << lsb)
-                            : ((low_mask << lsb) & 0xFFFFFFFF);
-                        uint64_t src_field = (datasize == 64) ? (src & low_mask) : ((uint32_t)src & low_mask);
+                        // BFM (BFI): insert field into destination
+                        uint64_t dst_mask = (width >= 64) ? ~0ULL : ((1ULL << width) - 1);
+                        dst_mask = (lsb >= 64) ? 0 : (dst_mask << lsb);
+                        if (datasize == 32) dst_mask &= 0xFFFFFFFFULL;
                         uint64_t cur = cpu.regs[d.rd];
                         if (!d.sf) cur &= 0xFFFFFFFF;
                         uint64_t keep = cur & ~dst_mask;
-                        if (d.rd != 31) cpu.regs[d.rd] = keep | ((src_field << lsb) & dst_mask);
+                        if (d.rd != 31) cpu.regs[d.rd] = keep | (result & dst_mask);
                     }
                 }
                 if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
