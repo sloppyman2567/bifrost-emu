@@ -6,6 +6,107 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.3.0-beta.4] — 2026-06-19
+
+The "real hierarchical decoder" release. v1.3.0-beta.3 had a stub
+`switch (bits[28:24])` at the top of `decode()` that did nothing
+(`default: break;`) and then fell through to ~500 lines of flat
+`if ((inst & MASK) == VAL)` chains — a hierarchical decoder in name
+only. v1.3.0-beta.4 replaces that with a real two-level hierarchical
+switch: outer switch on bits `[28:24]` (the ARM ARM major encoding
+group), inner switch on the group-specific discriminator. Every flat
+`if` chain is now a `case` with early `return`.
+
+The rewrite also uncovered and fixed a long-standing latent bug: EXTR
+was unreachable in v0 because the bitfield check (mask `0x1F000000`,
+ignoring bit 23) shadowed the EXTR check (mask `0x1F800000`). Every
+EXTR instruction was silently misdecoded as SBFM/BFM/UBFM. The
+hierarchical version routes on bit 23 first, so EXTR is correctly
+decoded. The interpreter's EXTR handler was also fixed (operand order
+and undefined behavior — see below).
+
+### Added
+- **`extr` mnemonic in `mini_arm64_asm.py`** so test programs can use
+  EXTR directly. Encoding: `sf 00 100111 N Rm imms Rn Rd` (bits[28:23]
+  = `100111`).
+- **`test/extr.s`** — new test program that verifies EXTR works end-
+  to-end. Loads `x0 = 0xBABECAFE` and `x1 = 0xBEEFDEAD`, executes
+  `extr x2, x1, x0, #0` (which should give `x2 = x0 = 0xBABECAFE`),
+  compares against the expected value, and prints `OK` or `NO`. This
+  test would have failed silently on every prior version (EXTR was
+  misdecoded as SBFM).
+
+### Changed
+- **`decoder.cpp` rewritten as a true two-level hierarchical switch.**
+  Outer switch on bits `[28:24]` (5 bits, 32 major encoding groups);
+  inner switch on the group-specific discriminator (bits `[31:29]`,
+  bit 26, bit 23, bit 22, mode bits, opcodes). B/BL are pulled out
+  before the outer switch because their discriminator is bits
+  `[30:26]`, not bits `[28:24]` (imm26 leaks into bits[28:24]).
+  Field extraction is split: truly common fields (rd, rn, rm, rt, sf,
+  size, ...) are pulled out once at the top; group-specific fields
+  (imm, disp, atom_op, cmode, ...) are pulled out only in the case
+  that needs them.
+- **`interpreter.cpp` EXTR handler fixed** (see Fixed below).
+
+### Fixed
+- **EXTR was unreachable in v0.** The bitfield check (mask
+  `0x1F000000`, ignoring bit 23) came BEFORE the EXTR check (mask
+  `0x1F800000`, requiring bit 23 = 1). The bitfield mask matched
+  every EXTR encoding, so the EXTR check was unreachable — every
+  EXTR was silently misdecoded as SBFM/BFM/UBFM. The hierarchical
+  decoder routes on bit 23 first, so EXTR is correctly decoded. The
+  interpreter already had an EXTR case (it was just never reached).
+  A new test program (`test/extr.s`) verifies the behavior.
+- **EXTR interpreter operand order.** v0's interpreter concatenated
+  `Rm:Rn` instead of `Rn:Rm` (per the ARM ARM, EXTR extracts from the
+  concatenation `Xn:Xm`). For `lsb != 0`, this produced the wrong
+  result. Fixed to use `Rn:Rm`.
+- **EXTR interpreter undefined behavior.** v0's interpreter used
+  `(rn << width)` with `width == 64`, which is undefined behavior in
+  C++ (shifting a `uint64_t` by its full width). On x86_64 with GCC,
+  this typically produced 0 or the original value, which made the
+  EXTR result wrong even when the operand order was correct. Fixed
+  by using `__uint128_t` for the 128-bit concatenation.
+- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now decode
+  correctly. v0's flat masks caught only the 32-bit form (bits[31:29]
+  = 001). For example, `cbnz x0, label` (64-bit) would have been
+  misdecoded or rejected. The hierarchical version's inner switch on
+  bits[31:29] accepts both `001` (32-bit) and `101` (64-bit).
+- **BRK and HLT now enforce `bits[4:0] == 0`** per the ARM ARM. v0's
+  flat masks required this implicitly via the full 32-bit mask, but
+  the hierarchical version makes it an explicit check (and returns
+  `UNKNOWN` for non-zero `bits[4:0]`).
+- **Add/subtract extended register now enforces `bits[23:22] == 00`.**
+  v0's mask `0x1FE00000` required this implicitly; the hierarchical
+  version makes it an explicit check that returns `UNKNOWN` for
+  non-zero `bits[23:22]`.
+- **STP/LDP pre-index vs ORR collision is now structural.** v1.3.0-
+  beta.3 fixed this collision by careful if-chain ordering (checking
+  STP/LDP before logical shifted register). That fix was fragile —
+  any reordering of the if-chain could re-introduce the bug. v1.3.0-
+  beta.4 makes the fix structural: STP/LDP pre-index V=0 lives in
+  outer case `0x09`; logical shifted register lives in outer case
+  `0x0A`. They cannot collide regardless of code ordering.
+
+### Removed
+- **Stub `switch (bits[28:24])` in `decode()`.** v1.3.0-beta.3 had a
+  switch at the top of `decode()` that did nothing (`default: break;`)
+  and fell through to flat if-chains. v1.3.0-beta.4 replaces the
+  entire structure with a real hierarchical switch.
+- **Flat `if ((inst & MASK) == VAL)` chains in `decode()`.** All ~25
+  flat checks are now `case` labels in the hierarchical switch.
+
+### Compatibility
+- **No regressions.** All five original `.elf` test programs (hello,
+  count, fib, cat, echo) produce byte-identical output and exit codes
+  vs v1.3.0-beta.3.
+- **`extr.elf`** — new test, PASS.
+- **Musl-static C tests** (`hello.c`, `loop.c`, `test_malloc.c`) —
+  continue to work.
+- **`test_float.elf`** — pre-existing hang (musl's `printf("%f")`
+  softfloat path) is unchanged; not a regression.
+
 ## [1.3.0-beta.3] — 2026-06-19
 
 The "mallocng hang is finally fixed" release. The #1 blocker since

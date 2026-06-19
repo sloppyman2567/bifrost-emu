@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.3.0-beta.3
+  bifrost-emu  v1.3.0-beta.4
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.3.0-beta.3](https://img.shields.io/badge/version-1.3.0--beta.3-orange.svg)](CHANGELOG.md)
+[![Version: 1.3.0-beta.4](https://img.shields.io/badge/version-1.3.0--beta.4-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -51,22 +51,22 @@ No args? You get the banner. Try `--bifrost` for a hidden easter egg.
 ## Architecture
 
 ```
-┌──────────────────────┐         ┌───────────────────────┐
-│    decoder.cpp       │         │  interpreter.cpp      │
-│                      │         │                       │
-│  decode(d, inst)     │ ──────► │  switch(d.cls) {      │
-│                      │         │    case ADD_IMM:      │
-│  - bit patterns      │         │      res = a + b;     │
-│  - field extraction  │         │      break;           │
-│  - InstClass         │         │    case LDR_IMM:      │
-│  - SP/XZR disambig   │         │      ...              │
-│  - shift calc        │         │    ...                │
-│  - addressing        │         │  }                    │
-│                      │         │                       │
-│  NO execution        │         │  EXECUTE ONLY         │
-│                      │         │  - reads d.* fields   │
-│                      │         │  - no bit extraction  │
-└──────────────────────┘         └───────────────────────┘
+┌──────────────────────────┐         ┌───────────────────────┐
+│    decoder.cpp           │         │  interpreter.cpp      │
+│                          │         │                       │
+│  Hierarchical switch:    │         │  switch(d.cls) {      │
+│   outer: bits[28:24]     │ ──────► │    case ADD_IMM:      │
+│   inner: group-specific  │         │      res = a + b;     │
+│  ──────────────────────  │         │      break;           │
+│  - field extraction      │         │    case LDR_IMM:      │
+│  - InstClass             │         │      ...              │
+│  - SP/XZR disambig       │         │    ...                │
+│  - shift calc            │         │  }                    │
+│  - addressing            │         │                       │
+│                          │         │  EXECUTE ONLY         │
+│  NO execution            │         │  - reads d.* fields   │
+│                          │         │  - no bit extraction  │
+└──────────────────────────┘         └───────────────────────┘
          ▲
          │
 ┌────────┴─────────────┐
@@ -77,21 +77,50 @@ No args? You get the banner. Try `--bifrost` for a hidden easter egg.
 ```
 
 The **decoder** (`decoder.cpp`) is the single source of truth for
-instruction decode. It extracts all fields into a `DecodedInst` struct
-and classifies the instruction into an `InstClass` enum value. The
-decoder does NO execution — only bit extraction and classification.
+instruction decode. It is a true two-level hierarchical switch:
+
+- **Outer switch** on bits `[28:24]` — the 5-bit "major encoding group"
+  selector from the ARM ARM top-level encoding table. This routes each
+  instruction to one of 32 cases (most reserved), preventing the
+  encoding collisions that plague flat mask-and-compare decoders.
+- **Inner switch** on the group-specific discriminator — typically
+  bits `[31:29]` (opc/sf), bit 26 (V), bit 23, bit 22, the addressing-
+  mode bits, or a sub-opcode field, depending on the group.
+
+The decoder extracts all fields into a `DecodedInst` struct and
+classifies the instruction into an `InstClass` enum value. It does NO
+execution — only bit extraction and classification. B/BL are pulled
+out before the outer switch because their discriminator is bits
+`[30:26]`, not bits `[28:24]` (imm26 leaks into bits[28:24]).
 
 The **interpreter** (`interpreter.cpp`) dispatches on `d.cls` via a
-`switch` statement. Each case reads `d.*` fields and executes. The
-interpreter never does bit extraction (`op >> 22`, `(op & mask)`, etc.)
-— that's the decoder's job. **As of v1.3.0-beta.3, the legacy if-chain
-has been entirely deleted.** Every instruction handler lives in the
-`switch(d.cls)`.
+flat `switch` statement. Each case reads `d.*` fields and executes.
+The interpreter never does bit extraction (`op >> 22`, `(op & mask)`,
+etc.) — that's the decoder's job. The legacy if-chain was deleted in
+v1.3.0-beta.3; v1.3.0-beta.4 restructured the decoder itself from a
+flat if-chain into the hierarchical switch described above.
 
 A **decode cache** (`PC → DecodedInst`) avoids re-decoding the same
 instruction on repeated execution (tight loops). Since guest code is
 not self-modifying (static binaries only), each PC always decodes to
 the same instruction.
+
+### Hierarchical Decoder — Structural Properties
+
+The hierarchical structure prevents several long-standing encoding
+collisions by construction (no test ordering required):
+
+- **STP/LDP pre-index vs ORR** — STP/LDP pre-index V=0 lives in outer
+  case `0x09`; logical shifted register lives in outer case `0x0A`.
+  They cannot collide regardless of test order. (v0 had this collision
+  fixed only by careful if-chain ordering; the fix was fragile.)
+- **LSE atomics vs LDUR/STUR** — both live in outer case `0x18`, but
+  the inner switch dispatches on bit 21 + bits[11:10] mode, with an
+  explicit V (bit 26) check for LSE atomics (LSE requires V=0).
+- **EXTR vs SBFM/BFM/UBFM** — both live in outer case `0x13`, but the
+  inner check on bit 23 routes EXTR (bit 23 = 1) before the bitfield
+  opc switch. (v0 had a bug where the bitfield check ignored bit 23
+  and came first, making EXTR unreachable. v1.3.0-beta.4 fixes this.)
 
 ### Decoder Switch — Complete Coverage
 
@@ -210,6 +239,7 @@ bifrost-emu/
 | `repl.elf` | Line-buffered REPL ("got: \<line\>") |
 | `cat.elf` | Reads a file path from argv[1] and prints it |
 | `fib.elf` | Computes fib(30) and prints it in decimal |
+| `extr.elf` | Verifies EXTR instruction decode and execute |
 
 Assemble new test programs with:
 ```bash
@@ -231,6 +261,7 @@ aarch64-linux-musl-gcc -static -O2 -o prog.elf prog.c
 | `cat.elf` (assembled) | ✅ Works | |
 | `echo.elf` (assembled) | ✅ Works | Interactive, raw TTY |
 | `repl.elf` (assembled) | ✅ Works | Line-buffered |
+| `extr.elf` (assembled) | ✅ Works | Verifies EXTR (v1.3.0-beta.4) |
 | `hello_arm64_musl` (static) | ✅ Works | Full musl static |
 | `loop.elf` (musl static-PIE, `-O2`) | ✅ Works | `for` loop + `printf("%d")` |
 | `test_recursion.elf` (musl static) | ✅ Works | Recursive `fib(20)` |
@@ -302,6 +333,80 @@ static-PIE); PT_LOAD with BSS zero-fill; RELA relocations (JUMP_SLOT,
 GLOB_DAT, RELATIVE, ABS64); PT_NOTE parsing for GNU property features
 (LSE detection); full initial stack with argc/argv/envp/auxv (AT_PHDR,
 AT_ENTRY, AT_RANDOM, AT_HWCAP, etc.).
+
+## What's New in 1.3.0-beta.4
+
+**The decoder is now a true hierarchical switch.** v1.3.0-beta.3 had a
+stub `switch (bits[28:24])` at the top of `decode()` that did nothing
+(`default: break;`) and then fell through to ~500 lines of flat
+`if ((inst & MASK) == VAL)` chains. v1.3.0-beta.4 replaces that with
+a real two-level hierarchical switch: outer switch on bits `[28:24]`
+(the ARM ARM major encoding group), inner switch on the group-specific
+discriminator. Every flat `if` chain is now a `case` with early
+`return`.
+
+**EXTR is now actually decoded.** v0 had two dead-code bugs around
+EXTR:
+
+1. The bitfield check (mask `0x1F000000`, ignoring bit 23) came BEFORE
+   the EXTR check (mask `0x1F800000`, requiring bit 23 = 1). The
+   bitfield mask matched every EXTR encoding, so the EXTR check was
+   unreachable — every EXTR was silently misdecoded as
+   SBFM/BFM/UBFM. v1.3.0-beta.4 routes on bit 23 first, so EXTR is
+   correctly decoded.
+2. The interpreter's EXTR handler had the operand order backwards:
+   it concatenated `Rm:Rn` instead of `Rn:Rm` (per the ARM ARM,
+   EXTR extracts from the concatenation `Xn:Xm`). v1.3.0-beta.4
+   fixes the operand order.
+3. The interpreter's EXTR handler used `(rn << width)` with
+   `width == 64`, which is undefined behavior in C++ (shifting a
+   `uint64_t` by its full width). v1.3.0-beta.4 uses `__uint128_t`
+   for the 128-bit concatenation.
+
+The interpreter already had an `EXTR` case (it was just never
+reached). With the decoder fix, EXTR now works end-to-end. A new
+test program (`test/extr.s`) verifies the behavior.
+
+**Additional decoder correctness fixes:**
+
+- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now
+  decode correctly. v0's flat masks caught only the 32-bit form
+  (bits[31:29] = 001).
+- **BRK and HLT** now enforce `bits[4:0] == 0` per the ARM ARM. v0's
+  flat masks required this implicitly via the full 32-bit mask, but
+  the hierarchical version makes it explicit.
+- **Add/subtract extended register** now enforces `bits[23:22] == 00`
+  (v0's mask `0x1FE00000` required this implicitly; the hierarchical
+  version makes it an explicit check).
+- **SIMD data processing** now explicitly requires `bit 31 == 0`
+  (v0's mask `0x9E000000` included bit 31; the hierarchical version
+  checks it explicitly for clarity).
+- **Load/store various** (LDUR/STUR, LSE atomics, LDR/STR register
+  offset) now explicitly requires `bit 29 == 1` (v0's masks required
+  this implicitly).
+
+**STP/LDP pre-index collision fix is now structural.** v1.3.0-beta.3
+fixed the STP/LDP pre-index vs ORR collision by careful if-chain
+ordering (checking STP/LDP before logical shifted register). That fix
+was fragile — any reordering of the if-chain could re-introduce the
+bug. v1.3.0-beta.4 makes the fix structural: STP/LDP pre-index V=0
+lives in outer case `0x09`; logical shifted register lives in outer
+case `0x0A`. They cannot collide regardless of code ordering.
+
+**Added `extr` mnemonic to `mini_arm64_asm.py`** so test programs
+can use EXTR directly.
+
+**`test/extr.s`** — new test program that verifies EXTR works
+end-to-end. Loads `x0 = 0xBABECAFE` and `x1 = 0xBEEFDEAD`, executes
+`extr x2, x1, x0, #0` (which should give `x2 = x0 = 0xBABECAFE`),
+compares against the expected value, and prints `OK` or `NO`.
+
+**No regressions.** All five original `.elf` test programs (hello,
+count, fib, cat, echo) produce byte-identical output and exit codes
+vs v1.3.0-beta.3. The three working musl-static C tests
+(`hello.c`, `loop.c`, `test_malloc.c`) also continue to work. The
+pre-existing `test_float.elf` hang (musl's `printf("%f")` softfloat
+path) is unchanged — it's not a regression.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
@@ -444,14 +549,9 @@ This is beta-quality software. Known issues:
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
 - **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation bug.
-  Fix requires hierarchical decoder restructure, planned for v2.0.
+  Fix requires further decoder work, planned for v2.0.
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled
   instruction.
-- **Pre-index STP/LDP** (bit 25=1) shares its top-byte pattern with
-  ORR and is currently misclassified as logical shifted register.
-  This is a long-standing bug noted in the legacy if-chain comments;
-  it's preserved verbatim in the new switch. Proper fix requires
-  hierarchical decoder restructure (v2.0).
 - **`test_sdl2.elf`** gets past atomics and mallocng init (thanks to
   the beta.3 fixes) but hangs later in SDL2 setup. The hang watchdog
   catches it as a fast-fail.
@@ -469,11 +569,16 @@ This is beta-quality software. Known issues:
 2. SDL2 rendering for the graphics backend (video/audio/input) — the
    mallocng fix in beta.3 unblocks this; SDL2 init now gets past the
    allocator
-3. Pre-index STP/LDP proper fix (hierarchical decoder)
+3. Sub-decode the SIMD DP and FP scalar catch-all groups (currently
+   routed as generic `SIMD_DP` / `FP_SCALAR` and re-dispatched in the
+   interpreter; the hierarchical decoder structure makes adding
+   dedicated `InstClass` values for each a clean refactor)
 
 **Long-term (2.0+):**
 1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
-   interpreter. Target: 100-500 MIPS.
+   interpreter. Target: 100-500 MIPS. The hierarchical decoder
+   structure in v1.3.0-beta.4 makes this easier — the outer switch
+   on bits[28:24] maps directly to a JIT dispatch table.
 2. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
    statically-linked ARM64 SDL2 games at playable framerates.
 
