@@ -395,11 +395,50 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t src = cpu.regs[d.rn];
                 if (!d.sf) src &= 0xFFFFFFFF;
                 int datasize = width;
+
+                // Per ARM ARM, BFM/SBFM/UBFM all use DecodeBitMasks to compute
+                // wmask (write mask) and tmask (top mask), then:
+                //   bot = (dst & ~wmask) | (ROR(src, immr) & wmask)
+                //   dst = (dst & ~tmask) | (bot & tmask)         [BFM]
+                //   dst = sign_extend(bot, imms+1) & tmask        [SBFM]
+                //   dst = bot & tmask                              [UBFM]
+                //
+                // For SBFM/UBFM, dst is 0 (so bot = ROR(src, immr) & wmask).
+                // For BFM, dst is the current Rd value.
+                //
+                // DecodeBitMasks for the imms>=immr case (the "extract" case):
+                //   len = highest_set_bit(N:~imms)
+                //   esize = 1 << len
+                //   levels = esize - 1
+                //   S = imms & levels
+                //   R = immr & levels
+                //   if S == levels: reserved (we don't check)
+                //   wmask = replicate(ones(S+1) >> R within esize, esize)
+                //   tmask = replicate(ones(S+1) << (esize-1-S) within esize, esize)
+                //
+                // But there's a simpler equivalent for the common cases.
+                // For SBFM/UBFM when imms >= immr:
+                //   extracted = (src >> immr) & ones(imms-immr+1)
+                // For SBFM/UBFM when imms < immr:
+                //   extracted = ROR(src, immr) & ones(imms+1)
+                // For BFM when imms >= immr (BFXIL):
+                //   dst[imms:immr] = src[imms:immr]  (preserve rest of dst)
+                // For BFM when imms < immr (BFI):
+                //   dst[imms+immr:immr] = src[imms:0]  (preserve rest of dst)
+                //
+                // The v0 code had a bug in the BFI case: it computed
+                //   field_mask = mask | hi_mask
+                // which for BFI(x3, x0, #48, #16) gives field_mask = 0xFFFF | 0xFFFFFFFFFFFF0000 = ~0
+                // → replaces ALL of dst instead of just bits[63:48].
+                // This broke __floatsitf's BFI, corrupting 128-bit long doubles.
+
                 if (imms >= immr) {
+                    // BFXIL / extract case
                     int len = imms - immr + 1;
                     uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
                     uint64_t extracted = (src >> immr) & mask;
                     if (opc == 0) {
+                        // SBFM: sign-extend
                         uint64_t m = (1ULL << (len - 1));
                         if (extracted & m) {
                             uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
@@ -407,8 +446,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         }
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else if (opc == 2) {
+                        // UBFM
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else {
+                        // BFM (BFXIL): insert extracted at bits[imms:immr], preserve rest
                         uint64_t cur = cpu.regs[d.rd];
                         if (!d.sf) cur &= 0xFFFFFFFF;
                         uint64_t dst_mask = mask << immr;
@@ -416,14 +457,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (d.rd != 31) cpu.regs[d.rd] = keep | ((extracted << immr) & dst_mask);
                     }
                 } else {
+                    // BFI / rotate case (imms < immr)
                     int len = imms + 1;
                     uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
-                    // For 32-bit, rotate within 32 bits — ror64 would put
-                    // wrapped bits above bit 32 where the (uint32_t) cast
-                    // drops them. This was the root cause of the mallocng
-                    // hang: `lsl w24, w26, #4` (= ubfm w24, w26, #28, #27)
-                    // produced 0 instead of 32, making the stride 0, which
-                    // caused alloc_slot to recurse infinitely.
                     uint64_t rotated;
                     if (width == 64) {
                         rotated = ror64(src, immr);
@@ -434,6 +470,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     uint64_t extracted = rotated & mask;
                     if (opc == 0) {
+                        // SBFM: sign-extend
                         uint64_t m = (1ULL << (len - 1));
                         if (extracted & m) {
                             uint64_t high = ~mask & (datasize == 64 ? ~0ULL : (1ULL<<datasize)-1);
@@ -441,15 +478,31 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         }
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else if (opc == 2) {
+                        // UBFM
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else {
-                        uint64_t hi_mask = ~((1ULL << immr) - 1);
-                        if (datasize == 32) hi_mask &= 0xFFFFFFFF;
-                        uint64_t field_mask = mask | hi_mask;
+                        // BFM (BFI): insert src[width-1:0] into dst[lsb+width-1:lsb]
+                        // where lsb = (datasize - immr) MOD datasize, width = imms+1.
+                        // The field to replace is bits[lsb+width-1:lsb].
+                        // For 64-bit BFI: lsb = 64 - immr, so bits[64-immr+imms : 64-immr]
+                        //   = bits[imms-immr+64 mod 64 ... ] — but since imms < immr,
+                        //   the field wraps. Actually no: BFI doesn't wrap.
+                        //   The field is bits[lsb+width-1 : lsb] = bits[64-immr+imms : 64-immr]
+                        //   For BFI x3, x0, #48, #16: lsb=48, width=16, field = bits[63:48]
+                        //   mask<<lsb = 0xFFFF << 48 = 0xFFFF000000000000
+                        //   So we replace bits[63:48] of dst with bits[15:0] of src.
+                        //
+                        // The v0 bug: field_mask = mask | hi_mask was wrong.
+                        // Correct: dst_mask = mask << lsb, where lsb = (datasize - immr) % datasize.
+                        int lsb = (datasize - immr) % datasize;
+                        uint64_t dst_mask = (datasize == 64)
+                            ? (mask << lsb)
+                            : ((mask << lsb) & 0xFFFFFFFF);
+                        uint64_t src_field = (datasize == 64) ? (src & mask) : ((uint32_t)src & mask);
                         uint64_t cur = cpu.regs[d.rd];
                         if (!d.sf) cur &= 0xFFFFFFFF;
-                        uint64_t rotated_w = (datasize == 64) ? rotated : (uint32_t)rotated;
-                        if (d.rd != 31) cpu.regs[d.rd] = (cur & ~field_mask) | (rotated_w & field_mask);
+                        uint64_t keep = cur & ~dst_mask;
+                        if (d.rd != 31) cpu.regs[d.rd] = keep | ((src_field << lsb) & dst_mask);
                     }
                 }
                 if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
@@ -1226,24 +1279,42 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool Q = (op >> 30) & 1;
                 bool U = (op >> 29) & 1;
                 uint8_t size = (op >> 22) & 3;
-                uint8_t opcode = (op >> 12) & 0x1F;
                 uint8_t rm = (op >> 16) & 0x1F;
                 uint8_t rn = (op >> 5) & 0x1F;
                 uint8_t rd = op & 0x1F;
-                (void)U; (void)opcode;  // used in sub-dispatch below
+                (void)U;
 
-                // DUP (general)
-                if ((op & 0xFFE0FC00) == 0x0E000C00) {
+                // Sub-discriminator: bits[15:10] select the SIMD DP operation.
+                // We mask off the Q bit (30) so both Q=0 (8-byte) and Q=1
+                // (16-byte) forms route to the same handler. The Q bit is
+                // passed separately to each handler via the `Q` variable.
+                //
+                // IMPROVEMENT over v0: v0 used flat if-chains with masks
+                // that sometimes included bit 30 (Q), causing Q=1 forms
+                // of DUP, INS, ORR(MOV), and EXT to be silently NOP'd.
+                // This broke musl's 128-bit long-double softfloat, which
+                // uses `mov v1.16b, v0.16b` to copy 128-bit values.
+                uint32_t sub = op & 0xFFE0FC00;  // bits[31:24] + bits[20:10]
+                // Strip Q from sub for matching purposes
+                uint32_t sub_noq = sub & ~(1u << 30);
+
+                switch (sub_noq) {
+                // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
+                // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).
+                // Fixed: strip Q, match both forms.
+                case 0x0E000C00: {
                     uint8_t imm5 = (op >> 16) & 0x1F;
                     int esize;
-                    if (imm5 == 0x01) esize = 1;
-                    else if (imm5 == 0x02) esize = 2;
-                    else if (imm5 == 0x04) esize = 4;
-                    else if (imm5 == 0x08) esize = 8;
-                    else throw DecodeError(cpu.pc, inst);
+                    switch (imm5) {
+                        case 0x01: esize = 1; break;
+                        case 0x02: esize = 2; break;
+                        case 0x04: esize = 4; break;
+                        case 0x08: esize = 8; break;
+                        default: throw DecodeError(cpu.pc, inst);
+                    }
                     int elems = (Q ? 16 : 8) / esize;
                     uint64_t src = cpu.regs[rn];
-                    uint8_t bytes[16];
+                    uint8_t bytes[16] = {0};
                     for (int i = 0; i < elems; i++) {
                         uint64_t v = src;
                         if (esize == 1) v = src & 0xFF;
@@ -1256,8 +1327,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // INS (general)
-                if ((op & 0xFFE0FC00) == 0x4E000C00) {
+                // ── INS (general): sf 0 0 11110 10 0 imm5 0000 0 1 Rn Rd ──
+                case 0x4E000C00: {
                     uint8_t imm5 = (op >> 16) & 0x1F;
                     int esize = 0, idx = 0;
                     for (int b = 0; b < 5; b++) {
@@ -1274,248 +1345,70 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // ORR (vector) — alias for MOV (vector)
-                if ((op & 0xFF20FC00) == 0x0EA01C00) {
+                // ── ORR (vector) / MOV (vector alias): ... 0 1 Rn 0 0 0 1 1 1 0 0 0 0 0 Rm Rd
+                // v0 mask 0xFF20FC00 val 0x0EA01C00 only matched Q=0.
+                // Also note: v0 had a separate "ORR (vector) — full form"
+                // check at 0x0EA01C00 that was unreachable (the MOV alias
+                // caught it first). Merged here.
+                case 0x0EA01C00: {
                     cpu.v_lo[rd] = cpu.v_lo[rn] | cpu.v_lo[rm];
                     if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] | cpu.v_hi[rm];
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // EXT (extract)
-                if ((op & 0xFFE00000) == 0x6E000000) {
-                    uint8_t imm4 = (op >> 11) & 0xF;
-                    uint8_t buf[32];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    memcpy(buf + 16, &cpu.v_lo[rm], 8);
-                    memcpy(buf + 24, &cpu.v_hi[rm], 8);
-                    uint8_t out[16] = {0};
-                    int nbytes = Q ? 16 : 8;
-                    memcpy(out, buf + imm4, nbytes);
-                    memcpy(&cpu.v_lo[rd], out, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // REV16 (vector)
-                if ((op & 0xBFFFFC00) == 0x0E201800) {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i += 2) std::swap(buf[i], buf[i+1]);
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // REV32 (vector)
-                if ((op & 0xBFFFFC00) == 0x0E203800) {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i += 4) {
-                        std::swap(buf[i], buf[i+3]);
-                        std::swap(buf[i+1], buf[i+2]);
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // REV64 (vector)
-                if ((op & 0xBFFFFC00) == 0x0E200800) {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i += 8) {
-                        for (int j = 0; j < 4; j++) std::swap(buf[i+j], buf[i+7-j]);
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // CNT (vector)
-                if ((op & 0xBFFFFC00) == 0x0E205800) {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i++) buf[i] = __builtin_popcount(buf[i]);
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // UADDLV (addv)
-                if ((op & 0xBF3FFC00) == 0x0E31B800) {
-                    int esize = 1 << size;
-                    int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    uint64_t sum = 0;
-                    for (int i = 0; i < elems; i++) {
-                        uint64_t v = 0;
-                        memcpy(&v, buf + i * esize, esize);
-                        sum += v;
-                    }
-                    cpu.v_lo[rd] = sum;
-                    cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // CMEQ vs zero
-                if ((op & 0xBF9FFC00) == 0x0E208800) {
-                    int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
-                    int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    for (int i = 0; i < elems; i++) {
-                        bool is_zero = true;
-                        for (int b = 0; b < esize; b++) {
-                            if (buf[i*esize + b] != 0) { is_zero = false; break; }
-                        }
-                        memset(buf + i*esize, is_zero ? 0xFF : 0x00, esize);
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // CMEQ two registers
-                if ((op & 0xBFE0FC00) == 0x2E208C00) {
-                    int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
-                    int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf_rn[16], buf_rm[16];
-                    memcpy(buf_rn, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf_rn + 8, &cpu.v_hi[rn], 8);
-                    memcpy(buf_rm, &cpu.v_lo[rm], 8);
-                    if (Q) memcpy(buf_rm + 8, &cpu.v_hi[rm], 8);
-                    uint8_t out[16] = {0};
-                    for (int i = 0; i < elems; i++) {
-                        bool eq = (memcmp(buf_rn + i*esize, buf_rm + i*esize, esize) == 0);
-                        memset(out + i*esize, eq ? 0xFF : 0x00, esize);
-                    }
-                    memcpy(&cpu.v_lo[rd], out, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // MOVI (vector immediate) — mask excludes bit 30 (Q) so both
-                // Q=0 (8B/4H/2S/1D) and Q=1 (16B/8H/4S/2D) forms match.
-                if ((op & 0x1F8FFC00) == 0x0F00E400) {
-                    uint8_t cmode = (op >> 12) & 0xF;
-                    uint8_t imm8 = ((op >> 16) & 0x1F) << 3 | ((op >> 5) & 0x7);
-                    if (cmode == 0xE) {
-                        uint64_t val = imm8;
-                        cpu.v_lo[rd] = val;
-                        if (Q) cpu.v_hi[rd] = val;
-                        else cpu.v_hi[rd] = 0;
-                    } else {
-                        uint8_t buf[16];
-                        memset(buf, imm8, Q ? 16 : 8);
-                        memcpy(&cpu.v_lo[rd], buf, 8);
-                        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                        else cpu.v_hi[rd] = 0;
-                    }
-                    return;
-                }
-                // SHL (vector, immediate)
-                if ((op & 0xBF00FC00) == 0x0F00A400) {
-                    uint8_t immh = (op >> 19) & 0xF;
-                    uint8_t immb = (op >> 16) & 0xF;
-                    int esize, shift;
-                    if (immh == 0) return;
-                    else if (immh < 2) { esize = 1; shift = (immh & 1) << 4 | immb; }
-                    else if (immh < 4) { esize = 2; shift = (immh & 3) << 4 | immb; }
-                    else if (immh < 8) { esize = 4; shift = (immh & 7) << 4 | immb; }
-                    else { esize = 8; shift = (immh & 0xF) << 4 | immb; }
-                    int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    for (int i = 0; i < elems; i++) {
-                        uint64_t v = 0;
-                        memcpy(&v, buf + i*esize, esize);
-                        v <<= shift;
-                        v &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
-                        memcpy(buf + i*esize, &v, esize);
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // USHR (vector, immediate)
-                if ((op & 0xBF00FC00) == 0x2F000400) {
-                    uint8_t immh = (op >> 19) & 0xF;
-                    uint8_t immb = (op >> 16) & 0xF;
-                    int esize, shift;
-                    if (immh == 0) return;
-                    else if (immh < 2) { esize = 1; shift = (8 - (((immh & 1) << 4) | immb)); }
-                    else if (immh < 4) { esize = 2; shift = (16 - (((immh & 3) << 4) | immb)); }
-                    else if (immh < 8) { esize = 4; shift = (32 - (((immh & 7) << 4) | immb)); }
-                    else { esize = 8; shift = (64 - (((immh & 0xF) << 4) | immb)); }
-                    int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    for (int i = 0; i < elems; i++) {
-                        uint64_t v = 0;
-                        memcpy(&v, buf + i*esize, esize);
-                        v >>= shift;
-                        memcpy(buf + i*esize, &v, esize);
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // EOR (vector)
-                if ((op & 0xBFE0FC00) == 0x2E201C00) {
-                    cpu.v_lo[rd] = cpu.v_lo[rn] ^ cpu.v_lo[rm];
-                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] ^ cpu.v_hi[rm];
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // AND (vector)
-                if ((op & 0xBFE0FC00) == 0x0E201C00) {
-                    cpu.v_lo[rd] = cpu.v_lo[rn] & cpu.v_lo[rm];
-                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] & cpu.v_hi[rm];
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // ORR (vector) — full form
-                if ((op & 0xBFE0FC00) == 0x0EA01C00) {
-                    cpu.v_lo[rd] = cpu.v_lo[rn] | cpu.v_lo[rm];
-                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] | cpu.v_hi[rm];
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // BIC (vector)
-                if ((op & 0xBFE0FC00) == 0x0EA01800) {
+                // ── BIC (vector): ... 1 1 Rn 0 0 0 1 1 0 0 0 0 0 Rm Rd ──
+                case 0x0EA01800: {
                     cpu.v_lo[rd] = cpu.v_lo[rn] & ~cpu.v_lo[rm];
                     if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] & ~cpu.v_hi[rm];
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // MVN/NOT (vector) — note: encoding collides with CNT in the
-                // original code (same mask 0xBFFFFC00 == 0x0E205800). The
-                // original code's MVN branch was unreachable. Kept here for
-                // source fidelity; the CNT case above catches it first.
-                // TBL/TBX (stub: copy Vn to Vd)
-                if ((op & 0xBFE0FC00) == 0x0E000000 || (op & 0xBFE0FC00) == 0x0E001000) {
+                // ── AND (vector) ──
+                case 0x0E201C00: {
+                    cpu.v_lo[rd] = cpu.v_lo[rn] & cpu.v_lo[rm];
+                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] & cpu.v_hi[rm];
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── EOR (vector) ──
+                case 0x2E201C00: {
+                    cpu.v_lo[rd] = cpu.v_lo[rn] ^ cpu.v_lo[rm];
+                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] ^ cpu.v_hi[rm];
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── TBL/TBX (stub: copy Vn to Vd) ──
+                case 0x0E000000:
+                case 0x0E001000: {
                     cpu.v_lo[rd] = cpu.v_lo[rn];
                     if (Q) cpu.v_hi[rd] = cpu.v_hi[rn];
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // UMAXP/UMINP/SMAXP/SMINP family
-                if ((op & 0xBFE0FC00) == 0x2E20A400) {
+                // ── CMHS (vector) ──
+                case 0x2E203400: {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf_n[16], buf_m[16];
+                    memcpy(buf_n, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf_m, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    uint8_t out[16] = {0};
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t n = 0, m = 0;
+                        memcpy(&n, buf_n + i*esize, esize);
+                        memcpy(&m, buf_m + i*esize, esize);
+                        bool ge = (n >= m);
+                        memset(out + i*esize, ge ? 0xFF : 0x00, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── UMAXP/UMINP/SMAXP/SMINP family ──
+                case 0x2E20A400: {
                     bool C = (op >> 15) & 1;
                     int esize = 1 << size;
                     int elems = (Q ? 16 : 8) / esize;
@@ -1549,29 +1442,211 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // CMHS (vector)
-                if ((op & 0xBFE0FC00) == 0x2E203400) {
-                    int esize = 1 << size;
+                // ── CMEQ two registers ──
+                case 0x2E208C00: {
+                    int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
                     int elems = (Q ? 16 : 8) / esize;
-                    uint8_t buf_n[16], buf_m[16];
-                    memcpy(buf_n, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-                    memcpy(buf_m, &cpu.v_lo[rm], 8);
-                    if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    uint8_t buf_rn[16], buf_rm[16];
+                    memcpy(buf_rn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf_rn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf_rm, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(buf_rm + 8, &cpu.v_hi[rm], 8);
                     uint8_t out[16] = {0};
                     for (int i = 0; i < elems; i++) {
-                        uint64_t n = 0, m = 0;
-                        memcpy(&n, buf_n + i*esize, esize);
-                        memcpy(&m, buf_m + i*esize, esize);
-                        bool ge = (n >= m);
-                        memset(out + i*esize, ge ? 0xFF : 0x00, esize);
+                        bool eq = (memcmp(buf_rn + i*esize, buf_rm + i*esize, esize) == 0);
+                        memset(out + i*esize, eq ? 0xFF : 0x00, esize);
                     }
                     memcpy(&cpu.v_lo[rd], out, 8);
                     if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SHRN (vector, immediate)
+                default: break;  // fall through to size-based checks below
+                }
+
+                // Sub-discriminator: bits[15:10] with size field, for ops
+                // that have a different mask shape (REV/CNT/UADDLV/CMEQ#0).
+                uint32_t sub2 = op & 0xBFFFFC00;  // mask off Q (30) and Rm (20:16)
+                switch (sub2) {
+                // ── REV64 (vector) ──
+                case 0x0E200800: {
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    int nbytes = Q ? 16 : 8;
+                    for (int i = 0; i < nbytes; i += 8) {
+                        for (int j = 0; j < 4; j++) std::swap(buf[i+j], buf[i+7-j]);
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── REV16 (vector) ──
+                case 0x0E201800: {
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    int nbytes = Q ? 16 : 8;
+                    for (int i = 0; i < nbytes; i += 2) std::swap(buf[i], buf[i+1]);
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── REV32 (vector) ──
+                case 0x0E203800: {
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    int nbytes = Q ? 16 : 8;
+                    for (int i = 0; i < nbytes; i += 4) {
+                        std::swap(buf[i], buf[i+3]);
+                        std::swap(buf[i+1], buf[i+2]);
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── CNT (vector) ──
+                case 0x0E205800: {
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    int nbytes = Q ? 16 : 8;
+                    for (int i = 0; i < nbytes; i++) buf[i] = __builtin_popcount(buf[i]);
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── CMEQ vs zero ──
+                case 0x0E208800: {
+                    int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        bool is_zero = true;
+                        for (int b = 0; b < esize; b++) {
+                            if (buf[i*esize + b] != 0) { is_zero = false; break; }
+                        }
+                        memset(buf + i*esize, is_zero ? 0xFF : 0x00, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                default: break;
+                }
+
+                // UADDLV — unique mask shape.
+                if ((op & 0xBF3FFC00) == 0x0E31B800) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    uint64_t sum = 0;
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t v = 0;
+                        memcpy(&v, buf + i * esize, esize);
+                        sum += v;
+                    }
+                    cpu.v_lo[rd] = sum;
+                    cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // EXT (extract) — v0 mask 0xFFE00000 val 0x6E000000
+                // MISSED Q=0 form. Fixed: strip Q from the comparison.
+                if ((op & 0xBFE00000) == 0x2E000000) {
+                    uint8_t imm4 = (op >> 11) & 0xF;
+                    uint8_t buf[32];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf + 16, &cpu.v_lo[rm], 8);
+                    memcpy(buf + 24, &cpu.v_hi[rm], 8);
+                    uint8_t out[16] = {0};
+                    int nbytes = Q ? 16 : 8;
+                    memcpy(out, buf + imm4, nbytes);
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // MOVI (vector immediate) — mask excludes Q already (0x1F8FFC00).
+                if ((op & 0x1F8FFC00) == 0x0F00E400) {
+                    uint8_t cmode = (op >> 12) & 0xF;
+                    uint8_t imm8 = ((op >> 16) & 0x1F) << 3 | ((op >> 5) & 0x7);
+                    if (cmode == 0xE) {
+                        uint64_t val = imm8;
+                        cpu.v_lo[rd] = val;
+                        if (Q) cpu.v_hi[rd] = val;
+                        else cpu.v_hi[rd] = 0;
+                    } else {
+                        uint8_t buf[16];
+                        memset(buf, imm8, Q ? 16 : 8);
+                        memcpy(&cpu.v_lo[rd], buf, 8);
+                        if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                        else cpu.v_hi[rd] = 0;
+                    }
+                    return;
+                }
+                // SHL (vector, immediate) — mask 0xBF00FC00 excludes Q.
+                if ((op & 0xBF00FC00) == 0x0F00A400) {
+                    uint8_t immh = (op >> 19) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) return;
+                    else if (immh < 2) { esize = 1; shift = (immh & 1) << 4 | immb; }
+                    else if (immh < 4) { esize = 2; shift = (immh & 3) << 4 | immb; }
+                    else if (immh < 8) { esize = 4; shift = (immh & 7) << 4 | immb; }
+                    else { esize = 8; shift = (immh & 0xF) << 4 | immb; }
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t v = 0;
+                        memcpy(&v, buf + i*esize, esize);
+                        v <<= shift;
+                        v &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
+                        memcpy(buf + i*esize, &v, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // USHR (vector, immediate) — mask 0xBF00FC00 excludes Q.
+                if ((op & 0xBF00FC00) == 0x2F000400) {
+                    uint8_t immh = (op >> 19) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) return;
+                    else if (immh < 2) { esize = 1; shift = (8 - (((immh & 1) << 4) | immb)); }
+                    else if (immh < 4) { esize = 2; shift = (16 - (((immh & 3) << 4) | immb)); }
+                    else if (immh < 8) { esize = 4; shift = (32 - (((immh & 7) << 4) | immb)); }
+                    else { esize = 8; shift = (64 - (((immh & 0xF) << 4) | immb)); }
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t v = 0;
+                        memcpy(&v, buf + i*esize, esize);
+                        v >>= shift;
+                        memcpy(buf + i*esize, &v, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // SHRN (vector, immediate) — mask 0xBF00FC00 excludes Q.
                 if ((op & 0xBF00FC00) == 0x0F008400) {
                     uint8_t immh = (op >> 19) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;

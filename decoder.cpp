@@ -642,7 +642,16 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 // Cond compare (CCMP/CCMN). Requires bit 29 = 1.
                 if (!bit29) return false;
                 d.is_sub      = (inst >> 30) & 1;
-                d.is_register = (inst >> 21) & 1;  // always 0 here
+                // Register vs immediate form is distinguished by bit 11:
+                //   bit 11 = 0 → register form (operand is Rm)
+                //   bit 11 = 1 → immediate form (operand is imm5)
+                // v0 used bit 21 which is always 0 (the encoding group
+                // requires it), so CCMP was always treated as immediate
+                // form. This broke __eqtf2 which uses `ccmp x6, x7, #0, eq`
+                // (register form) — the emulator compared x6 with #7
+                // instead of x7, producing wrong flags and making
+                // printf("%f") hang forever.
+                d.is_register = !((inst >> 11) & 1);
                 d.rm          = (inst >> 16) & 0x1F;
                 d.cond        = (inst >> 12) & 0xF;
                 d.rn          = (inst >> 5) & 0x1F;
@@ -652,17 +661,27 @@ bool decode(DecodedInst& d, uint32_t inst) {
             }
             case 0b10: {
                 // Cond select (CSEL/CSINC/CSINV/CSNEG)
-                uint8_t op = (inst >> 10) & 3;
+                // Encoding uses BOTH bits[30:29] (opc) AND bits[11:10] (op2):
+                //   opc=00, op2=00 → CSEL
+                //   opc=00, op2=01 → CSINC
+                //   opc=10, op2=00 → CSINV
+                //   opc=10, op2=01 → CSNEG
+                // v0 only checked bits[11:10], confusing CSINC with CSNEG
+                // and CSINV with CSEL. This broke CNEG (alias for CSNEG
+                // with inverted condition), which is used by __gttf2 and
+                // __lttf2 to negate the return value — producing -1
+                // instead of 1, breaking all long double comparisons.
+                uint8_t opc = (inst >> 29) & 3;
+                uint8_t op2 = (inst >> 10) & 3;
                 d.rm   = (inst >> 16) & 0x1F;
                 d.cond = (inst >> 12) & 0xF;
                 d.rn   = (inst >> 5) & 0x1F;
                 d.rd   = inst & 0x1F;
-                switch (op) {
-                    case 0: d.cls = InstClass::CSEL;  break;
-                    case 1: d.cls = InstClass::CSINC; break;
-                    case 2: d.cls = InstClass::CSINV; break;
-                    case 3: d.cls = InstClass::CSNEG; break;
-                }
+                if (opc == 0 && op2 == 0)      d.cls = InstClass::CSEL;
+                else if (opc == 0 && op2 == 1) d.cls = InstClass::CSINC;
+                else if (opc == 2 && op2 == 0) d.cls = InstClass::CSINV;
+                else if (opc == 2 && op2 == 1) d.cls = InstClass::CSNEG;
+                else return false;
                 return true;
             }
             case 0b11: {
