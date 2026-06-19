@@ -122,6 +122,23 @@ release. Three major areas of improvement:
   uses `readv` with 2 iovecs (putback area + user buffer). Added
   case 65 (readv) and correctly relabeled case 67 (preadv64).
 
+- **`isatty()` always returned true.** The ioctl handler returned
+  success (`0`) for every unknown ioctl, including `TIOCGWINSZ`
+  (which musl's `isatty()` uses as a fast-path probe). This made
+  `isatty()` always return `true` — even for pipes and regular
+  files — breaking musl's stdio buffering decisions on non-tty
+  stdin. The handler now:
+  - Forwards `TIOCGWINSZ` (0x5413) to the host so a real tty
+    returns the actual window size and a pipe/file returns
+    `-ENOTTY`.
+  - Forwards `TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF` (0x5401-0x5404)
+    to the host with proper termios marshalling.
+  - Forwards `FIONREAD` (0x541B) to the host so guest select/poll
+    loops see correct byte counts.
+  - Returns `-ENOTTY` for all other unknown ioctls (matching real
+    kernel behavior).
+  Interactive keyboard input now works end-to-end via a real PTY.
+
 ### Known issues (real-world testing)
 
 - **NEON bug in `strtok`/`strtok_r` path.** musl's `strtok` and
@@ -144,9 +161,12 @@ release. Three major areas of improvement:
 - Throughput: `fib(40)` = 102334155 in ~23ms (~140 MIPS); `yes`
   emits ~150M lines/sec through the emulator.
 - Interactive shell (`sh.elf`): `help`, `echo hello world`,
-  `eval 6*7` → `= 42`, `exit` all work.
+  `eval 6*7` → `= 42`, `exit` all work — both with piped input and
+  with interactive keyboard input via a real PTY.
+- `isatty()` correctly returns `false` for pipes and `/dev/null`,
+  `true` for actual terminals.
 - No regressions on the original `test/*.elf` and `ctest/*.elf`
-  test suites.
+  test suites (including the framebuffer `--fb-dump` test).
 
 
 - **Direct-mapped decode cache.** 4096-entry flat array replacing

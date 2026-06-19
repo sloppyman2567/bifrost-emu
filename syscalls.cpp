@@ -597,16 +597,21 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(brk_);
             return;
         }
-        case 29: { // ioctl - handle TIOCGWINSZ, FBIOGET_* etc.
-            // Return a sane window size for interactive use.
+        case 29: { // ioctl(fd, request, argp) — AArch64 syscall 29
+            // TIOCGWINSZ: query terminal window size. musl's isatty()
+            // uses this as a fast-path probe — if it succeeds, the fd
+            // is considered a tty. We MUST forward to the host so
+            // isatty() correctly returns false for pipes/files.
+            // (Previously we always returned success with a fake
+            // 24x80 size, which made isatty() always return true —
+            // breaking musl's stdio buffering decisions.)
             if (a1 == 0x5413 /*TIOCGWINSZ*/) {
                 struct winsize ws;
-                if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-                    mem_.write(a2, &ws, sizeof(ws));
-                    ret_host(0);
+                int r = ::ioctl((int)a0, TIOCGWINSZ, &ws);
+                if (r < 0) {
+                    ret_host((uint64_t)(int64_t)-errno);
                 } else {
-                    struct winsize def { 24, 80, 0, 0 };
-                    mem_.write(a2, &def, sizeof(def));
+                    mem_.write(a2, &ws, sizeof(ws));
                     ret_host(0);
                 }
                 return;
@@ -631,15 +636,60 @@ void Emulator::syscall(CPU& cpu) {
                     cpu.regs[0] = (uint64_t)(int64_t)r;
                 } else {
                     // sizeof(struct fb_var_screeninfo) = 160
-                    // sizeof(struct fb_fix_screeninfo) = 72
-                    size_t out_sz = (a1 == FBIOGET_VSCREENINFO) ? 160 : 72;
+                    // sizeof(struct fb_fix_screeninfo) = 80 (LP64)
+                    size_t out_sz = (a1 == FBIOGET_VSCREENINFO) ? 160 : 80;
                     mem_.write(a2, host_buf, out_sz);
                     ret_host(0);
                 }
                 return;
             }
-            // Most other ioctls on terminal we can no-op successfully
-            ret_host(0);
+            // Terminal attribute ioctls (TCGETS, TCSETS, etc.).
+            // Forward to the host so isatty() works correctly: musl's
+            // isatty() calls ioctl(fd, TCGETS, &termios) and considers
+            // the fd a tty iff that returns 0. Previously we returned
+            // 0 for EVERY unknown ioctl, which made isatty() always
+            // return true — even for pipes and regular files. That
+            // broke musl's stdio: it would pick line-buffered mode
+            // for non-tty stdin, and the interactive shell would
+            // hang waiting for keyboard input that never came.
+            //
+            // TCGETS reads the termios struct; TCSETS/TCSETSW/TCSETSF
+            // write it. Both structs are identical layout (struct
+            // termios, ~60 bytes on Linux). We marshal through a
+            // host-side buffer because a2 is a guest virtual address.
+            if (a1 == 0x5401 /*TCGETS*/) {
+                struct termios t;
+                int r = ::ioctl((int)a0, TCGETS, &t);
+                if (r == 0) mem_.write(a2, &t, sizeof(t));
+                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                else       ret_host(r);
+                return;
+            }
+            if (a1 == 0x5402 /*TCSETS*/ || a1 == 0x5403 /*TCSETSW*/ ||
+                a1 == 0x5404 /*TCSETSF*/) {
+                struct termios t;
+                mem_.read(a2, &t, sizeof(t));
+                int r = ::ioctl((int)a0, (unsigned long)a1, &t);
+                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                else       ret_host(r);
+                return;
+            }
+            // FIONREAD (0x541B): how many bytes can be read without
+            // blocking. Forward to host so guest select/poll loops
+            // work correctly.
+            if (a1 == 0x541B /*FIONREAD*/) {
+                int n = 0;
+                int r = ::ioctl((int)a0, FIONREAD, &n);
+                if (r == 0) mem_.store<int32_t>(a2, n);
+                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                else       ret_host(r);
+                return;
+            }
+            // TIOCGETD / TIOCSETD / TIOCNOTTY etc. — pass through.
+            // Anything we don't recognize: return -ENOTTY so callers
+            // (especially isatty()) can correctly distinguish ttys
+            // from non-ttys.
+            ret_host((uint64_t)(int64_t)-ENOTTY);
             return;
         }
         case 17: { // getcwd(buf, size) — AArch64 syscall 17

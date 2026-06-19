@@ -609,7 +609,16 @@ with stdin all produce expected output. Throughput:
 **Interactive shell verified:** `ctest_real/sh.elf` is a tiny REPL
 that supports `help`, `echo ARGS`, `eval EXPR` (arithmetic), and
 `exit [N]`. It uses a manual tokenizer instead of `strtok` (see
-Limitations below).
+Limitations below). Interactive keyboard input works end-to-end
+via a real PTY — type commands at the `bifrost-sh$ ` prompt and
+they execute as expected.
+
+**`isatty()` fixed:** the ioctl handler previously returned success
+for every unknown ioctl (including `TIOCGWINSZ`), which made
+`isatty()` always return `true` — even for pipes and regular files.
+This broke musl's stdio buffering decisions on non-tty stdin. The
+handler now forwards `TIOCGWINSZ`, `TCGETS`/`TCSETS`/etc., and
+`FIONREAD` to the host, and returns `-ENOTTY` for everything else.
 
 **Latent NEON bug discovered:** musl's `strtok`/`strtok_r` expose a
 NEON/SIMD corruption bug (see Limitations). The shell works around
