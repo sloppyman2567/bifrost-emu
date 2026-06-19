@@ -1979,10 +1979,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0x1: r = std::fabs(a); break;
                             case 0x2: r = -a; break;
                             case 0x3: r = std::sqrt(a); break;
-                            case 0x4: r = std::rint(a); break;
-                            case 0x5: r = std::ceil(a); break;
-                            case 0x6: r = std::floor(a); break;
-                            case 0x7: r = std::trunc(a); break;
+                            case 0x4: r = std::rint(a); break;     // FRINTN
+                            case 0x5: r = std::ceil(a); break;      // FRINTP
+                            case 0x6: r = std::floor(a); break;     // FRINTM
+                            case 0x7: r = std::trunc(a); break;     // FRINTZ
+                            case 0x8: r = std::rint(a); break;      // FRINTA
+                            case 0x9: r = std::rint(a); break;      // FRINTX
+                            case 0xA: r = std::rint(a); break;      // FRINTI
                             case 0xC: r = std::rint(a); break;
                             case 0xE: r = std::rint(a); break;
                             case 0xF: r = std::rint(a); break;
@@ -1996,14 +1999,71 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0x1: r = std::fabsf(a); break;
                             case 0x2: r = -a; break;
                             case 0x3: r = std::sqrtf(a); break;
-                            case 0x4: r = std::rintf(a); break;
-                            case 0x5: r = std::ceilf(a); break;
-                            case 0x6: r = std::floorf(a); break;
-                            case 0x7: r = std::truncf(a); break;
+                            case 0x4: r = std::rintf(a); break;     // FRINTN
+                            case 0x5: r = std::ceilf(a); break;     // FRINTP
+                            case 0x6: r = std::floorf(a); break;    // FRINTM
+                            case 0x7: r = std::truncf(a); break;    // FRINTZ
+                            case 0x8: r = std::rintf(a); break;     // FRINTA
+                            case 0x9: r = std::rintf(a); break;     // FRINTX
+                            case 0xA: r = std::rintf(a); break;     // FRINTI
                             case 0xC: r = std::rintf(a); break;
                             default: r = a; break;
                         }
                         write_fp_s(rd, r);
+                    }
+                    return;
+                }
+                // FCVT{N,P,M,Z}{S,U} — FP to int with explicit rounding mode.
+                // Encoding: 0x1E280000 (FCVTNS) .. 0x1E390000 (FCVTZU).
+                // The rounding mode is in bits[16:19]:
+                //   0000 = N (nearest even), 0001 = P (+inf), 0010 = M (-inf),
+                //   0011 = Z (zero), 0100 = A (FPCR mode)
+                // Bit 7 (of the rmode field, i.e., bit 22) selects unsigned.
+                // We handle the common Z (zero) variant via the existing
+                // FCVTZS/FCVTZU path; the others use their respective
+                // rounding functions.
+                if ((op & 0x7F3F0000) == 0x1E280000 && ((op >> 16) & 1) == 0) {
+                    // FCVTNS/FCVTNM/FCVTNP/FCVTNU (and FCVTAS via rmode=0b1100)
+                    uint8_t rmode = (op >> 19) & 0x7;  // bits 21:19
+                    bool is_unsigned = ((op >> 16) & 1);  // bit 16 = U
+                    bool is_64bit = sf_val;
+                    // rmode: 0=N, 1=P, 2=M, 3=Z, 4=A
+                    auto round_d = [&](double v) -> int64_t {
+                        switch (rmode) {
+                            case 0: return (int64_t)std::llrint(v);   // N
+                            case 1: return (int64_t)std::ceil(v);     // P
+                            case 2: return (int64_t)std::floor(v);    // M
+                            case 3: return (int64_t)std::trunc(v);    // Z
+                            default: return (int64_t)std::llrint(v);  // A
+                        }
+                    };
+                    auto round_s = [&](float v) -> int64_t {
+                        switch (rmode) {
+                            case 0: return (int64_t)std::llrintf(v);
+                            case 1: return (int64_t)std::ceilf(v);
+                            case 2: return (int64_t)std::floorf(v);
+                            case 3: return (int64_t)std::truncf(v);
+                            default: return (int64_t)std::llrintf(v);
+                        }
+                    };
+                    if (ftype) {
+                        double a = read_fp_d(rn);
+                        if (is_unsigned) {
+                            uint64_t v = (a < 0) ? 0 : (uint64_t)round_d(a);
+                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                        } else {
+                            int64_t v = round_d(a);
+                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                        }
+                    } else {
+                        float a = read_fp_s(rn);
+                        if (is_unsigned) {
+                            uint64_t v = (a < 0) ? 0 : (uint64_t)round_s(a);
+                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                        } else {
+                            int64_t v = round_s(a);
+                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                        }
                     }
                     return;
                 }

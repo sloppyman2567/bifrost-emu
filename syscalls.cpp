@@ -29,6 +29,25 @@ static std::string read_path(Memory& mem, uint64_t addr) {
     return s;
 }
 
+// Helper: remap a guest path to a host path using BIFROST_ROOT.
+//
+// If the BIFROST_ROOT environment variable is set, guest absolute paths
+// starting with "/" (except /proc and /dev which are virtual) are
+// remapped to "$BIFROST_ROOT/<path>". This lets the user sandbox guest
+// file I/O to a specific directory.
+//
+// If BIFROST_ROOT is not set, the path is returned unchanged.
+static std::string map_guest_path(const std::string& guest_path) {
+    const char* bifrost_root = getenv("BIFROST_ROOT");
+    if (!bifrost_root || !bifrost_root[0]) return guest_path;
+    if (guest_path.empty() || guest_path[0] != '/') return guest_path;
+    if (guest_path.substr(0, 5) == "/proc") return guest_path;
+    if (guest_path.substr(0, 4) == "/dev") return guest_path;
+    std::string root(bifrost_root);
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    return root + guest_path;
+}
+
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
@@ -174,9 +193,45 @@ void Emulator::syscall(CPU& cpu) {
                 cpu.regs[0] = (uint64_t)(int64_t)-ENODEV;
                 return;
             }
+            // /dev/tty → open the host's controlling terminal.
+            // Many programs (e.g. interactive shells) open /dev/tty
+            // explicitly to read from/write to the terminal regardless
+            // of stdin/stdout redirection. We map it to /dev/tty on
+            // the host.
+            else if (path_str == "/dev/tty") {
+                int host_fd = ::openat(AT_FDCWD, "/dev/tty", (int)a2, (mode_t)a3);
+                if (host_fd >= 0) { ret_host(host_fd); return; }
+                cpu.regs[0] = (uint64_t)(int64_t)-errno;
+                return;
+            }
+            // /dev/stdin, /dev/stdout, /dev/stderr → dup the host fd.
+            // Linux kernels expose these as symlinks to /proc/self/fd/{0,1,2}.
+            else if (path_str == "/dev/stdin") {
+                int r = ::dup(0);
+                if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+                ret_host(r);
+                return;
+            }
+            else if (path_str == "/dev/stdout") {
+                int r = ::dup(1);
+                if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+                ret_host(r);
+                return;
+            }
+            else if (path_str == "/dev/stderr") {
+                int r = ::dup(2);
+                if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
+                ret_host(r);
+                return;
+            }
+
+            // ── Guest path mapping (v1.4.0-alpha) ──────────────────
+            // See map_guest_path() above. Virtual paths (/proc, /dev)
+            // are not remapped; everything else goes through the mapper.
+            std::string host_path = map_guest_path(path_str);
 
             // Normal file: pass through to host
-            int host_fd = ::openat(AT_FDCWD, path_str.c_str(), (int)a2, (mode_t)a3);
+            int host_fd = ::openat(AT_FDCWD, host_path.c_str(), (int)a2, (mode_t)a3);
             if (host_fd < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
             ret_host(host_fd);
             return;
@@ -207,22 +262,22 @@ void Emulator::syscall(CPU& cpu) {
             return;
         }
         case 34: { // mkdirat
-            std::string path = read_path(mem_, a1);
+            std::string path = map_guest_path(read_path(mem_, a1));
             int r = ::mkdirat((int)a0, path.c_str(), (mode_t)a2);
             if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
             ret_host(0);
             return;
         }
         case 35: { // unlinkat
-            std::string path = read_path(mem_, a1);
+            std::string path = map_guest_path(read_path(mem_, a1));
             int r = ::unlinkat((int)a0, path.c_str(), (int)a2);
             if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
             ret_host(0);
             return;
         }
         case 38: { // renameat
-            std::string oldp = read_path(mem_, a1);
-            std::string newp = read_path(mem_, a3);
+            std::string oldp = map_guest_path(read_path(mem_, a1));
+            std::string newp = map_guest_path(read_path(mem_, a3));
             int r = ::renameat((int)a0, oldp.c_str(), (int)a2, newp.c_str());
             if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
             ret_host(0);
@@ -931,17 +986,57 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 79: { // fstatat / newfstatat
-            // Same idea: zero-fill a generic stat structure (128 bytes for AArch64).
+        case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
+            // v1.4.0-alpha: do a real stat on the (mapped) host path
+            // so guest programs see correct file sizes, types, and
+            // permissions. Previously this always returned a fake
+            // "regular file, 0 bytes" stat, which broke programs that
+            // check file sizes before reading.
+            std::string path = map_guest_path(read_path(mem_, a1));
+            struct stat st;
+            int r;
+            // If dirfd is AT_FDCWD (-100) or the path is absolute, use
+            // fstatat on the host. Otherwise fall back to the fake stat.
+            if ((int)a0 == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
+                r = ::fstatat(AT_FDCWD, path.c_str(), &st, (int)a3);
+            } else {
+                r = ::fstatat((int)a0, path.c_str(), &st, (int)a3);
+            }
+            if (r < 0) {
+                // Fall back to fake stat on error (keeps old behavior
+                // for paths that don't exist on the host).
+                uint8_t buf[128] = {0};
+                uint32_t mode = 0100644, nlink = 1;
+                uint64_t blksize = 4096;
+                memcpy(buf + 16, &mode, 4);
+                memcpy(buf + 20, &nlink, 4);
+                memcpy(buf + 0x38, &blksize, 8);
+                mem_.write(a2, buf, 128);
+                ret_host(0);
+                return;
+            }
+            // Build the AArch64 struct stat (128 bytes):
+            //   dev64, ino64, mode32, nlink32, uid32|gid32, pad, rdev64,
+            //   size64, blksize64, blocks64, atime, atime_nsec,
+            //   mtime, mtime_nsec, ctime, ctime_nsec
             uint8_t buf[128] = {0};
-            uint64_t dev = 0, ino = 0;
-            uint32_t mode = 0100644, nlink = 1;
-            uint64_t blksize = 4096;
-            memcpy(buf + 0,  &dev, 8);
-            memcpy(buf + 8,  &ino, 8);
-            memcpy(buf + 16, &mode, 4);
-            memcpy(buf + 20, &nlink, 4);
-            memcpy(buf + 0x38, &blksize, 8);
+            uint64_t* p = (uint64_t*)buf;
+            p[0] = st.st_dev;
+            p[1] = st.st_ino;
+            ((uint32_t*)&p[2])[0] = st.st_mode;
+            ((uint32_t*)&p[2])[1] = st.st_nlink;
+            p[3] = st.st_uid | ((uint64_t)st.st_gid << 32);
+            p[4] = 0;
+            p[5] = st.st_rdev;
+            p[6] = st.st_size;
+            p[7] = st.st_blksize;
+            p[8] = st.st_blocks;
+            p[9]  = st.st_atim.tv_sec;
+            p[10] = st.st_atim.tv_nsec;
+            p[11] = st.st_mtim.tv_sec;
+            p[12] = st.st_mtim.tv_nsec;
+            p[13] = st.st_ctim.tv_sec;
+            p[14] = st.st_ctim.tv_nsec;
             mem_.write(a2, buf, 128);
             ret_host(0);
             return;
