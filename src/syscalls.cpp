@@ -1410,9 +1410,10 @@ void Emulator::syscall(CPU& cpu) {
         }
         case 232: { // epoll_wait(epfd, events, maxevents, timeout) — aarch64 22
             // Note: aarch64 syscall 22 is epoll_pwait. We use 232 here as
-            // a non-conflicting slot, but guests using real epoll_pwait
-            // (syscall 22) will hit the pipe2 handler above. This is a
-            // known limitation — fix in v1.1 by renumbering all syscalls.
+            // a non-conflicting slot for epoll_wait, but guests using real
+            // epoll_pwait (syscall 22) will hit the pipe2 handler above.
+            // This is a known slot conflict — to be resolved by a full
+            // syscall-table renumbering pass in a future release.
             struct epoll_event evs[256];
             int maxev = (int)a2;
             if (maxev > 256) maxev = 256;

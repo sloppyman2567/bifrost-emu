@@ -4,6 +4,8 @@
 // allowing it to be embedded in other applications (debuggers, IDE
 // plugins, test harnesses, etc.) without depending on C++.
 //
+// Version: 1.4.0-alpha
+//
 // Basic usage:
 //
 //     #include "bifrost.h"
@@ -120,7 +122,7 @@ void bifrost_set_verbose(bifrost_emu_t* emu, int enable);
 
 // ── Version ─────────────────────────────────────────────────────────────
 
-// Get the library version string (e.g., "1.3.0-beta.4").
+// Get the library version string (e.g., "1.4.0-alpha").
 const char* bifrost_version(void);
 
 #ifdef __cplusplus

@@ -1,15 +1,16 @@
 // decoder.hpp — Shared ARM64 instruction decode tables and helpers.
 //
 // This header is included by both the interpreter (interpreter.cpp) and
-// the future JIT compiler (jit.cpp, planned for v2.0). It defines:
+// the JIT (frostjit.cpp, experimental as of v1.4.0-alpha). It defines:
 //   - Instruction class enumerations
 //   - The DecodedInst struct (fields extracted from a 32-bit ARM64 word)
 //   - The decode() function that fills a DecodedInst from raw bits
 //   - Shared helpers (condition codes, extend_reg, sign_extend, etc.)
 //
 // The interpreter calls decode() then dispatches on DecodedInst::cls.
-// The JIT will call decode() then emit x86_64 code based on
-// DecodedInst::cls. Both share the same decode logic, so adding a new
+// frostJIT calls decode() then emits x86_64 code based on
+// DecodedInst::cls, falling back to the interpreter for unsupported
+// instructions. Both share the same decode logic, so adding a new
 // instruction in one place automatically makes it available to both.
 //
 // Design principle: decode() does NO execution and NO memory access.
@@ -132,7 +133,6 @@ enum class InstClass : uint16_t {
     STLR,           // store release
     LDAR,           // load acquire
     LSE_ATOMIC,     // LSE atomic (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS — sub-dispatched on atom_op)
-    CAS,            // (legacy alias — LSE_ATOMIC now covers CAS via atom_op>=0xC; kept for source compatibility)
 
     // SIMD/FP (subset)
     SIMD_LD1,       // vector load single structure

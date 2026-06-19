@@ -19,7 +19,7 @@ Linux host without needing qemu or a cross-compiler.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-alpha](https://img.shields.io/badge/version-1.4.0--alpha-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -172,8 +172,9 @@ two optimizations:
 
 The `fib(30)` test runs 258 instructions in under 0.01ms; musl static
 hello world runs 1,760 instructions in under 0.1ms. A 10M-iteration
-compute loop runs 90M instructions in 0.64s. A JIT is planned for
-v2.0 (target: 500+ MIPS).
+compute loop runs 90M instructions in 0.64s. An experimental JIT
+(frostJIT) landed in v1.4.0-alpha — enable with `--jit`; target for
+the production JIT is 500+ MIPS.
 
 Run `bifrost-emu -v <elf>` to see MIPS, memory page count, and decode
 cache hit rate for any program.
@@ -254,16 +255,23 @@ No external libraries required. Only standard C++ and POSIX.
 
 ```
 bifrost-emu/
-├── arm64_emu.hpp         Emulator class (CPU, Memory, ELF loader, threads)
-├── decoder.hpp           DecodedInst struct, InstClass enum, decode() decl
-├── decoder.cpp           Pure instruction decoder (single source of truth)
-├── interpreter.cpp       Instruction execution (pure switch on d.cls — no if-chain)
-├── syscalls.cpp          Linux AArch64 syscall layer (~88 syscalls)
-├── graphics.hpp/cpp      GraphicsBackend (framebuffer stub for 1.3.0)
+├── include/
+│   ├── arm64_emu.hpp     Emulator class (CPU, Memory, ELF loader, threads)
+│   ├── decoder.hpp       DecodedInst struct, InstClass enum, decode() decl
+│   ├── graphics.hpp      GraphicsBackend (framebuffer + optional SDL2)
+│   ├── signal.hpp        Signal frame / rt_sigaction plumbing
+│   └── frostjit.hpp      frostJIT block translator (experimental, v1.4.0-alpha)
+├── src/
+│   ├── decoder.cpp       Pure instruction decoder (single source of truth)
+│   ├── interpreter.cpp   Instruction execution (pure switch on d.cls)
+│   ├── syscalls.cpp      Linux AArch64 syscall layer (~88 syscalls)
+│   ├── graphics.cpp      GraphicsBackend implementation (headless + SDL2)
+│   ├── signal.cpp        Signal frame save/restore
+│   ├── frostjit.cpp      frostJIT x86_64 emitter (experimental)
+│   ├── jit_glue.cpp      Emulator↔FrostJIT glue (enable_jit, jit_step)
+│   └── main.cpp          CLI entry point
 ├── api/bifrost.h         Public C API for libbifrost
-├── main.cpp              CLI entry point
-├── mini_arm64_asm.py     Built-in ARM64 assembler (for test programs)
-├── test/                 Sample ARM64 programs (.s sources)
+├── test/                 Sample ARM64 programs (.s sources + assembled .elf)
 ├── ctest/                C test programs (musl-static)
 ├── ctest_real/           Real-world Unix utilities (musl-static): cat, wc,
 │                         head, tr, rev, sort, sh, fib, yes
@@ -272,6 +280,9 @@ bifrost-emu/
 ├── README.md             This file
 └── LICENSE               Public domain (Unlicense)
 ```
+
+Note: `mini_arm64_asm.py` was removed during the v1.4.0-alpha source-tree
+restructure — test `.elf` files in `test/` are now checked in directly.
 
 ## Test Programs
 
@@ -294,11 +305,6 @@ bifrost-emu/
 | `ctest_real/sh.elf` | Interactive REPL shell: `help`/`echo`/`eval`/`exit` (musl static) |
 | `ctest_real/fib.elf` | Fibonacci benchmark, accepts N on command line (musl static) |
 | `ctest_real/yes.elf` | Unix `yes` clone — emit a string forever (musl static) |
-
-Assemble new test programs with:
-```bash
-python3 mini_arm64_asm.py prog.s -o prog.elf
-```
 
 For C programs, compile with a musl cross-compiler:
 ```bash
@@ -409,144 +415,279 @@ by the guest). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls
 supported (any real fb program can query the mode). Default mode
 640x480@32bpp BGRA. Headless: `--fb-dump PATH` syncs the guest's
 framebuffer pages back to the host on exit and writes a PPM image
-suitable for viewing in any image viewer. SDL2 window support is
-planned for v1.4.0-alpha.
+suitable for viewing in any image viewer. An optional SDL2 window
+backend is available at build time via `make USE_SDL2=1` (see
+`graphics.hpp` / `graphics.cpp`).
 
-## What's New in 1.4.0
+## Release History
 
-### Performance: 3.8x speedup (37 → 140 MIPS)
+This section summarizes what each tagged release actually delivered,
+based on the commit history. Full per-commit detail lives in
+[CHANGELOG.md](CHANGELOG.md).
 
-Two optimizations that together give a 3.78x speedup on compute-heavy
-workloads:
+### v1.4.0-alpha
+
+The "printf %f, malloc, qsort, signal delivery, and an experimental
+JIT" release. Re-versioned from `1.4.0` to `1.4.0-alpha` to reflect
+that this is a preview of the 1.4 feature set, not a stable release.
+The non-JIT path remains fully functional and passes all existing
+tests; the JIT is opt-in and known to crash on some programs.
+
+**Critical correctness fixes (the headline wins)**
+
+- **`printf("%f", ...)` finally works.** Three root causes fixed in
+  this release:
+
+  1. **UBFM/SBFM/LSL/SBFIZ/UBFIZ mask bug.** The bitfield handler was
+     using the wrong mask in the rotate case. For `LSL Xd, Xn, #shift`
+     (encoded as `UBFM Xd, Xn, #(-shift MOD 64), #(63-shift)`), the
+     result field lives in the HIGH bits, not the low bits. The
+     previous code used the low-bits `wmask` and extracted bits
+     unrelated to the shift result. This was the root cause of
+     `printf("%f")` hanging forever: musl's `__extenddftf2` uses
+     `lsl x0, x0, #60` to left-align the IEEE-754 mantissa, and the
+     buggy handler produced `0x1` instead of `0xF000000000000000`,
+     corrupting the long-double value. The downstream `__fixunstfsi`
+     then looped forever. Verified: `ctest/test_float.elf` now prints
+     `3.140000` and exits 0.
+
+  2. **FMOV (scalar, immediate) decoding.** The 8-bit FP immediate was
+     decoded with a wrong sign/exp4/mant3 layout. Replaced with the
+     ARM ARM `VFPExpandImm` algorithm. Example: `fmov d0, #2.5` used
+     to produce `0x4078…` (= 384.0) instead of `0x4004…` (= 2.5),
+     corrupting every `printf("%f", float_var)`.
+
+  3. **Interactive shell no longer hangs (termios).** The emulator was
+     unconditionally enabling raw TTY mode whenever stdin was a TTY.
+     Raw mode turns off `ICANON` and `ECHO`, so the host kernel
+     delivered each keystroke as a 1-byte `read()`. That broke every
+     guest program using line-oriented stdio: musl's `fgets()` in
+     `sh.elf` received one byte per `read()` and never saw the
+     trailing newline. Default is now to leave the host TTY alone;
+     raw mode is opt-in via `--raw-tty`.
+
+- **malloc / free crash and qsort n≥8 bug — root cause found.** Both
+  were the same bug: `SBFM`/`UBFM` with `imms < immr` (the
+  `SBFIZ`/`UBFIZ`/`BFI`/`LSL` alias group) used the wrong mask. The
+  previous code masked the ROR'd value with `high_mask` (bits at the
+  TOP of the register), but `SBFIZ`/`UBFIZ` need the field at bits
+  `[lsb+width-1:lsb]` which is NOT necessarily at the top. This broke
+  `SBFIZ` specifically: `sbfiz x3, x19, #3, #32` (which computes
+  `pshift*8` for `lp[]` indexing) returned 0 instead of the correct
+  value (e.g., 24 for `pshift=3`). This caused musl's smoothsort to
+  read the wrong `lp[]` element, corrupting the heap structure and
+  producing wrong sort results for `n >= 8`. The same bug also caused
+  the malloc/free crash: musl's mallocng uses `SBFIZ` internally, and
+  the wrong result corrupted heap metadata, triggering the
+  `BRK #1000` assertion in `get_meta()`. Rewrote the `BFI`/rotate
+  case to directly extract low `(imms+1)` bits, sign-extend for
+  `SBFM`, and shift left by `(datasize - immr)`. Verified: `qsort`
+  works for n=1..20, `test_malloc` runs to completion, and `sort.elf`
+  no longer crashes.
+
+- **LSR #0 / LSL #0 — shift by 64.** On AArch64, `LSR Xd, Xn, #0` and
+  `LSL Xd, Xn, #0` both encode as `UBFM Xd, Xn, #0, #63`, which
+  shifts by 64 (result = 0), NOT a no-op. The `UBFM` extract case
+  with `imms=datasize-1` and `immr=0` was returning the source
+  unchanged. This corrupted musl's smoothsort `shr()` function.
+
+**New subsystems**
+
+- **Signal delivery (`signal.hpp` / `signal.cpp`).** `rt_sigaction`
+  (syscall 134) now actually installs handlers instead of being a
+  silent no-op. `rt_sigreturn` (syscall 133) pops a `SignalFrame` and
+  restores CPU state. `kill` (129), `tkill` (130), `tgkill` (131)
+  deliver signals to the current thread. A `sigreturn` trampoline
+  (`mov x8, #139; svc #0`) is mapped at a fixed guest address
+  (`0x7000000000`) so signal handlers can return into it. The run
+  loop catches `UnmappedMemory` and delivers `SIGSEGV` if a handler
+  is installed (otherwise terminates with exit `128+11`).
+  Limitations (documented in `signal.hpp`): no `siginfo_t`/
+  `ucontext_t` contents, no `SA_RESTART`, no signal masks, no
+  `sigaltstack`, no real-time signals 32+.
+
+- **frostJIT — experimental block-translation JIT
+  (`frostjit.hpp` / `frostjit.cpp`).** Translates AArch64 basic blocks
+  into x86_64 machine code in a 16 MB `mmap`'d RWX code cache, sharing
+  the existing decoder with the interpreter. Uses a register-bank-in-
+  memory model (ARM64 `X0`-`X30`/`SP` live in the `CPU` struct; the
+  JIT emits load/op/store sequences with no regalloc). Supports a
+  limited subset: `ADD`/`SUB`/`AND`/`ORR`/`EOR` (reg + imm),
+  `MOVN`/`MOVZ`/`MOVK`, `CSEL`, `MADD`/`MSUB`, `LSL`/`LSR`/`ASR`/
+  `ROR`, `LDR`/`STR` (imm/unscaled/reg), `ADR`/`ADRP`, `B`/`BL`/
+  `BR`/`BLR`/`RET`, `Bcond`/`CBZ`/`CBNZ`/`TBZ`/`TBNZ` (simplified —
+  always branches), `NOP`. Falls back to the interpreter for `SVC`,
+  FP/SIMD, atomics, `MSR`/`MRS`, `BRK`/`HLT`, and any unsupported op
+  (block ends, single-step). Block cache keyed by guest PC; cache
+  hits skip translation. Statistics (blocks translated/executed,
+  cache hit rate, interpreter fallbacks, code cache usage) printed
+  with `-v`. Enabled via `--jit`; default is interpreter-only.
+  frostJIT is **experimental** and known to crash on some programs
+  (`fib`, `sort` segfault under `--jit`). Tracked in the roadmap.
+
+- **SDL2 window backend for `/dev/fb0` (`graphics.hpp` /
+  `graphics.cpp`).** Build with `make USE_SDL2=1`. Opens a real SDL2
+  window and pushes the framebuffer on every `refresh()`. The run
+  loop now periodically syncs the guest framebuffer back to the host
+  and calls `graphics_.refresh()` every ~1M instructions (~6 fps at
+  6 MIPS — enough for interactive graphics without killing
+  performance). `poll_events()` is also called so closing the SDL2
+  window terminates the guest cleanly. Headless mode (default) skips
+  this; the `--fb-dump PATH` PPM dump on exit still works.
+
+- **VFS improvements (`syscalls.cpp`).** Added `BIFROST_ROOT`
+  environment variable for guest path sandboxing: set
+  `BIFROST_ROOT=/tmp/guest-root` to redirect all guest absolute
+  paths (except `/proc` and `/dev`) to that directory on the host.
+  Added `/dev/tty` (opens host controlling terminal), `/dev/stdin`,
+  `/dev/stdout`, `/dev/stderr` (dup host fds 0/1/2). `fstatat`
+  (syscall 79) now does a real host `stat` instead of returning a
+  fake "regular file, 0 bytes" result. All path-based syscalls now
+  go through `map_guest_path()` for consistent `BIFROST_ROOT`
+  remapping.
+
+- **FCVT rounding modes (`interpreter.cpp`).** Added
+  `FCVTNS`/`FCVTNM`/`FCVTPS`/`FCVTPM`/`FCVTZS`/`FCVTZU` (and
+  unsigned variants) with explicit rounding mode field. Previously
+  only `FCVTZS`/`FCVTZU` (round-toward-zero) was handled; the
+  others fell through to the default case. Added
+  `FRINTN`/`FRINTP`/`FRINTM`/`FRINTZ`/`FRINTA`/`FRINTX`/`FRINTI`
+  variants in the FP 1-source group. Added `FCVT H` half-precision
+  (FP16) conversions (`D`↔`H`, `S`↔`H`) with manual IEEE 754
+  binary16 ↔ binary32 conversion helpers. Required for musl's
+  hex-float printf path.
+
+- **Source-tree restructure.** All `.cpp` moved to `src/`, all `.hpp`
+  moved to `include/`, `mini_arm64_asm.py` removed (dead code; not
+  referenced by the build since test `.elf` files are pre-assembled).
+  Makefile updated with `-Iinclude` and `src/` paths.
+
+**Stability verification**
+
+All `test/` and `ctest/` tests pass under the default interpreter
+path: `hello`, `loop`, `test_float`, `test_fb`, `sh`, `cat`, `wc`,
+`head`, `rev`, `fib`, `yes`, `fgets_test`, `extr`, `count`, `echo`,
+`repl`. `qsort` works for `n = 1..20`. `printf("%f")` works. The
+frostJIT path is the only known source of crashes; the interpreter
+path is stable.
+
+### v1.3.0-beta.4
+
+The "real hierarchical decoder + 3.8x performance + softfloat fixes"
+release. Three major areas of improvement:
+
+1. **Performance**: 3.78x speedup (37 → 140 MIPS) via direct-mapped
+   decode cache and memory page cache.
+2. **Hierarchical decoder**: flat if-chains replaced with a true
+   two-level switch on bits[28:24].
+3. **Softfloat fixes**: four critical bugs (CCMP, CSEL/CSNEG, SIMD
+   Q-form, BFM BFI) that blocked musl's 128-bit long double routines,
+   partially unblocking `printf("%f")`.
+
+**Performance: 3.8x speedup (37 → 140 MIPS)**
+
+Two optimizations:
 
 1. **Direct-mapped decode cache.** Replaced
-   `std::unordered_map<uint64_t, DecodedInst>` (hash + 88-byte struct
-   copy per instruction) with a flat 4096-entry direct-mapped array
-   (384 KB). The hot path is now: hash PC to 12-bit index, compare tag,
-   use const reference. No hash, no copy. `__builtin_expect` for branch
-   prediction. Alone gives 2.17x (37 → 80 MIPS).
+   `std::unordered_map<uint64_t, DecodedInst>` (hash + 88-byte
+   struct copy per instruction) with a flat 4096-entry direct-mapped
+   array (384 KB). The hot path is now: hash PC to 12-bit index,
+   compare tag, use `const` reference. No hash, no copy.
+   `__builtin_expect` for branch prediction. Alone gives 2.17x
+   (37 → 80 MIPS).
 
-2. **Memory page cache.** Added single-entry last-page caches for read
-   and write. The old code locked a mutex + did an unordered_map lookup
-   on EVERY memory access. The new code checks the last-page cache
-   first (no lock, no hash — just a tag compare + memcpy). For tight
-   loops accessing the same page, eliminates all mutex/hash overhead.
-   Gives an additional 1.75x (80 → 140 MIPS).
+2. **Memory page cache.** Added single-entry last-page caches for
+   read and write. The old code locked a mutex + did an
+   `unordered_map` lookup on every memory access. The new code checks
+   the last-page cache first (no lock, no hash — just a tag compare +
+   `memcpy`). For tight loops accessing the same page, eliminates all
+   mutex/hash overhead. Gives an additional 1.75x (80 → 140 MIPS).
 
-### Hierarchical decoder
+**Hierarchical decoder**
 
 The decoder is now a true two-level hierarchical switch. v1.3.0-beta.3
 had a stub `switch (bits[28:24])` at the top of `decode()` that did
 nothing (`default: break;`) and fell through to ~500 lines of flat
-`if ((inst & MASK) == VAL)` chains. v1.4.0-alpha replaces that with a
+`if ((inst & MASK) == VAL)` chains. v1.3.0-beta.4 replaces that with a
 real hierarchical switch: outer switch on bits `[28:24]` (the ARM ARM
-major encoding group), inner switch on the group-specific discriminator.
-Every flat `if` chain is now a `case` with early `return`. See the
-Architecture section above for details.
+major encoding group), inner switch on the group-specific
+discriminator. Every flat `if` chain is now a `case` with early
+`return`. See the Architecture section above for details.
 
-### Critical decoder/interpreter bug fixes (unblocks `printf("%f")`)
+**Critical decoder/interpreter bug fixes (unblocks `printf("%f")`)**
 
 Four bugs that together blocked musl's 128-bit long double softfloat
 path (used by `printf("%f")`):
 
 1. **CCMP register vs immediate form.** The register/immediate
    distinction is at **bit 11** (0=register, 1=immediate), not bit 21
-   (always 0). v0 always treated CCMP as immediate, so `ccmp x6, x7,
-   #0, eq` compared x6 with #7 instead of x7. Broke `__eqtf2` (long
-   double equality), making `y == 0.0` always false — printf's
-   do/while digit extraction loop never exited.
+   (always 0). The previous code always treated CCMP as immediate, so
+   `ccmp x6, x7, #0, eq` compared `x6` with `#7` instead of `x7`.
+   Broke `__eqtf2` (long double equality), making `y == 0.0` always
+   false — printf's do/while digit extraction loop never exited.
 
 2. **CSEL/CSINC/CSINV/CSNEG decode.** The variant is selected by BOTH
-   `bits[30:29]` (opc) AND `bits[11:10]` (op2), not just bits[11:10].
-   v0 confused CSINC with CSNEG. Broke CNEG (alias for CSNEG), used by
-   `__gttf2`/`__lttf2` to negate return values — producing -1 instead
-   of 1, breaking all long double ordering comparisons.
+   `bits[30:29]` (opc) AND `bits[11:10]` (op2), not just
+   `bits[11:10]`. The previous code confused CSINC with CSNEG. Broke
+   CNEG (alias for CSNEG), used by `__gttf2`/`__lttf2` to negate
+   return values — producing `-1` instead of `1`, breaking all long
+   double ordering comparisons.
 
-3. **SIMD DP Q-form bugs.** v0's SIMD_DP if-chains had masks that
-   included bit 30 (Q), so Q=1 (128-bit) forms of DUP, INS, ORR(MOV
-   alias), and EXT were silently NOP'd. This broke musl's 128-bit
-   softfloat, which uses `mov v1.16b, v0.16b` to copy 128-bit values.
-   Converted the SIMD_DP handler from flat if-chains to a proper switch
-   with Q-stripped sub-discriminator.
+3. **SIMD DP Q-form bugs.** The SIMD_DP if-chains had masks that
+   included bit 30 (Q), so `Q=1` (128-bit) forms of `DUP`, `INS`,
+   `ORR` (MOV alias), and `EXT` were silently NOP'd. This broke
+   musl's 128-bit softfloat, which uses `mov v1.16b, v0.16b` to copy
+   128-bit values. Converted the SIMD_DP handler from flat if-chains
+   to a proper switch with Q-stripped sub-discriminator.
 
-4. **BFM BFI field mask.** v0 computed `field_mask = mask | hi_mask =
-   ~0`, replacing ALL of Rd instead of just the target field. Fixed to
-   `mask << lsb`. Broke `__floatsitf`'s BFI, corrupting 128-bit long
-   double values.
+4. **BFM BFI field mask.** The previous code computed
+   `field_mask = mask | hi_mask = ~0`, replacing ALL of `Rd` instead
+   of just the target field. Fixed to `mask << lsb`. Broke
+   `__floatsitf`'s BFI, corrupting 128-bit long double values.
 
-After these fixes: `__multf3` (128-bit multiply), `__eqtf2` (long
-double ==), and `__gttf2`/`__lttf2` (long double >, <) all work
-correctly. `printf("%f")` is much closer — the do/while digit
-extraction loop now converges. The remaining issue is in `__subtf3`'s
-mantissa alignment path (a performance issue with large exponent
-differences, not a correctness bug).
+**EXTR instruction fixed**
 
-### EXTR instruction fixed
+Three bugs around EXTR:
 
-v0 had three bugs around EXTR:
-
-1. The bitfield check (mask `0x1F000000`, ignoring bit 23) came BEFORE
-   the EXTR check (mask `0x1F800000`, requiring bit 23 = 1). Every EXTR
-   was silently misdecoded as SBFM/BFM/UBFM. v1.4.0-alpha routes on
-   bit 23 first.
+1. The bitfield check (mask `0x1F000000`, ignoring bit 23) came
+   BEFORE the EXTR check (mask `0x1F800000`, requiring bit 23 = 1).
+   Every EXTR was silently misdecoded as SBFM/BFM/UBFM. v1.3.0-beta.4
+   routes on bit 23 first.
 2. The interpreter's EXTR handler had the operand order backwards
    (`Rm:Rn` instead of `Rn:Rm`).
 3. The interpreter used `(rn << width)` with `width == 64`, which is
    undefined behavior in C++. Fixed with `__uint128_t`.
 
-### Graphics backend
+**Graphics backend wired up**
 
-v1.3.0-beta.2 introduced `GraphicsBackend` as a stub. v1.4.0-alpha
-wires it up end-to-end:
+`GraphicsBackend` is no longer a stub. `Emulator` owns an instance.
+`openat("/dev/fb0")` returns a memfd-backed fd that the guest can
+`mmap` and write pixels to. `FBIOGET_VSCREENINFO` and
+`FBIOGET_FSCREENINFO` ioctls supported. `--fb-dump PATH` syncs the
+guest's framebuffer pages back to the host on exit and writes a PPM
+file. Verified pixel-by-pixel. New `ctest/test_fb.c` verifies the
+full pipeline. (SDL2 window support came in v1.4.0-alpha.)
 
-- `Emulator` owns a `GraphicsBackend` instance.
-- `openat("/dev/fb0")` returns a memfd-backed fd that the guest can
-  `mmap` and write pixels to.
-- `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` ioctls supported.
-- `--fb-dump PATH` syncs the guest's framebuffer pages back to the
-  host on exit and writes a PPM file. Verified pixel-by-pixel.
-- New `ctest/test_fb.c` verifies the full pipeline.
+**Additional decoder correctness fixes**
 
-Still headless (no SDL2 window). SDL2 support is planned for v1.4.0-alpha.
-
-### Additional decoder correctness fixes
-
-- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now decode
-  correctly. v0's flat masks caught only the 32-bit form.
+- **64-bit CBZ/CBNZ/TBZ/TBNZ** (`sf=1`, bits[31:29] = 101) now
+  decode correctly. The previous flat masks caught only the 32-bit
+  form.
 - **BRK and HLT** now enforce `bits[4:0] == 0` per the ARM ARM.
 - **Add/subtract extended register** now enforces `bits[23:22] == 00`.
 - **STP/LDP pre-index collision** is now structural (outer case 0x09
   vs 0x0A, not if-chain ordering).
-- **INS (general)** case label fixed from unreachable `0x4E000C00` to
-  correct `0x0E001C00`.
+- **INS (general)** case label fixed from unreachable `0x4E000C00`
+  to correct `0x0E001C00`.
 
-### Added
-
-- `extr` mnemonic in `mini_arm64_asm.py`.
-- `test/extr.s` — verifies EXTR works end-to-end.
-- `ctest/test_fb.c` — verifies the `/dev/fb0` framebuffer pipeline.
-- `--fb-dump PATH` command-line option.
-- Decode cache hit rate in `-v` verbose output.
-
-### No regressions
-
-All five original `.elf` test programs (hello, count, fib, cat, echo)
-produce byte-identical output and exit codes vs v1.3.0-beta.3. The
-three working musl-static C tests (`hello.c`, `loop.c`,
-`test_malloc.c`) also continue to work. The pre-existing
-`test_float.elf` hang (musl's `printf("%f")` softfloat path) is
-partially fixed — long double multiply and comparisons now work
-correctly; the remaining issue is a performance problem in
-`__subtf3`'s mantissa alignment, not a correctness bug.
-
-### Post-release audit (code-review fixes)
+**Code-review audit (post-release)**
 
 A review pass after the beta.4 release landed an additional batch of
 correctness and hygiene fixes:
 
 - **Page-cache sentinel.** `Memory::PageCache` defaulted
   `read_page = 0`, which matched any real access to page 0 (e.g. a
-  null-deref at offset 0x480), causing `read_ptr = nullptr` to be
+  null-deref at offset `0x480`), causing `read_ptr = nullptr` to be
   dereferenced — `hello.elf` was crashing deterministically. Default
   is now `UINT64_MAX`.
 - **Per-vCPU decode cache.** Moved the decode cache from the shared
@@ -563,9 +704,9 @@ correctness and hygiene fixes:
   getcwd), `getcpu` (168, was wrongly ppoll), `msync` (227, was
   wrongly mremap), `mount` (40, was wrongly sendfile), and
   `process_vm_readv` (270, was wrongly an eventfd2 alt entry).
-- **ELF loader bounds checks.** Program-header table is now validated
-  against `data.size()` before indexing — prevents OOB reads on
-  truncated or hostile ELF files.
+- **ELF loader bounds checks.** Program-header table is now
+  validated against `data.size()` before indexing — prevents OOB
+  reads on truncated or hostile ELF files.
 - **Futex liveness fix.** The `*uaddr == val` check moved inside the
   slot lock, eliminating a "wait forever" race where a concurrent
   waker could slip in between check and waiter increment.
@@ -584,245 +725,234 @@ correctness and hygiene fixes:
   under AddressSanitizer + UndefinedBehaviorSanitizer with no
   violations.
 - **Dead code removed.** `Emulator::exiting_` (write-only),
-  `GuestThread::done` (write-only), `GuestThread::set_tid_address_ptr`
-  (duplicated by `CPU::set_tid_address_ptr`), duplicate pipe2 handler
-  at case 22, and an empty `CLONE_CHILD_SETTID` if-block.
+  `GuestThread::done` (write-only),
+  `GuestThread::set_tid_address_ptr` (duplicated by
+  `CPU::set_tid_address_ptr`), duplicate pipe2 handler at case 22,
+  and an empty `CLONE_CHILD_SETTID` if-block.
 
-### Post-release audit (real-world testing)
+**Real-world testing (post-release)**
 
 The emulator was tested against 9 real-world Unix-style utility
 programs built with `aarch64-linux-musl-gcc -O2 -static`. All
 programs in `ctest_real/` (`cat`, `wc`, `head`, `tr`, `rev`, `sort`,
 `sh`, `fib`, `yes`) work correctly end-to-end.
 
-**Bug found and fixed:** `readv` was at the wrong syscall number
-(case 67 = `preadv64`, missing case 65 = `readv`). musl's `fgets`
-uses `readv` with 2 iovecs for buffered stdin, so any program using
-`fgets()` on a non-tty stdin silently broke. Added both `readv` (65)
-and `preadv64` (67) handlers correctly.
+- **`readv` syscall number fix.** `readv` was at the wrong syscall
+  number (case 67 = `preadv64`, missing case 65 = `readv`). musl's
+  `fgets` uses `readv` with 2 iovecs for buffered stdin, so any
+  program using `fgets()` on a non-tty stdin silently broke. Added
+  both `readv` (65) and `preadv64` (67) handlers correctly.
+- **`isatty()` fixed.** The ioctl handler previously returned
+  success for every unknown ioctl (including `TIOCGWINSZ`), which
+  made `isatty()` always return `true` — even for pipes and regular
+  files. This broke musl's stdio buffering decisions on non-tty
+  stdin. The handler now forwards `TIOCGWINSZ`,
+  `TCGETS`/`TCSETS`/etc., and `FIONREAD` to the host, and returns
+  `-ENOTTY` for everything else.
+- **Pipelines verified.** `cat foo | wc`, `rev | tr | head`, `sort`
+  with stdin all produce expected output. Throughput:
+  `fib(40)` = 102334155 in ~23ms (~140 MIPS); `yes` emits ~150M
+  lines/sec through the emulator.
+- **Interactive shell verified.** `ctest_real/sh.elf` is a tiny REPL
+  that supports `help`, `echo ARGS`, `eval EXPR` (arithmetic), and
+  `exit [N]`. It uses a manual tokenizer instead of `strtok` (see
+  Limitations below). Interactive keyboard input works end-to-end
+  via a real PTY.
+- **Latent NEON bug discovered.** musl's `strtok`/`strtok_r` expose a
+  NEON/SIMD corruption bug (see Limitations). The shell works around
+  this with a manual tokenizer. The specific NEON instruction that
+  misbehaves is the next thing to track down — likely related to the
+  ORR (vector) handler's byte order vs `STR Qn`/`LDR Qn`.
 
-**Pipelines verified:** `cat foo | wc`, `rev | tr | head`, `sort`
-with stdin all produce expected output. Throughput:
-- `fib(40)` = 102334155 in ~23ms (~140 MIPS)
-- `yes` emits ~150M lines/sec through the emulator
+### v1.3.0-beta.3
 
-**Interactive shell verified:** `ctest_real/sh.elf` is a tiny REPL
-that supports `help`, `echo ARGS`, `eval EXPR` (arithmetic), and
-`exit [N]`. It uses a manual tokenizer instead of `strtok` (see
-Limitations below). Interactive keyboard input works end-to-end
-via a real PTY — type commands at the `bifrost-sh$ ` prompt and
-they execute as expected.
+The "mallocng hang finally fixed + the legacy if-chain is deleted"
+release. The single biggest blocker since v1.1.5-alpha.1 was squashed,
+and the interpreter was migrated to a pure `switch(d.cls)` dispatch.
 
-**`isatty()` fixed:** the ioctl handler previously returned success
-for every unknown ioctl (including `TIOCGWINSZ`), which made
-`isatty()` always return `true` — even for pipes and regular files.
-This broke musl's stdio buffering decisions on non-tty stdin. The
-handler now forwards `TIOCGWINSZ`, `TCGETS`/`TCSETS`/etc., and
-`FIONREAD` to the host, and returns `-ENOTTY` for everything else.
+- **The mallocng hang is fixed.** Root cause: a 32-bit rotation bug in
+  the UBFM/SBFM/BFM instruction handler. When executing
+  `lsl w24, w26, #4` (which the compiler encodes as
+  `ubfm w24, w26, #28, #27`), the emulator used `ror64` followed by
+  a `uint32_t` cast, which lost the wrapped bits —
+  `ror64(0x2, 28)` puts the wrapped bits at position 36, and
+  `(uint32_t)0x2000000000 = 0x0` instead of the correct `0x20` (= 32).
+  This made musl's mallocng stride 0, which caused `alloc_slot` to
+  infinitely recurse. `malloc`/`free`/`qsort` all work after this
+  fix.
+- **BIC/ORN/EON/BICS fix (the printf/fclose root cause).** The
+  logical shifted register group has an N bit (bit 21) that inverts
+  the second operand: AND→BIC, ORR→ORN, EOR→EON, ANDS→BICS. The
+  interpreter was ignoring N entirely — BIC was treated as AND. This
+  broke musl's `strlen` zero-byte detection, causing strlen to scan
+  past NUL terminators, which corrupted stdio buffer management,
+  producing garbled printf output and the exit-133 fclose crash.
+- **Bitmask immediate decode fix.** The decoder's
+  `decode_bitmask_imm` used `~0` for `esize==64` regardless of `S`,
+  producing all-ones instead of the correct mask. The interpreter's
+  inline bitmask decode had a separate bug (shifted ones to
+  `esize-1-S` instead of bit 0). Both fixed.
+- **Hierarchical STP/LDP decoder fix.** The decoder now checks
+  Load/Store pair (STP/LDP) before logical shifted register,
+  preventing the pre-index STP/LDP vs ORR encoding collision. The
+  STP/LDP mask was expanded to catch all three addressing modes
+  (post-index, signed offset, pre-index) for both GP and SIMD
+  registers, with a mode validation check to reject LDUR/STUR that
+  shares the same top bits.
+- **The decoder switch is complete, the legacy if-chain is deleted.**
+  Every instruction handler — branches, system, data processing
+  (immediate and register), load/store, atomics, SIMD data-
+  processing, and FP scalar — now lives in the `switch(d.cls)` block
+  in `interpreter.cpp`. The ~500-line legacy if-chain that lived
+  below the switch since alpha.1 is gone.
+- **FP scalar decoder fix.** The FP scalar decoder only matched
+  `0x1E200000` (32-bit single-precision). It missed all 64-bit
+  (`sf=1`, top byte `0x9E`) and double-precision (`ftype=01`) FP
+  instructions, causing decode errors on any binary using D
+  registers. Fixed by adding the broad `0x1E000000` and `0x9E000000`
+  top-byte masks.
+- **mallocng MAP_FIXED overlap handling.** When musl's mallocng calls
+  `mmap(MAP_FIXED, addr, ...)` inside the brk region, the brk is now
+  pushed forward past the mmap'd region. This prevents a subsequent
+  `brk(new)` extension from re-mapping the same pages via
+  `map_range` and corrupting musl's metadata.
+- **Hang watchdog.** The run loop tracks the last PC and counts how
+  many times it's been executed consecutively. If the same PC is hit
+  more than 50 million times in a row (which only happens for
+  `b .` self-branches or genuinely stuck atomic-CAS loops), the
+  emulator aborts with a diagnostic message instead of spinning
+  forever. Legitimate tight loops (`fib`, `count`, etc.) cycle
+  through multiple PCs and never trip the watchdog.
+- **MADD family decoder fix.** The old decoder classified `SMULH` as
+  `sub_op=7`, but per the ARM ARM pseudocode `SMULH` is `sub_op=2`.
+  The old `case 7` was unreachable; `SMULH` instructions would have
+  fallen through to UNKNOWN and thrown a `DecodeError`.
+- **LSE atomics decoder fix.** The old decoder treated `SWP` as a
+  distinct encoding (bit 21=1) and `LDADD` family as bit 21=0. Per
+  the ARM ARM, **all** LSE atomics have bit 21=1 — they're
+  distinguished by the `opc` field at bits 15:12. The new decoder
+  classifies any bit-21=1 encoding in the 111000 group as
+  `LSE_ATOMIC` and sub-dispatches on `atom_op` in the interpreter.
+  The `has_lse_` gate is now checked in the interpreter's
+  `LSE_ATOMIC` case: if the binary doesn't declare LSE, the encoding
+  is executed as LDUR/STUR (matching real hardware).
 
-**Latent NEON bug discovered:** musl's `strtok`/`strtok_r` expose a
-NEON/SIMD corruption bug (see Limitations). The shell works around
-this with a manual tokenizer. The specific NEON instruction that
-misbehaves is the next thing to track down — likely related to the
-ORR (vector) handler's byte order vs `STR Qn`/`LDR Qn`.
+### Earlier releases
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
-
-## What's New in 1.3.0-beta.3
-
-**The big one: the mallocng hang is fixed.** The root cause was a
-32-bit rotation bug in the UBFM/SBFM/BFM instruction handler. When
-executing `lsl w24, w26, #4` (which the compiler encodes as
-`ubfm w24, w26, #28, #27`), the emulator used `ror64` followed by a
-`uint32_t` cast, which lost the wrapped bits — `ror64(0x2, 28)` puts
-the wrapped bits at position 36, and `(uint32_t)0x2000000000 = 0x0`
-instead of the correct `0x20` (= 32). This made musl's mallocng stride
-0, which caused `alloc_slot` to infinitely recurse because no group size
-class could satisfy the `stride * nslots + 16 <= pagesize/2` check.
-`malloc`/`free`/`qsort` all work now. This was THE #1 blocker since
-v1.1.5-alpha.1.
-
-**BIC/ORN/EON/BICS fix (the printf/fclose root cause).** The logical
-shifted register group has an N bit (bit 21) that inverts the second
-operand: AND→BIC, ORR→ORN, EOR→EON, ANDS→BICS. The interpreter was
-ignoring N entirely — BIC was treated as AND. This broke musl's `strlen`
-zero-byte detection (`bic x2, x3, x2` computed `x3 & x2` instead of
-`x3 & ~x2`), causing strlen to scan past NUL terminators, which
-corrupted stdio buffer management, producing garbled printf output and
-the exit-133 fclose crash. With the fix, all printf formats (`%s %d %u
-%x %c %ld %llx`), puts, fwrite, and qsort produce correct output, and
-programs exit cleanly (exit 0, no fclose crash).
-
-**Bitmask immediate decode fix.** The decoder's `decode_bitmask_imm` used
-`~0` for `esize==64` regardless of `S`, producing all-ones instead of
-the correct mask for masks like `0xFFFFFFFFFFFFFFF0`. The interpreter's
-inline bitmask decode had a separate bug (shifted ones to `esize-1-S`
-instead of bit 0, producing `0xf8f8f8f8` for `0x1f`). Both fixed: the
-decoder uses `(1ULL << width) - 1`, and the interpreter uses `d.imm_u`
-from the decoder.
-
-**Hierarchical STP/LDP decoder fix.** The decoder now checks Load/Store
-pair (STP/LDP) before logical shifted register, preventing the pre-index
-STP/LDP vs ORR encoding collision. The STP/LDP mask was expanded to
-catch all three addressing modes (post-index, signed offset, pre-index)
-for both GP and SIMD registers, with a mode validation check to reject
-LDUR/STUR that shares the same top bits.
-
-**The decoder switch is complete, the legacy if-chain is deleted.**
-Every instruction handler — branches, system, data processing (immediate
-and register), load/store, atomics, SIMD data-processing, and FP scalar —
-now lives in the `switch(d.cls)` block in `interpreter.cpp`. The
-~500-line legacy if-chain that lived below the switch since alpha.1 is
-gone. The interpreter now does a single `decode()` call per instruction
-and dispatches purely on `d.cls`. The decoder is the true single source
-of truth, no exceptions.
-
-**FP scalar decoder fix.** The FP scalar decoder only matched
-`0x1E200000` (32-bit single-precision). It missed all 64-bit
-(`sf=1`, top byte `0x9E`) and double-precision (`ftype=01`) FP
-instructions, causing decode errors on any binary using D registers.
-Fixed by adding the broad `0x1E000000` and `0x9E000000` top-byte masks,
-matching the original if-chain's three-way check. `test_float` no
-longer hangs — it now fails fast with a decode error on an unhandled
-FP instruction in the softfloat path (an improvement over the infinite
-hang).
-
-**mallocng MAP_FIXED overlap handling.** When musl's mallocng calls
-`mmap(MAP_FIXED, addr, ...)` inside the brk region (which it does to
-carve out guard pages and meta_area slots), the brk is now pushed
-forward past the mmap'd region. This prevents a subsequent `brk(new)`
-extension from re-mapping the same pages via `map_range` and corrupting
-musl's metadata. The 1.1.5-alpha.1 changelog described this fix but the
-actual code was missing; this release finally implements it. (Note: this
-was NOT the root cause of the mallocng hang — the UBFM rotation bug was.
-But this fix is still correct and necessary for long-running malloc
-workloads.)
-
-**Hang watchdog.** The run loop tracks the last PC and counts how many
-times it's been executed consecutively. If the same PC is hit more than
-50 million times in a row (which only happens for `b .` self-branches
-or genuinely stuck atomic-CAS loops), the emulator aborts with a
-diagnostic message instead of spinning forever. Legitimate tight loops
-(`fib`, `count`, etc.) cycle through multiple PCs and never trip the
-watchdog.
-
-**MADD family decoder fix.** The old decoder classified `SMULH` as
-`sub_op=7`, but per the ARM ARM pseudocode (verified at
-https://www.scs.stanford.edu/~zyedidia/arm64/smulh.html), `SMULH` is
-`sub_op=2`. The old code's `case 7: d.cls = InstClass::SMULH` was
-unreachable; `SMULH` instructions would have fallen through to the
-UNKNOWN case and thrown a `DecodeError`. Fixed to use the correct
-`sub_op=2`.
-
-**LSE atomics decoder fix.** The old decoder treated `SWP` as a
-distinct encoding (bit 21=1) and `LDADD` family as bit 21=0. Per the
-ARM ARM, **all** LSE atomics have bit 21=1 — they're distinguished by
-the `opc` field at bits 15:12, not by bit 21. The old code's LDADD
-handler (checking bit 21=0) would never match real LDADD instructions;
-only the SWP handler caught them, and it did swap semantics — silently
-wrong for LDADD/LDCLR/LDEOR/etc. The new decoder classifies any
-bit-21=1 encoding in the 111000 group as `LSE_ATOMIC` and sub-dispatches
-on `atom_op` in the interpreter. The `has_lse_` gate is now checked in
-the interpreter's `LSE_ATOMIC` case: if the binary doesn't declare LSE,
-the encoding is executed as LDUR/STUR (matching real hardware).
-
-**Decoder warning cleanup.** Fixed three compiler warnings in
-`decoder.cpp`: the tautological hint-mask comparison (`(inst & 0xFFFFF010)
-== 0xD5033090` was always false), the unused `nbytes` variable in the
-unsigned-offset load/store decoder, and the unused `sf` parameter in
-`extend_reg`.
-
-**Migration status section deleted.** The README no longer has a
-"Current Migration Status" / "Still in if-chain" section — there is no
-if-chain anymore. The full instruction list now lives under
-"Decoder Switch — Complete Coverage" above.
-
-**Fixes from 1.1.x / 1.3.0-alpha/beta.1/beta.2 carried forward:**
-- SIMD LDR/STR Q-form (128-bit) — was transferring only 1 byte
-- FMOV Vd.D[1], Rn — was unimplemented (broke 128-bit softfloat)
-- BFM destination field position — was inserting at bit 0
-- ADC/ADCS/SBC/SBCS — were unimplemented
-- MOVI Vd.2D, #0 — was only handling byte broadcast form
-- PT_NOTE-based LDUR/LSE disambiguation — matches real hardware
-- MAP_FIXED overlap handling for mallocng (now actually implemented)
-- Exclusive monitor: branches no longer clear the monitor
-- LDXR decode: `low6=0x3F` with `o0=0` is LDXR, not LDAR
-- fclose/`__stdio_exit` crash: catch UnmappedMemory during exit
-
-Full release notes in [CHANGELOG.md](CHANGELOG.md).
+- **v1.3.0-beta.2** — malloc fixes, ARM ISA research, STP/LDP
+  decoder correction, SWP instruction fix.
+- **v1.3.0-beta.1** — exclusive monitor fix, fclose crash fix, SDL2
+  cross-build.
+- **v1.3.0-alpha.1..3** — wired the decoder up as the entry point,
+  `switch(d.cls)` dispatch, full decoder rewrite, decode cache,
+  MOVI fix, immediate group migrated to the decoder switch.
+- **v1.1.5-alpha.1** — SIMD LDR/STR Q-form, FMOV Vd.D[1], BFM fix,
+  ADC/SBC, more syscalls.
+- **v1.1.1-alpha.1** — PT_NOTE-based LDUR/LSE disambiguation.
+- **v1.1.0-rc.1..2** — VFS support, SIMD STP/LDP, real FP/SIMD
+  arithmetic (FADD/FSUB/FMUL/FDIV/FSQRT/FCMP/FCVT/SCVTF/FCVTZS/
+  FMADD), file split, decoder.hpp.
+- **v1.1.0-beta.1** — LSE atomics encoding fix (toybox gets past
+  mallocng init).
+- **v1.1.0-alpha.1** — exclusive monitor, LSE atomics fix, mmap
+  MAP_FIXED, getppid, mremap in-place.
+- **v1.0.0-beta.1** — initial commit.
 
 ## Limitations
 
-This is beta-quality software. Known issues:
+This is alpha-quality software. Known issues:
 
-- **`printf("%f", ...)` partially works.** Long double multiply
-  (`__multf3`), equality (`__eqtf2`), and ordering (`__gttf2`/
-  `__lttf2`) all work correctly after the CCMP/CSEL/SIMD/BFM fixes.
-  The remaining issue is a performance problem in `__subtf3`'s
-  mantissa alignment path (large exponent differences cause a very
-  long shift loop), not a correctness bug. Integer printf formats
-  (`%d`, `%x`, `%c`, `%s`, `%ld`, `%llx`) all work.
+- **frostJIT (`--jit`) is experimental and known to crash.** `fib`,
+  `sort`, and other programs that hit the JIT's unsupported
+  instruction paths or NZCV flag-emission TODOs can segfault. The
+  default interpreter path is stable and passes all tests; do not
+  rely on `--jit` for production use yet.
+
+- **Signal delivery is partial.** `rt_sigaction` installs handlers,
+  `rt_sigreturn` restores CPU state, and `kill`/`tkill`/`tgkill`
+  deliver signals to the current thread. However: no `siginfo_t`/
+  `ucontext_t` contents are passed to handlers, no `SA_RESTART`,
+  no signal masks, no `sigaltstack`, no real-time signals 32+, and
+  no cross-thread delivery. See `signal.hpp` for the full list.
 
 - **NEON bug triggered by `strtok`/`strtok_r`.** musl's `strtok` and
   `strtok_r` call `strspn`/`strcspn`, which build a 256-bit bitset
-  using NEON/SIMD instructions. After a successful `fgets` of "hi\n",
-  calling `strtok_r` corrupts registers `x21`/`x22` with garbage
-  values like `0xffff98f000000108` (top 16 bits set — invalid
-  user-space addresses on AArch64). The specific NEON instruction
-  that corrupts state has not yet been identified. The
+  using NEON/SIMD instructions. After a successful `fgets` of
+  `"hi\n"`, calling `strtok_r` corrupts registers `x21`/`x22` with
+  garbage values like `0xffff98f000000108` (top 16 bits set —
+  invalid user-space addresses on AArch64). The specific NEON
+  instruction that corrupts state has not yet been identified. The
   `ctest_real/sh.elf` REPL shell works around this by using a manual
   tokenizer. Programs that avoid `strtok` family functions work
-  correctly. **Likely root cause:** an ORR (vector) handler that
-  writes `v_lo`/`v_hi` in a different byte order than `STR Qn`/`LDR
-  Qn` reads them, or a 128-bit shift/extract instruction whose
+  correctly. Likely root cause: an ORR (vector) handler that writes
+  `v_lo`/`v_hi` in a different byte order than `STR Qn`/`LDR Qn`
+  reads them, or a 128-bit shift/extract instruction whose
   high-half handling is wrong.
 
 - **Function pointer tables in static-PIE binaries** may not relocate
   correctly (`test_fnptr` hits a decode error).
-- **No signal delivery** — `rt_sigaction` is a no-op.
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
-- **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation bug.
-  Fix requires further decoder work, planned for v2.0.
+- **`toybox-aarch64` crashes at PC=0** — STP/LDP mode calculation
+  bug. Fix requires further decoder work.
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled
   instruction.
-- **`test_sdl2.elf`** gets past atomics and mallocng init (thanks to
-  the beta.3 fixes) but hangs later in SDL2 setup. The hang watchdog
-  catches it as a fast-fail.
+- **`test_sdl2.elf`** gets past atomics and mallocng init but hangs
+  later in SDL2 setup. The hang watchdog catches it as a fast-fail.
 
 ## Roadmap
 
-**Short-term (1.3.0 final):**
-1. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` — the
-   most likely root cause is an ORR (vector) handler that writes
-   `v_lo`/`v_hi` in a different byte order than `STR Qn`/`LDR Qn`
-   reads them, or a 128-bit shift/extract instruction whose
-   high-half handling is wrong. Tracing the `strspn` bitset
-   construction in musl should pinpoint the exact instruction.
-2. Fix `printf("%f")` performance — optimize `__subtf3`'s mantissa
-   alignment loop (the remaining blocker for full float printf)
-3. Fix `test_fnptr` — investigate static-PIE self-relocation
-4. More test coverage: threads, signals
+**v1.4.0 (stabilize the alpha)**
 
-**Medium-term (1.4.0):**
-1. Signal delivery (`rt_sigaction` + `rt_sigreturn` + trampoline page)
-2. SDL2 rendering for the graphics backend (video/audio/input) — the
-   mallocng fix in beta.3 unblocks this; SDL2 init now gets past the
-   allocator
-3. Sub-decode the SIMD DP and FP scalar catch-all groups (currently
-   routed as generic `SIMD_DP` / `FP_SCALAR` and re-dispatched in the
-   interpreter; the hierarchical decoder structure makes adding
-   dedicated `InstClass` values for each a clean refactor)
+1. **Make frostJIT not crash.** Fill in the NZCV flag-emission paths
+   (currently `TODO` in `frostjit.cpp` for `ADDS`/`SUBS`/`CMP` and
+   shifted-register forms), add SIMD/FP fallbacks that don't abort
+   the block, and add a regression test that runs every `ctest_real/`
+   binary under `--jit` and compares output against the interpreter.
+   Target: `--jit` runs `fib(40)` and `sort` without segfaulting.
+2. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r`. Trace
+   the `strspn` bitset construction in musl to pinpoint the exact
+   instruction. Most likely candidate: an ORR (vector) handler that
+   writes `v_lo`/`v_hi` in a different byte order than `STR Qn`/
+   `LDR Qn` reads them, or a 128-bit shift/extract instruction whose
+   high-half handling is wrong.
+3. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
+   contents, `SA_RESTART`, signal masks, `sigaltstack`, and
+   cross-thread delivery. The signal frame plumbing landed in
+   v1.4.0-alpha; this is the remaining work to make it useful for
+   real signal-heavy programs.
+4. **Fix `test_fnptr`** — investigate static-PIE self-relocation.
+5. **More test coverage**: threads, signals, real-time signals.
 
-**Long-term (2.0+):**
-1. **JIT compiler** — x86_64 codegen sharing decoder tables with the
-   interpreter. Target: 500+ MIPS. The hierarchical decoder structure
-   in v1.4.0-alpha makes this easier — the outer switch on bits[28:24]
-   maps directly to a JIT dispatch table. The direct-mapped decode
-   cache already demonstrates the hot-path speedup achievable with
-   flat dispatch.
-2. **Game support** — framebuffer/DRM, audio, input. Long-term goal:
-   statically-linked ARM64 SDL2 games at playable framerates.
+**v1.4.x (feature work)**
+
+1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
+   backend. The video path is wired up and refreshed every ~1M
+   instructions; audio and input are the remaining pieces for
+   interactive graphical guests.
+2. **Sub-decode the SIMD DP and FP scalar catch-all groups.**
+   Currently these are routed as generic `SIMD_DP` / `FP_SCALAR` and
+   re-dispatched in the interpreter. The hierarchical decoder
+   structure makes adding dedicated `InstClass` values for each a
+   clean refactor — and would make the NEON bug above easier to
+   isolate.
+3. **Promote frostJIT from experimental to default.** Once the
+   stabilization work above lands, flip the default to JIT-on with
+   an interpreter fallback. Target: 500+ MIPS. The outer switch on
+   bits[28:24] maps directly to a JIT dispatch table, and the
+   direct-mapped decode cache already demonstrates the hot-path
+   speedup achievable with flat dispatch.
+
+**v2.0+ (long-term)**
+
+1. **Full game support** — framebuffer/DRM, audio, input. Long-term
+   goal: statically-linked ARM64 SDL2 games at playable framerates.
+2. **Dynamic linking** — currently static binaries only. Loading and
+   resolving a dynamic AArch64 binary would significantly expand the
+   set of runnable software.
+3. **ASLR** — binaries currently load at their preferred vaddr;
+   randomizing load addresses would catch guest programs that
+   accidentally depend on absolute addressing.
 
 ## Forking
 

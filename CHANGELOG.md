@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0] — 2026-06-19
+## [1.4.0-alpha] — 2026-06-19
 
 The "printf("%f") finally works + interactive shell fixed" release.
 Three critical bugs squashed that previously broke almost every
@@ -80,9 +80,31 @@ floating-point printf and every interactive guest program.
 
 ### Changed
 
-- Bumped version from `1.3.0-beta.4` to `1.4.0`. This is the first
-  stable release — the previous betas had the FMOV-imm and UBFM-LSL
-  bugs that made `printf("%f", ...)` unusable on real workloads.
+- Bumped version from `1.3.0-beta.4` to `1.4.0-alpha`. This is the first
+  release cut from the post-beta.4 audit branch — the previous betas had
+  the FMOV-imm and UBFM-LSL bugs that made `printf("%f", ...)` unusable on
+  real workloads.
+
+### Documentation / hygiene (post-release audit)
+
+- **README file-structure section** updated to reflect the actual
+  `src/` + `include/` layout (was still listing root-level files and
+  the removed `mini_arm64_asm.py`). GraphicsBackend is no longer
+  described as a "framebuffer stub for 1.3.0" — it is the full
+  headless + optional SDL2 implementation landed in this release.
+- **SDL2 status** in the README corrected: SDL2 is no longer "planned
+  for v1.4.0-alpha" — it shipped (build with `make USE_SDL2=1`).
+- **Roadmap heading** corrected from "Short-term (1.3.0 final)" to
+  "Short-term (1.4.0 final)".
+- **`api/bifrost.h`** gained a `Version: 1.4.0-alpha` preamble and the
+  `bifrost_version()` example string was updated from the stale
+  `1.3.0-beta.4` to `1.4.0-alpha`.
+- **Stale "fix in v1.1" comment** removed from `syscalls.cpp`'s
+  epoll_wait placeholder (v1.1 is many releases back; the placeholder
+  is documented inline as a known slot conflict, not a v1.1 TODO).
+- **Dead `InstClass::CAS` enum value** removed. `LSE_ATOMIC` already
+  covers CAS via `atom_op >= 0xC`; the legacy alias was never
+  referenced anywhere in the tree.
 
 ## [1.3.0-beta.4] — 2026-06-19
 
