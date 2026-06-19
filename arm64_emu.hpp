@@ -120,6 +120,19 @@ public:
 
     Memory() = default;
 
+    // Thread-local page cache: each thread gets its own read/write cache
+    // entry, avoiding mutex contention for same-page accesses. This is
+    // safe because the underlying pages_ map is still protected by mu_.
+    // The cache stores a raw pointer into the vector's data; this is
+    // stable because std::vector<uint8_t> objects inside the unordered_map
+    // are heap-allocated and don't move when the map rehashes.
+    struct PageCache {
+        uint64_t          read_page  = 0;
+        const uint8_t*    read_ptr   = nullptr;
+        uint64_t          write_page = 0;
+        uint8_t*          write_ptr  = nullptr;
+    };
+
     void map_range(uint64_t addr, uint64_t size) {
         if (size == 0) return;
         std::lock_guard<std::mutex> g(mu_);
@@ -145,7 +158,7 @@ public:
         return true;
     }
 
-    void write(uint64_t addr, const void* src, size_t n) {
+    void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr) {
         if (n == 0) return;
         const uint8_t* p = (const uint8_t*)src;
         uint64_t cur = addr;
@@ -154,10 +167,9 @@ public:
             uint64_t pn = cur / PAGE_SIZE;
             uint64_t off = cur & PAGE_MASK;
             size_t take = std::min<size_t>(PAGE_SIZE - off, remaining);
-            // Fast path: check last-page cache (no lock needed for
-            // single-threaded execution — the common case)
-            if (__builtin_expect(pn == last_write_page_, 1)) {
-                memcpy(last_write_ptr_ + off, p, take);
+            // Fast path: check thread-local page cache
+            if (pc && __builtin_expect(pn == pc->write_page, 1)) {
+                memcpy(pc->write_ptr + off, p, take);
             } else {
                 std::vector<uint8_t>* page = nullptr;
                 {
@@ -169,9 +181,10 @@ public:
                     page = &it->second;
                 }
                 memcpy(page->data() + off, p, take);
-                // Update cache
-                last_write_page_ = pn;
-                last_write_ptr_ = page->data();
+                if (pc) {
+                    pc->write_page = pn;
+                    pc->write_ptr = page->data();
+                }
             }
             p += take;
             cur += take;
@@ -179,7 +192,7 @@ public:
         }
     }
 
-    void read(uint64_t addr, void* dst, size_t n) const {
+    void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const {
         if (n == 0) return;
         uint8_t* p = (uint8_t*)dst;
         uint64_t cur = addr;
@@ -188,9 +201,9 @@ public:
             uint64_t pn = cur / PAGE_SIZE;
             uint64_t off = cur & PAGE_MASK;
             size_t take = std::min<size_t>(PAGE_SIZE - off, remaining);
-            // Fast path: check last-page cache
-            if (__builtin_expect(pn == last_read_page_, 1)) {
-                memcpy(p, last_read_ptr_ + off, take);
+            // Fast path: check thread-local page cache
+            if (pc && __builtin_expect(pn == pc->read_page, 1)) {
+                memcpy(p, pc->read_ptr + off, take);
             } else {
                 const std::vector<uint8_t>* page = nullptr;
                 {
@@ -200,9 +213,10 @@ public:
                     page = &it->second;
                 }
                 memcpy(p, page->data() + off, take);
-                // Update cache
-                last_read_page_ = pn;
-                last_read_ptr_ = page->data();
+                if (pc) {
+                    pc->read_page = pn;
+                    pc->read_ptr = page->data();
+                }
             }
             p += take;
             cur += take;
@@ -218,12 +232,25 @@ public:
         return v;
     }
     template<typename T>
+    T load(uint64_t addr, PageCache* pc) const {
+        T v;
+        read(addr, &v, sizeof(T), pc);
+        return v;
+    }
+    template<typename T>
     void store(uint64_t addr, T v) {
         write(addr, &v, sizeof(T));
+    }
+    template<typename T>
+    void store(uint64_t addr, T v, PageCache* pc) {
+        write(addr, &v, sizeof(T), pc);
     }
 
     uint32_t fetch_inst(uint64_t addr) const {
         return load<uint32_t>(addr);
+    }
+    uint32_t fetch_inst(uint64_t addr, PageCache* pc) const {
+        return load<uint32_t>(addr, pc);
     }
 
     size_t page_count() const {
@@ -314,15 +341,6 @@ public:
 private:
     mutable std::mutex mu_;
     std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
-
-    // Last-page cache: avoids repeated mutex+hash-lookup for accesses
-    // to the same page (stack, heap, code). This is the single hottest
-    // data structure in the emulator — the cache gives ~10x speedup
-    // for tight loops that access memory on the same page.
-    mutable uint64_t    last_read_page_  = 0;
-    mutable const uint8_t* last_read_ptr_ = nullptr;
-    uint64_t            last_write_page_ = 0;
-    uint8_t*            last_write_ptr_  = nullptr;
     uint64_t mmap_next_ = 0x5000000000ULL; // 20 GB region - won't collide with stack/heap
 };
 
@@ -571,6 +589,11 @@ public:
     // Thread ID (guest TID). Main thread is 1; cloned threads get 2, 3, ...
     // Used by getpid/gettid/tgkill and as the futex owner field.
     int tid = 1;
+
+    // Per-CPU memory page cache for the hot path. Avoids mutex+hash
+    // on every memory access to the same page. Each CPU (thread) has
+    // its own cache, so no locking needed.
+    Memory::PageCache page_cache;
 
     // Address set via set_tid_address() — used by futex on child termination
     // (set_child_tid). Currently informational; we don't reap children.
@@ -1020,7 +1043,7 @@ private:
                     (unsigned long long)cpu.v_lo[0],
                     (unsigned long long)cpu.v_hi[0]);
         }
-        uint32_t inst = mem_.fetch_inst(cpu.pc);
+        uint32_t inst = mem_.fetch_inst(cpu.pc, &cpu.page_cache);
         uint64_t next_pc = cpu.pc + 4;
         execute(inst, next_pc, cpu);
         cpu.pc = next_pc;

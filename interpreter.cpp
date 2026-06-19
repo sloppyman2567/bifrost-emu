@@ -63,6 +63,7 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
 }
 
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
+    auto* pcache = &cpu.page_cache;
     // ── Decode via the shared decoder ─────────────────────────────
     // The decoder (decoder.cpp) is the single source of truth for
     // instruction classification. We call decode() once, then dispatch
@@ -886,30 +887,30 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.is_vec) {
                     if (d.is_load) {
                         uint64_t lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
-                        mem_.read(addr, &lo1, 8);
-                        if (esize >= 16) mem_.read(addr + 8, &hi1, 8);
-                        mem_.read(addr + esize, &lo2, 8);
-                        if (esize >= 16) mem_.read(addr + esize + 8, &hi2, 8);
+                        mem_.read(addr, &lo1, 8, pcache);
+                        if (esize >= 16) mem_.read(addr + 8, &hi1, 8, pcache);
+                        mem_.read(addr + esize, &lo2, 8, pcache);
+                        if (esize >= 16) mem_.read(addr + esize + 8, &hi2, 8, pcache);
                         cpu.v_lo[d.rt] = lo1; cpu.v_hi[d.rt] = hi1;
                         cpu.v_lo[d.rt2] = lo2; cpu.v_hi[d.rt2] = hi2;
                     } else {
-                        mem_.write(addr, &cpu.v_lo[d.rt], 8);
-                        if (esize >= 16) mem_.write(addr + 8, &cpu.v_hi[d.rt], 8);
-                        mem_.write(addr + esize, &cpu.v_lo[d.rt2], 8);
-                        if (esize >= 16) mem_.write(addr + esize + 8, &cpu.v_hi[d.rt2], 8);
+                        mem_.write(addr, &cpu.v_lo[d.rt], 8, pcache);
+                        if (esize >= 16) mem_.write(addr + 8, &cpu.v_hi[d.rt], 8, pcache);
+                        mem_.write(addr + esize, &cpu.v_lo[d.rt2], 8, pcache);
+                        if (esize >= 16) mem_.write(addr + esize + 8, &cpu.v_hi[d.rt2], 8, pcache);
                     }
                 } else {
                     if (d.is_load) {
                         uint64_t v1 = 0, v2 = 0;
-                        mem_.read(addr, &v1, esize);
-                        mem_.read(addr + esize, &v2, esize);
+                        mem_.read(addr, &v1, esize, pcache);
+                        mem_.read(addr + esize, &v2, esize, pcache);
                         if (d.rt  != 31) cpu.regs[d.rt]  = v1;
                         if (d.rt2 != 31) cpu.regs[d.rt2] = v2;
                     } else {
                         uint64_t v1 = (d.rt  == 31) ? 0 : cpu.regs[d.rt];
                         uint64_t v2 = (d.rt2 == 31) ? 0 : cpu.regs[d.rt2];
-                        mem_.write(addr, &v1, esize);
-                        mem_.write(addr + esize, &v2, esize);
+                        mem_.write(addr, &v1, esize, pcache);
+                        mem_.write(addr + esize, &v2, esize, pcache);
                     }
                 }
                 return;
@@ -939,13 +940,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         int nbytes = is_q ? 16 : (1 << d.size);
                         if (is_load) {
                             uint64_t lo = 0, hi = 0;
-                            mem_.read(addr, &lo, std::min(nbytes, 8));
+                            mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
                             if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                             cpu.v_lo[d.rt] = lo;
                             cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                         } else {
                             uint64_t lo = cpu.v_lo[d.rt];
-                            mem_.write(addr, &lo, std::min(nbytes, 8));
+                            mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                             if (nbytes > 8) {
                                 uint64_t hi = cpu.v_hi[d.rt];
                                 mem_.write(addr + 8, &hi, nbytes - 8);
@@ -954,7 +955,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     } else {
                         if (is_load) {
                             uint64_t v = 0;
-                            mem_.read(addr, &v, width_bytes);
+                            mem_.read(addr, &v, width_bytes, pcache);
                             if (d.rt != 31) {
                                 if (opc_ls & 2) v = sign_extend(v, width_bytes * 8);
                                 cpu.regs[d.rt] = v;
@@ -964,7 +965,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             uint64_t mask = (width_bytes == 8) ? ~0ULL
                                           : ((1ULL << (width_bytes * 8)) - 1);
                             v &= mask;
-                            mem_.write(addr, &v, width_bytes);
+                            mem_.write(addr, &v, width_bytes, pcache);
                         }
                     }
                     return;
@@ -978,12 +979,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // CAS family (atom_op >= 0xC): compare-and-swap.
                 if (d.atom_op >= 0xC) {
                     uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes);
+                    mem_.read(base, &old, width_bytes, pcache);
                     uint64_t cmp = cpu.regs[d.rs] & mask;
                     old &= mask;
                     if (old == cmp) {
                         uint64_t newv = cpu.regs[d.rt] & mask;
-                        mem_.write(base, &newv, width_bytes);
+                        mem_.write(base, &newv, width_bytes, pcache);
                     }
                     if (d.rt != 31) cpu.regs[d.rt] = old;
                     return;
@@ -992,17 +993,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // SWP (atom_op == 0x8): atomic swap.
                 if (d.atom_op == 0x8) {
                     uint64_t old = 0;
-                    mem_.read(base, &old, width_bytes);
+                    mem_.read(base, &old, width_bytes, pcache);
                     old &= mask;
                     uint64_t newv = cpu.regs[d.rs] & mask;
-                    mem_.write(base, &newv, width_bytes);
+                    mem_.write(base, &newv, width_bytes, pcache);
                     if (d.is_load && d.rt != 31) cpu.regs[d.rt] = old;
                     return;
                 }
 
                 // Other LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN).
                 uint64_t a = 0, b = cpu.regs[d.rs];
-                mem_.read(base, &a, width_bytes);
+                mem_.read(base, &a, width_bytes, pcache);
                 a &= mask;
                 b &= mask;
                 uint64_t newv = 0;
@@ -1025,7 +1026,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     case 0x7: newv = (a < b ? a : b) & mask; break;    // UMIN
                     default:  newv = a & mask; break;
                 }
-                mem_.write(base, &newv, width_bytes);
+                mem_.write(base, &newv, width_bytes, pcache);
                 if (d.is_load && d.rt != 31) cpu.regs[d.rt] = a;
                 return;
             }
@@ -1044,14 +1045,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t addr = base + ((uint64_t)imm12 << scale);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
                         uint64_t hi = cpu.v_hi[d.rt];
-                        mem_.write(addr, &lo, std::min(nbytes, 8));
+                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8);
                     }
                     return;
@@ -1060,7 +1061,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes);
+                    mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
                         if (opc & 2) v = sign_extend(v, width_bytes * 8);
                         cpu.regs[d.rt] = v;
@@ -1070,7 +1071,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes);
+                    mem_.write(addr, &v, width_bytes, pcache);
                 }
                 return;
             }
@@ -1100,13 +1101,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     int nbytes = is_q ? 16 : (1 << size);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
-                        mem_.write(addr, &lo, std::min(nbytes, 8));
+                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
                             mem_.write(addr + 8, &hi, nbytes - 8);
@@ -1117,7 +1118,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes);
+                    mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
                         if (opc & 2) v = sign_extend(v, width_bytes * 8);
                         cpu.regs[d.rt] = v;
@@ -1127,7 +1128,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes);
+                    mem_.write(addr, &v, width_bytes, pcache);
                 }
                 return;
             }
@@ -1147,13 +1148,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     int nbytes = is_q ? 16 : (1 << size);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
-                        mem_.read(addr, &lo, std::min(nbytes, 8));
+                        mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8);
                         cpu.v_lo[d.rt] = lo;
                         cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
-                        mem_.write(addr, &lo, std::min(nbytes, 8));
+                        mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) {
                             uint64_t hi = cpu.v_hi[d.rt];
                             mem_.write(addr + 8, &hi, nbytes - 8);
@@ -1164,7 +1165,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int width_bytes = 1 << size;
                 if (d.is_load) {
                     uint64_t v = 0;
-                    mem_.read(addr, &v, width_bytes);
+                    mem_.read(addr, &v, width_bytes, pcache);
                     if (d.rt != 31) {
                         if (opc & 2) v = sign_extend(v, width_bytes * 8);
                         cpu.regs[d.rt] = v;
@@ -1174,7 +1175,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;
-                    mem_.write(addr, &v, width_bytes);
+                    mem_.write(addr, &v, width_bytes, pcache);
                 }
                 return;
             }
@@ -1205,7 +1206,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             uint64_t mask = (width_bytes == 8) ? ~0ULL
                                           : ((1ULL << (width_bytes * 8)) - 1);
                             v &= mask;
-                            mem_.write(base, &v, width_bytes);
+                            mem_.write(base, &v, width_bytes, pcache);
                         }
                         if (d.rs != 31) cpu.regs[d.rs] = ok ? 0 : 1;
                         cpu.excl_clear();
@@ -1215,12 +1216,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t mask = (width_bytes == 8) ? ~0ULL
                                       : ((1ULL << (width_bytes * 8)) - 1);
                         v &= mask;
-                        mem_.write(base, &v, width_bytes);
+                        mem_.write(base, &v, width_bytes, pcache);
                     }
                 } else {
                     // Load-exclusive (LDXR/LDAXR) or load-acquire (LDAR).
                     uint64_t v = 0;
-                    mem_.read(base, &v, width_bytes);
+                    mem_.read(base, &v, width_bytes, pcache);
                     cpu.regs[d.rt] = v;
                     if (use_monitor) {
                         cpu.excl_mark(base, width_bytes);
@@ -1249,7 +1250,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint64_t a = base + i * total_bytes;
                     if (d.is_load) {
                         uint8_t buf[16];
-                        mem_.read(a, buf, total_bytes);
+                        mem_.read(a, buf, total_bytes, pcache);
                         memcpy(&cpu.v_lo[r], buf, 8);
                         if (total_bytes == 16) memcpy(&cpu.v_hi[r], buf + 8, 8);
                         else cpu.v_hi[r] = 0;
@@ -1257,7 +1258,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint8_t buf[16];
                         memcpy(buf, &cpu.v_lo[r], 8);
                         if (total_bytes == 16) memcpy(buf + 8, &cpu.v_hi[r], 8);
-                        mem_.write(a, buf, total_bytes);
+                        mem_.write(a, buf, total_bytes, pcache);
                     }
                 }
                 return;
@@ -1721,8 +1722,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint8_t rn = (op >> 5) & 0x1F;
                 uint8_t rd = op & 0x1F;
                 uint8_t rm = (op >> 16) & 0x1F;
-                bool sf = (op >> 31) & 1;
-                bool ftype = (op >> 22) & 1;  // 0=S(32-bit), 1=D(64-bit)
+                uint8_t sf_val = (op >> 31) & 1;
+                uint8_t ftype = (op >> 22) & 3;  // 0=S(32-bit), 1=D(64-bit), 3=H(16-bit)
 
                 auto read_fp_d = [&](int r) -> double {
                     uint64_t bits = cpu.v_lo[r];
@@ -1906,9 +1907,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FCVTZS/FCVTZU
-                if ((op & 0x7F3F0000) == 0x1E780000 || (op & 0x7F3F0000) == 0x1E790000) {
+                if ((op & 0x7F3F0000) == 0x1E380000) {  // FCVTZS/FCVTZU
                     bool is_unsigned = ((op >> 16) & 1);
-                    bool is_64bit = sf;
+                    bool is_64bit = sf_val;
                     if (ftype) {
                         double a = read_fp_d(rn);
                         if (is_unsigned) {
@@ -1931,9 +1932,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // SCVTF/UCVTF
-                if ((op & 0x7F3F0000) == 0x1E620000 || (op & 0x7F3F0000) == 0x1E630000) {
+                if ((op & 0x7F3F0000) == 0x1E220000) {  // SCVTF/UCVTF
                     bool is_unsigned = ((op >> 16) & 1);
-                    bool is_64bit = sf;
+                    bool is_64bit = sf_val;
                     if (ftype) {
                         if (is_unsigned) {
                             uint64_t v = is_64bit ? cpu.regs[rn] : (uint32_t)cpu.regs[rn];
@@ -1954,8 +1955,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FCSEL
-                if ((op & 0xFF200C00) == 0x1E200000 && ((op >> 21) & 1) == 0 &&
-                    ((op >> 10) & 0xF) == 0xC) {
+                if ((op & 0xFF200C00) == 0x1E200C00) {  // FCSEL (bit 21=0, bits[13:10]=1100)
                     uint8_t cond = (op >> 12) & 0xF;
                     if (ftype) {
                         double r = cond_true(cond, cpu.pstate) ? read_fp_d(rn) : read_fp_d(rm);
@@ -1980,7 +1980,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // Unknown FP instruction — NOP (don't crash)
-                (void)sf; (void)rm;
+                (void)sf_val; (void)rm;
                 return;
             }
 
