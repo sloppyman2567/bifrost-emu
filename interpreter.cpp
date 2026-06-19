@@ -1675,9 +1675,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
 
             // ── FP scalar (FMOV/FADD/FSUB/FMUL/FDIV/FCMP/FCVT/...) ────
-            // The decoder classifies the entire 0x1E200000 group as
-            // FP_SCALAR. We sub-dispatch on raw opcode bits, same as the
-            // old code did.
+            // The decoder classifies the entire 0x1E000000/0x9E000000
+            // group as FP_SCALAR. We sub-dispatch on raw opcode bits.
             case InstClass::FP_SCALAR: {
                 uint32_t op = d.raw;
                 uint8_t rn = (op >> 5) & 0x1F;
