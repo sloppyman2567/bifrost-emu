@@ -1,4 +1,4 @@
-// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.4.0)
+// arm64_emu.hpp - Bifrost-EMU: ARM64 Linux user-mode emulator (v1.4.0-alpha)
 //
 // Provides:
 //   - Sparse paged 64-bit memory model (thread-safe)
@@ -67,10 +67,25 @@
 
 namespace arm64emu {
 
+// Forward declarations.
+class FrostJIT;
+class SignalTable;
+struct CPU;
+class Emulator;
+class Memory;
+
+} // namespace arm64emu
+
+// Now include signal.hpp — it forward-declares Emulator/Memory/CPU itself
+// but our forward declarations above ensure they're visible.
+#include "signal.hpp"
+
+namespace arm64emu {
+
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION = "1.4.0";
+constexpr const char* VERSION = "1.4.0-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -707,7 +722,10 @@ public:
 // which run on real OS threads.
 class Emulator {
 public:
-    Emulator() = default;
+    Emulator();
+    ~Emulator();
+    Emulator(const Emulator&) = delete;
+    Emulator& operator=(const Emulator&) = delete;
 
     void load_elf_file(const std::string& path, std::vector<std::string>& argv) {
         elf_path_ = path;
@@ -785,11 +803,27 @@ public:
 
         while (main_cpu_.running) {
             try {
-                step(main_cpu_);
+                if (jit_enabled_ && jit_) {
+                    // Experimental JIT dispatch (v1.4.0-alpha). Defined
+                    // in jit_glue.cpp so the FrostJIT definition is
+                    // available. The JIT translates a basic block and
+                    // runs it; for any instruction it can't handle, it
+                    // falls back to step_public() (the interpreter).
+                    jit_step(main_cpu_);
+                } else {
+                    step(main_cpu_);
+                }
             } catch (UnmappedMemory& e) {
-                // During exit cleanup, stale FILE buffer pointers can
-                // cause unmapped reads. Just stop emulation — program
-                // output is already complete.
+                // v1.4.0-alpha: if the guest has installed a SIGSEGV
+                // handler, deliver the signal and continue. Otherwise,
+                // stop emulation (program output is already complete
+                // — typically this is exit cleanup touching stale FILE
+                // buffers, but it could also be a genuine segfault).
+                if (deliver_signal(*this, main_cpu_, signals_, BIFROST_SIGSEGV)) {
+                    // Handler invoked — continue execution.
+                    count++;
+                    continue;
+                }
                 (void)e;
                 break;
             }
@@ -853,13 +887,25 @@ public:
                         (unsigned long long)misses,
                         100.0 * hits / total);
             }
+            if (jit_ && jit_enabled_) {
+                print_jit_stats();
+            }
         }
         return main_cpu_.exit_code;
     }
 
+    // Print frostJIT statistics (defined in jit_glue.cpp so the
+    // FrostJIT definition is available).
+    void print_jit_stats();
+
+    // JIT-dispatch one block (defined in jit_glue.cpp).
+    void jit_step(CPU& cpu);
+
     void set_verbose(bool v) { verbose_ = v; }
     void set_trace(bool v)   { trace_  = v; }
     void set_brk_verbose(bool v) { brk_verbose_ = v; }
+    void set_jit_enabled(bool v) { jit_enabled_ = v; }
+    bool jit_enabled() const { return jit_enabled_; }
 
     // Graphics backend access. The Emulator owns a GraphicsBackend
     // (virtual /dev/fb0) and wires it into the syscall layer. Guest
@@ -871,6 +917,13 @@ public:
     // Public so syscall handlers in arm64_emu.cpp can use it
     Memory& mem() { return mem_; }
     const std::string& elf_path() const { return elf_path_; }
+
+    // Signal table access (for syscalls.cpp's rt_sigaction/rt_sigreturn).
+    SignalTable& signals() { return signals_; }
+
+    // JIT access (nullptr if JIT is disabled).
+    FrostJIT* jit() { return jit_.get(); }
+    void enable_jit();
 
     // Public step wrapper for spawned threads (which need to call step()
     // from outside the main run() loop).
@@ -938,6 +991,20 @@ private:
     // ioctl() handlers (see case 56 for /dev/fb0, case 29 for
     // FBIOGET_VSCREENINFO / FBIOGET_FSCREENINFO).
     GraphicsBackend graphics_;
+
+    // ── Signal delivery (v1.4.0-alpha) ────────────────────────────────
+    // Per-Emulator signal handler table. rt_sigaction writes here;
+    // the run loop reads it when delivering signals (e.g., SIGSEGV
+    // from unmapped memory accesses).
+    SignalTable signals_;
+
+    // ── frostJIT (v1.4.0-alpha, experimental) ────────────────────────
+    // Lazily constructed when enable_jit() is called (typically from
+    // main.cpp when the --jit flag is passed). When non-null and
+    // jit_enabled_ is true, the run loop dispatches through the JIT
+    // instead of the switch-based interpreter.
+    std::unique_ptr<FrostJIT> jit_;
+    bool jit_enabled_ = false;
 
     // Friend declaration must come AFTER GuestThread is defined
     friend void thread_entry(Emulator* emu, GuestThread* gt);

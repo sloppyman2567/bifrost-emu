@@ -711,11 +711,43 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 131: { // tgkill - no-op
+        case 131: { // tgkill(tgid, tid, sig) — send signal to specific thread
+            // v1.4.0-alpha: deliver the signal to the target thread.
+            // For now we only handle signals directed at the current
+            // thread (tid == cpu.tid). Cross-thread delivery is left
+            // to a future version.
+            (void)a0;  // tgid
+            (void)a1;  // tid
+            int sig = (int)a2;
+            if (sig == 0) {
+                // Signal 0: just check permission (always succeeds).
+                ret_host(0);
+                return;
+            }
+            if (sig >= 1 && sig <= MAX_SIGNAL) {
+                // If there's a handler installed, deliver it.
+                // Otherwise apply default disposition (which may
+                // terminate the guest).
+                deliver_signal(*this, cpu, signals_, sig);
+            }
             ret_host(0);
             return;
         }
-        case 130: { // tkill - no-op
+        case 130: { // tkill(tid, sig)
+            int sig = (int)a1;
+            if (sig == 0) { ret_host(0); return; }
+            if (sig >= 1 && sig <= MAX_SIGNAL) {
+                deliver_signal(*this, cpu, signals_, sig);
+            }
+            ret_host(0);
+            return;
+        }
+        case 129: { // kill(pid, sig)
+            int sig = (int)a1;
+            if (sig == 0) { ret_host(0); return; }
+            if (sig >= 1 && sig <= MAX_SIGNAL) {
+                deliver_signal(*this, cpu, signals_, sig);
+            }
             ret_host(0);
             return;
         }
@@ -771,12 +803,20 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(0);
             return;
         }
-        case 134: { // rt_sigaction / 134 = rt_sigaction
-            // no-op OK for most binaries
-            ret_host(0);
+        case 134: { // rt_sigaction(signo, new_act, old_act, sigsetsize)
+            // v1.4.0-alpha: actually install the signal handler in
+            // our SignalTable. Previously a no-op, which meant guest
+            // signal handlers were silently dropped.
+            int signo = (int)a0;
+            int r = signals_.install(mem_, signo, a1, a2);
+            ret_host(r);
             return;
         }
-        case 135: { // rt_sigprocmask
+        case 135: { // rt_sigprocmask(how, new_set, old_set, sigsetsize)
+            // Still a no-op — we don't track signal masks. musl's
+            // libc startup calls this; returning 0 lets it proceed.
+            // (If we later track masks, we'd store them per-CPU and
+            // check them in deliver_signal().)
             ret_host(0);
             return;
         }
@@ -1203,7 +1243,23 @@ void Emulator::syscall(CPU& cpu) {
             ret_host(r);
             return;
         }
-        case 133: { // rt_sigreturn — no signal delivery, return 0
+        case 133: { // rt_sigreturn — restore CPU state from signal frame
+            // v1.4.0-alpha: pop the most recent signal frame and
+            // restore the saved CPU state. The "return value" of this
+            // syscall is irrelevant — we restore PC, so the dispatcher
+            // will continue at the saved PC, not at the instruction
+            // after the SVC.
+            SignalFrame frame;
+            if (signals_.pop_frame(frame)) {
+                memcpy(cpu.regs, frame.regs, sizeof(cpu.regs));
+                cpu.sp     = frame.sp;
+                cpu.pc     = frame.pc;
+                cpu.pstate = frame.pstate;
+                // Return value is whatever X0 was in the saved frame
+                // (already restored above). Don't overwrite it.
+                return;
+            }
+            // No pending frame — guest bug. Return 0 to avoid crash.
             ret_host(0);
             return;
         }

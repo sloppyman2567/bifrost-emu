@@ -20,8 +20,9 @@ LDFLAGS  ?= -pthread
 
 TARGET   := bifrost-emu
 LIB      := libbifrost.a
-SOURCES  := main.cpp interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp
-HEADERS  := arm64_emu.hpp decoder.hpp graphics.hpp api/bifrost.h
+SOURCES  := main.cpp interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp \
+    signal.cpp frostjit.cpp jit_glue.cpp
+HEADERS  := arm64_emu.hpp decoder.hpp graphics.hpp signal.hpp frostjit.hpp api/bifrost.h
 
 # ── SDL2 backend (opt-in) ────────────────────────────────────────────────
 ifeq ($(USE_SDL2),1)
@@ -41,12 +42,16 @@ $(TARGET): $(SOURCES) $(HEADERS)
 # Build the static library (libbifrost.a) for API consumers
 lib: $(LIB)
 
-$(LIB): interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp arm64_emu.hpp decoder.hpp graphics.hpp
+$(LIB): interpreter.cpp syscalls.cpp decoder.cpp graphics.cpp signal.cpp frostjit.cpp jit_glue.cpp \
+    arm64_emu.hpp decoder.hpp graphics.hpp signal.hpp frostjit.hpp
 	$(CXX) $(CXXFLAGS) -c interpreter.cpp -o interpreter.o
 	$(CXX) $(CXXFLAGS) -c syscalls.cpp   -o syscalls.o
 	$(CXX) $(CXXFLAGS) -c decoder.cpp    -o decoder.o
 	$(CXX) $(CXXFLAGS) -c graphics.cpp   -o graphics.o
-	ar rcs $@ interpreter.o syscalls.o decoder.o graphics.o
+	$(CXX) $(CXXFLAGS) -c signal.cpp     -o signal.o
+	$(CXX) $(CXXFLAGS) -c frostjit.cpp   -o frostjit.o
+	$(CXX) $(CXXFLAGS) -c jit_glue.cpp   -o jit_glue.o
+	ar rcs $@ interpreter.o syscalls.o decoder.o graphics.o signal.o frostjit.o jit_glue.o
 	@echo "Built $@ (note: this skips main.cpp; link your own driver)"
 
 # Debug build with sanitizers

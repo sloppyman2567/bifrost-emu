@@ -2,7 +2,7 @@
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
 //
-// Version: 1.4.0
+// Version: 1.4.0-alpha
 //
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]
@@ -15,6 +15,9 @@
 //   --raw-tty       force raw TTY mode (per-character input, no echo)
 //                   default is to leave the host TTY alone so guest
 //                   line-buffered stdio (fgets, gets, readline) works
+//   --jit           enable frostJIT (experimental block-translation JIT;
+//                   shares the decoder with the interpreter, falls back
+//                   to the interpreter for unsupported instructions)
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
@@ -57,6 +60,7 @@ static void print_banner() {
         "    -q, --quiet     suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH  dump /dev/fb0 to PATH on exit (PPM)\n"
         "    --raw-tty       force raw TTY mode (per-char input, no echo)\n"
+        "    --jit           enable frostJIT (experimental block-translation JIT)\n"
         "    -V, --version   show version and exit\n"
         "    -h, --help      show this message\n"
         "\n"
@@ -97,7 +101,7 @@ static void print_rainbow() {
 //   see the trailing '\n' it needs to return a line, so the shell
 //   appeared to "hang" waiting for input that was actually arriving.
 //
-// FIX (v1.4.0):
+// FIX (v1.4.0-alpha):
 //   Default to leaving the host TTY alone. The host kernel's line
 //   discipline already does the right thing for 99% of guest programs
 //   (fgets, gets, scanf, getline, …): it buffers a line, delivers the
@@ -152,8 +156,9 @@ int main(int argc, char** argv) {
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
-    bool raw_tty = false;  // v1.4: opt-in raw TTY (default off — see set_raw_terminal)
-    std::string fb_dump_path;  // empty = no auto-dump
+    bool raw_tty = false;
+    bool use_jit = false;  // v1.4.0-alpha: experimental frostJIT
+    std::string fb_dump_path;
     int  arg_i   = 1;
 
     while (arg_i < argc) {
@@ -164,6 +169,7 @@ int main(int argc, char** argv) {
         if (a == "-v" || a == "--verbose")  { verbose = true;  arg_i++; continue; }
         if (a == "-q" || a == "--quiet")    { quiet   = true;  arg_i++; continue; }
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
+        if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--fb-dump") {
             if (arg_i + 1 >= argc) {
                 fprintf(stderr, "bifrost-emu: --fb-dump requires a PATH argument\n");
@@ -212,6 +218,7 @@ int main(int argc, char** argv) {
     emu.set_verbose(verbose);
     emu.set_trace(debug);
     emu.set_brk_verbose(debug && !quiet);  // -d shows BRKs unless -q
+    if (use_jit) emu.enable_jit();
 
     try {
         emu.load_elf_file(elf_path, guest_argv);
