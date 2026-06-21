@@ -2338,11 +2338,17 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // Pre-scan IR to find all scratch vregs (33+) and assign each a
     // fixed stack slot. This avoids the lazy allocation mismatch between
     // the pre-computed stack size and the runtime slot counter.
+    //
+    // BUGFIX (alpha.4): the previous code limited max_vreg to < 200,
+    // but blocks with many ARM instructions (e.g., __multf3's 82-instr
+    // block) can have vregs up to 317+. Vregs >= 200 would get stack
+    // slots via lazy allocation that extend BEYOND the pre-allocated
+    // stack frame, causing stack corruption.
     int max_vreg = 33;
     for (auto& inst : ir_block.insts) {
-        if (inst.dest > max_vreg && inst.dest < 200) max_vreg = inst.dest;
-        if (inst.src1 > max_vreg && inst.src1 < 200) max_vreg = inst.src1;
-        if (inst.src2 > max_vreg && inst.src2 < 200) max_vreg = inst.src2;
+        if (inst.dest > max_vreg) max_vreg = inst.dest;
+        if (inst.src1 > max_vreg) max_vreg = inst.src1;
+        if (inst.src2 > max_vreg) max_vreg = inst.src2;
     }
     // Pre-assign stack slots: vreg 33 → slot -8, vreg 34 → slot -16, etc.
     for (int v = 33; v <= max_vreg; v++) {
