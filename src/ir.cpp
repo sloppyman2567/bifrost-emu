@@ -167,9 +167,22 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── ADD/SUB (register, immediate) ────────────────────────────
         case InstClass::ADD_REG: case InstClass::ADD_IMM:
         case InstClass::SUB_REG: case InstClass::SUB_IMM: {
-            // For immediate forms, rn=31 reads SP (when !set_flags).
-            // For register forms, rn=31 reads XZR.
-            bool rn_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) && d.reads_sp;
+            // For immediate AND extended-register forms, rn=31/rd=31 can
+            // mean SP (the decoder sets d.reads_sp/d.writes_sp). For the
+            // shifted-register form (bit21=0), rd=31 means XZR (the
+            // decoder leaves d.writes_sp=false).
+            //
+            // BUGFIX (alpha.4): the old code only checked ADD_IMM/SUB_IMM
+            // for SP mapping. ADD_REG/SUB_REG (extended register form)
+            // was excluded, so `add sp, sp, x12` (very common in
+            // function epilogues) was computed as `add xzr, xzr, x12`
+            // and the result was discarded. This corrupted the stack
+            // pointer, causing crashes in musl's mallocng during free()
+            // (get_meta would see a non-16-byte-aligned pointer because
+            // SP was never restored after the function's stack frame
+            // allocation).
+            bool rn_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM ||
+                             d.cls == InstClass::ADD_REG || d.cls == InstClass::SUB_REG) && d.reads_sp;
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
             uint8_t b;
             if (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) {
@@ -266,8 +279,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t r = g_alloc.alloc();
             emit(block, op, r, a, b);
             r = zext_if_32bit(block, r, d.sf);
-            // For immediate forms, rd=31 writes SP (when !set_flags).
-            bool rd_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) && d.writes_sp;
+            // For immediate AND extended-register forms, rd=31 writes SP
+            // (when !set_flags). The decoder sets d.writes_sp accordingly.
+            bool rd_is_sp = (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM ||
+                             d.cls == InstClass::ADD_REG || d.cls == InstClass::SUB_REG) && d.writes_sp;
             store_arm_reg(block, d.rd, r, rd_is_sp);
             return false;
         }
