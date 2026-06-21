@@ -1010,8 +1010,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // FP arithmetic (2-source): bit[21]=1, NOT FMOV
-            if (((op >> 21) & 1) == 1) {
+            // FP arithmetic (2-source): bit[21]=1, bits[15:10] != 0b000100 (FMOV imm)
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) != 0x04) {
                 // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
                 if (opcode <= 6 && ftype <= 1) {
                     emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);

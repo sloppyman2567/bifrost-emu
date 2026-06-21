@@ -2017,17 +2017,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flush_all_vregs();
             invalidate_all_vregs();
 
-            // Load src1 into XMM0
+            // Load src1 into XMM0: movsd/movss xmm0, [rbx+off]
+            // BUGFIX: no REX needed — SSE regs are 0-7, RBX is 3.
+            // REX.R would extend xmm1 to xmm9, breaking the op.
             int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
             emit_byte(ld_prefix);
-            emit_byte(rex(true, 0, false, false));
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
-            // Load src2 into XMM1
+            // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
             int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
             emit_byte(ld_prefix);
-            emit_byte(rex(true, 1, false, false));
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(1, CPU_REG, off2);
 
@@ -2043,10 +2043,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 case 5: sse_op = 0x5D; break;  // min
                 default: sse_op = 0x58; break;
             }
+            // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
+            // BUGFIX: must use modrm(3, 0, 1) → reg=xmm0, rm=xmm1
+            // The old code used modrm(3, 1, 0) with REX.R which encoded
+            // ADDSD xmm1, xmm0 (result in xmm1) but stored xmm0 (stale).
             emit_byte(ld_prefix);
-            emit_byte(rex(false, 1, false, false));
             emit_byte(0x0F); emit_byte(sse_op);
-            emit_byte(modrm(3, 1, 0));
+            emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
 
             if (opc == 6) {  // FNMUL: negate
                 emit_mov_imm64(RAX, 0x8000000000000000ULL);
@@ -2054,10 +2057,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
             }
 
-            // Store result
+            // Store result: movsd/movss [rbx+off], xmm0
             int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
             emit_byte(ld_prefix);
-            emit_byte(rex(true, 0, false, false));
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
 
@@ -2076,7 +2078,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
             int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
             emit_byte(prefix);
-            emit_byte(rex(true, 0, false, false));
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
@@ -2102,7 +2103,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
             int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
             emit_byte(prefix);
-            emit_byte(rex(true, 0, false, false));
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
 
@@ -2513,7 +2513,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::FCVT: case InstClass::FCVTZS:
             case InstClass::FCVTZU: case InstClass::SCVTF:
             case InstClass::UCVTF: case InstClass::FCSEL:
-            case InstClass::FRINT:
+            case InstClass::FRINT: case InstClass::FP_SCALAR:
             case InstClass::BFM:
             case InstClass::MRS: case InstClass::MRS_SYS:
             case InstClass::MSR: case InstClass::MSR_SYS:
