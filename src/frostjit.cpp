@@ -64,10 +64,23 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
     cpu->page_cache.read_page = UINT64_MAX;
     cpu->page_cache.write_page = UINT64_MAX;
     if (getenv("BIFROST_STEP_TRACE")) {
-        fprintf(stderr, "    [step] pc=0x%llx x2=0x%llx\n",
-                (unsigned long long)cpu->pc, (unsigned long long)cpu->regs[2]);
+        fprintf(stderr, "    [step] pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x24=0x%llx x27=0x%llx pstate=0x%x\n",
+                (unsigned long long)cpu->pc,
+                (unsigned long long)cpu->regs[0],
+                (unsigned long long)cpu->regs[1],
+                (unsigned long long)cpu->regs[2],
+                (unsigned long long)cpu->regs[24],
+                (unsigned long long)cpu->regs[27],
+                cpu->pstate);
     }
     emu->step_public(*cpu);
+    if (getenv("BIFROST_STEP_TRACE")) {
+        fprintf(stderr, "    [step] pc=0x%llx done x0=0x%llx x24=0x%llx pstate=0x%x\n",
+                (unsigned long long)cpu->pc,
+                (unsigned long long)cpu->regs[0],
+                (unsigned long long)cpu->regs[24],
+                cpu->pstate);
+    }
 }
 
 // ── Construction ────────────────────────────────────────────────────────
@@ -1769,43 +1782,45 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // and x86 CF=0 (TEST clears CF), so they also agree.
             //
             // The default arm_cond_to_x86() mapping assumes the "SUB
-            // case" (x86 CF = NOT ARM C), because that's the common
-            // case (CMP/B.HI/B.LS etc. all follow SUBS):
-            //   ARM CS (C=1) → need CF=0 → JAE
-            //   ARM CC (C=0) → need CF=1 → JB
-            //   ARM HI (C=1,Z=0) → need CF=0,ZF=0 → JA
-            //   ARM LS (C=0|Z=1) → need CF=1|ZF=1 → JBE
+            // case" (x86 CF = NOT ARM C). When flags came from ADD/TST
+            // (carry_is_direct), CS/CC need swapped mappings (the old
+            // code did this correctly). HI/LS are the hard case: there
+            // is no x86 JCC for "CF=1 AND ZF=0" (ARM HI after ADD), so
+            // we emit `cmc` to invert CF, making it match the SUB
+            // convention, then use the default JA/JBE mapping.
             //
-            // When flags are "direct" (CF = ARM C, i.e. from ADD or
-            // loaded from pstate with from_sub bit clear), we must
-            // SWAP CS↔CC and HI↔LS:
-            //   ARM CS (C=1) → CF=1 → JB
-            //   ARM CC (C=0) → CF=0 → JAE
-            //   ARM HI (C=1,Z=0) → CF=1,ZF=0 → (no direct jcc; use JBE
-            //     inverted = fall-through of JBE means HI... but simpler
-            //     to just swap and accept the rare ADD+HI case is wrong)
-            //   ARM LS (C=0|Z=1) → CF=0|ZF=1 → JA inverted
+            // BUGFIX (alpha.4): the old code's HI→JA mapping was wrong
+            // (JA checks CF=0 AND ZF=0, but ARM HI after ADD needs
+            // CF=1 AND ZF=0). This broke musl's __syscall_ret
+            // `cmn x0, #0x1, lsl #12` + `b.hi error_path` — every
+            // successful syscall was misclassified as an error, breaking
+            // fopen(), read(), and every libc syscall wrapper.
             //
-            // flags_from_sub_ == true  → x86 CF = NOT ARM C → use default
-            // flags_from_sub_ == false → x86 CF = ARM C      → swap C-conds
+            // GE/LT/GT/LE depend on N, V, Z (not C), so the default
+            // mapping works regardless of carry polarity.
             bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
+            bool need_cmc_for_hi_ls = false;
             if (carry_is_direct) {
-                // Flags came from ADD/TST (or pstate-direct): x86 CF = ARM C.
-                // For direct carry: ARM C=1 ↔ x86 CF=1.
-                //   ARM CS (C=1) → x86 CF=1 → JB(2)
-                //   ARM CC (C=0) → x86 CF=0 → JAE(3)
-                //   ARM HI (C=1,Z=0) → x86 CF=1,ZF=0 → JA(7)
-                //   ARM LS (C=0|ZF=1) → x86 CF=0|ZF=1 → JBE(6)
                 switch (base) {
-                    case 0x2: cc = (inst.cond & 1) ? 3 : 2; break;  // CS→JB(2), CC→JAE(3)
-                    case 0x8: cc = (inst.cond & 1) ? 6 : 7; break;  // HI→JA(7), LS→JBE(6)
-                    default:  cc = arm_cond_to_x86(inst.cond); break;
+                    case 0x2:  // CS/CC — swap mappings (correct, no cmc needed)
+                        cc = (inst.cond & 1) ? 3 : 2;  // CS→JB(2)? no: CC→JAE(3), CS→JB(2)
+                        // Wait: ARM CS (C=1) with direct CF → CF=1 → JB(2).
+                        //       ARM CC (C=0) with direct CF → CF=0 → JAE(3).
+                        // inst.cond & 1: CS=2 (bit0=0)→JB(2), CC=3 (bit0=1)→JAE(3).
+                        cc = (inst.cond & 1) ? 3 : 2;
+                        break;
+                    case 0x8:  // HI/LS — no direct JCC, use cmc + default
+                        need_cmc_for_hi_ls = true;
+                        cc = arm_cond_to_x86(inst.cond);
+                        break;
+                    default:  // EQ/NE/MI/PL/VS/VC/GE/LT/GT/LE — default works
+                        cc = arm_cond_to_x86(inst.cond);
+                        break;
                 }
             } else {
-                // Flags from SUB (or pstate-with-from_sub): default mapping
-                // is correct (x86 CF = NOT ARM C).
                 cc = arm_cond_to_x86(inst.cond);
             }
+            (void)base;
             // Materialize flags to pstate BEFORE consuming them for the
             // JCC, but save/restore RFLAGS around the materialization
             // because emit_materialize_flags clobbers them with its own
@@ -1824,6 +1839,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         reg_vreg_[r] = -1;
                         vreg_dirty_[v] = false;
                     }
+                }
+                // BUGFIX (alpha.4): if flags came from ADD/TST and the
+                // condition is HI/LS, invert CF with `cmc` so it matches
+                // the SUB convention that arm_cond_to_x86() expects.
+                // pstate already has the correct ARM C (from materialize
+                // above), so this only affects the JCC. CS/CC are handled
+                // by the swapped mapping above (no cmc needed). GE/LT/GT/LE
+                // don't depend on C (no cmc needed).
+                if (need_cmc_for_hi_ls) {
+                    emit_byte(0xF5);  // cmc
                 }
             }
             flags_in_host_ = false;

@@ -173,7 +173,18 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
             uint8_t b;
             if (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) {
-                b = load_imm(block, d.imm_u);
+                // BUGFIX (alpha.4): the decoder sets d.imm_u to the raw
+                // 12-bit immediate and d.shift to 0 or 12 (the optional
+                // left-shift by 12 for the "add/sub imm, lsl #12" form).
+                // The previous code passed d.imm_u through unshifted, so
+                // e.g. `add x0, x0, #0x1, lsl #12` (= add x0, x0, #0x1000)
+                // was computed as `add x0, x0, #1`. This broke musl's
+                // `cmn x0, #0x1, lsl #12` in __syscall_ret — the function
+                // uses it to test whether a syscall return value is in
+                // the [-4095, -1] error range. Without the shift, every
+                // successful syscall looked like an error, and every
+                // syscall was reported as -1 with bogus errno.
+                b = load_imm(block, (uint64_t)d.imm_u << d.shift);
             } else {
                 // Register form. Two sub-cases:
                 //   (a) Extended register (bit21=1): apply extend type
@@ -270,9 +281,91 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn, false);
             uint8_t b;
             if (d.cls == InstClass::ADDS_IMM || d.cls == InstClass::SUBS_IMM) {
-                b = load_imm(block, d.imm_u);
+                // BUGFIX (alpha.4): apply d.shift (0 or 12) to d.imm_u,
+                // matching the interpreter. See ADD_IMM/SUB_IMM above
+                // for the full rationale.
+                b = load_imm(block, (uint64_t)d.imm_u << d.shift);
             } else {
+                // Register form. Two sub-cases (mirrors ADD_REG/SUB_REG):
+                //   (a) Extended register (bit21=1): apply extend type
+                //       (UXTB/SXTB/UXTH/SXTH/UXTW/SXTW/UXTX/SXTX) then
+                //       optional shift (0-4).
+                //   (b) Shifted register (bit21=0): apply shift_type
+                //       (LSL/LSR/ASR/ROR) by d.shift (0-63).
+                //
+                // BUGFIX (alpha.4): the previous code ignored d.extend
+                // and d.shift_type for ADDS/SUBS, so e.g.
+                //   cmp x0, w24, sxtw
+                // was computed as `x0 - w24` (treating w24 as unsigned
+                // 32-bit, NOT sign-extended). This caused `csel x24, x0,
+                //   x1, ge` in musl's vfprintf %d-zero handling to pick
+                //   the wrong source, producing "" instead of "0" for
+                //   printf("%d", 0). Many other CSEL-after-CMP paths in
+                //   musl were similarly broken.
                 b = load_arm_reg(block, d.rm);
+                if (d.extend != 0) {
+                    // Extended register form — apply extend, then shift.
+                    switch (d.extend & 7) {
+                        case 0: { // UXTB
+                            uint16_t m = load_imm(block, 0xFF);
+                            uint16_t r = g_alloc.alloc();
+                            emit(block, IROp::AND, r, b, m);
+                            b = r;
+                            break;
+                        }
+                        case 1: { // UXTH
+                            uint16_t m = load_imm(block, 0xFFFF);
+                            uint16_t r = g_alloc.alloc();
+                            emit(block, IROp::AND, r, b, m);
+                            b = r;
+                            break;
+                        }
+                        case 2: { // UXTW
+                            uint16_t m = load_imm(block, 0xFFFFFFFF);
+                            uint16_t r = g_alloc.alloc();
+                            emit(block, IROp::AND, r, b, m);
+                            b = r;
+                            break;
+                        }
+                        case 3: break; // UXTX — no extend
+                        case 4: { // SXTB
+                            uint16_t s = g_alloc.alloc();
+                            emit(block, IROp::SEXT, s, b, 0, 8);
+                            b = s;
+                            break;
+                        }
+                        case 5: { // SXTH
+                            uint16_t s = g_alloc.alloc();
+                            emit(block, IROp::SEXT, s, b, 0, 16);
+                            b = s;
+                            break;
+                        }
+                        case 6: { // SXTW
+                            uint16_t s = g_alloc.alloc();
+                            emit(block, IROp::SEXT, s, b, 0, 32);
+                            b = s;
+                            break;
+                        }
+                        case 7: break; // SXTX — no extend
+                    }
+                    // Apply shift (for extended register, shift is 0-4).
+                    if (d.shift != 0) {
+                        uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                        uint16_t shifted = g_alloc.alloc();
+                        emit(block, IROp::SHL, shifted, b, sh);
+                        b = shifted;
+                    }
+                } else if (d.shift != 0 || d.shift_type != 0) {
+                    // Shifted register form — apply shift_type by d.shift.
+                    uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                    uint16_t shifted = g_alloc.alloc();
+                    IROp shop = (d.shift_type == 0) ? IROp::SHL
+                              : (d.shift_type == 1) ? IROp::SHR
+                              : (d.shift_type == 2) ? IROp::SAR
+                              : IROp::ROR;
+                    emit(block, shop, shifted, b, sh);
+                    b = shifted;
+                }
             }
             bool is_add = (d.cls == InstClass::ADDS_REG || d.cls == InstClass::ADDS_IMM);
             uint16_t r = g_alloc.alloc();
@@ -570,8 +663,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint16_t val = g_alloc.alloc();
                 emit(block, IROp::LOAD_MEM, val, addr, 0, (uint8_t)width,
                      0, 0, (uint64_t)mem_off);
-                bool sign_ext = (d.cls == InstClass::LDRSW || d.cls == InstClass::LDRSB ||
-                                 d.cls == InstClass::LDRSH);
+                // Sign-extend check: for non-vector loads, opc_ls bit 2
+                // (i.e. opc_ls & 2) indicates LDRSW/LDRSB/LDRSH (sign-
+                // extending loads). The decoder does NOT set d.cls to
+                // LDRSW/LDRSB/LDRSH — it leaves the class as LDR_IMM/
+                // LDR_UNS/LDR_REG and uses d.opc_ls to distinguish
+                // sign-extended loads. (Matching the interpreter, which
+                // checks `opc_ls & 2` directly.)
+                bool sign_ext = !d.is_vec && (d.opc_ls & 2);
                 if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
                     emit(block, IROp::SEXT, ext, val, 0, (uint8_t)(width * 8));
