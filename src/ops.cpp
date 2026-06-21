@@ -409,6 +409,20 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 return cpu.pc;
             }
 
+            case IROp::FMOV_G2F:
+                cpu.v_lo[inst.dest] = vregs[inst.src1];
+                cpu.v_hi[inst.dest] = 0;
+                break;
+            case IROp::FMOV_F2G:
+                vregs[inst.dest] = cpu.v_lo[inst.src1];
+                break;
+            case IROp::FMOV_G2FHI:
+                cpu.v_hi[inst.dest] = vregs[inst.src1];
+                break;
+            case IROp::FMOV_FHI2G:
+                vregs[inst.dest] = cpu.v_hi[inst.src1];
+                break;
+
             default:
                 break;
         }

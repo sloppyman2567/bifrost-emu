@@ -927,15 +927,59 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::NOP);
             return false;
 
+        // ── FMOV (general ↔ FP) — native IR ─────────────────────────
+        case InstClass::FMOV: {
+            uint32_t op = d.raw;
+            // FMOV (general → FP, 64-bit): mask 0xFFE0FC00 == 0x9E600000
+            if ((op & 0xFFE0FC00) == 0x9E600000) {
+                bool to_fp = (op >> 16) & 1;
+                uint8_t rd = op & 0x1F;
+                uint8_t rn = (op >> 5) & 0x1F;
+                if (to_fp) {
+                    // v_lo[rd] = regs[rn]; v_hi[rd] = 0
+                    uint16_t val = load_arm_reg(block, rn);
+                    emit(block, IROp::FMOV_G2F, rd, val, 0, 0, 0, 0, 0, cur_pc);
+                } else {
+                    // regs[rd] = v_lo[rn]
+                    uint16_t v = g_alloc.alloc();
+                    emit(block, IROp::FMOV_F2G, v, rn, 0, 0, 0, 0, 0, cur_pc);
+                    store_arm_reg(block, rd, v);
+                }
+                return false;
+            }
+            // FMOV (general → FP, 32-bit): mask 0xFFE0FC00 == 0x1E200000
+            if ((op & 0xFFE0FC00) == 0x1E200000) {
+                // 32-bit form — fall back to interpreter for now
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+            // FMOV (scalar, immediate): fall back to interpreter
+            // FMOV (FP↔FP register): fall back to interpreter
+            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            return false;
+        }
+
+        case InstClass::FMOV_VD1: {
+            // FMOV Vd.D[1], Rn → v_hi[Vd] = regs[Rn]
+            uint16_t val = load_arm_reg(block, d.rn);
+            emit(block, IROp::FMOV_G2FHI, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
+            return false;
+        }
+
+        case InstClass::FMOV_RVD1: {
+            // FMOV Rn, Vm.D[1] → regs[Rn] = v_hi[Vm]
+            uint16_t v = g_alloc.alloc();
+            emit(block, IROp::FMOV_FHI2G, v, d.rn, 0, 0, 0, 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, v);
+            return false;
+        }
+
         // ── SIMD / FP — fall back to interpreter (single-instruction) ──
-        // We don't model the vector register file in IR. Block does NOT
-        // split — the interpreter call is inline.
         case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
         case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
         case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
-        case InstClass::FMOV: case InstClass::FMOV_IMM:
-        case InstClass::FMOV_VD1: case InstClass::FMOV_RVD1:
+        case InstClass::FMOV_IMM:
         case InstClass::FADD: case InstClass::FSUB:
         case InstClass::FMUL: case InstClass::FDIV:
         case InstClass::FMAX: case InstClass::FMIN:

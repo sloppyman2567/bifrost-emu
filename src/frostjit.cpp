@@ -1950,6 +1950,61 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             unchainable_end_ = true;  // syscall may modify PC
             return true;
 
+        // ── FMOV (general ↔ FP) — native codegen ────────────────────
+        // These ops move data between cpu.regs[] and cpu.v_lo[]/v_hi[]
+        // using direct memory access through CPU_REG (RBX).
+        // No CALL_INTERP needed — pure memory moves through RAX.
+        case IROp::FMOV_G2F: {
+            // v_lo[dest] = src1; v_hi[dest] = 0
+            // dest is the FP register index (0-31), src1 is the vreg.
+            int s = ensure_vreg(inst.src1, RAX);
+            if (s != RAX) emit_mov_reg(RAX, s);
+            // Store to v_lo[dest] = CPU_REG + V_LO_OFF + dest*8
+            int32_t vlo_off = V_LO_OFF + (int)inst.dest * 8;
+            emit_store(CPU_REG, vlo_off, RAX);
+            // Store 0 to v_hi[dest]
+            int32_t vhi_off = V_HI_OFF + (int)inst.dest * 8;
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, vhi_off, RAX);
+            // Drop RAX cache mapping (we overwrote it).
+            if (reg_vreg_[RAX] >= 0) {
+                vreg_home_[reg_vreg_[RAX]] = -1;
+                reg_vreg_[RAX] = -1;
+                vreg_dirty_[reg_vreg_[RAX]] = false;
+            }
+            return false;
+        }
+        case IROp::FMOV_F2G: {
+            // dest = v_lo[src1]
+            // src1 is the FP register index (0-31), dest is the vreg.
+            int d = alloc_reg();
+            int32_t vlo_off = V_LO_OFF + (int)inst.src1 * 8;
+            emit_load(d, CPU_REG, vlo_off);
+            set_vreg_reg(inst.dest, d);
+            return false;
+        }
+        case IROp::FMOV_G2FHI: {
+            // v_hi[dest] = src1
+            int s = ensure_vreg(inst.src1, RAX);
+            if (s != RAX) emit_mov_reg(RAX, s);
+            int32_t vhi_off = V_HI_OFF + (int)inst.dest * 8;
+            emit_store(CPU_REG, vhi_off, RAX);
+            if (reg_vreg_[RAX] >= 0) {
+                vreg_home_[reg_vreg_[RAX]] = -1;
+                reg_vreg_[RAX] = -1;
+                vreg_dirty_[reg_vreg_[RAX]] = false;
+            }
+            return false;
+        }
+        case IROp::FMOV_FHI2G: {
+            // dest = v_hi[src1]
+            int d = alloc_reg();
+            int32_t vhi_off = V_HI_OFF + (int)inst.src1 * 8;
+            emit_load(d, CPU_REG, vhi_off);
+            set_vreg_reg(inst.dest, d);
+            return false;
+        }
+
         // ── Bitfield ops (SBFM/UBFM/BFM/EXTR) ──────────────────────
         // These are very common (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW/LSL/LSR/
         // ASR/SBFIZ/UBFIZ/BFI/BFXIL) and falling back to CALL_INTERP

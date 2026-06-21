@@ -94,6 +94,11 @@ enum class IROp : uint8_t {
     CALL_INTERP,    // call interpreter for ARM instruction at arm_pc
     // Syscall (treated as block-ending side effect)
     SVC,            // call syscall handler; pc may change
+    // FMOV (general ↔ FP register) — native JIT support
+    FMOV_G2F,      // v_lo[dest] = src1; v_hi[dest] = 0  (GPR → FP, 64-bit)
+    FMOV_F2G,      // dest = v_lo[src1]                    (FP → GPR, 64-bit)
+    FMOV_G2FHI,    // v_hi[dest] = src1                    (GPR → FP high half)
+    FMOV_FHI2G,    // dest = v_hi[src1]                    (FP high half → GPR)
 };
 
 // Condition codes (same encoding as ARM64 cond field).

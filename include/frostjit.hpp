@@ -80,6 +80,10 @@ public:
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;
     static constexpr int PSTATE_OFF = 272;
+    static constexpr int V_LO_OFF   = 288;  // v_lo[0] — 32 × uint64_t
+    static constexpr int V_HI_OFF   = 544;  // v_hi[0] — 32 × uint64_t
+    static constexpr int FPCR_OFF   = 800;
+    static constexpr int FPSR_OFF   = 804;
 
     // x86 reg constants.
     static constexpr int RAX=0, RCX=1, RDX=2, RBX=3, RSP=4;
