@@ -99,6 +99,13 @@ enum class IROp : uint8_t {
     FMOV_F2G,      // dest = v_lo[src1]                    (FP → GPR, 64-bit)
     FMOV_G2FHI,    // v_hi[dest] = src1                    (GPR → FP high half)
     FMOV_FHI2G,    // dest = v_hi[src1]                    (FP high half → GPR)
+    // Native FP scalar arithmetic (operate on v_lo/v_hi directly)
+    FP_BINOP,      // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest]=0
+                   // imm = opcode (0=mul,1=div,2=add,3=sub,4=max,5=min,6=nmul)
+                   // width = ftype (0=S, 1=D)
+    FP_UNOP,       // v_lo[dest] = op(v_lo[src1]); v_hi[dest]=0
+                   // imm = opcode (0=mov,1=abs,2=neg,3=sqrt)
+                   // width = ftype (0=S, 1=D)
 };
 
 // Condition codes (same encoding as ARM64 cond field).

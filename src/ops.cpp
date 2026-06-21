@@ -423,6 +423,71 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 vregs[inst.dest] = cpu.v_hi[inst.src1];
                 break;
 
+            case IROp::FP_BINOP: {
+                uint8_t opc = (uint8_t)inst.imm;
+                if (inst.width == 1) {  // double
+                    double a, b, r = 0;
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    memcpy(&b, &cpu.v_lo[inst.src2], 8);
+                    switch (opc) {
+                        case 0: r = a * b; break;
+                        case 1: r = a / b; break;
+                        case 2: r = a + b; break;
+                        case 3: r = a - b; break;
+                        case 4: r = (a > b) ? a : b; break;
+                        case 5: r = (a < b) ? a : b; break;
+                        case 6: r = -(a * b); break;
+                    }
+                    cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                    cpu.v_hi[inst.dest] = 0;
+                } else {  // single
+                    float a, b, r = 0;
+                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
+                    uint32_t tb = (uint32_t)cpu.v_lo[inst.src2];
+                    memcpy(&a, &ta, 4); memcpy(&b, &tb, 4);
+                    switch (opc) {
+                        case 0: r = a * b; break;
+                        case 1: r = a / b; break;
+                        case 2: r = a + b; break;
+                        case 3: r = a - b; break;
+                        case 4: r = (a > b) ? a : b; break;
+                        case 5: r = (a < b) ? a : b; break;
+                        case 6: r = -(a * b); break;
+                    }
+                    uint32_t tr; memcpy(&tr, &r, 4);
+                    cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
+                }
+                break;
+            }
+            case IROp::FP_UNOP: {
+                uint8_t opc = (uint8_t)inst.imm;
+                if (inst.width == 1) {  // double
+                    double a, r = 0;
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    switch (opc) {
+                        case 0: r = a; break;
+                        case 1: r = __builtin_fabs(a); break;
+                        case 2: r = -a; break;
+                        case 3: r = __builtin_sqrt(a); break;
+                    }
+                    cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                    cpu.v_hi[inst.dest] = 0;
+                } else {  // single
+                    float a, r = 0;
+                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
+                    memcpy(&a, &ta, 4);
+                    switch (opc) {
+                        case 0: r = a; break;
+                        case 1: r = __builtin_fabsf(a); break;
+                        case 2: r = -a; break;
+                        case 3: r = __builtin_sqrtf(a); break;
+                    }
+                    uint32_t tr; memcpy(&tr, &r, 4);
+                    cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
+                }
+                break;
+            }
+
             default:
                 break;
         }

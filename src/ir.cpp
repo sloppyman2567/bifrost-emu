@@ -974,6 +974,64 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
+        // ── FP_SCALAR — native FP arithmetic ────────────────────────
+        // Decode specific FP op from raw bits and emit native IR ops.
+        // Falls back to CALL_INTERP for ops we don't handle natively.
+        case InstClass::FP_SCALAR: {
+            uint32_t op = d.raw;
+            uint8_t ftype = (op >> 22) & 3;
+            uint8_t rd = op & 0x1F;
+            uint8_t rn = (op >> 5) & 0x1F;
+            uint8_t rm = (op >> 16) & 0x1F;
+            uint8_t opcode = (op >> 12) & 0xF;
+
+            // FMOV (general ↔ FP, 64-bit): handled by InstClass::FMOV case
+            // but decoder may classify it as FP_SCALAR. Check first.
+            if ((op & 0xFFE0FC00) == 0x9E600000) {
+                bool to_fp = (op >> 16) & 1;
+                if (to_fp) {
+                    uint16_t val = load_arm_reg(block, rn);
+                    emit(block, IROp::FMOV_G2F, rd, val, 0, 0, 0, 0, 0, cur_pc);
+                } else {
+                    uint16_t v = g_alloc.alloc();
+                    emit(block, IROp::FMOV_F2G, v, rn, 0, 0, 0, 0, 0, cur_pc);
+                    store_arm_reg(block, rd, v);
+                }
+                return false;
+            }
+            // FMOV (general ↔ FP, 32-bit): fall back to interpreter
+            if ((op & 0xFFE0FC00) == 0x1E200000) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+            // FMOV (FP↔FP register): fall back to interpreter
+            if ((op & 0xFFFFFC00) == 0x1E604000 || (op & 0xFFFFFC00) == 0x1E204000) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+
+            // FP arithmetic (2-source): bit[21]=1, NOT FMOV
+            if (((op >> 21) & 1) == 1) {
+                // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
+                if (opcode <= 6 && ftype <= 1) {
+                    emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);
+                    return false;
+                }
+            }
+            // FP 1-source: bit[21]=1, bits[15:10]=0b010000
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) == 0x10) {
+                // FMOV=0x0, FABS=0x1, FNEG=0x2, FSQRT=0x3
+                if (opcode <= 3 && ftype <= 1) {
+                    emit(block, IROp::FP_UNOP, rd, rn, 0, ftype, 0, 0, opcode, cur_pc);
+                    return false;
+                }
+            }
+            // Everything else (FCMP, FCVT, FCVTZS, SCVTF, FRINT, FMADD, etc.)
+            // falls back to interpreter.
+            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            return false;
+        }
+
         // ── SIMD / FP — fall back to interpreter (single-instruction) ──
         case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
         case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
@@ -990,7 +1048,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::FCVT: case InstClass::FCVTZS:
         case InstClass::FCVTZU: case InstClass::SCVTF:
         case InstClass::UCVTF: case InstClass::FRINT:
-        case InstClass::FCSEL: case InstClass::FP_SCALAR:
+        case InstClass::FCSEL:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
 

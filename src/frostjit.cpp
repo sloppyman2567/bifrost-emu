@@ -2005,6 +2005,112 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
+        // ── FP scalar arithmetic — native SSE2 codegen ──────────────
+        // These ops use XMM0/XMM1 as scratch, loading from and storing
+        // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with
+        // the GPR register allocator at all.
+        case IROp::FP_BINOP: {
+            // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest] = 0
+            bool is_double = (inst.width == 1);
+            uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
+            clobber_flags();
+            flush_all_vregs();
+            invalidate_all_vregs();
+
+            // Load src1 into XMM0
+            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            emit_byte(ld_prefix);
+            emit_byte(rex(true, 0, false, false));
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off1);
+
+            // Load src2 into XMM1
+            int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
+            emit_byte(ld_prefix);
+            emit_byte(rex(true, 1, false, false));
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(1, CPU_REG, off2);
+
+            // Execute SSE2 op
+            uint8_t opc = (uint8_t)inst.imm;
+            uint8_t sse_op;
+            switch (opc) {
+                case 0: sse_op = 0x59; break;  // mul
+                case 1: sse_op = 0x5E; break;  // div
+                case 2: sse_op = 0x58; break;  // add
+                case 3: sse_op = 0x5C; break;  // sub
+                case 4: sse_op = 0x5F; break;  // max
+                case 5: sse_op = 0x5D; break;  // min
+                default: sse_op = 0x58; break;
+            }
+            emit_byte(ld_prefix);
+            emit_byte(rex(false, 1, false, false));
+            emit_byte(0x0F); emit_byte(sse_op);
+            emit_byte(modrm(3, 1, 0));
+
+            if (opc == 6) {  // FNMUL: negate
+                emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
+            }
+
+            // Store result
+            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            emit_byte(ld_prefix);
+            emit_byte(rex(true, 0, false, false));
+            emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, off_d);
+
+            // Zero v_hi[dest]
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            return false;
+        }
+
+        case IROp::FP_UNOP: {
+            bool is_double = (inst.width == 1);
+            uint8_t prefix = is_double ? 0xF2 : 0xF3;
+            clobber_flags();
+            flush_all_vregs();
+            invalidate_all_vregs();
+
+            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            emit_byte(prefix);
+            emit_byte(rex(true, 0, false, false));
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off1);
+
+            uint8_t opc = (uint8_t)inst.imm;
+            if (opc == 0) {
+                // FMOV — no-op
+            } else if (opc == 1) {
+                // FABS
+                emit_mov_imm64(RAX, 0x7FFFFFFFFFFFFFFFULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
+            } else if (opc == 2) {
+                // FNEG
+                emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
+            } else if (opc == 3) {
+                // FSQRT
+                emit_byte(prefix);
+                emit_byte(0x0F); emit_byte(0x51);
+                emit_byte(modrm(3, 0, 0));
+            }
+
+            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            emit_byte(prefix);
+            emit_byte(rex(true, 0, false, false));
+            emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, off_d);
+
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            return false;
+        }
+
         // ── Bitfield ops (SBFM/UBFM/BFM/EXTR) ──────────────────────
         // These are very common (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW/LSL/LSR/
         // ASR/SBFIZ/UBFIZ/BFI/BFXIL) and falling back to CALL_INTERP
@@ -2407,7 +2513,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::FCVT: case InstClass::FCVTZS:
             case InstClass::FCVTZU: case InstClass::SCVTF:
             case InstClass::UCVTF: case InstClass::FCSEL:
-            case InstClass::FP_SCALAR: case InstClass::FRINT:
+            case InstClass::FRINT:
             case InstClass::BFM:
             case InstClass::MRS: case InstClass::MRS_SYS:
             case InstClass::MSR: case InstClass::MSR_SYS:
