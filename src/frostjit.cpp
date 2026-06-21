@@ -1991,18 +1991,26 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // - ASR (imms == width-1, SBFM): arithmetic shift right by immr
 
             // LSL: imms < immr (e.g. lsl w0, w0, #2 = UBFM w0, w0, #30, #31)
+            // UBFM semantics for imms < immr:
+            //   field = src & ((1 << (imms+1)) - 1)   [take low imms+1 bits]
+            //   result = field << (width - immr)       [shift left to position]
+            // BUGFIX (alpha.4): the previous code did shl THEN and, which
+            // zeroed the result for shift >= 32. For example, lsl x0, x0, #32
+            // (immr=32, imms=31): shl rax,32 → 0x100000000, then and rax,
+            // 0xFFFFFFFF → 0. The correct order is: mask FIRST, then shift.
             if (imms < immr) {
                 int sh = width - immr;
                 if (sh > 0 && sh < width) {
+                    // Mask to imms+1 bits FIRST.
+                    uint64_t mask = (1ULL << (imms + 1)) - 1;
+                    emit_mov_imm64(RDX, mask);
+                    emit_and_reg(RAX, RDX);
+                    // THEN shift left by sh.
                     if (width == 32) {
                         emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte((uint8_t)sh);
                     } else {
                         emit_shift_imm8(RAX, 4, sh);
                     }
-                    // Mask to imms+1 bits
-                    uint64_t mask = (1ULL << (imms + 1)) - 1;
-                    emit_mov_imm64(RDX, mask);
-                    emit_and_reg(RAX, RDX);
                     if (width == 32) {
                         if (RAX >= 8) emit_byte(0x45);
                         emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
