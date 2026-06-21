@@ -2399,6 +2399,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         }
     }
 
+    // ── PC store point ───────────────────────────────────────────
+    // Both the normal epilogue and the CALL_INTERP early-exit converge
+    // here. At this point, flags are materialized and vregs are flushed.
+    // RAX holds the next PC (either from rax_holds_next_pc_ or from the
+    // CALL_INTERP's interpreter call).
+    // BUGFIX (alpha.4): call_interp_branch_patches_ jump here (after the
+    // RAX overwrite) to preserve the interpreter's PC in RAX.
+    size_t pc_store_off = code_buf_used_;
+
     emit_store(CPU_REG, PC_OFF, RAX);
 
     // ── Chain-capable epilogue ────────────────────────────────────
@@ -2431,7 +2440,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         patch_jmp_rel32(p.patch_off, rel);
     }
     for (size_t off : call_interp_branch_patches_) {
-        int32_t rel = (int32_t)(epilogue_off - (off + 6));
+        // BUGFIX (alpha.4): jump to pc_store_off (after the RAX overwrite)
+        // to preserve the interpreter's PC in RAX. emit_call_interp already
+        // materialized flags and flushed vregs before the JNE, so we can
+        // skip the normal epilogue's flag/vreg handling.
+        int32_t rel = (int32_t)(pc_store_off - (off + 6));
         patch_jcc_rel32(off, rel);
     }
 
