@@ -593,6 +593,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDR_IMM: case InstClass::LDR_UNS: case InstClass::LDR_REG:
         case InstClass::LDRSW: case InstClass::LDRSB: case InstClass::LDRSH:
         case InstClass::STR_IMM: case InstClass::STR_UNS: case InstClass::STR_REG: {
+            // BUGFIX (alpha.4): vector loads/stores (LDR/STR Q/D/S/H/B with
+            // is_vec=true) must fall back to the interpreter. The IR
+            // translator's load/store code uses d.rt as a general-purpose
+            // register index (cpu.regs[d.rt]), but for vector instructions
+            // d.rt refers to a vector register (V0-V31). Treating a vector
+            // load/store as an integer one corrupts the wrong register —
+            // e.g. `str q0, [sp, #32]` would store X0's value instead of
+            // Q0's, and `ldr q0, [sp, #32]` would load into X0 instead of
+            // Q0. This broke musl's __fixunstfsi/__extenddftf2 which spill
+            // 128-bit long doubles to the stack via `str q0` / `ldp x0,x1`.
+            if (d.is_vec) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
             bool is_load = (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
                             d.cls == InstClass::LDR_REG || d.cls == InstClass::LDRSW ||
                             d.cls == InstClass::LDRSB || d.cls == InstClass::LDRSH);
