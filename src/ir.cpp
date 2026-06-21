@@ -738,11 +738,72 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
 
         // ── LDP/STP ──────────────────────────────────────────────────
-        // Fall back to interpreter for now — the pair load/store with
-        // writeback has complex addressing that needs careful codegen.
-        // TODO: implement direct IR translation for LDP/STP.
+        // Native IR translation for GPR pair load/store.
+        // SIMD LDP/STP (is_vec=true) still falls back to interpreter.
         case InstClass::LDP: case InstClass::STP: {
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            if (d.is_vec) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+            // GPR LDP/STP: decode esize from opc (bits[31:30])
+            uint8_t opc = (d.raw >> 30) & 3;
+            int esize = (opc == 2) ? 8 : 4;
+            int width = esize;
+            bool is_load = d.is_load;
+            uint16_t base = load_arm_reg(block, d.rn, true);  // rn=31 → SP
+            // Compute address based on addressing mode.
+            // d.mode: 1=post-index, 2=signed offset, 3=pre-index
+            bool post_index = (d.mode == 1);
+            bool pre_index = (d.mode == 3);
+            uint16_t addr;
+            if (post_index) {
+                // Load/store from base (no offset), writeback base+disp
+                addr = base;
+            } else {
+                // Offset or pre-index: addr = base + disp
+                // Use LOAD_MEM/STORE_MEM imm field for the displacement.
+                addr = base;
+            }
+            int64_t mem_off = post_index ? 0 : d.disp;
+            if (is_load) {
+                uint16_t val1 = g_alloc.alloc();
+                emit(block, IROp::LOAD_MEM, val1, addr, 0, (uint8_t)width,
+                     0, 0, (uint64_t)mem_off);
+                // Sign-extend or zero-extend if needed (for 32-bit)
+                if (width < 8) {
+                    uint16_t ext1 = g_alloc.alloc();
+                    emit(block, IROp::ZEXT, ext1, val1, 0, (uint8_t)(width * 8));
+                    store_arm_reg(block, d.rt, ext1);
+                } else {
+                    store_arm_reg(block, d.rt, val1);
+                }
+                uint16_t val2 = g_alloc.alloc();
+                emit(block, IROp::LOAD_MEM, val2, addr, 0, (uint8_t)width,
+                     0, 0, (uint64_t)(mem_off + esize));
+                if (width < 8) {
+                    uint16_t ext2 = g_alloc.alloc();
+                    emit(block, IROp::ZEXT, ext2, val2, 0, (uint8_t)(width * 8));
+                    store_arm_reg(block, d.rt2, ext2);
+                } else {
+                    store_arm_reg(block, d.rt2, val2);
+                }
+            } else {
+                // STP: store rt, rt2
+                uint16_t val1 = load_arm_reg(block, d.rt);
+                uint16_t val2 = load_arm_reg(block, d.rt2);
+                emit(block, IROp::STORE_MEM, 0, addr, val1, (uint8_t)width,
+                     0, 0, (uint64_t)mem_off);
+                emit(block, IROp::STORE_MEM, 0, addr, val2, (uint8_t)width,
+                     0, 0, (uint64_t)(mem_off + esize));
+            }
+            // Writeback
+            if (d.writeback || post_index || pre_index) {
+                bool rn_is_sp = (d.rn == 31);
+                uint16_t off = load_imm(block, (uint64_t)d.disp);
+                uint16_t new_base = g_alloc.alloc();
+                emit(block, IROp::ADD, new_base, base, off);
+                store_arm_reg(block, d.rn, new_base, rn_is_sp);
+            }
             return false;
         }
 

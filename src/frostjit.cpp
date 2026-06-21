@@ -2308,7 +2308,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // block, which gets a fresh register allocator state. This trades a
     // small perf cost (one extra block dispatch per split) for
     // correctness in complex blocks.
-    constexpr int MAX_CALL_INTERP_PER_BLOCK = 8;
+    constexpr int MAX_CALL_INTERP_PER_BLOCK = 2;
     int call_interp_count = 0;
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
