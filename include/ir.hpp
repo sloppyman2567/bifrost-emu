@@ -1,0 +1,162 @@
+// ir.hpp — Intermediate Representation for bifrost-emu JIT (v1.4.0-alpha.3)
+//
+// The IR is a list of micro-operations that represent the semantics
+// of ARM64 instructions. Each ARM64 instruction translates into 1-N
+// IR ops. The IR is then:
+//   1. Optimized (DCE, constant folding, copy propagation, peephole)
+//   2. Either executed by ops.cpp's tight switch loop (debug path),
+//      or compiled to native x86-64 code by frostjit.cpp (the real JIT).
+//
+// ── Design ────────────────────────────────────────────────────────────
+//
+// Virtual registers (vregs) are indices into a per-block value table.
+//   vreg 0..30  → ARM64 X0..X30   (live across the block)
+//   vreg 31     → SP               (live across the block)
+//   vreg 32     → XZR              (always 0; writes are discarded)
+//   vreg 33..   → scratch temporaries (local to one ARM64 instruction)
+//
+// The translator reads ARM64 register state into vregs with LOAD_REG,
+// performs computation in vreg space, then writes results back with
+// STORE_REG. The optimizer can eliminate LOAD_REG/STORE_REG pairs
+// when the value is already in a vreg, and can fold IMM + ALU chains
+// into a single IMM.
+//
+// IR ops are deliberately close to x86 semantics so codegen is a
+// near 1:1 mapping. This is what makes the JIT fast: each IR op
+// typically emits 1-3 x86 instructions, and the optimizer removes
+// redundant loads/stores between consecutive ARM64 instructions.
+#pragma once
+
+#include "decoder.hpp"
+#include <cstdint>
+#include <cstddef>
+#include <cstdio>
+#include <vector>
+#include <utility>
+
+namespace arm64emu {
+
+// IR opcodes. Keep this list tight — every opcode must be handled in
+// both ops.cpp (executor) and frostjit.cpp (codegen).
+enum class IROp : uint8_t {
+    NOP,            // no operation (used by optimizer as a tombstone)
+    IMM,            // dest = imm                          (constant)
+    MOV,            // dest = src1                         (copy)
+    LOAD_REG,       // dest = arm64_reg[src1]              (read ARM64 reg)
+    STORE_REG,      // arm64_reg[dest] = src1              (write ARM64 reg)
+    LOAD_MEM,       // dest = mem[src1 + imm]              (width in `width`)
+    STORE_MEM,      // mem[src1 + imm] = src2              (width in `width`)
+    ADD,            // dest = src1 + src2
+    SUB,            // dest = src1 - src2
+    MUL,            // dest = src1 * src2      (low 64 bits)
+    AND,            // dest = src1 & src2
+    OR,             // dest = src1 | src2
+    XOR,            // dest = src1 ^ src2
+    SHL,            // dest = src1 << (src2 & 63)
+    SHR,            // dest = src1 >> (src2 & 63)   (unsigned)
+    SAR,            // dest = src1 >> (src2 & 63)   (signed)
+    ROR,            // dest = ROR(src1, src2 & 63)
+    NOT,            // dest = ~src1
+    NEG,            // dest = -src1
+    SEXT,           // dest = sign_extend(src1, imm=bits)
+    ZEXT,           // dest = zero_extend(src1, imm=bits)
+    CLZ,            // dest = count_leading_zeros(src1)
+    CLS,            // dest = count_leading_sign_bits(src1)
+    RBIT,           // dest = bit_reverse(src1)
+    REV16,          // dest = byte_reverse_16(src1)
+    REV32,          // dest = byte_reverse_32(src1)
+    REV64,          // dest = byte_reverse_64(src1)
+    // Flag-setting ops (compute result + set NZCV in cpu.pstate)
+    ADDS,           // dest = src1 + src2, set flags.   flags_op=0
+    SUBS,           // dest = src1 - src2, set flags.   flags_op=1
+    ADCS,           // dest = src1 + src2 + C,  set flags
+    SBCS,           // dest = src1 - src2 - 1 + C, set flags
+    TST,            // set flags from src1 & src2 (no dest write)
+    TST_ZERO,       // set Z flag from (src1 == 0), clear N/C/V (for CBZ/CBNZ)
+    BRCOND_ZERO,    // if (src1 == 0) == (cond==EQ) : pc = imm  [no flag deps]
+    BRCOND_BIT,     // if ((src1 >> imm) & 1) == (cond==NE) : pc = imm  [no flag deps]
+    // Conditional
+    CSEL,           // dest = cond ? src1 : src2
+    CSINC,          // dest = cond ? src1 : (src2 + 1)
+    CSINV,          // dest = cond ? src1 : ~src2
+    CSNEG,          // dest = cond ? src1 : -src2
+    CCMP,           // if cond: set flags from src1 - src2; else: imm=nzcv
+    // Bitfield
+    BFM,            // dest = (src1 & ~mask) | (src2 << immr & mask)
+    UBFM,           // dest = (src1 ror immr) & mask   (mask from imms)
+    SBFM,           // dest = sign_extend((src1 ror immr) & mask, width)
+    EXTR,           // dest = (src1:src2) >> immr
+    // Branch
+    BR,             // pc = src1 (unconditional, register)
+    BRCOND,         // if cond(imm): pc = target(imm)  (also arm_pc for fallthrough bookkeeping)
+    BRCOND_FALLTHRU,// like BRCOND but fall-through branch — used for B (taken always) / BL
+    // Interpreter fallback (single instruction)
+    CALL_INTERP,    // call interpreter for ARM instruction at arm_pc
+    // Syscall (treated as block-ending side effect)
+    SVC,            // call syscall handler; pc may change
+};
+
+// Condition codes (same encoding as ARM64 cond field).
+// 0=EQ, 1=NE, 2=CS, 3=CC, 4=MI, 5=PL, 6=VS, 7=VC,
+// 8=HI, 9=LS, 10=GE, 11=LT, 12=GT, 13=LE, 14=AL, 15=NV
+static inline const char* cond_name(uint8_t c) {
+    static const char* names[16] = {
+        "EQ","NE","CS","CC","MI","PL","VS","VC",
+        "HI","LS","GE","LT","GT","LE","AL","NV"
+    };
+    return names[c & 15];
+}
+
+// A single IR instruction.
+struct IRInst {
+    IROp    op;
+    uint16_t dest;   // destination vreg (0 if no dest)  [was uint8_t]
+    uint16_t src1;   // source vreg 1                     [was uint8_t]
+    uint16_t src2;   // source vreg 2                     [was uint8_t]
+    uint8_t width;   // for LOAD_MEM/STORE_MEM: 1/2/4/8; for SEXT/ZEXT: bits; for BFM/UBFM/SBFM/EXTR: encoded
+    uint8_t cond;    // for CSEL*/CCMP/BRCOND: ARM64 condition code
+    uint8_t flags_op;// for ADDS/SUBS/ADCS/SBCS: 0=add, 1=sub (controls C flag inversion)
+    uint64_t imm;    // immediate value / mem offset / branch target
+    uint64_t arm_pc; // PC of the original ARM instruction (for CALL_INTERP, BRCOND, SVC)
+
+    // Optional metadata used by the optimizer. Defaults to zero.
+    uint8_t immr = 0;   // for BFM/UBFM/SBFM: rotate amount
+    uint8_t imms = 0;   // for BFM/UBFM/SBFM: field width selector
+    uint8_t sf   = 0;   // 1 if 64-bit, 0 if 32-bit (for masking)
+};
+
+// An IR block: a list of IR instructions translated from a basic block
+// of ARM64 code.
+struct IRBlock {
+    uint64_t start_pc = 0;
+    int count = 0;  // number of ARM64 instructions translated (for fall-through PC)
+    std::vector<IRInst> insts;
+    bool ends_with_branch = false;
+    // Optimization stats (filled by optimize_ir)
+    int dce_removed = 0;
+    int fold_subst  = 0;
+    int peephole_folded = 0;
+
+    IRBlock() = default;
+};
+
+// Translate a single ARM64 instruction into IR ops.
+// Appends 1+ IRInst to `block->insts`. Returns true if the instruction
+// ends the block (branch/ret/svc).
+bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
+
+// Reset the per-block vreg allocator. Call at the start of each block.
+void ir_reset_vreg_alloc();
+
+// Optimize an IR block in place. Performs:
+//   - Constant folding (IMM + ALU → IMM)
+//   - Copy propagation (MOV chains)
+//   - Dead code elimination (unused stores/scratch ops)
+//   - Peephole (load+op fusion, mask elimination when sf=1)
+//   - Local register caching (LOAD_REG → reuse cached vreg if value is live)
+void optimize_ir(IRBlock& block);
+
+// Dump an IR block to stderr for debugging.
+void dump_ir(const IRBlock& block, FILE* out = stderr);
+
+} // namespace arm64emu

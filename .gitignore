@@ -1,0 +1,44 @@
+# Build artifacts
+bifrost-emu
+bifrost-emu-dbg
+*.o
+*.a
+*.so
+*.dSYM/
+
+# Test binaries (regenerated from .s)
+test/*.elf
+
+# C test binaries (regenerated from .c via musl toolchain)
+ctest/*.elf
+ctest_real/*.elf
+
+# Benchmarks / scripts (developer-only, not part of release tarball)
+bench.sh
+
+# External / downloaded test binaries (not part of the repo)
+toybox-aarch64
+
+# Downloaded musl cross-toolchain (fetched on demand by tools/fetch-musl-toolchain.sh)
+tools/aarch64-linux-musl-cross/
+tools/aarch64-linux-musl-cross.tgz
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake (if added later)
+build/
+cmake-build-*/
+
+# Logs
+*.log
+trace-*.txt
+
+# Benchmarking / debug artifacts
+bifrost-fb.ppm
+*.ppm
