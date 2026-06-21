@@ -2296,24 +2296,26 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     ir_reset_vreg_alloc();
 
     constexpr int MAX_BLOCK = 256;
+    // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
+    // block. Each CALL_INTERP invalidates all cached vregs, and each
+    // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
+    // In long blocks with many CALL_INTERPs (e.g., __multf3's 82-instr
+    // multiply block with ~10 CSINC/CCMP/CSEL fallbacks), this creates
+    // a cascade of stale reloads that corrupt register values.
+    //
+    // Fix: after MAX_CALL_INTERP_PER_BLOCK interpreter fallbacks, force
+    // a block boundary. The next instruction becomes the start of a new
+    // block, which gets a fresh register allocator state. This trades a
+    // small perf cost (one extra block dispatch per split) for
+    // correctness in complex blocks.
+    constexpr int MAX_CALL_INTERP_PER_BLOCK = 2;
+    int call_interp_count = 0;
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
     while (!block_ended && instr_count < MAX_BLOCK) {
         // ── Block splitting at known entry points ──────────────────
-        // If cur_pc is already the start of a cached block (and it's
-        // not the very first instruction of THIS block), stop here.
-        // Otherwise we'd translate the same instruction twice — once
-        // as part of this block (via CALL_INTERP or direct IR) and
-        // once as the start of the existing block. That double-
-        // execution corrupts loop state (e.g. STP post-index writeback
-        // applied twice, SUBS decrement applied twice). This is the
-        // standard "single-entry" invariant: every block starts at a
-        // branch target or fall-through, and no instruction belongs
-        // to more than one cached block.
         if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
-            // Fall through to the existing block. Set the chain target
-            // so the dispatcher hop can be patched to a direct jump.
             chain_target_pc_ = cur_pc;
             break;
         }
@@ -2323,7 +2325,68 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         } catch (...) { break; }
         DecodedInst d;
         if (!decode(d, inst)) break;
+
+        // ── Pre-scan: if this instruction will produce a CALL_INTERP
+        // and we've already hit the limit, split the block here. ──
+        // We check the instruction class to see if it's one that
+        // routes to CALL_INTERP in the IR translator.
+        bool will_call_interp = false;
+        switch (d.cls) {
+            case InstClass::CSEL: case InstClass::CSINC:
+            case InstClass::CSINV: case InstClass::CSNEG:
+            case InstClass::CCMP: case InstClass::CCMN:
+            case InstClass::LDP: case InstClass::STP:
+            case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
+            case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
+            case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
+            case InstClass::SIMD_REV: case InstClass::SIMD_DP:
+            case InstClass::FMOV: case InstClass::FMOV_IMM:
+            case InstClass::FMOV_VD1: case InstClass::FMOV_RVD1:
+            case InstClass::FADD: case InstClass::FSUB:
+            case InstClass::FMUL: case InstClass::FDIV:
+            case InstClass::FMAX: case InstClass::FMIN:
+            case InstClass::FNMUL: case InstClass::FMADD:
+            case InstClass::FMSUB: case InstClass::FABS:
+            case InstClass::FNEG: case InstClass::FSQRT:
+            case InstClass::FCMP: case InstClass::FCMPE:
+            case InstClass::FCVT: case InstClass::FCVTZS:
+            case InstClass::FCVTZU: case InstClass::SCVTF:
+            case InstClass::UCVTF: case InstClass::FCSEL:
+            case InstClass::FP_SCALAR: case InstClass::FRINT:
+            case InstClass::BFM:
+            case InstClass::MRS: case InstClass::MRS_SYS:
+            case InstClass::MSR: case InstClass::MSR_SYS:
+            case InstClass::UDIV: case InstClass::SDIV:
+            case InstClass::ADC_REG: case InstClass::ADCS_REG:
+            case InstClass::SBC_REG: case InstClass::SBCS_REG:
+            case InstClass::SMADDL: case InstClass::SMSUBL:
+            case InstClass::UMADDL: case InstClass::UMSUBL:
+            case InstClass::SMULH: case InstClass::UMULH:
+            case InstClass::LDXR: case InstClass::STXR:
+            case InstClass::LDAXR: case InstClass::STLXR:
+            case InstClass::LDAR: case InstClass::STLR:
+            case InstClass::LSE_ATOMIC:
+                will_call_interp = true;
+                break;
+            default:
+                break;
+        }
+        // Also check for vector load/store (is_vec=true LDR/STR)
+        if (!will_call_interp && d.is_vec &&
+            (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
+             d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_IMM ||
+             d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG)) {
+            will_call_interp = true;
+        }
+
+        if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
+            // Split here — the next instruction starts a new block.
+            chain_target_pc_ = cur_pc;
+            break;
+        }
+
         bool ends = translate_to_ir(ir_block, d, cur_pc);
+        if (will_call_interp) call_interp_count++;
         instr_count++;
         ir_block.count = instr_count;
         if (ends) block_ended = true;
