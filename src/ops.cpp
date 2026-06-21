@@ -488,6 +488,40 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            case IROp::SIMD_LOGICAL: {
+                uint8_t opc = (uint8_t)inst.imm;
+                uint64_t lo = cpu.v_lo[inst.src1], hi = cpu.v_hi[inst.src1];
+                uint64_t lo2 = cpu.v_lo[inst.src2], hi2 = cpu.v_hi[inst.src2];
+                switch (opc) {
+                    case 0: lo &= lo2; hi &= hi2; break;  // AND
+                    case 1: lo |= lo2; hi |= hi2; break;  // ORR
+                    case 2: lo ^= lo2; hi ^= hi2; break;  // EOR
+                    case 3: lo &= ~lo2; hi &= ~hi2; break; // BIC
+                    case 4: lo |= ~lo2; hi |= ~hi2; break; // ORN
+                    case 5: lo ^= ~lo2; hi ^= ~hi2; break; // EON
+                }
+                cpu.v_lo[inst.dest] = lo;
+                cpu.v_hi[inst.dest] = hi;
+                break;
+            }
+            case IROp::SIMD_DUP:
+                cpu.v_lo[inst.dest] = vregs[inst.src1];
+                cpu.v_hi[inst.dest] = vregs[inst.src1];
+                break;
+            case IROp::SIMD_MOVI:
+                cpu.v_lo[inst.dest] = inst.imm;
+                cpu.v_hi[inst.dest] = inst.imm;
+                break;
+            case IROp::SIMD_LDST:
+                if (inst.width == 1) { // load vregs → v_lo/v_hi
+                    cpu.v_lo[inst.dest] = vregs[inst.src1];
+                    cpu.v_hi[inst.dest] = vregs[inst.src2];
+                } else { // store v_lo/v_hi → vregs
+                    vregs[inst.src1] = cpu.v_lo[inst.dest];
+                    vregs[inst.src2] = cpu.v_hi[inst.dest];
+                }
+                break;
+
             default:
                 break;
         }

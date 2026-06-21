@@ -106,6 +106,14 @@ enum class IROp : uint8_t {
     FP_UNOP,       // v_lo[dest] = op(v_lo[src1]); v_hi[dest]=0
                    // imm = opcode (0=mov,1=abs,2=neg,3=sqrt)
                    // width = ftype (0=S, 1=D)
+    // Native SIMD/NEON ops (operate on v_lo/v_hi directly via SSE2/AVX)
+    SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
+                   // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
+    SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
+    SIMD_MOVI,     // v_lo[dest] = v_hi[dest] = imm (broadcast imm)
+    SIMD_LDST,     // Load/store 128-bit from memory
+                   // dest = vreg index, src1 = addr vreg, imm = offset
+                   // width = 0 (store), 1 (load)
 };
 
 // Condition codes (same encoding as ARM64 cond field).

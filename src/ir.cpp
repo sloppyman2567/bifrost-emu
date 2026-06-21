@@ -1032,10 +1032,65 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SIMD / FP — fall back to interpreter (single-instruction) ──
-        case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
-        case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
-        case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
+        // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native ────────
+        case InstClass::SIMD_LOGICAL: {
+            uint32_t op = d.raw;
+            uint8_t opcode = (op >> 12) & 0xF;
+            // ARM SIMD logical opcodes: AND=3, BIC=0, ORR=1, ORN=2,
+            //                           EOR=7, EON=6, BIF=8, BIT=9, BSL=10
+            // Map to our SIMD_LOGICAL imm: 0=and,1=orr,2=xor,3=bic,4=orn,5=eon
+            uint8_t simd_op;
+            switch (opcode) {
+                case 0x3: simd_op = 0; break; // AND
+                case 0x1: simd_op = 1; break; // ORR
+                case 0x7: simd_op = 2; break; // EOR
+                case 0x0: simd_op = 3; break; // BIC
+                case 0x2: simd_op = 4; break; // ORN
+                case 0x6: simd_op = 5; break; // EON
+                default:
+                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                    return false;
+            }
+            emit(block, IROp::SIMD_LOGICAL, d.rd, d.rn, d.rm, 0, 0, 0, simd_op, cur_pc);
+            return false;
+        }
+
+        // ── SIMD DUP — native ──────────────────────────────────────
+        case InstClass::SIMD_DUP: {
+            // dup Vd.2d, Rn → broadcast Rn to both halves
+            uint16_t val = load_arm_reg(block, d.rn);
+            emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
+            return false;
+        }
+
+        // ── SIMD LD1/ST1 — native (128-bit load/store) ─────────────
+        case InstClass::SIMD_LD1: {
+            uint16_t base = load_arm_reg(block, d.rn, true);
+            // Load 16 bytes: v_lo[rt] = mem[base], v_hi[rt] = mem[base+8]
+            uint16_t lo = g_alloc.alloc();
+            emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0, 0);
+            uint16_t hi = g_alloc.alloc();
+            emit(block, IROp::LOAD_MEM, hi, base, 0, 8, 0, 0, 8);
+            // Store to v_lo/v_hi via SIMD_LDST (width=1 = load)
+            emit(block, IROp::SIMD_LDST, d.rt, lo, hi, 1, 0, 0, 0, cur_pc);
+            return false;
+        }
+
+        case InstClass::SIMD_ST1: {
+            uint16_t base = load_arm_reg(block, d.rn, true);
+            // Store 16 bytes: mem[base] = v_lo[rt], mem[base+8] = v_hi[rt]
+            // Use SIMD_LDST with width=0 to read v_lo/v_hi into vregs
+            uint16_t lo = g_alloc.alloc();
+            uint16_t hi = g_alloc.alloc();
+            emit(block, IROp::SIMD_LDST, d.rt, lo, hi, 0, 0, 0, 0, cur_pc);
+            emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0, 0);
+            emit(block, IROp::STORE_MEM, 0, base, hi, 8, 0, 0, 8);
+            return false;
+        }
+
+        // ── SIMD / FP — fall back to interpreter ──
+        case InstClass::SIMD_SHIFT:
+        case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
         case InstClass::FMOV_IMM:
         case InstClass::FADD: case InstClass::FSUB:

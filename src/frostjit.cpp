@@ -2111,7 +2111,124 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // ── Bitfield ops (SBFM/UBFM/BFM/EXTR) ──────────────────────
+        // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native SSE2 ────
+        case IROp::SIMD_LOGICAL: {
+            // v_lo[dest],v_hi[dest] = src1 OP src2
+            // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
+            clobber_flags();
+            flush_all_vregs();
+            invalidate_all_vregs();
+
+            // Load src1 lo/hi into XMM0
+            int32_t off1lo = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t off1hi = V_HI_OFF + (int)inst.src1 * 8;
+            // movsd xmm0, [rbx+off1lo]
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off1lo);
+
+            // Load src2 lo into XMM1
+            int32_t off2lo = V_LO_OFF + (int)inst.src2 * 8;
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(1, CPU_REG, off2lo);
+
+            // Execute lo half
+            uint8_t opc = (uint8_t)inst.imm;
+            uint8_t sse_op;
+            if (opc <= 2) {
+                sse_op = (opc == 0) ? 0x54 : (opc == 1) ? 0x56 : 0x57;
+            } else {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            // 66 0F sse_op C1 (xmm0, xmm1)
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
+
+            // Store lo result
+            int32_t offdlo = V_LO_OFF + (int)inst.dest * 8;
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, offdlo);
+
+            // Load src1 hi into XMM0
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off1hi);
+            // Load src2 hi into XMM1
+            int32_t off2hi = V_HI_OFF + (int)inst.src2 * 8;
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(1, CPU_REG, off2hi);
+            // Execute hi half
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
+            // Store hi result
+            int32_t offdhi = V_HI_OFF + (int)inst.dest * 8;
+            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, offdhi);
+            return false;
+        }
+
+        // ── SIMD DUP (broadcast GPR to both halves) ────────────────
+        case IROp::SIMD_DUP: {
+            // v_lo[dest] = v_hi[dest] = src1 (GPR value)
+            int s = ensure_vreg(inst.src1, RAX);
+            if (s != RAX) emit_mov_reg(RAX, s);
+            int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+            int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+            emit_store(CPU_REG, offlo, RAX);
+            emit_store(CPU_REG, offhi, RAX);
+            if (reg_vreg_[RAX] >= 0) {
+                vreg_home_[reg_vreg_[RAX]] = -1;
+                reg_vreg_[RAX] = -1;
+            }
+            return false;
+        }
+
+        // ── SIMD MOVI (broadcast immediate) ─────────────────────────
+        case IROp::SIMD_MOVI: {
+            // v_lo[dest] = v_hi[dest] = imm
+            emit_mov_imm64(RAX, inst.imm);
+            int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+            int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+            emit_store(CPU_REG, offlo, RAX);
+            emit_store(CPU_REG, offhi, RAX);
+            if (reg_vreg_[RAX] >= 0) {
+                vreg_home_[reg_vreg_[RAX]] = -1;
+                reg_vreg_[RAX] = -1;
+            }
+            return false;
+        }
+
+        // ── SIMD LDST (read/write v_lo/v_hi to/from vregs) ─────────
+        case IROp::SIMD_LDST: {
+            // width=1 (load): src1=lo vreg, src2=hi vreg → v_lo[dest], v_hi[dest]
+            // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg
+            if (inst.width == 1) {
+                // Load: write vregs to v_lo/v_hi
+                int slo = ensure_vreg(inst.src1, RAX);
+                if (slo != RAX) emit_mov_reg(RAX, slo);
+                int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+                emit_store(CPU_REG, offlo, RAX);
+
+                int shi = ensure_vreg(inst.src2, RAX);
+                if (shi != RAX) emit_mov_reg(RAX, shi);
+                int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+                emit_store(CPU_REG, offhi, RAX);
+
+                if (reg_vreg_[RAX] >= 0) {
+                    vreg_home_[reg_vreg_[RAX]] = -1;
+                    reg_vreg_[RAX] = -1;
+                }
+            } else {
+                // Store: read v_lo/v_hi into vregs
+                int dlo = alloc_reg();
+                int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+                emit_load(dlo, CPU_REG, offlo);
+                set_vreg_reg(inst.src1, dlo);
+
+                int dhi = alloc_reg();
+                int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+                emit_load(dhi, CPU_REG, offhi);
+                set_vreg_reg(inst.src2, dhi);
+            }
+            return false;
+        }
         // These are very common (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW/LSL/LSR/
         // ASR/SBFIZ/UBFIZ/BFI/BFXIL) and falling back to CALL_INTERP
         // for each one is both slow and a source of correctness bugs
