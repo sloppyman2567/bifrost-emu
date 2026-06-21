@@ -102,6 +102,8 @@ static bool is_pure(IROp op) {
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_MOVI: case IROp::SIMD_LDST:   // write to v_lo/v_hi
+        case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
+        case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:
@@ -644,6 +646,10 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_DUP: return "SIMD_DUP";
                     case IROp::SIMD_MOVI: return "SIMD_MOVI";
                     case IROp::SIMD_LDST: return "SIMD_LDST";
+                    case IROp::FP_F2I: return "FP_F2I";
+                    case IROp::FP_I2F: return "FP_I2F";
+                    case IROp::FP_CMP: return "FP_CMP";
+                    case IROp::FP_MOVI: return "FP_MOVI";
                     }
                     return "?";
                 }(inst.op),

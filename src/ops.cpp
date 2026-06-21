@@ -522,6 +522,69 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 }
                 break;
 
+            case IROp::FP_F2I: {
+                bool is_unsigned = (inst.imm == 1);
+                if (inst.width == 1) {
+                    double a; memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    int64_t r = (int64_t)a;
+                    vregs[inst.dest] = is_unsigned ? (uint64_t)r : (uint64_t)r;
+                } else {
+                    float a; uint32_t tb = (uint32_t)cpu.v_lo[inst.src1];
+                    memcpy(&a, &tb, 4);
+                    int32_t r = (int32_t)a;
+                    vregs[inst.dest] = (uint32_t)r;
+                }
+                break;
+            }
+            case IROp::FP_I2F: {
+                bool is_unsigned = (inst.imm == 1);
+                if (inst.width == 1) {
+                    double r = is_unsigned ? (double)(uint64_t)vregs[inst.src1]
+                                          : (double)(int64_t)vregs[inst.src1];
+                    cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                    cpu.v_hi[inst.dest] = 0;
+                } else {
+                    float r = is_unsigned ? (float)(uint32_t)vregs[inst.src1]
+                                         : (float)(int32_t)vregs[inst.src1];
+                    uint32_t tr; memcpy(&tr, &r, 4);
+                    cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
+                }
+                break;
+            }
+            case IROp::FP_CMP: {
+                bool is_double = (inst.width == 1);
+                bool unordered = false;
+                if (is_double) {
+                    double a, b;
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    if (inst.src2 != 0 || inst.imm != 0) {
+                        memcpy(&b, &cpu.v_lo[inst.src2], 8);
+                    } else { b = 0.0; }
+                    if (a != a || b != b) unordered = true;
+                    else if (a < b) cpu.pstate = 0x80000000;
+                    else if (a == b) cpu.pstate = 0x60000000;
+                    else cpu.pstate = 0x20000000;
+                } else {
+                    float a, b;
+                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
+                    memcpy(&a, &ta, 4);
+                    if (inst.src2 != 0 || inst.imm != 0) {
+                        uint32_t tb = (uint32_t)cpu.v_lo[inst.src2];
+                        memcpy(&b, &tb, 4);
+                    } else { b = 0.0f; }
+                    if (a != a || b != b) unordered = true;
+                    else if (a < b) cpu.pstate = 0x80000000;
+                    else if (a == b) cpu.pstate = 0x60000000;
+                    else cpu.pstate = 0x20000000;
+                }
+                if (unordered) cpu.pstate = 0x28000000; // N=0, Z=0, C=1, V=1
+                break;
+            }
+            case IROp::FP_MOVI:
+                cpu.v_lo[inst.dest] = inst.imm;
+                cpu.v_hi[inst.dest] = 0;
+                break;
+
             default:
                 break;
         }

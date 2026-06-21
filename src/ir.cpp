@@ -1026,7 +1026,66 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
-            // Everything else (FCMP, FCVT, FCVTZS, SCVTF, FRINT, FMADD, etc.)
+            // FCVTZS/FCVTZU: FP→int (toward zero)
+            // Encoding: (op & 0x7F3F0000) == 0x1E380000, rmode=3 (toward zero)
+            if ((op & 0x7F3F0000) == 0x1E380000) {
+                bool is_unsigned = (op >> 16) & 1;
+                if (ftype <= 1) {
+                    emit(block, IROp::FP_F2I, rd, rn, 0, ftype, 0, 0, is_unsigned, cur_pc);
+                    return false;
+                }
+            }
+            // SCVTF/UCVTF: int→FP
+            // Encoding: (op & 0x7F3F0000) == 0x1E220000
+            if ((op & 0x7F3F0000) == 0x1E220000) {
+                bool is_unsigned = (op >> 16) & 1;
+                if (ftype <= 1) {
+                    emit(block, IROp::FP_I2F, rd, rn, 0, ftype, 0, 0, is_unsigned, cur_pc);
+                    return false;
+                }
+            }
+            // FCMP/FCMPE: FP compare
+            // Encoding: (op & 0xFF20FC1F) == 0x1E202000 (with Rm≠31)
+            //           (op & 0xFF20FC1F) == 0x1E202008 (with #0.0)
+            if ((op & 0xFF200000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0x08) {
+                bool with_zero = (rm == 31);
+                if (with_zero) {
+                    // FCMP Dn, #0.0 — compare against zero
+                    emit(block, IROp::FP_CMP, 0, rn, 0, ftype, 0, 0, 0, cur_pc);
+                } else {
+                    emit(block, IROp::FP_CMP, 0, rn, rm, ftype, 0, 0, 0, cur_pc);
+                }
+                return false;
+            }
+            // FMOV (scalar, immediate): (op & 0xFFE0001F) == 0x1E600000
+            // Already handled above for FP↔FP and general. The immediate
+            // form has bits[15:10] = 0b000100.
+            // We decode the 8-bit FP immediate here and emit FP_MOVI.
+            if ((op & 0xFFE0001F) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
+                uint8_t imm8 = (op >> 13) & 0xFF;
+                // VFPExpandImm for double (ftype=1):
+                //   sign = imm8[7], exp = NOT(imm8[6]) : imm8[5:4] : 1000 (4 bits)
+                //   mantissa = imm8[3:0] : 0000...0000 (48 bits)
+                uint64_t sign = (imm8 >> 7) & 1;
+                uint64_t exp, mant;
+                if (ftype == 1) {
+                    // Double: exp = (NOT(imm8[6]) << 10) | (imm8[5:4] << 8) | 0x3F0
+                    exp = (~(imm8 >> 6) & 1);
+                    exp = (exp << 10) | ((imm8 & 0x30) << 4) | 0x3F0;
+                    mant = (uint64_t)(imm8 & 0x0F) << 48;
+                    uint64_t bits = (sign << 63) | (exp << 52) | mant;
+                    emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
+                } else {
+                    // Single: exp = (NOT(imm8[6]) << 6) | (imm8[5:4] << 4) | 0x1C
+                    exp = (~(imm8 >> 6) & 1);
+                    exp = (exp << 6) | ((imm8 & 0x30) << 0) | 0x1C;
+                    mant = (uint32_t)(imm8 & 0x0F) << 19;
+                    uint64_t bits = (sign << 31) | (exp << 23) | mant;
+                    emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
+                }
+                return false;
+            }
+            // Everything else (FCVT, FRINT, FMADD, etc.)
             // falls back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
