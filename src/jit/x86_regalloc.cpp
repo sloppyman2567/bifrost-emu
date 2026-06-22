@@ -265,9 +265,9 @@ void FrostJIT::store_vreg(int v, int src) {
         // that need it preserved must `evict_vreg(v)` first.
         reg_vreg_[home] = -1;
     }
-    // Record v → src.
     // If src already held another vreg v2, kill v2's mapping (its
-    // value was just overwritten).
+    // value was just overwritten). Callers that need v2's value
+    // preserved must evict_vreg(v2) BEFORE overwriting src.
     int old_v = reg_vreg_[src];
     if (old_v >= 0 && old_v != v) {
         vreg_home_[old_v] = -1;

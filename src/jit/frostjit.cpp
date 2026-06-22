@@ -564,16 +564,36 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::REV64: {
             // Force src1 into RAX (properly evicts old RAX occupant).
             force_vreg_to_reg(inst.src1, RAX);
-            if (inst.width == 32) {
-                // 32-bit REV: use bswap eax (no REX.W) which only swaps
-                // the low 4 bytes and zero-extends to 64 bits.
-                // Encoding: 0F C8 (for RAX).
-                emit_byte(0x0F); emit_byte(0xC8);
-            } else {
-                // 64-bit REV: bswap rax (REX.W 0F C8).
-                emit_bswap_reg(RAX);
+            // (v1.4.0-beta.1 bugfix): bswap modifies RAX in place, which
+            // destroys v(src1)'s value. If dest != src1, we must preserve
+            // src1's value for potential later readers. Allocate a separate
+            // dest reg and copy src1 there BEFORE bswap, so src1 stays
+            // cached in RAX (or gets reloaded from cpu.regs[]/stack later).
+            //
+            // The previous code did `bswap eax; store_vreg(dest, RAX)` which
+            // silently dropped src1's value if src1 was a scratch vreg
+            // (v > 31) — store_vreg cleared src1's dirty flag without
+            // spilling, and a later force_vreg_to_reg(src1) loaded from an
+            // uninitialized stack slot. This caused jit_simd.elf's
+            // `cmp w0, w5` to compute wrong flags and crash.
+            int d = alloc_reg_for(inst.dest, RAX);
+            if (d != RAX) {
+                // Copy src1 to d, then bswap d (preserving src1 in RAX).
+                emit_mov_reg(d, RAX);
             }
-            store_vreg(inst.dest, RAX);
+            // bswap d (in-place if d == RAX, or the copy if d != RAX).
+            if (inst.width == 32) {
+                // 32-bit bswap: 0F C8+r (no REX.W). REX.B if d >= 8.
+                if (d >= 8) emit_byte(0x41);
+                emit_byte(0x0F); emit_byte(0xC8 + (d & 7));
+                // Zero-extend 32-bit result to 64 bits.
+                emit_byte(rex(false, d>=8, false, d>=8));
+                emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
+            } else {
+                // 64-bit bswap: REX.W 0F C8+r.
+                emit_bswap_reg(d);
+            }
+            // dest is already cached in d (via alloc_reg_for) and marked dirty.
             return false;
         }
 

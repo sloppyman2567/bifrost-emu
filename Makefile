@@ -82,9 +82,18 @@ debug: LDFLAGS = -pthread -fsanitize=address,undefined
 debug: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
 
-# Run smoke tests
+# Run all test programs (interpreter + JIT modes).
 test: $(TARGET)
-	@bash scripts/smoke.sh ./$(TARGET)
+	@echo "--- Running test suite (interpreter) ---"
+	@for f in test/*.elf ctest/*.elf ctest_real/*.elf; do \
+	    echo "--- $$f ---"; \
+	    timeout 10 ./$(TARGET) $$f || echo "FAILED (rc=$$?): $$f"; \
+	done
+	@echo "--- Running JIT tests ---"
+	@for f in ctest/jit_*.elf; do \
+	    echo "--- $$f (JIT) ---"; \
+	    timeout 10 ./$(TARGET) --jit $$f || echo "FAILED (rc=$$?): $$f"; \
+	done
 
 # Cross-compile a test program with the bundled musl toolchain.
 # Usage: make cross SRC=ctest_real/hello.c OUT=ctest_real/hello.elf
