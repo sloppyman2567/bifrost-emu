@@ -97,6 +97,7 @@ FrostJIT::~FrostJIT() {
 
 void FrostJIT::flush_cache() {
     blocks_.clear();
+    back_refs_.clear();  // v1.4.0-alpha.5: back-reference index
     code_buf_used_ = 0;
     pending_back_edges_.clear();  // v1.4.0-alpha.5
 }
@@ -377,6 +378,24 @@ void FrostJIT::emit_and_cl_imm8(uint8_t mask) {
 // the RSP-16-alignment dance before calls (pushfq adjusts RSP by 8).
 void FrostJIT::emit_pushfq() { emit_byte(0x9C); }
 void FrostJIT::emit_popfq()  { emit_byte(0x9D); }
+
+// emit_call_aligned — see header for the full contract.
+// At JIT body entry RSP%16==8. After the caller's `num_pushed` pushes,
+// RSP%16 == (8 + 8*num_pushed) % 16. We need RSP%16==0 right before
+// the CALL instruction (ABI requirement).
+//
+// Total pushes including the pushfq below = num_pushed + 1. For
+// RSP%16==0 we need (8 * (num_pushed + 1)) % 16 == 0, i.e.
+// num_pushed must be EVEN. If num_pushed is ODD, we emit `sub rsp, 8`
+// first (effectively adding 1 more "push"), making the total even.
+void FrostJIT::emit_call_aligned(void* target, int num_pushed) {
+    bool need_align = (num_pushed & 1) != 0;  // ODD → misaligned
+    if (need_align) emit_sub_rsp_imm8(8);
+    emit_pushfq();
+    emit_call_abs(target);
+    emit_popfq();
+    if (need_align) emit_add_rsp_imm8(8);
+}
 
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
@@ -1032,12 +1051,11 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
         evict_vreg(31);
     }
-    emit_push(WIN_REG);  // save R10 (caller-saved)
-    emit_push(RAX);      // save RAX + alignment
-    emit_pushfq();
+    emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
+    emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup needed)
     // Set cpu.pc = arm_pc.
     if (arm_pc <= 0xFFFFFFFFULL) {
-        emit_mov_imm32_zext(RAX, (uint32_t)arm_pc);
+        emit_mov_imm32_zext(RAX, static_cast<uint32_t>(arm_pc));
     } else {
         emit_mov_imm64(RAX, arm_pc);
     }
@@ -1045,8 +1063,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // Set args: RDI = emu, RSI = cpu.
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, CPU_REG);
-    emit_call_abs(&jit_interp_step);
-    emit_popfq();
+    emit_call_aligned(&jit_interp_step, /*num_pushed=*/2);
     emit_pop(RAX);       // restore RAX
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX.
@@ -1093,19 +1110,15 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     emit_cmp_reg(dst, tmp);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
 
-    // Slow path. RSP%16==8 on entry; we need RSP%16==0 before the call.
-    // Sequence: push R10 (+8) → sub rsp,8 (+8) → pushfq (+8) = +24, total
-    // mod 16 = 8+24=32 ≡ 0 mod 16. After call: popfq, add rsp 8, pop R10.
-    emit_push(WIN_REG);
-    emit_sub_rsp_imm8(8);
+    // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
+    // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
+    // add rsp,8 dance automatically. We just set up args and call.
+    emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, dst);
     emit_mov_imm32(RDX, w);
-    emit_pushfq();
-    emit_call_abs(&jit_load_mem_slow);
-    emit_popfq();
-    emit_add_rsp_imm8(8);
-    emit_pop(WIN_REG);
+    emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
+    emit_pop(WIN_REG);                   // restore R10
     // RAX now has the return value (the loaded data).
     if (dst != RAX) emit_mov_reg(dst, RAX);
     size_t jmp_past = emit_jmp_rel32_placeholder();
@@ -1151,22 +1164,16 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
 
     // Slow path: call jit_store_mem_slow(emu, addr, val, width).
-    // RSP%16==8 on entry; we need RSP%16==0 before the call.
-    // Sequence: push src(+8) → push RAX(+8) → push R10(+8) → sub rsp,8(+8)
-    // → pushfq(+8) = +40, total mod 16 = 8+40=48 ≡ 0 mod 16.
-    // After call: popfq, add rsp 8, pop R10, pop RAX, pop src.
-    emit_push(src_reg);            // save val (RCX)
-    emit_push(RAX);                // save RAX
-    emit_push(WIN_REG);            // save R10
-    emit_sub_rsp_imm8(8);
+    // 3 pushes (src, RAX, R10) — ODD, so emit_call_aligned handles the
+    // sub rsp,8 + pushfq + call + popfq + add rsp,8 automatically.
+    emit_push(src_reg);            // save val (RCX)  — 1 push
+    emit_push(RAX);                // save RAX        — 2 pushes
+    emit_push(WIN_REG);            // save R10        — 3 pushes (ODD)
     emit_mov_reg(RDI, EMU_REG);    // rdi = emu
     emit_mov_reg(RSI, R8);         // rsi = addr (from R8)
     emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
     emit_mov_imm32(RCX, w);        // rcx = width
-    emit_pushfq();
-    emit_call_abs(&jit_store_mem_slow);
-    emit_popfq();
-    emit_add_rsp_imm8(8);
+    emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/3);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(RAX);                 // restore RAX
     emit_pop(src_reg);             // restore val (RCX)
@@ -2947,19 +2954,42 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
 }
 
 void FrostJIT::chain_back_references(uint64_t target_pc) {
-    // Iterate over all cached blocks; any block whose chain_target_pc
-    // equals target_pc (and isn't yet chained) gets its chain slot
-    // patched to jump directly to the newly-translated block.
+    // Patch any cached block whose chain_target_pc == target_pc.
+    //
+    // Uses the back_refs_ index for O(k) lookup (k = number of back-
+    // refs, typically 1-3). Falls back to O(N) scan if the index is
+    // missing for this target_pc — defensive, shouldn't happen since
+    // the index is maintained at translate-time.
     if (blocks_.find(target_pc) == blocks_.end()) return;
     const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(blocks_[target_pc].fn);
     if (target_fn == nullptr) return;
-    for (auto& kv : blocks_) {
-        BlockEntry& entry = kv.second;
-        if (entry.chained) continue;
-        if (entry.chain_target_pc != target_pc) continue;
+
+    auto try_patch = [&](uint64_t src_pc) {
+        auto sit = blocks_.find(src_pc);
+        if (sit == blocks_.end()) return;
+        BlockEntry& entry = sit->second;
+        if (entry.chained) return;
+        if (entry.chain_target_pc != target_pc) return;
         if (patch_chain(entry.chain_patch_off, target_fn)) {
             entry.chained = true;
             block_chains_patched++;
+        }
+    };
+
+    auto it = back_refs_.find(target_pc);
+    if (it != back_refs_.end()) {
+        for (uint64_t src_pc : it->second) {
+            try_patch(src_pc);
+        }
+    }
+    // Defensive fallback: also scan all blocks in case the index missed
+    // any (e.g. blocks translated before the index was added). This is
+    // O(N) but only runs when back_refs_ lacks the entry, which is rare.
+    // Skip the scan if the index hit covered everything — for hot loops
+    // the index always hits, so this stays O(k).
+    if (it == back_refs_.end()) {
+        for (auto& kv : blocks_) {
+            try_patch(kv.first);
         }
     }
 }
@@ -3290,6 +3320,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     blocks_[start_pc] = entry;
     blocks_translated++;
 
+    // Maintain the back-reference index: this block at start_pc has
+    // chain_target_pc=T, so add start_pc to back_refs_[T]. This lets
+    // chain_back_references(T) find this block in O(k) instead of
+    // scanning all blocks.
+    if (chain_target_pc_ != 0) {
+        back_refs_[chain_target_pc_].push_back(start_pc);
+    }
+
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
     try_chain_block(start_pc, blocks_[start_pc]);
@@ -3325,9 +3363,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // becomes available patches the jmp; subsequent hits run the
         // patched jmp and skip the epilogue+lookup+prologue overhead.
         // try_chain_block is a no-op if already chained or no target.
-        if (!entry.chained && entry.chain_target_pc != 0) {
-            try_chain_block(pc, it->second);
-            entry = it->second;  // refresh local copy (chained flag may have changed)
+        //
+        // Also call chain_back_references(pc) — patches any OTHER
+        // blocks whose chain_target_pc == pc. This is the reverse
+        // direction: a block translated AFTER this one might point
+        // back to pc, and its translate-time chain_back_references
+        // call would have already patched it — but if that call ran
+        // before this block's body was finalized (rare race in
+        // re-translation), or if the back-ref index wasn't populated
+        // yet, this catches it. Now O(k) via back_refs_, so cheap
+        // enough to run per-hit.
+        if (!entry.chained || !back_refs_.empty()) {
+            if (!entry.chained && entry.chain_target_pc != 0) {
+                try_chain_block(pc, it->second);
+                entry = it->second;  // refresh local copy
+            }
+            // Only run back-ref scan if there ARE back-refs for this pc.
+            // Avoids the unordered_map lookup when back_refs_ is empty
+            // (common case after warmup).
+            auto brit = back_refs_.find(pc);
+            if (brit != back_refs_.end()) {
+                chain_back_references(pc);
+            }
         }
     } else {
         cache_misses++;
@@ -3340,23 +3397,24 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         entry = blocks_[pc];
     }
 
-    // (v1.4.0-alpha.5): loop watchdog — if the same block runs more
-    // than 100K times consecutively, it's likely stuck in an infinite
-    // loop due to a JIT codegen bug. Fall back to the interpreter for
-    // this block to make progress. The watchdog resets on any different
-    // PC.
-    static uint64_t last_watchdog_pc = UINT64_MAX;
-    static uint32_t watchdog_count = 0;
-    if (pc == last_watchdog_pc) {
-        watchdog_count++;
-        if (watchdog_count > 100000) {
+    // Loop watchdog — if the same block runs > WATCHDOG_LIMIT times
+    // consecutively, it's likely stuck in an infinite loop due to a JIT
+    // codegen bug. Fall back to the interpreter for this block to make
+    // progress. The watchdog resets on any different PC.
+    //
+    // State is per-instance (not static) so multiple FrostJIT objects
+    // in the same process — e.g. one per worker thread — don't trample
+    // each other's counters.
+    if (pc == watchdog_last_pc_) {
+        watchdog_count_++;
+        if (watchdog_count_ > WATCHDOG_LIMIT) {
             interpreter_fallbacks++;
             emu.step_public(cpu);
             return cpu.pc;
         }
     } else {
-        last_watchdog_pc = pc;
-        watchdog_count = 0;
+        watchdog_last_pc_ = pc;
+        watchdog_count_ = 0;
     }
 
     blocks_executed++;

@@ -69,6 +69,14 @@ public:
     uint64_t interpreter_fallbacks = 0;
     uint64_t block_chains_patched = 0;
 
+    // Loop watchdog state — per-instance so multiple FrostJIT objects
+    // (e.g. one per thread) don't share/corrupt each other's counters.
+    // Resets on any different PC; if the same PC runs > 100K times in
+    // a row, fall back to the interpreter to break the loop.
+    static constexpr uint32_t WATCHDOG_LIMIT = 100000;
+    uint64_t watchdog_last_pc_ = UINT64_MAX;
+    uint32_t watchdog_count_   = 0;
+
     void flush_cache();
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return 64 * 1024 * 1024; }
@@ -121,6 +129,15 @@ private:
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 
+    // Back-reference index: maps target_pc → list of source_pcs whose
+    // chain_target_pc equals target_pc. Maintained incrementally at
+    // translate-time (each block adds itself to its target's back-ref
+    // list). Lets chain_back_references run in O(k) where k is the
+    // number of back-refs (typically 1-3), instead of O(N) scanning
+    // all blocks. This makes it cheap enough to call on every cache
+    // hit, not just at translate-time.
+    std::unordered_map<uint64_t, std::vector<uint64_t>> back_refs_;
+
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
     bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
@@ -128,6 +145,8 @@ private:
     // and try to chain any existing blocks whose target is `pc`.
     void try_chain_block(uint64_t pc, BlockEntry& entry);
     // Scan all cached blocks and chain any whose target is `target_pc`.
+    // Uses back_refs_ for O(k) lookup; falls back to O(N) scan only if
+    // the index is missing (defensive — should never happen).
     void chain_back_references(uint64_t target_pc);
 
     // ── x86 emitters ────────────────────────────────────────────────
@@ -186,6 +205,46 @@ private:
     // that were scattered across ~20 call sites.
     void emit_pushfq();
     void emit_popfq();
+
+    // emit_call_aligned: emit a properly RSP-16-aligned call sequence.
+    //
+    // Background: the SysV AMD64 ABI requires RSP%16==0 at the point of
+    // the CALL instruction (so that inside the callee, after the return
+    // address is pushed, RSP%16==8 — and the callee's prologue typically
+    // pushes RBP to restore alignment). At JIT body entry RSP%16==8
+    // (prologue does 6 pushes + aligned sub). After the caller pushes
+    // `num_pushed` additional regs to save them across the call, RSP%16
+    // = (8 + 8*num_pushed) % 16. Adding `pushfq` (+1 push) makes the
+    // total even iff `num_pushed` is even, yielding RSP%16==0.
+    //
+    // Rule:
+    //   num_pushed EVEN → pushfq alone aligns (no sub rsp needed)
+    //   num_pushed ODD  → sub rsp,8 first, then pushfq aligns
+    //
+    // The helper emits (in order):
+    //   [sub rsp, 8]    (only if num_pushed is odd)
+    //   pushfq
+    //   call <target>
+    //   popfq
+    //   [add rsp, 8]    (only if num_pushed is odd)
+    //
+    // Caller pattern:
+    //   emit_push(R10);                // save caller-saved
+    //   emit_push(RAX);
+    //   // ... set up RDI/RSI/RDX/RCX call args ...
+    //   emit_call_aligned(&jit_foo, /*num_pushed=*/2);
+    //   emit_pop(RAX);                 // restore in reverse order
+    //   emit_pop(R10);
+    //
+    // The caller owns the push/pop of saved regs; the helper owns the
+    // alignment fixup + flag save + the call itself.
+    void emit_call_aligned(void* target, int num_pushed);
+
+    // Function-pointer overload — see emit_call_abs template above.
+    template <typename R, typename... Args>
+    void emit_call_aligned(R (*fn)(Args...), int num_pushed) {
+        emit_call_aligned(reinterpret_cast<void*>(fn), num_pushed);
+    }
     size_t emit_jmp_rel32_placeholder();
     void patch_jmp_rel32(size_t off, int32_t rel);
     size_t emit_jcc_rel32_placeholder(uint8_t cc);
