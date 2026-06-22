@@ -85,7 +85,7 @@ namespace arm64emu {
 // ---------------------------------------------------------------------------
 // Version
 // ---------------------------------------------------------------------------
-constexpr const char* VERSION  = "1.4.0-alpha.3";
+constexpr const char* VERSION  = "1.4.0-alpha.5";
 constexpr const char* CODENAME = "bifrost-emu";
 
 // ---------------------------------------------------------------------------
@@ -528,7 +528,7 @@ public:
     // Public accessor for debug tools (memdump, mappages).
     const std::unordered_map<uint64_t, std::vector<uint8_t>>& pages_map_public() const { return pages_; }
 
-    // ── Direct-access window for JIT (v1.4.0-alpha.3) ─────────────
+    // ── Direct-access window for JIT (v1.4.0-alpha.5) ─────────────
     // A large mmap'd region that mirrors guest pages at their native
     // addresses. The JIT can do 'mov rax, [window_base + guest_addr]'
     // directly — no function call, no push/pop, no stack alloc.

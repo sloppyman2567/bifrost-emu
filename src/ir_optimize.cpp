@@ -1,4 +1,4 @@
-// ir_optimize.cpp — IR optimization passes for bifrost-emu (v1.4.0-alpha.3)
+// ir_optimize.cpp — IR optimization passes for bifrost-emu (v1.4.0-alpha.5)
 //
 // Implements optimize_ir(), which performs the following passes on an
 // IRBlock in place:
@@ -437,7 +437,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::CSINV: case IROp::CSNEG:
             case IROp::CCMP:
             case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: {
-                // (v1.4.0-alpha.3): constant-fold UBFM/SBFM when src1 is
+                // (v1.4.0-alpha.5): constant-fold UBFM/SBFM when src1 is
                 // a known constant. These are very common (SXTB/SXTH/SXTW/
                 // UXTB/UXTH/UXTW/LSL/LSR/ASR immediate) and folding them
                 // eliminates redundant shifts in tight loops.

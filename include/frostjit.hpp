@@ -1,4 +1,4 @@
-// frostjit.hpp — IR → x86-64 JIT for bifrost-emu (v1.4.0-alpha.3)
+// frostjit.hpp — IR → x86-64 JIT for bifrost-emu (v1.4.0-alpha.5)
 //
 // ── Architecture ──────────────────────────────────────────────────────
 //
@@ -77,6 +77,17 @@ public:
     uint64_t watchdog_last_pc_ = UINT64_MAX;
     uint32_t watchdog_count_   = 0;
 
+    // Global progress watchdog: if total block executions exceed this
+    // limit, the JIT switches to interpreter-only mode permanently.
+    // This is a safety valve for JIT codegen bugs that cause infinite
+    // loops across multiple PCs (e.g. a 2-block cycle where neither
+    // PC repeats 100K times consecutively). The limit is low enough
+    // that a stuck JIT terminates quickly, and the cache flush on
+    // trigger gives the interpreter a clean restart.
+    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 10000;
+    uint64_t total_blocks_executed_ = 0;
+    bool     jit_disabled_ = false;  // set by global watchdog
+
     void flush_cache();
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return 64 * 1024 * 1024; }
@@ -126,6 +137,8 @@ private:
         int     instr_count = 0;      // number of ARM64 instructions in this block
         size_t  body_off = 0;         // offset of the IR body (after prologue) — for frameless back-edge chaining
         bool    frameless_compatible = false; // true if the block can be the target of a frameless back-edge jump
+        bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
+        int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 

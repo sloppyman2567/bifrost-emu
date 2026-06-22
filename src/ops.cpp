@@ -1,4 +1,4 @@
-// ops.cpp — IR executor (debug / fallback) for bifrost-emu (v1.4.0-alpha.3)
+// ops.cpp — IR executor (debug / fallback) for bifrost-emu (v1.4.0-alpha.5)
 //
 // Executes a list of IR instructions with a tight switch loop. This is
 // NOT the JIT — it's the slow reference path used when the JIT is

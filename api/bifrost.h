@@ -4,7 +4,7 @@
 // allowing it to be embedded in other applications (debuggers, IDE
 // plugins, test harnesses, etc.) without depending on C++.
 //
-// Version: 1.4.0-alpha.3
+// Version: 1.4.0-alpha.5
 //
 // Basic usage:
 //
@@ -15,7 +15,7 @@
 //     int exit_code = bifrost_run(emu);
 //     bifrost_destroy(emu);
 //
-// With JIT enabled (experimental, v1.4.0-alpha.3+):
+// With JIT enabled (experimental, v1.4.0-alpha.5+):
 //
 //     bifrost_emu_t* emu = bifrost_create();
 //     bifrost_load_elf(emu, "hello.elf", argc, argv);
@@ -128,7 +128,7 @@ void bifrost_set_trace(bifrost_emu_t* emu, int enable);
 // Enable/disable verbose mode (prints execution stats on exit).
 void bifrost_set_verbose(bifrost_emu_t* emu, int enable);
 
-// ── JIT configuration (v1.4.0-alpha.3+) ─────────────────────────────────
+// ── JIT configuration (v1.4.0-alpha.5+) ─────────────────────────────────
 
 // Enable/disable the frostJIT compiler. When enabled, the emulator
 // translates ARM64 basic blocks to native x86-64 code on first
@@ -155,7 +155,7 @@ int bifrost_get_jit(const bifrost_emu_t* emu);
 // Only effective when JIT is also enabled.
 void bifrost_set_jit_verify(bifrost_emu_t* emu, int enable);
 
-// ── JIT statistics (v1.4.0-alpha.3+) ────────────────────────────────────
+// ── JIT statistics (v1.4.0-alpha.5+) ────────────────────────────────────
 
 // JIT statistics structure. Filled by bifrost_get_jit_stats().
 typedef struct {
@@ -175,7 +175,7 @@ int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats);
 
 // ── Version ─────────────────────────────────────────────────────────────
 
-// Get the library version string (e.g., "1.4.0-alpha.3").
+// Get the library version string (e.g., "1.4.0-alpha.5").
 const char* bifrost_version(void);
 
 #ifdef __cplusplus

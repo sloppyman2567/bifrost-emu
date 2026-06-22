@@ -1,4 +1,4 @@
-// frostjit.cpp — IR → x86-64 JIT compiler for bifrost-emu (v1.4.0-alpha.3)
+// frostjit.cpp — IR → x86-64 JIT compiler for bifrost-emu (v1.4.0-alpha.5)
 //
 // ── Architecture ──────────────────────────────────────────────────────
 //
@@ -797,7 +797,7 @@ void FrostJIT::invalidate_caller_saved_vregs() {
 
 // ── Old simple load/store (kept for fallback paths) ────────────────────
 //
-// IMPORTANT (v1.4.0-alpha.3 fix): these helpers MUST participate in the
+// IMPORTANT (v1.4.0-alpha.5 fix): these helpers MUST participate in the
 // register-allocator cache. The previous implementation always loaded
 // from / stored to memory (cpu.regs[] or the stack slot), bypassing the
 // cache. If a vreg was cached in a host register with a dirty value not
@@ -1553,7 +1553,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::CLZ: {
             // LZCNT clobbers RAX. If src1 is cached in RAX, evict it
-            // first so we don't corrupt the cached value. (v1.4.0-alpha.3
+            // first so we don't corrupt the cached value. (v1.4.0-alpha.5
             // fix: with cache-aware load_vreg, loading src1 from RAX into
             // RAX is a no-op, but the subsequent lzcnt would overwrite
             // the cached value.)
@@ -1669,7 +1669,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // don't modify architectural flags). We save/restore RFLAGS
             // around the test to avoid clobbering pending flags.
             //
-            // (v1.4.0-alpha.3 fix): the previous code did
+            // (v1.4.0-alpha.5 fix): the previous code did
             //   int s1 = ensure_vreg(inst.src1, RAX);
             //   if (s1 != RAX) emit_mov_reg(RAX, s1);
             // which would overwrite RAX without evicting whatever dirty
@@ -1759,7 +1759,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // cond=1 (NE) → branch if bit == 1 (TBNZ)
             // We emit: bt rax, bit; jcc (JNC for bit==0, JC for bit==1)
             // BT sets CF = (val >> bit) & 1. We save/restore RFLAGS.
-            // (v1.4.0-alpha.3 fix): same RAX eviction as BRCOND_ZERO —
+            // (v1.4.0-alpha.5 fix): same RAX eviction as BRCOND_ZERO —
             // see the comment there for the rationale.
             clobber_flags();
             if (reg_vreg_[RAX] >= 0) {
@@ -2571,7 +2571,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int immr = inst.immr;
             int imms = inst.imms;
             // Load src into RAX.
-            // (v1.4.0-alpha.3 fix): flush+invalidate FIRST so the
+            // (v1.4.0-alpha.5 fix): flush+invalidate FIRST so the
             // cache is empty and the subsequent load/store_vreg can't
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
@@ -3134,6 +3134,34 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     }
     if (instr_count == 0) return nullptr;
 
+    // ── Heuristic: skip JIT for CALL_INTERP-heavy blocks ──────────
+    // The JIT's per-CALL_INTERP overhead (flush all vregs + push 2 regs +
+    // call interpreter + pop 2 regs + reload) is ~20 instructions. For
+    // blocks with ANY CALL_INTERP, the pure interpreter is faster — it
+    // skips the prologue/epilogue/dispatch entirely.
+    //
+    // This fixes the long-double multiply/divide hang: __multf3/__divtf3
+    // are ~82-instruction soft-float routines split into ~20 tiny blocks
+    // by the MAX_CALL_INTERP_PER_BLOCK=2 splitter. The JIT was 100-200x
+    // slower than the interpreter for these, causing effective hangs on
+    // jit_block_split.elf and jit_fp_scalar.elf with --jit.
+    //
+    // Interp-only blocks are cached (so we skip the re-decode cost on
+    // cache hits) and run exactly instr_count interpreter steps.
+    if (call_interp_count > 0) {
+        BlockEntry entry;
+        entry.fn = nullptr;
+        entry.interp_only = true;
+        entry.interp_only_count = instr_count;
+        entry.ends_with_branch = ir_block.ends_with_branch;
+        entry.chain_target_pc = 0;
+        entry.chained = false;
+        entry.instr_count = instr_count;
+        blocks_[start_pc] = entry;
+        blocks_translated++;
+        return nullptr;
+    }
+
     // ── Optimize the IR ──────────────────────────────────────────
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
     if (!no_opt_) optimize_ir(ir_block);
@@ -3324,7 +3352,16 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // chain_target_pc=T, so add start_pc to back_refs_[T]. This lets
     // chain_back_references(T) find this block in O(k) instead of
     // scanning all blocks.
+    //
+    // Cap: if back_refs_ grows too large (rare — only happens for
+    // very long-running programs with millions of unique PCs), clear
+    // it and let it rebuild lazily. This prevents unbounded memory
+    // growth. The cap is generous (1M entries ≈ 50MB) so it never
+    // fires in practice.
     if (chain_target_pc_ != 0) {
+        if (back_refs_.size() > 1000000) {
+            back_refs_.clear();
+        }
         back_refs_[chain_target_pc_].push_back(start_pc);
     }
 
@@ -3344,43 +3381,58 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
 // ── run_block ───────────────────────────────────────────────────────────
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
-    if (!code_buf_) {
+    if (!code_buf_ || jit_disabled_) {
         interpreter_fallbacks++;
         emu.step_public(cpu);
         return cpu.pc;
     }
+
+    // Global progress watchdog — if we've executed > GLOBAL_BLOCK_LIMIT
+    // blocks, the JIT is likely stuck in a codegen-bug-induced loop.
+    // Disable the JIT permanently and fall back to pure interpreter.
+    // This is a safety valve; normal programs never hit it.
+    if (++total_blocks_executed_ > GLOBAL_BLOCK_LIMIT) {
+        jit_disabled_ = true;
+        fprintf(stderr, "[JIT] global watchdog: %llu blocks executed — disabling JIT (likely codegen bug)\n",
+                (unsigned long long)total_blocks_executed_);
+        interpreter_fallbacks++;
+        emu.step_public(cpu);
+        return cpu.pc;
+    }
+
     uint64_t pc = cpu.pc;
     auto it = blocks_.find(pc);
     BlockEntry entry;
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // (v1.4.0-alpha.5): opportunistically try to chain this block
-        // to its target on every cache hit. The target may have been
-        // translated AFTER this block (so the translate-time
-        // try_chain_block call was a no-op). Re-checking here patches
-        // the chain slot lazily — the first hit after the target
-        // becomes available patches the jmp; subsequent hits run the
-        // patched jmp and skip the epilogue+lookup+prologue overhead.
-        // try_chain_block is a no-op if already chained or no target.
-        //
-        // Also call chain_back_references(pc) — patches any OTHER
-        // blocks whose chain_target_pc == pc. This is the reverse
-        // direction: a block translated AFTER this one might point
-        // back to pc, and its translate-time chain_back_references
-        // call would have already patched it — but if that call ran
-        // before this block's body was finalized (rare race in
-        // re-translation), or if the back-ref index wasn't populated
-        // yet, this catches it. Now O(k) via back_refs_, so cheap
-        // enough to run per-hit.
-        if (!entry.chained || !back_refs_.empty()) {
-            if (!entry.chained && entry.chain_target_pc != 0) {
-                try_chain_block(pc, it->second);
-                entry = it->second;  // refresh local copy
+
+        // ── interp_only shortcut ──────────────────────────────────
+        // Blocks that are too CALL_INTERP-heavy to JIT (e.g. __multf3)
+        // are marked interp_only at translate-time. Run them through
+        // the interpreter directly — no prologue/epilogue/CALL_INTERP
+        // overhead. The interpreter steps exactly interp_only_count
+        // instructions, matching what the JIT block would have done.
+        if (entry.interp_only) {
+            blocks_executed++;
+            for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
+                emu.step_public(cpu);
             }
-            // Only run back-ref scan if there ARE back-refs for this pc.
-            // Avoids the unordered_map lookup when back_refs_ is empty
-            // (common case after warmup).
+            return cpu.pc;
+        }
+
+        // ── Lazy block chaining ───────────────────────────────────
+        // Opportunistically try to chain this block to its target on
+        // every cache hit. The target may have been translated AFTER
+        // this block (so the translate-time try_chain_block call was
+        // a no-op). Also call chain_back_references(pc) to patch any
+        // OTHER blocks whose chain_target_pc == pc — now O(k) via
+        // back_refs_, cheap enough per-hit.
+        if (!entry.chained) {
+            if (entry.chain_target_pc != 0) {
+                try_chain_block(pc, it->second);
+                entry = it->second;
+            }
             auto brit = back_refs_.find(pc);
             if (brit != back_refs_.end()) {
                 chain_back_references(pc);
@@ -3390,6 +3442,19 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         cache_misses++;
         auto fn = translate_block(emu, pc);
         if (!fn) {
+            // translate_block returns nullptr for two reasons:
+            //   1. Block is interp_only (already stored in blocks_[pc])
+            //   2. Genuine translation failure (code buf overflow, etc.)
+            // Case 1: run the interp_only block.
+            // Case 2: single-step the interpreter.
+            if (blocks_.count(pc) && blocks_[pc].interp_only) {
+                entry = blocks_[pc];
+                blocks_executed++;
+                for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
+                    emu.step_public(cpu);
+                }
+                return cpu.pc;
+            }
             interpreter_fallbacks++;
             emu.step_public(cpu);
             return cpu.pc;
@@ -3399,8 +3464,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
 
     // Loop watchdog — if the same block runs > WATCHDOG_LIMIT times
     // consecutively, it's likely stuck in an infinite loop due to a JIT
-    // codegen bug. Fall back to the interpreter for this block to make
-    // progress. The watchdog resets on any different PC.
+    // codegen bug. Fall back to the interpreter for this block AND mark
+    // it as interp_only permanently so future hits also use the
+    // interpreter (avoiding repeated watchdog triggers).
     //
     // State is per-instance (not static) so multiple FrostJIT objects
     // in the same process — e.g. one per worker thread — don't trample
@@ -3408,6 +3474,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (pc == watchdog_last_pc_) {
         watchdog_count_++;
         if (watchdog_count_ > WATCHDOG_LIMIT) {
+            // Mark this block as interp_only permanently — the JIT
+            // codegen for it is buggy, so always use the interpreter.
+            if (blocks_.count(pc) && !blocks_[pc].interp_only) {
+                blocks_[pc].interp_only = true;
+                blocks_[pc].interp_only_count = blocks_[pc].instr_count;
+                blocks_[pc].fn = nullptr;
+                blocks_[pc].chained = false;
+            }
             interpreter_fallbacks++;
             emu.step_public(cpu);
             return cpu.pc;

@@ -1,4 +1,4 @@
-// ir.cpp — ARM64 → IR translator for bifrost-emu (v1.4.0-alpha.3)
+// ir.cpp — ARM64 → IR translator for bifrost-emu (v1.4.0-alpha.5)
 //
 // Translates each ARM64 instruction (DecodedInst) into 1+ IR micro-ops.
 // The IR is then optimized (optimize_ir) and either executed by ops.cpp
@@ -1007,7 +1007,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Post-index: load/store from base (no offset).
                 addr = base;
             } else {
-                // (v1.4.0-alpha.3 optimization): for offset and pre-index
+                // (v1.4.0-alpha.5 optimization): for offset and pre-index
                 // modes, fold the displacement into the LOAD_MEM/STORE_MEM
                 // imm field instead of emitting a separate IMM+ADD. The
                 // executor and JIT both handle `mem[base + imm]` directly.
