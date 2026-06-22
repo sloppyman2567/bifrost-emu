@@ -61,8 +61,75 @@ void FrostJIT::evict_vreg(int v) {
     vreg_dirty_[v] = false;
 }
 
-// Get a free x86 reg, evicting if necessary. If `preferred` >= 0, try
-// to use that specific reg.
+// Drop a vreg's cache mapping WITHOUT spilling.
+//
+// This is the "safe drop" helper: if the vreg is dirty (its cached value
+// differs from memory), we EVICT it first (write back to cpu.regs[] or
+// stack slot) so the value is preserved. Only then do we clear the
+// mapping.
+//
+// Use this instead of the raw pattern:
+//     vreg_home_[v] = -1;
+//     vreg_dirty_[v] = false;
+// which silently loses dirty values. That pattern was the root cause of
+// the v1.4.0-beta.1 jit_simd crash — REV64 and CLZ both dropped a dirty
+// src1 vreg without spilling, then a later reader reloaded from an
+// uninitialized stack slot.
+//
+// If you INTEND to drop a dirty value (because the value is genuinely
+// dead — e.g. the register was overwritten by a computation whose result
+// you're keeping), use kill_vreg(v) instead, which does NOT evict.
+//
+// In debug builds (NDEBUG not defined), this function asserts that the
+// regalloc state is consistent: reg_vreg_[vreg_home_[v]] == v.
+void FrostJIT::drop_vreg(int v) {
+    int r = vreg_home_[v];
+    if (r < 0) {
+        // Not cached — nothing to do.
+        vreg_dirty_[v] = false;
+        return;
+    }
+#ifndef NDEBUG
+    // Consistency check: the reverse mapping must agree.
+    if (reg_vreg_[r] != v) {
+        fprintf(stderr, "[JIT REGALLOC BUG] drop_vreg(%d): reg_vreg_[%d]=%d (expected %d) — "
+                "cache state corrupted. This is a bug in the JIT codegen; please report it.\n",
+                v, r, reg_vreg_[r], v);
+    }
+#endif
+    if (vreg_dirty_[v]) {
+        // Value is dirty — preserve it by spilling to memory first.
+        if (v <= 31) {
+            emit_store_arm(v, r);
+        } else {
+            int32_t off = vreg_stack_slot(v);
+            emit_store(RBP, off, r);
+        }
+    }
+    vreg_home_[v] = -1;
+    reg_vreg_[r] = -1;
+    vreg_dirty_[v] = false;
+}
+
+// Evict the occupant of `host_reg` if dirty, then clear the mapping.
+// Use this BEFORE clobbering `host_reg` with a computation that doesn't
+// preserve the old value (e.g. emit_mov_imm64(RAX, ...) in FP_MOVI).
+void FrostJIT::clobber_host_reg(int host_reg) {
+    int v = reg_vreg_[host_reg];
+    if (v < 0) return;
+    if (vreg_dirty_[v]) {
+        // Preserve the dirty value by spilling to memory.
+        if (v <= 31) {
+            emit_store_arm(v, host_reg);
+        } else {
+            int32_t off = vreg_stack_slot(v);
+            emit_store(RBP, off, host_reg);
+        }
+    }
+    vreg_home_[v] = -1;
+    reg_vreg_[host_reg] = -1;
+    vreg_dirty_[v] = false;
+}
 int FrostJIT::alloc_reg(int preferred) {
     // Try preferred first.
     if (preferred >= 0 && reg_vreg_[preferred] == -1) {

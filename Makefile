@@ -95,6 +95,21 @@ test: $(TARGET)
 	    timeout 10 ./$(TARGET) --jit $$f || echo "FAILED (rc=$$?): $$f"; \
 	done
 
+# Run JIT tests under BIFROST_JIT_VERIFY=1 — catches JIT/interpreter
+# divergences by running each block through both paths and comparing
+# CPU state. Slow (10-50x), but catches codegen bugs that produce
+# wrong results without crashing. Use this after any JIT codegen change.
+verify: $(TARGET)
+	@echo "--- JIT verify mode (divergence check) ---"
+	@for f in ctest/jit_*.elf; do \
+	    echo "--- $$f (verify) ---"; \
+	    BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) --jit $$f 2>&1 | \
+	        grep -E 'VERIFY.*DIVERGENCE.*\(pc|VERIFY.*x[0-9]+: jit' | head -3; \
+	    echo "  (rc=$$?)"; \
+	done
+	@echo "Done. Any DIVERGENCE lines above indicate JIT codegen bugs."
+
+
 # Cross-compile a test program with the bundled musl toolchain.
 # Usage: make cross SRC=ctest_real/hello.c OUT=ctest_real/hello.elf
 CROSS_CC := tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc

@@ -98,15 +98,18 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
         if (fp_field == 0) {
             int32_t vhi_off = V_HI_OFF + static_cast<int>(idx) * 8;
+            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty vreg cached
+            // in RAX BEFORE we overwrite it with 0. The old code silently
+            // dropped src1 (if it was cached in RAX) via raw mapping clear.
+            clobber_host_reg(RAX);
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, vhi_off, RAX);
-        }
-        // Drop RAX cache mapping (we clobbered it).
-        if (reg_vreg_[RAX] >= 0) {
-            int old_v = reg_vreg_[RAX];  // capture BEFORE clearing
-            vreg_home_[old_v] = -1;
-            reg_vreg_[RAX] = -1;
-            vreg_dirty_[old_v] = false;
+        } else {
+            // For G2FHI, RAX still holds src1's value (not clobbered).
+            // But we need to drop the mapping if src1 was loaded into RAX
+            // via ensure_vreg (it's now "consumed" by the store). Use
+            // clobber_host_reg to safely evict if dirty.
+            clobber_host_reg(RAX);
         }
     } else {
         // FP → GPR: load fp_off into a fresh vreg for dest.
@@ -532,32 +535,33 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::CLZ: {
-            // LZCNT clobbers RAX. If src1 is cached in RAX, evict it
-            // first so we don't corrupt the cached value. (v1.4.0-alpha.5
-            // fix: with cache-aware load_vreg, loading src1 from RAX into
-            // RAX is a no-op, but the subsequent lzcnt would overwrite
-            // the cached value.)
+            // (v1.4.0-beta.1 bugfix): lzcnt rax, rax overwrites RAX, destroying
+            // src1's cached value. If src1 is a scratch vreg holding a snapshot
+            // of an arch reg (from LOAD_REG), later readers would reload from
+            // an uninitialized stack slot. Use the same fix as REV64: allocate
+            // a separate dest reg and copy src1 there BEFORE lzcnt.
+            //
+            // The previous code did `vreg_home_[inst.src1] = -1; vreg_dirty_[inst.src1] = false`
+            // which silently dropped a dirty src1 — same bug class as REV64.
             clobber_flags();  // lzcnt doesn't clobber flags, but sub does (32-bit path)
-            if (vreg_home_[inst.src1] == RAX) {
-                // src1 is in RAX — that's fine, we'll clobber it but
-                // we don't need src1 anymore after lzcnt. Just drop the
-                // mapping so a later ensure_vreg(src1) reloads from memory.
-                reg_vreg_[RAX] = -1;
-                vreg_home_[inst.src1] = -1;
-                vreg_dirty_[inst.src1] = false;
-            } else {
-                load_vreg(RAX, inst.src1);
+            force_vreg_to_reg(inst.src1, RAX);
+            int d = alloc_reg_for(inst.dest, RAX);
+            if (d != RAX) {
+                emit_mov_reg(d, RAX);  // copy src1 to d, preserving src1 in RAX
             }
-            emit_lzcnt_reg(RAX, RAX);
+            emit_lzcnt_reg(d, d);  // lzcnt d, d (in-place on d)
             // For 32-bit CLZ: x86 LZCNT counts 64-bit leading zeros.
             // ARM 32-bit CLZ should only count the lower 32 bits.
             // Subtract 32 to account for the upper 32 zero bits.
             if (inst.width == 32) {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xE8); emit_byte(0x20); // sub rax, 32
-                if (RAX >= 8) emit_byte(0x45);
-                emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7)); // mov eax, eax (zext)
+                // sub d, 32 (use the right encoding for d >= R8)
+                if (d >= 8) emit_byte(0x49); else emit_byte(0x48);
+                emit_byte(0x83); emit_byte(0xE8 | (d & 7)); emit_byte(0x20);
+                // mov e_d, e_d (zero-extend to 64 bits)
+                if (d >= 8) emit_byte(0x45);
+                emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
             }
-            store_vreg(inst.dest, RAX);
+            // dest is already cached in d (via alloc_reg_for) and marked dirty.
             return false;
         }
 
@@ -1419,15 +1423,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FMOV immediate (load decoded FP immediate) ──────────────
         case IROp::FP_MOVI: {
             // v_lo[dest] = imm; v_hi[dest] = 0
+            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty GPR vreg
+            // cached in RAX BEFORE we overwrite it with the immediate.
+            // The old code silently dropped dirty vregs.
+            clobber_host_reg(RAX);
             emit_mov_imm64(RAX, inst.imm);
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, off_d, RAX);
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
-            if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
-            }
             return false;
         }
 
@@ -1487,31 +1491,31 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
+            // (v1.4.0-beta.1): DON'T drop src1's cache mapping after the
+            // store — src1 may be read again later in the block. The old
+            // code did `vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1`
+            // which silently dropped a dirty src1.
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
             int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
             emit_store(CPU_REG, offhi, RAX);
-            if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
-            }
+            // src1 stays cached in RAX (or its original reg) for later readers.
             return false;
         }
 
         // ── SIMD MOVI (broadcast immediate) ─────────────────────────
         case IROp::SIMD_MOVI: {
             // v_lo[dest] = v_hi[dest] = imm
+            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty GPR vreg
+            // cached in RAX BEFORE we overwrite it with the immediate.
+            clobber_host_reg(RAX);
             emit_mov_imm64(RAX, inst.imm);
             int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
             emit_store(CPU_REG, offhi, RAX);
-            if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
-            }
             return false;
         }
 
@@ -1521,20 +1525,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg
             if (inst.width == 1) {
                 // Load: write vregs to v_lo/v_hi
+                // (v1.4.0-beta.1): use separate host regs for lo/hi so we
+                // don't clobber src1's cached value when loading src2.
+                // The old code reused RAX for both, dropping src1's mapping.
                 int slo = ensure_vreg(inst.src1, RAX);
-                if (slo != RAX) emit_mov_reg(RAX, slo);
                 int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-                emit_store(CPU_REG, offlo, RAX);
+                emit_store(CPU_REG, offlo, slo);
 
-                int shi = ensure_vreg(inst.src2, RAX);
-                if (shi != RAX) emit_mov_reg(RAX, shi);
+                // For the hi half, use a different reg if possible.
+                int shi = ensure_vreg(inst.src2, RCX);
                 int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-                emit_store(CPU_REG, offhi, RAX);
-
-                if (reg_vreg_[RAX] >= 0) {
-                    vreg_home_[reg_vreg_[RAX]] = -1;
-                    reg_vreg_[RAX] = -1;
-                }
+                emit_store(CPU_REG, offhi, shi);
             } else {
                 // Store: read v_lo/v_hi into vregs
                 int dlo = alloc_reg();

@@ -336,6 +336,12 @@ private:
 
     int  alloc_reg(int preferred = -1);
     void evict_vreg(int v);
+    void drop_vreg(int v);  // safe drop — evicts if dirty (use instead of raw clear)
+    // Evict the occupant of `host_reg` if it's dirty, then clear the mapping.
+    // Use this BEFORE clobbering `host_reg` with a computation that doesn't
+    // care about the old value (e.g. emit_mov_imm64(RAX, ...) in FP_MOVI).
+    // Without this, a dirty vreg cached in `host_reg` is silently lost.
+    void clobber_host_reg(int host_reg);
     void flush_all_vregs();
     void invalidate_all_vregs();
     // v1.4.0-beta.1: flush/invalidate only caller-saved vregs. Used
