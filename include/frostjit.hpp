@@ -74,7 +74,6 @@ public:
     size_t code_buf_size()  const { return 64 * 1024 * 1024; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
-    bool can_translate_public(const DecodedInst& d) const;
 
     static constexpr int REGS_OFF   = 0;
     static constexpr int SP_OFF     = 256;
@@ -182,6 +181,11 @@ private:
     void emit_nop();
     void emit_push(int reg);
     void emit_pop(int reg);
+    // pushfq / popfq — save/restore x86 RFLAGS to/from stack.
+    // Replaces the magic byte sequences `emit_byte(0x9C)` / `emit_byte(0x9D)`
+    // that were scattered across ~20 call sites.
+    void emit_pushfq();
+    void emit_popfq();
     size_t emit_jmp_rel32_placeholder();
     void patch_jmp_rel32(size_t off, int32_t rel);
     size_t emit_jcc_rel32_placeholder(uint8_t cc);
@@ -297,6 +301,25 @@ private:
     void force_two_vregs_to(int src1, int host_reg1,
                             int src2, int host_reg2);
 
+    // ── FMOV helper ───────────────────────────────────────────────────
+    // Moves a 64-bit value between a GPR vreg and an FP register slot
+    // (cpu.v_lo[] or cpu.v_hi[]) via the RAX scratch register.
+    //
+    //   dir = 0: GPR → FP,  fp_field = 0 (v_lo) or 1 (v_hi)
+    //            Stores src1 vreg into the FP slot. If fp_field == 0
+    //            (FMOV_G2F), also zeros v_hi[dest] — ARM semantics.
+    //   dir = 1: FP → GPR, fp_field = 0 (v_lo) or 1 (v_hi)
+    //            Loads the FP slot into a fresh vreg for dest.
+    //
+    // `idx` is the FP register index (0-31) — comes from inst.dest for
+    // G→F or inst.src1 for F→G.
+    //
+    // After G→F: RAX is clobbered; its cache mapping is dropped safely
+    // (capture-before-clear, avoiding the OOB write that previously
+    // lived inline in each FMOV_G2F* case).
+    void emit_fmov_helper(int dir, int fp_field, uint16_t idx,
+                          uint16_t src1, uint16_t dest);
+
     // Old simple load/store (kept for fallback).
     void load_vreg(int dst, int v);
     void store_vreg(int v, int src);
@@ -378,7 +401,6 @@ private:
 
     // Translation entry point.
     uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
-    bool can_translate(const DecodedInst& d) const;
 };
 
 } // namespace arm64emu

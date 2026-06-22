@@ -371,6 +371,13 @@ void FrostJIT::emit_and_cl_imm8(uint8_t mask) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(mask);
 }
 
+// pushfq / popfq — save/restore x86 RFLAGS.
+// Encoding: 0x9C / 0x9D.
+// Used around C calls to preserve pending flag state, and as part of
+// the RSP-16-alignment dance before calls (pushfq adjusts RSP by 8).
+void FrostJIT::emit_pushfq() { emit_byte(0x9C); }
+void FrostJIT::emit_popfq()  { emit_byte(0x9D); }
+
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
     if (ar >= 0 && ar <= 30) emit_load(xr, CPU_REG, REGS_OFF + 8*ar);
@@ -393,7 +400,7 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
 // bit 27).
 void FrostJIT::emit_materialize_flags(bool from_sub) {
     emit_push(RAX);
-    emit_byte(0x9C);  // pushfq
+    emit_pushfq();
     emit_byte(0x58);  // pop rax
 
     emit_xor_reg(RDX, RDX);
@@ -485,7 +492,7 @@ void FrostJIT::emit_load_flags_from_pstate() {
     emit_or_reg(RAX, RDX);
 
     emit_push(RAX);
-    emit_byte(0x9D); // popfq
+    emit_popfq();
 }
 
 // ── Condition code mapping ─────────────────────────────────────────────
@@ -516,15 +523,6 @@ uint8_t FrostJIT::arm_cond_to_x86(uint8_t arm_cond) const {
         case 0xC: return (arm_cond & 1) ? 14 : 15; // GT→JG(15) / LE→JLE(14)
         default:  return 4;
     }
-}
-
-// ── can_translate ──────────────────────────────────────────────────────
-bool FrostJIT::can_translate(const DecodedInst& d) const {
-    (void)d;
-    return true;
-}
-bool FrostJIT::can_translate_public(const DecodedInst& d) const {
-    return can_translate(d);
 }
 
 // ── Memory access helpers (C-callable from JIT) ────────────────────────
@@ -951,6 +949,48 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
     reg_vreg_[host_reg2] = src2;
 }
 
+// ── emit_fmov_helper ───────────────────────────────────────────────────
+// Unified FMOV codegen for all four GPR↔FP register moves:
+//   dir=0, fp_field=0: FMOV_G2F   — v_lo[idx] = src1; v_hi[idx] = 0
+//   dir=0, fp_field=1: FMOV_G2FHI — v_hi[idx] = src1
+//   dir=1, fp_field=0: FMOV_F2G   — dest = v_lo[idx]
+//   dir=1, fp_field=1: FMOV_FHI2G — dest = v_hi[idx]
+//
+// Replaces 4 near-identical inline cases (~50 lines total) with one
+// shared helper. Also fixes the OOB write that was in the old inline
+// G2F/G2FHI cases (they read reg_vreg_[RAX] AFTER clearing it to -1,
+// causing vreg_dirty_[-1] = false; this version captures the old
+// value BEFORE clearing).
+void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
+                                uint16_t src1, uint16_t dest) {
+    int32_t fp_off = (fp_field == 0 ? V_LO_OFF : V_HI_OFF)
+                   + static_cast<int>(idx) * 8;
+    if (dir == 0) {
+        // GPR → FP: load src1 vreg into RAX, store to fp_off.
+        int s = ensure_vreg(src1, RAX);
+        if (s != RAX) emit_mov_reg(RAX, s);
+        emit_store(CPU_REG, fp_off, RAX);
+        // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
+        if (fp_field == 0) {
+            int32_t vhi_off = V_HI_OFF + static_cast<int>(idx) * 8;
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, vhi_off, RAX);
+        }
+        // Drop RAX cache mapping (we clobbered it).
+        if (reg_vreg_[RAX] >= 0) {
+            int old_v = reg_vreg_[RAX];  // capture BEFORE clearing
+            vreg_home_[old_v] = -1;
+            reg_vreg_[RAX] = -1;
+            vreg_dirty_[old_v] = false;
+        }
+    } else {
+        // FP → GPR: load fp_off into a fresh vreg for dest.
+        int d = alloc_reg();
+        emit_load(d, CPU_REG, fp_off);
+        set_vreg_reg(dest, d);
+    }
+}
+
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // Materialize host flags to pstate if valid.
@@ -994,7 +1034,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     }
     emit_push(WIN_REG);  // save R10 (caller-saved)
     emit_push(RAX);      // save RAX + alignment
-    emit_byte(0x9C);     // pushfq (save flags + alignment)
+    emit_pushfq();
     // Set cpu.pc = arm_pc.
     if (arm_pc <= 0xFFFFFFFFULL) {
         emit_mov_imm32_zext(RAX, (uint32_t)arm_pc);
@@ -1006,7 +1046,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, CPU_REG);
     emit_call_abs(&jit_interp_step);
-    emit_byte(0x9D);     // popfq
+    emit_popfq();
     emit_pop(RAX);       // restore RAX
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX.
@@ -1053,24 +1093,19 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     emit_cmp_reg(dst, tmp);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
 
-    // Slow path. RSP%16 == 8 here. Need RSP%16 == 0 before call.
-    // push r10 → RSP%16 == 0 (save WIN_REG — call clobbers it)
-    // pushfq   → RSP%16 == 8  — need one more push for alignment.
-    // But we can't push RAX (return value goes there). Use a dummy sub.
-    //   push r10 → RSP%16 == 0
-    //   sub rsp, 8 → RSP%16 == 8
-    //   pushfq → RSP%16 == 0  ✓
-    // After call: popfq, add rsp 8, pop r10.
-    emit_push(WIN_REG);  // save R10
+    // Slow path. RSP%16==8 on entry; we need RSP%16==0 before the call.
+    // Sequence: push R10 (+8) → sub rsp,8 (+8) → pushfq (+8) = +24, total
+    // mod 16 = 8+24=32 ≡ 0 mod 16. After call: popfq, add rsp 8, pop R10.
+    emit_push(WIN_REG);
     emit_sub_rsp_imm8(8);
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, dst);
     emit_mov_imm32(RDX, w);
-    emit_byte(0x9C); // pushfq (alignment)
+    emit_pushfq();
     emit_call_abs(&jit_load_mem_slow);
-    emit_byte(0x9D); // popfq
+    emit_popfq();
     emit_add_rsp_imm8(8);
-    emit_pop(WIN_REG); // restore R10
+    emit_pop(WIN_REG);
     // RAX now has the return value (the loaded data).
     if (dst != RAX) emit_mov_reg(dst, RAX);
     size_t jmp_past = emit_jmp_rel32_placeholder();
@@ -1116,24 +1151,10 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
 
     // Slow path: call jit_store_mem_slow(emu, addr, val, width).
-    // RSP%16 == 8 here. Need RSP%16 == 0 before call.
-    // push src_reg → RSP%16 == 0
-    // push rax     → RSP%16 == 8
-    // push r10     → RSP%16 == 0  (save WIN_REG — call clobbers it)
-    // pushfq       → RSP%16 == 8  — need one more...
-    // Actually: 4 pushes = 32 bytes. RSP%16 == 8 + 32 = 40 % 16 = 8. Not 0.
-    // We need odd number of pushes (3 or 5). Use: src_reg, rax, pushfq = 3.
-    // But we also need to save R10. Use 5 pushes: src, rax, r10, rcx, pushfq.
-    // Simpler: save R10 to a stack slot via push, and adjust.
-    // Let's use 3 pushes (src, rax, pushfq) and save R10 separately.
-    // Actually: R10 is needed for the fast path (which uses R10 as window base).
-    // The slow path doesn't use R10. But the call clobbers R10.
-    // We must save R10. Use 4 pushes + sub rsp,8 for alignment:
-    //   push src_reg → RSP%16 == 0
-    //   push rax     → RSP%16 == 8
-    //   push r10     → RSP%16 == 0
-    //   pushfq       → RSP%16 == 8  → need +8 more
-    //   sub rsp, 8   → RSP%16 == 0  ✓
+    // RSP%16==8 on entry; we need RSP%16==0 before the call.
+    // Sequence: push src(+8) → push RAX(+8) → push R10(+8) → sub rsp,8(+8)
+    // → pushfq(+8) = +40, total mod 16 = 8+40=48 ≡ 0 mod 16.
+    // After call: popfq, add rsp 8, pop R10, pop RAX, pop src.
     emit_push(src_reg);            // save val (RCX)
     emit_push(RAX);                // save RAX
     emit_push(WIN_REG);            // save R10
@@ -1142,9 +1163,9 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_mov_reg(RSI, R8);         // rsi = addr (from R8)
     emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
     emit_mov_imm32(RCX, w);        // rcx = width
-    emit_byte(0x9C); // pushfq (alignment)
+    emit_pushfq();
     emit_call_abs(&jit_store_mem_slow);
-    emit_byte(0x9D); // popfq
+    emit_popfq();
     emit_add_rsp_imm8(8);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(RAX);                 // restore RAX
@@ -1374,48 +1395,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // These ops clobber x86 RFLAGS, so materialize pending flags first.
         case IROp::ADD: case IROp::SUB: case IROp::AND:
         case IROp::OR:  case IROp::XOR: case IROp::MUL: {
+            // Force src1 → RAX, src2 → RCX (aliasing-safe via force_two_vregs_to).
             clobber_flags();
-            // Force src1 into RAX, src2 into RCX.
-            // Evict whatever's in RAX/RCX first.
-            if (reg_vreg_[RAX] >= 0 && reg_vreg_[RAX] != inst.src1) evict_vreg(reg_vreg_[RAX]);
-            if (reg_vreg_[RCX] >= 0 && reg_vreg_[RCX] != inst.src2 && reg_vreg_[RCX] != inst.src1) evict_vreg(reg_vreg_[RCX]);
-            // If src1 is already cached in a reg, move it to RAX.
-            if (vreg_home_[inst.src1] >= 0) {
-                int r = vreg_home_[inst.src1];
-                if (r != RAX) {
-                    emit_mov_reg(RAX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src1] = RAX;
-                    reg_vreg_[RAX] = inst.src1;
-                }
-            } else {
-                // Load src1 into RAX.
-                if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-                else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-                vreg_home_[inst.src1] = RAX;
-                reg_vreg_[RAX] = inst.src1;
-            }
-            // If src2 is already cached in a reg, move it to RCX (if != RAX).
-            if (vreg_home_[inst.src2] >= 0) {
-                int r = vreg_home_[inst.src2];
-                if (r == RAX) {
-                    // src2 is in RAX (same as src1). Copy to RCX.
-                    emit_mov_reg(RCX, RAX);
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                } else if (r != RCX) {
-                    emit_mov_reg(RCX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                }
-            } else {
-                // Load src2 into RCX.
-                if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-                else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
-                vreg_home_[inst.src2] = RCX;
-                reg_vreg_[RCX] = inst.src2;
-            }
+            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s2 = RCX;  // src2 is in RCX; src1 (RAX) is implicit dest
             // Compute dest = src1 op src2. Reuse RAX for dest if possible.
             int d;
@@ -1708,7 +1690,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 reg_vreg_[RAX] = -1;
             }
             // Save RFLAGS (in case any pending flags weren't materialized)
-            emit_byte(0x9C);  // pushfq
+            emit_pushfq();
             // test rax, rax
             emit_test_reg(RAX, RAX);
             // jcc to taken target
@@ -1730,7 +1712,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     // consumed the flags from `test` — we need to popfq
                     // on the not-taken path (fall-through).
                     // NOT taken: popfq, RAX = fall-through, go to epilogue.
-                    emit_byte(0x9D);  // popfq
+                    emit_popfq();
                     uint64_t fall = inst.arm_pc + 4;
                     if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
                     else                            emit_mov_imm64(RAX, fall);
@@ -1745,14 +1727,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
             else                            emit_mov_imm64(RAX, fall);
             // Restore RFLAGS before jumping to epilogue
-            emit_byte(0x9D);  // popfq
+            emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
             int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             // Restore RFLAGS (CBZ/CBNZ don't modify flags)
-            emit_byte(0x9D);  // popfq
+            emit_popfq();
             if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
             else                            emit_mov_imm64(RAX, inst.imm);
             // Record pending back-edge for later patching.
@@ -1783,7 +1765,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 vreg_home_[reg_vreg_[RAX]] = -1;
                 reg_vreg_[RAX] = -1;
             }
-            emit_byte(0x9C);  // pushfq (save flags)
+            emit_pushfq();
             // bt rax, imm8  — 0x48 0x0F 0xBA /5 r/m, imm8
             emit_byte(rex(true, false, false, RAX >= 8));
             emit_byte(0x0F); emit_byte(0xBA);
@@ -1801,7 +1783,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     }
                 }
                 if (emit_frameless_back_edge(inst.imm, cc)) {
-                    emit_byte(0x9D);  // popfq (not-taken path)
+                    emit_popfq();
                     uint64_t fall = inst.arm_pc + 4;
                     if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
                     else                            emit_mov_imm64(RAX, fall);
@@ -1815,13 +1797,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint64_t fall = inst.arm_pc + 4;
             if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
             else                            emit_mov_imm64(RAX, fall);
-            emit_byte(0x9D);  // popfq (restore flags)
+            emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
             int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            emit_byte(0x9D);  // popfq (restore flags)
+            emit_popfq();
             if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
             else                            emit_mov_imm64(RAX, inst.imm);
             if (is_back_edge) {
@@ -1916,10 +1898,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // pushfq/popfq preserves the actual flags.
             bool saved_fih = flags_in_host_;
             bool saved_ffs = flags_from_sub_;
-            emit_byte(0x9C);  // pushfq (save flags)
+            emit_pushfq();
             flush_all_vregs();
             invalidate_all_vregs();
-            emit_byte(0x9D);  // popfq (restore flags)
+            emit_popfq();
             flags_in_host_ = saved_fih;
             flags_from_sub_ = saved_ffs;
             if (need_cmc) emit_byte(0xF5);  // cmc
@@ -1934,7 +1916,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
             // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
             if (inst.op != IROp::CSEL) {
-                emit_byte(0x9C);  // pushfq (save flags for jcc)
+                emit_pushfq();
                 if (inst.op == IROp::CSINC) {
                     // add rcx, 1
                     emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x01);
@@ -1943,7 +1925,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 } else {  // CSNEG
                     emit_neg_reg(RCX);
                 }
-                emit_byte(0x9D);  // popfq (restore flags for jcc)
+                emit_popfq();
             }
 
             // RDX = RAX (d = src1).
@@ -2039,9 +2021,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // (v1.4.0-alpha.5 bugfix): emit_materialize_flags clobbers
                 // RAX/RCX/RDX. Invalidate their cache mappings so a later
                 // ensure_vreg doesn't return stale (garbage) values.
-                emit_byte(0x9C);  // pushfq (save original flags)
+                emit_pushfq();
                 emit_materialize_flags(flags_from_sub_);
-                emit_byte(0x9D);  // popfq (restore original flags for JCC)
+                emit_popfq();
                 for (int r : {RAX, RCX, RDX}) {
                     int v = reg_vreg_[r];
                     if (v >= 0) {
@@ -2115,9 +2097,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 return true;
             }
             // Forward branch: full flush + normal epilogue.
-            emit_byte(0x9C);  // pushfq
+            emit_pushfq();
             flush_all_vregs();
-            emit_byte(0x9D);  // popfq
+            emit_popfq();
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             {
@@ -2160,60 +2142,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             unchainable_end_ = true;  // syscall may modify PC
             return true;
 
-        // ── FMOV (general ↔ FP) — native codegen ────────────────────
+        // ── FMOV (general ↔ FP) — native codegen via emit_fmov_helper ───
         // These ops move data between cpu.regs[] and cpu.v_lo[]/v_hi[]
         // using direct memory access through CPU_REG (RBX).
         // No CALL_INTERP needed — pure memory moves through RAX.
-        case IROp::FMOV_G2F: {
-            // v_lo[dest] = src1; v_hi[dest] = 0
-            // dest is the FP register index (0-31), src1 is the vreg.
-            int s = ensure_vreg(inst.src1, RAX);
-            if (s != RAX) emit_mov_reg(RAX, s);
-            // Store to v_lo[dest] = CPU_REG + V_LO_OFF + dest*8
-            int32_t vlo_off = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_store(CPU_REG, vlo_off, RAX);
-            // Store 0 to v_hi[dest]
-            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, vhi_off, RAX);
-            // Drop RAX cache mapping (we overwrote it).
-            if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
-                vreg_dirty_[reg_vreg_[RAX]] = false;
-            }
-            return false;
-        }
-        case IROp::FMOV_F2G: {
-            // dest = v_lo[src1]
-            // src1 is the FP register index (0-31), dest is the vreg.
-            int d = alloc_reg();
-            int32_t vlo_off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            emit_load(d, CPU_REG, vlo_off);
-            set_vreg_reg(inst.dest, d);
-            return false;
-        }
-        case IROp::FMOV_G2FHI: {
-            // v_hi[dest] = src1
-            int s = ensure_vreg(inst.src1, RAX);
-            if (s != RAX) emit_mov_reg(RAX, s);
-            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_store(CPU_REG, vhi_off, RAX);
-            if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
-                vreg_dirty_[reg_vreg_[RAX]] = false;
-            }
-            return false;
-        }
-        case IROp::FMOV_FHI2G: {
-            // dest = v_hi[src1]
-            int d = alloc_reg();
-            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            emit_load(d, CPU_REG, vhi_off);
-            set_vreg_reg(inst.dest, d);
-            return false;
-        }
+        case IROp::FMOV_G2F:    emit_fmov_helper(/*dir=*/0, /*field=*/0, inst.dest, inst.src1, inst.dest); return false;
+        case IROp::FMOV_F2G:    emit_fmov_helper(/*dir=*/1, /*field=*/0, inst.src1, inst.src1, inst.dest); return false;
+        case IROp::FMOV_G2FHI:  emit_fmov_helper(/*dir=*/0, /*field=*/1, inst.dest, inst.src1, inst.dest); return false;
+        case IROp::FMOV_FHI2G:  emit_fmov_helper(/*dir=*/1, /*field=*/1, inst.src1, inst.src1, inst.dest); return false;
 
         // ── FP scalar arithmetic — native SSE2 codegen ──────────────
         // These ops use XMM0/XMM1 as scratch, loading from and storing
@@ -2434,7 +2370,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
             // Build pstate in RDX using conditional moves.
             // pushfq to get flags into RAX, then test bits.
-            emit_byte(0x9C);  // pushfq
+            emit_pushfq();
             emit_byte(0x58);  // pop rax (flags in rax)
 
             // RDX = 0 (default)
@@ -2815,9 +2751,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     int v = reg_vreg_[r];
                     if (v >= 0 && vreg_dirty_[v]) evict_vreg(v);
                 }
-                emit_byte(0x9C);  // pushfq (save for the ADC/SBB)
+                emit_pushfq();
                 emit_materialize_flags(flags_from_sub_);
-                emit_byte(0x9D);  // popfq (restore CF and other flags)
+                emit_popfq();
                 for (int r : {RAX, RCX, RDX}) {
                     int v = reg_vreg_[r];
                     if (v >= 0) {
@@ -3381,6 +3317,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
+        // (v1.4.0-alpha.5): opportunistically try to chain this block
+        // to its target on every cache hit. The target may have been
+        // translated AFTER this block (so the translate-time
+        // try_chain_block call was a no-op). Re-checking here patches
+        // the chain slot lazily — the first hit after the target
+        // becomes available patches the jmp; subsequent hits run the
+        // patched jmp and skip the epilogue+lookup+prologue overhead.
+        // try_chain_block is a no-op if already chained or no target.
+        if (!entry.chained && entry.chain_target_pc != 0) {
+            try_chain_block(pc, it->second);
+            entry = it->second;  // refresh local copy (chained flag may have changed)
+        }
     } else {
         cache_misses++;
         auto fn = translate_block(emu, pc);
