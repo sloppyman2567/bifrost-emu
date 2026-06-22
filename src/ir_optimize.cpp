@@ -98,7 +98,8 @@ static bool is_pure(IROp op) {
         case IROp::STORE_MEM:
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::CALL_INTERP: case IROp::SVC:
-        case IROp::FMOV_G2F: case IROp::FMOV_G2FHI:  // write to v_lo/v_hi
+        case IROp::FMOV_G2F: case IROp::FMOV_F2G:
+        case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_MOVI: case IROp::SIMD_LDST:   // write to v_lo/v_hi
@@ -476,9 +477,18 @@ void optimize_ir(IRBlock& block) {
                     consts.set(inst.dest, result);
                     block.fold_subst++;
                 }
-                // These write to an architectural reg (dest <= 31).
-                // Invalidate the arm_reg_cache for that reg so subsequent
-                // LOAD_REGs don't use a stale cached value.
+                // BUGFIX: CSEL/CSINC/CSINV/CSNEG/CCMP and BFM/UBFM/SBFM/EXTR
+                // fall back to CALL_INTERP in the JIT, which can modify ANY
+                // cpu.regs[] (the interpreter runs the full ARM instruction).
+                // The old code only invalidated arm_reg_cache[dest], leaving
+                // stale entries for OTHER registers. This caused the optimizer
+                // to substitute later LOAD_REGs with stale vregs — e.g., after
+                // `csel w1, w1, wzr, eq`, arm_reg_cache[0] still pointed to a
+                // pre-CSEL vreg, so the next `LOAD_REG x0` was replaced with
+                // the stale vreg (whose stack slot held an outdated value),
+                // causing wrong flag computation in `cmp x3, x0`.
+                // Fix: invalidate the ENTIRE arm_reg_cache, like CALL_INTERP.
+                arm_reg_cache.clear();
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);

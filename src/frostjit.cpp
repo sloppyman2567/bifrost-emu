@@ -1031,6 +1031,8 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
 // (for later patching) and returns false — the caller should emit the
 // normal epilogue path as a fallback.
 bool FrostJIT::emit_frameless_back_edge(uint64_t target_pc, uint8_t cc) {
+    static bool disable_ = (getenv("BIFROST_NO_FRAMELESS") != nullptr);
+    if (disable_) return false;
     auto it = blocks_.find(target_pc);
     if (it == blocks_.end() || !it->second.frameless_compatible) {
         // Target not ready. Record a pending patch site that the caller
@@ -1079,6 +1081,8 @@ bool FrostJIT::emit_frameless_back_edge(uint64_t target_pc, uint8_t cc) {
 // directly to the now-translated target's body. Called from
 // translate_block() after a new block is registered.
 void FrostJIT::patch_pending_back_edges(uint64_t target_pc) {
+    static bool disable_ = (getenv("BIFROST_NO_FRAMELESS") != nullptr);
+    if (disable_) return;
     auto pit = pending_back_edges_.find(target_pc);
     if (pit == pending_back_edges_.end()) return;
     auto bit = blocks_.find(target_pc);
@@ -1514,8 +1518,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     reg_vreg_[RCX] = inst.src2;
                 }
             } else {
-                if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-                else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
+                if (inst.src2 <= 31) {
+                    emit_load_arm(RCX, inst.src2);
+                } else {
+                    int32_t off = vreg_stack_slot(inst.src2);
+                    emit_load(RCX, RBP, off);
+                }
                 vreg_home_[inst.src2] = RCX;
                 reg_vreg_[RCX] = inst.src2;
             }
@@ -1543,9 +1551,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 if (is_sub) { emit_byte(0x29); emit_byte(modrm(3, s2&7, d&7)); }
                 else        { emit_byte(0x01); emit_byte(modrm(3, s2&7, d&7)); }
                 // Zero-extend dest to 64 bits (32-bit ops zero-extend).
-                // mov e_d, e_d
+                // mov e_d, e_d — BUGFIX: must set BOTH REX.R (reg field)
+                // and REX.B (r/m field) when d >= 8, otherwise the reg
+                // field defaults to EAX and we emit `mov r8d, eax` instead
+                // of `mov r8d, r8d`, corrupting the dest with EAX's value.
                 if (d >= 8) {
-                    emit_byte(rex(false, false, false, d>=8));
+                    emit_byte(rex(false, d>=8, false, d>=8));
                 }
                 emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
             } else {
@@ -2175,85 +2186,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FP compare (FCMP/FCMPE) ────────────────────────────────
         case IROp::FP_CMP: {
-            // Compare v_lo[src1] vs v_lo[src2], set pstate NZCV
-            bool is_double = (inst.width == 1);
-            clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
-
-            // Load src1 into XMM0
-            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off1);
-
-            // Load src2 into XMM1 (or zero for FCMP #0.0)
-            if (inst.src2 != 0 || inst.imm != 0) {
-                int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off2);
-            } else {
-                // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
-                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
-            }
-
-            // UCOMISD/UCOMISS xmm0, xmm1
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x2E);
-            emit_byte(0xC1);  // xmm0, xmm1
-
-            // Now set pstate from x86 flags:
-            // ARM FCMP result: N=0 Z=0 C=1 V=1 if unordered (NaN)
-            //                  N=1 Z=0 C=0 V=0 if less than
-            //                  N=0 Z=1 C=1 V=0 if equal
-            //                  N=0 Z=0 C=1 V=0 if greater than
-            // x86 after UCOMISD: PF=1 if unordered, CF=1 if less or unordered
-            //                    ZF=1 if equal or unordered
-            // We use PUSHFQ + pop + mask to extract flags.
-            emit_byte(0x9C);  // pushfq
-            emit_byte(0x58);  // pop rax (flags in rax)
-
-            // Extract ZF (bit 6), PF (bit 2), CF (bit 0)
-            // Build pstate: N=bit31, Z=bit30, C=bit29, V=bit28
-            // Unordered (PF=1): N=0, Z=0, C=1, V=1
-            // Less (CF=1, PF=0, ZF=0): N=1, Z=0, C=0, V=0
-            // Equal (ZF=1): N=0, Z=1, C=1, V=0
-            // Greater (CF=0, ZF=0, PF=0): N=0, Z=0, C=1, V=0
-
-            // Simple approach: test PF first (unordered)
-            // Use conditional sets to build pstate
-            emit_mov_imm32_zext(RDX, 0);  // pstate = 0
-
-            // Test PF (unordered): if PF=1, set C+V
-            // TEST rax, 0x4 (PF)
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4
-            // CMOVNE: if PF=1, pstate = 0x28000000 (C=1, V=1)
-            emit_mov_imm32_zext(RCX, 0x28000000);
-            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
-
-            // If not unordered, test CF (less): if CF=1, pstate = 0x80000000 (N=1)
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
-            emit_mov_imm32_zext(RCX, 0x80000000);
-            // If CF=1 and not PF (already handled), set N
-            // But we need "CF=1 and PF=0" — use CMOVE since if PF=1, ZF is also 1
-            // Actually simpler: if PF was set, rdx already has the right value.
-            // If PF was not set, check CF.
-            // Use a different approach: test ZF for equal
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
-            emit_mov_imm32_zext(RCX, 0x40000000); // Z=1, but need C=1 too
-            // If ZF=1: pstate = 0x60000000 (Z=1, C=1)
-            // Actually: equal → N=0, Z=1, C=1, V=0 = 0x60000000
-            emit_mov_imm32_zext(RCX, 0x60000000);
-            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
-
-            // If neither PF, CF, nor ZF → greater: N=0, Z=0, C=1, V=0 = 0x20000000
-            // But we need to handle the case where none matched.
-            // Use: if rdx==0 (no match), set to 0x20000000 (greater)
-            // Actually, let's just default to 0x20000000 and override:
-            // This is getting complex. Fall back to interpreter for FCMP.
-            emit_store32(CPU_REG, PSTATE_OFF, RDX);
-
-            // Also need to set flags_in_host_ = false since we wrote pstate directly
-            flags_in_host_ = false;
+            // FCMP/FCMPE set NZCV from a floating-point comparison.
+            // The previous native codegen was incomplete (it only handled
+            // the unordered and equal cases correctly, leaving "less than"
+            // and "greater than" with wrong N/C flags). Rather than emit
+            // buggy flags, fall back to the interpreter which computes
+            // the correct ARM NZCV from UCOMISD.
+            emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
