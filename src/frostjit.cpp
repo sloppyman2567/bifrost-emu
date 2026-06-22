@@ -3160,9 +3160,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::MRS: case InstClass::MRS_SYS:
             case InstClass::MSR: case InstClass::MSR_SYS:
             case InstClass::UDIV: case InstClass::SDIV:
-            // CLS still routes to CALL_INTERP (decomposition requires
-            // multiple CSELs + edge-case handling for 0/~0).
-            case InstClass::CLS:
+            // CLS is now decomposed via SAR+XOR+CLZ+SUB — no CALL_INTERP.
             // SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH: still CALL_INTERP
             // (long-multiply forms need 128-bit accumulation).
             case InstClass::SMADDL: case InstClass::SMSUBL:

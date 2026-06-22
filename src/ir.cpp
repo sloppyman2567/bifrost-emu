@@ -820,34 +820,61 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
 
         // CLS: count leading sign bits.
-        //   For 64-bit: CLS(v) = CLZ(v) if v<0, else CLZ(~v)
-        //   Equivalently: CLS(v) = CLZ(v ^ (v >> 63)) — i.e. xor with
-        //   the sign-extended top bit, then CLZ, then subtract 1.
-        //   But the cleanest identity is:
-        //     if v >= 0:  CLS = CLZ(~v) - 1     (number of leading 1s in ~v)
-        //     if v <  0:  CLS = CLZ(v)  - 1     (number of leading 0s in v)
-        //     v == 0 or v == ~0: CLS = width (per ARM spec)
-        //   We avoid branching and use the identity:
-        //     CLS(v) = CLZ(v ^ (v >> (W-1))) - 1   (for non-edge cases)
-        //   But edge cases need handling. The simplest correct
-        //   decomposition uses CSEL after computing both candidates:
-        //     cand_pos = CLZ(~v)        // for v >= 0
-        //     cand_neg = CLZ(v)         // for v <  0
-        //     sign     = SUBS v, 0      // sets flags: N = sign bit
-        //     sel      = CSEL(cand_neg, cand_pos, MI)
-        //     result   = sel - 1
-        //   For v == 0: CLZ(~0) = 0, sel = 0, result = -1 → wrap to width.
-        //   ARM says CLS(0) = width, CLS(~0) = width. So if sel == 0 we
-        //   need to substitute width. This requires a second CSEL on Z.
-        //   For simplicity (and matching what the interpreter does for
-        //   the rare all-0 / all-1 cases), we just route CLS through the
-        //   interpreter for now — it's rare (only used by some hashing
-        //   and CRC code paths) and correctness matters more than speed.
+        //
+        // ARM semantics:
+        //   CLS(v) = CLZ(v ^ SAR(v, W-1)) - 1
+        //
+        // Proof: SAR(v, W-1) arithmetic-shifts the sign bit into all
+        // positions. So:
+        //   - If v >= 0 (sign bit 0): SAR(v, W-1) = 0, and v ^ 0 = v.
+        //     CLZ(v) - 1 = (leading zeros) - 1 = (leading sign bits).
+        //   - If v <  0 (sign bit 1): SAR(v, W-1) = ~0 (all ones), and
+        //     v ^ ~0 = ~v. CLZ(~v) - 1 = (leading ones in v) - 1.
+        //   - v == 0: SAR(0, W-1) = 0, XOR = 0, CLZ(0) = W, W - 1 = W-1.
+        //     ARM says CLS(0) = W; we'd return W-1. But wait — the ARM
+        //     pseudocode is:
+        //       CLS: result = CLZ(if v<w-1> == '1' then NOT(v) else v) - 1
+        //     For v = 0: CLZ(0) - 1 = W - 1, but ARM spec says CLS(0) = W.
+        //     Re-checking the ARM ARM... actually CLS(0) = W-1, not W.
+        //     The pseudocode result is W-1 for v=0 (CLZ(0)=W, minus 1).
+        //     My earlier reasoning was wrong. So the formula is exact.
+        //   - v == ~0: SAR(~0, W-1) = ~0, XOR = 0, CLZ(0) = W, W - 1 = W-1.
+        //     ARM pseudocode: v<w-1>=1 so use NOT(v)=0; CLZ(0)-1 = W-1. ✓
+        //
+        // Decomposition (5 IR ops including 1 IMM):
+        //   sh     = IMM (W-1)
+        //   sign   = SAR(v, sh)
+        //   xored  = XOR(v, sign)
+        //   clz    = CLZ(xored)
+        //   result = SUB(clz, IMM 1)
+        //
+        // Uses only primitive IR ops the JIT already compiles natively
+        // (SAR via shift, XOR, CLZ via LZCNT, SUB). Avoids CALL_INTERP
+        // and the block-split it triggers.
         case InstClass::CLS: {
-            // Fall back to interpreter for CLS — the SWAR-ish decomposition
-            // requires multiple CSELs and edge-case handling for 0/~0,
-            // which adds complexity without clear speedup.
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            uint16_t v = load_arm_reg(block, d.rn);
+            int width = d.sf ? 64 : 32;
+            // 32-bit CLS: ZEXT the input first so the high bits are 0
+            // (SAR by 31 will then correctly sign-extend within the
+            // low 32 bits, and CLZ with width=32 will count only the
+            // low 32 bits).
+            if (!d.sf) {
+                uint16_t z = g_alloc.alloc();
+                emit(block, IROp::ZEXT, z, v, 0, 32);
+                v = z;
+            }
+            uint16_t sh = load_imm(block, (uint64_t)(width - 1));
+            uint16_t sign = g_alloc.alloc();
+            emit(block, IROp::SAR, sign, v, sh);
+            uint16_t xored = g_alloc.alloc();
+            emit(block, IROp::XOR, xored, v, sign);
+            uint16_t clz = g_alloc.alloc();
+            emit(block, IROp::CLZ, clz, xored, 0, (uint8_t)width);
+            uint16_t one = load_imm(block, 1);
+            uint16_t r = g_alloc.alloc();
+            emit(block, IROp::SUB, r, clz, one);
+            r = zext_if_32bit(block, r, d.sf);
+            store_arm_reg(block, d.rd, r);
             return false;
         }
 
