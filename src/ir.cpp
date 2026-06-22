@@ -128,6 +128,85 @@ static inline uint16_t zext_if_32bit(IRBlock& b, uint16_t v, bool sf) {
     return r;
 }
 
+// ── SWAR helpers for bit-reversal / byte-swap decomposition ────────────
+// These decompose the ARM64 RBIT/REV16/REV32 ops into primitive IR ops
+// (AND, OR, SHL, SHR) that the JIT already compiles natively. This
+// replaces the CALL_INTERP fallback that the JIT used to take for these
+// ops, and lets the optimizer fold/propagate when the source is a known
+// constant.
+//
+// All helpers take an input vreg and return a fresh vreg holding the
+// transformed value. The 32-bit variants assume the caller has already
+// restricted the input to 32 bits (via ZEXT) and will ZEXT the result
+// again to clear the high 32 bits.
+
+// v = ((v >> n) & mask) | ((v & mask) << n)
+// Used for swap-with-mask patterns. Each call is 4 IR ops.
+static inline uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
+    uint16_t mask_v = load_imm(b, mask);
+    uint16_t n_v    = load_imm(b, (uint64_t)n);
+    // hi = (v & mask) << n
+    uint16_t kept   = g_alloc.alloc();
+    emit(b, IROp::AND, kept, v, mask_v);
+    uint16_t hi     = g_alloc.alloc();
+    emit(b, IROp::SHL, hi, kept, n_v);
+    // lo = (v >> n) & mask
+    uint16_t shr    = g_alloc.alloc();
+    emit(b, IROp::SHR, shr, v, n_v);
+    uint16_t lo     = g_alloc.alloc();
+    emit(b, IROp::AND, lo, shr, mask_v);
+    // out = hi | lo
+    uint16_t out    = g_alloc.alloc();
+    emit(b, IROp::OR, out, hi, lo);
+    return out;
+}
+
+// 64-bit bit-reversal via 6 SWAR stages:
+//   swap bits 1<>0, 3<>2, ..., 63<>62  (mask=0x5555..., n=1)
+//   swap pairs  3<>1, 2<>0, ..., 63<>61 (mask=0x3333..., n=2)
+//   swap nibbles 7<>4, 6<>5, ..., 63<>60 (mask=0x0F0F..., n=4)
+//   swap bytes within 16-bit halfwords   (mask=0x00FF..., n=8)
+//   swap 16-bit halfwords within 32-bit words (mask=0x0000FFFF..., n=16)
+//   swap 32-bit words                     (n=32, no mask needed)
+static inline uint16_t rbit64_ir(IRBlock& b, uint16_t v) {
+    v = swar_swap(b, v, 0x5555555555555555ULL,  1);
+    v = swar_swap(b, v, 0x3333333333333333ULL,  2);
+    v = swar_swap(b, v, 0x0F0F0F0F0F0F0F0FULL,  4);
+    v = swar_swap(b, v, 0x00FF00FF00FF00FFULL,  8);
+    v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
+    // Final 32-bit swap: out = (v << 32) | (v >> 32). No mask needed.
+    uint16_t n32 = load_imm(b, 32);
+    uint16_t hi  = g_alloc.alloc(); emit(b, IROp::SHL, hi, v, n32);
+    uint16_t lo  = g_alloc.alloc(); emit(b, IROp::SHR, lo, v, n32);
+    uint16_t out = g_alloc.alloc(); emit(b, IROp::OR,  out, hi, lo);
+    return out;
+}
+
+// 32-bit bit-reversal: same idea, 5 stages (no final 32-bit swap).
+static inline uint16_t rbit32_ir(IRBlock& b, uint16_t v) {
+    v = swar_swap(b, v, 0x55555555ULL,  1);
+    v = swar_swap(b, v, 0x33333333ULL,  2);
+    v = swar_swap(b, v, 0x0F0F0F0FULL,  4);
+    v = swar_swap(b, v, 0x00FF00FFULL,  8);
+    v = swar_swap(b, v, 0x0000FFFFULL, 16);
+    return v;
+}
+
+// REV16 (64-bit): swap bytes within each 16-bit halfword.
+//   mask=0x00FF00FF00FF00FF, n=8
+static inline uint16_t rev16_64_ir(IRBlock& b, uint16_t v) {
+    return swar_swap(b, v, 0x00FF00FF00FF00FFULL, 8);
+}
+
+// REV32 (64-bit): swap bytes within each 32-bit word.
+//   = REV16 followed by swap of 16-bit halves within each 32-bit word.
+//   = swar_swap(v, 0x00FF00FF00FF00FF, 8) | swar_swap(_, 0x0000FFFF0000FFFF, 16)
+static inline uint16_t rev32_64_ir(IRBlock& b, uint16_t v) {
+    v = swar_swap(b, v, 0x00FF00FF00FF00FFULL, 8);
+    v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
+    return v;
+}
+
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     switch (d.cls) {
@@ -674,20 +753,98 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
 
         // ── 1-source data processing: CLZ/CLS/RBIT/REV* ──────────────
-        case InstClass::CLZ: case InstClass::CLS:
-        case InstClass::RBIT: case InstClass::REV16:
-        case InstClass::REV32: case InstClass::REV: {
+        //
+        // Strategy:
+        //   CLZ    → native IROp::CLZ     (x86 LZCNT, 1 instr)
+        //   CLS    → decompose (see below)
+        //   RBIT   → decompose via SWAR (6 stages for 64-bit, 5 for 32-bit)
+        //   REV16  → decompose via SWAR (1 stage: byte-swap in 16-bit lanes)
+        //   REV32  → decompose via SWAR (2 stages: REV16 + halfword-swap)
+        //   REV    → native IROp::REV64   (x86 BSWAP, 1 instr)
+        //
+        // The SWAR decompositions use only AND/OR/SHL/SHR primitives that
+        // the JIT already compiles natively, eliminating the CALL_INTERP
+        // fallback that previously handled RBIT/REV16/REV32. CLZ and REV64
+        // stay native because x86 has single-instruction equivalents
+        // (LZCNT / BSWAP) — decomposing them would be strictly worse.
+        case InstClass::CLZ: {
             uint16_t a = load_arm_reg(block, d.rn);
-            IROp op = (d.cls == InstClass::CLZ)   ? IROp::CLZ
-                    : (d.cls == InstClass::CLS)   ? IROp::CLS
-                    : (d.cls == InstClass::RBIT)  ? IROp::RBIT
-                    : (d.cls == InstClass::REV16) ? IROp::REV16
-                    : (d.cls == InstClass::REV32) ? IROp::REV32
-                    : IROp::REV64;
             uint16_t r = g_alloc.alloc();
-            // Store rd (in imm) and arm_pc for JIT fallback to CALL_INTERP.
-            // Pass width=32 for 32-bit ops (sf=0) for CLZ 32-bit handling.
-            emit(block, op, r, a, 0, d.sf ? 64 : 32, 0, 0, d.rd, cur_pc);
+            emit(block, IROp::CLZ, r, a, 0, d.sf ? 64 : 32, 0, 0, d.rd, cur_pc);
+            r = zext_if_32bit(block, r, d.sf);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+
+        case InstClass::REV: {  // REV (64-bit byte-swap) — native BSWAP
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t r = g_alloc.alloc();
+            emit(block, IROp::REV64, r, a, 0, d.sf ? 64 : 32, 0, 0, d.rd, cur_pc);
+            r = zext_if_32bit(block, r, d.sf);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+
+        // CLS: count leading sign bits.
+        //   For 64-bit: CLS(v) = CLZ(v) if v<0, else CLZ(~v)
+        //   Equivalently: CLS(v) = CLZ(v ^ (v >> 63)) — i.e. xor with
+        //   the sign-extended top bit, then CLZ, then subtract 1.
+        //   But the cleanest identity is:
+        //     if v >= 0:  CLS = CLZ(~v) - 1     (number of leading 1s in ~v)
+        //     if v <  0:  CLS = CLZ(v)  - 1     (number of leading 0s in v)
+        //     v == 0 or v == ~0: CLS = width (per ARM spec)
+        //   We avoid branching and use the identity:
+        //     CLS(v) = CLZ(v ^ (v >> (W-1))) - 1   (for non-edge cases)
+        //   But edge cases need handling. The simplest correct
+        //   decomposition uses CSEL after computing both candidates:
+        //     cand_pos = CLZ(~v)        // for v >= 0
+        //     cand_neg = CLZ(v)         // for v <  0
+        //     sign     = SUBS v, 0      // sets flags: N = sign bit
+        //     sel      = CSEL(cand_neg, cand_pos, MI)
+        //     result   = sel - 1
+        //   For v == 0: CLZ(~0) = 0, sel = 0, result = -1 → wrap to width.
+        //   ARM says CLS(0) = width, CLS(~0) = width. So if sel == 0 we
+        //   need to substitute width. This requires a second CSEL on Z.
+        //   For simplicity (and matching what the interpreter does for
+        //   the rare all-0 / all-1 cases), we just route CLS through the
+        //   interpreter for now — it's rare (only used by some hashing
+        //   and CRC code paths) and correctness matters more than speed.
+        case InstClass::CLS: {
+            // Fall back to interpreter for CLS — the SWAR-ish decomposition
+            // requires multiple CSELs and edge-case handling for 0/~0,
+            // which adds complexity without clear speedup.
+            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            return false;
+        }
+
+        case InstClass::RBIT: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t r;
+            if (d.sf) {
+                r = rbit64_ir(block, a);
+            } else {
+                // 32-bit RBIT: ZEXT input to clear high bits, decompose,
+                // ZEXT result.
+                uint16_t z = g_alloc.alloc();
+                emit(block, IROp::ZEXT, z, a, 0, 32);
+                r = rbit32_ir(block, z);
+                r = zext_if_32bit(block, r, /*sf=*/false);
+            }
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+
+        case InstClass::REV16: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t r = rev16_64_ir(block, a);
+            r = zext_if_32bit(block, r, d.sf);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+
+        case InstClass::REV32: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t r = rev32_64_ir(block, a);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
