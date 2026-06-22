@@ -262,6 +262,14 @@ void FrostJIT::emit_add_reg(int dst, int src) {
 void FrostJIT::emit_sub_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x29); emit_byte(modrm(3,src&7,dst&7));
 }
+void FrostJIT::emit_adc_reg(int dst, int src) {
+    // adc r64, r64: REX.W 11 /r
+    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x11); emit_byte(modrm(3,src&7,dst&7));
+}
+void FrostJIT::emit_sbb_reg(int dst, int src) {
+    // sbb r64, r64: REX.W 19 /r
+    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x19); emit_byte(modrm(3,src&7,dst&7));
+}
 void FrostJIT::emit_and_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x21); emit_byte(modrm(3,src&7,dst&7));
 }
@@ -1180,10 +1188,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
 
         case IROp::LOAD_MEM: {
-            // (v1.4.0-alpha.5): revert to safe flush+invalidate for
-            // correctness. The caller-saved-only approach was too
-            // aggressive — it left stale cache entries that caused
-            // wrong memory reads in the __fmt_fp loop.
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
@@ -1751,11 +1755,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::CSEL: case IROp::CSINC:
         case IROp::CSINV: case IROp::CSNEG: {
-            // CSEL/CSINC/CSINV/CSNEG: fall back to interpreter for correctness.
-            // The inline cmovcc approach has subtle flag-preservation issues.
-            // inst.imm holds rd, inst.arm_pc holds the ARM PC.
+            // CSEL/CSINC/CSINV/CSNEG: fall back to interpreter.
+            // Native cmovcc codegen was attempted but has subtle flag
+            // preservation issues that produce wrong results. The
+            // CALL_INTERP fallback is correct and the block splitter
+            // limits CALL_INTERP frequency for performance.
             emit_call_interp(inst.arm_pc, false);
-            // Load the interpreter's result from cpu.regs[rd] into inst.dest.
             kill_vreg(inst.dest);
             {
                 int d = alloc_reg();
@@ -2549,7 +2554,119 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             return false;
 
-        case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
+        case IROp::ADCS: case IROp::SBCS: {
+            // Native ADCS/SBCS using x86 ADC/SBB.
+            //   ADCS: dst = src1 + src2 + C, set flags
+            //   SBCS: dst = src1 - src2 - 1 + C, set flags
+            // x86 ADC: dst = dst + src + CF
+            // x86 SBB: dst = dst - src - CF
+            // ARM C = x86 CF for ADC (carry out).
+            // ARM C = NOT x86 CF for SBB (NOT borrow).
+            //
+            // We must load the C flag from pstate into x86 CF first
+            // (emit_load_flags_from_pstate handles the from_sub inversion).
+            bool is_sub = (inst.op == IROp::SBCS);
+            bool is_32bit = (inst.width == 32);
+
+            // Load flags from pstate (we need CF in x86 CF).
+            // If flags_in_host_, materialize first (to preserve pstate),
+            // then we already have flags in host.
+            if (flags_in_host_) {
+                // Materialize to pstate (clobbers RAX/RCX/RDX).
+                for (int r : {RAX, RCX, RDX}) {
+                    int v = reg_vreg_[r];
+                    if (v >= 0 && vreg_dirty_[v]) evict_vreg(v);
+                }
+                emit_byte(0x9C);  // pushfq (save for the ADC/SBB)
+                emit_materialize_flags(flags_from_sub_);
+                emit_byte(0x9D);  // popfq (restore CF and other flags)
+                for (int r : {RAX, RCX, RDX}) {
+                    int v = reg_vreg_[r];
+                    if (v >= 0) {
+                        vreg_home_[v] = -1;
+                        reg_vreg_[r] = -1;
+                        vreg_dirty_[v] = false;
+                    }
+                }
+            } else {
+                flush_all_vregs();
+                emit_load_flags_from_pstate();
+                invalidate_all_vregs();
+            }
+            // Now x86 CF holds the ARM C flag (correctly un-inverted
+            // by emit_load_flags_from_pstate if from_sub was set).
+
+            // Force src1 into RAX, src2 into RCX.
+            if (reg_vreg_[RAX] >= 0 && reg_vreg_[RAX] != inst.src1)
+                evict_vreg(reg_vreg_[RAX]);
+            if (reg_vreg_[RCX] >= 0 && reg_vreg_[RCX] != inst.src2 &&
+                reg_vreg_[RCX] != inst.src1)
+                evict_vreg(reg_vreg_[RCX]);
+            // src1 → RAX
+            if (vreg_home_[inst.src1] >= 0) {
+                int r = vreg_home_[inst.src1];
+                if (r != RAX) {
+                    emit_mov_reg(RAX, r);
+                    reg_vreg_[r] = -1;
+                    vreg_home_[inst.src1] = RAX;
+                    reg_vreg_[RAX] = inst.src1;
+                }
+            } else {
+                if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
+                else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
+                vreg_home_[inst.src1] = RAX;
+                reg_vreg_[RAX] = inst.src1;
+            }
+            // src2 → RCX
+            if (vreg_home_[inst.src2] >= 0) {
+                int r = vreg_home_[inst.src2];
+                if (r == RAX) {
+                    emit_mov_reg(RCX, RAX);
+                    vreg_home_[inst.src2] = RCX;
+                    reg_vreg_[RCX] = inst.src2;
+                } else if (r != RCX) {
+                    emit_mov_reg(RCX, r);
+                    reg_vreg_[r] = -1;
+                    vreg_home_[inst.src2] = RCX;
+                    reg_vreg_[RCX] = inst.src2;
+                }
+            } else {
+                if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
+                else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
+                vreg_home_[inst.src2] = RCX;
+                reg_vreg_[RCX] = inst.src2;
+            }
+            int s1 = RAX, s2 = RCX;
+            int d;
+            if (inst.dest == inst.src1 && inst.dest != 0) {
+                d = s1;
+                vreg_dirty_[inst.dest] = true;
+            } else if (inst.dest != 0) {
+                d = alloc_reg_for(inst.dest, s1);
+                if (d != s1) emit_mov_reg(d, s1);
+            } else {
+                d = s1;
+            }
+            if (is_32bit) {
+                // 32-bit ADC/SBB: REX if needed.
+                bool need_rex = (s2 >= 8) || (d >= 8);
+                if (need_rex) emit_byte(rex(false, s2>=8, false, d>=8));
+                if (is_sub) { emit_byte(0x19); emit_byte(modrm(3, s2&7, d&7)); }
+                else        { emit_byte(0x11); emit_byte(modrm(3, s2&7, d&7)); }
+                // Zero-extend dest (mov e_d, e_d) with correct REX.
+                if (d >= 8) emit_byte(rex(false, d>=8, false, d>=8));
+                emit_byte(0x89); emit_byte(modrm(3, d&7, d&7));
+            } else {
+                if (is_sub) emit_sbb_reg(d, s2);
+                else        emit_adc_reg(d, s2);
+            }
+            flags_in_host_ = true;
+            flags_from_sub_ = is_sub;  // SBB: ARM C = NOT CF; ADC: ARM C = CF
+            if (inst.dest == 0) kill_vreg(inst.src1);
+            return false;
+        }
+
+        case IROp::CCMP:
             emit_call_interp(inst.arm_pc, false);
             return false;
 

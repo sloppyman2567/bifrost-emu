@@ -158,6 +158,8 @@ private:
 
     void emit_add_reg(int dst, int src);
     void emit_sub_reg(int dst, int src);
+    void emit_adc_reg(int dst, int src);   // adc r64, r64 (with CF)
+    void emit_sbb_reg(int dst, int src);   // sbb r64, r64 (with CF)
     void emit_and_reg(int dst, int src);
     void emit_or_reg(int dst, int src);
     void emit_xor_reg(int dst, int src);

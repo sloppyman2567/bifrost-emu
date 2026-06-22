@@ -436,7 +436,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::CSEL: case IROp::CSINC:
             case IROp::CSINV: case IROp::CSNEG:
             case IROp::CCMP:
-            case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR:
+            case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: {
                 // (v1.4.0-alpha.3): constant-fold UBFM/SBFM when src1 is
                 // a known constant. These are very common (SXTB/SXTH/SXTW/
                 // UXTB/UXTH/UXTW/LSL/LSR/ASR immediate) and folding them
@@ -477,18 +477,26 @@ void optimize_ir(IRBlock& block) {
                     consts.set(inst.dest, result);
                     block.fold_subst++;
                 }
-                // BUGFIX: CSEL/CSINC/CSINV/CSNEG/CCMP and BFM/UBFM/SBFM/EXTR
+                // BUGFIX (alpha.5): CSEL/CSINC/CSINV/CSNEG/CCMP and BFM
                 // fall back to CALL_INTERP in the JIT, which can modify ANY
                 // cpu.regs[] (the interpreter runs the full ARM instruction).
                 // The old code only invalidated arm_reg_cache[dest], leaving
                 // stale entries for OTHER registers. This caused the optimizer
-                // to substitute later LOAD_REGs with stale vregs — e.g., after
-                // `csel w1, w1, wzr, eq`, arm_reg_cache[0] still pointed to a
-                // pre-CSEL vreg, so the next `LOAD_REG x0` was replaced with
-                // the stale vreg (whose stack slot held an outdated value),
-                // causing wrong flag computation in `cmp x3, x0`.
-                // Fix: invalidate the ENTIRE arm_reg_cache, like CALL_INTERP.
-                arm_reg_cache.clear();
+                // to substitute later LOAD_REGs with stale vregs.
+                // Fix: invalidate the ENTIRE arm_reg_cache for CALL_INTERP
+                // fallback ops.
+                //
+                // UBFM/SBFM/EXTR are native in the JIT (no CALL_INTERP), so
+                // they only need dest invalidation — this allows the optimizer
+                // to keep caching other registers across these ops, improving
+                // code quality.
+                bool falls_back_to_interp =
+                    (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
+                     inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
+                     inst.op == IROp::CCMP || inst.op == IROp::BFM);
+                if (falls_back_to_interp) {
+                    arm_reg_cache.clear();
+                }
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);
@@ -496,6 +504,7 @@ void optimize_ir(IRBlock& block) {
                 }
                 last_def[inst.dest] = i;
                 break;
+            }
 
             case IROp::CALL_INTERP:
             case IROp::SVC:
