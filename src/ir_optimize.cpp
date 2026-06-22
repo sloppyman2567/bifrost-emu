@@ -445,33 +445,45 @@ void optimize_ir(IRBlock& block) {
                     consts.has(inst.src1)) {
                     uint64_t a = consts.get(inst.src1);
                     int width = inst.sf ? 64 : 32;
-                    int immr = inst.immr;
+                    int immr = inst.immr % width;
                     int imms = inst.imms;
-                    // ROR(a, immr) within width
-                    uint64_t rotated = a;
-                    if (immr != 0) {
-                        int r = immr % width;
-                        if (width == 64) {
-                            rotated = (a >> r) | (a << (64 - r));
+                    uint64_t result;
+                    if (imms < immr) {
+                        // LSL/BFI case: extract low (imms+1) bits, shift
+                        // left by (width - immr).
+                        uint64_t field_mask = (1ULL << (imms + 1)) - 1;
+                        uint64_t field = a & field_mask;
+                        int sh = width - immr;
+                        result = field << sh;
+                        if (inst.op == IROp::SBFM) {
+                            // Sign-extend from bit (imms + sh)
+                            int sb = 1ULL << (imms + sh);
+                            result = ((result ^ sb) - sb);
+                        }
+                    } else {
+                        // Normal case: ROR(a, immr) then extract [imms:0]
+                        uint64_t rotated = a;
+                        if (immr != 0) {
+                            if (width == 64) {
+                                rotated = (a >> immr) | (a << (64 - immr));
+                            } else {
+                                uint32_t v = (uint32_t)a;
+                                rotated = ((v >> immr) | (v << (32 - immr))) & 0xFFFFFFFFULL;
+                            }
+                        }
+                        uint64_t mask = (imms < width - 1)
+                            ? ((1ULL << (imms + 1)) - 1)
+                            : (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
+                        uint64_t extracted = rotated & mask;
+                        if (inst.op == IROp::SBFM && imms < width - 1) {
+                            int sb = 1ULL << imms;
+                            result = ((extracted ^ sb) - sb);
+                            if (width == 32) result &= 0xFFFFFFFFULL;
                         } else {
-                            uint32_t v = (uint32_t)a;
-                            rotated = ((v >> r) | (v << (32 - r))) & 0xFFFFFFFFULL;
+                            result = extracted;
                         }
                     }
-                    // Extract bits [imms:0]
-                    uint64_t mask = (imms < width - 1)
-                        ? ((1ULL << (imms + 1)) - 1)
-                        : (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
-                    uint64_t extracted = rotated & mask;
-                    uint64_t result;
-                    if (inst.op == IROp::SBFM && imms < width - 1) {
-                        // Sign-extend from bit imms
-                        int sb = 1ULL << imms;
-                        result = ((extracted ^ sb) - sb);
-                        if (width == 32) result &= 0xFFFFFFFFULL;
-                    } else {
-                        result = extracted;
-                    }
+                    if (width == 32) result &= 0xFFFFFFFFULL;
                     inst.op = IROp::IMM;
                     inst.imm = result;
                     consts.set(inst.dest, result);
