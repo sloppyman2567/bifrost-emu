@@ -173,10 +173,20 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
 
             case IROp::CLS: {
+                // ARM CLS: count leading sign bits = CLZ(v ^ SAR(v, W-1)) - 1.
+                // Edge cases: CLS(0) = CLS(~0) = W-1.
+                // __builtin_clz(0) is UB, so handle 0 and ~0 explicitly.
                 uint64_t v = vregs[inst.src1];
-                if (v == 0 || v == ~0ULL) vregs[inst.dest] = 64;
-                else if ((int64_t)v >= 0) vregs[inst.dest] = __builtin_clzll(~v) - 1;
-                else                       vregs[inst.dest] = __builtin_clzll(v) - 1;
+                int width = (inst.width == 32) ? 32 : 64;
+                uint64_t all_ones = (width == 64) ? ~0ULL : 0xFFFFFFFFULL;
+                if (v == 0 || v == all_ones) {
+                    vregs[inst.dest] = width - 1;
+                } else {
+                    uint64_t operand = (int64_t)v < 0 ? ~v : v;
+                    int clz = (width == 64) ? __builtin_clzll(operand)
+                                            : __builtin_clz(static_cast<uint32_t>(operand));
+                    vregs[inst.dest] = clz - 1;
+                }
                 break;
             }
 

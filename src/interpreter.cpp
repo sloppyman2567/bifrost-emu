@@ -806,10 +806,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                                                : __builtin_clz(static_cast<uint32_t>(v));
                         break;
                     case InstClass::CLS:
-                        if (width == 64)
-                            v = (v >> 63) ? __builtin_clzll(~v) : __builtin_clzll(v);
-                        else
-                            v = (v >> 31) ? __builtin_clz(static_cast<uint32_t>(~v)) : __builtin_clz(static_cast<uint32_t>(v));
+                        // ARM CLS: count leading sign bits = CLZ(v ^ SAR(v, W-1)) - 1.
+                        // Edge cases: CLS(0) = CLS(~0) = W-1 (the -1 makes CLZ(0)-1 = W-1).
+                        // __builtin_clz(0) is UB, so handle 0 and ~0 explicitly.
+                        if (width == 64) {
+                            if (v == 0 || v == ~0ULL) v = 63;
+                            else v = (v >> 63) ? __builtin_clzll(~v) - 1
+                                               : __builtin_clzll(v)  - 1;
+                        } else {
+                            if (v == 0 || v == 0xFFFFFFFFULL) v = 31;
+                            else v = (v >> 31) ? __builtin_clz(static_cast<uint32_t>(~v)) - 1
+                                               : __builtin_clz(static_cast<uint32_t>(v))  - 1;
+                        }
                         break;
                     default: break;
                 }
