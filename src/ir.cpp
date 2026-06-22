@@ -512,17 +512,60 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SBFM/UBFM/EXTR (bitfield extract) ───────────────────────
-        // These are native in the JIT — pass through as single IR ops.
-        case InstClass::SBFM: case InstClass::UBFM:
-        case InstClass::EXTR: {
+        // ── SBFM/UBFM (bitfield extract) ───────────────────────────
+        // These stay native in the JIT — pass through as single IR ops.
+        // (The JIT has dedicated, well-tested codegen for them and the
+        // constant folder in ir_optimize.cpp knows how to fold them
+        // when the source is a known immediate.)
+        case InstClass::SBFM: case InstClass::UBFM: {
             uint16_t a = load_arm_reg(block, d.rn);
-            uint8_t b = (d.cls == InstClass::EXTR)
-                        ? load_arm_reg(block, d.rm) : 0;
             IROp op = (d.cls == InstClass::SBFM) ? IROp::SBFM
-                    : (d.cls == InstClass::UBFM) ? IROp::UBFM
-                    : IROp::EXTR;
-            emit_bf(block, op, d.rd, a, b, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
+                    : IROp::UBFM;
+            emit_bf(block, op, d.rd, a, 0, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
+            return false;
+        }
+
+        // ── EXTR (bitfield extract from concat) ────────────────────
+        // EXTR Rd, Rn, Rm, #imms:
+        //   Rd = (Rn:Rm) >> imms    (imms in [0, width-1])
+        //
+        // Decomposed into primitive IR ops the JIT already compiles
+        // natively (SHL, SHR, OR), mirroring the BFM decomposition
+        // strategy. This eliminates the IROp::EXTR native codegen path
+        // (~45 lines of x86 in frostjit.cpp) and lets the constant
+        // folder / peephole optimize the result.
+        //
+        //   imms == 0       → Rd = Rm                       (1 MOV)
+        //   otherwise       → Rd = (Rn << (W-imms)) | (Rm >> imms)
+        //                                                  (SHL+SHR+OR)
+        //
+        // 32-bit EXTR additionally needs a ZEXT to clear the high 32
+        // bits (handled by the trailing zext_if_32bit at the end).
+        case InstClass::EXTR: {
+            uint16_t rn_v = load_arm_reg(block, d.rn);
+            uint16_t rm_v = load_arm_reg(block, d.rm);
+            int width = d.sf ? 64 : 32;
+            int lsb = d.imms;  // ARM encodes the extraction point in imms
+
+            uint16_t result;
+            if (lsb == 0) {
+                // Rd = Rm (low 64 bits of the concatenation).
+                result = rm_v;
+            } else {
+                // hi_part = Rn << (width - lsb)
+                uint16_t sh_hi = load_imm(block, (uint64_t)(width - lsb));
+                uint16_t hi = g_alloc.alloc();
+                emit(block, IROp::SHL, hi, rn_v, sh_hi);
+                // lo_part = Rm >> lsb
+                uint16_t sh_lo = load_imm(block, (uint64_t)lsb);
+                uint16_t lo = g_alloc.alloc();
+                emit(block, IROp::SHR, lo, rm_v, sh_lo);
+                // result = hi | lo
+                result = g_alloc.alloc();
+                emit(block, IROp::OR, result, hi, lo);
+            }
+            result = zext_if_32bit(block, result, d.sf);
+            store_arm_reg(block, d.rd, result);
             return false;
         }
 
