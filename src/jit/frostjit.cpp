@@ -92,25 +92,26 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                    + static_cast<int>(idx) * 8;
     if (dir == 0) {
         // GPR → FP: load src1 vreg into RAX, store to fp_off.
+        // We use RAX as a scratch for the memory store. src1's cached
+        // value is NOT modified by the store, so we keep src1's mapping
+        // intact for later readers.
         int s = ensure_vreg(src1, RAX);
         if (s != RAX) emit_mov_reg(RAX, s);
         emit_store(CPU_REG, fp_off, RAX);
         // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
+        // The zero-load clobbers RAX, so we must spill any dirty vreg
+        // cached there BEFORE overwriting. Use a DIFFERENT reg (RCX) for
+        // the zero to avoid clobbering src1 in RAX entirely.
         if (fp_field == 0) {
             int32_t vhi_off = V_HI_OFF + static_cast<int>(idx) * 8;
-            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty vreg cached
-            // in RAX BEFORE we overwrite it with 0. The old code silently
-            // dropped src1 (if it was cached in RAX) via raw mapping clear.
-            clobber_host_reg(RAX);
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, vhi_off, RAX);
-        } else {
-            // For G2FHI, RAX still holds src1's value (not clobbered).
-            // But we need to drop the mapping if src1 was loaded into RAX
-            // via ensure_vreg (it's now "consumed" by the store). Use
-            // clobber_host_reg to safely evict if dirty.
-            clobber_host_reg(RAX);
+            // Use RCX as scratch for the zero (doesn't disturb src1 in RAX).
+            // clobber_host_reg(RCX) spills any dirty vreg cached in RCX.
+            clobber_host_reg(RCX);
+            emit_mov_imm32_zext(RCX, 0);
+            emit_store(CPU_REG, vhi_off, RCX);
         }
+        // src1 stays cached in its reg (RAX or wherever ensure_vreg put it).
+        // No mapping drop needed — the store didn't modify src1.
     } else {
         // FP → GPR: load fp_off into a fresh vreg for dest.
         int d = alloc_reg();
@@ -1496,12 +1497,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // code did `vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1`
             // which silently dropped a dirty src1.
             int s = ensure_vreg(inst.src1, RAX);
-            if (s != RAX) emit_mov_reg(RAX, s);
+            if (s != RAX) {
+                // src1 is cached in another reg (s). We need its value in
+                // RAX for the store. clobber_host_reg(RAX) spills any dirty
+                // vreg currently in RAX BEFORE we overwrite it.
+                clobber_host_reg(RAX);
+                emit_mov_reg(RAX, s);
+            }
             int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
             emit_store(CPU_REG, offhi, RAX);
-            // src1 stays cached in RAX (or its original reg) for later readers.
+            // src1 stays cached in its original reg (s) for later readers.
+            // RAX holds a copy (not a cached vreg) — no mapping to update.
             return false;
         }
 
@@ -1532,7 +1540,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offlo, slo);
 
-                // For the hi half, use a different reg if possible.
+                // For the hi half, use RCX. If src2 is cached in a different
+                // reg, ensure_vreg returns it (no eviction). If src2 is not
+                // cached, ensure_vreg loads it into RCX (evicting RCX's
+                // current occupant via alloc_reg, which calls evict_vreg).
                 int shi = ensure_vreg(inst.src2, RCX);
                 int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offhi, shi);
