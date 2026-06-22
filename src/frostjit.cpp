@@ -538,6 +538,32 @@ extern "C" uint64_t jit_rbit(uint64_t val, int width) {
     return v;
 }
 
+// BFM (Bitfield Move) helper: inserts Rn's bits into Rd's field.
+//   dst = (dst & ~mask) | (ROR(src, immr) & mask)
+extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int width) {
+    uint64_t r, mask;
+    if (width == 32) {
+        uint32_t d = (uint32_t)dst;
+        uint32_t s = (uint32_t)src;
+        immr &= 31;
+        r = (immr == 0) ? s : ((s >> immr) | (s << (32 - immr)));
+        if (imms < immr) {
+            mask = (~((1U << immr) - 1)) | ((1U << (imms + 1)) - 1);
+        } else {
+            mask = ((1U << (imms - immr + 1)) - 1) << immr;
+        }
+        return (d & ~mask) | (r & mask);
+    }
+    immr &= 63;
+    r = (immr == 0) ? src : ((src >> immr) | (src << (64 - immr)));
+    if (imms < immr) {
+        mask = (~((1ULL << immr) - 1)) | ((1ULL << (imms + 1)) - 1);
+    } else {
+        mask = ((1ULL << (imms - immr + 1)) - 1) << immr;
+    }
+    return (dst & ~mask) | (r & mask);
+}
+
 // ── Register allocator ──────────────────────────────────────────────────
 // Maps vregs to x86 registers for the duration of a block. Vregs 0-31
 // are architectural (live in cpu.regs[]/sp); vregs 33+ are scratch
@@ -2297,13 +2323,89 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FP compare (FCMP/FCMPE) ────────────────────────────────
         case IROp::FP_CMP: {
-            // FCMP/FCMPE set NZCV from a floating-point comparison.
-            // The previous native codegen was incomplete (it only handled
-            // the unordered and equal cases correctly, leaving "less than"
-            // and "greater than" with wrong N/C flags). Rather than emit
-            // buggy flags, fall back to the interpreter which computes
-            // the correct ARM NZCV from UCOMISD.
-            emit_call_interp(inst.arm_pc, false);
+            // Native FCMP/FCMPE using UCOMISD/UCOMISS.
+            //
+            // ARM FCMP sets NZCV:
+            //   unordered (NaN): N=0 Z=0 C=1 V=1
+            //   less than:       N=1 Z=0 C=0 V=0
+            //   equal:           N=0 Z=1 C=1 V=0
+            //   greater than:    N=0 Z=0 C=1 V=0
+            //
+            // x86 UCOMISD sets:
+            //   unordered: PF=1, CF=1, ZF=1
+            //   less than: PF=0, CF=1, ZF=0
+            //   equal:     PF=0, CF=0, ZF=1
+            //   greater:   PF=0, CF=0, ZF=0
+            //
+            // Translation:
+            //   PF=1 (unordered) → pstate = 0x28000000 (C=1, V=1)
+            //   else CF=1 (less) → pstate = 0x80000000 (N=1)
+            //   else ZF=1 (equal) → pstate = 0x60000000 (Z=1, C=1)
+            //   else (greater) → pstate = 0x20000000 (C=1)
+            //
+            // We use conditional sets (setcc) to build pstate in RDX,
+            // then store to cpu.pstate.
+            bool is_double = (inst.width == 1);
+            clobber_flags();
+            flush_all_vregs();
+            invalidate_all_vregs();
+
+            // Load src1 into XMM0
+            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            uint8_t prefix = is_double ? 0xF2 : 0xF3;
+            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off1);
+
+            // Load src2 into XMM1 (or zero for FCMP #0.0)
+            if (inst.src2 != 0 || inst.imm != 0) {
+                int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2);
+            } else {
+                // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
+                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
+            }
+
+            // UCOMISD/UCOMISS xmm0, xmm1
+            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x2E);
+            emit_byte(0xC1);  // xmm0, xmm1
+
+            // Build pstate in RDX using conditional moves.
+            // pushfq to get flags into RAX, then test bits.
+            emit_byte(0x9C);  // pushfq
+            emit_byte(0x58);  // pop rax (flags in rax)
+
+            // RDX = 0 (default)
+            emit_xor_reg(RDX, RDX);
+
+            // Save rax (flags image) — we need it for multiple tests.
+            emit_byte(0x50);  // push rax
+
+            // Test PF (unordered): if PF=1, pstate = 0x28000000 (C=1, V=1)
+            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF)
+            emit_mov_imm32_zext(RCX, 0x28000000);
+            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
+
+            // Test CF (less): if CF=1, pstate = 0x80000000 (N=1)
+            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
+            emit_mov_imm32_zext(RCX, 0x80000000);
+            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
+
+            // Test ZF (equal): if ZF=1, pstate = 0x60000000 (Z=1, C=1)
+            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
+            emit_mov_imm32_zext(RCX, 0x60000000);
+            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
+
+            // If RDX still 0 (none matched), it's "greater" → C=1
+            emit_byte(0x48); emit_byte(0x85); emit_byte(0xD2); // test rdx, rdx
+            emit_mov_imm32_zext(RCX, 0x20000000);
+            emit_byte(0x0F); emit_byte(0x44); emit_byte(0xD1); // cmove rdx, rcx
+
+            emit_byte(0x58);  // pop rax (discard)
+
+            // Store pstate
+            emit_store32(CPU_REG, PSTATE_OFF, RDX);
+            flags_in_host_ = false;
             return false;
         }
 
@@ -2595,9 +2697,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::BFM: {
-            // BFM Rd, Rn, #immr, #imms:
-            //   inserts Rn's bits into Rd's field [imms:immr] (after rotation)
-            // For simplicity, fall back to interpreter for BFM (rare).
+            // BFM: fall back to interpreter (native codegen had issues).
             emit_call_interp(inst.arm_pc, false);
             return false;
         }
