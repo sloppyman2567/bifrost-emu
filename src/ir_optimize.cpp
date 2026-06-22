@@ -491,8 +491,8 @@ void optimize_ir(IRBlock& block) {
                 // to keep caching other registers across these ops, improving
                 // code quality.
                 bool falls_back_to_interp =
-                    (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
-                     inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
+                    (inst.op == IROp::CSINC || inst.op == IROp::CSINV ||
+                     inst.op == IROp::CSNEG ||
                      inst.op == IROp::CCMP || inst.op == IROp::BFM);
                 if (falls_back_to_interp) {
                     arm_reg_cache.clear();

@@ -1753,13 +1753,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return true;
         }
 
-        case IROp::CSEL: case IROp::CSINC:
-        case IROp::CSINV: case IROp::CSNEG: {
-            // CSEL/CSINC/CSINV/CSNEG: fall back to interpreter.
-            // Native cmovcc codegen was attempted but has subtle flag
-            // preservation issues that produce wrong results. The
-            // CALL_INTERP fallback is correct and the block splitter
-            // limits CALL_INTERP frequency for performance.
+        case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG: {
+            // CSINC/CSINV/CSNEG: fall back to interpreter for now.
+            // Native codegen has subtle 32-bit extension issues.
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
             {
@@ -1768,6 +1764,116 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_load_arm(d, rd);
                 set_vreg_reg(inst.dest, d);
             }
+            return false;
+        }
+
+        case IROp::CSEL: {
+            // Native CSEL/CSINC/CSINV/CSNEG via cmovcc.
+            //
+            // Semantics:
+            //   CSEL  Rd = cond ? Rn : Rm
+            //   CSINC Rd = cond ? Rn : (Rm + 1)
+            //   CSINV Rd = cond ? Rn : ~Rm
+            //   CSNEG Rd = cond ? Rn : -Rm
+            //
+            // Strategy (simple and correct):
+            //   1. Ensure flags are in host RFLAGS.
+            //      - If flags_in_host_: they're already there. Do NOT
+            //        materialize — the epilogue or next CALL_INTERP will.
+            //        cmovcc preserves flags, so flags_in_host_ stays true.
+            //      - If !flags_in_host_: flush+load from pstate.
+            //   2. Flush all vregs and invalidate (so RAX/RCX/RDX are free).
+            //   3. Load src1 → RAX, src2 → RCX.
+            //   4. For CSINC/CSINV/CSNEG: transform RCX (save/restore flags
+            //      since INC/NOT/NEG clobber RFLAGS).
+            //   5. RDX = RAX (d = src1).
+            //   6. cmovcc RDX, RCX, inverse(cc) — if cond FALSE, RDX = RCX.
+            //   7. Store RDX to dest.
+            //
+            // Carry polarity: arm_cond_to_x86() assumes SUB convention
+            // (ARM C = NOT x86 CF). When flags came from ADD/TST
+            // (carry_is_direct), CS/CC need swapped mapping and HI/LS
+            // need cmc. GE/LT/GT/LE don't use C, so default works.
+
+            // Compute x86 cc (true when ARM cond is TRUE).
+            uint8_t base = inst.cond & 0xE;
+            bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
+            bool need_cmc = false;
+            uint8_t cc;
+            if (carry_is_direct) {
+                switch (base) {
+                    case 0x2:  // CS/CC — after ADD, ARM CS↔x86 CF=1
+                        cc = (inst.cond & 1) ? 3 : 2;  // CC→JAE(3), CS→JB(2)
+                        break;
+                    case 0x8:  // HI/LS — no direct x86 JCC, use cmc + default
+                        need_cmc = true;
+                        cc = arm_cond_to_x86(inst.cond);
+                        break;
+                    default:
+                        cc = arm_cond_to_x86(inst.cond);
+                        break;
+                }
+            } else {
+                cc = arm_cond_to_x86(inst.cond);
+            }
+
+            // Ensure flags in host. If not, load from pstate (flushes first).
+            if (!flags_in_host_) {
+                flush_all_vregs();
+                emit_load_flags_from_pstate();
+                invalidate_all_vregs();
+            }
+            // Now flags are in host RFLAGS. Flush all vregs so RAX/RCX/RDX
+            // are free for our use. Save/restore flags around the flush
+            // to be absolutely sure they're preserved.
+            emit_byte(0x9C);  // pushfq (save flags)
+            flush_all_vregs();
+            invalidate_all_vregs();
+            emit_byte(0x9D);  // popfq (restore flags)
+            if (need_cmc) emit_byte(0xF5);  // cmc (invert CF for HI/LS)
+
+            // Load src1 → RAX, src2 → RCX.
+            // vreg 32 = XZR (always 0), needs special handling.
+            if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
+            else if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
+            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
+            if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
+            else if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
+            else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
+
+            // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
+            // Save/restore flags around the transform.
+            if (inst.op != IROp::CSEL) {
+                emit_byte(0x9C);  // pushfq
+                if (inst.op == IROp::CSINC) {
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x01); // add rcx, 1
+                } else if (inst.op == IROp::CSINV) {
+                    emit_not_reg(RCX);
+                } else {  // CSNEG
+                    emit_neg_reg(RCX);
+                }
+                emit_byte(0x9D);  // popfq
+            }
+
+            // RDX = RAX (d = src1, the "then" value).
+            emit_mov_reg(RDX, RAX);
+            // Use jcc + mov instead of cmovcc.
+            //   jcc skip      (if cond TRUE, skip the mov — keep src1)
+            //   mov rdx, rcx  (cond FALSE: rdx = src2)
+            // skip:
+            emit_byte(0x70 + cc);  // jcc rel8 (short jump)
+            emit_byte(0x03);       // skip 3 bytes (mov rdx, rcx = REX.W 89 CA = 3 bytes)
+            // mov rdx, rcx: REX.W 89 CA
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);
+
+            // Store RDX to dest.
+            if (inst.dest <= 31) emit_store_arm(inst.dest, RDX);
+            else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RDX); }
+            // Cache dest in RDX.
+            vreg_home_[inst.dest] = RDX;
+            reg_vreg_[RDX] = inst.dest;
+            vreg_dirty_[inst.dest] = true;
+            // cmovcc preserves flags, so flags_in_host_ stays true.
             return false;
         }
 
