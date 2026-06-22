@@ -512,33 +512,103 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SBFM/UBFM/BFM/EXTR (bitfield) ────────────────────────────
-        // Decoded by the decoder into immr/imms; we pass them through to
-        // the IR executor / codegen which compute the actual mask.
-        case InstClass::SBFM: case InstClass::UBFM: case InstClass::BFM:
+        // ── SBFM/UBFM/EXTR (bitfield extract) ───────────────────────
+        // These are native in the JIT — pass through as single IR ops.
+        case InstClass::SBFM: case InstClass::UBFM:
         case InstClass::EXTR: {
             uint16_t a = load_arm_reg(block, d.rn);
-            uint8_t b = (d.cls == InstClass::BFM || d.cls == InstClass::EXTR)
+            uint8_t b = (d.cls == InstClass::EXTR)
                         ? load_arm_reg(block, d.rm) : 0;
             IROp op = (d.cls == InstClass::SBFM) ? IROp::SBFM
                     : (d.cls == InstClass::UBFM) ? IROp::UBFM
-                    : (d.cls == InstClass::BFM)  ? IROp::BFM
                     : IROp::EXTR;
             emit_bf(block, op, d.rd, a, b, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
             return false;
         }
 
+        // ── BFM (bitfield insert) ───────────────────────────────────
+        // BFM Rd, Rn, #immr, #imms:
+        //   mask = ROR(Ones(imms+1), immr, width)
+        //   Rd = (Rd & ~mask) | (ROR(Rn, immr) & mask)
+        // We compute mask and ~mask at translation time (they're immediates).
+        // For the ROR(Rn, immr), we use SHL+SHR+OR which the JIT handles
+        // natively for both 32 and 64-bit (avoids the ROR & 0x3F issue).
+        case InstClass::BFM: {
+            uint16_t rn_v = load_arm_reg(block, d.rn);
+            uint16_t rd_v = load_arm_reg(block, d.rd);
+            int width = d.sf ? 64 : 32;
+            int immr = d.immr % width;
+            int imms = d.imms;
+            // Compute mask = ROR(Ones(imms+1), immr, width)
+            uint64_t welem = (imms + 1 >= 64) ? ~0ULL : ((1ULL << (imms + 1)) - 1);
+            if (width == 32) welem &= 0xFFFFFFFFULL;
+            uint64_t mask;
+            if (immr == 0) {
+                mask = welem;
+            } else {
+                mask = (welem >> immr) | (welem << (width - immr));
+                if (width == 32) mask &= 0xFFFFFFFFULL;
+            }
+            uint64_t notmask = ~mask & ((width == 32) ? 0xFFFFFFFFULL : ~0ULL);
+            // rotated = (Rn << (width - immr)) | (Rn >> immr)
+            // Use SHL and SHR with immediate amounts (JIT handles these natively).
+            uint16_t rot_hi, rot_lo, rotated;
+            if (immr == 0) {
+                rotated = rn_v;  // no rotation needed
+            } else {
+                uint16_t sh_hi = load_imm(block, width - immr);
+                uint16_t sh_lo = load_imm(block, immr);
+                rot_hi = g_alloc.alloc();
+                emit(block, IROp::SHL, rot_hi, rn_v, sh_hi);
+                rot_lo = g_alloc.alloc();
+                emit(block, IROp::SHR, rot_lo, rn_v, sh_lo);
+                rotated = g_alloc.alloc();
+                emit(block, IROp::OR, rotated, rot_hi, rot_lo);
+            }
+            // field = rotated & mask
+            uint16_t mask_v = load_imm(block, mask);
+            uint16_t field = g_alloc.alloc();
+            emit(block, IROp::AND, field, rotated, mask_v);
+            // cleared = Rd & ~mask
+            uint16_t notmask_v = load_imm(block, notmask);
+            uint16_t cleared = g_alloc.alloc();
+            emit(block, IROp::AND, cleared, rd_v, notmask_v);
+            // result = cleared | field
+            uint16_t result = g_alloc.alloc();
+            emit(block, IROp::OR, result, cleared, field);
+            store_arm_reg(block, d.rd, result);
+            return false;
+        }
+
         // ── CSEL / CSINC / CSINV / CSNEG ─────────────────────────────
+        // CSEL  Rd = cond ? Rn : Rm         → CSEL(Rn, Rm)
+        // CSINC Rd = cond ? Rn : (Rm + 1)   → CSEL(Rn, ADD(Rm, 1))
+        // CSINV Rd = cond ? Rn : ~Rm        → CSEL(Rn, NOT(Rm))
+        // CSNEG Rd = cond ? Rn : -Rm        → CSEL(Rn, NEG(Rm))
+        // Decompose into transform + CSEL so the JIT only needs native
+        // CSEL (which it has) — no CALL_INTERP for CSINC/CSINV/CSNEG.
         case InstClass::CSEL: case InstClass::CSINC:
         case InstClass::CSINV: case InstClass::CSNEG: {
             uint16_t rn_v = load_arm_reg(block, d.rn);
             uint16_t rm_v = load_arm_reg(block, d.rm);
-            IROp op = (d.cls == InstClass::CSEL)  ? IROp::CSEL
-                    : (d.cls == InstClass::CSINC) ? IROp::CSINC
-                    : (d.cls == InstClass::CSINV) ? IROp::CSINV
-                    : IROp::CSNEG;
+            uint16_t sel_src2 = rm_v;
+            if (d.cls == InstClass::CSINC) {
+                uint16_t one = load_imm(block, 1);
+                uint16_t inc = g_alloc.alloc();
+                emit(block, IROp::ADD, inc, rm_v, one);
+                sel_src2 = inc;
+            } else if (d.cls == InstClass::CSINV) {
+                uint16_t inv = g_alloc.alloc();
+                emit(block, IROp::NOT, inv, rm_v);
+                sel_src2 = inv;
+            } else if (d.cls == InstClass::CSNEG) {
+                uint16_t neg = g_alloc.alloc();
+                emit(block, IROp::NEG, neg, rm_v);
+                sel_src2 = neg;
+            }
+            // CSEL: dest = cond ? rn : sel_src2
             uint16_t r = g_alloc.alloc();
-            emit(block, op, r, rn_v, rm_v, 0, d.cond, 0, d.rd, cur_pc);
+            emit(block, IROp::CSEL, r, rn_v, sel_src2, 0, d.cond, 0, d.rd, cur_pc);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;

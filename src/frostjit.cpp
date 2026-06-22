@@ -1868,12 +1868,26 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
-                invalidate_all_vregs();
+                // Drop all cache mappings but DON'T clear flags_in_host_
+                // (invalidate_all_vregs does). Flags ARE in host now.
+                for (int v = 0; v <= max_vreg_; v++) {
+                    int r = vreg_home_[v];
+                    if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
+                }
+                flags_in_host_ = true;
+                flags_from_sub_ = false;
             }
+            // Save flags, flush vregs, restore flags. CRITICAL: preserve
+            // flags_in_host_ — invalidate_all_vregs would clear it, but
+            // pushfq/popfq preserves the actual flags.
+            bool saved_fih = flags_in_host_;
+            bool saved_ffs = flags_from_sub_;
             emit_byte(0x9C);  // pushfq (save flags)
             flush_all_vregs();
             invalidate_all_vregs();
             emit_byte(0x9D);  // popfq (restore flags)
+            flags_in_host_ = saved_fih;
+            flags_from_sub_ = saved_ffs;
             if (need_cmc) emit_byte(0xF5);  // cmc
 
             // Load src1 → RAX, src2 → RCX.
@@ -3113,9 +3127,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         // routes to CALL_INTERP in the IR translator.
         bool will_call_interp = false;
         switch (d.cls) {
-            case InstClass::CSEL: case InstClass::CSINC:
-            case InstClass::CSINV: case InstClass::CSNEG:
-            case InstClass::CCMP: case InstClass::CCMN:
+            // CSEL/CSINC/CSINV/CSNEG are decomposed in ir.cpp (CSEL is native).
+            // CCMP/CCMN are native in the JIT.
+            // BFM is decomposed in ir.cpp (UBFM+AND+OR are native).
             case InstClass::LDP: case InstClass::STP:
             case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
             case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
@@ -3134,7 +3148,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::FCVTZU: case InstClass::SCVTF:
             case InstClass::UCVTF: case InstClass::FCSEL:
             case InstClass::FRINT: case InstClass::FP_SCALAR:
-            case InstClass::BFM:
+            // BFM is now decomposed in ir.cpp — no longer CALL_INTERP.
             case InstClass::MRS: case InstClass::MRS_SYS:
             case InstClass::MSR: case InstClass::MSR_SYS:
             case InstClass::UDIV: case InstClass::SDIV:
