@@ -1832,11 +1832,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return true;
         }
 
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // CSINC/CSINV/CSNEG were decomposed to ADD+NOT+NEG + CSEL in
+        // ir.cpp (commit bfc7e76). The JIT only sees IROp::CSEL (native)
+        // for these. This case is a defensive fallback — if a future
+        // change accidentally re-emits CSINC/CSINV/CSNEG, the JIT will
+        // fall back to the interpreter instead of crashing or producing
+        // silent wrong-code. The fallback is correct but slow.
         case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG: {
-            // CSINC/CSINV/CSNEG: fall back to interpreter.
-            // Native codegen works for standalone cases but fails in
-            // certain multi-CSEL block contexts (sign_neg/sign_zero
-            // in jit_csel.elf). Root cause not yet diagnosed.
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
             {
@@ -2755,59 +2758,29 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // BFM was decomposed to SHL+SHR+OR+AND+OR in ir.cpp (commit
+        // bfc7e76). This case is a defensive fallback.
         case IROp::BFM: {
-            // BFM: fall back to interpreter. The C helper had mask bugs.
             emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // EXTR was decomposed to SHL+SHR+OR in ir.cpp (commit 8fd8e6c).
+        // This case is a defensive fallback. The ~45 lines of native
+        // codegen that used to live here were removed — if you need to
+        // revive them, see git history (commit 8fd8e6c^).
         case IROp::EXTR: {
-            // EXTR Rd, Rn, Rm, #imms:
-            //   Rd = (Rn:Rm) >> imms   (extract 64 bits from the
-            //   128-bit concatenation Rn:Rm, starting at bit `imms`)
-            //
-            //   imms=0  → Rd = Rm       (low 64 bits)
-            //   imms=63 → Rd = Rn       (high 64 bits)
-            //   general → Rd = (Rn << (64-imms)) | (Rm >> imms)
-            //
-            // (v1.4.0-alpha.4 bugfix): the previous code returned Rn
-            // when imms=0, but it should return Rm. This caused extr.elf
-            // to print "NO" instead of "OK".
-            int width = inst.sf ? 64 : 32;
-            clobber_flags();  // shifts clobber RFLAGS
-            flush_all_vregs();
-            invalidate_all_vregs();
-            // Load Rn into RAX, Rm into RCX.
-            if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-            if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-            else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
-            if (inst.imms == 0) {
-                // Rd = Rm (the low 64 bits of Rn:Rm).
-                emit_mov_reg(RAX, RCX);
-            } else {
-                // RDX = Rn << (width - imms)
-                emit_mov_reg(RDX, RAX);
-                int sh = width - inst.imms;
-                emit_shift_imm8(RDX, 4, sh);  // shl rdx, sh
-                // RAX = Rm >> imms
-                emit_mov_reg(RAX, RCX);
-                emit_shift_imm8(RAX, 5, inst.imms);  // shr rax, imms
-                // RAX = RAX | RDX
-                emit_or_reg(RAX, RDX);
-            }
-            if (width == 32) {
-                // zero-extend to 64 bits: mov eax, eax
-                emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
-            }
-            // Write result directly to dest's memory home, then cache.
-            if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
-            else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RAX); }
-            set_vreg_reg(inst.dest, RAX);
+            emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
-        // Complex ops — fall back to interpreter.
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // RBIT/REV16/REV32 were decomposed to SWAR shift/mask patterns
+        // in ir.cpp (commit 1aad1e1). CLS was decomposed to SAR+XOR+
+        // CLZ+SUB in ir.cpp (commit a0e545c). These cases are defensive
+        // fallbacks.
         case IROp::RBIT: case IROp::CLS: case IROp::REV16: case IROp::REV32:
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
