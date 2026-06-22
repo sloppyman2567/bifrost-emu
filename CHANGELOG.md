@@ -6,6 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.1] — 2026-06-23 (directory-layout overhaul + VFS abstraction)
+
+The first beta of the 1.4.0 line. Source tree restructured for
+maintainability and scalability: the four "god files" (arm64_emu.hpp,
+frostjit.cpp, ir.cpp, syscalls.cpp) are split into focused modules
+behind clean interfaces. A new VFS layer replaces the inline /proc//dev/
+else-if chains in the syscall handler.
+
+### Directory layout (before → after)
+
+```
+include/
+  arm64_emu.hpp (1454 LOC, god header)  →  bifrost/{types,version,emulator}.hpp
+                                            + core/{cpu,memory,emulator,signal}.h
+                                            (private internals under src/core/)
+  ir.hpp          → ir/ir.hpp
+  frostjit.hpp    → jit/frostjit.hpp
+
+src/
+  frostjit.cpp  (3671 LOC)  →  jit/{frostjit, x86_backend, x86_regalloc,
+                                    jit_cache, jit_profiler, jit_glue}.cpp
+  ir.cpp        (1515 LOC)  →  ir/{ir_builder, ir_translate, ir_lower,
+                                    ir_optimize, ops}.cpp
+  syscalls.cpp  (1889 LOC)  →  syscalls/{syscalls, fs, mem, threads, time,
+                                    ioctls, misc}.cpp
+  interpreter.cpp           →  interp/interpreter.cpp
+  decoder.cpp               →  frontend/decoder.cpp
+  (ELF loader inline)       →  frontend/elf_loader.cpp
+  graphics.cpp              →  graphics/graphics.cpp
+  signal.cpp                →  core/signal.cpp
+  main.cpp                  →  main.cpp (at root)
+```
+
+### VFS overhaul
+
+New `src/vfs/` module replaces the inline 200-line `/proc//dev/` else-if
+chain inside `case 56: openat`. The VFS layer provides:
+
+- **VNode** — abstract base with `read/write/lseek/fstat` methods
+- **VFS** — path resolver dispatching to procfs/devfs/host passthrough
+- **FdTable** — guest fd → VNode* table (replaces leaking host fds)
+
+Concrete VNode subclasses:
+- `HostVNode`     — wraps a host fd
+- `MemfdVNode`    — synthetic /proc/* content served from a memfd
+- `FbVNode`       — /dev/fb0 wrapper (memfd-backed via GraphicsBackend)
+- `StdioVNode`    — stdin/stdout/stderr wrapper
+
+Adding a new `/proc/foo` virtual file now means adding one `if` branch
+in `vfs.cpp::open_procfs` — syscalls.cpp stays untouched.
+
+### Dead code removed
+
+- `Memory::track_allocation()` — "kept for future use" but never called
+- `Memory::map_direct()` — referenced but the calling path didn't exist
+  (the direct window IS the storage; pages_ is only for high addresses)
+- `Emulator_step` / `Emulator_syscall` / `Emulator_execute` friend
+  wrappers — declared in the old arm64_emu.hpp but never defined
+- Three `// ── DEAD: decomposed in ir.cpp` cases in frostjit.cpp are
+  kept as defensive fallbacks (CSINC/CSINV/CSNEG + REV16/REV32 paths)
+
+### Compatibility
+
+- Public C API (`api/bifrost.h`) unchanged
+- `#include "arm64_emu.hpp"` still works (umbrella header re-exports
+  the new split headers)
+- All 22 smoke tests pass (interpreter + JIT modes)
+
 ## [1.4.0-alpha.4] — 2026-06-21 (IR layer refinement + critical JIT fixes)
 
 Follow-up to alpha.3 focused on the IR layer (`ir.cpp`, `ir_optimize.cpp`,

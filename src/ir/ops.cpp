@@ -9,7 +9,7 @@
 // — the block does NOT split. After the call, if PC changed (branch),
 // the executor returns immediately.
 
-#include "ir.hpp"
+#include "ir/ir.hpp"
 #include "arm64_emu.hpp"
 #include <cstring>
 

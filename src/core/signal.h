@@ -1,4 +1,4 @@
-// signal.hpp — Guest signal delivery for bifrost-emu (v1.4.0-alpha).
+// core/signal.h — guest signal delivery for bifrost-emu.
 //
 // Provides minimal, experimental signal delivery for guest programs.
 // Most AArch64 Linux user-mode emulators punt on signals entirely
@@ -36,21 +36,19 @@
 //
 // The trampoline lives at TRAMPOLINE_ADDR (a fixed high address that
 // doesn't collide with the guest's stack, heap, or mmap region).
+//
+// This is a private header — only Emulator and the syscalls layer
+// include it. The public surface is the SignalTable class itself.
 #pragma once
 
-#include <cstdint>
+#include "bifrost/types.hpp"
+
 #include <cstddef>
-#include <vector>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace arm64emu {
-
-// Forward declarations — arm64_emu.hpp includes this file, so we
-// can't include arm64_emu.hpp here (circular). These forward decls
-// are enough for the function signatures below.
-class Memory;
-class Emulator;
-struct CPU;
 
 // Linux signal numbers (asm-generic/signal.h).
 constexpr int BIFROST_SIGHUP    = 1;
@@ -83,7 +81,6 @@ constexpr int BIFROST_SIGWINCH  = 28;
 constexpr int BIFROST_SIGIO     = 29;
 constexpr int BIFROST_SIGSYS    = 31;
 
-// Maximum signal number we support (31 for standard Unix signals).
 constexpr int MAX_SIGNAL = 31;
 
 // Fixed guest address where we map the sigreturn trampoline.
@@ -100,9 +97,7 @@ constexpr uint64_t TRAMPOLINE_ADDR = 0x7000000000ULL;
 // Total size: 32 bytes. Matches the kernel's struct k_sigaction.
 constexpr size_t KSIGACTION_SIZE = 32;
 
-// Saved CPU state for signal delivery. This is what rt_sigreturn
-// restores. We keep it in a std::vector (a stack of frames) so
-// nested signals work.
+// Saved CPU state for signal delivery.
 struct SignalFrame {
     uint64_t regs[31];   // X0..X30
     uint64_t sp;
@@ -136,15 +131,10 @@ public:
     // to it. The caller fills in the saved CPU state.
     SignalFrame& push_frame(int signo);
 
-    // Pop the most recent signal frame. Returns true on success, false
-    // if the stack was empty (which indicates a guest bug — calling
-    // rt_sigreturn without a corresponding signal delivery).
+    // Pop the most recent signal frame.
     bool pop_frame(SignalFrame& out);
 
-    // True if there's at least one pending signal frame on the stack.
     bool has_pending() const { return !frames_.empty(); }
-
-    // Number of pending signal frames (for diagnostics).
     size_t frame_count() const { return frames_.size(); }
 
 private:
@@ -171,8 +161,7 @@ uint64_t map_sigreturn_trampoline(Memory& mem);
 //   - Other signals → terminate with 128 + signo (safe default).
 //
 // Returns true if the signal was delivered (handler invoked), false
-// if the default disposition was applied (in which case cpu.running
-// has been set to false and cpu.exit_code has been set).
+// if the default disposition was applied.
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo);
 
 } // namespace arm64emu

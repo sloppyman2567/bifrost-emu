@@ -20,7 +20,7 @@
 // in the run loop. This unbreaks guest programs that poll a
 // signal-pending flag (e.g., toybox sh's `sig_process_pending()`).
 
-#include "signal.hpp"
+#include "core/signal.h"
 #include "arm64_emu.hpp"
 #include <cerrno>
 #include <cstring>

@@ -21,7 +21,7 @@
 // IR is roughly 40% smaller than the naive IR and runs ~3x faster in
 // the x86 codegen.
 
-#include "ir.hpp"
+#include "ir/ir.hpp"
 #include "arm64_emu.hpp"
 
 #include <unordered_map>

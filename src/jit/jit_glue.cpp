@@ -1,11 +1,12 @@
 // jit_glue.cpp — Glue between Emulator and FrostJIT.
+//
+// Emulator's constructor/destructor live in src/core/emulator.cpp.
+// This file holds the JIT-specific Emulator methods that need to see
+// FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "arm64_emu.hpp"
-#include "frostjit.hpp"
+#include "jit/frostjit.hpp"
 
 namespace arm64emu {
-
-Emulator::Emulator() = default;
-Emulator::~Emulator() = default;
 
 void Emulator::enable_jit() {
     if (jit_) return;

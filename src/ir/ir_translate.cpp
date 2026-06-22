@@ -1,8 +1,8 @@
-// ir.cpp — ARM64 → IR translator for bifrost-emu (v1.4.0-alpha.5)
+// ir_translate.cpp — ARM64 → IR translator.
 //
 // Translates each ARM64 instruction (DecodedInst) into 1+ IR micro-ops.
-// The IR is then optimized (optimize_ir) and either executed by ops.cpp
-// (debug) or compiled to native x86-64 code by frostjit.cpp (the JIT).
+// The IR is then optimized (ir_optimize.cpp) and either executed by
+// ops.cpp (debug) or compiled to native x86-64 code by frostjit.cpp.
 //
 // Vreg mapping:
 //   0-30  = ARM64 X0-X30
@@ -24,188 +24,11 @@
 //     redundant ZEXTs after ops that already zero-extend (ADD with
 //     32-bit dest on x86, etc.) when generating x86.
 
-#include "ir.hpp"
+#include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
+#include "ir/ir.hpp"      // public IR types
 #include "arm64_emu.hpp"  // for cond_true() (used by executor only)
 
 namespace arm64emu {
-
-// ── Scratch vreg allocator ──────────────────────────────────────────────
-// Per-block resetable. The translator allocates a fresh vreg for every
-// intermediate value; the optimizer later reuses them.
-//
-// (v1.4.0-alpha.5): widened from uint8_t to uint16_t to prevent
-// wrap-around. Arch regs use 0-32, scratch starts at 33. With uint8_t,
-// large blocks (82+ ARM instructions) exhausted the 256-vreg space and
-// wrapped to 0, colliding with arch regs (vreg 31 = SP). This caused
-// test_float's "decode error at pc=0x0" crash. uint16_t gives 65535
-// vregs — effectively unlimited.
-struct VregAlloc {
-    uint16_t next = 33;
-    uint16_t alloc() { return next++; }
-    void reset() { next = 33; }
-};
-
-static thread_local VregAlloc g_alloc;
-
-// Reset the per-block allocator. Called at the start of each block.
-void ir_reset_vreg_alloc() { g_alloc.reset(); }
-
-// Helper: emit a single IR op.
-static inline void emit(IRBlock& b, IROp op, uint16_t dest = 0,
-                        uint16_t src1 = 0, uint16_t src2 = 0,
-                        uint8_t width = 0, uint8_t cond = 0,
-                        uint8_t flags_op = 0, uint64_t imm = 0,
-                        uint64_t arm_pc = 0) {
-    IRInst inst{};
-    inst.op = op;
-    inst.dest = dest;
-    inst.src1 = src1;
-    inst.src2 = src2;
-    inst.width = width;
-    inst.cond = cond;
-    inst.flags_op = flags_op;
-    inst.imm = imm;
-    inst.arm_pc = arm_pc;
-    b.insts.push_back(inst);
-}
-
-// Helper: emit an IRInst with the extra bitfield fields.
-static inline void emit_bf(IRBlock& b, IROp op, uint16_t dest,
-                           uint16_t src1, uint16_t src2,
-                           uint8_t immr, uint8_t imms, uint8_t sf,
-                           uint64_t arm_pc) {
-    IRInst inst{};
-    inst.op = op;
-    inst.dest = dest;
-    inst.src1 = src1;
-    inst.src2 = src2;
-    inst.immr = immr;
-    inst.imms = imms;
-    inst.sf = sf;
-    inst.arm_pc = arm_pc;
-    b.insts.push_back(inst);
-}
-
-// Helper: emit an immediate into a fresh vreg.
-static inline uint16_t load_imm(IRBlock& b, uint64_t val) {
-    uint16_t v = g_alloc.alloc();
-    emit(b, IROp::IMM, v, 0, 0, 0, 0, 0, val);
-    return v;
-}
-
-// Helper: read an ARM64 reg into a fresh vreg.
-// `is_sp` controls the reg-31 mapping:
-//   - For ADD/SUB immediate: reg 31 = SP (is_sp=true)
-//   - For load/store data regs: reg 31 = XZR (is_sp=false)
-//   - For data processing (logical/shift): reg 31 = XZR (is_sp=false)
-static inline uint16_t load_arm_reg(IRBlock& b, uint8_t ar, bool is_sp = false) {
-    if (ar == 31 && !is_sp) ar = 32;  // XZR
-    // (v1.4.0-alpha.5): XZR (vreg 32) is always 0 — emit IMM 0 instead
-    // of LOAD_REG. This eliminates a memory read and lets the constant
-    // folder propagate it.
-    if (ar == 32) {
-        return load_imm(b, 0);
-    }
-    uint16_t v = g_alloc.alloc();
-    emit(b, IROp::LOAD_REG, v, ar);
-    return v;
-}
-
-// Helper: write a vreg to an ARM64 reg.
-// `is_sp` controls reg-31 mapping (same as load_arm_reg).
-static inline void store_arm_reg(IRBlock& b, uint8_t ar, uint8_t v, bool is_sp = false) {
-    if (ar == 31 && !is_sp) return;  // XZR — discard
-    emit(b, IROp::STORE_REG, ar, v);
-}
-
-// Helper: zero-extend a value to 32 bits (sf=0) or pass-through (sf=1).
-// We always emit the op; the optimizer peephole removes redundant ZEXTs
-// after ops whose x86 encoding already zero-extends.
-static inline uint16_t zext_if_32bit(IRBlock& b, uint16_t v, bool sf) {
-    if (sf) return v;
-    uint16_t r = g_alloc.alloc();
-    emit(b, IROp::ZEXT, r, v, 0, 32);
-    return r;
-}
-
-// ── SWAR helpers for bit-reversal / byte-swap decomposition ────────────
-// These decompose the ARM64 RBIT/REV16/REV32 ops into primitive IR ops
-// (AND, OR, SHL, SHR) that the JIT already compiles natively. This
-// replaces the CALL_INTERP fallback that the JIT used to take for these
-// ops, and lets the optimizer fold/propagate when the source is a known
-// constant.
-//
-// All helpers take an input vreg and return a fresh vreg holding the
-// transformed value. The 32-bit variants assume the caller has already
-// restricted the input to 32 bits (via ZEXT) and will ZEXT the result
-// again to clear the high 32 bits.
-
-// v = ((v >> n) & mask) | ((v & mask) << n)
-// Used for swap-with-mask patterns. Each call is 4 IR ops.
-static inline uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
-    uint16_t mask_v = load_imm(b, mask);
-    uint16_t n_v    = load_imm(b, (uint64_t)n);
-    // hi = (v & mask) << n
-    uint16_t kept   = g_alloc.alloc();
-    emit(b, IROp::AND, kept, v, mask_v);
-    uint16_t hi     = g_alloc.alloc();
-    emit(b, IROp::SHL, hi, kept, n_v);
-    // lo = (v >> n) & mask
-    uint16_t shr    = g_alloc.alloc();
-    emit(b, IROp::SHR, shr, v, n_v);
-    uint16_t lo     = g_alloc.alloc();
-    emit(b, IROp::AND, lo, shr, mask_v);
-    // out = hi | lo
-    uint16_t out    = g_alloc.alloc();
-    emit(b, IROp::OR, out, hi, lo);
-    return out;
-}
-
-// 64-bit bit-reversal via 6 SWAR stages:
-//   swap bits 1<>0, 3<>2, ..., 63<>62  (mask=0x5555..., n=1)
-//   swap pairs  3<>1, 2<>0, ..., 63<>61 (mask=0x3333..., n=2)
-//   swap nibbles 7<>4, 6<>5, ..., 63<>60 (mask=0x0F0F..., n=4)
-//   swap bytes within 16-bit halfwords   (mask=0x00FF..., n=8)
-//   swap 16-bit halfwords within 32-bit words (mask=0x0000FFFF..., n=16)
-//   swap 32-bit words                     (n=32, no mask needed)
-static inline uint16_t rbit64_ir(IRBlock& b, uint16_t v) {
-    v = swar_swap(b, v, 0x5555555555555555ULL,  1);
-    v = swar_swap(b, v, 0x3333333333333333ULL,  2);
-    v = swar_swap(b, v, 0x0F0F0F0F0F0F0F0FULL,  4);
-    v = swar_swap(b, v, 0x00FF00FF00FF00FFULL,  8);
-    v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
-    // Final 32-bit swap: out = (v << 32) | (v >> 32). No mask needed.
-    uint16_t n32 = load_imm(b, 32);
-    uint16_t hi  = g_alloc.alloc(); emit(b, IROp::SHL, hi, v, n32);
-    uint16_t lo  = g_alloc.alloc(); emit(b, IROp::SHR, lo, v, n32);
-    uint16_t out = g_alloc.alloc(); emit(b, IROp::OR,  out, hi, lo);
-    return out;
-}
-
-// 32-bit bit-reversal: same idea, 5 stages (no final 32-bit swap).
-static inline uint16_t rbit32_ir(IRBlock& b, uint16_t v) {
-    v = swar_swap(b, v, 0x55555555ULL,  1);
-    v = swar_swap(b, v, 0x33333333ULL,  2);
-    v = swar_swap(b, v, 0x0F0F0F0FULL,  4);
-    v = swar_swap(b, v, 0x00FF00FFULL,  8);
-    v = swar_swap(b, v, 0x0000FFFFULL, 16);
-    return v;
-}
-
-// REV16 (64-bit): swap bytes within each 16-bit halfword.
-//   mask=0x00FF00FF00FF00FF, n=8
-static inline uint16_t rev16_64_ir(IRBlock& b, uint16_t v) {
-    return swar_swap(b, v, 0x00FF00FF00FF00FFULL, 8);
-}
-
-// REV32 (64-bit): swap bytes within each 32-bit word.
-//   = REV16 followed by swap of 16-bit halves within each 32-bit word.
-//   = swar_swap(v, 0x00FF00FF00FF00FF, 8) | swar_swap(_, 0x0000FFFF0000FFFF, 16)
-static inline uint16_t rev32_64_ir(IRBlock& b, uint16_t v) {
-    v = swar_swap(b, v, 0x00FF00FF00FF00FFULL, 8);
-    v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
-    return v;
-}
 
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {

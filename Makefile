@@ -1,5 +1,8 @@
-# bifrost-emu Makefile
-# Simple, no autotools. Just `make` to build, `make test` to run tests.
+# bifrost-emu Makefile (v1.4.0-beta.1)
+#
+# Auto-discovers all .cpp files under src/ and compiles them into the
+# final bifrost-emu binary. Library builds (libbifrost.a) compile the
+# same sources minus main.cpp.
 #
 # Build options (set on the make command line, e.g. `make USE_SDL2=1`):
 #
@@ -13,21 +16,38 @@
 #   CXX            C++ compiler (default: g++)
 #   CXXFLAGS       C++ compiler flags
 #   LDFLAGS        Linker flags
+#
+# Directory layout (v1.4.0-beta.1+):
+#
+#   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
+#   src/vfs/          — VFS abstraction (VNode + FdTable + procfs + devfs)
+#   src/ir/           — IR builder/translator/optimizer/executor
+#   src/jit/          — FrostJIT (split into x86_backend, x86_regalloc,
+#                       jit_cache, jit_profiler, frostjit, jit_glue)
+#   src/syscalls/     — Linux AArch64 syscall layer (split by concern)
+#   src/frontend/     — decoder + ELF loader
+#   src/graphics/     — /dev/fb0 backend (headless or SDL2)
+#   src/interp/       — switch-based instruction interpreter
 
 CXX      ?= g++
-SRCDIR   := src
 INCDIR   := include
-CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR)
+CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -Isrc
 LDFLAGS  ?= -pthread
 
 TARGET   := bifrost-emu
 LIB      := libbifrost.a
-SOURCES  := $(SRCDIR)/main.cpp $(SRCDIR)/interpreter.cpp $(SRCDIR)/syscalls.cpp \
-	    $(SRCDIR)/decoder.cpp $(SRCDIR)/graphics.cpp $(SRCDIR)/signal.cpp \
-	    $(SRCDIR)/frostjit.cpp $(SRCDIR)/jit_glue.cpp $(SRCDIR)/ir.cpp \
-	    $(SRCDIR)/ir_optimize.cpp $(SRCDIR)/ops.cpp
-HEADERS  := $(INCDIR)/arm64_emu.hpp $(INCDIR)/decoder.hpp $(INCDIR)/graphics.hpp \
-	    $(INCDIR)/signal.hpp $(INCDIR)/frostjit.hpp $(INCDIR)/ir.hpp api/bifrost.h
+
+# Auto-discover all .cpp under src/, plus main.cpp at the root.
+SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphics src/interp
+SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
+OBJDIR   := build
+OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
+
+# Library objects (everything except main.cpp)
+LIB_SOURCES := $(filter-out main.cpp,$(SOURCES))
+LIB_OBJECTS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(LIB_SOURCES))
+
+HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
 
 # ── SDL2 backend (opt-in) ────────────────────────────────────────────────
 ifeq ($(USE_SDL2),1)
@@ -37,43 +57,44 @@ ifeq ($(USE_SDL2),1)
     LDFLAGS  += $(SDL2_LIBS)
 endif
 
-.PHONY: all test clean install uninstall lib
+.PHONY: all test clean install uninstall lib debug
 
 all: $(TARGET)
 
-$(TARGET): $(SOURCES) $(HEADERS)
-	$(CXX) $(CXXFLAGS) -o $@ $(SOURCES) $(LDFLAGS)
+$(TARGET): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
+
+# Pattern rule: compile any .cpp under src/ or main.cpp to .o in build/
+$(OBJDIR)/%.o: %.cpp $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Build the static library (libbifrost.a) for API consumers
 lib: $(LIB)
 
-$(LIB): $(SOURCES) $(HEADERS)
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/interpreter.cpp -o interpreter.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/syscalls.cpp   -o syscalls.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/decoder.cpp    -o decoder.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/graphics.cpp   -o graphics.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/signal.cpp     -o signal.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/frostjit.cpp   -o frostjit.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/jit_glue.cpp   -o jit_glue.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/ir.cpp         -o ir.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/ir_optimize.cpp -o ir_optimize.o
-	$(CXX) $(CXXFLAGS) -c $(SRCDIR)/ops.cpp        -o ops.o
-	ar rcs $@ interpreter.o syscalls.o decoder.o graphics.o signal.o frostjit.o jit_glue.o ir.o ir_optimize.o ops.o
-	@echo "Built $@ (note: this skips main.cpp; link your own driver)"
+$(LIB): $(LIB_OBJECTS)
+	ar rcs $@ $^
+	@echo "Built $@ (excludes main.cpp; link your own driver)"
 
 # Debug build with sanitizers
-debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR)
+debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR) -Isrc
 debug: LDFLAGS = -pthread -fsanitize=address,undefined
-debug: $(SOURCES) $(HEADERS)
-	$(CXX) $(CXXFLAGS) -o $(TARGET)-dbg $(SOURCES) $(LDFLAGS)
+debug: $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
 
-# Run all test programs
+# Run smoke tests
 test: $(TARGET)
-	@echo "--- Running test suite ---"
-	@for f in test/*.elf; do \
-	    echo "--- $$f ---"; \
-	    ./$(TARGET) $$f || echo "FAILED: $$f"; \
-	done
+	@bash scripts/smoke.sh ./$(TARGET)
+
+# Cross-compile a test program with the bundled musl toolchain.
+# Usage: make cross SRC=ctest_real/hello.c OUT=ctest_real/hello.elf
+CROSS_CC := tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
+cross:
+	@if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
+	    echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \
+	fi
+	@$(CROSS_CC) -static -O2 -o $(OUT) $(SRC)
+	@echo "Built $(OUT)"
 
 # Install to /usr/local/bin
 install: $(TARGET)
@@ -84,4 +105,4 @@ uninstall:
 	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
 
 clean:
-	rm -f $(TARGET) $(TARGET)-dbg *.o $(LIB)
+	rm -rf $(OBJDIR) $(TARGET) $(TARGET)-dbg *.o $(LIB)

@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-alpha.5
+  bifrost-emu  v1.4.0-beta.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-alpha.5](https://img.shields.io/badge/version-1.4.0--alpha.5-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-beta.1](https://img.shields.io/badge/version-1.4.0--beta.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -375,7 +375,7 @@ status from when they were last tested:
 | `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Got past atomics + mallocng init; hung later in SDL2 setup. May behave differently now that mallocng and SBFIZ are fixed — re-test before relying on this. |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng. glibc static binaries are not a target; musl-static is. |
 | `toybox-aarch64` (non-sh commands) | ✅ Works | v1.4.0-alpha.1: `echo`, `uname`, `whoami`, `sleep`, `true`, `cat`, `wc`, `head`, `sort`, `rev`, `tr`, `fib`, `yes` all work. The previous "PC=0 STP/LDP mode bug" is gone. |
-| `toybox-aarch64 sh` | ❌ Hangs | sh's signal-pending polling loop waits for SIGCHLD from a forked child that never existed (our `clone()` returns 0 = "you are the child"). Tracked for v1.4.0-alpha.5. |
+| `toybox-aarch64 sh` | ❌ Hangs | sh's signal-pending polling loop waits for SIGCHLD from a forked child that never existed (our `clone()` returns 0 = "you are the child"). Tracked for v1.4.0-beta.1. |
 
 ### frostJIT (`--jit`) compatibility
 
@@ -547,7 +547,7 @@ toybox uname                        25091      0.001      28.19       91.1
   polling loop doesn't use `sigsuspend` — it expects signals to
   arrive asynchronously and set the flag via the handler. Without a
   real child process to send SIGCHLD, the loop never exits. Tracked
-  for v1.4.0-alpha.5.
+  for v1.4.0-beta.1.
 - **frostJIT (`--jit`) still crashes on `fib` and `sort`.** No
   change from v1.4.0-alpha. The NZCV flag-emission TODOs in
   `frostjit.cpp` are the next blocker.
@@ -1011,7 +1011,7 @@ This is alpha-quality software. Known issues:
   side effect, **toybox `sh -c '...'` hangs** — sh's signal-pending
   polling loop waits for SIGCHLD from a child that never existed.
   toybox `sh` interactive (with stdin piped) works for non-forking
-  commands. Tracked for v1.4.0-alpha.5.
+  commands. Tracked for v1.4.0-beta.1.
 
 - **NEON bug triggered by `strtok`/`strtok_r`.** musl's `strtok` and
   `strtok_r` call `strspn`/`strcspn`, which build a 256-bit bitset
@@ -1041,7 +1041,7 @@ This is alpha-quality software. Known issues:
 
 ## Roadmap
 
-**v1.4.0-alpha.5 (next)**
+**v1.4.0-beta.1 (next)**
 
 1. **Fix toybox `sh -c` hang.** The signal-pending polling loop needs
    either (a) a real fork implementation with copy-on-write guest
@@ -1056,7 +1056,7 @@ This is alpha-quality software. Known issues:
    binary under `--jit` and compares output against the interpreter.
    Target: `--jit` runs `fib(40)` and `sort` without segfaulting.
 
-**v1.4.0-alpha.5**
+**v1.4.0-beta.1**
 
 1. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
    contents, `SA_RESTART`, signal masks, `sigaltstack`, and
