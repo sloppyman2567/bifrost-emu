@@ -195,6 +195,12 @@ private:
     void emit_sub_rsp_imm8(uint8_t n);
     void emit_add_rsp_imm8(uint8_t n);
 
+    // Mask CL register with an 8-bit immediate (`and cl, imm8`).
+    // Used before variable shifts (shl/shr/sar/ror r, cl) to clamp
+    // the shift count to the operand width. Replaces the magic-byte
+    // sequence `emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(n);`.
+    void emit_and_cl_imm8(uint8_t mask);
+
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);
@@ -270,9 +276,45 @@ private:
     int32_t vreg_stack_slot(int v);
     int  alloc_reg_for(int v, int preferred = -1);  // alloc + evict old occupant BEFORE computation
 
+    // Force a vreg into a specific host register (MOVE semantics).
+    // Evicts the current occupant of `host_reg` if any, then either
+    // moves `v` from its current home (clearing the old mapping) or
+    // loads it from memory. After this call:
+    //   vreg_home_[v] == host_reg, reg_vreg_[host_reg] == v.
+    // Use this when the caller needs `v` in a specific reg AND doesn't
+    // need `v` to remain in its old location.
+    void force_vreg_to_reg(int v, int host_reg);
+
+    // Force two vregs into two specific host registers in one call.
+    // Handles the aliasing case where src1 == src2 (or src2 was
+    // originally cached in host_reg1) by COPYING src2 to host_reg2
+    // instead of moving (so src1's mapping in host_reg1 is preserved).
+    // After this call:
+    //   vreg_home_[src1] == host_reg1, reg_vreg_[host_reg1] == src1.
+    //   vreg_home_[src2] == host_reg2, reg_vreg_[host_reg2] == src2.
+    // Use this for binary ops like SHL/ADDS that need src1 in one
+    // fixed reg and src2 in another (e.g. RAX and RCX).
+    void force_two_vregs_to(int src1, int host_reg1,
+                            int src2, int host_reg2);
+
     // Old simple load/store (kept for fallback).
     void load_vreg(int dst, int v);
     void store_vreg(int v, int src);
+
+    // ── Typed emit_call_abs overload ──────────────────────────────────
+    // The void* overload (declared above) is the low-level primitive.
+    // This function-pointer overload lets call sites write:
+    //     emit_call_abs(&jit_interp_step);
+    //     emit_call_abs(jit_load_mem_slow);
+    // instead of:
+    //     emit_call_abs((void*)&jit_interp_step);
+    //     emit_call_abs((void*)&jit_load_mem_slow);
+    // C++ overload resolution picks this template when the argument is
+    // a function pointer; the void* overload is picked for void*.
+    template <typename R, typename... Args>
+    void emit_call_abs(R (*fn)(Args...)) {
+        emit_call_abs(reinterpret_cast<void*>(fn));
+    }
 
     // IR compiler helpers.
     struct BranchPatch { size_t patch_off; int target_kind; };

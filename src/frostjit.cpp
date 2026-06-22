@@ -365,6 +365,12 @@ void FrostJIT::emit_add_rsp_imm8(uint8_t n) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(n);
 }
 
+// and cl, imm8 — used to mask shift counts to 0..63 / 0..31.
+// Encoding: REX.W 83 E1 NN.
+void FrostJIT::emit_and_cl_imm8(uint8_t mask) {
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(mask);
+}
+
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
     if (ar >= 0 && ar <= 30) emit_load(xr, CPU_REG, REGS_OFF + 8*ar);
@@ -840,6 +846,109 @@ void FrostJIT::store_vreg(int v, int src) {
     vreg_home_[v] = src;
     reg_vreg_[src] = v;
     vreg_dirty_[v] = true;
+}
+
+// ── force_vreg_to_reg ──────────────────────────────────────────────────
+// Force vreg `v` to live in host register `host_reg` (MOVE semantics).
+//
+// This replaces the manually-inlined "evict occupant of host_reg, then
+// either move v from its current home or load v from memory" boilerplate
+// that was duplicated across SHL/SHR/SAR/ROR, ADDS/SUBS, and ADCS/SBCS
+// cases (each ~50 lines). The caller now writes:
+//
+//     force_vreg_to_reg(inst.src1, RAX);
+//     force_vreg_to_reg(inst.src2, RCX);
+//
+// instead of inlining the eviction + move/load logic each time.
+//
+// After this call:
+//   vreg_home_[v]   == host_reg
+//   reg_vreg_[host_reg] == v
+//
+// Any previous occupant of `host_reg` (other than `v` itself) is evicted
+// (spilled if dirty). If `v` was previously in another reg, that reg's
+// mapping is cleared (the value moves to `host_reg`).
+void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
+    if (v > max_vreg_) max_vreg_ = v;
+
+    // Step 1: evict whatever is in host_reg (unless it's already v).
+    int cur = reg_vreg_[host_reg];
+    if (cur >= 0 && cur != v) {
+        evict_vreg(cur);
+    }
+
+    // Step 2: place v in host_reg.
+    int home = vreg_home_[v];
+    if (home == host_reg) {
+        return;  // already there
+    }
+    if (home >= 0) {
+        // v is in another reg — move it (clear old mapping).
+        emit_mov_reg(host_reg, home);
+        reg_vreg_[home] = -1;
+    } else {
+        // v is spilled — load from memory.
+        if (v <= 31) {
+            emit_load_arm(host_reg, v);
+        } else {
+            int32_t off = vreg_stack_slot(v);
+            emit_load(host_reg, RBP, off);
+        }
+    }
+    vreg_home_[v] = host_reg;
+    reg_vreg_[host_reg] = v;
+}
+
+// ── force_two_vregs_to ─────────────────────────────────────────────────
+// Force two vregs into two specific host registers in one call.
+//
+// Handles the aliasing case where src1 == src2 (or src2 was originally
+// cached in host_reg1) by COPYING src2 to host_reg2 instead of moving,
+// so src1's mapping in host_reg1 is preserved.
+//
+// After this call:
+//   vreg_home_[src1] == host_reg1,  reg_vreg_[host_reg1] == src1
+//   vreg_home_[src2] == host_reg2,  reg_vreg_[host_reg2] == src2
+//
+// When src1 == src2, both host_reg1 and host_reg2 hold the same value;
+// reg_vreg_[host_reg1] stays as src1 (aliasing), and vreg_home_[src1]
+// is set to host_reg2 (the most recent force wins).
+void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
+                                  int src2, int host_reg2) {
+    // Force src1 into host_reg1 (MOVE semantics).
+    force_vreg_to_reg(src1, host_reg1);
+
+    // Force src2 into host_reg2. Evict host_reg2's current occupant
+    // if it's not src2. (If src1 == src2 and src1 is now in host_reg1,
+    // the eviction of host_reg2 won't touch host_reg1.)
+    if (reg_vreg_[host_reg2] >= 0 && reg_vreg_[host_reg2] != src2) {
+        evict_vreg(reg_vreg_[host_reg2]);
+    }
+
+    int home2 = vreg_home_[src2];
+    if (home2 == host_reg2) {
+        return;  // already there
+    }
+    if (home2 == host_reg1) {
+        // src2 is in host_reg1 (either because src1 == src2, or src2
+        // was independently cached there). COPY — don't clear
+        // host_reg1's mapping, because src1 needs to stay there.
+        emit_mov_reg(host_reg2, host_reg1);
+    } else if (home2 >= 0) {
+        // src2 is in some other reg — move it (clear old mapping).
+        emit_mov_reg(host_reg2, home2);
+        reg_vreg_[home2] = -1;
+    } else {
+        // src2 is spilled — load from memory.
+        if (src2 <= 31) {
+            emit_load_arm(host_reg2, src2);
+        } else {
+            int32_t off = vreg_stack_slot(src2);
+            emit_load(host_reg2, RBP, off);
+        }
+    }
+    vreg_home_[src2] = host_reg2;
+    reg_vreg_[host_reg2] = src2;
 }
 
 // ── emit_call_interp ───────────────────────────────────────────────────
@@ -1331,55 +1440,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::SHL: case IROp::SHR:
         case IROp::SAR: case IROp::ROR: {
+            // x86 variable shifts use CL for the count, so we must force
+            // src2 into RCX and src1 into RAX. force_two_vregs_to handles
+            // the eviction, move, and aliasing (src1==src2) cases in one
+            // call — the previous inline version of this logic was ~50
+            // lines and was duplicated across SHL/ADDS/ADCS cases.
             clobber_flags();
-            // x86 variable shifts use CL for the count, so we MUST force
-            // src2 into RCX (not just hint it). ensure_vreg() with a
-            // preferred reg does NOT move an already-cached vreg, so we
-            // use the same explicit force-to-reg pattern as the ADD/SUB
-            // case below. Without this, `and rcx, 0x3F` would mask
-            // whatever stale vreg happened to be sitting in RCX, and
-            // `shl d, cl` would shift by a garbage count — which is
-            // exactly what caused hello.elf to compute X0=0x80fffffed0
-            // instead of 0x7ffffffed8 inside the static-pie reloc loop.
-            if (reg_vreg_[RAX] >= 0 && reg_vreg_[RAX] != inst.src1)
-                evict_vreg(reg_vreg_[RAX]);
-            if (reg_vreg_[RCX] >= 0 && reg_vreg_[RCX] != inst.src2 &&
-                reg_vreg_[RCX] != inst.src1)
-                evict_vreg(reg_vreg_[RCX]);
-            // Force src1 -> RAX.
-            if (vreg_home_[inst.src1] >= 0) {
-                int r = vreg_home_[inst.src1];
-                if (r != RAX) {
-                    emit_mov_reg(RAX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src1] = RAX;
-                    reg_vreg_[RAX] = inst.src1;
-                }
-            } else {
-                if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-                else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-                vreg_home_[inst.src1] = RAX;
-                reg_vreg_[RAX] = inst.src1;
-            }
-            // Force src2 -> RCX (so CL holds the shift count).
-            if (vreg_home_[inst.src2] >= 0) {
-                int r = vreg_home_[inst.src2];
-                if (r == RAX) {
-                    emit_mov_reg(RCX, RAX);
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                } else if (r != RCX) {
-                    emit_mov_reg(RCX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                }
-            } else {
-                if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-                else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
-                vreg_home_[inst.src2] = RCX;
-                reg_vreg_[RCX] = inst.src2;
-            }
+            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
+
             // Pick dest reg. Reuse RAX if dest==src1; otherwise allocate
             // a fresh reg that is NOT RCX (we need CL for the count).
             int d;
@@ -1414,7 +1482,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 if (d != RAX) emit_mov_reg(d, RAX);
             }
             // CL = src2 & 0x3F.
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(0x3F);
+            emit_and_cl_imm8(0x3F);
             int kind = (inst.op == IROp::SHL) ? 4
                      : (inst.op == IROp::SHR) ? 5
                      : (inst.op == IROp::SAR) ? 7 : 1;
@@ -1539,46 +1607,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::ADDS: case IROp::SUBS: {
-            // Same fixed-assignment approach as binary ALU.
-            // Force src1 into RAX, src2 into RCX.
-            if (reg_vreg_[RAX] >= 0 && reg_vreg_[RAX] != inst.src1) evict_vreg(reg_vreg_[RAX]);
-            if (reg_vreg_[RCX] >= 0 && reg_vreg_[RCX] != inst.src2 && reg_vreg_[RCX] != inst.src1) evict_vreg(reg_vreg_[RCX]);
-            if (vreg_home_[inst.src1] >= 0) {
-                int r = vreg_home_[inst.src1];
-                if (r != RAX) {
-                    emit_mov_reg(RAX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src1] = RAX;
-                    reg_vreg_[RAX] = inst.src1;
-                }
-            } else {
-                if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-                else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-                vreg_home_[inst.src1] = RAX;
-                reg_vreg_[RAX] = inst.src1;
-            }
-            if (vreg_home_[inst.src2] >= 0) {
-                int r = vreg_home_[inst.src2];
-                if (r == RAX) {
-                    emit_mov_reg(RCX, RAX);
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                } else if (r != RCX) {
-                    emit_mov_reg(RCX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                }
-            } else {
-                if (inst.src2 <= 31) {
-                    emit_load_arm(RCX, inst.src2);
-                } else {
-                    int32_t off = vreg_stack_slot(inst.src2);
-                    emit_load(RCX, RBP, off);
-                }
-                vreg_home_[inst.src2] = RCX;
-                reg_vreg_[RCX] = inst.src2;
-            }
+            // Force src1 into RAX, src2 into RCX (same fixed-assignment
+            // pattern as SHL/SHR/SAR/ROR — handled by force_two_vregs_to).
+            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s1 = RAX, s2 = RCX;
             bool is_sub = (inst.op == IROp::SUBS);
             bool is_32bit = (inst.width == 32);
@@ -2830,46 +2861,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Now x86 CF holds the ARM C flag (correctly un-inverted
             // by emit_load_flags_from_pstate if from_sub was set).
 
-            // Force src1 into RAX, src2 into RCX.
-            if (reg_vreg_[RAX] >= 0 && reg_vreg_[RAX] != inst.src1)
-                evict_vreg(reg_vreg_[RAX]);
-            if (reg_vreg_[RCX] >= 0 && reg_vreg_[RCX] != inst.src2 &&
-                reg_vreg_[RCX] != inst.src1)
-                evict_vreg(reg_vreg_[RCX]);
-            // src1 → RAX
-            if (vreg_home_[inst.src1] >= 0) {
-                int r = vreg_home_[inst.src1];
-                if (r != RAX) {
-                    emit_mov_reg(RAX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src1] = RAX;
-                    reg_vreg_[RAX] = inst.src1;
-                }
-            } else {
-                if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-                else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-                vreg_home_[inst.src1] = RAX;
-                reg_vreg_[RAX] = inst.src1;
-            }
-            // src2 → RCX
-            if (vreg_home_[inst.src2] >= 0) {
-                int r = vreg_home_[inst.src2];
-                if (r == RAX) {
-                    emit_mov_reg(RCX, RAX);
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                } else if (r != RCX) {
-                    emit_mov_reg(RCX, r);
-                    reg_vreg_[r] = -1;
-                    vreg_home_[inst.src2] = RCX;
-                    reg_vreg_[RCX] = inst.src2;
-                }
-            } else {
-                if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-                else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
-                vreg_home_[inst.src2] = RCX;
-                reg_vreg_[RCX] = inst.src2;
-            }
+            // Force src1 into RAX, src2 into RCX (same pattern as SHL/ADDS).
+            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s1 = RAX, s2 = RCX;
             int d;
             if (inst.dest == inst.src1 && inst.dest != 0) {
