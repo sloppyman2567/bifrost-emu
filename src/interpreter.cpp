@@ -790,11 +790,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             v = ((v & 0xFF00FF00ULL) >> 8) | ((v & 0x00FF00FFULL) << 8);
                         break;
                     case InstClass::REV32:
-                        if (width == 64)
-                            v = ((v & 0xFFFF0000FFFF0000ULL) >> 16) |
-                                ((v & 0x0000FFFF0000FFFFULL) << 16);
-                        else
-                            v = ((v & 0xFFFF0000ULL) >> 16) | ((v & 0x0000FFFFULL) << 16);
+                        // REV32: reverse bytes within each 32-bit word.
+                        // 64-bit: apply bswap32 to both halves.
+                        // 32-bit: just bswap32 (though REV32 is typically 64-bit only).
+                        if (width == 64) {
+                            uint32_t lo = static_cast<uint32_t>(v);
+                            uint32_t hi = static_cast<uint32_t>(v >> 32);
+                            v = (static_cast<uint64_t>(__builtin_bswap32(hi)) << 32) |
+                                static_cast<uint64_t>(__builtin_bswap32(lo));
+                        } else {
+                            v = __builtin_bswap32(static_cast<uint32_t>(v));
+                        }
                         break;
                     case InstClass::REV:
                         v = (width == 64) ? __builtin_bswap64(v)

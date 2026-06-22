@@ -1582,15 +1582,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::REV64: {
-            // BSWAP clobbers RAX. Same eviction logic as CLZ.
-            if (vreg_home_[inst.src1] == RAX) {
-                reg_vreg_[RAX] = -1;
-                vreg_home_[inst.src1] = -1;
-                vreg_dirty_[inst.src1] = false;
+            // Force src1 into RAX (properly evicts old RAX occupant).
+            force_vreg_to_reg(inst.src1, RAX);
+            if (inst.width == 32) {
+                // 32-bit REV: use bswap eax (no REX.W) which only swaps
+                // the low 4 bytes and zero-extends to 64 bits.
+                // Encoding: 0F C8 (for RAX).
+                emit_byte(0x0F); emit_byte(0xC8);
             } else {
-                load_vreg(RAX, inst.src1);
+                // 64-bit REV: bswap rax (REX.W 0F C8).
+                emit_bswap_reg(RAX);
             }
-            emit_bswap_reg(RAX);
             store_vreg(inst.dest, RAX);
             return false;
         }

@@ -700,7 +700,10 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     switch (d.dp_opcode) {
                         case 0:  d.cls = InstClass::RBIT;  return true;
                         case 1:  d.cls = InstClass::REV16; return true;
-                        case 2:  d.cls = InstClass::REV32; return true;
+                        // opcode=2: REV (32-bit) when sf=0, REV32 (64-bit) when sf=1.
+                        // REV32 reverses bytes within each 32-bit word of a 64-bit reg.
+                        case 2:  d.cls = d.sf ? InstClass::REV32 : InstClass::REV; return true;
+                        // opcode=3: REV (64-bit only). UNALLOCATED when sf=0.
                         case 3:  d.cls = InstClass::REV;   return true;
                         case 4:  d.cls = InstClass::CLZ;   return true;
                         case 5:  d.cls = InstClass::CLS;   return true;

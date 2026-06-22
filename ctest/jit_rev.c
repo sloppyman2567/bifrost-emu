@@ -180,10 +180,9 @@ int main(void) {
     /* Verify specific known values (skip the bswap-in-comparison pattern
      * because the JIT's block-splitter hangs on it). */
     CHECK(out_buf[0] == 0x44332211u, "bswap_loop_first");
-    /* bswap32(0xDDEEFF00) = 0xFF00DDEE (bytes are reversed:
-     * 0xDD,0xEE,0xFF,0x00 → 0x00,0xFF,0xEE,0xDD → as LE uint32 = 0xFF00DDEE) */
-    CHECK(out_buf[3] == 0xFF00DDEEu, "bswap_loop_fourth");
-    CHECK(out_buf[7] == 0x32107654u, "bswap_loop_last");
+    /* bswap32(0xDDEEFF00) = 0x00FFEEDD (bytes reversed: DD,EE,FF,00 → 00,FF,EE,DD) */
+    CHECK(out_buf[3] == 0x00FFEEDDu, "bswap_loop_fourth");
+    CHECK(out_buf[7] == 0x10325476u, "bswap_loop_last");
 
     /* ── Count leading zeros in a loop (used by sparse bitmap ops) ── */
     /* Use values that fit in a 16-bit MOVZ + shift encoding to avoid
