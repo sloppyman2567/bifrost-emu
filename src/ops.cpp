@@ -539,13 +539,13 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::FP_I2F: {
                 bool is_unsigned = (inst.imm == 1);
                 if (inst.width == 1) {
-                    double r = is_unsigned ? (double)(uint64_t)vregs[inst.src1]
-                                          : (double)(int64_t)vregs[inst.src1];
+                    double r = is_unsigned ? static_cast<double>(static_cast<uint64_t>(vregs[inst.src1]))
+                                          : static_cast<double>(static_cast<int64_t>(vregs[inst.src1]));
                     cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
                     cpu.v_hi[inst.dest] = 0;
                 } else {
-                    float r = is_unsigned ? (float)(uint32_t)vregs[inst.src1]
-                                         : (float)(int32_t)vregs[inst.src1];
+                    float r = is_unsigned ? static_cast<float>(static_cast<uint32_t>(vregs[inst.src1]))
+                                         : static_cast<float>(static_cast<int32_t>(vregs[inst.src1]));
                     uint32_t tr; memcpy(&tr, &r, 4);
                     cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
                 }

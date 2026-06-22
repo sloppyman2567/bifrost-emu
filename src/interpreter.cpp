@@ -161,7 +161,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
             case InstClass::CBZ:
             case InstClass::CBNZ: {
-                uint64_t v = d.sf ? cpu.regs[d.rt] : (uint32_t)cpu.regs[d.rt];
+                uint64_t v = d.sf ? cpu.regs[d.rt] : static_cast<uint32_t>(cpu.regs[d.rt]);
                 bool is_zero = (v == 0);
                 bool taken = (d.cls == InstClass::CBZ) ? is_zero : !is_zero;
                 if (taken) next_pc = cpu.pc + d.imm;
@@ -321,10 +321,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         cpu.tpidrro_el0 = v; return;                    // TPIDRRO_EL0
                     }
                     if (crn == 4 && crm == 4 && op2 == 0) {
-                        cpu.fpcr = (uint32_t)v; return;                 // FPCR
+                        cpu.fpcr = static_cast<uint32_t>(v); return;                 // FPCR
                     }
                     if (crn == 4 && crm == 4 && op2 == 1) {
-                        cpu.fpsr = (uint32_t)v; return;                 // FPSR
+                        cpu.fpsr = static_cast<uint32_t>(v); return;                 // FPSR
                     }
                     // Other EL0-accessible sysregs we don't model: NOP.
                     return;
@@ -361,11 +361,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 int shift = hw * 16;
                 uint64_t v;
                 if (d.cls == InstClass::MOVN) {
-                    v = ~((uint64_t)imm16 << shift);
+                    v = ~(static_cast<uint64_t>(imm16) << shift);
                     if (!d.sf) v &= 0xFFFFFFFF;
                     if (d.rd != 31) cpu.regs[d.rd] = v;
                 } else if (d.cls == InstClass::MOVZ) {
-                    v = (uint64_t)imm16 << shift;
+                    v = static_cast<uint64_t>(imm16) << shift;
                     if (!d.sf) v &= 0xFFFFFFFF;
                     if (d.rd != 31) cpu.regs[d.rd] = v;
                 } else { // MOVK
@@ -374,7 +374,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         : (0xFFFFULL << shift) & 0xFFFFFFFFULL;
                     uint64_t cur = cpu.regs[d.rd];
                     if (!d.sf) cur &= 0xFFFFFFFF;
-                    v = (cur & ~mask) | ((uint64_t)imm16 << shift);
+                    v = (cur & ~mask) | (static_cast<uint64_t>(imm16) << shift);
                     if (!d.sf) v &= 0xFFFFFFFF;
                     if (d.rd != 31) cpu.regs[d.rd] = v;
                 }
@@ -393,7 +393,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool is_sub = d.is_sub;
                 uint64_t a = (d.rn == 31 && !set_flags) ? cpu.sp : cpu.regs[d.rn];
                 if (!d.sf && !(d.rn == 31 && !set_flags)) a &= 0xFFFFFFFF;
-                uint64_t b = (uint64_t)imm12 << (sh ? 12 : 0);
+                uint64_t b = static_cast<uint64_t>(imm12) << (sh ? 12 : 0);
                 uint64_t res;
                 if (is_sub) res = set_sub_flags(cpu, a, b, width, set_flags);
                 else        res = set_add_flags(cpu, a, b, 0, width, set_flags);
@@ -591,7 +591,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (!d.sf) { rn &= 0xFFFFFFFF; rm &= 0xFFFFFFFF; }
                 __uint128_t combined = ((__uint128_t)rn << width) | rm;
                 __uint128_t shifted = combined >> immr;
-                uint64_t v = (uint64_t)shifted & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
+                uint64_t v = static_cast<uint64_t>(shifted) & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
                 if (!d.sf) v &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = v;
                 return;
@@ -653,8 +653,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (!d.sf) b &= 0xFFFFFFFF;
                     switch (d.shift_type) {
                         case 0: b = b << d.shift; break;
-                        case 1: b = (width == 64) ? (b >> d.shift) : ((uint32_t)b >> d.shift); break;
-                        case 2: b = ((int64_t)b) >> d.shift; break;
+                        case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
+                        case 2: b = (static_cast<int64_t>(b)) >> d.shift; break;
                         case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
                     }
                 }
@@ -682,8 +682,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (!d.sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
                 switch (d.shift_type) {
                     case 0: b = b << d.shift; break;
-                    case 1: b = (width == 64) ? (b >> d.shift) : ((uint32_t)b >> d.shift); break;
-                    case 2: b = ((int64_t)b) >> d.shift; break;
+                    case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
+                    case 2: b = (static_cast<int64_t>(b)) >> d.shift; break;
                     case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
                 }
                 if (!d.sf) b &= 0xFFFFFFFF;
@@ -798,18 +798,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         break;
                     case InstClass::REV:
                         v = (width == 64) ? __builtin_bswap64(v)
-                                          : __builtin_bswap32((uint32_t)v);
+                                          : __builtin_bswap32(static_cast<uint32_t>(v));
                         break;
                     case InstClass::CLZ:
                         if (v == 0) v = width;
                         else v = (width == 64) ? __builtin_clzll(v)
-                                               : __builtin_clz((uint32_t)v);
+                                               : __builtin_clz(static_cast<uint32_t>(v));
                         break;
                     case InstClass::CLS:
                         if (width == 64)
                             v = (v >> 63) ? __builtin_clzll(~v) : __builtin_clzll(v);
                         else
-                            v = (v >> 31) ? __builtin_clz((uint32_t)~v) : __builtin_clz((uint32_t)v);
+                            v = (v >> 31) ? __builtin_clz(static_cast<uint32_t>(~v)) : __builtin_clz(static_cast<uint32_t>(v));
                         break;
                     default: break;
                 }
@@ -833,26 +833,26 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 switch (d.cls) {
                     case InstClass::UDIV:
                         if (b != 0)
-                            res = (width == 64) ? a / b : (uint32_t)a / (uint32_t)b;
+                            res = (width == 64) ? a / b : static_cast<uint32_t>(a) / static_cast<uint32_t>(b);
                         break;
                     case InstClass::SDIV:
                         if (b != 0)
-                            res = (width == 64) ? (uint64_t)((int64_t)a / (int64_t)b)
-                                                : (uint64_t)((int32_t)a / (int32_t)b);
+                            res = (width == 64) ? static_cast<uint64_t>(static_cast<int64_t>(a) / static_cast<int64_t>(b))
+                                                : static_cast<uint64_t>(static_cast<int32_t>(a) / static_cast<int32_t>(b));
                         break;
                     case InstClass::LSL:
-                        res = (width == 64) ? (a << (b & 63)) : ((uint32_t)a << (b & 31));
+                        res = (width == 64) ? (a << (b & 63)) : (static_cast<uint32_t>(a) << (b & 31));
                         break;
                     case InstClass::LSR:
-                        res = (width == 64) ? (a >> (b & 63)) : ((uint32_t)a >> (b & 31));
+                        res = (width == 64) ? (a >> (b & 63)) : (static_cast<uint32_t>(a) >> (b & 31));
                         break;
                     case InstClass::ASR:
-                        res = (width == 64) ? (uint64_t)((int64_t)a >> (b & 63))
-                                            : (uint64_t)((int32_t)a >> (b & 31));
+                        res = (width == 64) ? static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63))
+                                            : static_cast<uint64_t>(static_cast<int32_t>(a) >> (b & 31));
                         break;
                     case InstClass::ROR:
                         res = (width == 64) ? ror64(a, b & 63)
-                                            : (uint32_t)ror64(a, b & 31);
+                                            : static_cast<uint32_t>(ror64(a, b & 31));
                         break;
                     default: break;
                 }
@@ -878,37 +878,37 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t res = 0;
                 switch (d.cls) {
                     case InstClass::MADD:
-                        res = (width == 64) ? (a * b) : ((uint32_t)a * (uint32_t)b);
+                        res = (width == 64) ? (a * b) : (static_cast<uint32_t>(a) * static_cast<uint32_t>(b));
                         res = c + res;
                         break;
                     case InstClass::MSUB:
-                        res = (width == 64) ? (a * b) : ((uint32_t)a * (uint32_t)b);
+                        res = (width == 64) ? (a * b) : (static_cast<uint32_t>(a) * static_cast<uint32_t>(b));
                         res = c - res;
                         break;
                     case InstClass::SMADDL:
-                        res = (uint64_t)((int64_t)(int32_t)a * (int64_t)(int32_t)b);
+                        res = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(a)) * static_cast<int64_t>(static_cast<int32_t>(b)));
                         res = c + res;
                         break;
                     case InstClass::SMSUBL:
-                        res = (uint64_t)((int64_t)(int32_t)a * (int64_t)(int32_t)b);
+                        res = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(a)) * static_cast<int64_t>(static_cast<int32_t>(b)));
                         res = c - res;
                         break;
                     case InstClass::UMADDL:
-                        res = (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;
+                        res = static_cast<uint64_t>(static_cast<uint32_t>(a)) * static_cast<uint64_t>(static_cast<uint32_t>(b));
                         res = c + res;
                         break;
                     case InstClass::UMSUBL:
-                        res = (uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b;
+                        res = static_cast<uint64_t>(static_cast<uint32_t>(a)) * static_cast<uint64_t>(static_cast<uint32_t>(b));
                         res = c - res;
                         break;
                     case InstClass::UMULH: {
                         unsigned __int128 prod = (unsigned __int128)a * (unsigned __int128)b;
-                        res = (uint64_t)(prod >> 64);
+                        res = static_cast<uint64_t>(prod >> 64);
                         break;
                     }
                     case InstClass::SMULH: {
-                        unsigned __int128 prod = (unsigned __int128)((int64_t)a * (int64_t)b);
-                        res = (uint64_t)(prod >> 64);
+                        unsigned __int128 prod = (unsigned __int128)(static_cast<int64_t>(a) * static_cast<int64_t>(b));
+                        res = static_cast<uint64_t>(prod >> 64);
                         break;
                     }
                     default: break;
@@ -1076,13 +1076,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     case 0x2: newv = (a ^ b) & mask; break;            // LDEOR
                     case 0x3: newv = (a | b) & mask; break;            // LDSET
                     case 0x4: { // SMAX
-                        int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                        int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                        int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
                         newv = (sa > sb ? sa : sb) & mask; break;
                     }
                     case 0x5: { // SMIN
-                        int64_t sa = (int64_t)(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
-                        int64_t sb = (int64_t)(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                        int64_t sa = static_cast<int64_t>(a << (64 - width_bytes*8)) >> (64 - width_bytes*8);
+                        int64_t sb = static_cast<int64_t>(b << (64 - width_bytes*8)) >> (64 - width_bytes*8);
                         newv = (sa < sb ? sa : sb) & mask; break;
                     }
                     case 0x6: newv = (a > b ? a : b) & mask; break;    // UMAX
@@ -1105,7 +1105,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     bool is_q = (opc & 2) && size == 0;
                     int nbytes = is_q ? 16 : (1 << size);
                     uint64_t scale = is_q ? 4 : size;
-                    uint64_t addr = base + ((uint64_t)imm12 << scale);
+                    uint64_t addr = base + (static_cast<uint64_t>(imm12) << scale);
                     if (d.is_load) {
                         uint64_t lo = 0, hi = 0;
                         mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
@@ -1399,9 +1399,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
                     uint64_t src = cpu.regs[rn];
-                    if (esize == 1) ((uint8_t*)&cpu.v_lo[rd])[idx] = src & 0xFF;
-                    else if (esize == 2) ((uint16_t*)&cpu.v_lo[rd])[idx] = src & 0xFFFF;
-                    else if (esize == 4) ((uint32_t*)&cpu.v_lo[rd])[idx] = src & 0xFFFFFFFF;
+                    if (esize == 1) reinterpret_cast<uint8_t*>(&cpu.v_lo[rd])[idx] = src & 0xFF;
+                    else if (esize == 2) reinterpret_cast<uint16_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFF;
+                    else if (esize == 4) reinterpret_cast<uint32_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFFFFFF;
                     else if (esize == 8) {
                         if (idx == 0) cpu.v_lo[rd] = src;
                         else if (idx == 1) cpu.v_hi[rd] = src;
@@ -1526,15 +1526,15 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t val = (index == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
                         if (rd != 31) cpu.regs[rd] = val;
                     } else if (esize == 4) {
-                        uint32_t* v = (uint32_t*)&cpu.v_lo[rn];
+                        uint32_t* v = reinterpret_cast<uint32_t*>(&cpu.v_lo[rn]);
                         uint64_t val = v[index];
                         if (rd != 31) cpu.regs[rd] = val;
                     } else if (esize == 2) {
-                        uint16_t* v = (uint16_t*)&cpu.v_lo[rn];
+                        uint16_t* v = reinterpret_cast<uint16_t*>(&cpu.v_lo[rn]);
                         uint64_t val = v[index];
                         if (rd != 31) cpu.regs[rd] = val;
                     } else {  // esize == 1
-                        uint8_t* v = (uint8_t*)&cpu.v_lo[rn];
+                        uint8_t* v = reinterpret_cast<uint8_t*>(&cpu.v_lo[rn]);
                         uint64_t val = v[index];
                         if (rd != 31) cpu.regs[rd] = val;
                     }
@@ -1681,7 +1681,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                     uint8_t msl = (op >> 13) & 3;
                     uint64_t val = 0;
-                    for (int i = 0; i < 8; i++) val |= ((uint64_t)imm8) << (i * 8);
+                    for (int i = 0; i < 8; i++) val |= (static_cast<uint64_t>(imm8)) << (i * 8);
                     val <<= (8 * msl);
                     cpu.v_lo[rd] = val;
                     if (Q) cpu.v_hi[rd] = val;
@@ -1697,7 +1697,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (cmode == 0xE) {
                         // cmode=0xE: broadcast imm8 to all bytes
                         uint64_t val = 0;
-                        for (int i = 0; i < 8; i++) val |= ((uint64_t)imm8) << (i * 8);
+                        for (int i = 0; i < 8; i++) val |= (static_cast<uint64_t>(imm8)) << (i * 8);
                         cpu.v_lo[rd] = val;
                         if (Q) cpu.v_hi[rd] = val;
                         else cpu.v_hi[rd] = 0;
@@ -1864,9 +1864,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if ((op & 0xBF20FC00) == 0x0E20D400) {
                         // FADD (vector) — fadd v0.4s, v1.4s, v2.4s
                         if (size == 0) { // 4S (32-bit float)
-                            float* fn = (float*)&cpu.v_lo[rn];
-                            float* fm = (float*)&cpu.v_lo[rm];
-                            float* fd = (float*)&cpu.v_lo[rd];
+                            float* fn = reinterpret_cast<float*>(&cpu.v_lo[rn]);
+                            float* fm = reinterpret_cast<float*>(&cpu.v_lo[rm]);
+                            float* fd = reinterpret_cast<float*>(&cpu.v_lo[rd]);
                             float fn_hi[2], fm_hi[2], fd_hi[2];
                             if (Q) {
                                 memcpy(fn_hi, &cpu.v_hi[rn], 8);
@@ -1919,7 +1919,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     double d; memcpy(&d, &bits, 8); return d;
                 };
                 auto read_fp_s = [&](int r) -> float {
-                    uint32_t bits = (uint32_t)cpu.v_lo[r];
+                    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[r]);
                     float f; memcpy(&f, &bits, 4); return f;
                 };
                 auto write_fp_d = [&](int r, double d) {
@@ -1962,28 +1962,28 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 auto f2h = [&](float f) -> uint16_t {
                     uint32_t fbits; memcpy(&fbits, &f, 4);
                     uint32_t sign = (fbits >> 31) & 1;
-                    int32_t  exp  = (int32_t)((fbits >> 23) & 0xFF) - 127 + 15;
+                    int32_t  exp  = static_cast<int32_t>((fbits >> 23) & 0xFF) - 127 + 15;
                     uint32_t mant = (fbits & 0x7FFFFF) >> 13;  // top 10 bits
                     if (exp <= 0) {
                         // Denormal or zero
                         if (exp < -10) {
                             // Underflow to zero
-                            return (uint16_t)(sign << 15);
+                            return static_cast<uint16_t>(sign << 15);
                         }
                         // Subnormal: implicit leading 1 + exp adjustment
                         mant |= 0x400;  // add implicit leading bit
                         mant >>= (1 - exp);
-                        return (uint16_t)((sign << 15) | mant);
+                        return static_cast<uint16_t>((sign << 15) | mant);
                     } else if (exp >= 0x1F) {
                         // Overflow to Inf
-                        return (uint16_t)((sign << 15) | (0x1F << 10));
+                        return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
                     }
-                    return (uint16_t)((sign << 15) | (exp << 10) | mant);
+                    return static_cast<uint16_t>((sign << 15) | (exp << 10) | mant);
                 };
                 auto d2h = [&](double d) -> uint16_t {
                     // Reuse f2h after downcasting to float — small precision loss
                     // but adequate for the printf hex-float path that uses FCVT H.
-                    return f2h((float)d);
+                    return f2h(static_cast<float>(d));
                 };
 
                 // FMOV (general ↔ FP, 64-bit)
@@ -2027,8 +2027,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                                       | (imm6 << 48);
                         cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
                     } else if (ftype == 0) {  // single precision (ftype=00 → S)
-                        uint32_t rep_b = (uint32_t)(b * 0x1Fu);  // Replicate(b, 5)
-                        uint32_t bits = (uint32_t)((sign << 31)
+                        uint32_t rep_b = static_cast<uint32_t>(b * 0x1Fu);  // Replicate(b, 5)
+                        uint32_t bits = static_cast<uint32_t>((sign << 31)
                                       | (not_b << 30)
                                       | (rep_b << 25)
                                       | (imm6 << 19));
@@ -2039,8 +2039,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         // standard half→single conversion of the immediate value.
                         // For the immediate, VFPExpandImm with N=16 gives a 16-bit
                         // half value; we then convert that to single precision.
-                        uint16_t rep_b = (uint16_t)(b * 0x3u);   // Replicate(b, 2)
-                        uint16_t hbits = (uint16_t)((sign << 15)
+                        uint16_t rep_b = static_cast<uint16_t>(b * 0x3u);   // Replicate(b, 2)
+                        uint16_t hbits = static_cast<uint16_t>((sign << 15)
                                       | (not_b << 14)
                                       | (rep_b << 12)
                                       | (imm6 << 6));
@@ -2051,19 +2051,19 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint32_t sbits;
                         if (sexp == 0) {
                             // Denormal/zero — normalize to single
-                            if (smant == 0) sbits = (uint32_t)sign << 31;
+                            if (smant == 0) sbits = static_cast<uint32_t>(sign) << 31;
                             else {
                                 int e = -1;
                                 while (!(smant & 0x400)) { smant <<= 1; e--; }
                                 smant &= 0x3FF;
-                                sbits = ((uint32_t)sign << 31)
-                                      | (((uint32_t)(127 + e - 14)) << 23)
+                                sbits = (static_cast<uint32_t>(sign) << 31)
+                                      | ((static_cast<uint32_t>(127 + e - 14)) << 23)
                                       | (smant << 13);
                             }
                         } else if (sexp == 0x1F) {
-                            sbits = ((uint32_t)sign << 31) | (0xFFu << 23) | (smant << 13);
+                            sbits = (static_cast<uint32_t>(sign) << 31) | (0xFFu << 23) | (smant << 13);
                         } else {
-                            sbits = ((uint32_t)sign << 31)
+                            sbits = (static_cast<uint32_t>(sign) << 31)
                                   | ((sexp - 15 + 127) << 23)
                                   | (smant << 13);
                         }
@@ -2171,49 +2171,49 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // rmode: 0=N, 1=P, 2=M, 3=Z, 4=A
                     auto round_d = [&](double v) -> int64_t {
                         switch (rmode) {
-                            case 0: return (int64_t)std::llrint(v);   // N
-                            case 1: return (int64_t)std::ceil(v);     // P
-                            case 2: return (int64_t)std::floor(v);    // M
-                            case 3: return (int64_t)std::trunc(v);    // Z
-                            default: return (int64_t)std::llrint(v);  // A
+                            case 0: return static_cast<int64_t>(std::llrint(v));   // N
+                            case 1: return static_cast<int64_t>(std::ceil(v));     // P
+                            case 2: return static_cast<int64_t>(std::floor(v));    // M
+                            case 3: return static_cast<int64_t>(std::trunc(v));    // Z
+                            default: return static_cast<int64_t>(std::llrint(v));  // A
                         }
                     };
                     auto round_s = [&](float v) -> int64_t {
                         switch (rmode) {
-                            case 0: return (int64_t)std::llrintf(v);
-                            case 1: return (int64_t)std::ceilf(v);
-                            case 2: return (int64_t)std::floorf(v);
-                            case 3: return (int64_t)std::truncf(v);
-                            default: return (int64_t)std::llrintf(v);
+                            case 0: return static_cast<int64_t>(std::llrintf(v));
+                            case 1: return static_cast<int64_t>(std::ceilf(v));
+                            case 2: return static_cast<int64_t>(std::floorf(v));
+                            case 3: return static_cast<int64_t>(std::truncf(v));
+                            default: return static_cast<int64_t>(std::llrintf(v));
                         }
                     };
                     if (ftype) {
                         double a = read_fp_d(rn);
                         if (is_unsigned) {
-                            uint64_t v = (a < 0) ? 0 : (uint64_t)round_d(a);
-                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                            uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_d(a));
+                            cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                         } else {
                             int64_t v = round_d(a);
-                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                            cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     } else {
                         float a = read_fp_s(rn);
                         if (is_unsigned) {
-                            uint64_t v = (a < 0) ? 0 : (uint64_t)round_s(a);
-                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                            uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_s(a));
+                            cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                         } else {
                             int64_t v = round_s(a);
-                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                            cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     }
                     return;
                 }
                 // FCVT (between FP precisions)
                 if ((op & 0xFFFFFC00) == 0x1E624000) { // FCVT Sd, Dn
-                    write_fp_s(rd, (float)read_fp_d(rn)); return;
+                    write_fp_s(rd, static_cast<float>(read_fp_d(rn))); return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn
-                    write_fp_d(rd, (double)read_fp_s(rn)); return;
+                    write_fp_d(rd, static_cast<double>(read_fp_s(rn))); return;
                 }
                 // FCVT H — half-precision conversions. We don't model 16-bit FP
                 // natively, but we can route H↔S via host __gnu_f2h_ieee / __gnu_h2f_ieee
@@ -2234,14 +2234,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E634000) { // FCVT Sn, Hn (H → S)
-                    uint16_t hbits = (uint16_t)(cpu.v_lo[rn] & 0xFFFF);
+                    uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
                     float f = h2f(hbits);
                     write_fp_s(rd, f);
                     return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E224000) { // FCVT Dd, Hn (H → D)
-                    uint16_t hbits = (uint16_t)(cpu.v_lo[rn] & 0xFFFF);
-                    double d = (double)h2f(hbits);
+                    uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
+                    double d = static_cast<double>(h2f(hbits));
                     write_fp_d(rd, d);
                     return;
                 }
@@ -2296,20 +2296,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (ftype) {
                         double a = read_fp_d(rn);
                         if (is_unsigned) {
-                            uint64_t v = (a < 0) ? 0 : (uint64_t)a;
-                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                            uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
+                            cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                         } else {
-                            int64_t v = (int64_t)a;
-                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                            int64_t v = static_cast<int64_t>(a);
+                            cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     } else {
                         float a = read_fp_s(rn);
                         if (is_unsigned) {
-                            uint64_t v = (a < 0) ? 0 : (uint64_t)a;
-                            cpu.regs[rd] = is_64bit ? v : (uint32_t)v;
+                            uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
+                            cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                         } else {
-                            int64_t v = (int64_t)a;
-                            cpu.regs[rd] = is_64bit ? (uint64_t)v : (uint32_t)(int32_t)v;
+                            int64_t v = static_cast<int64_t>(a);
+                            cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     }
                     return;
@@ -2320,19 +2320,19 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     bool is_64bit = sf_val;
                     if (ftype) {
                         if (is_unsigned) {
-                            uint64_t v = is_64bit ? cpu.regs[rn] : (uint32_t)cpu.regs[rn];
-                            write_fp_d(rd, (double)v);
+                            uint64_t v = is_64bit ? cpu.regs[rn] : static_cast<uint32_t>(cpu.regs[rn]);
+                            write_fp_d(rd, static_cast<double>(v));
                         } else {
-                            int64_t v = is_64bit ? (int64_t)cpu.regs[rn] : (int32_t)cpu.regs[rn];
-                            write_fp_d(rd, (double)v);
+                            int64_t v = is_64bit ? static_cast<int64_t>(cpu.regs[rn]) : static_cast<int32_t>(cpu.regs[rn]);
+                            write_fp_d(rd, static_cast<double>(v));
                         }
                     } else {
                         if (is_unsigned) {
-                            uint64_t v = is_64bit ? cpu.regs[rn] : (uint32_t)cpu.regs[rn];
-                            write_fp_s(rd, (float)v);
+                            uint64_t v = is_64bit ? cpu.regs[rn] : static_cast<uint32_t>(cpu.regs[rn]);
+                            write_fp_s(rd, static_cast<float>(v));
                         } else {
-                            int64_t v = is_64bit ? (int64_t)cpu.regs[rn] : (int32_t)cpu.regs[rn];
-                            write_fp_s(rd, (float)v);
+                            int64_t v = is_64bit ? static_cast<int64_t>(cpu.regs[rn]) : static_cast<int32_t>(cpu.regs[rn]);
+                            write_fp_s(rd, static_cast<float>(v));
                         }
                     }
                     return;

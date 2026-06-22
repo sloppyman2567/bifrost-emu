@@ -73,7 +73,7 @@ public:
     // Query the framebuffer dimensions.
     uint32_t width()  const { return width_; }
     uint32_t height() const { return height_; }
-    size_t   size()   const { return (size_t)width_ * height_ * 4; }
+    size_t   size()   const { return static_cast<size_t>(width_) * height_ * 4; }
     int      fd()     const { return fb_fd_; }
     bool     ready()  const { return fb_fd_ >= 0; }
 

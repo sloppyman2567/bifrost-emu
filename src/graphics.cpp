@@ -292,14 +292,14 @@ bool GraphicsBackend::dump_to_ppm(const std::string& path) const {
     // Framebuffer is 32-bit BGRA. PPM is 24-bit RGB. We drop alpha
     // and swap B/R on the fly. We use a per-row buffer to amortize
     // the fwrite calls.
-    const uint8_t* src = (const uint8_t*)fb_data_;
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(fb_data_);
     std::string row;
-    row.resize((size_t)width_ * 3);
+    row.resize(static_cast<size_t>(width_) * 3);
     for (uint32_t y = 0; y < height_; y++) {
-        const uint8_t* srow = src + (size_t)y * width_ * 4;
+        const uint8_t* srow = src + static_cast<size_t>(y) * width_ * 4;
         for (uint32_t x = 0; x < width_; x++) {
-            const uint8_t* px = srow + (size_t)x * 4;
-            uint8_t* out = (uint8_t*)row.data() + (size_t)x * 3;
+            const uint8_t* px = srow + static_cast<size_t>(x) * 4;
+            uint8_t* out = reinterpret_cast<uint8_t*>(row.data()) + static_cast<size_t>(x) * 3;
             out[0] = px[2];  // R (fb is BGRA)
             out[1] = px[1];  // G
             out[2] = px[0];  // B
@@ -387,7 +387,7 @@ void GraphicsBackend::refresh() {
     // Headless refresh: dump to PPM if the framebuffer has any
     // non-zero pixel (avoids creating empty PPM files for programs
     // that never wrote to the fb).
-    const uint8_t* p = (const uint8_t*)fb_data_;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(fb_data_);
     size_t n = size();
     bool any_pixel = false;
     for (size_t i = 0; i < n; i += 64) {  // sample every 64th byte

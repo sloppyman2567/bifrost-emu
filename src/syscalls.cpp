@@ -26,7 +26,7 @@ static std::string read_path(Memory& mem, uint64_t addr) {
         uint8_t c = 0;
         try { c = mem.load<uint8_t>(addr + off); } catch (...) { break; }
         if (c == 0) break;
-        s.push_back((char)c);
+        s.push_back(static_cast<char>(c));
     }
     return s;
 }
@@ -85,7 +85,7 @@ void Emulator::syscall(CPU& cpu) {
             }
             std::vector<uint8_t> path_bytes(off);
             mem_.read(a1, path_bytes.data(), off);
-            std::string path_str((const char*)path_bytes.data(), off);
+            std::string path_str(reinterpret_cast<const char*>(path_bytes.data()), off);
 
             // ── VFS: virtual files ──────────────────────────────────
             // Intercept specific paths and serve synthetic content.
@@ -300,7 +300,7 @@ void Emulator::syscall(CPU& cpu) {
                 ssize_t n = ::write((int)a0, tmp.data(), len);
                 if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
                 total += n;
-                if ((size_t)n < len) break;
+                if (static_cast<size_t>(n) < len) break;
             }
             ret_host(total);
             return;
@@ -318,7 +318,7 @@ void Emulator::syscall(CPU& cpu) {
                 if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
-                if ((size_t)n < len) break;
+                if (static_cast<size_t>(n) < len) break;
             }
             ret_host(total);
             return;
@@ -343,7 +343,7 @@ void Emulator::syscall(CPU& cpu) {
                 if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
-                if ((size_t)n < len) break;
+                if (static_cast<size_t>(n) < len) break;
             }
             ::lseek((int)a0, saved, SEEK_SET);
             ret_host(total);
@@ -357,11 +357,11 @@ void Emulator::syscall(CPU& cpu) {
             // uid32, gid32, pad, rdev64, size64, blksize64, blocks64, atime, atime_nsec,
             // mtime, mtime_nsec, ctime, ctime_nsec
             uint8_t buf[128] = {0};
-            uint64_t* p = (uint64_t*)buf;
+            uint64_t* p = reinterpret_cast<uint64_t*>(buf);
             p[0] = st.st_dev;
             p[1] = st.st_ino;
-            ((uint32_t*)&p[2])[0] = st.st_mode;
-            ((uint32_t*)&p[2])[1] = st.st_nlink;
+            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
+            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
             p[3] = st.st_uid | ((uint64_t)st.st_gid << 32);
             p[4] = 0;
             p[5] = st.st_rdev;
@@ -1104,11 +1104,11 @@ void Emulator::syscall(CPU& cpu) {
             //   size64, blksize64, blocks64, atime, atime_nsec,
             //   mtime, mtime_nsec, ctime, ctime_nsec
             uint8_t buf[128] = {0};
-            uint64_t* p = (uint64_t*)buf;
+            uint64_t* p = reinterpret_cast<uint64_t*>(buf);
             p[0] = st.st_dev;
             p[1] = st.st_ino;
-            ((uint32_t*)&p[2])[0] = st.st_mode;
-            ((uint32_t*)&p[2])[1] = st.st_nlink;
+            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
+            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
             p[3] = st.st_uid | ((uint64_t)st.st_gid << 32);
             p[4] = 0;
             p[5] = st.st_rdev;
@@ -1140,7 +1140,7 @@ void Emulator::syscall(CPU& cpu) {
                 }
                 std::vector<uint8_t> path_bytes(off);
                 if (off > 0) mem_.read(a1, path_bytes.data(), off);
-                std::string path_str((const char*)path_bytes.data(), off);
+                std::string path_str(reinterpret_cast<const char*>(path_bytes.data()), off);
                 if (path_str == "/proc/self/exe") {
                     if (a3 > 0 && elf_path_.size() < a3) {
                         mem_.write(a2, elf_path_.data(), elf_path_.size() + 1);
@@ -1154,7 +1154,7 @@ void Emulator::syscall(CPU& cpu) {
                 char buf[4096];
                 ssize_t n = ::readlinkat((int)a0, path_str.c_str(), buf, sizeof(buf));
                 if (n < 0) { ret_host((uint64_t)(int64_t)-errno); return; }
-                if ((size_t)n > a3) n = a3;
+                if (static_cast<size_t>(n) > a3) n = a3;
                 mem_.write(a2, buf, n);
                 ret_host(n);
                 return;
@@ -1480,7 +1480,7 @@ void Emulator::syscall(CPU& cpu) {
             // the default case. Document in CHANGELOG.
             off_t off = 0;
             if (a2) off = (off_t)mem_.load<uint64_t>(a2);
-            ssize_t r = ::sendfile((int)a0, (int)a1, a2 ? &off : nullptr, (size_t)a3);
+            ssize_t r = ::sendfile(static_cast<int>(a0), static_cast<int>(a1), a2 ? &off : nullptr, static_cast<size_t>(a3));
             if (a2 && r >= 0) mem_.store<uint64_t>(a2, (uint64_t)off);
             ret_host(r);
             return;

@@ -216,7 +216,7 @@ public:
             memcpy(direct_window_ + addr, src, n);
             return;
         }
-        const uint8_t* p = (const uint8_t*)src;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(src);
         uint64_t cur = addr;
         size_t remaining = n;
         while (remaining > 0) {
@@ -954,7 +954,7 @@ public:
         fseek(f, 0, SEEK_SET);
         if (sz <= 0) { fclose(f); throw EmuError("empty or invalid ELF"); }
         std::vector<uint8_t> data(sz);
-        if (fread(data.data(), 1, sz, f) != (size_t)sz) {
+        if (fread(data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
             fclose(f); throw EmuError("short read on " + path);
         }
         fclose(f);

@@ -88,7 +88,7 @@ FrostJIT::FrostJIT() {
     void* p = mmap(nullptr, CODE_BUF_SIZE,
                    PROT_READ | PROT_WRITE | PROT_EXEC,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p != MAP_FAILED) code_buf_ = (uint8_t*)p;
+    if (p != MAP_FAILED) code_buf_ = static_cast<uint8_t*>(p);
 }
 
 FrostJIT::~FrostJIT() {
@@ -1005,7 +1005,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // Set args: RDI = emu, RSI = cpu.
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, CPU_REG);
-    emit_call_abs((void*)&jit_interp_step);
+    emit_call_abs(&jit_interp_step);
     emit_byte(0x9D);     // popfq
     emit_pop(RAX);       // restore RAX
     emit_pop(WIN_REG);   // restore WIN_REG
@@ -1067,7 +1067,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     emit_mov_reg(RSI, dst);
     emit_mov_imm32(RDX, w);
     emit_byte(0x9C); // pushfq (alignment)
-    emit_call_abs((void*)&jit_load_mem_slow);
+    emit_call_abs(&jit_load_mem_slow);
     emit_byte(0x9D); // popfq
     emit_add_rsp_imm8(8);
     emit_pop(WIN_REG); // restore R10
@@ -1143,7 +1143,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
     emit_mov_imm32(RCX, w);        // rcx = width
     emit_byte(0x9C); // pushfq (alignment)
-    emit_call_abs((void*)&jit_store_mem_slow);
+    emit_call_abs(&jit_store_mem_slow);
     emit_byte(0x9D); // popfq
     emit_add_rsp_imm8(8);
     emit_pop(WIN_REG);             // restore R10
@@ -1269,7 +1269,7 @@ void FrostJIT::patch_pending_back_edges(uint64_t target_pc) {
             int32_t rel = (int32_t)(target_body - (code_buf_ + be.patch_off + 6));
             memcpy(code_buf_ + be.patch_off + 2, &rel, 4);
             if (dbg) fprintf(stderr, "[BACKEDGE]   patched jcc at 0x%zx → rel=0x%x (target_body=%p)\n",
-                             be.patch_off, (unsigned)rel, (void*)target_body);
+                             be.patch_off, static_cast<unsigned>(rel), static_cast<const void*>(target_body));
         } else {
             // jmp rel32: E9 rel32 (5 bytes). rel32 at be.patch_off + 1.
             if (code_buf_[be.patch_off] != 0xE9) {
@@ -1280,7 +1280,7 @@ void FrostJIT::patch_pending_back_edges(uint64_t target_pc) {
             int32_t rel = (int32_t)(target_body - (code_buf_ + be.patch_off + 5));
             memcpy(code_buf_ + be.patch_off + 1, &rel, 4);
             if (dbg) fprintf(stderr, "[BACKEDGE]   patched jmp at 0x%zx → rel=0x%x\n",
-                             be.patch_off, (unsigned)rel);
+                             be.patch_off, static_cast<unsigned>(rel));
         }
     }
     // Clear the pending list — they're all patched now.
@@ -1841,7 +1841,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             kill_vreg(inst.dest);
             {
                 int d = alloc_reg();
-                int rd = (int)inst.imm;
+                int rd = static_cast<int>(inst.imm);
                 emit_load_arm(d, rd);
                 set_vreg_reg(inst.dest, d);
             }
@@ -2167,10 +2167,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
             // Store to v_lo[dest] = CPU_REG + V_LO_OFF + dest*8
-            int32_t vlo_off = V_LO_OFF + (int)inst.dest * 8;
+            int32_t vlo_off = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, vlo_off, RAX);
             // Store 0 to v_hi[dest]
-            int32_t vhi_off = V_HI_OFF + (int)inst.dest * 8;
+            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, vhi_off, RAX);
             // Drop RAX cache mapping (we overwrote it).
@@ -2185,7 +2185,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // dest = v_lo[src1]
             // src1 is the FP register index (0-31), dest is the vreg.
             int d = alloc_reg();
-            int32_t vlo_off = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t vlo_off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_load(d, CPU_REG, vlo_off);
             set_vreg_reg(inst.dest, d);
             return false;
@@ -2194,7 +2194,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // v_hi[dest] = src1
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
-            int32_t vhi_off = V_HI_OFF + (int)inst.dest * 8;
+            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, vhi_off, RAX);
             if (reg_vreg_[RAX] >= 0) {
                 vreg_home_[reg_vreg_[RAX]] = -1;
@@ -2206,7 +2206,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::FMOV_FHI2G: {
             // dest = v_hi[src1]
             int d = alloc_reg();
-            int32_t vhi_off = V_HI_OFF + (int)inst.src1 * 8;
+            int32_t vhi_off = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             emit_load(d, CPU_REG, vhi_off);
             set_vreg_reg(inst.dest, d);
             return false;
@@ -2227,13 +2227,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Load src1 into XMM0: movsd/movss xmm0, [rbx+off]
             // BUGFIX: no REX needed — SSE regs are 0-7, RBX is 3.
             // REX.R would extend xmm1 to xmm9, breaking the op.
-            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
             // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
-            int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
+            int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(1, CPU_REG, off2);
@@ -2265,14 +2265,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
 
             // Store result: movsd/movss [rbx+off], xmm0
-            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
 
             // Zero v_hi[dest]
             emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
 
@@ -2283,7 +2283,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flush_all_vregs();
             invalidate_all_vregs();
 
-            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
@@ -2308,13 +2308,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(modrm(3, 0, 0));
             }
 
-            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix);
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
 
             emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
 
@@ -2328,7 +2328,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_all_vregs();
 
             // Load FP value into XMM0
-            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
@@ -2370,13 +2370,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(0xC0);  // xmm0, rax
 
             // Store to v_lo[dest]
-            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
 
             // Zero v_hi[dest]
             emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
 
@@ -2410,14 +2410,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_all_vregs();
 
             // Load src1 into XMM0
-            int32_t off1 = V_LO_OFF + (int)inst.src1 * 8;
+            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
             // Load src2 into XMM1 (or zero for FCMP #0.0)
             if (inst.src2 != 0 || inst.imm != 0) {
-                int32_t off2 = V_LO_OFF + (int)inst.src2 * 8;
+                int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
             } else {
@@ -2472,10 +2472,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::FP_MOVI: {
             // v_lo[dest] = imm; v_hi[dest] = 0
             emit_mov_imm64(RAX, inst.imm);
-            int32_t off_d = V_LO_OFF + (int)inst.dest * 8;
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, off_d, RAX);
             emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + (int)inst.dest * 8, RAX);
+            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             if (reg_vreg_[RAX] >= 0) {
                 vreg_home_[reg_vreg_[RAX]] = -1;
                 reg_vreg_[RAX] = -1;
@@ -2492,14 +2492,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_all_vregs();
 
             // Load src1 lo/hi into XMM0
-            int32_t off1lo = V_LO_OFF + (int)inst.src1 * 8;
-            int32_t off1hi = V_HI_OFF + (int)inst.src1 * 8;
+            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             // movsd xmm0, [rbx+off1lo]
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1lo);
 
             // Load src2 lo into XMM1
-            int32_t off2lo = V_LO_OFF + (int)inst.src2 * 8;
+            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(1, CPU_REG, off2lo);
 
@@ -2516,7 +2516,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
 
             // Store lo result
-            int32_t offdlo = V_LO_OFF + (int)inst.dest * 8;
+            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, offdlo);
 
@@ -2524,13 +2524,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1hi);
             // Load src2 hi into XMM1
-            int32_t off2hi = V_HI_OFF + (int)inst.src2 * 8;
+            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(1, CPU_REG, off2hi);
             // Execute hi half
             emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
             // Store hi result
-            int32_t offdhi = V_HI_OFF + (int)inst.dest * 8;
+            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, offdhi);
             return false;
@@ -2541,8 +2541,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
-            int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
-            int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+            int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
             emit_store(CPU_REG, offhi, RAX);
             if (reg_vreg_[RAX] >= 0) {
@@ -2556,8 +2556,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::SIMD_MOVI: {
             // v_lo[dest] = v_hi[dest] = imm
             emit_mov_imm64(RAX, inst.imm);
-            int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
-            int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+            int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
             emit_store(CPU_REG, offhi, RAX);
             if (reg_vreg_[RAX] >= 0) {
@@ -2575,12 +2575,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // Load: write vregs to v_lo/v_hi
                 int slo = ensure_vreg(inst.src1, RAX);
                 if (slo != RAX) emit_mov_reg(RAX, slo);
-                int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+                int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offlo, RAX);
 
                 int shi = ensure_vreg(inst.src2, RAX);
                 if (shi != RAX) emit_mov_reg(RAX, shi);
-                int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+                int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offhi, RAX);
 
                 if (reg_vreg_[RAX] >= 0) {
@@ -2590,12 +2590,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             } else {
                 // Store: read v_lo/v_hi into vregs
                 int dlo = alloc_reg();
-                int32_t offlo = V_LO_OFF + (int)inst.dest * 8;
+                int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_load(dlo, CPU_REG, offlo);
                 set_vreg_reg(inst.src1, dlo);
 
                 int dhi = alloc_reg();
-                int32_t offhi = V_HI_OFF + (int)inst.dest * 8;
+                int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
                 emit_load(dhi, CPU_REG, offhi);
                 set_vreg_reg(inst.src2, dhi);
             }
@@ -2813,7 +2813,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             kill_vreg(inst.dest);
             {
                 int d = alloc_reg();
-                int rd = (int)inst.imm;
+                int rd = static_cast<int>(inst.imm);
                 emit_load_arm(d, rd);
                 set_vreg_reg(inst.dest, d);
             }
@@ -3012,7 +3012,7 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     // If it's already patched (0xE9), don't patch again.
     if (code_buf_[chain_patch_off] != 0xC3) return false;
     // Compute the relative displacement: target - (slot + 5).
-    int32_t rel = (int32_t)((const uint8_t*)target_fn
+    int32_t rel = static_cast<int32_t>(target_fn
                             - (code_buf_ + chain_patch_off + 5));
     // Overwrite the 5 bytes with `jmp rel32` (0xE9 + 4-byte displacement).
     code_buf_[chain_patch_off] = 0xE9;
@@ -3031,7 +3031,7 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     auto it = blocks_.find(entry.chain_target_pc);
     if (it == blocks_.end()) return;
     if (it->second.fn == nullptr) return;
-    if (patch_chain(entry.chain_patch_off, (const uint8_t*)it->second.fn)) {
+    if (patch_chain(entry.chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
         entry.chained = true;
         block_chains_patched++;
     }
@@ -3042,7 +3042,7 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     // equals target_pc (and isn't yet chained) gets its chain slot
     // patched to jump directly to the newly-translated block.
     if (blocks_.find(target_pc) == blocks_.end()) return;
-    const uint8_t* target_fn = (const uint8_t*)blocks_[target_pc].fn;
+    const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(blocks_[target_pc].fn);
     if (target_fn == nullptr) return;
     for (auto& kv : blocks_) {
         BlockEntry& entry = kv.second;
@@ -3334,7 +3334,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     if (dump_ir_) {
         size_t code_len = code_buf_used_ - block_start;
         fprintf(stderr, "  → %zu bytes of x86 code @ %p:\n    ",
-                code_len, (void*)(code_buf_ + block_start));
+                code_len, static_cast<void*>(code_buf_ + block_start));
         for (size_t i = 0; i < code_len; i++) {
             fprintf(stderr, "%02x ", code_buf_[block_start + i]);
             if ((i & 31) == 31 && i + 1 < code_len) fprintf(stderr, "\n    ");
