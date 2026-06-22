@@ -3125,12 +3125,20 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         // and we've already hit the limit, split the block here. ──
         // We check the instruction class to see if it's one that
         // routes to CALL_INTERP in the IR translator.
+        //
+        // (v1.4.0-alpha.5): refined after IR decomposition work:
+        //   - CSEL/CSINC/CSINV/CSNEG: decomposed in ir.cpp (CSEL is native)
+        //   - CCMP/CCMN: native in the JIT
+        //   - BFM: decomposed in ir.cpp (SHL+SHR+OR+AND are native)
+        //   - EXTR: decomposed in ir.cpp (SHL+SHR+OR are native)
+        //   - RBIT/REV16/REV32: decomposed in ir.cpp (SWAR via SHL+SHR+AND+OR)
+        //   - ADC_REG/SBC_REG (no-flags): decomposed in ir.cpp
+        //     (CSEL+NOT+ADD primitives are native)
+        //   - ADCS_REG/SBCS_REG: native IROp::ADCS/SBCS (no CALL_INTERP)
+        //   - LDP/STP GPR: decomposed to 2x LOAD_MEM/STORE_MEM (no CALL_INTERP)
+        //   - LDP/STP SIMD (is_vec=true): still CALL_INTERP — checked below
         bool will_call_interp = false;
         switch (d.cls) {
-            // CSEL/CSINC/CSINV/CSNEG are decomposed in ir.cpp (CSEL is native).
-            // CCMP/CCMN are native in the JIT.
-            // BFM is decomposed in ir.cpp (UBFM+AND+OR are native).
-            case InstClass::LDP: case InstClass::STP:
             case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
             case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
             case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
@@ -3148,12 +3156,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::FCVTZU: case InstClass::SCVTF:
             case InstClass::UCVTF: case InstClass::FCSEL:
             case InstClass::FRINT: case InstClass::FP_SCALAR:
-            // BFM is now decomposed in ir.cpp — no longer CALL_INTERP.
+            // BFM/EXTR are now decomposed in ir.cpp — no longer CALL_INTERP.
             case InstClass::MRS: case InstClass::MRS_SYS:
             case InstClass::MSR: case InstClass::MSR_SYS:
             case InstClass::UDIV: case InstClass::SDIV:
-            case InstClass::ADC_REG: case InstClass::ADCS_REG:
-            case InstClass::SBC_REG: case InstClass::SBCS_REG:
+            // CLS still routes to CALL_INTERP (decomposition requires
+            // multiple CSELs + edge-case handling for 0/~0).
+            case InstClass::CLS:
+            // SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH: still CALL_INTERP
+            // (long-multiply forms need 128-bit accumulation).
             case InstClass::SMADDL: case InstClass::SMSUBL:
             case InstClass::UMADDL: case InstClass::UMSUBL:
             case InstClass::SMULH: case InstClass::UMULH:
@@ -3163,14 +3174,18 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             case InstClass::LSE_ATOMIC:
                 will_call_interp = true;
                 break;
+            // LDP/STP: GPR form is decomposed to LOAD_MEM/STORE_MEM;
+            // only the SIMD (is_vec) form falls back to CALL_INTERP.
+            // The is_vec check below handles this.
             default:
                 break;
         }
-        // Also check for vector load/store (is_vec=true LDR/STR)
+        // Also check for vector load/store (is_vec=true LDR/STR/LDP/STP)
         if (!will_call_interp && d.is_vec &&
             (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
              d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_IMM ||
-             d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG)) {
+             d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG ||
+             d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
             will_call_interp = true;
         }
 

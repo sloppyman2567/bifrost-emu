@@ -485,10 +485,44 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, is_sub ? IROp::SBCS : IROp::ADCS, r, a, b,
                      0, 0, is_sub ? 1 : 0);
             } else {
-                // No-flag form: emulate as a + b + C (or a - b - 1 + C).
-                // We model this with a CALL_INTERP to keep the IR small.
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return false;
+                // No-flag ADC/SBC: decompose into CSEL + ADD (+ NOT for SBC).
+                //
+                // ARM semantics:
+                //   ADC: Rd = Rn + Rm + C
+                //   SBC: Rd = Rn - Rm - 1 + C = Rn + ~Rm + C
+                //
+                // We need the C flag as a 0/1 value. CSEL with cond=CS
+                // (carry set) gives us that:
+                //   c_val = CSEL(1, 0, CS)  →  c_val = (C==1) ? 1 : 0
+                //
+                // Then:
+                //   ADC:  Rd = ADD(ADD(Rn, Rm), c_val)
+                //   SBC:  Rd = ADD(ADD(Rn, NOT(Rm)), c_val)
+                //
+                // This is 4 IR ops (1 IMM, 1 CSEL, 1 NOT for SBC, 2 ADD)
+                // plus 1 IMM for the constant 0. It avoids CALL_INTERP
+                // which would invalidate the entire vreg cache and force
+                // a block split.
+                uint16_t one  = load_imm(block, 1);
+                uint16_t zero = load_imm(block, 0);
+                // cond=2 (CS = carry set), flags_op=0
+                uint16_t c_val = g_alloc.alloc();
+                emit(block, IROp::CSEL, c_val, one, zero, 0,
+                     2 /*CS*/, 0, 0, cur_pc);
+                uint16_t op1;
+                if (is_sub) {
+                    // op1 = Rn + ~Rm
+                    uint16_t not_b = g_alloc.alloc();
+                    emit(block, IROp::NOT, not_b, b);
+                    op1 = g_alloc.alloc();
+                    emit(block, IROp::ADD, op1, a, not_b);
+                } else {
+                    // op1 = Rn + Rm
+                    op1 = g_alloc.alloc();
+                    emit(block, IROp::ADD, op1, a, b);
+                }
+                // r = op1 + c_val
+                emit(block, IROp::ADD, r, op1, c_val);
             }
             if (d.rd != 31) {
                 r = zext_if_32bit(block, r, d.sf);
