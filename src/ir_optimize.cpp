@@ -490,13 +490,8 @@ void optimize_ir(IRBlock& block) {
                 // they only need dest invalidation — this allows the optimizer
                 // to keep caching other registers across these ops, improving
                 // code quality.
-                bool falls_back_to_interp =
-                    (inst.op == IROp::CSINC || inst.op == IROp::CSINV ||
-                     inst.op == IROp::CSNEG ||
-                     inst.op == IROp::CCMP || inst.op == IROp::BFM);
-                if (falls_back_to_interp) {
-                    arm_reg_cache.clear();
-                }
+                // BFM falls back to CALL_INTERP — must clear arm_reg_cache.
+                if (inst.op == IROp::BFM) arm_reg_cache.clear();
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);

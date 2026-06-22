@@ -343,6 +343,28 @@ void FrostJIT::patch_jcc_rel32(size_t off, int32_t rel) {
     memcpy(code_buf_+off+2, &rel, 4);
 }
 
+// rel8 jumps: jcc rel8 = 0x70+cc <rel8> (2 bytes), jmp rel8 = 0xEB <rel8> (2 bytes)
+size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
+    size_t off = code_buf_used_; emit_byte(0x70 + cc); emit_byte(0); return off;
+}
+void FrostJIT::patch_jcc_rel8(size_t off, int8_t rel) {
+    code_buf_[off+1] = (uint8_t)rel;
+}
+size_t FrostJIT::emit_jmp_rel8_placeholder() {
+    size_t off = code_buf_used_; emit_byte(0xEB); emit_byte(0); return off;
+}
+void FrostJIT::patch_jmp_rel8(size_t off, int8_t rel) {
+    code_buf_[off+1] = (uint8_t)rel;
+}
+
+// sub rsp, imm8 / add rsp, imm8 (REX.W 83 EC NN / REX.W 83 C4 NN)
+void FrostJIT::emit_sub_rsp_imm8(uint8_t n) {
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(n);
+}
+void FrostJIT::emit_add_rsp_imm8(uint8_t n) {
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(n);
+}
+
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
     if (ar >= 0 && ar <= 30) emit_load(xr, CPU_REG, REGS_OFF + 8*ar);
@@ -931,14 +953,14 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     //   pushfq → RSP%16 == 0  ✓
     // After call: popfq, add rsp 8, pop r10.
     emit_push(WIN_REG);  // save R10
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x08); // sub rsp, 8
+    emit_sub_rsp_imm8(8);
     emit_mov_reg(RDI, EMU_REG);
     emit_mov_reg(RSI, dst);
     emit_mov_imm32(RDX, w);
     emit_byte(0x9C); // pushfq (alignment)
     emit_call_abs((void*)&jit_load_mem_slow);
     emit_byte(0x9D); // popfq
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x08); // add rsp, 8
+    emit_add_rsp_imm8(8);
     emit_pop(WIN_REG); // restore R10
     // RAX now has the return value (the loaded data).
     if (dst != RAX) emit_mov_reg(dst, RAX);
@@ -1006,7 +1028,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_push(src_reg);            // save val (RCX)
     emit_push(RAX);                // save RAX
     emit_push(WIN_REG);            // save R10
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x08); // sub rsp, 8
+    emit_sub_rsp_imm8(8);
     emit_mov_reg(RDI, EMU_REG);    // rdi = emu
     emit_mov_reg(RSI, R8);         // rsi = addr (from R8)
     emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
@@ -1014,7 +1036,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_byte(0x9C); // pushfq (alignment)
     emit_call_abs((void*)&jit_store_mem_slow);
     emit_byte(0x9D); // popfq
-    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x08); // add rsp, 8
+    emit_add_rsp_imm8(8);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(RAX);                 // restore RAX
     emit_pop(src_reg);             // restore val (RCX)
@@ -1780,8 +1802,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG: {
-            // CSINC/CSINV/CSNEG: fall back to interpreter for now.
-            // Native codegen has subtle 32-bit extension issues.
+            // CSINC/CSINV/CSNEG: fall back to interpreter.
+            // Native codegen works for standalone cases but fails in
+            // certain multi-CSEL block contexts (sign_neg/sign_zero
+            // in jit_csel.elf). Root cause not yet diagnosed.
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
             {
@@ -1794,7 +1818,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::CSEL: {
-            // Native CSEL/CSINC/CSINV/CSNEG via cmovcc.
+            // Native CSEL/CSINC/CSINV/CSNEG via jcc+mov.
             //
             // Semantics:
             //   CSEL  Rd = cond ? Rn : Rm
@@ -1802,24 +1826,21 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             //   CSINV Rd = cond ? Rn : ~Rm
             //   CSNEG Rd = cond ? Rn : -Rm
             //
-            // Strategy (simple and correct):
-            //   1. Ensure flags are in host RFLAGS.
-            //      - If flags_in_host_: they're already there. Do NOT
-            //        materialize — the epilogue or next CALL_INTERP will.
-            //        cmovcc preserves flags, so flags_in_host_ stays true.
-            //      - If !flags_in_host_: flush+load from pstate.
-            //   2. Flush all vregs and invalidate (so RAX/RCX/RDX are free).
-            //   3. Load src1 → RAX, src2 → RCX.
-            //   4. For CSINC/CSINV/CSNEG: transform RCX (save/restore flags
-            //      since INC/NOT/NEG clobber RFLAGS).
+            // Strategy:
+            //   1. Ensure flags in host RFLAGS.
+            //   2. Flush all vregs (save/restore flags around flush).
+            //   3. Load src1 → RAX, src2 → RCX (with XZR special case).
+            //   4. For CSINC/CSINV/CSNEG: transform RCX (pushfq/popfq
+            //      to preserve flags). For 32-bit ops, zero-extend RCX
+            //      after the transform.
             //   5. RDX = RAX (d = src1).
-            //   6. cmovcc RDX, RCX, inverse(cc) — if cond FALSE, RDX = RCX.
-            //   7. Store RDX to dest.
+            //   6. jcc skip (if cond TRUE, keep src1); else mov rdx, rcx.
+            //   7. For 32-bit ops, zero-extend RDX.
+            //   8. Store RDX to dest.
             //
             // Carry polarity: arm_cond_to_x86() assumes SUB convention
             // (ARM C = NOT x86 CF). When flags came from ADD/TST
-            // (carry_is_direct), CS/CC need swapped mapping and HI/LS
-            // need cmc. GE/LT/GT/LE don't use C, so default works.
+            // (carry_is_direct), CS/CC need swapped mapping, HI/LS need cmc.
 
             // Compute x86 cc (true when ARM cond is TRUE).
             uint8_t base = inst.cond & 0xE;
@@ -1828,10 +1849,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint8_t cc;
             if (carry_is_direct) {
                 switch (base) {
-                    case 0x2:  // CS/CC — after ADD, ARM CS↔x86 CF=1
-                        cc = (inst.cond & 1) ? 3 : 2;  // CC→JAE(3), CS→JB(2)
+                    case 0x2:  // CS/CC
+                        cc = (inst.cond & 1) ? 3 : 2;
                         break;
-                    case 0x8:  // HI/LS — no direct x86 JCC, use cmc + default
+                    case 0x8:  // HI/LS
                         need_cmc = true;
                         cc = arm_cond_to_x86(inst.cond);
                         break;
@@ -1843,23 +1864,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 cc = arm_cond_to_x86(inst.cond);
             }
 
-            // Ensure flags in host. If not, load from pstate (flushes first).
+            // Ensure flags in host.
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
                 invalidate_all_vregs();
             }
-            // Now flags are in host RFLAGS. Flush all vregs so RAX/RCX/RDX
-            // are free for our use. Save/restore flags around the flush
-            // to be absolutely sure they're preserved.
             emit_byte(0x9C);  // pushfq (save flags)
             flush_all_vregs();
             invalidate_all_vregs();
             emit_byte(0x9D);  // popfq (restore flags)
-            if (need_cmc) emit_byte(0xF5);  // cmc (invert CF for HI/LS)
+            if (need_cmc) emit_byte(0xF5);  // cmc
 
             // Load src1 → RAX, src2 → RCX.
-            // vreg 32 = XZR (always 0), needs special handling.
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
             else if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
             else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
@@ -1868,38 +1885,35 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
 
             // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
-            // Save/restore flags around the transform.
             if (inst.op != IROp::CSEL) {
-                emit_byte(0x9C);  // pushfq
+                emit_byte(0x9C);  // pushfq (save flags for jcc)
                 if (inst.op == IROp::CSINC) {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x01); // add rcx, 1
+                    // add rcx, 1
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x01);
                 } else if (inst.op == IROp::CSINV) {
                     emit_not_reg(RCX);
                 } else {  // CSNEG
                     emit_neg_reg(RCX);
                 }
-                emit_byte(0x9D);  // popfq
+                emit_byte(0x9D);  // popfq (restore flags for jcc)
             }
 
-            // RDX = RAX (d = src1, the "then" value).
+            // RDX = RAX (d = src1).
             emit_mov_reg(RDX, RAX);
-            // Use jcc + mov instead of cmovcc.
-            //   jcc skip      (if cond TRUE, skip the mov — keep src1)
-            //   mov rdx, rcx  (cond FALSE: rdx = src2)
-            // skip:
-            emit_byte(0x70 + cc);  // jcc rel8 (short jump)
-            emit_byte(0x03);       // skip 3 bytes (mov rdx, rcx = REX.W 89 CA = 3 bytes)
-            // mov rdx, rcx: REX.W 89 CA
+            // jcc skip (if cond TRUE, keep src1 in RDX).
+            // Use placeholder+patch instead of hardcoded offset.
+            size_t jcc_off = emit_jcc_rel8_placeholder(cc);
+            // mov rdx, rcx (cond FALSE: rdx = src2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);
+            // Patch jcc to skip over the 3-byte mov.
+            patch_jcc_rel8(jcc_off, 3);
 
             // Store RDX to dest.
             if (inst.dest <= 31) emit_store_arm(inst.dest, RDX);
             else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RDX); }
-            // Cache dest in RDX.
             vreg_home_[inst.dest] = RDX;
             reg_vreg_[RDX] = inst.dest;
             vreg_dirty_[inst.dest] = true;
-            // cmovcc preserves flags, so flags_in_host_ stays true.
             return false;
         }
 
@@ -2697,7 +2711,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::BFM: {
-            // BFM: fall back to interpreter (native codegen had issues).
+            // BFM: fall back to interpreter. The C helper had mask bugs.
             emit_call_interp(inst.arm_pc, false);
             return false;
         }
@@ -2872,9 +2886,75 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        case IROp::CCMP:
-            emit_call_interp(inst.arm_pc, false);
+        case IROp::CCMP: {
+            // CCMP/CCMN: if cond then set flags from (rn - rm) [CCMP]
+            //            or (rn + rm) [CCMN]; else set flags to imm nzcv.
+            // inst.width = nzcv field (4 bits), inst.cond = ARM cond,
+            // inst.flags_op = 1 for CCMP (sub), 0 for CCMN (add).
+            bool is_sub = (inst.flags_op == 1);
+            uint8_t nzcv = inst.width & 0xF;
+
+            // Compute x86 cc (true when ARM cond is TRUE).
+            uint8_t base = inst.cond & 0xE;
+            bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
+            bool need_cmc = false;
+            uint8_t cc;
+            if (carry_is_direct) {
+                switch (base) {
+                    case 0x2: cc = (inst.cond & 1) ? 3 : 2; break;
+                    case 0x8: need_cmc = true; cc = arm_cond_to_x86(inst.cond); break;
+                    default: cc = arm_cond_to_x86(inst.cond); break;
+                }
+            } else {
+                cc = arm_cond_to_x86(inst.cond);
+            }
+
+            // Ensure flags in host.
+            if (!flags_in_host_) {
+                flush_all_vregs();
+                emit_load_flags_from_pstate();
+                // Drop all cache mappings WITHOUT clearing flags_in_host_.
+                for (int v = 0; v <= max_vreg_; v++) {
+                    int r = vreg_home_[v];
+                    if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
+                }
+                flags_in_host_ = true;
+                flags_from_sub_ = false;
+            }
+            if (need_cmc) emit_byte(0xF5);
+
+            // Load src1 (rn) → RAX, src2 (rm) → RCX.
+            if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
+            else load_vreg(RAX, inst.src1);
+            if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
+            else load_vreg(RCX, inst.src2);
+
+            // jcc do_compare (if cond TRUE, do the compare)
+            size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
+            // --- else path: cond FALSE, set pstate = nzcv ---
+            uint32_t pstate_else = ((uint32_t)nzcv << 28);
+            if (is_sub) pstate_else |= (1U << 27);
+            emit_mov_imm32_zext(RDX, pstate_else);
+            emit_store32(CPU_REG, PSTATE_OFF, RDX);
+            // Jump to end.
+            size_t jmp_to_end = emit_jmp_rel32_placeholder();
+            // --- cond TRUE path: do the compare ---
+            size_t compare_off = code_buf_used_;
+            if (is_sub) emit_sub_reg(RAX, RCX);
+            else        emit_add_reg(RAX, RCX);
+            // Materialize flags to pstate.
+            emit_materialize_flags(is_sub);
+            size_t end_off = code_buf_used_;
+
+            // Patch jumps.
+            int32_t rel_compare = (int32_t)(compare_off - (jcc_to_compare + 6));
+            patch_jcc_rel32(jcc_to_compare, rel_compare);
+            int32_t rel_end = (int32_t)(end_off - (jmp_to_end + 5));
+            patch_jmp_rel32(jmp_to_end, rel_end);
+
+            flags_in_host_ = false;
             return false;
+        }
 
         default:
             emit_call_interp(inst.arm_pc, false);

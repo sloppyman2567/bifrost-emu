@@ -186,6 +186,14 @@ private:
     void patch_jmp_rel32(size_t off, int32_t rel);
     size_t emit_jcc_rel32_placeholder(uint8_t cc);
     void patch_jcc_rel32(size_t off, int32_t rel);
+    // rel8 jumps (short, ±127 bytes). Return offset of placeholder; patch later.
+    size_t emit_jcc_rel8_placeholder(uint8_t cc);
+    void patch_jcc_rel8(size_t off, int8_t rel);
+    size_t emit_jmp_rel8_placeholder();
+    void patch_jmp_rel8(size_t off, int8_t rel);
+    // Stack pointer adjustment (sub/add rsp, imm8).
+    void emit_sub_rsp_imm8(uint8_t n);
+    void emit_add_rsp_imm8(uint8_t n);
 
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
