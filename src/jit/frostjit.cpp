@@ -122,17 +122,21 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
 
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
+    // (v1.4.0-beta.1): flush ALL dirty vregs BEFORE materializing flags.
+    // The previous code called emit_materialize_flags FIRST, which
+    // clobbers RAX/RCX/RDX — if those held dirty vregs, their values
+    // were lost before flush_all_vregs could spill them. This caused
+    // state corruption in __multf3 (128-bit softfloat) blocks where
+    // a dirty vreg in RAX was silently dropped, producing wrong FP
+    // results (e.g. printf("%f", 3.14) → "2.000000").
+    flush_all_vregs();
     // Materialize host flags to pstate if valid.
     if (flags_in_host_) {
-        // (v1.4.0-alpha.5 bugfix): emit_materialize_flags clobbers
-        // RAX/RCX/RDX. We must invalidate their cache mappings AFTER
-        // the materialize, otherwise a subsequent ensure_vreg would
-        // return a stale (garbage) value. flush_caller_saved_vregs
-        // only evicts DIRTY vregs — non-dirty cached vregs in RAX/
-        // RCX/RDX get clobbered silently.
         emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
-        // Drop cache mappings for the clobbered registers.
+        // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
+        // cache mappings (values were already flushed above, so
+        // dirty vregs are safe — just drop the stale associations).
         for (int r : {RAX, RCX, RDX}) {
             int v = reg_vreg_[r];
             if (v >= 0) {
@@ -142,22 +146,10 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
             }
         }
     }
-    // (v1.4.0-alpha.5): only flush CALLER-SAVED dirty vregs. Callee-saved
-    // vregs (R12/R13/R15) are preserved by the C calling convention, so
-    // they survive the call without spilling. This is the key win: live
-    // values in callee-saved regs stay cached across interpreter calls.
-    // BUT: SP (vreg 31) and PC-related regs must be flushed to memory
-    // because the interpreter may read/modify them. Also, any arch reg
-    // that the interpreter instruction writes to must be invalidated
-    // after the call (handled by invalidate_caller_saved_vregs below,
-    // but SP needs special handling since it's at a different offset).
-    flush_all_vregs();  // must flush ALL dirty vregs — interp reads cpu.regs[]
-    // (v1.4.0-alpha.5 bugfix): SP (vreg 31) is special — the interpreter
-    // may modify it (stack ops, push/pop). If SP is cached in a caller-
-    // saved reg and dirty, flush_caller_saved_vregs already wrote it to
-    // cpu.sp. But if SP is cached in a CALLEE-SAVED reg (R12/R13/R15),
-    // it won't be flushed, and after the call the cached value is stale
-    // (the interpreter might have changed cpu.sp). Force-flush SP here.
+    // (v1.4.0-beta.1): flush_all_vregs already called above (before
+    // materialize_flags). All dirty vregs are now in cpu.regs[]/stack.
+    // SP (vreg 31) may have been flushed above, but force-check here
+    // in case the materialize introduced a new dirty SP (it shouldn't).
     if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
         evict_vreg(31);
     }
@@ -433,7 +425,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     // alloc_reg_for handed us RCX, but we cannot overwrite
                     // it (src2 lives there). Spill RCX's mapping for dest
                     // and grab a different reg.
-                    vreg_home_[inst.dest] = -1;
+                    // (v1.4.0-beta.1): use kill_vreg to properly clear
+                    // both vreg_home_ and vreg_dirty_ (alloc_reg_for set
+                    // dest dirty, so we must clear that too).
+                    kill_vreg(inst.dest);
                     reg_vreg_[RCX] = inst.src2;
                     vreg_home_[inst.src2] = RCX;
                     // Find any free reg != RCX, evicting if needed.
@@ -690,18 +685,18 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // value, and drop RAX's cache mapping so flush_all_vregs
             // can't miswrite it.
             clobber_flags();  // materialize any pending flags first
-            // Evict dirty vreg in RAX, then drop the mapping.
+            // (v1.4.0-beta.1): use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
-                if (vreg_dirty_[reg_vreg_[RAX]]) evict_vreg(reg_vreg_[RAX]);
-                else { vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1; }
+                drop_vreg(reg_vreg_[RAX]);
             }
             int s1 = ensure_vreg(inst.src1, RAX);
             if (s1 != RAX) emit_mov_reg(RAX, s1);
             // RAX now holds the test value. Drop RAX's cache mapping so
             // the upcoming `mov eax, <pc>` doesn't corrupt any vreg.
+            // (v1.4.0-beta.1): use drop_vreg — if RAX holds a dirty vreg,
+            // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
+                drop_vreg(reg_vreg_[RAX]);
             }
             // Save RFLAGS (in case any pending flags weren't materialized)
             emit_pushfq();
@@ -769,15 +764,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // (v1.4.0-alpha.5 fix): same RAX eviction as BRCOND_ZERO —
             // see the comment there for the rationale.
             clobber_flags();
+            // (v1.4.0-beta.1): use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
-                if (vreg_dirty_[reg_vreg_[RAX]]) evict_vreg(reg_vreg_[RAX]);
-                else { vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1; }
+                drop_vreg(reg_vreg_[RAX]);
             }
             int s1 = ensure_vreg(inst.src1, RAX);
             if (s1 != RAX) emit_mov_reg(RAX, s1);
+            // (v1.4.0-beta.1): use drop_vreg — if RAX holds a dirty vreg,
+            // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
-                vreg_home_[reg_vreg_[RAX]] = -1;
-                reg_vreg_[RAX] = -1;
+                drop_vreg(reg_vreg_[RAX]);
             }
             emit_pushfq();
             // bt rax, imm8  — 0x48 0x0F 0xBA /5 r/m, imm8
