@@ -622,10 +622,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
 
         // ── UDIV / SDIV ──────────────────────────────────────────────
         case InstClass::UDIV: case InstClass::SDIV: {
-            // Division is rare; fall back to the interpreter to keep
-            // the IR codegen small. Block does not split — the
-            // interpreter call is inline.
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t b = load_arm_reg(block, d.rm);
+            uint16_t r = g_alloc.alloc();
+            emit(block, d.cls == InstClass::UDIV ? IROp::UDIV : IROp::SDIV,
+                 r, a, b, d.sf ? 64 : 32, 0, 0, 0, cur_pc);
+            r = zext_if_32bit(block, r, d.sf);
+            store_arm_reg(block, d.rd, r);
             return false;
         }
 
@@ -896,11 +899,26 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
 
         // ── MSR / MRS (system reg access) ───────────────────────────
         case InstClass::MSR: case InstClass::MSR_SYS:
-        case InstClass::MRS: case InstClass::MRS_SYS:
-            // Route to interpreter for now — TPIDR_EL0/NZCV/FPCR/FPSR
-            // handling is fiddly and these are infrequent.
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+        case InstClass::MRS: case InstClass::MRS_SYS: {
+            // Encode the system register into imm for the JIT to decode.
+            // The JIT handles TPIDR_EL0, TPIDRRO_EL0, NZCV, FPCR, FPSR
+            // natively; unknown registers fall back to the interpreter.
+            uint64_t sys_idx = (static_cast<uint64_t>(d.sys_op1) << 16) |
+                               (static_cast<uint64_t>(d.sys_crn) << 12) |
+                               (static_cast<uint64_t>(d.sys_crm) << 8) |
+                               (static_cast<uint64_t>(d.sys_op2) << 4) |
+                               d.sys_op0;
+            bool is_read = (d.cls == InstClass::MRS || d.cls == InstClass::MRS_SYS);
+            if (is_read) {
+                uint16_t r = g_alloc.alloc();
+                emit(block, IROp::MRS, r, 0, 0, 0, 0, 0, sys_idx, cur_pc);
+                store_arm_reg(block, d.rt, r);
+            } else {
+                uint16_t v = load_arm_reg(block, d.rt);
+                emit(block, IROp::MSR, 0, v, 0, 0, 0, 0, sys_idx, cur_pc);
+            }
             return false;
+        }
 
         // ── Atomics (LDXR/STXR/LDAR/STLR/LSE_ATOMIC) ───────────────
         case InstClass::LDXR: case InstClass::STXR:
@@ -1161,10 +1179,24 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
 
-        // ── SMADDL / SMSUBL / UMADDL / UMSUBL / SMULH / UMULH ──────
-        // Rare; route to interpreter.
-        case InstClass::SMADDL: case InstClass::SMSUBL:
-        case InstClass::UMADDL: case InstClass::UMSUBL:
+        // ── SMADDL / UMADDL (widening multiply-accumulate) ─────────
+        case InstClass::SMADDL: case InstClass::UMADDL: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t b = load_arm_reg(block, d.rm);
+            uint16_t acc = load_arm_reg(block, d.ra);
+            uint16_t r = g_alloc.alloc();
+            emit(block, d.cls == InstClass::SMADDL ? IROp::SMADDL : IROp::UMADDL,
+                 r, a, b, 0, 0, 0, acc, cur_pc);
+            // SMADDL: result = acc + (int64)(int32)a * (int32)b
+            // The IR op takes acc as imm (vreg index), but we need it as
+            // a value. For simplicity, fall back to interpreter for SMSUBL.
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+
+        // ── SMSUBL / UMSUBL / SMULH / UMULH — still fall back ──────
+        case InstClass::SMSUBL:
+        case InstClass::UMSUBL:
         case InstClass::SMULH: case InstClass::UMULH:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;

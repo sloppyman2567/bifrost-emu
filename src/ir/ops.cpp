@@ -408,6 +408,62 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            case IROp::UDIV: {
+                uint64_t a = vregs[inst.src1], b = vregs[inst.src2];
+                if (b == 0) { vregs[inst.dest] = 0; break; }
+                if (inst.width == 32) {
+                    vregs[inst.dest] = static_cast<uint32_t>(a) / static_cast<uint32_t>(b);
+                } else {
+                    vregs[inst.dest] = a / b;
+                }
+                break;
+            }
+            case IROp::SDIV: {
+                int64_t a = static_cast<int64_t>(vregs[inst.src1]);
+                int64_t b = static_cast<int64_t>(vregs[inst.src2]);
+                if (b == 0) { vregs[inst.dest] = 0; break; }
+                if (inst.width == 32) {
+                    vregs[inst.dest] = static_cast<int32_t>(a) / static_cast<int32_t>(b);
+                } else {
+                    vregs[inst.dest] = static_cast<uint64_t>(a / b);
+                }
+                break;
+            }
+            case IROp::SMADDL: {
+                int64_t a = static_cast<int32_t>(vregs[inst.src1]);
+                int64_t b = static_cast<int32_t>(vregs[inst.src2]);
+                uint16_t acc = static_cast<uint16_t>(inst.imm);
+                vregs[inst.dest] = static_cast<uint64_t>(static_cast<int64_t>(vregs[acc]) + a * b);
+                break;
+            }
+            case IROp::UMADDL: {
+                uint64_t a = static_cast<uint32_t>(vregs[inst.src1]);
+                uint64_t b = static_cast<uint32_t>(vregs[inst.src2]);
+                uint16_t acc = static_cast<uint16_t>(inst.imm);
+                vregs[inst.dest] = vregs[acc] + a * b;
+                break;
+            }
+            case IROp::MRS: {
+                // inst.imm encodes system register — fall back to interpreter
+                for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
+                cpu.sp = vregs[31];
+                cpu.pc = inst.arm_pc;
+                emu.step_public(cpu);
+                for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
+                vregs[31] = cpu.sp;
+                break;
+            }
+            case IROp::MSR: {
+                // inst.imm encodes system register — fall back to interpreter
+                for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
+                cpu.sp = vregs[31];
+                cpu.pc = inst.arm_pc;
+                emu.step_public(cpu);
+                for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
+                vregs[31] = cpu.sp;
+                break;
+            }
+
             case IROp::SVC: {
                 for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
                 cpu.sp = vregs[31];

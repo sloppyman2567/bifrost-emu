@@ -1620,6 +1620,223 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
+        // ── UDIV / SDIV — native x86 div/idiv ────────────────────────
+        case IROp::UDIV:
+        case IROp::SDIV: {
+            // ARM64 UDIV/SDIV by zero returns 0 (no exception).
+            // x86 div/idiv by zero raises SIGFPE. We emit a test+jz
+            // to skip the div and set result=0 when divisor is zero.
+            clobber_flags();
+            flush_caller_saved_vregs();
+            for (int r : {RAX, RCX, RDX}) {
+                int v = reg_vreg_[r];
+                if (v >= 0) {
+                    if (vreg_dirty_[v]) evict_vreg(v);
+                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
+                }
+            }
+            load_vreg_to_reg(RAX, inst.src1);  // dividend
+            load_vreg_to_reg(RCX, inst.src2);  // divisor
+
+            // For 32-bit division, zero-extend EAX into RAX (clear upper 32).
+            // The dividend must be in EAX; if we loaded a 64-bit value,
+            // the upper bits would corrupt the 32-bit div.
+            if (inst.width == 32) {
+                // mov eax, eax (zero-extends to RAX on x86-64)
+                emit_byte(0x89); emit_byte(0xC0);
+                // mov ecx, ecx (zero-extends divisor)
+                emit_byte(0x89); emit_byte(0xC9);
+            }
+
+            // test rcx, rcx
+            emit_test_reg(RCX, RCX);
+            // jz zero_div (jump to xor eax,eax if divisor == 0)
+            size_t jz_patch = emit_jcc_rel32_placeholder(4);  // JE
+            // --- non-zero divisor path ---
+            if (inst.width == 32) {
+                // 32-bit division: use div/idiv on EAX.
+                // xor edx, edx (clear upper for unsigned) or cdq (sign-extend)
+                if (inst.op == IROp::UDIV) {
+                    emit_byte(0x31); emit_byte(0xD2);  // xor edx, edx
+                    emit_byte(0xF7); emit_byte(0xF1);  // div ecx
+                } else {
+                    emit_byte(0x99);                    // cdq
+                    emit_byte(0xF7); emit_byte(0xF9);  // idiv ecx
+                }
+            } else {
+                // 64-bit division
+                if (inst.op == IROp::UDIV) {
+                    emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2);  // xor rdx, rdx
+                    emit_byte(0x48); emit_byte(0xF7); emit_byte(0xF1);  // div rcx
+                } else {
+                    emit_byte(0x48); emit_byte(0x99);                    // cqo
+                    emit_byte(0x48); emit_byte(0xF7); emit_byte(0xF9);  // idiv rcx
+                }
+            }
+            // jmp past_zero
+            size_t jmp_patch = emit_jmp_rel32_placeholder();
+            // --- zero divisor path: result = 0 ---
+            size_t zero_off = code_buf_used_;
+            patch_jcc_rel32(jz_patch, static_cast<int32_t>(zero_off - (jz_patch + 6)));
+            emit_byte(0x48); emit_byte(0x31); emit_byte(0xC0);  // xor rax, rax
+            // --- past_zero ---
+            size_t past_off = code_buf_used_;
+            patch_jmp_rel32(jmp_patch, static_cast<int32_t>(past_off - (jmp_patch + 5)));
+
+            // For 32-bit results, writing to EAX zero-extends to RAX.
+            int d = alloc_reg_for(inst.dest, RAX);
+            if (d != RAX) emit_mov_reg(d, RAX);
+            set_vreg_reg(inst.dest, d);  // cache the result
+            return false;
+        }
+
+        // ── SMADDL / UMADDL — widening multiply-accumulate ──────────
+        case IROp::SMADDL:
+        case IROp::UMADDL: {
+            // SMADDL: dest = acc + (int64)(int32)src1 * (int64)(int32)src2
+            // UMADDL: dest = acc + (uint64)(uint32)src1 * (uint64)(uint32)src2
+            // x86: imul rax, rcx (64-bit multiply); add rax, acc
+            clobber_flags();
+            flush_caller_saved_vregs();
+            for (int r : {RAX, RCX, RDX}) {
+                int v = reg_vreg_[r];
+                if (v >= 0) {
+                    if (vreg_dirty_[v]) evict_vreg(v);
+                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
+                }
+            }
+            // Load src1 (32-bit, sign/zero-extended) into RAX
+            load_vreg_to_reg(RAX, inst.src1);
+            if (inst.op == IROp::SMADDL) {
+                // cdqe (sign-extend EAX into RAX)
+                emit_byte(0x48); emit_byte(0x98);
+            } else {
+                // mov eax, eax (zero-extend)
+                emit_byte(0x89); emit_byte(0xC0);
+            }
+            // Load src2 (32-bit, extended) into RCX
+            load_vreg_to_reg(RCX, inst.src2);
+            if (inst.op == IROp::SMADDL) {
+                // Sign-extend ECX into RCX (cdqe on RCX isn't directly
+                // available; use movsxd rcx, ecx instead).
+                // 48 63 c9 = movsxd rcx, ecx
+                emit_byte(0x48); emit_byte(0x63); emit_byte(0xC9);
+            } else {
+                // mov ecx, ecx (zext)
+                emit_byte(0x89); emit_byte(0xC9);
+            }
+            // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
+            emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
+            // Add accumulator (stored in inst.imm as a vreg index —
+            // but we encoded it as `acc` vreg. We need to load it.)
+            // Actually, the IR translator passed acc as `imm` field,
+            // which is the vreg index. Load it into RDX and add.
+            uint16_t acc_vreg = static_cast<uint16_t>(inst.imm);
+            load_vreg_to_reg(RDX, acc_vreg);
+            // add rax, rdx
+            emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);
+            int d = alloc_reg_for(inst.dest, RAX);
+            if (d != RAX) emit_mov_reg(d, RAX);
+            store_reg_to_vreg(inst.dest, d);
+            return false;
+        }
+
+        // ── MRS — read system register ───────────────────────────────
+        case IROp::MRS: {
+            // inst.imm encodes the system register (op1/crn/crm/op2/op0).
+            // We handle the common ones: TPIDR_EL0, TPIDRRO_EL0, NZCV, FPCR, FPSR.
+            // Everything else falls back to the interpreter.
+            uint64_t sys = inst.imm;
+            uint8_t op1 = (sys >> 16) & 0x7;
+            uint8_t crn = (sys >> 12) & 0xF;
+            uint8_t crm = (sys >> 8) & 0xF;
+            uint8_t op2 = (sys >> 4) & 0x7;
+            // System register encodings (op0=3 op1=3):
+            //   TPIDR_EL0:   crn=13 crm=0 op2=2  → cpu.tpidr_el0
+            //   TPIDRRO_EL0: crn=13 crm=0 op2=3  → cpu.tpidrro_el0
+            //   NZCV:        crn=4  crm=2 op2=0  → cpu.pstate (bits 31-28)
+            //   FPCR:        crn=4  crm=4 op2=0  → cpu.fpcr
+            //   FPSR:        crn=4  crm=4 op2=1  → cpu.fpsr
+            int d = alloc_reg_for(inst.dest, RAX);
+            int32_t off = -1;
+            bool is_nzcv = false;
+            if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
+                off = 808;  // TPIDR_EL0
+            } else if (op1 == 3 && crn == 13 && crm == 0 && op2 == 3) {
+                off = 816;  // TPIDRRO_EL0
+            } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
+                // NZCV — stored in pstate bits 31-28. Read pstate and mask.
+                is_nzcv = true;
+            } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
+                off = FPCR_OFF;  // FPCR
+            } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
+                off = FPSR_OFF;  // FPSR
+            }
+            if (is_nzcv) {
+                // Read pstate, shift NZCV bits (31-28) into position.
+                // pstate layout: N=31, Z=30, C=29, V=28.
+                // NZCV register value = (pstate >> 28) & 0xF, but the
+                // register puts them at bits 31-28, so just mask.
+                emit_load32(d, CPU_REG, PSTATE_OFF);
+                // and d, 0xF0000000
+                emit_byte(rex(true, false, false, d >= 8));
+                emit_byte(0x81); emit_byte(modrm(3, 4, d & 7));
+                emit_u32(0xF0000000);
+            } else if (off >= 0) {
+                emit_load(d, CPU_REG, off);
+            } else {
+                // Unknown system register — fall back to interpreter.
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            set_vreg_reg(inst.dest, d);
+            return false;
+        }
+
+        // ── MSR — write system register ──────────────────────────────
+        case IROp::MSR: {
+            uint64_t sys = inst.imm;
+            uint8_t op1 = (sys >> 16) & 0x7;
+            uint8_t crn = (sys >> 12) & 0xF;
+            uint8_t crm = (sys >> 8) & 0xF;
+            uint8_t op2 = (sys >> 4) & 0x7;
+            int s = ensure_vreg(inst.src1, RAX);
+            if (s != RAX) emit_mov_reg(RAX, s);
+            int32_t off = -1;
+            bool is_nzcv = false;
+            if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
+                off = 808;  // TPIDR_EL0
+            } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
+                // NZCV — write bits 31-28 of RAX into pstate bits 31-28.
+                is_nzcv = true;
+            } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
+                off = FPCR_OFF;
+            } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
+                off = FPSR_OFF;
+            }
+            if (is_nzcv) {
+                // Read current pstate, clear bits 31-28, OR in new NZCV.
+                // RCX = pstate & 0x0FFFFFFF
+                emit_load32(RCX, CPU_REG, PSTATE_OFF);
+                // and rcx, 0x0FFFFFFF
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xE1);
+                emit_u32(0x0FFFFFFF);
+                // and eax, 0xF0000000
+                emit_byte(0x25);  // and eax, imm32 (no REX needed for RAX)
+                emit_u32(0xF0000000);
+                // or rax, rcx
+                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8);
+                // store pstate
+                emit_store32(CPU_REG, PSTATE_OFF, RAX);
+                flags_in_host_ = false;  // flags changed externally
+            } else if (off >= 0) {
+                emit_store(CPU_REG, off, RAX);
+            } else {
+                emit_call_interp(inst.arm_pc, false);
+            }
+            return false;
+        }
+
         default:
             emit_call_interp(inst.arm_pc, false);
             return false;
@@ -1687,11 +1904,9 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::FCVTZU: case InstClass::SCVTF:
         case InstClass::UCVTF: case InstClass::FCSEL:
         case InstClass::FRINT: case InstClass::FP_SCALAR:
-        case InstClass::MRS: case InstClass::MRS_SYS:
-        case InstClass::MSR: case InstClass::MSR_SYS:
-        case InstClass::UDIV: case InstClass::SDIV:
-        case InstClass::SMADDL: case InstClass::SMSUBL:
-        case InstClass::UMADDL: case InstClass::UMSUBL:
+        // MRS/MSR, UDIV/SDIV, SMADDL/UMADDL now have native IR ops.
+        case InstClass::SMSUBL:
+        case InstClass::UMSUBL:
         case InstClass::SMULH: case InstClass::UMULH:
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:

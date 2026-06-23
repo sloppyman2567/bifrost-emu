@@ -123,6 +123,15 @@ enum class IROp : uint8_t {
                    // imm = 0 (FCMP), 1 (FCMPE); width = ftype
     FP_MOVI,       // v_lo[dest] = imm (decoded FP immediate); v_hi=0
                    // width = ftype (0=S, 1=D)
+    // Native division (x86 div/idiv)
+    UDIV,          // dest = src1 / src2 (unsigned, 64-bit)
+    SDIV,          // dest = src1 / src2 (signed, 64-bit)
+    // Native multiply-accumulate long (widening)
+    SMADDL,        // dest = (int64_t)(int32_t)src2 * (int32_t)src1 + src1_hi
+    UMADDL,        // dest = (uint64_t)(uint32_t)src2 * (uint32_t)src1 + src1_hi
+    // System register access (TPIDR_EL0, NZCV, FPCR, FPSR)
+    MRS,           // dest = system_reg[imm]  (imm = reg index)
+    MSR,           // system_reg[imm] = src1
 };
 
 // Condition codes (same encoding as ARM64 cond field).
