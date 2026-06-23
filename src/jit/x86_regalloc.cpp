@@ -28,7 +28,22 @@
 #include <cstring>
 
 namespace arm64emu {
+
+// Bounds-check helper: ensures vreg index is within the fixed-size arrays.
+// If a block exceeds MAX_VREGS, we'd have a buffer overflow. This assert
+// catches it at the earliest point (vreg allocation) instead of silently
+// corrupting memory.
+static inline void check_vreg_bounds(int v) {
+#ifndef NDEBUG
+    if (v < 0 || v >= 4096) {
+        fprintf(stderr, "[JIT REGALLOC BUG] vreg %d out of bounds (max 4096). "
+                "Block too long? Please report this.\n", v);
+    }
+#endif
+}
+
 int32_t FrostJIT::vreg_stack_slot(int v) {
+    check_vreg_bounds(v);
     if (vreg_slot_[v] != 0) return vreg_slot_[v];
     num_stack_slots_++;
     vreg_slot_[v] = -8 * num_stack_slots_;

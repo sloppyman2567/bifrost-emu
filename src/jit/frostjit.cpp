@@ -2074,8 +2074,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // ── Heuristic: skip JIT for CALL_INTERP-heavy blocks ──────────
     // The JIT's per-CALL_INTERP overhead (flush all vregs + push 2 regs +
     // call interpreter + pop 2 regs + reload) is ~20 instructions. For
-    // blocks with ANY CALL_INTERP, the pure interpreter is faster — it
+    // blocks where CALL_INTERP dominates (more than half the instructions
+    // are interpreter fallbacks), the pure interpreter is faster — it
     // skips the prologue/epilogue/dispatch entirely.
+    //
+    // (v1.4.0-beta.1): refined from "any CALL_INTERP → interp_only" to
+    // "CALL_INTERP-heavy → interp_only". The old heuristic was too
+    // aggressive — a block with 10 native ops and 1 CALL_INTERP would
+    // skip JIT entirely, losing the 10 native ops' speedup. Now we only
+    // fall back to interpreter when CALL_INTERP is the majority.
     //
     // This fixes the long-double multiply/divide hang: __multf3/__divtf3
     // are ~82-instruction soft-float routines split into ~20 tiny blocks
@@ -2085,7 +2092,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     //
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
-    if (call_interp_count > 0) {
+    if (call_interp_count > 0 && call_interp_count * 2 > instr_count) {
         BlockEntry entry;
         entry.fn = nullptr;
         entry.interp_only = true;
