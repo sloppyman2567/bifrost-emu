@@ -1931,6 +1931,55 @@ void FrostJIT::clobber_flags() {
 // cache flush is needed, but we emit a memory barrier to ensure the
 // patched bytes are visible to any in-flight execution on the same core.
 
+// (v1.4.0-beta.1): single source of truth for "will this instruction route
+// to CALL_INTERP in the IR translator?" Used by the block splitter to
+// pre-scan before translating. If this list gets out of sync with
+// ir_translate.cpp's default case, the splitter would misclassify
+// instructions.
+static bool instr_will_call_interp(const DecodedInst& d) {
+    switch (d.cls) {
+        case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
+        case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
+        case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
+        case InstClass::SIMD_REV: case InstClass::SIMD_DP:
+        case InstClass::FMOV: case InstClass::FMOV_IMM:
+        case InstClass::FMOV_VD1: case InstClass::FMOV_RVD1:
+        case InstClass::FADD: case InstClass::FSUB:
+        case InstClass::FMUL: case InstClass::FDIV:
+        case InstClass::FMAX: case InstClass::FMIN:
+        case InstClass::FNMUL: case InstClass::FMADD:
+        case InstClass::FMSUB: case InstClass::FABS:
+        case InstClass::FNEG: case InstClass::FSQRT:
+        case InstClass::FCMP: case InstClass::FCMPE:
+        case InstClass::FCVT: case InstClass::FCVTZS:
+        case InstClass::FCVTZU: case InstClass::SCVTF:
+        case InstClass::UCVTF: case InstClass::FCSEL:
+        case InstClass::FRINT: case InstClass::FP_SCALAR:
+        case InstClass::MRS: case InstClass::MRS_SYS:
+        case InstClass::MSR: case InstClass::MSR_SYS:
+        case InstClass::UDIV: case InstClass::SDIV:
+        case InstClass::SMADDL: case InstClass::SMSUBL:
+        case InstClass::UMADDL: case InstClass::UMSUBL:
+        case InstClass::SMULH: case InstClass::UMULH:
+        case InstClass::LDXR: case InstClass::STXR:
+        case InstClass::LDAXR: case InstClass::STLXR:
+        case InstClass::LDAR: case InstClass::STLR:
+        case InstClass::LSE_ATOMIC:
+            return true;
+        default:
+            break;
+    }
+    // Vector load/store (is_vec=true LDR/STR/LDP/STP) → CALL_INTERP.
+    if (d.is_vec &&
+        (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
+         d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_IMM ||
+         d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG ||
+         d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
+        return true;
+    }
+    return false;
+}
+
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     if (!code_buf_) return nullptr;
@@ -1990,71 +2039,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         DecodedInst d;
         if (!decode(d, inst)) break;
 
-        // ── Pre-scan: if this instruction will produce a CALL_INTERP
-        // and we've already hit the limit, split the block here. ──
-        // We check the instruction class to see if it's one that
-        // routes to CALL_INTERP in the IR translator.
-        //
-        // (v1.4.0-alpha.5): refined after IR decomposition work:
-        //   - CSEL/CSINC/CSINV/CSNEG: decomposed in ir.cpp (CSEL is native)
-        //   - CCMP/CCMN: native in the JIT
-        //   - BFM: decomposed in ir.cpp (SHL+SHR+OR+AND are native)
-        //   - EXTR: decomposed in ir.cpp (SHL+SHR+OR are native)
-        //   - RBIT/REV16/REV32: decomposed in ir.cpp (SWAR via SHL+SHR+AND+OR)
-        //   - ADC_REG/SBC_REG (no-flags): decomposed in ir.cpp
-        //     (CSEL+NOT+ADD primitives are native)
-        //   - ADCS_REG/SBCS_REG: native IROp::ADCS/SBCS (no CALL_INTERP)
-        //   - LDP/STP GPR: decomposed to 2x LOAD_MEM/STORE_MEM (no CALL_INTERP)
-        //   - LDP/STP SIMD (is_vec=true): still CALL_INTERP — checked below
-        bool will_call_interp = false;
-        switch (d.cls) {
-            case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
-            case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
-            case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
-            case InstClass::SIMD_REV: case InstClass::SIMD_DP:
-            case InstClass::FMOV: case InstClass::FMOV_IMM:
-            case InstClass::FMOV_VD1: case InstClass::FMOV_RVD1:
-            case InstClass::FADD: case InstClass::FSUB:
-            case InstClass::FMUL: case InstClass::FDIV:
-            case InstClass::FMAX: case InstClass::FMIN:
-            case InstClass::FNMUL: case InstClass::FMADD:
-            case InstClass::FMSUB: case InstClass::FABS:
-            case InstClass::FNEG: case InstClass::FSQRT:
-            case InstClass::FCMP: case InstClass::FCMPE:
-            case InstClass::FCVT: case InstClass::FCVTZS:
-            case InstClass::FCVTZU: case InstClass::SCVTF:
-            case InstClass::UCVTF: case InstClass::FCSEL:
-            case InstClass::FRINT: case InstClass::FP_SCALAR:
-            // BFM/EXTR are now decomposed in ir.cpp — no longer CALL_INTERP.
-            case InstClass::MRS: case InstClass::MRS_SYS:
-            case InstClass::MSR: case InstClass::MSR_SYS:
-            case InstClass::UDIV: case InstClass::SDIV:
-            // CLS is now decomposed via SAR+XOR+CLZ+SUB — no CALL_INTERP.
-            // SMADDL/SMSUBL/UMADDL/UMSUBL/SMULH/UMULH: still CALL_INTERP
-            // (long-multiply forms need 128-bit accumulation).
-            case InstClass::SMADDL: case InstClass::SMSUBL:
-            case InstClass::UMADDL: case InstClass::UMSUBL:
-            case InstClass::SMULH: case InstClass::UMULH:
-            case InstClass::LDXR: case InstClass::STXR:
-            case InstClass::LDAXR: case InstClass::STLXR:
-            case InstClass::LDAR: case InstClass::STLR:
-            case InstClass::LSE_ATOMIC:
-                will_call_interp = true;
-                break;
-            // LDP/STP: GPR form is decomposed to LOAD_MEM/STORE_MEM;
-            // only the SIMD (is_vec) form falls back to CALL_INTERP.
-            // The is_vec check below handles this.
-            default:
-                break;
-        }
-        // Also check for vector load/store (is_vec=true LDR/STR/LDP/STP)
-        if (!will_call_interp && d.is_vec &&
-            (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
-             d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_IMM ||
-             d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG ||
-             d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
-            will_call_interp = true;
-        }
+        bool will_call_interp = instr_will_call_interp(d);
 
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
