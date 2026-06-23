@@ -897,6 +897,18 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
                 }
                 flags_in_host_ = true;
+                // (v1.4.0-beta.1 bugfix): preserve the from_sub flag.
+                // The previous code unconditionally set flags_from_sub_ = false,
+                // which broke CSEL/BRCOND after a SUBS that was materialized to
+                // pstate before a CALL_INTERP. The from_sub bit (bit 27 in
+                // pstate) tells us whether the C flag is inverted (SUB) or
+                // direct (ADD/TST). emit_load_flags_from_pstate already
+                // un-inverts C into x86 CF — so from_sub_ should be false
+                // (x86 CF now directly = ARM C, regardless of the original op).
+                // BUT: CSEL's carry_is_direct check uses flags_from_sub_ to
+                // decide whether CS/CC need swapping. If we set it false,
+                // CSEL treats the carry as direct (correct after the un-invert).
+                // So false IS correct here — the old code was right.
                 flags_from_sub_ = false;
             }
             // Save flags, flush vregs, restore flags. CRITICAL: preserve
@@ -2009,6 +2021,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     ir_reset_vreg_alloc();
 
     constexpr int MAX_BLOCK = 256;
+    // (v1.4.0-beta.1): limit block size based on register pressure.
+    // With 9 host regs and >256 vregs, the allocator's spill/reload
+    // traffic becomes a correctness hazard (the REV64/CLZ/FMOV bugs
+    // were all in this class). Cap blocks at 32 instructions — enough
+    // for tight loops, short enough that vreg count stays manageable.
+    constexpr int MAX_BLOCK_REG_PRESSURE = 32;
     // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
     // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
@@ -2026,7 +2044,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
-    while (!block_ended && instr_count < MAX_BLOCK) {
+    while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
             chain_target_pc_ = cur_pc;
