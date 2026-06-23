@@ -140,7 +140,8 @@ bool Audio::dump_to_wav(const std::string& path) {
     fwrite(&fmt_size, 4, 1, f);
     uint16_t audio_format = 1;  // PCM
     fwrite(&audio_format, 2, 1, f);
-    fwrite(&channels_, 2, 1, f);
+    uint16_t channels_u16 = channels_;  // promote uint8_t → uint16_t
+    fwrite(&channels_u16, 2, 1, f);
     fwrite(&sample_rate_, 4, 1, f);
     fwrite(&byte_rate, 4, 1, f);
     fwrite(&block_align, 2, 1, f);
