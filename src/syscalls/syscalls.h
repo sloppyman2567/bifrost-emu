@@ -16,11 +16,29 @@
 #include "bifrost/types.hpp"
 
 #include <cstdint>
+#include <errno.h>
 
 namespace arm64emu {
 
 // Sentinel return value: this handler didn't recognize `num`.
 constexpr int64_t SYSCALL_NOT_HANDLED = INT64_MIN;
+
+// ── Syscall helper macros ─────────────────────────────────────────────
+// These reduce the 30+ duplicated `ret_host(static_cast<uint64_t>(static_cast<int64_t>(-X)))`
+// patterns across all syscall files. They make the code more readable and
+// maintainable.
+
+// Set the return value in cpu.regs[0] to a signed value.
+#define ret_host(val) do { cpu.regs[0] = static_cast<uint64_t>(val); } while(0)
+
+// Set the return value to -errno (the most common error pattern).
+#define ret_errno() do { ret_host(static_cast<int64_t>(-errno)); } while(0)
+
+// Set the return value to a specific negative error code.
+#define ret_err(code) do { ret_host(static_cast<int64_t>(-(code))); } while(0)
+
+// Set the return value to 0 (success).
+#define ret_ok() do { ret_host(0); } while(0)
 
 // Each handler takes the Emulator (so it can access mem/fds/vfs/etc.)
 // and the CPU (for register access). It reads args from cpu.regs[0..5]
@@ -35,6 +53,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
-int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);  // catch-all in syscalls.cpp
+int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
 
 } // namespace arm64emu

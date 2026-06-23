@@ -20,6 +20,7 @@
 #include "vfs/vfs_table.h"
 
 #include <cerrno>
+#include <sys/statfs.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -371,32 +372,22 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 44: { // fstatfs
-            struct statfs {
-                long f_type, f_bsize, f_blocks, f_bfree, f_bavail,
-                     f_files, f_ffree, f_fsid[2], f_namelen, f_frsize,
-                     f_flags, f_spare[4];
-            };
-            struct statfs sfs{};  // zero-init all fields (avoids -Wmissing-field-initializers)
+            struct statfs sfs{};
             sfs.f_type = 0xEF53;       // ext2 magic
             sfs.f_bsize = 4096;
             sfs.f_namelen = 255;
             mem_.write(a1, &sfs, sizeof(sfs));
-            ret_host(0);
+            ret_ok();
             return 0;
         }
 
         case 43: { // statfs (by path)
-            struct statfs {
-                long f_type, f_bsize, f_blocks, f_bfree, f_bavail,
-                     f_files, f_ffree, f_fsid[2], f_namelen, f_frsize,
-                     f_flags, f_spare[4];
-            };
-            struct statfs sfs{};  // zero-init all fields
+            struct statfs sfs{};
             sfs.f_type = 0xEF53;
             sfs.f_bsize = 4096;
             sfs.f_namelen = 255;
             mem_.write(a1, &sfs, sizeof(sfs));
-            ret_host(0);
+            ret_ok();
             return 0;
         }
 
