@@ -195,6 +195,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                 if (len == 0) continue;
+                // Defensive cap: if len is absurdly large, the iovec is
+                // corrupted (JIT codegen bug). Clamp to avoid OOM crash.
+                if (len > 64 * 1024 * 1024) {
+                    len = 64 * 1024 * 1024;
+                }
                 std::vector<uint8_t> tmp(len);
                 mem_.read(base, tmp.data(), len);
                 ssize_t n = ::write(static_cast<int>(a0), tmp.data(), len);
@@ -214,6 +219,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                 if (len == 0) continue;
+                // Defensive cap (same as writev).
+                if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 std::vector<uint8_t> tmp(len);
                 ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
                 if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }

@@ -2628,8 +2628,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
-    try_chain_block(start_pc, blocks_[start_pc]);
-    chain_back_references(start_pc);
+    // BIFROST_NO_CHAIN disables chaining for debugging.
+    static bool no_chain_ = (getenv("BIFROST_NO_CHAIN") != nullptr);
+    if (!no_chain_) {
+        try_chain_block(start_pc, blocks_[start_pc]);
+        chain_back_references(start_pc);
+    }
 
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
@@ -2729,13 +2733,16 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // OTHER blocks whose chain_target_pc == pc — now O(k) via
         // back_refs_, cheap enough per-hit.
         if (!entry.chained) {
-            if (entry.chain_target_pc != 0) {
-                try_chain_block(pc, it->second);
-                entry = it->second;
-            }
-            auto brit = back_refs_.find(pc);
-            if (brit != back_refs_.end()) {
-                chain_back_references(pc);
+            static bool no_chain_hit_ = (getenv("BIFROST_NO_CHAIN") != nullptr);
+            if (!no_chain_hit_) {
+                if (entry.chain_target_pc != 0) {
+                    try_chain_block(pc, it->second);
+                    entry = it->second;
+                }
+                auto brit = back_refs_.find(pc);
+                if (brit != back_refs_.end()) {
+                    chain_back_references(pc);
+                }
             }
         }
     } else {
@@ -2837,8 +2844,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
                     static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
         }
+
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
+
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
