@@ -45,6 +45,7 @@
 namespace arm64emu {
 
 class GraphicsBackend;
+class Audio;
 
 // ── VNode: abstract file handle ────────────────────────────────────────
 class VNode {
@@ -112,10 +113,14 @@ public:
     // emulator was built without SDL2 and the guest never opens /dev/fb0.
     void set_graphics(GraphicsBackend* gfx) { gfx_ = gfx; }
 
+    // Wire up the audio backend (for /dev/dsp, /dev/snd). May be null.
+    void set_audio(Audio* audio) { audio_ = audio; }
+
 private:
     std::string elf_path_;
     std::vector<std::string> argv_;
     GraphicsBackend* gfx_ = nullptr;
+    Audio* audio_ = nullptr;
 
     // Sub-resolvers (defined in vfs_procfs.cpp / vfs_devfs.cpp /
     // vfs_host.cpp). Each returns nullptr if it doesn't handle the path.

@@ -8,6 +8,7 @@
 // 0/1/2 so close(guest_fd) doesn't close the host's stdio.
 #include "vfs/vfs.h"
 #include "vfs/vfs_table.h"
+#include "audio/audio.h"
 #include "graphics.hpp"
 
 #include <cerrno>
@@ -61,14 +62,18 @@ std::unique_ptr<VNode> VFS::open_devfs(const std::string& path,
         return std::make_unique<HostVNode>(r, flags);
     }
 
-    // /dev/snd → audio device (OSS-style /dev/dsp passthrough)
+    // /dev/snd, /dev/dsp, /dev/audio → audio backend (PCM buffer + WAV dump)
     if (path == "/dev/snd" || path == "/dev/dsp" || path == "/dev/audio") {
-        int fd = ::openat(AT_FDCWD, "/dev/dsp", flags, mode);
-        if (fd < 0) {
-            // No real audio device — return /dev/null as a sink so writes succeed
-            fd = ::openat(AT_FDCWD, "/dev/null", flags, mode);
-            if (fd < 0) { *err_out = -errno; return nullptr; }
+        if (audio_) {
+            // Open the audio backend with default params (44100 Hz, stereo, 16-bit).
+            if (!audio_->ready()) {
+                audio_->open(44100, 2, 2);
+            }
+            return std::make_unique<AudioVNode>(audio_, flags);
         }
+        // No audio backend — fall back to /dev/null so writes succeed.
+        int fd = ::openat(AT_FDCWD, "/dev/null", flags, mode);
+        if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostVNode>(fd, flags);
     }
 

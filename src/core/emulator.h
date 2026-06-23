@@ -18,6 +18,7 @@
 #include "core/memory.h"
 #include "core/signal.h"
 #include "graphics.hpp"
+#include "audio/audio.h"
 #include "vfs/vfs.h"
 
 #include <atomic>
@@ -85,6 +86,7 @@ public:
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
     GraphicsBackend& graphics() { return graphics_; }
+    Audio&          audio()    { return audio_; }
     SignalTable&    signals()  { return signals_; }
     VFS&            vfs()      { return vfs_; }
     FdTable&        fds()      { return fds_; }
@@ -157,6 +159,9 @@ private:
 
     // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
     GraphicsBackend graphics_;
+
+    // ── Audio backend (virtual /dev/dsp, /dev/snd) ────────────────────
+    Audio audio_;
 
     // ── VFS + fd table ────────────────────────────────
     // Replaces the inline /proc//dev/ chains in syscalls.cpp.

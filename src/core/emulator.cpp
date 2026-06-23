@@ -46,6 +46,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     vfs_.set_elf_path(path);
     vfs_.set_argv(argv);
     vfs_.set_graphics(&graphics_);
+    vfs_.set_audio(&audio_);
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) throw EmuError("cannot open " + path + ": " + strerror(errno));
     fseek(f, 0, SEEK_END);

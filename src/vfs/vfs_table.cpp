@@ -4,7 +4,9 @@
 // files (vfs_host.cpp, vfs_dev.cpp). This file holds:
 //   - MemfdVNode::create + method implementations (used by /proc/*)
 //   - StdioVNode method implementations (used for fd 0/1/2 default entries)
+//   - AudioVNode method implementations (used by /dev/dsp, /dev/snd)
 #include "vfs/vfs_table.h"
+#include "audio/audio.h"
 
 #include <cerrno>
 #include <cstring>
@@ -72,6 +74,30 @@ ssize_t StdioVNode::lseek(int64_t /*off*/, int /*whence*/) {
 int StdioVNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
+}
+
+// ── AudioVNode ──────────────────────────────────────────────────────────
+AudioVNode::~AudioVNode() = default;
+
+ssize_t AudioVNode::read(uint64_t /*off*/, void* /*buf*/, size_t n) {
+    // Recording not yet supported — return 0 (EOF) immediately.
+    return 0;
+}
+
+ssize_t AudioVNode::write(uint64_t /*off*/, const void* buf, size_t n) {
+    if (!audio_) return static_cast<ssize_t>(n);  // no backend — discard
+    return audio_->write(static_cast<const uint8_t*>(buf), n);
+}
+
+ssize_t AudioVNode::lseek(int64_t /*off*/, int /*whence*/) {
+    return -ESPIPE;  // not seekable
+}
+
+int AudioVNode::fstat(struct stat* st) {
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | 0666;  // character device
+    st->st_size = 0;
+    return 0;
 }
 
 } // namespace arm64emu

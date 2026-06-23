@@ -158,8 +158,9 @@ int main(int argc, char** argv) {
     bool verbose = false;
     bool quiet   = false;
     bool raw_tty = false;
-    bool use_jit = false;  // v1.4.0-alpha: experimental frostJIT
+    bool use_jit = false;  // experimental frostJIT
     std::string fb_dump_path;
+    std::string audio_dump_path;
     int  arg_i   = 1;
 
     while (arg_i < argc) {
@@ -177,6 +178,15 @@ int main(int argc, char** argv) {
                 return 2;
             }
             fb_dump_path = argv[arg_i + 1];
+            arg_i += 2;
+            continue;
+        }
+        if (a == "--audio-dump") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --audio-dump requires a PATH argument\n");
+                return 2;
+            }
+            audio_dump_path = argv[arg_i + 1];
             arg_i += 2;
             continue;
         }
@@ -252,6 +262,17 @@ int main(int argc, char** argv) {
                 }
             } else {
                 fprintf(stderr, "[emu] framebuffer dump failed\n");
+            }
+        }
+        // Optional audio dump on exit — writes accumulated PCM to a WAV file.
+        if (!audio_dump_path.empty() && emu.audio().ready()) {
+            if (emu.audio().dump_to_wav(audio_dump_path)) {
+                if (verbose) {
+                    fprintf(stderr, "[emu] audio dumped to '%s'\n",
+                            audio_dump_path.c_str());
+                }
+            } else {
+                fprintf(stderr, "[emu] audio dump failed (no data?)\n");
             }
         }
         return code;
