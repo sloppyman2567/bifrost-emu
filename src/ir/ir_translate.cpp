@@ -1012,19 +1012,85 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // FMOV (general ↔ FP, 32-bit): fall back to interpreter
+            // FMOV (general ↔ FP, 32-bit): v1.4.0-beta.3 native path.
+            // Encoding: 0x1E200000 with bit 16 = to_fp (1) or to_gpr (0).
+            // FMOV Sn, Wn → v_lo[rd] = (uint32_t)regs[rn]; v_hi[rd] = 0
+            // FMOV Wd, Sn → regs[rd] = (uint32_t)v_lo[rn]
             if ((op & 0xFFE0FC00) == 0x1E200000) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                bool to_fp = (op >> 16) & 1;
+                if (to_fp) {
+                    // Wn → Sn: load GPR, mask to 32 bits, store to v_lo[rd].
+                    // We reuse FMOV_G2F but the JIT will store the full 64-bit
+                    // GPR value; the interpreter reads only the low 32 bits for
+                    // single-precision, so this is correct as long as the upper
+                    // 32 bits don't matter (they're masked on FP reads).
+                    // Actually, for correctness we need to zero-extend. Use a
+                    // scratch vreg + AND to mask to 32 bits.
+                    uint16_t val = load_arm_reg(block, rn);
+                    uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
+                    uint16_t masked = g_alloc.alloc();
+                    emit(block, IROp::AND, masked, val, mask);
+                    emit(block, IROp::FMOV_G2F, rd, masked, 0, 0, 0, 0, 0, cur_pc);
+                } else {
+                    // Sn → Wd: load v_lo[rn] (full 64 bits), mask to 32 bits.
+                    uint16_t v = g_alloc.alloc();
+                    emit(block, IROp::FMOV_F2G, v, rn, 0, 0, 0, 0, 0, cur_pc);
+                    uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
+                    uint16_t masked = g_alloc.alloc();
+                    emit(block, IROp::AND, masked, v, mask);
+                    store_arm_reg(block, rd, masked);
+                }
                 return false;
             }
-            // FMOV (FP↔FP register): fall back to interpreter
-            if ((op & 0xFFFFFC00) == 0x1E604000 || (op & 0xFFFFFC00) == 0x1E204000) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            // FMOV (FP↔FP register): v1.4.0-beta.3 native path.
+            // Encoding: 0x1E604000 (double) or 0x1E204000 (single).
+            // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = v_hi[rn]
+            // FMOV Sd, Sn → v_lo[rd] = v_lo[rn] (low 32 bits); v_hi[rd] = 0
+            // We use FMOV_G2F/F2G via a GPR scratch to avoid adding a new IR op.
+            // For double: load v_lo[rn] into GPR, store to v_lo[rd]; same for v_hi.
+            // For single: load v_lo[rn] into GPR, mask to 32 bits, store to v_lo[rd]; v_hi[rd] = 0.
+            if ((op & 0xFFFFFC00) == 0x1E604000) {
+                // Double-precision FP register move.
+                uint16_t lo = g_alloc.alloc();
+                emit(block, IROp::FMOV_F2G, lo, rn, 0, 0, 0, 0, 0, cur_pc);
+                emit(block, IROp::FMOV_G2F, rd, lo, 0, 0, 0, 0, 0, cur_pc);
+                uint16_t hi = g_alloc.alloc();
+                emit(block, IROp::FMOV_FHI2G, hi, rn, 0, 0, 0, 0, 0, cur_pc);
+                emit(block, IROp::FMOV_G2FHI, rd, hi, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+            if ((op & 0xFFFFFC00) == 0x1E204000) {
+                // Single-precision FP register move (zeroes upper bits).
+                uint16_t lo = g_alloc.alloc();
+                emit(block, IROp::FMOV_F2G, lo, rn, 0, 0, 0, 0, 0, cur_pc);
+                uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
+                uint16_t masked = g_alloc.alloc();
+                emit(block, IROp::AND, masked, lo, mask);
+                emit(block, IROp::FMOV_G2F, rd, masked, 0, 0, 0, 0, 0, cur_pc);
                 return false;
             }
 
+            // v1.4.0-beta.3: FCMP/FCMPE must be checked BEFORE FP arithmetic
+            // because FCMP has bit[21]=1 and bits[15:10]=0x08, which would
+            // otherwise match the FP arithmetic pattern (bit[21]=1, bits[15:10]!=0x04).
+            // FCMP encoding: (op & 0xFF200000) == 0x1E200000, bits[15:10]=0x08.
+            if ((op & 0xFF200000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0x08) {
+                bool with_zero = (rm == 31);
+                if (with_zero) {
+                    // FCMP Dn, #0.0 — compare against zero
+                    emit(block, IROp::FP_CMP, 0, rn, 0, ftype, 0, 0, 0, cur_pc);
+                } else {
+                    emit(block, IROp::FP_CMP, 0, rn, rm, ftype, 0, 0, 0, cur_pc);
+                }
+                return false;
+            }
             // FP arithmetic (2-source): bit[21]=1, bits[15:10] != 0b000100 (FMOV imm)
-            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) != 0x04) {
+            // and != 0b001000 (FCMP, handled above) and != 0b010000 (FP 1-source)
+            // and != 0b010100 (FMOV imm, alternate encoding).
+            // v1.4.0-beta.3: added 0x14 exclusion — FMOV imm has bits[15:10]=0x14.
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) != 0x04 &&
+                ((op >> 10) & 0x3F) != 0x08 && ((op >> 10) & 0x3F) != 0x10 &&
+                ((op >> 10) & 0x3F) != 0x14) {
                 // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
                 if (opcode <= 6 && ftype <= 1) {
                     emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);
@@ -1057,49 +1123,158 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
-            // FCMP/FCMPE: FP compare
-            // Encoding: (op & 0xFF20FC1F) == 0x1E202000 (with Rm≠31)
-            //           (op & 0xFF20FC1F) == 0x1E202008 (with #0.0)
-            if ((op & 0xFF200000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0x08) {
-                bool with_zero = (rm == 31);
-                if (with_zero) {
-                    // FCMP Dn, #0.0 — compare against zero
-                    emit(block, IROp::FP_CMP, 0, rn, 0, ftype, 0, 0, 0, cur_pc);
-                } else {
-                    emit(block, IROp::FP_CMP, 0, rn, rm, ftype, 0, 0, 0, cur_pc);
-                }
-                return false;
-            }
-            // FMOV (scalar, immediate): (op & 0xFFE0001F) == 0x1E600000
-            // Already handled above for FP↔FP and general. The immediate
-            // form has bits[15:10] = 0b000100.
-            // We decode the 8-bit FP immediate here and emit FP_MOVI.
-            if ((op & 0xFFE0001F) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
+            // FMOV (scalar, immediate): v1.4.0-beta.3 fix.
+            // Encoding: bits[31:21] = 0x1E6 (0001 1110 011) + ftype<<22,
+            // bits[20:13] = imm8, bits[12:10] = 100, bits[9:5] = 00000.
+            // Mask 0xFFE003E0 covers bits[31:21] and bits[9:5], so Rd and
+            // imm8 are don't-cares. The old mask 0xFFE0001F incorrectly
+            // required Rd=0 (bit 4:0 = 0), which only matched FMOV D0, #imm.
+            // Now all Rd values match.
+            if ((op & 0xFFE003E0) == 0x1E600000) {
                 uint8_t imm8 = (op >> 13) & 0xFF;
-                // VFPExpandImm for double (ftype=1):
-                //   sign = imm8[7], exp = NOT(imm8[6]) : imm8[5:4] : 1000 (4 bits)
-                //   mantissa = imm8[3:0] : 0000...0000 (48 bits)
+                // VFPExpandImm — v1.4.0-beta.3: use the correct algorithm
+                // from the ARM ARM (matches the interpreter's decoding).
+                //   sign = imm8[7]
+                //   b = imm8[6], not_b = NOT(b)
+                //   imm6 = imm8[5:0]
+                // For double (N=64):
+                //   exp = not_b : Replicate(b, 8) : 0x3F0... wait, let me use
+                //   the interpreter's proven formula:
+                //   bits = (sign << 63) | (not_b << 62) | (Replicate(b,8) << 54) | (imm6 << 48)
                 uint64_t sign = (imm8 >> 7) & 1;
-                uint64_t exp, mant;
-                if (ftype == 1) {
-                    // Double: exp = (NOT(imm8[6]) << 10) | (imm8[5:4] << 8) | 0x3F0
-                    exp = (~(imm8 >> 6) & 1);
-                    exp = (exp << 10) | ((imm8 & 0x30) << 4) | 0x3F0;
-                    mant = static_cast<uint64_t>(imm8 & 0x0F) << 48;
-                    uint64_t bits = (sign << 63) | (exp << 52) | mant;
+                uint64_t b     = (imm8 >> 6) & 1;
+                uint64_t not_b = b ^ 1;
+                uint64_t imm6  = imm8 & 0x3F;
+                if (ftype == 1) {  // double precision
+                    uint64_t rep_b = b * 0xFFULL;          // Replicate(b, 8)
+                    uint64_t bits = (sign << 63)
+                                  | (not_b << 62)
+                                  | (rep_b << 54)
+                                  | (imm6 << 48);
                     emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
-                } else {
-                    // Single: exp = (NOT(imm8[6]) << 6) | (imm8[5:4] << 4) | 0x1C
-                    exp = (~(imm8 >> 6) & 1);
-                    exp = (exp << 6) | ((imm8 & 0x30) << 0) | 0x1C;
-                    mant = static_cast<uint32_t>(imm8 & 0x0F) << 19;
-                    uint64_t bits = (sign << 31) | (exp << 23) | mant;
+                } else {  // single precision (ftype == 0)
+                    uint32_t rep_b = static_cast<uint32_t>(b * 0x1Fu);  // Replicate(b, 5)
+                    uint32_t bits = static_cast<uint32_t>((sign << 31)
+                                  | (not_b << 30)
+                                  | (rep_b << 25)
+                                  | (imm6 << 19));
                     emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
                 }
                 return false;
             }
-            // Everything else (FCVT, FRINT, FMADD, etc.)
-            // falls back to interpreter.
+            // v1.4.0-beta.3: FMADD/FMSUB (FP fused multiply-add/subtract).
+            // Encoding: (op & 0xFF200000) == 0x1F000000, bit 15 = sub (1=FMSUB, 0=FMADD).
+            // ra = bits[14:10]. Operands: a=Vn, b=Vm, c=Va.
+            if ((op & 0xFF200000) == 0x1F000000) {
+                uint8_t ra = (op >> 10) & 0x1F;
+                bool sub = (op >> 15) & 1;
+                if (ftype <= 1) {
+                    // FMADD: dest = a * b + c (acc)
+                    // FMSUB: dest = c - a * b = -a * b + c
+                    // The JIT's FMADD/FMSUB IR ops expect:
+                    //   src1 = multiplier 1 (a)
+                    //   src2 = multiplier 2 (b)
+                    //   imm  = acc register index (c)
+                    //   width = ftype (0=S, 1=D)
+                    // Note: the JIT reads v_lo[imm] as the accumulator.
+                    uint16_t a = load_arm_reg(block, rn);
+                    uint16_t b = load_arm_reg(block, rm);
+                    uint16_t r = g_alloc.alloc();
+                    // The JIT's FMADD reads acc from v_lo[imm] directly.
+                    // We encode the accumulator register index in imm.
+                    // But imm is uint64_t — we need to pass the register index.
+                    // The JIT code at FMADD case: off_acc = V_LO_OFF + inst.imm * 8.
+                    // So inst.imm = ra (the accumulator FP register index).
+                    emit(block, sub ? IROp::FMSUB : IROp::FMADD,
+                         r, a, b, ftype ? 64 : 32, 0, 0,
+                         static_cast<uint64_t>(ra), cur_pc);
+                    store_arm_reg(block, rd, r);
+                    return false;
+                }
+            }
+
+            // v1.4.0-beta.3: FCVT (float ↔ double conversion).
+            // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
+            if ((op & 0xFFFFFC00) == 0x1E624000) {
+                // FCVT Sd, Dn (double → single)
+                uint16_t src = load_arm_reg(block, rn);
+                uint16_t r = g_alloc.alloc();
+                emit(block, IROp::FCVT_D2S, r, src, 0, 0, 0, 0, 0, cur_pc);
+                store_arm_reg(block, rd, r);
+                return false;
+            }
+            if ((op & 0xFFFFFC00) == 0x1E22C000) {
+                // FCVT Dd, Sn (single → double)
+                uint16_t src = load_arm_reg(block, rn);
+                uint16_t r = g_alloc.alloc();
+                emit(block, IROp::FCVT_S2D, r, src, 0, 0, 0, 0, 0, cur_pc);
+                store_arm_reg(block, rd, r);
+                return false;
+            }
+
+            // v1.4.0-beta.3: FRINT (FP round to integer).
+            // The FRINT* instructions have multiple encodings. The common ones:
+            // FRINTN (round to nearest even): 0x1E244000 | (ftype<<22)
+            // FRINTP (round toward +inf):     0x1E24C000 | (ftype<<22)
+            // FRINTM (round toward -inf):     0x1E254000 | (ftype<<22)
+            // FRINTZ (round toward zero):     0x1E25C000 | (ftype<<22)
+            // FRINTA (round per FPCR):        0x1E264000 | (ftype<<22)
+            // FRINTX (round exact):           0x1E274000 | (ftype<<22)
+            // FRINTI (round per FPCR, inexact): 0x1E27C000 | (ftype<<22)
+            // All have bits[21:20] = 0b11, bits[19:15] = 0b11000 | rmode.
+            // rmode: 0=N, 1=P, 2=M, 3=Z (for FRINTN/P/M/Z).
+            // We detect via (op & 0x7F3F0000) == 0x1E240000 (FRINT family base)
+            // with rmode in bits[19:16] (0-3 = N/P/M/Z, 4=A, 5=X, 6=I, 7=I).
+            if ((op & 0xFF3F0000) == 0x1E240000 && ftype <= 1) {
+                uint8_t rmode = (op >> 19) & 0x7;  // bits 21:19
+                // Map ARM rmode to our FRINT imm encoding:
+                //   0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(zero), 4=A(FPCR), 5=X(exact)
+                uint8_t frint_mode;
+                switch (rmode) {
+                    case 0: frint_mode = 0; break;  // FRINTN
+                    case 1: frint_mode = 1; break;  // FRINTP
+                    case 2: frint_mode = 2; break;  // FRINTM
+                    case 3: frint_mode = 3; break;  // FRINTZ
+                    case 4: frint_mode = 4; break;  // FRINTA (FPCR)
+                    case 5: frint_mode = 5; break;  // FRINTX
+                    case 6: frint_mode = 4; break;  // FRINTI → treat as FPCR
+                    default: frint_mode = 0; break;
+                }
+                uint16_t src = load_arm_reg(block, rn);
+                uint16_t r = g_alloc.alloc();
+                emit(block, IROp::FRINT, r, src, 0, ftype ? 64 : 32,
+                     frint_mode, 0, 0, cur_pc);
+                store_arm_reg(block, rd, r);
+                return false;
+            }
+
+            // v1.4.0-beta.3: FCSEL (FP conditional select).
+            // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
+            // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.
+            // We emit a CSEL-like sequence via a GPR scratch + CSEL IR op,
+            // since we don't have a native FP_CSEL IR op. But actually we
+            // can do this natively by loading both FP values into GPRs and
+            // using CSEL.
+            if ((op & 0xFF200C00) == 0x1E200C00 && ftype <= 1) {
+                uint8_t cond = (op >> 12) & 0xF;
+                // Load both FP values into GPR scratch vregs.
+                uint16_t val_n = g_alloc.alloc();
+                emit(block, IROp::FMOV_F2G, val_n, rn, 0, 0, 0, 0, 0, cur_pc);
+                uint16_t val_m = g_alloc.alloc();
+                emit(block, IROp::FMOV_F2G, val_m, rm, 0, 0, 0, 0, 0, cur_pc);
+                // CSEL between the two GPR values.
+                uint16_t selected = g_alloc.alloc();
+                emit(block, IROp::CSEL, selected, val_n, val_m, 0, cond, 0, 0, cur_pc);
+                // Store the selected value back to v_lo[rd].
+                emit(block, IROp::FMOV_G2F, rd, selected, 0, 0, 0, 0, 0, cur_pc);
+                // For single-precision, also zero v_hi[rd].
+                if (ftype == 0) {
+                    // v_hi[rd] = 0 (handled by FMOV_G2F which zeroes v_hi).
+                }
+                return false;
+            }
+
+            // Everything else (rare FP ops) falls back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
         }
@@ -1217,14 +1392,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
         case InstClass::FMOV_IMM:
-        case InstClass::FADD: case InstClass::FSUB:
-        case InstClass::FMUL: case InstClass::FDIV:
-        case InstClass::FMAX: case InstClass::FMIN:
-        case InstClass::FNMUL:
-        case InstClass::FCVTZS:
-        case InstClass::FCVTZU: case InstClass::SCVTF:
-        case InstClass::UCVTF:
-        case InstClass::FCSEL:
+            // v1.4.0-beta.3: The decoder never emits these InstClass values
+            // (FP_SCALAR catches all FP/SIMD in the 0x1Exxxxxx encoding range).
+            // They're kept here as defensive fallbacks.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
 

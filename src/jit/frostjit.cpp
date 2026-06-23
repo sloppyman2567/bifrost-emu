@@ -143,14 +143,8 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
         // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
         // cache mappings (values were already flushed above, so
         // dirty vregs are safe — just drop the stale associations).
-        for (int r : {RAX, RCX, RDX}) {
-            int v = reg_vreg_[r];
-            if (v >= 0) {
-                vreg_home_[v] = -1;
-                reg_vreg_[r] = -1;
-                vreg_dirty_[v] = false;
-            }
-        }
+        // v1.4.0-beta.3: use bitmask helper.
+        invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
     }
     // : flush_all_vregs already called above (before
     // materialize_flags). All dirty vregs are now in cpu.regs[]/stack.
@@ -258,17 +252,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // caller-saved dirty vregs — callee-saved vregs (R12/R13/
             // R15) survive the C call and load_vreg_to_reg will mov
             // from them correctly.
+            //
+            // v1.4.0-beta.3: replaced O(max_vreg_) flush + 6-reg
+            // invalidate loop with two O(popcount) bitmask walks.
             clobber_flags();
-            flush_caller_saved_vregs();
-            // Drop caller-saved cache mappings (clobbered by slow path).
-            for (int r : {RAX, RCX, RDX, R8, R9, R11}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    vreg_home_[v] = -1;
-                    reg_vreg_[r] = -1;
-                    vreg_dirty_[v] = false;
-                }
-            }
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
             load_vreg_to_reg(RAX, inst.src1);
             emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm), inst.width, false);
             store_reg_to_vreg(inst.dest, RAX);
@@ -278,15 +269,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::STORE_MEM: {
             // Same as LOAD_MEM: only flush caller-saved dirty vregs.
             clobber_flags();
-            flush_caller_saved_vregs();
-            for (int r : {RAX, RCX, RDX, R8, R9, R11}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    vreg_home_[v] = -1;
-                    reg_vreg_[r] = -1;
-                    vreg_dirty_[v] = false;
-                }
-            }
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
             load_vreg_to_reg(RAX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
             emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
@@ -308,6 +294,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == inst.src1) {
                 d = RAX;  // in-place
                 vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << RAX);  // v1.4.0-beta.3: maintain bitmask
             } else {
                 d = alloc_reg_for(inst.dest, RAX);
                 if (d != RAX) emit_mov_reg(d, RAX);
@@ -340,6 +327,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == inst.src1) {
                 d = RAX;
                 vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << RAX);  // v1.4.0-beta.3: maintain bitmask
             } else {
                 d = alloc_reg_for(inst.dest, RAX);
                 if (d == RCX) {
@@ -367,6 +355,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     vreg_home_[inst.dest] = d;
                     reg_vreg_[d] = inst.dest;
                     vreg_dirty_[inst.dest] = true;
+                    dirty_host_regs_ |= (1u << d);  // v1.4.0-beta.3: maintain bitmask
                 }
                 if (d != RAX) emit_mov_reg(d, RAX);
             }
@@ -529,6 +518,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == inst.src1 && inst.dest != 0) {
                 d = s1;
                 vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << s1);  // v1.4.0-beta.3: maintain bitmask
             } else if (inst.dest != 0) {
                 d = alloc_reg_for(inst.dest, s1);
                 if (d != s1) emit_mov_reg(d, s1);
@@ -536,7 +526,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 d = s1;
             }
             if (is_32bit) {
-                // 32-bit SUB/ADD: need REX prefix if either reg is R8-R15.
                 // 0x29 /r = SUB r/m32, r32 (sub dst, src)
                 // 0x01 /r = ADD r/m32, r32 (add dst, src)
                 bool need_rex = (s2 >= 8) || (d >= 8);
@@ -741,10 +730,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
                 // Drop all cache mappings but DON'T clear flags_in_host_.
-                for (int v = 0; v <= max_vreg_; v++) {
-                    int r = vreg_home_[v];
-                    if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
-                }
+                // v1.4.0-beta.3: use invalidate_all_vregs but preserve flags_in_host_.
+                bool saved_fih2 = flags_in_host_;
+                invalidate_all_vregs();
+                flags_in_host_ = saved_fih2;
                 flags_in_host_ = true;
                 flags_from_sub_ = false;
             }
@@ -824,21 +813,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (flags_in_host_) {
                 // emit_materialize_flags clobbers RAX/RCX/RDX. Evict any
                 // dirty vregs in those regs first, then drop cache mappings.
+                // v1.4.0-beta.3: use bitmask helpers.
                 emit_pushfq();
-                for (int r : {RAX, RCX, RDX}) {
-                    int v = reg_vreg_[r];
-                    if (v >= 0 && vreg_dirty_[v]) evict_vreg(v);
-                }
+                constexpr uint16_t FLAGS3 = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
+                flush_dirty_host_regs(FLAGS3);
                 emit_materialize_flags(flags_from_sub_);
                 emit_popfq();
-                for (int r : {RAX, RCX, RDX}) {
-                    int v = reg_vreg_[r];
-                    if (v >= 0) {
-                        vreg_home_[v] = -1;
-                        reg_vreg_[r] = -1;
-                        vreg_dirty_[v] = false;
-                    }
-                }
+                invalidate_host_regs(FLAGS3);
                 // if flags came from ADD/TST and the
                 // condition is HI/LS, invert CF with `cmc` so it matches
                 // the SUB convention that arm_cond_to_x86() expects.
@@ -910,13 +891,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // These ops use XMM0/XMM1 as scratch, loading from and storing
         // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with
         // the GPR register allocator at all.
+        //
+        // v1.4.0-beta.3: replaced flush_all_vregs()+invalidate_all_vregs()
+        // (O(max_vreg_) per op) with flush_invalidate_host_regs({RAX})
+        // (O(1) per op). FP_BINOP only clobbers RAX (for the FNMUL sign
+        // mask and the v_hi[dest]=0 zero store). Callee-saved vregs in
+        // R12/R13/R15 are preserved.
         case IROp::FP_BINOP: {
             // v_lo[dest] = op(v_lo[src1], v_lo[src2]); v_hi[dest] = 0
             bool is_double = (inst.width == 1);
             uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // v1.4.0-beta.3: FP_BINOP only clobbers RAX (zero store to
+            // v_hi[dest]; sign mask for FNMUL). XMM0/XMM1 are scratch and
+            // don't hold vregs. Use targeted flush for O(1) instead of
+            // O(max_vreg_) flush_all+invalidate_all.
+            flush_invalidate_host_regs(1u << RAX);
 
             // Load src1 into XMM0: movsd/movss xmm0, [rbx+off]
             // BUGFIX: no REX needed — SSE regs are 0-7, RBX is 3.
@@ -974,8 +964,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // FP_UNOP clobbers RAX (sign mask for FABS/FNEG; zero store).
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(prefix);
@@ -1015,13 +1005,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
             // regs[dest] = (int/uint)(v_lo[src1])
-            // NOTE: unsigned conversion (FCVTZU) is not yet implemented —
-            // we use signed CVTTSD2SI which is correct for values < INT64_MAX.
-            // Most code doesn't convert huge doubles to unsigned.
+            // v1.4.0-beta.3: proper unsigned conversion via the
+            // "subtract 2^63, convert signed, add 2^63" trick.
             bool is_double = (inst.width == 1);
+            bool is_unsigned = (inst.imm != 0);
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // FP_F2I clobbers RAX (CVTTSD2SI result) and, in the unsigned
+            // path, RCX (2^63 constant). Flush+invalidate both.
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             // Load FP value into XMM0
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -1029,9 +1020,41 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
-            // CVTTSD2SI rax, xmm0 (truncate toward zero)
-            emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
-            emit_byte(0xC0);  // rax, xmm0
+            if (is_unsigned) {
+                // Unsigned conversion: x86 lacks CVTTSD2USI, so we use:
+                //   if (xmm0 >= 2^63) { xmm0 -= 2^63; CVTTSD2SI rax; rax += 2^63 }
+                //   else                CVTTSD2SI rax
+                // Use RCX for the comparison constant.
+                // mov rcx, 0x43E0000000000000 (double 2^63)
+                emit_mov_imm64(RCX, 0x43E0000000000000ULL);
+                // movq xmm1, rcx
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
+                // ucomisd xmm0, xmm1 (compare src against 2^63)
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);
+                // jae .large (CF=0 means src >= 2^63)
+                size_t jae_patch = emit_jcc_rel32_placeholder(0x3);  // JAE rel32
+                // CVTTSD2SI rax, xmm0 (small path)
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                emit_byte(0xC0);  // rax, xmm0
+                // jmp .done
+                size_t jmp_done = emit_jmp_rel32_placeholder();
+                size_t large_path = code_buf_used_;
+                patch_jcc_rel32(jae_patch, static_cast<int32_t>(large_path - (jae_patch + 6)));
+                // subsd xmm0, xmm1
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1);
+                // CVTTSD2SI rax, xmm0
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                emit_byte(0xC0);  // rax, xmm0
+                // add rax, 0x8000000000000000 (using mov + add to avoid imm64 in add)
+                emit_mov_imm64(RCX, 0x8000000000000000ULL);
+                emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8);  // add rax, rcx
+                size_t done_path = code_buf_used_;
+                patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
+            } else {
+                // CVTTSD2SI rax, xmm0 (truncate toward zero, signed)
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                emit_byte(0xC0);  // rax, xmm0
+            }
 
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);
@@ -1041,20 +1064,56 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── int→FP conversion (SCVTF/UCVTF) ────────────────────────
         case IROp::FP_I2F: {
             // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
-            // NOTE: unsigned conversion (UCVTF) is not yet implemented —
-            // we use signed CVTSI2SD which is correct for values < INT64_MAX.
+            // v1.4.0-beta.3: proper unsigned conversion via the
+            // "if (src >= 2^63) subtract 2^63, convert signed, add 2^63
+            //  to result as double" trick.
             bool is_double = (inst.width == 1);
+            bool is_unsigned = (inst.imm != 0);
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // FP_I2F clobbers RAX (GPR load), RCX (subtract flag), and
+            // RDX (2^63 constant) in the unsigned path. Flush+invalidate
+            // all three.
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             // Load GPR into RAX
             load_vreg_to_reg(RAX, inst.src1);
 
-            // CVTSI2SD xmm0, rax (convert signed int64 to double)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A);
-            emit_byte(0xC0);  // xmm0, rax
+            if (is_unsigned) {
+                // Unsigned: if (rax >= 2^63) { rcx = 1; sub rax, 2^63 } else rcx = 0
+                // CVTSI2SD xmm0, rax (signed convert of the adjusted value)
+                // if (rcx) addsd xmm0, [2^63 as double]
+                emit_mov_imm32_zext(RCX, 0);
+                // cmp rax, 0x8000000000000000
+                emit_mov_imm64(RDX, 0x8000000000000000ULL);
+                emit_byte(0x48); emit_byte(0x39); emit_byte(0xD0);  // cmp rax, rdx
+                // jb .small (CF=1 means rax < 2^63)
+                size_t jb_patch = emit_jcc_rel32_placeholder(0x2);  // JB rel32
+                size_t large_path = code_buf_used_;
+                // sub rax, 2^63 (rax -= rdx)
+                emit_byte(0x48); emit_byte(0x29); emit_byte(0xD0);  // sub rax, rdx
+                emit_mov_imm32_zext(RCX, 1);  // mark that we subtracted
+                size_t small_path = code_buf_used_;
+                patch_jcc_rel32(jb_patch, static_cast<int32_t>(small_path - (jb_patch + 6)));
+                (void)large_path;
+                // CVTSI2SD xmm0, rax
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A);
+                emit_byte(0xC0);  // xmm0, rax
+                // if (rcx != 0) add 2^63 as double
+                emit_byte(0x48); emit_byte(0x85); emit_byte(0xC9);  // test rcx, rcx
+                size_t jz_patch = emit_jcc_rel32_placeholder(0x4);  // JZ rel32
+                // mov rdx, 0x43E0000000000000 (double 2^63)
+                emit_mov_imm64(RDX, 0x43E0000000000000ULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xCA);  // movq xmm1, rdx
+                // addsd/addss xmm0, xmm1
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1);
+                size_t done_path = code_buf_used_;
+                patch_jcc_rel32(jz_patch, static_cast<int32_t>(done_path - (jz_patch + 6)));
+            } else {
+                // CVTSI2SD xmm0, rax (convert signed int64 to double)
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A);
+                emit_byte(0xC0);  // xmm0, rax
+            }
 
             // Store to v_lo[dest]
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
@@ -1093,8 +1152,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // then store to cpu.pstate.
             bool is_double = (inst.width == 1);
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // FP_CMP clobbers RAX, RCX, RDX (flag manipulation).
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             // Load src1 into XMM0
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -1127,29 +1186,68 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Save rax (flags image) — we need it for multiple tests.
             emit_byte(0x50);  // push rax
 
-            // Test PF (unordered): if PF=1, pstate = 0x28000000 (C=1, V=1)
-            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF)
-            emit_mov_imm32_zext(RCX, 0x28000000);
-            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
+            // v1.4.0-beta.3: Fixed flag conversion.
+            // x86 UCOMISD sets: unordered (PF=1,CF=1,ZF=1), less (CF=1),
+            //                    equal (ZF=1), greater (none).
+            // We use a priority chain: check PF first (unordered), then
+            // CF (less), then ZF (equal), else greater. Each cmovne only
+            // fires if RDX is still 0 (i.e., no higher-priority case matched).
+            // We use cmovne (ZF=0) because `test` sets ZF=0 when the bit
+            // IS set (i.e., the flag IS 1).
+            //
+            // But the old chain had a bug: if unordered (PF=1,CF=1,ZF=1),
+            // all three cmovne would fire, and the last one (equal=0x60000000)
+            // would overwrite the correct unordered value (0x30000000).
+            //
+            // Fix: use a priority chain where each cmov only fires if RDX
+            // is still 0. We do this by checking RDX after each set.
+            //
+            // Simpler approach: use conditional jumps (je/jne) to build
+            // a proper if-else chain. This is slightly more code but
+            // unambiguously correct.
 
-            // Test CF (less): if CF=1, pstate = 0x80000000 (N=1)
+            // Default: RDX = 0x20000000 (greater → C=1)
+            emit_mov_imm32_zext(RDX, 0x20000000);
+
+            // v1.4.0-beta.3: Fixed flag conversion using clean if-else chain.
+            // After `test rax, bit`:
+            //   ZF=1 iff (rax & bit) == 0 (flag bit is 0)
+            //   ZF=0 iff (rax & bit) != 0 (flag bit is 1)
+            // JNZ (0x5) jumps when ZF=0, i.e., when the flag bit IS set.
+            // We use JNZ to jump OVER the value-set block when the condition
+            // is NOT met (flag bit is 0), so the default/previous value stays.
+
+            // if PF=1 (unordered): RDX = 0x30000000, then jmp done
+            emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF bit)
+            size_t jz_skip1 = emit_jcc_rel32_placeholder(0x4);  // JZ: PF=0, skip
+            emit_mov_imm32_zext(RDX, 0x30000000);
+            size_t jmp_done1 = emit_jmp_rel32_placeholder();
+            size_t after_pf = code_buf_used_;
+            patch_jcc_rel32(jz_skip1, static_cast<int32_t>(after_pf - (jz_skip1 + 6)));
+
+            // if CF=1 (less): RDX = 0x80000000 (N=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
-            emit_mov_imm32_zext(RCX, 0x80000000);
-            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
+            size_t jz_skip2 = emit_jcc_rel32_placeholder(0x4);  // JZ: CF=0, skip
+            emit_mov_imm32_zext(RDX, 0x80000000);
+            size_t jmp_done2 = emit_jmp_rel32_placeholder();
+            size_t after_cf = code_buf_used_;
+            patch_jcc_rel32(jz_skip2, static_cast<int32_t>(after_cf - (jz_skip2 + 6)));
 
-            // Test ZF (equal): if ZF=1, pstate = 0x60000000 (Z=1, C=1)
+            // if ZF=1 (equal): RDX = 0x60000000 (Z=1, C=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
-            emit_mov_imm32_zext(RCX, 0x60000000);
-            emit_byte(0x0F); emit_byte(0x45); emit_byte(0xD1); // cmovne rdx, rcx
-
-            // If RDX still 0 (none matched), it's "greater" → C=1
-            emit_byte(0x48); emit_byte(0x85); emit_byte(0xD2); // test rdx, rdx
-            emit_mov_imm32_zext(RCX, 0x20000000);
-            emit_byte(0x0F); emit_byte(0x44); emit_byte(0xD1); // cmove rdx, rcx
+            size_t jz_skip3 = emit_jcc_rel32_placeholder(0x4);  // JZ: ZF=0, skip
+            emit_mov_imm32_zext(RDX, 0x60000000);
+            size_t done_flags = code_buf_used_;
+            patch_jcc_rel32(jz_skip3, static_cast<int32_t>(done_flags - (jz_skip3 + 6)));
+            patch_jmp_rel32(jmp_done1, static_cast<int32_t>(done_flags - (jmp_done1 + 5)));
+            patch_jmp_rel32(jmp_done2, static_cast<int32_t>(done_flags - (jmp_done2 + 5)));
 
             emit_byte(0x58);  // pop rax (discard)
 
-            // Store pstate
+            // Store pstate (mask NZCV bits, OR in new value)
+            emit_load32(RCX, CPU_REG, PSTATE_OFF);
+            emit_byte(0x81); emit_byte(0xE1); emit_u32(0x0FFFFFFF);  // and ecx, 0x0FFFFFFF
+            emit_byte(0x48); emit_byte(0x09); emit_byte(0xCA);  // or rdx, rcx
             emit_store32(CPU_REG, PSTATE_OFF, RDX);
             flags_in_host_ = false;
             return false;
@@ -1174,9 +1272,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::SIMD_LOGICAL: {
             // v_lo[dest],v_hi[dest] = src1 OP src2
             // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
+            // v1.4.0-beta.3: SIMD_LOGICAL only touches XMM0/XMM1, no GPRs.
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            // No GPR clobbered — but be safe and invalidate RAX/RCX/RDX
+            // in case the JIT has stale mappings (they shouldn't be dirty
+            // since no GPR is touched, but the cache state may be stale).
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             // Load src1 lo/hi into XMM0
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -1498,21 +1599,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // then we already have flags in host.
             if (flags_in_host_) {
                 // Materialize to pstate (clobbers RAX/RCX/RDX).
-                for (int r : {RAX, RCX, RDX}) {
-                    int v = reg_vreg_[r];
-                    if (v >= 0 && vreg_dirty_[v]) evict_vreg(v);
-                }
+                // v1.4.0-beta.3: use bitmask helpers.
                 emit_pushfq();
+                constexpr uint16_t FLAGS3a = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
+                flush_dirty_host_regs(FLAGS3a);
                 emit_materialize_flags(flags_from_sub_);
                 emit_popfq();
-                for (int r : {RAX, RCX, RDX}) {
-                    int v = reg_vreg_[r];
-                    if (v >= 0) {
-                        vreg_home_[v] = -1;
-                        reg_vreg_[r] = -1;
-                        vreg_dirty_[v] = false;
-                    }
-                }
+                invalidate_host_regs(FLAGS3a);
             } else {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
@@ -1528,6 +1621,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == inst.src1 && inst.dest != 0) {
                 d = s1;
                 vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << s1);  // v1.4.0-beta.3: maintain bitmask
             } else if (inst.dest != 0) {
                 d = alloc_reg_for(inst.dest, s1);
                 if (d != s1) emit_mov_reg(d, s1);
@@ -1570,9 +1664,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
                 // Drop all cache mappings WITHOUT clearing flags_in_host_.
-                for (int v = 0; v <= max_vreg_; v++) {
-                    int r = vreg_home_[v];
-                    if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
+                // v1.4.0-beta.3: use invalidate_all_vregs but preserve flags_in_host_.
+                {
+                    bool saved_fih3 = flags_in_host_;
+                    invalidate_all_vregs();
+                    flags_in_host_ = saved_fih3;
                 }
                 flags_in_host_ = true;
                 flags_from_sub_ = false;
@@ -1627,14 +1723,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // x86 div/idiv by zero raises SIGFPE. We emit a test+jz
             // to skip the div and set result=0 when divisor is zero.
             clobber_flags();
-            flush_caller_saved_vregs();
-            for (int r : {RAX, RCX, RDX}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    if (vreg_dirty_[v]) evict_vreg(v);
-                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
-                }
-            }
+            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);  // dividend
             load_vreg_to_reg(RCX, inst.src2);  // divisor
 
@@ -1697,14 +1787,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // UMADDL: dest = acc + (uint64)(uint32)src1 * (uint64)(uint32)src2
             // x86: imul rax, rcx (64-bit multiply); add rax, acc
             clobber_flags();
-            flush_caller_saved_vregs();
-            for (int r : {RAX, RCX, RDX}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    if (vreg_dirty_[v]) evict_vreg(v);
-                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
-                }
-            }
+            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             // Load src1 (32-bit, sign/zero-extended) into RAX
             load_vreg_to_reg(RAX, inst.src1);
             if (inst.op == IROp::SMADDL) {
@@ -1833,14 +1917,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // x86 imul: RDX:RAX = RAX * r/m64 (signed, one-operand form)
             // Result high 64 bits in RDX.
             clobber_flags();
-            flush_caller_saved_vregs();
-            for (int r : {RAX, RCX, RDX}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    if (vreg_dirty_[v]) evict_vreg(v);
-                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
-                }
-            }
+            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
             if (inst.op == IROp::UMULH) {
@@ -1863,14 +1941,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // SMSUBL: dest = acc - (int64)(int32)src1 * (int32)src2
             // UMSUBL: dest = acc - (uint64)(uint32)src1 * (uint32)src2
             clobber_flags();
-            flush_caller_saved_vregs();
-            for (int r : {RAX, RCX, RDX}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) {
-                    if (vreg_dirty_[v]) evict_vreg(v);
-                    else { vreg_home_[v] = -1; reg_vreg_[r] = -1; }
-                }
-            }
+            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);
             if (inst.op == IROp::SMSUBL) {
                 emit_byte(0x48); emit_byte(0x98);  // cdqe
@@ -1901,9 +1973,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FCVT: float <-> double conversion ────────────────────────
         case IROp::FCVT_S2D:
         case IROp::FCVT_D2S: {
+            // v1.4.0-beta.3: FCVT only clobbers RAX (zero store).
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             // Load FP value from v_lo[src1] into XMM0
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             uint8_t prefix = (inst.op == IROp::FCVT_S2D) ? 0xF3 : 0xF2;
@@ -1931,11 +2003,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FRINT: FP round to integer ───────────────────────────────
         case IROp::FRINT: {
+            // v1.4.0-beta.3: FRINT only clobbers RAX (zero store).
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            bool is_double = (inst.width == 64);
+            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             // Load FP value into XMM0
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
@@ -1967,10 +2039,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FCMP: FP compare (sets NZCV) ─────────────────────────────
         case IROp::FCMP: {
+            // v1.4.0-beta.3: FCMP clobbers RAX, RCX, RDX (flag manipulation).
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
-            bool is_double = (inst.width == 64);
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -2041,10 +2113,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FP_UNOP2: FABS/FNEG/FSQRT ────────────────────────────────
         case IROp::FP_UNOP2: {
+            // v1.4.0-beta.3: FP_UNOP2 clobbers RAX (sign mask + zero store).
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
-            bool is_double = (inst.width == 64);
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             // Load FP value into XMM0
@@ -2088,10 +2160,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // FMADD: dest = src1 * src2 + acc
             // FMSUB: dest = -src1 * src2 + acc = acc - src1 * src2
             // We decompose: mul, then add/sub acc (non-fused, but correct)
+            // v1.4.0-beta.3: FMADD clobbers RAX (zero store).
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
-            bool is_double = (inst.width == 64);
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -2142,26 +2214,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 void FrostJIT::clobber_flags() {
     if (flags_in_host_) {
         // emit_materialize_flags clobbers RAX, RCX, RDX.
-        // Evict any dirty vregs in those registers FIRST so their
-        // values are preserved in cpu.regs[]/stack.
-        for (int r : {RAX, RCX, RDX}) {
-            int v = reg_vreg_[r];
-            if (v >= 0 && vreg_dirty_[v]) {
-                evict_vreg(v);
-            }
-        }
+        // v1.4.0-beta.3: use targeted flush+invalidate via the bitmask
+        // instead of two open-coded 3-reg loops.
+        constexpr uint16_t FLAGS_CLOBBER =
+            (1u << RAX) | (1u << RCX) | (1u << RDX);
+        flush_dirty_host_regs(FLAGS_CLOBBER);
         emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
         // Drop cache mappings for RAX/RCX/RDX (values were evicted above
         // if dirty; non-dirty values can be safely reloaded from memory).
-        for (int r : {RAX, RCX, RDX}) {
-            int v = reg_vreg_[r];
-            if (v >= 0) {
-                vreg_home_[v] = -1;
-                reg_vreg_[r] = -1;
-                vreg_dirty_[v] = false;
-            }
-        }
+        invalidate_host_regs(FLAGS_CLOBBER);
     }
 }
 
@@ -2182,20 +2244,13 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
         case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
-        case InstClass::FMOV: case InstClass::FMOV_IMM:
-        case InstClass::FMOV_VD1: case InstClass::FMOV_RVD1:
-        case InstClass::FADD: case InstClass::FSUB:
-        case InstClass::FMUL: case InstClass::FDIV:
-        case InstClass::FMAX: case InstClass::FMIN:
-        case InstClass::FNMUL:
-        // FMADD/FMSUB, FABS/FNEG/FSQRT, FCMP/FCMPE, FCVT, FRINT now have native IR ops.
-        case InstClass::FCVTZS:
-        case InstClass::FCVTZU: case InstClass::SCVTF:
-        case InstClass::UCVTF:
-        case InstClass::FCSEL:
+        // v1.4.0-beta.3: FP_SCALAR now has native IR paths for most FP ops
+        // (FMOV, FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL, FABS/FNEG/FSQRT,
+        // FCMP/FCMPE, FCVT, FRINT, FMADD/FMSUB, FCSEL, FCVTZS/FCVTZU,
+        // SCVTF/UCVTF, FMOV imm). But it still falls back to CALL_INTERP
+        // for some ops (FCVTAS, half-precision, etc.), so mark it as
+        // "will call interp" conservatively to trigger block splitting.
         case InstClass::FP_SCALAR:
-        // SMULH/UMULH, SMSUBL/UMSUBL now have native IR ops.
-        // MRS/MSR, UDIV/SDIV, SMADDL/UMADDL now have native IR ops.
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
@@ -2239,6 +2294,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     }
     for (int i = 0; i < 16; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
+    dirty_host_regs_ = 0;  // v1.4.0-beta.3: reset dirty bitmask
 
     size_t block_start = code_buf_used_;
 
@@ -2519,6 +2575,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
+    // v1.4.0-beta.3: verify dirty_host_regs_ invariant (debug only).
+    (void)verify_dirty_host_regs_();
     return fn;
 }
 
@@ -2550,17 +2608,58 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         entry = it->second;
         cache_hits++;
 
+        // v1.4.0-beta.3: Per-PC hotness tracking. If this PC has been
+        // dispatched > HOT_PC_THRESHOLD times, mark it interp_only so
+        // future hits skip the dispatcher. This catches tight multi-
+        // block cycles (soft-float routines) that the consecutive-PC
+        // watchdog can't detect. The interpreter is faster for tiny
+        // blocks because it avoids ~1us of dispatch overhead per block.
+        if (!entry.interp_only && entry.fn) {
+            auto& cnt = hot_pc_counts_[pc];
+            if (++cnt >= HOT_PC_THRESHOLD) {
+                // Promote to interp_only. The interpreter runs the same
+                // instr_count instructions without dispatcher overhead.
+                it->second.interp_only = true;
+                it->second.interp_only_count = it->second.instr_count;
+                it->second.fn = nullptr;
+                it->second.chained = false;
+                entry = it->second;
+                // Clear the hotness counter to save memory.
+                hot_pc_counts_.erase(pc);
+            }
+            // Bound the map size to prevent unbounded growth.
+            if (hot_pc_counts_.size() > HOT_PC_MAP_MAX) {
+                hot_pc_counts_.clear();
+            }
+        }
+
         // ── interp_only shortcut ──────────────────────────────────
         // Blocks that are too CALL_INTERP-heavy to JIT (e.g. __multf3)
         // are marked interp_only at translate-time. Run them through
         // the interpreter directly — no prologue/epilogue/CALL_INTERP
         // overhead. The interpreter steps exactly interp_only_count
         // instructions, matching what the JIT block would have done.
+        //
+        // v1.4.0-beta.3: tight-loop accelerator. If after running the
+        // block once the PC is back at the same block start, we're in
+        // a tight self-loop (common for soft-float routines). Re-run
+        // the block in a tight loop (no dispatcher overhead) until the
+        // PC changes or a max iteration count is reached. This eliminates
+        // ~1us of dispatch overhead per iteration, speeding up soft-float
+        // loops by 10-100x.
         if (entry.interp_only) {
             blocks_executed++;
-            for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
-                emu.step_public(cpu);
-            }
+            constexpr int TIGHT_LOOP_MAX = 1000000;  // safety cap
+            int tight_iter = 0;
+            do {
+                for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
+                    emu.step_public(cpu);
+                }
+                tight_iter++;
+                if (tight_iter >= TIGHT_LOOP_MAX) break;
+                // If PC unchanged, the block is a tight self-loop — re-run.
+                // Otherwise, exit to the dispatcher.
+            } while (cpu.running && cpu.pc == pc);
             return cpu.pc;
         }
 

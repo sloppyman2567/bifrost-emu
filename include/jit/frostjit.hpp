@@ -77,13 +77,28 @@ public:
     uint64_t watchdog_last_pc_ = UINT64_MAX;
     uint32_t watchdog_count_   = 0;
 
+    // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
+    // PC has been dispatched (total, not consecutive). When a PC exceeds
+    // HOT_PC_THRESHOLD, it's marked interp_only — the interpreter is
+    // faster for tiny blocks because it skips the C dispatcher overhead
+    // (~1us per block). This catches tight multi-block cycles (e.g.,
+    // __multf3's ~10-block cycle) that the consecutive-PC watchdog can't
+    // detect. The counter map is bounded by HOT_PC_MAP_MAX to prevent
+    // unbounded memory growth; eviction is LRU-ish (clear on overflow).
+    static constexpr uint32_t HOT_PC_THRESHOLD = 5000;
+    static constexpr size_t   HOT_PC_MAP_MAX   = 65536;
+    std::unordered_map<uint64_t, uint32_t> hot_pc_counts_;
+
     // Global progress watchdog: if total block executions exceed this
     // limit, the JIT switches to interpreter-only mode permanently.
     // This is a safety valve for JIT codegen bugs that cause infinite
     // loops across multiple PCs. Set high enough that real workloads
     // (toybox, musl libc loops) never trip it — 10000 was way too low
     // and disabled the JIT mid-run on any non-trivial program.
-    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 50000000;
+    // v1.4.0-beta.2: bumped from 50M to 1B. Soft-float-heavy programs
+    // (long double multiply, printf %Lf) can legitimately dispatch
+    // 100M+ tiny interp_only blocks; 50M was too aggressive.
+    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000;
     uint64_t total_blocks_executed_ = 0;
     bool     jit_disabled_ = false;  // set by global watchdog
 
@@ -321,6 +336,11 @@ private:
                r == R10;  // WIN_REG is caller-saved too
     }
 
+    // Bitmask of all caller-saved host regs (used as a fast `mask` arg).
+    static constexpr uint16_t CALLER_SAVED_MASK =
+        (1u << RAX) | (1u << RCX) | (1u << RDX) |
+        (1u << R8)  | (1u << R9)  | (1u << R11) | (1u << R10);
+
     // vreg → x86 reg (or -1 if spilled to stack).
     int vreg_home_[4096];
     // x86 reg → vreg currently in it (or -1).
@@ -336,6 +356,19 @@ private:
     // Max vreg from the previous block — used to bound the array-clearing
     // in translate_block() so we don't zero all 4096 entries every time.
     int prev_max_vreg_ = 0;
+
+    // ── Dirty host-reg bitmask (unique flush-reduction scheme) ───────
+    // Bit `r` is set iff reg_vreg_[r] holds a dirty vreg (i.e.
+    // vreg_dirty_[reg_vreg_[r]] == true). Maintained in lockstep with
+    // set_vreg_reg / alloc_reg_for / evict_vreg / kill_vreg / drop_vreg /
+    // clobber_host_reg / invalidate_all_vregs. Lets us do O(popcount(mask))
+    // targeted flushes instead of O(max_vreg_) scans — critical for FP
+    // heavy blocks where max_vreg_ can be 256+.
+    //
+    // Invariant:
+    //   dirty_host_regs_ & (1u << r)  ⇔  reg_vreg_[r] >= 0 &&
+    //                                     vreg_dirty_[reg_vreg_[r]]
+    uint16_t dirty_host_regs_ = 0;
 
     int  alloc_reg(int preferred = -1);
     void evict_vreg(int v);
@@ -354,6 +387,23 @@ private:
     // callee-saved regs across interpreter calls, eliminating redundant
     // reload traffic.
     void flush_caller_saved_vregs();
+
+    // ── Targeted flush/invalidate (v1.4.0-beta.2) ───────────────────
+    // Walk only the host regs whose bits are set in `mask`, spilling any
+    // dirty vreg cached there. O(popcount(mask)) instead of O(max_vreg_).
+    // Used by FP JIT codegen — FP ops only clobber XMM0/XMM1 plus a small
+    // fixed set of GPRs (RAX/RCX/RDX), so flushing just those is enough.
+    void flush_dirty_host_regs(uint16_t mask);
+    // Drop cache mappings for host regs in `mask` (no spill — caller must
+    // have already flushed if any were dirty). Companion to above.
+    void invalidate_host_regs(uint16_t mask);
+    // Convenience: flush + invalidate in one call (the common pattern).
+    inline void flush_invalidate_host_regs(uint16_t mask) {
+        flush_dirty_host_regs(mask);
+        invalidate_host_regs(mask);
+    }
+    // Debug-only: verify the dirty_host_regs_ invariant. Returns true if OK.
+    bool verify_dirty_host_regs_() const;
 
     int  ensure_vreg(int v, int preferred = -1);
     void set_vreg_reg(int v, int r);
