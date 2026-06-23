@@ -146,8 +146,13 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
             }
         }
     }
-    // (v1.4.0-beta.1): flush_all_vregs above already spilled all dirty
-    // vregs including SP. No separate SP flush needed.
+    // (v1.4.0-beta.1): flush_all_vregs already called above (before
+    // materialize_flags). All dirty vregs are now in cpu.regs[]/stack.
+    // SP (vreg 31) may have been flushed above, but force-check here
+    // in case the materialize introduced a new dirty SP (it shouldn't).
+    if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
+        evict_vreg(31);
+    }
     emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
     emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup needed)
     // Set cpu.pc = arm_pc.
@@ -165,7 +170,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX.
     emit_load(RAX, CPU_REG, PC_OFF);
-    // (refactored): invalidate ALL cache mappings after the call.
+    // (v1.4.0-alpha.5): invalidate ALL cache mappings after the call.
     // We can't keep callee-saved vregs cached because the interpreter
     // may have modified cpu.regs[] for registers that the JIT has
     // cached as non-dirty. A STORE_REG earlier in the block may have
@@ -318,27 +323,25 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::LOAD_REG:
             // dest = arm64_reg[src1]. src1 is the ARM64 reg index.
-            // (v1.4.0-beta.1): fast path for XZR (src1==32) — emit IMM 0.
             {
+                // Kill any existing value for dest, allocate a fresh reg.
                 kill_vreg(inst.dest);
                 int d = alloc_reg();
-                if (inst.src1 == 32) {
-                    // XZR — always 0.
-                    emit_mov_imm32_zext(d, 0);
-                } else {
-                    emit_load_arm(d, inst.src1);
-                }
+                emit_load_arm(d, inst.src1);
                 set_vreg_reg(inst.dest, d);
             }
             return false;
 
         case IROp::STORE_REG:
             // arm64_reg[dest] = src1. Write to cpu.regs[dest].
-            // (v1.4.0-beta.1): fast path for dest==32 (XZR) — discard.
-            if (inst.dest == 32) return false;  // XZR — discard write
+            // DON'T cache dest — leave it uncached so it reloads from
+            // cpu.regs[dest] if needed (correct value, just written).
+            // DON'T touch src1 — it stays cached in its reg.
+            // This avoids all aliasing problems and eliminates spills.
             {
                 int s = ensure_vreg(inst.src1);
                 emit_store_arm(inst.dest, s);
+                // Kill any stale dest mapping (dest's value is now in cpu.regs).
                 if (inst.dest <= 31) {
                     kill_vreg(inst.dest);
                 }
@@ -346,23 +349,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
 
         case IROp::LOAD_MEM: {
-            // (v1.4.0-beta.1 rewrite): use register allocator instead of
-            // flush_all_vregs. The new emit_load_mem's fast path only
-            // clobbers dst (via push/pop R11 for the limit check).
-            // Slow path clobbers caller-saved — flush those, keep
-            // callee-saved cached.
             clobber_flags();
-            flush_caller_saved_vregs();
-            // Get address into RAX via the allocator.
-            int s1 = ensure_vreg(inst.src1, RAX);
-            if (s1 != RAX) { clobber_host_reg(RAX); emit_mov_reg(RAX, s1); }
-            // Drop caller-saved mappings (slow path may clobber them).
-            for (int r : {RAX, RCX, RDX, R8, R9, R11}) {
-                int v = reg_vreg_[r];
-                if (v >= 0) { vreg_home_[v] = -1; reg_vreg_[r] = -1; vreg_dirty_[v] = false; }
-            }
+            flush_all_vregs();
+            invalidate_all_vregs();
+            load_vreg_to_reg(RAX, inst.src1);
             emit_load_mem(RAX, RAX, (int32_t)inst.imm, inst.width, false);
-            // Result in RAX. Store to dest's memory home.
             store_reg_to_vreg(inst.dest, RAX);
             return false;
         }
@@ -575,9 +566,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // dest reg and copy src1 there BEFORE bswap, so src1 stays
             // cached in RAX (or gets reloaded from cpu.regs[]/stack later).
             //
-            // (old code used store_vreg which silently dropped dirty vregs)
+            // The previous code did `bswap eax; store_vreg(dest, RAX)` which
             // silently dropped src1's value if src1 was a scratch vreg
-            // Fixed in v1.4.0-beta.1 by using alloc_reg_for instead.
+            // (v > 31) — store_vreg cleared src1's dirty flag without
             // spilling, and a later force_vreg_to_reg(src1) loaded from an
             // uninitialized stack slot. This caused jit_simd.elf's
             // `cmp w0, w5` to compute wrong flags and crash.
@@ -709,7 +700,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_test_reg(RAX, RAX);
             // jcc to taken target
             uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
-            // ── Frameless back-edge (refactored) ─────────────────
+            // ── Frameless back-edge (v1.4.0-alpha.5) ─────────────────
             // If this is a back-edge (target ≤ start_pc), try to emit a
             // direct jcc to the loop top's body. CBZ/CBNZ at the bottom
             // of a loop is the canonical case.
@@ -789,7 +780,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // jcc: TBZ (cond=0, EQ) → JNC (bit==0, CF=0) → JAE (cc=3)
             //      TBNZ (cond=1, NE) → JC (bit==1, CF=1) → JB (cc=2)
             uint8_t cc = (inst.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
-            // ── Frameless back-edge (refactored) ─────────────────
+            // ── Frameless back-edge (v1.4.0-alpha.5) ─────────────────
             bool is_back_edge = (inst.imm <= inst.arm_pc);
             if (is_back_edge) {
                 for (int v = 0; v <= 31; v++) {
@@ -827,6 +818,25 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;
             return true;
+        }
+
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // CSINC/CSINV/CSNEG were decomposed to ADD+NOT+NEG + CSEL in
+        // ir.cpp (commit bfc7e76). The JIT only sees IROp::CSEL (native)
+        // for these. This case is a defensive fallback — if a future
+        // change accidentally re-emits CSINC/CSINV/CSNEG, the JIT will
+        // fall back to the interpreter instead of crashing or producing
+        // silent wrong-code. The fallback is correct but slow.
+        case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG: {
+            emit_call_interp(inst.arm_pc, false);
+            kill_vreg(inst.dest);
+            {
+                int d = alloc_reg();
+                int rd = static_cast<int>(inst.imm);
+                emit_load_arm(d, rd);
+                set_vreg_reg(inst.dest, d);
+            }
+            return false;
         }
 
         case IROp::CSEL: {
@@ -1049,7 +1059,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 }
             }
             flags_in_host_ = false;
-            // ── Frameless back-edge chaining (refactored) ────────
+            // ── Frameless back-edge chaining (v1.4.0-alpha.5) ────────
             // If the branch target is a back-edge (target ≤ start_pc),
             // try to emit a direct jcc to the target's body, skipping
             // the epilogue + dispatcher + prologue. This is the hot
@@ -1701,6 +1711,39 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             set_vreg_reg(inst.dest, RAX);
             return false;
         }
+
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // BFM was decomposed to SHL+SHR+OR+AND+OR in ir.cpp (commit
+        // bfc7e76). This case is a defensive fallback.
+        case IROp::BFM: {
+            emit_call_interp(inst.arm_pc, false);
+            return false;
+        }
+
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // EXTR was decomposed to SHL+SHR+OR in ir.cpp (commit 8fd8e6c).
+        // This case is a defensive fallback. The ~45 lines of native
+        // codegen that used to live here were removed — if you need to
+        // revive them, see git history (commit 8fd8e6c^).
+        case IROp::EXTR: {
+            emit_call_interp(inst.arm_pc, false);
+            return false;
+        }
+
+        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
+        // RBIT/REV16/REV32 were decomposed to SWAR shift/mask patterns
+        // in ir.cpp (commit 1aad1e1). CLS was decomposed to SAR+XOR+
+        // CLZ+SUB in ir.cpp (commit a0e545c). These cases are defensive
+        // fallbacks.
+        case IROp::RBIT: case IROp::CLS: case IROp::REV16: case IROp::REV32:
+            emit_call_interp(inst.arm_pc, false);
+            kill_vreg(inst.dest);
+            {
+                int d = alloc_reg();
+                int rd = static_cast<int>(inst.imm);
+                emit_load_arm(d, rd);
+                set_vreg_reg(inst.dest, d);
+            }
             return false;
 
         case IROp::ADCS: case IROp::SBCS: {
@@ -1815,8 +1858,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (need_cmc) emit_byte(0xF5);
 
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
-            
-            
+            // (v1.4.0-beta.1): use ensure_vreg + mov instead of load_vreg
+            // (load_vreg is being removed as dead code).
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
             else {
                 int s = ensure_vreg(inst.src1, RAX);
@@ -1955,7 +1998,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     code_buf_overflow_ = false;
     call_interp_branch_patches_.clear();
     branch_target_patches_.clear();
-    back_edge_patches_.clear();  //  frameless back-edge sites
+    back_edge_patches_.clear();  // v1.4.0-alpha.5: frameless back-edge sites
     rax_holds_next_pc_ = false;
     flags_in_host_ = false;
     flags_from_sub_ = false;
@@ -1977,12 +2020,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
 
+    constexpr int MAX_BLOCK = 256;
     // (v1.4.0-beta.1): limit block size based on register pressure.
     // With 9 host regs and >256 vregs, the allocator's spill/reload
     // traffic becomes a correctness hazard (the REV64/CLZ/FMOV bugs
     // were all in this class). Cap blocks at 32 instructions — enough
     // for tight loops, short enough that vreg count stays manageable.
-    constexpr int MAX_BLOCK_REG_PRESSURE = 48;
+    constexpr int MAX_BLOCK_REG_PRESSURE = 32;
     // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
     // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
@@ -2051,7 +2095,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     //
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
-    if (call_interp_count > 0 && call_interp_count * 2 > instr_count) {
+    // (v1.4.0-beta.1): blocks with >32 instructions have too much
+    // register pressure for the 9-host-reg allocator. The __multf3
+    // 82-instruction softfloat block generates ~246 vregs, causing
+    // spill/reload correctness bugs. Run long blocks via interpreter.
+    if (instr_count > 32 ||
+        (call_interp_count > 0 && call_interp_count * 2 > instr_count)) {
         BlockEntry entry;
         entry.fn = nullptr;
         entry.interp_only = true;
@@ -2111,7 +2160,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
     if (window_base_) emit_mov_imm64(WIN_REG, (uint64_t)window_base_);
 
-    //  record the body offset (after prologue). Frameless
+    // v1.4.0-alpha.5: record the body offset (after prologue). Frameless
     // back-edge chaining jumps directly here, skipping the prologue.
     size_t body_off = code_buf_used_;
 
@@ -2223,7 +2272,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chain_target_pc = chain_target_pc_;
     entry.chained = false;
     entry.instr_count = instr_count;
-    entry.body_off = body_off;  //  for frameless back-edge chaining
+    entry.body_off = body_off;  // v1.4.0-alpha.5: for frameless back-edge chaining
     // A block is frameless-compatible if it doesn't end with an op that
     // requires a fresh stack frame or has runtime-dependent control flow
     // that can't be patched. SVC and BR (indirect) are not compatible.
@@ -2272,7 +2321,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // also patch any existing blocks whose chain target is this block.
     try_chain_block(start_pc, blocks_[start_pc]);
     chain_back_references(start_pc);
-    //  patch any pending back-edges that target this
+    // v1.4.0-alpha.5: patch any pending back-edges that target this
     // block's body. This handles the case where a loop body was
     // translated BEFORE the loop top — the back-edge in the body was
     // recorded as pending, and now that the top is translated, we can
