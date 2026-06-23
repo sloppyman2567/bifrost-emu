@@ -32,12 +32,19 @@ bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
     fd_ = ::open("/dev/dsp", O_WRONLY | O_NONBLOCK);
     if (fd_ >= 0) {
         // Configure OSS: set format, channels, sample rate.
+        // Check return values — if config fails, the device may not
+        // support the requested format, but we proceed (buffer_ still
+        // captures data for WAV dump).
         int fmt = AFMT_S16_NE;
         int ch = channels;
         int sr = static_cast<int>(sample_rate);
-        ::ioctl(fd_, SNDCTL_DSP_SETFMT, &fmt);
-        ::ioctl(fd_, SNDCTL_DSP_CHANNELS, &ch);
-        ::ioctl(fd_, SNDCTL_DSP_SPEED, &sr);
+        if (::ioctl(fd_, SNDCTL_DSP_SETFMT, &fmt) < 0 || fmt != AFMT_S16_NE) {
+            // Format not supported — close device, use buffer only.
+            ::close(fd_); fd_ = -1;
+        } else {
+            ::ioctl(fd_, SNDCTL_DSP_CHANNELS, &ch);
+            ::ioctl(fd_, SNDCTL_DSP_SPEED, &sr);
+        }
     }
 
     opened_ = true;
@@ -122,8 +129,12 @@ bool Audio::dump_to_wav(const std::string& path) {
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
 
+    // Cap at 4GB — WAV format uses 32-bit size fields.
+    size_t write_size = buffer_.size();
+    if (write_size > 0xFFFFFFFFULL) write_size = 0xFFFFFFFFULL;
+
     // Write WAV header.
-    uint32_t data_size = static_cast<uint32_t>(buffer_.size());
+    uint32_t data_size = static_cast<uint32_t>(write_size);
     uint32_t byte_rate = sample_rate_ * channels_ * sample_size_;
     uint16_t block_align = channels_ * sample_size_;
     uint16_t bits_per_sample = sample_size_ * 8;
@@ -150,7 +161,7 @@ bool Audio::dump_to_wav(const std::string& path) {
     // data chunk
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
-    fwrite(buffer_.data(), 1, buffer_.size(), f);
+    fwrite(buffer_.data(), 1, write_size, f);
 
     fclose(f);
     return true;
