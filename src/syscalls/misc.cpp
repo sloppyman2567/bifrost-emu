@@ -54,11 +54,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& signals_ = emu.signals_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = (uint64_t)r; };
+    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         case 117: { // ptrace — return -EPERM
-            ret_host((uint64_t)(int64_t)-EPERM);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EPERM)));
             return 0;
         }
 
@@ -84,7 +84,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ::sigsuspend(&empty);
             // After the signal handler runs (and possibly rt_sigreturn
             // restores state), sigsuspend returns -EINTR.
-            ret_host((uint64_t)-EINTR);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINTR)));
             return 0;
         }
 
@@ -92,7 +92,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // v1.4.0-alpha: actually install the signal handler in
             // our SignalTable. Previously a no-op, which meant guest
             // signal handlers were silently dropped.
-            int signo = (int)a0;
+            int signo = static_cast<int>(a0);
             int r = signals_.install(mem_, signo, a1, a2);
             ret_host(r);
             return 0;
@@ -176,7 +176,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 163: { // getrlimit(resource, rlim) — AArch64 syscall 163
             // Return generous infinite limits so libc doesn't choke.
             // struct rlimit { uint64_t rlim_cur; uint64_t rlim_max; }
-            uint64_t rlim[2] = { (uint64_t)-1ULL, (uint64_t)-1ULL };
+            uint64_t rlim[2] = { static_cast<uint64_t>(-1ULL), static_cast<uint64_t>(-1ULL) };
             mem_.write(a1, rlim, sizeof(rlim));
             ret_host(0);
             return 0;
@@ -194,7 +194,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // v1.4.0-alpha.1: toybox sh calls umask(0) during init and
             // umask(prev) at shutdown. Just pass through to the host.
             mode_t old = ::umask((mode_t)a0);
-            ret_host((uint64_t)old);
+            ret_host(static_cast<uint64_t>(old));
             return 0;
         }
 
@@ -209,7 +209,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // modern ppoll — but 168 on aarch64 is actually poll. To avoid
             // further conflicts, we just call this "poll-like" and accept
             // the limitation.
-            int nfds = (int)a1;
+            int nfds = static_cast<int>(a1);
             std::vector<struct pollfd> pfds(nfds);
             for (int i = 0; i < nfds; i++) {
                 pfds[i].fd = mem_.load<int>(a0 + i * 8);
@@ -221,7 +221,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t sec = mem_.load<uint64_t>(a2);
                 uint64_t nsec = mem_.load<uint64_t>(a2 + 8);
                 if (sec == 0 && nsec == 0) timeout_ms = 0;
-                else timeout_ms = (int)(sec * 1000 + nsec / 1000000);
+                else timeout_ms = static_cast<int>(sec * 1000 + nsec / 1000000);
             }
             int r = ::poll(pfds.data(), nfds, timeout_ms);
             for (int i = 0; i < nfds; i++) {
@@ -268,18 +268,18 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
-            ret_host(::eventfd((unsigned int)a0, (int)a1));
+            ret_host(::eventfd((unsigned int)a0, static_cast<int>(a1)));
             return 0;
         }
 
         case 198: { // socket (glibc may probe for IPC)
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
         case 199: { // socketpair(domain, type, protocol, sv) — aarch64 199
             int fds[2];
-            int r = ::socketpair((int)a0, (int)a1, (int)a2, fds);
+            int r = ::socketpair(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2), fds);
             if (r == 0) {
                 mem_.store<int>(a3, fds[0]);
                 mem_.store<int>(a3 + 4, fds[1]);
@@ -289,29 +289,29 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 20: { // epoll_create1(flags) — aarch64 syscall 20
-            ret_host(::epoll_create1((int)a0));
+            ret_host(::epoll_create1(static_cast<int>(a0)));
             return 0;
         }
 
         case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
             // We can't marshal sockaddr from guest memory safely without
             // knowing the family, so return -ENOSYS for now.
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
         case 201: { // listen(sockfd, backlog) — aarch64 201
-            ret_host(::listen((int)a0, (int)a1));
+            ret_host(::listen(static_cast<int>(a0), static_cast<int>(a1)));
             return 0;
         }
 
         case 202: { // accept(sockfd, addr, addrlen) — aarch64 202
-            ret_host(::accept((int)a0, nullptr, nullptr));
+            ret_host(::accept(static_cast<int>(a0), nullptr, nullptr));
             return 0;
         }
 
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
@@ -322,7 +322,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             struct epoll_event ev;
             ev.events = mem_.load<uint32_t>(a3);
             ev.data.u64 = mem_.load<uint64_t>(a3 + 4);
-            ret_host(::epoll_ctl((int)a0, (int)a1, (int)a2, &ev));
+            ret_host(::epoll_ctl(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2), &ev));
             return 0;
         }
 
@@ -345,12 +345,12 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Real AArch64 syscall 22. We forward to epoll_wait and ignore
             // the sigmask (guest signal delivery isn't supported anyway).
             struct epoll_event evs[256];
-            int maxev = (int)a2;
+            int maxev = static_cast<int>(a2);
             if (maxev > 256) maxev = 256;
-            int n = ::epoll_wait((int)a0, evs, maxev, (int)a3);
+            int n = ::epoll_wait(static_cast<int>(a0), evs, maxev, static_cast<int>(a3));
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
-                    uint64_t p = a1 + (uint64_t)i * 12;
+                    uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
                     mem_.store<uint32_t>(p, evs[i].events);
                     mem_.store<uint64_t>(p + 4, evs[i].data.u64);
                 }
@@ -366,12 +366,12 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // This is a known slot conflict — to be resolved by a full
             // syscall-table renumbering pass in a future release.
             struct epoll_event evs[256];
-            int maxev = (int)a2;
+            int maxev = static_cast<int>(a2);
             if (maxev > 256) maxev = 256;
-            int n = ::epoll_wait((int)a0, evs, maxev, (int)a3);
+            int n = ::epoll_wait(static_cast<int>(a0), evs, maxev, static_cast<int>(a3));
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
-                    uint64_t p = a1 + (uint64_t)i * 12;
+                    uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
                     mem_.store<uint32_t>(p, evs[i].events);
                     mem_.store<uint64_t>(p + 4, evs[i].data.u64);
                 }
@@ -382,15 +382,15 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 247: { // waitpid (legacy, same as wait4) — aarch64 247
             int status = 0;
-            pid_t r = ::waitpid((pid_t)a0, &status, (int)a2);
+            pid_t r = ::waitpid((pid_t)a0, &status, static_cast<int>(a2));
             if (r < 0) {
-                ret_host((uint64_t)(int64_t)-errno);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 return 0;
             }
             if (a1) {
-                mem_.store<uint32_t>(a1, (uint32_t)status);
+                mem_.store<uint32_t>(a1, static_cast<uint32_t>(status));
             }
-            ret_host((uint64_t)r);
+            ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 
@@ -398,21 +398,21 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // v1.4.0-alpha.2: with real fork() support, we forward to
             // host wait4() so the parent can reap forked children.
             pid_t pid = (pid_t)a0;
-            int options = (int)a2;
+            int options = static_cast<int>(a2);
             int status = 0;
             struct rusage ru;
             pid_t r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
             if (r < 0) {
-                ret_host((uint64_t)(int64_t)-errno);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 return 0;
             }
             if (a1) {
-                mem_.store<uint32_t>(a1, (uint32_t)status);
+                mem_.store<uint32_t>(a1, static_cast<uint32_t>(status));
             }
             if (a3) {
                 mem_.write(a3, &ru, sizeof(ru));
             }
-            ret_host((uint64_t)r);
+            ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 
@@ -432,16 +432,16 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 270: { // eventfd2 alt entry (in case 19 was missed)
-            ret_host(::eventfd((unsigned int)a0, (int)a1));
+            ret_host(::eventfd((unsigned int)a0, static_cast<int>(a1)));
             return 0;
         }
 
         case 272: { // waitid(idtype, id, infop, options) — aarch64 272
             // v1.4.0-alpha.2: forward to host waitid.
             siginfo_t si;
-            int r = ::waitid((idtype_t)a0, (id_t)a1, &si, (int)a3);
+            int r = ::waitid((idtype_t)a0, (id_t)a1, &si, static_cast<int>(a3));
             if (r < 0) {
-                ret_host((uint64_t)(int64_t)-errno);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 return 0;
             }
             if (a2) {
@@ -460,23 +460,23 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (a1 == 0 || a0 == 0) { ret_host(0); return 0; }
             std::vector<uint8_t> tmp(a1);
             FILE* ur = fopen("/dev/urandom", "rb");
-            if (!ur) { ret_host((uint64_t)-ENOSYS); return 0; }
+            if (!ur) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; }
             size_t got = fread(tmp.data(), 1, a1, ur);
             fclose(ur);
-            if (got == 0) { ret_host((uint64_t)-EIO); return 0; }
+            if (got == 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EIO))); return 0; }
             mem_.write(a0, tmp.data(), got);
             ret_host(got);
             return 0;
         }
 
         case 281: { // execveat — not supported
-            ret_host((uint64_t)(int64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
         case 293: { // rseq (restartable sequences, glibc probes at startup)
             // Return -ENOSYS so glibc disables rseq and uses regular paths.
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
@@ -484,7 +484,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Delegate to host select. FD sets are bitmaps (1024 bits = 128 bytes).
             fd_set rfds, wfds, efds;
             FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
-            int nfds = (int)a0;
+            int nfds = static_cast<int>(a0);
             if (a1) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
                 if (mem_.load<uint8_t>(a1 + fd/8) & (1 << (fd%8))) FD_SET(fd, &rfds);
             }
@@ -524,11 +524,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // ppoll() to wait for input on stdin, and the -ENOSYS fallback
             // sent it into a busy-wait loop. Forward to host poll(2) with
             // a millisecond timeout derived from the timespec.
-            int nfds = (int)a1;
+            int nfds = static_cast<int>(a1);
             std::vector<struct pollfd> pfds(nfds);
             for (int i = 0; i < nfds; i++) {
-                pfds[i].fd      = mem_.load<int>(a0 + (uint64_t)i * 8);
-                pfds[i].events  = mem_.load<int16_t>(a0 + (uint64_t)i * 8 + 4);
+                pfds[i].fd      = mem_.load<int>(a0 + static_cast<uint64_t>(i) * 8);
+                pfds[i].events  = mem_.load<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 4);
                 pfds[i].revents = 0;
             }
             int timeout_ms = -1;
@@ -536,34 +536,34 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t sec  = mem_.load<uint64_t>(a2);
                 uint64_t nsec = mem_.load<uint64_t>(a2 + 8);
                 if (sec == 0 && nsec == 0) timeout_ms = 0;
-                else timeout_ms = (int)(sec * 1000 + nsec / 1000000);
+                else timeout_ms = static_cast<int>(sec * 1000 + nsec / 1000000);
             }
             int r = ::poll(pfds.data(), nfds, timeout_ms);
             for (int i = 0; i < nfds; i++) {
-                mem_.store<int16_t>(a0 + (uint64_t)i * 8 + 6, pfds[i].revents);
+                mem_.store<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 6, pfds[i].revents);
             }
             ret_host(r);
             return 0;
         }
 
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
-            ret_host(::timerfd_create((int)a0, (int)a1));
+            ret_host(::timerfd_create(static_cast<int>(a0), static_cast<int>(a1)));
             return 0;
         }
 
         case 86: { // timerfd_settime(fd, flags, new, old) — aarch64 syscall 86
             struct itimerspec newv;
             struct itimerspec oldv;
-            newv.it_interval.tv_sec  = (time_t)mem_.load<uint64_t>(a2);
-            newv.it_interval.tv_nsec = (long)mem_.load<uint64_t>(a2 + 8);
-            newv.it_value.tv_sec     = (time_t)mem_.load<uint64_t>(a2 + 16);
-            newv.it_value.tv_nsec    = (long)mem_.load<uint64_t>(a2 + 24);
-            int r = ::timerfd_settime((int)a0, (int)a1, &newv, a3 ? &oldv : nullptr);
+            newv.it_interval.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a2));
+            newv.it_interval.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a2 + 8));
+            newv.it_value.tv_sec     = static_cast<time_t>(mem_.load<uint64_t>(a2 + 16));
+            newv.it_value.tv_nsec    = static_cast<long>(mem_.load<uint64_t>(a2 + 24));
+            int r = ::timerfd_settime(static_cast<int>(a0), static_cast<int>(a1), &newv, a3 ? &oldv : nullptr);
             if (r == 0 && a3) {
-                mem_.store<uint64_t>(a3, (uint64_t)oldv.it_interval.tv_sec);
-                mem_.store<uint64_t>(a3 + 8, (uint64_t)oldv.it_interval.tv_nsec);
-                mem_.store<uint64_t>(a3 + 16, (uint64_t)oldv.it_value.tv_sec);
-                mem_.store<uint64_t>(a3 + 24, (uint64_t)oldv.it_value.tv_nsec);
+                mem_.store<uint64_t>(a3, static_cast<uint64_t>(oldv.it_interval.tv_sec));
+                mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(oldv.it_interval.tv_nsec));
+                mem_.store<uint64_t>(a3 + 16, static_cast<uint64_t>(oldv.it_value.tv_sec));
+                mem_.store<uint64_t>(a3 + 24, static_cast<uint64_t>(oldv.it_value.tv_nsec));
             }
             ret_host(r);
             return 0;
@@ -571,12 +571,12 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 87: { // timerfd_gettime(fd, curr) — aarch64 syscall 87
             struct itimerspec cur;
-            int r = ::timerfd_gettime((int)a0, &cur);
+            int r = ::timerfd_gettime(static_cast<int>(a0), &cur);
             if (r == 0 && a1) {
-                mem_.store<uint64_t>(a1, (uint64_t)cur.it_interval.tv_sec);
-                mem_.store<uint64_t>(a1 + 8, (uint64_t)cur.it_interval.tv_nsec);
-                mem_.store<uint64_t>(a1 + 16, (uint64_t)cur.it_value.tv_sec);
-                mem_.store<uint64_t>(a1 + 24, (uint64_t)cur.it_value.tv_nsec);
+                mem_.store<uint64_t>(a1, static_cast<uint64_t>(cur.it_interval.tv_sec));
+                mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(cur.it_interval.tv_nsec));
+                mem_.store<uint64_t>(a1 + 16, static_cast<uint64_t>(cur.it_value.tv_sec));
+                mem_.store<uint64_t>(a1 + 24, static_cast<uint64_t>(cur.it_value.tv_nsec));
             }
             ret_host(r);
             return 0;
@@ -584,13 +584,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 93: { // exit
             cpu.running = false;
-            cpu.exit_code = (int)a0;
+            cpu.exit_code = static_cast<int>(a0);
             return 0;
         }
 
         case 94: { // exit_group
             cpu.running = false;
-            cpu.exit_code = (int)a0;
+            cpu.exit_code = static_cast<int>(a0);
             return 0;
         }
 

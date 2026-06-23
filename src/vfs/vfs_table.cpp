@@ -23,7 +23,7 @@ std::unique_ptr<MemfdVNode> MemfdVNode::create(const std::string& name,
     if (fd < 0) return nullptr;
     if (!content.empty()) {
         ssize_t w = ::write(fd, content.data(), content.size());
-        if (w < 0 || (size_t)w != content.size()) {
+        if (w < 0 || static_cast<size_t>(w) != content.size()) {
             ::close(fd);
             return nullptr;
         }

@@ -135,8 +135,6 @@ private:
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
         bool    chained = false;       // true once the slot has been patched to a jmp
         int     instr_count = 0;      // number of ARM64 instructions in this block
-        size_t  body_off = 0;         // offset of the IR body (after prologue) — for frameless back-edge chaining
-        bool    frameless_compatible = false; // true if the block can be the target of a frameless back-edge jump
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
     };
@@ -416,12 +414,6 @@ private:
     struct BranchPatch { size_t patch_off; int target_kind; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
     bool compile_ir_inst(const IRInst& inst);
-    // Emit a frameless jcc/jmp to a loop-top block's body. Returns true
-    // if emitted (caller skips normal epilogue). See implementation.
-    bool emit_frameless_back_edge(uint64_t target_pc, uint8_t cc);
-    // Patch a pending back-edge site (recorded in pending_back_edges_)
-    // to jump directly to the now-translated target's body.
-    void patch_pending_back_edges(uint64_t target_pc);
 
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;
@@ -437,35 +429,6 @@ private:
     // so it cannot be chained even at fall-through.
     uint64_t chain_target_pc_ = 0;
     bool unchainable_end_ = false;
-
-    // ── Frameless back-edge chaining ──────────────────────────────────
-    // When a conditional/unconditional branch targets a PC ≤ start_pc
-    // (a loop back-edge), we can emit a direct jcc/jmp to the target
-    // block's BODY (skipping its prologue), provided:
-    //   - the target block is already translated
-    //   - the target block is "frameless_compatible" (its body doesn't
-    //     rely on a fresh stack frame beyond what the loop top already
-    //     has set up)
-    //   - we flush all dirty architectural vregs + materialize flags
-    //     before the jump (the target will reload from cpu.regs[]/
-    //     pstate, so we must write them back)
-    //
-    // Each entry is a back-edge site that needs patching. `patch_off` is
-    // the offset of the jcc/jmp rel32 placeholder; `target_pc` is the
-    // loop-top PC; `is_conditional` distinguishes jcc (6 bytes) from
-    // jmp (5 bytes). `taken_path_off` is the offset where the "taken"
-    // path begins (for conditional back-edges, this is right after the
-    // jcc; for unconditional, it IS the jmp).
-    struct BackEdgePatch {
-        size_t  patch_off;       // offset of the rel32 to patch
-        uint64_t target_pc;      // loop-top PC
-        bool    is_conditional;  // jcc (6 bytes) vs jmp (5 bytes)
-    };
-    std::vector<BackEdgePatch> back_edge_patches_;
-    // Per-PC list of back-edge sites that target this PC, kept across
-    // block translations so a later-translated loop top can patch
-    // earlier-emitted back-edges. Key = target_pc, value = list of sites.
-    std::unordered_map<uint64_t, std::vector<BackEdgePatch>> pending_back_edges_;
 
     // Materialize pending host flags to pstate if any flag-clobbering
     // instruction is about to execute. Called by ADD/SUB/AND/OR/XOR/

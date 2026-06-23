@@ -30,7 +30,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) {
                     fprintf(stderr,
                         "[%s] thread %d: PC ran into unmapped memory at 0x%llx\n",
-                        CODENAME, cpu.tid, (unsigned long long)cpu.pc);
+                        CODENAME, cpu.tid, static_cast<unsigned long long>(cpu.pc));
                     break;
                 }
             }

@@ -187,7 +187,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo) {
 
     // Set up the handler call: X0=signo, X1=0 (siginfo), X2=0 (ucontext),
     // X30=trampoline (so the handler returns into the trampoline).
-    cpu.regs[0]  = (uint64_t)signo;
+    cpu.regs[0]  = static_cast<uint64_t>(signo);
     cpu.regs[1]  = 0;  // fake siginfo_t pointer
     cpu.regs[2]  = 0;  // fake ucontext_t pointer
     cpu.regs[30] = tramp;

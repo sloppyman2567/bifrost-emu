@@ -11,10 +11,6 @@
 //                                  instruction (CALL_INTERP / SVC paths)
 //   - emit_fmov_helper          — GPR↔FP register move helper
 //   - emit_call_interp          — emit a CALL_INTERP call site inside a block
-//   - emit_frameless_back_edge  — emit a direct jcc/jmp to a loop-top body
-//                                  (skipping the prologue)
-//   - patch_pending_back_edges  — patch earlier-emitted back-edges to jump
-//                                  to a now-translated target's body
 //   - compile_ir_inst           — the big IR-op→x86 switch (1500+ lines)
 //   - clobber_flags             — flush pending host flags to pstate before
 //                                  a flag-clobbering instruction
@@ -29,6 +25,7 @@
 #include "ir/ir.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -37,6 +34,20 @@
 #include <vector>
 
 namespace arm64emu {
+
+// ── Compile-time layout checks ─────────────────────────────────────────
+// The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)
+// for direct memory access in generated x86 code. If the CPU struct layout
+// ever changes, these static_asserts will catch it at compile time instead
+// of producing silently-wrong JIT code.
+static_assert(offsetof(CPU, regs)   == FrostJIT::REGS_OFF,   "CPU regs offset mismatch");
+static_assert(offsetof(CPU, sp)     == FrostJIT::SP_OFF,     "CPU sp offset mismatch");
+static_assert(offsetof(CPU, pc)     == FrostJIT::PC_OFF,     "CPU pc offset mismatch");
+static_assert(offsetof(CPU, pstate) == FrostJIT::PSTATE_OFF, "CPU pstate offset mismatch");
+static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mismatch");
+static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
+static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
+static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mismatch");
 
 // ── Forward decls of slow-path helpers defined in x86_backend.cpp ──────
 // These are extern "C" so JIT-compiled code can call them by address
@@ -58,20 +69,20 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
     cpu->page_cache.write_page = UINT64_MAX;
     if (getenv("BIFROST_STEP_TRACE")) {
         fprintf(stderr, "    [step] pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x24=0x%llx x27=0x%llx pstate=0x%x\n",
-                (unsigned long long)cpu->pc,
-                (unsigned long long)cpu->regs[0],
-                (unsigned long long)cpu->regs[1],
-                (unsigned long long)cpu->regs[2],
-                (unsigned long long)cpu->regs[24],
-                (unsigned long long)cpu->regs[27],
+                static_cast<unsigned long long>(cpu->pc),
+                static_cast<unsigned long long>(cpu->regs[0]),
+                static_cast<unsigned long long>(cpu->regs[1]),
+                static_cast<unsigned long long>(cpu->regs[2]),
+                static_cast<unsigned long long>(cpu->regs[24]),
+                static_cast<unsigned long long>(cpu->regs[27]),
                 cpu->pstate);
     }
     emu->step_public(*cpu);
     if (getenv("BIFROST_STEP_TRACE")) {
         fprintf(stderr, "    [step] pc=0x%llx done x0=0x%llx x24=0x%llx pstate=0x%x\n",
-                (unsigned long long)cpu->pc,
-                (unsigned long long)cpu->regs[0],
-                (unsigned long long)cpu->regs[24],
+                static_cast<unsigned long long>(cpu->pc),
+                static_cast<unsigned long long>(cpu->regs[0]),
+                static_cast<unsigned long long>(cpu->regs[24]),
                 cpu->pstate);
     }
 }
@@ -181,7 +192,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     if (!ends_block) {
         uint64_t next_pc = arm_pc + 4;
         if (next_pc <= 0xFFFFFFFFULL) {
-            emit_mov_imm32_zext(RCX, (uint32_t)next_pc);
+            emit_mov_imm32_zext(RCX, static_cast<uint32_t>(next_pc));
         } else {
             emit_mov_imm64(RCX, next_pc);
         }
@@ -194,106 +205,6 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
 
-// ── emit_frameless_back_edge + patch_pending_back_edges ─────────────
-bool FrostJIT::emit_frameless_back_edge(uint64_t target_pc, uint8_t cc) {
-    static bool disable_ = (getenv("BIFROST_NO_FRAMELESS") != nullptr);
-    if (disable_) return false;
-    auto it = blocks_.find(target_pc);
-    if (it == blocks_.end() || !it->second.frameless_compatible) {
-        // Target not ready. Record a pending patch site that the caller
-        // will create via emit_jcc_rel32_placeholder / emit_jmp_rel32_placeholder.
-        // We can't record it here because the caller hasn't emitted the
-        // placeholder yet. The caller calls patch_pending_back_edges_record
-        // after emitting the placeholder. Actually, simpler: the caller
-        // records it directly. So here we just return false.
-        return false;
-    }
-    // Target is ready and compatible. Flush dirty arch vregs + flags.
-    if (flags_in_host_) {
-        emit_materialize_flags(flags_from_sub_);
-        flags_in_host_ = false;
-    }
-    for (int v = 0; v <= 31; v++) {
-        if (vreg_home_[v] >= 0 && vreg_dirty_[v]) {
-            evict_vreg(v);
-        }
-    }
-    // Drop all cache mappings (callee-saved host regs stay live).
-    for (int v = 0; v <= max_vreg_; v++) {
-        int r = vreg_home_[v];
-        if (r >= 0) {
-            reg_vreg_[r] = -1;
-            vreg_home_[v] = -1;
-            vreg_dirty_[v] = false;
-        }
-    }
-    // Emit the jcc/jmp to the target's body.
-    const uint8_t* target_body = code_buf_ + it->second.body_off;
-    size_t patch_off = code_buf_used_;
-    if (cc == 0xFF) {
-        emit_byte(0xE9);  // jmp rel32
-        int32_t rel = (int32_t)(target_body - (code_buf_ + patch_off + 5));
-        emit_u32((uint32_t)rel);
-    } else {
-        emit_byte(0x0F); emit_byte(0x80 + cc);  // jcc rel32
-        int32_t rel = (int32_t)(target_body - (code_buf_ + patch_off + 6));
-        emit_u32((uint32_t)rel);
-    }
-    return true;
-}
-
-// Patch all pending back-edge sites that target `target_pc` to jump
-// directly to the now-translated target's body. Called from
-// translate_block() after a new block is registered.
-void FrostJIT::patch_pending_back_edges(uint64_t target_pc) {
-    static bool disable_ = (getenv("BIFROST_NO_FRAMELESS") != nullptr);
-    if (disable_) return;
-    auto pit = pending_back_edges_.find(target_pc);
-    if (pit == pending_back_edges_.end()) return;
-    auto bit = blocks_.find(target_pc);
-    if (bit == blocks_.end() || !bit->second.frameless_compatible) return;
-    const uint8_t* target_body = code_buf_ + bit->second.body_off;
-    static bool dbg = (getenv("BIFROST_BACKEDGE_DBG") != nullptr);
-    if (dbg) {
-        fprintf(stderr, "[BACKEDGE] patching %zu pending back-edge(s) targeting 0x%llx → body_off=0x%zx\n",
-                pit->second.size(), (unsigned long long)target_pc, bit->second.body_off);
-    }
-    for (auto& be : pit->second) {
-        if (be.is_conditional) {
-            // jcc rel32: 0F 8x rel32 (6 bytes). rel32 at be.patch_off + 2.
-            if (code_buf_[be.patch_off] != 0x0F) {
-                if (dbg) fprintf(stderr, "[BACKEDGE]   skip: byte at 0x%zx = 0x%02x (expected 0x0F)\n",
-                                 be.patch_off, code_buf_[be.patch_off]);
-                continue;
-            }
-            int32_t rel = (int32_t)(target_body - (code_buf_ + be.patch_off + 6));
-            memcpy(code_buf_ + be.patch_off + 2, &rel, 4);
-            if (dbg) fprintf(stderr, "[BACKEDGE]   patched jcc at 0x%zx → rel=0x%x (target_body=%p)\n",
-                             be.patch_off, static_cast<unsigned>(rel), static_cast<const void*>(target_body));
-        } else {
-            // jmp rel32: E9 rel32 (5 bytes). rel32 at be.patch_off + 1.
-            if (code_buf_[be.patch_off] != 0xE9) {
-                if (dbg) fprintf(stderr, "[BACKEDGE]   skip: byte at 0x%zx = 0x%02x (expected 0xE9)\n",
-                                 be.patch_off, code_buf_[be.patch_off]);
-                continue;
-            }
-            int32_t rel = (int32_t)(target_body - (code_buf_ + be.patch_off + 5));
-            memcpy(code_buf_ + be.patch_off + 1, &rel, 4);
-            if (dbg) fprintf(stderr, "[BACKEDGE]   patched jmp at 0x%zx → rel=0x%x\n",
-                             be.patch_off, static_cast<unsigned>(rel));
-        }
-    }
-    // Clear the pending list — they're all patched now.
-    pending_back_edges_.erase(pit);
-}
-
-// ── compile_ir_inst ────────────────────────────────────────────────────
-// Emit x86 code for a single IR instruction.
-// Returns true if the instruction ends the block.
-
-// ── compile_ir_inst ────────────────────────────────────────────────
-// Emit x86 code for a single IR instruction.
-// Returns true if the instruction ends the block.
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     switch (inst.op) {
         case IROp::NOP:
@@ -303,7 +214,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest) {
                 int d = alloc_reg_for(inst.dest, -1);
                 if (inst.imm <= 0xFFFFFFFFULL) {
-                    emit_mov_imm32_zext(d, (uint32_t)inst.imm);
+                    emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm));
                 } else {
                     emit_mov_imm64(d, inst.imm);
                 }
@@ -349,11 +260,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
 
         case IROp::LOAD_MEM: {
+            // Memory access via emit_load_mem. The slow path calls
+            // jit_load_mem_slow (C function, clobbers all caller-saved
+            // regs). Flush all dirty vregs and invalidate cache to be
+            // safe — the slow path is rare (only for high addresses),
+            // and the fast path still needs RAX/RDX/RCX/R10 clear.
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
             load_vreg_to_reg(RAX, inst.src1);
-            emit_load_mem(RAX, RAX, (int32_t)inst.imm, inst.width, false);
+            emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm), inst.width, false);
             store_reg_to_vreg(inst.dest, RAX);
             return false;
         }
@@ -364,7 +280,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_all_vregs();
             load_vreg_to_reg(RAX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
-            emit_store_mem(RAX, (int32_t)inst.imm, RCX, inst.width);
+            emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
             return false;
         }
 
@@ -694,58 +610,28 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
             }
-            // Save RFLAGS (in case any pending flags weren't materialized)
+            // Save RFLAGS (CBZ/CBNZ don't modify architectural flags).
             emit_pushfq();
             // test rax, rax
             emit_test_reg(RAX, RAX);
             // jcc to taken target
             uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
-            // ── Frameless back-edge (v1.4.0-alpha.5) ─────────────────
-            // If this is a back-edge (target ≤ start_pc), try to emit a
-            // direct jcc to the loop top's body. CBZ/CBNZ at the bottom
-            // of a loop is the canonical case.
-            bool is_back_edge = (inst.imm <= inst.arm_pc);
-            if (is_back_edge) {
-                // Flush dirty arch vregs for loop-top reload.
-                for (int v = 0; v <= 31; v++) {
-                    if (vreg_home_[v] >= 0 && vreg_dirty_[v]) {
-                        evict_vreg(v);
-                    }
-                }
-                if (emit_frameless_back_edge(inst.imm, cc)) {
-                    // Frameless jcc emitted (taken → loop body). The jcc
-                    // consumed the flags from `test` — we need to popfq
-                    // on the not-taken path (fall-through).
-                    // NOT taken: popfq, RAX = fall-through, go to epilogue.
-                    emit_popfq();
-                    uint64_t fall = inst.arm_pc + 4;
-                    if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
-                    else                            emit_mov_imm64(RAX, fall);
-                    rax_holds_next_pc_ = true;
-                    unchainable_end_ = true;
-                    return true;
-                }
-            }
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
+            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
             else                            emit_mov_imm64(RAX, fall);
             // Restore RFLAGS before jumping to epilogue
             emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
-            int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             // Restore RFLAGS (CBZ/CBNZ don't modify flags)
             emit_popfq();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
+            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
             else                            emit_mov_imm64(RAX, inst.imm);
-            // Record pending back-edge for later patching.
-            if (is_back_edge) {
-                pending_back_edges_[inst.imm].push_back({jcc_patch, inst.imm, true});
-            }
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // conditional branch
             return true;
@@ -780,41 +666,20 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // jcc: TBZ (cond=0, EQ) → JNC (bit==0, CF=0) → JAE (cc=3)
             //      TBNZ (cond=1, NE) → JC (bit==1, CF=1) → JB (cc=2)
             uint8_t cc = (inst.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
-            // ── Frameless back-edge (v1.4.0-alpha.5) ─────────────────
-            bool is_back_edge = (inst.imm <= inst.arm_pc);
-            if (is_back_edge) {
-                for (int v = 0; v <= 31; v++) {
-                    if (vreg_home_[v] >= 0 && vreg_dirty_[v]) {
-                        evict_vreg(v);
-                    }
-                }
-                if (emit_frameless_back_edge(inst.imm, cc)) {
-                    emit_popfq();
-                    uint64_t fall = inst.arm_pc + 4;
-                    if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
-                    else                            emit_mov_imm64(RAX, fall);
-                    rax_holds_next_pc_ = true;
-                    unchainable_end_ = true;
-                    return true;
-                }
-            }
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
+            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
             else                            emit_mov_imm64(RAX, fall);
             emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: patch jcc to here.
-            int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             emit_popfq();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
+            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
             else                            emit_mov_imm64(RAX, inst.imm);
-            if (is_back_edge) {
-                pending_back_edges_[inst.imm].push_back({jcc_patch, inst.imm, true});
-            }
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;
             return true;
@@ -890,25 +755,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
-                // Drop all cache mappings but DON'T clear flags_in_host_
-                // (invalidate_all_vregs does). Flags ARE in host now.
+                // Drop all cache mappings but DON'T clear flags_in_host_.
                 for (int v = 0; v <= max_vreg_; v++) {
                     int r = vreg_home_[v];
                     if (r >= 0) { reg_vreg_[r] = -1; vreg_home_[v] = -1; vreg_dirty_[v] = false; }
                 }
                 flags_in_host_ = true;
-                // (v1.4.0-beta.1 bugfix): preserve the from_sub flag.
-                // The previous code unconditionally set flags_from_sub_ = false,
-                // which broke CSEL/BRCOND after a SUBS that was materialized to
-                // pstate before a CALL_INTERP. The from_sub bit (bit 27 in
-                // pstate) tells us whether the C flag is inverted (SUB) or
-                // direct (ADD/TST). emit_load_flags_from_pstate already
-                // un-inverts C into x86 CF — so from_sub_ should be false
-                // (x86 CF now directly = ARM C, regardless of the original op).
-                // BUT: CSEL's carry_is_direct check uses flags_from_sub_ to
-                // decide whether CS/CC need swapping. If we set it false,
-                // CSEL treats the carry as direct (correct after the un-invert).
-                // So false IS correct here — the old code was right.
                 flags_from_sub_ = false;
             }
             // Save flags, flush vregs, restore flags. CRITICAL: preserve
@@ -1033,10 +885,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // because emit_materialize_flags clobbers them with its own
             // AND/SHIFT/OR operations. The JCC needs the original flags.
             if (flags_in_host_) {
-                // (v1.4.0-alpha.5 bugfix): emit_materialize_flags clobbers
-                // RAX/RCX/RDX. Invalidate their cache mappings so a later
-                // ensure_vreg doesn't return stale (garbage) values.
+                // emit_materialize_flags clobbers RAX/RCX/RDX. Evict any
+                // dirty vregs in those regs first, then drop cache mappings.
                 emit_pushfq();
+                for (int r : {RAX, RCX, RDX}) {
+                    int v = reg_vreg_[r];
+                    if (v >= 0 && vreg_dirty_[v]) evict_vreg(v);
+                }
                 emit_materialize_flags(flags_from_sub_);
                 emit_popfq();
                 for (int r : {RAX, RCX, RDX}) {
@@ -1059,59 +914,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 }
             }
             flags_in_host_ = false;
-            // ── Frameless back-edge chaining (v1.4.0-alpha.5) ────────
-            // If the branch target is a back-edge (target ≤ start_pc),
-            // try to emit a direct jcc to the target's body, skipping
-            // the epilogue + dispatcher + prologue. This is the hot
-            // loop case — the perf win is ~10×.
-            bool is_back_edge = (inst.imm <= inst.arm_pc);
-            if (is_back_edge) {
-                // Flush dirty arch vregs (needed for loop top reload).
-                // Flags already materialized above.
-                for (int v = 0; v <= 31; v++) {
-                    if (vreg_home_[v] >= 0 && vreg_dirty_[v]) {
-                        evict_vreg(v);
-                    }
-                }
-                // Try frameless back-edge for the TAKEN path.
-                if (emit_frameless_back_edge(inst.imm, cc)) {
-                    // Frameless jcc emitted (taken → loop body). Now emit
-                    // the NOT-taken path: fall-through to next PC via
-                    // the normal epilogue.
-                    // The jcc we just emitted jumps to the loop body if
-                    // taken; if not taken, execution falls through to
-                    // here. Set up RAX = fall-through PC and go to epilogue.
-                    uint64_t fall = inst.arm_pc + 4;
-                    if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
-                    else                        emit_mov_imm64(RAX, fall);
-                    rax_holds_next_pc_ = true;
-                    unchainable_end_ = true;
-                    return true;
-                }
-                // Target not ready or not compatible. Emit a normal jcc
-                // placeholder that, for now, jumps to the taken-epilogue
-                // path. Record it as a pending back-edge so the target's
-                // translate_block() can patch it to jump to the body.
-                size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
-                // Not taken: RAX = fall-through.
-                uint64_t fall = inst.arm_pc + 4;
-                if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
-                else                        emit_mov_imm64(RAX, fall);
-                size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
-                branch_target_patches_.push_back({jmp_to_epilogue, 0});
-                // Taken: RAX = target.
-                int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
-                patch_jcc_rel32(jcc_patch, taken_rel);
-                if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
-                else                            emit_mov_imm64(RAX, inst.imm);
-                // Record pending back-edge: when the target block is
-                // translated, patch this jcc to jump to its body.
-                pending_back_edges_[inst.imm].push_back({jcc_patch, inst.imm, true});
-                rax_holds_next_pc_ = true;
-                unchainable_end_ = true;
-                return true;
-            }
-            // Forward branch: full flush + normal epilogue.
+            // All conditional branches (forward or back-edge) use the same
+            // code path: flush vregs, emit jcc, set RAX to taken/fall-through
+            // PC, return to dispatcher. The dispatcher handles re-entering
+            // the target block through its normal prologue.
             emit_pushfq();
             flush_all_vregs();
             emit_popfq();
@@ -1119,15 +925,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Not taken: RAX = fall-through.
             {
                 uint64_t fall = inst.arm_pc + 4;
-                if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)fall);
+                if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
                 else                        emit_mov_imm64(RAX, fall);
             }
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: RAX = target.
-            int32_t taken_rel = (int32_t)(code_buf_used_ - (jcc_patch + 6));
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
+            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
             else                            emit_mov_imm64(RAX, inst.imm);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // conditional branch — runtime-dependent next PC
@@ -1136,7 +942,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::BRCOND_FALLTHRU: {
             flush_all_vregs();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)inst.imm);
+            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
             else                            emit_mov_imm64(RAX, inst.imm);
             rax_holds_next_pc_ = true;
             // Unconditional branch with statically-known target — record
@@ -1193,7 +999,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_modrm_disp(1, CPU_REG, off2);
 
             // Execute SSE2 op
-            uint8_t opc = (uint8_t)inst.imm;
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
             uint8_t sse_op;
             switch (opc) {
                 case 0: sse_op = 0x59; break;  // mul
@@ -1242,7 +1048,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
-            uint8_t opc = (uint8_t)inst.imm;
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
             if (opc == 0) {
                 // FMOV — no-op
             } else if (opc == 1) {
@@ -1458,7 +1264,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_modrm_disp(1, CPU_REG, off2lo);
 
             // Execute lo half
-            uint8_t opc = (uint8_t)inst.imm;
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
             uint8_t sse_op;
             if (opc <= 2) {
                 sse_op = (opc == 0) ? 0x54 : (opc == 1) ? 0x56 : 0x57;
@@ -1617,7 +1423,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_and_reg(RAX, RDX);
                     // THEN shift left by sh.
                     if (width == 32) {
-                        emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte((uint8_t)sh);
+                        emit_byte(0xC1); emit_byte(modrm(3, 4, RAX & 7)); emit_byte(static_cast<uint8_t>(sh));
                     } else {
                         emit_shift_imm8(RAX, 4, sh);
                     }
@@ -1639,10 +1445,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         if (immr <= 31) {
                             if (inst.op == IROp::SBFM) {
                                 // SAR (arithmetic)
-                                emit_byte(0xC1); emit_byte(modrm(3, 7, RAX & 7)); emit_byte((uint8_t)immr);
+                                emit_byte(0xC1); emit_byte(modrm(3, 7, RAX & 7)); emit_byte(static_cast<uint8_t>(immr));
                             } else {
                                 // SHR (logical)
-                                emit_byte(0xC1); emit_byte(modrm(3, 5, RAX & 7)); emit_byte((uint8_t)immr);
+                                emit_byte(0xC1); emit_byte(modrm(3, 5, RAX & 7)); emit_byte(static_cast<uint8_t>(immr));
                             }
                         }
                     } else {
@@ -1874,7 +1680,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
             // --- else path: cond FALSE, set pstate = nzcv ---
-            uint32_t pstate_else = ((uint32_t)nzcv << 28);
+            uint32_t pstate_else = (static_cast<uint32_t>(nzcv) << 28);
             if (is_sub) pstate_else |= (1U << 27);
             emit_mov_imm32_zext(RDX, pstate_else);
             emit_store32(CPU_REG, PSTATE_OFF, RDX);
@@ -1889,9 +1695,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             size_t end_off = code_buf_used_;
 
             // Patch jumps.
-            int32_t rel_compare = (int32_t)(compare_off - (jcc_to_compare + 6));
+            int32_t rel_compare = static_cast<int32_t>(compare_off - (jcc_to_compare + 6));
             patch_jcc_rel32(jcc_to_compare, rel_compare);
-            int32_t rel_end = (int32_t)(end_off - (jmp_to_end + 5));
+            int32_t rel_end = static_cast<int32_t>(end_off - (jmp_to_end + 5));
             patch_jmp_rel32(jmp_to_end, rel_end);
 
             flags_in_host_ = false;
@@ -1998,7 +1804,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     code_buf_overflow_ = false;
     call_interp_branch_patches_.clear();
     branch_target_patches_.clear();
-    back_edge_patches_.clear();  // v1.4.0-alpha.5: frameless back-edge sites
     rax_holds_next_pc_ = false;
     flags_in_host_ = false;
     flags_from_sub_ = false;
@@ -2020,12 +1825,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
 
-    constexpr int MAX_BLOCK = 256;
-    // (v1.4.0-beta.1): limit block size based on register pressure.
-    // With 9 host regs and >256 vregs, the allocator's spill/reload
-    // traffic becomes a correctness hazard (the REV64/CLZ/FMOV bugs
-    // were all in this class). Cap blocks at 32 instructions — enough
-    // for tight loops, short enough that vreg count stays manageable.
+    // Limit block size based on register pressure. With 9 host regs and
+    // >256 vregs, the allocator's spill/reload traffic becomes a
+    // correctness hazard. Cap blocks at 32 instructions — enough for
+    // tight loops, short enough that vreg count stays manageable.
     constexpr int MAX_BLOCK_REG_PRESSURE = 32;
     // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
@@ -2121,7 +1924,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
     if (dump_ir_) {
         fprintf(stderr, "══ Block @ 0x%llx (%d ARM instrs) ══\n",
-                (unsigned long long)start_pc, instr_count);
+                static_cast<unsigned long long>(start_pc), instr_count);
         dump_ir(ir_block);
     }
 
@@ -2147,7 +1950,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     }
     num_stack_slots_ = max_vreg - 32;
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
-    uint32_t stack_bytes = (uint32_t)(num_stack_slots_ * 8 + 64) & ~15U;
+    uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
 
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
@@ -2158,11 +1961,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
-    if (window_base_) emit_mov_imm64(WIN_REG, (uint64_t)window_base_);
-
-    // v1.4.0-alpha.5: record the body offset (after prologue). Frameless
-    // back-edge chaining jumps directly here, skipping the prologue.
-    size_t body_off = code_buf_used_;
+    if (window_base_) emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
 
     // ── Compile IR ───────────────────────────────────────────────
     for (auto& inst : ir_block.insts) {
@@ -2187,7 +1986,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     if (!rax_holds_next_pc_) {
         uint64_t next_pc = start_pc + ir_block.count * 4;
-        if (next_pc <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, (uint32_t)next_pc);
+        if (next_pc <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(next_pc));
         else                            emit_mov_imm64(RAX, next_pc);
         // Fall-through (MAX_BLOCK hit before any block-ender): the next
         // PC is statically known, so this block is chainable to it.
@@ -2233,7 +2032,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     // Patch branch targets to epilogue.
     for (auto& p : branch_target_patches_) {
-        int32_t rel = (int32_t)(epilogue_off - (p.patch_off + 5));
+        int32_t rel = static_cast<int32_t>(epilogue_off - (p.patch_off + 5));
         patch_jmp_rel32(p.patch_off, rel);
     }
     for (size_t off : call_interp_branch_patches_) {
@@ -2241,7 +2040,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         // to preserve the interpreter's PC in RAX. emit_call_interp already
         // materialized flags and flushed vregs before the JNE, so we can
         // skip the normal epilogue's flag/vreg handling.
-        int32_t rel = (int32_t)(pc_store_off - (off + 6));
+        int32_t rel = static_cast<int32_t>(pc_store_off - (off + 6));
         patch_jcc_rel32(off, rel);
     }
 
@@ -2272,39 +2071,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chain_target_pc = chain_target_pc_;
     entry.chained = false;
     entry.instr_count = instr_count;
-    entry.body_off = body_off;  // v1.4.0-alpha.5: for frameless back-edge chaining
-    // A block is frameless-compatible if it doesn't end with an op that
-    // requires a fresh stack frame or has runtime-dependent control flow
-    // that can't be patched. SVC and BR (indirect) are not compatible.
-    // BRCOND/BRCOND_ZERO/BRCOND_BIT/BRCOND_FALLTHRU/fall-through ARE
-    // compatible — their back-edges can be patched.
-    // We also require that the block doesn't start with a CALL_INTERP
-    // that might read the stack frame (conservative — most CALL_INTERPs
-    // don't, but we can't easily tell at translate time).
-    // For now: frameless_compatible = !unchainable_end_ (i.e. the block
-    // ends with a chainable op or fall-through). SVC and BR set
-    // unchainable_end_=true, so they're excluded. BRCOND and friends
-    // set it too currently — we need to NOT set it for back-edge BRCONDs
-    // since those are exactly the case we want to chain. But that would
-    // break the forward-chain mechanism. Instead, we set
-    // frameless_compatible based on whether the block's LAST op was a
-    // back-edge branch (which we track separately).
-    // (v1.4.0-beta.1 fixup): frameless back-edge chaining is fundamentally
-    // unsafe because the target block's body uses stack slots sized for
-    // the TARGET's max_vreg, not the source's. When block A's back-edge
-    // jumps directly to block B's body, B's stack slot accesses go beyond
-    // A's stack frame (corrupting the caller) or overlap with A's frame
-    // (corrupting A's vregs). The "flush arch vregs + materialize flags"
-    // dance only ensures cpu.regs[]/pstate consistency — it does NOT
-    // synchronize the stack frame layout. This caused toybox wc to
-    // produce huge bogus output followed by std::bad_alloc.
-    //
-    // Until the allocator is reworked to use a SHARED stack frame across
-    // all blocks (or to size each block's frame to the global max_vreg),
-    // we disable frameless back-edge chaining entirely. The dispatch
-    // overhead is small (one ret + one C call per loop iteration), and
-    // the alternative — silent corruption — is much worse.
-    entry.frameless_compatible = false;
     blocks_[start_pc] = entry;
     blocks_translated++;
 
@@ -2329,12 +2095,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // also patch any existing blocks whose chain target is this block.
     try_chain_block(start_pc, blocks_[start_pc]);
     chain_back_references(start_pc);
-    // v1.4.0-alpha.5: patch any pending back-edges that target this
-    // block's body. This handles the case where a loop body was
-    // translated BEFORE the loop top — the back-edge in the body was
-    // recorded as pending, and now that the top is translated, we can
-    // patch it to jump directly to the top's body.
-    patch_pending_back_edges(start_pc);
 
     return fn;
 }
@@ -2356,7 +2116,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (++total_blocks_executed_ > GLOBAL_BLOCK_LIMIT) {
         jit_disabled_ = true;
         fprintf(stderr, "[JIT] global watchdog: %llu blocks executed — disabling JIT (likely codegen bug)\n",
-                (unsigned long long)total_blocks_executed_);
+                static_cast<unsigned long long>(total_blocks_executed_));
         interpreter_fallbacks++;
         emu.step_public(cpu);
         return cpu.pc;
@@ -2462,8 +2222,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         uint64_t target = strtoull(s, nullptr, 0);
         if (pc == target) {
             fprintf(stderr, "[DBG] entry block @ 0x%llx pstate=0x%x x1=0x%llx\n",
-                    (unsigned long long)pc, cpu.pstate,
-                    (unsigned long long)cpu.regs[1]);
+                    static_cast<unsigned long long>(pc), cpu.pstate,
+                    static_cast<unsigned long long>(cpu.regs[1]));
         }
     }
 
@@ -2496,15 +2256,15 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Debug: print entry state for specific blocks
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] entry block @ 0x%llx x0=0x%llx x1=0x%llx pstate=0x%x\n",
-                    (unsigned long long)pc, (unsigned long long)cpu.regs[0],
-                    (unsigned long long)cpu.regs[1], cpu.pstate);
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
+                    static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
         }
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
-                    (unsigned long long)pc, (unsigned long long)cpu.regs[0],
-                    cpu.pstate, (unsigned long long)jit_next);
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
+                    cpu.pstate, static_cast<unsigned long long>(jit_next));
         }
         // Debug: print pstate after JIT
         if (dbg_) {
@@ -2512,9 +2272,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             uint64_t target = strtoull(s, nullptr, 0);
             if (pc == target) {
                 fprintf(stderr, "[DBG] exit  block @ 0x%llx pstate=0x%x x19=0x%llx jit_next=0x%llx\n",
-                        (unsigned long long)pc, cpu.pstate,
-                        (unsigned long long)cpu.regs[19],
-                        (unsigned long long)jit_next);
+                        static_cast<unsigned long long>(pc), cpu.pstate,
+                        static_cast<unsigned long long>(cpu.regs[19]),
+                        static_cast<unsigned long long>(jit_next));
             }
         }
         // Run interpreter from saved state for the same number of instrs.
@@ -2535,35 +2295,26 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Compare PC first — if PCs differ, the JIT took a different path.
         bool skip_reg_check = false;
         if (ref.pc != jit_next) {
-            // Check if this is a false positive from frameless back-edge
-            // chaining: the JIT block ran the loop multiple times (via
-            // patched back-edge jcc/jmp), so jit_next is the loop-exit PC
-            // while ref.pc (after only instr_count steps) is the loop-back
-            // PC. Skip the entire verification for this block.
-            if (entry.instr_count > 0 && entry.frameless_compatible) {
-                fprintf(stderr, "[VERIFY] block @ 0x%llx: PC DIVERGENCE (jit_next=0x%llx ref_next=0x%llx steps=%d/%d) [back-edge false-positive — skipping]\n",
-                        (unsigned long long)pc, (unsigned long long)jit_next,
-                        (unsigned long long)ref.pc, steps, entry.instr_count);
-                skip_reg_check = true;
-            } else {
-                fprintf(stderr, "[VERIFY] block @ 0x%llx: PC DIVERGENCE (jit_next=0x%llx ref_next=0x%llx steps=%d/%d)\n",
-                        (unsigned long long)pc, (unsigned long long)jit_next,
-                        (unsigned long long)ref.pc, steps, entry.instr_count);
-                for (int i = 0; i < 31; i++) {
-                    if (cpu.regs[i] != ref.regs[i]) {
-                        fprintf(stderr, "[VERIFY]   x%d: jit=0x%llx ref=0x%llx\n",
-                                i, (unsigned long long)cpu.regs[i],
-                                (unsigned long long)ref.regs[i]);
-                    }
+            // PC divergence: the JIT and interpreter took different paths.
+            // This is a real codegen bug — log it and abort so it can be
+            // investigated.
+            fprintf(stderr, "[VERIFY] block @ 0x%llx: PC DIVERGENCE (jit_next=0x%llx ref_next=0x%llx steps=%d/%d)\n",
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
+                    static_cast<unsigned long long>(ref.pc), steps, entry.instr_count);
+            for (int i = 0; i < 31; i++) {
+                if (cpu.regs[i] != ref.regs[i]) {
+                    fprintf(stderr, "[VERIFY]   x%d: jit=0x%llx ref=0x%llx\n",
+                            i, static_cast<unsigned long long>(cpu.regs[i]),
+                            static_cast<unsigned long long>(ref.regs[i]));
                 }
-                if (cpu.sp != ref.sp)
-                    fprintf(stderr, "[VERIFY]   sp: jit=0x%llx ref=0x%llx\n",
-                            (unsigned long long)cpu.sp, (unsigned long long)ref.sp);
-                if (cpu.pstate != ref.pstate)
-                    fprintf(stderr, "[VERIFY]   pstate: jit=0x%llx ref=0x%llx\n",
-                            (unsigned long long)cpu.pstate, (unsigned long long)ref.pstate);
-                abort();
             }
+            if (cpu.sp != ref.sp)
+                fprintf(stderr, "[VERIFY]   sp: jit=0x%llx ref=0x%llx\n",
+                        static_cast<unsigned long long>(cpu.sp), static_cast<unsigned long long>(ref.sp));
+            if (cpu.pstate != ref.pstate)
+                fprintf(stderr, "[VERIFY]   pstate: jit=0x%llx ref=0x%llx\n",
+                        static_cast<unsigned long long>(cpu.pstate), static_cast<unsigned long long>(ref.pstate));
+            abort();
         }
         if (!skip_reg_check) {
         // PCs match — compare register state.
@@ -2575,14 +2326,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         for (int i = 0; i < 31; i++) {
             if (cpu.regs[i] != ref.regs[i]) {
                 fprintf(stderr, "[VERIFY] x%d: jit=0x%llx ref=0x%llx\n",
-                        i, (unsigned long long)cpu.regs[i],
-                        (unsigned long long)ref.regs[i]);
+                        i, static_cast<unsigned long long>(cpu.regs[i]),
+                        static_cast<unsigned long long>(ref.regs[i]));
                 diverged = true;
             }
         }
         if (cpu.sp != ref.sp) {
             fprintf(stderr, "[VERIFY] sp: jit=0x%llx ref=0x%llx\n",
-                    (unsigned long long)cpu.sp, (unsigned long long)ref.sp);
+                    static_cast<unsigned long long>(cpu.sp), static_cast<unsigned long long>(ref.sp));
             diverged = true;
         }
         if (cpu.pstate != ref.pstate) {
@@ -2592,19 +2343,19 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             uint64_t mask = 0xF0000000ULL;  // N=bit31, Z=bit30, C=bit29, V=bit28
             if ((cpu.pstate & mask) != (ref.pstate & mask)) {
                 fprintf(stderr, "[VERIFY] pstate: jit=0x%llx ref=0x%llx (flags only: jit=0x%llx ref=0x%llx)\n",
-                        (unsigned long long)cpu.pstate, (unsigned long long)ref.pstate,
-                        (unsigned long long)(cpu.pstate & mask),
-                        (unsigned long long)(ref.pstate & mask));
+                        static_cast<unsigned long long>(cpu.pstate), static_cast<unsigned long long>(ref.pstate),
+                        static_cast<unsigned long long>(cpu.pstate & mask),
+                        static_cast<unsigned long long>(ref.pstate & mask));
                 diverged = true;
             }
         }
         if (diverged) {
-            // Log but don't abort — the verify mode has known false
-            // positives from (1) frameless back-edge chaining and
-            // (2) read-then-write same address in one block.
+            // Log but don't abort — verify mode has known false positives
+            // from read-then-write same address in one block (the JIT's
+            // STORE_MEM already happened when the interpreter re-reads).
             // Real bugs will cause a crash or wrong output later.
             fprintf(stderr, "[VERIFY] block @ 0x%llx: DIVERGENCE (pc=0x%llx steps=%d/%d) [logging only — may be false-positive]\n",
-                    (unsigned long long)pc, (unsigned long long)jit_next,
+                    static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
                     steps, entry.instr_count);
         }
         }  // end if (!skip_reg_check)
@@ -2619,10 +2370,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     static bool trace_ = (getenv("BIFROST_JIT_TRACE") != nullptr);
     if (trace_) {
         fprintf(stderr, "[JIT] run block @ 0x%llx sp=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x5=0x%llx\n",
-                (unsigned long long)pc, (unsigned long long)cpu.sp,
-                (unsigned long long)cpu.regs[0], (unsigned long long)cpu.regs[1],
-                (unsigned long long)cpu.regs[2], (unsigned long long)cpu.regs[3],
-                (unsigned long long)cpu.regs[5]);
+                static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.sp),
+                static_cast<unsigned long long>(cpu.regs[0]), static_cast<unsigned long long>(cpu.regs[1]),
+                static_cast<unsigned long long>(cpu.regs[2]), static_cast<unsigned long long>(cpu.regs[3]),
+                static_cast<unsigned long long>(cpu.regs[5]));
     }
     uint64_t next_pc = entry.fn(&cpu, &emu);
     cpu.pc = next_pc;

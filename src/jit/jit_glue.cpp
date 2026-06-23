@@ -24,12 +24,12 @@ void Emulator::print_jit_stats() {
     fprintf(stderr, "[%s] frostJIT: %llu blocks translated, %llu executed "
             "(%llu cache hits, %llu misses, %llu fallbacks, %llu chains)\n",
             CODENAME,
-            (unsigned long long)jit_->blocks_translated,
-            (unsigned long long)jit_->blocks_executed,
-            (unsigned long long)jit_->cache_hits,
-            (unsigned long long)jit_->cache_misses,
-            (unsigned long long)jit_->interpreter_fallbacks,
-            (unsigned long long)jit_->block_chains_patched);
+            static_cast<unsigned long long>(jit_->blocks_translated),
+            static_cast<unsigned long long>(jit_->blocks_executed),
+            static_cast<unsigned long long>(jit_->cache_hits),
+            static_cast<unsigned long long>(jit_->cache_misses),
+            static_cast<unsigned long long>(jit_->interpreter_fallbacks),
+            static_cast<unsigned long long>(jit_->block_chains_patched));
     fprintf(stderr, "[%s] frostJIT: code cache %zu/%zu bytes, %zu blocks\n",
             CODENAME, jit_->code_buf_used(), jit_->code_buf_size(),
             jit_->cache_entries());

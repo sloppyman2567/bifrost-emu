@@ -126,7 +126,7 @@ static bool fold_binop(IROp op, uint64_t a, uint64_t b, uint64_t& out) {
         case IROp::XOR: out = a ^ b; return true;
         case IROp::SHL: out = a << (b & 63); return true;
         case IROp::SHR: out = a >> (b & 63); return true;
-        case IROp::SAR: out = (uint64_t)((int64_t)a >> (b & 63)); return true;
+        case IROp::SAR: out = static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63)); return true;
         case IROp::ROR: {
             uint64_t r = b & 63;
             out = r ? ((a >> r) | (a << (64 - r))) : a;
@@ -140,9 +140,9 @@ static bool fold_binop(IROp op, uint64_t a, uint64_t b, uint64_t& out) {
 static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
     switch (op) {
         case IROp::NOT: out = ~a; return true;
-        case IROp::NEG: out = -(int64_t)a; return true;
+        case IROp::NEG: out = -static_cast<int64_t>(a); return true;
         case IROp::SEXT: {
-            uint64_t m = mask_for_width((int)width);
+            uint64_t m = mask_for_width(static_cast<int>(width));
             uint64_t v = a & m;
             if (width < 64) {
                 uint64_t sb = 1ULL << (width - 1);
@@ -153,7 +153,7 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
             return true;
         }
         case IROp::ZEXT:
-            out = a & mask_for_width((int)width);
+            out = a & mask_for_width(static_cast<int>(width));
             return true;
         case IROp::CLZ: {
             // Count leading zeros by scanning from the high bit down.
@@ -170,18 +170,18 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
         case IROp::REV16: {
             uint64_t r = 0;
             for (int i = 0; i < 4; i++) {
-                uint16_t h = (uint16_t)((a >> (i * 16)) & 0xFFFF);
-                uint16_t s = (uint16_t)(((h & 0xFF) << 8) | ((h >> 8) & 0xFF));
-                r |= (uint64_t)s << (i * 16);
+                uint16_t h = static_cast<uint16_t>((a >> (i * 16)) & 0xFFFF);
+                uint16_t s = static_cast<uint16_t>(((h & 0xFF) << 8) | ((h >> 8) & 0xFF));
+                r |= static_cast<uint64_t>(s) << (i * 16);
             }
             out = r; return true;
         }
         case IROp::REV32: {
             uint64_t r = 0;
             for (int i = 0; i < 2; i++) {
-                uint32_t w = (uint32_t)((a >> (i * 32)) & 0xFFFFFFFF);
+                uint32_t w = static_cast<uint32_t>((a >> (i * 32)) & 0xFFFFFFFF);
                 uint32_t s = __builtin_bswap32(w);
-                r |= (uint64_t)s << (i * 32);
+                r |= static_cast<uint64_t>(s) << (i * 32);
             }
             out = r; return true;
         }
@@ -467,7 +467,7 @@ void optimize_ir(IRBlock& block) {
                             if (width == 64) {
                                 rotated = (a >> immr) | (a << (64 - immr));
                             } else {
-                                uint32_t v = (uint32_t)a;
+                                uint32_t v = static_cast<uint32_t>(a);
                                 rotated = ((v >> immr) | (v << (32 - immr))) & 0xFFFFFFFFULL;
                             }
                         }
@@ -604,7 +604,7 @@ void optimize_ir(IRBlock& block) {
 // ── Dump IR (debug) ────────────────────────────────────────────────────
 void dump_ir(const IRBlock& block, FILE* out) {
     fprintf(out, "── IR block @ 0x%llx (count=%d, ends_branch=%d) ──\n",
-            (unsigned long long)block.start_pc, block.count,
+            static_cast<unsigned long long>(block.start_pc), block.count,
             block.ends_with_branch);
     for (size_t i = 0; i < block.insts.size(); i++) {
         const IRInst& inst = block.insts[i];
@@ -682,8 +682,8 @@ void dump_ir(const IRBlock& block, FILE* out) {
                 }(inst.op),
                 inst.dest, inst.src1, inst.src2, inst.width,
                 cond_name(inst.cond), inst.flags_op,
-                (unsigned long long)inst.imm,
-                (unsigned long long)inst.arm_pc,
+                static_cast<unsigned long long>(inst.imm),
+                static_cast<unsigned long long>(inst.arm_pc),
                 inst.immr, inst.imms, inst.sf);
     }
     fprintf(out, "  (dce_removed=%d fold_subst=%d peephole=%d)\n",

@@ -42,7 +42,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& vfs_ = emu.vfs_;
     auto& fds_ = emu.fds_;
     auto& elf_path_ = emu.elf_path_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = (uint64_t)r; };
+    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         // ── openat — REWRITTEN to use VFS ─────────────────────────────
@@ -52,9 +52,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 56: { // openat
             std::string path = VFS::VFS::read_path(mem_, a1);
             int err = 0;
-            auto node = vfs_.open(path, (int)a2, (mode_t)a3, &err);
+            auto node = vfs_.open(path, static_cast<int>(a2), (mode_t)a3, &err);
             if (!node) {
-                cpu.regs[0] = (uint64_t)(int64_t)(err != 0 ? err : -ENOENT);
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
                 return 0;
             }
             // Adopt into the FdTable.
@@ -65,11 +65,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── read — VFS-aware ──────────────────────────────────────────
         case 63: { // read
-            auto node = fds_.get((int)a0);
-            if (!node) { cpu.regs[0] = (uint64_t)(int64_t)-EBADF; return 0; }
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             std::vector<uint8_t> tmp(std::max<uint64_t>(a2, 1));
             ssize_t r = node->read(UINT64_MAX, tmp.data(), a2);
-            if (r < 0) { cpu.regs[0] = (uint64_t)r; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
             if (r > 0) mem_.write(a1, tmp.data(), r);
             ret_host(r);
             return 0;
@@ -77,8 +77,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── write — VFS-aware ─────────────────────────────────────────
         case 64: { // write
-            auto node = fds_.get((int)a0);
-            if (!node) { cpu.regs[0] = (uint64_t)(int64_t)-EBADF; return 0; }
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             std::vector<uint8_t> tmp(a2);
             if (a2 > 0) mem_.read(a1, tmp.data(), a2);
             ssize_t r = node->write(UINT64_MAX, tmp.data(), a2);
@@ -88,44 +88,44 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── close — VFS-aware ─────────────────────────────────────────
         case 57: { // close
-            int r = fds_.close((int)a0);
+            int r = fds_.close(static_cast<int>(a0));
             ret_host(r);
             return 0;
         }
 
         // ── dup / dup2 / dup3 — VFS-aware ─────────────────────────────
         case 23: { // dup
-            int r = fds_.dup((int)a0);
+            int r = fds_.dup(static_cast<int>(a0));
             ret_host(r);
             return 0;
         }
         case 33: { // dup2
-            int r = fds_.dup2((int)a0, (int)a1);
+            int r = fds_.dup2(static_cast<int>(a0), static_cast<int>(a1));
             ret_host(r);
             return 0;
         }
         case 24: { // dup3 - rare but possible
-            int r = fds_.dup2((int)a0, (int)a1);
+            int r = fds_.dup2(static_cast<int>(a0), static_cast<int>(a1));
             ret_host(r);
             return 0;
         }
 
         // ── lseek — VFS-aware ─────────────────────────────────────────
         case 62: { // lseek
-            auto node = fds_.get((int)a0);
-            if (!node) { cpu.regs[0] = (uint64_t)(int64_t)-EBADF; return 0; }
-            ssize_t r = node->lseek((int64_t)a1, (int)a2);
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            ssize_t r = node->lseek(static_cast<int64_t>(a1), static_cast<int>(a2));
             ret_host(r);
             return 0;
         }
 
         // ── fstat — VFS-aware ─────────────────────────────────────────
         case 80: { // fstat
-            auto node = fds_.get((int)a0);
-            if (!node) { cpu.regs[0] = (uint64_t)(int64_t)-EBADF; return 0; }
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             struct stat st{};
             int r = node->fstat(&st);
-            if (r < 0) { cpu.regs[0] = (uint64_t)r; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
             // Write the stat struct to guest memory at a1.
             mem_.write(a1, &st, sizeof(st));
             ret_host(0);
@@ -134,8 +134,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 59: { // pipe2
             int fds[2];
-            int r = ::pipe2(fds, (int)a1);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::pipe2(fds, static_cast<int>(a1));
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             mem_.write(a0, fds, sizeof(fds));
             ret_host(0);
             return 0;
@@ -143,16 +143,16 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 34: { // mkdirat
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
-            int r = ::mkdirat((int)a0, path.c_str(), (mode_t)a2);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::mkdirat(static_cast<int>(a0), path.c_str(), (mode_t)a2);
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(0);
             return 0;
         }
 
         case 35: { // unlinkat
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
-            int r = ::unlinkat((int)a0, path.c_str(), (int)a2);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(0);
             return 0;
         }
@@ -160,8 +160,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 38: { // renameat
             std::string oldp = VFS::remap_path(VFS::read_path(mem_, a1));
             std::string newp = VFS::remap_path(VFS::read_path(mem_, a3));
-            int r = ::renameat((int)a0, oldp.c_str(), (int)a2, newp.c_str());
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::renameat(static_cast<int>(a0), oldp.c_str(), static_cast<int>(a2), newp.c_str());
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(0);
             return 0;
         }
@@ -177,8 +177,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (len == 0) continue;
                 std::vector<uint8_t> tmp(len);
                 mem_.read(base, tmp.data(), len);
-                ssize_t n = ::write((int)a0, tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+                ssize_t n = ::write(static_cast<int>(a0), tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
             }
@@ -195,8 +195,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                 if (len == 0) continue;
                 std::vector<uint8_t> tmp(len);
-                ssize_t n = ::read((int)a0, tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+                ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
@@ -213,21 +213,21 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t cnt = a2;
             off_t offset = (off_t)a3;
             ssize_t total = 0;
-            off_t saved = ::lseek((int)a0, 0, SEEK_CUR);
+            off_t saved = ::lseek(static_cast<int>(a0), 0, SEEK_CUR);
             if (saved < 0) saved = 0;
-            ::lseek((int)a0, offset, SEEK_SET);
+            ::lseek(static_cast<int>(a0), offset, SEEK_SET);
             for (uint64_t i = 0; i < cnt; i++) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                 if (len == 0) continue;
                 std::vector<uint8_t> tmp(len);
-                ssize_t n = ::read((int)a0, tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+                ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
             }
-            ::lseek((int)a0, saved, SEEK_SET);
+            ::lseek(static_cast<int>(a0), saved, SEEK_SET);
             ret_host(total);
             return 0;
         }
@@ -283,10 +283,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             int r;
             // If dirfd is AT_FDCWD (-100) or the path is absolute, use
             // fstatat on the host. Otherwise fall back to the fake stat.
-            if ((int)a0 == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
-                r = ::fstatat(AT_FDCWD, path.c_str(), &st, (int)a3);
+            if (static_cast<int>(a0) == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
+                r = ::fstatat(AT_FDCWD, path.c_str(), &st, static_cast<int>(a3));
             } else {
-                r = ::fstatat((int)a0, path.c_str(), &st, (int)a3);
+                r = ::fstatat(static_cast<int>(a0), path.c_str(), &st, static_cast<int>(a3));
             }
             if (r < 0) {
                 // Fall back to fake stat on error (keeps old behavior
@@ -311,7 +311,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             p[1] = st.st_ino;
             reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
             reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
-            p[3] = st.st_uid | ((uint64_t)st.st_gid << 32);
+            p[3] = st.st_uid | (static_cast<uint64_t>(st.st_gid) << 32);
             p[4] = 0;
             p[5] = st.st_rdev;
             p[6] = st.st_size;
@@ -350,19 +350,19 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_host(elf_path_.size());
                         return 0;
                     }
-                    ret_host((uint64_t)-ENOSYS);
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
                     return 0;
                 }
                 // Call host readlinkat for real filesystem paths
                 char buf[4096];
-                ssize_t n = ::readlinkat((int)a0, path_str.c_str(), buf, sizeof(buf));
-                if (n < 0) { ret_host((uint64_t)(int64_t)-errno); return 0; }
+                ssize_t n = ::readlinkat(static_cast<int>(a0), path_str.c_str(), buf, sizeof(buf));
+                if (n < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
                 if (static_cast<size_t>(n) > a3) n = a3;
                 mem_.write(a2, buf, n);
                 ret_host(n);
                 return 0;
             }
-            ret_host((uint64_t)-EFAULT);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
             return 0;
         }
 
@@ -403,15 +403,15 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
-            int r = ::faccessat((int)a0, path.c_str(), (int)a2, (int)a3);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 14: { // fchdir(fd) — AArch64 14
-            int r = ::fchdir((int)a0);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::fchdir(static_cast<int>(a0));
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -419,14 +419,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 50: { // chdir(path) — AArch64 50
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::chdir(path.c_str());
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 46: { // ftruncate(fd, length) — AArch64 46
-            int r = ::ftruncate((int)a0, (off_t)a1);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::ftruncate(static_cast<int>(a0), (off_t)a1);
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -434,22 +434,22 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 52: { // chmod(path, mode) — AArch64 52
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::chmod(path.c_str(), (mode_t)a1);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 53: { // fchmod(fd, mode) — AArch64 53
-            int r = ::fchmod((int)a0, (mode_t)a1);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::fchmod(static_cast<int>(a0), (mode_t)a1);
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 88: { // utimensat(dirfd, path, times, flags) — AArch64 88
             std::string path = a1 ? VFS::remap_path(VFS::read_path(mem_, a1)) : std::string();
-            int r = ::utimensat((int)a0, a1 ? path.c_str() : nullptr, (const struct timespec*)a2, (int)a3);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            int r = ::utimensat(static_cast<int>(a0), a1 ? path.c_str() : nullptr, (const struct timespec*)a2, static_cast<int>(a3));
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -457,7 +457,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 37: { // unlink(path) — AArch64 37 (legacy)
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::unlink(path.c_str());
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -466,7 +466,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             std::string oldp = VFS::remap_path(VFS::read_path(mem_, a0));
             std::string newp = VFS::remap_path(VFS::read_path(mem_, a1));
             int r = ::symlink(oldp.c_str(), newp.c_str());
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -475,7 +475,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             std::string oldp = VFS::remap_path(VFS::read_path(mem_, a0));
             std::string newp = VFS::remap_path(VFS::read_path(mem_, a1));
             int r = ::link(oldp.c_str(), newp.c_str());
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -483,7 +483,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 45: { // truncate(path, length) — AArch64 45
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::truncate(path.c_str(), (off_t)a1);
-            if (r < 0) { cpu.regs[0] = (uint64_t)(int64_t)-errno; return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
@@ -498,8 +498,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // guest's mmap'd view — too complex for the common case.
             // Return success for mode=0 (allocate) on regular host fds;
             // return -ENOSYS for modes we can't honour (punch-hole, collapse).
-            int fd = (int)a0;
-            int mode = (int)a1;
+            int fd = static_cast<int>(a0);
+            int mode = static_cast<int>(a1);
             if (mode == 0) {
                 // FALLOC_FL_KEEP_SIZE is 0x01; pure allocate (mode=0)
                 // is the only one we can pass through safely.
@@ -507,7 +507,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(r);
                 return 0;
             }
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
@@ -519,7 +519,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             off_t off = 0;
             if (a2) off = (off_t)mem_.load<uint64_t>(a2);
             ssize_t r = ::sendfile(static_cast<int>(a0), static_cast<int>(a1), a2 ? &off : nullptr, static_cast<size_t>(a3));
-            if (a2 && r >= 0) mem_.store<uint64_t>(a2, (uint64_t)off);
+            if (a2 && r >= 0) mem_.store<uint64_t>(a2, static_cast<uint64_t>(off));
             ret_host(r);
             return 0;
         }

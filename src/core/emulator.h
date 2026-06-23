@@ -208,7 +208,7 @@ private:
     void join_threads();
 
     static std::string to_hex(uint64_t v) {
-        char b[32]; snprintf(b, sizeof(b), "%llx", (unsigned long long)v);
+        char b[32]; snprintf(b, sizeof(b), "%llx", static_cast<unsigned long long>(v));
         return b;
     }
 };

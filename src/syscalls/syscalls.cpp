@@ -64,7 +64,7 @@ void Emulator::syscall(CPU& cpu) {
     if (syscall_misc(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
 
     // Completely unknown syscall — return -ENOSYS.
-    cpu.regs[0] = (uint64_t)(int64_t)-ENOSYS;
+    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS));
 }
 
 } // namespace arm64emu

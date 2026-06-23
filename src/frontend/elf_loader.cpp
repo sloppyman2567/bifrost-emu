@@ -149,10 +149,10 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
 
     // Process RELA relocations (.rela.plt and .rela.dyn if present).
     if (e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
-        uint64_t shstr_off = e_shoff + (uint64_t)e_shstrndx * e_shentsize;
+        uint64_t shstr_off = e_shoff + static_cast<uint64_t>(e_shstrndx) * e_shentsize;
         if (shstr_off + e_shentsize <= data.size()) {
             for (uint16_t i = 0; i < e_shnum; i++) {
-                uint64_t sh_off = e_shoff + (uint64_t)i * e_shentsize;
+                uint64_t sh_off = e_shoff + static_cast<uint64_t>(i) * e_shentsize;
                 if (sh_off + e_shentsize > data.size()) break;
                 uint32_t sh_name, sh_type;
                 uint64_t sh_offset, sh_size;

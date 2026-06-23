@@ -199,7 +199,7 @@ bool GraphicsBackend::init(uint32_t width, uint32_t height) {
         s->window = SDL_CreateWindow(
             "bifrost-emu /dev/fb0",
             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            (int)width_, (int)height_,
+            static_cast<int>(width_), static_cast<int>(height_),
             SDL_WINDOW_SHOWN);
         if (s->window) {
             s->renderer = SDL_CreateRenderer(
@@ -212,7 +212,7 @@ bool GraphicsBackend::init(uint32_t width, uint32_t height) {
                     s->renderer,
                     SDL_PIXELFORMAT_BGRA8888,
                     SDL_TEXTUREACCESS_STREAMING,
-                    (int)width_, (int)height_);
+                    static_cast<int>(width_), static_cast<int>(height_));
             }
         }
         if (!s->window || !s->renderer || !s->texture) {
@@ -372,7 +372,7 @@ void GraphicsBackend::refresh() {
             // (The caller is responsible for calling sync_from() before
             // refresh(); if they didn't, we just show whatever's in
             // fb_data_, which is the last-synced state.)
-            SDL_UpdateTexture(s->texture, nullptr, fb_data_, (int)width_ * 4);
+            SDL_UpdateTexture(s->texture, nullptr, fb_data_, static_cast<int>(width_) * 4);
             SDL_RenderClear(s->renderer);
             SDL_RenderCopy(s->renderer, s->texture, nullptr, nullptr);
             SDL_RenderPresent(s->renderer);
@@ -440,8 +440,8 @@ int GraphicsBackend::ioctl(uint32_t request, void* guest_buf) {
             v.transp.offset = 24; v.transp.length = 8; v.transp.msb_right = 0;
             v.nonstd = 0;
             v.activate = 0;
-            v.height = (uint32_t)(height_ * 1000 / 96);  // fake ~96 DPI
-            v.width  = (uint32_t)(width_  * 1000 / 96);
+            v.height = static_cast<uint32_t>(height_ * 1000 / 96);  // fake ~96 DPI
+            v.width  = static_cast<uint32_t>(width_  * 1000 / 96);
             v.accel_flags = 0;
             v.pixclock = 1000000 / (width_ * height_ * 60 / 1000000ULL);
             v.left_margin = v.right_margin = 1;
@@ -458,7 +458,7 @@ int GraphicsBackend::ioctl(uint32_t request, void* guest_buf) {
             memset(&fix, 0, sizeof(fix));
             strncpy(fix.id, "bifrost_fb", sizeof(fix.id) - 1);
             fix.smem_start = 0;       // unused (no real hardware)
-            fix.smem_len   = (uint32_t)size();
+            fix.smem_len   = static_cast<uint32_t>(size());
             fix.type       = 0;       // FB_TYPE_PACKED_PIXELS
             fix.type_aux   = 0;
             fix.visual     = 2;       // FB_VISUAL_TRUECOLOR

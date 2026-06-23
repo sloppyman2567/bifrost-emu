@@ -27,7 +27,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& brk_start_ = emu.brk_start_;
     auto& brk_mu_ = emu.brk_mu_;
     auto& graphics_ = emu.graphics_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = (uint64_t)r; };
+    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         case 222: { // mmap
@@ -36,7 +36,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t length = a1;
             uint64_t prot = a2;
             uint64_t flags = a3;
-            if (length == 0) { cpu.regs[0] = (uint64_t)-22; return 0; } // EINVAL
+            if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
 
             constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
 
@@ -94,14 +94,14 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // written via the brk extension is not zeroed out.
 
             // If a file fd is given, read its contents in
-            if ((int64_t)a4 != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {
+            if (static_cast<int64_t>(a4) != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {
                 struct stat st;
-                if (::fstat((int)a4, &st) == 0) {
+                if (::fstat(static_cast<int>(a4), &st) == 0) {
                     std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
-                    off_t old = ::lseek((int)a4, 0, SEEK_CUR);
-                    ::lseek((int)a4, a5, SEEK_SET);
-                    ssize_t n = ::read((int)a4, buf.data(), buf.size());
-                    ::lseek((int)a4, old, SEEK_SET);
+                    off_t old = ::lseek(static_cast<int>(a4), 0, SEEK_CUR);
+                    ::lseek(static_cast<int>(a4), a5, SEEK_SET);
+                    ssize_t n = ::read(static_cast<int>(a4), buf.data(), buf.size());
+                    ::lseek(static_cast<int>(a4), old, SEEK_SET);
                     if (n > 0) mem_.write(mapped, buf.data(), n);
                 }
                 // If the guest is mmap'ing the graphics framebuffer fd,
@@ -110,7 +110,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // dump_to_ppm / refresh). Use owns_fd() (which does
                 // fstat comparison) because open_dev_fb0() returns a
                 // dup'd fd, not the original fb_fd_.
-                if (graphics_.ready() && graphics_.owns_fd((int)a4)) {
+                if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
                     graphics_.set_guest_fb_addr(mapped);
                 }
             }

@@ -27,7 +27,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& graphics_ = emu.graphics_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = (uint64_t)r; };
+    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         case 29: { // ioctl(fd, request, argp) — AArch64 syscall 29
@@ -40,9 +40,9 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // breaking musl's stdio buffering decisions.)
             if (a1 == 0x5413 /*TIOCGWINSZ*/) {
                 struct winsize ws;
-                int r = ::ioctl((int)a0, TIOCGWINSZ, &ws);
+                int r = ::ioctl(static_cast<int>(a0), TIOCGWINSZ, &ws);
                 if (r < 0) {
-                    ret_host((uint64_t)(int64_t)-errno);
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 } else {
                     mem_.write(a2, &ws, sizeof(ws));
                     ret_host(0);
@@ -57,16 +57,16 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // it to the guest buffer.
             if (a1 == FBIOGET_VSCREENINFO || a1 == FBIOGET_FSCREENINFO) {
                 if (!graphics_.ready()) {
-                    cpu.regs[0] = (uint64_t)(int64_t)-ENODEV;
+                    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENODEV));
                     return 0;
                 }
                 // The two structs are different sizes; we use the
                 // larger one as the host buffer to be safe.
                 char host_buf[192];  // ample for either struct
                 memset(host_buf, 0, sizeof(host_buf));
-                int r = graphics_.ioctl((uint32_t)a1, host_buf);
+                int r = graphics_.ioctl(static_cast<uint32_t>(a1), host_buf);
                 if (r < 0) {
-                    cpu.regs[0] = (uint64_t)(int64_t)r;
+                    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(r));
                 } else {
                     // sizeof(struct fb_var_screeninfo) = 160
                     // sizeof(struct fb_fix_screeninfo) = 80 (LP64)
@@ -92,9 +92,9 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // host-side buffer because a2 is a guest virtual address.
             if (a1 == 0x5401 /*TCGETS*/) {
                 struct termios t;
-                int r = ::ioctl((int)a0, TCGETS, &t);
+                int r = ::ioctl(static_cast<int>(a0), TCGETS, &t);
                 if (r == 0) mem_.write(a2, &t, sizeof(t));
-                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 else       ret_host(r);
                 return 0;
             }
@@ -102,8 +102,8 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 a1 == 0x5404 /*TCSETSF*/) {
                 struct termios t;
                 mem_.read(a2, &t, sizeof(t));
-                int r = ::ioctl((int)a0, (unsigned long)a1, &t);
-                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                int r = ::ioctl(static_cast<int>(a0), static_cast<unsigned long>(a1), &t);
+                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 else       ret_host(r);
                 return 0;
             }
@@ -112,9 +112,9 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // work correctly.
             if (a1 == 0x541B /*FIONREAD*/) {
                 int n = 0;
-                int r = ::ioctl((int)a0, FIONREAD, &n);
+                int r = ::ioctl(static_cast<int>(a0), FIONREAD, &n);
                 if (r == 0) mem_.store<int32_t>(a2, n);
-                if (r < 0) ret_host((uint64_t)(int64_t)-errno);
+                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
                 else       ret_host(r);
                 return 0;
             }
@@ -122,7 +122,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // Anything we don't recognize: return -ENOTTY so callers
             // (especially isatty()) can correctly distinguish ttys
             // from non-ttys.
-            ret_host((uint64_t)(int64_t)-ENOTTY);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOTTY)));
             return 0;
         }
 

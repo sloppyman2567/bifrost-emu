@@ -18,7 +18,7 @@ namespace arm64emu {
 // Used for swap-with-mask patterns. Each call is 4 IR ops.
 uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
     uint16_t mask_v = load_imm(b, mask);
-    uint16_t n_v    = load_imm(b, (uint64_t)n);
+    uint16_t n_v    = load_imm(b, static_cast<uint64_t>(n));
     // hi = (v & mask) << n
     uint16_t kept   = g_alloc.alloc();
     emit(b, IROp::AND, kept, v, mask_v);

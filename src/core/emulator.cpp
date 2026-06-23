@@ -124,7 +124,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     uint8_t rnd[16];
     FILE* ur = fopen("/dev/urandom", "rb");
     if (ur) { fread(rnd, 1, 16, ur); fclose(ur); }
-    else { for (int i = 0; i < 16; i++) rnd[i] = (uint8_t)rand(); }
+    else { for (int i = 0; i < 16; i++) rnd[i] = static_cast<uint8_t>(rand()); }
     mem_.write(sp, rnd, 16);
     uint64_t random_addr = sp;
 
@@ -189,7 +189,7 @@ int Emulator::run() {
     // recursion, softfloat loops, or atomic-CAS loops where STXR
     // always fails).
     constexpr uint64_t HANG_LIMIT = 50'000'000;  // ~50M instructions
-    uint64_t last_pc = (uint64_t)-1;
+    uint64_t last_pc = static_cast<uint64_t>(-1);
     uint64_t same_pc_count = 0;
 
     while (main_cpu_.running) {
@@ -223,8 +223,8 @@ int Emulator::run() {
                     "without progress; aborting (likely mallocng init "
                     "recursion or atomic loop)\n",
                     CODENAME,
-                    (unsigned long long)main_cpu_.pc,
-                    (unsigned long long)same_pc_count);
+                    static_cast<unsigned long long>(main_cpu_.pc),
+                    static_cast<unsigned long long>(same_pc_count));
                 main_cpu_.running = false;
                 main_cpu_.exit_code = 70;  // EX_SOFTWARE
                 break;
@@ -270,7 +270,7 @@ int Emulator::run() {
     double secs = std::chrono::duration<double>(t1 - t0).count();
     if (verbose_) {
         fprintf(stderr, "[%s] executed %llu instructions in %.3fs (%.2f MIPS)\n",
-                CODENAME, (unsigned long long)count, secs, count / 1e6 / secs);
+                CODENAME, static_cast<unsigned long long>(count), secs, count / 1e6 / secs);
         fprintf(stderr, "[%s] mem pages: %zu (%.1f MB)\n",
                 CODENAME, mem_.page_count(),
                 mem_.page_count() * 4096 / 1048576.0);
@@ -286,8 +286,8 @@ int Emulator::run() {
         uint64_t total = hits + misses;
         if (total > 0) {
             fprintf(stderr, "[%s] decode cache: %llu hits, %llu misses (%.1f%% hit rate)\n",
-                    CODENAME, (unsigned long long)hits,
-                    (unsigned long long)misses,
+                    CODENAME, static_cast<unsigned long long>(hits),
+                    static_cast<unsigned long long>(misses),
                     100.0 * hits / total);
         }
         if (jit_ && jit_enabled_) {
@@ -307,22 +307,22 @@ void Emulator::step(CPU& cpu) {
             "x26=0x%llx x27=0x%llx x28=0x%llx x29=0x%llx x30=0x%llx pstate=0x%x "
             "sp=0x%llx v0lo=0x%llx v0hi=0x%llx v1lo=0x%llx v1hi=0x%llx v2lo=0x%llx v2hi=0x%llx\n",
             cpu.tid,
-            (unsigned long long)cpu.pc,
-            (unsigned long long)cpu.regs[0], (unsigned long long)cpu.regs[1],
-            (unsigned long long)cpu.regs[2], (unsigned long long)cpu.regs[3],
-            (unsigned long long)cpu.regs[4], (unsigned long long)cpu.regs[5],
-            (unsigned long long)cpu.regs[8], (unsigned long long)cpu.regs[16],
-            (unsigned long long)cpu.regs[17], (unsigned long long)cpu.regs[19],
-            (unsigned long long)cpu.regs[20], (unsigned long long)cpu.regs[21],
-            (unsigned long long)cpu.regs[22], (unsigned long long)cpu.regs[23],
-            (unsigned long long)cpu.regs[24], (unsigned long long)cpu.regs[25],
-            (unsigned long long)cpu.regs[26], (unsigned long long)cpu.regs[27],
-            (unsigned long long)cpu.regs[28], (unsigned long long)cpu.regs[29],
-            (unsigned long long)cpu.regs[30], cpu.pstate,
-            (unsigned long long)cpu.sp,
-            (unsigned long long)cpu.v_lo[0], (unsigned long long)cpu.v_hi[0],
-            (unsigned long long)cpu.v_lo[1], (unsigned long long)cpu.v_hi[1],
-            (unsigned long long)cpu.v_lo[2], (unsigned long long)cpu.v_hi[2]);
+            static_cast<unsigned long long>(cpu.pc),
+            static_cast<unsigned long long>(cpu.regs[0]), static_cast<unsigned long long>(cpu.regs[1]),
+            static_cast<unsigned long long>(cpu.regs[2]), static_cast<unsigned long long>(cpu.regs[3]),
+            static_cast<unsigned long long>(cpu.regs[4]), static_cast<unsigned long long>(cpu.regs[5]),
+            static_cast<unsigned long long>(cpu.regs[8]), static_cast<unsigned long long>(cpu.regs[16]),
+            static_cast<unsigned long long>(cpu.regs[17]), static_cast<unsigned long long>(cpu.regs[19]),
+            static_cast<unsigned long long>(cpu.regs[20]), static_cast<unsigned long long>(cpu.regs[21]),
+            static_cast<unsigned long long>(cpu.regs[22]), static_cast<unsigned long long>(cpu.regs[23]),
+            static_cast<unsigned long long>(cpu.regs[24]), static_cast<unsigned long long>(cpu.regs[25]),
+            static_cast<unsigned long long>(cpu.regs[26]), static_cast<unsigned long long>(cpu.regs[27]),
+            static_cast<unsigned long long>(cpu.regs[28]), static_cast<unsigned long long>(cpu.regs[29]),
+            static_cast<unsigned long long>(cpu.regs[30]), cpu.pstate,
+            static_cast<unsigned long long>(cpu.sp),
+            static_cast<unsigned long long>(cpu.v_lo[0]), static_cast<unsigned long long>(cpu.v_hi[0]),
+            static_cast<unsigned long long>(cpu.v_lo[1]), static_cast<unsigned long long>(cpu.v_hi[1]),
+            static_cast<unsigned long long>(cpu.v_lo[2]), static_cast<unsigned long long>(cpu.v_hi[2]));
     }
     uint32_t inst = mem_.fetch_inst(cpu.pc, &cpu.page_cache);
     uint64_t next_pc = cpu.pc + 4;

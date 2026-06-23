@@ -29,7 +29,6 @@ FrostJIT::FrostJIT() {
                    PROT_READ | PROT_WRITE | PROT_EXEC,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p != MAP_FAILED) code_buf_ = static_cast<uint8_t*>(p);
-
     // Counters start at zero (declared in the public header).
     blocks_translated = 0;
     blocks_executed   = 0;
@@ -53,7 +52,6 @@ void FrostJIT::flush_cache() {
     blocks_.clear();
     back_refs_.clear();
     code_buf_used_ = 0;
-    pending_back_edges_.clear();
 }
 
 } // namespace arm64emu

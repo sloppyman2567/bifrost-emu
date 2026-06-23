@@ -79,9 +79,9 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
         case 1: val = val & 0xFFFF;          break;  // UXTH
         case 2: val = val & 0xFFFFFFFF;      break;  // UXTW
         case 3: break;                               // UXTX
-        case 4: val = (int64_t)(int8_t)val;  break;  // SXTB
-        case 5: val = (int64_t)(int16_t)val; break;  // SXTH
-        case 6: val = (int64_t)(int32_t)val; break;  // SXTW
+        case 4: val = static_cast<int64_t>(static_cast<int8_t>(val));  break;  // SXTB
+        case 5: val = static_cast<int64_t>(static_cast<int16_t>(val)); break;  // SXTH
+        case 6: val = static_cast<int64_t>(static_cast<int32_t>(val)); break;  // SXTW
         case 7: break;                               // SXTX
     }
     return val << shift;
@@ -168,7 +168,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.is_load   = (inst >> 22) & 1;
             d.mode      = 1;
             d.writeback = true;
-            int16_t imm7 = (int16_t)arm64emu::sign_extend((inst >> 15) & 0x7F, 7);
+            int16_t imm7 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 15) & 0x7F, 7));
             int esize = (opc == 2) ? 8 : 4;
             d.disp = imm7 * esize;
             d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
@@ -206,7 +206,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.is_load   = (inst >> 22) & 1;
         d.mode      = mode_check;
         d.writeback = (mode_check == 3);
-        int16_t imm7 = (int16_t)arm64emu::sign_extend((inst >> 15) & 0x7F, 7);
+        int16_t imm7 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 15) & 0x7F, 7));
         int esize = (opc == 2) ? 8 : 4;
         d.disp = imm7 * esize;
         d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
@@ -282,7 +282,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.is_load   = (inst >> 22) & 1;
         d.mode      = mode_check;
         d.writeback = (mode_check == 1 || mode_check == 3);
-        int16_t imm7 = (int16_t)arm64emu::sign_extend((inst >> 15) & 0x7F, 7);
+        int16_t imm7 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 15) & 0x7F, 7));
         int esize = (opc == 0) ? 4 : (opc == 1) ? 8 : 16;
         d.disp = imm7 * esize;
         d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
@@ -559,7 +559,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.size      = (inst >> 30) & 3;
             d.opc_ls    = (inst >> 22) & 3;
             d.is_vec    = (inst >> 26) & 1;
-            int16_t imm9 = (int16_t)arm64emu::sign_extend((inst >> 12) & 0x1FF, 9);
+            int16_t imm9 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 12) & 0x1FF, 9));
             d.rn        = (inst >> 5) & 0x1F;
             d.rt        = inst & 0x1F;
             d.writeback = (mode_b == 1 || mode_b == 3);
@@ -615,7 +615,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt      = inst & 0x1F;
         bool is_q = (d.opc_ls & 2) && d.size == 0;
         uint64_t scale = is_q ? 4 : d.size;
-        d.disp    = (int64_t)(imm12 << scale);
+        d.disp    = static_cast<int64_t>(imm12 << scale);
         d.is_load = d.is_vec ? (d.opc_ls & 1)
                              : ((d.opc_ls & 2) || (d.opc_ls & 1));
         d.cls = d.is_load ? InstClass::LDR_IMM : InstClass::STR_IMM;

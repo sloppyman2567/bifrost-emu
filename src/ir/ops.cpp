@@ -141,7 +141,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
 
             case IROp::SAR:
-                vregs[inst.dest] = (uint64_t)((int64_t)vregs[inst.src1] >>
+                vregs[inst.dest] = static_cast<uint64_t>(static_cast<int64_t>(vregs[inst.src1]) >>
                                                (vregs[inst.src2] & 63));
                 break;
 
@@ -157,7 +157,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
 
             case IROp::NEG:
-                vregs[inst.dest] = -(int64_t)vregs[inst.src1];
+                vregs[inst.dest] = -static_cast<int64_t>(vregs[inst.src1]);
                 break;
 
             case IROp::SEXT:
@@ -182,7 +182,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 if (v == 0 || v == all_ones) {
                     vregs[inst.dest] = width - 1;
                 } else {
-                    uint64_t operand = (int64_t)v < 0 ? ~v : v;
+                    uint64_t operand = static_cast<int64_t>(v) < 0 ? ~v : v;
                     int clz = (width == 64) ? __builtin_clzll(operand)
                                             : __builtin_clz(static_cast<uint32_t>(operand));
                     vregs[inst.dest] = clz - 1;
@@ -200,8 +200,8 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::REV16: {
                 uint64_t v = vregs[inst.src1], r = 0;
                 for (int i = 0; i < 4; i++) {
-                    uint16_t h = (uint16_t)((v >> (i * 16)) & 0xFFFF);
-                    r |= (uint64_t)(((h & 0xFF) << 8) | ((h >> 8) & 0xFF)) << (i * 16);
+                    uint16_t h = static_cast<uint16_t>((v >> (i * 16)) & 0xFFFF);
+                    r |= static_cast<uint64_t>(((h & 0xFF) << 8) | ((h >> 8) & 0xFF)) << (i * 16);
                 }
                 vregs[inst.dest] = r;
                 break;
@@ -210,8 +210,8 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::REV32: {
                 uint64_t v = vregs[inst.src1], r = 0;
                 for (int i = 0; i < 2; i++) {
-                    uint32_t w = (uint32_t)((v >> (i * 32)) & 0xFFFFFFFF);
-                    r |= (uint64_t)__builtin_bswap32(w) << (i * 32);
+                    uint32_t w = static_cast<uint32_t>((v >> (i * 32)) & 0xFFFFFFFF);
+                    r |= static_cast<uint64_t>(__builtin_bswap32(w)) << (i * 32);
                 }
                 vregs[inst.dest] = r;
                 break;
@@ -230,7 +230,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 uint64_t z = (r == 0) ? 1 : 0;
                 uint64_t c = (r < a) ? 1 : 0;
                 uint64_t v = ((~(a ^ b)) & (a ^ r) & (1ULL << 63)) ? 1 : 0;
-                cpu.pstate = (uint32_t)((n << 31) | (z << 30) | (c << 29) | (v << 28));
+                cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30) | (c << 29) | (v << 28));
                 break;
             }
 
@@ -243,7 +243,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 uint64_t z = (r == 0) ? 1 : 0;
                 uint64_t c = (a >= b) ? 1 : 0;
                 uint64_t v = ((a ^ b) & (a ^ r) & (1ULL << 63)) ? 1 : 0;
-                cpu.pstate = (uint32_t)((n << 31) | (z << 30) | (c << 29) | (v << 28));
+                cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30) | (c << 29) | (v << 28));
                 break;
             }
 
@@ -257,7 +257,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 uint64_t z = (r == 0) ? 1 : 0;
                 uint64_t c = (r < a) || (cin && r == a) ? 1 : 0;
                 uint64_t v = ((~(a ^ b)) & (a ^ r) & (1ULL << 63)) ? 1 : 0;
-                cpu.pstate = (uint32_t)((n << 31) | (z << 30) | (c << 29) | (v << 28));
+                cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30) | (c << 29) | (v << 28));
                 break;
             }
 
@@ -273,7 +273,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 uint64_t z = (r == 0) ? 1 : 0;
                 uint64_t c = (a + nb + cin) > a ? 1 : 0;  // carry out of add
                 uint64_t v = ((~(a ^ nb)) & (a ^ r) & (1ULL << 63)) ? 1 : 0;
-                cpu.pstate = (uint32_t)((n << 31) | (z << 30) | (c << 29) | (v << 28));
+                cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30) | (c << 29) | (v << 28));
                 break;
             }
 
@@ -281,14 +281,14 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 uint64_t r = vregs[inst.src1] & vregs[inst.src2];
                 uint64_t n = (r >> 63) & 1;
                 uint64_t z = (r == 0) ? 1 : 0;
-                cpu.pstate = (uint32_t)((n << 31) | (z << 30));
+                cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30));
                 break;
             }
 
             case IROp::TST_ZERO: {
                 // CBZ/CBNZ: set Z=(val==0), clear N/C/V
                 uint64_t z = (vregs[inst.src1] == 0) ? 1 : 0;
-                cpu.pstate = (uint32_t)(z << 30);
+                cpu.pstate = static_cast<uint32_t>(z << 30);
                 break;
             }
 
@@ -338,7 +338,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::CSNEG: {
                 bool t = cond_true(inst.cond, cpu.pstate);
                 uint64_t s2 = vregs[inst.src2];
-                vregs[inst.dest] = t ? vregs[inst.src1] : -(int64_t)s2;
+                vregs[inst.dest] = t ? vregs[inst.src1] : -static_cast<int64_t>(s2);
                 break;
             }
 
@@ -353,9 +353,9 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     uint64_t v = inst.flags_op
                         ? (((a ^ b) & (a ^ r) & (1ULL << 63)) ? 1 : 0)
                         : (((~(a ^ b)) & (a ^ r) & (1ULL << 63)) ? 1 : 0);
-                    cpu.pstate = (uint32_t)((n << 31) | (z << 30) | (c << 29) | (v << 28));
+                    cpu.pstate = static_cast<uint32_t>((n << 31) | (z << 30) | (c << 29) | (v << 28));
                 } else {
-                    cpu.pstate = (uint32_t)(inst.width << 28);  // nzcv_field in width
+                    cpu.pstate = static_cast<uint32_t>(inst.width << 28);  // nzcv_field in width
                 }
                 break;
             }
@@ -434,7 +434,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
 
             case IROp::FP_BINOP: {
-                uint8_t opc = (uint8_t)inst.imm;
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
                 if (inst.width == 1) {  // double
                     double a, b, r = 0;
                     memcpy(&a, &cpu.v_lo[inst.src1], 8);
@@ -452,8 +452,8 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     cpu.v_hi[inst.dest] = 0;
                 } else {  // single
                     float a, b, r = 0;
-                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
-                    uint32_t tb = (uint32_t)cpu.v_lo[inst.src2];
+                    uint32_t ta = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    uint32_t tb = static_cast<uint32_t>(cpu.v_lo[inst.src2]);
                     memcpy(&a, &ta, 4); memcpy(&b, &tb, 4);
                     switch (opc) {
                         case 0: r = a * b; break;
@@ -470,7 +470,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
             case IROp::FP_UNOP: {
-                uint8_t opc = (uint8_t)inst.imm;
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
                 if (inst.width == 1) {  // double
                     double a, r = 0;
                     memcpy(&a, &cpu.v_lo[inst.src1], 8);
@@ -484,7 +484,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     cpu.v_hi[inst.dest] = 0;
                 } else {  // single
                     float a, r = 0;
-                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
+                    uint32_t ta = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
                     memcpy(&a, &ta, 4);
                     switch (opc) {
                         case 0: r = a; break;
@@ -499,7 +499,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             }
 
             case IROp::SIMD_LOGICAL: {
-                uint8_t opc = (uint8_t)inst.imm;
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
                 uint64_t lo = cpu.v_lo[inst.src1], hi = cpu.v_hi[inst.src1];
                 uint64_t lo2 = cpu.v_lo[inst.src2], hi2 = cpu.v_hi[inst.src2];
                 switch (opc) {
@@ -536,13 +536,13 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 bool is_unsigned = (inst.imm == 1);
                 if (inst.width == 1) {
                     double a; memcpy(&a, &cpu.v_lo[inst.src1], 8);
-                    int64_t r = (int64_t)a;
-                    vregs[inst.dest] = is_unsigned ? (uint64_t)r : (uint64_t)r;
+                    int64_t r = static_cast<int64_t>(a);
+                    vregs[inst.dest] = is_unsigned ? static_cast<uint64_t>(r) : static_cast<uint64_t>(r);
                 } else {
-                    float a; uint32_t tb = (uint32_t)cpu.v_lo[inst.src1];
+                    float a; uint32_t tb = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
                     memcpy(&a, &tb, 4);
-                    int32_t r = (int32_t)a;
-                    vregs[inst.dest] = (uint32_t)r;
+                    int32_t r = static_cast<int32_t>(a);
+                    vregs[inst.dest] = static_cast<uint32_t>(r);
                 }
                 break;
             }
@@ -576,10 +576,10 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     else cpu.pstate = 0x20000000;
                 } else {
                     float a, b;
-                    uint32_t ta = (uint32_t)cpu.v_lo[inst.src1];
+                    uint32_t ta = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
                     memcpy(&a, &ta, 4);
                     if (inst.src2 != 0 || inst.imm != 0) {
-                        uint32_t tb = (uint32_t)cpu.v_lo[inst.src2];
+                        uint32_t tb = static_cast<uint32_t>(cpu.v_lo[inst.src2]);
                         memcpy(&b, &tb, 4);
                     } else { b = 0.0f; }
                     if (a != a || b != b) unordered = true;

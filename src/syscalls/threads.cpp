@@ -24,7 +24,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& signals_ = emu.signals_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = (uint64_t)r; };
+    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     // Lambda wrappers for Emulator member access (spawn_thread, get_futex).
     // (find_cpu_by_tid / decrement_alive_threads are available via emu.*
@@ -79,7 +79,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // can detect it and handle exit differently.
                 pid_t child_pid = ::fork();
                 if (child_pid < 0) {
-                    ret_host((uint64_t)-ENOMEM);
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
                 if (child_pid == 0) {
@@ -99,9 +99,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Parent: return child PID.
                 // CLONE_PARENT_SETTID: write child TID to *ptid
                 if ((flags & 0x100000) && ptid_ptr) {
-                    mem_.store<uint32_t>(ptid_ptr, (uint32_t)child_pid);
+                    mem_.store<uint32_t>(ptid_ptr, static_cast<uint32_t>(child_pid));
                 }
-                ret_host((uint64_t)child_pid);
+                ret_host(static_cast<uint64_t>(child_pid));
                 return 0;
             }
 
@@ -114,7 +114,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
 
             int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls);
             if (child_tid < 0) {
-                ret_host((uint64_t)-ENOMEM);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
 
@@ -128,7 +128,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 221: { // clone3 - not supported (use clone)
-            ret_host((uint64_t)-ENOSYS);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
             return 0;
         }
 
@@ -146,8 +146,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             //   FUTEX_CMP_REQUEUE (4):    requeue with comparison
             //   FUTEX_LOCK_PI / UNLOCK_PI / etc.: not supported (return -ENOSYS)
             uint64_t uaddr = a0;
-            uint32_t op = (uint32_t)a1;
-            uint32_t val = (uint32_t)a2;
+            uint32_t op = static_cast<uint32_t>(a1);
+            uint32_t val = static_cast<uint32_t>(a2);
             uint64_t timeout_ptr = a3;
             (void)a4;  // uaddr2 — used by FUTEX_REQUEUE, not yet implemented
             (void)a5;  // val3   — used by FUTEX_REQUEUE, not yet implemented
@@ -178,7 +178,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // us sleeping forever.
                     uint32_t cur = mem_.load<uint32_t>(uaddr);
                     if (cur != val) {
-                        ret_host((uint64_t)-EAGAIN);
+                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EAGAIN)));
                         return 0;
                     }
                     slot->waiters++;
@@ -212,7 +212,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 {
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     std::lock_guard<std::mutex> lk(slot->mu);
-                    int to_wake = (int)val;
+                    int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
                     int woken = std::min(to_wake, slot->waiters);
                     if (woken >= slot->waiters) {
@@ -231,7 +231,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // moves them to a different futex word without waking.
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     std::lock_guard<std::mutex> lk(slot->mu);
-                    int woken = std::min((int)val, slot->waiters);
+                    int woken = std::min(static_cast<int>(val), slot->waiters);
                     if (woken >= slot->waiters) slot->cv.notify_all();
                     else for (int i = 0; i < woken; i++) slot->cv.notify_one();
                     ret_host(woken);
@@ -239,7 +239,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 default:
                     // PI futexes and others: not supported
-                    ret_host((uint64_t)-ENOSYS);
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
                     return 0;
             }
         }
@@ -270,7 +270,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // to a future version.
             (void)a0;  // tgid
             (void)a1;  // tid
-            int sig = (int)a2;
+            int sig = static_cast<int>(a2);
             if (sig == 0) {
                 // Signal 0: just check permission (always succeeds).
                 ret_host(0);
@@ -287,7 +287,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 130: { // tkill(tid, sig)
-            int sig = (int)a1;
+            int sig = static_cast<int>(a1);
             if (sig == 0) { ret_host(0); return 0; }
             if (sig >= 1 && sig <= MAX_SIGNAL) {
                 deliver_signal(emu, cpu, signals_, sig);
@@ -297,7 +297,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 129: { // kill(pid, sig)
-            int sig = (int)a1;
+            int sig = static_cast<int>(a1);
             if (sig == 0) { ret_host(0); return 0; }
             if (sig >= 1 && sig <= MAX_SIGNAL) {
                 deliver_signal(emu, cpu, signals_, sig);

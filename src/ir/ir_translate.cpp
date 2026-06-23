@@ -39,14 +39,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
 
         // ── MOVZ / MOVN / MOVK ───────────────────────────────────────
         case InstClass::MOVZ: {
-            uint64_t val = (uint64_t)d.imm16 << (d.hw * 16);
+            uint64_t val = static_cast<uint64_t>(d.imm16) << (d.hw * 16);
             if (!d.sf) val &= 0xFFFFFFFF;
             uint16_t v = load_imm(block, val);
             store_arm_reg(block, d.rd, v);
             return false;
         }
         case InstClass::MOVN: {
-            uint64_t val = ~(uint64_t)((uint64_t)d.imm16 << (d.hw * 16));
+            uint64_t val = ~static_cast<uint64_t>(static_cast<uint64_t>(d.imm16) << (d.hw * 16));
             if (!d.sf) val &= 0xFFFFFFFF;
             uint16_t v = load_imm(block, val);
             store_arm_reg(block, d.rd, v);
@@ -54,10 +54,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         case InstClass::MOVK: {
             uint16_t cur = load_arm_reg(block, d.rd);
-            uint64_t mask = ~((uint64_t)0xFFFF << (d.hw * 16));
+            uint64_t mask = ~(static_cast<uint64_t>(0xFFFF) << (d.hw * 16));
             if (!d.sf) mask |= 0xFFFFFFFF00000000ULL;
             uint16_t mv = load_imm(block, mask);
-            uint16_t bits = load_imm(block, (uint64_t)d.imm16 << (d.hw * 16));
+            uint16_t bits = load_imm(block, static_cast<uint64_t>(d.imm16) << (d.hw * 16));
             uint16_t masked = g_alloc.alloc();
             emit(block, IROp::AND, masked, cur, mv);
             uint16_t result = g_alloc.alloc();
@@ -99,7 +99,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // the [-4095, -1] error range. Without the shift, every
                 // successful syscall looked like an error, and every
                 // syscall was reported as -1 with bogus errno.
-                b = load_imm(block, (uint64_t)d.imm_u << d.shift);
+                b = load_imm(block, static_cast<uint64_t>(d.imm_u) << d.shift);
             } else {
                 // Register form. Two sub-cases:
                 //   (a) Extended register (bit21=1): apply extend type
@@ -159,14 +159,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     }
                     // Apply shift (for extended register, shift is 0-4).
                     if (d.shift != 0) {
-                        uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                        uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
                         uint16_t shifted = g_alloc.alloc();
                         emit(block, IROp::SHL, shifted, b, sh);
                         b = shifted;
                     }
                 } else if (d.shift != 0 || d.shift_type != 0) {
                     // Shifted register form — apply shift_type by d.shift.
-                    uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
                     uint16_t shifted = g_alloc.alloc();
                     IROp shop = (d.shift_type == 0) ? IROp::SHL
                               : (d.shift_type == 1) ? IROp::SHR
@@ -201,7 +201,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // BUGFIX (alpha.4): apply d.shift (0 or 12) to d.imm_u,
                 // matching the interpreter. See ADD_IMM/SUB_IMM above
                 // for the full rationale.
-                b = load_imm(block, (uint64_t)d.imm_u << d.shift);
+                b = load_imm(block, static_cast<uint64_t>(d.imm_u) << d.shift);
             } else {
                 // Register form. Two sub-cases (mirrors ADD_REG/SUB_REG):
                 //   (a) Extended register (bit21=1): apply extend type
@@ -267,14 +267,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     }
                     // Apply shift (for extended register, shift is 0-4).
                     if (d.shift != 0) {
-                        uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                        uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
                         uint16_t shifted = g_alloc.alloc();
                         emit(block, IROp::SHL, shifted, b, sh);
                         b = shifted;
                     }
                 } else if (d.shift != 0 || d.shift_type != 0) {
                     // Shifted register form — apply shift_type by d.shift.
-                    uint16_t sh = load_imm(block, (uint64_t)d.shift);
+                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
                     uint16_t shifted = g_alloc.alloc();
                     IROp shop = (d.shift_type == 0) ? IROp::SHL
                               : (d.shift_type == 1) ? IROp::SHR
@@ -375,7 +375,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 b = load_arm_reg(block, (d.rm == 31) ? 32 : d.rm);
                 // Apply shift to the register operand.
                 if (d.shift != 0 || d.shift_type != 0) {
-                    uint16_t shift_amt = load_imm(block, (uint64_t)d.shift);
+                    uint16_t shift_amt = load_imm(block, static_cast<uint64_t>(d.shift));
                     uint16_t shifted = g_alloc.alloc();
                     IROp shop = (d.shift_type == 0) ? IROp::SHL
                               : (d.shift_type == 1) ? IROp::SHR
@@ -489,11 +489,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 result = rm_v;
             } else {
                 // hi_part = Rn << (width - lsb)
-                uint16_t sh_hi = load_imm(block, (uint64_t)(width - lsb));
+                uint16_t sh_hi = load_imm(block, static_cast<uint64_t>(width - lsb));
                 uint16_t hi = g_alloc.alloc();
                 emit(block, IROp::SHL, hi, rn_v, sh_hi);
                 // lo_part = Rm >> lsb
-                uint16_t sh_lo = load_imm(block, (uint64_t)lsb);
+                uint16_t sh_lo = load_imm(block, static_cast<uint64_t>(lsb));
                 uint16_t lo = g_alloc.alloc();
                 emit(block, IROp::SHR, lo, rm_v, sh_lo);
                 // result = hi | lo
@@ -686,13 +686,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::ZEXT, z, v, 0, 32);
                 v = z;
             }
-            uint16_t sh = load_imm(block, (uint64_t)(width - 1));
+            uint16_t sh = load_imm(block, static_cast<uint64_t>(width - 1));
             uint16_t sign = g_alloc.alloc();
             emit(block, IROp::SAR, sign, v, sh);
             uint16_t xored = g_alloc.alloc();
             emit(block, IROp::XOR, xored, v, sign);
             uint16_t clz = g_alloc.alloc();
-            emit(block, IROp::CLZ, clz, xored, 0, (uint8_t)width);
+            emit(block, IROp::CLZ, clz, xored, 0, static_cast<uint8_t>(width));
             uint16_t one = load_imm(block, 1);
             uint16_t r = g_alloc.alloc();
             emit(block, IROp::SUB, r, clz, one);
@@ -819,7 +819,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         break;
                 }
                 if (d.shift & 1) {
-                    uint16_t sh = load_imm(block, (uint64_t)d.size);
+                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.size));
                     uint16_t shifted = g_alloc.alloc();
                     emit(block, IROp::SHL, shifted, ext, sh);
                     ext = shifted;
@@ -844,8 +844,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             int64_t mem_off = post_index ? 0 : d.disp;
             if (is_load) {
                 uint16_t val = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val, addr, 0, (uint8_t)width,
-                     0, 0, (uint64_t)mem_off);
+                emit(block, IROp::LOAD_MEM, val, addr, 0, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off));
                 // Sign-extend check: for non-vector loads, opc_ls bit 2
                 // (i.e. opc_ls & 2) indicates LDRSW/LDRSB/LDRSH (sign-
                 // extending loads). The decoder does NOT set d.cls to
@@ -856,19 +856,19 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool sign_ext = !d.is_vec && (d.opc_ls & 2);
                 if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
-                    emit(block, IROp::SEXT, ext, val, 0, (uint8_t)(width * 8));
+                    emit(block, IROp::SEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
                 } else if (width < 8) {
                     uint16_t ext = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext, val, 0, (uint8_t)(width * 8));
+                    emit(block, IROp::ZEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
                 } else {
                     store_arm_reg(block, d.rt, val);
                 }
             } else {
                 uint16_t val = load_arm_reg(block, d.rt);
-                emit(block, IROp::STORE_MEM, 0, addr, val, (uint8_t)width,
-                     0, 0, (uint64_t)mem_off);
+                emit(block, IROp::STORE_MEM, 0, addr, val, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off));
             }
             // Writeback.
             if (d.writeback) {
@@ -876,13 +876,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool rn_is_sp = (d.rn == 31);
                 if (post_index) {
                     // rn = base + disp
-                    uint16_t off = load_imm(block, (uint64_t)d.disp);
+                    uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                     uint16_t new_base = g_alloc.alloc();
                     emit(block, IROp::ADD, new_base, base, off);
                     store_arm_reg(block, d.rn, new_base, rn_is_sp);
                 } else {
                     // Pre-index: rn = base + disp.
-                    uint16_t off = load_imm(block, (uint64_t)d.disp);
+                    uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                     uint16_t new_base = g_alloc.alloc();
                     emit(block, IROp::ADD, new_base, base, off);
                     store_arm_reg(block, d.rn, new_base, rn_is_sp);
@@ -921,22 +921,22 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             int64_t mem_off = post_index ? 0 : d.disp;
             if (is_load) {
                 uint16_t val1 = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val1, addr, 0, (uint8_t)width,
-                     0, 0, (uint64_t)mem_off);
+                emit(block, IROp::LOAD_MEM, val1, addr, 0, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off));
                 // Sign-extend or zero-extend if needed (for 32-bit)
                 if (width < 8) {
                     uint16_t ext1 = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext1, val1, 0, (uint8_t)(width * 8));
+                    emit(block, IROp::ZEXT, ext1, val1, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext1);
                 } else {
                     store_arm_reg(block, d.rt, val1);
                 }
                 uint16_t val2 = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, val2, addr, 0, (uint8_t)width,
-                     0, 0, (uint64_t)(mem_off + esize));
+                emit(block, IROp::LOAD_MEM, val2, addr, 0, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off + esize));
                 if (width < 8) {
                     uint16_t ext2 = g_alloc.alloc();
-                    emit(block, IROp::ZEXT, ext2, val2, 0, (uint8_t)(width * 8));
+                    emit(block, IROp::ZEXT, ext2, val2, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt2, ext2);
                 } else {
                     store_arm_reg(block, d.rt2, val2);
@@ -945,15 +945,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // STP: store rt, rt2
                 uint16_t val1 = load_arm_reg(block, d.rt);
                 uint16_t val2 = load_arm_reg(block, d.rt2);
-                emit(block, IROp::STORE_MEM, 0, addr, val1, (uint8_t)width,
-                     0, 0, (uint64_t)mem_off);
-                emit(block, IROp::STORE_MEM, 0, addr, val2, (uint8_t)width,
-                     0, 0, (uint64_t)(mem_off + esize));
+                emit(block, IROp::STORE_MEM, 0, addr, val1, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off));
+                emit(block, IROp::STORE_MEM, 0, addr, val2, static_cast<uint8_t>(width),
+                     0, 0, static_cast<uint64_t>(mem_off + esize));
             }
             // Writeback
             if (d.writeback || post_index || pre_index) {
                 bool rn_is_sp = (d.rn == 31);
-                uint16_t off = load_imm(block, (uint64_t)d.disp);
+                uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
                 uint16_t new_base = g_alloc.alloc();
                 emit(block, IROp::ADD, new_base, base, off);
                 store_arm_reg(block, d.rn, new_base, rn_is_sp);
@@ -1029,7 +1029,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t val = load_arm_reg(block, d.rt);
             uint64_t target = cur_pc + d.imm;
             uint8_t cond = (d.cls == InstClass::TBZ) ? 0 /*EQ*/ : 1 /*NE*/;
-            uint8_t bit = (uint8_t)(d.imm_u & 0x3F);
+            uint8_t bit = static_cast<uint8_t>(d.imm_u & 0x3F);
             emit(block, IROp::BRCOND_BIT, 0, val, 0, bit, cond, 0, target, cur_pc);
             block.ends_with_branch = true;
             return true;
@@ -1226,14 +1226,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // Double: exp = (NOT(imm8[6]) << 10) | (imm8[5:4] << 8) | 0x3F0
                     exp = (~(imm8 >> 6) & 1);
                     exp = (exp << 10) | ((imm8 & 0x30) << 4) | 0x3F0;
-                    mant = (uint64_t)(imm8 & 0x0F) << 48;
+                    mant = static_cast<uint64_t>(imm8 & 0x0F) << 48;
                     uint64_t bits = (sign << 63) | (exp << 52) | mant;
                     emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
                 } else {
                     // Single: exp = (NOT(imm8[6]) << 6) | (imm8[5:4] << 4) | 0x1C
                     exp = (~(imm8 >> 6) & 1);
                     exp = (exp << 6) | ((imm8 & 0x30) << 0) | 0x1C;
-                    mant = (uint32_t)(imm8 & 0x0F) << 19;
+                    mant = static_cast<uint32_t>(imm8 & 0x0F) << 19;
                     uint64_t bits = (sign << 31) | (exp << 23) | mant;
                     emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
                 }

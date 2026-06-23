@@ -84,66 +84,66 @@ void FrostJIT::emit_load(int dst, int base, int32_t off) {
     emit_byte(0x8B);
     if (base==4||base==12) {
         if (off==0) { emit_byte(modrm(0,dst&7,4)); emit_byte(sib(0,4,base&7)); }
-        else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_u32((uint32_t)off); }
+        else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if ((base&7)==5) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,dst&7,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,dst&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if (off==0) { emit_byte(modrm(0,dst&7,base&7)); }
-    else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte((uint8_t)off); }
-    else { emit_byte(modrm(2,dst&7,base&7)); emit_u32((uint32_t)off); }
+    else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+    else { emit_byte(modrm(2,dst&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_store(int base, int32_t off, int src) {
     emit_byte(rex(true,src>=8,false,base>=8));
     emit_byte(0x89);
     if (base==4||base==12) {
         if (off==0) { emit_byte(modrm(0,src&7,4)); emit_byte(sib(0,4,base&7)); }
-        else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,4)); emit_byte(sib(0,4,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,src&7,4)); emit_byte(sib(0,4,base&7)); emit_u32((uint32_t)off); }
+        else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,src&7,4)); emit_byte(sib(0,4,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if ((base&7)==5) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,src&7,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,src&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if (off==0) { emit_byte(modrm(0,src&7,base&7)); }
-    else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte((uint8_t)off); }
-    else { emit_byte(modrm(2,src&7,base&7)); emit_u32((uint32_t)off); }
+    else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+    else { emit_byte(modrm(2,src&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_load32(int dst, int base, int32_t off) {
     emit_byte(rex(false,dst>=8,false,base>=8));
     emit_byte(0x8B);
     if (base==4||base==12) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,dst&7,4)); emit_byte(sib(0,4,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if ((base&7)==5) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,dst&7,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,dst&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if (off==0) { emit_byte(modrm(0,dst&7,base&7)); }
-    else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte((uint8_t)off); }
-    else { emit_byte(modrm(2,dst&7,base&7)); emit_u32((uint32_t)off); }
+    else if (off>=-128&&off<=127) { emit_byte(modrm(1,dst&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+    else { emit_byte(modrm(2,dst&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_store32(int base, int32_t off, int src) {
     emit_byte(rex(false,src>=8,false,base>=8));
     emit_byte(0x89);
     if (base==4||base==12) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,4)); emit_byte(sib(0,4,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,src&7,4)); emit_byte(sib(0,4,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,src&7,4)); emit_byte(sib(0,4,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if ((base&7)==5) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,src&7,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,src&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if (off==0) { emit_byte(modrm(0,src&7,base&7)); }
-    else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte((uint8_t)off); }
-    else { emit_byte(modrm(2,src&7,base&7)); emit_u32((uint32_t)off); }
+    else if (off>=-128&&off<=127) { emit_byte(modrm(1,src&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+    else { emit_byte(modrm(2,src&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_modrm_disp(int reg, int base, int32_t off) {
     if (base==4||base==12) {
         if (off==0) { emit_byte(modrm(0,reg&7,4)); emit_byte(sib(0,4,base&7)); }
-        else if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,4)); emit_byte(sib(0,4,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,reg&7,4)); emit_byte(sib(0,4,base&7)); emit_u32((uint32_t)off); }
+        else if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,4)); emit_byte(sib(0,4,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,reg&7,4)); emit_byte(sib(0,4,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if ((base&7)==5) {
-        if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,base&7)); emit_byte((uint8_t)off); }
-        else { emit_byte(modrm(2,reg&7,base&7)); emit_u32((uint32_t)off); }
+        if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+        else { emit_byte(modrm(2,reg&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
     } else if (off==0) { emit_byte(modrm(0,reg&7,base&7)); }
-    else if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,base&7)); emit_byte((uint8_t)off); }
-    else { emit_byte(modrm(2,reg&7,base&7)); emit_u32((uint32_t)off); }
+    else if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
+    else { emit_byte(modrm(2,reg&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
 void FrostJIT::emit_load16(int dst, int base, int32_t off) {
     emit_byte(rex(false,dst>=8,false,base>=8));
@@ -234,7 +234,7 @@ void FrostJIT::emit_bswap_reg(int dst) {
     emit_byte(rex(true,false,false,dst>=8)); emit_byte(0x0F); emit_byte(0xC8 + (dst&7));
 }
 void FrostJIT::emit_call_abs(void* target) {
-    emit_mov_imm64(RAX, (uint64_t)target);
+    emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(target));
     emit_byte(0xFF); emit_byte(0xD0);
 }
 void FrostJIT::emit_ret() { emit_byte(0xC3); }
@@ -265,7 +265,7 @@ size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x70 + cc); emit_byte(0); return off;
 }
 void FrostJIT::patch_jcc_rel8(size_t off, int8_t rel) {
-    code_buf_[off+1] = (uint8_t)rel;
+    code_buf_[off+1] = static_cast<uint8_t>(rel);
 }
 
 // sub rsp, imm8 / add rsp, imm8 (REX.W 83 EC NN / REX.W 83 C4 NN)
@@ -464,14 +464,14 @@ extern "C" {
         emu->mem().read(addr, &val, width);
         if (getenv("BIFROST_MEM_TRACE")) {
             fprintf(stderr, "    [load] addr=0x%llx w=%d → 0x%llx\n",
-                    (unsigned long long)addr, width, (unsigned long long)val);
+                    static_cast<unsigned long long>(addr), width, static_cast<unsigned long long>(val));
         }
         return val;
     }
     void jit_store_mem_slow(Emulator* emu, uint64_t addr, uint64_t val, int width) {
         if (getenv("BIFROST_MEM_TRACE")) {
             fprintf(stderr, "    [store] addr=0x%llx val=0x%llx w=%d\n",
-                    (unsigned long long)addr, (unsigned long long)val, width);
+                    static_cast<unsigned long long>(addr), static_cast<unsigned long long>(val), width);
         }
         emu->mem().write(addr, &val, width);
     }
@@ -480,7 +480,7 @@ extern "C" {
 // RBIT helper: reverses bit order of a value.
 extern "C" uint64_t jit_rbit(uint64_t val, int width) {
     if (width == 32) {
-        uint32_t v = (uint32_t)val;
+        uint32_t v = static_cast<uint32_t>(val);
         v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
         v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
         v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
@@ -501,8 +501,8 @@ extern "C" uint64_t jit_rbit(uint64_t val, int width) {
 extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int width) {
     uint64_t r, mask;
     if (width == 32) {
-        uint32_t d = (uint32_t)dst;
-        uint32_t s = (uint32_t)src;
+        uint32_t d = static_cast<uint32_t>(dst);
+        uint32_t s = static_cast<uint32_t>(src);
         immr &= 31;
         r = (immr == 0) ? s : ((s >> immr) | (s << (32 - immr)));
         if (imms < immr) {
@@ -549,10 +549,10 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     if (off != 0) {
         if (off >= -128 && off <= 127) {
             emit_byte(rex(true,false,false,dst>=8));
-            emit_byte(0x83); emit_byte(modrm(3,0,dst&7)); emit_byte((uint8_t)off);
+            emit_byte(0x83); emit_byte(modrm(3,0,dst&7)); emit_byte(static_cast<uint8_t>(off));
         } else {
             emit_byte(rex(true,false,false,dst>=8));
-            emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32((uint32_t)off);
+            emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32(static_cast<uint32_t>(off));
         }
     }
     // Check if addr + w <= 4GB.
@@ -576,7 +576,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     size_t jmp_past = emit_jmp_rel32_placeholder();
 
     // Fast path.
-    int32_t fast_rel = (int32_t)(code_buf_used_ - (jbe_patch + 6));
+    int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
     emit_add_reg(dst, WIN_REG);
     if (w == 8) {
@@ -588,7 +588,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     } else if (w == 1) {
         if (sign_ext) emit_load8_sx(dst, dst, 0); else emit_load8(dst, dst, 0);
     }
-    int32_t end_rel = (int32_t)(code_buf_used_ - (jmp_past + 5));
+    int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
     (void)sign_ext;
 }
@@ -603,10 +603,10 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     if (off != 0) {
         if (off >= -128 && off <= 127) {
             emit_byte(rex(true,false,false,R8>=8));
-            emit_byte(0x83); emit_byte(modrm(3,0,R8&7)); emit_byte((uint8_t)off);
+            emit_byte(0x83); emit_byte(modrm(3,0,R8&7)); emit_byte(static_cast<uint8_t>(off));
         } else {
             emit_byte(rex(true,false,false,R8>=8));
-            emit_byte(0x81); emit_byte(modrm(3,0,R8&7)); emit_u32((uint32_t)off);
+            emit_byte(0x81); emit_byte(modrm(3,0,R8&7)); emit_u32(static_cast<uint32_t>(off));
         }
     }
     // Limit check: R9 = limit. cmp R8, R9.
@@ -632,7 +632,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     size_t jmp_past = emit_jmp_rel32_placeholder();
 
     // Fast path: direct window store.
-    int32_t fast_rel = (int32_t)(code_buf_used_ - (jbe_patch + 6));
+    int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
     // R8 = R10 + R8 (window_base + guest_addr)
     // add r8, r10: REX.W+R+B (0x4D), opcode 0x01, modrm(3, r10&7=2, r8&7=0)=0xD0
@@ -643,7 +643,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     } else if (w == 4) emit_store32(R8, 0, src_reg);
     else if (w == 2) emit_store16(R8, 0, src_reg);
     else if (w == 1) emit_store8(R8, 0, src_reg);
-    int32_t end_rel = (int32_t)(code_buf_used_ - (jmp_past + 5));
+    int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }
 
