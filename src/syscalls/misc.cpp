@@ -35,6 +35,7 @@
 #include <syscall.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/inotify.h>
 #include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
@@ -590,6 +591,204 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 93: { // exit
             cpu.running = false;
             cpu.exit_code = static_cast<int>(a0);
+            return 0;
+        }
+
+        // ── inotify_init1 (syscall 75) ───────────────────────────────
+        case 75: { // inotify_init1(flags)
+            int fd = ::inotify_init1(static_cast<int>(a0));
+            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(fd));
+            return 0;
+        }
+
+        // ── inotify_add_watch (syscall 76) ───────────────────────────
+        case 76: { // inotify_add_watch(fd, pathname, mask)
+            std::string path = VFS::read_path(mem_, a1);
+            int wd = ::inotify_add_watch(static_cast<int>(a0), path.c_str(),
+                                         static_cast<uint32_t>(a2));
+            if (wd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(wd));
+            return 0;
+        }
+
+        // ── inotify_rm_watch (syscall 77) ────────────────────────────
+        case 77: { // inotify_rm_watch(fd, wd)
+            int r = ::inotify_rm_watch(static_cast<int>(a0), static_cast<int>(a1));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── accept4 (syscall 88) ─────────────────────────────────────
+        case 88: { // accept4(sockfd, addr, addrlen, flags)
+            int fd = ::accept4(static_cast<int>(a0),
+                               reinterpret_cast<struct sockaddr*>(a1),
+                               reinterpret_cast<socklen_t*>(a2),
+                               static_cast<int>(a3));
+            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(fd));
+            return 0;
+        }
+
+        // ── clock_nanosleep (syscall 115) ────────────────────────────
+        case 115: { // clock_nanosleep(clockid, flags, request, remain)
+            if (!a2) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            struct timespec req;
+            req.tv_sec = static_cast<time_t>(mem_.load<uint64_t>(a2));
+            req.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a2 + 8));
+            struct timespec rem;
+            int r = ::clock_nanosleep(static_cast<clockid_t>(a0),
+                                      static_cast<int>(a1), &req,
+                                      a3 ? &rem : nullptr);
+            if (r != 0 && a3) {
+                mem_.store<uint64_t>(a3, static_cast<uint64_t>(rem.tv_sec));
+                mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(rem.tv_nsec));
+            }
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-r)));
+            return 0;
+        }
+
+        // ── getsockname (syscall 206) ────────────────────────────────
+        case 206: { // getsockname(sockfd, addr, addrlen)
+            int r = ::getsockname(static_cast<int>(a0),
+                                  reinterpret_cast<struct sockaddr*>(a1),
+                                  reinterpret_cast<socklen_t*>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── getpeername (syscall 207) ────────────────────────────────
+        case 207: { // getpeername(sockfd, addr, addrlen)
+            int r = ::getpeername(static_cast<int>(a0),
+                                  reinterpret_cast<struct sockaddr*>(a1),
+                                  reinterpret_cast<socklen_t*>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── sendto (syscall 208) ─────────────────────────────────────
+        case 208: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+            std::vector<uint8_t> buf(a2);
+            mem_.read(a1, buf.data(), a2);
+            ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), a2,
+                                 static_cast<int>(a3),
+                                 a4 ? reinterpret_cast<const struct sockaddr*>(a4) : nullptr,
+                                 static_cast<socklen_t>(a5));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
+
+        // ── recvfrom (syscall 209) ───────────────────────────────────
+        case 209: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
+            std::vector<uint8_t> buf(a2);
+            ssize_t r = ::recvfrom(static_cast<int>(a0), buf.data(), a2,
+                                   static_cast<int>(a3),
+                                   a4 ? reinterpret_cast<struct sockaddr*>(a4) : nullptr,
+                                   a5 ? reinterpret_cast<socklen_t*>(a5) : nullptr);
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            mem_.write(a1, buf.data(), static_cast<size_t>(r));
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
+
+        // ── sendmsg / recvmsg (syscall 210/211) ──────────────────────
+        // These require marshaling msghdr/iov structs from guest memory.
+        // For now, return -ENOSYS — most static binaries don't use these.
+        case 210: { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; } // sendmsg
+        case 211: { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; } // recvmsg
+
+        // ── fadvise64 (syscall 223) ──────────────────────────────────
+        case 223: { // fadvise64(fd, offset, len, advice)
+            int r = ::posix_fadvise(static_cast<int>(a0),
+                                    static_cast<off_t>(a1),
+                                    static_cast<off_t>(a2),
+                                    static_cast<int>(a3));
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-r)));
+            return 0;
+        }
+
+        // ── statx (syscall 291) ──────────────────────────────────────
+        case 291: { // statx(dirfd, pathname, flags, mask, statxbuf)
+            // statx requires glibc 2.28+ and sys/statx.h. If unavailable,
+            // fall back to fstatat (which provides most of the same info).
+            if (!a4) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            std::string path = a1 ? VFS::read_path(mem_, a1) : "";
+            std::string host = VFS::remap_path(path);
+            struct stat st;
+            int r = ::fstatat(static_cast<int>(a0), host.c_str(), &st,
+                              static_cast<int>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            // Convert struct stat to a minimal statx structure (256 bytes).
+            // The statx struct is larger, but we fill the key fields.
+            uint8_t statx_buf[256];
+            memset(statx_buf, 0, sizeof(statx_buf));
+            // stx_mask = STATX_BASIC_STATS (0x7ff)
+            *reinterpret_cast<uint32_t*>(statx_buf + 0) = 0x7ff;
+            // stx_blksize
+            *reinterpret_cast<uint32_t*>(statx_buf + 4) = static_cast<uint32_t>(st.st_blksize);
+            // stx_attributes = 0
+            // stx_nlink
+            *reinterpret_cast<uint32_t*>(statx_buf + 16) = static_cast<uint32_t>(st.st_nlink);
+            // stx_uid, stx_gid
+            *reinterpret_cast<uint32_t*>(statx_buf + 20) = st.st_uid;
+            *reinterpret_cast<uint32_t*>(statx_buf + 24) = st.st_gid;
+            // stx_mode (16-bit at offset 28)
+            *reinterpret_cast<uint16_t*>(statx_buf + 28) = static_cast<uint16_t>(st.st_mode);
+            // stx_ino
+            *reinterpret_cast<uint64_t*>(statx_buf + 32) = st.st_ino;
+            // stx_size
+            *reinterpret_cast<uint64_t*>(statx_buf + 40) = st.st_size;
+            // stx_blocks
+            *reinterpret_cast<uint64_t*>(statx_buf + 48) = st.st_blocks;
+            // stx_atime, stx_mtime, stx_ctime (each 16 bytes: sec + nsec)
+            *reinterpret_cast<uint64_t*>(statx_buf + 64) = st.st_atim.tv_sec;
+            *reinterpret_cast<uint64_t*>(statx_buf + 72) = st.st_atim.tv_nsec;
+            *reinterpret_cast<uint64_t*>(statx_buf + 80) = st.st_mtim.tv_sec;
+            *reinterpret_cast<uint64_t*>(statx_buf + 88) = st.st_mtim.tv_nsec;
+            *reinterpret_cast<uint64_t*>(statx_buf + 96) = st.st_ctim.tv_sec;
+            *reinterpret_cast<uint64_t*>(statx_buf + 104) = st.st_ctim.tv_nsec;
+            mem_.write(a4, statx_buf, sizeof(statx_buf));
+            ret_host(0);
+            return 0;
+        }
+
+        // ── close_range (syscall 436) ────────────────────────────────
+        case 436: { // close_range(first, last, flags)
+            for (int fd = static_cast<int>(a0); fd <= static_cast<int>(a1); fd++) {
+                emu.fds().close(fd);
+            }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── openat2 (syscall 437) ────────────────────────────────────
+        case 437: { // openat2(dirfd, pathname, how, size)
+            uint64_t flags = a2 ? mem_.load<uint64_t>(a2) : 0;
+            uint64_t mode = a2 ? mem_.load<uint64_t>(a2 + 8) : 0;
+            std::string path = VFS::read_path(mem_, a1);
+            int err = 0;
+            auto node = emu.vfs().open(path, static_cast<int>(flags),
+                                       static_cast<mode_t>(mode), &err);
+            if (!node) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(err ? err : -ENOENT)));
+                return 0;
+            }
+            ret_host(static_cast<uint64_t>(emu.fds().allocate(std::move(node))));
+            return 0;
+        }
+
+        // ── faccessat2 (syscall 439) ─────────────────────────────────
+        case 439: { // faccessat2(dirfd, pathname, mode, flags)
+            std::string path = VFS::read_path(mem_, a1);
+            std::string host = VFS::remap_path(path);
+            int r = ::faccessat(static_cast<int>(a0), host.c_str(),
+                               static_cast<int>(a2), static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0);
             return 0;
         }
 
