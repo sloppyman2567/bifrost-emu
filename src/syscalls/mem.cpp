@@ -5,7 +5,11 @@
 // (v1.4.0-alpha.5); they reference the same private Emulator members
 // (mem_, brk_, brk_start_, brk_mu_) via the friend declaration in
 // core/emulator.h.
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "core/memory.h"
+#include "core/cpu.h"
+#include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 
 #include <errno.h>

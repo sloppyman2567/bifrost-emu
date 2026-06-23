@@ -20,7 +20,11 @@
 //   2. Add a case in that file's switch.
 //   3. Document the syscall number (AArch64 numbering).
 //   4. Add a test if possible.
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "core/memory.h"
+#include "core/cpu.h"
+#include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 
 #include <errno.h>

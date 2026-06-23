@@ -9,7 +9,8 @@
 //   2. Add the execute case here
 //   3. (Future) Add JIT codegen in jit.cpp
 
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "decoder.hpp"
 #include "decoder.hpp"
 #include <cmath>
 #include <cstring>

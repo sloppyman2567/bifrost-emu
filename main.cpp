@@ -25,7 +25,8 @@
 // stdout/stderr appears. No stats, no exit codes, no noise — just the
 // output.
 
-#include "arm64_emu.hpp"
+#include "bifrost/emulator.hpp"
+#include "decoder.hpp"
 #include <string>
 #include <vector>
 #include <cstdio>

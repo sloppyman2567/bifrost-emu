@@ -40,7 +40,8 @@
 //   6. Add/sub extended register bits[23:22] = 00 check enforced.
 
 #include "decoder.hpp"
-#include "arm64_emu.hpp"  // for sign_extend, ror64
+#include "core/emulator.h"
+#include "decoder.hpp"  // for sign_extend, ror64
 
 namespace arm64emu {
 

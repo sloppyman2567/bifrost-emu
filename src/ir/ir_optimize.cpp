@@ -22,7 +22,7 @@
 // the x86 codegen.
 
 #include "ir/ir.hpp"
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
 
 #include <unordered_map>
 #include <unordered_set>

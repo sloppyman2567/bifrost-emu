@@ -3,7 +3,7 @@
 // Emulator's constructor/destructor live in src/core/emulator.cpp.
 // This file holds the JIT-specific Emulator methods that need to see
 // FrostJIT's full definition (held via unique_ptr in Emulator).
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
 #include "jit/frostjit.hpp"
 
 namespace arm64emu {

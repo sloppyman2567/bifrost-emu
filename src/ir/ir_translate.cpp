@@ -26,7 +26,7 @@
 
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
-#include "arm64_emu.hpp"  // for cond_true() (used by executor only)
+#include "core/emulator.h"  // for cond_true() (used by executor only)
 
 namespace arm64emu {
 

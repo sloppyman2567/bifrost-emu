@@ -25,7 +25,7 @@
 // vreg_*, patch_chain, try_chain_block, chain_back_references, ctor/dtor,
 // flush_cache, and counter state live in the other src/jit/*.cpp files.
 #include "jit/frostjit.hpp"
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
 #include "ir/ir.hpp"
 
 #include <atomic>

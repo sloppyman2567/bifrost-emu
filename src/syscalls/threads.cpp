@@ -4,7 +4,11 @@
 // Extracted verbatim from the original syscalls.cpp. References to
 // private Emulator members (signals_, mem_, get_futex, spawn_thread,
 // find_cpu_by_tid, etc.) work via the friend declaration.
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "core/memory.h"
+#include "core/cpu.h"
+#include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 
 #include <errno.h>

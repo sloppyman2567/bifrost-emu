@@ -10,7 +10,7 @@
 // the executor returns immediately.
 
 #include "ir/ir.hpp"
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
 #include <cstring>
 
 namespace arm64emu {

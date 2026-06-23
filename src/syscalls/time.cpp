@@ -2,7 +2,11 @@
 // clock_nanosleep/clock_getres.
 //
 // Extracted verbatim from the original syscalls.cpp.
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "core/memory.h"
+#include "core/cpu.h"
+#include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 
 #include <errno.h>

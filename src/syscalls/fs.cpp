@@ -11,7 +11,11 @@
 //
 // References to private Emulator members (mem_, elf_path_, graphics_)
 // work via the friend declaration in core/emulator.h.
-#include "arm64_emu.hpp"
+#include "core/emulator.h"
+#include "core/memory.h"
+#include "core/cpu.h"
+#include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_table.h"
