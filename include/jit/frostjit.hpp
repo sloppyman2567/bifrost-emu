@@ -344,7 +344,7 @@ private:
     // callee-saved regs across interpreter calls, eliminating redundant
     // reload traffic.
     void flush_caller_saved_vregs();
-    void invalidate_caller_saved_vregs();
+
     int  ensure_vreg(int v, int preferred = -1);
     void set_vreg_reg(int v, int r);
     void kill_vreg(int v);

@@ -17,7 +17,6 @@
 //   flush_all_vregs      — write back all dirty vregs to cpu.regs[]/stack
 //   flush_caller_saved_vregs — same, but only caller-saved (R12/R13/R15 stay)
 //   invalidate_all_vregs — drop all vreg→host mappings (after a C call)
-//   invalidate_caller_saved_vregs — same, but only caller-saved
 //   drop_vreg            — safe drop: evict if dirty, then clear mapping
 //   clobber_host_reg     — evict occupant of a host reg if dirty
 //   force_vreg_to_reg    — move/load vreg v into a specific host reg
@@ -238,7 +237,7 @@ void FrostJIT::flush_all_vregs() {
     }
 }
 
-// (v1.4.0-alpha.5): flush only caller-saved dirty vregs. Callee-saved
+// (refactored.5): flush only caller-saved dirty vregs. Callee-saved
 // regs (R12/R13/R15) are preserved by C calls, so vregs cached there
 // don't need to be spilled around CALL_INTERP / memory slow paths.
 void FrostJIT::flush_caller_saved_vregs() {
@@ -282,20 +281,6 @@ void FrostJIT::invalidate_all_vregs() {
     for (int v = 0; v <= max_vreg_; v++) {
         int r = vreg_home_[v];
         if (r >= 0) {
-            reg_vreg_[r] = -1;
-            vreg_home_[v] = -1;
-            vreg_dirty_[v] = false;
-        }
-    }
-    flags_in_host_ = false;
-}
-
-// (v1.4.0-alpha.5): invalidate only caller-saved cache mappings.
-// Callee-saved vregs (in R12/R13/R15) are still valid after a C call.
-void FrostJIT::invalidate_caller_saved_vregs() {
-    for (int v = 0; v <= max_vreg_; v++) {
-        int r = vreg_home_[v];
-        if (r >= 0 && is_caller_saved(r)) {
             reg_vreg_[r] = -1;
             vreg_home_[v] = -1;
             vreg_dirty_[v] = false;
