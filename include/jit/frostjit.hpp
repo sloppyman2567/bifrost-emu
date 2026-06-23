@@ -201,13 +201,8 @@ private:
     void emit_shift_imm8(int dst, int kind, uint8_t cnt);
     void emit_not_reg(int dst);
     void emit_neg_reg(int dst);
-    void emit_bsf_reg(int dst, int src);
-    void emit_bsr_reg(int dst, int src);
     void emit_lzcnt_reg(int dst, int src);
-    void emit_popcnt_reg(int dst, int src);
     void emit_bswap_reg(int dst);
-    void emit_setcc(int dst, uint8_t cc);
-    void emit_cmovcc(int dst, int src, uint8_t cc);
     void emit_call_abs(void* target);
     void emit_ret();
     void emit_nop();
@@ -265,8 +260,6 @@ private:
     // rel8 jumps (short, ±127 bytes). Return offset of placeholder; patch later.
     size_t emit_jcc_rel8_placeholder(uint8_t cc);
     void patch_jcc_rel8(size_t off, int8_t rel);
-    size_t emit_jmp_rel8_placeholder();
-    void patch_jmp_rel8(size_t off, int8_t rel);
     // Stack pointer adjustment (sub/add rsp, imm8).
     void emit_sub_rsp_imm8(uint8_t n);
     void emit_add_rsp_imm8(uint8_t n);
@@ -381,26 +374,20 @@ private:
 
     // ── FMOV helper ───────────────────────────────────────────────────
     // Moves a 64-bit value between a GPR vreg and an FP register slot
-    // (cpu.v_lo[] or cpu.v_hi[]) via the RAX scratch register.
+    // (cpu.v_lo[] or cpu.v_hi[]) via RAX (G→F) or a fresh reg (F→G).
     //
     //   dir = 0: GPR → FP,  fp_field = 0 (v_lo) or 1 (v_hi)
     //            Stores src1 vreg into the FP slot. If fp_field == 0
     //            (FMOV_G2F), also zeros v_hi[dest] — ARM semantics.
+    //            Uses RCX as scratch for the zero store so src1 stays
+    //            cached in RAX for later readers.
     //   dir = 1: FP → GPR, fp_field = 0 (v_lo) or 1 (v_hi)
     //            Loads the FP slot into a fresh vreg for dest.
     //
     // `idx` is the FP register index (0-31) — comes from inst.dest for
     // G→F or inst.src1 for F→G.
-    //
-    // After G→F: RAX is clobbered; its cache mapping is dropped safely
-    // (capture-before-clear, avoiding the OOB write that previously
-    // lived inline in each FMOV_G2F* case).
     void emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                           uint16_t src1, uint16_t dest);
-
-    // Old simple load/store (kept for fallback).
-    void load_vreg(int dst, int v);
-    void store_vreg(int v, int src);
 
     // ── Typed emit_call_abs overload ──────────────────────────────────
     // The void* overload (declared above) is the low-level primitive.

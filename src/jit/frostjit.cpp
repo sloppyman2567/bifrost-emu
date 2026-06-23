@@ -1582,7 +1582,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int imms = inst.imms;
             // Load src into RAX.
             // (v1.4.0-alpha.5 fix): flush+invalidate FIRST so the
-            // cache is empty and the subsequent load/store_vreg can't
+            // cache is empty and the subsequent memory access can't
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
             clobber_flags();  // shifts/ands clobber RFLAGS
@@ -1857,10 +1857,18 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (need_cmc) emit_byte(0xF5);
 
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
+            // (v1.4.0-beta.1): use ensure_vreg + mov instead of load_vreg
+            // (load_vreg is being removed as dead code).
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
-            else load_vreg(RAX, inst.src1);
+            else {
+                int s = ensure_vreg(inst.src1, RAX);
+                if (s != RAX) emit_mov_reg(RAX, s);
+            }
             if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
-            else load_vreg(RCX, inst.src2);
+            else {
+                int s = ensure_vreg(inst.src2, RCX);
+                if (s != RCX) emit_mov_reg(RCX, s);
+            }
 
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);

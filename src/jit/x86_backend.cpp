@@ -7,8 +7,7 @@
 //   - mov (imm/reg), load/store (8/16/32/64 + sign-extend variants)
 //   - ALU (add/sub/adc/sbb/and/or/xor/imul/test/cmp)
 //   - Shifts (variable CL + immediate)
-//   - not / neg / lzcnt / bswap / bsf / bsr / popcnt
-//   - setcc / cmovcc
+//   - not / neg / lzcnt / bswap
 //   - Call (absolute + aligned), ret, nop, push, pop, pushfq, popfq
 //   - Conditional/unconditional jumps (rel8 + rel32, with patch slots)
 //   - Stack adjust (sub/add rsp, imm8) and CL mask (and cl, imm8)
@@ -234,15 +233,6 @@ void FrostJIT::emit_lzcnt_reg(int dst, int src) {
 void FrostJIT::emit_bswap_reg(int dst) {
     emit_byte(rex(true,false,false,dst>=8)); emit_byte(0x0F); emit_byte(0xC8 + (dst&7));
 }
-void FrostJIT::emit_setcc(int dst, uint8_t cc) {
-    if (dst>=8) emit_byte(0x41);
-    emit_byte(0x0F); emit_byte(0x90+cc); emit_byte(modrm(3,0,dst&7));
-    if (dst>=8) { emit_byte(0x41); emit_byte(0x0F); emit_byte(0xB6); emit_byte(modrm(3,0,dst&7)); }
-    else { emit_byte(0x0F); emit_byte(0xB6); emit_byte(modrm(3,0,dst&7)); }
-}
-void FrostJIT::emit_cmovcc(int dst, int src, uint8_t cc) {
-    emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x0F); emit_byte(0x40+cc); emit_byte(modrm(3,src&7,dst&7));
-}
 void FrostJIT::emit_call_abs(void* target) {
     emit_mov_imm64(RAX, (uint64_t)target);
     emit_byte(0xFF); emit_byte(0xD0);
@@ -270,17 +260,11 @@ void FrostJIT::patch_jcc_rel32(size_t off, int32_t rel) {
     memcpy(code_buf_+off+2, &rel, 4);
 }
 
-// rel8 jumps: jcc rel8 = 0x70+cc <rel8> (2 bytes), jmp rel8 = 0xEB <rel8> (2 bytes)
+// rel8 jumps: jcc rel8 = 0x70+cc <rel8> (2 bytes)
 size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x70 + cc); emit_byte(0); return off;
 }
 void FrostJIT::patch_jcc_rel8(size_t off, int8_t rel) {
-    code_buf_[off+1] = (uint8_t)rel;
-}
-size_t FrostJIT::emit_jmp_rel8_placeholder() {
-    size_t off = code_buf_used_; emit_byte(0xEB); emit_byte(0); return off;
-}
-void FrostJIT::patch_jmp_rel8(size_t off, int8_t rel) {
     code_buf_[off+1] = (uint8_t)rel;
 }
 

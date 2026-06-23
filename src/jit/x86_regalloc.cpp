@@ -6,16 +6,6 @@
 // load/store). When a reg is needed for a new vreg, the old owner is
 // spilled if dirty.
 //
-// Scratch x86 regs available for allocation:
-//   Caller-saved (clobbered by C calls): RAX, RCX, RDX, R8, R9, R11
-//   Callee-saved (preserved by C calls): R12, R13, R15
-// Persistent: RBX=CPU, R14=EMU, R10=window, RBP=frame.
-//
-// (v1.4.0-alpha.5): added R12/R13/R15 (callee-saved) to the pool. This
-// gives 9 registers instead of 6, and vregs cached in callee-saved regs
-// survive CALL_INTERP without spilling — the C calling convention
-// preserves them across calls.
-//
 // Methods implemented here:
 //   vreg_stack_slot      — allocate a stack slot for a spilled vreg
 //   evict_vreg           — spill a vreg from its host reg to stack
@@ -28,7 +18,8 @@
 //   flush_caller_saved_vregs — same, but only caller-saved (R12/R13/R15 stay)
 //   invalidate_all_vregs — drop all vreg→host mappings (after a C call)
 //   invalidate_caller_saved_vregs — same, but only caller-saved
-//   load_vreg / store_vreg — fallback memory access (kept for legacy paths)
+//   drop_vreg            — safe drop: evict if dirty, then clear mapping
+//   clobber_host_reg     — evict occupant of a host reg if dirty
 //   force_vreg_to_reg    — move/load vreg v into a specific host reg
 //   force_two_vregs_to   — same for two vregs (handles aliasing)
 #include "jit/frostjit.hpp"
@@ -275,76 +266,6 @@ void FrostJIT::invalidate_caller_saved_vregs() {
     flags_in_host_ = false;
 }
 
-// ── Old simple load/store (kept for fallback paths) ────────────────────
-//
-// IMPORTANT (v1.4.0-alpha.5 fix): these helpers MUST participate in the
-// register-allocator cache. The previous implementation always loaded
-// from / stored to memory (cpu.regs[] or the stack slot), bypassing the
-// cache. If a vreg was cached in a host register with a dirty value not
-// yet written back, `load_vreg` would return the STALE memory value,
-// and `store_vreg` would write the new value to memory but leave the
-// stale cached value in the host register — so a subsequent `ensure_vreg`
-// of the same vreg would still return the stale value.
-//
-// This was the root cause of the LOAD_MEM divergence in `__towrite`
-// (hello.elf under --jit) and of wrong RBIT/CLS/REV16/REV32 results
-// when their source vreg had been computed but not spilled.
-//
-// The fix: if the vreg is currently cached, `load_vreg` emits a `mov`
-// from the cached reg; `store_vreg` updates the cache mapping (and
-// marks the vreg dirty) instead of writing to memory. Only uncached
-// vregs go through the memory path. Callers that need a hard memory
-// writeback (e.g. before a C call that may read cpu.regs[]) should
-// call `flush_all_vregs()` first.
-
-// Load vreg `v` into x86 reg `dst`.
-// If `v` is cached in a host register, emit a `mov` from that register
-// (preserving the cached, possibly-dirty value). Otherwise load from
-// cpu.regs[] (v <= 31) or the vreg's stack slot (v >= 33).
-void FrostJIT::load_vreg(int dst, int v) {
-    if (v > max_vreg_) max_vreg_ = v;
-    int home = vreg_home_[v];
-    if (home >= 0) {
-        // Cached — copy from the cached register.
-        if (dst != home) emit_mov_reg(dst, home);
-        return;
-    }
-    if (v <= 31) {
-        emit_load_arm(dst, v);
-    } else {
-        int32_t off = vreg_stack_slot(v);
-        emit_load(dst, RBP, off);
-    }
-}
-
-// Store x86 reg `src` to vreg `v`.
-// If `v` is currently cached, update the cache to point at `src` (the
-// old cached reg, if different, is dropped — its value is overwritten
-// by `src`). If `v` is uncached, write directly to memory (cpu.regs[]
-// or stack slot). Either way the vreg ends up cached in `src` and
-// marked dirty, mirroring the contract of `set_vreg_reg`.
-void FrostJIT::store_vreg(int v, int src) {
-    if (v > max_vreg_) max_vreg_ = v;
-    int home = vreg_home_[v];
-    if (home >= 0 && home != src) {
-        // Drop the old cached mapping — the register's value is being
-        // overwritten by `src`. The old cached value is lost; callers
-        // that need it preserved must `evict_vreg(v)` first.
-        reg_vreg_[home] = -1;
-    }
-    // If src already held another vreg v2, kill v2's mapping (its
-    // value was just overwritten). Callers that need v2's value
-    // preserved must evict_vreg(v2) BEFORE overwriting src.
-    int old_v = reg_vreg_[src];
-    if (old_v >= 0 && old_v != v) {
-        vreg_home_[old_v] = -1;
-        vreg_dirty_[old_v] = false;
-    }
-    vreg_home_[v] = src;
-    reg_vreg_[src] = v;
-    vreg_dirty_[v] = true;
-}
-
 // ── force_vreg_to_reg ──────────────────────────────────────────────────
 // Force vreg `v` to live in host register `host_reg` (MOVE semantics).
 //
@@ -455,10 +376,8 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
 //   dir=1, fp_field=0: FMOV_F2G   — dest = v_lo[idx]
 //   dir=1, fp_field=1: FMOV_FHI2G — dest = v_hi[idx]
 //
-// Replaces 4 near-identical inline cases (~50 lines total) with one
-// shared helper. Also fixes the OOB write that was in the old inline
-// G2F/G2FHI cases (they read reg_vreg_[RAX] AFTER clearing it to -1,
-// causing vreg_dirty_[-1] = false; this version captures the old
-// value BEFORE clearing).
+// (v1.4.0-beta.1): G→F path uses RCX as scratch for the zero store
+// (v_hi) so src1 stays cached in RAX. The F→G path loads the FP slot
+// into a fresh vreg via alloc_reg + emit_load + set_vreg_reg.
 
 } // namespace arm64emu
