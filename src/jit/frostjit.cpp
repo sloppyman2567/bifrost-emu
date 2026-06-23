@@ -2503,8 +2503,17 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // and no subsequent BRCOND consumed them, the flags are still in
     // the host CPU's RFLAGS but haven't been written to pstate. The
     // next block (or the interpreter) would see stale pstate.
+    //
+    // emit_materialize_flags clobbers RAX/RCX/RDX. We must flush any
+    // dirty vregs cached in those regs BEFORE the materialize, otherwise
+    // their values are silently lost. Use the same targeted flush+invalidate
+    // pattern as clobber_flags().
     if (flags_in_host_) {
+        constexpr uint16_t FLAGS_CLOBBER =
+            (1u << RAX) | (1u << RCX) | (1u << RDX);
+        flush_dirty_host_regs(FLAGS_CLOBBER);
         emit_materialize_flags(flags_from_sub_);
+        invalidate_host_regs(FLAGS_CLOBBER);
         flags_in_host_ = false;
     }
 
