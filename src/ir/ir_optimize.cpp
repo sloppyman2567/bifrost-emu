@@ -1,4 +1,4 @@
-// ir_optimize.cpp — IR optimization passes for bifrost-emu (v1.4.0-alpha.5)
+// ir_optimize.cpp — IR optimization passes for bifrost-emu 
 //
 // Implements optimize_ir(), which performs the following passes on an
 // IRBlock in place:
@@ -437,7 +437,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::CSINV: case IROp::CSNEG:
             case IROp::CCMP:
             case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: {
-                // (v1.4.0-alpha.5): constant-fold UBFM/SBFM when src1 is
+                // : constant-fold UBFM/SBFM when src1 is
                 // a known constant. These are very common (SXTB/SXTH/SXTW/
                 // UXTB/UXTH/UXTW/LSL/LSR/ASR immediate) and folding them
                 // eliminates redundant shifts in tight loops.
@@ -489,7 +489,7 @@ void optimize_ir(IRBlock& block) {
                     consts.set(inst.dest, result);
                     block.fold_subst++;
                 }
-                // BUGFIX (alpha.5): CSEL/CSINC/CSINV/CSNEG/CCMP and BFM
+                // CSEL/CSINC/CSINV/CSNEG/CCMP and BFM
                 // fall back to CALL_INTERP in the JIT, which can modify ANY
                 // cpu.regs[] (the interpreter runs the full ARM instruction).
                 // The old code only invalidated arm_reg_cache[dest], leaving

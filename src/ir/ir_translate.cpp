@@ -74,7 +74,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // shifted-register form (bit21=0), rd=31 means XZR (the
             // decoder leaves d.writes_sp=false).
             //
-            // BUGFIX (alpha.4): the old code only checked ADD_IMM/SUB_IMM
+            // the old code only checked ADD_IMM/SUB_IMM
             // for SP mapping. ADD_REG/SUB_REG (extended register form)
             // was excluded, so `add sp, sp, x12` (very common in
             // function epilogues) was computed as `add xzr, xzr, x12`
@@ -88,7 +88,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
             uint8_t b;
             if (d.cls == InstClass::ADD_IMM || d.cls == InstClass::SUB_IMM) {
-                // BUGFIX (alpha.4): the decoder sets d.imm_u to the raw
+                // the decoder sets d.imm_u to the raw
                 // 12-bit immediate and d.shift to 0 or 12 (the optional
                 // left-shift by 12 for the "add/sub imm, lsl #12" form).
                 // The previous code passed d.imm_u through unshifted, so
@@ -114,66 +114,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 b = load_arm_reg(block, d.rm);
                 if (d.extend != 0) {
                     // Extended register form — apply extend, then shift.
-                    switch (d.extend & 7) {
-                        case 0: { // UXTB
-                            uint16_t m = load_imm(block, 0xFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 1: { // UXTH
-                            uint16_t m = load_imm(block, 0xFFFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 2: { // UXTW
-                            uint16_t m = load_imm(block, 0xFFFFFFFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 3: break; // UXTX — no extend
-                        case 4: { // SXTB
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 8);
-                            b = s;
-                            break;
-                        }
-                        case 5: { // SXTH
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 16);
-                            b = s;
-                            break;
-                        }
-                        case 6: { // SXTW
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 32);
-                            b = s;
-                            break;
-                        }
-                        case 7: break; // SXTX — no extend
-                    }
-                    // Apply shift (for extended register, shift is 0-4).
-                    if (d.shift != 0) {
-                        uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
-                        uint16_t shifted = g_alloc.alloc();
-                        emit(block, IROp::SHL, shifted, b, sh);
-                        b = shifted;
-                    }
+                    b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
                     // Shifted register form — apply shift_type by d.shift.
-                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
-                    uint16_t shifted = g_alloc.alloc();
-                    IROp shop = (d.shift_type == 0) ? IROp::SHL
-                              : (d.shift_type == 1) ? IROp::SHR
-                              : (d.shift_type == 2) ? IROp::SAR
-                              : IROp::ROR;
-                    emit(block, shop, shifted, b, sh);
-                    b = shifted;
+                    b = apply_shift(block, b, d.shift_type, d.shift);
                 }
             }
             IROp op = (d.cls == InstClass::ADD_REG || d.cls == InstClass::ADD_IMM)
@@ -198,7 +142,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t a = load_arm_reg(block, d.rn, false);
             uint8_t b;
             if (d.cls == InstClass::ADDS_IMM || d.cls == InstClass::SUBS_IMM) {
-                // BUGFIX (alpha.4): apply d.shift (0 or 12) to d.imm_u,
+                // apply d.shift (0 or 12) to d.imm_u,
                 // matching the interpreter. See ADD_IMM/SUB_IMM above
                 // for the full rationale.
                 b = load_imm(block, static_cast<uint64_t>(d.imm_u) << d.shift);
@@ -210,7 +154,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 //   (b) Shifted register (bit21=0): apply shift_type
                 //       (LSL/LSR/ASR/ROR) by d.shift (0-63).
                 //
-                // BUGFIX (alpha.4): the previous code ignored d.extend
+                // the previous code ignored d.extend
                 // and d.shift_type for ADDS/SUBS, so e.g.
                 //   cmp x0, w24, sxtw
                 // was computed as `x0 - w24` (treating w24 as unsigned
@@ -221,67 +165,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 //   musl were similarly broken.
                 b = load_arm_reg(block, d.rm);
                 if (d.extend != 0) {
-                    // Extended register form — apply extend, then shift.
-                    switch (d.extend & 7) {
-                        case 0: { // UXTB
-                            uint16_t m = load_imm(block, 0xFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 1: { // UXTH
-                            uint16_t m = load_imm(block, 0xFFFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 2: { // UXTW
-                            uint16_t m = load_imm(block, 0xFFFFFFFF);
-                            uint16_t r = g_alloc.alloc();
-                            emit(block, IROp::AND, r, b, m);
-                            b = r;
-                            break;
-                        }
-                        case 3: break; // UXTX — no extend
-                        case 4: { // SXTB
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 8);
-                            b = s;
-                            break;
-                        }
-                        case 5: { // SXTH
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 16);
-                            b = s;
-                            break;
-                        }
-                        case 6: { // SXTW
-                            uint16_t s = g_alloc.alloc();
-                            emit(block, IROp::SEXT, s, b, 0, 32);
-                            b = s;
-                            break;
-                        }
-                        case 7: break; // SXTX — no extend
-                    }
-                    // Apply shift (for extended register, shift is 0-4).
-                    if (d.shift != 0) {
-                        uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
-                        uint16_t shifted = g_alloc.alloc();
-                        emit(block, IROp::SHL, shifted, b, sh);
-                        b = shifted;
-                    }
+                    b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
-                    // Shifted register form — apply shift_type by d.shift.
-                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.shift));
-                    uint16_t shifted = g_alloc.alloc();
-                    IROp shop = (d.shift_type == 0) ? IROp::SHL
-                              : (d.shift_type == 1) ? IROp::SHR
-                              : (d.shift_type == 2) ? IROp::SAR
-                              : IROp::ROR;
-                    emit(block, shop, shifted, b, sh);
-                    b = shifted;
+                    b = apply_shift(block, b, d.shift_type, d.shift);
                 }
             }
             bool is_add = (d.cls == InstClass::ADDS_REG || d.cls == InstClass::ADDS_IMM);
@@ -747,7 +633,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDR_IMM: case InstClass::LDR_UNS: case InstClass::LDR_REG:
         case InstClass::LDRSW: case InstClass::LDRSB: case InstClass::LDRSH:
         case InstClass::STR_IMM: case InstClass::STR_UNS: case InstClass::STR_REG: {
-            // BUGFIX (alpha.4): vector loads/stores (LDR/STR Q/D/S/H/B with
+            // vector loads/stores (LDR/STR Q/D/S/H/B with
             // is_vec=true) must fall back to the interpreter. The IR
             // translator's load/store code uses d.rt as a general-purpose
             // register index (cpu.regs[d.rt]), but for vector instructions
@@ -775,62 +661,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             if (d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_REG) {
                 // Register offset: addr = base + extend_reg(rm, option, S ? size : 0)
                 uint16_t idx = load_arm_reg(block, d.rm);
-                uint8_t ext = idx;
-                switch (d.extend & 7) {
-                    case 0: { // UXTB
-                        uint16_t m = load_imm(block, 0xFF);
-                        ext = g_alloc.alloc();
-                        emit(block, IROp::AND, ext, idx, m);
-                        break;
-                    }
-                    case 1: { // UXTH
-                        uint16_t m = load_imm(block, 0xFFFF);
-                        ext = g_alloc.alloc();
-                        emit(block, IROp::AND, ext, idx, m);
-                        break;
-                    }
-                    case 2: { // UXTW
-                        uint16_t m = load_imm(block, 0xFFFFFFFF);
-                        ext = g_alloc.alloc();
-                        emit(block, IROp::AND, ext, idx, m);
-                        break;
-                    }
-                    case 3: // UXTX — no extend
-                        break;
-                    case 4: { // SXTB
-                        uint16_t s = g_alloc.alloc();
-                        emit(block, IROp::SEXT, s, idx, 0, 8);
-                        ext = s;
-                        break;
-                    }
-                    case 5: { // SXTH
-                        uint16_t s = g_alloc.alloc();
-                        emit(block, IROp::SEXT, s, idx, 0, 16);
-                        ext = s;
-                        break;
-                    }
-                    case 6: { // SXTW
-                        uint16_t s = g_alloc.alloc();
-                        emit(block, IROp::SEXT, s, idx, 0, 32);
-                        ext = s;
-                        break;
-                    }
-                    case 7: // SXTX — no extend
-                        break;
-                }
-                if (d.shift & 1) {
-                    uint16_t sh = load_imm(block, static_cast<uint64_t>(d.size));
-                    uint16_t shifted = g_alloc.alloc();
-                    emit(block, IROp::SHL, shifted, ext, sh);
-                    ext = shifted;
-                }
+                // Apply extend (UXTB..SXTX). For LDR/STR register-offset,
+                // the shift is d.size if d.shift&1 is set, else 0.
+                uint8_t shift_amt = (d.shift & 1) ? d.size : 0;
+                uint16_t ext = apply_extend(block, idx, d.extend, shift_amt);
                 addr = g_alloc.alloc();
                 emit(block, IROp::ADD, addr, base, ext);
             } else if (post_index) {
                 // Post-index: load/store from base (no offset).
                 addr = base;
             } else {
-                // (v1.4.0-alpha.5 optimization): for offset and pre-index
+                // : for offset and pre-index
                 // modes, fold the displacement into the LOAD_MEM/STORE_MEM
                 // imm field instead of emitting a separate IMM+ADD. The
                 // executor and JIT both handle `mem[base + imm]` directly.

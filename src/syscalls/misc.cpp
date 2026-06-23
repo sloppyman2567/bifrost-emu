@@ -27,7 +27,6 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "syscalls/syscalls.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -68,7 +67,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 133: { // rt_sigsuspend(mask, sigsetsize) — aarch64 133
-            // v1.4.0-alpha.1: previously misimplemented as rt_sigreturn
+            // previously misimplemented as rt_sigreturn
             // (which is actually syscall 139). rt_sigsuspend blocks the
             // calling thread until a signal is delivered that's not in
             // `mask`. Since we don't track signal masks, we just block
@@ -89,7 +88,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 134: { // rt_sigaction(signo, new_act, old_act, sigsetsize)
-            // v1.4.0-alpha: actually install the signal handler in
+            // actually install the signal handler in
             // our SignalTable. Previously a no-op, which meant guest
             // signal handlers were silently dropped.
             int signo = static_cast<int>(a0);
@@ -108,7 +107,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 139: { // rt_sigreturn — restore CPU state from signal frame
-            // v1.4.0-alpha.1: corrected syscall number (was wrongly at
+            // corrected syscall number (was wrongly at
             // case 133, which is actually rt_sigsuspend). Pop the most
             // recent signal frame and restore the saved CPU state. The
             // "return value" of this syscall is irrelevant — we restore
@@ -191,7 +190,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 166: { // umask(new_mask) — aarch64 166
-            // v1.4.0-alpha.1: toybox sh calls umask(0) during init and
+            // toybox sh calls umask(0) during init and
             // umask(prev) at shutdown. Just pass through to the host.
             mode_t old = ::umask((mode_t)a0);
             ret_host(static_cast<uint64_t>(old));
@@ -395,7 +394,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 260: { // wait4(pid, wstatus, options, rusage) — aarch64 260
-            // v1.4.0-alpha.2: with real fork() support, we forward to
+            // with real fork() support, we forward to
             // host wait4() so the parent can reap forked children.
             pid_t pid = (pid_t)a0;
             int options = static_cast<int>(a2);
@@ -437,7 +436,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 272: { // waitid(idtype, id, infop, options) — aarch64 272
-            // v1.4.0-alpha.2: forward to host waitid.
+            // forward to host waitid.
             siginfo_t si;
             int r = ::waitid((idtype_t)a0, (id_t)a1, &si, static_cast<int>(a3));
             if (r < 0) {
@@ -520,7 +519,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 73: { // ppoll(fds, nfds, ts, sigmask) — aarch64 syscall 73
-            // v1.4.0-alpha.1: previously missing — toybox's `sh` calls
+            // previously missing — toybox's `sh` calls
             // ppoll() to wait for input on stdin, and the -ENOSYS fallback
             // sent it into a busy-wait loop. Forward to host poll(2) with
             // a millisecond timeout derived from the timespec.

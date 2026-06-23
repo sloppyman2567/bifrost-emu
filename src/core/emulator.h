@@ -158,7 +158,7 @@ private:
     // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
     GraphicsBackend graphics_;
 
-    // ── VFS + fd table (v1.4.0-beta.1) ────────────────────────────────
+    // ── VFS + fd table ────────────────────────────────
     // Replaces the inline /proc//dev/ chains in syscalls.cpp.
     // VFS resolves guest paths to VNodes; FdTable maps guest fds to
     // VNodes. Owned by Emulator so all vCPUs share the same view.

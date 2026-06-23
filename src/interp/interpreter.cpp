@@ -1,25 +1,21 @@
 // interpreter.cpp — ARM64 instruction interpreter.
 //
 // This file implements Emulator::execute(), which decodes and executes
-// a single ARM64 instruction. The decode logic is shared with the
-// future JIT via decoder.hpp.
+// a single ARM64 instruction. The decode logic is shared with the JIT
+// (src/jit/frostjit.cpp) via decoder.hpp.
 //
 // When adding a new instruction:
 //   1. Add the decode in decoder.cpp (sets InstClass)
 //   2. Add the execute case here
-//   3. (Future) Add JIT codegen in jit.cpp
+//   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
 
 #include "core/emulator.h"
-#include "decoder.hpp"
 #include "decoder.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 
 namespace arm64emu {
-
-// (decode_bitmask_imm was moved to the logical immediate switch case
-//  inline — no longer needed as a separate function.)
 
 // Set NZCV from a 64-bit add-with-carry result.
 static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_in,
@@ -76,7 +72,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // Using a const reference avoids copying the 88-byte DecodedInst.
         // The cache lives on `cpu` so each vCPU gets a lock-free cache.
         //
-        // v1.4.0-alpha.1: upgraded from direct-mapped to 2-way
+        // upgraded from direct-mapped to 2-way
         // set-associative to reduce conflict misses.
         size_t set_idx = (cpu.pc >> 2) & CPU::DECODE_CACHE_SET_MASK;
         size_t way0 = set_idx * 2;
@@ -151,13 +147,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool link = (d.cls == InstClass::BL);
                 if (link) cpu.regs[30] = cpu.pc + 4;
                 next_pc = cpu.pc + d.imm;
-                
                 return;
             }
             case InstClass::Bcond: {
                 if (cond_true(d.cond, cpu.pstate))
                     next_pc = cpu.pc + d.imm;
-                
                 return;
             }
             case InstClass::CBZ:
@@ -166,7 +160,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool is_zero = (v == 0);
                 bool taken = (d.cls == InstClass::CBZ) ? is_zero : !is_zero;
                 if (taken) next_pc = cpu.pc + d.imm;
-                
                 return;
             }
             case InstClass::TBZ:
@@ -175,22 +168,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool bit_set = (v >> d.imm_u) & 1;
                 bool taken = (d.cls == InstClass::TBZ) ? !bit_set : bit_set;
                 if (taken) next_pc = cpu.pc + d.imm;
-                
                 return;
             }
             case InstClass::BR:
                 next_pc = cpu.regs[d.rn];
-                
                 return;
             case InstClass::BLR:
                 cpu.regs[30] = cpu.pc + 4;
                 next_pc = cpu.regs[d.rn];
-                
                 return;
             case InstClass::RET:
                 next_pc = cpu.regs[d.rn];
                 if (next_pc == 0) next_pc = cpu.regs[30];  // RET with XZR
-                
                 return;
 
             // ── System ────────────────────────────────────────────────
@@ -462,7 +451,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     int len = imms - immr + 1;
                     uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
 
-                    // ── LSR #0 / LSL #0 special case (v1.4.0-alpha fix) ──
+                    // ── LSR #0 / LSL #0 special case (fix) ──
                     // On AArch64, `LSR Xd, Xn, #0` is encoded as
                     // `UBFM Xd, Xn, #0, #63`. Real hardware treats LSR
                     // by 0 as a shift by 64 (result = 0), NOT as a
@@ -532,7 +521,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // (datasize - immr) to place them at the correct
                     // position in the result.
                     //
-                    // v1.4.0-alpha fix: the previous code used `high_mask`
+                    // fix: the previous code used `high_mask`
                     // (top bits) which was correct for LSL but WRONG for
                     // SBFIZ/UBFIZ where the field is NOT at the top of
                     // the register. This broke musl's smoothsort which
@@ -2383,7 +2372,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
 
             default:
-                // Not recognized by the decoder
+                // Not recognized by the decoder — fall through
                 // to the unhandled-instruction error below.
                 break;
         }

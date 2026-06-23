@@ -9,7 +9,6 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "syscalls/syscalls.h"
 #include "graphics.hpp"
 
 #include <errno.h>

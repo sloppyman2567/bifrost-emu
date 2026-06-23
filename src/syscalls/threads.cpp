@@ -9,7 +9,6 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "syscalls/syscalls.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -64,7 +63,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // Refuse fork()-style clones (no CLONE_VM) for now
             const uint64_t BIFROST_CLONE_VM = 0x100;
             if (!(flags & BIFROST_CLONE_VM)) {
-                // v1.4.0-alpha.2: real fork via host fork(). The child
+                // real fork via host fork(). The child
                 // gets a copy-on-write duplicate of the entire emulator
                 // state (CPU, memory, etc.). The parent returns the child
                 // PID; the child returns 0 and continues executing the
@@ -264,7 +263,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 131: { // tgkill(tgid, tid, sig) — send signal to specific thread
-            // v1.4.0-alpha: deliver the signal to the target thread.
+            // deliver the signal to the target thread.
             // For now we only handle signals directed at the current
             // thread (tid == cpu.tid). Cross-thread delivery is left
             // to a future version.

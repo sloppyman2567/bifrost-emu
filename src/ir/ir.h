@@ -14,7 +14,7 @@ namespace arm64emu {
 // Per-block resetable. The translator allocates a fresh vreg for every
 // intermediate value; the optimizer later reuses them.
 //
-// (v1.4.0-alpha.5): widened from uint8_t to uint16_t to prevent
+// : widened from uint8_t to uint16_t to prevent
 // wrap-around. Arch regs use 0-32, scratch starts at 33. With uint8_t,
 // large blocks (82+ ARM instructions) exhausted the 256-vreg space and
 // wrapped to 0, colliding with arch regs (vreg 31 = SP).
@@ -106,6 +106,79 @@ inline uint16_t zext_if_32bit(IRBlock& b, uint16_t v, bool sf) {
     uint16_t r = g_alloc.alloc();
     emit(b, IROp::ZEXT, r, v, 0, 32);
     return r;
+}
+
+// Apply an extend operation (UXTB/SXTB/UXTH/SXTH/UXTW/SXTW/UXTX/SXTX) to
+// a vreg, returning a new vreg holding the result. Used by ADD_REG/SUB_REG,
+// ADDS_REG/SUBS_REG, and LDR_REG/STR_REG for the extended-register form.
+// extend: bits[2:0] = extend type (0=UXTB..7=SXTX).
+// shift:  shift amount to apply after extend (0-4 for extended form).
+inline uint16_t apply_extend(IRBlock& b, uint16_t v, uint8_t extend, uint8_t shift) {
+    switch (extend & 7) {
+        case 0: { // UXTB
+            uint16_t m = load_imm(b, 0xFF);
+            uint16_t r = g_alloc.alloc();
+            emit(b, IROp::AND, r, v, m);
+            v = r;
+            break;
+        }
+        case 1: { // UXTH
+            uint16_t m = load_imm(b, 0xFFFF);
+            uint16_t r = g_alloc.alloc();
+            emit(b, IROp::AND, r, v, m);
+            v = r;
+            break;
+        }
+        case 2: { // UXTW
+            uint16_t m = load_imm(b, 0xFFFFFFFF);
+            uint16_t r = g_alloc.alloc();
+            emit(b, IROp::AND, r, v, m);
+            v = r;
+            break;
+        }
+        case 3: break; // UXTX — no extend
+        case 4: { // SXTB
+            uint16_t s = g_alloc.alloc();
+            emit(b, IROp::SEXT, s, v, 0, 8);
+            v = s;
+            break;
+        }
+        case 5: { // SXTH
+            uint16_t s = g_alloc.alloc();
+            emit(b, IROp::SEXT, s, v, 0, 16);
+            v = s;
+            break;
+        }
+        case 6: { // SXTW
+            uint16_t s = g_alloc.alloc();
+            emit(b, IROp::SEXT, s, v, 0, 32);
+            v = s;
+            break;
+        }
+        case 7: break; // SXTX — no extend
+    }
+    if (shift != 0) {
+        uint16_t sh = load_imm(b, static_cast<uint64_t>(shift));
+        uint16_t shifted = g_alloc.alloc();
+        emit(b, IROp::SHL, shifted, v, sh);
+        v = shifted;
+    }
+    return v;
+}
+
+// Apply a shift-type operation (LSL/LSR/ASR/ROR) to a vreg.
+// shift_type: 0=LSL, 1=LSR, 2=ASR, 3=ROR.
+// shift:       shift amount.
+inline uint16_t apply_shift(IRBlock& b, uint16_t v, uint8_t shift_type, uint8_t shift) {
+    if (shift == 0 && shift_type == 0) return v;
+    uint16_t sh = load_imm(b, static_cast<uint64_t>(shift));
+    uint16_t shifted = g_alloc.alloc();
+    IROp shop = (shift_type == 0) ? IROp::SHL
+              : (shift_type == 1) ? IROp::SHR
+              : (shift_type == 2) ? IROp::SAR
+              : IROp::ROR;
+    emit(b, shop, shifted, v, sh);
+    return shifted;
 }
 
 // ── SWAR lowering helpers (defined in ir_lower.cpp) ─────────────────────

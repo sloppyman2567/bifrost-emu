@@ -77,7 +77,7 @@ void FrostJIT::evict_vreg(int v) {
 //     vreg_home_[v] = -1;
 //     vreg_dirty_[v] = false;
 // which silently loses dirty values. That pattern was the root cause of
-// the v1.4.0-beta.1 jit_simd crash — REV64 and CLZ both dropped a dirty
+// the jit_simd crash — REV64 and CLZ both dropped a dirty
 // src1 vreg without spilling, then a later reader reloaded from an
 // uninitialized stack slot.
 //
@@ -399,7 +399,7 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
 //   dir=1, fp_field=0: FMOV_F2G   — dest = v_lo[idx]
 //   dir=1, fp_field=1: FMOV_FHI2G — dest = v_hi[idx]
 //
-// (v1.4.0-beta.1): G→F path uses RCX as scratch for the zero store
+// : G→F path uses RCX as scratch for the zero store
 // (v_hi) so src1 stays cached in RAX. The F→G path loads the FP slot
 // into a fresh vreg via alloc_reg + emit_load + set_vreg_reg.
 

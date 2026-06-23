@@ -66,7 +66,7 @@ public:
     // entries (~1.5 MiB per vCPU). This is the hot path — ~100% hit
     // rate for tight loops.
     //
-    // v1.4.0-alpha.1: upgraded from direct-mapped to 2-way
+    // upgraded from direct-mapped to 2-way
     // set-associative to reduce conflict misses.
     static constexpr size_t DECODE_CACHE_BITS = 13;   // 8192 sets
     static constexpr size_t DECODE_CACHE_WAYS = 2;

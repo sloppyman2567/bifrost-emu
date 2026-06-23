@@ -1,7 +1,7 @@
 // decoder.hpp — Shared ARM64 instruction decode tables and helpers.
 //
 // This header is included by both the interpreter (interpreter.cpp) and
-// the JIT (frostjit.cpp, experimental as of v1.4.0-alpha). It defines:
+// the JIT (frostjit.cpp, experimental as of ). It defines:
 //   - Instruction class enumerations
 //   - The DecodedInst struct (fields extracted from a 32-bit ARM64 word)
 //   - The decode() function that fills a DecodedInst from raw bits

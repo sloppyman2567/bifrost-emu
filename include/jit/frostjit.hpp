@@ -1,4 +1,4 @@
-// frostjit.hpp — IR → x86-64 JIT for bifrost-emu (v1.4.0-beta.1)
+// frostjit.hpp — IR → x86-64 JIT for bifrost-emu ()
 //
 // ── Architecture ──────────────────────────────────────────────────────
 //
@@ -280,6 +280,16 @@ private:
     void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext);
     void emit_store_mem(int addr_reg, int32_t off, int src_reg, int w);
 
+    // Move a 64-bit immediate into RAX, using the 32-bit zero-extend form
+    // when the value fits in 32 bits (smaller code).
+    void emit_mov_imm_to_rax(uint64_t val);
+
+    // Resolve an ARM condition code to an x86 Jcc condition code, handling
+    // the carry-polarity difference between ADD/TST (direct CF) and SUB
+    // (inverted CF). Sets need_cmc=true if the caller must emit a `cmc`
+    // before the JCC (needed for HI/LS after ADD/TST).
+    uint8_t resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc);
+
     // Condition code mapping.
     uint8_t arm_cond_to_x86(uint8_t arm_cond) const;
 
@@ -295,7 +305,7 @@ private:
     //   Callee-saved (preserved by C calls): R12, R13, R15
     // Persistent: RBX=CPU, R14=EMU, R10=window, RBP=frame.
     //
-    // (v1.4.0-beta.1): added R12/R13/R15 (callee-saved) to the pool.
+    // (): added R12/R13/R15 (callee-saved) to the pool.
     // This gives 9 registers instead of 6, and vregs cached in
     // callee-saved regs survive CALL_INTERP without spilling — the C
     // calling convention preserves them across calls. This dramatically
@@ -335,7 +345,7 @@ private:
     void clobber_host_reg(int host_reg);
     void flush_all_vregs();
     void invalidate_all_vregs();
-    // v1.4.0-beta.1: flush/invalidate only caller-saved vregs. Used
+    // : flush/invalidate only caller-saved vregs. Used
     // around CALL_INTERP and memory ops — callee-saved vregs (R12/R13/
     // R15) are preserved by the C calling convention, so they DON'T
     // need to be spilled or invalidated. This keeps live values in

@@ -1,4 +1,4 @@
-// signal.cpp — Guest signal delivery for bifrost-emu (v1.4.0-alpha).
+// signal.cpp — Guest signal delivery for bifrost-emu.
 //
 // Implements the SignalTable and signal delivery logic described in
 // signal.hpp. The trampoline is mapped into the guest's address space
@@ -14,7 +14,7 @@
 //   4. The rt_sigreturn syscall handler (case 133 in syscalls.cpp)
 //      pops the top SignalFrame and restores CPU state.
 //
-// v1.4.0-alpha.1 adds host-to-guest signal forwarding: host signals
+// adds host-to-guest signal forwarding: host signals
 // (SIGINT, SIGTERM, SIGHUP, SIGCHLD, SIGWINCH, SIGALRM) are caught
 // by a host signal handler, queued, and drained between instructions
 // in the run loop. This unbreaks guest programs that poll a
@@ -196,7 +196,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo) {
     return true;
 }
 
-// ── Host-to-guest signal forwarding (v1.4.0-alpha.1) ──────────────────
+// ── Host-to-guest signal forwarding ──────────────────
 
 void Emulator::host_signal_handler(int signo) {
     // Called from the host kernel when a signal is delivered to the

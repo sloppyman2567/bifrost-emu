@@ -5,7 +5,7 @@
 // sendfile/getcwd.
 //
 // All case bodies are extracted verbatim from the original syscalls.cpp
-// (v1.4.0-alpha.5) EXCEPT case 56 (openat), which has been rewritten to
+//  EXCEPT case 56 (openat), which has been rewritten to
 // use the new VFS abstraction (src/vfs/) instead of inline /proc//dev/
 // else-if chains.
 //
@@ -15,7 +15,6 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
-#include "syscalls/syscalls.h"
 #include "syscalls/syscalls.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_table.h"
@@ -273,7 +272,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
-            // v1.4.0-alpha: do a real stat on the (mapped) host path
+            // do a real stat on the (mapped) host path
             // so guest programs see correct file sizes, types, and
             // permissions. Previously this always returned a fake
             // "regular file, 0 bytes" stat, which broke programs that
@@ -489,7 +488,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 47: { // fallocate(fd, mode, offset, len) — aarch64 47
-            // v1.4.0-alpha.1: toybox's sh hits fallocate during line-edit
+            // toybox's sh hits fallocate during line-edit
             // setup. We can't safely allocate guest memory from a host
             // fallocate (the fd may be a memfd with host-side backing),
             // but we *can* just let the host kernel handle it for fds that

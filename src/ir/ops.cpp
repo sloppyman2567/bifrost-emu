@@ -1,4 +1,4 @@
-// ops.cpp — IR executor (debug / fallback) for bifrost-emu (v1.4.0-alpha.5)
+// ops.cpp — IR executor (debug / fallback) for bifrost-emu 
 //
 // Executes a list of IR instructions with a tight switch loop. This is
 // NOT the JIT — it's the slow reference path used when the JIT is
@@ -364,13 +364,11 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 // These have rich semantics; route through interpreter for
                 // correctness in the executor path. The JIT (frostjit.cpp)
                 // has direct codegen for these.
-                uint64_t save_pc = cpu.pc;
                 cpu.pc = inst.arm_pc;
                 emu.step_public(cpu);
                 // Sync vregs from cpu state.
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
-                (void)save_pc;
                 break;
             }
 

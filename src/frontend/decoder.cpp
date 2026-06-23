@@ -664,18 +664,14 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.cond        = (inst >> 12) & 0xF;
                 d.rn          = (inst >> 5) & 0x1F;
                 d.nzcv_field  = inst & 0xF;
-                // (v1.4.0-beta.1 fixup): for the IMMEDIATE form, the 5-bit
+                // : for the IMMEDIATE form, the 5-bit
                 // immediate lives in bits[20:16] — the same bit position as
                 // Rm in the register form. The IR translator reads d.imm_u
                 // (not d.rm) when d.is_register == false, so we must populate
                 // d.imm_u here. Without this, the IR translator passes an
                 // uninitialized/zero immediate to CCMP, producing wrong flags
                 // and corrupting word counts in toybox wc (5 vs 7 on a
-                // 3-line input). The decoder was setting d.rm (which happens
-                // to hold the same 5 bits) but the IR translator was reading
-                // d.imm_u — a long-standing mismatch that only surfaced now
-                // that the frameless back-edge fix lets toybox actually run
-                // far enough to hit CCMP-heavy code.
+                // 3-line input).
                 if (!d.is_register) {
                     d.imm_u = (inst >> 16) & 0x1F;
                 }

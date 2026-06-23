@@ -454,6 +454,32 @@ uint8_t FrostJIT::arm_cond_to_x86(uint8_t arm_cond) const {
     }
 }
 
+// Resolve an ARM condition code to an x86 Jcc code, accounting for the
+// carry-polarity difference between ADD/TST (direct CF) and SUB (inverted).
+// After ADD/TST, ARM C and x86 CF agree (both = carry-out / both = 0).
+// After SUB, they're inverted (ARM C = NOT borrow, x86 CF = borrow).
+// arm_cond_to_x86() assumes the SUB convention, so for ADD/TST:
+//   - CS/CC: swap the mapping (no cmc needed)
+//   - HI/LS: emit `cmc` to invert CF, then use the default mapping
+//   - GE/LT/GT/LE: depend on N,V,Z only — default works
+uint8_t FrostJIT::resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc) {
+    need_cmc = false;
+    bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
+    uint8_t base = arm_cond & 0xE;
+    if (!carry_is_direct) {
+        return arm_cond_to_x86(arm_cond);
+    }
+    switch (base) {
+        case 0x2:  // CS/CC — swap mappings
+            return (arm_cond & 1) ? 3 : 2;  // CS→JB(2), CC→JAE(3)
+        case 0x8:  // HI/LS — no direct JCC, use cmc + default
+            need_cmc = true;
+            return arm_cond_to_x86(arm_cond);
+        default:  // EQ/NE/MI/PL/VS/VC/GE/LT/GT/LE — default works
+            return arm_cond_to_x86(arm_cond);
+    }
+}
+
 // ── Memory access helpers (C-callable from JIT) ────────────────────────
 // These are referenced by name from JIT-compiled code in frostjit.cpp
 // (emit_load_mem / emit_store_mem slow paths). They MUST be non-static
@@ -541,7 +567,16 @@ extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int 
 // the low 4 GiB; falls back to the C helper (jit_load_mem_slow /
 // jit_store_mem_slow, defined above) for high addresses.
 
-// ── emit_load_mem / emit_store_mem ─────────────────────────────────────
+// Move a 64-bit immediate into RAX. Uses the shorter mov imm32 + zext
+// form when the value fits in 32 bits, otherwise the 10-byte mov imm64.
+void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
+    if (val <= 0xFFFFFFFFULL) {
+        emit_mov_imm32_zext(RAX, static_cast<uint32_t>(val));
+    } else {
+        emit_mov_imm64(RAX, val);
+    }
+}
+
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
     // dst = addr_reg + off
@@ -590,7 +625,6 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     }
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
-    (void)sign_ext;
 }
 
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {

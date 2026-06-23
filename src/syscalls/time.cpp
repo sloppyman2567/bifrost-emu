@@ -7,7 +7,6 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "syscalls/syscalls.h"
 
 #include <errno.h>
 #include <sys/time.h>

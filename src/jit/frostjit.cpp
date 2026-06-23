@@ -11,7 +11,7 @@
 //                                  instruction (CALL_INTERP / SVC paths)
 //   - emit_fmov_helper          — GPR↔FP register move helper
 //   - emit_call_interp          — emit a CALL_INTERP call site inside a block
-//   - compile_ir_inst           — the big IR-op→x86 switch (1500+ lines)
+//   - compile_ir_inst           — the IR-op→x86 switch
 //   - clobber_flags             — flush pending host flags to pstate before
 //                                  a flag-clobbering instruction
 //   - translate_block           — translate one ARM64 basic block to x86
@@ -89,11 +89,6 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
 
 } // namespace arm64emu
 
-// ── The big chunks (extracted verbatim from the original frostjit.cpp) ──
-// These are large method bodies that haven't been rewritten, just moved
-// out of the monolithic file for readability. Each section is bracketed
-// by clear section headers.
-
 namespace arm64emu {
 
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
@@ -133,7 +128,7 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
 
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
-    // (v1.4.0-beta.1): flush ALL dirty vregs BEFORE materializing flags.
+    // : flush ALL dirty vregs BEFORE materializing flags.
     // The previous code called emit_materialize_flags FIRST, which
     // clobbers RAX/RCX/RDX — if those held dirty vregs, their values
     // were lost before flush_all_vregs could spill them. This caused
@@ -157,7 +152,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
             }
         }
     }
-    // (v1.4.0-beta.1): flush_all_vregs already called above (before
+    // : flush_all_vregs already called above (before
     // materialize_flags). All dirty vregs are now in cpu.regs[]/stack.
     // SP (vreg 31) may have been flushed above, but force-check here
     // in case the materialize introduced a new dirty SP (it shouldn't).
@@ -167,11 +162,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
     emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup needed)
     // Set cpu.pc = arm_pc.
-    if (arm_pc <= 0xFFFFFFFFULL) {
-        emit_mov_imm32_zext(RAX, static_cast<uint32_t>(arm_pc));
-    } else {
-        emit_mov_imm64(RAX, arm_pc);
-    }
+    emit_mov_imm_to_rax(arm_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     // Set args: RDI = emu, RSI = cpu.
     emit_mov_reg(RDI, EMU_REG);
@@ -181,7 +172,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX.
     emit_load(RAX, CPU_REG, PC_OFF);
-    // (v1.4.0-alpha.5): invalidate ALL cache mappings after the call.
+    // : invalidate ALL cache mappings after the call.
     // We can't keep callee-saved vregs cached because the interpreter
     // may have modified cpu.regs[] for registers that the JIT has
     // cached as non-dirty. A STORE_REG earlier in the block may have
@@ -337,7 +328,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     // alloc_reg_for handed us RCX, but we cannot overwrite
                     // it (src2 lives there). Spill RCX's mapping for dest
                     // and grab a different reg.
-                    // (v1.4.0-beta.1): use kill_vreg to properly clear
+                    // : use kill_vreg to properly clear
                     // both vreg_home_ and vreg_dirty_ (alloc_reg_for set
                     // dest dirty, so we must clear that too).
                     kill_vreg(inst.dest);
@@ -443,7 +434,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::CLZ: {
-            // (v1.4.0-beta.1 bugfix): lzcnt rax, rax overwrites RAX, destroying
+            // : lzcnt rax, rax overwrites RAX, destroying
             // src1's cached value. If src1 is a scratch vreg holding a snapshot
             // of an arch reg (from LOAD_REG), later readers would reload from
             // an uninitialized stack slot. Use the same fix as REV64: allocate
@@ -476,7 +467,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::REV64: {
             // Force src1 into RAX (properly evicts old RAX occupant).
             force_vreg_to_reg(inst.src1, RAX);
-            // (v1.4.0-beta.1 bugfix): bswap modifies RAX in place, which
+            // : bswap modifies RAX in place, which
             // destroys v(src1)'s value. If dest != src1, we must preserve
             // src1's value for potential later readers. Allocate a separate
             // dest reg and copy src1 there BEFORE bswap, so src1 stays
@@ -583,7 +574,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // don't modify architectural flags). We save/restore RFLAGS
             // around the test to avoid clobbering pending flags.
             //
-            // (v1.4.0-alpha.5 fix): the previous code did
+            // : the previous code did
             //   int s1 = ensure_vreg(inst.src1, RAX);
             //   if (s1 != RAX) emit_mov_reg(RAX, s1);
             // which would overwrite RAX without evicting whatever dirty
@@ -597,7 +588,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // value, and drop RAX's cache mapping so flush_all_vregs
             // can't miswrite it.
             clobber_flags();  // materialize any pending flags first
-            // (v1.4.0-beta.1): use drop_vreg — evicts if dirty, drops if not.
+            // : use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
             }
@@ -605,7 +596,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (s1 != RAX) emit_mov_reg(RAX, s1);
             // RAX now holds the test value. Drop RAX's cache mapping so
             // the upcoming `mov eax, <pc>` doesn't corrupt any vreg.
-            // (v1.4.0-beta.1): use drop_vreg — if RAX holds a dirty vreg,
+            // : use drop_vreg — if RAX holds a dirty vreg,
             // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
@@ -619,8 +610,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
-            else                            emit_mov_imm64(RAX, fall);
+            emit_mov_imm_to_rax(fall);
             // Restore RFLAGS before jumping to epilogue
             emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
@@ -630,8 +620,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             patch_jcc_rel32(jcc_patch, taken_rel);
             // Restore RFLAGS (CBZ/CBNZ don't modify flags)
             emit_popfq();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
-            else                            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // conditional branch
             return true;
@@ -643,16 +632,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // cond=1 (NE) → branch if bit == 1 (TBNZ)
             // We emit: bt rax, bit; jcc (JNC for bit==0, JC for bit==1)
             // BT sets CF = (val >> bit) & 1. We save/restore RFLAGS.
-            // (v1.4.0-alpha.5 fix): same RAX eviction as BRCOND_ZERO —
+            // : same RAX eviction as BRCOND_ZERO —
             // see the comment there for the rationale.
             clobber_flags();
-            // (v1.4.0-beta.1): use drop_vreg — evicts if dirty, drops if not.
+            // : use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
             }
             int s1 = ensure_vreg(inst.src1, RAX);
             if (s1 != RAX) emit_mov_reg(RAX, s1);
-            // (v1.4.0-beta.1): use drop_vreg — if RAX holds a dirty vreg,
+            // : use drop_vreg — if RAX holds a dirty vreg,
             // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
@@ -669,8 +658,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
             // Not taken: RAX = fall-through.
             uint64_t fall = inst.arm_pc + 4;
-            if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
-            else                            emit_mov_imm64(RAX, fall);
+            emit_mov_imm_to_rax(fall);
             emit_popfq();
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
@@ -678,8 +666,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             emit_popfq();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
-            else                            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;
             return true;
@@ -728,28 +715,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Carry polarity: arm_cond_to_x86() assumes SUB convention
             // (ARM C = NOT x86 CF). When flags came from ADD/TST
             // (carry_is_direct), CS/CC need swapped mapping, HI/LS need cmc.
-
-            // Compute x86 cc (true when ARM cond is TRUE).
-            uint8_t base = inst.cond & 0xE;
-            bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
             bool need_cmc = false;
-            uint8_t cc;
-            if (carry_is_direct) {
-                switch (base) {
-                    case 0x2:  // CS/CC
-                        cc = (inst.cond & 1) ? 3 : 2;
-                        break;
-                    case 0x8:  // HI/LS
-                        need_cmc = true;
-                        cc = arm_cond_to_x86(inst.cond);
-                        break;
-                    default:
-                        cc = arm_cond_to_x86(inst.cond);
-                        break;
-                }
-            } else {
-                cc = arm_cond_to_x86(inst.cond);
-            }
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
 
             // Ensure flags in host.
             if (!flags_in_host_) {
@@ -831,55 +798,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flags_from_sub_ = false;
                 invalidate_all_vregs();
             }
-            uint8_t cc;
-            uint8_t base = inst.cond & 0xE;
-            // ── Carry polarity ────────────────────────────────────────
-            // ARM C and x86 CF have DIFFERENT semantics after SUB:
-            //   ARM C  = NOT borrow (1 = no borrow, i.e. dst >= src)
-            //   x86 CF = borrow     (1 = borrow,     i.e. dst <  src)
-            // After ADD they agree (both = carry-out). After TST, ARM C=0
-            // and x86 CF=0 (TEST clears CF), so they also agree.
-            //
-            // The default arm_cond_to_x86() mapping assumes the "SUB
-            // case" (x86 CF = NOT ARM C). When flags came from ADD/TST
-            // (carry_is_direct), CS/CC need swapped mappings (the old
-            // code did this correctly). HI/LS are the hard case: there
-            // is no x86 JCC for "CF=1 AND ZF=0" (ARM HI after ADD), so
-            // we emit `cmc` to invert CF, making it match the SUB
-            // convention, then use the default JA/JBE mapping.
-            //
-            // BUGFIX (alpha.4): the old code's HI→JA mapping was wrong
-            // (JA checks CF=0 AND ZF=0, but ARM HI after ADD needs
-            // CF=1 AND ZF=0). This broke musl's __syscall_ret
-            // `cmn x0, #0x1, lsl #12` + `b.hi error_path` — every
-            // successful syscall was misclassified as an error, breaking
-            // fopen(), read(), and every libc syscall wrapper.
-            //
-            // GE/LT/GT/LE depend on N, V, Z (not C), so the default
-            // mapping works regardless of carry polarity.
-            bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
+            // Resolve condition code, handling carry polarity (ADD/TST vs SUB).
             bool need_cmc_for_hi_ls = false;
-            if (carry_is_direct) {
-                switch (base) {
-                    case 0x2:  // CS/CC — swap mappings (correct, no cmc needed)
-                        cc = (inst.cond & 1) ? 3 : 2;  // CS→JB(2)? no: CC→JAE(3), CS→JB(2)
-                        // Wait: ARM CS (C=1) with direct CF → CF=1 → JB(2).
-                        //       ARM CC (C=0) with direct CF → CF=0 → JAE(3).
-                        // inst.cond & 1: CS=2 (bit0=0)→JB(2), CC=3 (bit0=1)→JAE(3).
-                        cc = (inst.cond & 1) ? 3 : 2;
-                        break;
-                    case 0x8:  // HI/LS — no direct JCC, use cmc + default
-                        need_cmc_for_hi_ls = true;
-                        cc = arm_cond_to_x86(inst.cond);
-                        break;
-                    default:  // EQ/NE/MI/PL/VS/VC/GE/LT/GT/LE — default works
-                        cc = arm_cond_to_x86(inst.cond);
-                        break;
-                }
-            } else {
-                cc = arm_cond_to_x86(inst.cond);
-            }
-            (void)base;
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
             // Materialize flags to pstate BEFORE consuming them for the
             // JCC, but save/restore RFLAGS around the materialization
             // because emit_materialize_flags clobbers them with its own
@@ -902,7 +823,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         vreg_dirty_[v] = false;
                     }
                 }
-                // BUGFIX (alpha.4): if flags came from ADD/TST and the
+                // if flags came from ADD/TST and the
                 // condition is HI/LS, invert CF with `cmc` so it matches
                 // the SUB convention that arm_cond_to_x86() expects.
                 // pstate already has the correct ARM C (from materialize
@@ -925,16 +846,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Not taken: RAX = fall-through.
             {
                 uint64_t fall = inst.arm_pc + 4;
-                if (fall <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(fall));
-                else                        emit_mov_imm64(RAX, fall);
+                emit_mov_imm_to_rax(fall);
             }
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
             // Taken: RAX = target.
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
-            else                            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // conditional branch — runtime-dependent next PC
             return true;
@@ -942,8 +861,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::BRCOND_FALLTHRU: {
             flush_all_vregs();
-            if (inst.imm <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(inst.imm));
-            else                            emit_mov_imm64(RAX, inst.imm);
+            emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             // Unconditional branch with statically-known target — record
             // it for block chaining. try_chain_block() will patch the
@@ -1081,8 +999,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
             // regs[dest] = (int/uint)(v_lo[src1])
+            // NOTE: unsigned conversion (FCVTZU) is not yet implemented —
+            // we use signed CVTTSD2SI which is correct for values < INT64_MAX.
+            // Most code doesn't convert huge doubles to unsigned.
             bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm == 1);
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
@@ -1094,14 +1014,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_modrm_disp(0, CPU_REG, off1);
 
             // CVTTSD2SI rax, xmm0 (truncate toward zero)
-            // F2 48 0F 2C C0 (signed) or use CVTTSS2SI for single
             emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
             emit_byte(0xC0);  // rax, xmm0
-
-            // For unsigned, we need to handle values > INT64_MAX.
-            // For now, just use the signed result — most code doesn't
-            // convert huge doubles to unsigned.
-            (void)is_unsigned;  // TODO: handle unsigned properly
 
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);
@@ -1111,18 +1025,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── int→FP conversion (SCVTF/UCVTF) ────────────────────────
         case IROp::FP_I2F: {
             // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
+            // NOTE: unsigned conversion (UCVTF) is not yet implemented —
+            // we use signed CVTSI2SD which is correct for values < INT64_MAX.
             bool is_double = (inst.width == 1);
-            bool is_unsigned = (inst.imm == 1);
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
 
             // Load GPR into RAX
             load_vreg_to_reg(RAX, inst.src1);
-
-            // For unsigned, we'd need to handle the sign bit differently.
-            // For now, use signed conversion — most code uses signed.
-            (void)is_unsigned;
 
             // CVTSI2SD xmm0, rax (convert signed int64 to double)
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
@@ -1231,7 +1142,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FMOV immediate (load decoded FP immediate) ──────────────
         case IROp::FP_MOVI: {
             // v_lo[dest] = imm; v_hi[dest] = 0
-            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty GPR vreg
+            // : clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             // The old code silently dropped dirty vregs.
             clobber_host_reg(RAX);
@@ -1299,7 +1210,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
-            // (v1.4.0-beta.1): DON'T drop src1's cache mapping after the
+            // : DON'T drop src1's cache mapping after the
             // store — src1 may be read again later in the block. The old
             // code did `vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1`
             // which silently dropped a dirty src1.
@@ -1323,7 +1234,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── SIMD MOVI (broadcast immediate) ─────────────────────────
         case IROp::SIMD_MOVI: {
             // v_lo[dest] = v_hi[dest] = imm
-            // (v1.4.0-beta.1): clobber_host_reg evicts any dirty GPR vreg
+            // : clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             clobber_host_reg(RAX);
             emit_mov_imm64(RAX, inst.imm);
@@ -1340,7 +1251,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg
             if (inst.width == 1) {
                 // Load: write vregs to v_lo/v_hi
-                // (v1.4.0-beta.1): use separate host regs for lo/hi so we
+                // : use separate host regs for lo/hi so we
                 // don't clobber src1's cached value when loading src2.
                 // The old code reused RAX for both, dropping src1's mapping.
                 int slo = ensure_vreg(inst.src1, RAX);
@@ -1392,7 +1303,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int immr = inst.immr;
             int imms = inst.imms;
             // Load src into RAX.
-            // (v1.4.0-alpha.5 fix): flush+invalidate FIRST so the
+            // : flush+invalidate FIRST so the
             // cache is empty and the subsequent memory access can't
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
@@ -1410,7 +1321,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // UBFM semantics for imms < immr:
             //   field = src & ((1 << (imms+1)) - 1)   [take low imms+1 bits]
             //   result = field << (width - immr)       [shift left to position]
-            // BUGFIX (alpha.4): the previous code did shl THEN and, which
+            // the previous code did shl THEN and, which
             // zeroed the result for shift >= 32. For example, lsl x0, x0, #32
             // (immr=32, imms=31): shl rax,32 → 0x100000000, then and rax,
             // 0xFFFFFFFF → 0. The correct order is: mask FIRST, then shift.
@@ -1483,7 +1394,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 }
             }
             // Extract bits [imms-immr:0] from RAX (after rotate).
-            // BUGFIX (alpha.4): after ROR by immr, the field that was at
+            // after ROR by immr, the field that was at
             // [imms:immr] in the original is now at [imms-immr:0]. So the
             // mask must be (imms-immr+1) bits wide, NOT (imms+1) bits.
             // The old code used (1<<(imms+1))-1 which extracted too many
@@ -1635,19 +1546,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint8_t nzcv = inst.width & 0xF;
 
             // Compute x86 cc (true when ARM cond is TRUE).
-            uint8_t base = inst.cond & 0xE;
-            bool carry_is_direct = flags_in_host_ && !flags_from_sub_;
             bool need_cmc = false;
-            uint8_t cc;
-            if (carry_is_direct) {
-                switch (base) {
-                    case 0x2: cc = (inst.cond & 1) ? 3 : 2; break;
-                    case 0x8: need_cmc = true; cc = arm_cond_to_x86(inst.cond); break;
-                    default: cc = arm_cond_to_x86(inst.cond); break;
-                }
-            } else {
-                cc = arm_cond_to_x86(inst.cond);
-            }
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
 
             // Ensure flags in host.
             if (!flags_in_host_) {
@@ -1664,7 +1564,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (need_cmc) emit_byte(0xF5);
 
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
-            // (v1.4.0-beta.1): use ensure_vreg + mov instead of load_vreg
+            // : use ensure_vreg + mov instead of load_vreg
             // (load_vreg is being removed as dead code).
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
             else {
@@ -1715,8 +1615,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 // materialize them to cpu.pstate BEFORE a flag-clobbering instruction
 // overwrites them. Without this, any ALU op after ADDS/SUBS/TST would
 // lose the flags, causing wrong branch decisions downstream.
-
-// ── clobber_flags ─────────────────────────────────────────────────
 void FrostJIT::clobber_flags() {
     if (flags_in_host_) {
         // emit_materialize_flags clobbers RAX, RCX, RDX.
@@ -1749,7 +1647,7 @@ void FrostJIT::clobber_flags() {
 // cache flush is needed, but we emit a memory barrier to ensure the
 // patched bytes are visible to any in-flight execution on the same core.
 
-// (v1.4.0-beta.1): single source of truth for "will this instruction route
+// : single source of truth for "will this instruction route
 // to CALL_INTERP in the IR translator?" Used by the block splitter to
 // pre-scan before translating. If this list gets out of sync with
 // ir_translate.cpp's default case, the splitter would misclassify
@@ -1830,7 +1728,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // correctness hazard. Cap blocks at 32 instructions — enough for
     // tight loops, short enough that vreg count stays manageable.
     constexpr int MAX_BLOCK_REG_PRESSURE = 32;
-    // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
+    // limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
     // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
     // In long blocks with many CALL_INTERPs (e.g., __multf3's 82-instr
@@ -1884,7 +1782,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // are interpreter fallbacks), the pure interpreter is faster — it
     // skips the prologue/epilogue/dispatch entirely.
     //
-    // (v1.4.0-beta.1): refined from "any CALL_INTERP → interp_only" to
+    // : refined from "any CALL_INTERP → interp_only" to
     // "CALL_INTERP-heavy → interp_only". The old heuristic was too
     // aggressive — a block with 10 native ops and 1 CALL_INTERP would
     // skip JIT entirely, losing the 10 native ops' speedup. Now we only
@@ -1898,7 +1796,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     //
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
-    // (v1.4.0-beta.1): blocks with >32 instructions have too much
+    // : blocks with >32 instructions have too much
     // register pressure for the 9-host-reg allocator. The __multf3
     // 82-instruction softfloat block generates ~246 vregs, causing
     // spill/reload correctness bugs. Run long blocks via interpreter.
@@ -1933,7 +1831,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // fixed stack slot. This avoids the lazy allocation mismatch between
     // the pre-computed stack size and the runtime slot counter.
     //
-    // BUGFIX (alpha.4): the previous code limited max_vreg to < 200,
+    // the previous code limited max_vreg to < 200,
     // but blocks with many ARM instructions (e.g., __multf3's 82-instr
     // block) can have vregs up to 317+. Vregs >= 200 would get stack
     // slots via lazy allocation that extend BEYOND the pre-allocated
@@ -1986,8 +1884,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     if (!rax_holds_next_pc_) {
         uint64_t next_pc = start_pc + ir_block.count * 4;
-        if (next_pc <= 0xFFFFFFFFULL) emit_mov_imm32_zext(RAX, static_cast<uint32_t>(next_pc));
-        else                            emit_mov_imm64(RAX, next_pc);
+        emit_mov_imm_to_rax(next_pc);
         // Fall-through (MAX_BLOCK hit before any block-ender): the next
         // PC is statically known, so this block is chainable to it.
         if (!unchainable_end_ && chain_target_pc_ == 0) {
@@ -2000,7 +1897,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // here. At this point, flags are materialized and vregs are flushed.
     // RAX holds the next PC (either from rax_holds_next_pc_ or from the
     // CALL_INTERP's interpreter call).
-    // BUGFIX (alpha.4): call_interp_branch_patches_ jump here (after the
+    // call_interp_branch_patches_ jump here (after the
     // RAX overwrite) to preserve the interpreter's PC in RAX.
     size_t pc_store_off = code_buf_used_;
 
@@ -2036,7 +1933,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         patch_jmp_rel32(p.patch_off, rel);
     }
     for (size_t off : call_interp_branch_patches_) {
-        // BUGFIX (alpha.4): jump to pc_store_off (after the RAX overwrite)
+        // jump to pc_store_off (after the RAX overwrite)
         // to preserve the interpreter's PC in RAX. emit_call_interp already
         // materialized flags and flushed vregs before the JNE, so we can
         // skip the normal epilogue's flag/vreg handling.
@@ -2100,8 +1997,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 }
 
 // ── run_block ───────────────────────────────────────────────────────────
-
-// ── run_block ─────────────────────────────────────────────────────
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (!code_buf_ || jit_disabled_) {
         interpreter_fallbacks++;
@@ -2293,11 +2188,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             steps++;
         }
         // Compare PC first — if PCs differ, the JIT took a different path.
-        bool skip_reg_check = false;
+        // This is a real codegen bug — log it and abort.
         if (ref.pc != jit_next) {
-            // PC divergence: the JIT and interpreter took different paths.
-            // This is a real codegen bug — log it and abort so it can be
-            // investigated.
             fprintf(stderr, "[VERIFY] block @ 0x%llx: PC DIVERGENCE (jit_next=0x%llx ref_next=0x%llx steps=%d/%d)\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
                     static_cast<unsigned long long>(ref.pc), steps, entry.instr_count);
@@ -2316,7 +2208,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                         static_cast<unsigned long long>(cpu.pstate), static_cast<unsigned long long>(ref.pstate));
             abort();
         }
-        if (!skip_reg_check) {
         // PCs match — compare register state.
         // NOTE: we skip pstate comparison for blocks ending with BRCOND
         // because CBNZ/CBZ are translated as TST+BRCOND, and the TST
@@ -2358,7 +2249,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
                     steps, entry.instr_count);
         }
-        }  // end if (!skip_reg_check)
         // Restore chain slot if it was patched.
         if (was_chained) {
             memcpy(code_buf_ + entry.chain_patch_off, saved_chain, 5);

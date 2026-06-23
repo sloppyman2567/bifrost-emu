@@ -6,7 +6,7 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// v1.4.0-beta.1 — directory-layout overhaul + VFS abstraction.
+// — directory-layout overhaul + VFS abstraction.
 //   * arm64_emu.hpp "god header" split into include/bifrost/{types,emulator,
 //     version}.hpp + src/core/{cpu,memory,emulator,signal}.h/.cpp.
 //   * frostjit.cpp (3671 LOC) split into src/jit/{frostjit, jit_cache,

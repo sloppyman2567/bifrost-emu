@@ -98,6 +98,4 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     }
 }
 
-// ── translate_block ────────────────────────────────────────────────────
-
 } // namespace arm64emu
