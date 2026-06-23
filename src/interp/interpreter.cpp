@@ -17,6 +17,69 @@
 
 namespace arm64emu {
 
+// ── FP register access helpers (file-scope, no per-dispatch allocation) ──
+// These were previously local lambdas inside the FP_SCALAR case, which
+// meant they were reconstructed on every FP instruction dispatch. Moving
+// them to file scope eliminates that overhead.
+static inline double read_fp_d(const CPU& cpu, int r) {
+    uint64_t bits = cpu.v_lo[r];
+    double d; memcpy(&d, &bits, 8); return d;
+}
+static inline float read_fp_s(const CPU& cpu, int r) {
+    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[r]);
+    float f; memcpy(&f, &bits, 4); return f;
+}
+static inline void write_fp_d(CPU& cpu, int r, double d) {
+    uint64_t bits; memcpy(&bits, &d, 8);
+    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
+}
+static inline void write_fp_s(CPU& cpu, int r, float f) {
+    uint32_t bits; memcpy(&bits, &f, 4);
+    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
+}
+
+// ── Half-precision (FP16) helpers ──────────────────────────────────────
+// IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa.
+static inline float h2f(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp  = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    uint32_t fbits;
+    if (exp == 0) {
+        if (mant == 0) {
+            fbits = sign << 31;
+        } else {
+            int e = -1;
+            while (!(mant & 0x400)) { mant <<= 1; e--; }
+            mant &= 0x3FF;
+            fbits = (sign << 31) | ((127 + e - 14) << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        fbits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+    } else {
+        fbits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+    }
+    float f; memcpy(&f, &fbits, 4); return f;
+}
+static inline uint16_t f2h(float f) {
+    uint32_t fbits; memcpy(&fbits, &f, 4);
+    uint32_t sign = (fbits >> 31) & 1;
+    int32_t  exp  = static_cast<int32_t>((fbits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = (fbits & 0x7FFFFF) >> 13;
+    if (exp <= 0) {
+        if (exp < -10) return static_cast<uint16_t>(sign << 15);
+        mant |= 0x400;
+        mant >>= (1 - exp);
+        return static_cast<uint16_t>((sign << 15) | mant);
+    } else if (exp >= 0x1F) {
+        return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
+    }
+    return static_cast<uint16_t>((sign << 15) | (exp << 10) | mant);
+}
+static inline uint16_t d2h(double d) {
+    return f2h(static_cast<float>(d));
+}
+
 // Set NZCV from a 64-bit add-with-carry result.
 static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_in,
                               int width, bool set_flags) {
@@ -1918,77 +1981,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint8_t sf_val = (op >> 31) & 1;
                 uint8_t ftype = (op >> 22) & 3;  // 0=S(32-bit), 1=D(64-bit), 3=H(16-bit)
 
-                auto read_fp_d = [&](int r) -> double {
-                    uint64_t bits = cpu.v_lo[r];
-                    double d; memcpy(&d, &bits, 8); return d;
-                };
-                auto read_fp_s = [&](int r) -> float {
-                    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[r]);
-                    float f; memcpy(&f, &bits, 4); return f;
-                };
-                auto write_fp_d = [&](int r, double d) {
-                    uint64_t bits; memcpy(&bits, &d, 8);
-                    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
-                };
-                auto write_fp_s = [&](int r, float f) {
-                    uint32_t bits; memcpy(&bits, &f, 4);
-                    cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
-                };
-
-                // ── Half-precision (FP16) helpers ──────────────────────────
-                // IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa.
-                // We store half values in the low 16 bits of v_lo, matching
-                // what real AArch64 hardware does for the H register alias.
-                auto h2f = [&](uint16_t h) -> float {
-                    uint32_t sign = (h >> 15) & 1;
-                    uint32_t exp  = (h >> 10) & 0x1F;
-                    uint32_t mant = h & 0x3FF;
-                    uint32_t fbits;
-                    if (exp == 0) {
-                        if (mant == 0) {
-                            fbits = sign << 31;
-                        } else {
-                            // Denormal → normalize
-                            int e = -1;
-                            while (!(mant & 0x400)) { mant <<= 1; e--; }
-                            mant &= 0x3FF;
-                            fbits = (sign << 31) | ((127 + e - 14) << 23) | (mant << 13);
-                        }
-                    } else if (exp == 0x1F) {
-                        // Inf / NaN
-                        fbits = (sign << 31) | (0xFFu << 23) | (mant << 13);
-                    } else {
-                        // Normal: re-bias from 15 to 127
-                        fbits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
-                    }
-                    float f; memcpy(&f, &fbits, 4); return f;
-                };
-                auto f2h = [&](float f) -> uint16_t {
-                    uint32_t fbits; memcpy(&fbits, &f, 4);
-                    uint32_t sign = (fbits >> 31) & 1;
-                    int32_t  exp  = static_cast<int32_t>((fbits >> 23) & 0xFF) - 127 + 15;
-                    uint32_t mant = (fbits & 0x7FFFFF) >> 13;  // top 10 bits
-                    if (exp <= 0) {
-                        // Denormal or zero
-                        if (exp < -10) {
-                            // Underflow to zero
-                            return static_cast<uint16_t>(sign << 15);
-                        }
-                        // Subnormal: implicit leading 1 + exp adjustment
-                        mant |= 0x400;  // add implicit leading bit
-                        mant >>= (1 - exp);
-                        return static_cast<uint16_t>((sign << 15) | mant);
-                    } else if (exp >= 0x1F) {
-                        // Overflow to Inf
-                        return static_cast<uint16_t>((sign << 15) | (0x1F << 10));
-                    }
-                    return static_cast<uint16_t>((sign << 15) | (exp << 10) | mant);
-                };
-                auto d2h = [&](double d) -> uint16_t {
-                    // Reuse f2h after downcasting to float — small precision loss
-                    // but adequate for the printf hex-float path that uses FCVT H.
-                    return f2h(static_cast<float>(d));
-                };
+                // FP register access + half-precision helpers are now
+                // file-scope functions (read_fp_d, read_fp_s, write_fp_d,
+                // write_fp_s, h2f, f2h, d2h) — see top of this file.
 
                 // FMOV (general ↔ FP, 64-bit)
                 if ((op & 0xFFE0FC00) == 0x9E600000) {
@@ -2086,7 +2081,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1) {
                     uint8_t opcode = (op >> 12) & 0xF;
                     if (ftype) {
-                        double a = read_fp_d(rn), b = read_fp_d(rm), r = 0;
+                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), r = 0;
                         switch (opcode) {
                             case 0x2: r = a + b; break;
                             case 0x3: r = a - b; break;
@@ -2097,9 +2092,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0x6: r = -(a * b); break;
                             default: r = 0; break;
                         }
-                        write_fp_d(rd, r);
+                        write_fp_d(cpu, rd, r);
                     } else {
-                        float a = read_fp_s(rn), b = read_fp_s(rm), r = 0;
+                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm), r = 0;
                         switch (opcode) {
                             case 0x2: r = a + b; break;
                             case 0x3: r = a - b; break;
@@ -2110,7 +2105,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0x6: r = -(a * b); break;
                             default: r = 0; break;
                         }
-                        write_fp_s(rd, r);
+                        write_fp_s(cpu, rd, r);
                     }
                     return;
                 }
@@ -2118,7 +2113,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) == 0x10) {
                     uint8_t opcode = (op >> 12) & 0xF;
                     if (ftype) {
-                        double a = read_fp_d(rn), r = 0;
+                        double a = read_fp_d(cpu, rn), r = 0;
                         switch (opcode) {
                             case 0x0: r = a; break;
                             case 0x1: r = std::fabs(a); break;
@@ -2136,9 +2131,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0xF: r = std::rint(a); break;
                             default: r = a; break;
                         }
-                        write_fp_d(rd, r);
+                        write_fp_d(cpu, rd, r);
                     } else {
-                        float a = read_fp_s(rn), r = 0;
+                        float a = read_fp_s(cpu, rn), r = 0;
                         switch (opcode) {
                             case 0x0: r = a; break;
                             case 0x1: r = std::fabsf(a); break;
@@ -2154,7 +2149,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0xC: r = std::rintf(a); break;
                             default: r = a; break;
                         }
-                        write_fp_s(rd, r);
+                        write_fp_s(cpu, rd, r);
                     }
                     return;
                 }
@@ -2192,7 +2187,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         }
                     };
                     if (ftype) {
-                        double a = read_fp_d(rn);
+                        double a = read_fp_d(cpu, rn);
                         if (is_unsigned) {
                             uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_d(a));
                             cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
@@ -2201,7 +2196,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     } else {
-                        float a = read_fp_s(rn);
+                        float a = read_fp_s(cpu, rn);
                         if (is_unsigned) {
                             uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_s(a));
                             cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
@@ -2214,10 +2209,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 // FCVT (between FP precisions)
                 if ((op & 0xFFFFFC00) == 0x1E624000) { // FCVT Sd, Dn
-                    write_fp_s(rd, static_cast<float>(read_fp_d(rn))); return;
+                    write_fp_s(cpu, rd, static_cast<float>(read_fp_d(cpu, rn))); return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E22C000) { // FCVT Dd, Sn
-                    write_fp_d(rd, static_cast<double>(read_fp_s(rn))); return;
+                    write_fp_d(cpu, rd, static_cast<double>(read_fp_s(cpu, rn))); return;
                 }
                 // FCVT H — half-precision conversions. We don't model 16-bit FP
                 // natively, but we can route H↔S via host __gnu_f2h_ieee / __gnu_h2f_ieee
@@ -2226,13 +2221,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // which sometimes uses FCVT Hn, Dn for hex-float formatting.
                 if ((op & 0xFFFFFC00) == 0x1E63C000) { // FCVT Hd, Dn (D → H)
                     // Half is stored in low 16 bits of v_lo.
-                    double d = read_fp_d(rn);
+                    double d = read_fp_d(cpu, rn);
                     uint16_t hbits = d2h(d);
                     cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
                     return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E23C000) { // FCVT Hn, Sn (S → H)
-                    float f = read_fp_s(rn);
+                    float f = read_fp_s(cpu, rn);
                     uint16_t hbits = f2h(f);
                     cpu.v_lo[rd] = hbits; cpu.v_hi[rd] = 0;
                     return;
@@ -2240,19 +2235,19 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if ((op & 0xFFFFFC00) == 0x1E634000) { // FCVT Sn, Hn (H → S)
                     uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
                     float f = h2f(hbits);
-                    write_fp_s(rd, f);
+                    write_fp_s(cpu, rd, f);
                     return;
                 }
                 if ((op & 0xFFFFFC00) == 0x1E224000) { // FCVT Dd, Hn (H → D)
                     uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
                     double d = static_cast<double>(h2f(hbits));
-                    write_fp_d(rd, d);
+                    write_fp_d(cpu, rd, d);
                     return;
                 }
                 // FCMP/FCMPE
                 if ((op & 0xFFE0FC1F) == 0x1E602000) {
                     if (ftype) {
-                        double a = read_fp_d(rn), b = read_fp_d(rm);
+                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm);
                         if (std::isnan(a) || std::isnan(b)) {
                             cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
                         } else if (a == b) {
@@ -2263,7 +2258,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
                         }
                     } else {
-                        float a = read_fp_s(rn), b = read_fp_s(rm);
+                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
                         if (std::isnan(a) || std::isnan(b)) {
                             cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
                         } else if (a == b) {
@@ -2279,13 +2274,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // FCMP with #0.0
                 if ((op & 0xFFE0FC1F) == 0x1E602008) {
                     if (ftype) {
-                        double a = read_fp_d(rn);
+                        double a = read_fp_d(cpu, rn);
                         if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
                         else if (a == 0.0) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
                         else if (a < 0.0) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
                         else { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0); }
                     } else {
-                        float a = read_fp_s(rn);
+                        float a = read_fp_s(cpu, rn);
                         if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
                         else if (a == 0.0f) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
                         else if (a < 0.0f) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
@@ -2298,7 +2293,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
                     if (ftype) {
-                        double a = read_fp_d(rn);
+                        double a = read_fp_d(cpu, rn);
                         if (is_unsigned) {
                             uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
                             cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
@@ -2307,7 +2302,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                         }
                     } else {
-                        float a = read_fp_s(rn);
+                        float a = read_fp_s(cpu, rn);
                         if (is_unsigned) {
                             uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
                             cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
@@ -2325,18 +2320,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (ftype) {
                         if (is_unsigned) {
                             uint64_t v = is_64bit ? cpu.regs[rn] : static_cast<uint32_t>(cpu.regs[rn]);
-                            write_fp_d(rd, static_cast<double>(v));
+                            write_fp_d(cpu, rd, static_cast<double>(v));
                         } else {
                             int64_t v = is_64bit ? static_cast<int64_t>(cpu.regs[rn]) : static_cast<int32_t>(cpu.regs[rn]);
-                            write_fp_d(rd, static_cast<double>(v));
+                            write_fp_d(cpu, rd, static_cast<double>(v));
                         }
                     } else {
                         if (is_unsigned) {
                             uint64_t v = is_64bit ? cpu.regs[rn] : static_cast<uint32_t>(cpu.regs[rn]);
-                            write_fp_s(rd, static_cast<float>(v));
+                            write_fp_s(cpu, rd, static_cast<float>(v));
                         } else {
                             int64_t v = is_64bit ? static_cast<int64_t>(cpu.regs[rn]) : static_cast<int32_t>(cpu.regs[rn]);
-                            write_fp_s(rd, static_cast<float>(v));
+                            write_fp_s(cpu, rd, static_cast<float>(v));
                         }
                     }
                     return;
@@ -2345,11 +2340,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if ((op & 0xFF200C00) == 0x1E200C00) {  // FCSEL (bit 21=0, bits[13:10]=1100)
                     uint8_t cond = (op >> 12) & 0xF;
                     if (ftype) {
-                        double r = cond_true(cond, cpu.pstate) ? read_fp_d(rn) : read_fp_d(rm);
-                        write_fp_d(rd, r);
+                        double r = cond_true(cond, cpu.pstate) ? read_fp_d(cpu, rn) : read_fp_d(cpu, rm);
+                        write_fp_d(cpu, rd, r);
                     } else {
-                        float r = cond_true(cond, cpu.pstate) ? read_fp_s(rn) : read_fp_s(rm);
-                        write_fp_s(rd, r);
+                        float r = cond_true(cond, cpu.pstate) ? read_fp_s(cpu, rn) : read_fp_s(cpu, rm);
+                        write_fp_s(cpu, rd, r);
                     }
                     return;
                 }
@@ -2358,11 +2353,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint8_t ra = (op >> 10) & 0x1F;
                     bool sub = (op >> 15) & 1;
                     if (ftype) {
-                        double a = read_fp_d(rn), b = read_fp_d(rm), c = read_fp_d(ra);
-                        write_fp_d(rd, sub ? (c - a * b) : (c + a * b));
+                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), c = read_fp_d(cpu, ra);
+                        write_fp_d(cpu, rd, sub ? (c - a * b) : (c + a * b));
                     } else {
-                        float a = read_fp_s(rn), b = read_fp_s(rm), c = read_fp_s(ra);
-                        write_fp_s(rd, sub ? (c - a * b) : (c + a * b));
+                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm), c = read_fp_s(cpu, ra);
+                        write_fp_s(cpu, rd, sub ? (c - a * b) : (c + a * b));
                     }
                     return;
                 }

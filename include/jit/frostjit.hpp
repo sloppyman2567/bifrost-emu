@@ -80,11 +80,10 @@ public:
     // Global progress watchdog: if total block executions exceed this
     // limit, the JIT switches to interpreter-only mode permanently.
     // This is a safety valve for JIT codegen bugs that cause infinite
-    // loops across multiple PCs (e.g. a 2-block cycle where neither
-    // PC repeats 100K times consecutively). The limit is low enough
-    // that a stuck JIT terminates quickly, and the cache flush on
-    // trigger gives the interpreter a clean restart.
-    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 10000;
+    // loops across multiple PCs. Set high enough that real workloads
+    // (toybox, musl libc loops) never trip it — 10000 was way too low
+    // and disabled the JIT mid-run on any non-trivial program.
+    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 50000000;
     uint64_t total_blocks_executed_ = 0;
     bool     jit_disabled_ = false;  // set by global watchdog
 
@@ -334,6 +333,9 @@ private:
     int num_stack_slots_ = 0;
     // Max vreg used in this block.
     int max_vreg_ = 0;
+    // Max vreg from the previous block — used to bound the array-clearing
+    // in translate_block() so we don't zero all 4096 entries every time.
+    int prev_max_vreg_ = 0;
 
     int  alloc_reg(int preferred = -1);
     void evict_vreg(int v);

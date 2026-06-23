@@ -42,6 +42,19 @@ FrostJIT::FrostJIT() {
     watchdog_count_   = 0;
     total_blocks_executed_ = 0;
     jit_disabled_ = false;
+
+    // Initialize vreg arrays — prev_max_vreg_ must be large enough that
+    // the first translate_block() clears all 4096 entries. Without this,
+    // uninitialized vreg_home_[] garbage causes load_vreg_to_reg to think
+    // vregs are cached in random host regs, producing mov-from-garbage.
+    prev_max_vreg_ = 4095;
+    for (int i = 0; i < 4096; i++) {
+        vreg_home_[i] = -1;
+        vreg_dirty_[i] = false;
+        vreg_slot_[i] = 0;
+    }
+    for (int i = 0; i < 16; i++) reg_vreg_[i] = -1;
+    max_vreg_ = 0;
 }
 
 FrostJIT::~FrostJIT() {

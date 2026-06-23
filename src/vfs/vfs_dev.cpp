@@ -61,6 +61,31 @@ std::unique_ptr<VNode> VFS::open_devfs(const std::string& path,
         return std::make_unique<HostVNode>(r, flags);
     }
 
+    // /dev/snd → audio device (OSS-style /dev/dsp passthrough)
+    if (path == "/dev/snd" || path == "/dev/dsp" || path == "/dev/audio") {
+        int fd = ::openat(AT_FDCWD, "/dev/dsp", flags, mode);
+        if (fd < 0) {
+            // No real audio device — return /dev/null as a sink so writes succeed
+            fd = ::openat(AT_FDCWD, "/dev/null", flags, mode);
+            if (fd < 0) { *err_out = -errno; return nullptr; }
+        }
+        return std::make_unique<HostVNode>(fd, flags);
+    }
+
+    // /dev/ptmx → pseudo-terminal master (passthrough for interactive apps)
+    if (path == "/dev/ptmx") {
+        int fd = ::openat(AT_FDCWD, "/dev/ptmx", flags, mode);
+        if (fd < 0) { *err_out = -errno; return nullptr; }
+        return std::make_unique<HostVNode>(fd, flags);
+    }
+
+    // /dev/pts/N → pseudo-terminal slaves (passthrough)
+    if (path.rfind("/dev/pts/", 0) == 0) {
+        int fd = ::openat(AT_FDCWD, path.c_str(), flags, mode);
+        if (fd < 0) { *err_out = -errno; return nullptr; }
+        return std::make_unique<HostVNode>(fd, flags);
+    }
+
     *err_out = 0;
     return nullptr;  // not a /dev path we handle
 }

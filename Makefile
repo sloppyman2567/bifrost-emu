@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (v1.4.0-beta.1)
+# bifrost-emu Makefile (v1.4.0-beta.2)
 #
 # Auto-discovers all .cpp files under src/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
@@ -17,7 +17,7 @@
 #   CXXFLAGS       C++ compiler flags
 #   LDFLAGS        Linker flags
 #
-# Directory layout (v1.4.0-beta.1+):
+# Directory layout (v1.4.0-beta.2+):
 #
 #   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
 #   src/vfs/          — VFS abstraction (VNode + FdTable + procfs + devfs)
@@ -38,7 +38,7 @@ TARGET   := bifrost-emu
 LIB      := libbifrost.a
 
 # Auto-discover all .cpp under src/, plus main.cpp at the root.
-SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphics src/interp
+SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphics src/interp src/audio
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
 OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))

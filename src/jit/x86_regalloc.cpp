@@ -251,10 +251,20 @@ void FrostJIT::flush_caller_saved_vregs() {
 
 // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ────────────
 // These wrap the "load vreg to host reg" / "store host reg to vreg"
-// patterns that were duplicated across LOAD_MEM, STORE_MEM, FP_MOVI,
-// SIMD_DUP, SIMD_LDST, etc. Each replaces a 2-line if/else with one call.
+// patterns. load_vreg_to_reg is cache-aware: if v is already cached in
+// a host reg, it emits a mov from that reg (preserving the dirty value)
+// instead of loading stale data from memory. store_reg_to_vreg writes
+// to memory and kills any stale cache mapping for v.
 
 void FrostJIT::load_vreg_to_reg(int dst, int v) {
+    // If v is cached in a host reg, mov from there — the cached value
+    // may be dirty and not yet written to memory.
+    if (v <= max_vreg_ && vreg_home_[v] >= 0) {
+        int src = vreg_home_[v];
+        if (src != dst) emit_mov_reg(dst, src);
+        return;
+    }
+    // Not cached — load from memory (cpu.regs[] or stack slot).
     if (v <= 31) {
         emit_load_arm(dst, v);
     } else {
@@ -264,11 +274,19 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
 }
 
 void FrostJIT::store_reg_to_vreg(int v, int src) {
+    // Write to memory (cpu.regs[] or stack slot).
     if (v <= 31) {
         emit_store_arm(v, src);
     } else {
         int32_t off = vreg_stack_slot(v);
         emit_store(RBP, off, src);
+    }
+    // Kill any stale cache mapping for v — memory now has the new value,
+    // but a cached entry would still hold the old one.
+    if (v <= max_vreg_ && vreg_home_[v] >= 0) {
+        reg_vreg_[vreg_home_[v]] = -1;
+        vreg_home_[v] = -1;
+        vreg_dirty_[v] = false;
     }
 }
 

@@ -131,6 +131,24 @@ std::unique_ptr<VNode> VFS::open_procfs(const std::string& path,
     if (path == "/proc/sys/kernel/osrelease") {
         return serve(std::string("6.5.0\n"));
     }
+    // /proc/sys/kernel/hostname
+    if (path == "/proc/sys/kernel/hostname") {
+        return serve(std::string("bifrost\n"));
+    }
+    // /proc/self/limits → basic resource limits
+    if (path == "/proc/self/limits") {
+        std::string s;
+        s += "Limit                     Soft Limit           Hard Limit           Units     \n";
+        s += "Max cpu time              unlimited            unlimited            seconds   \n";
+        s += "Max file size             unlimited            unlimited            bytes     \n";
+        s += "Max data size             unlimited            unlimited            bytes     \n";
+        s += "Max stack size            8388608              unlimited            bytes     \n";
+        s += "Max core file size        0                    unlimited            bytes     \n";
+        s += "Max resident set          unlimited            unlimited            bytes     \n";
+        s += "Max processes             unlimited            unlimited            processes \n";
+        s += "Max open files            1024                 4096                 files     \n";
+        return serve(s);
+    }
 
     *err_out = 0;
     return nullptr;

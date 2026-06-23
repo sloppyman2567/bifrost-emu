@@ -12,7 +12,7 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-beta.1
+  bifrost-emu  v1.4.0-beta.2
   x86_64 ◄─────────────────► ARM64
 ```
 

@@ -36,6 +36,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/resource.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
@@ -592,6 +593,18 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.exit_code = static_cast<int>(a0);
             return 0;
         }
+
+        // ── signalfd4 (syscall 74) ────────────────────────────────────
+        case 74: { // signalfd4
+            int fd = ::signalfd(static_cast<int>(a0),
+                                reinterpret_cast<const sigset_t*>(a1),
+                                static_cast<int>(a3));
+            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(fd));
+            return 0;
+        }
+
+        // ── getrandom (syscall 278) — already implemented above ──
 
         default:
             return SYSCALL_NOT_HANDLED;
