@@ -41,7 +41,6 @@
 
 #include "decoder.hpp"
 #include "core/emulator.h"
-#include "decoder.hpp"  // for sign_extend, ror64
 
 namespace arm64emu {
 

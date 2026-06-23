@@ -79,7 +79,7 @@ int StdioVNode::fstat(struct stat* st) {
 // ── AudioVNode ──────────────────────────────────────────────────────────
 AudioVNode::~AudioVNode() = default;
 
-ssize_t AudioVNode::read(uint64_t /*off*/, void* /*buf*/, size_t n) {
+ssize_t AudioVNode::read(uint64_t /*off*/, void* /*buf*/, size_t /*n*/) {
     // Recording not yet supported — return 0 (EOF) immediately.
     return 0;
 }

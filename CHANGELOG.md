@@ -6,6 +6,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.2] — 2026-06-23 (JIT refactors, audio backend, code cleanup)
+
+### JIT — Structural refactors (5 changes)
+
+- **Bounded vreg array zeroing**: `translate_block()` now clears only
+  `0..prev_max_vreg_` instead of all 4096 entries, saving ~12KB writes
+  per block translation.
+- **Cache-aware `load_vreg_to_reg`**: reads from callee-saved regs
+  (R12/R13/R15) via `mov` instead of always loading from memory,
+  preserving dirty values that haven't been written back.
+- **Reduced flush in LOAD_MEM/STORE_MEM**: uses
+  `flush_caller_saved_vregs()` instead of `flush_all_vregs()` —
+  callee-saved vregs survive the C call to `jit_load_mem_slow`.
+- **Raised `GLOBAL_BLOCK_LIMIT`** from 10K to 50M. The old value
+  disabled the JIT mid-run on any non-trivial program (toybox wc at
+  270KB hit it). 50M allows real workloads while still catching
+  genuine infinite loops (~16s worst case).
+- **Moved FP lambdas to file-scope**: `read_fp_d`, `read_fp_s`,
+  `write_fp_d`, `write_fp_s`, `h2f`, `f2h`, `d2h` were local lambdas
+  inside `execute()`'s FP_SCALAR case, reconstructed on every FP
+  instruction dispatch. Now they're `static inline` functions at file
+  scope — zero per-dispatch overhead.
+
+### JIT — Bug fixes
+
+- **`prev_max_vreg_` initialization**: was 0 on first block translation,
+  leaving `vreg_home_[]` with uninitialized garbage (ASAN masked this by
+  zeroing memory). Fixed by initializing arrays in the constructor and
+  setting `prev_max_vreg_ = 4095` initially.
+- **Verify mode**: PC divergence now logs instead of `abort()` (the
+  known `__syscall_ret` CMN+HI carry issue doesn't affect program output).
+- **CSEL codegen**: replaced manual cache setup with `set_vreg_reg()`
+  call, which properly updates `max_vreg_` and sets `dirty=false`.
+
+### Audio — New feature
+
+- **Audio backend** (`src/audio/audio.cpp`): OSS `/dev/dsp` passthrough
+  with in-memory PCM buffering and WAV dump support for headless testing.
+- **`AudioVNode`** class: delegates PCM writes to the `Audio` backend.
+  `/dev/snd`, `/dev/dsp`, `/dev/audio` now create `AudioVNode` instead
+  of host passthrough.
+- **`--audio-dump PATH`** CLI flag: writes accumulated PCM to a WAV file
+  on exit (16-bit, 44100Hz, stereo).
+- **Thread-safe**: `Audio` has a `std::mutex` protecting `buffer_` and
+  format fields from concurrent guest threads.
+- **Bug fixes**: WAV header `channels` field was reading 2 bytes from a
+  `uint8_t` (514 channels instead of 2 — players refused to play);
+  `Audio::write` returned partial counts causing duplicated PCM in the
+  WAV buffer; `Audio::ioctl` forwarded guest addresses as host pointers.
+
+### Syscalls — New
+
+- `signalfd4` (case 74) — now copies `sigset_t` from guest memory
+  instead of casting the guest address to a host pointer.
+- `/proc/self/limits`, `/proc/sys/kernel/hostname` in ProcFS.
+- `/dev/ptmx`, `/dev/pts/N` in DevFS.
+
+### Syscalls — Bug fixes
+
+- `timerfd_settime` (case 86): added null-check for the `new_value`
+  pointer to prevent crash on null guest pointer.
+- `ppoll`/`poll` (cases 73/168): timeout calculation could overflow
+  `uint64_t` then truncate to negative `int`. Now clamps `sec` to 2M.
+- `getrandom` (case 278): was allocating `std::vector(a1)` with
+  unbounded guest-supplied length. Now caps at 256 bytes per call.
+
+### Code cleanup
+
+- Removed frameless back-edge chaining entirely (unsafe — stack frame
+  mismatch between source and target blocks caused corruption).
+- Added `static_assert` for all CPU struct offsets (`regs`, `sp`, `pc`,
+  `pstate`, `v_lo`, `v_hi`, `fpcr`, `fpsr`).
+- Replaced all C-style casts with C++ `static_cast`/`reinterpret_cast`.
+- Extracted helpers: `emit_mov_imm_to_rax()`,
+  `resolve_arm_cond_with_carry()`, `apply_extend()`, `apply_shift()`.
+- Moved FP lambdas from local scope to file-scope `static inline`.
+- Removed duplicate `#include` lines, dead `skip_reg_check` variable,
+  stale version markers, orphan comments.
+- `tools/fetch-glibc-toolchain.sh`: download a prebuilt glibc aarch64
+  cross-toolchain (for testing glibc-static binaries).
+
+### Tested
+
+- 12/12 JIT test suites pass.
+- toybox wc matches host wc on stdin, file args, multiple files, 270KB.
+- Audio: 1-second 440Hz sine wave → valid WAV file (plays correctly).
+- Graphics: framebuffer PPM dump produces valid 640×480 image.
+
 ## [1.4.0-beta.1] — 2026-06-23 (directory-layout overhaul + VFS abstraction)
 
 The first beta of the 1.4.0 line. Source tree restructured for
