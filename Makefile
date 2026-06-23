@@ -31,7 +31,7 @@
 
 CXX      ?= g++
 INCDIR   := include
-CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -Isrc
+CXXFLAGS ?= -O3 -std=c++17 -pthread -Wall -Wextra -I$(INCDIR) -Isrc -MMD -MP
 LDFLAGS  ?= -pthread
 
 TARGET   := bifrost-emu
@@ -42,6 +42,7 @@ SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphi
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
 OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
+DEPS     := $(OBJECTS:.o=.d)   # auto-generated header dependency files
 
 # Library objects (everything except main.cpp)
 LIB_SOURCES := $(filter-out main.cpp,$(SOURCES))
@@ -65,9 +66,13 @@ $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
 
 # Pattern rule: compile any .cpp under src/ or main.cpp to .o in build/
-$(OBJDIR)/%.o: %.cpp $(HEADERS)
+# Header dependencies are auto-tracked via -MMD -MP (see DEPS above).
+$(OBJDIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Include auto-generated header dependencies (silently ignore if missing).
+-include $(DEPS)
 
 # Build the static library (libbifrost.a) for API consumers
 lib: $(LIB)
