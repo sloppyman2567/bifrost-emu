@@ -544,6 +544,12 @@ extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int 
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
+    // (v1.4.0-beta.1 rewrite): limit check uses push/pop R11 as scratch
+    // instead of clobbering RDX/RCX. This means the FAST PATH clobbers
+    // ONLY dst — no other caller-saved reg is touched. The slow path
+    // (C call) clobbers caller-saved, but the caller handles that by
+    // flushing caller-saved vregs before calling emit_load_mem.
+    //
     // dst = addr_reg + off
     if (addr_reg != dst) emit_mov_reg(dst, addr_reg);
     if (off != 0) {
@@ -555,27 +561,26 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
             emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32((uint32_t)off);
         }
     }
-    // Check if addr + w <= 4GB.
+    // Limit check: push R11, load limit into R11, cmp dst, R11, pop R11.
+    // R11 is caller-saved but we save/restore it — zero cache impact.
+    emit_push(R11);                         // push r11
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    int tmp = (dst != RDX) ? RDX : RCX;
-    emit_mov_imm64(tmp, limit);
-    emit_cmp_reg(dst, tmp);
-    size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
+    emit_mov_imm64(R11, limit);             // mov r11, limit
+    emit_cmp_reg(dst, R11);                 // cmp dst, r11
+    emit_pop(R11);                          // pop r11 (restore before branch)
+    size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE slow_path
 
-    // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
-    // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
-    // add rsp,8 dance automatically. We just set up args and call.
-    emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
+    // ── Slow path: C call (clobbers all caller-saved) ───────────
+    emit_push(WIN_REG);                     // save R10 (1 push, ODD)
     emit_mov_reg(RDI, EMU_REG);
-    emit_mov_reg(RSI, dst);
+    emit_mov_reg(RSI, dst);                 // addr is still in dst
     emit_mov_imm32(RDX, w);
     emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
-    emit_pop(WIN_REG);                   // restore R10
-    // RAX now has the return value (the loaded data).
-    if (dst != RAX) emit_mov_reg(dst, RAX);
+    emit_pop(WIN_REG);
+    if (dst != RAX) emit_mov_reg(dst, RAX); // move result to dst
     size_t jmp_past = emit_jmp_rel32_placeholder();
 
-    // Fast path.
+    // ── Fast path: direct window (only clobbers dst) ────────────
     int32_t fast_rel = (int32_t)(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
     emit_add_reg(dst, WIN_REG);
@@ -594,10 +599,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
 }
 
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
-    // We use R8 as the address scratch (NOT RDX/RCX, since the caller
-    // passes addr in RAX and val in RCX, and we must not clobber either
-    // before the limit check).
-    //
+    // (v1.4.0-beta.1 rewrite): push/pop R11 for limit check — zero cache impact.
     // R8 = addr_reg + off
     emit_mov_reg(R8, addr_reg);
     if (off != 0) {
@@ -609,35 +611,32 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
             emit_byte(0x81); emit_byte(modrm(3,0,R8&7)); emit_u32((uint32_t)off);
         }
     }
-    // Limit check: R9 = limit. cmp R8, R9.
+    // Limit check: push/pop R11.
+    emit_push(R11);
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    emit_mov_imm64(R9, limit);
-    emit_cmp_reg(R8, R9);
+    emit_mov_imm64(R11, limit);
+    emit_cmp_reg(R8, R11);
+    emit_pop(R11);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
 
-    // Slow path: call jit_store_mem_slow(emu, addr, val, width).
-    // 3 pushes (src, RAX, R10) — ODD, so emit_call_aligned handles the
-    // sub rsp,8 + pushfq + call + popfq + add rsp,8 automatically.
-    emit_push(src_reg);            // save val (RCX)  — 1 push
-    emit_push(RAX);                // save RAX        — 2 pushes
-    emit_push(WIN_REG);            // save R10        — 3 pushes (ODD)
-    emit_mov_reg(RDI, EMU_REG);    // rdi = emu
-    emit_mov_reg(RSI, R8);         // rsi = addr (from R8)
-    emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
-    emit_mov_imm32(RCX, w);        // rcx = width
-    emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/3);
-    emit_pop(WIN_REG);             // restore R10
-    emit_pop(RAX);                 // restore RAX
-    emit_pop(src_reg);             // restore val (RCX)
+    // Slow path: save src + RAX + R10, call, restore.
+    emit_push(src_reg);
+    emit_push(RAX);
+    emit_push(WIN_REG);            // 3 pushes (ODD)
+    emit_mov_reg(RDI, EMU_REG);
+    emit_mov_reg(RSI, R8);
+    emit_mov_reg(RDX, src_reg);    // val still in src_reg
+    emit_mov_imm32(RCX, w);
+    emit_call_aligned(&jit_store_mem_slow, 3);
+    emit_pop(WIN_REG);
+    emit_pop(RAX);
+    emit_pop(src_reg);
     size_t jmp_past = emit_jmp_rel32_placeholder();
 
-    // Fast path: direct window store.
+    // Fast path: R8 += WIN_REG, store [R8].
     int32_t fast_rel = (int32_t)(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
-    // R8 = R10 + R8 (window_base + guest_addr)
-    // add r8, r10: REX.W+R+B (0x4D), opcode 0x01, modrm(3, r10&7=2, r8&7=0)=0xD0
-    emit_byte(0x4D); emit_byte(0x01); emit_byte(0xD0);
-    // Store to [R8] with the right width.
+    emit_byte(0x4D); emit_byte(0x01); emit_byte(0xD0); // add r8, r10
     if (w == 8) {
         emit_byte(rex(true,src_reg>=8,false,R8>=8)); emit_byte(0x89); emit_byte(modrm(0,src_reg&7,R8&7));
     } else if (w == 4) emit_store32(R8, 0, src_reg);

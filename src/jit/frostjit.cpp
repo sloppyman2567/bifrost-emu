@@ -349,11 +349,23 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
 
         case IROp::LOAD_MEM: {
+            // (v1.4.0-beta.1 rewrite): use register allocator instead of
+            // flush_all_vregs. The new emit_load_mem's fast path only
+            // clobbers dst (via push/pop R11 for the limit check).
+            // Slow path clobbers caller-saved — flush those, keep
+            // callee-saved cached.
             clobber_flags();
-            flush_all_vregs();
-            invalidate_all_vregs();
-            load_vreg_to_reg(RAX, inst.src1);
+            flush_caller_saved_vregs();
+            // Get address into RAX via the allocator.
+            int s1 = ensure_vreg(inst.src1, RAX);
+            if (s1 != RAX) { clobber_host_reg(RAX); emit_mov_reg(RAX, s1); }
+            // Drop caller-saved mappings (slow path may clobber them).
+            for (int r : {RAX, RCX, RDX, R8, R9, R11}) {
+                int v = reg_vreg_[r];
+                if (v >= 0) { vreg_home_[v] = -1; reg_vreg_[r] = -1; vreg_dirty_[v] = false; }
+            }
             emit_load_mem(RAX, RAX, (int32_t)inst.imm, inst.width, false);
+            // Result in RAX. Store to dest's memory home.
             store_reg_to_vreg(inst.dest, RAX);
             return false;
         }
