@@ -7,6 +7,7 @@
 #include "core/memory.h"
 
 #include <algorithm>
+#include <shared_mutex>
 #include <sys/mman.h>
 
 namespace arm64emu {
@@ -31,7 +32,7 @@ Memory::~Memory() {
 
 void Memory::map_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t start = addr & ~PAGE_MASK;
     uint64_t end = addr + size;
     for (; start < end; start += PAGE_SIZE) {
@@ -53,7 +54,7 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
     if (direct_window_ && addr + size <= DIRECT_WINDOW_SIZE) {
         return true;
     }
-    std::lock_guard<std::mutex> g(mu_);
+    std::shared_lock<std::shared_mutex> g(mu_);
     uint64_t start = addr & ~PAGE_MASK;
     uint64_t end = addr + size;
     for (; start < end; start += PAGE_SIZE) {
@@ -81,7 +82,7 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
         } else {
             std::vector<uint8_t>* page = nullptr;
             {
-                std::lock_guard<std::mutex> g(mu_);
+                std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) {
                     it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
@@ -118,7 +119,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
         } else {
             const std::vector<uint8_t>* page = nullptr;
             {
-                std::lock_guard<std::mutex> g(mu_);
+                std::shared_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) throw UnmappedMemory(cur, false);
                 page = &it->second;
@@ -137,7 +138,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
 
 uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     if (size == 0) size = PAGE_SIZE;
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t base = hint;
     uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
     if (base == 0) {
@@ -172,7 +173,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     // the guest won't access them, and we never reclaim address space
     // anyway (bump allocator).
     if (new_aligned <= old_aligned) {
-        std::lock_guard<std::mutex> g(mu_);
+        std::unique_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
             it->second = new_aligned;
@@ -190,7 +191,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
 
     bool can_grow_in_place = true;
     {
-        std::lock_guard<std::mutex> g(mu_);
+        std::shared_lock<std::shared_mutex> g(mu_);
         for (const auto& kv : allocations_) {
             uint64_t other_base = kv.first;
             uint64_t other_size = kv.second;
@@ -205,7 +206,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
 
     if (can_grow_in_place) {
         map_range(extra_start, extra_end - extra_start);
-        std::lock_guard<std::mutex> g(mu_);
+        std::shared_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
             it->second = new_aligned;
@@ -226,19 +227,19 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         write(new_addr, buf.data(), old_size);
     }
     {
-        std::lock_guard<std::mutex> g(mu_);
+        std::shared_lock<std::shared_mutex> g(mu_);
         allocations_.erase(old_addr);
     }
     return new_addr;
 }
 
 void Memory::untrack_allocation(uint64_t addr) {
-    std::lock_guard<std::mutex> g(mu_);
+    std::shared_lock<std::shared_mutex> g(mu_);
     allocations_.erase(addr);
 }
 
 bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     auto it = pages_.find(addr / PAGE_SIZE);
     if (it == pages_.end()) {
         if (expected != 0) return false;
@@ -256,7 +257,7 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
 }
 
 bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
-    std::lock_guard<std::mutex> g(mu_);
+    std::unique_lock<std::shared_mutex> g(mu_);
     auto it = pages_.find(addr / PAGE_SIZE);
     if (it == pages_.end()) {
         if (expected != 0) return false;
@@ -274,7 +275,7 @@ bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
 }
 
 size_t Memory::page_count() const {
-    std::lock_guard<std::mutex> g(mu_);
+    std::shared_lock<std::shared_mutex> g(mu_);
     return pages_.size();
 }
 

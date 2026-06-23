@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -128,7 +129,12 @@ public:
     }
 
 private:
-    mutable std::mutex mu_;
+    // v1.4.0-beta.3: Use shared_mutex for reader-writer locking.
+    // Read operations (load, read, fetch_inst) take a shared lock —
+    // multiple threads can read simultaneously. Write operations
+    // (write, map_range, mmap_alloc) take a unique lock. This reduces
+    // contention for multi-threaded guests.
+    mutable std::shared_mutex mu_;
     std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
     // Tracks the start address and page-aligned size of every region
     // handed out by mmap_alloc. Used by mremap_grow to detect when an

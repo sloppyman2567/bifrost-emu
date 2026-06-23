@@ -1834,45 +1834,64 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── MRS — read system register ───────────────────────────────
         case IROp::MRS: {
             // inst.imm encodes the system register (op1/crn/crm/op2/op0).
-            // We handle TPIDR_EL0, TPIDRRO_EL0, FPCR, FPSR natively.
-            // NZCV falls back to interpreter; unknown registers return 0.
+            // We handle TPIDR_EL0, TPIDRRO_EL0, FPCR, FPSR, NZCV natively.
+            // ID registers (CTR_EL0, DCZID_EL0, MIDR_EL1, MVFR*) return
+            // fixed values matching the interpreter. Unknown registers
+            // return 0.
             clobber_flags();  // xor d,d and emit_load don't preserve flags
             uint64_t sys = inst.imm;
             uint8_t op1 = (sys >> 16) & 0x7;
             uint8_t crn = (sys >> 12) & 0xF;
             uint8_t crm = (sys >> 8) & 0xF;
             uint8_t op2 = (sys >> 4) & 0x7;
-            // System register encodings (op0=3 op1=3):
-            //   TPIDR_EL0:   crn=13 crm=0 op2=2  → cpu.tpidr_el0
-            //   TPIDRRO_EL0: crn=13 crm=0 op2=3  → cpu.tpidrro_el0
-            //   NZCV:        crn=4  crm=2 op2=0  → fall back (needs flag materialization)
-            //   FPCR:        crn=4  crm=4 op2=0  → cpu.fpcr
-            //   FPSR:        crn=4  crm=4 op2=1  → cpu.fpsr
             int d = alloc_reg_for(inst.dest, RAX);
             int32_t off = -1;
+            uint64_t imm_val = 0;
+            bool use_imm = false;
             if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
                 off = 808;  // TPIDR_EL0
             } else if (op1 == 3 && crn == 13 && crm == 0 && op2 == 3) {
                 off = 816;  // TPIDRRO_EL0
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
-                // NZCV — fall back to interpreter (flag materialization
-                // is too expensive for the common case).
-                emit_call_interp(inst.arm_pc, false);
-                return false;
+                // NZCV — materialize flags from host to pstate, then load.
+                if (flags_in_host_) {
+                    emit_materialize_flags(flags_from_sub_);
+                    flags_in_host_ = false;
+                    // Drop cache mappings for RAX/RCX/RDX (clobbered by materialize).
+                    invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
+                }
+                off = PSTATE_OFF;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
                 off = FPCR_OFF;  // FPCR
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
                 off = FPSR_OFF;  // FPSR
+            } else if (op1 == 3 && crn == 0 && crm == 0 && op2 == 1) {
+                imm_val = 0x8444C004; use_imm = true;  // CTR_EL0
+            } else if (op1 == 3 && crn == 0 && crm == 0 && op2 == 7) {
+                imm_val = (1u << 4); use_imm = true;  // DCZID_EL0 (no DC ZVA)
+            } else if (op1 == 3 && crn == 0 && crm == 0 && op2 == 0) {
+                imm_val = 0x410FD080; use_imm = true;  // MIDR_EL1 (Cortex-A72)
+            } else if (op1 == 3 && crn == 0 && crm == 0 && op2 == 5) {
+                imm_val = 0x10110222; use_imm = true;  // MVFR0_EL1
+            } else if (op1 == 3 && crn == 0 && crm == 0 && op2 == 6) {
+                imm_val = 0x12122211; use_imm = true;  // MVFR1_EL1
+            } else if (op1 == 3 && crn == 0 && crm == 2 && op2 == 0) {
+                imm_val = 0x00000022; use_imm = true;  // ID_AA64PFR0_EL1
+            } else if (op1 == 3 && crn == 0 && crm == 2 && op2 == 2) {
+                imm_val = 0x00000000; use_imm = true;  // ID_AA64MMFR0_EL1
+            } else if (op1 == 3 && crn == 0 && crm == 2 && op2 == 4) {
+                imm_val = 0x00000000; use_imm = true;  // ID_AA64ISAR0_EL1
             }
             if (off >= 0) {
                 emit_load(d, CPU_REG, off);
+            } else if (use_imm) {
+                if (imm_val <= 0xFFFFFFFFULL) {
+                    emit_mov_imm32_zext(d, static_cast<uint32_t>(imm_val));
+                } else {
+                    emit_mov_imm64(d, imm_val);
+                }
             } else {
-                // Unknown system register — return 0 (matching the
-                // interpreter's behavior). This is much faster than
-                // falling back to CALL_INTERP, which flushes the entire
-                // vreg cache. Musl probes several ID registers during
-                // startup (CTR_EL0, DCZID_EL0, MIDR_EL1, MVFR*, etc.)
-                // and each CALL_INTERP would invalidate all cached vregs.
+                // Unknown system register — return 0.
                 emit_byte(rex(true, false, false, d >= 8));
                 emit_byte(0x31); emit_byte(modrm(3, d & 7, d & 7));  // xor d, d
             }

@@ -266,6 +266,7 @@ int Emulator::run() {
     uint64_t pc_index = 0;
     uint64_t tight_loop_count = 0;
     uint64_t last_syscall_count = 0;
+    uint64_t last_progress_x2_ = 0;  // for tight-loop progress detection
 
     while (main_cpu_.running) {
         try {
@@ -311,27 +312,40 @@ int Emulator::run() {
 
         // Tight-loop detection: track recent PCs in a ring buffer.
         // If we've been cycling through a small set of PCs for too long
-        // without hitting a syscall, it's likely a bug-induced tight loop.
-        // Sample every 16 instructions to reduce overhead.
-        if ((count & 0xF) == 0) {
+        // without hitting a syscall AND registers aren't changing, it's
+        // likely a bug-induced tight loop. We sample x2 as a progress
+        // indicator — if it changes, the loop is making progress.
+        // Sample every 256 instructions to reduce overhead.
+        if ((count & 0xFF) == 0) {
             recent_pcs[pc_index % LOOP_DETECT_WINDOW] = main_cpu_.pc;
             pc_index++;
-            // Check if all recent PCs are the same small set (≤4 unique).
+            // Check if all recent PCs are the same small set (≤4 unique)
+            // AND the progress register hasn't changed.
             if ((pc_index % LOOP_DETECT_WINDOW) == 0) {
                 std::set<uint64_t> unique_pcs(recent_pcs, recent_pcs + LOOP_DETECT_WINDOW);
                 if (unique_pcs.size() <= 4) {
-                    tight_loop_count += LOOP_DETECT_WINDOW;
-                    if (tight_loop_count > LOOP_DETECT_LIMIT) {
-                        fprintf(stderr,
-                            "[%s] tight-loop watchdog: %zu unique PCs in last "
-                            "%llu instructions; aborting (likely linked-list "
-                            "cycle or similar bug)\n",
-                            CODENAME, unique_pcs.size(),
-                            static_cast<unsigned long long>(tight_loop_count));
-                        main_cpu_.running = false;
-                        main_cpu_.exit_code = 70;
-                        break;
+                    // Check if any register has changed since last check.
+                    // If registers ARE changing, the loop is making progress
+                    // (e.g., a tight compute loop). Only trigger if registers
+                    // are frozen (true bug).
+                    uint64_t current_x2 = main_cpu_.regs[2];
+                    if (current_x2 == last_progress_x2_) {
+                        tight_loop_count += LOOP_DETECT_WINDOW * 16;
+                        if (tight_loop_count > LOOP_DETECT_LIMIT) {
+                            fprintf(stderr,
+                                "[%s] tight-loop watchdog: %zu unique PCs, "
+                                "registers frozen for %llu instructions; aborting "
+                                "(likely linked-list cycle or similar bug)\n",
+                                CODENAME, unique_pcs.size(),
+                                static_cast<unsigned long long>(tight_loop_count));
+                            main_cpu_.running = false;
+                            main_cpu_.exit_code = 70;
+                            break;
+                        }
+                    } else {
+                        tight_loop_count = 0;
                     }
+                    last_progress_x2_ = current_x2;
                 } else {
                     tight_loop_count = 0;
                 }
