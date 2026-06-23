@@ -2289,14 +2289,22 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // break the forward-chain mechanism. Instead, we set
     // frameless_compatible based on whether the block's LAST op was a
     // back-edge branch (which we track separately).
-    // Simpler heuristic: always set frameless_compatible=true. The
-    // emit_frameless_back_edge caller checks the target's compatibility
-    // by looking at whether body_off is valid (non-zero). Since we always
-    // set body_off, all blocks are eligible. The safety is ensured by
-    // the caller flushing all dirty arch vregs + materializing flags
-    // before the frameless jump, so the target block's body sees a
-    // consistent cpu.regs[]/pstate state regardless of stack frame.
-    entry.frameless_compatible = true;
+    // (v1.4.0-beta.1 fixup): frameless back-edge chaining is fundamentally
+    // unsafe because the target block's body uses stack slots sized for
+    // the TARGET's max_vreg, not the source's. When block A's back-edge
+    // jumps directly to block B's body, B's stack slot accesses go beyond
+    // A's stack frame (corrupting the caller) or overlap with A's frame
+    // (corrupting A's vregs). The "flush arch vregs + materialize flags"
+    // dance only ensures cpu.regs[]/pstate consistency — it does NOT
+    // synchronize the stack frame layout. This caused toybox wc to
+    // produce huge bogus output followed by std::bad_alloc.
+    //
+    // Until the allocator is reworked to use a SHARED stack frame across
+    // all blocks (or to size each block's frame to the global max_vreg),
+    // we disable frameless back-edge chaining entirely. The dispatch
+    // overhead is small (one ret + one C call per loop iteration), and
+    // the alternative — silent corruption — is much worse.
+    entry.frameless_compatible = false;
     blocks_[start_pc] = entry;
     blocks_translated++;
 
