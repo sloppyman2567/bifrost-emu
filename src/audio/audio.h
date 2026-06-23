@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,7 @@ private:
     uint8_t sample_size_ = 2;  // 16-bit
     int fd_ = -1;              // raw PCM output fd (-1 if none)
     std::vector<uint8_t> buffer_;  // accumulated PCM data for WAV dump
+    std::mutex mu_;            // protects buffer_, channels_, sample_rate_
 };
 
 } // namespace arm64emu

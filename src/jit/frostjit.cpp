@@ -791,11 +791,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Patch jcc to skip over the 3-byte mov.
             patch_jcc_rel8(jcc_off, 3);
 
-            // Store RDX to dest.
+            // Store RDX to dest, then cache it in RDX.
             store_reg_to_vreg(inst.dest, RDX);
-            vreg_home_[inst.dest] = RDX;
-            reg_vreg_[RDX] = inst.dest;
-            vreg_dirty_[inst.dest] = true;
+            set_vreg_reg(inst.dest, RDX);
             return false;
         }
 

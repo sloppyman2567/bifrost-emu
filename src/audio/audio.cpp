@@ -56,18 +56,24 @@ void Audio::close() {
 
 ssize_t Audio::write(const uint8_t* data, size_t len) {
     if (!opened_) return -1;
+    std::lock_guard<std::mutex> lock(mu_);
 
     // Buffer the data for potential WAV dump.
     buffer_.insert(buffer_.end(), data, data + len);
 
     // If we have a real audio device, write to it (non-blocking).
+    // We always report 'len' bytes written so the guest doesn't retry
+    // the same bytes (which would duplicate them in buffer_). The WAV
+    // dump already has the full data; partial writes to /dev/dsp just
+    // drop samples in the non-blocking case.
     if (fd_ >= 0) {
         ssize_t written = ::write(fd_, data, len);
-        if (written < 0) written = 0;  // would block — buffer it
-        return written;
+        if (written < 0) {
+            // EAGAIN/EWOULDBLOCK — drop for real-time, keep in buffer.
+        }
+        // Report full write so guest doesn't re-send partial data.
     }
 
-    // No real device — pretend we wrote everything (buffered in memory).
     return static_cast<ssize_t>(len);
 }
 
@@ -79,44 +85,38 @@ ssize_t Audio::read(uint8_t* buf, size_t len) {
 }
 
 int Audio::ioctl(uint32_t cmd, uint64_t arg) {
-    // Forward to the real OSS device if we have one.
-    if (fd_ >= 0) {
-        return ::ioctl(fd_, cmd, reinterpret_cast<void*>(arg));
-    }
-    // Headless: return sensible defaults for common queries.
+    std::lock_guard<std::mutex> lock(mu_);
+    // Headless: handle common OSS ioctls by updating internal state.
+    // We do NOT forward `arg` as a host pointer — it's a guest address.
+    // The caller (ioctls.cpp) is responsible for marshaling pointer
+    // arguments through host-side buffers if needed.
     switch (cmd) {
-        case SNDCTL_DSP_GETFMTS: {
-            int* p = reinterpret_cast<int*>(arg);
-            if (p) *p = AFMT_S16_NE;
+        case SNDCTL_DSP_GETFMTS:
+            // arg would be int* in guest memory; caller handles marshaling.
+            return 0;  // AFMT_S16_NE available
+        case SNDCTL_DSP_SETFMT:
+            // arg is the format value (not a pointer for SETFMT)
+            if (static_cast<int>(arg) == AFMT_S16_NE) return 0;
+            return -EINVAL;
+        case SNDCTL_DSP_CHANNELS:
+            channels_ = static_cast<uint8_t>(static_cast<int>(arg));
             return 0;
-        }
-        case SNDCTL_DSP_SETFMT: {
-            int* p = reinterpret_cast<int*>(arg);
-            if (p && *p == AFMT_S16_NE) return 0;
-            return -EINVAL;
-        }
-        case SNDCTL_DSP_CHANNELS: {
-            int* p = reinterpret_cast<int*>(arg);
-            if (p) {
-                channels_ = static_cast<uint8_t>(*p);
-                return 0;
-            }
-            return -EINVAL;
-        }
-        case SNDCTL_DSP_SPEED: {
-            int* p = reinterpret_cast<int*>(arg);
-            if (p) {
-                sample_rate_ = static_cast<uint32_t>(*p);
-                return 0;
-            }
-            return -EINVAL;
-        }
+        case SNDCTL_DSP_SPEED:
+            sample_rate_ = static_cast<uint32_t>(static_cast<int>(arg));
+            return 0;
         default:
+            // If we have a real device, forward the ioctl with the raw
+            // arg value. This is safe for integer-arg ioctls; pointer-arg
+            // ioctls need marshaling (not yet implemented).
+            if (fd_ >= 0) {
+                return ::ioctl(fd_, cmd, arg);
+            }
             return -ENOSYS;
     }
 }
 
 bool Audio::dump_to_wav(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (buffer_.empty()) return false;
 
     FILE* f = fopen(path.c_str(), "wb");

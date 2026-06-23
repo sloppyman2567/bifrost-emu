@@ -221,7 +221,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t sec = mem_.load<uint64_t>(a2);
                 uint64_t nsec = mem_.load<uint64_t>(a2 + 8);
                 if (sec == 0 && nsec == 0) timeout_ms = 0;
-                else timeout_ms = static_cast<int>(sec * 1000 + nsec / 1000000);
+                else { uint64_t ms = (sec > 2000000ULL) ? 2000000000ULL : sec * 1000; ms += nsec / 1000000; timeout_ms = (ms > 2000000000ULL) ? 2000000000 : static_cast<int>(ms); }
             }
             int r = ::poll(pfds.data(), nfds, timeout_ms);
             for (int i = 0; i < nfds; i++) {
@@ -458,10 +458,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // initialize via this syscall; returning the requested
             // bytes sets state->cap > 0.
             if (a1 == 0 || a0 == 0) { ret_host(0); return 0; }
-            std::vector<uint8_t> tmp(a1);
+            // Cap at 256 bytes to prevent huge allocations — the kernel
+            // itself caps getrandom at 256 per call for GRND_NONBLOCK.
+            size_t len = a1;
+            if (len > 256) len = 256;
+            std::vector<uint8_t> tmp(len);
             FILE* ur = fopen("/dev/urandom", "rb");
             if (!ur) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; }
-            size_t got = fread(tmp.data(), 1, a1, ur);
+            size_t got = fread(tmp.data(), 1, len, ur);
             fclose(ur);
             if (got == 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EIO))); return 0; }
             mem_.write(a0, tmp.data(), got);
@@ -536,7 +540,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint64_t sec  = mem_.load<uint64_t>(a2);
                 uint64_t nsec = mem_.load<uint64_t>(a2 + 8);
                 if (sec == 0 && nsec == 0) timeout_ms = 0;
-                else timeout_ms = static_cast<int>(sec * 1000 + nsec / 1000000);
+                else { uint64_t ms = (sec > 2000000ULL) ? 2000000000ULL : sec * 1000; ms += nsec / 1000000; timeout_ms = (ms > 2000000000ULL) ? 2000000000 : static_cast<int>(ms); }
             }
             int r = ::poll(pfds.data(), nfds, timeout_ms);
             for (int i = 0; i < nfds; i++) {
@@ -552,6 +556,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 86: { // timerfd_settime(fd, flags, new, old) — aarch64 syscall 86
+            if (!a2) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
             struct itimerspec newv;
             struct itimerspec oldv;
             newv.it_interval.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a2));
@@ -595,9 +600,20 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         // ── signalfd4 (syscall 74) ────────────────────────────────────
-        case 74: { // signalfd4
-            int fd = ::signalfd(static_cast<int>(a0),
-                                reinterpret_cast<const sigset_t*>(a1),
+        case 74: { // signalfd4(fd, mask, sizemask, flags)
+            // Copy sigset_t from guest memory — a1 is a guest address,
+            // NOT a host pointer. Using it directly would read garbage
+            // from the host process's memory.
+            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            sigset_t host_mask;
+            memset(&host_mask, 0, sizeof(host_mask));
+            try {
+                mem_.read(a1, &host_mask, sizeof(host_mask));
+            } catch (...) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
+                return 0;
+            }
+            int fd = ::signalfd(static_cast<int>(a0), &host_mask,
                                 static_cast<int>(a3));
             if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
             ret_host(static_cast<uint64_t>(fd));
