@@ -1743,7 +1743,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);
             int d = alloc_reg_for(inst.dest, RAX);
             if (d != RAX) emit_mov_reg(d, RAX);
-            store_reg_to_vreg(inst.dest, d);
+            set_vreg_reg(inst.dest, d);  // cache the result (like UDIV)
             return false;
         }
 
@@ -1751,9 +1751,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::MRS: {
             // inst.imm encodes the system register (op1/crn/crm/op2/op0).
             // We handle TPIDR_EL0, TPIDRRO_EL0, FPCR, FPSR natively.
-            // NZCV and unknown registers fall back to interpreter (NZCV
-            // requires flag materialization which is expensive in tight
-            // loops; unknown registers return 0 like the interpreter).
+            // NZCV falls back to interpreter; unknown registers return 0.
+            clobber_flags();  // xor d,d and emit_load don't preserve flags
             uint64_t sys = inst.imm;
             uint8_t op1 = (sys >> 16) & 0x7;
             uint8_t crn = (sys >> 12) & 0xF;
