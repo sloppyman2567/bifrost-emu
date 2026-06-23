@@ -57,6 +57,7 @@ public:
         uint64_t phent;
         uint64_t end_addr;   // highest mapped addr (for brk baseline)
         bool     has_lse;    // ELF declared AArch64 LSE atomic feature
+        std::string interp;  // PT_INTERP path (dynamic linker), empty if static
     };
 
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data);
@@ -130,6 +131,8 @@ private:
     uint64_t phdr_addr_ = 0;
     uint64_t phnum_ = 0;
     uint64_t phent_ = 0;
+    uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
+    uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;

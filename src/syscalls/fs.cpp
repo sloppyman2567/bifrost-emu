@@ -28,9 +28,12 @@
 #include <sys/ioctl.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sys/sysmacros.h>
 
 namespace arm64emu {
 
@@ -120,14 +123,32 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         // ── fstat — VFS-aware ─────────────────────────────────────────
-        case 80: { // fstat
+        case 80: { // fstat(fd, statbuf) — AArch64 80
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             struct stat st{};
             int r = node->fstat(&st);
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
-            // Write the stat struct to guest memory at a1.
-            mem_.write(a1, &st, sizeof(st));
+            // Build AArch64 struct stat (128 bytes) — same layout as fstatat.
+            uint8_t buf[128] = {0};
+            uint64_t* p = reinterpret_cast<uint64_t*>(buf);
+            p[0] = st.st_dev;
+            p[1] = st.st_ino;
+            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
+            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
+            reinterpret_cast<uint32_t*>(&p[3])[0] = st.st_uid;
+            reinterpret_cast<uint32_t*>(&p[3])[1] = st.st_gid;
+            p[4] = st.st_rdev;
+            p[6] = st.st_size;
+            reinterpret_cast<uint32_t*>(&p[7])[0] = st.st_blksize;
+            p[8] = st.st_blocks;
+            p[9]  = st.st_atim.tv_sec;
+            p[10] = st.st_atim.tv_nsec;
+            p[11] = st.st_mtim.tv_sec;
+            p[12] = st.st_mtim.tv_nsec;
+            p[13] = st.st_ctim.tv_sec;
+            p[14] = st.st_ctim.tv_nsec;
+            mem_.write(a1, buf, 128);
             ret_host(0);
             return 0;
         }
@@ -232,97 +253,148 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 61: { // getdents64
-            // Return a small fake directory listing.
-            ret_host(0);
+        case 61: { // getdents64(fd, dirent_buf, count)
+            // Read real directory entries from the host and convert to
+            // the AArch64 linux_dirent64 layout.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { ret_host(-EBADF); return 0; }
+            // Use the host fd directly if it's a HostVNode.
+            int host_fd = node->host_fd();
+            if (host_fd < 0) { ret_host(-ENOTDIR); return 0; }
+            // Call the host getdents64.
+            char host_buf[8192];
+            int n = ::syscall(SYS_getdents64, host_fd, host_buf, sizeof(host_buf));
+            if (n < 0) { ret_host(-errno); return 0; }
+            if (n > static_cast<int>(a2)) n = a2;  // truncate to count
+            mem_.write(a1, host_buf, n);
+            ret_host(n);
             return 0;
         }
 
         case 291: { // statx (Linux 4.11+, glibc uses it for fstatat fallback)
             // statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
-            // struct statx is 256 bytes. We zero-fill it and return success.
-            // For stdin/stdout/stderr or any fd, return a generic file type.
-            uint8_t buf[256] = {0};
-            // Set stx_mask = STATX_BASIC_STATS (0x7FF) so caller sees "all fields valid"
-            // Layout: stx_mask at offset 0x00 (4 bytes)
-            //         stx_blksize at 0x04 (4)
-            //         stx_attributes at 0x08 (8)
-            //         stx_nlink at 0x10 (4)
-            //         stx_uid at 0x14 (4)
-            //         stx_gid at 0x18 (4)
-            //         stx_mode at 0x1C (2) + padding (2)
-            //         stx_ino at 0x20 (8)
-            //         stx_size at 0x28 (8)
-            //         stx_blocks at 0x30 (8)
-            //         stx_attributes_mask at 0x38 (8)
-            //         ... access/modification/change/birth times ...
-            uint32_t mask = 0x7FF; // STATX_BASIC_STATS
-            memcpy(buf + 0, &mask, 4);
-            uint32_t blksize = 4096;
+            // Do a real stat on the (remapped) host path and convert to statx.
+            std::string path = VFS::read_path(mem_, a1);
+            std::string host_path = VFS::remap_path(path);
+            struct stat st;
+            int r;
+            int host_flags = static_cast<int>(a2);
+            // AT_SYMLINK_NOFOLLOW → don't follow symlinks
+            // AT_EMPTY_PATH → stat the fd itself
+            if (static_cast<int>(a0) == AT_FDCWD || (host_path.size() > 0 && host_path[0] == '/')) {
+                r = ::fstatat(AT_FDCWD, host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
+            } else {
+                r = ::fstatat(static_cast<int>(a0), host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
+            }
+            if (r < 0) { ret_host(-errno); return 0; }
+            // Build statx structure (256 bytes).
+            uint8_t buf[256];
+            memset(buf, 0, sizeof(buf));
+            uint32_t stx_mask = 0x7FF; // STATX_BASIC_STATS
+            memcpy(buf + 0, &stx_mask, 4);
+            uint32_t blksize = st.st_blksize;
             memcpy(buf + 4, &blksize, 4);
-            uint32_t nlink = 1;
+            uint64_t attr = 0;
+            memcpy(buf + 8, &attr, 8);
+            uint32_t nlink = st.st_nlink;
             memcpy(buf + 0x10, &nlink, 4);
-            uint32_t uid = 0, gid = 0;
+            uint32_t uid = st.st_uid, gid = st.st_gid;
             memcpy(buf + 0x14, &uid, 4);
             memcpy(buf + 0x18, &gid, 4);
-            uint16_t mode = 0100644; // regular file
+            uint16_t mode = static_cast<uint16_t>(st.st_mode);
             memcpy(buf + 0x1C, &mode, 2);
+            uint16_t spare = 0;
+            memcpy(buf + 0x1E, &spare, 2);
+            uint64_t ino = st.st_ino;
+            memcpy(buf + 0x20, &ino, 8);
+            uint64_t size = st.st_size;
+            memcpy(buf + 0x28, &size, 8);
+            uint64_t blocks = st.st_blocks;
+            memcpy(buf + 0x30, &blocks, 8);
+            uint64_t attr_mask = 0;
+            memcpy(buf + 0x38, &attr_mask, 8);
+            uint64_t atime_sec = st.st_atim.tv_sec;
+            uint32_t atime_nsec = st.st_atim.tv_nsec;
+            memcpy(buf + 0x40, &atime_sec, 8);
+            memcpy(buf + 0x48, &atime_nsec, 4);
+            uint64_t btime_sec = 0; uint32_t btime_nsec = 0;
+            memcpy(buf + 0x4C, &btime_sec, 8);
+            memcpy(buf + 0x54, &btime_nsec, 4);
+            uint64_t ctime_sec = st.st_ctim.tv_sec;
+            uint32_t ctime_nsec = st.st_ctim.tv_nsec;
+            memcpy(buf + 0x58, &ctime_sec, 8);
+            memcpy(buf + 0x60, &ctime_nsec, 4);
+            uint64_t mtime_sec = st.st_mtim.tv_sec;
+            uint32_t mtime_nsec = st.st_mtim.tv_nsec;
+            memcpy(buf + 0x64, &mtime_sec, 8);
+            memcpy(buf + 0x6C, &mtime_nsec, 4);
+            uint32_t rdev_major = major(st.st_rdev), rdev_minor = minor(st.st_rdev);
+            memcpy(buf + 0x70, &rdev_major, 4);
+            memcpy(buf + 0x74, &rdev_minor, 4);
+            uint32_t dev_major = major(st.st_dev), dev_minor = minor(st.st_dev);
+            memcpy(buf + 0x78, &dev_major, 4);
+            memcpy(buf + 0x7C, &dev_minor, 4);
             mem_.write(a4, buf, 256);
             ret_host(0);
             return 0;
         }
 
         case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
-            // do a real stat on the (mapped) host path
-            // so guest programs see correct file sizes, types, and
-            // permissions. Previously this always returned a fake
-            // "regular file, 0 bytes" stat, which broke programs that
-            // check file sizes before reading.
+            // Do a real stat on the (mapped) host path so guest programs
+            // see correct file sizes, types, and permissions.
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
             struct stat st;
             int r;
-            // If dirfd is AT_FDCWD (-100) or the path is absolute, use
-            // fstatat on the host. Otherwise fall back to the fake stat.
             if (static_cast<int>(a0) == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
                 r = ::fstatat(AT_FDCWD, path.c_str(), &st, static_cast<int>(a3));
             } else {
                 r = ::fstatat(static_cast<int>(a0), path.c_str(), &st, static_cast<int>(a3));
             }
             if (r < 0) {
-                // Fall back to fake stat on error (keeps old behavior
-                // for paths that don't exist on the host).
-                uint8_t buf[128] = {0};
-                uint32_t mode = 0100644, nlink = 1;
-                uint64_t blksize = 4096;
-                memcpy(buf + 16, &mode, 4);
-                memcpy(buf + 20, &nlink, 4);
-                memcpy(buf + 0x38, &blksize, 8);
-                mem_.write(a2, buf, 128);
-                ret_host(0);
+                ret_host(-errno);
                 return 0;
             }
             // Build the AArch64 struct stat (128 bytes):
-            //   dev64, ino64, mode32, nlink32, uid32|gid32, pad, rdev64,
-            //   size64, blksize64, blocks64, atime, atime_nsec,
-            //   mtime, mtime_nsec, ctime, ctime_nsec
+            //   offset  0: st_dev     (8)
+            //   offset  8: st_ino     (8)
+            //   offset 16: st_mode    (4)
+            //   offset 20: st_nlink   (4)
+            //   offset 24: st_uid     (4)
+            //   offset 28: st_gid     (4)
+            //   offset 32: st_rdev    (8)
+            //   offset 40: __pad1     (8) = 0
+            //   offset 48: st_size    (8)
+            //   offset 56: st_blksize (4)
+            //   offset 60: __pad2     (4) = 0
+            //   offset 64: st_blocks  (8)
+            //   offset 72: st_atime   (8)
+            //   offset 80: st_atime_nsec (8)
+            //   offset 88: st_mtime   (8)
+            //   offset 96: st_mtime_nsec (8)
+            //   offset 104: st_ctime  (8)
+            //   offset 112: st_ctime_nsec (8)
+            //   offset 120: __unused4 (4)
+            //   offset 124: __unused5 (4)
             uint8_t buf[128] = {0};
             uint64_t* p = reinterpret_cast<uint64_t*>(buf);
-            p[0] = st.st_dev;
-            p[1] = st.st_ino;
-            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
-            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
-            p[3] = st.st_uid | (static_cast<uint64_t>(st.st_gid) << 32);
-            p[4] = 0;
-            p[5] = st.st_rdev;
-            p[6] = st.st_size;
-            p[7] = st.st_blksize;
-            p[8] = st.st_blocks;
-            p[9]  = st.st_atim.tv_sec;
-            p[10] = st.st_atim.tv_nsec;
-            p[11] = st.st_mtim.tv_sec;
-            p[12] = st.st_mtim.tv_nsec;
-            p[13] = st.st_ctim.tv_sec;
-            p[14] = st.st_ctim.tv_nsec;
+            p[0] = st.st_dev;                                         // 0
+            p[1] = st.st_ino;                                         // 8
+            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;       // 16
+            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;      // 20
+            reinterpret_cast<uint32_t*>(&p[3])[0] = st.st_uid;        // 24
+            reinterpret_cast<uint32_t*>(&p[3])[1] = st.st_gid;        // 28
+            p[4] = st.st_rdev;                                        // 32
+            // p[5] = 0 (__pad1, already zeroed)                       // 40
+            p[6] = st.st_size;                                        // 48
+            reinterpret_cast<uint32_t*>(&p[7])[0] = st.st_blksize;    // 56
+            // __pad2 at 60 already zeroed
+            p[8] = st.st_blocks;                                      // 64
+            p[9]  = st.st_atim.tv_sec;                                // 72
+            p[10] = st.st_atim.tv_nsec;                               // 80
+            p[11] = st.st_mtim.tv_sec;                                // 88
+            p[12] = st.st_mtim.tv_nsec;                               // 96
+            p[13] = st.st_ctim.tv_sec;                                // 104
+            p[14] = st.st_ctim.tv_nsec;                               // 112
             mem_.write(a2, buf, 128);
             ret_host(0);
             return 0;
@@ -399,14 +471,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 14: { // fchdir(fd) — AArch64 14
+        case 50: { // fchdir(fd) — AArch64 50
             int r = ::fchdir(static_cast<int>(a0));
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 50: { // chdir(path) — AArch64 50
+        case 49: { // chdir(path) — AArch64 49
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::chdir(path.c_str());
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }

@@ -76,6 +76,19 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     info.end_addr  = 0;
     info.has_lse   = false;
 
+    // Detect PT_INTERP (dynamic linker path).
+    for (auto& h : phdrs) {
+        if (h.p_type == 3) {  // PT_INTERP
+            if (h.p_offset + h.p_filesz <= data.size()) {
+                info.interp.assign(reinterpret_cast<const char*>(data.data() + h.p_offset), h.p_filesz);
+                // Strip trailing NUL.
+                if (!info.interp.empty() && info.interp.back() == '\0')
+                    info.interp.pop_back();
+            }
+            break;
+        }
+    }
+
     for (auto& h : phdrs) {
         if (h.p_type == 6) {  // PT_PHDR
             info.phdr_addr = h.p_vaddr;

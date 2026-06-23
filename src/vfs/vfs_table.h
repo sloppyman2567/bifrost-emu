@@ -26,7 +26,7 @@ public:
     bool    seekable() const override { return true; }
     int     flags() const override { return flags_; }
 
-    int host_fd() const { return fd_; }
+    int host_fd() const override { return fd_; }
 
 private:
     int fd_;
@@ -53,7 +53,7 @@ public:
     bool    seekable() const override { return true; }
     int     flags() const override { return flags_; }
 
-    int host_fd() const { return fd_; }
+    int host_fd() const override { return fd_; }
 
 private:
     MemfdVNode(int fd, int flags) : fd_(fd), flags_(flags) {}

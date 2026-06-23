@@ -153,3 +153,54 @@ Stage Summary:
 - GLOBAL_BLOCK_LIMIT raised 20x (50M → 1B) for soft-float workloads.
 - 15/15 interp tests pass, 12/12 non-FP JIT tests pass.
 - Ready for commit + repackage as bifrost-emu-1.4.0-beta.3.
+
+---
+Task ID: 3
+Agent: main (Super Z)
+Task: Fix IR/JIT issues, improve compatibility, get SDL2, fix toybox sh,
+      add dynamic linker support, optimize performance, commit & repackage.
+
+Work Log:
+- Downloaded SDL2 dev package and dependencies via apt-get download.
+- Added toybox-aarch64 as ctest_real/toybox for testing.
+- Fixed getdents64 (syscall 61): was returning 0 (empty listing), now
+  passes through real host directory entries via SYS_getdents64.
+- Fixed fstat (syscall 80): was writing host struct stat layout (144 bytes,
+  wrong offsets), now builds correct AArch64 struct stat (128 bytes with
+  proper field offsets).
+- Fixed statx (syscall 291): was returning fake "regular file" mode, now
+  does real fstatat and converts to statx structure with correct fields.
+- Fixed fstatat (syscall 79): rdev was at offset 40 (p[5]), moved to
+  correct offset 32 (p[4]). Also removed fake-stat fallback on error
+  (now returns -errno).
+- Fixed chdir/fchdir syscall numbers: chdir was case 50 (wrong, that's
+  fchdir on AArch64), changed to case 49. fchdir was case 14 (wrong,
+  that's rt_sigprocmask), changed to case 50.
+- Added BIFROST_SYSCALL_TRACE env var for debugging syscall dispatch.
+- Added VNode::host_fd() virtual method for getdents64 passthrough.
+- Added tight-loop watchdog: detects multi-PC tight loops (≤4 unique PCs
+  in 16-instruction window) that run for >5M instructions without hitting
+  a syscall. Catches the toybox sh linked-list cycle hang.
+- Added PT_INTERP (dynamic linker) detection to ELF loader.
+- Added dynamic linker loading: if PT_INTERP is present, loads the
+  interpreter ELF at 0x4000000000, sets entry_ to interpreter's entry,
+  passes original entry via AT_ENTRY and interpreter base via AT_BASE.
+- Searched for interpreter in multiple paths: direct, /usr/aarch64-linux-gnu,
+  /tools/aarch64-linux-musl-cross.
+
+Testing:
+  - All 15 interp-mode tests pass (ctest + ctest_real).
+  - All 12 non-FP JIT tests pass.
+  - Toybox commands now working: ls, cat, wc, head, sort, echo, env, id,
+    true, false, printf (format only), hostname, uname, date (partial).
+  - Toybox sh -c still hangs (linked-list cycle) but tight-loop watchdog
+    now aborts after 5M instructions instead of hanging forever.
+  - SDL2 build attempted but blocked by missing transitive deps
+    (libdecor, gbm, drm, X11) — headless build works fine.
+
+Stage Summary:
+- 5 syscall bugs fixed (getdents64, fstat, statx, fstatat, chdir/fchdir).
+- Tight-loop watchdog prevents infinite hangs on bug-induced cycles.
+- Dynamic linker support added (PT_INTERP detection + loading).
+- Toybox ls/cat/wc/head/sort/echo/env/id now work correctly.
+- Ready for commit + repackage.

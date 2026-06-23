@@ -28,6 +28,7 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -60,11 +61,73 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     fclose(f);
     auto info = ElfLoader::load(mem_, data);
     entry_ = info.entry;
+    prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
     phdr_addr_ = info.phdr_addr;
     phnum_ = info.phnum;
     phent_ = info.phent;
     has_lse_ = info.has_lse;
+    interp_base_ = 0;
+
+    // If the binary has a PT_INTERP (dynamic linker), load it.
+    // The dynamic linker's entry point becomes the real entry point;
+    // the binary's entry is passed via AT_ENTRY in auxv.
+    uint64_t interp_base = 0;
+    if (!info.interp.empty()) {
+        // Try to open the interpreter. First check the host path directly,
+        // then try common aarch64 multiarch paths.
+        std::vector<std::string> interp_paths = {
+            info.interp,
+            "/usr/aarch64-linux-gnu" + info.interp,
+            "/tools/aarch64-linux-musl-cross/aarch64-linux-musl" + info.interp,
+        };
+        FILE* ifile = nullptr;
+        std::string found_path;
+        for (auto& ip : interp_paths) {
+            ifile = fopen(ip.c_str(), "rb");
+            if (ifile) { found_path = ip; break; }
+        }
+        if (ifile) {
+            fseek(ifile, 0, SEEK_END);
+            long isz = ftell(ifile);
+            fseek(ifile, 0, SEEK_SET);
+            std::vector<uint8_t> idata(isz);
+            fread(idata.data(), 1, isz, ifile);
+            fclose(ifile);
+            // Load the interpreter at a high address to avoid conflicts.
+            // Use 0x4000000000 (above the 16GB direct window).
+            interp_base = 0x4000000000ULL;
+            interp_base_ = interp_base;  // Save for AT_BASE in auxv.
+            if (idata.size() >= 64 && idata[0] == 0x7f && idata[1] == 'E') {
+                uint64_t i_entry, i_phoff;
+                uint16_t i_phnum, i_phentsize;
+                memcpy(&i_entry, idata.data() + 24, 8);
+                memcpy(&i_phoff, idata.data() + 32, 8);
+                memcpy(&i_phentsize, idata.data() + 54, 2);
+                memcpy(&i_phnum, idata.data() + 56, 2);
+                for (int i = 0; i < i_phnum; i++) {
+                    const uint8_t* pp = idata.data() + i_phoff + i * i_phentsize;
+                    uint32_t p_type;
+                    uint64_t p_offset, p_vaddr, p_filesz, p_memsz;
+                    memcpy(&p_type, pp + 0, 4);
+                    memcpy(&p_offset, pp + 8, 8);
+                    memcpy(&p_vaddr, pp + 16, 8);
+                    memcpy(&p_filesz, pp + 32, 8);
+                    memcpy(&p_memsz, pp + 40, 8);
+                    if (p_type != 1) continue;  // PT_LOAD
+                    uint64_t addr = interp_base + p_vaddr;
+                    mem_.map_range(addr, p_memsz);
+                    if (p_filesz > 0) {
+                        mem_.write(addr, idata.data() + p_offset, p_filesz);
+                    }
+                    uint64_t end = addr + p_memsz;
+                    if (end > end_addr_) end_addr_ = end;
+                }
+                // The entry point is the interpreter's entry (relative to interp_base).
+                entry_ = interp_base + i_entry;
+            }
+        }
+    }
 
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
@@ -147,13 +210,13 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         3, phdr_addr_,     // AT_PHDR
         4, phent_,         // AT_PHENT
         5, phnum_,         // AT_PHNUM
-        9, entry_,         // AT_ENTRY
+        9, prog_entry_,    // AT_ENTRY (original binary's entry, not interp's)
         25, random_addr,   // AT_RANDOM
         16, hwcap,         // AT_HWCAP
         26, 0,             // AT_HWCAP2 (no BTI, no PAC)
         23, 0,             // AT_SECURE (not setuid)
         31, execfn_addr,   // AT_EXECFN (program name)
-        7, 0,              // AT_BASE (0 for static binaries)
+        7, interp_base_,   // AT_BASE (interpreter load address, 0 if static)
         33, 0,             // AT_SYSINFO_EHDR (no vDSO)
         51, 0,             // AT_MINSIGSTKSZ
         0, 0,              // AT_NULL
@@ -189,9 +252,20 @@ int Emulator::run() {
     // over without making progress (a common symptom of mallocng init
     // recursion, softfloat loops, or atomic-CAS loops where STXR
     // always fails).
+    // Also detects tight multi-PC loops (e.g., a 4-instruction cycle
+    // that never exits) by tracking the set of recently-seen PCs.
     constexpr uint64_t HANG_LIMIT = 50'000'000;  // ~50M instructions
+    constexpr uint64_t LOOP_DETECT_WINDOW = 16;  // track last 16 PCs
+    constexpr uint64_t LOOP_DETECT_LIMIT = 5'000'000;  // 5M in tight loop
     uint64_t last_pc = static_cast<uint64_t>(-1);
     uint64_t same_pc_count = 0;
+    // Tight-loop detection: track PCs in a small ring buffer. If we
+    // see the same set of PCs repeat for too long without a syscall,
+    // it's a tight loop.
+    uint64_t recent_pcs[LOOP_DETECT_WINDOW] = {};
+    uint64_t pc_index = 0;
+    uint64_t tight_loop_count = 0;
+    uint64_t last_syscall_count = 0;
 
     while (main_cpu_.running) {
         try {
@@ -233,6 +307,35 @@ int Emulator::run() {
         } else {
             last_pc = main_cpu_.pc;
             same_pc_count = 0;
+        }
+
+        // Tight-loop detection: track recent PCs in a ring buffer.
+        // If we've been cycling through a small set of PCs for too long
+        // without hitting a syscall, it's likely a bug-induced tight loop.
+        // Sample every 16 instructions to reduce overhead.
+        if ((count & 0xF) == 0) {
+            recent_pcs[pc_index % LOOP_DETECT_WINDOW] = main_cpu_.pc;
+            pc_index++;
+            // Check if all recent PCs are the same small set (≤4 unique).
+            if ((pc_index % LOOP_DETECT_WINDOW) == 0) {
+                std::set<uint64_t> unique_pcs(recent_pcs, recent_pcs + LOOP_DETECT_WINDOW);
+                if (unique_pcs.size() <= 4) {
+                    tight_loop_count += LOOP_DETECT_WINDOW;
+                    if (tight_loop_count > LOOP_DETECT_LIMIT) {
+                        fprintf(stderr,
+                            "[%s] tight-loop watchdog: %zu unique PCs in last "
+                            "%llu instructions; aborting (likely linked-list "
+                            "cycle or similar bug)\n",
+                            CODENAME, unique_pcs.size(),
+                            static_cast<unsigned long long>(tight_loop_count));
+                        main_cpu_.running = false;
+                        main_cpu_.exit_code = 70;
+                        break;
+                    }
+                } else {
+                    tight_loop_count = 0;
+                }
+            }
         }
 
         // Drain the host-signal queue every ~4K instructions.

@@ -49,6 +49,8 @@ std::unique_ptr<VNode> VFS::open_host(const std::string& guest_path,
 }
 
 // ── HostVNode method implementations ───────────────────────────────────
+// host_fd() is inline in vfs_table.h
+
 ssize_t HostVNode::read(uint64_t off, void* buf, size_t n) {
     if (off != UINT64_MAX) {
         ssize_t r = ::lseek(fd_, off, SEEK_SET);

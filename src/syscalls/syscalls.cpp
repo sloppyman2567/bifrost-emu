@@ -53,6 +53,39 @@ namespace arm64emu {
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
 
+    // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
+    static bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
+    if (trace_syscalls) {
+        // Read path string for path-based syscalls (56=openat, 79=fstatat, etc.)
+        const char* name = nullptr;
+        switch (num) {
+            case 56: name = "openat"; break;
+            case 57: name = "close"; break;
+            case 63: name = "read"; break;
+            case 64: name = "write"; break;
+            case 79: name = "fstatat"; break;
+            case 61: name = "getdents64"; break;
+            case 291: name = "statx"; break;
+            case 78: name = "readlinkat"; break;
+            case 48: name = "faccessat"; break;
+            case 49: name = "chdir"; break;
+            case 50: name = "fchdir"; break;
+            case 80: name = "fstat"; break;
+            case 221: name = "execve"; break;
+            case 220: name = "clone"; break;
+            case 93: name = "exit"; break;
+            case 94: name = "exit_group"; break;
+            default: break;
+        }
+        if (name) {
+            fprintf(stderr, "[syscall] %llu %s a0=0x%llx a1=0x%llx a2=0x%llx\n",
+                    static_cast<unsigned long long>(num), name,
+                    static_cast<unsigned long long>(cpu.regs[0]),
+                    static_cast<unsigned long long>(cpu.regs[1]),
+                    static_cast<unsigned long long>(cpu.regs[2]));
+        }
+    }
+
     // Try each subsystem handler in order. The first one that handles
     // the call returns 0 (with the result already in cpu.regs[0]).
     if (syscall_fs(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;

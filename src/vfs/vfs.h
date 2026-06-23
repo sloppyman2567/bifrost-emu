@@ -73,6 +73,10 @@ public:
 
     // Hint for fcntl F_GETFL — default to O_RDWR.
     virtual int flags() const { return O_RDWR; }
+
+    // Return the host file descriptor for passthrough operations
+    // (getdents64, etc.). Returns -1 if this VNode has no host fd.
+    virtual int host_fd() const { return -1; }
 };
 
 // ── VFS: path → VNode resolver ─────────────────────────────────────────
