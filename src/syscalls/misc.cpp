@@ -622,11 +622,20 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── accept4 (syscall 88) ─────────────────────────────────────
         case 88: { // accept4(sockfd, addr, addrlen, flags)
+            // Marshal sockaddr from host to guest memory.
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
             int fd = ::accept4(static_cast<int>(a0),
-                               reinterpret_cast<struct sockaddr*>(a1),
-                               reinterpret_cast<socklen_t*>(a2),
+                               reinterpret_cast<struct sockaddr*>(&ss), &sslen,
                                static_cast<int>(a3));
             if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (a1 && a2) {
+                // Read guest addrlen, clamp to our result.
+                socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
+                if (guest_len > sslen) guest_len = sslen;
+                mem_.write(a1, &ss, guest_len);
+                mem_.store<uint32_t>(a2, guest_len);
+            }
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
@@ -651,31 +660,54 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── getsockname (syscall 206) ────────────────────────────────
         case 206: { // getsockname(sockfd, addr, addrlen)
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
             int r = ::getsockname(static_cast<int>(a0),
-                                  reinterpret_cast<struct sockaddr*>(a1),
-                                  reinterpret_cast<socklen_t*>(a2));
+                                  reinterpret_cast<struct sockaddr*>(&ss), &sslen);
             if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (a1 && a2) {
+                socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
+                if (guest_len > sslen) guest_len = sslen;
+                mem_.write(a1, &ss, guest_len);
+                mem_.store<uint32_t>(a2, guest_len);
+            }
             ret_host(0);
             return 0;
         }
 
         // ── getpeername (syscall 207) ────────────────────────────────
         case 207: { // getpeername(sockfd, addr, addrlen)
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
             int r = ::getpeername(static_cast<int>(a0),
-                                  reinterpret_cast<struct sockaddr*>(a1),
-                                  reinterpret_cast<socklen_t*>(a2));
+                                  reinterpret_cast<struct sockaddr*>(&ss), &sslen);
             if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (a1 && a2) {
+                socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
+                if (guest_len > sslen) guest_len = sslen;
+                mem_.write(a1, &ss, guest_len);
+                mem_.store<uint32_t>(a2, guest_len);
+            }
             ret_host(0);
             return 0;
         }
 
         // ── sendto (syscall 208) ─────────────────────────────────────
         case 208: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+            // Copy data buffer from guest memory.
             std::vector<uint8_t> buf(a2);
             mem_.read(a1, buf.data(), a2);
+            // Marshal dest_addr from guest memory if present.
+            struct sockaddr_storage dest_ss;
+            struct sockaddr* dest_ptr = nullptr;
+            if (a4) {
+                socklen_t addrlen = static_cast<socklen_t>(a5);
+                if (addrlen > sizeof(dest_ss)) addrlen = sizeof(dest_ss);
+                mem_.read(a4, &dest_ss, addrlen);
+                dest_ptr = reinterpret_cast<struct sockaddr*>(&dest_ss);
+            }
             ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), a2,
-                                 static_cast<int>(a3),
-                                 a4 ? reinterpret_cast<const struct sockaddr*>(a4) : nullptr,
+                                 static_cast<int>(a3), dest_ptr,
                                  static_cast<socklen_t>(a5));
             if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
             ret_host(static_cast<uint64_t>(r));
@@ -685,21 +717,117 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── recvfrom (syscall 209) ───────────────────────────────────
         case 209: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
             std::vector<uint8_t> buf(a2);
+            struct sockaddr_storage src_ss;
+            socklen_t srclen = sizeof(src_ss);
             ssize_t r = ::recvfrom(static_cast<int>(a0), buf.data(), a2,
                                    static_cast<int>(a3),
-                                   a4 ? reinterpret_cast<struct sockaddr*>(a4) : nullptr,
-                                   a5 ? reinterpret_cast<socklen_t*>(a5) : nullptr);
+                                   reinterpret_cast<struct sockaddr*>(&src_ss),
+                                   &srclen);
             if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            // Write received data back to guest buffer.
             mem_.write(a1, buf.data(), static_cast<size_t>(r));
+            // Write source address back to guest memory if requested.
+            if (a4 && a5) {
+                socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a5));
+                if (guest_len > srclen) guest_len = srclen;
+                mem_.write(a4, &src_ss, guest_len);
+                mem_.store<uint32_t>(a5, guest_len);
+            }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 
-        // ── sendmsg / recvmsg (syscall 210/211) ──────────────────────
-        // These require marshaling msghdr/iov structs from guest memory.
-        // For now, return -ENOSYS — most static binaries don't use these.
-        case 210: { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; } // sendmsg
-        case 211: { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; } // recvmsg
+        // ── sendmsg (syscall 210) ────────────────────────────────────
+        case 210: { // sendmsg(sockfd, msg, flags)
+            // Marshal msghdr + iovec from guest memory.
+            // Guest msghdr layout (AArch64):
+            //   +0:  void*     msg_name      (8 bytes)
+            //   +8:  socklen_t msg_namelen   (4 bytes)
+            //   +12: padding                  (4 bytes)
+            //   +16: struct iovec* msg_iov    (8 bytes)
+            //   +24: size_t    msg_iovlen    (8 bytes)
+            //   +32: void*     msg_control   (8 bytes)
+            //   +40: socklen_t msg_controllen (4 bytes)
+            //   +44: int       msg_flags     (4 bytes)
+            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            uint64_t msg_name = mem_.load<uint64_t>(a1);
+            uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
+            uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
+            uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
+
+            // Marshal iovec array: each entry is (void* base, size_t len).
+            if (msg_iovlen > 1024) msg_iovlen = 1024;  // sanity cap
+            std::vector<iovec> iovs(msg_iovlen);
+            std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
+            for (uint64_t i = 0; i < msg_iovlen; i++) {
+                uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
+                uint64_t len = mem_.load<uint64_t>(msg_iov + i * 16 + 8);
+                iov_bufs[i].resize(len);
+                mem_.read(base, iov_bufs[i].data(), len);
+                iovs[i].iov_base = iov_bufs[i].data();
+                iovs[i].iov_len = len;
+            }
+            // Marshal msg_name.
+            std::vector<uint8_t> name_buf;
+            if (msg_name && msg_namelen) {
+                name_buf.resize(msg_namelen);
+                mem_.read(msg_name, name_buf.data(), msg_namelen);
+            }
+            struct msghdr host_msg;
+            memset(&host_msg, 0, sizeof(host_msg));
+            host_msg.msg_name = name_buf.empty() ? nullptr : name_buf.data();
+            host_msg.msg_namelen = msg_namelen;
+            host_msg.msg_iov = iovs.data();
+            host_msg.msg_iovlen = msg_iovlen;
+            ssize_t r = ::sendmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
+
+        // ── recvmsg (syscall 211) ────────────────────────────────────
+        case 211: { // recvmsg(sockfd, msg, flags)
+            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            uint64_t msg_name = mem_.load<uint64_t>(a1);
+            uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
+            uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
+            uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
+
+            if (msg_iovlen > 1024) msg_iovlen = 1024;
+            std::vector<iovec> iovs(msg_iovlen);
+            std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
+            for (uint64_t i = 0; i < msg_iovlen; i++) {
+                uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
+                uint64_t len = mem_.load<uint64_t>(msg_iov + i * 16 + 8);
+                iov_bufs[i].resize(len);
+                iovs[i].iov_base = iov_bufs[i].data();
+                iovs[i].iov_len = len;
+            }
+            std::vector<uint8_t> name_buf;
+            if (msg_name && msg_namelen) name_buf.resize(msg_namelen);
+            struct msghdr host_msg;
+            memset(&host_msg, 0, sizeof(host_msg));
+            host_msg.msg_name = name_buf.empty() ? nullptr : name_buf.data();
+            host_msg.msg_namelen = msg_namelen;
+            host_msg.msg_iov = iovs.data();
+            host_msg.msg_iovlen = msg_iovlen;
+            ssize_t r = ::recvmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            // Write received data back to guest iovec buffers.
+            for (uint64_t i = 0; i < msg_iovlen; i++) {
+                uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
+                mem_.write(base, iov_bufs[i].data(), iov_bufs[i].size());
+            }
+            // Write source address back.
+            if (msg_name && msg_namelen) {
+                socklen_t actual = static_cast<socklen_t>(host_msg.msg_namelen);
+                if (actual > msg_namelen) actual = msg_namelen;
+                mem_.write(msg_name, name_buf.data(), actual);
+                mem_.store<uint32_t>(a1 + 8, actual);
+            }
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
 
         // ── fadvise64 (syscall 223) ──────────────────────────────────
         case 223: { // fadvise64(fd, offset, len, advice)
