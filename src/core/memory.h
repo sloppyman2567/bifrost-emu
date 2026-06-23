@@ -129,7 +129,7 @@ public:
     }
 
 private:
-    // v1.4.0-beta.3: Use shared_mutex for reader-writer locking.
+    // Use shared_mutex for reader-writer locking.
     // Read operations (load, read, fetch_inst) take a shared lock —
     // multiple threads can read simultaneously. Write operations
     // (write, map_range, mmap_alloc) take a unique lock. This reduces

@@ -23,7 +23,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& signals_ = emu.signals_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     // Lambda wrappers for Emulator member access (spawn_thread, get_futex).
     // (find_cpu_by_tid / decrement_alive_threads are available via emu.*

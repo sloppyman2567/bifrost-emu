@@ -26,7 +26,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& brk_start_ = emu.brk_start_;
     auto& brk_mu_ = emu.brk_mu_;
     auto& graphics_ = emu.graphics_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         case 222: { // mmap

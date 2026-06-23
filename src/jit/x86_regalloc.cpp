@@ -41,7 +41,7 @@ static inline void check_vreg_bounds(int v) {
 #endif
 }
 
-// v1.4.0-beta.3: verify the dirty_host_regs_ invariant.
+// verify the dirty_host_regs_ invariant.
 // Bit r is set iff reg_vreg_[r] >= 0 && vreg_dirty_[reg_vreg_[r]].
 // Called in debug builds at block boundaries to catch maintenance bugs.
 bool FrostJIT::verify_dirty_host_regs_() const {
@@ -261,7 +261,7 @@ void FrostJIT::kill_vreg(int v) {
 }
 
 // Spill all dirty vregs to their home (before CALL_INTERP/SVC/branch).
-// v1.4.0-beta.3: walks the dirty_host_regs_ bitmask — O(popcount) instead
+// walks the dirty_host_regs_ bitmask — O(popcount) instead
 // of O(max_vreg_). For typical blocks (max_vreg_ ≈ 100) this is ~10x
 // faster; for FP-heavy blocks (max_vreg_ ≈ 256+) it's 30x+ faster.
 void FrostJIT::flush_all_vregs() {
@@ -279,7 +279,7 @@ void FrostJIT::flush_all_vregs() {
 // (refactored.5): flush only caller-saved dirty vregs. Callee-saved
 // regs (R12/R13/R15) are preserved by C calls, so vregs cached there
 // don't need to be spilled around CALL_INTERP / memory slow paths.
-// v1.4.0-beta.3: uses dirty_host_regs_ bitmask for O(popcount) walk.
+// uses dirty_host_regs_ bitmask for O(popcount) walk.
 void FrostJIT::flush_caller_saved_vregs() {
     flush_dirty_host_regs(CALLER_SAVED_MASK);
 }
@@ -500,7 +500,7 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
 //   dir=1, fp_field=0: FMOV_F2G   — dest = v_lo[idx]
 //   dir=1, fp_field=1: FMOV_FHI2G — dest = v_hi[idx]
 //
-// : G→F path uses RCX as scratch for the zero store
+// G→F path uses RCX as scratch for the zero store
 // (v_hi) so src1 stays cached in RAX. The F→G path loads the FP slot
 // into a fresh vreg via alloc_reg + emit_load + set_vreg_reg.
 

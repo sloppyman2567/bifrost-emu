@@ -14,7 +14,7 @@ namespace arm64emu {
 // Per-block resetable. The translator allocates a fresh vreg for every
 // intermediate value; the optimizer later reuses them.
 //
-// : widened from uint8_t to uint16_t to prevent
+// widened from uint8_t to uint16_t to prevent
 // wrap-around. Arch regs use 0-32, scratch starts at 33. With uint8_t,
 // large blocks (82+ ARM instructions) exhausted the 256-vreg space and
 // wrapped to 0, colliding with arch regs (vreg 31 = SP).

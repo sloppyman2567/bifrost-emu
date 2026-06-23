@@ -111,8 +111,12 @@ static bool is_pure(IROp op) {
         case IROp::BRCOND_ZERO:
         case IROp::BRCOND_BIT:
             return false;
+        // Newer ops (UDIV/SDIV/SMADDL/UMADDL/SMULH/UMULH/SMSUBL/UMSUBL,
+        // FCVT_S2D/FCVT_D2S/FRINT/FCMP/FP_UNOP2/FMADD/FMSUB, MRS/MSR)
+        // are not pure (side effects on pstate or system regs) — never DCE.
+        default:
+            return false;
     }
-    return false;
 }
 
 // ── Fold a binary op with two constant operands ──────────────────────
@@ -437,7 +441,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::CSINV: case IROp::CSNEG:
             case IROp::CCMP:
             case IROp::BFM: case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: {
-                // : constant-fold UBFM/SBFM when src1 is
+                // constant-fold UBFM/SBFM when src1 is
                 // a known constant. These are very common (SXTB/SXTH/SXTW/
                 // UXTB/UXTH/UXTW/LSL/LSR/ASR immediate) and folding them
                 // eliminates redundant shifts in tight loops.
@@ -677,6 +681,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FP_I2F: return "FP_I2F";
                     case IROp::FP_CMP: return "FP_CMP";
                     case IROp::FP_MOVI: return "FP_MOVI";
+                    default: return "?";
                     }
                     return "?";
                 }(inst.op),

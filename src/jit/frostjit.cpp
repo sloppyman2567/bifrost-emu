@@ -128,7 +128,7 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
 
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
-    // : flush ALL dirty vregs BEFORE materializing flags.
+    // flush ALL dirty vregs BEFORE materializing flags.
     // The previous code called emit_materialize_flags FIRST, which
     // clobbers RAX/RCX/RDX — if those held dirty vregs, their values
     // were lost before flush_all_vregs could spill them. This caused
@@ -143,10 +143,10 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
         // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
         // cache mappings (values were already flushed above, so
         // dirty vregs are safe — just drop the stale associations).
-        // v1.4.0-beta.3: use bitmask helper.
+        // use bitmask helper.
         invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
     }
-    // : flush_all_vregs already called above (before
+    // flush_all_vregs already called above (before
     // materialize_flags). All dirty vregs are now in cpu.regs[]/stack.
     // SP (vreg 31) may have been flushed above, but force-check here
     // in case the materialize introduced a new dirty SP (it shouldn't).
@@ -166,7 +166,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_pop(WIN_REG);   // restore WIN_REG
     // Reload PC into RAX.
     emit_load(RAX, CPU_REG, PC_OFF);
-    // : invalidate ALL cache mappings after the call.
+    // invalidate ALL cache mappings after the call.
     // We can't keep callee-saved vregs cached because the interpreter
     // may have modified cpu.regs[] for registers that the JIT has
     // cached as non-dirty. A STORE_REG earlier in the block may have
@@ -253,7 +253,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // R15) survive the C call and load_vreg_to_reg will mov
             // from them correctly.
             //
-            // v1.4.0-beta.3: replaced O(max_vreg_) flush + 6-reg
+            // replaced O(max_vreg_) flush + 6-reg
             // invalidate loop with two O(popcount) bitmask walks.
             clobber_flags();
             constexpr uint16_t MEM_CLOBBER =
@@ -334,7 +334,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     // alloc_reg_for handed us RCX, but we cannot overwrite
                     // it (src2 lives there). Spill RCX's mapping for dest
                     // and grab a different reg.
-                    // : use kill_vreg to properly clear
+                    // use kill_vreg to properly clear
                     // both vreg_home_ and vreg_dirty_ (alloc_reg_for set
                     // dest dirty, so we must clear that too).
                     kill_vreg(inst.dest);
@@ -441,7 +441,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::CLZ: {
-            // : lzcnt rax, rax overwrites RAX, destroying
+            // lzcnt rax, rax overwrites RAX, destroying
             // src1's cached value. If src1 is a scratch vreg holding a snapshot
             // of an arch reg (from LOAD_REG), later readers would reload from
             // an uninitialized stack slot. Use the same fix as REV64: allocate
@@ -474,7 +474,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::REV64: {
             // Force src1 into RAX (properly evicts old RAX occupant).
             force_vreg_to_reg(inst.src1, RAX);
-            // : bswap modifies RAX in place, which
+            // bswap modifies RAX in place, which
             // destroys v(src1)'s value. If dest != src1, we must preserve
             // src1's value for potential later readers. Allocate a separate
             // dest reg and copy src1 there BEFORE bswap, so src1 stays
@@ -581,7 +581,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // don't modify architectural flags). We save/restore RFLAGS
             // around the test to avoid clobbering pending flags.
             //
-            // : the previous code did
+            // the previous code did
             //   int s1 = ensure_vreg(inst.src1, RAX);
             //   if (s1 != RAX) emit_mov_reg(RAX, s1);
             // which would overwrite RAX without evicting whatever dirty
@@ -595,7 +595,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // value, and drop RAX's cache mapping so flush_all_vregs
             // can't miswrite it.
             clobber_flags();  // materialize any pending flags first
-            // : use drop_vreg — evicts if dirty, drops if not.
+            // use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
             }
@@ -603,7 +603,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (s1 != RAX) emit_mov_reg(RAX, s1);
             // RAX now holds the test value. Drop RAX's cache mapping so
             // the upcoming `mov eax, <pc>` doesn't corrupt any vreg.
-            // : use drop_vreg — if RAX holds a dirty vreg,
+            // use drop_vreg — if RAX holds a dirty vreg,
             // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
@@ -639,16 +639,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // cond=1 (NE) → branch if bit == 1 (TBNZ)
             // We emit: bt rax, bit; jcc (JNC for bit==0, JC for bit==1)
             // BT sets CF = (val >> bit) & 1. We save/restore RFLAGS.
-            // : same RAX eviction as BRCOND_ZERO —
+            // same RAX eviction as BRCOND_ZERO —
             // see the comment there for the rationale.
             clobber_flags();
-            // : use drop_vreg — evicts if dirty, drops if not.
+            // use drop_vreg — evicts if dirty, drops if not.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
             }
             int s1 = ensure_vreg(inst.src1, RAX);
             if (s1 != RAX) emit_mov_reg(RAX, s1);
-            // : use drop_vreg — if RAX holds a dirty vreg,
+            // use drop_vreg — if RAX holds a dirty vreg,
             // evict it to memory first so the value is preserved.
             if (reg_vreg_[RAX] >= 0) {
                 drop_vreg(reg_vreg_[RAX]);
@@ -730,7 +730,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
                 // Drop all cache mappings but DON'T clear flags_in_host_.
-                // v1.4.0-beta.3: use invalidate_all_vregs but preserve flags_in_host_.
+                // use invalidate_all_vregs but preserve flags_in_host_.
                 bool saved_fih2 = flags_in_host_;
                 invalidate_all_vregs();
                 flags_in_host_ = saved_fih2;
@@ -813,7 +813,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (flags_in_host_) {
                 // emit_materialize_flags clobbers RAX/RCX/RDX. Evict any
                 // dirty vregs in those regs first, then drop cache mappings.
-                // v1.4.0-beta.3: use bitmask helpers.
+                // use bitmask helpers.
                 emit_pushfq();
                 constexpr uint16_t FLAGS3 = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
                 flush_dirty_host_regs(FLAGS3);
@@ -892,7 +892,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with
         // the GPR register allocator at all.
         //
-        // v1.4.0-beta.3: replaced flush_all_vregs()+invalidate_all_vregs()
+        // replaced flush_all_vregs()+invalidate_all_vregs()
         // (O(max_vreg_) per op) with flush_invalidate_host_regs({RAX})
         // (O(1) per op). FP_BINOP only clobbers RAX (for the FNMUL sign
         // mask and the v_hi[dest]=0 zero store). Callee-saved vregs in
@@ -902,7 +902,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             uint8_t ld_prefix = is_double ? 0xF2 : 0xF3;  // MOVSD/MOVSS
             clobber_flags();
-            // v1.4.0-beta.3: FP_BINOP only clobbers RAX (zero store to
+            // FP_BINOP only clobbers RAX (zero store to
             // v_hi[dest]; sign mask for FNMUL). XMM0/XMM1 are scratch and
             // don't hold vregs. Use targeted flush for O(1) instead of
             // O(max_vreg_) flush_all+invalidate_all.
@@ -1005,7 +1005,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
             // regs[dest] = (int/uint)(v_lo[src1])
-            // v1.4.0-beta.3: proper unsigned conversion via the
+            // proper unsigned conversion via the
             // "subtract 2^63, convert signed, add 2^63" trick.
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
@@ -1064,7 +1064,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── int→FP conversion (SCVTF/UCVTF) ────────────────────────
         case IROp::FP_I2F: {
             // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
-            // v1.4.0-beta.3: proper unsigned conversion via the
+            // proper unsigned conversion via the
             // "if (src >= 2^63) subtract 2^63, convert signed, add 2^63
             //  to result as double" trick.
             bool is_double = (inst.width == 1);
@@ -1186,7 +1186,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Save rax (flags image) — we need it for multiple tests.
             emit_byte(0x50);  // push rax
 
-            // v1.4.0-beta.3: Fixed flag conversion.
+            // Fixed flag conversion.
             // x86 UCOMISD sets: unordered (PF=1,CF=1,ZF=1), less (CF=1),
             //                    equal (ZF=1), greater (none).
             // We use a priority chain: check PF first (unordered), then
@@ -1209,7 +1209,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Default: RDX = 0x20000000 (greater → C=1)
             emit_mov_imm32_zext(RDX, 0x20000000);
 
-            // v1.4.0-beta.3: Fixed flag conversion using clean if-else chain.
+            // Fixed flag conversion using clean if-else chain.
             // After `test rax, bit`:
             //   ZF=1 iff (rax & bit) == 0 (flag bit is 0)
             //   ZF=0 iff (rax & bit) != 0 (flag bit is 1)
@@ -1256,7 +1256,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FMOV immediate (load decoded FP immediate) ──────────────
         case IROp::FP_MOVI: {
             // v_lo[dest] = imm; v_hi[dest] = 0
-            // : clobber_host_reg evicts any dirty GPR vreg
+            // clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             // The old code silently dropped dirty vregs.
             clobber_host_reg(RAX);
@@ -1272,7 +1272,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::SIMD_LOGICAL: {
             // v_lo[dest],v_hi[dest] = src1 OP src2
             // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
-            // v1.4.0-beta.3: SIMD_LOGICAL only touches XMM0/XMM1, no GPRs.
+            // SIMD_LOGICAL only touches XMM0/XMM1, no GPRs.
             clobber_flags();
             // No GPR clobbered — but be safe and invalidate RAX/RCX/RDX
             // in case the JIT has stale mappings (they shouldn't be dirty
@@ -1327,7 +1327,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
-            // : DON'T drop src1's cache mapping after the
+            // DON'T drop src1's cache mapping after the
             // store — src1 may be read again later in the block. The old
             // code did `vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1`
             // which silently dropped a dirty src1.
@@ -1351,7 +1351,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── SIMD MOVI (broadcast immediate) ─────────────────────────
         case IROp::SIMD_MOVI: {
             // v_lo[dest] = v_hi[dest] = imm
-            // : clobber_host_reg evicts any dirty GPR vreg
+            // clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
             clobber_host_reg(RAX);
             emit_mov_imm64(RAX, inst.imm);
@@ -1368,7 +1368,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // width=0 (store): v_lo[dest] → src1 vreg, v_hi[dest] → src2 vreg
             if (inst.width == 1) {
                 // Load: write vregs to v_lo/v_hi
-                // : use separate host regs for lo/hi so we
+                // use separate host regs for lo/hi so we
                 // don't clobber src1's cached value when loading src2.
                 // The old code reused RAX for both, dropping src1's mapping.
                 int slo = ensure_vreg(inst.src1, RAX);
@@ -1420,7 +1420,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int immr = inst.immr;
             int imms = inst.imms;
             // Load src into RAX.
-            // : flush+invalidate FIRST so the
+            // flush+invalidate FIRST so the
             // cache is empty and the subsequent memory access can't
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
@@ -1599,7 +1599,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // then we already have flags in host.
             if (flags_in_host_) {
                 // Materialize to pstate (clobbers RAX/RCX/RDX).
-                // v1.4.0-beta.3: use bitmask helpers.
+                // use bitmask helpers.
                 emit_pushfq();
                 constexpr uint16_t FLAGS3a = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
                 flush_dirty_host_regs(FLAGS3a);
@@ -1664,7 +1664,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
                 // Drop all cache mappings WITHOUT clearing flags_in_host_.
-                // v1.4.0-beta.3: use invalidate_all_vregs but preserve flags_in_host_.
+                // use invalidate_all_vregs but preserve flags_in_host_.
                 {
                     bool saved_fih3 = flags_in_host_;
                     invalidate_all_vregs();
@@ -1676,7 +1676,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (need_cmc) emit_byte(0xF5);
 
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
-            // : use ensure_vreg + mov instead of load_vreg
+            // use ensure_vreg + mov instead of load_vreg
             // (load_vreg is being removed as dead code).
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
             else {
@@ -1723,7 +1723,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // x86 div/idiv by zero raises SIGFPE. We emit a test+jz
             // to skip the div and set result=0 when divisor is zero.
             clobber_flags();
-            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            // use bitmask helpers instead of open-coded loop.
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);  // dividend
             load_vreg_to_reg(RCX, inst.src2);  // divisor
@@ -1787,7 +1787,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // UMADDL: dest = acc + (uint64)(uint32)src1 * (uint64)(uint32)src2
             // x86: imul rax, rcx (64-bit multiply); add rax, acc
             clobber_flags();
-            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            // use bitmask helpers instead of open-coded loop.
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             // Load src1 (32-bit, sign/zero-extended) into RAX
             load_vreg_to_reg(RAX, inst.src1);
@@ -1936,7 +1936,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // x86 imul: RDX:RAX = RAX * r/m64 (signed, one-operand form)
             // Result high 64 bits in RDX.
             clobber_flags();
-            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            // use bitmask helpers instead of open-coded loop.
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
@@ -1960,7 +1960,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // SMSUBL: dest = acc - (int64)(int32)src1 * (int32)src2
             // UMSUBL: dest = acc - (uint64)(uint32)src1 * (uint32)src2
             clobber_flags();
-            // v1.4.0-beta.3: use bitmask helpers instead of open-coded loop.
+            // use bitmask helpers instead of open-coded loop.
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);
             if (inst.op == IROp::SMSUBL) {
@@ -1992,7 +1992,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── FCVT: float <-> double conversion ────────────────────────
         case IROp::FCVT_S2D:
         case IROp::FCVT_D2S: {
-            // v1.4.0-beta.3: FCVT only clobbers RAX (zero store).
+            // FCVT only clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             // Load FP value from v_lo[src1] into XMM0
@@ -2022,7 +2022,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FRINT: FP round to integer ───────────────────────────────
         case IROp::FRINT: {
-            // v1.4.0-beta.3: FRINT only clobbers RAX (zero store).
+            // FRINT only clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -2058,7 +2058,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FCMP: FP compare (sets NZCV) ─────────────────────────────
         case IROp::FCMP: {
-            // v1.4.0-beta.3: FCMP clobbers RAX, RCX, RDX (flag manipulation).
+            // FCMP clobbers RAX, RCX, RDX (flag manipulation).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
@@ -2132,7 +2132,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FP_UNOP2: FABS/FNEG/FSQRT ────────────────────────────────
         case IROp::FP_UNOP2: {
-            // v1.4.0-beta.3: FP_UNOP2 clobbers RAX (sign mask + zero store).
+            // FP_UNOP2 clobbers RAX (sign mask + zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
@@ -2179,7 +2179,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // FMADD: dest = src1 * src2 + acc
             // FMSUB: dest = -src1 * src2 + acc = acc - src1 * src2
             // We decompose: mul, then add/sub acc (non-fused, but correct)
-            // v1.4.0-beta.3: FMADD clobbers RAX (zero store).
+            // FMADD clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
@@ -2233,7 +2233,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 void FrostJIT::clobber_flags() {
     if (flags_in_host_) {
         // emit_materialize_flags clobbers RAX, RCX, RDX.
-        // v1.4.0-beta.3: use targeted flush+invalidate via the bitmask
+        // use targeted flush+invalidate via the bitmask
         // instead of two open-coded 3-reg loops.
         constexpr uint16_t FLAGS_CLOBBER =
             (1u << RAX) | (1u << RCX) | (1u << RDX);
@@ -2252,7 +2252,7 @@ void FrostJIT::clobber_flags() {
 // cache flush is needed, but we emit a memory barrier to ensure the
 // patched bytes are visible to any in-flight execution on the same core.
 
-// : single source of truth for "will this instruction route
+// single source of truth for "will this instruction route
 // to CALL_INTERP in the IR translator?" Used by the block splitter to
 // pre-scan before translating. If this list gets out of sync with
 // ir_translate.cpp's default case, the splitter would misclassify
@@ -2263,7 +2263,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
         case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
-        // v1.4.0-beta.3: FP_SCALAR now has native IR paths for most FP ops
+        // FP_SCALAR now has native IR paths for most FP ops
         // (FMOV, FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL, FABS/FNEG/FSQRT,
         // FCMP/FCMPE, FCVT, FRINT, FMADD/FMSUB, FCSEL, FCVTZS/FCVTZU,
         // SCVTF/UCVTF, FMOV imm). But it still falls back to CALL_INTERP
@@ -2381,7 +2381,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // are interpreter fallbacks), the pure interpreter is faster — it
     // skips the prologue/epilogue/dispatch entirely.
     //
-    // : refined from "any CALL_INTERP → interp_only" to
+    // refined from "any CALL_INTERP → interp_only" to
     // "CALL_INTERP-heavy → interp_only". The old heuristic was too
     // aggressive — a block with 10 native ops and 1 CALL_INTERP would
     // skip JIT entirely, losing the 10 native ops' speedup. Now we only
@@ -2395,7 +2395,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     //
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
-    // : blocks with >32 instructions have too much
+    // blocks with >32 instructions have too much
     // register pressure for the 9-host-reg allocator. The __multf3
     // 82-instruction softfloat block generates ~246 vregs, causing
     // spill/reload correctness bugs. Run long blocks via interpreter.
@@ -2594,7 +2594,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
-    // v1.4.0-beta.3: verify dirty_host_regs_ invariant (debug only).
+    // verify dirty_host_regs_ invariant (debug only).
     (void)verify_dirty_host_regs_();
     return fn;
 }
@@ -2627,7 +2627,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         entry = it->second;
         cache_hits++;
 
-        // v1.4.0-beta.3: Per-PC hotness tracking. If this PC has been
+        // Per-PC hotness tracking. If this PC has been
         // dispatched > HOT_PC_THRESHOLD times, mark it interp_only so
         // future hits skip the dispatcher. This catches tight multi-
         // block cycles (soft-float routines) that the consecutive-PC
@@ -2659,7 +2659,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // overhead. The interpreter steps exactly interp_only_count
         // instructions, matching what the JIT block would have done.
         //
-        // v1.4.0-beta.3: tight-loop accelerator. If after running the
+        // tight-loop accelerator. If after running the
         // block once the PC is back at the same block start, we're in
         // a tight self-loop (common for soft-float routines). Re-run
         // the block in a tight loop (no dispatcher overhead) until the

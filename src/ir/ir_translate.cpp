@@ -674,7 +674,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Post-index: load/store from base (no offset).
                 addr = base;
             } else {
-                // : for offset and pre-index
+                // for offset and pre-index
                 // modes, fold the displacement into the LOAD_MEM/STORE_MEM
                 // imm field instead of emitting a separate IMM+ADD. The
                 // executor and JIT both handle `mem[base + imm]` directly.
@@ -1070,7 +1070,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // v1.4.0-beta.3: FCMP/FCMPE must be checked BEFORE FP arithmetic
+            // FCMP/FCMPE must be checked BEFORE FP arithmetic
             // because FCMP has bit[21]=1 and bits[15:10]=0x08, which would
             // otherwise match the FP arithmetic pattern (bit[21]=1, bits[15:10]!=0x04).
             // FCMP encoding: (op & 0xFF200000) == 0x1E200000, bits[15:10]=0x08.
@@ -1087,7 +1087,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // FP arithmetic (2-source): bit[21]=1, bits[15:10] != 0b000100 (FMOV imm)
             // and != 0b001000 (FCMP, handled above) and != 0b010000 (FP 1-source)
             // and != 0b010100 (FMOV imm, alternate encoding).
-            // v1.4.0-beta.3: added 0x14 exclusion — FMOV imm has bits[15:10]=0x14.
+            // added 0x14 exclusion — FMOV imm has bits[15:10]=0x14.
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) != 0x04 &&
                 ((op >> 10) & 0x3F) != 0x08 && ((op >> 10) & 0x3F) != 0x10 &&
                 ((op >> 10) & 0x3F) != 0x14) {
@@ -1162,7 +1162,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // v1.4.0-beta.3: FMADD/FMSUB (FP fused multiply-add/subtract).
+            // FMADD/FMSUB (FP fused multiply-add/subtract).
             // Encoding: (op & 0xFF200000) == 0x1F000000, bit 15 = sub (1=FMSUB, 0=FMADD).
             // ra = bits[14:10]. Operands: a=Vn, b=Vm, c=Va.
             if ((op & 0xFF200000) == 0x1F000000) {
@@ -1193,7 +1193,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
             }
 
-            // v1.4.0-beta.3: FCVT (float ↔ double conversion).
+            // FCVT (float ↔ double conversion).
             // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
             if ((op & 0xFFFFFC00) == 0x1E624000) {
                 // FCVT Sd, Dn (double → single)
@@ -1212,7 +1212,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // v1.4.0-beta.3: FRINT (FP round to integer).
+            // FRINT (FP round to integer).
             // The FRINT* instructions have multiple encodings. The common ones:
             // FRINTN (round to nearest even): 0x1E244000 | (ftype<<22)
             // FRINTP (round toward +inf):     0x1E24C000 | (ftype<<22)
@@ -1248,7 +1248,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // v1.4.0-beta.3: FCSEL (FP conditional select).
+            // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
             // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.
             // We emit a CSEL-like sequence via a GPR scratch + CSEL IR op,
@@ -1392,7 +1392,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
         case InstClass::FMOV_IMM:
-            // v1.4.0-beta.3: The decoder never emits these InstClass values
+            // The decoder never emits these InstClass values
             // (FP_SCALAR catches all FP/SIMD in the 0x1Exxxxxx encoding range).
             // They're kept here as defensive fallbacks.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);

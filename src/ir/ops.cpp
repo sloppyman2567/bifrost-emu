@@ -549,7 +549,6 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             // FCMP: FP compare (sets NZCV)
             case IROp::FCMP: {
                 bool is_double = (inst.width == 64);
-                bool unordered_result = false;
                 if (is_double) {
                     double a, b;
                     memcpy(&a, &cpu.v_lo[inst.src1], 8);

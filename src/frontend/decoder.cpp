@@ -663,7 +663,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.cond        = (inst >> 12) & 0xF;
                 d.rn          = (inst >> 5) & 0x1F;
                 d.nzcv_field  = inst & 0xF;
-                // : for the IMMEDIATE form, the 5-bit
+                // for the IMMEDIATE form, the 5-bit
                 // immediate lives in bits[20:16] — the same bit position as
                 // Rm in the register form. The IR translator reads d.imm_u
                 // (not d.rm) when d.is_register == false, so we must populate

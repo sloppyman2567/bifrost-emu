@@ -265,7 +265,6 @@ int Emulator::run() {
     uint64_t recent_pcs[LOOP_DETECT_WINDOW] = {};
     uint64_t pc_index = 0;
     uint64_t tight_loop_count = 0;
-    uint64_t last_syscall_count = 0;
     uint64_t last_progress_x2_ = 0;  // for tight-loop progress detection
 
     while (main_cpu_.running) {

@@ -55,7 +55,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& signals_ = emu.signals_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         case 117: { // ptrace — return -EPERM
@@ -797,7 +796,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             std::vector<iovec> iovs(msg_iovlen);
             std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
             for (uint64_t i = 0; i < msg_iovlen; i++) {
-                uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
                 uint64_t len = mem_.load<uint64_t>(msg_iov + i * 16 + 8);
                 iov_bufs[i].resize(len);
                 iovs[i].iov_base = iov_bufs[i].data();

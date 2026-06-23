@@ -45,7 +45,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& vfs_ = emu.vfs_;
     auto& fds_ = emu.fds_;
     auto& elf_path_ = emu.elf_path_;
-    auto ret_host = [&](int64_t r) { cpu.regs[0] = static_cast<uint64_t>(r); };
 
     switch (num) {
         // ── openat — REWRITTEN to use VFS ─────────────────────────────
