@@ -2026,7 +2026,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // traffic becomes a correctness hazard (the REV64/CLZ/FMOV bugs
     // were all in this class). Cap blocks at 32 instructions — enough
     // for tight loops, short enough that vreg count stays manageable.
-    constexpr int MAX_BLOCK_REG_PRESSURE = 32;
+    constexpr int MAX_BLOCK_REG_PRESSURE = 48;
     // BUGFIX (alpha.4): limit the number of CALL_INTERP fallbacks per
     // block. Each CALL_INTERP invalidates all cached vregs, and each
     // subsequent clobber_flags() drops non-dirty vregs from RAX/RCX/RDX.
