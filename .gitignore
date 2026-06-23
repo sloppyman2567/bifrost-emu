@@ -42,3 +42,8 @@ trace-*.txt
 # Benchmarking / debug artifacts
 bifrost-fb.ppm
 *.ppm
+core
+bifrost-emu-o0
+bifrost-emu-o1
+bifrost-emu-o2
+bifrost-emu-test*
