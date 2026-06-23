@@ -351,6 +351,14 @@ private:
     int32_t vreg_stack_slot(int v);
     int  alloc_reg_for(int v, int preferred = -1);  // alloc + evict old occupant BEFORE computation
 
+    // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ──────
+    // Load vreg `v` into host reg `dst`, handling both arch vregs (0-31,
+    // loaded from cpu.regs[]) and scratch vregs (33+, loaded from stack).
+    // Does NOT participate in the cache — use ensure_vreg for that.
+    void load_vreg_to_reg(int dst, int v);
+    // Store host reg `src` to arch reg `v` (0-31 = cpu.regs[], 31 = sp).
+    void store_reg_to_vreg(int v, int src);
+
     // Force a vreg into a specific host register (MOVE semantics).
     // Evicts the current occupant of `host_reg` if any, then either
     // moves `v` from its current home (clearing the old mapping) or

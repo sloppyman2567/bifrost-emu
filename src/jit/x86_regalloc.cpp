@@ -235,6 +235,29 @@ void FrostJIT::flush_caller_saved_vregs() {
     }
 }
 
+// ── Codegen helpers (reduce boilerplate in compile_ir_inst) ────────────
+// These wrap the "load vreg to host reg" / "store host reg to vreg"
+// patterns that were duplicated across LOAD_MEM, STORE_MEM, FP_MOVI,
+// SIMD_DUP, SIMD_LDST, etc. Each replaces a 2-line if/else with one call.
+
+void FrostJIT::load_vreg_to_reg(int dst, int v) {
+    if (v <= 31) {
+        emit_load_arm(dst, v);
+    } else {
+        int32_t off = vreg_stack_slot(v);
+        emit_load(dst, RBP, off);
+    }
+}
+
+void FrostJIT::store_reg_to_vreg(int v, int src) {
+    if (v <= 31) {
+        emit_store_arm(v, src);
+    } else {
+        int32_t off = vreg_stack_slot(v);
+        emit_store(RBP, off, src);
+    }
+}
+
 // Drop all cached vreg→reg mappings WITHOUT spilling.
 // Used after operations that clobber all caller-saved regs (C calls).
 // Assumes flush_all_vregs was called BEFORE the clobbering operation,

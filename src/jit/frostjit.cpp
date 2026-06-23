@@ -352,11 +352,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
-            if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
+            load_vreg_to_reg(RAX, inst.src1);
             emit_load_mem(RAX, RAX, (int32_t)inst.imm, inst.width, false);
-            if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
-            else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RAX); }
+            store_reg_to_vreg(inst.dest, RAX);
             return false;
         }
 
@@ -364,10 +362,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             clobber_flags();
             flush_all_vregs();
             invalidate_all_vregs();
-            if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
-            if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-            else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
+            load_vreg_to_reg(RAX, inst.src1);
+            load_vreg_to_reg(RCX, inst.src2);
             emit_store_mem(RAX, (int32_t)inst.imm, RCX, inst.width);
             return false;
         }
@@ -918,11 +914,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
             // Load src1 → RAX, src2 → RCX.
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
-            else if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
+            else load_vreg_to_reg(RAX, inst.src1);
             if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
-            else if (inst.src2 <= 31) emit_load_arm(RCX, inst.src2);
-            else { int32_t off = vreg_stack_slot(inst.src2); emit_load(RCX, RBP, off); }
+            else load_vreg_to_reg(RCX, inst.src2);
 
             // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
             if (inst.op != IROp::CSEL) {
@@ -949,8 +943,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             patch_jcc_rel8(jcc_off, 3);
 
             // Store RDX to dest.
-            if (inst.dest <= 31) emit_store_arm(inst.dest, RDX);
-            else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RDX); }
+            store_reg_to_vreg(inst.dest, RDX);
             vreg_home_[inst.dest] = RDX;
             reg_vreg_[RDX] = inst.dest;
             vreg_dirty_[inst.dest] = true;
@@ -1293,7 +1286,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             (void)is_unsigned;  // TODO: handle unsigned properly
 
             // Store result to cpu.regs[dest]
-            if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
+            store_reg_to_vreg(inst.dest, RAX);
             return false;
         }
 
@@ -1307,7 +1300,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_all_vregs();
 
             // Load GPR into RAX
-            if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
+            load_vreg_to_reg(RAX, inst.src1);
 
             // For unsigned, we'd need to handle the sign bit differently.
             // For now, use signed conversion — most code uses signed.
@@ -1588,8 +1581,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             clobber_flags();  // shifts/ands clobber RFLAGS
             flush_all_vregs();
             invalidate_all_vregs();
-            if (inst.src1 <= 31) emit_load_arm(RAX, inst.src1);
-            else { int32_t off = vreg_stack_slot(inst.src1); emit_load(RAX, RBP, off); }
+            load_vreg_to_reg(RAX, inst.src1);
 
             // Handle common aliases efficiently:
             // - LSL (imms < immr): shift left by (width - immr)
@@ -1622,8 +1614,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
                     }
                     // Write result directly to dest's memory home, then cache.
-                    if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
-                    else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RAX); }
+                    store_reg_to_vreg(inst.dest, RAX);
                     set_vreg_reg(inst.dest, RAX);
                     return false;
                 }
@@ -1654,8 +1645,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     if (RAX >= 8) emit_byte(0x45);
                     emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
                 }
-                if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
-                else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RAX); }
+                store_reg_to_vreg(inst.dest, RAX);
                 set_vreg_reg(inst.dest, RAX);
                 return false;
             }
@@ -1705,8 +1695,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (width == 32) {
                 emit_byte(0x89); emit_byte(modrm(3, RAX&7, RAX&7));
             }
-            if (inst.dest <= 31) emit_store_arm(inst.dest, RAX);
-            else { int32_t off = vreg_stack_slot(inst.dest); emit_store(RBP, off, RAX); }
+            store_reg_to_vreg(inst.dest, RAX);
             set_vreg_reg(inst.dest, RAX);
             return false;
         }
