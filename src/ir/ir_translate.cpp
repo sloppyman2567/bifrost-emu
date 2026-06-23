@@ -1160,7 +1160,59 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SIMD / FP — fall back to interpreter ──
+        // ── SIMD / FP — some now have native IR ops ──
+        // FCVT: float <-> double conversion
+        case InstClass::FCVT: {
+            uint16_t src = load_arm_reg(block, d.rn);
+            uint16_t r = g_alloc.alloc();
+            // d.imm_u encodes the conversion type: 0=S→D, 1=D→S
+            emit(block, d.imm_u == 0 ? IROp::FCVT_S2D : IROp::FCVT_D2S,
+                 r, src, 0, 0, 0, 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+        // FRINT: round to integer (FP)
+        case InstClass::FRINT: {
+            uint16_t src = load_arm_reg(block, d.rn);
+            uint16_t r = g_alloc.alloc();
+            // d.imm_u encodes rounding mode: 0=N,1=P,2=M,3=Z,4=I,5=X
+            emit(block, IROp::FRINT, r, src, 0, d.sf ? 64 : 32,
+                 static_cast<uint8_t>(d.imm_u & 0x7), 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+        // FCMP/FCMPE: FP compare (sets NZCV)
+        case InstClass::FCMP: case InstClass::FCMPE: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t b = load_arm_reg(block, d.rm);
+            bool is_e = (d.cls == InstClass::FCMPE);
+            emit(block, IROp::FCMP, 0, a, b, d.sf ? 64 : 32,
+                 is_e ? 1 : 0, 0, 0, cur_pc);
+            return false;
+        }
+        // FABS/FNEG/FSQRT: FP 1-source ops
+        case InstClass::FABS: case InstClass::FNEG: case InstClass::FSQRT: {
+            uint16_t src = load_arm_reg(block, d.rn);
+            uint16_t r = g_alloc.alloc();
+            uint8_t op = (d.cls == InstClass::FABS) ? 0 :
+                         (d.cls == InstClass::FNEG) ? 1 : 2;
+            emit(block, IROp::FP_UNOP2, r, src, 0, d.sf ? 64 : 32,
+                 op, 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+        // FMADD/FMSUB: FP fused multiply-add
+        case InstClass::FMADD: case InstClass::FMSUB: {
+            uint16_t a = load_arm_reg(block, d.rn);    // multiplier 1
+            uint16_t b = load_arm_reg(block, d.rm);    // multiplier 2
+            uint16_t c = load_arm_reg(block, d.ra);    // accumulator
+            uint16_t r = g_alloc.alloc();
+            emit(block, d.cls == InstClass::FMADD ? IROp::FMADD : IROp::FMSUB,
+                 r, a, b, d.sf ? 64 : 32, 0, 0, c, cur_pc);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
+        // Remaining FP/SIMD still fall back to interpreter
         case InstClass::SIMD_SHIFT:
         case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
@@ -1168,13 +1220,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::FADD: case InstClass::FSUB:
         case InstClass::FMUL: case InstClass::FDIV:
         case InstClass::FMAX: case InstClass::FMIN:
-        case InstClass::FNMUL: case InstClass::FMADD:
-        case InstClass::FMSUB: case InstClass::FABS:
-        case InstClass::FNEG: case InstClass::FSQRT:
-        case InstClass::FCMP: case InstClass::FCMPE:
-        case InstClass::FCVT: case InstClass::FCVTZS:
+        case InstClass::FNMUL:
+        case InstClass::FCVTZS:
         case InstClass::FCVTZU: case InstClass::SCVTF:
-        case InstClass::UCVTF: case InstClass::FRINT:
+        case InstClass::UCVTF:
         case InstClass::FCSEL:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
@@ -1196,12 +1245,27 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SMSUBL / UMSUBL / SMULH / UMULH — still fall back ──────
+        // ── SMSUBL / UMSUBL / SMULH / UMULH ─────────────────────────
         case InstClass::SMSUBL:
-        case InstClass::UMSUBL:
-        case InstClass::SMULH: case InstClass::UMULH:
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+        case InstClass::UMSUBL: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t b = load_arm_reg(block, d.rm);
+            uint16_t r = g_alloc.alloc();
+            // Accumulator register index in cond field (31=XZR → 0).
+            emit(block, d.cls == InstClass::SMSUBL ? IROp::SMSUBL : IROp::UMSUBL,
+                 r, a, b, 0, d.ra & 0x1F, 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, r);
             return false;
+        }
+        case InstClass::SMULH: case InstClass::UMULH: {
+            uint16_t a = load_arm_reg(block, d.rn);
+            uint16_t b = load_arm_reg(block, d.rm);
+            uint16_t r = g_alloc.alloc();
+            emit(block, d.cls == InstClass::SMULH ? IROp::SMULH : IROp::UMULH,
+                 r, a, b, 0, 0, 0, 0, cur_pc);
+            store_arm_reg(block, d.rd, r);
+            return false;
+        }
 
         // ── Everything else: inline interpreter call (no block split) ──
         default:

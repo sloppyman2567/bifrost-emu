@@ -11,6 +11,7 @@
 
 #include "ir/ir.hpp"
 #include "core/emulator.h"
+#include <cmath>
 #include <cstring>
 
 namespace arm64emu {
@@ -462,6 +463,183 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 emu.step_public(cpu);
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
+                break;
+            }
+
+            // SMULH/UMULH: high 64 bits of 128-bit multiply
+            case IROp::SMULH: {
+                __int128 r = static_cast<__int128>(static_cast<int64_t>(vregs[inst.src1]))
+                            * static_cast<__int128>(static_cast<int64_t>(vregs[inst.src2]));
+                vregs[inst.dest] = static_cast<uint64_t>(r >> 64);
+                break;
+            }
+            case IROp::UMULH: {
+                unsigned __int128 r = static_cast<unsigned __int128>(vregs[inst.src1])
+                                    * static_cast<unsigned __int128>(vregs[inst.src2]);
+                vregs[inst.dest] = static_cast<uint64_t>(r >> 64);
+                break;
+            }
+            // SMSUBL/UMSUBL: acc - widening multiply
+            case IROp::SMSUBL: {
+                int64_t a = static_cast<int32_t>(vregs[inst.src1]);
+                int64_t b = static_cast<int32_t>(vregs[inst.src2]);
+                uint64_t acc = (inst.cond == 31) ? 0 : vregs[inst.cond];
+                vregs[inst.dest] = static_cast<uint64_t>(static_cast<int64_t>(acc) - a * b);
+                break;
+            }
+            case IROp::UMSUBL: {
+                uint64_t a = static_cast<uint32_t>(vregs[inst.src1]);
+                uint64_t b = static_cast<uint32_t>(vregs[inst.src2]);
+                uint64_t acc = (inst.cond == 31) ? 0 : vregs[inst.cond];
+                vregs[inst.dest] = acc - a * b;
+                break;
+            }
+            // FCVT: float <-> double
+            case IROp::FCVT_S2D: {
+                float f;
+                uint32_t bits = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                memcpy(&f, &bits, 4);
+                double d = static_cast<double>(f);
+                memcpy(&cpu.v_lo[inst.dest], &d, 8);
+                cpu.v_hi[inst.dest] = 0;
+                break;
+            }
+            case IROp::FCVT_D2S: {
+                double d;
+                memcpy(&d, &cpu.v_lo[inst.src1], 8);
+                float f = static_cast<float>(d);
+                uint32_t bits;
+                memcpy(&bits, &f, 4);
+                cpu.v_lo[inst.dest] = bits;
+                cpu.v_hi[inst.dest] = 0;
+                break;
+            }
+            // FRINT: round to integer (FP)
+            case IROp::FRINT: {
+                if (inst.width == 64) {
+                    double d;
+                    memcpy(&d, &cpu.v_lo[inst.src1], 8);
+                    double r;
+                    switch (inst.imm & 0x7) {
+                        case 0: r = rint(d); break;
+                        case 1: r = ceil(d); break;
+                        case 2: r = floor(d); break;
+                        case 3: r = trunc(d); break;
+                        default: r = rint(d); break;
+                    }
+                    memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                } else {
+                    float f;
+                    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    memcpy(&f, &bits, 4);
+                    float r;
+                    switch (inst.imm & 0x7) {
+                        case 0: r = rintf(f); break;
+                        case 1: r = ceilf(f); break;
+                        case 2: r = floorf(f); break;
+                        case 3: r = truncf(f); break;
+                        default: r = rintf(f); break;
+                    }
+                    memcpy(&bits, &r, 4);
+                    cpu.v_lo[inst.dest] = bits;
+                }
+                cpu.v_hi[inst.dest] = 0;
+                break;
+            }
+            // FCMP: FP compare (sets NZCV)
+            case IROp::FCMP: {
+                bool is_double = (inst.width == 64);
+                bool unordered_result = false;
+                if (is_double) {
+                    double a, b;
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    memcpy(&b, &cpu.v_lo[inst.src2], 8);
+                    if (std::isnan(a) || std::isnan(b)) {
+                        cpu.set_flag_n(0); cpu.set_flag_z(0);
+                        cpu.set_flag_c(1); cpu.set_flag_v(1);
+                    } else if (a > b) {
+                        cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                    } else if (a < b) {
+                        cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                    } else {
+                        cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                    }
+                } else {
+                    float a, b;
+                    uint32_t ba = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    uint32_t bb = static_cast<uint32_t>(cpu.v_lo[inst.src2]);
+                    memcpy(&a, &ba, 4);
+                    memcpy(&b, &bb, 4);
+                    if (std::isnan(a) || std::isnan(b)) {
+                        cpu.set_flag_n(0); cpu.set_flag_z(0);
+                        cpu.set_flag_c(1); cpu.set_flag_v(1);
+                    } else if (a > b) {
+                        cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                    } else if (a < b) {
+                        cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
+                    } else {
+                        cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(1); cpu.set_flag_v(0);
+                    }
+                }
+                break;
+            }
+            // FP_UNOP2: FABS/FNEG/FSQRT
+            case IROp::FP_UNOP2: {
+                bool is_double = (inst.width == 64);
+                if (is_double) {
+                    double v;
+                    memcpy(&v, &cpu.v_lo[inst.src1], 8);
+                    double r;
+                    switch (inst.imm & 0x7) {
+                        case 0: r = fabs(v); break;
+                        case 1: r = -v; break;
+                        case 2: r = sqrt(v); break;
+                        default: r = v; break;
+                    }
+                    memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                } else {
+                    float v;
+                    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    memcpy(&v, &bits, 4);
+                    float r;
+                    switch (inst.imm & 0x7) {
+                        case 0: r = fabsf(v); break;
+                        case 1: r = -v; break;
+                        case 2: r = sqrtf(v); break;
+                        default: r = v; break;
+                    }
+                    memcpy(&bits, &r, 4);
+                    cpu.v_lo[inst.dest] = bits;
+                }
+                cpu.v_hi[inst.dest] = 0;
+                break;
+            }
+            // FMADD/FMSUB: FP fused multiply-add
+            case IROp::FMADD:
+            case IROp::FMSUB: {
+                bool is_double = (inst.width == 64);
+                uint16_t acc_vreg = static_cast<uint16_t>(inst.imm);
+                if (is_double) {
+                    double a, b, c;
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                    memcpy(&b, &cpu.v_lo[inst.src2], 8);
+                    memcpy(&c, &cpu.v_lo[acc_vreg], 8);
+                    double r = (inst.op == IROp::FMADD) ? (a * b + c) : (c - a * b);
+                    memcpy(&cpu.v_lo[inst.dest], &r, 8);
+                } else {
+                    float a, b, c;
+                    uint32_t ba = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    uint32_t bb = static_cast<uint32_t>(cpu.v_lo[inst.src2]);
+                    uint32_t bc = static_cast<uint32_t>(cpu.v_lo[acc_vreg]);
+                    memcpy(&a, &ba, 4);
+                    memcpy(&b, &bb, 4);
+                    memcpy(&c, &bc, 4);
+                    float r = (inst.op == IROp::FMADD) ? (a * b + c) : (c - a * b);
+                    uint32_t bits;
+                    memcpy(&bits, &r, 4);
+                    cpu.v_lo[inst.dest] = bits;
+                }
+                cpu.v_hi[inst.dest] = 0;
                 break;
             }
 

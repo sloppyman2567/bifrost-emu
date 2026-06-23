@@ -129,6 +129,26 @@ enum class IROp : uint8_t {
     // Native multiply-accumulate long (widening)
     SMADDL,        // dest = (int64_t)(int32_t)src2 * (int32_t)src1 + src1_hi
     UMADDL,        // dest = (uint64_t)(uint32_t)src2 * (uint32_t)src1 + src1_hi
+    // Native multiply high (128-bit result, high 64 bits)
+    SMULH,         // dest = bits[127:64] of (int128)src1 * (int128)src2
+    UMULH,         // dest = bits[127:64] of (uint128)src1 * (uint128)src2
+    // Native multiply-subtract long (widening)
+    SMSUBL,        // dest = (int64_t)acc - (int64)(int32)src1 * (int32)src2
+    UMSUBL,        // dest = (uint64_t)acc - (uint64)(uint32)src1 * (uint32)src2
+    // Native FP conversions (float <-> double, via x86 cvtss2sd/cvtsd2ss)
+    FCVT_S2D,      // v_lo[dest] = (double)(float)v_lo[src1]
+    FCVT_D2S,      // v_lo[dest] = (float)(double)v_lo[src1]
+    // Native FP round to integer (via x86 roundss/roundsd)
+    FRINT,         // v_lo[dest] = round(v_lo[src1]); imm = rounding mode
+                   // 0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(0), 4=I(current), 5=X(exact)
+    // Native FP compare (sets NZCV in pstate)
+    FCMP,          // compare v_lo[src1] vs v_lo[src2]; width=ftype; imm=0(FCMP)/1(FCMPE)
+    // Native FP 1-source ops (abs, neg, sqrt via x86 andps/xorps/sqrtsd)
+    FP_UNOP2,      // v_lo[dest] = op(v_lo[src1]); imm = opcode
+                   // 0=abs, 1=neg, 2=sqrt (separate from FP_UNOP which handles mov)
+    // Native FP fused multiply-add (via x86 vfmadd or decomposition)
+    FMADD,         // v_lo[dest] = v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
+    FMSUB,         // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
     // System register access (TPIDR_EL0, NZCV, FPCR, FPSR)
     MRS,           // dest = system_reg[imm]  (imm = reg index)
     MSR,           // system_reg[imm] = src1
