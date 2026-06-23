@@ -554,9 +554,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         case IROp::TST: {
-            int s1 = ensure_vreg(inst.src1, RAX);
-            int s2 = ensure_vreg(inst.src2, RCX);
-            emit_test_reg(s1, s2);
+            // Force both operands into distinct host regs via force_two_vregs_to.
+            // The old code used ensure_vreg(src1, RAX) + ensure_vreg(src2, RCX),
+            // but ensure_vreg ignores the `preferred` hint when the vreg is
+            // already cached elsewhere. Under high register pressure, the
+            // second ensure_vreg could evict the first operand's register
+            // (via alloc_reg evicting ALLOC_REGS[0]=RAX), causing both
+            // operands to end up in the same register — test rax, rax tests
+            // the wrong value.
+            clobber_flags();
+            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
+            emit_test_reg(RAX, RCX);
             flags_in_host_ = true;
             flags_from_sub_ = false;
             return false;
@@ -725,6 +733,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
 
+            // Track whether we loaded flags from pstate. If we did, the
+            // flags in pstate are already correct and the epilogue should
+            // NOT re-materialize (the loaded x86 flags have inverted CF,
+            // and materialize(false) would corrupt the C flag).
+            // If we didn't load (flags were already in host), the epilogue
+            // must still materialize them.
+            bool loaded_from_pstate = !flags_in_host_;
+
             // Ensure flags in host.
             if (!flags_in_host_) {
                 flush_all_vregs();
@@ -783,6 +799,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Store RDX to dest, then cache it in RDX.
             store_reg_to_vreg(inst.dest, RDX);
             set_vreg_reg(inst.dest, RDX);
+            // If we loaded flags from pstate, clear flags_in_host_ so the
+            // epilogue doesn't re-materialize. The flags in pstate are
+            // already correct (CSEL doesn't modify flags). Re-materializing
+            // with the loaded x86 flags would corrupt the C flag: the load
+            // inverted CF based on the from_sub bit, and materialize(false)
+            // would set ARM C = x86 CF (the inverted value), losing the C.
+            // If flags were already in host (not loaded), keep flags_in_host_
+            // so the epilogue materializes them normally.
+            if (loaded_from_pstate) {
+                flags_in_host_ = false;
+            }
             return false;
         }
 
@@ -1676,17 +1703,20 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (need_cmc) emit_byte(0xF5);
 
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
-            // use ensure_vreg + mov instead of load_vreg
-            // (load_vreg is being removed as dead code).
-            if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
-            else {
-                int s = ensure_vreg(inst.src1, RAX);
-                if (s != RAX) emit_mov_reg(RAX, s);
-            }
-            if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
-            else {
-                int s = ensure_vreg(inst.src2, RCX);
-                if (s != RCX) emit_mov_reg(RCX, s);
+            // Use force_two_vregs_to for proper aliasing/eviction handling.
+            // The old ensure_vreg + mov pattern could lose src1's value when
+            // the second ensure_vreg evicted RAX under register pressure.
+            if (inst.src1 == 32 && inst.src2 == 32) {
+                emit_mov_imm32_zext(RAX, 0);
+                emit_mov_imm32_zext(RCX, 0);
+            } else if (inst.src1 == 32) {
+                force_vreg_to_reg(inst.src2, RCX);
+                emit_mov_imm32_zext(RAX, 0);
+            } else if (inst.src2 == 32) {
+                force_vreg_to_reg(inst.src1, RAX);
+                emit_mov_imm32_zext(RCX, 0);
+            } else {
+                force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             }
 
             // jcc do_compare (if cond TRUE, do the compare)
