@@ -432,15 +432,16 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::SMADDL: {
                 int64_t a = static_cast<int32_t>(vregs[inst.src1]);
                 int64_t b = static_cast<int32_t>(vregs[inst.src2]);
-                uint16_t acc = static_cast<uint16_t>(inst.imm);
-                vregs[inst.dest] = static_cast<uint64_t>(static_cast<int64_t>(vregs[acc]) + a * b);
+                // Accumulator register index is in inst.cond (0-31, 31=XZR)
+                uint64_t acc = (inst.cond == 31) ? 0 : vregs[inst.cond];
+                vregs[inst.dest] = static_cast<uint64_t>(static_cast<int64_t>(acc) + a * b);
                 break;
             }
             case IROp::UMADDL: {
                 uint64_t a = static_cast<uint32_t>(vregs[inst.src1]);
                 uint64_t b = static_cast<uint32_t>(vregs[inst.src2]);
-                uint16_t acc = static_cast<uint16_t>(inst.imm);
-                vregs[inst.dest] = vregs[acc] + a * b;
+                uint64_t acc = (inst.cond == 31) ? 0 : vregs[inst.cond];
+                vregs[inst.dest] = acc + a * b;
                 break;
             }
             case IROp::MRS: {

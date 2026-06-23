@@ -1727,12 +1727,18 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
-            // Add accumulator (stored in inst.imm as a vreg index —
-            // but we encoded it as `acc` vreg. We need to load it.)
-            // Actually, the IR translator passed acc as `imm` field,
-            // which is the vreg index. Load it into RDX and add.
-            uint16_t acc_vreg = static_cast<uint16_t>(inst.imm);
-            load_vreg_to_reg(RDX, acc_vreg);
+            // Load accumulator from cpu.regs[inst.cond] directly.
+            // inst.cond is the ARM64 register index (0-31). If 31 (XZR),
+            // the accumulator is 0 (xor rdx, rdx). Otherwise, load from
+            // cpu.regs[cond] = [CPU_REG + cond*8].
+            if (inst.cond == 31) {
+                // XZR — accumulator is 0
+                emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2);  // xor rdx, rdx
+            } else {
+                // Load cpu.regs[cond] into RDX
+                int32_t acc_off = REGS_OFF + static_cast<int>(inst.cond) * 8;
+                emit_load(RDX, CPU_REG, acc_off);
+            }
             // add rax, rdx
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);
             int d = alloc_reg_for(inst.dest, RAX);
@@ -1744,8 +1750,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── MRS — read system register ───────────────────────────────
         case IROp::MRS: {
             // inst.imm encodes the system register (op1/crn/crm/op2/op0).
-            // We handle the common ones: TPIDR_EL0, TPIDRRO_EL0, NZCV, FPCR, FPSR.
-            // Everything else falls back to the interpreter.
+            // We handle TPIDR_EL0, TPIDRRO_EL0, FPCR, FPSR natively.
+            // NZCV and unknown registers fall back to interpreter (NZCV
+            // requires flag materialization which is expensive in tight
+            // loops; unknown registers return 0 like the interpreter).
             uint64_t sys = inst.imm;
             uint8_t op1 = (sys >> 16) & 0x7;
             uint8_t crn = (sys >> 12) & 0xF;
@@ -1754,40 +1762,36 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // System register encodings (op0=3 op1=3):
             //   TPIDR_EL0:   crn=13 crm=0 op2=2  → cpu.tpidr_el0
             //   TPIDRRO_EL0: crn=13 crm=0 op2=3  → cpu.tpidrro_el0
-            //   NZCV:        crn=4  crm=2 op2=0  → cpu.pstate (bits 31-28)
+            //   NZCV:        crn=4  crm=2 op2=0  → fall back (needs flag materialization)
             //   FPCR:        crn=4  crm=4 op2=0  → cpu.fpcr
             //   FPSR:        crn=4  crm=4 op2=1  → cpu.fpsr
             int d = alloc_reg_for(inst.dest, RAX);
             int32_t off = -1;
-            bool is_nzcv = false;
             if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
                 off = 808;  // TPIDR_EL0
             } else if (op1 == 3 && crn == 13 && crm == 0 && op2 == 3) {
                 off = 816;  // TPIDRRO_EL0
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
-                // NZCV — stored in pstate bits 31-28. Read pstate and mask.
-                is_nzcv = true;
+                // NZCV — fall back to interpreter (flag materialization
+                // is too expensive for the common case).
+                emit_call_interp(inst.arm_pc, false);
+                return false;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
                 off = FPCR_OFF;  // FPCR
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
                 off = FPSR_OFF;  // FPSR
             }
-            if (is_nzcv) {
-                // Read pstate, shift NZCV bits (31-28) into position.
-                // pstate layout: N=31, Z=30, C=29, V=28.
-                // NZCV register value = (pstate >> 28) & 0xF, but the
-                // register puts them at bits 31-28, so just mask.
-                emit_load32(d, CPU_REG, PSTATE_OFF);
-                // and d, 0xF0000000
-                emit_byte(rex(true, false, false, d >= 8));
-                emit_byte(0x81); emit_byte(modrm(3, 4, d & 7));
-                emit_u32(0xF0000000);
-            } else if (off >= 0) {
+            if (off >= 0) {
                 emit_load(d, CPU_REG, off);
             } else {
-                // Unknown system register — fall back to interpreter.
-                emit_call_interp(inst.arm_pc, false);
-                return false;
+                // Unknown system register — return 0 (matching the
+                // interpreter's behavior). This is much faster than
+                // falling back to CALL_INTERP, which flushes the entire
+                // vreg cache. Musl probes several ID registers during
+                // startup (CTR_EL0, DCZID_EL0, MIDR_EL1, MVFR*, etc.)
+                // and each CALL_INTERP would invalidate all cached vregs.
+                emit_byte(rex(true, false, false, d >= 8));
+                emit_byte(0x31); emit_byte(modrm(3, d & 7, d & 7));  // xor d, d
             }
             set_vreg_reg(inst.dest, d);
             return false;
@@ -1803,36 +1807,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
             int32_t off = -1;
-            bool is_nzcv = false;
             if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
                 off = 808;  // TPIDR_EL0
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {
-                // NZCV — write bits 31-28 of RAX into pstate bits 31-28.
-                is_nzcv = true;
+                // NZCV — fall back to interpreter.
+                emit_call_interp(inst.arm_pc, false);
+                return false;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
                 off = FPCR_OFF;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
                 off = FPSR_OFF;
             }
-            if (is_nzcv) {
-                // Read current pstate, clear bits 31-28, OR in new NZCV.
-                // RCX = pstate & 0x0FFFFFFF
-                emit_load32(RCX, CPU_REG, PSTATE_OFF);
-                // and rcx, 0x0FFFFFFF
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xE1);
-                emit_u32(0x0FFFFFFF);
-                // and eax, 0xF0000000
-                emit_byte(0x25);  // and eax, imm32 (no REX needed for RAX)
-                emit_u32(0xF0000000);
-                // or rax, rcx
-                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8);
-                // store pstate
-                emit_store32(CPU_REG, PSTATE_OFF, RAX);
-                flags_in_host_ = false;  // flags changed externally
-            } else if (off >= 0) {
+            if (off >= 0) {
                 emit_store(CPU_REG, off, RAX);
             } else {
-                emit_call_interp(inst.arm_pc, false);
+                // Unknown system register — treat as NOP (discard the
+                // write). Much faster than CALL_INTERP.
             }
             return false;
         }

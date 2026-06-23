@@ -1183,13 +1183,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::SMADDL: case InstClass::UMADDL: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
-            uint16_t acc = load_arm_reg(block, d.ra);
             uint16_t r = g_alloc.alloc();
+            // Encode the accumulator register index (d.ra) in the `cond`
+            // field. The JIT loads cpu.regs[d.ra] directly. This avoids
+            // creating a vreg for the accumulator that could be DCE'd by
+            // the optimizer (which would leave the SMADDL with a stale
+            // vreg reference). If d.ra == 31 (XZR), cond=31 and the JIT
+            // uses 0 as the accumulator.
             emit(block, d.cls == InstClass::SMADDL ? IROp::SMADDL : IROp::UMADDL,
-                 r, a, b, 0, 0, 0, acc, cur_pc);
-            // SMADDL: result = acc + (int64)(int32)a * (int32)b
-            // The IR op takes acc as imm (vreg index), but we need it as
-            // a value. For simplicity, fall back to interpreter for SMSUBL.
+                 r, a, b, 0, d.ra & 0x1F, 0, 0, cur_pc);
             store_arm_reg(block, d.rd, r);
             return false;
         }
