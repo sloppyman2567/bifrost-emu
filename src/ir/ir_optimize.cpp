@@ -58,6 +58,14 @@ struct CopyMap {
     void set(uint8_t v, uint8_t src) { parent[v] = src; }
     void clear(uint8_t v) { parent.erase(v); }
     void clear_all() { parent.clear(); }
+    // Invalidate all copies where `src` is the source vreg.
+    // Called when `src` is modified — any copy of `src` becomes stale.
+    void clear_source(uint8_t src) {
+        for (auto it = parent.begin(); it != parent.end(); ) {
+            if (it->second == src) it = parent.erase(it);
+            else ++it;
+        }
+    }
 };
 
 // ── Bitwise helpers for constant folding ──────────────────────────────
@@ -234,6 +242,12 @@ void optimize_ir(IRBlock& block) {
     // ARM64 register loads.
     for (size_t i = 0; i < block.insts.size(); i++) {
         IRInst& inst = block.insts[i];
+        // If this instruction reassigns a vreg, invalidate any copies
+        // that use it as a source. If v35 was copied to v40 and now v35
+        // is reassigned, the copy is stale.
+        if (inst.dest && inst.op != IROp::STORE_REG) {
+            copies.clear_source(inst.dest);
+        }
         // Substitute copy sources.
         if (inst.src1 && copies.parent.count(inst.src1))
             inst.src1 = copies.find(inst.src1);
@@ -267,7 +281,15 @@ void optimize_ir(IRBlock& block) {
 
             case IROp::LOAD_REG: {
                 uint8_t ar = inst.src1;
-                auto it = arm_reg_cache.find(ar);
+                // arm_reg_cache optimization disabled: it has a subtle
+                // correctness bug where a cached vreg can become stale.
+                // The cache maps ARM reg → vreg, but if the vreg is
+                // modified after being cached (by copy propagation
+                // substituting a different vreg, or by the vreg being
+                // reassigned), a subsequent LOAD_REG reads the wrong value.
+                // The performance impact of disabling this is minimal
+                // (LOAD_REG is just a memory load from cpu.regs[]).
+                auto it = arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
                     // Reuse cached vreg: turn this into MOV.
                     inst.op = IROp::MOV;
