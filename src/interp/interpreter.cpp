@@ -86,12 +86,14 @@ static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_i
     uint64_t mask = (width == 64) ? ~0ULL : ((1ULL << width) - 1);
     uint64_t a_w = a & mask;
     uint64_t b_w = b & mask;
+    // Detect carry BEFORE the addition wraps. For 64-bit: carry = (a_w + b_w + carry_in) > mask.
+    // Since uint64_t wraps, we detect carry as: a_w > (mask - b_w - carry_in).
+    bool c = (a_w > (mask - b_w)) || (a_w == (mask - b_w) && carry_in);
     uint64_t sum = a_w + b_w + carry_in;
     uint64_t res = sum & mask;
     if (set_flags) {
         bool n = (res >> (width - 1)) & 1;
         bool z = (res == 0);
-        bool c = (sum > mask);
         bool sa = (a_w >> (width - 1)) & 1;
         bool sb = (b_w >> (width - 1)) & 1;
         bool sr = (res >> (width - 1)) & 1;

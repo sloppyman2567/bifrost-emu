@@ -289,15 +289,23 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s2 = RCX;  // src2 is in RCX; src1 (RAX) is implicit dest
-            // Compute dest = src1 op src2. Reuse RAX for dest if possible.
-            int d;
-            if (inst.dest == inst.src1) {
-                d = RAX;  // in-place
-                vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << RAX);  // v1.4.0-beta.3: maintain bitmask
+            // Compute dest = src1 op src2. Always compute in RAX (which
+            // holds src1) to avoid alloc_reg_for evicting the operands.
+            // If dest != src1, spill src1 first (if dirty) to preserve its
+            // value for potential later readers, then attribute RAX to dest.
+            int d = RAX;
+            if (inst.dest != inst.src1) {
+                // Spill src1 if dirty so its value survives in memory.
+                if (vreg_home_[inst.src1] == RAX && vreg_dirty_[inst.src1]) {
+                    evict_vreg(inst.src1);
+                } else if (vreg_home_[inst.src1] == RAX) {
+                    vreg_home_[inst.src1] = -1;
+                    reg_vreg_[RAX] = -1;
+                    dirty_host_regs_ &= ~(1u << RAX);
+                }
             } else {
-                d = alloc_reg_for(inst.dest, RAX);
-                if (d != RAX) emit_mov_reg(d, RAX);
+                vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << RAX);
             }
             switch (inst.op) {
                 case IROp::ADD: emit_add_reg(d, s2); break;
@@ -308,6 +316,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 case IROp::MUL: emit_imul_reg(d, s2); break;
                 default: break;
             }
+            if (inst.dest != inst.src1) {
+                set_vreg_reg(inst.dest, d);
+            }
             return false;
         }
 
@@ -316,48 +327,24 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // x86 variable shifts use CL for the count, so we must force
             // src2 into RCX and src1 into RAX. force_two_vregs_to handles
             // the eviction, move, and aliasing (src1==src2) cases in one
-            // call — the previous inline version of this logic was ~50
-            // lines and was duplicated across SHL/ADDS/ADCS cases.
+            // call.
             clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
 
-            // Pick dest reg. Reuse RAX if dest==src1; otherwise allocate
-            // a fresh reg that is NOT RCX (we need CL for the count).
-            int d;
-            if (inst.dest == inst.src1) {
-                d = RAX;
-                vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << RAX);  // v1.4.0-beta.3: maintain bitmask
-            } else {
-                d = alloc_reg_for(inst.dest, RAX);
-                if (d == RCX) {
-                    // alloc_reg_for handed us RCX, but we cannot overwrite
-                    // it (src2 lives there). Spill RCX's mapping for dest
-                    // and grab a different reg.
-                    // use kill_vreg to properly clear
-                    // both vreg_home_ and vreg_dirty_ (alloc_reg_for set
-                    // dest dirty, so we must clear that too).
-                    kill_vreg(inst.dest);
-                    reg_vreg_[RCX] = inst.src2;
-                    vreg_home_[inst.src2] = RCX;
-                    // Find any free reg != RCX, evicting if needed.
-                    int pick = -1;
-                    for (int i = 0; i < NUM_ALLOC_REGS; i++) {
-                        int r = ALLOC_REGS[i];
-                        if (r != RCX && reg_vreg_[r] == -1) { pick = r; break; }
-                    }
-                    if (pick < 0) {
-                        // Evict RDX (deterministic) to make room.
-                        if (reg_vreg_[RDX] >= 0) evict_vreg(reg_vreg_[RDX]);
-                        pick = RDX;
-                    }
-                    d = pick;
-                    vreg_home_[inst.dest] = d;
-                    reg_vreg_[d] = inst.dest;
-                    vreg_dirty_[inst.dest] = true;
-                    dirty_host_regs_ |= (1u << d);  // v1.4.0-beta.3: maintain bitmask
+            // Always compute in RAX (holds src1) to avoid alloc_reg_for
+            // evicting the operands under register pressure.
+            int d = RAX;
+            if (inst.dest != inst.src1) {
+                if (vreg_home_[inst.src1] == RAX && vreg_dirty_[inst.src1]) {
+                    evict_vreg(inst.src1);
+                } else if (vreg_home_[inst.src1] == RAX) {
+                    vreg_home_[inst.src1] = -1;
+                    reg_vreg_[RAX] = -1;
+                    dirty_host_regs_ &= ~(1u << RAX);
                 }
-                if (d != RAX) emit_mov_reg(d, RAX);
+            } else {
+                vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << RAX);
             }
             // CL = src2 & 0x3F.
             emit_and_cl_imm8(0x3F);
@@ -365,7 +352,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                      : (inst.op == IROp::SHR) ? 5
                      : (inst.op == IROp::SAR) ? 7 : 1;
             emit_shift_cl(d, kind);
-            set_vreg_reg(inst.dest, d);
+            if (inst.dest != inst.src1) {
+                set_vreg_reg(inst.dest, d);
+            }
             return false;
         }
 
@@ -510,20 +499,32 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::ADDS: case IROp::SUBS: {
             // Force src1 into RAX, src2 into RCX (same fixed-assignment
             // pattern as SHL/SHR/SAR/ROR — handled by force_two_vregs_to).
+            // Call clobber_flags() first to materialize any pending flags
+            // before force_two_vregs_to potentially clobbers them.
+            clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s1 = RAX, s2 = RCX;
             bool is_sub = (inst.op == IROp::SUBS);
             bool is_32bit = (inst.width == 32);
-            int d;
-            if (inst.dest == inst.src1 && inst.dest != 0) {
-                d = s1;
+            // Always compute in RAX (holds src1) to avoid alloc_reg_for
+            // evicting the operands under register pressure.
+            int d = RAX;
+            if (inst.dest != inst.src1 && inst.dest != 0) {
+                // Drop src1's mapping (don't spill — set_vreg_reg will
+                // handle the transition). If src1 was dirty, spill first
+                // to preserve its value for later readers.
+                if (vreg_home_[inst.src1] == RAX) {
+                    if (vreg_dirty_[inst.src1]) {
+                        evict_vreg(inst.src1);
+                    } else {
+                        vreg_home_[inst.src1] = -1;
+                        reg_vreg_[RAX] = -1;
+                        dirty_host_regs_ &= ~(1u << RAX);
+                    }
+                }
+            } else if (inst.dest == inst.src1 && inst.dest != 0) {
                 vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << s1);  // v1.4.0-beta.3: maintain bitmask
-            } else if (inst.dest != 0) {
-                d = alloc_reg_for(inst.dest, s1);
-                if (d != s1) emit_mov_reg(d, s1);
-            } else {
-                d = s1;
+                dirty_host_regs_ |= (1u << RAX);
             }
             if (is_32bit) {
                 // 0x29 /r = SUB r/m32, r32 (sub dst, src)
@@ -550,6 +551,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flags_in_host_ = true;
             flags_from_sub_ = is_sub;
             if (inst.dest == 0) kill_vreg(inst.src1);
+            else if (inst.dest != inst.src1) set_vreg_reg(inst.dest, d);
             return false;
         }
 
@@ -799,6 +801,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Store RDX to dest, then cache it in RDX.
             store_reg_to_vreg(inst.dest, RDX);
             set_vreg_reg(inst.dest, RDX);
+            // If we loaded flags from pstate, clear flags_in_host_ so the
+            // epilogue doesn't re-materialize. The flags in pstate are
+            // already correct (CSEL doesn't modify flags). Re-materializing
+            // with the loaded x86 flags would corrupt the C flag: the load
+            // inverted CF based on the from_sub bit, and materialize(false)
+            // would set ARM C = x86 CF (the inverted value), losing the C.
             // If we loaded flags from pstate, clear flags_in_host_ so the
             // epilogue doesn't re-materialize. The flags in pstate are
             // already correct (CSEL doesn't modify flags). Re-materializing
@@ -2806,9 +2814,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         const char* s = getenv("BIFROST_DBG_PC");
         uint64_t target = strtoull(s, nullptr, 0);
         if (pc == target) {
-            fprintf(stderr, "[DBG] entry block @ 0x%llx pstate=0x%x x1=0x%llx\n",
+            fprintf(stderr, "[DBG] entry block @ 0x%llx pstate=0x%x x1=0x%llx x9=0x%llx x11=0x%llx x31=0x%llx\n",
                     static_cast<unsigned long long>(pc), cpu.pstate,
-                    static_cast<unsigned long long>(cpu.regs[1]));
+                    static_cast<unsigned long long>(cpu.regs[1]),
+                    static_cast<unsigned long long>(cpu.regs[9]),
+                    static_cast<unsigned long long>(cpu.regs[11]),
+                    static_cast<unsigned long long>(cpu.regs[31]));
         }
     }
 
@@ -2858,9 +2869,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             const char* s = getenv("BIFROST_DBG_PC");
             uint64_t target = strtoull(s, nullptr, 0);
             if (pc == target) {
-                fprintf(stderr, "[DBG] exit  block @ 0x%llx pstate=0x%x x19=0x%llx jit_next=0x%llx\n",
+                fprintf(stderr, "[DBG] exit  block @ 0x%llx pstate=0x%x x19=0x%llx x31=0x%llx jit_next=0x%llx\n",
                         static_cast<unsigned long long>(pc), cpu.pstate,
                         static_cast<unsigned long long>(cpu.regs[19]),
+                        static_cast<unsigned long long>(cpu.regs[31]),
                         static_cast<unsigned long long>(jit_next));
             }
         }
