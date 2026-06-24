@@ -424,6 +424,36 @@ void FrostJIT::emit_load_flags_from_pstate() {
     emit_popfq();
 }
 
+// Normalize x86 CF to SUB convention (x86 CF = NOT ARM C) after
+// emit_load_flags_from_pstate. After loading, x86 CF = ARM C XOR from_sub:
+//   from_sub=1: x86 CF = NOT ARM C (already SUB convention — no change)
+//   from_sub=0: x86 CF = ARM C (ADD convention — need to invert)
+// We read the from_sub bit from pstate at runtime and invert CF if needed.
+// After this call, the default arm_cond_to_x86() mapping is correct.
+// Uses RAX/RCX as scratch; caller must flush/invalidate them first.
+void FrostJIT::emit_normalize_cf_to_sub_convention() {
+    // Save current flags (including the loaded CF) to RAX.
+    emit_pushfq();            // pushfq
+    emit_byte(0x58);          // pop rax  (RAX = saved RFLAGS, CF is bit 0)
+
+    // Read pstate and extract from_sub bit (bit 27).
+    emit_load32(RCX, CPU_REG, PSTATE_OFF);  // mov ecx, [rbx+PSTATE_OFF]
+    emit_shift_imm8(RCX, 5, 27);            // shr ecx, 27
+    emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);  // and ecx, 1
+
+    // Compute mask = NOT from_sub = 1 XOR from_sub.
+    // If from_sub=0: mask=1 (need to flip CF).
+    // If from_sub=1: mask=0 (CF already correct).
+    emit_byte(0x83); emit_byte(0xF1); emit_byte(0x01);  // xor ecx, 1
+
+    // XOR RAX bit 0 (CF) with the mask. This flips CF iff from_sub=0.
+    emit_xor_reg(RAX, RCX);  // xor rax, rcx
+
+    // Restore flags from RAX (CF is now normalized to SUB convention).
+    emit_byte(0x50);          // push rax
+    emit_popfq();             // popfq
+}
+
 // ── Condition code mapping ─────────────────────────────────────────────
 // Maps ARM condition codes to x86 Jcc condition codes.
 // Since emit_load_flags_from_pstate correctly restores x86 CF (un-inverting

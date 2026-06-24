@@ -503,7 +503,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // before force_two_vregs_to potentially clobbers them.
             clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            int s1 = RAX, s2 = RCX;
+            int s2 = RCX;
             bool is_sub = (inst.op == IROp::SUBS);
             bool is_32bit = (inst.width == 32);
             // Always compute in RAX (holds src1) to avoid alloc_reg_for
@@ -732,8 +732,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Carry polarity: arm_cond_to_x86() assumes SUB convention
             // (ARM C = NOT x86 CF). When flags came from ADD/TST
             // (carry_is_direct), CS/CC need swapped mapping, HI/LS need cmc.
-            bool need_cmc = false;
-            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
 
             // Track whether we loaded flags from pstate. If we did, the
             // flags in pstate are already correct and the epilogue should
@@ -747,14 +745,24 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
+                // emit_load_flags_from_pstate sets x86 CF = ARM C XOR from_sub.
+                // Normalize to SUB convention (x86 CF = NOT ARM C) so the
+                // default arm_cond_to_x86() mapping works correctly for ALL
+                // conditions (CS/CC/HI/LS included) regardless of whether
+                // the flags originally came from ADD or SUB.
+                emit_normalize_cf_to_sub_convention();
                 // Drop all cache mappings but DON'T clear flags_in_host_.
-                // use invalidate_all_vregs but preserve flags_in_host_.
                 bool saved_fih2 = flags_in_host_;
                 invalidate_all_vregs();
                 flags_in_host_ = saved_fih2;
                 flags_in_host_ = true;
-                flags_from_sub_ = false;
+                flags_from_sub_ = true;  // CF is now in SUB convention
             }
+            // Resolve condition code. With flags_from_sub_=true (SUB convention,
+            // whether originally from SUB or normalized after loading),
+            // resolve_arm_cond_with_carry uses the default mapping.
+            bool need_cmc = false;
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
             // Save flags, flush vregs, restore flags. CRITICAL: preserve
             // flags_in_host_ — invalidate_all_vregs would clear it, but
             // pushfq/popfq preserves the actual flags.
@@ -835,10 +843,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
-                flags_from_sub_ = false;
+                // Normalize CF to SUB convention so the default
+                // arm_cond_to_x86() mapping works for all conditions.
+                emit_normalize_cf_to_sub_convention();
+                flags_from_sub_ = true;  // CF is now in SUB convention
                 invalidate_all_vregs();
+                flags_in_host_ = true;
             }
             // Resolve condition code, handling carry polarity (ADD/TST vs SUB).
+            // With flags_from_sub_=true (SUB convention, whether originally
+            // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
             // Materialize flags to pstate BEFORE consuming them for the
@@ -858,10 +872,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // if flags came from ADD/TST and the
                 // condition is HI/LS, invert CF with `cmc` so it matches
                 // the SUB convention that arm_cond_to_x86() expects.
-                // pstate already has the correct ARM C (from materialize
-                // above), so this only affects the JCC. CS/CC are handled
-                // by the swapped mapping above (no cmc needed). GE/LT/GT/LE
-                // don't depend on C (no cmc needed).
                 if (need_cmc_for_hi_ls) {
                     emit_byte(0xF5);  // cmc
                 }
@@ -1207,7 +1217,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
 
             // UCOMISD/UCOMISS xmm0, xmm1
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x2E);
+            // Encoding: UCOMISD = 66 0F 2E /r ; UCOMISS = NP 0F 2E /r
+            // (NOT F2/F3 — those prefixes are for arithmetic ops like ADDSD,
+            // not for compare ops. Using F2/F3 here emits an illegal
+            // instruction that raises SIGILL on real hardware.)
+            if (is_double) emit_byte(0x66);
+            emit_byte(0x0F); emit_byte(0x2E);
             emit_byte(0xC1);  // xmm0, xmm1
 
             // Build pstate in RDX using conditional moves.
@@ -1624,8 +1639,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // ARM C = x86 CF for ADC (carry out).
             // ARM C = NOT x86 CF for SBB (NOT borrow).
             //
-            // We must load the C flag from pstate into x86 CF first
-            // (emit_load_flags_from_pstate handles the from_sub inversion).
+            // We must load the C flag from pstate into x86 CF first.
+            // After loading, x86 CF = ARM C XOR from_sub. We need:
+            //   ADCS: x86 CF = ARM C (ADD convention)
+            //   SBCS: x86 CF = NOT ARM C (SUB convention)
+            // emit_normalize_cf_to_sub_convention normalizes to SUB convention.
+            // For ADCS, we then cmc to get ADD convention.
             bool is_sub = (inst.op == IROp::SBCS);
             bool is_32bit = (inst.width == 32);
 
@@ -1634,20 +1653,36 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // then we already have flags in host.
             if (flags_in_host_) {
                 // Materialize to pstate (clobbers RAX/RCX/RDX).
-                // use bitmask helpers.
                 emit_pushfq();
                 constexpr uint16_t FLAGS3a = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
                 flush_dirty_host_regs(FLAGS3a);
                 emit_materialize_flags(flags_from_sub_);
                 emit_popfq();
                 invalidate_host_regs(FLAGS3a);
+                // Host flags are in the convention indicated by flags_from_sub_.
+                // For SBCS: need SUB convention (x86 CF = NOT ARM C).
+                //   If flags_from_sub_=true: already SUB. OK.
+                //   If flags_from_sub_=false: ADD convention. Need cmc.
+                // For ADCS: need ADD convention (x86 CF = ARM C).
+                //   If flags_from_sub_=false: already ADD. OK.
+                //   If flags_from_sub_=true: SUB convention. Need cmc.
+                if (is_sub && !flags_from_sub_) {
+                    emit_byte(0xF5);  // cmc: ADD → SUB
+                } else if (!is_sub && flags_from_sub_) {
+                    emit_byte(0xF5);  // cmc: SUB → ADD
+                }
             } else {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
+                // Normalize CF to SUB convention (x86 CF = NOT ARM C).
+                emit_normalize_cf_to_sub_convention();
                 invalidate_all_vregs();
+                // For SBCS: CF is now NOT ARM C. Correct.
+                // For ADCS: need ARM C. cmc to invert.
+                if (!is_sub) {
+                    emit_byte(0xF5);  // cmc: SUB → ADD
+                }
             }
-            // Now x86 CF holds the ARM C flag (correctly un-inverted
-            // by emit_load_flags_from_pstate if from_sub was set).
 
             // Force src1 into RAX, src2 into RCX (same pattern as SHL/ADDS).
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);

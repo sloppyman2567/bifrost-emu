@@ -47,3 +47,10 @@ bifrost-emu-o0
 bifrost-emu-o1
 bifrost-emu-o2
 bifrost-emu-test*
+
+# External toolchains (downloaded by tools/fetch-musl-toolchain.sh)
+tools/aarch64-linux-musl-cross/
+tools/aarch64-linux-musl-cross.tgz
+
+# Downloaded SDL2 .deb packages (for offline SDL2 build)
+tools/sdl2-debs/

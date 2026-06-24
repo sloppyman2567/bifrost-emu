@@ -289,6 +289,13 @@ private:
     // Flag materialization.
     void emit_materialize_flags(bool from_sub = false);
     void emit_load_flags_from_pstate();
+    // After emit_load_flags_from_pstate, x86 CF = ARM C XOR from_sub.
+    // This helper emits runtime code to normalize CF to SUB convention
+    // (x86 CF = NOT ARM C) by inverting CF when from_sub=0. After this,
+    // the default arm_cond_to_x86() mapping (which assumes SUB convention)
+    // is correct for all conditions.
+    // Uses RAX and RCX as scratch (caller must ensure they're free).
+    void emit_normalize_cf_to_sub_convention();
 
     // Memory access (direct-window path).
     void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext);
