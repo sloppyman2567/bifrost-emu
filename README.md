@@ -84,7 +84,8 @@ make install  # install to /usr/local/bin/
 
 No external libraries required for the default build. Only standard C++
 and POSIX. For the SDL2 window backend: `make USE_SDL2=1` (requires
-`libsdl2-dev`).
+`libsdl2-dev`, or run `./tools/fetch-sdl2-headers.sh` to download
+SDL2 headers via `apt-get download` without a system-wide install).
 
 To cross-compile test programs with the bundled musl toolchain:
 

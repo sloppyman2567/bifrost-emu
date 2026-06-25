@@ -54,3 +54,6 @@ tools/aarch64-linux-musl-cross.tgz
 
 # Downloaded SDL2 .deb packages (for offline SDL2 build)
 tools/sdl2-debs/
+
+# SDL2 SDK (extracted by tools/fetch-sdl2-headers.sh)
+tools/sdl2-sdk/
