@@ -42,7 +42,7 @@ make
 # Pass arguments to the emulated program
 ./bifrost-emu cat.elf /etc/hostname
 
-# Enable the experimental JIT (38/39 tests pass)
+# Enable the JIT (39/39 tests pass)
 ./bifrost-emu --jit ctest_real/fib.elf
 
 # Show version
@@ -150,7 +150,8 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-Enable with `--jit`. As of beta.3, 39 of 39 test programs pass under JIT.
+Enable with `--jit`. As of beta.3 (2026-06-26), all 39 test programs
+pass under JIT.
 
 ## Performance
 
@@ -259,10 +260,9 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 39 test programs pass under the default interpreter path. Under
-`--jit`, 38 of 39 pass (one sub-test in `jit_fp_scalar` has a residual
-interpreter encoding issue). See [TESTS.md](TESTS.md) for the full test
-matrix, including toybox compatibility (31/37 commands pass).
+All 39 test programs pass under both the default interpreter path and
+`--jit`. See [TESTS.md](TESTS.md) for the full test matrix, including
+toybox compatibility (31/37 commands pass).
 
 Run the test suite:
 
@@ -287,21 +287,28 @@ This is beta-quality software. Key limitations:
 - **Signal delivery is partial.** `rt_sigaction` installs handlers and
   `kill`/`tgkill` deliver signals, but `siginfo_t`/`ucontext_t` contents,
   `SA_RESTART`, and signal masks are not fully implemented.
-- **frostJIT (`--jit`) is experimental.** 38/39 tests pass; the one
-  remaining failure is an interpreter encoding issue, not a JIT codegen
-  bug. The interpreter path is the default for production use.
+- **frostJIT (`--jit`) is experimental.** All 39 tests pass, but the
+  JIT has not been exhaustively tested against arbitrary ARM64 binaries.
+  The interpreter path is the default for production use.
 - **toybox `seq` and `od`** hit SIMD decode errors on unhandled vector
   instructions. All other tested toybox commands work.
+- **toybox `ls /` crashes under JIT** (pre-existing; works under
+  interpreter). Root cause not yet identified.
 
 For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-beta.3** (2026-06-25), which includes:
+current release is **v1.4.0-beta.3** (2026-06-26), which includes:
 
-- JIT critical correctness fixes (FCMP prefix, CSEL/BRCOND flag resolution,
-  CF normalization, ADCS/SBCS carry convention)
+- JIT FP correctness overhaul — all 39 tests now pass under JIT
+  (FCMP #0.0 form detection, FP 1-source opcode extraction,
+  FMOV imm mask, FMOV imm vs SCVTF collision, missing interp FCMP)
+- Shared `fp_decode` helpers in `decoder.hpp` to keep interpreter
+  and JIT's IR translator in sync
+- JIT critical correctness fixes (FCMP prefix, CSEL/BRCOND flag
+  resolution, CF normalization, ADCS/SBCS carry convention)
 - Audio backend (OSS `/dev/dsp` passthrough + WAV dump)
 - VFS abstraction (VNode + FdTable + procfs + devfs)
 - ~16 new syscalls (networking, inotify, statx)

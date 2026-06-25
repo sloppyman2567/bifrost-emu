@@ -11,12 +11,14 @@ their current status under both the interpreter (default) and frostJIT
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
 | Interpreter (`./bifrost-emu`) | 39 | 39 | 0 |
-| frostJIT (`./bifrost-emu --jit`) | 39 | 38 | 1 |
+| frostJIT (`./bifrost-emu --jit`) | 39 | 39 | 0 |
 
-The single JIT failure is one sub-test in `jit_fp_scalar` (an FCMP
-comparison in an interp-only block). The JIT's own FCMP codegen is
-correct after the beta.2 UCOMISD prefix fix — the failure is a
-downstream interpreter encoding-disambiguation issue.
+All 39 test programs pass under both the interpreter and frostJIT as
+of beta.3 (2026-06-26). The previous beta.3 release carried a single
+JIT failure in `jit_fp_scalar` caused by a cluster of FP decode bugs
+(FCMP #0.0 form detection, FP 1-source opcode extraction, FMOV imm
+mask, FMOV imm vs SCVTF collision, missing interpreter FCMP handler).
+All are fixed; see CHANGELOG.md for details.
 
 ---
 
@@ -64,7 +66,7 @@ natively. They are the regression suite for frostJIT codegen changes.
 | `ctest/jit_cls.elf` | ✅ | ✅ | CLS (count leading sign bits) |
 | `ctest/jit_csel.elf` | ✅ | ✅ | CSEL/CSINC/CSINV/CSNEG |
 | `ctest/jit_extend.elf` | ✅ | ✅ | SXTB/SXTH/SXTW/UXTB/UXTH/UXTW |
-| `ctest/jit_fp_scalar.elf` | ✅ | ⚠️ | FP scalar ops (24/25 sub-tests pass; 1 FCMP sub-test fails in an interp-only block) |
+| `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests pass after FCMP/FABS/FNEG/FSQRT/FMOV-imm decode fixes) |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |
 | `ctest/jit_rev.elf` | ✅ | ✅ | REV/REV16/REV32/RBIT |

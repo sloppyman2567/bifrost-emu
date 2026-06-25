@@ -287,6 +287,75 @@ bool cond_true(uint32_t cond, uint32_t pstate);
 //         100 SXTB, 101 SXTH, 110 SXTW, 111 SXTX
 uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool sf);
 
+// ── FP scalar decode helpers (shared between interpreter and JIT) ───────
+//
+// The 0x1Exxxxxx encoding space packs many FP/SIMD ops into overlapping
+// bit fields. These helpers centralize the field extraction so the
+// interpreter (src/interp/interpreter.cpp) and the JIT's IR translator
+// (src/ir/ir_translate.cpp) decode identically. Drift between the two
+// historically caused FCMP/FABS/FSQRT/FMOV-imm bugs that were tedious
+// to track down.
+
+namespace fp_decode {
+
+// True iff `op` is an FCMP/FCMPE encoding.
+//   bits[31:24]=0x1E, bits[23:22]=ftype, bit[21]=1, bits[15:10]=0b001000
+inline bool is_fcmp(uint32_t op) {
+    return (op & 0xFF200000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0x08;
+}
+
+// True iff this FCMP encoding is the "#0.0" form (vs register form).
+//   #0.0 form:    bits[4:0] = 0b01000 (Op = 8)
+//   register form: bits[4:0] = 0b00000, Rm in bits[20:16]
+inline bool fcmp_with_zero(uint32_t op) {
+    return (op & 0x1F) == 0x08;
+}
+
+// True iff `op` is an FMOV (scalar, immediate) encoding.
+//   0 00 11110 ftype 1 imm8 100 00000 Rd
+// Mask off ftype (bits[23:22]), imm8 (bits[20:13]), and Rd (bits[4:0])
+// so both single and double forms match.
+inline bool is_fmov_imm(uint32_t op) {
+    return (op & 0xFF201FE0) == 0x1E201000;
+}
+
+// True iff `op` is an FP 1-source instruction (FMOV-reg/FABS/FNEG/FSQRT/FRINT*).
+//   bit[21]=1, bits[14:10]=0b10000 (constant)
+// The 6-bit opcode is in bits[20:15] (= rmode:opcode in the ARM ARM).
+inline bool is_fp_1source(uint32_t op) {
+    return ((op >> 21) & 1) == 1 && ((op >> 10) & 0x1F) == 0x10;
+}
+
+// Extract the FP 1-source opcode (bits[20:15], 6 bits).
+//   0x00 = FMOV (register)
+//   0x01 = FABS
+//   0x02 = FNEG
+//   0x03 = FSQRT
+//   0x04..0x0F = FRINT* family
+inline uint8_t fp_1source_opcode(uint32_t op) {
+    return (op >> 15) & 0x3F;
+}
+
+// VFPExpandImm: expand an 8-bit FP immediate to its 32-bit (single) or
+// 64-bit (double) IEEE 754 representation. ftype: 0=S, 1=D.
+inline uint64_t vfp_expand_imm(uint8_t imm8, uint8_t ftype) {
+    uint64_t sign  = (imm8 >> 7) & 1;
+    uint64_t b     = (imm8 >> 6) & 1;
+    uint64_t not_b = b ^ 1;
+    uint64_t imm6  = imm8 & 0x3F;
+    if (ftype == 1) {  // double
+        uint64_t rep_b = b * 0xFFULL;
+        return (sign << 63) | (not_b << 62) | (rep_b << 54) | (imm6 << 48);
+    } else {  // single (ftype == 0)
+        uint32_t rep_b = static_cast<uint32_t>(b * 0x1Fu);
+        return static_cast<uint64_t>(
+            (sign << 31) | (not_b << 30) | (rep_b << 25) | (imm6 << 19));
+    }
+}
+
+}  // namespace fp_decode
+
+
 // Sign-extend a value from `bits` width to 64 bits.
 // (Defined in arm64_emu.hpp — included here for reference.)
 // inline uint64_t sign_extend(uint64_t v, int bits) { ... }

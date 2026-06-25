@@ -2014,48 +2014,32 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // `fmov d0, #2.5` (which produces 0x4078… instead of 0x4004…),
                 // corrupting every `printf("%f", float_var)` because the variadic
                 // arg-promoted float was being loaded with the wrong immediate.
-                // FMOV (scalar, immediate): bits[31:21]=0x1E6, bits[12:10]=0b100,
-                // bits[9:5]=0 (Rn=0), bits[4:0]=Rd (any).
-                // Mask 0xFFE003E0 covers bits[31:21] and bits[9:5] but NOT Rd.
-                if ((op & 0xFFE003E0) == 0x1E600000
-                    && ((op >> 10) & 0x7) == 0x4) {
+                // FMOV (scalar, immediate): uses shared fp_decode helper.
+                if (fp_decode::is_fmov_imm(op)) {
                     uint8_t imm8 = (op >> 13) & 0xFF;
-                    uint64_t sign = (imm8 >> 7) & 1;
-                    uint64_t b     = (imm8 >> 6) & 1;
-                    uint64_t not_b = b ^ 1;
-                    uint64_t imm6  = imm8 & 0x3F;
-                    if (ftype == 1) {  // double precision (ftype=01 → D)
-                        uint64_t rep_b = b * 0xFFULL;          // Replicate(b, 8)
-                        uint64_t bits = (sign << 63)
-                                      | (not_b << 62)
-                                      | (rep_b << 54)
-                                      | (imm6 << 48);
+                    uint64_t bits = fp_decode::vfp_expand_imm(imm8, ftype);
+                    if (ftype == 1) {
                         cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
-                    } else if (ftype == 0) {  // single precision (ftype=00 → S)
-                        uint32_t rep_b = static_cast<uint32_t>(b * 0x1Fu);  // Replicate(b, 5)
-                        uint32_t bits = static_cast<uint32_t>((sign << 31)
-                                      | (not_b << 30)
-                                      | (rep_b << 25)
-                                      | (imm6 << 19));
+                    } else if (ftype == 0) {
                         cpu.v_lo[rd] = bits; cpu.v_hi[rd] = 0;
                     } else {
-                        // ftype == 3 → half precision (H). We don't model 16-bit FP
-                        // natively, so expand to single-precision bits via the
-                        // standard half→single conversion of the immediate value.
-                        // For the immediate, VFPExpandImm with N=16 gives a 16-bit
-                        // half value; we then convert that to single precision.
-                        uint16_t rep_b = static_cast<uint16_t>(b * 0x3u);   // Replicate(b, 2)
+                        // ftype == 3 → half precision. We don't model 16-bit
+                        // FP natively, so expand to single-precision bits via
+                        // the standard half→single conversion of the imm value.
+                        // (Preserved from the original implementation.)
+                        uint64_t sign = (imm8 >> 7) & 1;
+                        uint64_t b     = (imm8 >> 6) & 1;
+                        uint64_t not_b = b ^ 1;
+                        uint64_t imm6  = imm8 & 0x3F;
+                        uint16_t rep_b = static_cast<uint16_t>(b * 0x3u);
                         uint16_t hbits = static_cast<uint16_t>((sign << 15)
                                       | (not_b << 14)
                                       | (rep_b << 12)
                                       | (imm6 << 6));
-                        // Half→single expansion (no Inf/NaN special handling needed
-                        // for the small set of values representable as FMOV imm).
                         uint32_t sexp = (hbits >> 10) & 0x1F;
                         uint32_t smant = hbits & 0x3FF;
                         uint32_t sbits;
                         if (sexp == 0) {
-                            // Denormal/zero — normalize to single
                             if (smant == 0) sbits = static_cast<uint32_t>(sign) << 31;
                             else {
                                 int e = -1;
@@ -2117,25 +2101,66 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // FP 1-source: FABS/FNEG/FSQRT/FRINT*
-                // All FP 1-source instructions have bits[11:10]=0b00.
-                // FCMP and FMOV imm are already handled above.
-                if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0x0) {
-                    uint8_t opcode = (op >> 12) & 0xF;
+                // FCMP/FCMPE: FP compare (sets NZCV).
+                // Uses shared fp_decode helpers for encoding detection.
+                // Must be checked BEFORE FP 1-source (below) because both
+                // have bits[11:10]=0b00; without this explicit check,
+                // FCMP would be misdecoded as FNEG.
+                if (fp_decode::is_fcmp(op)) {
+                    bool with_zero = fp_decode::fcmp_with_zero(op);
+                    uint32_t nzcv;
+                    auto set_nzcv = [&](bool unordered, bool less, bool equal) {
+                        // ARM FCMP NZCV (bits[31:28] = N Z C V):
+                        //   unordered: N=0 Z=0 C=1 V=1 = 0x28000000
+                        //   less:      N=1 Z=0 C=0 V=0 = 0x80000000
+                        //   equal:     N=0 Z=1 C=1 V=0 = 0x60000000
+                        //   greater:   N=0 Z=0 C=1 V=0 = 0x20000000
+                        if (unordered)      nzcv = 0x28000000;
+                        else if (less)       nzcv = 0x80000000;
+                        else if (equal)      nzcv = 0x60000000;
+                        else                 nzcv = 0x20000000;
+                    };
+                    if (ftype == 1) {  // double
+                        double a = read_fp_d(cpu, rn);
+                        double b = with_zero ? 0.0 : read_fp_d(cpu, rm);
+                        if (std::isnan(a) || std::isnan(b))
+                            set_nzcv(true, false, false);
+                        else if (a < b) set_nzcv(false, true, false);
+                        else if (a > b) set_nzcv(false, false, false);
+                        else            set_nzcv(false, false, true);
+                    } else if (ftype == 0) {  // single
+                        float a = read_fp_s(cpu, rn);
+                        float b = with_zero ? 0.0f : read_fp_s(cpu, rm);
+                        if (std::isnan(a) || std::isnan(b))
+                            set_nzcv(true, false, false);
+                        else if (a < b) set_nzcv(false, true, false);
+                        else if (a > b) set_nzcv(false, false, false);
+                        else            set_nzcv(false, false, true);
+                    } else {
+                        nzcv = 0x28000000;  // half-precision: treat as unordered
+                    }
+                    cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | nzcv;
+                    return;
+                }
+                // FP 1-source: FMOV/FABS/FNEG/FSQRT/FRINT*
+                // Uses shared fp_decode helpers. The 6-bit opcode is in
+                // bits[20:15] (= rmode:opcode in the ARM ARM).
+                if (fp_decode::is_fp_1source(op)) {
+                    uint8_t opcode = fp_decode::fp_1source_opcode(op);
                     if (ftype) {
                         double a = read_fp_d(cpu, rn), r = 0;
                         switch (opcode) {
-                            case 0x0: r = a; break;
-                            case 0x1: r = std::fabs(a); break;
-                            case 0x2: r = -a; break;
-                            case 0x3: r = std::sqrt(a); break;
-                            case 0x4: r = std::rint(a); break;     // FRINTN
-                            case 0x5: r = std::ceil(a); break;      // FRINTP
-                            case 0x6: r = std::floor(a); break;     // FRINTM
-                            case 0x7: r = std::trunc(a); break;     // FRINTZ
-                            case 0x8: r = std::rint(a); break;      // FRINTA
-                            case 0x9: r = std::rint(a); break;      // FRINTX
-                            case 0xA: r = std::rint(a); break;      // FRINTI
+                            case 0x0: r = a; break;                        // FMOV
+                            case 0x1: r = std::fabs(a); break;             // FABS
+                            case 0x2: r = -a; break;                       // FNEG
+                            case 0x3: r = std::sqrt(a); break;             // FSQRT
+                            case 0x4: r = std::rint(a); break;             // FRINTN
+                            case 0x5: r = std::ceil(a); break;             // FRINTP
+                            case 0x6: r = std::floor(a); break;            // FRINTM
+                            case 0x7: r = std::trunc(a); break;            // FRINTZ
+                            case 0x8: r = std::rint(a); break;             // FRINTA
+                            case 0x9: r = std::rint(a); break;             // FRINTX
+                            case 0xA: r = std::rint(a); break;             // FRINTI
                             case 0xC: r = std::rint(a); break;
                             case 0xE: r = std::rint(a); break;
                             case 0xF: r = std::rint(a); break;
@@ -2149,13 +2174,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             case 0x1: r = std::fabsf(a); break;
                             case 0x2: r = -a; break;
                             case 0x3: r = std::sqrtf(a); break;
-                            case 0x4: r = std::rintf(a); break;     // FRINTN
-                            case 0x5: r = std::ceilf(a); break;     // FRINTP
-                            case 0x6: r = std::floorf(a); break;    // FRINTM
-                            case 0x7: r = std::truncf(a); break;    // FRINTZ
-                            case 0x8: r = std::rintf(a); break;     // FRINTA
-                            case 0x9: r = std::rintf(a); break;     // FRINTX
-                            case 0xA: r = std::rintf(a); break;     // FRINTI
+                            case 0x4: r = std::rintf(a); break;
+                            case 0x5: r = std::ceilf(a); break;
+                            case 0x6: r = std::floorf(a); break;
+                            case 0x7: r = std::truncf(a); break;
+                            case 0x8: r = std::rintf(a); break;
+                            case 0x9: r = std::rintf(a); break;
+                            case 0xA: r = std::rintf(a); break;
                             case 0xC: r = std::rintf(a); break;
                             default: r = a; break;
                         }

@@ -1070,17 +1070,26 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // FCMP/FCMPE must be checked BEFORE FP arithmetic
-            // because FCMP has bit[21]=1 and bits[15:10]=0x08, which would
-            // otherwise match the FP arithmetic pattern (bit[21]=1, bits[15:10]!=0x04).
-            // FCMP encoding: (op & 0xFF200000) == 0x1E200000, bits[15:10]=0x08.
-            if ((op & 0xFF200000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0x08) {
-                bool with_zero = (rm == 31);
+            // FCMP/FCMPE — uses shared fp_decode helper.
+            //
+            // The #0.0 form vs register form is distinguished by bits[4:0]:
+            //   #0.0 form:    bits[4:0] = 0b01000
+            //   register form: bits[4:0] = 0b00000, rm in bits[20:16]
+            //
+            // We pass src2 = rm for the register form (including rm == 0,
+            // which means "compare against d0"), and src2 = 0 plus a
+            // sentinel bit in the `imm` field (bit 0) for the #0.0 form.
+            // The JIT checks `inst.imm & 1` to distinguish the two cases;
+            // without this sentinel, FCMP Dn, D0 would be confused with
+            // FCMP Dn, #0.0 because both have IR src2 == 0.
+            if (fp_decode::is_fcmp(op)) {
+                bool with_zero = fp_decode::fcmp_with_zero(op);
                 if (with_zero) {
-                    // FCMP Dn, #0.0 — compare against zero
-                    emit(block, IROp::FP_CMP, 0, rn, 0, ftype, 0, 0, 0, cur_pc);
+                    emit(block, IROp::FP_CMP, 0, rn, 0, ftype,
+                         0, 0, /*imm=*/1, cur_pc);
                 } else {
-                    emit(block, IROp::FP_CMP, 0, rn, rm, ftype, 0, 0, 0, cur_pc);
+                    emit(block, IROp::FP_CMP, 0, rn, rm, ftype,
+                         0, 0, /*imm=*/0, cur_pc);
                 }
                 return false;
             }
@@ -1097,13 +1106,31 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
-            // FP 1-source: bit[21]=1, bits[15:10]=0b010000
-            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) == 0x10) {
-                // FMOV=0x0, FABS=0x1, FNEG=0x2, FSQRT=0x3
-                if (opcode <= 3 && ftype <= 1) {
-                    emit(block, IROp::FP_UNOP, rd, rn, 0, ftype, 0, 0, opcode, cur_pc);
+            // FP 1-source: uses shared fp_decode helper.
+            // FABS=1, FNEG=2, FSQRT=3. FRINT* (4+) is handled by the
+            // dedicated FRINT block further below.
+            if (fp_decode::is_fp_1source(op)) {
+                uint8_t fp1_opcode = fp_decode::fp_1source_opcode(op);
+                if (fp1_opcode >= 1 && fp1_opcode <= 3 && ftype <= 1) {
+                    emit(block, IROp::FP_UNOP, rd, rn, 0, ftype,
+                         0, 0, fp1_opcode, cur_pc);
                     return false;
                 }
+            }
+            // FMOV (scalar, immediate) — uses shared fp_decode helper.
+            //
+            // MUST be checked BEFORE FCVTZS/SCVTF — the SCVTF mask
+            // 0x7F3F0000 also matches FMOV imm (since both have bit[21]=1
+            // and similar high bits), causing FMOV imm to be misdecoded
+            // as SCVTF (int→FP conversion). This bug caused `fmov d1, #5.0`
+            // to be treated as `scvtf d1, x0` (reading garbage from x0),
+            // which made every subsequent FP comparison against an
+            // immediate-loaded register fail.
+            if (fp_decode::is_fmov_imm(op)) {
+                uint8_t imm8 = (op >> 13) & 0xFF;
+                uint64_t bits = fp_decode::vfp_expand_imm(imm8, ftype);
+                emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
+                return false;
             }
             // FCVTZS/FCVTZU: FP→int (toward zero)
             // Encoding: (op & 0x7F3F0000) == 0x1E380000, rmode=3 (toward zero)
@@ -1116,51 +1143,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             // SCVTF/UCVTF: int→FP
             // Encoding: (op & 0x7F3F0000) == 0x1E220000
+            // Checked AFTER FMOV imm (which has a tighter mask and must
+            // match first to avoid collision).
             if ((op & 0x7F3F0000) == 0x1E220000) {
                 bool is_unsigned = (op >> 16) & 1;
                 if (ftype <= 1) {
                     emit(block, IROp::FP_I2F, rd, rn, 0, ftype, 0, 0, is_unsigned, cur_pc);
                     return false;
                 }
-            }
-            // FMOV (scalar, immediate): fix.
-            // Encoding: bits[31:21] = 0x1E6 (0001 1110 011) + ftype<<22,
-            // bits[20:13] = imm8, bits[12:10] = 100, bits[9:5] = 00000.
-            // Mask 0xFFE003E0 covers bits[31:21] and bits[9:5], so Rd and
-            // imm8 are don't-cares. The old mask 0xFFE0001F incorrectly
-            // required Rd=0 (bit 4:0 = 0), which only matched FMOV D0, #imm.
-            // Now all Rd values match.
-            if ((op & 0xFFE003E0) == 0x1E600000) {
-                uint8_t imm8 = (op >> 13) & 0xFF;
-                // VFPExpandImm — use the correct algorithm
-                // from the ARM ARM (matches the interpreter's decoding).
-                //   sign = imm8[7]
-                //   b = imm8[6], not_b = NOT(b)
-                //   imm6 = imm8[5:0]
-                // For double (N=64):
-                //   exp = not_b : Replicate(b, 8) : 0x3F0... wait, let me use
-                //   the interpreter's proven formula:
-                //   bits = (sign << 63) | (not_b << 62) | (Replicate(b,8) << 54) | (imm6 << 48)
-                uint64_t sign = (imm8 >> 7) & 1;
-                uint64_t b     = (imm8 >> 6) & 1;
-                uint64_t not_b = b ^ 1;
-                uint64_t imm6  = imm8 & 0x3F;
-                if (ftype == 1) {  // double precision
-                    uint64_t rep_b = b * 0xFFULL;          // Replicate(b, 8)
-                    uint64_t bits = (sign << 63)
-                                  | (not_b << 62)
-                                  | (rep_b << 54)
-                                  | (imm6 << 48);
-                    emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
-                } else {  // single precision (ftype == 0)
-                    uint32_t rep_b = static_cast<uint32_t>(b * 0x1Fu);  // Replicate(b, 5)
-                    uint32_t bits = static_cast<uint32_t>((sign << 31)
-                                  | (not_b << 30)
-                                  | (rep_b << 25)
-                                  | (imm6 << 19));
-                    emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
-                }
-                return false;
             }
             // FMADD/FMSUB (FP fused multiply-add/subtract).
             // Encoding: (op & 0xFF200000) == 0x1F000000, bit 15 = sub (1=FMSUB, 0=FMADD).

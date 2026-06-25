@@ -6,12 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0-beta.3] — 2026-06-25 (version bump, documentation restructure)
+## [1.4.0-beta.3] — 2026-06-26 (JIT FP correctness overhaul — 39/39 tests pass)
 
-### Version
+### Summary
 
-- Bumped version from 1.4.0-beta.2 to 1.4.0-beta.3 across all files
-  (version.hpp, main.cpp, Makefile, README.md).
+All 39 test programs now pass under both the interpreter and frostJIT.
+The previous beta.3 carried a single JIT failure in `jit_fp_scalar`
+(attributed to an "interpreter encoding issue"). Root-cause analysis
+revealed a cluster of related FP decode bugs in both the interpreter
+and the JIT's IR translator; all are fixed in this release.
+
+### JIT — frostJIT now passes 39/39 tests (was 38/39)
+
+- **FCMP `#0.0` form misdecoded as register form.** The IR translator
+  used `rm == 31` to detect the `#0.0` form, but the ARM ARM encodes
+  the `#0.0` form with `rm = 0` and `bits[4:0] = 0b01000` (Op = 8).
+  The register form has `bits[4:0] = 0` and `rm =` the source register.
+  This caused `FCMP Dn, D0` (register form with rm=0) to be confused
+  with `FCMP Dn, #0.0` (zero form), producing wrong comparison
+  results for any code that compared against d0. Fixed by checking
+  `bits[4:0] == 0x08` for the `#0.0` form. A sentinel bit in the IR
+  `imm` field (bit 0) now distinguishes the two forms so the JIT
+  codegen can pick the right XMM1 source (zero xorps vs. v_lo load).
+
+- **FP 1-source opcode extracted from wrong bits.** The IR translator
+  and interpreter extracted the FP 1-source opcode from `bits[15:12]`
+  (4 bits), but the ARM ARM puts it in `bits[20:15]` (6 bits). This
+  caused FSQRT (`bits[20:15]=0x03`) to dispatch as FRINT* (because
+  `bits[15:12]=0xC`), and FABS/FNEG to fall through to CALL_INTERP
+  (because the IR translator's `bits[15:10]==0x10` check only matched
+  FMOV-register). Fixed by extracting the opcode from `bits[20:15]`.
+
+- **FMOV (scalar, immediate) mask only matched double precision.** The
+  old mask `0xFFE003E0` required `bits[23:22]=01` (double), silently
+  dropping single-precision FMOV imm into the FP 1-source handler,
+  which then misdecoded it as FNEG. Fixed by masking off `ftype`
+  (`bits[23:22]`) so both single and double forms match the new mask
+  `0xFF201FE0`.
+
+- **FMOV imm misdecoded as SCVTF.** The SCVTF/UCVTF mask `0x7F3F0000`
+  also matches FMOV imm (both have `bit[21]=1` and similar high
+  bits). Because the SCVTF check came first, `fmov d1, #5.0` was
+  translated as `scvtf d1, x0` (reading garbage from x0), which made
+  every subsequent FP comparison against an immediate-loaded
+  register fail. Fixed by checking FMOV imm BEFORE SCVTF/FCVTZS.
+
+- **Interpreter FCMP missing — fell into FP 1-source handler.** The
+  interpreter's FP 1-source check (`bits[11:10]==0b00`) also matches
+  FCMP (which has the same `bits[11:10]=0b00`). The comment said
+  "FCMP is handled above" but no handler existed. FCMP was thus
+  executed as FNEG (opcode 2 in the `bits[15:12]` extraction). Fixed
+  by adding an explicit FCMP handler before the FP 1-source check.
+
+### Code quality — shared FP decode helpers
+
+- Added `fp_decode` namespace in `include/decoder.hpp` with inline
+  helpers: `is_fcmp`, `fcmp_with_zero`, `is_fmov_imm`,
+  `is_fp_1source`, `fp_1source_opcode`, `vfp_expand_imm`. Both the
+  interpreter and the JIT's IR translator now call these helpers
+  instead of open-coding the bit extraction. This eliminates the
+  drift between the two code paths that caused the bugs above.
 
 ### Documentation
 
@@ -22,20 +76,14 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 - Shortened README.md from 1,124 to 322 lines by extracting Release
   History to CHANGELOG.md, Roadmap to ROADMAP.md, and Test Programs
   to TESTS.md.
-- Updated all documentation to reflect 38/39 JIT test pass rate.
+- Updated all documentation to reflect 39/39 JIT test pass rate.
 
 ### Known issues (carried over from beta.2)
 
-- `jit_fp_scalar` has one remaining sub-test failure (FCMP encoding
-  collision in interp-only blocks). Root cause identified: the
-  interpreter's FMOV immediate check uses mask `0xFFE0001F` which
-  requires Rd=0, causing FMOV Dn (n>0) to fall through to the FP
-  arithmetic handler. Fix requires changing the mask to `0xFFE003E0`
-  and adding `bits[12:10]=0b100` and `bits[11:10]=0b10` checks, but
-  this exposes a downstream sqrt code path bug that needs separate
-  investigation. Tracked for beta.4.
 - toybox `seq` and `od` hit SIMD decode errors on unhandled vector
   instructions.
+- toybox `ls /` crashes under JIT (pre-existing; works under
+  interpreter). Root cause not yet identified.
 
 ## [1.4.0-beta.2] — 2026-06-25 (JIT refactors, audio backend, code cleanup)
 

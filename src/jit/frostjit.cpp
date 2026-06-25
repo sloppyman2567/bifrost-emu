@@ -1203,8 +1203,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
 
-            // Load src2 into XMM1 (or zero for FCMP #0.0)
-            if (inst.src2 != 0 || inst.imm != 0) {
+            // Load src2 into XMM1 (or zero for FCMP #0.0).
+            //
+            // The IR translator marks the #0.0 form by setting bit 0 of
+            // inst.imm (sentinel). Without this sentinel, FCMP Dn, D0
+            // (register form with rm==0) would be indistinguishable from
+            // FCMP Dn, #0.0 (zero form), because both have IR src2 == 0.
+            //
+            // Register form: src2 = rm (0..30). Load v_lo[src2] into XMM1.
+            // Zero form: src2 = 0, imm bit 0 = 1. Use xorps to zero XMM1.
+            bool with_zero = (inst.imm & 1) != 0;
+            if (!with_zero) {
                 int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
