@@ -689,13 +689,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return true;
         }
 
-        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
-        // CSINC/CSINV/CSNEG were decomposed to ADD+NOT+NEG + CSEL in
-        // ir.cpp (commit bfc7e76). The JIT only sees IROp::CSEL (native)
-        // for these. This case is a defensive fallback — if a future
-        // change accidentally re-emits CSINC/CSINV/CSNEG, the JIT will
-        // fall back to the interpreter instead of crashing or producing
-        // silent wrong-code. The fallback is correct but slow.
+        // Defensive fallback: CSINC/CSINV/CSNEG are normally decomposed
+        // to ADD+NOT+NEG + CSEL in ir_translate.cpp, so the JIT only sees
+        // IROp::CSEL. If a future change re-emits these, fall back to the
+        // interpreter (correct but slow) instead of crashing.
         case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG: {
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
@@ -1596,29 +1593,23 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
-        // BFM was decomposed to SHL+SHR+OR+AND+OR in ir.cpp (commit
-        // bfc7e76). This case is a defensive fallback.
+        // Defensive fallback: BFM is normally decomposed to SHL+SHR+
+        // OR+AND+OR in ir_translate.cpp. Falls back to interpreter.
         case IROp::BFM: {
             emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
-        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
-        // EXTR was decomposed to SHL+SHR+OR in ir.cpp (commit 8fd8e6c).
-        // This case is a defensive fallback. The ~45 lines of native
-        // codegen that used to live here were removed — if you need to
-        // revive them, see git history (commit 8fd8e6c^).
+        // Defensive fallback: EXTR is normally decomposed to SHL+SHR+OR
+        // in ir_translate.cpp. Falls back to interpreter.
         case IROp::EXTR: {
             emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
-        // ── DEAD: decomposed in ir.cpp ──────────────────────────────
-        // RBIT/REV16/REV32 were decomposed to SWAR shift/mask patterns
-        // in ir.cpp (commit 1aad1e1). CLS was decomposed to SAR+XOR+
-        // CLZ+SUB in ir.cpp (commit a0e545c). These cases are defensive
-        // fallbacks.
+        // Defensive fallback: RBIT/REV16/REV32 are decomposed to SWAR
+        // shift/mask patterns in ir_translate.cpp, and CLS to SAR+XOR+
+        // CLZ+SUB. Falls back to interpreter if re-emitted.
         case IROp::RBIT: case IROp::CLS: case IROp::REV16: case IROp::REV32:
             emit_call_interp(inst.arm_pc, false);
             kill_vreg(inst.dest);
@@ -1691,7 +1682,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == inst.src1 && inst.dest != 0) {
                 d = s1;
                 vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << s1);  // v1.4.0-beta.3: maintain bitmask
+                dirty_host_regs_ |= (1u << s1);  // maintain dirty-bitmask invariant
             } else if (inst.dest != 0) {
                 d = alloc_reg_for(inst.dest, s1);
                 if (d != s1) emit_mov_reg(d, s1);
@@ -2099,7 +2090,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
+            // ftype encoding: 0 = single (S), 1 = double (D)
+            bool is_double = (inst.width != 0);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             // Load FP value into XMM0
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
@@ -2134,7 +2126,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // FCMP clobbers RAX, RCX, RDX (flag manipulation).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
+            // ftype encoding: 0 = single (S), 1 = double (D)
+            bool is_double = (inst.width != 0);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -2208,7 +2201,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // FP_UNOP2 clobbers RAX (sign mask + zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
+            // ftype encoding: 0 = single (S), 1 = double (D)
+            bool is_double = (inst.width != 0);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             // Load FP value into XMM0
@@ -2255,7 +2249,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // FMADD clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            bool is_double = (inst.width != 0);  // v1.4.0-beta.3: ftype (0=S, 1=D)
+            // ftype encoding: 0 = single (S), 1 = double (D)
+            bool is_double = (inst.width != 0);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -2386,7 +2381,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     }
     for (int i = 0; i < 16; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
-    dirty_host_regs_ = 0;  // v1.4.0-beta.3: reset dirty bitmask
+    dirty_host_regs_ = 0;  // reset dirty-bitmask
 
     size_t block_start = code_buf_used_;
 

@@ -64,7 +64,7 @@ FrostJIT::~FrostJIT() {
 void FrostJIT::flush_cache() {
     blocks_.clear();
     back_refs_.clear();
-    hot_pc_counts_.clear();  // v1.4.0-beta.3: clear hotness tracker
+    hot_pc_counts_.clear();  // clear hotness tracker
     code_buf_used_ = 0;
 }
 

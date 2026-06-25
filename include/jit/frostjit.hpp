@@ -326,12 +326,12 @@ private:
     //   Callee-saved (preserved by C calls): R12, R13, R15
     // Persistent: RBX=CPU, R14=EMU, R10=window, RBP=frame.
     //
-    // (): added R12/R13/R15 (callee-saved) to the pool.
-    // This gives 9 registers instead of 6, and vregs cached in
-    // callee-saved regs survive CALL_INTERP without spilling — the C
-    // calling convention preserves them across calls. This dramatically
-    // reduces eviction traffic in SIMD-heavy blocks that fall back to
-    // the interpreter frequently.
+    // The pool includes R12/R13/R15 (callee-saved). This gives 9
+    // registers instead of 6, and vregs cached in callee-saved regs
+    // survive CALL_INTERP without spilling — the C calling convention
+    // preserves them across calls. This dramatically reduces eviction
+    // traffic in SIMD-heavy blocks that fall back to the interpreter
+    // frequently.
     static constexpr int NUM_ALLOC_REGS = 9;
     static constexpr int ALLOC_REGS[9] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15};
 
@@ -387,9 +387,9 @@ private:
     void clobber_host_reg(int host_reg);
     void flush_all_vregs();
     void invalidate_all_vregs();
-    // : flush/invalidate only caller-saved vregs. Used
-    // around CALL_INTERP and memory ops — callee-saved vregs (R12/R13/
-    // R15) are preserved by the C calling convention, so they DON'T
+    // flush_caller_saved_vregs: flush/invalidate only caller-saved vregs.
+    // Used around CALL_INTERP and memory ops — callee-saved vregs (R12/
+    // R13/R15) are preserved by the C calling convention, so they DON'T
     // need to be spilled or invalidated. This keeps live values in
     // callee-saved regs across interpreter calls, eliminating redundant
     // reload traffic.

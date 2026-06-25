@@ -284,7 +284,7 @@ void FrostJIT::flush_caller_saved_vregs() {
     flush_dirty_host_regs(CALLER_SAVED_MASK);
 }
 
-// ── Targeted flush/invalidate (v1.4.0-beta.3) ────────────────────────
+// ── Targeted flush/invalidate (v1.4.0-beta.2) ────────────────────────
 // Walk only the host regs whose bits are set in `mask`, spilling any
 // dirty vreg cached there. This is the heart of the flush-penalty
 // reduction: FP JIT ops can flush just RAX/RCX/RDX in ~3 iterations

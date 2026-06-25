@@ -1012,7 +1012,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // FMOV (general ↔ FP, 32-bit): v1.4.0-beta.3 native path.
+            // FMOV (general ↔ FP, 32-bit): native path.
             // Encoding: 0x1E200000 with bit 16 = to_fp (1) or to_gpr (0).
             // FMOV Sn, Wn → v_lo[rd] = (uint32_t)regs[rn]; v_hi[rd] = 0
             // FMOV Wd, Sn → regs[rd] = (uint32_t)v_lo[rn]
@@ -1042,7 +1042,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // FMOV (FP↔FP register): v1.4.0-beta.3 native path.
+            // FMOV (FP↔FP register): native path.
             // Encoding: 0x1E604000 (double) or 0x1E204000 (single).
             // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = v_hi[rn]
             // FMOV Sd, Sn → v_lo[rd] = v_lo[rn] (low 32 bits); v_hi[rd] = 0
@@ -1123,7 +1123,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
-            // FMOV (scalar, immediate): v1.4.0-beta.3 fix.
+            // FMOV (scalar, immediate): fix.
             // Encoding: bits[31:21] = 0x1E6 (0001 1110 011) + ftype<<22,
             // bits[20:13] = imm8, bits[12:10] = 100, bits[9:5] = 00000.
             // Mask 0xFFE003E0 covers bits[31:21] and bits[9:5], so Rd and
@@ -1132,7 +1132,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // Now all Rd values match.
             if ((op & 0xFFE003E0) == 0x1E600000) {
                 uint8_t imm8 = (op >> 13) & 0xFF;
-                // VFPExpandImm — v1.4.0-beta.3: use the correct algorithm
+                // VFPExpandImm — use the correct algorithm
                 // from the ARM ARM (matches the interpreter's decoding).
                 //   sign = imm8[7]
                 //   b = imm8[6], not_b = NOT(b)
@@ -1387,14 +1387,16 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-        // Remaining FP/SIMD still fall back to interpreter
+        // Defensive fallback: the decoder never emits SIMD_SHIFT, SIMD_CNT,
+        // SIMD_REV, SIMD_DP, or FMOV_IMM as InstClass values (FP_SCALAR
+        // catches all FP/SIMD in the 0x1Exxxxxx encoding range, and SIMD_DP
+        // is sub-dispatched inside the interpreter). These cases exist only
+        // to guard against future decoder changes; they fall back to the
+        // interpreter if reached.
         case InstClass::SIMD_SHIFT:
         case InstClass::SIMD_CNT:
         case InstClass::SIMD_REV: case InstClass::SIMD_DP:
         case InstClass::FMOV_IMM:
-            // The decoder never emits these InstClass values
-            // (FP_SCALAR catches all FP/SIMD in the 0x1Exxxxxx encoding range).
-            // They're kept here as defensive fallbacks.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
 

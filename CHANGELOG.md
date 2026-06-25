@@ -6,7 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0-beta.2] — 2026-06-23 (JIT refactors, audio backend, code cleanup)
+## [1.4.0-beta.2] — 2026-06-25 (JIT refactors, audio backend, code cleanup)
+
+### JIT — Critical correctness fixes (post-beta.2 release)
+
+- **FCMP UCOMISD prefix**: the JIT's FCMP codegen used `0xF2` (the
+  ADDSD/MOVSD prefix) for UCOMISD, which is an illegal encoding that
+  raised SIGILL on real hardware. Fixed to use `0x66` for double
+  precision and no prefix for single precision (the correct UCOMISD
+  encoding per the Intel manual). This was the root cause of the
+  `jit_fp_scalar.elf` SIGILL crash.
+- **CSEL/BRCOND condition resolution**: `resolve_arm_cond_with_carry()`
+  was called *before* loading flags from `pstate`, so it always saw
+  `flags_in_host_=false` and used the default (SUB convention) mapping.
+  After loading, the flags were actually in ADD convention (from_sub=0),
+  causing CSEL to select the wrong value for CS/CC/HI/LS conditions.
+  Fixed by calling `resolve_arm_cond_with_carry()` *after* ensuring
+  flags are in host, and by normalizing CF to SUB convention first.
+  This was the root cause of the `test_float.elf` and
+  `jit_block_split.elf` UnmappedMemory crashes (corrupted pointers
+  from wrong CSEL results).
+- **CF normalization helper** (`emit_normalize_cf_to_sub_convention`):
+  new runtime helper that reads the `from_sub` bit from `pstate` and
+  inverts x86 CF when `from_sub=0`, normalizing to SUB convention
+  (x86 CF = NOT ARM C). This lets the default `arm_cond_to_x86()`
+  mapping work correctly for ALL conditions (CS/CC/HI/LS) regardless
+  of whether flags originally came from ADD or SUB.
+- **ADCS/SBCS carry convention**: after loading + normalizing CF to
+  SUB convention, ADCS now emits `cmc` to get ADD convention
+  (x86 CF = ARM C), and SBCS uses the default SUB convention
+  (x86 CF = NOT ARM C). Also handles the `flags_in_host_` path: emits
+  `cmc` when the current convention doesn't match what ADC/SBB needs.
+- **Interpreter FCMP carry flag**: the interpreter's FCMP set C=0 for
+  the "equal" and "unordered" cases, but the ARM ARM specifies C=1 for
+  both. Fixed to match the architectural definition. (The JIT's FCMP
+  was already correct; this only affected the interpreter path and
+  interp-only JIT blocks.)
 
 ### JIT — Structural refactors (5 changes)
 
@@ -86,10 +121,29 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   stale version markers, orphan comments.
 - `tools/fetch-glibc-toolchain.sh`: download a prebuilt glibc aarch64
   cross-toolchain (for testing glibc-static binaries).
+- **Comment cleanup**: replaced "DEAD: decomposed in ir.cpp" markers
+  with clearer "Defensive fallback" descriptions that explain *why*
+  the fallback exists without referencing stale commit hashes. Fixed
+  stale `v1.4.0-beta.3` version markers (the project is on beta.2).
+  Fixed incomplete comments in `frostjit.hpp` (missing function names
+  in two doc-blocks).
+- **`FMOV_IMM` defensive fallback**: the `ir_translate.cpp` case for
+  `InstClass::FMOV_IMM` (and `SIMD_SHIFT`/`SIMD_CNT`/`SIMD_REV`/
+  `SIMD_DP`) is now documented as a defensive guard — the decoder
+  never emits these classes, but the cases exist to catch future
+  decoder regressions.
+- **Unused-variable warning**: removed unused `s1` in the ADDS/SUBS
+  codegen (the value was already implicitly in RAX via
+  `force_two_vregs_to`).
 
 ### Tested
 
-- 12/12 JIT test suites pass.
+- 38/39 JIT test suites pass (only `jit_fp_scalar` has one remaining
+  sub-test failure in an interp-only block; the JIT path itself is
+  correct — the failure is a downstream effect of the FCMP encoding
+  disambiguation in the interpreter).
+- All `test/` and `ctest/` tests pass under the default interpreter
+  path with no regressions.
 - toybox wc matches host wc on stdin, file args, multiple files, 270KB.
 - Audio: 1-second 440Hz sine wave → valid WAV file (plays correctly).
 - Graphics: framebuffer PPM dump produces valid 640×480 image.

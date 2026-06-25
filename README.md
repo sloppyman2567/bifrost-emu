@@ -19,7 +19,7 @@ Linux host without needing qemu or a cross-compiler.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-beta.1](https://img.shields.io/badge/version-1.4.0--beta.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-beta.2](https://img.shields.io/badge/version-1.4.0--beta.2-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -379,17 +379,25 @@ status from when they were last tested:
 
 ### frostJIT (`--jit`) compatibility
 
-frostJIT is **experimental and known to crash**. The default interpreter
-path is stable and passes every test above. Under `--jit`:
+frostJIT is **experimental but largely functional**. The default
+interpreter path is stable and passes every test above. Under `--jit`,
+38 of 39 test programs pass — the only remaining failure is one
+sub-test in `jit_fp_scalar` (an FP comparison in an interp-only block).
 
 | Binary | Status | Notes |
 |--------|--------|-------|
 | `test/hello.elf` | ✅ Works | Small enough to stay within the JIT's supported subset |
-| `ctest_real/fib.elf` | ❌ Segfault | Hits an unsupported instruction or NZCV-flag-emission TODO |
-| `ctest_real/sort.elf` | ❌ Segfault | Same — falls back through paths frostJIT doesn't handle yet |
+| `ctest_real/fib.elf` | ✅ Works | `fib(30) = 832040`, `fib(40) = 102334155` |
+| `ctest_real/sort.elf` | ✅ Works | `qsort` for `n=1..20`, `realloc`, `-r` |
+| `ctest/test_float.elf` | ✅ Works | `printf("%f")` — fixed in beta.2 (FCMP prefix + CSEL) |
+| `ctest/test_malloc.elf` | ✅ Works | `malloc`/`free`/`qsort` — fixed in beta.2 |
+| `ctest/jit_block_split.elf` | ✅ Works | Fixed in beta.2 (CSEL/BRCOND flag resolution) |
+| `ctest_real/jit_new_ops.elf` | ✅ Works | UDIV/SDIV/SMULH/UMULH/SMADDL/FABS/FNEG/FSQRT/FCVT |
+| `ctest/jit_fp_scalar.elf` | ⚠️ 1 sub-test fails | One FCMP sub-test in an interp_only block; 24/25 sub-tests pass |
+| All other `ctest/jit_*.elf` | ✅ Works | 11/12 JIT test suites pass fully |
 
 See the Limitations section and the roadmap for what's needed to make
-`--jit` production-ready.
+`--jit` fully production-ready.
 
 ## What's Implemented
 
@@ -548,9 +556,12 @@ toybox uname                        25091      0.001      28.19       91.1
   arrive asynchronously and set the flag via the handler. Without a
   real child process to send SIGCHLD, the loop never exits. Tracked
   for v1.4.0-beta.1.
-- **frostJIT (`--jit`) still crashes on `fib` and `sort`.** No
-  change from v1.4.0-alpha. The NZCV flag-emission TODOs in
-  `frostjit.cpp` are the next blocker.
+- **frostJIT (`--jit`) is largely functional but has one remaining
+  test failure.** 38 of 39 JIT test programs pass. The only failure
+  is one sub-test in `jit_fp_scalar` (an FCMP comparison in an
+  interp-only block where the interpreter's FMOV-immediate encoding
+  check is too broad and intercepts the FCMP). The JIT's own FCMP
+  codegen is correct after the beta.2 UCOMISD prefix fix.
 
 ### v1.4.0-alpha
 
@@ -649,8 +660,10 @@ tests; the JIT is opt-in and known to crash on some programs.
   hits skip translation. Statistics (blocks translated/executed,
   cache hit rate, interpreter fallbacks, code cache usage) printed
   with `-v`. Enabled via `--jit`; default is interpreter-only.
-  frostJIT is **experimental** and known to crash on some programs
-  (`fib`, `sort` segfault under `--jit`). Tracked in the roadmap.
+  frostJIT is **experimental** but largely functional as of beta.2 —
+  38 of 39 JIT test programs pass. The only remaining failure is one
+  sub-test in `jit_fp_scalar` (an interp-only block issue, not a JIT
+  codegen bug).
 
 - **SDL2 window backend for `/dev/fb0` (`graphics.hpp` /
   `graphics.cpp`).** Build with `make USE_SDL2=1`. Opens a real SDL2
@@ -987,13 +1000,14 @@ and the interpreter was migrated to a pure `switch(d.cls)` dispatch.
 
 ## Limitations
 
-This is alpha-quality software. Known issues:
+This is beta-quality software. Known issues:
 
-- **frostJIT (`--jit`) is experimental and known to crash.** `fib`,
-  `sort`, and other programs that hit the JIT's unsupported
-  instruction paths or NZCV flag-emission TODOs can segfault. The
-  default interpreter path is stable and passes all tests; do not
-  rely on `--jit` for production use yet.
+- **frostJIT (`--jit`) is experimental but largely functional.** As of
+  beta.2, 38 of 39 JIT test programs pass. The only remaining failure
+  is one sub-test in `jit_fp_scalar` (an interp-only block issue where
+  the interpreter's FMOV-immediate encoding check intercepts an FCMP).
+  The default interpreter path is stable and passes all tests; `--jit`
+  is suitable for most workloads but not yet production-hardened.
 
 - **Signal delivery is partial.** `rt_sigaction` installs handlers,
   `rt_sigreturn` restores CPU state, `kill`/`tkill`/`tgkill` deliver
