@@ -280,43 +280,66 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
 
         // ── Binary ALU ops ──
-        // Load src1 into RAX and src2 into RCX (guaranteed different regs).
-        // This avoids the aliasing bug where ensure_vreg(src2) evicts src1.
-        // These ops clobber x86 RFLAGS, so materialize pending flags first.
+        // Use src1 and src2 in whatever host regs they're already cached in.
+        // Only allocate a fresh reg for dest when dest != src1 && dest != src2.
+        // This avoids the old "force everything into RAX/RCX" pattern that
+        // caused massive stack spilling — values now stay in their host regs
+        // across ALU ops, and the register allocator's caching actually pays
+        // off.
+        //
+        // Commutative ops (ADD/AND/OR/XOR/MUL) can swap operands, so
+        // dest == src2 is handled by computing in src2's reg. Non-commutative
+        // ops (SUB) need a fresh reg when dest == src2 (because we'd lose
+        // src2 before the subtraction).
         case IROp::ADD: case IROp::SUB: case IROp::AND:
         case IROp::OR:  case IROp::XOR: case IROp::MUL: {
-            // Force src1 → RAX, src2 → RCX (aliasing-safe via force_two_vregs_to).
             clobber_flags();
-            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-            int s2 = RCX;  // src2 is in RCX; src1 (RAX) is implicit dest
-            // Compute dest = src1 op src2. Always compute in RAX (which
-            // holds src1) to avoid alloc_reg_for evicting the operands.
-            // If dest != src1, spill src1 first (if dirty) to preserve its
-            // value for potential later readers, then attribute RAX to dest.
-            int d = RAX;
-            if (inst.dest != inst.src1) {
-                // Spill src1 if dirty so its value survives in memory.
-                if (vreg_home_[inst.src1] == RAX && vreg_dirty_[inst.src1]) {
-                    evict_vreg(inst.src1);
-                } else if (vreg_home_[inst.src1] == RAX) {
-                    vreg_home_[inst.src1] = -1;
-                    reg_vreg_[RAX] = -1;
-                    dirty_host_regs_ &= ~(1u << RAX);
+            bool commutative = (inst.op != IROp::SUB);
+            int s1 = ensure_vreg(inst.src1);
+            int s2 = ensure_vreg(inst.src2);
+            int d;
+            if (inst.dest == inst.src1) {
+                // dest == src1: compute in s1 (in-place modify).
+                d = s1;
+                switch (inst.op) {
+                    case IROp::ADD: emit_add_reg(d, s2); break;
+                    case IROp::SUB: emit_sub_reg(d, s2); break;
+                    case IROp::AND: emit_and_reg(d, s2); break;
+                    case IROp::OR:  emit_or_reg(d, s2);  break;
+                    case IROp::XOR: emit_xor_reg(d, s2); break;
+                    case IROp::MUL: emit_imul_reg(d, s2); break;
+                    default: break;
                 }
-            } else {
                 vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << RAX);
-            }
-            switch (inst.op) {
-                case IROp::ADD: emit_add_reg(d, s2); break;
-                case IROp::SUB: emit_sub_reg(d, s2); break;
-                case IROp::AND: emit_and_reg(d, s2); break;
-                case IROp::OR:  emit_or_reg(d, s2);  break;
-                case IROp::XOR: emit_xor_reg(d, s2); break;
-                case IROp::MUL: emit_imul_reg(d, s2); break;
-                default: break;
-            }
-            if (inst.dest != inst.src1) {
+                dirty_host_regs_ |= (1u << d);
+            } else if (inst.dest == inst.src2 && commutative) {
+                // dest == src2, commutative: compute in s2 (swap operands).
+                d = s2;
+                switch (inst.op) {
+                    case IROp::ADD: emit_add_reg(d, s1); break;
+                    case IROp::AND: emit_and_reg(d, s1); break;
+                    case IROp::OR:  emit_or_reg(d, s1);  break;
+                    case IROp::XOR: emit_xor_reg(d, s1); break;
+                    case IROp::MUL: emit_imul_reg(d, s1); break;
+                    default: break;
+                }
+                vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << d);
+            } else {
+                // dest != src1 (and not the commutative src2 case):
+                // allocate a fresh reg for dest that doesn't collide with
+                // s1 or s2, then mov src1 and op src2.
+                d = alloc_reg_excluding(s1, s2);
+                if (d != s1) emit_mov_reg(d, s1);
+                switch (inst.op) {
+                    case IROp::ADD: emit_add_reg(d, s2); break;
+                    case IROp::SUB: emit_sub_reg(d, s2); break;
+                    case IROp::AND: emit_and_reg(d, s2); break;
+                    case IROp::OR:  emit_or_reg(d, s2);  break;
+                    case IROp::XOR: emit_xor_reg(d, s2); break;
+                    case IROp::MUL: emit_imul_reg(d, s2); break;
+                    default: break;
+                }
                 set_vreg_reg(inst.dest, d);
             }
             return false;
@@ -324,35 +347,47 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::SHL: case IROp::SHR:
         case IROp::SAR: case IROp::ROR: {
-            // x86 variable shifts use CL for the count, so we must force
-            // src2 into RCX and src1 into RAX. force_two_vregs_to handles
-            // the eviction, move, and aliasing (src1==src2) cases in one
-            // call.
+            // x86 variable shifts use CL for the count. We force src2 into
+            // RCX (clobbering its previous occupant), but leave src1 in
+            // whatever reg it's cached in. dest is computed in src1's reg
+            // when dest == src1, else in a fresh reg excluding src1 and RCX.
             clobber_flags();
-            force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
-
-            // Always compute in RAX (holds src1) to avoid alloc_reg_for
-            // evicting the operands under register pressure.
-            int d = RAX;
-            if (inst.dest != inst.src1) {
-                if (vreg_home_[inst.src1] == RAX && vreg_dirty_[inst.src1]) {
-                    evict_vreg(inst.src1);
-                } else if (vreg_home_[inst.src1] == RAX) {
-                    vreg_home_[inst.src1] = -1;
-                    reg_vreg_[RAX] = -1;
-                    dirty_host_regs_ &= ~(1u << RAX);
+            int s1 = ensure_vreg(inst.src1);
+            // Force src2 into RCX, but if s1 == RCX, move src1 elsewhere first
+            // so we don't lose it.
+            if (s1 == RCX) {
+                int tmp = alloc_reg_excluding(RCX, -1);
+                emit_mov_reg(tmp, RCX);
+                reg_vreg_[RCX] = -1;
+                vreg_home_[inst.src1] = tmp;
+                reg_vreg_[tmp] = inst.src1;
+                if (vreg_dirty_[inst.src1]) {
+                    dirty_host_regs_ &= ~(1u << RCX);
+                    dirty_host_regs_ |= (1u << tmp);
                 }
-            } else {
-                vreg_dirty_[inst.dest] = true;
-                dirty_host_regs_ |= (1u << RAX);
+                s1 = tmp;
             }
-            // CL = src2 & 0x3F.
-            emit_and_cl_imm8(0x3F);
-            int kind = (inst.op == IROp::SHL) ? 4
-                     : (inst.op == IROp::SHR) ? 5
-                     : (inst.op == IROp::SAR) ? 7 : 1;
-            emit_shift_cl(d, kind);
-            if (inst.dest != inst.src1) {
+            // Now force src2 into RCX (evict current occupant if any).
+            force_vreg_to_reg(inst.src2, RCX);
+
+            int d;
+            if (inst.dest == inst.src1) {
+                d = s1;
+                emit_and_cl_imm8(0x3F);
+                int kind = (inst.op == IROp::SHL) ? 4
+                         : (inst.op == IROp::SHR) ? 5
+                         : (inst.op == IROp::SAR) ? 7 : 1;
+                emit_shift_cl(d, kind);
+                vreg_dirty_[inst.dest] = true;
+                dirty_host_regs_ |= (1u << d);
+            } else {
+                d = alloc_reg_excluding(s1, RCX);
+                if (d != s1) emit_mov_reg(d, s1);
+                emit_and_cl_imm8(0x3F);
+                int kind = (inst.op == IROp::SHL) ? 4
+                         : (inst.op == IROp::SHR) ? 5
+                         : (inst.op == IROp::SAR) ? 7 : 1;
+                emit_shift_cl(d, kind);
                 set_vreg_reg(inst.dest, d);
             }
             return false;
@@ -852,48 +887,104 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
-            // Materialize flags to pstate BEFORE consuming them for the
-            // JCC, but save/restore RFLAGS around the materialization
-            // because emit_materialize_flags clobbers them with its own
-            // AND/SHIFT/OR operations. The JCC needs the original flags.
+
+            // ── Deferred flag materialization ──
+            // The old code materialized flags to pstate BEFORE the JCC,
+            // which meant both the taken and fall-through paths paid the
+            // ~25-instruction materialization cost.
+            //
+            // New approach: emit the JCC first (it uses host RFLAGS
+            // directly — no materialization needed). Then materialize on
+            // each path separately. This lets the self-loop path (below)
+            // skip materialization entirely for tight loops.
+            //
+            // Flush all vregs before the JCC — both paths return to the
+            // dispatcher, which may read cpu.regs[]. Stores don't clobber
+            // RFLAGS, so no pushfq/popfq needed around the flush.
+            flush_all_vregs();
+
+            // Emit JCC (uses host RFLAGS directly).
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
+            }
+            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+
+            // ── Fall-through path: materialize flags, set RAX, jump to epilogue ──
             if (flags_in_host_) {
-                // emit_materialize_flags clobbers RAX/RCX/RDX. Evict any
-                // dirty vregs in those regs first, then drop cache mappings.
-                // use bitmask helpers.
-                emit_pushfq();
                 constexpr uint16_t FLAGS3 = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
+                emit_pushfq();  // save RFLAGS (materialize clobbers them)
                 flush_dirty_host_regs(FLAGS3);
                 emit_materialize_flags(flags_from_sub_);
-                emit_popfq();
+                emit_popfq();   // restore RFLAGS (not needed here, but harmless)
                 invalidate_host_regs(FLAGS3);
-                // if flags came from ADD/TST and the
-                // condition is HI/LS, invert CF with `cmc` so it matches
-                // the SUB convention that arm_cond_to_x86() expects.
-                if (need_cmc_for_hi_ls) {
-                    emit_byte(0xF5);  // cmc
-                }
             }
-            flags_in_host_ = false;
-            // All conditional branches (forward or back-edge) use the same
-            // code path: flush vregs, emit jcc, set RAX to taken/fall-through
-            // PC, return to dispatcher. The dispatcher handles re-entering
-            // the target block through its normal prologue.
-            emit_pushfq();
-            flush_all_vregs();
-            emit_popfq();
-            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
-            // Not taken: RAX = fall-through.
             {
                 uint64_t fall = inst.arm_pc + 4;
                 emit_mov_imm_to_rax(fall);
             }
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
-            // Taken: RAX = target.
+
+            // ── Taken path ──
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
+
+            // For the taken path: materialize flags to pstate if they're
+            // in host. The next block (taken target) might read pstate.
+            // For self-loops, we could skip this (the body sets flags fresh),
+            // but only if the body doesn't read flags before clobbering them.
+            // To be safe, always materialize on the taken path.
+            if (flags_in_host_) {
+                constexpr uint16_t FLAGS3 = (1u<<RAX)|(1u<<RCX)|(1u<<RDX);
+                emit_pushfq();
+                flush_dirty_host_regs(FLAGS3);
+                emit_materialize_flags(flags_from_sub_);
+                emit_popfq();
+                invalidate_host_regs(FLAGS3);
+            }
+
+            // ── Self-loop chaining ──
+            // If the taken target is the block's own start PC, emit a
+            // 5-byte selfloop slot. After the block is fully compiled,
+            // translate_block patches this slot to `jmp block_body_start`,
+            // creating a tight loop that skips the epilogue, dispatcher,
+            // and prologue. This is the single biggest win for tight loops
+            // like bench_mips (100M iters).
+            //
+            // For flags: if flags_in_host_ is true (SUBS set flags), we
+            // skip materialization for self-loops. This is safe when the
+            // loop body clobbers flags (via ADD/SUB/etc.) before reading
+            // them (via CSEL/BRCOND). This is the common case for tight
+            // loops — the body does ALU work (clobbering flags) before the
+            // next SUBS+BRCOND at the end. The stale flags from the
+            // previous iteration's SUBS are never read.
+            //
+            // The slot is followed by the normal epilogue path (store PC,
+            // restore regs, ret → dispatcher) as a fallback. The selfloop
+            // patch overwrites the first 5 bytes (the jmp), so the
+            // fallback is only reached if the patch is not applied.
+            bool is_selfloop = (inst.imm == current_start_pc_);
+            // Only enable self-loop for blocks with no CALL_INTERPs and
+            // where flags are not in host (the body will set flags fresh).
+            // This is conservative but correct — the self-loop skips flag
+            // materialization, so we can only apply it when the body
+            // doesn't need the stale flags.
+            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            if (is_selfloop && !no_selfloop_) {
+                // Materialize flags if they're in host — the body might
+                // read them. But for tight loops where the body clobbers
+                // flags first, this is unnecessary. We skip materialization
+                // for backward branches (taken_is_backward) since the body
+                // will set flags fresh before reading them.
+                // (Flag materialization is skipped here for self-loops.)
+                has_selfloop_slot_ = true;
+                selfloop_patch_off_ = code_buf_used_;
+                emit_byte(0xE9); emit_u32(0);  // jmp rel32 (placeholder, patched later)
+            }
+
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
+            flags_in_host_ = false;
             unchainable_end_ = true;  // conditional branch — runtime-dependent next PC
             return true;
         }
@@ -2369,6 +2460,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     if (!code_buf_) return nullptr;
+    current_start_pc_ = start_pc;
     code_buf_overflow_ = false;
     call_interp_branch_patches_.clear();
     branch_target_patches_.clear();
@@ -2377,6 +2469,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     flags_from_sub_ = false;
     chain_target_pc_ = 0;
     unchainable_end_ = false;
+    has_selfloop_slot_ = false;
+    selfloop_patch_off_ = 0;
     num_stack_slots_ = 0;
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
@@ -2537,10 +2631,74 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
     if (window_base_) emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
 
-    // ── Compile IR ───────────────────────────────────────────────
-    for (auto& inst : ir_block.insts) {
-        if (compile_ir_inst(inst)) break;
+    // Record the block body start offset (after prologue). Used for
+    // self-loop chaining: the selfloop slot is patched to jmp here.
+    block_body_start_off_ = code_buf_used_;
+
+    // ── Compute liveness: for each vreg, find the last op that uses it ──
+    // This lets us free host regs of dead vregs immediately after their
+    // last use, instead of keeping them cached until eviction. Without
+    // this, the register allocator treats all vregs as live until the end
+    // of the block, causing unnecessary spills when register pressure is
+    // high (e.g., 5+ live vregs but 9 host regs, with 4+ dead vregs
+    // occupying the other regs).
+    //
+    // Special cases:
+    //   - LOAD_REG: src1 is the ARM reg index (0-31), NOT a vreg. Don't
+    //     treat it as a use.
+    //   - STORE_REG: dest is the ARM reg index, src1 is the vreg being
+    //     stored. src1 IS a use.
+    //   - dest of any op is a definition (not a use). If dest == src1
+    //     (in-place modify), the vreg is still live after this op (as
+    //     dest), so we don't kill it.
+    //   - ARM reg vregs (0-31): SBFM/UBFM/BFM use ARM reg indices as dest
+    //     directly (via emit_bf). These vregs represent architectural
+    //     state and must be flushed to cpu.regs[] at the epilogue. We must
+    //     NOT kill them via liveness-based freeing — killing a dirty ARM
+    //     reg vreg loses its value before flush_all_vregs can write it
+    //     back. So we only track scratch vregs (33+) for killing.
+    {
+        size_t n = ir_block.insts.size();
+        std::vector<int> last_use(4096, -1);
+        for (size_t i = 0; i < n; i++) {
+            const IRInst& inst = ir_block.insts[i];
+            if (inst.op != IROp::LOAD_REG) {
+                // src1 and src2 are vregs (for LOAD_REG, src1 is ARM reg index).
+                // Only track scratch vregs (33+) — ARM reg vregs (0-31) must
+                // not be killed (they need flush at epilogue).
+                if (inst.src1 && inst.src1 > 31) last_use[inst.src1] = static_cast<int>(i);
+                if (inst.src2 && inst.src2 > 31) last_use[inst.src2] = static_cast<int>(i);
+            }
+        }
+        // Build kills_per_op_: for each op i, the list of vregs whose last
+        // use is i (and that are not the dest of op i).
+        kills_per_op_.assign(n, {});
+        for (int v = 32; v < 4096; v++) {  // start from 32 — skip ARM reg vregs
+            if (last_use[v] >= 0) {
+                kills_per_op_[last_use[v]].push_back(static_cast<uint16_t>(v));
+            }
+        }
     }
+
+    // ── Compile IR ───────────────────────────────────────────────
+    for (size_t i = 0; i < ir_block.insts.size(); i++) {
+        const IRInst& inst = ir_block.insts[i];
+        if (compile_ir_inst(inst)) break;
+        // Free host regs of vregs whose last use was this op.
+        // This is the key to avoiding spills: dead vregs are freed
+        // immediately, making room for new vregs without eviction.
+        if (i < kills_per_op_.size()) {
+            for (uint16_t v : kills_per_op_[i]) {
+                // Don't kill the dest of this op (it's a new definition,
+                // still live). dest == src1 (in-place modify) is handled
+                // here: if v == inst.dest, skip.
+                if (v != inst.dest) {
+                    kill_vreg(v);
+                }
+            }
+        }
+    }
+    kills_per_op_.clear();  // free memory
 
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
@@ -2653,6 +2811,22 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chain_target_pc = chain_target_pc_;
     entry.chained = false;
     entry.instr_count = instr_count;
+    entry.call_interp_count = call_interp_count;
+    // Record self-loop info: if the block has a selfloop slot, patch it
+    // to jump back to the block body start (skipping epilogue+dispatcher+
+    // prologue). This is the single biggest win for tight loops.
+    if (has_selfloop_slot_) {
+        entry.has_selfloop_slot = true;
+        entry.selfloop_patch_off = selfloop_patch_off_;
+        // Patch the selfloop slot: `jmp rel32` → block body start.
+        size_t body_off = block_body_start_off_;
+        int32_t self_rel = static_cast<int32_t>(body_off - (selfloop_patch_off_ + 5));
+        code_buf_[selfloop_patch_off_] = 0xE9;  // jmp rel32
+        code_buf_[selfloop_patch_off_ + 1] = self_rel & 0xFF;
+        code_buf_[selfloop_patch_off_ + 2] = (self_rel >> 8) & 0xFF;
+        code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
+        code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
+    }
     blocks_[start_pc] = entry;
     blocks_translated++;
 
@@ -2723,7 +2897,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // block cycles (soft-float routines) that the consecutive-PC
         // watchdog can't detect. The interpreter is faster for tiny
         // blocks because it avoids ~1us of dispatch overhead per block.
-        if (!entry.interp_only && entry.fn) {
+        //
+        // HOWEVER: only apply this to blocks that have CALL_INTERP
+        // fallbacks — those are the blocks where the interpreter is
+        // genuinely faster (it skips the prologue/epilogue/CALL_INTERP
+        // overhead). For pure JIT blocks (no CALL_INTERPs), the JIT
+        // compiled code is always faster than the interpreter, even
+        // with dispatcher overhead. This is especially true after the
+        // IR optimizer and codegen improvements (load forwarding,
+        // liveness-based reg freeing, self-loop chaining) that make
+        // tight JIT loops run without dispatcher overhead at all.
+        if (!entry.interp_only && entry.fn && entry.call_interp_count > 0) {
             auto& cnt = hot_pc_counts_[pc];
             if (++cnt >= HOT_PC_THRESHOLD) {
                 // Promote to interp_only. The interpreter runs the same

@@ -175,6 +175,32 @@ int FrostJIT::alloc_reg(int preferred) {
     return r;
 }
 
+// Allocate a host reg excluding `excl1` and `excl2`. Used by ALU codegen
+// to place `dest` in a reg that doesn't collide with src1/src2's host regs,
+// so we can compute dest = src1 op src2 without spilling the operands.
+int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
+    // First pass: look for a free reg (skipping excluded ones).
+    for (int i = 0; i < NUM_ALLOC_REGS; i++) {
+        int r = ALLOC_REGS[i];
+        if (r == excl1 || r == excl2) continue;
+        if (reg_vreg_[r] == -1) return r;
+    }
+    // No free reg — evict a non-excluded reg. Walk in order and evict
+    // the first non-excluded occupant.
+    for (int i = 0; i < NUM_ALLOC_REGS; i++) {
+        int r = ALLOC_REGS[i];
+        if (r == excl1 || r == excl2) continue;
+        int v = reg_vreg_[r];
+        if (v >= 0) {
+            evict_vreg(v);
+            return r;
+        }
+    }
+    // All alloc regs are excluded — shouldn't happen (we have 9 alloc regs
+    // and only exclude at most 2). Fall back to alloc_reg.
+    return alloc_reg();
+}
+
 // Ensure vreg v is in an x86 reg. Returns the reg.
 // `preferred` is a HINT for newly loaded vregs only — if v is already
 // cached, we return its current reg WITHOUT moving (avoids overhead).

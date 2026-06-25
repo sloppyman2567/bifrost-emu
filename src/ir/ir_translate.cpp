@@ -339,11 +339,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // (The JIT has dedicated, well-tested codegen for them and the
         // constant folder in ir_optimize.cpp knows how to fold them
         // when the source is a known immediate.)
+        //
+        // Use a scratch vreg as dest (not d.rd directly) so the optimizer's
+        // arm_reg_cache and liveness analysis work correctly. ARM reg
+        // vregs (0-31) used as dest confuse the optimizer because they
+        // represent architectural state that must be flushed via STORE_REG.
+        // The store_arm_reg below emits the STORE_REG that writes the
+        // result to cpu.regs[d.rd].
         case InstClass::SBFM: case InstClass::UBFM: {
             uint16_t a = load_arm_reg(block, d.rn);
             IROp op = (d.cls == InstClass::SBFM) ? IROp::SBFM
                     : IROp::UBFM;
-            emit_bf(block, op, d.rd, a, 0, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
+            uint16_t r = g_alloc.alloc();
+            emit_bf(block, op, r, a, 0, d.immr, d.imms, d.sf ? 1 : 0, cur_pc);
+            store_arm_reg(block, d.rd, r, d.writes_sp);
             return false;
         }
 
