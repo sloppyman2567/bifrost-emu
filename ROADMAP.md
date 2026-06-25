@@ -77,13 +77,16 @@ The v2.0 line will focus on expanding the set of runnable software
 beyond musl-static binaries. This is a significant architectural
 expansion.
 
-1. **Dynamic linking support.** Currently bifrost-emu only runs
-   statically-linked AArch64 ELF binaries. v2.0 will add a guest
-   dynamic linker (`ld-linux-aarch64.so`) integration layer that
-   can load and resolve dynamic AArch64 binaries, process `DT_NEEDED`
-   entries, and apply runtime relocations. This significantly expands
-   the set of runnable software — most real-world ARM64 Linux
-   distributions ship dynamically-linked binaries.
+1. **Full dynamic linking support.** Bifrost-emu already has limited
+   dynamic linking: it loads the PT_INTERP dynamic linker ELF, maps
+   its segments, and uses its entry point (so the linker's own code
+   handles DT_NEEDED, relocations, etc. via our syscalls). This works
+   for simple dynamically-linked musl binaries. v2.0 will expand this
+   to full dynamic linking: proper DT_NEEDED processing, runtime
+   relocation application, PLT/GOT resolution, and glibc's dynamic
+   linker support. This significantly expands the set of runnable
+   software — most real-world ARM64 Linux distributions ship
+   dynamically-linked binaries.
 
 2. **glibc support.** Currently only musl-static binaries are
    supported; glibc 2.36+ static binaries hit a decode error on an

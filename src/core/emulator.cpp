@@ -72,14 +72,20 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // If the binary has a PT_INTERP (dynamic linker), load it.
     // The dynamic linker's entry point becomes the real entry point;
     // the binary's entry is passed via AT_ENTRY in auxv.
+    //
+    // This is LIMITED dynamic linking support: we load the dynamic linker
+    // ELF and map its segments, but we do NOT process DT_NEEDED entries,
+    // apply runtime relocations, or resolve symbols. The linker runs its
+    // own code (which uses our syscalls) to do that. This works for
+    // simple dynamically-linked musl binaries but not yet for glibc.
     uint64_t interp_base = 0;
     if (!info.interp.empty()) {
-        // Try to open the interpreter. First check the host path directly,
-        // then try common aarch64 multiarch paths.
+        // Try to open the interpreter. Check common host paths for
+        // aarch64 dynamic linkers (musl and glibc multiarch).
         std::vector<std::string> interp_paths = {
-            info.interp,
-            "/usr/aarch64-linux-gnu" + info.interp,
-            "/tools/aarch64-linux-musl-cross/aarch64-linux-musl" + info.interp,
+            info.interp,                                    // exact path from PT_INTERP
+            "/usr/aarch64-linux-gnu" + info.interp,         // Debian/Ubuntu multiarch
+            "/usr/lib/aarch64-linux-gnu" + info.interp,     // newer Debian multiarch
         };
         FILE* ifile = nullptr;
         std::string found_path;

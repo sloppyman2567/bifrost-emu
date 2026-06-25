@@ -275,9 +275,12 @@ make verify   # JIT divergence checker (slow, catches codegen bugs)
 
 This is beta-quality software. Key limitations:
 
-- **Static binaries only.** No dynamic linking — guest binaries must be
-  statically linked. Dynamic linking and glibc support are planned for
-  v2.0 (see [ROADMAP.md](ROADMAP.md)).
+- **Limited dynamic linking.** The dynamic linker (PT_INTERP) is loaded
+  and its entry point is used, allowing simple dynamically-linked musl
+  binaries to run. However, full dynamic linking (DT_NEEDED processing,
+  runtime relocations, glibc support) is not yet complete. Static
+  binaries are recommended. Full dynamic linking and glibc support are
+  planned for v2.0 (see [ROADMAP.md](ROADMAP.md)).
 - **No ASLR.** Binaries load at their preferred vaddr.
 - **`fork()` is stubbed.** `clone()` without `CLONE_VM` returns 0 (vfork
   semantics). Real fork with copy-on-write is planned for v1.4.x.
