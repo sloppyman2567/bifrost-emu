@@ -6,14 +6,15 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.0-beta.3 (next)
+## v1.4.0-beta.4 (next)
 
 1. **Fix the remaining `jit_fp_scalar` sub-test failure.** The
-   interpreter's FMOV-immediate and FP-arithmetic encoding checks
-   need tightening (add `bits[12:10]` and `bits[11:10]` verification)
-   so FCMP is not intercepted by the broader FMOV/FADD checks. The
-   JIT's own FCMP codegen is already correct after the beta.2 UCOMISD
-   prefix fix — only the interp-only block path is affected.
+   interpreter's FMOV-immediate encoding check uses mask `0xFFE0001F`
+   which requires Rd=0, causing FMOV Dn (n>0) to fall through to the
+   FP arithmetic handler. The fix is to change the mask to `0xFFE003E0`
+   and add `bits[12:10]=0b100` and `bits[11:10]=0b10` checks. However,
+   this exposes a downstream sqrt code path bug in musl's soft-float
+   routines that needs separate investigation.
 
 2. **Expand SIMD decoder coverage.** Add decode paths for the vector
    FP convert (`0x5ee1b960`) and load-store patterns (`0x6c373025`)

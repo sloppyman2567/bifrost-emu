@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.3] — 2026-06-25 (version bump, documentation restructure)
+
+### Version
+
+- Bumped version from 1.4.0-beta.2 to 1.4.0-beta.3 across all files
+  (version.hpp, main.cpp, Makefile, README.md).
+
+### Documentation
+
+- Created ROADMAP.md with extracted roadmap content from README.md,
+  including v2.0 plans for dynamic linking and glibc support.
+- Created TESTS.md with full test matrix (39 test programs, per-test
+  status, toybox compatibility table).
+- Shortened README.md from 1,124 to 322 lines by extracting Release
+  History to CHANGELOG.md, Roadmap to ROADMAP.md, and Test Programs
+  to TESTS.md.
+- Updated all documentation to reflect 38/39 JIT test pass rate.
+
+### Known issues (carried over from beta.2)
+
+- `jit_fp_scalar` has one remaining sub-test failure (FCMP encoding
+  collision in interp-only blocks). Root cause identified: the
+  interpreter's FMOV immediate check uses mask `0xFFE0001F` which
+  requires Rd=0, causing FMOV Dn (n>0) to fall through to the FP
+  arithmetic handler. Fix requires changing the mask to `0xFFE003E0`
+  and adding `bits[12:10]=0b100` and `bits[11:10]=0b10` checks, but
+  this exposes a downstream sqrt code path bug that needs separate
+  investigation. Tracked for beta.4.
+- toybox `seq` and `od` hit SIMD decode errors on unhandled vector
+  instructions.
+
 ## [1.4.0-beta.2] — 2026-06-25 (JIT refactors, audio backend, code cleanup)
 
 ### JIT — Critical correctness fixes (post-beta.2 release)

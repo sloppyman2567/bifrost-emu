@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-beta.2
+  bifrost-emu  v1.4.0-beta.3
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-beta.2](https://img.shields.io/badge/version-1.4.0--beta.2-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-beta.3](https://img.shields.io/badge/version-1.4.0--beta.3-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -149,7 +149,7 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-Enable with `--jit`. As of beta.2, 38 of 39 test programs pass under JIT.
+Enable with `--jit`. As of beta.3, 39 of 39 test programs pass under JIT.
 
 ## Performance
 
@@ -294,7 +294,7 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-beta.2** (2026-06-25), which includes:
+current release is **v1.4.0-beta.3** (2026-06-25), which includes:
 
 - JIT critical correctness fixes (FCMP prefix, CSEL/BRCOND flag resolution,
   CF normalization, ADCS/SBCS carry convention)

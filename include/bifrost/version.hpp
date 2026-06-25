@@ -19,7 +19,7 @@ namespace arm64emu {
 //   * Dead code removed (track_allocation, map_direct, three DEAD
 //     frostjit cases, never-defined Emulator_step/syscall/execute
 //     friend wrappers).
-constexpr const char* VERSION  = "1.4.0-beta.2";
+constexpr const char* VERSION  = "1.4.0-beta.3";
 constexpr const char* CODENAME = "bifrost-emu";
 
 } // namespace arm64emu

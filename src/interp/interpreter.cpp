@@ -2014,7 +2014,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // `fmov d0, #2.5` (which produces 0x4078… instead of 0x4004…),
                 // corrupting every `printf("%f", float_var)` because the variadic
                 // arg-promoted float was being loaded with the wrong immediate.
-                if ((op & 0xFFE0001F) == 0x1E600000 && ((op >> 5) & 0x1F) == 0) {
+                // FMOV (scalar, immediate): bits[31:21]=0x1E6, bits[12:10]=0b100,
+                // bits[9:5]=0 (Rn=0), bits[4:0]=Rd (any).
+                // Mask 0xFFE003E0 covers bits[31:21] and bits[9:5] but NOT Rd.
+                if ((op & 0xFFE003E0) == 0x1E600000
+                    && ((op >> 10) & 0x7) == 0x4) {
                     uint8_t imm8 = (op >> 13) & 0xFF;
                     uint64_t sign = (imm8 >> 7) & 1;
                     uint64_t b     = (imm8 >> 6) & 1;
@@ -2080,7 +2084,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL
-                if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1) {
+                // bits[11:10]=0b10 distinguishes from FCMP (bits[11:10]=0b00).
+                if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1
+                    && ((op >> 10) & 0x3) == 0x2) {
                     uint8_t opcode = (op >> 12) & 0xF;
                     if (ftype) {
                         double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), r = 0;
@@ -2112,7 +2118,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FP 1-source: FABS/FNEG/FSQRT/FRINT*
-                if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) == 0x10) {
+                // All FP 1-source instructions have bits[11:10]=0b00.
+                // FCMP and FMOV imm are already handled above.
+                if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0x0) {
                     uint8_t opcode = (op >> 12) & 0xF;
                     if (ftype) {
                         double a = read_fp_d(cpu, rn), r = 0;
@@ -2244,50 +2252,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint16_t hbits = static_cast<uint16_t>(cpu.v_lo[rn] & 0xFFFF);
                     double d = static_cast<double>(h2f(hbits));
                     write_fp_d(cpu, rd, d);
-                    return;
-                }
-                // FCMP/FCMPE
-                if ((op & 0xFFE0FC1F) == 0x1E602000) {
-                    if (ftype) {
-                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm);
-                        if (std::isnan(a) || std::isnan(b)) {
-                            cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
-                        } else if (a == b) {
-                            cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                        } else if (a < b) {
-                            cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                        } else {
-                            cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                        }
-                    } else {
-                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
-                        if (std::isnan(a) || std::isnan(b)) {
-                            cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1);
-                        } else if (a == b) {
-                            cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                        } else if (a < b) {
-                            cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                        } else {
-                            cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                        }
-                    }
-                    return;
-                }
-                // FCMP with #0.0
-                if ((op & 0xFFE0FC1F) == 0x1E602008) {
-                    if (ftype) {
-                        double a = read_fp_d(cpu, rn);
-                        if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
-                        else if (a == 0.0) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
-                        else if (a < 0.0) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
-                        else { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0); }
-                    } else {
-                        float a = read_fp_s(cpu, rn);
-                        if (std::isnan(a)) { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(1); }
-                        else if (a == 0.0f) { cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(0); cpu.set_flag_v(0); }
-                        else if (a < 0.0f) { cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0); }
-                        else { cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0); }
-                    }
                     return;
                 }
                 // FCVTZS/FCVTZU
