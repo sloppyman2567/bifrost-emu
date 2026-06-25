@@ -155,7 +155,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // Reserved groups.
     case 0x00: case 0x01: case 0x02: case 0x03:
     case 0x04: case 0x05: case 0x06: case 0x07:
-    case 0x1F:
         return false;
 
     // Load/Store Pair post-index (V=0) + Load/Store Exclusive.
@@ -271,6 +270,12 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.rt      = inst & 0x1F;
             d.rn      = (inst >> 5) & 0x1F;
             d.rm      = (inst >> 16) & 0x1F;
+            // Register count for multi-structure LD1/ST1 is in bits[14:13].
+            //   00=1 reg, 01=2 regs, 10=3 regs, 11=4 regs.
+            // This applies to both variants (bit 12=0 for 8B/4S/2D/1Q,
+            // bit 12=1 for 16B). Single-structure LD1/ST1 (e.g. LD1 {Vt.S})
+            // uses different encoding bits — we leave simd_count=1 for those.
+            d.simd_count = ((inst >> 13) & 3) + 1;
             d.cls = d.is_load ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;
             return true;
         }
@@ -612,8 +617,21 @@ bool decode(DecodedInst& d, uint32_t inst) {
         uint16_t imm12 = (inst >> 10) & 0xFFF;
         d.rn      = (inst >> 5) & 0x1F;
         d.rt      = inst & 0x1F;
-        bool is_q = (d.opc_ls & 2) && d.size == 0;
-        uint64_t scale = is_q ? 4 : d.size;
+        // Address offset = imm12 << scale.
+        //   Non-SIMD: scale = size (1/2/4/8 bytes per element).
+        //   SIMD&FP:  scale = Q ? 4 : 3 (Q-form=16B, D-form=8B).
+        //
+        // The old code used `is_q = (opc_ls & 2) && size == 0` which
+        // incorrectly matched LDRSB (size=0, opc=11) and LDRSB got
+        // scale=4 instead of 0, multiplying the offset by 16. This
+        // caused `ldrsb w0, [x0, #176]` to access [x0+2816] and crash
+        // toybox ls / with UnmappedMemory.
+        uint64_t scale;
+        if (d.is_vec) {
+            scale = (d.size & 2) ? 4 : 3;   // bit 30 = Q
+        } else {
+            scale = d.size;
+        }
         d.disp    = static_cast<int64_t>(imm12 << scale);
         d.is_load = d.is_vec ? (d.opc_ls & 1)
                              : ((d.opc_ls & 2) || (d.opc_ls & 1));
@@ -769,7 +787,31 @@ bool decode(DecodedInst& d, uint32_t inst) {
             return true;
         }
         uint8_t op31_24 = (inst >> 24) & 0xFF;
-        if (op31_24 != 0x1E && op31_24 != 0x9E) return false;
+        // Accept scalar FP (0x1E), FMOV Vd.D[1] (0x9E), and vector FP
+        // with Q=1 (0x5E). The 0x5E form covers instructions like
+        // FCVTZS Vd.2D, Vn.2D (vector 2-lane 64-bit FP→int conversion)
+        // used by toybox seq. The IR translator's FP_SCALAR case will
+        // fall back to CALL_INTERP for vector-specific encodings it
+        // doesn't handle natively.
+        if (op31_24 != 0x1E && op31_24 != 0x9E && op31_24 != 0x5E) return false;
+        d.is_vec    = true;
+        d.cls       = InstClass::FP_SCALAR;
+        d.ftype     = (inst >> 22) & 3;
+        d.rd        = inst & 0x1F;
+        d.rn        = (inst >> 5) & 0x1F;
+        d.rm        = (inst >> 16) & 0x1F;
+        d.fp_opcode = (inst >> 12) & 0xF;
+        d.rmode     = (inst >> 19) & 3;
+        return true;
+    }
+
+    // FMADD / FMSUB / FNMADD / FNMSUB — FP fused multiply-add/subtract
+    // (3-source). bits[28:24]=11111, bit[15]=o1 (0=FMADD/FNMADD, 1=FMSUB/FNMSUB),
+    // bit[21]=o2 (0=FMADD/FMSUB, 1=FNMADD/FNMSUB). The IR translator's
+    // FP_SCALAR case handles these via the (op & 0xFF200000) == 0x1F000000
+    // check, so we just classify them as FP_SCALAR and let the translator
+    // dispatch.
+    case 0x1F: {
         d.is_vec    = true;
         d.cls       = InstClass::FP_SCALAR;
         d.ftype     = (inst >> 22) & 3;

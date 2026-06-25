@@ -1365,18 +1365,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             // ── SIMD load/store multiple structures (LD1/ST1) ─────────
             case InstClass::SIMD_LD1:
             case InstClass::SIMD_ST1: {
-                uint8_t opcode = (d.raw >> 12) & 0xF;
                 bool Q = d.Q;
                 int total_bytes = Q ? 16 : 8;
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-                int nregs = 1;
-                if (opcode == 0x0) nregs = 1;
-                else if (opcode == 0x2) nregs = 1;
-                else if (opcode == 0x4) nregs = 2;
-                else if (opcode == 0x6) nregs = 2;
-                else if (opcode == 0x7) nregs = 2;
-                else if (opcode == 0x8) nregs = 3;
-                else if (opcode == 0xA) nregs = 4;
+                // The decoder now captures the register count in
+                // d.simd_count (from bits[14:13]). The old opcode-based
+                // logic was wrong: opcode 0xA mapped to 4 regs but is
+                // actually 2 regs (post-index variant), etc.
+                int nregs = d.simd_count;
                 for (int i = 0; i < nregs; i++) {
                     int r = (d.rt + i) & 0x1F;
                     uint64_t a = base + i * total_bytes;

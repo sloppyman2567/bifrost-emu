@@ -1102,13 +1102,23 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // FP arithmetic (2-source): bit[21]=1, bits[15:10] != 0b000100 (FMOV imm)
-            // and != 0b001000 (FCMP, handled above) and != 0b010000 (FP 1-source)
-            // and != 0b010100 (FMOV imm, alternate encoding).
-            // added 0x14 exclusion — FMOV imm has bits[15:10]=0x14.
-            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3F) != 0x04 &&
-                ((op >> 10) & 0x3F) != 0x08 && ((op >> 10) & 0x3F) != 0x10 &&
-                ((op >> 10) & 0x3F) != 0x14) {
+            // FP arithmetic (2-source): bit[21]=1, bits[11:10]=0b10.
+            //
+            // The ARM ARM distinguishes FP 2-source (FMUL/FADD/etc.) from
+            // FP→int (FCVTZS/FCVTZU) and int→FP (SCVTF/UCVTF) conversions
+            // by bits[11:10]: 2-source ops have bits[11:10]=0b10, while
+            // conversions have bits[11:10]=0b00 (with bits[15:10]=0b000000).
+            //
+            // The old check only excluded bits[15:10] in {0x04, 0x08, 0x10,
+            // 0x14} (FMOV imm / FCMP / FP 1-source / FMOV imm alternate) —
+            // but those all have bit[21]=0, so the bit[21]=1 check already
+            // excluded them. The real collision was with FCVTZS/SCVTF,
+            // which have bit[21]=1 AND bits[15:10]=0x00, matching the old
+            // check and causing `fcvtzs w1, d0` (0x1e780001) to be
+            // misdecoded as `fmul d1, d0, d24`. The fix is to require
+            // bits[11:10]=0b10, which is the architectural encoding for
+            // 2-source ops.
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10) {
                 // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
                 if (opcode <= 6 && ftype <= 1) {
                     emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);
@@ -1310,27 +1320,36 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
 
         // ── SIMD LD1/ST1 — native (128-bit load/store) ─────────────
+        // Handles multi-register forms: LD1/ST1 {Vt..Vt+n-1} stores n×16
+        // bytes (n = d.simd_count, 1..4). Each register's v_lo and v_hi
+        // are loaded/stored as two 8-byte memory accesses.
         case InstClass::SIMD_LD1: {
             uint16_t base = load_arm_reg(block, d.rn, true);
-            // Load 16 bytes: v_lo[rt] = mem[base], v_hi[rt] = mem[base+8]
-            uint16_t lo = g_alloc.alloc();
-            emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0, 0);
-            uint16_t hi = g_alloc.alloc();
-            emit(block, IROp::LOAD_MEM, hi, base, 0, 8, 0, 0, 8);
-            // Store to v_lo/v_hi via SIMD_LDST (width=1 = load)
-            emit(block, IROp::SIMD_LDST, d.rt, lo, hi, 1, 0, 0, 0, cur_pc);
+            for (uint8_t i = 0; i < d.simd_count; i++) {
+                uint8_t reg = (d.rt + i) & 0x1F;
+                uint16_t lo = g_alloc.alloc();
+                emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0,
+                     static_cast<uint64_t>(i * 16));
+                uint16_t hi = g_alloc.alloc();
+                emit(block, IROp::LOAD_MEM, hi, base, 0, 8, 0, 0,
+                     static_cast<uint64_t>(i * 16 + 8));
+                emit(block, IROp::SIMD_LDST, reg, lo, hi, 1, 0, 0, 0, cur_pc);
+            }
             return false;
         }
 
         case InstClass::SIMD_ST1: {
             uint16_t base = load_arm_reg(block, d.rn, true);
-            // Store 16 bytes: mem[base] = v_lo[rt], mem[base+8] = v_hi[rt]
-            // Use SIMD_LDST with width=0 to read v_lo/v_hi into vregs
-            uint16_t lo = g_alloc.alloc();
-            uint16_t hi = g_alloc.alloc();
-            emit(block, IROp::SIMD_LDST, d.rt, lo, hi, 0, 0, 0, 0, cur_pc);
-            emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0, 0);
-            emit(block, IROp::STORE_MEM, 0, base, hi, 8, 0, 0, 8);
+            for (uint8_t i = 0; i < d.simd_count; i++) {
+                uint8_t reg = (d.rt + i) & 0x1F;
+                uint16_t lo = g_alloc.alloc();
+                uint16_t hi = g_alloc.alloc();
+                emit(block, IROp::SIMD_LDST, reg, lo, hi, 0, 0, 0, 0, cur_pc);
+                emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0,
+                     static_cast<uint64_t>(i * 16));
+                emit(block, IROp::STORE_MEM, 0, base, hi, 8, 0, 0,
+                     static_cast<uint64_t>(i * 16 + 8));
+            }
             return false;
         }
 

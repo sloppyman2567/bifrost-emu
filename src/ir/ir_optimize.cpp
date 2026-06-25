@@ -575,6 +575,22 @@ void optimize_ir(IRBlock& block) {
                 // but we keep it conservative within the block.
                 break;
 
+            case IROp::FP_F2I: {
+                // FP_F2I writes directly to ARM reg vreg `dest` (0..31),
+                // bypassing STORE_REG. The JIT's store_reg_to_vreg(dest, RAX)
+                // caches the conversion result in vreg `dest`. Update the
+                // arm_reg_cache so a subsequent LOAD_REG of `dest` reuses
+                // the vreg instead of substituting a stale cached vreg.
+                // Without this, the FWD cache would substitute the LOAD_REG
+                // with a MOV pointing at the pre-conversion vreg, losing
+                // the FP_F2I result.
+                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                consts.clear(inst.dest);
+                copies.clear(inst.dest);
+                last_def[inst.dest] = i;
+                break;
+            }
+
             default:
                 break;
         }

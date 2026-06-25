@@ -261,6 +261,7 @@ struct DecodedInst {
     uint8_t  cmode = 0;         // SIMD immediate cmode field
     uint8_t  fp_opcode = 0;     // FP arithmetic opcode
     uint8_t  rmode = 0;         // FP rounding mode
+    uint8_t  simd_count = 1;    // SIMD LD1/ST1 register count (1-4)
     bool     is_sub = false;    // SUB vs ADD (various groups)
 
     // ── System registers (MSR/MRS) ──

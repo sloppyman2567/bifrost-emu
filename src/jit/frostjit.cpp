@@ -101,8 +101,19 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         // We use RAX as a scratch for the memory store. src1's cached
         // value is NOT modified by the store, so we keep src1's mapping
         // intact for later readers.
+        //
+        // BUGFIX: if src1 is cached in a reg OTHER than RAX, the old code
+        // did `emit_mov_reg(RAX, s)` which silently overwrote whatever
+        // dirty vreg was in RAX — losing its value. This caused
+        // printf("%f", 3.14) → "2.000000" under BIFROST_ENABLE_FWD=1
+        // because v46 (the bfxil result holding x1's low 48 bits) was
+        // in RAX and got clobbered by the FMOV_G2F that copies x9 to
+        // v_lo[0]. Fix: spill RAX's occupant BEFORE overwriting it.
         int s = ensure_vreg(src1, RAX);
-        if (s != RAX) emit_mov_reg(RAX, s);
+        if (s != RAX) {
+            clobber_host_reg(RAX);  // spill dirty vreg in RAX before reuse
+            emit_mov_reg(RAX, s);
+        }
         emit_store(CPU_REG, fp_off, RAX);
         // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
         // The zero-load clobbers RAX, so we must spill any dirty vreg
@@ -219,11 +230,27 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         case IROp::LOAD_REG:
             // dest = arm64_reg[src1]. src1 is the ARM64 reg index.
+            //
+            // If the ARM reg vreg (src1, in 0..31) is already cached in a
+            // host reg — e.g., because a previous FP_F2I / FP_I2F / FMOV_F2G
+            // wrote directly to it via store_reg_to_vreg(src1, RAX) without
+            // going through STORE_REG — reuse the cached value. Otherwise
+            // we would emit a load from cpu.regs[src1], which is STALE
+            // (the dirty vreg hasn't been flushed yet). This was the root
+            // cause of `fcvtzs w1, d0; add w19, w19, w1` losing the
+            // conversion result: FP_F2I cached vreg 1, then LOAD_REG v34, x1
+            // reloaded the stale cpu.regs[1] instead of the cached vreg 1.
             {
-                // Kill any existing value for dest, allocate a fresh reg.
                 kill_vreg(inst.dest);
-                int d = alloc_reg();
-                emit_load_arm(d, inst.src1);
+                int d;
+                if (inst.src1 <= 31 && vreg_home_[inst.src1] >= 0) {
+                    int s = vreg_home_[inst.src1];
+                    d = alloc_reg_excluding(s, -1);
+                    emit_mov_reg(d, s);
+                } else {
+                    d = alloc_reg();
+                    emit_load_arm(d, inst.src1);
+                }
                 set_vreg_reg(inst.dest, d);
             }
             return false;
