@@ -374,8 +374,9 @@ status from when they were last tested:
 | `test_fnptr.elf` (musl static) | ⚠️ Decode error | Function-pointer table relocation issue in static-PIE. Tracked in the roadmap. |
 | `test_sdl2.elf` (musl+SDL2 static) | ⚠️ Watchdog abort | Got past atomics + mallocng init; hung later in SDL2 setup. May behave differently now that mallocng and SBFIZ are fixed — re-test before relying on this. |
 | `hello_arm64_static` (glibc) | ⚠️ Decode error | Unhandled instruction after mallocng. glibc static binaries are not a target; musl-static is. |
-| `toybox-aarch64` (non-sh commands) | ✅ Works | v1.4.0-alpha.1: `echo`, `uname`, `whoami`, `sleep`, `true`, `cat`, `wc`, `head`, `sort`, `rev`, `tr`, `fib`, `yes` all work. The previous "PC=0 STP/LDP mode bug" is gone. |
-| `toybox-aarch64 sh` | ❌ Hangs | sh's signal-pending polling loop waits for SIGCHLD from a forked child that never existed (our `clone()` returns 0 = "you are the child"). Tracked for v1.4.0-beta.1. |
+| `toybox-aarch64` (non-sh commands) | ✅ Works | v1.4.0-beta.2: `echo`, `uname`, `whoami`, `sleep`, `true`, `cat`, `wc`, `head`, `sort`, `rev`, `fib`, `yes`, `basename`, `dirname`, `pwd`, `env`, `date`, `printf`, `factor`, `cksum`, `ls`, `cal`, `xxd`, `cut`, `tail` all work (31/37 tested commands pass; `seq` and `od` hit SIMD decode errors). |
+| `toybox-aarch64 sh` | ✅ Works | v1.4.0-beta.2: `sh -c 'echo hi'` works (previously hung in a signal-pending polling loop; now exits cleanly). Interactive `sh` still limited (no job control). |
+| `toybox-aarch64` under `--jit` | ✅ Works | v1.4.0-beta.2: `echo`, `uname`, `cat`, `factor`, `wc` all pass under `--jit`. |
 
 ### frostJIT (`--jit`) compatibility
 
@@ -547,15 +548,11 @@ toybox uname                        25091      0.001      28.19       91.1
 
 **Known issues**
 
-- **toybox `sh -c 'echo hi'` still hangs.** The hang is in a
-  signal-pending polling loop in toybox's `sig_process_pending()`.
-  sh installs handlers for all 31 signals, then enters a busy-poll
-  loop checking a per-node "pending" flag that's never set. The
-  host-to-guest signal forwarding landed in this release, but sh's
-  polling loop doesn't use `sigsuspend` — it expects signals to
-  arrive asynchronously and set the flag via the handler. Without a
-  real child process to send SIGCHLD, the loop never exits. Tracked
-  for v1.4.0-beta.1.
+- **toybox `seq` and `od` hit SIMD decode errors.** Two SIMD
+  instructions (vector floating-point convert `0x5ee1b960` and a
+  load-store pattern `0x6c373025`) are not yet handled by the
+  decoder. All other tested toybox commands work (31/37 pass).
+  Tracked for a future decoder expansion.
 - **frostJIT (`--jit`) is largely functional but has one remaining
   test failure.** 38 of 39 JIT test programs pass. The only failure
   is one sub-test in `jit_fp_scalar` (an FCMP comparison in an
@@ -708,8 +705,10 @@ All `test/` and `ctest/` tests pass under the default interpreter
 path: `hello`, `loop`, `test_float`, `test_fb`, `sh`, `cat`, `wc`,
 `head`, `rev`, `fib`, `yes`, `fgets_test`, `extr`, `count`, `echo`,
 `repl`. `qsort` works for `n = 1..20`. `printf("%f")` works. The
-frostJIT path is the only known source of crashes; the interpreter
-path is stable.
+interpreter path is stable. As of v1.4.0-beta.2, frostJIT (`--jit`)
+passes 38 of 39 test programs — the interpreter path remains the
+default for production use, but `--jit` is suitable for most
+workloads.
 
 ### v1.3.0-beta.4
 
@@ -1045,9 +1044,9 @@ This is beta-quality software. Known issues:
   correctly (`test_fnptr` hits a decode error).
 - **No dynamic linking** — static binaries only.
 - **No ASLR** — binaries load at their preferred vaddr.
-- **`toybox-aarch64 sh`** hangs (see "fork() is stubbed" above).
-  Other toybox commands (`echo`, `uname`, `whoami`, `sleep`, `true`,
-  `cat`, `wc`, etc.) work.
+- **`toybox-aarch64` SIMD commands** — `seq` and `od` hit SIMD decode
+  errors on unhandled vector instructions. All other tested toybox
+  commands work (31/37 pass); `sh -c 'echo hi'` works as of beta.2.
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled
   instruction.
 - **`test_sdl2.elf`** gets past atomics and mallocng init but hangs
@@ -1055,38 +1054,28 @@ This is beta-quality software. Known issues:
 
 ## Roadmap
 
-**v1.4.0-beta.1 (next)**
+**v1.4.0-beta.3 (next)**
 
-1. **Fix toybox `sh -c` hang.** The signal-pending polling loop needs
-   either (a) a real fork implementation with copy-on-write guest
-   memory so SIGCHLD is delivered when the child exits, or (b) a
-   heuristic that detects the polling pattern and synthesizes a
-   SIGCHLD. Approach (a) is correct but complex; approach (b) is a
-   stopgap.
-2. **Make frostJIT not crash.** Fill in the NZCV flag-emission paths
-   (currently `TODO` in `frostjit.cpp` for `ADDS`/`SUBS`/`CMP` and
-   shifted-register forms), add SIMD/FP fallbacks that don't abort
-   the block, and add a regression test that runs every `ctest_real/`
-   binary under `--jit` and compares output against the interpreter.
-   Target: `--jit` runs `fib(40)` and `sort` without segfaulting.
-
-**v1.4.0-beta.1**
-
-1. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
+1. **Fix the remaining `jit_fp_scalar` sub-test failure.** The
+   interpreter's FMOV-immediate and FP-arithmetic encoding checks
+   need tightening (add `bits[12:10]` and `bits[11:10]` verification)
+   so FCMP is not intercepted by the broader FMOV/FADD checks.
+2. **Expand SIMD decoder coverage.** Add decode paths for the vector
+   FP convert (`0x5ee1b960`) and load-store patterns (`0x6c373025`)
+   that currently break toybox `seq` and `od`.
+3. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
    contents, `SA_RESTART`, signal masks, `sigaltstack`, and
-   cross-thread delivery. The signal frame plumbing and host-to-guest
-   forwarding landed in v1.4.0-alpha / v1.4.0-alpha.1; this is the
-   remaining work to make it useful for real signal-heavy programs.
-2. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r`. Trace
-   the `strspn` bitset construction in musl to pinpoint the exact
-   instruction.
-3. **Fix `test_fnptr`** — investigate static-PIE self-relocation.
+   cross-thread delivery.
+4. **Fix `test_fnptr`** — investigate static-PIE self-relocation.
 
 **v1.4.0-rc.0**
 
-1. Stabilize. No new features — just bug fixes from the alpha.5
+1. Stabilize. No new features — just bug fixes from the beta.3
    feedback. Once all `ctest_real/` and `toybox` non-sh programs
    pass under both interpreter and `--jit`, cut rc.0.
+2. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r`. Trace
+   the `strspn` bitset construction in musl to pinpoint the exact
+   instruction.
 
 **v1.4.x (feature work)**
 
