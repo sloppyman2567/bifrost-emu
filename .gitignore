@@ -57,3 +57,7 @@ tools/sdl2-debs/
 
 # SDL2 SDK (extracted by tools/fetch-sdl2-headers.sh)
 tools/sdl2-sdk/
+
+# Agent context file — local working notes for AI assistants.
+# NEVER commit this file; it is for cross-session continuity only.
+context.md
