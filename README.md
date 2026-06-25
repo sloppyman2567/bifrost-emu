@@ -296,10 +296,14 @@ This is beta-quality software. Key limitations:
 - **frostJIT (`--jit`) is experimental.** All 39 tests pass, but the
   JIT has not been exhaustively tested against arbitrary ARM64 binaries.
   The interpreter path is the default for production use.
-- **toybox `seq` and `od`** hit SIMD decode errors on unhandled vector
-  instructions. All other tested toybox commands work.
-- **toybox `ls /` crashes under JIT** (pre-existing; works under
-  interpreter). Root cause not yet identified.
+- **toybox `seq`** no longer hits SIMD decode errors (FCVTZS vector and
+  FMADD are now decoded), but produces no output due to a separate
+  printf formatting issue still under investigation. All other tested
+  toybox commands work, including `ls /` (previously crashed).
+- **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
+  opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
+  JIT tests pass with it enabled, but toybox `ls /` still crashes
+  (pre-existing, not introduced by the FWD bug fixes).
 
 For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 
