@@ -73,12 +73,10 @@ public:
     // (e.g. one per thread) don't share/corrupt each other's counters.
     // Resets on any different PC; if the same PC runs > WATCHDOG_LIMIT
     // times in a row, fall back to the interpreter to break the loop.
-    // v1.4.0-beta.3 optimized: raised from 100K to 500M because pure JIT
-    // blocks (no CALL_INTERPs) are no longer marked interp_only by the
-    // hotness tracker. Tight loops legitimately run 100M+ iterations
-    // through the dispatcher before self-loop chaining kicks in (the
-    // self-loop slot is patched at translate-time, but the first few
-    // iterations go through the dispatcher).
+    // Raised from 100K to 500M: pure JIT blocks (no CALL_INTERPs) are no
+    // longer demoted to interp_only, so tight loops legitimately run
+    // 100M+ iterations through the dispatcher before self-loop chaining
+    // kicks in.
     static constexpr uint32_t WATCHDOG_LIMIT = 500000000;
     uint64_t watchdog_last_pc_ = UINT64_MAX;
     uint32_t watchdog_count_   = 0;
@@ -158,15 +156,17 @@ private:
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // number of CALL_INTERP fallbacks in this block
-        // Self-loop: the block's taken branch target equals its own start PC.
-        // patch_off_selfloop_ is the offset of a 5-byte jmp slot in the block's
-        // taken path. Initially it's the normal epilogue path (store PC, restore
-        // regs, ret → dispatcher). When the block is identified as a self-loop,
-        // the slot is patched to `jmp block_body_start`, skipping the epilogue,
-        // dispatcher, and prologue — the block body runs again directly. This
-        // eliminates ~25 instructions of overhead per iteration for tight loops.
+        // Self-loop chaining: when the block's BRCOND taken target equals its
+        // own start PC, a 5-byte `jmp rel32` slot is emitted on the taken path.
+        // After the block is fully compiled, translate_block patches this slot
+        // to jump directly to the block body start — skipping the epilogue,
+        // dispatcher, and prologue. The block body runs again immediately.
+        // This is the single biggest win for tight loops (e.g. bench_mips):
+        // ~25 instructions of per-iteration overhead are eliminated.
+        // has_selfloop_slot = false means no slot was emitted (block is not
+        // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
-        size_t  selfloop_patch_off = 0;
+        size_t  selfloop_patch_off = 0;  // offset of the 5-byte jmp slot in code_buf_
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 
@@ -513,14 +513,12 @@ private:
     bool flags_from_sub_ = false;
 
     // ── Liveness-based register freeing ─────────────────────────────
-    // For each vreg, the index of the last IR op that uses it (as src1 or
-    // src2, NOT as dest). After compiling that op, the vreg's host reg is
-    // freed (via kill_vreg) so it can be reused for a new vreg without
-    // eviction. This dramatically reduces spill traffic in tight loops
-    // where the JIT would otherwise keep dead vregs cached.
-    //
-    // kills_per_op_[i] = list of vregs whose last use is op i (and that
-    // are NOT the dest of op i — dest is a new definition, still live).
+    // kills_per_op_[i] = list of scratch vregs whose last use is IR op i
+    // (and that are not the dest of op i). After compiling op i, each
+    // vreg in this list is killed via kill_vreg, freeing its host reg for
+    // reuse without eviction. Only scratch vregs (33+) are tracked — ARM
+    // reg vregs (0-31) represent architectural state that must be flushed
+    // at the epilogue, so they must not be killed early.
     std::vector<std::vector<uint16_t>> kills_per_op_;
 
     // Block-chaining state (reset at translate_block start).
@@ -532,19 +530,26 @@ private:
     bool unchainable_end_ = false;
 
     // Self-loop chaining state (reset at translate_block start).
-    // When the block's BRCOND taken target == block start PC, we emit a
-    // 5-byte "selfloop slot" on the taken path. After the block is fully
-    // compiled, the slot is patched to `jmp block_body_start`, creating
-    // a tight loop that skips the epilogue, dispatcher, and prologue.
+    // When a BRCOND's taken target == block start PC, a 5-byte jmp slot is
+    // emitted on the taken path. translate_block patches it to jump directly
+    // to the block body start (block_body_start_off_), creating a tight loop
+    // that skips the epilogue/dispatcher/prologue.
     bool    has_selfloop_slot_ = false;
-    size_t  selfloop_patch_off_ = 0;
-    size_t  block_body_start_off_ = 0;  // offset of block body (after prologue)
-    uint64_t current_start_pc_ = 0;     // start PC of the block being translated
+    size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
+    size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
+    uint64_t current_start_pc_ = 0;      // start PC of the block being translated
 
     // Materialize pending host flags to pstate if any flag-clobbering
     // instruction is about to execute. Called by ADD/SUB/AND/OR/XOR/
     // SHL/SHR/SAR/ROR/NOT/NEG/IMUL to preserve flag correctness.
     void clobber_flags();
+
+    // Materialize host flags (NZCV) to cpu.pstate, preserving the current
+    // RFLAGS around the materialization (which clobbers RAX/RCX/RDX).
+    // Used at block exits (BRCOND fall-through and taken paths) where the
+    // next block may read pstate. No-op if flags_in_host_ is false.
+    // Does NOT clear flags_in_host_ — the caller manages that.
+    void materialize_flags_to_pstate();
 
     // Translation entry point.
     uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);

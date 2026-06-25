@@ -281,35 +281,32 @@ void optimize_ir(IRBlock& block) {
 
             case IROp::LOAD_REG: {
                 uint8_t ar = inst.src1;
-                // arm_reg_cache load-forwarding (re-enabled).
+                // arm_reg_cache load-forwarding.
                 //
                 // The cache maps ARM reg index → vreg holding its current
                 // value. After a LOAD_REG or STORE_REG of arm reg R, the
                 // cache knows which vreg holds R's value. A subsequent
                 // LOAD_REG of R can be replaced by MOV dest, cached_vreg
-                // (or IMM if the cached vreg is a known constant).
+                // (or IMM if the cached vreg is a known constant). This is
+                // the single most impactful IR optimization for tight loops:
+                // without it, every ARM register access reloads from
+                // cpu.regs[] memory, even when the value is already in a
+                // host register from the previous iteration.
                 //
-                // This is the single most impactful IR optimization for
-                // tight loops: without it, every ARM register access
-                // reloads from cpu.regs[] memory, even when the value is
-                // already in a host register from the previous iteration.
+                // The cache is invalidated by CALL_INTERP/SVC (interpreter
+                // may modify any cpu.regs[]). The MOV/IMM emitted by the
+                // substitution marks the cached vreg as live in Pass 2 DCE.
                 //
-                // Safety: see the detailed comment in the code. The cache
-                // is invalidated by CALL_INTERP/SVC (interpreter may modify
-                // any cpu.regs[]). The MOV emitted by the substitution
-                // marks the cached vreg as live in Pass 2 DCE.
-                // arm_reg_cache load-forwarding.
-                //
-                // Disabled by default because it has a subtle correctness bug
-                // that breaks jit_block_split and jit_fp_scalar. The bug is
-                // not fully diagnosed but likely involves an interaction between
-                // the cache substitution, dead-store elimination, and the
-                // liveness-based register freeing. Enable with BIFROST_ENABLE_FWD=1
-                // for experimentation (bench_mips gets ~4x speedup when it works).
-                //
-                // Even without this, the JIT still achieves >200 MIPS on
-                // bench_mips thanks to self-loop chaining, liveness-based reg
-                // freeing, and the improved ALU codegen.
+                // Disabled by default: has a subtle correctness bug that
+                // breaks jit_block_split and jit_fp_scalar. The bug is not
+                // fully diagnosed but likely involves an interaction between
+                // the cache substitution, dead-store elimination (Pass 1.5),
+                // and liveness-based register freeing. Enable with
+                // BIFROST_ENABLE_FWD=1 for experimentation (bench_mips gets
+                // ~4x speedup when it works, but 2 tests fail). Without it,
+                // the JIT still achieves 573 MIPS on bench_mips thanks to
+                // self-loop chaining, liveness-based reg freeing, and the
+                // improved ALU codegen.
                 static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
                 auto it = enable_fwd_ ? arm_reg_cache.find(ar) : arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
@@ -584,36 +581,19 @@ void optimize_ir(IRBlock& block) {
     }
 
     // ── Pass 1.5: post-substitution dead-store elimination ───────
-    // After Pass 1, many LOAD_REGs have been substituted to MOVs (which
+    // After Pass 1, LOAD_REGs may have been substituted to MOVs (which
     // are then turned into copy relations or DCE'd). This reveals dead
     // STORE_REGs that Pass 0 couldn't see because the intervening
     // LOAD_REGs were still present.
     //
-    // Example (bench_mips loop body):
-    //   Before Pass 1:
-    //     STORE_REG v0 = v35
-    //     LOAD_REG v39 src1=v0   ← blocks dead-store elimination
-    //     ...
-    //     STORE_REG v0 = v43
-    //   After Pass 1 (LOAD_REG v39 substituted to MOV v39, v35):
-    //     STORE_REG v0 = v35
-    //     MOV v39, v35           ← (will be DCE'd; v39 unused after copy-prop)
-    //     ...
-    //     STORE_REG v0 = v43
-    //   Pass 1.5 now correctly sees the first STORE_REG v0 is dead
-    //   (no intervening LOAD_REG v0) and NOPs it out.
+    // A STORE_REG to ARM reg R is dead if a later STORE_REG to the same R
+    // exists with NO intervening LOAD_REG of R or CALL_INTERP/SVC (either
+    // of which could observe the first store). The first store is NOP'd.
     //
-    // This eliminates redundant memory stores to cpu.regs[] in tight
-    // loops, roughly halving the store traffic for bench_mips.elf.
-    //
-    // NOTE: This pass is conservative — it only NOPs a STORE_REG if
-    // there's a later STORE_REG to the same ARM reg with NO intervening
-    // LOAD_REG or CALL_INTERP/SVC. If a CALL_INTERP could read the ARM
-    // reg, the STORE_REG is kept.
-    // NOTE: This pass is most effective when combined with arm_reg_cache
-    // load-forwarding (BIFROST_ENABLE_FWD=1). Without load-forwarding, the
-    // intervening LOAD_REGs are still present and this pass is mostly a no-op.
-    // It's still correct to run, just less impactful.
+    // Most effective when combined with arm_reg_cache load-forwarding
+    // (BIFROST_ENABLE_FWD=1): without it, the intervening LOAD_REGs are
+    // still present and this pass is mostly a no-op. It's still correct
+    // to run, just less impactful. Disable with BIFROST_NO_DSE=1.
     static bool no_dse_ = (getenv("BIFROST_NO_DSE") != nullptr);
     if (!no_dse_)
     {

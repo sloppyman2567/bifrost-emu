@@ -155,18 +155,24 @@ pass under JIT.
 
 ## Performance
 
-~140 MIPS on a typical desktop (compute-heavy workload). The interpreter
-achieves this via:
+The interpreter achieves ~96 MIPS on compute-heavy workloads. The
+experimental frostJIT (`--jit`) achieves **573 MIPS** on `bench_mips`
+(5.9x faster than the interpreter) via:
 
-1. **Decode cache** — a flat array indexed by PC avoids re-decoding on
+1. **Self-loop chaining** — tight loops jump directly back to the block
+   body, skipping the epilogue/dispatcher/prologue.
+2. **Liveness-based register freeing** — dead vregs' host regs are freed
+   immediately after their last use, eliminating eviction spills.
+3. **Register-cache-aware ALU codegen** — operands stay in whatever host
+   regs they're cached in, instead of being forced into RAX/RCX.
+4. **Decode cache** — a flat array indexed by PC avoids re-decoding on
    repeated execution (tight loops get 100% hit rate).
-2. **Memory page cache** — single-entry last-page caches for read and
+5. **Memory page cache** — single-entry last-page caches for read and
    write, avoiding mutex lock + hash-map lookup on every memory access
    to the same page.
 
-The experimental frostJIT (`--jit`) targets 500+ MIPS. Run
-`bifrost-emu -v <elf>` to see MIPS, memory page count, and decode cache
-hit rate for any program.
+Run `bifrost-emu -v <elf>` to see MIPS, memory page count, and decode
+cache hit rate for any program.
 
 ## Design Philosophy
 
@@ -302,6 +308,9 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
 current release is **v1.4.0-beta.3** (2026-06-26), which includes:
 
+- JIT performance overhaul — 573 MIPS on bench_mips (5.9x speedup over
+  interpreter) via self-loop chaining, liveness-based register freeing,
+  and register-cache-aware ALU codegen
 - JIT FP correctness overhaul — all 39 tests now pass under JIT
   (FCMP #0.0 form detection, FP 1-source opcode extraction,
   FMOV imm mask, FMOV imm vs SCVTF collision, missing interp FCMP)

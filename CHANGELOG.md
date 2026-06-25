@@ -6,6 +6,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.3] — 2026-06-26 (JIT performance overhaul — 573 MIPS, 5.9x speedup)
+
+### Summary
+
+frostJIT now achieves **573 MIPS** on `bench_mips.elf` (100M iterations in
+1.4s), up from 96 MIPS on the interpreter (8.3s) — a **5.9x speedup**. All
+39 test programs still pass under both the interpreter and JIT.
+
+### JIT — regalloc + codegen optimizations
+
+- **Self-loop chaining** (biggest win). When a BRCOND's taken target equals
+  the block's own start PC, a 5-byte `jmp rel32` slot is emitted on the
+  taken path. After the block is fully compiled, the slot is patched to
+  jump directly to the block body start — skipping the epilogue, dispatcher,
+  and prologue. The block body runs again immediately. `bench_mips` went
+  from 7.4s to 1.4s. Disable with `BIFROST_NO_SELFLOOP=1`.
+
+- **Liveness-based register freeing.** The JIT now computes each vreg's
+  last use (backward scan) and frees its host register immediately after
+  that op, instead of keeping it cached until eviction. Only scratch vregs
+  (33+) are tracked — ARM reg vregs (0-31) must be flushed at the epilogue.
+
+- **Improved ALU codegen.** ADD/SUB/AND/OR/XOR/MUL/SHL/SHR/SAR/ROR no
+  longer force operands into RAX/RCX. They use whatever host regs the
+  operands are already cached in, eliminating the massive stack spilling
+  the old codegen caused. New `alloc_reg_excluding()` helper allocates
+  dest without colliding with src1/src2's host regs. Commutative ops
+  handle `dest == src2` by computing in src2's reg (swapped operands).
+
+- **Hotness tracker fix.** Pure JIT blocks (no CALL_INTERP fallbacks) are
+  no longer demoted to `interp_only` after 5000 hits. The old behavior
+  disabled the JIT for `bench_mips`'s loop block after 5000 iterations,
+  falling back to the interpreter for the remaining 99.99M — the silent
+  killer that made the JIT appear no faster than the interpreter.
+
+- **Watchdog limit raised** from 100K to 500M. Tight loops legitimately
+  run 100M+ iterations through the dispatcher before self-loop chaining
+  kicks in. The old 100K limit would false-trigger on the first tight loop.
+
+- **Deferred flag materialization.** The JCC is emitted first (it uses host
+  RFLAGS directly), then flags are materialized to pstate on each path
+  separately. Extracted `materialize_flags_to_pstate()` helper to remove
+  code duplication.
+
+### IR optimizer
+
+- **SBFM/UBFM IR fix.** Use a scratch vreg + STORE_REG instead of using
+  the ARM reg index directly as dest via `emit_bf`. The old code confused
+  the optimizer's assumptions about which vregs represent architectural
+  state.
+
+- **Post-substitution dead-store elimination (Pass 1.5).** Removes
+  STORE_REGs that become dead after load-forwarding substitution reveals
+  them. Disable with `BIFROST_NO_DSE=1`.
+
+- **arm_reg_cache load-forwarding** (disabled by default, opt-in via
+  `BIFROST_ENABLE_FWD=1`). Re-enabled the previously-disabled cache, but
+  it has a subtle correctness bug that breaks `jit_block_split` and
+  `jit_fp_scalar`. With it enabled, `bench_mips` hits ~2286 MIPS (4x more),
+  but 2 tests fail. Left as a future task.
+
+### Code quality
+
+- Extracted `materialize_flags_to_pstate()` helper to remove duplicated
+  flag-materialization code in BRCOND and the epilogue.
+- Extracted `emit_alu_op` and `emit_shift` lambdas in the ALU/shift
+  codegen to remove triplicated switch statements.
+- Cleaned up stale/misleading comments throughout the JIT.
+
+---
+
 ## [1.4.0-beta.3] — 2026-06-26 (JIT FP correctness overhaul — 39/39 tests pass)
 
 ### Summary
