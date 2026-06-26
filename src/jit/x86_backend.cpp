@@ -533,51 +533,6 @@ extern "C" {
     }
 }
 
-// RBIT helper: reverses bit order of a value.
-extern "C" uint64_t jit_rbit(uint64_t val, int width) {
-    if (width == 32) {
-        uint32_t v = static_cast<uint32_t>(val);
-        v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
-        v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
-        v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
-        v = ((v >> 8) & 0x00FF00FFu) | ((v & 0x00FF00FFu) << 8);
-        v = (v >> 16) | (v << 16);
-        return v;
-    }
-    uint64_t v = val;
-    v = ((v >> 1) & 0x5555555555555555ULL) | ((v & 0x5555555555555555ULL) << 1);
-    v = ((v >> 2) & 0x3333333333333333ULL) | ((v & 0x3333333333333333ULL) << 2);
-    v = ((v >> 4) & 0x0F0F0F0F0F0F0F0FULL) | ((v & 0x0F0F0F0F0F0F0F0FULL) << 4);
-    v = __builtin_bswap64(v);
-    return v;
-}
-
-// BFM (Bitfield Move) helper: inserts Rn's bits into Rd's field.
-//   dst = (dst & ~mask) | (ROR(src, immr) & mask)
-extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int width) {
-    uint64_t r, mask;
-    if (width == 32) {
-        uint32_t d = static_cast<uint32_t>(dst);
-        uint32_t s = static_cast<uint32_t>(src);
-        immr &= 31;
-        r = (immr == 0) ? s : ((s >> immr) | (s << (32 - immr)));
-        if (imms < immr) {
-            mask = (~((1U << immr) - 1)) | ((1U << (imms + 1)) - 1);
-        } else {
-            mask = ((1U << (imms - immr + 1)) - 1) << immr;
-        }
-        return (d & ~mask) | (r & mask);
-    }
-    immr &= 63;
-    r = (immr == 0) ? src : ((src >> immr) | (src << (64 - immr)));
-    if (imms < immr) {
-        mask = (~((1ULL << immr) - 1)) | ((1ULL << (imms + 1)) - 1);
-    } else {
-        mask = ((1ULL << (imms - immr + 1)) - 1) << immr;
-    }
-    return (dst & ~mask) | (r & mask);
-}
-
 // ── Register allocator ──────────────────────────────────────────────────
 // Maps vregs to x86 registers for the duration of a block. Vregs 0-31
 // are architectural (live in cpu.regs[]/sp); vregs 33+ are scratch
@@ -588,9 +543,12 @@ extern "C" uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int 
 //   reg_vreg_[r]  = vreg currently in x86 reg r, or -1.
 //   vreg_dirty_[v] = true if the cached value differs from cpu.regs[]/stack.
 //
-// Available x86 regs: RAX, RCX, RDX, R8, R9, R11.
+// Available x86 regs (9 total):
+//   Caller-saved (clobbered by C calls): RAX, RCX, RDX, R8, R9, R11
+//   Callee-saved (preserved by C calls): R12, R13, R15
 // Reserved: RBX=CPU, R14=EMU, R10=window, RBP=frame, RSP=stack.
-// constexpr int FrostJIT::ALLOC_REGS[] = {RAX, RCX, RDX, R8, R9, R11}; // defined in header
+// constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15};
+// (defined in frostjit.hpp; vregs cached in R12/R13/R15 survive CALL_INTERP)
 
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────
 // Memory access through the direct window (R10) when the address is in

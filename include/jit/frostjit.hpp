@@ -408,13 +408,6 @@ private:
     void clobber_host_reg(int host_reg);
     void flush_all_vregs();
     void invalidate_all_vregs();
-    // flush_caller_saved_vregs: flush/invalidate only caller-saved vregs.
-    // Used around CALL_INTERP and memory ops — callee-saved vregs (R12/
-    // R13/R15) are preserved by the C calling convention, so they DON'T
-    // need to be spilled or invalidated. This keeps live values in
-    // callee-saved regs across interpreter calls, eliminating redundant
-    // reload traffic.
-    void flush_caller_saved_vregs();
 
     // ── Targeted flush/invalidate (v1.4.0-beta.2) ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any

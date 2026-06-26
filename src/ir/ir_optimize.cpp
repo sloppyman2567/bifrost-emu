@@ -110,7 +110,7 @@ static bool is_pure(IROp op) {
         case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
-        case IROp::SIMD_MOVI: case IROp::SIMD_LDST:   // write to v_lo/v_hi
+        case IROp::SIMD_LDST:                          // write to v_lo/v_hi
         case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
@@ -297,16 +297,15 @@ void optimize_ir(IRBlock& block) {
                 // may modify any cpu.regs[]). The MOV/IMM emitted by the
                 // substitution marks the cached vreg as live in Pass 2 DCE.
                 //
-                // Disabled by default: has a subtle correctness bug that
-                // breaks jit_block_split and jit_fp_scalar. The bug is not
-                // fully diagnosed but likely involves an interaction between
-                // the cache substitution, dead-store elimination (Pass 1.5),
-                // and liveness-based register freeing. Enable with
-                // BIFROST_ENABLE_FWD=1 for experimentation (bench_mips gets
-                // ~4x speedup when it works, but 2 tests fail). Without it,
-                // the JIT still achieves 573 MIPS on bench_mips thanks to
-                // self-loop chaining, liveness-based reg freeing, and the
-                // improved ALU codegen.
+                // Disabled by default: has a known correctness bug that
+                // crashes `toybox ls /` (store-then-load patterns produce
+                // stale vreg substitutions). The 36-test suite passes
+                // under FWD, but the toybox crash is a blocker.
+                // Enable with BIFROST_ENABLE_FWD=1 for experimentation
+                // (bench_mips gets ~5.6% speedup). Without FWD, the JIT
+                // still achieves 571 MIPS (10-run average) thanks to
+                // self-loop chaining, liveness-based reg freeing, and
+                // the improved ALU codegen.
                 static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
                 auto it = enable_fwd_ ? arm_reg_cache.find(ar) : arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
@@ -534,22 +533,13 @@ void optimize_ir(IRBlock& block) {
                     consts.set(inst.dest, result);
                     block.fold_subst++;
                 }
-                // CSEL/CSINC/CSINV/CSNEG/CCMP and BFM
-                // fall back to CALL_INTERP in the JIT, which can modify ANY
-                // cpu.regs[] (the interpreter runs the full ARM instruction).
-                // The old code only invalidated arm_reg_cache[dest], leaving
-                // stale entries for OTHER registers. This caused the optimizer
-                // to substitute later LOAD_REGs with stale vregs.
-                // Fix: invalidate the ENTIRE arm_reg_cache for CALL_INTERP
-                // fallback ops.
-                //
-                // UBFM/SBFM/EXTR are native in the JIT (no CALL_INTERP), so
-                // they only need dest invalidation — this allows the optimizer
-                // to keep caching other registers across these ops, improving
-                // code quality.
-                // BFM is now decomposed into UBFM+AND+OR in ir.cpp,
-                // so it never reaches here as IROp::BFM. All ops in this
-                // case are native — only need dest invalidation.
+                // CSEL/CSINC/CSINV/CSNEG/CCMP are native in the JIT (no
+                // CALL_INTERP), so they only need dest invalidation — this
+                // allows the optimizer to keep caching other registers
+                // across these ops, improving code quality.
+                // BFM is decomposed into SHL+SHR+AND+OR in ir_translate.cpp
+                // (never reaches here as IROp::BFM). All ops in this case
+                // are native — only need dest invalidation.
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);
@@ -767,12 +757,26 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FP_UNOP: return "FP_UNOP";
                     case IROp::SIMD_LOGICAL: return "SIMD_LOGICAL";
                     case IROp::SIMD_DUP: return "SIMD_DUP";
-                    case IROp::SIMD_MOVI: return "SIMD_MOVI";
                     case IROp::SIMD_LDST: return "SIMD_LDST";
                     case IROp::FP_F2I: return "FP_F2I";
                     case IROp::FP_I2F: return "FP_I2F";
                     case IROp::FP_CMP: return "FP_CMP";
                     case IROp::FP_MOVI: return "FP_MOVI";
+                    case IROp::UDIV: return "UDIV";
+                    case IROp::SDIV: return "SDIV";
+                    case IROp::SMADDL: return "SMADDL";
+                    case IROp::UMADDL: return "UMADDL";
+                    case IROp::SMSUBL: return "SMSUBL";
+                    case IROp::UMSUBL: return "UMSUBL";
+                    case IROp::SMULH: return "SMULH";
+                    case IROp::UMULH: return "UMULH";
+                    case IROp::FCVT_S2D: return "FCVT_S2D";
+                    case IROp::FCVT_D2S: return "FCVT_D2S";
+                    case IROp::FRINT: return "FRINT";
+                    case IROp::FMADD: return "FMADD";
+                    case IROp::FMSUB: return "FMSUB";
+                    case IROp::MRS: return "MRS";
+                    case IROp::MSR: return "MSR";
                     default: return "?";
                     }
                     return "?";

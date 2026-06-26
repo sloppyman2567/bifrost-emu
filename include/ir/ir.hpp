@@ -110,19 +110,20 @@ enum class IROp : uint8_t {
     SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
     SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
-    SIMD_MOVI,     // v_lo[dest] = v_hi[dest] = imm (broadcast imm)
     SIMD_LDST,     // Load/store 128-bit from memory
                    // dest = vreg index, src1 = addr vreg, imm = offset
                    // width = 0 (store), 1 (load)
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype
-                   // flags_op = sf (0=32-bit GPR dest, 1=64-bit GPR dest)
+                   // flags_op = sf (JIT ignores this; ir_translate emits
+                   //                an explicit ZEXT after FP_F2I when sf=0)
     FP_I2F,        // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
     FP_CMP,        // compare v_lo[src1] vs v_lo[src2], set pstate
-                   // imm = 0 (FCMP), 1 (FCMPE); width = ftype
+                   // imm bit 0 = 1 for FCMP Dn,#0.0 form, 0 for register form;
+                   // width = ftype
     FP_MOVI,       // v_lo[dest] = imm (decoded FP immediate); v_hi=0
                    // width = ftype (0=S, 1=D)
     // Native division (x86 div/idiv)
@@ -143,11 +144,6 @@ enum class IROp : uint8_t {
     // Native FP round to integer (via x86 roundss/roundsd)
     FRINT,         // v_lo[dest] = round(v_lo[src1]); imm = rounding mode
                    // 0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(0), 4=I(current), 5=X(exact)
-    // Native FP compare (sets NZCV in pstate)
-    FCMP,          // compare v_lo[src1] vs v_lo[src2]; width=ftype; imm=0(FCMP)/1(FCMPE)
-    // Native FP 1-source ops (abs, neg, sqrt via x86 andps/xorps/sqrtsd)
-    FP_UNOP2,      // v_lo[dest] = op(v_lo[src1]); imm = opcode
-                   // 0=abs, 1=neg, 2=sqrt (separate from FP_UNOP which handles mov)
     // Native FP fused multiply-add (via x86 vfmadd or decomposition)
     FMADD,         // v_lo[dest] = v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
     FMSUB,         // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype

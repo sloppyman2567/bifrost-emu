@@ -546,73 +546,6 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 cpu.v_hi[inst.dest] = 0;
                 break;
             }
-            // FCMP: FP compare (sets NZCV)
-            case IROp::FCMP: {
-                bool is_double = (inst.width == 64);
-                if (is_double) {
-                    double a, b;
-                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
-                    memcpy(&b, &cpu.v_lo[inst.src2], 8);
-                    if (std::isnan(a) || std::isnan(b)) {
-                        cpu.set_flag_n(0); cpu.set_flag_z(0);
-                        cpu.set_flag_c(1); cpu.set_flag_v(1);
-                    } else if (a > b) {
-                        cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                    } else if (a < b) {
-                        cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                    } else {
-                        cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                    }
-                } else {
-                    float a, b;
-                    uint32_t ba = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
-                    uint32_t bb = static_cast<uint32_t>(cpu.v_lo[inst.src2]);
-                    memcpy(&a, &ba, 4);
-                    memcpy(&b, &bb, 4);
-                    if (std::isnan(a) || std::isnan(b)) {
-                        cpu.set_flag_n(0); cpu.set_flag_z(0);
-                        cpu.set_flag_c(1); cpu.set_flag_v(1);
-                    } else if (a > b) {
-                        cpu.set_flag_n(0); cpu.set_flag_z(0); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                    } else if (a < b) {
-                        cpu.set_flag_n(1); cpu.set_flag_z(0); cpu.set_flag_c(0); cpu.set_flag_v(0);
-                    } else {
-                        cpu.set_flag_n(0); cpu.set_flag_z(1); cpu.set_flag_c(1); cpu.set_flag_v(0);
-                    }
-                }
-                break;
-            }
-            // FP_UNOP2: FABS/FNEG/FSQRT
-            case IROp::FP_UNOP2: {
-                bool is_double = (inst.width == 64);
-                if (is_double) {
-                    double v;
-                    memcpy(&v, &cpu.v_lo[inst.src1], 8);
-                    double r;
-                    switch (inst.imm & 0x7) {
-                        case 0: r = fabs(v); break;
-                        case 1: r = -v; break;
-                        case 2: r = sqrt(v); break;
-                        default: r = v; break;
-                    }
-                    memcpy(&cpu.v_lo[inst.dest], &r, 8);
-                } else {
-                    float v;
-                    uint32_t bits = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
-                    memcpy(&v, &bits, 4);
-                    float r;
-                    switch (inst.imm & 0x7) {
-                        case 0: r = fabsf(v); break;
-                        case 1: r = -v; break;
-                        case 2: r = sqrtf(v); break;
-                        default: r = v; break;
-                    }
-                    memcpy(&bits, &r, 4);
-                    cpu.v_lo[inst.dest] = bits;
-                }
-                cpu.v_hi[inst.dest] = 0;
-                break;
-            }
             // FMADD/FMSUB: FP fused multiply-add
             case IROp::FMADD:
             case IROp::FMSUB: {
@@ -749,10 +682,6 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::SIMD_DUP:
                 cpu.v_lo[inst.dest] = vregs[inst.src1];
                 cpu.v_hi[inst.dest] = vregs[inst.src1];
-                break;
-            case IROp::SIMD_MOVI:
-                cpu.v_lo[inst.dest] = inst.imm;
-                cpu.v_hi[inst.dest] = inst.imm;
                 break;
             case IROp::SIMD_LDST:
                 if (inst.width == 1) { // load vregs → v_lo/v_hi

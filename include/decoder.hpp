@@ -138,35 +138,15 @@ enum class InstClass : uint16_t {
     SIMD_LD1,       // vector load single structure
     SIMD_ST1,       // vector store single structure
     SIMD_LOGICAL,   // vector AND/ORR/EOR/BIC
-    SIMD_SHIFT,     // vector SHL/USHR/SHRN
     SIMD_DUP,       // vector duplicate
-    SIMD_CNT,       // vector count
-    SIMD_REV,       // vector byte reverse
-    FMOV,           // FP move (register or general)
-    FMOV_IMM,       // FP move immediate
     FMOV_VD1,       // FMOV Vd.D[1], Rn (move GPR to high 64 bits)
     FMOV_RVD1,      // FMOV Rn, Vm.D[1] (move high 64 bits to GPR)
-    FADD,           // FP add
-    FSUB,           // FP subtract
-    FMUL,           // FP multiply
-    FDIV,           // FP divide
-    FMAX,           // FP max
-    FMIN,           // FP min
-    FNMUL,          // FP negative multiply
-    FMADD,          // FP fused multiply-add
-    FMSUB,          // FP fused multiply-subtract
-    FABS,           // FP absolute value
-    FNEG,           // FP negate
-    FSQRT,          // FP square root
-    FCMP,           // FP compare
-    FCMPE,          // FP compare with exception
-    FCVT,           // FP convert (S↔D)
-    FCVTZS,         // FP to signed int (toward zero)
-    FCVTZU,         // FP to unsigned int (toward zero)
-    SCVTF,          // signed int to FP
-    UCVTF,          // unsigned int to FP
-    FRINT,          // FP round to integer (all modes)
-    FCSEL,          // FP conditional select
+    // FP arithmetic (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL/FMADD/FMSUB/FABS/
+    // FNEG/FSQRT/FCMP/FCMPE/FCVT/FCVTZS/FCVTZU/SCVTF/UCVTF/FRINT/FCSEL/
+    // FMOV/FMOV_IMM) are all dispatched via FP_SCALAR in both the
+    // interpreter and IR translator — the decoder never emits them as
+    // distinct InstClass values. The enum entries were removed to avoid
+    // dead-code accumulation.
 
     // System
     SVC_IMM,        // SVC #imm

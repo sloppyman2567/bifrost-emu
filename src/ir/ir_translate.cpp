@@ -941,39 +941,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::NOP);
             return false;
 
-        // ── FMOV (general ↔ FP) — native IR ─────────────────────────
-        case InstClass::FMOV: {
-            uint32_t op = d.raw;
-            // FMOV (general → FP, 64-bit): mask 0xFFE0FC00 == 0x9E600000
-            // Bit[18]=1 distinguishes FMOV from SCVTF (bit[18]=0).
-            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
-                bool to_fp = (op >> 16) & 1;
-                uint8_t rd = op & 0x1F;
-                uint8_t rn = (op >> 5) & 0x1F;
-                if (to_fp) {
-                    // v_lo[rd] = regs[rn]; v_hi[rd] = 0
-                    uint16_t val = load_arm_reg(block, rn);
-                    emit(block, IROp::FMOV_G2F, rd, val, 0, 0, 0, 0, 0, cur_pc);
-                } else {
-                    // regs[rd] = v_lo[rn]
-                    uint16_t v = g_alloc.alloc();
-                    emit(block, IROp::FMOV_F2G, v, rn, 0, 0, 0, 0, 0, cur_pc);
-                    store_arm_reg(block, rd, v);
-                }
-                return false;
-            }
-            // FMOV (general → FP, 32-bit): mask 0xFFE0FC00 == 0x1E200000
-            if ((op & 0xFFE0FC00) == 0x1E200000) {
-                // 32-bit form — fall back to interpreter for now
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return false;
-            }
-            // FMOV (scalar, immediate): fall back to interpreter
-            // FMOV (FP↔FP register): fall back to interpreter
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-            return false;
-        }
-
         case InstClass::FMOV_VD1: {
             // FMOV Vd.D[1], Rn → v_hi[Vd] = regs[Rn]
             uint16_t val = load_arm_reg(block, d.rn);
@@ -1025,13 +992,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
-                    // Wn → Sn: load GPR, mask to 32 bits, store to v_lo[rd].
-                    // We reuse FMOV_G2F but the JIT will store the full 64-bit
-                    // GPR value; the interpreter reads only the low 32 bits for
-                    // single-precision, so this is correct as long as the upper
-                    // 32 bits don't matter (they're masked on FP reads).
-                    // Actually, for correctness we need to zero-extend. Use a
-                    // scratch vreg + AND to mask to 32 bits.
+                    // Wn → Sn: mask GPR to 32 bits before storing to v_lo[rd].
                     uint16_t val = load_arm_reg(block, rn);
                     uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
                     uint16_t masked = g_alloc.alloc();
@@ -1303,10 +1264,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::CSEL, selected, val_n, val_m, 0, cond, 0, 0, cur_pc);
                 // Store the selected value back to v_lo[rd].
                 emit(block, IROp::FMOV_G2F, rd, selected, 0, 0, 0, 0, 0, cur_pc);
-                // For single-precision, also zero v_hi[rd].
-                if (ftype == 0) {
-                    // v_hi[rd] = 0 (handled by FMOV_G2F which zeroes v_hi).
-                }
+                // FMOV_G2F zeroes v_hi[rd] per ARM semantics, so no extra
+                // zero-store is needed for single-precision (ftype == 0).
                 return false;
             }
 
@@ -1379,67 +1338,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return false;
         }
-
-        // ── SIMD / FP — some now have native IR ops ──
-        // FCVT: float <-> double conversion
-        case InstClass::FCVT: {
-            uint16_t src = load_arm_reg(block, d.rn);
-            uint16_t r = g_alloc.alloc();
-            // d.imm_u encodes the conversion type: 0=S→D, 1=D→S
-            emit(block, d.imm_u == 0 ? IROp::FCVT_S2D : IROp::FCVT_D2S,
-                 r, src, 0, 0, 0, 0, 0, cur_pc);
-            store_arm_reg(block, d.rd, r);
-            return false;
-        }
-        // FRINT: round to integer (FP)
-        case InstClass::FRINT: {
-            uint16_t src = load_arm_reg(block, d.rn);
-            uint16_t r = g_alloc.alloc();
-            // d.imm_u encodes rounding mode: 0=N,1=P,2=M,3=Z,4=I,5=X
-            emit(block, IROp::FRINT, r, src, 0, d.sf ? 64 : 32,
-                 static_cast<uint8_t>(d.imm_u & 0x7), 0, 0, cur_pc);
-            store_arm_reg(block, d.rd, r);
-            return false;
-        }
-        // FCMP/FCMPE: FP compare (sets NZCV)
-        case InstClass::FCMP: case InstClass::FCMPE: {
-            uint16_t a = load_arm_reg(block, d.rn);
-            uint16_t b = load_arm_reg(block, d.rm);
-            bool is_e = (d.cls == InstClass::FCMPE);
-            emit(block, IROp::FCMP, 0, a, b, d.sf ? 64 : 32,
-                 is_e ? 1 : 0, 0, 0, cur_pc);
-            return false;
-        }
-        // FABS/FNEG/FSQRT: FP 1-source ops
-        case InstClass::FABS: case InstClass::FNEG: case InstClass::FSQRT: {
-            uint16_t src = load_arm_reg(block, d.rn);
-            uint16_t r = g_alloc.alloc();
-            uint8_t op = (d.cls == InstClass::FABS) ? 0 :
-                         (d.cls == InstClass::FNEG) ? 1 : 2;
-            emit(block, IROp::FP_UNOP2, r, src, 0, d.sf ? 64 : 32,
-                 op, 0, 0, cur_pc);
-            store_arm_reg(block, d.rd, r);
-            return false;
-        }
-        // FMADD/FMSUB: FP fused multiply-add (see FP_SCALAR for details)
-        case InstClass::FMADD: case InstClass::FMSUB: {
-            emit(block, d.cls == InstClass::FMADD ? IROp::FMADD : IROp::FMSUB,
-                 d.rd, d.rn, d.rm, d.sf ? 64 : 32, 0, 0,
-                 static_cast<uint64_t>(d.ra), cur_pc);
-            return false;
-        }
-        // Defensive fallback: the decoder never emits SIMD_SHIFT, SIMD_CNT,
-        // SIMD_REV, SIMD_DP, or FMOV_IMM as InstClass values (FP_SCALAR
-        // catches all FP/SIMD in the 0x1Exxxxxx encoding range, and SIMD_DP
-        // is sub-dispatched inside the interpreter). These cases exist only
-        // to guard against future decoder changes; they fall back to the
-        // interpreter if reached.
-        case InstClass::SIMD_SHIFT:
-        case InstClass::SIMD_CNT:
-        case InstClass::SIMD_REV: case InstClass::SIMD_DP:
-        case InstClass::FMOV_IMM:
-            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-            return false;
 
         // ── SMADDL / UMADDL (widening multiply-accumulate) ─────────
         case InstClass::SMADDL: case InstClass::UMADDL: {

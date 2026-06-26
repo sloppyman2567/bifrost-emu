@@ -18,7 +18,7 @@
 //   --no-jit        disable frostJIT and use the interpreter; this is the
 //                   escape hatch for programs that hit a JIT bug or for
 //                   debugging the interpreter directly. JIT is on by
-//                   default because the 35-test suite, toybox, and musl
+//                   default because the 36-test suite, toybox, and musl
 //                   libc all pass under it (6.4x speedup on compute workloads).
 //   --jit           enable frostJIT (now the default; kept for backwards-
 //                   compatibility with existing scripts)
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
     bool quiet   = false;
     bool raw_tty = false;
     // JIT is now ON by default. Use --no-jit to force the interpreter.
-    // The 35-test suite, toybox integration, and musl libc all pass
+    // The 36-test suite, toybox integration, and musl libc all pass
     // under the JIT, and bench_mips shows a 6.4x speedup. The
     // interpreter is still available as a fallback for programs that
     // hit a JIT bug or for debugging.

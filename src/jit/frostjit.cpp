@@ -55,9 +55,6 @@ static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mi
 extern "C" {
     uint64_t jit_load_mem_slow(Emulator* emu, uint64_t addr, int width);
     void     jit_store_mem_slow(Emulator* emu, uint64_t addr, uint64_t val, int width);
-    uint64_t jit_rbit(uint64_t val, int width);
-    uint64_t jit_bfm(uint64_t dst, uint64_t src, int immr, int imms, int width);
-    uint64_t jit_count_leading_zeros(uint64_t v, int width, bool is_cls);
 }
 
 // ── Interpreter-step trampoline (called from JIT-compiled code) ─────────
@@ -1071,8 +1068,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             clobber_flags();
-            // FP_UNOP clobbers RAX (sign mask for FABS/FNEG; zero store).
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // FP_UNOP clobbers only RAX (sign mask for FABS/FNEG; zero store).
+            // RCX/RDX are not touched — don't flush them.
+            flush_invalidate_host_regs(1u << RAX);
 
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(prefix);
@@ -1115,9 +1113,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // proper unsigned conversion via the
             // "subtract 2^63, convert signed, add 2^63" trick.
             //
-            // sf (flags_op) selects the dest GPR width:
-            //   sf=0 → 32-bit GPR (Wd): result is truncated to 32 bits on store
-            //   sf=1 → 64-bit GPR (Xd): full 64-bit result
+            // sf (flags_op) is unused by the JIT — the JIT always emits
+            // 64-bit CVTTSD2SI rax. 32-bit dest truncation (sf=0) is
+            // handled by an explicit IROp::ZEXT emitted by ir_translate.cpp
+            // after FP_F2I, which zero-extends the low 32 bits per AArch64
+            // 32-bit register write semantics.
+            //
             // For the unsigned path, the 2^63 constant must match the FP
             // precision: 0x43E0000000000000 (double) for width=1, or
             // 0x5F000000 (float) for width=0. Using the double constant
@@ -1238,13 +1239,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0x48); emit_byte(0x39); emit_byte(0xD0);  // cmp rax, rdx
                 // jb .small (CF=1 means rax < 2^63)
                 size_t jb_patch = emit_jcc_rel32_placeholder(0x2);  // JB rel32
-                size_t large_path = code_buf_used_;
-                // sub rax, 2^63 (rax -= rdx)
+                // Fall-through (rax >= 2^63): sub rax, 2^63 (rax -= rdx)
                 emit_byte(0x48); emit_byte(0x29); emit_byte(0xD0);  // sub rax, rdx
                 emit_mov_imm32_zext(RCX, 1);  // mark that we subtracted
                 size_t small_path = code_buf_used_;
                 patch_jcc_rel32(jb_patch, static_cast<int32_t>(small_path - (jb_patch + 6)));
-                (void)large_path;
                 // CVTSI2SD/SS xmm0, rax (or eax for 32-bit source)
                 emit_byte(prefix);
                 if (rex_w) emit_byte(rex_w);
@@ -1516,20 +1515,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_store(CPU_REG, offhi, RAX);
             // src1 stays cached in its original reg (s) for later readers.
             // RAX holds a copy (not a cached vreg) — no mapping to update.
-            return false;
-        }
-
-        // ── SIMD MOVI (broadcast immediate) ─────────────────────────
-        case IROp::SIMD_MOVI: {
-            // v_lo[dest] = v_hi[dest] = imm
-            // clobber_host_reg evicts any dirty GPR vreg
-            // cached in RAX BEFORE we overwrite it with the immediate.
-            clobber_host_reg(RAX);
-            emit_mov_imm64(RAX, inst.imm);
-            int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_store(CPU_REG, offlo, RAX);
-            emit_store(CPU_REG, offhi, RAX);
             return false;
         }
 
@@ -2250,125 +2235,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // ── FCMP: FP compare (sets NZCV) ─────────────────────────────
-        case IROp::FCMP: {
-            // FCMP clobbers RAX, RCX, RDX (flag manipulation).
-            clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // ftype encoding: 0 = single (S), 1 = double (D)
-            bool is_double = (inst.width != 0);
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            // Load src1 into XMM0, src2 into XMM1
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off1);
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(1, CPU_REG, off2);
-            // ucomiss/ucomisd xmm0, xmm1 (sets x86 ZF/PF/CF)
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x2E);
-            emit_byte(0xC1);  // xmm0, xmm1
-            // Convert x86 flags to ARM NZCV:
-            // Unordered (PF=1): ARM N=0,Z=0,C=1,V=1
-            // Greater (ZF=0,CF=0,PF=0): ARM N=0,Z=0,C=1,V=0
-            // Less (ZF=0,CF=1,PF=0): ARM N=1,Z=0,C=0,V=0
-            // Equal (ZF=1): ARM N=0,Z=1,C=1,V=0
-            // Use pushfq + pop + bit manipulation to build NZCV
-            emit_pushfq();
-            emit_pop(RAX);
-            // PF=bit2, ZF=bit6, CF=bit0
-            // Extract PF (unordered)
-            emit_mov_reg(RCX, RAX);
-            emit_byte(0xC1); emit_byte(0xE8); emit_byte(2);  // shr eax, 2
-            emit_byte(0x83); emit_byte(0xE0); emit_byte(1);  // and al, 1 (PF)
-            // If PF=1 (unordered): NZCV = 0x30000000 (C=1,V=1)
-            // Build pstate: N=bit31, Z=bit30, C=bit29, V=bit28
-            emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2);  // xor rdx, rdx
-            // Test PF
-            emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0);  // test rax, rax
-            size_t jnz_unordered = emit_jcc_rel32_placeholder(5);  // JNE (PF=1)
-            // Ordered path: extract ZF and CF
-            // ZF=bit6: (RCX >> 6) & 1
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);  // mov rdx, rcx
-            emit_byte(0x48); emit_byte(0xC1); emit_byte(0xEA); emit_byte(6);  // shr rdx, 6
-            emit_byte(0x83); emit_byte(0xE2); emit_byte(1);  // and edx, 1 (ZF)
-            // Z → ARM Z=bit30
-            emit_byte(0xC1); emit_byte(0xE2); emit_byte(30);  // shl edx, 30
-            // CF=bit0: RCX & 1
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xC8);  // mov rax, rcx
-            emit_byte(0x83); emit_byte(0xE0); emit_byte(1);  // and eax, 1 (CF)
-            // If CF=1 (less): N=1. If CF=0,ZF=0 (greater): C=1.
-            // ARM C = x86 CF for FCMP (when ordered, ARM C = NOT x86 CF for SUB,
-            // but for FCMP: greater → C=1, less → C=0, equal → C=1)
-            // Actually: ARM C = 1 for greater OR equal, 0 for less
-            // x86 CF = 1 for less (borrow), 0 for greater/equal
-            // So ARM C = NOT x86 CF
-            emit_byte(0x83); emit_byte(0xF0); emit_byte(1);  // xor eax, 1 (invert CF)
-            emit_byte(0xC1); emit_byte(0xE0); emit_byte(29);  // shl eax, 29 (ARM C)
-            // or rdx, rax
-            emit_byte(0x48); emit_byte(0x09); emit_byte(0xC2);
-            // jmp store
-            size_t jmp_store = emit_jmp_rel32_placeholder();
-            // Unordered: NZCV = C=1, V=1 = 0x30000000
-            size_t unord_off = code_buf_used_;
-            patch_jcc_rel32(jnz_unordered, static_cast<int32_t>(unord_off - (jnz_unordered + 6)));
-            emit_mov_imm32_zext(RDX, 0x30000000);
-            // store
-            size_t store_off = code_buf_used_;
-            patch_jmp_rel32(jmp_store, static_cast<int32_t>(store_off - (jmp_store + 5)));
-            // Mask pstate, clear NZCV bits, OR in new value
-            emit_load32(RCX, CPU_REG, PSTATE_OFF);
-            emit_byte(0x81); emit_byte(0xE1); emit_u32(0x0FFFFFFF);  // and ecx, 0x0FFFFFFF
-            emit_byte(0x48); emit_byte(0x09); emit_byte(0xCA);  // or rdx, rcx
-            emit_store32(CPU_REG, PSTATE_OFF, RDX);
-            flags_in_host_ = false;
-            return false;
-        }
-
-        // ── FP_UNOP2: FABS/FNEG/FSQRT ────────────────────────────────
-        case IROp::FP_UNOP2: {
-            // FP_UNOP2 clobbers RAX (sign mask + zero store).
-            clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // ftype encoding: 0 = single (S), 1 = double (D)
-            bool is_double = (inst.width != 0);
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            // Load FP value into XMM0
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off);
-            switch (inst.imm & 0x7) {
-                case 0: { // FABS: clear sign bit
-                    // Load sign mask into XMM1: 0x7FFFFFFFFFFFFFFF
-                    emit_mov_imm64(RAX, 0x7FFFFFFFFFFFFFFFULL);
-                    emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);  // movq xmm1, rax
-                    // andps xmm0, xmm1
-                    emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
-                    break;
-                }
-                case 1: { // FNEG: flip sign bit
-                    emit_mov_imm64(RAX, 0x8000000000000000ULL);
-                    emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);  // movq xmm1, rax
-                    // xorps xmm0, xmm1
-                    emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
-                    break;
-                }
-                case 2: { // FSQRT
-                    // sqrtsd/sqrtss xmm0, xmm0
-                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x51);
-                    emit_byte(0xC0);
-                    break;
-                }
-            }
-            // Store result to v_lo[dest]
-            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, off_d);
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
-            return false;
-        }
-
         // ── FMADD / FMSUB: FP fused multiply-add ─────────────────────
         case IROp::FMADD:
         case IROp::FMSUB: {
@@ -2470,12 +2336,16 @@ void FrostJIT::materialize_flags_to_pstate() {
 // pre-scan before translating. If this list gets out of sync with
 // ir_translate.cpp's default case, the splitter would misclassify
 // instructions.
+//
+// Note: SIMD_LD1, SIMD_ST1, SIMD_DUP, and SIMD_LOGICAL have native IR
+// paths (IROp::SIMD_LDST / SIMD_DUP / SIMD_LOGICAL) and do NOT route to
+// CALL_INTERP for the common cases — they are deliberately NOT listed
+// here so the block splitter doesn't fragment blocks around them.
+// SIMD_LOGICAL falls back to CALL_INTERP only for unrecognized opcodes
+// (its `default:` case), but that's rare enough to accept the risk.
 static bool instr_will_call_interp(const DecodedInst& d) {
     switch (d.cls) {
-        case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
-        case InstClass::SIMD_LOGICAL: case InstClass::SIMD_SHIFT:
-        case InstClass::SIMD_DUP: case InstClass::SIMD_CNT:
-        case InstClass::SIMD_REV: case InstClass::SIMD_DP:
+        case InstClass::SIMD_DP:
         // FP_SCALAR now has native IR paths for most FP ops
         // (FMOV, FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL, FABS/FNEG/FSQRT,
         // FCMP/FCMPE, FCVT, FRINT, FMADD/FMSUB, FCSEL, FCVTZS/FCVTZU,

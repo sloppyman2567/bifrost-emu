@@ -15,7 +15,6 @@
 //   set_vreg_reg         — bind vreg v to a specific host reg
 //   kill_vreg            — drop a vreg from its host reg (no spill)
 //   flush_all_vregs      — write back all dirty vregs to cpu.regs[]/stack
-//   flush_caller_saved_vregs — same, but only caller-saved (R12/R13/R15 stay)
 //   invalidate_all_vregs — drop all vreg→host mappings (after a C call)
 //   drop_vreg            — safe drop: evict if dirty, then clear mapping
 //   clobber_host_reg     — evict occupant of a host reg if dirty
@@ -300,14 +299,6 @@ void FrostJIT::flush_all_vregs() {
             evict_vreg(v);
         }
     }
-}
-
-// (refactored.5): flush only caller-saved dirty vregs. Callee-saved
-// regs (R12/R13/R15) are preserved by C calls, so vregs cached there
-// don't need to be spilled around CALL_INTERP / memory slow paths.
-// uses dirty_host_regs_ bitmask for O(popcount) walk.
-void FrostJIT::flush_caller_saved_vregs() {
-    flush_dirty_host_regs(CALLER_SAVED_MASK);
 }
 
 // ── Targeted flush/invalidate (v1.4.0-beta.2) ────────────────────────

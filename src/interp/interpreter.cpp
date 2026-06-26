@@ -2028,12 +2028,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 //   single (32): K=5,  M=19  (1+1+5+6+19 = 32)
                 //   double (64): K=8,  M=48  (1+1+8+6+48 = 64)
                 //   half   (16): K=2,  M=6   (1+1+2+6+6  = 16)
-                //
-                // The previous code used the "aBbb bccc" layout (sign:exp4:mant3)
-                // which is wrong — it mis-computed every FMOV imm. That broke
-                // `fmov d0, #2.5` (which produces 0x4078… instead of 0x4004…),
-                // corrupting every `printf("%f", float_var)` because the variadic
-                // arg-promoted float was being loaded with the wrong immediate.
                 // FMOV (scalar, immediate): uses shared fp_decode helper.
                 if (fp_decode::is_fmov_imm(op)) {
                     uint8_t imm8 = (op >> 13) & 0xFF;
@@ -2301,12 +2295,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FCVTZS/FCVTZU
-                // Mask 0x7F3E0000 deliberately excludes bit 16 (the U/S
-                // selector) so that both FCVTZS (bit 16=0) and FCVTZU
-                // (bit 16=1) match. The previous mask 0x7F3F0000 included
-                // bit 16, so FCVTZU fell through to "Unknown FP — NOP",
-                // silently producing zero for every unsigned float→int
-                // conversion. The same defect affected SCVTF/UCVTF below.
+                // Mask 0x7F3E0000 excludes bit 16 (the U/S selector) so both
+                // FCVTZS (bit 16=0) and FCVTZU (bit 16=1) match.
                 if ((op & 0x7F3E0000) == 0x1E380000) {  // FCVTZS/FCVTZU
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
@@ -2333,9 +2323,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 // SCVTF/UCVTF
                 // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
-                // and UCVTF (bit 16=1) match. The previous mask 0x7F3F0000
-                // included bit 16, so UCVTF (0x1E230000) did NOT match
-                // 0x1E220000 and was silently NOP'd.
+                // and UCVTF (bit 16=1) match.
                 if ((op & 0x7F3E0000) == 0x1E220000) {  // SCVTF/UCVTF
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
