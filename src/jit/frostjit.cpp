@@ -85,11 +85,13 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
     try {
         emu->step_public(*cpu);
     } catch (UnmappedMemory& e) {
-        (void)e;
-        // Deliver SIGSEGV — if no handler, sets cpu->running=false and
-        // cpu->exit_code = 139. The JIT run loop checks cpu->running
-        // after each block and exits cleanly.
-        deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+        // Deliver SIGSEGV with the fault address and proper si_code.
+        // SEGV_MAPERR (1) = address not mapped; SEGV_ACCERR (2) = wrong
+        // permissions (write to read-only page). We use ACCERR for write
+        // faults and MAPERR for read faults — matches Linux behavior.
+        int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+        deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV,
+                       si_code, e.addr);
     }
     if (getenv("BIFROST_STEP_TRACE")) {
         fprintf(stderr, "    [step] pc=0x%llx done x0=0x%llx x24=0x%llx pstate=0x%x\n",
@@ -3358,12 +3360,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     try {
         next_pc = entry.fn(&cpu, &emu);
     } catch (UnmappedMemory& e) {
-        (void)e;
-        // Deliver SIGSEGV to the guest. If a handler is installed,
-        // deliver_signal sets up the handler frame and returns true;
-        // we resume at the handler's PC. If no handler, it sets
-        // cpu.running = false and exit_code = 139.
-        deliver_signal(emu, cpu, emu.signals(), BIFROST_SIGSEGV);
+        // Deliver SIGSEGV to the guest with fault address + si_code.
+        // If a handler is installed, deliver_signal sets up the handler
+        // frame and returns true; we resume at the handler's PC. If no
+        // handler, it sets cpu.running = false and exit_code = 139.
+        int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+        deliver_signal(emu, cpu, emu.signals(), BIFROST_SIGSEGV,
+                       si_code, e.addr);
         // cpu.pc may have been changed by deliver_signal (handler entry)
         // or left unchanged (no handler — cpu.running is now false).
         next_pc = cpu.pc;

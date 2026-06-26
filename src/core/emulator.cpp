@@ -120,8 +120,12 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             fseek(ifile, 0, SEEK_END);
             long isz = ftell(ifile);
             fseek(ifile, 0, SEEK_SET);
+            if (isz <= 0) { fclose(ifile); throw EmuError("empty or invalid interpreter"); }
             std::vector<uint8_t> idata(isz);
-            fread(idata.data(), 1, isz, ifile);
+            if (fread(idata.data(), 1, isz, ifile) != static_cast<size_t>(isz)) {
+                fclose(ifile);
+                throw EmuError("short read on interpreter");
+            }
             fclose(ifile);
             // Load the interpreter at a high address to avoid conflicts.
             // Use 0x4000000000 (above the 16GB direct window).
@@ -312,12 +316,14 @@ int Emulator::run() {
             }
         } catch (UnmappedMemory& e) {
             // If the guest has installed a SIGSEGV handler, deliver the
-            // signal and continue. Otherwise, stop emulation.
-            if (deliver_signal(*this, main_cpu_, signals_, BIFROST_SIGSEGV)) {
+            // signal with the fault address and si_code (MAPERR for read,
+            // ACCERR for write) and continue. Otherwise, stop emulation.
+            int si_code = e.write ? SEGV_ACCERR_EMU : SEGV_MAPERR_EMU;
+            if (deliver_signal(*this, main_cpu_, signals_, BIFROST_SIGSEGV,
+                               si_code, e.addr)) {
                 count++;
                 continue;
             }
-            (void)e;
             break;
         }
         count++;

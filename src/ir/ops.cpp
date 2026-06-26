@@ -15,6 +15,15 @@
 #include <cmath>
 #include <cstring>
 
+// GCC's -Wstringop-overflow is overly conservative about SIMD_ARITH /
+// SIMD_CMP lane access: it can't prove that `out + i * esize + esize`
+// stays within the 16-byte buffer. The bounds are checked at runtime
+// (esize ∈ {1,2,4,8}, lanes = 8/esize, max offset = 8). Suppress the
+// false positive for the whole file.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+
 namespace arm64emu {
 
 // Maximum number of virtual registers (ARM64 has 33 + scratch).
@@ -700,8 +709,11 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 int esize = static_cast<int>(inst.width);
                 if (esize < 1 || esize > 8) esize = 8;
                 int lanes = 8 / esize;
-                uint8_t out_lo[8] = {0}, out_hi[8] = {0};
-                uint8_t in1_lo[8], in2_lo[8], in1_hi[8], in2_hi[8];
+                // Use 16-byte buffers to silence GCC's overly-conservative
+                // -Wstringop-overflow (it can't prove i*esize+esize <= 8).
+                uint8_t out_lo[16] = {0}, out_hi[16] = {0};
+                uint8_t in1_lo[16] = {0}, in2_lo[16] = {0};
+                uint8_t in1_hi[16] = {0}, in2_hi[16] = {0};
                 memcpy(in1_lo, &cpu.v_lo[inst.src1], 8);
                 memcpy(in2_lo, &cpu.v_lo[inst.src2], 8);
                 memcpy(in1_hi, &cpu.v_hi[inst.src1], 8);
@@ -785,8 +797,9 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 int esize = static_cast<int>(inst.width);
                 if (esize < 1 || esize > 8) esize = 8;
                 int lanes = 8 / esize;
-                uint8_t out_lo[8] = {0}, out_hi[8] = {0};
-                uint8_t in1_lo[8], in2_lo[8], in1_hi[8], in2_hi[8];
+                uint8_t out_lo[16] = {0}, out_hi[16] = {0};
+                uint8_t in1_lo[16] = {0}, in2_lo[16] = {0};
+                uint8_t in1_hi[16] = {0}, in2_hi[16] = {0};
                 memcpy(in1_lo, &cpu.v_lo[inst.src1], 8);
                 memcpy(in2_lo, &cpu.v_lo[inst.src2], 8);
                 memcpy(in1_hi, &cpu.v_hi[inst.src1], 8);
