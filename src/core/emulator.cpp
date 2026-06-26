@@ -230,12 +230,23 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         argv_addrs.push_back(sp);
     }
 
-    // Push envp (just PATH)
+    // Push envp. toybox sh and other programs need more than just PATH.
+    // Provide a minimal but realistic environment.
     std::vector<uint64_t> envp_addrs;
-    const char* env = "PATH=/bin:/usr/bin";
-    sp -= strlen(env) + 1;
-    mem_.write(sp, env, strlen(env) + 1);
-    envp_addrs.push_back(sp);
+    const char* envs[] = {
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+        "HOME=/root",
+        "SHELL=/bin/sh",
+        "TERM=linux",
+        "PWD=/",
+        "SHLVL=1",
+        "_=/bin/sh",
+    };
+    for (const char* e : envs) {
+        sp -= strlen(e) + 1;
+        mem_.write(sp, e, strlen(e) + 1);
+        envp_addrs.push_back(sp);
+    }
 
     // AT_RANDOM — 16 random bytes
     sp -= 16;

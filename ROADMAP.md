@@ -9,14 +9,16 @@ status, see [TESTS.md](TESTS.md).
 ## v1.4.0 (final release — after rc.0 stabilization)
 
 1. **Fix the `toybox sh` regression.** `toybox sh -c 'echo hi'`
-   exits 139 (SIGSEGV) — the JIT now delivers SIGSEGV cleanly
-   (was rc=134 crash before rc.0). The underlying guest fault
-   (argv walk reading string data as pointers at
-   `0x7473657463006883`) is a pre-existing toybox sh binary issue.
-   The standalone `sh.elf` works fine. Trace with
-   `./bifrost-emu -d ctest_real/toybox sh -c 'echo hi'` to find
-   the faulting instruction and determine whether it's a decode
-   bug, a stack layout issue, or an argv setup problem.
+   exits 139 (SIGSEGV). Root cause identified: the toybox command
+   hash table lookup for "sh" fails (all entries are checked but
+   none match), causing a fallback code path that loads 8 bytes of
+   the "sh" argv string (`0x7473657463006873`) and uses it as a
+   pointer, crashing at `LDR W5, [X0, #16]` at pc=0x400a8c.
+   The hash table IS populated (the constructor at 0x400290 runs),
+   and entries ARE checked, but none match "sh". This suggests a
+   subtle emulator bug in the hash computation or string comparison
+   during the lookup. Requires deep debugging of the toybox
+   initialization and hash table construction.
 
 2. **Stabilize.** No new features — just bug fixes from the rc.0
    feedback. Once all `ctest_real/` and `toybox` non-sh programs
@@ -28,18 +30,19 @@ status, see [TESTS.md](TESTS.md).
    byte-order mismatch or a 128-bit shift/extract high-half
    handling bug.
 
-4. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
-   contents, `SA_RESTART`, signal masks, `sigaltstack`, and
-   cross-thread delivery. The signal frame plumbing and host-to-guest
-   forwarding landed in v1.4.0-alpha / v1.4.0-alpha.1; this is the
-   remaining work to make it useful for real signal-heavy programs.
-   (Note: basic SIGSEGV delivery from JIT'd memory faults landed in
-   rc.0 — see CHANGELOG.md.)
+4. **Complete signal delivery.** ✅ DONE in rc.0 — proper
+   `siginfo_t`/`ucontext_t`, `SA_RESTART`, signal masks,
+   `sigaltstack`, and cross-thread delivery are all implemented.
+   See CHANGELOG.md for details.
 
-5. **Fix `strtod("-nan")` sign-bit loss.** `strtod("-nan")` returns
-   `nan` (sign bit dropped). The `-inf`/`+inf`/`infinity` paths all
-   work (fixed beta.3); `-nan` is a separate code path in musl's
-   `__floatscan` sign propagation.
+5. **Fix `strtod("-nan")` sign-bit loss.** NOT AN EMULATOR BUG —
+   this is a musl bug. In musl's `src/internal/floatscan.c`, the
+   `__floatscan` function returns `NAN` (line 472) without applying
+   the sign, unlike `sign * INFINITY` (line 465) for infinity. The
+   sign is parsed correctly (`sign -= 2*(c=='-')` at line 454), but
+   the NaN return path ignores it. This affects all musl-based
+   programs, not just under bifrost-emu. Cannot be fixed in the
+   emulator without patching the guest binary.
 
 ---
 
