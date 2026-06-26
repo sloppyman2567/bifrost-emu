@@ -2004,7 +2004,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // write_fp_s, h2f, f2h, d2h) — see top of this file.
 
                 // FMOV (general ↔ FP, 64-bit)
-                if ((op & 0xFFE0FC00) == 0x9E600000) {
+                // Bit[18]=1 distinguishes FMOV from SCVTF (which has bit[18]=0).
+                // Without this check, SCVTF (0x9E62xxxx) matches the FMOV mask
+                // (0x9E620000 & 0xFFE0FC00 == 0x9E600000) and is misdecoded as
+                // FMOV, causing `scvtf d0, x0` to copy x0's raw bits to d0
+                // instead of converting the integer to a double. This broke
+                // toybox seq's loop variable initialization.
+                if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
                     bool to_fp = (op >> 16) & 1;
                     if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }
                     else       { cpu.regs[rd] = cpu.v_lo[rn]; }

@@ -302,12 +302,12 @@ This is beta-quality software. Key limitations:
   was causing it to return `inf` with `ERANGE` for any input containing
   a decimal point or exponent. `strtod("inf")` still returns `-nan`
   (separate inf/nan string-parsing issue).
-- **toybox `seq`** produces no output. The FP arithmetic is verified
-  correct, but seq's main loop never executes — it appears to take the
-  "first > last" exit path even when `first=1, last=5`. The long-double
-  comparison routine may have a subtle bug. All other tested toybox
-  commands work, including `ls /`, `od`, `printf "%g"`, `head`, `sort`,
-  `rev`, `wc`, `cat`, `echo`.
+- **toybox `seq`** now works — `seq 1 5` outputs `1 2 3 4 5`. Two bugs
+  were fixed: SCVTF (int→double) was misdecoded as FMOV (raw GPR bit
+  copy), and FMADD's operand sources were reading from scratch vregs
+  instead of FP register indices. All seq variants work: `-w` (width
+  padding), `-s` (separator), `-f` (format), negative steps, float
+  steps.
 - **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
   opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
   JIT tests pass with it enabled, but toybox `ls /` still crashes
@@ -320,6 +320,10 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
 current release is **v1.4.0-beta.3** (2026-06-26), which includes:
 
+- SCVTF/FMOV decode + FMADD operand fix — `toybox seq` now works
+  (`seq 1 5` outputs `1 2 3 4 5`). SCVTF (int→double) was misdecoded
+  as FMOV (raw bit copy); FMADD's operands were reading scratch vregs
+  instead of FP register indices.
 - 32-bit ASR sign-extension fix — `strtod()` now works for all decimal
   and exponential inputs (`"0.5"`, `"1.5"`, `"1e1"`, etc.). Previously,
   a 32-bit ASR bug in `neg w0, w0, asr #1` caused musl's `__floatscan`

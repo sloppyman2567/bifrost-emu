@@ -950,7 +950,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::FMOV: {
             uint32_t op = d.raw;
             // FMOV (general → FP, 64-bit): mask 0xFFE0FC00 == 0x9E600000
-            if ((op & 0xFFE0FC00) == 0x9E600000) {
+            // Bit[18]=1 distinguishes FMOV from SCVTF (bit[18]=0).
+            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
                 bool to_fp = (op >> 16) & 1;
                 uint8_t rd = op & 0x1F;
                 uint8_t rn = (op >> 5) & 0x1F;
@@ -1006,7 +1007,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
 
             // FMOV (general ↔ FP, 64-bit): handled by InstClass::FMOV case
             // but decoder may classify it as FP_SCALAR. Check first.
-            if ((op & 0xFFE0FC00) == 0x9E600000) {
+            // Bit[18]=1 distinguishes FMOV from SCVTF (which has bit[18]=0).
+            // Without this, SCVTF (0x9E62xxxx) matches the FMOV mask and is
+            // misdecoded as FMOV, copying raw GPR bits to the FP register
+            // instead of converting int→double. This broke toybox seq.
+            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
                     uint16_t val = load_arm_reg(block, rn);
@@ -1177,24 +1182,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (ftype <= 1) {
                     // FMADD: dest = a * b + c (acc)
                     // FMSUB: dest = c - a * b = -a * b + c
-                    // The JIT's FMADD/FMSUB IR ops expect:
-                    //   src1 = multiplier 1 (a)
-                    //   src2 = multiplier 2 (b)
-                    //   imm  = acc register index (c)
-                    //   width = ftype (0=S, 1=D)
-                    // Note: the JIT reads v_lo[imm] as the accumulator.
-                    uint16_t a = load_arm_reg(block, rn);
-                    uint16_t b = load_arm_reg(block, rm);
-                    uint16_t r = g_alloc.alloc();
-                    // The JIT's FMADD reads acc from v_lo[imm] directly.
-                    // We encode the accumulator register index in imm.
-                    // But imm is uint64_t — we need to pass the register index.
-                    // The JIT code at FMADD case: off_acc = V_LO_OFF + inst.imm * 8.
-                    // So inst.imm = ra (the accumulator FP register index).
+                    // Pass FP register indices directly (rn, rm) as src1/src2
+                    // and ra (acc FP reg index) as imm. The JIT reads
+                    // V_LO_OFF + src*8 for all three operands.
+                    // Do NOT use load_arm_reg — that loads GPRs, not FP regs.
                     emit(block, sub ? IROp::FMSUB : IROp::FMADD,
-                         r, a, b, ftype ? 64 : 32, 0, 0,
+                         rd, rn, rm, ftype ? 64 : 32, 0, 0,
                          static_cast<uint64_t>(ra), cur_pc);
-                    store_arm_reg(block, rd, r);
                     return false;
                 }
             }
@@ -1393,13 +1387,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         // FMADD/FMSUB: FP fused multiply-add
         case InstClass::FMADD: case InstClass::FMSUB: {
-            uint16_t a = load_arm_reg(block, d.rn);    // multiplier 1
-            uint16_t b = load_arm_reg(block, d.rm);    // multiplier 2
-            uint16_t c = load_arm_reg(block, d.ra);    // accumulator
-            uint16_t r = g_alloc.alloc();
+            // Pass FP register indices directly. The JIT reads
+            // V_LO_OFF + src*8 for all operands. Do NOT use load_arm_reg.
             emit(block, d.cls == InstClass::FMADD ? IROp::FMADD : IROp::FMSUB,
-                 r, a, b, d.sf ? 64 : 32, 0, 0, c, cur_pc);
-            store_arm_reg(block, d.rd, r);
+                 d.rd, d.rn, d.rm, d.sf ? 64 : 32, 0, 0,
+                 static_cast<uint64_t>(d.ra), cur_pc);
             return false;
         }
         // Defensive fallback: the decoder never emits SIMD_SHIFT, SIMD_CNT,

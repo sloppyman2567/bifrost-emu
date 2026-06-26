@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.3] — 2026-06-26 (SCVTF/FMOV decode + FMADD operand fix — toybox seq works)
+
+### Summary
+
+Fixed two JIT correctness bugs that prevented `toybox seq` from producing
+output. `seq 1 5` now correctly outputs `1\n2\n3\n4\n5\n`. All 35 JIT
+test programs still pass; `bench_mips` still 573 MIPS (no regression).
+
+### Bug fixes
+
+- **SCVTF misdecoded as FMOV** (interpreter + IR translator). The FMOV
+  (general↔FP, 64-bit) check used mask `0xFFE0FC00` with value
+  `0x9E600000`, but SCVTF (general→FP) has encoding `0x9E62xxxx` which
+  also matches this mask. The distinguishing bit is bit[18]: FMOV has
+  bit[18]=1, SCVTF has bit[18]=0. Without this check, `scvtf d0, x0`
+  (int64→double conversion) was misdecoded as `fmov d0, x0` (raw GPR
+  bit copy), so the integer was not converted to a double — the raw
+  register bits were copied to the FP register instead. This broke
+  toybox seq's loop variable initialization (`scvtf d11, x21` with
+  `x21=0` produced `d11=0` instead of `d11=0.0`, and `scvtf d11, x21`
+  with `x21=5` produced `d11=5` (raw int) instead of `d11=5.0` (double)).
+  Fixed by adding `&& (op & (1u << 18))` to the FMOV check in both the
+  interpreter (`src/interp/interpreter.cpp`) and the IR translator
+  (`src/ir/ir_translate.cpp`, two call sites: `InstClass::FMOV` and
+  `InstClass::FP_SCALAR`).
+
+- **FMADD/FMSUB operand sources wrong** (IR translator). The FMADD IR
+  translator used `load_arm_reg()` to load the FP operand registers
+  (rn, rm) into scratch vregs, then passed the scratch vreg indices as
+  `src1`/`src2` to the FMADD IR op. But the JIT's FMADD code reads
+  operands from `V_LO_OFF + inst.src1 * 8` and `V_LO_OFF + inst.src2 *
+  8`, treating `src1`/`src2` as FP register indices (0–31), not scratch
+  vreg indices (33+). This caused FMADD to read from out-of-bounds
+  memory (V_LO_OFF + 33*8 = 552, which is past the 32-entry v_lo array
+  and into v_hi territory), producing garbage results. The first
+  iteration of seq's loop computed `fmadd d11, d11, d8, d10` =
+  `0*step+first` = `0` instead of `1`, causing a spurious leading `0`
+  in the output. Fixed by passing FP register indices directly (rn, rm)
+  as `src1`/`src2` — matching how `FP_BINOP` already works — instead of
+  routing through `load_arm_reg`. Both FMADD call sites fixed:
+  `InstClass::FP_SCALAR` (0x1F encoding) and `InstClass::FMADD/FMSUB`.
+
+### Test results
+
+- **35/35 JIT tests pass** (no regressions).
+- **`toybox seq 1 5`** = `1 2 3 4 5` (was no output).
+- **`toybox seq 1 0.5 3`** = `1.0 1.5 2.0 2.5 3.0` (was no output).
+- **`toybox seq -w 1 10`** = `01 02 ... 10` (was no output).
+- **`toybox seq -s ',' 1 5`** = `1,2,3,4,5` (was no output).
+- **`toybox seq 5 -1 1`** = `5 4 3 2 1` (negative step works).
+- **`bench_mips`**: 1.4s (573 MIPS) — no performance regression.
+- **JIT verify mode**: 0 divergences in `jit_fp_scalar`, `jit_madd`,
+  `jit_simd`.
+- **FWD mode**: 10/10 tests pass; `toybox seq` works under FWD too.
+
+### Known remaining issues
+
+- `strtod("inf")` still returns `-nan` instead of `inf` (separate
+  inf/nan string-parsing path in `__floatscan`).
+- `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes (pre-existing).
+
 ## [1.4.0-beta.3] — 2026-06-26 (32-bit ASR + FPSR read fixes — strtod works)
 
 ### Summary

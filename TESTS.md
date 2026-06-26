@@ -136,15 +136,15 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` (previously hung, fixed in beta.2) |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
 | `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
-| `seq` | ❌ | ❌ | Produces no output. FP arithmetic is correct, but seq's main loop never executes — likely a long-double comparison bug in `__letf2`/`__gttf2`. Investigation continues. |
+| `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. (Was broken: SCVTF misdecoded as FMOV + FMADD operand bug.) |
 | `tr` | N/A | N/A | Not in this toybox build |
 | `expr` | N/A | N/A | Not in this toybox build |
 
-**Toybox summary**: 32/37 commands pass (5 not in build, 1 produces no
-output). `od` now works (was SIMD decode error in prior beta.3). `seq`
-FP-arithmetic correctness is verified, but its loop-exit comparison is
-still broken. `sh -c 'echo hi'` works as of beta.2 (previously hung in
-a signal-pending polling loop).
+**Toybox summary**: 33/37 commands pass (5 not in build, 0 broken).
+`seq` now works (was broken in prior beta.3). `od` works (was SIMD
+decode error). `printf "%g"` works (was broken by ASR bug). `ls /`
+works (was crashing before beta.3). `sh -c 'echo hi'` works (was
+hanging before beta.2).
 
 ---
 
