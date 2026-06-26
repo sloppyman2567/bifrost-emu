@@ -1,8 +1,8 @@
 # Tests
 
 This document describes the test programs shipped with bifrost-emu and
-their current status under both the interpreter (`--no-jit`) and frostJIT
-(default) paths.
+their current status under both the frostJIT (default) and interpreter
+(`--no-jit`) paths.
 
 ---
 
@@ -11,15 +11,16 @@ their current status under both the interpreter (`--no-jit`) and frostJIT
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
 | frostJIT (`./bifrost-emu`, default) | 36 | 36 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 16 | 16 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 36 | 36 | 0 |
 
-All 36 JIT test programs pass under frostJIT as of beta.3 (2026-06-26).
-JIT is now the default execution mode (6.4x speedup on compute workloads).
-This release fixed 9 critical int↔FP conversion bugs (SCVTF/UCVTF/
-FCVTZS/FCVTZU) that were the root cause of `strtod("-inf")` returning
-`-nan`. A new 36-case ctest (`ctest/jit_int_fp_conv.c`) covers all 8
-variants of int↔FP conversion to prevent regression. See CHANGELOG.md
-for details.
+All 36 JIT test programs pass under frostJIT as of beta.3 (2026-06-26),
+and the `ctest/jit_*.elf` regression suite also passes under the
+interpreter to catch decoder drift. JIT is the default execution mode
+(6.4x speedup on compute workloads). This release fixed 9 critical
+int↔FP conversion bugs (SCVTF/UCVTF/FCVTZS/FCVTZU) that were the root
+cause of `strtod("-inf")` returning `-nan`. A new 36-case ctest
+(`ctest/jit_int_fp_conv.c`) covers all 8 variants of int↔FP conversion
+to prevent regression. See CHANGELOG.md for details.
 
 ---
 
@@ -134,18 +135,18 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `cal` | ✅ | ✅ | June 2026 calendar |
 | `xxd` | ✅ | ✅ | Hex dump of `/etc/hostname` |
 | `sleep` | ✅ | ✅ | `sleep 0.1` |
-| `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` (previously hung, fixed in beta.2) |
+| `sh -c` | ❌ | ❌ | `sh -c 'echo hi'` — currently aborts with `UnmappedMemory` (regression). The standalone `sh.elf` (ctest_real/sh.elf) works fine. |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
 | `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
 | `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. (Was broken: SCVTF misdecoded as FMOV + FMADD operand bug.) |
-| `tr` | N/A | N/A | Not in this toybox build |
+| `tr` | N/A | N/A | Not in this toybox build (use `ctest_real/tr.elf` instead — works) |
 | `expr` | N/A | N/A | Not in this toybox build |
 
-**Toybox summary**: 33/37 commands pass (5 not in build, 0 broken).
-`seq` now works (was broken in prior beta.3). `od` works (was SIMD
-decode error). `printf "%g"` works (was broken by ASR bug). `ls /`
-works (was crashing before beta.3). `sh -c 'echo hi'` works (was
-hanging before beta.2).
+**Toybox summary**: 28 of the 29 tested commands pass; `sh -c` is the
+only regression (UnmappedMemory abort — likely a stack-pointer or
+signal-frame issue specific to toybox's `sh` binary). `tr` and `expr`
+are not in this toybox build. `seq`, `od`, `printf "%g"`, `ls /`,
+`factor`, `cksum`, `cal`, `xxd` and many more all work.
 
 ---
 
@@ -158,8 +159,12 @@ make test
 ```
 
 This runs every `.elf` file under `test/`, `ctest/`, and `ctest_real/`
-through both the interpreter and `--jit` modes. Each test has a 10-second
-timeout. A test passes if it exits 0 within the timeout.
+under the JIT (the default mode), with stdin redirected from `/dev/null`
+so interactive programs don't block. Interactive programs (`echo.elf`,
+`repl.elf`, `sh.elf`, `fgets_test.elf`, `cat.elf`) and the infinite
+`yes.elf` are skipped — run them by hand. The `ctest/jit_*.elf`
+regression suite is then re-run under the interpreter (`--no-jit`) to
+catch decoder/interpreter drift. Each test has a 10-second timeout.
 
 For JIT divergence checking (slow, but catches codegen bugs):
 
@@ -181,10 +186,10 @@ CPU state. Any divergence is logged.
    ```bash
    make cross SRC=ctest/my_test.c OUT=ctest/my_test.elf
    ```
-3. Run it:
+3. Run it (JIT is the default; `--no-jit` opts out):
    ```bash
    ./bifrost-emu ctest/my_test.elf
-   ./bifrost-emu --jit ctest/my_test.elf
+   ./bifrost-emu --no-jit ctest/my_test.elf
    ```
 4. Add an entry to the appropriate table above.
 

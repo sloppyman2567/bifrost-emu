@@ -210,23 +210,24 @@ cache hit rate for any program.
 bifrost-emu/
 ├── include/
 │   ├── bifrost/          Public API headers (types, version, emulator)
-│   ├── core/             CPU, Memory, Emulator, Signal, ThreadMgr
 │   ├── jit/              frostjit.hpp — block translator interface
 │   ├── ir/               IR block / IR inst definitions
-│   └── decoder.hpp       DecodedInst struct, InstClass enum
+│   ├── arm64_emu.hpp     Legacy umbrella header (redirects to bifrost/)
+│   ├── graphics.hpp      Framebuffer / SDL2 interface
+│   └── decoder.hpp       DecodedInst struct, InstClass enum, fp_decode helpers
 ├── src/
-│   ├── core/             Emulator, Memory, CPU, Signal, ThreadMgr
+│   ├── core/             Emulator, Memory, CPU, Signal, ThreadMgr (headers + .cpp)
 │   ├── frontend/         decoder.cpp + elf_loader.cpp
 │   ├── interp/           interpreter.cpp (switch on d.cls)
-│   ├── ir/               IR builder, translator, optimizer, lowerer
-│   ├── jit/              frostjit.cpp, x86_backend, x86_regalloc, cache
-│   ├── syscalls/         Linux AArch64 syscall layer (~88 syscalls)
+│   ├── ir/               IR builder, translator, optimizer, lowerer, executor
+│   ├── jit/              frostjit.cpp, x86_backend, x86_regalloc, cache, profiler
+│   ├── syscalls/         Linux AArch64 syscall layer (~88 syscalls, split by concern)
 │   ├── vfs/              Virtual filesystem (VNode + FdTable + procfs + devfs)
 │   ├── graphics/         /dev/fb0 backend (headless or SDL2)
 │   └── audio/            OSS /dev/dsp passthrough + WAV dump
 ├── api/bifrost.h         Public C API for libbifrost
 ├── test/                 Sample ARM64 programs (.s sources + assembled .elf)
-├── ctest/                C test programs (musl-static) + jit_*.elf suites
+├── ctest/                C test programs (musl-static) + jit_*.elf regression suites
 ├── ctest_real/           Real-world Unix utilities + toybox binary
 ├── tools/                musl/glibc toolchain fetch scripts
 ├── Makefile              Build, test, install, cross-compile targets
@@ -283,16 +284,17 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 35 JIT test programs pass under both the default interpreter path and
-`--jit`. See [TESTS.md](TESTS.md) for the full test matrix, including
-toybox compatibility (33/37 commands work: `echo`, `ls /`, `od`, `head`,
-`sort`, `rev`, `wc`, `cat`, `printf "%g"`, `seq` all work; 4 commands
-not in this toybox build).
+All 36 JIT test programs pass under the default frostJIT path; the
+`ctest/jit_*.elf` regression suite also passes under the interpreter
+(`--no-jit`) to catch decoder drift. See [TESTS.md](TESTS.md) for the
+full test matrix, including toybox compatibility (`echo`, `ls /`, `od`,
+`head`, `sort`, `rev`, `wc`, `cat`, `printf "%g"`, `seq`, `factor` and
+many more all work).
 
 Run the test suite:
 
 ```bash
-make test     # run all tests under interpreter + JIT
+make test     # run all .elf under JIT, plus jit_*.elf under interpreter
 make verify   # JIT divergence checker (slow, catches codegen bugs)
 ```
 
@@ -334,10 +336,13 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
 current release is **v1.4.0-beta.3** (2026-06-26):
 
-- **JIT correctness overhaul** — 11 bugs fixed across FP decode,
-  32-bit shift semantics, int↔FP conversion, and system register
-  reads. `toybox seq`, `printf "%g"`, `strtod`, `ls /`, and `od` all
-  work now.
+- **JIT is now the default execution mode.** The 36-test suite,
+  toybox integration, and musl libc all pass under the JIT, and
+  `bench_mips` shows a 6.4x speedup. Use `--no-jit` to opt out.
+- **JIT correctness overhaul** — 20+ bugs fixed across FP decode,
+  32-bit shift semantics, int↔FP conversion (SCVTF/UCVTF/FCVTZS/
+  FCVTZU), and system register reads. `toybox seq`, `printf "%g"`,
+  `strtod("inf")`, `ls /`, and `od` all work now.
 - **JIT performance overhaul** — 571 MIPS on bench_mips (6.4x over
   interpreter, 10-run average) via self-loop chaining, liveness-based
   register freeing, and register-cache-aware ALU codegen.

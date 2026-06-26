@@ -6,43 +6,36 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.0-beta.4 (next)
+## v1.4.0-rc.0 (next)
 
-1. **Fix the remaining `jit_fp_scalar` sub-test failure.** The
-   interpreter's FMOV-immediate encoding check uses mask `0xFFE0001F`
-   which requires Rd=0, causing FMOV Dn (n>0) to fall through to the
-   FP arithmetic handler. The fix is to change the mask to `0xFFE003E0`
-   and add `bits[12:10]=0b100` and `bits[11:10]=0b10` checks. However,
-   this exposes a downstream sqrt code path bug in musl's soft-float
-   routines that needs separate investigation.
+1. **Fix the `toybox sh` regression.** `toybox sh -c 'echo hi'`
+   currently aborts with `UnmappedMemory` at `0x7473657463006883`.
+   The standalone `sh.elf` (a simpler REPL) works fine — the issue
+   is specific to toybox's `sh` binary, likely involving stack
+   pointer setup or a signal-frame layout assumption. Trace with
+   `./bifrost-emu -d ctest_real/toybox sh -c 'echo hi'` to find
+   the faulting instruction.
 
-2. **Expand SIMD decoder coverage.** Add decode paths for the vector
-   FP convert (`0x5ee1b960`) and load-store patterns (`0x6c373025`)
-   that currently break toybox `seq` and `od`. These are the only two
-   toybox commands that fail under the interpreter.
+2. **Stabilize.** No new features — just bug fixes from the beta.3
+   feedback. Once all `ctest_real/` and `toybox` non-sh programs
+   pass under both interpreter and JIT, cut rc.0.
 
-3. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
+3. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` in
+   some musl code paths. Trace the `strspn` bitset construction
+   to pinpoint the exact instruction. Likely a `STR Qn`/`LDR Qn`
+   byte-order mismatch or a 128-bit shift/extract high-half
+   handling bug.
+
+4. **Complete signal delivery.** Add `siginfo_t`/`ucontext_t`
    contents, `SA_RESTART`, signal masks, `sigaltstack`, and
    cross-thread delivery. The signal frame plumbing and host-to-guest
    forwarding landed in v1.4.0-alpha / v1.4.0-alpha.1; this is the
    remaining work to make it useful for real signal-heavy programs.
 
-4. **Fix `test_fnptr`** — investigate static-PIE self-relocation.
-   Function-pointer tables in static-PIE binaries may not relocate
-   correctly, causing a decode error.
-
----
-
-## v1.4.0-rc.0
-
-1. **Stabilize.** No new features — just bug fixes from the beta.3
-   feedback. Once all `ctest_real/` and `toybox` non-sh programs
-   pass under both interpreter and `--jit`, cut rc.0.
-
-2. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r`. Trace
-   the `strspn` bitset construction in musl to pinpoint the exact
-   instruction. Likely a `STR Qn`/`LDR Qn` byte-order mismatch or a
-   128-bit shift/extract high-half handling bug.
+5. **Fix `strtod("-nan")` sign-bit loss.** `strtod("-nan")` returns
+   `nan` (sign bit dropped). The `-inf`/`+inf`/`infinity` paths all
+   work (fixed beta.3); `-nan` is a separate code path in musl's
+   `__floatscan` sign propagation.
 
 ---
 
@@ -64,10 +57,12 @@ status, see [TESTS.md](TESTS.md).
    without `CLONE_VM` returns 0 (vfork semantics), which is enough
    for `sh -c` but not for true multi-process pipelines.
 
-4. **Promote frostJIT from experimental to default.** Once the
-   stabilization work above lands, flip the default to JIT-on with
-   an interpreter fallback. Target: 500+ MIPS (current interpreter
-   is ~140 MIPS; JIT target is 500+).
+4. **JIT I/O performance.** The JIT is ~9% slower than the
+   interpreter for I/O-bound workloads (seq 1 10000) because the
+   block-translation overhead (942 blocks for seq) is not amortized
+   when most time is in syscalls. Consider a hybrid mode: interpreter
+   for the first N instructions of each block, then switch to JIT
+   only for hot blocks.
 
 ---
 

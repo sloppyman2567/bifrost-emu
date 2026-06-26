@@ -83,24 +83,40 @@ $(LIB): $(LIB_OBJECTS)
 	ar rcs $@ $^
 	@echo "Built $@ (excludes main.cpp; link your own driver)"
 
-# Debug build with sanitizers
+# Debug build with sanitizers (no -MMD to keep build/ clean for release)
 debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR) -Isrc
 debug: LDFLAGS = -pthread -fsanitize=address,undefined
 debug: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
 
-# Run all test programs (interpreter + JIT modes).
+# Run all test programs.
+#
+# JIT is the default execution mode. The first loop runs every .elf
+# under the JIT (with stdin redirected from /dev/null so interactive
+# programs don't block). The second loop runs the JIT-specific
+# regression suite (ctest/jit_*.elf) under the interpreter (--no-jit)
+# to catch decoder/interpreter drift. Interactive programs that need
+# real stdin (echo, repl, sh, fgets_test, cat-with-args) and the
+# infinite `yes` program are excluded from the auto-loop -- run them
+# by hand.
 test: $(TARGET)
-	@echo "--- Running test suite (interpreter) ---"
+	@echo "--- Running test suite (JIT, default) ---"
 	@for f in test/*.elf ctest/*.elf ctest_real/*.elf; do \
+	    case "$$f" in \
+	      */echo.elf|*/repl.elf|*/sh.elf|*/fgets_test.elf|*/yes.elf|*/cat.elf) \
+	        echo "--- skipping interactive/infinite: $$f ---"; continue;; \
+	    esac; \
 	    echo "--- $$f ---"; \
-	    timeout 10 ./$(TARGET) $$f || echo "FAILED (rc=$$?): $$f"; \
+	    timeout 10 ./$(TARGET) $$f </dev/null \
+	        || echo "FAILED (rc=$$?): $$f"; \
 	done
-	@echo "--- Running JIT tests ---"
+	@echo "--- Running JIT regression suite under interpreter (--no-jit) ---"
 	@for f in ctest/jit_*.elf; do \
-	    echo "--- $$f (JIT) ---"; \
-	    timeout 10 ./$(TARGET) --jit $$f || echo "FAILED (rc=$$?): $$f"; \
+	    echo "--- $$f (interp) ---"; \
+	    timeout 10 ./$(TARGET) --no-jit $$f </dev/null \
+	        || echo "FAILED (rc=$$?): $$f"; \
 	done
+	@echo "--- Done. ---"
 
 # Run JIT tests under BIFROST_JIT_VERIFY=1 — catches JIT/interpreter
 # divergences by running each block through both paths and comparing
@@ -110,9 +126,9 @@ verify: $(TARGET)
 	@echo "--- JIT verify mode (divergence check) ---"
 	@for f in ctest/jit_*.elf; do \
 	    echo "--- $$f (verify) ---"; \
-	    BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) --jit $$f 2>&1 | \
-	        grep -E 'VERIFY.*DIVERGENCE.*\(pc|VERIFY.*x[0-9]+: jit' | head -3; \
-	    echo "  (rc=$$?)"; \
+	    BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) $$f </dev/null 2>&1 | \
+	        grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' | head -3; \
+	    echo "  (rc=$${PIPESTATUS[0]})"; \
 	done
 	@echo "Done. Any DIVERGENCE lines above indicate JIT codegen bugs."
 

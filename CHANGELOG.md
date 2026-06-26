@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased] — 2026-06-26 (JIT default + int↔FP conversion fixes)
+## [1.4.0-beta.3] — 2026-06-26 (JIT default + int↔FP conversion fixes + JIT correctness/performance overhaul)
 
 ### Summary
 
@@ -102,15 +102,14 @@ libc, and `bench_mips` (1.4s, 571 MIPS) are unaffected.
   and exact integer values for int results, including edge cases
   (INT32_MAX, UINT32_MAX, UINT64_MAX, 1e19).
 
-## [1.4.0-beta.3] — 2026-06-26 (JIT correctness + performance overhaul)
-
-### Summary
+### Earlier beta.3 work (JIT correctness + performance overhaul)
 
 The beta.3 release is a major JIT overhaul spanning four areas: FP
 decode correctness, 32-bit shift semantics, int↔FP conversion decode,
-and register allocator / codegen performance. All 35 JIT test programs
-pass; `bench_mips` achieves 573 MIPS (5.9x speedup over interpreter);
-`toybox seq`, `printf "%g"`, `strtod`, `ls /`, and `od` all work.
+and register allocator / codegen performance. All 36 JIT test programs
+pass; `bench_mips` achieves 571 MIPS (6.4x speedup over interpreter,
+10-run average); `toybox seq`, `printf "%g"`, `strtod`, `ls /`, and
+`od` all work.
 
 ### JIT correctness fixes
 
@@ -210,9 +209,12 @@ pass; `bench_mips` achieves 573 MIPS (5.9x speedup over interpreter);
 
 ### Test results
 
-- **35/35 JIT tests pass** (was 38/39 at beta.2 start).
+- **36/36 JIT tests pass** (was 35/35 before the int↔FP conversion fix
+  added `ctest/jit_int_fp_conv.elf`).
 - **`toybox seq 1 5`** = `1 2 3 4 5` (was no output).
 - **`strtod("0.5")`** = `0.500000` (was `inf`).
+- **`strtod("-inf")`** = `-inf` (was `-nan`).
+- **`strtod("inf")`** = `inf` (was `-nan`).
 - **`toybox printf "%g" 3.14`** = `3.14` (was no output).
 - **`toybox ls /`** works (was crashing under JIT).
 - **`toybox od`** works (was SIMD decode error).
@@ -224,9 +226,11 @@ pass; `bench_mips` achieves 573 MIPS (5.9x speedup over interpreter);
 
 ### Known remaining issues
 
-- `strtod("inf")` returns `-nan` instead of `inf` (separate inf/nan
-  string-parsing path in `__floatscan`).
+- `strtod("-nan")` returns `nan` (sign bit dropped) — separate from
+  the `-inf`/`+inf`/`infinity` paths which all work now.
 - `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes (pre-existing).
+- `toybox sh -c 'echo hi'` aborts with `UnmappedMemory` (regression —
+  see ROADMAP.md).
 
 ## [1.4.0-beta.2] — 2026-06-25 (JIT refactors, audio backend, code cleanup)
 
