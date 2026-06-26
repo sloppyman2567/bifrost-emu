@@ -42,8 +42,11 @@ make
 # Pass arguments to the emulated program
 ./bifrost-emu cat.elf /etc/hostname
 
-# Enable the JIT (39/39 tests pass)
-./bifrost-emu --jit ctest_real/fib.elf
+# JIT is ON by default (36/36 tests pass, 6.4x speedup on compute)
+./bifrost-emu ctest_real/fib.elf
+
+# Use --no-jit to force the interpreter (fallback / debugging)
+./bifrost-emu --no-jit ctest_real/fib.elf
 
 # Show version
 ./bifrost-emu --version
@@ -61,7 +64,9 @@ Options:
   -v, --verbose   print execution stats on exit
   -V, --version   show version and exit
   -h, --help      show help
-  --jit           enable frostJIT (experimental block-translation JIT)
+  --jit           enable frostJIT (now the default; kept for compatibility)
+  --no-jit        disable JIT and use the interpreter (fallback / debugging)
+  --              end of options; next arg is the ELF file (POSIX convention)
   --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM format)
   --audio-dump PATH  dump audio PCM to PATH on exit (WAV format)
   --raw-tty       force raw TTY mode (per-character input, no echo)
@@ -146,12 +151,13 @@ instruction on repeated execution (tight loops). Since guest code is not
 self-modifying (static binaries only), each PC always decodes to the same
 instruction.
 
-**frostJIT** (`src/jit/frostjit.cpp`) is an optional block-translation
+**frostJIT** (`src/jit/frostjit.cpp`) is the default block-translation
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-Enable with `--jit`. As of beta.3 (2026-06-26), all 39 test programs
-pass under JIT.
+JIT is ON by default; use `--no-jit` to opt out. As of beta.3 (2026-06-26),
+all 36 test programs pass under JIT, including the new
+`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion.
 
 ## Performance
 
@@ -306,13 +312,16 @@ This is beta-quality software. Key limitations:
 - **Signal delivery is partial.** `rt_sigaction` installs handlers and
   `kill`/`tgkill` deliver signals, but `siginfo_t`/`ucontext_t` contents,
   `SA_RESTART`, and signal masks are not fully implemented.
-- **frostJIT (`--jit`) is experimental.** All 35 tests pass, but the
-  JIT has not been exhaustively tested against arbitrary ARM64 binaries.
-  The interpreter path is the default for production use.
-- **`strtod("inf")` returns `-nan`** instead of `inf`. The inf/nan
-  string-parsing path in musl's `__floatscan` is not fully supported.
-  All decimal and exponential inputs work correctly (`strtod("0.5")` =
-  `0.5`, `strtod("1e1")` = `10.0`, etc.).
+- **frostJIT is the default execution mode.** All 36 tests pass, including
+  the comprehensive int↔FP conversion test. The interpreter is available
+  via `--no-jit` as a fallback for programs that hit a JIT bug or for
+  debugging.
+- **`strtod("inf")` and `strtod("-inf")` now work correctly** (return
+  `inf` / `-inf` respectively). The root cause was a 32-bit SCVTF
+  misdecode — see CHANGELOG.md for the full fix. `strtod("-nan")`
+  returns `nan` (sign bit lost) — a separate, lower-priority issue in
+  musl's `__floatscan` sign propagation that does not affect decimal
+  or exponential inputs.
 - **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
   opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
   JIT tests pass with it enabled, but `toybox ls /` crashes under FWD

@@ -6,6 +6,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — 2026-06-26 (JIT default + int↔FP conversion fixes)
+
+### Summary
+
+JIT is now the **default execution mode**. The `--no-jit` flag opts out
+to the interpreter; `--jit` is kept for backwards-compatibility. This
+change is backed by a comprehensive fix to the int↔FP conversion
+pipeline (SCVTF / UCVTF / FCVTZS / FCVTZU) that was the root cause of
+`strtod("-inf")` returning `-nan` instead of `-inf`. A new 36-case
+ctest (`ctest/jit_int_fp_conv.c`) covers all 8 variants of int↔FP
+conversion to prevent regression. All 36 JIT tests pass; toybox, musl
+libc, and `bench_mips` (1.4s, 571 MIPS) are unaffected.
+
+### JIT correctness fixes
+
+#### int↔FP conversion pipeline (9 bugs)
+
+- **FMOV (32-bit G↔F) check missing the `(op & (1u<<18))` guard.** The
+  64-bit FMOV check had this guard to distinguish FMOV (bit 18=1) from
+  SCVTF/UCVTF (bit 18=0), but the 32-bit check was missed. This caused
+  `scvtf s0, w0` (0x1E220000) and `ucvtf s0, w0` (0x1E230000) to be
+  misdecoded as `fmov w0, s0` (raw GPR↔FP bit copy). The misdecoded
+  FMOV copied the old FP register value into the GPR instead of
+  converting the integer, producing garbage for every int→FP
+  conversion from a 32-bit GPR. This broke musl's `__floatscan`
+  inf/nan detection: `strtod("-inf")` returned `-nan` because the
+  sign computation does `scvtf s1, w23` with `w23=-1` and expects
+  `s1=-1.0f`, but the misdecoded FMOV copied the old `s0` (zero) into
+  `w23` instead. Fixed in both the interpreter and the IR translator.
+- **SCVTF/UCVTF and FCVTZS/FCVTZU masks included bit 16.** The mask
+  `0x7F3F0000` includes bit 16 (the U/S selector), so UCVTF
+  (0x1E230000, bit 16=1) and FCVTZU (0x1E390000, bit 16=1) did NOT
+  match the checks (which compared to 0x1E220000 / 0x1E380000 with
+  bit 16=0). They fell through to "Unknown FP — NOP", silently
+  producing zero for every unsigned conversion. Fixed by changing the
+  mask to `0x7F3E0000` (excluding bit 16) so both signed and unsigned
+  variants match. The same fix was applied to the FCVT{N,P,M,Z,A}{S,U}
+  check, which previously only matched signed variants.
+- **JIT FP_I2F always used 64-bit CVTSI2SD/SS.** For 32-bit GPR source
+  (`scvtf s0, w0`), the 32-bit value is zero-extended to 64 bits in
+  the register. `cvtsi2ss rax` interpreted it as 4294967295 instead
+  of -1, producing 4.29e+09 instead of -1.0f. Fixed by adding an `sf`
+  parameter (carried via the `flags_op` IR field) and using the 32-bit
+  CVTSI2SS form (no REX.W) for signed 32-bit conversions.
+- **JIT FP_I2F unsigned path used the wrong 2^63 constant.** The
+  addend was `0x43E0000000000000` (double 2^63) even for single-
+  precision conversions. `addss` reads only the low 32 bits of `xmm1`
+  (0x00000000 = 0.0f), silently losing the 2^63 correction. Fixed by
+  selecting the constant based on `is_double`: `0x43E0000000000000`
+  for double, `0x5F000000` for single.
+- **JIT FP_I2F unsigned path with 32-bit source used the 32-bit
+  CVTSI2SS form.** This treated `0xFFFFFFFF` (uint32 max = 4294967295)
+  as -1 (int32) and produced -1.0f instead of 4.29e+09. Fixed by using
+  the 64-bit form (`rax`) for all unsigned conversions, since the
+  zero-extended 32-bit value fits in int64's positive range.
+- **JIT FP_F2I unsigned path had the same 2^63 constant bug** as
+  FP_I2F. Fixed the same way.
+- **JIT FP_F2I used `ucomisd`/`ucomiss` with the wrong prefix.** The
+  code reused the `prefix` variable (0xF2/0xF3) from the
+  `cvtsi2sd`/`cvtsi2ss` convention. `ucomisd` requires the 0x66
+  prefix; `ucomiss` requires NO mandatory prefix. Using 0xF2/0xF3
+  generated invalid instruction encodings and crashed with SIGILL on
+  the first unsigned FCVTZU. Fixed by using the correct prefixes.
+- **JIT FP_F2I for 32-bit dest did not zero the upper 32 bits.** The
+  64-bit CVTTSD2SI result was stored directly to `cpu.regs[rd]`
+  without zeroing the upper 32 bits, violating AArch64 32-bit
+  register write semantics. A subsequent `cbz`/`cbnz w0` test could
+  see stale high bits from a previous computation. Fixed by emitting
+  a `ZEXT` after FP_F2I when `sf=0`.
+- **IR executor (ops.cpp) FP_F2I and FP_I2F used the wrong width.**
+  The code used the FP precision (`width`) to determine the GPR
+  width, but these are independent: `FCVTZS Xd, Sn` writes a 64-bit
+  int from a 32-bit FP. Fixed to use the new `sf` parameter
+  (`flags_op`).
+
+### CLI changes
+
+- **JIT is now the default execution mode.** The `--no-jit` flag opts
+  out to the interpreter; `--jit` is kept for backwards-compatibility.
+  Rationale: the 36-test suite, toybox integration, and musl libc all
+  pass under the JIT, and `bench_mips` shows a 6.4x speedup. The
+  interpreter is still available as a fallback for programs that hit a
+  JIT bug or for debugging.
+- **`--` separator is now properly handled** (POSIX end-of-options
+  convention). The next argument after `--` is treated as the ELF
+  file, even if it starts with `-`. This matches the convention used
+  by `qemu-user`.
+
+### Tests
+
+- **Added `ctest/jit_int_fp_conv.c`** — 36 test cases covering all 8
+  variants of SCVTF/UCVTF/FCVTZS/FCVTZU (signed/unsigned × 32/64-bit
+  GPR × single/double FP). Verifies exact bit patterns for FP results
+  and exact integer values for int results, including edge cases
+  (INT32_MAX, UINT32_MAX, UINT64_MAX, 1e19).
+
 ## [1.4.0-beta.3] — 2026-06-26 (JIT correctness + performance overhaul)
 
 ### Summary

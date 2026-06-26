@@ -1,8 +1,8 @@
 # Tests
 
 This document describes the test programs shipped with bifrost-emu and
-their current status under both the interpreter (default) and frostJIT
-(`--jit`) paths.
+their current status under both the interpreter (`--no-jit`) and frostJIT
+(default) paths.
 
 ---
 
@@ -10,14 +10,16 @@ their current status under both the interpreter (default) and frostJIT
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| Interpreter (`./bifrost-emu`) | 35 | 35 | 0 |
-| frostJIT (`./bifrost-emu --jit`) | 35 | 35 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 36 | 36 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 16 | 16 | 0 |
 
-All 35 JIT test programs pass under both the interpreter and frostJIT as
-of beta.3 (2026-06-26). This release fixed 11 JIT correctness bugs (FP
-decode, 32-bit ASR, SCVTF/FMOV decode, FMADD operands, FPSR read) and
-added major performance optimizations (573 MIPS, 5.9x speedup). FWD mode
-is 10/10. See CHANGELOG.md for details.
+All 36 JIT test programs pass under frostJIT as of beta.3 (2026-06-26).
+JIT is now the default execution mode (6.4x speedup on compute workloads).
+This release fixed 9 critical int↔FP conversion bugs (SCVTF/UCVTF/
+FCVTZS/FCVTZU) that were the root cause of `strtod("-inf")` returning
+`-nan`. A new 36-case ctest (`ctest/jit_int_fp_conv.c`) covers all 8
+variants of int↔FP conversion to prevent regression. See CHANGELOG.md
+for details.
 
 ---
 
@@ -66,6 +68,7 @@ natively. They are the regression suite for frostJIT codegen changes.
 | `ctest/jit_csel.elf` | ✅ | ✅ | CSEL/CSINC/CSINV/CSNEG |
 | `ctest/jit_extend.elf` | ✅ | ✅ | SXTB/SXTH/SXTW/UXTB/UXTH/UXTW |
 | `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests pass after FCMP/FABS/FNEG/FSQRT/FMOV-imm decode fixes) |
+| `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests, added beta.3) |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |
 | `ctest/jit_rev.elf` | ✅ | ✅ | REV/REV16/REV32/RBIT |
