@@ -215,6 +215,19 @@ void optimize_ir(IRBlock& block) {
     // its current value. LOAD_REG can reuse this.
     std::unordered_map<uint16_t, uint16_t> arm_reg_cache;
 
+    // Helper: invalidate any arm_reg_cache entries that point to vreg `v`.
+    // This must be called whenever vreg `v` is redefined, because a
+    // cached LOAD_REG that reused `v` would now read the wrong value.
+    auto invalidate_vreg_in_cache = [&](uint16_t v) {
+        for (auto it = arm_reg_cache.begin(); it != arm_reg_cache.end(); ) {
+            if (it->second == v) {
+                it = arm_reg_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+
     // ── Pass 0: dead-store elimination for STORE_REG ───────────────
     // If a STORE_REG to arch reg R is followed by another STORE_REG to
     // the same R (no intervening LOAD_REG of R or CALL_INTERP/SVC),
@@ -259,6 +272,7 @@ void optimize_ir(IRBlock& block) {
                 break;
 
             case IROp::IMM:
+                invalidate_vreg_in_cache(inst.dest);
                 consts.set(inst.dest, inst.imm);
                 copies.clear(inst.dest);
                 last_def[inst.dest] = i;
@@ -266,6 +280,7 @@ void optimize_ir(IRBlock& block) {
 
             case IROp::MOV: {
                 // dest = src1. Replace subsequent uses of dest with src1.
+                invalidate_vreg_in_cache(inst.dest);
                 if (consts.has(inst.src1)) {
                     // Turn into IMM (constant propagation).
                     inst.op = IROp::IMM;
@@ -294,18 +309,12 @@ void optimize_ir(IRBlock& block) {
                 // host register from the previous iteration.
                 //
                 // The cache is invalidated by CALL_INTERP/SVC (interpreter
-                // may modify any cpu.regs[]). The MOV/IMM emitted by the
-                // substitution marks the cached vreg as live in Pass 2 DCE.
+                // may modify any cpu.regs[]) and by vreg redefinition
+                // (invalidate_vreg_in_cache). This fixes the previous
+                // correctness bug that crashed `toybox ls /`.
                 //
-                // Disabled by default: has a known correctness bug that
-                // crashes `toybox ls /` (store-then-load patterns produce
-                // stale vreg substitutions). The 36-test suite passes
-                // under FWD, but the toybox crash is a blocker.
-                // Enable with BIFROST_ENABLE_FWD=1 for experimentation
-                // (bench_mips gets ~5.6% speedup). Without FWD, the JIT
-                // still achieves 571 MIPS (10-run average) thanks to
-                // self-loop chaining, liveness-based reg freeing, and
-                // the improved ALU codegen.
+                // Enable with BIFROST_ENABLE_FWD=1 (bench_mips gets ~5.6%
+                // speedup). Without FWD, the JIT still achieves 571 MIPS.
                 static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
                 auto it = enable_fwd_ ? arm_reg_cache.find(ar) : arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
@@ -321,6 +330,9 @@ void optimize_ir(IRBlock& block) {
                     }
                 } else {
                     // Cache this load as the canonical source for ar.
+                    // First, invalidate any old cache entry pointing to
+                    // inst.dest (it's about to be redefined).
+                    invalidate_vreg_in_cache(inst.dest);
                     arm_reg_cache[ar] = inst.dest;
                     consts.clear(inst.dest);
                     copies.clear(inst.dest);
@@ -339,6 +351,7 @@ void optimize_ir(IRBlock& block) {
             }
 
             case IROp::LOAD_MEM: {
+                invalidate_vreg_in_cache(inst.dest);
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
                 last_def[inst.dest] = i;
@@ -442,6 +455,7 @@ void optimize_ir(IRBlock& block) {
                         copies.clear(inst.dest);
                     }
                 }
+                invalidate_vreg_in_cache(inst.dest);
                 last_def[inst.dest] = i;
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 break;
@@ -463,6 +477,7 @@ void optimize_ir(IRBlock& block) {
                     consts.clear(inst.dest);
                     copies.clear(inst.dest);
                 }
+                invalidate_vreg_in_cache(inst.dest);
                 last_def[inst.dest] = i;
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 break;
@@ -471,6 +486,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::ADDS: case IROp::SUBS: case IROp::TST:
             case IROp::ADCS: case IROp::SBCS:
                 // Flag-setting ops also write to dest (if != 0).
+                invalidate_vreg_in_cache(inst.dest);
                 if (inst.dest != 0 && inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);
@@ -540,6 +556,7 @@ void optimize_ir(IRBlock& block) {
                 // BFM is decomposed into SHL+SHR+AND+OR in ir_translate.cpp
                 // (never reaches here as IROp::BFM). All ops in this case
                 // are native — only need dest invalidation.
+                invalidate_vreg_in_cache(inst.dest);
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 if (inst.op != IROp::IMM) {  // don't clear if we just folded
                     consts.clear(inst.dest);
@@ -574,6 +591,7 @@ void optimize_ir(IRBlock& block) {
                 // Without this, the FWD cache would substitute the LOAD_REG
                 // with a MOV pointing at the pre-conversion vreg, losing
                 // the FP_F2I result.
+                invalidate_vreg_in_cache(inst.dest);
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 consts.clear(inst.dest);
                 copies.clear(inst.dest);

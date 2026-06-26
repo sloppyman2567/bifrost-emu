@@ -2579,18 +2579,19 @@ void FrostJIT::materialize_flags_to_pstate() {
 static bool instr_will_call_interp(const DecodedInst& d) {
     switch (d.cls) {
         case InstClass::SIMD_DP: {
-            // SIMD_DP now has native IR paths for ADD/SUB/MUL (vector).
-            // Check the encoding to see if it's one of the native ones.
-            // If so, don't mark it as "will call interp" — the block
-            // splitter won't fragment around it.
+            // SIMD_DP now has native IR paths for ADD/SUB/MUL (vector)
+            // and CMEQ (vector). Check the encoding to see if it's one
+            // of the native ones. If so, don't mark it as "will call
+            // interp" — the block splitter won't fragment around it.
             uint32_t op = d.raw;
             uint8_t size = (op >> 22) & 3;
             uint32_t sub3 = op & 0xFF20FC00;
             uint32_t sub3_noq = sub3 & ~(1u << 30);
             if (sub3_noq == 0x0E208400 ||  // ADD
                 sub3_noq == 0x2E208400 ||  // SUB
-                (sub3_noq == 0x0E209C00 && size != 3)) {  // MUL (not 64-bit)
-                return false;  // native SIMD_ARITH
+                (sub3_noq == 0x0E209C00 && size != 3) ||  // MUL (not 64-bit)
+                sub3_noq == 0x2E208C00) {  // CMEQ
+                return false;  // native SIMD_ARITH / SIMD_CMP
             }
             return true;  // other SIMD_DP ops fall back to interp
         }

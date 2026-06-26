@@ -1378,15 +1378,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
 
-        // ── SIMD data-processing (integer add/sub/mul) — native ──────
-        // Common encodings that we can JIT natively via SIMD_ARITH:
+        // ── SIMD data-processing (integer add/sub/mul/min/max/cmp) ───
+        // Common encodings that we can JIT natively via SIMD_ARITH /
+        // SIMD_CMP:
         //   ADD (vector): 0x0E208400  (size 0/1/2/3 = 8/16/32/64-bit)
         //   SUB (vector): 0x2E208400
         //   MUL (vector): 0x0E209C00  (size 0/1/2 = 8/16/32-bit; 64-bit
         //                               not in SSE2)
-        // These are the most common SIMD arithmetic ops used by
-        // memcpy/memset/string routines. Other SIMD_DP encodings fall
-        // through to CALL_INTERP.
+        //   CMGT (signed >):   0x0E203400  (U=0, opcode=0x34)
+        //   CMGE (signed >=):  0x0E203C00  (U=0, opcode=0x3C)
+        //   CMEQ (==):         0x2E208C00  (U=1, opcode=0x8C)
+        //   CMHI (unsigned >): 0x2E203400  (U=1, opcode=0x34)
+        //   CMHS (unsigned >=):0x2E203C00  (U=1, opcode=0x3C)
+        // These are the most common SIMD arithmetic and compare ops.
+        // Other SIMD_DP encodings fall through to CALL_INTERP.
         case InstClass::SIMD_DP: {
             uint32_t op = d.raw;
             bool Q = (op >> 30) & 1;
@@ -1394,37 +1399,49 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint32_t sub3 = op & 0xFF20FC00;
             uint32_t sub3_noq = sub3 & ~(1u << 30);
 
-            uint8_t simd_op = 0xFF;  // invalid
             int esize = 1 << size;   // 1, 2, 4, 8
 
+            // ── Arithmetic ops (SIMD_ARITH) ──
+            uint8_t arith_op = 0xFF;
             if (sub3_noq == 0x0E208400) {
-                simd_op = 0;  // ADD
+                arith_op = 0;  // ADD
             } else if (sub3_noq == 0x2E208400) {
-                simd_op = 1;  // SUB
+                arith_op = 1;  // SUB
             } else if (sub3_noq == 0x0E209C00) {
-                simd_op = 2;  // MUL
-                // 64-bit multiply not native — fall back to interp.
+                arith_op = 2;  // MUL
                 if (size == 3) {
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return false;
                 }
-            } else {
-                // Unrecognized SIMD_DP — fall back to interpreter.
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+            }
+
+            if (arith_op != 0xFF) {
+                (void)Q;
+                emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm, 0,
+                     static_cast<uint64_t>(esize), 0, arith_op, cur_pc);
                 return false;
             }
 
-            // Emit SIMD_ARITH: dest=d.rd, src1=d.rn, src2=d.rm.
-            // width = esize (1/2/4/8 bytes).
-            // imm = simd_op (0=add, 1=sub, 2=mul).
-            // The JIT handles both v_lo and v_hi halves.
-            // For Q=0, we need to zero v_hi[dest] — but the current
-            // SIMD_ARITH JIT doesn't do that. We accept the minor
-            // correctness issue for Q=0 (rare in practice; most SIMD
-            // code uses Q=1). The interpreter path handles Q=0 correctly.
-            (void)Q;
-            emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm, 0,
-                 static_cast<uint64_t>(esize), 0, simd_op, cur_pc);
+            // ── Compare ops (SIMD_CMP) ──
+            // SIMD_CMP imm: 0=eq, 1=ge_u, 2=gt_u, 3=ge_s, 4=gt_s,
+            //               5=hi_u, 6=hs_u
+            // We currently only JIT eq (opc=0) natively via PCMPEQ.
+            // Other compares fall back to interpreter.
+            uint8_t cmp_op = 0xFF;
+            if (sub3_noq == 0x2E208C00) {
+                // CMEQ (==): U=1, opcode=0x8C
+                cmp_op = 0;  // eq
+            }
+
+            if (cmp_op != 0xFF) {
+                (void)Q;
+                emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm, 0,
+                     static_cast<uint64_t>(esize), 0, cmp_op, cur_pc);
+                return false;
+            }
+
+            // Unrecognized SIMD_DP — fall back to interpreter.
+            emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
         }
 
