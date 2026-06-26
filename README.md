@@ -266,9 +266,10 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 39 test programs pass under both the default interpreter path and
+All 35 JIT test programs pass under both the default interpreter path and
 `--jit`. See [TESTS.md](TESTS.md) for the full test matrix, including
-toybox compatibility (31/37 commands pass).
+toybox compatibility (`echo`, `ls /`, `od`, `head`, `sort`, `rev`, `wc`,
+`cat`, `printf "%g"` all work; `seq` produces no output — see Limitations).
 
 Run the test suite:
 
@@ -293,13 +294,20 @@ This is beta-quality software. Key limitations:
 - **Signal delivery is partial.** `rt_sigaction` installs handlers and
   `kill`/`tgkill` deliver signals, but `siginfo_t`/`ucontext_t` contents,
   `SA_RESTART`, and signal masks are not fully implemented.
-- **frostJIT (`--jit`) is experimental.** All 39 tests pass, but the
+- **frostJIT (`--jit`) is experimental.** All 35 tests pass, but the
   JIT has not been exhaustively tested against arbitrary ARM64 binaries.
   The interpreter path is the default for production use.
-- **toybox `seq`** no longer hits SIMD decode errors (FCVTZS vector and
-  FMADD are now decoded), but produces no output due to a separate
-  printf formatting issue still under investigation. All other tested
-  toybox commands work, including `ls /` (previously crashed).
+- **`strtod()` now works** for all decimal and exponential inputs
+  (`"0.5"`, `"1.5"`, `"1e1"`, etc.) — a 32-bit ASR sign-extension bug
+  was causing it to return `inf` with `ERANGE` for any input containing
+  a decimal point or exponent. `strtod("inf")` still returns `-nan`
+  (separate inf/nan string-parsing issue).
+- **toybox `seq`** produces no output. The FP arithmetic is verified
+  correct, but seq's main loop never executes — it appears to take the
+  "first > last" exit path even when `first=1, last=5`. The long-double
+  comparison routine may have a subtle bug. All other tested toybox
+  commands work, including `ls /`, `od`, `printf "%g"`, `head`, `sort`,
+  `rev`, `wc`, `cat`, `echo`.
 - **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
   opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
   JIT tests pass with it enabled, but toybox `ls /` still crashes
@@ -312,6 +320,13 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
 current release is **v1.4.0-beta.3** (2026-06-26), which includes:
 
+- 32-bit ASR sign-extension fix — `strtod()` now works for all decimal
+  and exponential inputs (`"0.5"`, `"1.5"`, `"1e1"`, etc.). Previously,
+  a 32-bit ASR bug in `neg w0, w0, asr #1` caused musl's `__floatscan`
+  to take the overflow path and return `inf` with `ERANGE` for any
+  input with a decimal point or exponent.
+- JIT `mrs xN, fpsr/fpcr` fix — was reading 8 bytes instead of 4,
+  leaking adjacent `TPIDR_EL0` into the result.
 - JIT performance overhaul — 573 MIPS on bench_mips (5.9x speedup over
   interpreter) via self-loop chaining, liveness-based register freeing,
   and register-cache-aware ALU codegen

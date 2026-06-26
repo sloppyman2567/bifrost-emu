@@ -709,7 +709,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     switch (d.shift_type) {
                         case 0: b = b << d.shift; break;
                         case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
-                        case 2: b = (static_cast<int64_t>(b)) >> d.shift; break;
+                        // ASR: must sign-extend from the OPERATION width, not
+                        // from 64 bits. The previous code cast b (already
+                        // zero-extended to 64-bit by the `if (!d.sf) b &= 0xFFFFFFFF`
+                        // above) to int64_t, which left the sign bit at bit 63
+                        // (always 0 after the mask). This made 32-bit ASR behave
+                        // like LSR — e.g. `neg w0, w0, asr #1` with w0=0xfffffbcf
+                        // produced 0x80000219 instead of 0x00000219, breaking
+                        // musl's __floatscan exponent-range check and making
+                        // strtod("0.5") return inf with ERANGE.
+                        case 2:
+                            b = (width == 64)
+                                ? (static_cast<int64_t>(b) >> d.shift)
+                                : (static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(b))) >> d.shift);
+                            break;
                         case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
                     }
                 }
@@ -738,7 +751,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 switch (d.shift_type) {
                     case 0: b = b << d.shift; break;
                     case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
-                    case 2: b = (static_cast<int64_t>(b)) >> d.shift; break;
+                    // ASR: same 32-bit sign-extension fix as ADD/SUB shifted
+                    // register above. Without this, 32-bit ASR in AND/ORR/EOR
+                    // behaves like LSR.
+                    case 2:
+                        b = (width == 64)
+                            ? (static_cast<int64_t>(b) >> d.shift)
+                            : (static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(b))) >> d.shift);
+                        break;
                     case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
                 }
                 if (!d.sf) b &= 0xFFFFFFFF;

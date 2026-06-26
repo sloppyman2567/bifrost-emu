@@ -6,7 +6,96 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-beta.3] — 2026-06-26 (32-bit ASR + FPSR read fixes — strtod works)
+
+### Summary
+
+Fixed two correctness bugs in shift/register handling that broke
+`strtod()` for any number containing a decimal point or exponent
+(`strtod("0.5")` returned `inf` with `ERANGE`), plus a JIT-only bug
+where `mrs xN, fpsr` returned garbage from the adjacent `TPIDR_EL0`
+field. All 35 JIT test programs still pass; `toybox printf "%g" 3.14`
+now works; `toybox od`, `head`, `sort`, `rev`, `wc`, `cat`, `ls /`
+all still work.
+
+### Bug fixes
+
+- **32-bit ASR in ADD/SUB shifted register** (interpreter). The
+  `case 2` (ASR) branch cast the operand to `int64_t` *after* it had
+  been zero-extended to 64 bits by the `if (!d.sf) b &= 0xFFFFFFFF`
+  mask above. Because the high 32 bits were already 0, the sign bit
+  lived at bit 31 (correct for 32-bit ASR) but `int64_t` treated it
+  as bit 63 (always 0), so ASR silently degraded into LSR. This
+  broke musl's `__floatscan` exponent-range check
+  (`neg w0, w0, asr #1` with `w0=0xfffffbcf` produced `0x80000219`
+  instead of `0x00000219`), causing `strtod` to take the overflow
+  path and return `HUGE_VAL` with `errno=ERANGE` for any input with
+  a decimal point or exponent. Fixed by casting through
+  `int32_t` first (which sign-extends to `int64_t` correctly) for
+  the 32-bit case.
+
+- **32-bit ASR in logical shifted register** (interpreter). Same
+  bug as above in the AND/ORR/EOR/ANDS handler — the `case 2` ASR
+  branch used `(static_cast<int64_t>(b)) >> d.shift` which behaved
+  like LSR for 32-bit operations. Fixed identically.
+
+- **32-bit ASR in JIT** (IR translator + `apply_shift`). The IR
+  `apply_shift` helper emitted `SAR` without knowing the operation
+  width, and the JIT's SAR uses x86's 64-bit `sar r64, cl`. For
+  32-bit `neg w0, w0, asr #1`, the operand was zero-extended to
+  64 bits (`0x00000000fffffbcf`), so the 64-bit SAR saw sign bit 0
+  and produced `0x000000007ffffde7` instead of `0xfffffffffffffde7`.
+  The subsequent SUB then computed `0 - 0x000000007ffffde7 =
+  0xffffffff80000219` (64-bit), and the final `zext_if_32bit`
+  truncated to `0x80000219` — matching the interpreter's pre-fix
+  behaviour. Fixed by adding an `sf` parameter to `apply_shift`;
+  when `sf=false` and `shift_type==ASR`, a `SEXT` (sign-extend from
+  32 to 64 bits) IR op is emitted before the `SAR`, so the JIT's
+  64-bit SAR sees the correct sign bit. All three call sites
+  (ADD/SUB shifted register, ADDS/SUBS shifted register, logical
+  shifted register) now pass `d.sf`.
+
+- **JIT `mrs xN, fpsr` / `mrs xN, fpcr` read 8 bytes instead of 4**.
+  `FPSR` and `FPCR` are 32-bit fields in the `CPU` struct, but the
+  JIT's `MRS` handler used `emit_load` (64-bit `mov r64, [base+off]`)
+  for all system registers. For `FPSR` (offset 804), this read 4
+  bytes of `FPSR` plus 4 bytes of the adjacent `TPIDR_EL0` (offset
+  808), producing values like `0x176a800000000` instead of `0`.
+  `FPCR` (offset 800) was less affected because `FPSR` (804) is
+  usually 0, but the same leak existed. Fixed by using
+  `emit_load32` (32-bit load, zero-extended on x86) for these two
+  registers. The interpreter was already correct.
+
+### Test results
+
+- **35/35 JIT tests pass** (no regressions).
+- **`strtod("0.5")` = 0.500000** (was `inf`).
+- **`strtod("1.5")` = 1.500000** (was `inf`).
+- **`strtod("1e1")` = 10.000000** (was `inf`).
+- **`toybox printf "%g" 3.14`** = `3.14` (was no output / crash).
+- **`toybox ls /`** still works (no regression).
+- **`bench_mips`**: 1.4s (573 MIPS) — no performance regression.
+- **FWD mode**: 10/10 tests pass (was 8/10 — `jit_block_split` and
+  `jit_fp_scalar` failed at session start; both now pass with the
+  ASR fix, which also benefits the FWD-mode load-forwarding path).
+
+### Known remaining issues
+
+- `toybox seq 1 5` still produces no output. The FP arithmetic is
+  correct (verified: `1.0L + 2^28 = 268435457.0L`), but seq's main
+  loop never executes — it appears to take the "first > last" exit
+  path even when `first=1, last=5`. The comparison routine
+  (`__letf2` or similar) may have a subtle bug. Investigation
+  continues; this is a pre-existing issue not introduced by this
+  change.
+- `strtod("inf")` returns `-nan` instead of `inf`. The inf/nan
+  string parsing path in `__floatscan` is separate from the
+  decimal-parsing path fixed here.
+- `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes
+  (pre-existing — confirmed by testing original code with FWD).
+
 ## [1.4.0-beta.3] — 2026-06-26 (JIT performance overhaul — 573 MIPS, 5.9x speedup)
+
 
 ### Summary
 

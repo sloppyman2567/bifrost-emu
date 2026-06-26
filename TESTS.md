@@ -10,15 +10,16 @@ their current status under both the interpreter (default) and frostJIT
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| Interpreter (`./bifrost-emu`) | 39 | 39 | 0 |
-| frostJIT (`./bifrost-emu --jit`) | 39 | 39 | 0 |
+| Interpreter (`./bifrost-emu`) | 35 | 35 | 0 |
+| frostJIT (`./bifrost-emu --jit`) | 35 | 35 | 0 |
 
-All 39 test programs pass under both the interpreter and frostJIT as
-of beta.3 (2026-06-26). The previous beta.3 release carried a single
-JIT failure in `jit_fp_scalar` caused by a cluster of FP decode bugs
-(FCMP #0.0 form detection, FP 1-source opcode extraction, FMOV imm
-mask, FMOV imm vs SCVTF collision, missing interpreter FCMP handler).
-All are fixed; see CHANGELOG.md for details.
+All 35 JIT test programs pass under both the interpreter and frostJIT as
+of beta.3 (2026-06-26). This release fixes a 32-bit ASR sign-extension
+bug that broke `strtod()` for any input containing a decimal point or
+exponent (e.g. `strtod("0.5")` returned `inf` with `ERANGE`). The fix
+also resolved the two FWD-mode failures (`jit_block_split`,
+`jit_fp_scalar`) that were listed as "opt-in" in prior releases — FWD
+mode is now 10/10. See CHANGELOG.md for details.
 
 ---
 
@@ -119,7 +120,7 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `pwd` | ✅ | ✅ | `/` |
 | `env` | ✅ | ✅ | Prints `PATH=...` |
 | `date` | ✅ | ✅ | `Thu Jun 25 05:45:28 UTC 2026` |
-| `printf` | ✅ | ✅ | `printf '%d %s\n' 42 hello` |
+| `printf` | ✅ | ✅ | `printf '%d %s\n' 42 hello`, `printf '%g\n' 3.14` (3.14) |
 | `head` | ✅ | ✅ | `head -n 3 /etc/hostname` |
 | `tail` | ✅ | ✅ | `tail -n 1 /etc/hostname` |
 | `cat` | ✅ | ✅ | `cat /etc/hostname` |
@@ -134,14 +135,16 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `sleep` | ✅ | ✅ | `sleep 0.1` |
 | `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` (previously hung, fixed in beta.2) |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
-| `seq` | ❌ | ❌ | SIMD decode error (`0x5ee1b960` — vector FP convert) |
-| `od` | ❌ | ❌ | SIMD decode error (`0x6c373025` — load-store pattern) |
+| `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
+| `seq` | ❌ | ❌ | Produces no output. FP arithmetic is correct, but seq's main loop never executes — likely a long-double comparison bug in `__letf2`/`__gttf2`. Investigation continues. |
 | `tr` | N/A | N/A | Not in this toybox build |
 | `expr` | N/A | N/A | Not in this toybox build |
 
-**Toybox summary**: 31/37 commands pass (5 not in build, 2 SIMD decode
-errors). `sh -c 'echo hi'` works as of beta.2 (previously hung in a
-signal-pending polling loop).
+**Toybox summary**: 32/37 commands pass (5 not in build, 1 produces no
+output). `od` now works (was SIMD decode error in prior beta.3). `seq`
+FP-arithmetic correctness is verified, but its loop-exit comparison is
+still broken. `sh -c 'echo hi'` works as of beta.2 (previously hung in
+a signal-pending polling loop).
 
 ---
 

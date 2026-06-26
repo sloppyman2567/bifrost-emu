@@ -117,7 +117,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
                     // Shifted register form — apply shift_type by d.shift.
-                    b = apply_shift(block, b, d.shift_type, d.shift);
+                    // Pass d.sf so 32-bit ASR sign-extends from bit 31.
+                    b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
             }
             IROp op = (d.cls == InstClass::ADD_REG || d.cls == InstClass::ADD_IMM)
@@ -167,7 +168,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (d.extend != 0) {
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
-                    b = apply_shift(block, b, d.shift_type, d.shift);
+                    // Pass d.sf so 32-bit ASR sign-extends from bit 31.
+                    b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
             }
             bool is_add = (d.cls == InstClass::ADDS_REG || d.cls == InstClass::ADDS_IMM);
@@ -261,14 +263,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 b = load_arm_reg(block, (d.rm == 31) ? 32 : d.rm);
                 // Apply shift to the register operand.
                 if (d.shift != 0 || d.shift_type != 0) {
-                    uint16_t shift_amt = load_imm(block, static_cast<uint64_t>(d.shift));
-                    uint16_t shifted = g_alloc.alloc();
-                    IROp shop = (d.shift_type == 0) ? IROp::SHL
-                              : (d.shift_type == 1) ? IROp::SHR
-                              : (d.shift_type == 2) ? IROp::SAR
-                              : IROp::ROR;
-                    emit(block, shop, shifted, b, shift_amt);
-                    b = shifted;
+                    // Pass d.sf so 32-bit ASR sign-extends from bit 31
+                    // (matches the interpreter's behaviour).
+                    b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
                 // N=1 inverts the register operand (BIC/ORN/EON/BICS).
                 if (d.N) {

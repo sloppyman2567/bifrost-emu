@@ -2021,7 +2021,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 imm_val = 0x00000000; use_imm = true;  // ID_AA64ISAR0_EL1
             }
             if (off >= 0) {
-                emit_load(d, CPU_REG, off);
+                // FPCR and FPSR are 32-bit fields. Using emit_load (64-bit)
+                // here would read 4 bytes past the field into the adjacent
+                // CPU member, returning garbage in the high 32 bits. For
+                // FPSR (offset 804), this leaks 4 bytes of TPIDR_EL0
+                // (offset 808), producing values like 0x176a800000000
+                // instead of 0. The interpreter correctly returns a 32-bit
+                // value, so the JIT must match. Use emit_load32 (which
+                // zero-extends to 64 bits on x86) for these two registers.
+                if (op1 == 3 && crn == 4 && crm == 4 && (op2 == 0 || op2 == 1)) {
+                    emit_load32(d, CPU_REG, off);  // FPCR (op2=0) / FPSR (op2=1)
+                } else {
+                    emit_load(d, CPU_REG, off);  // NZCV (32-bit but stored in pstate), TPIDR_EL0, TPIDRRO_EL0 (64-bit)
+                }
             } else if (use_imm) {
                 if (imm_val <= 0xFFFFFFFFULL) {
                     emit_mov_imm32_zext(d, static_cast<uint32_t>(imm_val));
