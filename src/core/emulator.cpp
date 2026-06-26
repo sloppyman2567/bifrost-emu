@@ -96,6 +96,23 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         "falling back to guest ld.so\n",
                         CODENAME, dyn_linker_->error().c_str());
                 dyn_linker_.reset();
+            } else if (dyn_linker_->static_tls_size() > 0) {
+                // Set up TPIDR_EL0 to point to the end of the static TLS
+                // block (TP = base + total). This is the AArch64 TLS
+                // convention: the thread pointer points PAST the static
+                // TLS block, and TP-relative offsets are negative.
+                uint64_t tp = dyn_linker_->static_tls_base() +
+                              dyn_linker_->static_tls_size();
+                main_cpu_.tpidr_el0 = tp;
+                main_cpu_.tpidrro_el0 = tp;
+                if (verbose_) {
+                    fprintf(stderr, "[%s] native dynlink: static TLS block "
+                            "at 0x%llx (size %llu), TP=0x%llx\n",
+                            CODENAME,
+                            static_cast<unsigned long long>(dyn_linker_->static_tls_base()),
+                            static_cast<unsigned long long>(dyn_linker_->static_tls_size()),
+                            static_cast<unsigned long long>(tp));
+                }
             }
             // Even with native dynlink, we still load the interpreter
             // (ld.so) because some programs call ld.so's _dl_*
@@ -306,13 +323,19 @@ int Emulator::run() {
 
     while (main_cpu_.running) {
         try {
-            if (jit_enabled_ && jit_) {
+            // JIT warmup threshold: use the interpreter for the first
+            // `jit_threshold_` instructions, then switch to JIT. This
+            // avoids JIT compilation overhead for short programs.
+            bool use_jit_now = jit_enabled_ && jit_ &&
+                               (jit_threshold_ == 0 || interp_count_ >= jit_threshold_);
+            if (use_jit_now) {
                 // JIT dispatch — defined in src/jit/jit_glue.cpp so the
                 // FrostJIT definition is available. Falls back to
                 // step_public() for any instruction it can't handle.
                 jit_step(main_cpu_);
             } else {
                 step(main_cpu_);
+                interp_count_++;
             }
         } catch (UnmappedMemory& e) {
             // If the guest has installed a SIGSEGV handler, deliver the

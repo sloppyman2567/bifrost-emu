@@ -2578,7 +2578,22 @@ void FrostJIT::materialize_flags_to_pstate() {
 // (its `default:` case), but that's rare enough to accept the risk.
 static bool instr_will_call_interp(const DecodedInst& d) {
     switch (d.cls) {
-        case InstClass::SIMD_DP:
+        case InstClass::SIMD_DP: {
+            // SIMD_DP now has native IR paths for ADD/SUB/MUL (vector).
+            // Check the encoding to see if it's one of the native ones.
+            // If so, don't mark it as "will call interp" — the block
+            // splitter won't fragment around it.
+            uint32_t op = d.raw;
+            uint8_t size = (op >> 22) & 3;
+            uint32_t sub3 = op & 0xFF20FC00;
+            uint32_t sub3_noq = sub3 & ~(1u << 30);
+            if (sub3_noq == 0x0E208400 ||  // ADD
+                sub3_noq == 0x2E208400 ||  // SUB
+                (sub3_noq == 0x0E209C00 && size != 3)) {  // MUL (not 64-bit)
+                return false;  // native SIMD_ARITH
+            }
+            return true;  // other SIMD_DP ops fall back to interp
+        }
         // FP_SCALAR now has native IR paths for most FP ops
         // (FMOV, FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL, FABS/FNEG/FSQRT,
         // FCMP/FCMPE, FCVT, FRINT, FMADD/FMSUB, FCSEL, FCVTZS/FCVTZU,

@@ -171,6 +171,7 @@ int main(int argc, char** argv) {
     bool use_jit = true;
     std::string fb_dump_path;
     std::string audio_dump_path;
+    uint64_t jit_threshold = 0;  // 0 = use JIT from start
     int  arg_i   = 1;
 
     while (arg_i < argc) {
@@ -183,6 +184,19 @@ int main(int argc, char** argv) {
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
+        // --jit-threshold N: use the interpreter for the first N
+        // instructions, then switch to JIT. Useful for short programs
+        // where JIT compilation overhead exceeds the runtime. Typical
+        // values: 1000-100000. 0 = use JIT from start (default).
+        if (a == "--jit-threshold") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --jit-threshold requires a NUMBER argument\n");
+                return 2;
+            }
+            jit_threshold = strtoull(argv[arg_i + 1], nullptr, 0);
+            arg_i += 2;
+            continue;
+        }
         // `--` is the standard POSIX end-of-options separator. Treat
         // the NEXT argument as the ELF file, even if it starts with `-`.
         // This lets users run programs whose path looks like a flag
@@ -250,6 +264,7 @@ int main(int argc, char** argv) {
     emu.set_trace(debug);
     emu.set_brk_verbose(debug && !quiet);  // -d shows BRKs unless -q
     if (use_jit) emu.enable_jit();
+    emu.set_jit_threshold(jit_threshold);
     emu.install_host_signal_handlers_public();  // v1.4.0-alpha.1: forward host signals to guest
 
     try {

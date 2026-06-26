@@ -68,14 +68,16 @@ constexpr int DT_FINI_ARRAYSZ_  = 28;
 constexpr int DT_RUNPATH_   = 29;
 constexpr int DT_FLAGS_     = 30;
 
-// AArch64 relocation types (ELF64 codes).
-constexpr uint32_t R_AARCH64_ABS64_     = 257;
-constexpr uint32_t R_AARCH64_GLOB_DAT_  = 1025;
-constexpr uint32_t R_AARCH64_JUMP_SLOT_ = 1026;
-constexpr uint32_t R_AARCH64_RELATIVE_  = 1027;
-constexpr uint32_t R_AARCH64_TLS_TPREL_ = 1030;
-constexpr uint32_t R_AARCH64_TLSDESC_   = 1031;
-constexpr uint32_t R_AARCH64_IRELATIVE_ = 1032;
+// AArch64 relocation types (ELF64 codes), per ARM IHI 0056B.
+constexpr uint32_t R_AARCH64_ABS64_         = 257;
+constexpr uint32_t R_AARCH64_GLOB_DAT_      = 1025;
+constexpr uint32_t R_AARCH64_JUMP_SLOT_     = 1026;
+constexpr uint32_t R_AARCH64_RELATIVE_      = 1027;
+constexpr uint32_t R_AARCH64_TLS_DTPMOD_    = 1028;  // TLS module ID
+constexpr uint32_t R_AARCH64_TLS_DTPREL_    = 1029;  // TLS offset within module
+constexpr uint32_t R_AARCH64_TLS_TPREL_     = 1030;  // TLS TP-relative offset
+constexpr uint32_t R_AARCH64_TLSDESC_       = 1031;  // TLS descriptor
+constexpr uint32_t R_AARCH64_IRELATIVE_     = 1032;
 
 // ELF64 section header types.
 constexpr uint32_t SHT_RELA_ = 4;
@@ -151,6 +153,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     if (!parse_dynamic(main_data, main_base, main_obj)) {
         return false;
     }
+    parse_tls(main_data, main_obj);
     objects_.push_back(std::move(main_obj));
     index_symbols(objects_.back());
 
@@ -208,6 +211,11 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Now apply relocations for all loaded objects. We do this after
     // all libraries are loaded so symbol resolution can find symbols
     // in any object.
+    //
+    // First, allocate the static TLS block (must be done before TLS
+    // relocations, which reference tls_tp_offset / tls_mod_id).
+    allocate_static_tls();
+
     // Note: we re-apply using the original file bytes for each object,
     // since the in-memory dynamic section may have been relocated.
     // For the main binary we have `main_data`; for libs we kept their
@@ -271,9 +279,111 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         // Better: skip for now, leave a 0 and hope the
                         // program doesn't use the ifunc.
                         mem_.store<uint64_t>(target, obj.base_addr + A);
-                    } else if (type == R_AARCH64_TLS_TPREL_ ||
-                               type == R_AARCH64_TLSDESC_) {
-                        // TLS unsupported — leave zeroed.
+                    } else if (type == R_AARCH64_TLS_DTPMOD_) {
+                        // TLS_DTPMOD: store the module ID of the symbol's
+                        // defining object. If sym==0, it's the current
+                        // object's module ID (used for LD access).
+                        uint64_t mod_id = obj.tls_mod_id;
+                        if (sym != 0) {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            std::string name = read_guest_cstr(
+                                mem_, obj.strtab_addr + s.st_name);
+                            // Look up which object defines this symbol.
+                            uint64_t sym_addr = resolve_symbol(name);
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr &&
+                                        sym_addr < o.base_addr + 0x10000000) {
+                                        mod_id = o.tls_mod_id;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        mem_.store<uint64_t>(target, mod_id + A);
+                    } else if (type == R_AARCH64_TLS_DTPREL_) {
+                        // TLS_DTPREL: offset of the symbol within its
+                        // module's TLS block. For sym==0, addend is the
+                        // offset (used for LD access to current module).
+                        uint64_t off = static_cast<uint64_t>(A);
+                        if (sym != 0) {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            // st_value is the offset within the defining
+                            // module's PT_TLS segment.
+                            off = s.st_value + A;
+                        }
+                        mem_.store<uint64_t>(target, off);
+                    } else if (type == R_AARCH64_TLS_TPREL_) {
+                        // TLS_TPREL: TP-relative offset for Initial-Exec
+                        // access. Value = symbol's offset within its
+                        // module's TLS block + module's TP-offset.
+                        int64_t tp_off = A;
+                        if (sym != 0) {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            // Find which object defines this symbol.
+                            std::string name = read_guest_cstr(
+                                mem_, obj.strtab_addr + s.st_name);
+                            uint64_t sym_addr = resolve_symbol(name);
+                            int64_t mod_tp_off = obj.tls_tp_offset;
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr &&
+                                        sym_addr < o.base_addr + 0x10000000) {
+                                        mod_tp_off = o.tls_tp_offset;
+                                        break;
+                                    }
+                                }
+                            }
+                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
+                        } else {
+                            tp_off = obj.tls_tp_offset + A;
+                        }
+                        mem_.store<uint64_t>(target, static_cast<uint64_t>(tp_off));
+                    } else if (type == R_AARCH64_TLSDESC_) {
+                        // TLSDESC: a 16-byte descriptor. The first 8
+                        // bytes are the resolver function pointer; the
+                        // second 8 bytes are the argument (TP-offset).
+                        // For static TLS, we use a "lazy resolver" that
+                        // just returns the pre-computed offset — no PLT
+                        // call needed. We store:
+                        //   desc[0] = 0  (resolver = NULL → caller treats
+                        //                 desc[1] as the TP-offset directly)
+                        //   desc[1] = TP-offset
+                        // This is the "static TLSDESC" trick used by
+                        // musl/glibc when the offset is known at load time.
+                        int64_t tp_off = A;
+                        if (sym != 0) {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            std::string name = read_guest_cstr(
+                                mem_, obj.strtab_addr + s.st_name);
+                            uint64_t sym_addr = resolve_symbol(name);
+                            int64_t mod_tp_off = obj.tls_tp_offset;
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr &&
+                                        sym_addr < o.base_addr + 0x10000000) {
+                                        mod_tp_off = o.tls_tp_offset;
+                                        break;
+                                    }
+                                }
+                            }
+                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
+                        } else {
+                            tp_off = obj.tls_tp_offset + A;
+                        }
+                        // desc[0] = 0 (no resolver; inline)
+                        mem_.store<uint64_t>(target, 0);
+                        // desc[1] = TP-offset
+                        mem_.store<uint64_t>(target + 8,
+                            static_cast<uint64_t>(tp_off));
                     } else if (type == R_AARCH64_JUMP_SLOT_) {
                         // Eager binding: resolve now.
                         if (sym == 0) {
@@ -526,9 +636,137 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
     if (!parse_dynamic(data, base, obj)) {
         return 0;
     }
+    parse_tls(data, obj);
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     return base;
+}
+
+// ── parse_tls ──────────────────────────────────────────────────────────
+void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
+                              LoadedObject& obj) {
+    if (data.size() < 64) return;
+    uint64_t e_phoff;
+    uint16_t e_phentsize, e_phnum;
+    memcpy(&e_phoff,     data.data() + 32, 8);
+    memcpy(&e_phentsize, data.data() + 54, 2);
+    memcpy(&e_phnum,     data.data() + 56, 2);
+    for (int i = 0; i < e_phnum; i++) {
+        if (e_phoff + (i + 1) * e_phentsize > data.size()) break;
+        const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
+        uint32_t p_type;
+        memcpy(&p_type, p + 0, 4);
+        if (p_type != 7) continue;  // PT_TLS = 7
+        obj.tls.vaddr  = obj.base_addr + 0;  // relative to base; we'll add base when copying
+        memcpy(&obj.tls.vaddr,  p + 16, 8);  // p_vaddr (relative, NOT adjusted by base)
+        memcpy(&obj.tls.filesz, p + 32, 8);
+        memcpy(&obj.tls.memsz,  p + 40, 8);
+        memcpy(&obj.tls.align,  p + 48, 8);
+        obj.tls.present = true;
+        return;
+    }
+}
+
+// ── allocate_static_tls ────────────────────────────────────────────────
+// Lay out each PT_TLS block in a contiguous region. The TPIDR_EL0
+// register points to the END of the block (TP = base + total_size);
+// each module's TP-offset is negative (its block is below TP).
+//
+// Layout (mirrors glibc/musl static TLS):
+//   [base .. base+libc_memsz)              — module 1 (libc)
+//   [base+libc_memsz .. base+total)         — module 2 (main binary)
+//   ...
+// TP-offset for module i = (its_start_offset) - total_size
+//   (e.g., libc at offset 0 → tp_off = -total_size)
+//   (main  at offset libc_memsz → tp_off = libc_memsz - total_size)
+//
+// We copy initialized TLS data from each object's PT_TLS filesz into
+// the block; the rest (.bss) is zero-filled (mmap gives us zero pages).
+void DynamicLinker::allocate_static_tls() {
+    if (static_tls_base_ != 0) return;  // already allocated
+
+    // Compute total size with alignment.
+    uint64_t total = 0;
+    uint64_t max_align = 16;  // minimum alignment (TP must be 16-aligned)
+    for (auto& obj : objects_) {
+        if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        if (obj.tls.align > max_align) max_align = obj.tls.align;
+        // Align current offset up to obj.tls.align.
+        total = (total + obj.tls.align - 1) & ~(obj.tls.align - 1);
+        obj.tls_mod_id = next_tls_mod_id_++;
+        obj.tls_tp_offset = static_cast<int64_t>(total);  // tentative; finalized below
+        total += obj.tls.memsz;
+    }
+    if (total == 0) return;
+
+    // Round up total to max_align.
+    total = (total + max_align - 1) & ~(max_align - 1);
+    static_tls_size_ = total;
+
+    // Allocate guest memory for the block.
+    // Use mmap_alloc to get a fresh region (typically near other allocations).
+    static_tls_base_ = mem_.mmap_alloc(total + 16);  // +16 for TCB
+    if (static_tls_base_ == 0) {
+        error_ = "failed to allocate static TLS block";
+        return;
+    }
+
+    // TP = base + total (points to the byte AFTER the block).
+    // TP-offsets become negative: tp_off = obj_start_offset - total.
+    uint64_t cursor = 0;
+    for (auto& obj : objects_) {
+        if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        // Align cursor.
+        cursor = (cursor + obj.tls.align - 1) & ~(obj.tls.align - 1);
+        // Finalize TP-offset (negative).
+        obj.tls_tp_offset = static_cast<int64_t>(cursor) - static_cast<int64_t>(total);
+
+        // Copy initialized data from obj's PT_TLS filesz.
+        // obj.tls.vaddr is a file vaddr (relative to base); add base_addr
+        // to get the guest VA where the initialized data lives.
+        uint64_t src = obj.base_addr + obj.tls.vaddr;
+        uint64_t dst = static_tls_base_ + cursor;
+        if (obj.tls.filesz > 0) {
+            try {
+                std::vector<uint8_t> buf(obj.tls.filesz);
+                mem_.read(src, buf.data(), buf.size());
+                mem_.write(dst, buf.data(), buf.size());
+            } catch (...) {
+                // Reading the source failed — leave zeroed (mmap gave us zeros).
+            }
+        }
+        // .bss (memsz - filesz) is already zero from mmap.
+        cursor += obj.tls.memsz;
+    }
+}
+
+// ── TLS accessors ──────────────────────────────────────────────────────
+uint64_t DynamicLinker::tls_mod_id(const std::string& name) const {
+    for (const auto& o : objects_) {
+        if (o.name == name) return o.tls_mod_id;
+    }
+    return 0;
+}
+
+int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
+    for (const auto& o : objects_) {
+        if (o.tls_mod_id == mod_id) return o.tls_tp_offset;
+    }
+    return 0;
+}
+
+// ── resolve_reloc_symbol ───────────────────────────────────────────────
+uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
+                                             uint32_t sym_idx) {
+    if (sym_idx == 0) return 0;
+    Elf64_Sym s;
+    try {
+        mem_.read(obj.symtab_addr + sym_idx * sizeof(s), &s, sizeof(s));
+    } catch (...) {
+        return 0;
+    }
+    std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
+    return resolve_symbol(name);
 }
 
 // ── index_symbols ──────────────────────────────────────────────────────

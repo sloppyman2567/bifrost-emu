@@ -86,6 +86,12 @@ public:
     void set_brk_verbose(bool v) { brk_verbose_ = v; }
     void set_jit_enabled(bool v) { jit_enabled_ = v; }
     bool jit_enabled() const { return jit_enabled_; }
+    // Set the JIT warmup threshold: use the interpreter for the first
+    // `n` instructions, then switch to JIT. This avoids JIT compilation
+    // overhead for short programs (e.g., `toybox seq 1 10`). Set to 0
+    // (default) to use the JIT from the start.
+    void set_jit_threshold(uint64_t n) { jit_threshold_ = n; }
+    uint64_t jit_threshold() const { return jit_threshold_; }
 
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
@@ -191,6 +197,8 @@ private:
     // ── frostJIT ──────────────────────────────────────────────────────
     std::unique_ptr<FrostJIT> jit_;
     bool jit_enabled_ = false;
+    uint64_t jit_threshold_ = 0;  // 0 = use JIT from start; N = interp for N instructions
+    uint64_t interp_count_  = 0;  // instructions run under interpreter (for threshold)
 
     // ── Dynamic linker (for dynamically-linked binaries) ────────────
     // Owned via unique_ptr so we don't need the full DynamicLinker
