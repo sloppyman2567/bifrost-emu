@@ -1114,6 +1114,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // regs[dest] = (int/uint)(v_lo[src1])
             // proper unsigned conversion via the
             // "subtract 2^63, convert signed, add 2^63" trick.
+            //
+            // sf (flags_op) selects the dest GPR width:
+            //   sf=0 → 32-bit GPR (Wd): result is truncated to 32 bits on store
+            //   sf=1 → 64-bit GPR (Xd): full 64-bit result
+            // For the unsigned path, the 2^63 constant must match the FP
+            // precision: 0x43E0000000000000 (double) for width=1, or
+            // 0x5F000000 (float) for width=0. Using the double constant
+            // with single-precision ucomiss/subss reads only the low 32
+            // bits (0x00000000 = 0.0f), breaking the >= 2^63 detection.
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
             clobber_flags();
@@ -1132,12 +1141,21 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 //   if (xmm0 >= 2^63) { xmm0 -= 2^63; CVTTSD2SI rax; rax += 2^63 }
                 //   else                CVTTSD2SI rax
                 // Use RCX for the comparison constant.
-                // mov rcx, 0x43E0000000000000 (double 2^63)
-                emit_mov_imm64(RCX, 0x43E0000000000000ULL);
+                // 2^63 in the matching FP precision.
+                uint64_t pow63 = is_double ? 0x43E0000000000000ULL
+                                           : 0x5F000000ULL;
+                // mov rcx, pow63
+                emit_mov_imm64(RCX, pow63);
                 // movq xmm1, rcx
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
-                // ucomisd xmm0, xmm1 (compare src against 2^63)
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);
+                // ucomisd/iss xmm0, xmm1 (compare src against 2^63)
+                // NOTE: ucomisd takes the 0x66 prefix, ucomiss takes NO
+                // mandatory prefix. Using 0xF2/0xF3 here (as we do for
+                // cvtsi2sd/ss) would generate invalid instruction encodings
+                // on some CPUs and crash with SIGILL. The SSE/SSE2 prefix
+                // conventions are NOT uniform across instructions.
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);
                 // jae .large (CF=0 means src >= 2^63)
                 size_t jae_patch = emit_jcc_rel32_placeholder(0x3);  // JAE rel32
                 // CVTTSD2SI rax, xmm0 (small path)
@@ -1147,7 +1165,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 size_t jmp_done = emit_jmp_rel32_placeholder();
                 size_t large_path = code_buf_used_;
                 patch_jcc_rel32(jae_patch, static_cast<int32_t>(large_path - (jae_patch + 6)));
-                // subsd xmm0, xmm1
+                // subsd/ss xmm0, xmm1
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1);
                 // CVTTSD2SI rax, xmm0
                 emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
@@ -1174,8 +1192,32 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // proper unsigned conversion via the
             // "if (src >= 2^63) subtract 2^63, convert signed, add 2^63
             //  to result as double" trick.
+            //
+            // sf (flags_op) selects the source GPR width:
+            //   sf=0 → 32-bit GPR (Wn)
+            //   sf=1 → 64-bit GPR (Xn)
+            // For SIGNED conversion (SCVTF) with sf=0, we use the 32-bit
+            // CVTSI2SD/SS form (no REX.W) so eax is interpreted as int32.
+            // For UNSIGNED conversion (UCVTF) with sf=0, we MUST use the
+            // 64-bit form (REX.W) because the 32-bit value has been zero-
+            // extended to 64 bits in the register, and interpreting it as
+            // int64 gives the correct unsigned value (uint32 < 2^63).
+            // Using the 32-bit form for UCVTF would treat eax as int32,
+            // turning 0xFFFFFFFF (uint32 max = 4294967295) into -1 and
+            // producing -1.0f instead of 4.29e+09.
+            //
+            // For the unsigned path, the 2^63 addend must match the FP
+            // precision: 0x43E0000000000000 (double) for width=1, or
+            // 0x5F000000 (float) for width=0. Using the double constant
+            // with addss reads only the low 32 bits (0x00000000 = 0.0f),
+            // silently losing the 2^63 correction.
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
+            bool is_64bit_src = (inst.flags_op != 0);
+            // REX.W prefix: 64-bit form when source is 64-bit OR when
+            // unsigned (so the zero-extended 32-bit value is read as
+            // positive int64).
+            uint8_t rex_w = (is_64bit_src || is_unsigned) ? 0x48 : 0x00;
             clobber_flags();
             // FP_I2F clobbers RAX (GPR load), RCX (subtract flag), and
             // RDX (2^63 constant) in the unsigned path. Flush+invalidate
@@ -1203,22 +1245,30 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 size_t small_path = code_buf_used_;
                 patch_jcc_rel32(jb_patch, static_cast<int32_t>(small_path - (jb_patch + 6)));
                 (void)large_path;
-                // CVTSI2SD xmm0, rax
-                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A);
+                // CVTSI2SD/SS xmm0, rax (or eax for 32-bit source)
+                emit_byte(prefix);
+                if (rex_w) emit_byte(rex_w);
+                emit_byte(0x0F); emit_byte(0x2A);
                 emit_byte(0xC0);  // xmm0, rax
-                // if (rcx != 0) add 2^63 as double
+                // if (rcx != 0) add 2^63 as double/single
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC9);  // test rcx, rcx
                 size_t jz_patch = emit_jcc_rel32_placeholder(0x4);  // JZ rel32
-                // mov rdx, 0x43E0000000000000 (double 2^63)
-                emit_mov_imm64(RDX, 0x43E0000000000000ULL);
+                // 2^63 in the matching FP precision.
+                //   double: 0x43E0000000000000
+                //   single: 0x5F000000 (low 32 bits of xmm1)
+                uint64_t pow63 = is_double ? 0x43E0000000000000ULL
+                                           : 0x5F000000ULL;
+                emit_mov_imm64(RDX, pow63);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xCA);  // movq xmm1, rdx
                 // addsd/addss xmm0, xmm1
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1);
                 size_t done_path = code_buf_used_;
                 patch_jcc_rel32(jz_patch, static_cast<int32_t>(done_path - (jz_patch + 6)));
             } else {
-                // CVTSI2SD xmm0, rax (convert signed int64 to double)
-                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A);
+                // CVTSI2SD/SS xmm0, rax (or eax for 32-bit source)
+                emit_byte(prefix);
+                if (rex_w) emit_byte(rex_w);
+                emit_byte(0x0F); emit_byte(0x2A);
                 emit_byte(0xC0);  // xmm0, rax
             }
 

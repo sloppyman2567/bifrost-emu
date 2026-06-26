@@ -765,29 +765,55 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
 
             case IROp::FP_F2I: {
+                // FP→int conversion. Result width is determined by sf
+                // (flags_op), NOT by the FP precision: FCVTZS Xd, Sn writes
+                // a 64-bit int; FCVTZS Wd, Dn writes a 32-bit int.
                 bool is_unsigned = (inst.imm == 1);
+                bool is_64bit = (inst.flags_op != 0);
                 if (inst.width == 1) {
                     double a; memcpy(&a, &cpu.v_lo[inst.src1], 8);
-                    int64_t r = static_cast<int64_t>(a);
-                    vregs[inst.dest] = is_unsigned ? static_cast<uint64_t>(r) : static_cast<uint64_t>(r);
+                    if (is_unsigned) {
+                        uint64_t r = (a < 0) ? 0 : static_cast<uint64_t>(a);
+                        vregs[inst.dest] = is_64bit ? r : static_cast<uint32_t>(r);
+                    } else {
+                        int64_t r = static_cast<int64_t>(a);
+                        vregs[inst.dest] = is_64bit ? static_cast<uint64_t>(r)
+                                                    : static_cast<uint32_t>(static_cast<int32_t>(r));
+                    }
                 } else {
                     float a; uint32_t tb = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
                     memcpy(&a, &tb, 4);
-                    int32_t r = static_cast<int32_t>(a);
-                    vregs[inst.dest] = static_cast<uint32_t>(r);
+                    if (is_unsigned) {
+                        uint64_t r = (a < 0) ? 0 : static_cast<uint64_t>(a);
+                        vregs[inst.dest] = is_64bit ? r : static_cast<uint32_t>(r);
+                    } else {
+                        int64_t r = static_cast<int64_t>(a);
+                        vregs[inst.dest] = is_64bit ? static_cast<uint64_t>(r)
+                                                    : static_cast<uint32_t>(static_cast<int32_t>(r));
+                    }
                 }
                 break;
             }
             case IROp::FP_I2F: {
+                // int→FP conversion. Source GPR width is determined by sf
+                // (flags_op), NOT by the FP precision: SCVTF Sd, Wn reads a
+                // 32-bit int; SCVTF Sd, Xn reads a 64-bit int.
                 bool is_unsigned = (inst.imm == 1);
+                bool is_64bit = (inst.flags_op != 0);
                 if (inst.width == 1) {
-                    double r = is_unsigned ? static_cast<double>(static_cast<uint64_t>(vregs[inst.src1]))
-                                          : static_cast<double>(static_cast<int64_t>(vregs[inst.src1]));
+                    double r = is_unsigned
+                        ? static_cast<double>(is_64bit ? vregs[inst.src1]
+                                                       : static_cast<uint32_t>(vregs[inst.src1]))
+                        : static_cast<double>(is_64bit ? static_cast<int64_t>(vregs[inst.src1])
+                                                       : static_cast<int32_t>(vregs[inst.src1]));
                     cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
                     cpu.v_hi[inst.dest] = 0;
                 } else {
-                    float r = is_unsigned ? static_cast<float>(static_cast<uint32_t>(vregs[inst.src1]))
-                                         : static_cast<float>(static_cast<int32_t>(vregs[inst.src1]));
+                    float r = is_unsigned
+                        ? static_cast<float>(is_64bit ? vregs[inst.src1]
+                                                      : static_cast<uint32_t>(vregs[inst.src1]))
+                        : static_cast<float>(is_64bit ? static_cast<int64_t>(vregs[inst.src1])
+                                                      : static_cast<int32_t>(vregs[inst.src1]));
                     uint32_t tr; memcpy(&tr, &r, 4);
                     cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
                 }

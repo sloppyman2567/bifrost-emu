@@ -15,9 +15,13 @@
 //   --raw-tty       force raw TTY mode (per-character input, no echo)
 //                   default is to leave the host TTY alone so guest
 //                   line-buffered stdio (fgets, gets, readline) works
-//   --jit           enable frostJIT (experimental block-translation JIT;
-//                   shares the decoder with the interpreter, falls back
-//                   to the interpreter for unsupported instructions)
+//   --no-jit        disable frostJIT and use the interpreter; this is the
+//                   escape hatch for programs that hit a JIT bug or for
+//                   debugging the interpreter directly. JIT is on by
+//                   default because the 35-test suite, toybox, and musl
+//                   libc all pass under it (6.4x speedup on compute workloads).
+//   --jit           enable frostJIT (now the default; kept for backwards-
+//                   compatibility with existing scripts)
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
@@ -61,7 +65,8 @@ static void print_banner() {
         "    -q, --quiet     suppress BRK warnings (even with -d)\n"
         "    --fb-dump PATH  dump /dev/fb0 to PATH on exit (PPM)\n"
         "    --raw-tty       force raw TTY mode (per-char input, no echo)\n"
-        "    --jit           enable frostJIT (experimental block-translation JIT)\n"
+        "    --no-jit        use interpreter only (JIT is on by default)\n"
+        "    --jit           enable frostJIT (default; for compatibility)\n"
         "    -V, --version   show version and exit\n"
         "    -h, --help      show this message\n"
         "\n"
@@ -158,7 +163,12 @@ int main(int argc, char** argv) {
     bool verbose = false;
     bool quiet   = false;
     bool raw_tty = false;
-    bool use_jit = false;  // experimental frostJIT
+    // JIT is now ON by default. Use --no-jit to force the interpreter.
+    // The 35-test suite, toybox integration, and musl libc all pass
+    // under the JIT, and bench_mips shows a 6.4x speedup. The
+    // interpreter is still available as a fallback for programs that
+    // hit a JIT bug or for debugging.
+    bool use_jit = true;
     std::string fb_dump_path;
     std::string audio_dump_path;
     int  arg_i   = 1;
@@ -172,6 +182,16 @@ int main(int argc, char** argv) {
         if (a == "-q" || a == "--quiet")    { quiet   = true;  arg_i++; continue; }
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
+        if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
+        // `--` is the standard POSIX end-of-options separator. Treat
+        // the NEXT argument as the ELF file, even if it starts with `-`.
+        // This lets users run programs whose path looks like a flag
+        // (e.g. `bifrost-emu -- ./-myprogram`) and matches the
+        // convention used by qemu-user.
+        if (a == "--") {
+            arg_i++;
+            break;
+        }
         if (a == "--fb-dump") {
             if (arg_i + 1 >= argc) {
                 fprintf(stderr, "bifrost-emu: --fb-dump requires a PATH argument\n");
@@ -198,7 +218,7 @@ int main(int argc, char** argv) {
         break;
     }
 
-    // No file given → show the banner
+    // No file given → show the Banner
     if (arg_i >= argc) { print_banner(); return 0; }
 
     std::string elf_path = argv[arg_i];

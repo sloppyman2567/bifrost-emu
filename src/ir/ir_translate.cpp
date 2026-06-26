@@ -1016,9 +1016,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             // FMOV (general ↔ FP, 32-bit): native path.
             // Encoding: 0x1E200000 with bit 16 = to_fp (1) or to_gpr (0).
+            // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0),
+            // mirroring the 64-bit check above. Without this guard,
+            // `scvtf s0, w0` (0x1E220000) and `ucvtf s0, w0` (0x1E230000)
+            // match this mask and get misdecoded as a raw GPR↔FP bit copy.
             // FMOV Sn, Wn → v_lo[rd] = (uint32_t)regs[rn]; v_hi[rd] = 0
             // FMOV Wd, Sn → regs[rd] = (uint32_t)v_lo[rn]
-            if ((op & 0xFFE0FC00) == 0x1E200000) {
+            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
                     // Wn → Sn: load GPR, mask to 32 bits, store to v_lo[rd].
@@ -1145,22 +1149,64 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
             // FCVTZS/FCVTZU: FP→int (toward zero)
-            // Encoding: (op & 0x7F3F0000) == 0x1E380000, rmode=3 (toward zero)
-            if ((op & 0x7F3F0000) == 0x1E380000) {
+            // Encoding: (op & 0x7F3E0000) == 0x1E380000, rmode=3 (toward zero)
+            // Mask 0x7F3E0000 excludes bit 16 (U/S selector) so both
+            // FCVTZS and FCVTZU match. The previous mask 0x7F3F0000
+            // included bit 16, so FCVTZU fell through to CALL_INTERP
+            // (interpreter) which has the same mask bug — resulting in
+            // a silent NOP for every unsigned float→int conversion.
+            // We pass sf (bit 31 of the opcode) via flags_op so the JIT
+            // can choose between 32-bit and 64-bit CVTTSD2SI.
+            //
+            // For 32-bit dest (sf=0), the JIT's CVTTSD2SI produces a
+            // 64-bit result. AArch64 32-bit register writes must zero
+            // the upper 32 bits — otherwise a subsequent 64-bit read of
+            // Xd would see sign-extension instead of zero-extension,
+            // breaking code that reuses the register as a 64-bit value.
+            // We emit a ZEXT after FP_F2I when sf=0 to enforce this.
+            if ((op & 0x7F3E0000) == 0x1E380000) {
                 bool is_unsigned = (op >> 16) & 1;
+                uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
-                    emit(block, IROp::FP_F2I, rd, rn, 0, ftype, 0, 0, is_unsigned, cur_pc);
+                    // For 32-bit dest (sf=0), the JIT's CVTTSD2SI produces a
+                    // 64-bit result. AArch64 32-bit register writes must zero
+                    // the upper 32 bits — otherwise a subsequent 64-bit read
+                    // of Xd would see sign-extension instead of zero-extension,
+                    // and a cbz/cbnz w0 test on the 32-bit result could see
+                    // stale high bits from a previous computation. We emit a
+                    // ZEXT after FP_F2I when sf=0 to enforce this.
+                    uint16_t tmp = g_alloc.alloc();
+                    emit(block, IROp::FP_F2I, tmp, rn, 0, ftype, 0,
+                         sf, is_unsigned, cur_pc);
+                    if (!sf) {
+                        uint16_t z = g_alloc.alloc();
+                        emit(block, IROp::ZEXT, z, tmp, 0, 32);
+                        store_arm_reg(block, rd, z);
+                    } else {
+                        store_arm_reg(block, rd, tmp);
+                    }
                     return false;
                 }
             }
             // SCVTF/UCVTF: int→FP
-            // Encoding: (op & 0x7F3F0000) == 0x1E220000
+            // Encoding: (op & 0x7F3E0000) == 0x1E220000
+            // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
+            // and UCVTF (bit 16=1) match. The previous mask 0x7F3F0000
+            // included bit 16, so UCVTF (0x1E230000) did NOT match
+            // 0x1E220000 and was silently NOP'd.
+            // We pass sf (bit 31) via flags_op so the JIT can choose
+            // between 32-bit (CVTSI2SS eax) and 64-bit (CVTSI2SS rax)
+            // source forms. Without this, `scvtf s0, w0` with w0=-1
+            // would convert 0x00000000FFFFFFFF (4294967295) instead of
+            // -1, producing 4.29e+09 instead of -1.0f.
             // Checked AFTER FMOV imm (which has a tighter mask and must
             // match first to avoid collision).
-            if ((op & 0x7F3F0000) == 0x1E220000) {
+            if ((op & 0x7F3E0000) == 0x1E220000) {
                 bool is_unsigned = (op >> 16) & 1;
+                uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
-                    emit(block, IROp::FP_I2F, rd, rn, 0, ftype, 0, 0, is_unsigned, cur_pc);
+                    emit(block, IROp::FP_I2F, rd, rn, 0, ftype, 0,
+                         sf, is_unsigned, cur_pc);
                     return false;
                 }
             }

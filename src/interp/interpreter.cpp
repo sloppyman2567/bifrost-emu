@@ -2006,7 +2006,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FMOV (general ↔ FP, 32-bit)
-                if ((op & 0xFFE0FC00) == 0x1E200000) {
+                // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0),
+                // exactly mirroring the 64-bit check above. Without this
+                // guard, `scvtf s0, w0` (0x1E220000) and `ucvtf s0, w0`
+                // (0x1E230000) match this mask and get misdecoded as a raw
+                // GPR↔FP bit copy, producing garbage for any int→FP
+                // conversion from a 32-bit GPR. This broke musl's
+                // __floatscan inf/nan detection (strtod("-inf") returned
+                // -nan) because the sign computation does `scvtf s1, w23`
+                // with w23=-1 and expects s1=-1.0f.
+                if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))) {
                     bool to_fp = (op >> 16) & 1;
                     if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
                     else       { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
@@ -2199,16 +2208,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // FCVT{N,P,M,Z}{S,U} — FP to int with explicit rounding mode.
+                // FCVT{N,P,M,Z,A}{S,U} — FP to int with explicit rounding mode.
                 // Encoding: 0x1E280000 (FCVTNS) .. 0x1E390000 (FCVTZU).
-                // The rounding mode is in bits[16:19]:
-                //   0000 = N (nearest even), 0001 = P (+inf), 0010 = M (-inf),
-                //   0011 = Z (zero), 0100 = A (FPCR mode)
-                // Bit 7 (of the rmode field, i.e., bit 22) selects unsigned.
-                // We handle the common Z (zero) variant via the existing
-                // FCVTZS/FCVTZU path; the others use their respective
-                // rounding functions.
-                if ((op & 0x7F3F0000) == 0x1E280000 && ((op >> 16) & 1) == 0) {
+                // The rounding mode is in bits[20:19]:
+                //   00 = N (nearest even), 01 = P (+inf), 10 = M (-inf),
+                //   11 = Z (zero); bit[16]=1 selects the unsigned variant.
+                // Mask 0x7F3E0000 excludes bit 16 so both signed and
+                // unsigned variants of N/P/M/A match here. (The Z variant
+                // also matches here, but is explicitly dispatched to the
+                // FCVTZS/FCVTZU path below for clarity; the result is the
+                // same either way since rmode=3 → std::trunc.)
+                if ((op & 0x7F3E0000) == 0x1E280000) {
                     // FCVTNS/FCVTNM/FCVTNP/FCVTNU (and FCVTAS via rmode=0b1100)
                     uint8_t rmode = (op >> 19) & 0x7;  // bits 21:19
                     bool is_unsigned = ((op >> 16) & 1);  // bit 16 = U
@@ -2291,7 +2301,13 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // FCVTZS/FCVTZU
-                if ((op & 0x7F3F0000) == 0x1E380000) {  // FCVTZS/FCVTZU
+                // Mask 0x7F3E0000 deliberately excludes bit 16 (the U/S
+                // selector) so that both FCVTZS (bit 16=0) and FCVTZU
+                // (bit 16=1) match. The previous mask 0x7F3F0000 included
+                // bit 16, so FCVTZU fell through to "Unknown FP — NOP",
+                // silently producing zero for every unsigned float→int
+                // conversion. The same defect affected SCVTF/UCVTF below.
+                if ((op & 0x7F3E0000) == 0x1E380000) {  // FCVTZS/FCVTZU
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
                     if (ftype) {
@@ -2316,7 +2332,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // SCVTF/UCVTF
-                if ((op & 0x7F3F0000) == 0x1E220000) {  // SCVTF/UCVTF
+                // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
+                // and UCVTF (bit 16=1) match. The previous mask 0x7F3F0000
+                // included bit 16, so UCVTF (0x1E230000) did NOT match
+                // 0x1E220000 and was silently NOP'd.
+                if ((op & 0x7F3E0000) == 0x1E220000) {  // SCVTF/UCVTF
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
                     if (ftype) {

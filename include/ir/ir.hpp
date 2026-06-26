@@ -117,8 +117,10 @@ enum class IROp : uint8_t {
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype
+                   // flags_op = sf (0=32-bit GPR dest, 1=64-bit GPR dest)
     FP_I2F,        // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
+                   // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
     FP_CMP,        // compare v_lo[src1] vs v_lo[src2], set pstate
                    // imm = 0 (FCMP), 1 (FCMPE); width = ftype
     FP_MOVI,       // v_lo[dest] = imm (decoded FP immediate); v_hi=0
