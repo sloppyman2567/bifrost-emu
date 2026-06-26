@@ -6,305 +6,130 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0-beta.3] — 2026-06-26 (SCVTF/FMOV decode + FMADD operand fix — toybox seq works)
+## [1.4.0-beta.3] — 2026-06-26 (JIT correctness + performance overhaul)
 
 ### Summary
 
-Fixed two JIT correctness bugs that prevented `toybox seq` from producing
-output. `seq 1 5` now correctly outputs `1\n2\n3\n4\n5\n`. All 35 JIT
-test programs still pass; `bench_mips` still 573 MIPS (no regression).
+The beta.3 release is a major JIT overhaul spanning four areas: FP
+decode correctness, 32-bit shift semantics, int↔FP conversion decode,
+and register allocator / codegen performance. All 35 JIT test programs
+pass; `bench_mips` achieves 573 MIPS (5.9x speedup over interpreter);
+`toybox seq`, `printf "%g"`, `strtod`, `ls /`, and `od` all work.
 
-### Bug fixes
+### JIT correctness fixes
 
-- **SCVTF misdecoded as FMOV** (interpreter + IR translator). The FMOV
-  (general↔FP, 64-bit) check used mask `0xFFE0FC00` with value
-  `0x9E600000`, but SCVTF (general→FP) has encoding `0x9E62xxxx` which
-  also matches this mask. The distinguishing bit is bit[18]: FMOV has
-  bit[18]=1, SCVTF has bit[18]=0. Without this check, `scvtf d0, x0`
-  (int64→double conversion) was misdecoded as `fmov d0, x0` (raw GPR
-  bit copy), so the integer was not converted to a double — the raw
-  register bits were copied to the FP register instead. This broke
-  toybox seq's loop variable initialization (`scvtf d11, x21` with
-  `x21=0` produced `d11=0` instead of `d11=0.0`, and `scvtf d11, x21`
-  with `x21=5` produced `d11=5` (raw int) instead of `d11=5.0` (double)).
-  Fixed by adding `&& (op & (1u << 18))` to the FMOV check in both the
-  interpreter (`src/interp/interpreter.cpp`) and the IR translator
-  (`src/ir/ir_translate.cpp`, two call sites: `InstClass::FMOV` and
-  `InstClass::FP_SCALAR`).
+#### FP decode (5 bugs)
 
-- **FMADD/FMSUB operand sources wrong** (IR translator). The FMADD IR
-  translator used `load_arm_reg()` to load the FP operand registers
-  (rn, rm) into scratch vregs, then passed the scratch vreg indices as
-  `src1`/`src2` to the FMADD IR op. But the JIT's FMADD code reads
-  operands from `V_LO_OFF + inst.src1 * 8` and `V_LO_OFF + inst.src2 *
-  8`, treating `src1`/`src2` as FP register indices (0–31), not scratch
-  vreg indices (33+). This caused FMADD to read from out-of-bounds
-  memory (V_LO_OFF + 33*8 = 552, which is past the 32-entry v_lo array
-  and into v_hi territory), producing garbage results. The first
-  iteration of seq's loop computed `fmadd d11, d11, d8, d10` =
-  `0*step+first` = `0` instead of `1`, causing a spurious leading `0`
-  in the output. Fixed by passing FP register indices directly (rn, rm)
-  as `src1`/`src2` — matching how `FP_BINOP` already works — instead of
-  routing through `load_arm_reg`. Both FMADD call sites fixed:
-  `InstClass::FP_SCALAR` (0x1F encoding) and `InstClass::FMADD/FMSUB`.
+- **FCMP `#0.0` form misdecoded as register form.** The IR translator
+  used `rm == 31` to detect the zero form, but the ARM ARM encodes it
+  with `bits[4:0] = 0b01000`. Fixed by checking `bits[4:0] == 0x08`.
+- **FP 1-source opcode extracted from wrong bits** (4→6 bits). FSQRT
+  dispatched as FRINT*; FABS/FNEG fell through to CALL_INTERP.
+- **FMOV (scalar, immediate) mask only matched double precision.**
+  Single-precision FMOV imm fell through to the FP 1-source handler.
+- **FMOV imm misdecoded as SCVTF.** The SCVTF mask `0x7F3F0000` also
+  matches FMOV imm. Fixed by checking FMOV imm BEFORE SCVTF/FCVTZS.
+- **Interpreter FCMP missing** — fell into FP 1-source handler and was
+  executed as FNEG. Added explicit FCMP handler.
 
-### Test results
+#### 32-bit ASR sign extension (3 bugs)
 
-- **35/35 JIT tests pass** (no regressions).
-- **`toybox seq 1 5`** = `1 2 3 4 5` (was no output).
-- **`toybox seq 1 0.5 3`** = `1.0 1.5 2.0 2.5 3.0` (was no output).
-- **`toybox seq -w 1 10`** = `01 02 ... 10` (was no output).
-- **`toybox seq -s ',' 1 5`** = `1,2,3,4,5` (was no output).
-- **`toybox seq 5 -1 1`** = `5 4 3 2 1` (negative step works).
-- **`bench_mips`**: 1.4s (573 MIPS) — no performance regression.
-- **JIT verify mode**: 0 divergences in `jit_fp_scalar`, `jit_madd`,
-  `jit_simd`.
-- **FWD mode**: 10/10 tests pass; `toybox seq` works under FWD too.
+- **32-bit ASR in ADD/SUB shifted register** (interpreter). The ASR
+  branch cast the already-zero-extended operand to `int64_t`, leaving
+  the sign bit at bit 63 (always 0 for 32-bit ops). This made 32-bit
+  ASR behave like LSR, breaking `strtod()` for any input with a decimal
+  point or exponent (musl's `__floatscan` exponent-range check failed).
+  Fixed by casting through `int32_t` first.
+- **32-bit ASR in logical shifted register** (interpreter). Same bug
+  in AND/ORR/EOR/ANDS. Fixed identically.
+- **32-bit ASR in JIT** (IR translator + `apply_shift`). The JIT's SAR
+  uses x86's 64-bit `sar`, which looks at bit 63. For 32-bit ASR, the
+  operand was zero-extended, so the sign bit was 0. Fixed by adding an
+  `sf` parameter to `apply_shift`; when `sf=false` and `shift_type==ASR`,
+  a `SEXT` IR op is emitted before the `SAR`.
 
-### Known remaining issues
+#### Int↔FP conversion decode (2 bugs)
 
-- `strtod("inf")` still returns `-nan` instead of `inf` (separate
-  inf/nan string-parsing path in `__floatscan`).
-- `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes (pre-existing).
+- **SCVTF misdecoded as FMOV.** The FMOV (general↔FP, 64-bit) check
+  `(op & 0xFFE0FC00) == 0x9E600000` also matches SCVTF (`0x9E62xxxx`).
+  The distinguishing bit is bit[18]: FMOV=1, SCVTF=0. Without this,
+  `scvtf d0, x0` was treated as `fmov d0, x0` (raw bit copy), breaking
+  toybox seq's loop variable initialization. Fixed by adding
+  `&& (op & (1u << 18))` to the FMOV check in both interpreter and IR
+  translator (2 call sites each).
+- **FMADD/FMSUB operand sources wrong** (IR translator). The FMADD
+  translator used `load_arm_reg()` (which loads GPRs) for FP operands,
+  creating scratch vregs (33+). But the JIT's FMADD reads
+  `V_LO_OFF + src*8`, treating src as an FP register index (0–31).
+  This caused out-of-bounds reads into `v_hi` territory. Fixed by
+  passing FP register indices directly — matching how `FP_BINOP` works.
 
-## [1.4.0-beta.3] — 2026-06-26 (32-bit ASR + FPSR read fixes — strtod works)
+#### System register reads (1 bug)
 
-### Summary
+- **JIT `mrs xN, fpsr/fpcr` read 8 bytes instead of 4.** `FPSR` and
+  `FPCR` are `uint32_t` fields, but the JIT used `emit_load` (64-bit)
+  for all system registers. For `FPSR` (offset 804), this leaked
+  `TPIDR_EL0` (offset 808) into the high 32 bits. Fixed by using
+  `emit_load32` for FPCR/FPSR.
 
-Fixed two correctness bugs in shift/register handling that broke
-`strtod()` for any number containing a decimal point or exponent
-(`strtod("0.5")` returned `inf` with `ERANGE`), plus a JIT-only bug
-where `mrs xN, fpsr` returned garbage from the adjacent `TPIDR_EL0`
-field. All 35 JIT test programs still pass; `toybox printf "%g" 3.14`
-now works; `toybox od`, `head`, `sort`, `rev`, `wc`, `cat`, `ls /`
-all still work.
+### JIT performance optimizations
 
-### Bug fixes
-
-- **32-bit ASR in ADD/SUB shifted register** (interpreter). The
-  `case 2` (ASR) branch cast the operand to `int64_t` *after* it had
-  been zero-extended to 64 bits by the `if (!d.sf) b &= 0xFFFFFFFF`
-  mask above. Because the high 32 bits were already 0, the sign bit
-  lived at bit 31 (correct for 32-bit ASR) but `int64_t` treated it
-  as bit 63 (always 0), so ASR silently degraded into LSR. This
-  broke musl's `__floatscan` exponent-range check
-  (`neg w0, w0, asr #1` with `w0=0xfffffbcf` produced `0x80000219`
-  instead of `0x00000219`), causing `strtod` to take the overflow
-  path and return `HUGE_VAL` with `errno=ERANGE` for any input with
-  a decimal point or exponent. Fixed by casting through
-  `int32_t` first (which sign-extends to `int64_t` correctly) for
-  the 32-bit case.
-
-- **32-bit ASR in logical shifted register** (interpreter). Same
-  bug as above in the AND/ORR/EOR/ANDS handler — the `case 2` ASR
-  branch used `(static_cast<int64_t>(b)) >> d.shift` which behaved
-  like LSR for 32-bit operations. Fixed identically.
-
-- **32-bit ASR in JIT** (IR translator + `apply_shift`). The IR
-  `apply_shift` helper emitted `SAR` without knowing the operation
-  width, and the JIT's SAR uses x86's 64-bit `sar r64, cl`. For
-  32-bit `neg w0, w0, asr #1`, the operand was zero-extended to
-  64 bits (`0x00000000fffffbcf`), so the 64-bit SAR saw sign bit 0
-  and produced `0x000000007ffffde7` instead of `0xfffffffffffffde7`.
-  The subsequent SUB then computed `0 - 0x000000007ffffde7 =
-  0xffffffff80000219` (64-bit), and the final `zext_if_32bit`
-  truncated to `0x80000219` — matching the interpreter's pre-fix
-  behaviour. Fixed by adding an `sf` parameter to `apply_shift`;
-  when `sf=false` and `shift_type==ASR`, a `SEXT` (sign-extend from
-  32 to 64 bits) IR op is emitted before the `SAR`, so the JIT's
-  64-bit SAR sees the correct sign bit. All three call sites
-  (ADD/SUB shifted register, ADDS/SUBS shifted register, logical
-  shifted register) now pass `d.sf`.
-
-- **JIT `mrs xN, fpsr` / `mrs xN, fpcr` read 8 bytes instead of 4**.
-  `FPSR` and `FPCR` are 32-bit fields in the `CPU` struct, but the
-  JIT's `MRS` handler used `emit_load` (64-bit `mov r64, [base+off]`)
-  for all system registers. For `FPSR` (offset 804), this read 4
-  bytes of `FPSR` plus 4 bytes of the adjacent `TPIDR_EL0` (offset
-  808), producing values like `0x176a800000000` instead of `0`.
-  `FPCR` (offset 800) was less affected because `FPSR` (804) is
-  usually 0, but the same leak existed. Fixed by using
-  `emit_load32` (32-bit load, zero-extended on x86) for these two
-  registers. The interpreter was already correct.
-
-### Test results
-
-- **35/35 JIT tests pass** (no regressions).
-- **`strtod("0.5")` = 0.500000** (was `inf`).
-- **`strtod("1.5")` = 1.500000** (was `inf`).
-- **`strtod("1e1")` = 10.000000** (was `inf`).
-- **`toybox printf "%g" 3.14`** = `3.14` (was no output / crash).
-- **`toybox ls /`** still works (no regression).
-- **`bench_mips`**: 1.4s (573 MIPS) — no performance regression.
-- **FWD mode**: 10/10 tests pass (was 8/10 — `jit_block_split` and
-  `jit_fp_scalar` failed at session start; both now pass with the
-  ASR fix, which also benefits the FWD-mode load-forwarding path).
-
-### Known remaining issues
-
-- `toybox seq 1 5` still produces no output. The FP arithmetic is
-  correct (verified: `1.0L + 2^28 = 268435457.0L`), but seq's main
-  loop never executes — it appears to take the "first > last" exit
-  path even when `first=1, last=5`. The comparison routine
-  (`__letf2` or similar) may have a subtle bug. Investigation
-  continues; this is a pre-existing issue not introduced by this
-  change.
-- `strtod("inf")` returns `-nan` instead of `inf`. The inf/nan
-  string parsing path in `__floatscan` is separate from the
-  decimal-parsing path fixed here.
-- `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes
-  (pre-existing — confirmed by testing original code with FWD).
-
-## [1.4.0-beta.3] — 2026-06-26 (JIT performance overhaul — 573 MIPS, 5.9x speedup)
-
-
-### Summary
-
-frostJIT now achieves **573 MIPS** on `bench_mips.elf` (100M iterations in
-1.4s), up from 96 MIPS on the interpreter (8.3s) — a **5.9x speedup**. All
-39 test programs still pass under both the interpreter and JIT.
-
-### JIT — regalloc + codegen optimizations
-
-- **Self-loop chaining** (biggest win). When a BRCOND's taken target equals
-  the block's own start PC, a 5-byte `jmp rel32` slot is emitted on the
-  taken path. After the block is fully compiled, the slot is patched to
-  jump directly to the block body start — skipping the epilogue, dispatcher,
-  and prologue. The block body runs again immediately. `bench_mips` went
-  from 7.4s to 1.4s. Disable with `BIFROST_NO_SELFLOOP=1`.
-
-- **Liveness-based register freeing.** The JIT now computes each vreg's
-  last use (backward scan) and frees its host register immediately after
-  that op, instead of keeping it cached until eviction. Only scratch vregs
-  (33+) are tracked — ARM reg vregs (0-31) must be flushed at the epilogue.
-
-- **Improved ALU codegen.** ADD/SUB/AND/OR/XOR/MUL/SHL/SHR/SAR/ROR no
-  longer force operands into RAX/RCX. They use whatever host regs the
-  operands are already cached in, eliminating the massive stack spilling
-  the old codegen caused. New `alloc_reg_excluding()` helper allocates
-  dest without colliding with src1/src2's host regs. Commutative ops
-  handle `dest == src2` by computing in src2's reg (swapped operands).
-
-- **Hotness tracker fix.** Pure JIT blocks (no CALL_INTERP fallbacks) are
-  no longer demoted to `interp_only` after 5000 hits. The old behavior
-  disabled the JIT for `bench_mips`'s loop block after 5000 iterations,
-  falling back to the interpreter for the remaining 99.99M — the silent
-  killer that made the JIT appear no faster than the interpreter.
-
-- **Watchdog limit raised** from 100K to 500M. Tight loops legitimately
-  run 100M+ iterations through the dispatcher before self-loop chaining
-  kicks in. The old 100K limit would false-trigger on the first tight loop.
-
-- **Deferred flag materialization.** The JCC is emitted first (it uses host
-  RFLAGS directly), then flags are materialized to pstate on each path
-  separately. Extracted `materialize_flags_to_pstate()` helper to remove
-  code duplication.
+- **Self-loop chaining** (biggest win). When a BRCOND's taken target
+  equals the block's own start PC, a 5-byte `jmp rel32` slot is emitted
+  on the taken path and patched to jump directly to the block body.
+  `bench_mips` went from 7.4s to 1.4s. Disable with `BIFROST_NO_SELFLOOP=1`.
+- **Liveness-based register freeing.** Vreg last-use is computed via
+  backward scan; the host register is freed immediately after. Only
+  scratch vregs (33+) are tracked.
+- **Register-cache-aware ALU codegen.** ADD/SUB/AND/OR/XOR/MUL/SHL/SHR/
+  SAR/ROR use whatever host regs operands are already cached in,
+  eliminating massive stack spilling. New `alloc_reg_excluding()` helper.
+- **Hotness tracker fix.** Pure JIT blocks (no CALL_INTERP fallbacks)
+  are no longer demoted to `interp_only` after 5000 hits.
+- **Watchdog limit raised** from 100K to 500M.
+- **Deferred flag materialization.** JCC is emitted first (uses host
+  RFLAGS directly); flags are materialized to pstate on each path.
 
 ### IR optimizer
 
-- **SBFM/UBFM IR fix.** Use a scratch vreg + STORE_REG instead of using
-  the ARM reg index directly as dest via `emit_bf`. The old code confused
-  the optimizer's assumptions about which vregs represent architectural
-  state.
-
+- **SBFM/UBFM IR fix.** Use scratch vreg + STORE_REG instead of using
+  the ARM reg index directly as dest.
 - **Post-substitution dead-store elimination (Pass 1.5).** Removes
-  STORE_REGs that become dead after load-forwarding substitution reveals
-  them. Disable with `BIFROST_NO_DSE=1`.
-
-- **arm_reg_cache load-forwarding** (disabled by default, opt-in via
-  `BIFROST_ENABLE_FWD=1`). Re-enabled the previously-disabled cache, but
-  it has a subtle correctness bug that breaks `jit_block_split` and
-  `jit_fp_scalar`. With it enabled, `bench_mips` hits ~2286 MIPS (4x more),
-  but 2 tests fail. Left as a future task.
+  STORE_REGs that become dead after load-forwarding. Disable with
+  `BIFROST_NO_DSE=1`.
+- **arm_reg_cache load-forwarding** (opt-in via `BIFROST_ENABLE_FWD=1`).
+  Gives ~1.2x speedup on bench_mips. All JIT tests pass with it enabled;
+  `toybox ls /` still crashes under FWD (pre-existing).
 
 ### Code quality
 
-- Extracted `materialize_flags_to_pstate()` helper to remove duplicated
-  flag-materialization code in BRCOND and the epilogue.
-- Extracted `emit_alu_op` and `emit_shift` lambdas in the ALU/shift
-  codegen to remove triplicated switch statements.
-- Cleaned up stale/misleading comments throughout the JIT.
+- Added `fp_decode` namespace in `include/decoder.hpp` with shared
+  helpers (`is_fcmp`, `fcmp_with_zero`, `is_fmov_imm`, `is_fp_1source`,
+  `fp_1source_opcode`, `vfp_expand_imm`). Both interpreter and JIT's IR
+  translator now call these instead of open-coding bit extraction.
+- Extracted `materialize_flags_to_pstate()` helper.
+- Extracted `emit_alu_op` and `emit_shift` lambdas to remove triplicated
+  switch statements.
+- Created ROADMAP.md and TESTS.md; shortened README.md.
 
----
+### Test results
 
-## [1.4.0-beta.3] — 2026-06-26 (JIT FP correctness overhaul — 39/39 tests pass)
+- **35/35 JIT tests pass** (was 38/39 at beta.2 start).
+- **`toybox seq 1 5`** = `1 2 3 4 5` (was no output).
+- **`strtod("0.5")`** = `0.500000` (was `inf`).
+- **`toybox printf "%g" 3.14`** = `3.14` (was no output).
+- **`toybox ls /`** works (was crashing under JIT).
+- **`toybox od`** works (was SIMD decode error).
+- **`bench_mips`**: 1.4s (573 MIPS) — 5.9x over interpreter.
+- **FWD mode**: 10/10 tests pass.
+- **JIT verify**: 0 divergences in `jit_fp_scalar`, `jit_madd`,
+  `jit_simd`, `jit_addsub_imm`, `jit_carry`, `jit_csel`.
 
-### Summary
+### Known remaining issues
 
-All 39 test programs now pass under both the interpreter and frostJIT.
-The previous beta.3 carried a single JIT failure in `jit_fp_scalar`
-(attributed to an "interpreter encoding issue"). Root-cause analysis
-revealed a cluster of related FP decode bugs in both the interpreter
-and the JIT's IR translator; all are fixed in this release.
-
-### JIT — frostJIT now passes 39/39 tests (was 38/39)
-
-- **FCMP `#0.0` form misdecoded as register form.** The IR translator
-  used `rm == 31` to detect the `#0.0` form, but the ARM ARM encodes
-  the `#0.0` form with `rm = 0` and `bits[4:0] = 0b01000` (Op = 8).
-  The register form has `bits[4:0] = 0` and `rm =` the source register.
-  This caused `FCMP Dn, D0` (register form with rm=0) to be confused
-  with `FCMP Dn, #0.0` (zero form), producing wrong comparison
-  results for any code that compared against d0. Fixed by checking
-  `bits[4:0] == 0x08` for the `#0.0` form. A sentinel bit in the IR
-  `imm` field (bit 0) now distinguishes the two forms so the JIT
-  codegen can pick the right XMM1 source (zero xorps vs. v_lo load).
-
-- **FP 1-source opcode extracted from wrong bits.** The IR translator
-  and interpreter extracted the FP 1-source opcode from `bits[15:12]`
-  (4 bits), but the ARM ARM puts it in `bits[20:15]` (6 bits). This
-  caused FSQRT (`bits[20:15]=0x03`) to dispatch as FRINT* (because
-  `bits[15:12]=0xC`), and FABS/FNEG to fall through to CALL_INTERP
-  (because the IR translator's `bits[15:10]==0x10` check only matched
-  FMOV-register). Fixed by extracting the opcode from `bits[20:15]`.
-
-- **FMOV (scalar, immediate) mask only matched double precision.** The
-  old mask `0xFFE003E0` required `bits[23:22]=01` (double), silently
-  dropping single-precision FMOV imm into the FP 1-source handler,
-  which then misdecoded it as FNEG. Fixed by masking off `ftype`
-  (`bits[23:22]`) so both single and double forms match the new mask
-  `0xFF201FE0`.
-
-- **FMOV imm misdecoded as SCVTF.** The SCVTF/UCVTF mask `0x7F3F0000`
-  also matches FMOV imm (both have `bit[21]=1` and similar high
-  bits). Because the SCVTF check came first, `fmov d1, #5.0` was
-  translated as `scvtf d1, x0` (reading garbage from x0), which made
-  every subsequent FP comparison against an immediate-loaded
-  register fail. Fixed by checking FMOV imm BEFORE SCVTF/FCVTZS.
-
-- **Interpreter FCMP missing — fell into FP 1-source handler.** The
-  interpreter's FP 1-source check (`bits[11:10]==0b00`) also matches
-  FCMP (which has the same `bits[11:10]=0b00`). The comment said
-  "FCMP is handled above" but no handler existed. FCMP was thus
-  executed as FNEG (opcode 2 in the `bits[15:12]` extraction). Fixed
-  by adding an explicit FCMP handler before the FP 1-source check.
-
-### Code quality — shared FP decode helpers
-
-- Added `fp_decode` namespace in `include/decoder.hpp` with inline
-  helpers: `is_fcmp`, `fcmp_with_zero`, `is_fmov_imm`,
-  `is_fp_1source`, `fp_1source_opcode`, `vfp_expand_imm`. Both the
-  interpreter and the JIT's IR translator now call these helpers
-  instead of open-coding the bit extraction. This eliminates the
-  drift between the two code paths that caused the bugs above.
-
-### Documentation
-
-- Created ROADMAP.md with extracted roadmap content from README.md,
-  including v2.0 plans for dynamic linking and glibc support.
-- Created TESTS.md with full test matrix (39 test programs, per-test
-  status, toybox compatibility table).
-- Shortened README.md from 1,124 to 322 lines by extracting Release
-  History to CHANGELOG.md, Roadmap to ROADMAP.md, and Test Programs
-  to TESTS.md.
-- Updated all documentation to reflect 39/39 JIT test pass rate.
-
-### Known issues (carried over from beta.2)
-
-- toybox `seq` and `od` hit SIMD decode errors on unhandled vector
-  instructions.
-- toybox `ls /` crashes under JIT (pre-existing; works under
-  interpreter). Root cause not yet identified.
+- `strtod("inf")` returns `-nan` instead of `inf` (separate inf/nan
+  string-parsing path in `__floatscan`).
+- `toybox ls /` under `BIFROST_ENABLE_FWD=1` still crashes (pre-existing).
 
 ## [1.4.0-beta.2] — 2026-06-25 (JIT refactors, audio backend, code cleanup)
 

@@ -14,12 +14,10 @@ their current status under both the interpreter (default) and frostJIT
 | frostJIT (`./bifrost-emu --jit`) | 35 | 35 | 0 |
 
 All 35 JIT test programs pass under both the interpreter and frostJIT as
-of beta.3 (2026-06-26). This release fixes a 32-bit ASR sign-extension
-bug that broke `strtod()` for any input containing a decimal point or
-exponent (e.g. `strtod("0.5")` returned `inf` with `ERANGE`). The fix
-also resolved the two FWD-mode failures (`jit_block_split`,
-`jit_fp_scalar`) that were listed as "opt-in" in prior releases — FWD
-mode is now 10/10. See CHANGELOG.md for details.
+of beta.3 (2026-06-26). This release fixed 11 JIT correctness bugs (FP
+decode, 32-bit ASR, SCVTF/FMOV decode, FMADD operands, FPSR read) and
+added major performance optimizations (573 MIPS, 5.9x speedup). FWD mode
+is 10/10. See CHANGELOG.md for details.
 
 ---
 

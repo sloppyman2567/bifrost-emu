@@ -268,8 +268,9 @@ window backend via `make USE_SDL2=1`.
 
 All 35 JIT test programs pass under both the default interpreter path and
 `--jit`. See [TESTS.md](TESTS.md) for the full test matrix, including
-toybox compatibility (`echo`, `ls /`, `od`, `head`, `sort`, `rev`, `wc`,
-`cat`, `printf "%g"` all work; `seq` produces no output — see Limitations).
+toybox compatibility (33/37 commands work: `echo`, `ls /`, `od`, `head`,
+`sort`, `rev`, `wc`, `cat`, `printf "%g"`, `seq` all work; 4 commands
+not in this toybox build).
 
 Run the test suite:
 
@@ -297,54 +298,36 @@ This is beta-quality software. Key limitations:
 - **frostJIT (`--jit`) is experimental.** All 35 tests pass, but the
   JIT has not been exhaustively tested against arbitrary ARM64 binaries.
   The interpreter path is the default for production use.
-- **`strtod()` now works** for all decimal and exponential inputs
-  (`"0.5"`, `"1.5"`, `"1e1"`, etc.) — a 32-bit ASR sign-extension bug
-  was causing it to return `inf` with `ERANGE` for any input containing
-  a decimal point or exponent. `strtod("inf")` still returns `-nan`
-  (separate inf/nan string-parsing issue).
-- **toybox `seq`** now works — `seq 1 5` outputs `1 2 3 4 5`. Two bugs
-  were fixed: SCVTF (int→double) was misdecoded as FMOV (raw GPR bit
-  copy), and FMADD's operand sources were reading from scratch vregs
-  instead of FP register indices. All seq variants work: `-w` (width
-  padding), `-s` (separator), `-f` (format), negative steps, float
-  steps.
+- **`strtod("inf")` returns `-nan`** instead of `inf`. The inf/nan
+  string-parsing path in musl's `__floatscan` is not fully supported.
+  All decimal and exponential inputs work correctly (`strtod("0.5")` =
+  `0.5`, `strtod("1e1")` = `10.0`, etc.).
 - **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
   opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
-  JIT tests pass with it enabled, but toybox `ls /` still crashes
-  (pre-existing, not introduced by the FWD bug fixes).
+  JIT tests pass with it enabled, but `toybox ls /` crashes under FWD
+  (pre-existing, not introduced by recent fixes).
 
 For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-beta.3** (2026-06-26), which includes:
+current release is **v1.4.0-beta.3** (2026-06-26):
 
-- SCVTF/FMOV decode + FMADD operand fix — `toybox seq` now works
-  (`seq 1 5` outputs `1 2 3 4 5`). SCVTF (int→double) was misdecoded
-  as FMOV (raw bit copy); FMADD's operands were reading scratch vregs
-  instead of FP register indices.
-- 32-bit ASR sign-extension fix — `strtod()` now works for all decimal
-  and exponential inputs (`"0.5"`, `"1.5"`, `"1e1"`, etc.). Previously,
-  a 32-bit ASR bug in `neg w0, w0, asr #1` caused musl's `__floatscan`
-  to take the overflow path and return `inf` with `ERANGE` for any
-  input with a decimal point or exponent.
-- JIT `mrs xN, fpsr/fpcr` fix — was reading 8 bytes instead of 4,
-  leaking adjacent `TPIDR_EL0` into the result.
-- JIT performance overhaul — 573 MIPS on bench_mips (5.9x speedup over
+- **JIT correctness overhaul** — 11 bugs fixed across FP decode,
+  32-bit shift semantics, int↔FP conversion, and system register
+  reads. `toybox seq`, `printf "%g"`, `strtod`, `ls /`, and `od` all
+  work now.
+- **JIT performance overhaul** — 573 MIPS on bench_mips (5.9x over
   interpreter) via self-loop chaining, liveness-based register freeing,
-  and register-cache-aware ALU codegen
-- JIT FP correctness overhaul — all 39 tests now pass under JIT
-  (FCMP #0.0 form detection, FP 1-source opcode extraction,
-  FMOV imm mask, FMOV imm vs SCVTF collision, missing interp FCMP)
-- Shared `fp_decode` helpers in `decoder.hpp` to keep interpreter
-  and JIT's IR translator in sync
-- JIT critical correctness fixes (FCMP prefix, CSEL/BRCOND flag
-  resolution, CF normalization, ADCS/SBCS carry convention)
-- Audio backend (OSS `/dev/dsp` passthrough + WAV dump)
-- VFS abstraction (VNode + FdTable + procfs + devfs)
-- ~16 new syscalls (networking, inotify, statx)
-- frostJIT: native UDIV/SDIV, SMADDL/UMADDL, MRS/MSR, 15 new FP instructions
+  and register-cache-aware ALU codegen.
+- **Shared `fp_decode` helpers** in `decoder.hpp` keep the interpreter
+  and JIT's IR translator in sync.
+- **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
+- **VFS abstraction** — VNode + FdTable + procfs + devfs.
+- **~16 new syscalls** (networking, inotify, statx).
+- **frostJIT** — native UDIV/SDIV, SMADDL/UMADDL, MRS/MSR, 15 new FP
+  instructions.
 
 ## Forking
 

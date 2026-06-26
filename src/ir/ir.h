@@ -169,19 +169,12 @@ inline uint16_t apply_extend(IRBlock& b, uint16_t v, uint8_t extend, uint8_t shi
 // Apply a shift-type operation (LSL/LSR/ASR/ROR) to a vreg.
 // shift_type: 0=LSL, 1=LSR, 2=ASR, 3=ROR.
 // shift:       shift amount.
-// sf:          0 = 32-bit operation, 1 = 64-bit. For 32-bit ASR, the
-//              operand must be sign-extended from bit 31 (not bit 63)
-//              BEFORE the SAR, otherwise the sign bit is 0 after the
-//              zero-extension and SAR behaves like LSR. This broke
-//              musl's __floatscan exponent range check
-//              (`neg w0, w0, asr #1` with w0=0xfffffbcf produced
-//              0x80000219 instead of 0x00000219), causing strtod to
-//              return inf with ERANGE for any number with a decimal
-//              point or exponent.
+// sf:          0 = 32-bit, 1 = 64-bit. For 32-bit ASR, the operand is
+//              sign-extended from bit 31 before the SAR, because the
+//              JIT's SAR uses x86's 64-bit sar which looks at bit 63.
 inline uint16_t apply_shift(IRBlock& b, uint16_t v, uint8_t shift_type, uint8_t shift, bool sf = true) {
     if (shift == 0 && shift_type == 0) return v;
-    // For 32-bit ASR, sign-extend the operand from 32 to 64 bits first
-    // so the subsequent 64-bit SAR sees the correct sign bit.
+    // 32-bit ASR: sign-extend first so the 64-bit SAR sees the sign bit.
     if (shift_type == 2 && !sf) {
         uint16_t sext = g_alloc.alloc();
         emit(b, IROp::SEXT, sext, v, 0, 32);

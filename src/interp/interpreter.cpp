@@ -709,15 +709,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     switch (d.shift_type) {
                         case 0: b = b << d.shift; break;
                         case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
-                        // ASR: must sign-extend from the OPERATION width, not
-                        // from 64 bits. The previous code cast b (already
-                        // zero-extended to 64-bit by the `if (!d.sf) b &= 0xFFFFFFFF`
-                        // above) to int64_t, which left the sign bit at bit 63
-                        // (always 0 after the mask). This made 32-bit ASR behave
-                        // like LSR — e.g. `neg w0, w0, asr #1` with w0=0xfffffbcf
-                        // produced 0x80000219 instead of 0x00000219, breaking
-                        // musl's __floatscan exponent-range check and making
-                        // strtod("0.5") return inf with ERANGE.
+                        // ASR: sign-extend from the operation width. Casting
+                        // the already-zero-extended b to int64_t directly
+                        // would leave sign bit at 63 (always 0 for 32-bit),
+                        // making ASR behave like LSR.
                         case 2:
                             b = (width == 64)
                                 ? (static_cast<int64_t>(b) >> d.shift)
@@ -751,9 +746,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 switch (d.shift_type) {
                     case 0: b = b << d.shift; break;
                     case 1: b = (width == 64) ? (b >> d.shift) : (static_cast<uint32_t>(b) >> d.shift); break;
-                    // ASR: same 32-bit sign-extension fix as ADD/SUB shifted
-                    // register above. Without this, 32-bit ASR in AND/ORR/EOR
-                    // behaves like LSR.
+                    // ASR: sign-extend from operation width (see ADD/SUB above).
                     case 2:
                         b = (width == 64)
                             ? (static_cast<int64_t>(b) >> d.shift)
@@ -2004,12 +1997,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // write_fp_s, h2f, f2h, d2h) — see top of this file.
 
                 // FMOV (general ↔ FP, 64-bit)
-                // Bit[18]=1 distinguishes FMOV from SCVTF (which has bit[18]=0).
-                // Without this check, SCVTF (0x9E62xxxx) matches the FMOV mask
-                // (0x9E620000 & 0xFFE0FC00 == 0x9E600000) and is misdecoded as
-                // FMOV, causing `scvtf d0, x0` to copy x0's raw bits to d0
-                // instead of converting the integer to a double. This broke
-                // toybox seq's loop variable initialization.
+                // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
+                // Without this, SCVTF (0x9E62xxxx) matches the FMOV mask.
                 if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
                     bool to_fp = (op >> 16) & 1;
                     if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }

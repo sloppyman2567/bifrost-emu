@@ -116,8 +116,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // Extended register form — apply extend, then shift.
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
-                    // Shifted register form — apply shift_type by d.shift.
-                    // Pass d.sf so 32-bit ASR sign-extends from bit 31.
                     b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
             }
@@ -168,7 +166,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (d.extend != 0) {
                     b = apply_extend(block, b, d.extend, d.shift);
                 } else if (d.shift != 0 || d.shift_type != 0) {
-                    // Pass d.sf so 32-bit ASR sign-extends from bit 31.
                     b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
             }
@@ -263,8 +260,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 b = load_arm_reg(block, (d.rm == 31) ? 32 : d.rm);
                 // Apply shift to the register operand.
                 if (d.shift != 0 || d.shift_type != 0) {
-                    // Pass d.sf so 32-bit ASR sign-extends from bit 31
-                    // (matches the interpreter's behaviour).
                     b = apply_shift(block, b, d.shift_type, d.shift, d.sf);
                 }
                 // N=1 inverts the register operand (BIC/ORN/EON/BICS).
@@ -1005,12 +1000,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t rm = (op >> 16) & 0x1F;
             uint8_t opcode = (op >> 12) & 0xF;
 
-            // FMOV (general ↔ FP, 64-bit): handled by InstClass::FMOV case
-            // but decoder may classify it as FP_SCALAR. Check first.
-            // Bit[18]=1 distinguishes FMOV from SCVTF (which has bit[18]=0).
-            // Without this, SCVTF (0x9E62xxxx) matches the FMOV mask and is
-            // misdecoded as FMOV, copying raw GPR bits to the FP register
-            // instead of converting int→double. This broke toybox seq.
+            // FMOV (general ↔ FP, 64-bit): may reach here via FP_SCALAR.
+            // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
             if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
@@ -1180,12 +1171,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint8_t ra = (op >> 10) & 0x1F;
                 bool sub = (op >> 15) & 1;
                 if (ftype <= 1) {
-                    // FMADD: dest = a * b + c (acc)
-                    // FMSUB: dest = c - a * b = -a * b + c
-                    // Pass FP register indices directly (rn, rm) as src1/src2
-                    // and ra (acc FP reg index) as imm. The JIT reads
-                    // V_LO_OFF + src*8 for all three operands.
-                    // Do NOT use load_arm_reg — that loads GPRs, not FP regs.
+                    // FMADD: dest = rn * rm + ra
+                    // FMSUB: dest = ra - rn * rm
+                    // Pass FP register indices directly — the JIT reads
+                    // operands from V_LO_OFF + idx*8. Do NOT use
+                    // load_arm_reg (that loads GPRs, not FP regs).
                     emit(block, sub ? IROp::FMSUB : IROp::FMADD,
                          rd, rn, rm, ftype ? 64 : 32, 0, 0,
                          static_cast<uint64_t>(ra), cur_pc);
@@ -1385,10 +1375,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-        // FMADD/FMSUB: FP fused multiply-add
+        // FMADD/FMSUB: FP fused multiply-add (see FP_SCALAR for details)
         case InstClass::FMADD: case InstClass::FMSUB: {
-            // Pass FP register indices directly. The JIT reads
-            // V_LO_OFF + src*8 for all operands. Do NOT use load_arm_reg.
             emit(block, d.cls == InstClass::FMADD ? IROp::FMADD : IROp::FMSUB,
                  d.rd, d.rn, d.rm, d.sf ? 64 : 32, 0, 0,
                  static_cast<uint64_t>(d.ra), cur_pc);
