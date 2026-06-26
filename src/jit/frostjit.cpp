@@ -1126,6 +1126,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // bits (0x00000000 = 0.0f), breaking the >= 2^63 detection.
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
+            // Validate FP register index (src1 is an FP reg index 0-31).
+            check_fp_reg_index(inst.src1, "FP_F2I src1");
             clobber_flags();
             // FP_F2I clobbers RAX (CVTTSD2SI result) and, in the unsigned
             // path, RCX (2^63 constant). Flush+invalidate both.
@@ -1215,6 +1217,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
             bool is_64bit_src = (inst.flags_op != 0);
+            // Validate FP register index (dest is an FP reg index 0-31).
+            check_fp_reg_index(inst.dest, "FP_I2F dest");
             // REX.W prefix: 64-bit form when source is 64-bit OR when
             // unsigned (so the zero-extended 32-bit value is read as
             // positive int64).
@@ -2375,6 +2379,9 @@ static bool instr_will_call_interp(const DecodedInst& d) {
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     if (!code_buf_) return nullptr;
+    // W^X: toggle the code buffer to writable before emitting x86 code.
+    // (No-op if W^X is disabled or the buffer is already writable.)
+    make_writable();
     current_start_pc_ = start_pc;
     code_buf_overflow_ = false;
     call_interp_branch_patches_.clear();
@@ -2458,7 +2465,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (ends) block_ended = true;
         else      cur_pc += 4;
     }
-    if (instr_count == 0) return nullptr;
+    if (instr_count == 0) {
+        make_executable();  // W^X: balance the make_writable() at entry
+        return nullptr;
+    }
 
     // ── Heuristic: skip JIT for CALL_INTERP-heavy blocks ──────────
     // The JIT's per-CALL_INTERP overhead (flush all vregs + push 2 regs +
@@ -2497,6 +2507,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         entry.instr_count = instr_count;
         blocks_[start_pc] = entry;
         blocks_translated++;
+        make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
 
@@ -2685,6 +2696,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     if (code_buf_overflow_) {
         code_buf_used_ = block_start;
+        // W^X: make the buffer executable again before returning (we may
+        // have written partial code before the overflow was detected).
+        make_executable();
         return nullptr;
     }
 
@@ -2757,8 +2771,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
-    // verify dirty_host_regs_ invariant (debug only).
-    (void)verify_dirty_host_regs_();
+    // Verify dirty_host_regs_ invariant (active in debug or with
+    // BIFROST_REGALLOC_CHECK=1 — catches regalloc maintenance bugs).
+    verify_dirty_host_regs_();
+    // W^X: toggle the code buffer back to executable before returning.
+    // The block is fully emitted and patched; execution will read from it.
+    make_executable();
     return fn;
 }
 
@@ -2955,6 +2973,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         uint8_t saved_chain[5];
         bool was_chained = entry.chained;
         if (was_chained) {
+            // W^X: toggle to writable before patching the chain slot.
+            make_writable();
             memcpy(saved_chain, code_buf_ + entry.chain_patch_off, 5);
             code_buf_[entry.chain_patch_off] = 0xC3; // ret
             code_buf_[entry.chain_patch_off + 1] = 0x90;
@@ -2962,6 +2982,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             code_buf_[entry.chain_patch_off + 3] = 0x90;
             code_buf_[entry.chain_patch_off + 4] = 0x90;
             std::atomic_thread_fence(std::memory_order_release);
+            // W^X: toggle back to executable before running the block.
+            make_executable();
         }
         CPU saved = cpu;             // snapshot before
         // Debug: print entry state for specific blocks
@@ -3075,8 +3097,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         // Restore chain slot if it was patched.
         if (was_chained) {
+            // W^X: toggle to writable before restoring the chain slot.
+            make_writable();
             memcpy(code_buf_ + entry.chain_patch_off, saved_chain, 5);
             std::atomic_thread_fence(std::memory_order_release);
+            // W^X: toggle back to executable for normal execution.
+            make_executable();
         }
         return jit_next;
     }

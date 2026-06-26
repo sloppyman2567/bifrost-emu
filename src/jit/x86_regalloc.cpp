@@ -24,39 +24,56 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>   // getenv, abort
 
 namespace arm64emu {
 
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
-// If a block exceeds MAX_VREGS, we'd have a buffer overflow. This assert
+// If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
 // catches it at the earliest point (vreg allocation) instead of silently
 // corrupting memory.
-static inline void check_vreg_bounds(int v) {
+//
+// Active in debug builds (NDEBUG not defined) OR when BIFROST_REGALLOC_CHECK
+// is set. In release builds without the env var, the check is skipped for
+// performance (the typical max_vreg_ is 33-250, well within the 4096 limit).
+static inline bool regalloc_check_enabled() {
 #ifndef NDEBUG
-    if (v < 0 || v >= 4096) {
-        fprintf(stderr, "[JIT REGALLOC BUG] vreg %d out of bounds (max 4096). "
-                "Block too long? Please report this.\n", v);
-    }
+    return true;
+#else
+    static bool enabled = (getenv("BIFROST_REGALLOC_CHECK") != nullptr);
+    return enabled;
 #endif
 }
 
-// verify the dirty_host_regs_ invariant.
-// Bit r is set iff reg_vreg_[r] >= 0 && vreg_dirty_[reg_vreg_[r]].
-// Called in debug builds at block boundaries to catch maintenance bugs.
-bool FrostJIT::verify_dirty_host_regs_() const {
+static inline void check_vreg_bounds(int v) {
+    if (!regalloc_check_enabled()) return;
+    if (v < 0 || v >= 4096) {
+        fprintf(stderr, "[JIT REGALLOC BUG] vreg %d out of bounds (max 4096). "
+                "Block too long? Please report this.\n", v);
+        // In debug, abort so the bug is caught immediately. In release with
+        // the env var, just log (don't crash the user's program).
 #ifndef NDEBUG
+        abort();
+#endif
+    }
+}
+
+// Verify the dirty_host_regs_ invariant.
+// Bit r is set iff reg_vreg_[r] >= 0 && vreg_dirty_[reg_vreg_[r]].
+// Called at block boundaries to catch maintenance bugs.
+bool FrostJIT::verify_dirty_host_regs_() const {
+    if (!regalloc_check_enabled()) return true;
     for (int r = 0; r < 16; r++) {
         int v = reg_vreg_[r];
         bool bit_set = (dirty_host_regs_ >> r) & 1;
-        bool should_set = (v >= 0 && vreg_dirty_[v]);
+        bool should_set = (v >= 0 && v < 4096 && vreg_dirty_[v]);
         if (bit_set != should_set) {
             fprintf(stderr, "[JIT REGALLOC BUG] dirty_host_regs_ bit %d mismatch: "
                     "bit=%d expected=%d (reg_vreg_[%d]=%d, vreg_dirty_[%d]=%d)\n",
-                    r, bit_set, should_set, r, v, v, v >= 0 ? vreg_dirty_[v] : 0);
+                    r, bit_set, should_set, r, v, v, (v >= 0 && v < 4096) ? vreg_dirty_[v] : 0);
             return false;
         }
     }
-#endif
     return true;
 }
 
@@ -66,6 +83,21 @@ int32_t FrostJIT::vreg_stack_slot(int v) {
     num_stack_slots_++;
     vreg_slot_[v] = -8 * num_stack_slots_;
     return vreg_slot_[v];
+}
+
+// FP register index validation. FP ops use inst.dest/src1/src2 as FP
+// register indices (0-31). Values > 31 would cause out-of-bounds writes
+// to the CPU struct (v_lo[32+] or v_hi[32+] = past the array).
+void FrostJIT::check_fp_reg_index(int idx, const char* context) const {
+    if (!regalloc_check_enabled()) return;
+    if (idx < 0 || idx > 31) {
+        fprintf(stderr, "[JIT CODEGEN BUG] FP register index %d out of bounds "
+                "(must be 0-31) in %s. Decoder or IR translator bug?\n",
+                idx, context);
+#ifndef NDEBUG
+        abort();
+#endif
+    }
 }
 
 // Spill a vreg from its x86 reg back to its home (cpu.regs[] or stack).

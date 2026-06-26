@@ -34,6 +34,10 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     // Compute the relative displacement: target - (slot + 5).
     int32_t rel = static_cast<int32_t>(target_fn
                             - (code_buf_ + chain_patch_off + 5));
+    // W^X: toggle the code buffer to writable before patching. The toggle
+    // is cheap if the buffer is already writable (e.g., during translate_block).
+    // If W^X is disabled, this is a no-op.
+    make_writable();
     // Overwrite the 5 bytes with `jmp rel32` (0xE9 + 4-byte displacement).
     code_buf_[chain_patch_off] = 0xE9;
     memcpy(code_buf_ + chain_patch_off + 1, &rel, 4);
@@ -42,6 +46,8 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     // observes the patched bytes. x86 stores are already TSO, but the
     // compiler could reorder; the barrier constrains the compiler too.
     std::atomic_thread_fence(std::memory_order_release);
+    // W^X: toggle back to executable so the patched block can run.
+    make_executable();
     return true;
 }
 

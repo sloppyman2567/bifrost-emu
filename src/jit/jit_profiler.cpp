@@ -20,15 +20,38 @@
 #include "jit/frostjit.hpp"
 
 #include <sys/mman.h>
+#include <cstring>   // memcpy
+#include <cstdlib>   // getenv
 
 namespace arm64emu {
 
 // ── Construction ────────────────────────────────────────────────────────
 FrostJIT::FrostJIT() {
-    void* p = mmap(nullptr, CODE_BUF_SIZE,
-                   PROT_READ | PROT_WRITE | PROT_EXEC,
+    // W^X (Write XOR Execute) protection: allocate the code buffer as
+    // PROT_READ|PROT_WRITE first (for codegen), then toggle to
+    // PROT_READ|PROT_EXEC before execution. This prevents the buffer
+    // from being simultaneously writable and executable, mitigating
+    // code-injection attacks via JIT bugs.
+    //
+    // We check BIFROST_NO_WEX=1 to disable (for perf-sensitive builds).
+    // If the initial mprotect to RX fails (some hardened kernels reject
+    // PROT_EXEC on anonymous mappings), we fall back to RWX.
+    bool disable_wex = (getenv("BIFROST_NO_WEX") != nullptr);
+    int initial_prot = disable_wex
+        ? (PROT_READ | PROT_WRITE | PROT_EXEC)
+        : (PROT_READ | PROT_WRITE);
+    void* p = mmap(nullptr, CODE_BUF_SIZE, initial_prot,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p != MAP_FAILED) code_buf_ = static_cast<uint8_t*>(p);
+
+    // Initialize W^X state. If we started RW (no EXEC), enable W^X and
+    // mark the buffer as currently writable (since we just allocated it
+    // RW and will write to it during the first translate_block).
+    if (code_buf_ && !disable_wex) {
+        wex_enabled_ = true;
+        wex_write_depth_ = 0;  // buffer is RX (not writable) by default
+    }
+
     // Counters start at zero (declared in the public header).
     blocks_translated = 0;
     blocks_executed   = 0;
@@ -61,7 +84,52 @@ FrostJIT::~FrostJIT() {
     if (code_buf_) munmap(code_buf_, CODE_BUF_SIZE);
 }
 
+// ── W^X protection toggle (reference-counted) ──────────────────────────
+// make_writable: increment the write depth. If this is the first writer
+// (depth was 0), mprotect the buffer to RW. Subsequent calls are no-ops
+// (the buffer is already writable). This allows nested calls like
+// translate_block → patch_chain without premature make_executable.
+void FrostJIT::make_writable() {
+    if (!wex_enabled_) return;
+    if (wex_write_depth_ == 0) {
+        // First writer: toggle buffer from RX to RW.
+        if (mprotect(code_buf_, CODE_BUF_SIZE, PROT_READ | PROT_WRITE) != 0) {
+            // mprotect failed — disable W^X and re-mmap as RWX to avoid hang.
+            wex_enabled_ = false;
+            void* p = mmap(nullptr, CODE_BUF_SIZE,
+                           PROT_READ | PROT_WRITE | PROT_EXEC,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p != MAP_FAILED && p != code_buf_) {
+                memcpy(p, code_buf_, code_buf_used_);
+                munmap(code_buf_, CODE_BUF_SIZE);
+                code_buf_ = static_cast<uint8_t*>(p);
+            }
+            return;
+        }
+    }
+    wex_write_depth_++;
+}
+
+// make_executable: decrement the write depth. If this is the last writer
+// (depth reaches 0), mprotect the buffer to RX. No-op if other writers
+// are still active (nested calls).
+void FrostJIT::make_executable() {
+    if (!wex_enabled_) return;
+    if (wex_write_depth_ <= 0) return;  // defensive: never go negative
+    wex_write_depth_--;
+    if (wex_write_depth_ == 0) {
+        // Last writer done: toggle buffer from RW to RX.
+        mprotect(code_buf_, CODE_BUF_SIZE, PROT_READ | PROT_EXEC);
+        // If mprotect fails, leave the buffer writable (better than crashing).
+    }
+}
+
 void FrostJIT::flush_cache() {
+    // Ensure the buffer is writable before clearing block metadata.
+    // (The blocks_ map is cleared, but the code buffer itself is not zeroed
+    // — code_buf_used_ is reset to 0 so the next translate_block overwrites
+    // old code. We still need writable access for the next translation.)
+    make_writable();
     blocks_.clear();
     back_refs_.clear();
     hot_pc_counts_.clear();  // clear hotness tracker

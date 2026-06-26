@@ -137,6 +137,33 @@ private:
     bool     code_buf_overflow_ = false;
     uint8_t* window_base_ = nullptr;
 
+    // ── W^X (Write XOR Execute) protection ──────────────────────────
+    // The code buffer is mapped PROT_READ|PROT_EXEC by default (no WRITE).
+    // Before any codegen or patching operation, call make_writable() to
+    // toggle the buffer to PROT_READ|PROT_WRITE. After the write, call
+    // make_executable() to restore PROT_READ|PROT_EXEC.
+    //
+    // This prevents code-injection attacks where a buffer overflow in the
+    // JIT (or a bug in the decoder/codegen) could write malicious x86
+    // instructions into the executable buffer and have them run. With W^X,
+    // the buffer is never simultaneously writable and executable.
+    //
+    // Reference counting: make_writable() increments wex_write_depth_;
+    // make_executable() decrements it. The buffer only becomes executable
+    // when wex_write_depth_ reaches 0. This allows patch_chain to be called
+    // from within translate_block without prematurely toggling the buffer
+    // to RX while translate_block is still emitting code.
+    //
+    // Disabled if BIFROST_NO_WEX=1 is set in the environment (for
+    // performance-sensitive builds where the security tradeoff is
+    // acceptable). On systems where mprotect fails (e.g., some hardened
+    // kernels), W^X is automatically disabled and the buffer falls back
+    // to RWX.
+    bool     wex_enabled_ = false;
+    int      wex_write_depth_ = 0;  // >0 means buffer is currently writable
+    void make_writable();   // mprotect(code_buf_, RW) — call before writes
+    void make_executable(); // mprotect(code_buf_, RX) — call before execution
+
     // ── Block chaining ──────────────────────────────────────────────
     // Each block ends with a 5-byte "chain slot" that is initially
     // `ret` + 4 NOPs. When the block's statically-known next PC (its
@@ -379,6 +406,14 @@ private:
     // Max vreg from the previous block — used to bound the array-clearing
     // in translate_block() so we don't zero all 4096 entries every time.
     int prev_max_vreg_ = 0;
+
+    // ── FP register index validation ───────────────────────────────
+    // FP ops (FP_BINOP, FP_UNOP, FP_F2I, FP_I2F, FP_CMP, FP_MOVI, FMADD,
+    // SIMD_*) use inst.dest/src1/src2 as FP register indices (0-31).
+    // A decoder or IR-translator bug could produce indices > 31, causing
+    // out-of-bounds writes to the CPU struct. This check catches it.
+    // Active in debug builds or with BIFROST_REGALLOC_CHECK=1.
+    void check_fp_reg_index(int idx, const char* context) const;
 
     // ── Dirty host-reg bitmask (unique flush-reduction scheme) ───────
     // Bit `r` is set iff reg_vreg_[r] holds a dirty vreg (i.e.
