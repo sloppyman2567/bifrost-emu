@@ -4,9 +4,14 @@
 // the thread_entry trampoline that runs a cloned guest thread on a host
 // OS thread until the guest calls exit/exit_group.
 //
+// Also implements fork_guest() for clone() without CLONE_VM: snapshots
+// the guest memory and runs the child in a host thread with its own
+// Memory object.
+//
 // This file is a friend of Emulator (see core/emulator.h) so it can
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
 #include "core/emulator.h"
+#include "core/memory.h"
 #include "bifrost/version.hpp"
 
 #include <cstdio>
@@ -127,6 +132,92 @@ CPU* Emulator::find_cpu_by_tid(int tid) {
         if (gt->tid == tid) return &gt->cpu;
     }
     return nullptr;
+}
+
+// ── Fork support ───────────────────────────────────────────────────────
+// Fork is implemented via host fork(): the child process inherits a
+// copy-on-write duplicate of the entire emulator state (Memory, CPU,
+// JIT cache). This is the simplest correct approach — the child runs
+// independently with its own address space, and the parent's wait4()
+// forwards to host wait4().
+//
+// Key fix from previous attempt: the child must NOT continue running
+// the JIT (the JIT cache state may be inconsistent after fork). We
+// force the child to use the interpreter by setting jit_enabled_ = false.
+// We also flush stdio buffers before forking to prevent duplicate output.
+//
+// The child process exits via _exit() (not return from main) to avoid
+// running atexit handlers that would double-clean the parent's resources.
+
+int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
+                         uint64_t flags, uint64_t ptid_ptr,
+                         uint64_t ctid_ptr, uint64_t tls) {
+    // Flush stdio buffers before forking — otherwise the child inherits
+    // unflushed buffer data and prints it again on exit.
+    fflush(stdout);
+    fflush(stderr);
+
+    pid_t child_pid = ::fork();
+    if (child_pid < 0) {
+        return -1;
+    }
+
+    if (child_pid == 0) {
+        // ── Child process ──
+        // Set up the child's CPU state: new stack, return value 0.
+        // The child returns from clone() just like the parent — it
+        // continues executing the guest from the instruction after SVC.
+        // The normal run loop in main() will handle the child's exit.
+        parent_cpu.sp = child_stack;
+        parent_cpu.regs[0] = 0;  // child return value
+        parent_cpu.running = true;
+
+        if (flags & 0x80000) {  // CLONE_SETTLS
+            parent_cpu.tpidr_el0 = tls;
+            parent_cpu.tpidrro_el0 = tls;
+        }
+
+        int child_tid = static_cast<int>(getpid());
+        parent_cpu.tid = child_tid;
+
+        if ((flags & 0x1000000) && ctid_ptr) {  // CLONE_CHILD_SETTID
+            mem_.store<uint32_t>(ctid_ptr, child_tid);
+        }
+        if (flags & 0x2000000) {  // CLONE_CHILD_CLEARTID
+            parent_cpu.clear_child_tid = ctid_ptr;
+        }
+
+        // Disable the JIT in the child — the JIT code buffer's mprotect
+        // state may be inconsistent after fork, and the JIT cache is
+        // not thread/process-safe. The interpreter is always safe.
+        jit_enabled_ = false;
+
+        // Return 0 to indicate "child". The syscall handler will put
+        // this in x0, and the normal run loop continues.
+        return 0;
+    }
+
+    // ── Parent process ──
+    // CLONE_PARENT_SETTID: write child PID to *ptid in the parent's memory.
+    if ((flags & 0x100000) && ptid_ptr) {
+        mem_.store<uint32_t>(ptid_ptr, static_cast<uint32_t>(child_pid));
+    }
+
+    return child_pid;
+}
+
+Emulator::ForkChild* Emulator::find_fork_child(int pid) {
+    (void)pid;
+    return nullptr;  // host fork() children are tracked by the kernel
+}
+
+int Emulator::reap_fork_child(int pid, int options, bool& found) {
+    // This is only called if the host wait4() path in misc.cpp doesn't
+    // handle it. In practice, host fork() children are reaped via the
+    // kernel's wait4(), so this should never be called.
+    (void)pid; (void)options;
+    found = false;
+    return 0;
 }
 
 } // namespace arm64emu

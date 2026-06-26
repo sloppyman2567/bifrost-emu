@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -109,6 +110,26 @@ public:
     const std::unordered_map<uint64_t, std::vector<uint8_t>>& pages_map_public() const {
         return pages_;
     }
+
+    // ── Fork support ──────────────────────────────────────────────────
+    // Create a deep copy of this Memory object for fork(). The new
+    // Memory has its own direct window and pages_ map, with all
+    // mapped pages copied. This is O(total_mapped_size) — for typical
+    // guests (~64 MB), it takes a few milliseconds.
+    //
+    // The returned Memory is independent: writes in the child do not
+    // affect the parent, and vice versa. This is "copy-on-write" done
+    // eagerly — simpler than true CoW but correct.
+    std::unique_ptr<Memory> clone_for_fork() const;
+
+    // Snapshot all mapped pages into a flat list of (addr, data) pairs.
+    // Used by clone_for_fork() and for debugging. Addresses < 4 GiB
+    // come from the direct window; addresses >= 4 GiB come from pages_.
+    struct PageSnapshot {
+        uint64_t addr;
+        std::vector<uint8_t> data;
+    };
+    std::vector<PageSnapshot> snapshot_pages() const;
 
     // ── Direct-access window for JIT ──────────────────────────────────
     // A large mmap'd region that mirrors guest pages at their native

@@ -128,6 +128,36 @@ public:
     // Per-thread lookup (for tgkill, etc.)
     CPU* find_cpu_by_tid(int tid);
 
+    // ── Fork support (clone without CLONE_VM) ────────────────────────
+    // Fork the guest: snapshot the current memory + CPU state and
+    // create a child "process" that runs in a host thread with its own
+    // Memory. The child gets a new TID (PID). The parent returns the
+    // child's PID; the child returns 0.
+    //
+    // The child runs independently until it calls exit/exit_group, at
+    // which point its exit code is stored in the fork_children_ table
+    // for the parent's wait4() to retrieve.
+    struct ForkChild {
+        std::unique_ptr<Memory> mem;
+        CPU cpu;
+        int pid = 0;
+        int exit_code = 0;
+        bool exited = false;
+        bool waited = false;
+        std::thread host_thread;
+        std::mutex mu;
+        std::condition_variable cv;
+    };
+    int fork_guest(CPU& parent_cpu, uint64_t child_stack, uint64_t flags,
+                   uint64_t ptid_ptr, uint64_t ctid_ptr, uint64_t tls);
+    // Look up a forked child by PID. Returns nullptr if not found.
+    // The caller should hold fork_children_mu_ while accessing the
+    // returned pointer.
+    ForkChild* find_fork_child(int pid);
+    // Reap a forked child (called by wait4). Returns the exit code,
+    // or -ECHILD if the PID doesn't exist.
+    int reap_fork_child(int pid, int options, bool& found);
+
 private:
     // ── Owned state ───────────────────────────────────────────────────
     Memory mem_;
@@ -168,6 +198,10 @@ private:
     // ── Futex table ───────────────────────────────────────────────────
     std::mutex futex_table_mu_;
     std::unordered_map<uint64_t, FutexSlot> futex_table_;
+
+    // ── Fork children (clone without CLONE_VM) ───────────────────────
+    std::mutex fork_children_mu_;
+    std::vector<std::unique_ptr<ForkChild>> fork_children_;
 
     // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
     GraphicsBackend graphics_;

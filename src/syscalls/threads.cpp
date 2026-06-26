@@ -49,60 +49,33 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // The new thread starts at the same PC as the syscall return
             // address (i.e., x30 / LR of the parent), with x0=0.
             //
-            // We support the common subset: CLONE_VM | CLONE_FS |
-            // CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM,
-            // optionally combined with CLONE_SETTLS / CLONE_PARENT_SETTID
-            // / CLONE_CHILD_SETTID / CLONE_CHILD_CLEARTID.
+            // We support two paths:
+            //   1. CLONE_VM (threads): spawn a vCPU on a host thread.
+            //   2. No CLONE_VM (fork): host fork() with CoW memory.
             uint64_t flags = a0;
             uint64_t stack = a1;
             uint64_t ptid_ptr = a2;
-            (void)a3;  // ctid_ptr — child tid pointer; cleartid handled via CLONE_CHILD_CLEARTID flag path
+            uint64_t ctid_ptr = a3;
             uint64_t tls = a4;
 
-            // Refuse fork()-style clones (no CLONE_VM) for now
             const uint64_t BIFROST_CLONE_VM = 0x100;
             if (!(flags & BIFROST_CLONE_VM)) {
-                // real fork via host fork(). The child
-                // gets a copy-on-write duplicate of the entire emulator
-                // state (CPU, memory, etc.). The parent returns the child
-                // PID; the child returns 0 and continues executing the
-                // guest from the same PC. The parent's wait4() forwards
-                // to host wait4() on the child PID.
-                //
-                // The guest's stack pointer (SP) is set to the `stack`
-                // argument for the child (clone() semantics: the child
-                // runs on a new stack). The parent's SP is unchanged.
-                //
-                // We mark the child process with a flag so the run loop
-                // can detect it and handle exit differently.
-                pid_t child_pid = ::fork();
+                // ── Fork path (no CLONE_VM) ──
+                // Use host fork() for copy-on-write memory. The child
+                // process inherits the entire emulator state and runs
+                // independently. The parent's wait4() forwards to host
+                // wait4().
+                int child_pid = emu.fork_guest(cpu, stack, flags,
+                                               ptid_ptr, ctid_ptr, tls);
                 if (child_pid < 0) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
-                    return 0;
+                } else {
+                    ret_host(static_cast<uint64_t>(child_pid));
                 }
-                if (child_pid == 0) {
-                    // Child: set SP to the new stack, return 0.
-                    cpu.sp = stack;
-                    cpu.regs[0] = 0;
-                    // Mark that we're a forked child so the run loop
-                    // knows to _exit() instead of returning to the
-                    // parent's caller. We use a sentinel in the CPU.
-                    // Actually, the child just continues executing the
-                    // guest. When the guest calls exit(), the syscall
-                    // handler calls _exit() which terminates the child
-                    // process. The parent's wait4() reaps it.
-                    ret_host(0);
-                    return 0;
-                }
-                // Parent: return child PID.
-                // CLONE_PARENT_SETTID: write child TID to *ptid
-                if ((flags & 0x100000) && ptid_ptr) {
-                    mem_.store<uint32_t>(ptid_ptr, static_cast<uint32_t>(child_pid));
-                }
-                ret_host(static_cast<uint64_t>(child_pid));
                 return 0;
             }
 
+            // ── Thread path (CLONE_VM) ──
             // The new thread's entry point is the parent's link register
             // (X30). This matches the AArch64 convention where clone()
             // returns to the caller in both parent and child — the child

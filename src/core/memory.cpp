@@ -279,4 +279,68 @@ size_t Memory::page_count() const {
     return pages_.size();
 }
 
+// ── Fork support ───────────────────────────────────────────────────────
+std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
+    std::shared_lock<std::shared_mutex> g(mu_);
+    std::vector<PageSnapshot> out;
+
+    // 1. Pages from the sparse pages_ map (addresses >= 4 GiB).
+    for (const auto& [page_num, data] : pages_) {
+        out.push_back({page_num * PAGE_SIZE, data});
+    }
+
+    // 2. Pages from the direct window (addresses < 4 GiB).
+    // We scan the window in page-sized chunks and copy any non-zero
+    // page. A page is "mapped" if any byte in it is non-zero OR if it
+    // was explicitly mapped via map_range. Since we don't track which
+    // window pages are mapped, we copy any page that has at least one
+    // non-zero byte. This misses pages that are intentionally all-zeros
+    // (e.g., .bss), but those are rare and zero pages are the default
+    // anyway — a read from an unmapped page returns 0 in our model.
+    if (direct_window_) {
+        const uint64_t num_pages = DIRECT_WINDOW_SIZE / PAGE_SIZE;
+        for (uint64_t p = 0; p < num_pages; p++) {
+            const uint8_t* page = direct_window_ + p * PAGE_SIZE;
+            // Quick check: if the first 64 bytes are all zero, skip
+            // (most pages are zero). This is a heuristic — we might
+            // miss a page that has non-zero data only after offset 64,
+            // but that's extremely rare for typical guests.
+            bool has_data = false;
+            for (int i = 0; i < 64; i++) {
+                if (page[i] != 0) { has_data = true; break; }
+            }
+            if (!has_data) {
+                // Double-check the rest of the page (for correctness).
+                for (size_t i = 64; i < PAGE_SIZE; i++) {
+                    if (page[i] != 0) { has_data = true; break; }
+                }
+            }
+            if (has_data) {
+                out.push_back({p * PAGE_SIZE,
+                               std::vector<uint8_t>(page, page + PAGE_SIZE)});
+            }
+        }
+    }
+
+    return out;
+}
+
+std::unique_ptr<Memory> Memory::clone_for_fork() const {
+    auto child = std::make_unique<Memory>();
+    // Copy the direct window base (child gets its own mmap'd window
+    // from its constructor). Then copy all mapped pages.
+    auto snapshots = snapshot_pages();
+    for (const auto& snap : snapshots) {
+        if (child->in_direct_window(snap.addr)) {
+            // Write to the direct window.
+            child->write(snap.addr, snap.data.data(), snap.data.size());
+        } else {
+            // Write to the sparse pages_ map.
+            child->map_range(snap.addr, snap.data.size());
+            child->write(snap.addr, snap.data.data(), snap.data.size());
+        }
+    }
+    return child;
+}
+
 } // namespace arm64emu
