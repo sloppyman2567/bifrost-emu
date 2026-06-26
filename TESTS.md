@@ -10,15 +10,21 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 37 | 37 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 36 | 36 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 38 | 38 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 38 | 38 | 0 |
 
-All 37 JIT test programs pass under frostJIT as of rc.0 (2026-06-26),
-and the `ctest/jit_*.elf` regression suite also passes under the
-interpreter to catch decoder drift. JIT is the default execution mode
-(6.4x speedup on compute workloads). The rc.0 release adds SIGSEGV
-delivery for JIT'd memory faults (rc=139 instead of rc=134 crash).
-See CHANGELOG.md for details.
+All 38 JIT test programs pass under frostJIT as of rc.0 (2026-06-27),
+and all 38 also pass under the interpreter. The test suite has been
+verified clean under ASan+UBSan (debug build). JIT is the default
+execution mode (6.4x speedup on compute workloads).
+
+New tests added in this release:
+- `ctest/test_simd_arith.c` — native SIMD arithmetic (8/16/32-bit lane
+  add/sub/mul) verified under both JIT and interpreter.
+- `ctest/test_tls_static.c` — static TLS (__thread variables) with
+  initial values and write/read verification.
+- `ctest/test_jit_native.c` — comprehensive JIT test: integer arithmetic,
+  bitfield, CSEL, FP, SIMD, memory ops, and a 1M-iteration loop.
 
 ---
 

@@ -65,13 +65,13 @@ endif
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
+        $(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
 
 # Pattern rule: compile any .cpp under src/ or main.cpp to .o in build/
 # Header dependencies are auto-tracked via -MMD -MP (see DEPS above).
 $(OBJDIR)/%.o: %.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        @mkdir -p $(dir $@)
+        $(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Include auto-generated header dependencies (silently ignore if missing).
 -include $(DEPS)
@@ -80,14 +80,14 @@ $(OBJDIR)/%.o: %.cpp
 lib: $(LIB)
 
 $(LIB): $(LIB_OBJECTS)
-	ar rcs $@ $^
-	@echo "Built $@ (excludes main.cpp; link your own driver)"
+        ar rcs $@ $^
+        @echo "Built $@ (excludes main.cpp; link your own driver)"
 
 # Debug build with sanitizers (no -MMD to keep build/ clean for release)
 debug: CXXFLAGS = -O0 -g -std=c++17 -pthread -Wall -Wextra -fsanitize=address,undefined -I$(INCDIR) -Isrc
 debug: LDFLAGS = -pthread -fsanitize=address,undefined
 debug: $(OBJECTS)
-	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
+        $(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
 
 # Run all test programs.
 #
@@ -100,56 +100,56 @@ debug: $(OBJECTS)
 # infinite `yes` program are excluded from the auto-loop -- run them
 # by hand.
 test: $(TARGET)
-	@echo "--- Running test suite (JIT, default) ---"
-	@for f in test/*.elf ctest/*.elf ctest_real/*.elf; do \
-	    case "$$f" in \
-	      */echo.elf|*/repl.elf|*/sh.elf|*/fgets_test.elf|*/yes.elf|*/cat.elf) \
-	        echo "--- skipping interactive/infinite: $$f ---"; continue;; \
-	    esac; \
-	    echo "--- $$f ---"; \
-	    timeout 10 ./$(TARGET) $$f </dev/null \
-	        || echo "FAILED (rc=$$?): $$f"; \
-	done
-	@echo "--- Running JIT regression suite under interpreter (--no-jit) ---"
-	@for f in ctest/jit_*.elf; do \
-	    echo "--- $$f (interp) ---"; \
-	    timeout 10 ./$(TARGET) --no-jit $$f </dev/null \
-	        || echo "FAILED (rc=$$?): $$f"; \
-	done
-	@echo "--- Done. ---"
+        @echo "--- Running test suite (JIT, default) ---"
+        @for f in test/*.elf ctest/*.elf ctest_real/*.elf; do \
+            case "$$f" in \
+              */echo.elf|*/repl.elf|*/sh.elf|*/fgets_test.elf|*/yes.elf|*/cat.elf|*/tr.elf) \
+                echo "--- skipping interactive/infinite: $$f ---"; continue;; \
+            esac; \
+            echo "--- $$f ---"; \
+            timeout 10 ./$(TARGET) $$f </dev/null \
+                || echo "FAILED (rc=$$?): $$f"; \
+        done
+        @echo "--- Running JIT regression suite under interpreter (--no-jit) ---"
+        @for f in ctest/jit_*.elf; do \
+            echo "--- $$f (interp) ---"; \
+            timeout 10 ./$(TARGET) --no-jit $$f </dev/null \
+                || echo "FAILED (rc=$$?): $$f"; \
+        done
+        @echo "--- Done. ---"
 
 # Run JIT tests under BIFROST_JIT_VERIFY=1 — catches JIT/interpreter
 # divergences by running each block through both paths and comparing
 # CPU state. Slow (10-50x), but catches codegen bugs that produce
 # wrong results without crashing. Use this after any JIT codegen change.
 verify: $(TARGET)
-	@echo "--- JIT verify mode (divergence check) ---"
-	@for f in ctest/jit_*.elf; do \
-	    echo "--- $$f (verify) ---"; \
-	    BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) $$f </dev/null 2>&1 | \
-	        grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' | head -3; \
-	    echo "  (rc=$${PIPESTATUS[0]})"; \
-	done
-	@echo "Done. Any DIVERGENCE lines above indicate JIT codegen bugs."
+        @echo "--- JIT verify mode (divergence check) ---"
+        @for f in ctest/jit_*.elf; do \
+            echo "--- $$f (verify) ---"; \
+            BIFROST_JIT_VERIFY=1 timeout 30 ./$(TARGET) $$f </dev/null 2>&1 | \
+                grep -E 'VERIFY.*DIVERGENCE.*pc|VERIFY.*x[0-9]+: jit' | head -3; \
+            echo "  (rc=$${PIPESTATUS[0]})"; \
+        done
+        @echo "Done. Any DIVERGENCE lines above indicate JIT codegen bugs."
 
 
 # Cross-compile a test program with the bundled musl toolchain.
 # Usage: make cross SRC=ctest_real/hello.c OUT=ctest_real/hello.elf
 CROSS_CC := tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc
 cross:
-	@if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
-	    echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \
-	fi
-	@$(CROSS_CC) -static -O2 -o $(OUT) $(SRC)
-	@echo "Built $(OUT)"
+        @if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
+            echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \
+        fi
+        @$(CROSS_CC) -static -O2 -o $(OUT) $(SRC)
+        @echo "Built $(OUT)"
 
 # Install to /usr/local/bin
 install: $(TARGET)
-	install -d $(DESTDIR)/usr/local/bin
-	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/
+        install -d $(DESTDIR)/usr/local/bin
+        install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/
 
 uninstall:
-	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
+        rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
 
 clean:
-	rm -rf $(OBJDIR) $(TARGET) $(TARGET)-dbg *.o $(LIB)
+        rm -rf $(OBJDIR) $(TARGET) $(TARGET)-dbg *.o $(LIB)

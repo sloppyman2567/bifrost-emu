@@ -66,12 +66,28 @@ Options:
   -h, --help      show help
   --jit           enable frostJIT (now the default; kept for compatibility)
   --no-jit        disable JIT and use the interpreter (fallback / debugging)
+  --jit-threshold N  use interpreter for first N instructions, then switch
+                     to JIT (avoids compilation overhead for short programs;
+                     default 0 = use JIT from start)
   --              end of options; next arg is the ELF file (POSIX convention)
   --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM format)
   --audio-dump PATH  dump audio PCM to PATH on exit (WAV format)
   --raw-tty       force raw TTY mode (per-character input, no echo)
   -q, --quiet     suppress BRK warnings (even with -d)
 ```
+
+Environment variables:
+- `BIFROST_NATIVE_DYNLINK=1` — use the in-emulator dynamic linker instead
+  of loading the guest-side ld.so. Processes DT_NEEDED, applies
+  relocations, resolves symbols, and allocates TLS blocks natively.
+- `BIFROST_JIT_VERIFY=1` — run the JIT divergence checker (compares JIT
+  results against the interpreter for every block).
+- `BIFROST_ENABLE_FWD=1` — enable experimental load-forwarding in the IR
+  optimizer (~5.6% speedup, has known correctness bugs with some toybox
+  commands).
+- `BIFROST_SYSCALL_TRACE=1` — trace syscall invocations to stderr.
+- `BIFROST_NO_CHAIN=1` — disable lazy block chaining (for debugging).
+- `BIFROST_NO_SELFLOOP=1` — disable self-loop chaining (for debugging).
 
 The `--fb-dump PATH` option syncs the guest's `/dev/fb0` writes back to
 the host and writes a PPM image to `PATH` on exit. Useful for headless
