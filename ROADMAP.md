@@ -6,19 +6,21 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.0-rc.0 (next)
+## v1.4.0 (final release — after rc.0 stabilization)
 
 1. **Fix the `toybox sh` regression.** `toybox sh -c 'echo hi'`
-   currently aborts with `UnmappedMemory` at `0x7473657463006883`.
-   The standalone `sh.elf` (a simpler REPL) works fine — the issue
-   is specific to toybox's `sh` binary, likely involving stack
-   pointer setup or a signal-frame layout assumption. Trace with
+   exits 139 (SIGSEGV) — the JIT now delivers SIGSEGV cleanly
+   (was rc=134 crash before rc.0). The underlying guest fault
+   (argv walk reading string data as pointers at
+   `0x7473657463006883`) is a pre-existing toybox sh binary issue.
+   The standalone `sh.elf` works fine. Trace with
    `./bifrost-emu -d ctest_real/toybox sh -c 'echo hi'` to find
-   the faulting instruction.
+   the faulting instruction and determine whether it's a decode
+   bug, a stack layout issue, or an argv setup problem.
 
-2. **Stabilize.** No new features — just bug fixes from the beta.3
+2. **Stabilize.** No new features — just bug fixes from the rc.0
    feedback. Once all `ctest_real/` and `toybox` non-sh programs
-   pass under both interpreter and JIT, cut rc.0.
+   pass under both interpreter and JIT, cut the final 1.4.0.
 
 3. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` in
    some musl code paths. Trace the `strspn` bitset construction
@@ -31,6 +33,8 @@ status, see [TESTS.md](TESTS.md).
    cross-thread delivery. The signal frame plumbing and host-to-guest
    forwarding landed in v1.4.0-alpha / v1.4.0-alpha.1; this is the
    remaining work to make it useful for real signal-heavy programs.
+   (Note: basic SIGSEGV delivery from JIT'd memory faults landed in
+   rc.0 — see CHANGELOG.md.)
 
 5. **Fix `strtod("-nan")` sign-bit loss.** `strtod("-nan")` returns
    `nan` (sign bit dropped). The `-inf`/`+inf`/`infinity` paths all

@@ -51,15 +51,23 @@ static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mi
 
 // ── Forward decls of slow-path helpers defined in x86_backend.cpp ──────
 // These are extern "C" so JIT-compiled code can call them by address
-// without name-mangling concerns.
+// without name-mangling concerns. The CPU* arg is used for SIGSEGV
+// delivery when the memory access faults (UnmappedMemory).
 extern "C" {
-    uint64_t jit_load_mem_slow(Emulator* emu, uint64_t addr, int width);
-    void     jit_store_mem_slow(Emulator* emu, uint64_t addr, uint64_t val, int width);
+    uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width);
+    void     jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 }
 
 // ── Interpreter-step trampoline (called from JIT-compiled code) ─────────
 // Invalidates the CPU's page cache before stepping, then dispatches to
 // the interpreter. Optional BIFROST_STEP_TRACE env var logs each step.
+//
+// CRITICAL: this is extern "C" — C++ exceptions cannot propagate
+// through it. The interpreter's step_public() may throw UnmappedMemory
+// (e.g., when the guest touches an unmapped page). Catch it here and
+// translate to a SIGSEGV delivery, matching the run loop's behavior.
+// Without this catch, the exception would call std::terminate because
+// JIT'd code has no DWARF unwind info.
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
     // Invalidate the CPU's page cache before stepping.
     cpu->page_cache.read_page = UINT64_MAX;
@@ -74,7 +82,15 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
                 static_cast<unsigned long long>(cpu->regs[27]),
                 cpu->pstate);
     }
-    emu->step_public(*cpu);
+    try {
+        emu->step_public(*cpu);
+    } catch (UnmappedMemory& e) {
+        (void)e;
+        // Deliver SIGSEGV — if no handler, sets cpu->running=false and
+        // cpu->exit_code = 139. The JIT run loop checks cpu->running
+        // after each block and exits cleanly.
+        deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+    }
     if (getenv("BIFROST_STEP_TRACE")) {
         fprintf(stderr, "    [step] pc=0x%llx done x0=0x%llx x24=0x%llx pstate=0x%x\n",
                 static_cast<unsigned long long>(cpu->pc),
@@ -3115,7 +3131,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 static_cast<unsigned long long>(cpu.regs[2]), static_cast<unsigned long long>(cpu.regs[3]),
                 static_cast<unsigned long long>(cpu.regs[5]));
     }
-    uint64_t next_pc = entry.fn(&cpu, &emu);
+    // ── SIGSEGV delivery for JIT'd memory faults ───────────────────
+    // The JIT'd code (entry.fn) calls C helpers (jit_load_mem_slow /
+    // jit_store_mem_slow) that may throw UnmappedMemory. JIT'd code
+    // has no DWARF unwind info, so a C++ exception thrown across it
+    // would call std::terminate. Catch at the boundary and translate
+    // to a SIGSEGV signal delivery (matching the interpreter path in
+    // emulator.cpp). If no handler is installed, deliver_signal sets
+    // cpu.exit_code = 128+11 = 139 and cpu.running = false.
+    uint64_t next_pc;
+    try {
+        next_pc = entry.fn(&cpu, &emu);
+    } catch (UnmappedMemory& e) {
+        (void)e;
+        // Deliver SIGSEGV to the guest. If a handler is installed,
+        // deliver_signal sets up the handler frame and returns true;
+        // we resume at the handler's PC. If no handler, it sets
+        // cpu.running = false and exit_code = 139.
+        deliver_signal(emu, cpu, emu.signals(), BIFROST_SIGSEGV);
+        // cpu.pc may have been changed by deliver_signal (handler entry)
+        // or left unchanged (no handler — cpu.running is now false).
+        next_pc = cpu.pc;
+    }
     cpu.pc = next_pc;
     return next_pc;
 }

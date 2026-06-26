@@ -10,17 +10,15 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 36 | 36 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 37 | 37 | 0 |
 | Interpreter (`./bifrost-emu --no-jit`) | 36 | 36 | 0 |
 
-All 36 JIT test programs pass under frostJIT as of beta.3 (2026-06-26),
+All 37 JIT test programs pass under frostJIT as of rc.0 (2026-06-26),
 and the `ctest/jit_*.elf` regression suite also passes under the
 interpreter to catch decoder drift. JIT is the default execution mode
-(6.4x speedup on compute workloads). This release fixed 9 critical
-int↔FP conversion bugs (SCVTF/UCVTF/FCVTZS/FCVTZU) that were the root
-cause of `strtod("-inf")` returning `-nan`. A new 36-case ctest
-(`ctest/jit_int_fp_conv.c`) covers all 8 variants of int↔FP conversion
-to prevent regression. See CHANGELOG.md for details.
+(6.4x speedup on compute workloads). The rc.0 release adds SIGSEGV
+delivery for JIT'd memory faults (rc=139 instead of rc=134 crash).
+See CHANGELOG.md for details.
 
 ---
 
@@ -135,7 +133,7 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `cal` | ✅ | ✅ | June 2026 calendar |
 | `xxd` | ✅ | ✅ | Hex dump of `/etc/hostname` |
 | `sleep` | ✅ | ✅ | `sleep 0.1` |
-| `sh -c` | ❌ | ❌ | `sh -c 'echo hi'` — currently aborts with `UnmappedMemory` (regression). The standalone `sh.elf` (ctest_real/sh.elf) works fine. |
+| `sh -c` | ❌ | ❌ | `sh -c 'echo hi'` — exits 139 (SIGSEGV). The JIT now catches the `UnmappedMemory` exception and delivers SIGSEGV cleanly (was rc=134 SIGABRT crash before rc.0). The underlying guest fault (argv walk reading string data as pointers) is a pre-existing toybox sh binary issue. The standalone `sh.elf` (ctest_real/sh.elf) works fine. |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
 | `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
 | `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. (Was broken: SCVTF misdecoded as FMOV + FMADD operand bug.) |

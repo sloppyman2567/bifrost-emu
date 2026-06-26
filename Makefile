@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (v1.4.0-beta.3)
+# bifrost-emu Makefile (v1.4.0-rc.0)
 #
 # Auto-discovers all .cpp files under src/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the

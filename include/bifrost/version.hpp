@@ -6,21 +6,21 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// 1.4.0-beta.3 (2026-06-26): JIT is now the default execution mode.
-// 36/36 JIT tests pass; the ctest/jit_*.elf regression suite also
-// passes under the interpreter (--no-jit) to catch decoder drift.
-// Major work in this release: FCMP #0.0 form detection, FP 1-source
-// opcode extraction (bits[20:15] not bits[15:12]), FMOV imm mask
-// (now matches both single and double precision), FMOV imm vs SCVTF
-// encoding collision, missing interpreter FCMP handler, 32-bit ASR
-// sign-extension (interpreter + JIT), int<->FP conversion pipeline
-// (SCVTF/UCVTF/FCVTZS/FCVTZU — 9 bugs), system register width (FPSR/
-// FPCR 32-bit reads in JIT), and JIT performance (self-loop chaining,
-// liveness-based regalloc, register-cache-aware ALU codegen) — 571
-// MIPS on bench_mips (6.4x over interpreter). Added shared fp_decode
-// helpers in decoder.hpp to keep the interpreter and JIT's IR
-// translator in sync.
-constexpr const char* VERSION  = "1.4.0-beta.3";
+// 1.4.0-rc.0 (2026-06-26): Release candidate. JIT is the default
+// execution mode. 37/37 JIT tests pass; the ctest/jit_*.elf regression
+// suite also passes under the interpreter (--no-jit) to catch decoder
+// drift. Key changes since beta.3:
+//   - SIGSEGV delivery for JIT'd memory faults: exceptions thrown from
+//     JIT'd code (which has no DWARF unwind info) are now caught at the
+//     C-helper boundary (jit_load_mem_slow / jit_store_mem_slow /
+//     jit_interp_step) and translated to SIGSEGV signal delivery,
+//     matching the interpreter path. Previously these faults called
+//     std::terminate (SIGABRT, rc=134); now they exit cleanly with
+//     rc=139 (or invoke the guest's SIGSEGV handler if installed).
+//   - toybox sh -c regression documented (exits 139 instead of 134).
+//   - Docs/Makefile cleanup: test target no longer uses --jit, skips
+//     interactive programs, redirects stdin from /dev/null.
+constexpr const char* VERSION  = "1.4.0-rc.0";
 constexpr const char* CODENAME = "bifrost-emu";
 
 } // namespace arm64emu

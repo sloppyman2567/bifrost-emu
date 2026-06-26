@@ -514,22 +514,41 @@ uint8_t FrostJIT::resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc) 
 // These are referenced by name from JIT-compiled code in frostjit.cpp
 // (emit_load_mem / emit_store_mem slow paths). They MUST be non-static
 // so the JIT call sites can take their address.
+//
+// CRITICAL: these are extern "C" — C++ exceptions cannot propagate
+// through them back into JIT'd code (which has no DWARF unwind info).
+// Catch UnmappedMemory here and deliver SIGSEGV directly to the guest
+// via the CPU pointer (passed as the 4th arg from the JIT). If a
+// handler is installed, deliver_signal sets up the handler frame and
+// the JIT run loop resumes at the handler's PC. If not, it sets
+// cpu->running = false and cpu->exit_code = 139.
 extern "C" {
-    uint64_t jit_load_mem_slow(Emulator* emu, uint64_t addr, int width) {
+    uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
         uint64_t val = 0;
-        emu->mem().read(addr, &val, width);
+        try {
+            emu->mem().read(addr, &val, width);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+            return 0;  // cpu->running is now false (or handler installed)
+        }
         if (getenv("BIFROST_MEM_TRACE")) {
             fprintf(stderr, "    [load] addr=0x%llx w=%d → 0x%llx\n",
                     static_cast<unsigned long long>(addr), width, static_cast<unsigned long long>(val));
         }
         return val;
     }
-    void jit_store_mem_slow(Emulator* emu, uint64_t addr, uint64_t val, int width) {
+    void jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
         if (getenv("BIFROST_MEM_TRACE")) {
             fprintf(stderr, "    [store] addr=0x%llx val=0x%llx w=%d\n",
                     static_cast<unsigned long long>(addr), static_cast<unsigned long long>(val), width);
         }
-        emu->mem().write(addr, &val, width);
+        try {
+            emu->mem().write(addr, &val, width);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+        }
     }
 }
 
@@ -588,10 +607,14 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
     // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
     // add rsp,8 dance automatically. We just set up args and call.
+    //
+    // Args: jit_load_mem_slow(emu, cpu, addr, width)
+    //   RDI = emu, RSI = cpu, RDX = addr, RCX = width
     emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
-    emit_mov_reg(RDI, EMU_REG);
-    emit_mov_reg(RSI, dst);
-    emit_mov_imm32(RDX, w);
+    emit_mov_reg(RDI, EMU_REG);          // rdi = emu
+    emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
+    emit_mov_reg(RDX, dst);              // rdx = addr
+    emit_mov_imm32(RCX, w);              // rcx = width
     emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
     emit_pop(WIN_REG);                   // restore R10
     // RAX now has the return value (the loaded data).
@@ -637,16 +660,19 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_cmp_reg(R8, R9);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
 
-    // Slow path: call jit_store_mem_slow(emu, addr, val, width).
+    // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
     // 3 pushes (src, RAX, R10) — ODD, so emit_call_aligned handles the
     // sub rsp,8 + pushfq + call + popfq + add rsp,8 automatically.
+    //
+    // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
     emit_push(src_reg);            // save val (RCX)  — 1 push
     emit_push(RAX);                // save RAX        — 2 pushes
     emit_push(WIN_REG);            // save R10        — 3 pushes (ODD)
     emit_mov_reg(RDI, EMU_REG);    // rdi = emu
-    emit_mov_reg(RSI, R8);         // rsi = addr (from R8)
-    emit_mov_reg(RDX, src_reg);    // rdx = val (from src_reg=RCX)
-    emit_mov_imm32(RCX, w);        // rcx = width
+    emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
+    emit_mov_reg(RDX, R8);         // rdx = addr (from R8)
+    emit_mov_reg(RCX, src_reg);    // rcx = val (from src_reg=RCX)
+    emit_mov_imm32(R8, w);         // r8 = width
     emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/3);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(RAX);                 // restore RAX

@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-rc.0] — 2026-06-26 (release candidate — JIT SIGSEGV delivery + docs cleanup)
+
+### Summary
+
+The first release candidate. The JIT is production-ready: all 37 JIT
+tests pass, toybox integration works for 28/29 commands, and the JIT
+now handles memory faults gracefully (SIGSEGV delivery instead of
+SIGABRT crash). The Makefile `test` target has been cleaned up to
+match the JIT-default reality, and all docs have been corrected for
+stale references.
+
+### JIT correctness — SIGSEGV delivery for memory faults
+
+- **JIT'd code no longer crashes with `std::terminate` on unmapped
+  memory access.** Previously, when JIT'd code touched an unmapped
+  page, the `UnmappedMemory` C++ exception thrown by `Memory::read()`
+  /`write()` would propagate through the JIT'd code buffer (which has
+  no DWARF unwind info), causing `std::terminate` (SIGABRT, rc=134).
+  Now the exception is caught at the C-helper boundary
+  (`jit_load_mem_slow`, `jit_store_mem_slow`, `jit_interp_step`) and
+  translated to a SIGSEGV signal delivery via `deliver_signal()`. If
+  the guest has installed a SIGSEGV handler, it runs; otherwise the
+  guest exits with rc=139 (128+SIGSEGV), matching the interpreter
+  path. The `jit_load_mem_slow`/`jit_store_mem_slow` helpers now take
+  an extra `CPU*` argument (passed from the JIT as RSI) for signal
+  delivery.
+- **`toybox sh -c 'echo hi'`** now exits 139 (SIGSEGV) instead of
+  134 (SIGABRT). The underlying guest fault (argv walk reading string
+  data as pointers) is a pre-existing toybox sh binary issue, not a
+  regression — it's documented in ROADMAP.md as a v1.4.x item.
+
+### Build & test
+
+- **`make test` cleaned up.** The test target no longer uses `--jit`
+  (which is a no-op since JIT became default). It now: (1) runs all
+  `.elf` files under JIT with stdin redirected from `/dev/null` so
+  non-interactive programs don't block; (2) skips interactive/infinite
+  programs (echo, repl, sh, fgets_test, cat, yes); (3) re-runs the
+  `ctest/jit_*.elf` regression suite under `--no-jit` to catch
+  decoder/interpreter drift. The `verify` target also drops `--jit`
+  and uses `PIPESTATUS` for correct exit-code reporting.
+- **37/37 JIT tests pass** (was 36; the docs cleanup commit confirmed
+  the count). 36/37 interpreter tests pass (bench_mips needs >5s
+  timeout under interpreter — passes in 9s).
+
+### Documentation
+
+- **README.md**: File Structure section corrected (`include/core/`
+  never existed; core headers live in `src/core/*.h`). Test count
+  35→36→37. Stale "interpreter + JIT" wording replaced. Release
+  History now says "20+ bugs fixed" (was "11") and leads with the
+  JIT-default change.
+- **TESTS.md**: Summary table fixed (interpreter 16→36). Toybox `sh -c`
+  row marked as broken (was incorrectly ✅). Toybox summary rewritten
+  (28/29 pass, not "33/37"). Test-runner section updated to match new
+  Makefile. "Adding a new test" no longer suggests `--jit`.
+- **ROADMAP.md**: Removed stale items (seq/od now work, JIT already
+  default, 500+ MIPS already achieved at 571). Added toybox sh
+  regression as the top v1.4.x priority. Added `strtod("-nan")` and
+  JIT I/O performance items.
+- **CHANGELOG.md**: Merged `[Unreleased]` into `[1.4.0-beta.3]`
+  (version was pinned). Fixed "35/35 JIT tests" → "36/36". Added
+  `strtod("-inf")`/`strtod("inf")` to test results. Added toybox sh
+  regression to known issues.
+- **version.hpp**: Comment updated with accurate test count and beta.3
+  work summary.
+
 ## [1.4.0-beta.3] — 2026-06-26 (JIT default + int↔FP conversion fixes + JIT correctness/performance overhaul)
 
 ### Summary

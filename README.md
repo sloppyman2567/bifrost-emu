@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-beta.3
+  bifrost-emu  v1.4.0-rc.0
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-beta.3](https://img.shields.io/badge/version-1.4.0--beta.3-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-rc.0](https://img.shields.io/badge/version-1.4.0--rc.0-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -155,8 +155,8 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of beta.3 (2026-06-26),
-all 36 test programs pass under JIT, including the new
+JIT is ON by default; use `--no-jit` to opt out. As of rc.0 (2026-06-26),
+all 37 test programs pass under JIT, including the
 `ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion.
 
 ## Performance
@@ -334,15 +334,22 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-beta.3** (2026-06-26):
+current release is **v1.4.0-rc.0** (2026-06-26):
 
-- **JIT is now the default execution mode.** The 36-test suite,
+- **JIT is now the default execution mode.** The 37-test suite,
   toybox integration, and musl libc all pass under the JIT, and
   `bench_mips` shows a 6.4x speedup. Use `--no-jit` to opt out.
 - **JIT correctness overhaul** — 20+ bugs fixed across FP decode,
   32-bit shift semantics, int↔FP conversion (SCVTF/UCVTF/FCVTZS/
   FCVTZU), and system register reads. `toybox seq`, `printf "%g"`,
   `strtod("inf")`, `ls /`, and `od` all work now.
+- **JIT SIGSEGV delivery** — memory faults in JIT'd code are now
+  caught and delivered as SIGSEGV to the guest (rc=139), instead of
+  crashing with `std::terminate` (rc=134). JIT'd code has no DWARF
+  unwind info, so C++ exceptions can't propagate through it — the
+  C-helper boundary (`jit_load_mem_slow`/`jit_store_mem_slow`/
+  `jit_interp_step`) now catches `UnmappedMemory` and calls
+  `deliver_signal()`.
 - **JIT performance overhaul** — 571 MIPS on bench_mips (6.4x over
   interpreter, 10-run average) via self-loop chaining, liveness-based
   register freeing, and register-cache-aware ALU codegen.
