@@ -935,6 +935,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
 
             // ── Fall-through path: materialize flags, set RAX = fall-through PC ──
+            // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
+            // materialize_flags_to_pstate sees the original carry flag.
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — restore CF to original
+            }
             materialize_flags_to_pstate();
             emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
@@ -944,6 +949,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
 
+            // If CMC was emitted, re-invert CF before materializing flags.
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — restore CF to original
+            }
             // Materialize flags to pstate (the taken-target block may read them).
             materialize_flags_to_pstate();
 
