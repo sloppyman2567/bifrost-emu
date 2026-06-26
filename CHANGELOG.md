@@ -120,7 +120,8 @@ pass; `bench_mips` achieves 573 MIPS (5.9x speedup over interpreter);
 - **`toybox printf "%g" 3.14`** = `3.14` (was no output).
 - **`toybox ls /`** works (was crashing under JIT).
 - **`toybox od`** works (was SIMD decode error).
-- **`bench_mips`**: 1.4s (573 MIPS) — 5.9x over interpreter.
+- **`bench_mips`**: 1.401s avg (571 MIPS, 10-run average) — 6.4x over
+  interpreter (89 MIPS). JIT+FWD: 604 MIPS (6.8x).
 - **FWD mode**: 10/10 tests pass.
 - **JIT verify**: 0 divergences in `jit_fp_scalar`, `jit_madd`,
   `jit_simd`, `jit_addsub_imm`, `jit_carry`, `jit_csel`.

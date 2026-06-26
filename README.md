@@ -155,9 +155,20 @@ pass under JIT.
 
 ## Performance
 
-The interpreter achieves ~96 MIPS on compute-heavy workloads. The
-experimental frostJIT (`--jit`) achieves **573 MIPS** on `bench_mips`
-(5.9x faster than the interpreter) via:
+Measured on x86_64 Linux (Debian 14, g++ -O3), 10-run averages:
+
+| Workload | Interpreter | frostJIT | JIT + FWD |
+|----------|------------|----------|-----------|
+| bench_mips (compute) | 89 MIPS | **571 MIPS** (6.4x) | **604 MIPS** (6.8x) |
+| toybox seq 1 10000 (I/O) | 28 MIPS | 26 MIPS (0.9x) | — |
+
+The JIT excels at long-running compute-intensive workloads (loops, math,
+crypto) where its 6.4x throughput advantage amortizes the one-time block
+compilation cost. For short or I/O-bound programs (cat, ls, seq), the
+interpreter is faster because it has zero compilation overhead. Break-even
+is approximately 1–2 million instructions.
+
+The JIT achieves this via:
 
 1. **Self-loop chaining** — tight loops jump directly back to the block
    body, skipping the epilogue/dispatcher/prologue.
@@ -318,9 +329,9 @@ current release is **v1.4.0-beta.3** (2026-06-26):
   32-bit shift semantics, int↔FP conversion, and system register
   reads. `toybox seq`, `printf "%g"`, `strtod`, `ls /`, and `od` all
   work now.
-- **JIT performance overhaul** — 573 MIPS on bench_mips (5.9x over
-  interpreter) via self-loop chaining, liveness-based register freeing,
-  and register-cache-aware ALU codegen.
+- **JIT performance overhaul** — 571 MIPS on bench_mips (6.4x over
+  interpreter, 10-run average) via self-loop chaining, liveness-based
+  register freeing, and register-cache-aware ALU codegen.
 - **Shared `fp_decode` helpers** in `decoder.hpp` keep the interpreter
   and JIT's IR translator in sync.
 - **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
