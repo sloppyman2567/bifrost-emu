@@ -53,6 +53,14 @@ namespace arm64emu {
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
 
+    // Drain pending host-forwarded signals at every syscall boundary.
+    // This keeps signal-delivery latency low even when the guest is in
+    // a tight syscall loop (e.g., ppoll waiting for SIGCHLD). Without
+    // this, signals would only be drained every 4096 instructions in
+    // the run loop, which can be hundreds of milliseconds under the
+    // interpreter.
+    drain_host_signals(cpu);
+
     // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
     static bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
     if (trace_syscalls) {
