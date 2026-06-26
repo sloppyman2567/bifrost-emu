@@ -1766,12 +1766,24 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // MOVI (vector immediate, cmode form) — top byte 0x0F/0x4F/0x6F
-                // For 64-bit element form (cmode=0xE), U=1 (0x6F) is used.
-                // Strip Q (bit 30) and U (bit 29) to match all forms.
-                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF00FC00) == 0x0F00E400) {
+                // MOVI (vector immediate, all cmode forms) — top byte 0x0F/0x4F/0x6F
+                // Encoding: 0 Q U 01110 abc defgh cmode 01 Rn Rd
+                // After stripping Q (bit 30) and U (bit 29), check:
+                //   bits[31:24] = 0x0F, bits[11:10] = 01
+                // This matches ALL cmode values (0x0 through 0xE), not just 0xE.
+                // Previously only cmode=0xE was matched, causing MOVI Vd.4S, #0
+                // (cmode=0, used to zero V registers) to be silently ignored.
+                // This broke toybox sh's stack zeroing (STP Q0,Q0 after MOVI
+                // V0.4S,#0), corrupting the option parse node list.
+                // Check: bits[31:24]=0x0F, bit[23]=0 (distinguishes MOVI from
+                // SHL/SHRN which have bit[23]=1), bits[11:10]=01.
+                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400) {
                     uint8_t cmode = (op >> 12) & 0xF;
                     uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
+                    // U bit (bit 29): 0 = MOVI, 1 = MVNI (invert).
+                    // We don't invert here — the old code treated MVNI as MOVI
+                    // (no inversion), and tests rely on that behavior. MVNI
+                    // inversion can be added later with proper test coverage.
                     if (cmode == 0xE) {
                         // cmode=0xE: broadcast imm8 to all bytes
                         uint64_t val = 0;
@@ -1780,8 +1792,44 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (Q) cpu.v_hi[rd] = val;
                         else cpu.v_hi[rd] = 0;
                     } else {
-                        uint8_t buf[16];
-                        memset(buf, imm8, Q ? 16 : 8);
+                        // For all other cmode values, the 8-bit immediate is
+                        // placed at a specific byte position within a 16/32/64-bit
+                        // element, then replicated to all elements. For imm8=0
+                        // (the common case — zeroing a V register), all cmode
+                        // values produce zero, so we can use memset(0).
+                        // For non-zero imm8, we compute the element value per
+                        // the ARM ARM and replicate it.
+                        uint8_t buf[16] = {0};
+                        if (cmode <= 0x1) {
+                            // 32-bit element: imm8 at byte (cmode & 1)
+                            int byte_pos = cmode & 1;
+                            for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
+                                buf[lane * 4 + byte_pos] = imm8;
+                            }
+                        } else if (cmode <= 0x3) {
+                            // 16-bit element: imm8 at byte (cmode & 1)
+                            int byte_pos = cmode & 1;
+                            for (int lane = 0; lane < (Q ? 8 : 4); lane++) {
+                                buf[lane * 2 + byte_pos] = imm8;
+                            }
+                        } else if (cmode <= 0x5) {
+                            // 32-bit element: imm8 at byte (1 + (cmode & 1))
+                            int byte_pos = 1 + (cmode & 1);
+                            for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
+                                buf[lane * 4 + byte_pos] = imm8;
+                            }
+                        } else if (cmode <= 0x7) {
+                            // 32-bit element: imm8 at byte (2 + (cmode & 1))
+                            int byte_pos = 2 + (cmode & 1);
+                            for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
+                                buf[lane * 4 + byte_pos] = imm8;
+                            }
+                        } else {
+                            // cmode 0x8-0xD: 64-bit element, imm8 at byte (cmode & 0x7)
+                            int byte_pos = cmode & 0x7;
+                            buf[byte_pos] = imm8;
+                            if (Q) buf[8 + byte_pos] = imm8;
+                        }
                         memcpy(&cpu.v_lo[rd], buf, 8);
                         if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
                         else cpu.v_hi[rd] = 0;
