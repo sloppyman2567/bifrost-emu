@@ -64,6 +64,7 @@ public:
 
     uint64_t blocks_translated = 0;
     uint64_t blocks_executed   = 0;
+    uint64_t instructions_executed = 0;  // sum of instr_count over executed blocks
     uint64_t cache_hits        = 0;
     uint64_t cache_misses      = 0;
     uint64_t interpreter_fallbacks = 0;

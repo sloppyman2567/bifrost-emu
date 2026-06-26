@@ -113,6 +113,14 @@ enum class IROp : uint8_t {
     SIMD_LDST,     // Load/store 128-bit from memory
                    // dest = vreg index, src1 = addr vreg, imm = offset
                    // width = 0 (store), 1 (load)
+    SIMD_ARITH,    // v_lo[dest],v_hi[dest] = src1 OP src2 (integer lane-wise)
+                   // imm = opcode (0=add,1=sub,2=mul,3=umin,4=umax,5=smin,6=smax,
+                   //                7=orr_imm_lo,8=orr_imm_hi)  — see JIT
+                   // width = element size in bytes (1, 2, 4, 8)
+                   //   size=8 only valid for add/sub (no pmul etc.)
+    SIMD_CMP,      // v_lo[dest],v_hi[dest] = compare(src1, src2) ? all-ones : 0
+                   // imm = opcode (0=eq,1=ge_u,2=gt_u,3=ge_s,4=gt_s,5=hi_u,6=hs_u)
+                   // width = element size in bytes (1, 2, 4, 8)
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

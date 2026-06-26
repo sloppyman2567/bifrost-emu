@@ -63,6 +63,9 @@ public:
     static Loaded load(Memory& mem, const std::vector<uint8_t>& data);
 };
 
+// Forward-declare DynamicLinker (defined in src/frontend/dynamic_linker.h).
+class DynamicLinker;
+
 // ── Emulator ──────────────────────────────────────────────────────────
 class Emulator {
 public:
@@ -188,6 +191,12 @@ private:
     // ── frostJIT ──────────────────────────────────────────────────────
     std::unique_ptr<FrostJIT> jit_;
     bool jit_enabled_ = false;
+
+    // ── Dynamic linker (for dynamically-linked binaries) ────────────
+    // Owned via unique_ptr so we don't need the full DynamicLinker
+    // definition in this header. Created on first load_elf_file() if
+    // the binary has a PT_INTERP.
+    std::unique_ptr<DynamicLinker> dyn_linker_;
 
     // Friend declaration must come AFTER GuestThread is defined.
     friend void thread_entry(Emulator* emu, GuestThread* gt);

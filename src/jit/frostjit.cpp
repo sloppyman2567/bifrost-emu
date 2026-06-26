@@ -1462,55 +1462,266 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         case IROp::SIMD_LOGICAL: {
             // v_lo[dest],v_hi[dest] = src1 OP src2
             // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
-            // SIMD_LOGICAL only touches XMM0/XMM1, no GPRs.
+            // SIMD_LOGICAL only touches XMM0/XMM1/XMM2, no GPRs.
+            //
+            // SSE2 opcodes used:
+            //   AND  (0): pand     = 66 0F DB /r
+            //   ORR  (1): por      = 66 0F EB /r
+            //   EOR  (2): pxor     = 66 0F EF /r
+            //   BIC  (3): a & ~b   = pandn xmm2,xmm1 (xmm2=~xmm1); pand xmm0,xmm2
+            //   ORN  (4): a | ~b   = pandn xmm2,xmm1 (xmm2=~xmm1); por  xmm0,xmm2
+            //   EON  (5): a ^ ~b   = pxor xmm0,xmm1; pcmpeqd xmm1,xmm1 (all-ones);
+            //                       pxor xmm0,xmm1  →  ~xmm0
             clobber_flags();
-            // No GPR clobbered — but be safe and invalidate RAX/RCX/RDX
-            // in case the JIT has stale mappings (they shouldn't be dirty
-            // since no GPR is touched, but the cache state may be stale).
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
-            // Load src1 lo/hi into XMM0
-            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
-            // movsd xmm0, [rbx+off1lo]
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off1lo);
-
-            // Load src2 lo into XMM1
-            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(1, CPU_REG, off2lo);
-
-            // Execute lo half
             uint8_t opc = static_cast<uint8_t>(inst.imm);
-            uint8_t sse_op;
-            if (opc <= 2) {
-                sse_op = (opc == 0) ? 0x54 : (opc == 1) ? 0x56 : 0x57;
-            } else {
+            // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
+            // 2-3 instruction sequence.
+            uint8_t sse_op = 0;
+            bool simple = false;
+            if (opc == 0) { sse_op = 0xDB; simple = true; }       // PAND
+            else if (opc == 1) { sse_op = 0xEB; simple = true; }  // POR
+            else if (opc == 2) { sse_op = 0xEF; simple = true; }  // PXOR
+            else if (opc > 5) {
+                // Unknown opcode — fall back to interpreter.
                 emit_call_interp(inst.arm_pc, false);
                 return false;
             }
-            // 66 0F sse_op C1 (xmm0, xmm1)
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
 
-            // Store lo result
-            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, offdlo);
+            auto emit_logical_half = [&](int32_t off1, int32_t off2, int32_t offd) {
+                // movsd xmm0, [rbx+off1]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off1);
+                // movsd xmm1, [rbx+off2]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2);
 
-            // Load src1 hi into XMM0
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off1hi);
-            // Load src2 hi into XMM1
+                if (simple) {
+                    // 66 0F sse_op C1  (xmm0, xmm1)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op);
+                    emit_byte(0xC1);
+                } else if (opc == 3) {
+                    // BIC: a & ~b
+                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1 & xmm2
+                    // First set xmm2 to all-ones: pcmpeqd xmm2, xmm2
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
+                    emit_byte(0xE2);  // modrm(3, xmm2, xmm2)
+                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1 & xmm2 = ~xmm1
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDF);
+                    emit_byte(0xE1);  // modrm(3, xmm2, xmm1)
+                    // pand xmm0, xmm2
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDB);
+                    emit_byte(0xC2);  // modrm(3, xmm0, xmm2)
+                } else if (opc == 4) {
+                    // ORN: a | ~b
+                    // pcmpeqd xmm2, xmm2  (xmm2 = all-ones)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
+                    emit_byte(0xE2);
+                    // pandn xmm2, xmm1  →  xmm2 = ~xmm1
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xDF);
+                    emit_byte(0xE1);
+                    // por xmm0, xmm2
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEB);
+                    emit_byte(0xC2);
+                } else { // opc == 5: EON: a ^ ~b = ~(a^b)
+                    // pxor xmm0, xmm1
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xC1);
+                    // pcmpeqd xmm1, xmm1  (xmm1 = all-ones)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x76);
+                    emit_byte(0xE1);
+                    // pxor xmm0, xmm1  →  ~xmm0
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xC1);
+                }
+
+                // movsd [rbx+offd], xmm0
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offd);
+            };
+
+            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
             int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(1, CPU_REG, off2hi);
-            // Execute hi half
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op); emit_byte(0xC1);
-            // Store hi result
+            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, offdhi);
+            emit_logical_half(off1lo, off2lo, offdlo);
+            emit_logical_half(off1hi, off2hi, offdhi);
+            return false;
+        }
+
+        // ── SIMD ARITH (integer lane-wise add/sub/mul/min/max) ───────
+        // Uses SSE2/SSE4.1 integer SIMD ops. Only the common element
+        // sizes (1/2/4/8 bytes) and opcodes (add/sub/mul) are native;
+        // rare combinations fall back to CALL_INTERP.
+        case IROp::SIMD_ARITH: {
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            int esize = static_cast<int>(inst.width);
+            if (esize != 1 && esize != 2 && esize != 4 && esize != 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            // mul (opc=2) for size=8 is not in SSE2 — fall back.
+            if (opc == 2 && esize == 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            // min/max (opc=3..6) for size=8 not in SSE2 — fall back.
+            if (opc >= 3 && opc <= 6 && esize == 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+
+            // SSE2 opcodes (with 66 0F prefix):
+            //   paddb/h/w/d/q  = FC/FD/FE/D8
+            //   psubb/h/w/d/q  = F8/F9/FA/EB
+            //   pmullw (size=2) = D5   (only 16-bit multiply low)
+            //   pmulld (size=4, SSE4.1) = 40 5F (needs 66 0F 38 5F)
+            // min/max (unsigned/signed):
+            //   pminub/pmaxub (size=1) = DA/DE
+            //   pminsw/pmaxsw (size=2, signed) = EA/EE
+            //   pminud/pmaxud (size=4, SSE4.1) = 38 3B / 38 3F
+            // For signed min/max on size=1, we can use pminsb/pmaxsb (SSE4.1=38 38/3C)
+            // For simplicity, only support the SSE2 ones natively; fall back otherwise.
+            uint8_t op_byte = 0;
+            bool needs_38_prefix = false;  // SSE4.1 3-byte opcodes (66 0F 38 XX)
+            bool supported = true;
+
+            if (opc == 0) {  // ADD
+                switch (esize) {
+                    case 1: op_byte = 0xFC; break;  // paddb
+                    case 2: op_byte = 0xFD; break;  // paddw
+                    case 4: op_byte = 0xFE; break;  // paddd
+                    case 8: op_byte = 0xD4; break;  // paddq (note: 0F D4)
+                }
+            } else if (opc == 1) {  // SUB
+                switch (esize) {
+                    case 1: op_byte = 0xF8; break;  // psubb
+                    case 2: op_byte = 0xF9; break;  // psubw
+                    case 4: op_byte = 0xFA; break;  // psubd
+                    case 8: op_byte = 0xFB; break;  // psubq (note: 0F FB)
+                }
+            } else if (opc == 2) {  // MUL
+                if (esize == 2) {
+                    op_byte = 0xD5;        // pmullw (66 0F D5)
+                } else if (esize == 4) {
+                    // pmulld (SSE4.1): 66 0F 38 5F
+                    needs_38_prefix = true;
+                    op_byte = 0x5F;
+                } else {
+                    supported = false;  // size=1 or 8: no native multiply
+                }
+            } else if (opc == 3 || opc == 4) {  // unsigned min/max
+                if (esize == 1) {
+                    op_byte = (opc == 3) ? 0xDA : 0xDE;  // pminub/pmaxub
+                } else if (esize == 4) {
+                    // pminud = 66 0F 38 3B ; pmaxud = 66 0F 38 3F
+                    needs_38_prefix = true;
+                    op_byte = (opc == 3) ? 0x3B : 0x3F;
+                } else {
+                    supported = false;
+                }
+            } else if (opc == 5 || opc == 6) {  // signed min/max
+                if (esize == 2) {
+                    op_byte = (opc == 5) ? 0xEA : 0xEE;  // pminsw/pmaxsw
+                } else if (esize == 1 || esize == 4) {
+                    needs_38_prefix = true;
+                    if (esize == 1) {
+                        // pminsb = 66 0F 38 38 ; pmaxsb = 66 0F 38 3C
+                        op_byte = (opc == 5) ? 0x38 : 0x3C;
+                    } else {
+                        // pminsd = 66 0F 38 39 ; pmaxsd = 66 0F 38 3D
+                        op_byte = (opc == 5) ? 0x39 : 0x3D;
+                    }
+                } else {
+                    supported = false;
+                }
+            } else {
+                supported = false;
+            }
+
+            if (!supported) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+
+            auto emit_arith_half = [&](int32_t off1, int32_t off2, int32_t offd) {
+                // movsd xmm0, [rbx+off1]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off1);
+                // movsd xmm1, [rbx+off2]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2);
+                // emit the SSE op (xmm0, xmm1)
+                emit_byte(0x66); emit_byte(0x0F);
+                if (needs_38_prefix) {
+                    emit_byte(0x38);
+                }
+                emit_byte(op_byte);
+                emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
+                // movsd [rbx+offd], xmm0
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offd);
+            };
+
+            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_arith_half(off1lo, off2lo, offdlo);
+            emit_arith_half(off1hi, off2hi, offdhi);
+            return false;
+        }
+
+        // ── SIMD CMP (integer lane-wise compare) ─────────────────────
+        // Only eq (opc=0) is fully native via PCMPEQB/W/D/Q. Other
+        // comparisons fall back to CALL_INTERP for now.
+        case IROp::SIMD_CMP: {
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            int esize = static_cast<int>(inst.width);
+            if (opc != 0 || (esize != 1 && esize != 2 && esize != 4 && esize != 8)) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+
+            uint8_t op_byte = 0;
+            switch (esize) {
+                case 1: op_byte = 0x74; break;  // pcmpeqb
+                case 2: op_byte = 0x75; break;  // pcmpeqw
+                case 4: op_byte = 0x76; break;  // pcmpeqd
+                case 8: op_byte = 0x29; break;  // pcmpeqq (SSE4.1: 66 0F 38 29)
+            }
+            bool needs_38_prefix = (esize == 8);
+
+            auto emit_cmp_half = [&](int32_t off1, int32_t off2, int32_t offd) {
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off1);
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2);
+                emit_byte(0x66); emit_byte(0x0F);
+                if (needs_38_prefix) emit_byte(0x38);
+                emit_byte(op_byte);
+                emit_byte(0xC1);
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offd);
+            };
+
+            int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_cmp_half(off1lo, off2lo, offdlo);
+            emit_cmp_half(off1hi, off2hi, offdhi);
             return false;
         }
 
@@ -2874,6 +3085,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
                     emu.step_public(cpu);
                 }
+                instructions_executed += entry.interp_only_count;
                 tight_iter++;
                 if (tight_iter >= TIGHT_LOOP_MAX) break;
                 // If PC unchanged, the block is a tight self-loop — re-run.
@@ -2914,12 +3126,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             if (blocks_.count(pc) && blocks_[pc].interp_only) {
                 entry = blocks_[pc];
                 blocks_executed++;
+                instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
                     emu.step_public(cpu);
                 }
                 return cpu.pc;
             }
             interpreter_fallbacks++;
+            instructions_executed++;
             emu.step_public(cpu);
             return cpu.pc;
         }
@@ -2956,6 +3170,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     }
 
     blocks_executed++;
+    instructions_executed += entry.instr_count;
 
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);

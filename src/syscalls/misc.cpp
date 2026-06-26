@@ -67,6 +67,39 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        case 132: { // sigaltstack(new, old) — AArch64 132
+            // Set or query the alternate signal stack.
+            int r = signals_.set_altstack(mem_, a0, a1);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
+            return 0;
+        }
+
+        case 136: { // rt_sigpending(sigset, sigsetsize) — AArch64 136
+            // Return the set of pending (queued but not yet delivered)
+            // signals. Our simplified model has no pending queue —
+            // signals are delivered immediately. Return an empty mask.
+            if (a0 != 0) {
+                uint64_t empty = 0;
+                try { mem_.store<uint64_t>(a0, empty); }
+                catch (...) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            }
+            ret_host(0);
+            return 0;
+        }
+
+        case 138: { // rt_sigqueueinfo(tgid, signo, siginfo) — AArch64 138
+            // We don't support queueing signals with payloads. Pretend
+            // success so callers (e.g., raise()) proceed.
+            ret_host(0);
+            return 0;
+        }
+
+        case 137: { // rt_sigtimedwait(sigset, info, timeout, sigsetsize)
+            // No pending signals in our model; return -EAGAIN.
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EAGAIN)));
+            return 0;
+        }
+
         case 133: { // rt_sigsuspend(mask, sigsetsize) — aarch64 133
             // previously misimplemented as rt_sigreturn
             // (which is actually syscall 139). rt_sigsuspend blocks the
@@ -94,32 +127,36 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // signal handlers were silently dropped.
             int signo = static_cast<int>(a0);
             int r = signals_.install(mem_, signo, a1, a2);
-            ret_host(r);
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
 
         case 135: { // rt_sigprocmask(how, new_set, old_set, sigsetsize)
-            // Still a no-op — we don't track signal masks. musl's
-            // libc startup calls this; returning 0 lets it proceed.
-            // (If we later track masks, we'd store them per-CPU and
-            // check them in deliver_signal().)
-            ret_host(0);
+            // Per-CPU signal mask. Supports SIG_BLOCK/SIG_UNBLOCK/
+            // SIG_SETMASK. SIGKILL/SIGSTOP cannot be blocked.
+            int r = signals_.procmask(mem_, static_cast<int>(a0), a1, a2,
+                                      static_cast<size_t>(a3));
+            ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
 
         case 139: { // rt_sigreturn — restore CPU state from signal frame
-            // corrected syscall number (was wrongly at
-            // case 133, which is actually rt_sigsuspend). Pop the most
-            // recent signal frame and restore the saved CPU state. The
-            // "return value" of this syscall is irrelevant — we restore
-            // PC, so the dispatcher will continue at the saved PC, not
-            // at the instruction after the SVC.
+            // Pop the most recent signal frame, restore CPU state, and
+            // restore the saved signal mask. Also clear the altstack
+            // SS_ONSTACK flag if the handler was running on it.
             SignalFrame frame;
             if (signals_.pop_frame(frame)) {
                 memcpy(cpu.regs, frame.regs, sizeof(cpu.regs));
                 cpu.sp     = frame.sp;
                 cpu.pc     = frame.pc;
                 cpu.pstate = frame.pstate;
+                // Restore the signal mask saved at delivery time.
+                signals_.set_mask(frame.saved_mask);
+                // If we entered the handler on the altstack, clear
+                // the in-use flag now.
+                if (frame.on_altstack) {
+                    signals_.set_altstack_active(false);
+                }
                 // Return value is whatever X0 was in the saved frame
                 // (already restored above). Don't overwrite it.
                 return 0;

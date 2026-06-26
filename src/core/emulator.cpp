@@ -15,6 +15,7 @@
 
 #include "bifrost/version.hpp"
 #include "core/memory.h"
+#include "frontend/dynamic_linker.h"
 #include "jit/frostjit.hpp"
 
 #include <algorithm>
@@ -73,13 +74,35 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // The dynamic linker's entry point becomes the real entry point;
     // the binary's entry is passed via AT_ENTRY in auxv.
     //
-    // This is LIMITED dynamic linking support: we load the dynamic linker
-    // ELF and map its segments, but we do NOT process DT_NEEDED entries,
-    // apply runtime relocations, or resolve symbols. The linker runs its
-    // own code (which uses our syscalls) to do that. This works for
-    // simple dynamically-linked musl binaries but not yet for glibc.
+    // Two paths are supported:
+    //   (a) If BIFROST_NATIVE_DYNLINK=1, we use our own DynamicLinker
+    //       to process DT_NEEDED, apply relocations, and resolve
+    //       symbols — no guest-side ld.so needed. Faster and works
+    //       even when the host doesn't have the exact aarch64 ld.so.
+    //   (b) Otherwise, load the guest-side dynamic linker (ld-musl /
+    //       ld-linux) and let it run its own code to do dynamic linking.
+    //       This works for simple dynamically-linked musl binaries but
+    //       not yet for glibc.
     uint64_t interp_base = 0;
     if (!info.interp.empty()) {
+        // First, try the native (in-emulator) dynamic linker. This is
+        // faster and more reliable because we don't depend on the
+        // guest-side ld.so working correctly under emulation.
+        bool native_dynlink = (getenv("BIFROST_NATIVE_DYNLINK") != nullptr);
+        if (native_dynlink) {
+            dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+            if (!dyn_linker_->link(data, 0, path)) {
+                fprintf(stderr, "[%s] native dynamic linking failed: %s; "
+                        "falling back to guest ld.so\n",
+                        CODENAME, dyn_linker_->error().c_str());
+                dyn_linker_.reset();
+            }
+            // Even with native dynlink, we still load the interpreter
+            // (ld.so) because some programs call ld.so's _dl_*
+            // functions directly. The interpreter's symbols are
+            // available via the native linker's symbol table.
+        }
+
         // Try to open the interpreter. Check common host paths for
         // aarch64 dynamic linkers (musl and glibc multiarch).
         std::vector<std::string> interp_paths = {
@@ -130,7 +153,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     if (end > end_addr_) end_addr_ = end;
                 }
                 // The entry point is the interpreter's entry (relative to interp_base).
-                entry_ = interp_base + i_entry;
+                // Skip this if we used native dynlink — we run the main
+                // binary's entry directly.
+                if (!native_dynlink || !dyn_linker_) {
+                    entry_ = interp_base + i_entry;
+                }
             }
         }
     }

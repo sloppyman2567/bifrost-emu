@@ -183,13 +183,18 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                     memcpy(&r_info,   data.data() + sh_offset + j*24 + 8,  8);
                     memcpy(&r_addend, data.data() + sh_offset + j*24 + 16, 8);
                     uint32_t rtype = r_info & 0xFFFFFFFF;
-                    // R_AARCH64_JUMP_SLOT (1032), R_AARCH64_GLOB_DAT (1025),
-                    // R_AARCH64_RELATIVE (1027): *(addr) = addend
-                    if (rtype == 1032 || rtype == 1025 || rtype == 1027) {
-                        mem.store<uint64_t>(r_offset, r_addend);
-                    }
-                    // R_AARCH64_ABS64 (257): *(addr) = addend + S
-                    else if (rtype == 257) {
+                    // Per the AArch64 ELF ABI (ARM IHI 0056B), the dynamic
+                    // relocation codes are:
+                    //   257  R_AARCH64_ABS64      : *(addr) = S + A
+                    //   1025 R_AARCH64_GLOB_DAT   : *(addr) = S + A
+                    //   1026 R_AARCH64_JUMP_SLOT   : *(addr) = S + A  (PLT)
+                    //   1027 R_AARCH64_RELATIVE   : *(addr) = Delta + A
+                    //   1032 R_AARCH64_IRELATIVE  : *(addr) = Indirect(Delta + A)
+                    // For static binaries (no PT_INTERP), S is always 0
+                    // (no symbol resolution), so we just write A. The
+                    // Delta (= load bias) is 0 for non-PIE static binaries.
+                    if (rtype == 1026 || rtype == 1025 || rtype == 1027 ||
+                        rtype == 257 || rtype == 1032) {
                         mem.store<uint64_t>(r_offset, r_addend);
                     }
                 }

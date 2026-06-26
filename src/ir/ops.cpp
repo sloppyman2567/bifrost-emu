@@ -11,6 +11,7 @@
 
 #include "ir/ir.hpp"
 #include "core/emulator.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -692,6 +693,172 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     vregs[inst.src2] = cpu.v_hi[inst.dest];
                 }
                 break;
+
+            case IROp::SIMD_ARITH: {
+                // Lane-wise integer arithmetic on v_lo/v_hi (each 8 bytes).
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
+                int esize = static_cast<int>(inst.width);
+                if (esize < 1 || esize > 8) esize = 8;
+                int lanes = 8 / esize;
+                uint8_t out_lo[8] = {0}, out_hi[8] = {0};
+                uint8_t in1_lo[8], in2_lo[8], in1_hi[8], in2_hi[8];
+                memcpy(in1_lo, &cpu.v_lo[inst.src1], 8);
+                memcpy(in2_lo, &cpu.v_lo[inst.src2], 8);
+                memcpy(in1_hi, &cpu.v_hi[inst.src1], 8);
+                memcpy(in2_hi, &cpu.v_hi[inst.src2], 8);
+                auto do_lane = [&](uint8_t* a, uint8_t* b, uint8_t* out) {
+                    for (int i = 0; i < lanes; i++) {
+                        uint8_t* pa = a + i * esize;
+                        uint8_t* pb = b + i * esize;
+                        uint8_t* po = out + i * esize;
+                        if (esize == 1) {
+                            uint8_t x = pa[0], y = pb[0];
+                            int8_t sx = (int8_t)x, sy = (int8_t)y;
+                            switch (opc) {
+                                case 0: po[0] = x + y; break;
+                                case 1: po[0] = x - y; break;
+                                case 2: po[0] = x * y; break;
+                                case 3: po[0] = std::min<uint8_t>(x, y); break;
+                                case 4: po[0] = std::max<uint8_t>(x, y); break;
+                                case 5: po[0] = (uint8_t)std::min<int8_t>(sx, sy); break;
+                                case 6: po[0] = (uint8_t)std::max<int8_t>(sx, sy); break;
+                                default: po[0] = 0; break;
+                            }
+                        } else if (esize == 2) {
+                            uint16_t x, y; memcpy(&x, pa, 2); memcpy(&y, pb, 2);
+                            int16_t sx = (int16_t)x, sy = (int16_t)y;
+                            uint16_t r = 0;
+                            switch (opc) {
+                                case 0: r = x + y; break;
+                                case 1: r = x - y; break;
+                                case 2: r = x * y; break;
+                                case 3: r = std::min<uint16_t>(x, y); break;
+                                case 4: r = std::max<uint16_t>(x, y); break;
+                                case 5: r = (uint16_t)std::min<int16_t>(sx, sy); break;
+                                case 6: r = (uint16_t)std::max<int16_t>(sx, sy); break;
+                                default: r = 0; break;
+                            }
+                            memcpy(po, &r, 2);
+                        } else if (esize == 4) {
+                            uint32_t x, y; memcpy(&x, pa, 4); memcpy(&y, pb, 4);
+                            int32_t sx = (int32_t)x, sy = (int32_t)y;
+                            uint32_t r = 0;
+                            switch (opc) {
+                                case 0: r = x + y; break;
+                                case 1: r = x - y; break;
+                                case 2: r = x * y; break;
+                                case 3: r = std::min<uint32_t>(x, y); break;
+                                case 4: r = std::max<uint32_t>(x, y); break;
+                                case 5: r = (uint32_t)std::min<int32_t>(sx, sy); break;
+                                case 6: r = (uint32_t)std::max<int32_t>(sx, sy); break;
+                                default: r = 0; break;
+                            }
+                            memcpy(po, &r, 4);
+                        } else { // esize == 8
+                            uint64_t x, y; memcpy(&x, pa, 8); memcpy(&y, pb, 8);
+                            int64_t sx = (int64_t)x, sy = (int64_t)y;
+                            uint64_t r = 0;
+                            switch (opc) {
+                                case 0: r = x + y; break;
+                                case 1: r = x - y; break;
+                                case 2: r = x * y; break;  // low 64 bits
+                                case 3: r = std::min<uint64_t>(x, y); break;
+                                case 4: r = std::max<uint64_t>(x, y); break;
+                                case 5: r = (uint64_t)std::min<int64_t>(sx, sy); break;
+                                case 6: r = (uint64_t)std::max<int64_t>(sx, sy); break;
+                                default: r = 0; break;
+                            }
+                            memcpy(po, &r, 8);
+                        }
+                    }
+                };
+                do_lane(in1_lo, in2_lo, out_lo);
+                do_lane(in1_hi, in2_hi, out_hi);
+                memcpy(&cpu.v_lo[inst.dest], out_lo, 8);
+                memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
+                break;
+            }
+
+            case IROp::SIMD_CMP: {
+                // Lane-wise integer comparison; result is all-ones or 0.
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
+                int esize = static_cast<int>(inst.width);
+                if (esize < 1 || esize > 8) esize = 8;
+                int lanes = 8 / esize;
+                uint8_t out_lo[8] = {0}, out_hi[8] = {0};
+                uint8_t in1_lo[8], in2_lo[8], in1_hi[8], in2_hi[8];
+                memcpy(in1_lo, &cpu.v_lo[inst.src1], 8);
+                memcpy(in2_lo, &cpu.v_lo[inst.src2], 8);
+                memcpy(in1_hi, &cpu.v_hi[inst.src1], 8);
+                memcpy(in2_hi, &cpu.v_hi[inst.src2], 8);
+                auto do_lane = [&](uint8_t* a, uint8_t* b, uint8_t* out) {
+                    for (int i = 0; i < lanes; i++) {
+                        uint8_t* pa = a + i * esize;
+                        uint8_t* pb = b + i * esize;
+                        uint8_t* po = out + i * esize;
+                        bool r = false;
+                        if (esize == 1) {
+                            uint8_t x = pa[0], y = pb[0];
+                            int8_t sx = (int8_t)x, sy = (int8_t)y;
+                            switch (opc) {
+                                case 0: r = (x == y); break;
+                                case 1: r = (x >= y); break;
+                                case 2: r = (x > y); break;
+                                case 3: r = (sx >= sy); break;
+                                case 4: r = (sx > sy); break;
+                                case 5: r = (x > y); break;  // HI = unsigned >
+                                case 6: r = (x >= y); break; // HS = unsigned >=
+                                default: r = false; break;
+                            }
+                        } else if (esize == 2) {
+                            uint16_t x, y; memcpy(&x, pa, 2); memcpy(&y, pb, 2);
+                            int16_t sx = (int16_t)x, sy = (int16_t)y;
+                            switch (opc) {
+                                case 0: r = (x == y); break;
+                                case 1: r = (x >= y); break;
+                                case 2: r = (x > y); break;
+                                case 3: r = (sx >= sy); break;
+                                case 4: r = (sx > sy); break;
+                                case 5: r = (x > y); break;
+                                case 6: r = (x >= y); break;
+                                default: r = false; break;
+                            }
+                        } else if (esize == 4) {
+                            uint32_t x, y; memcpy(&x, pa, 4); memcpy(&y, pb, 4);
+                            int32_t sx = (int32_t)x, sy = (int32_t)y;
+                            switch (opc) {
+                                case 0: r = (x == y); break;
+                                case 1: r = (x >= y); break;
+                                case 2: r = (x > y); break;
+                                case 3: r = (sx >= sy); break;
+                                case 4: r = (sx > sy); break;
+                                case 5: r = (x > y); break;
+                                case 6: r = (x >= y); break;
+                                default: r = false; break;
+                            }
+                        } else {
+                            uint64_t x, y; memcpy(&x, pa, 8); memcpy(&y, pb, 8);
+                            int64_t sx = (int64_t)x, sy = (int64_t)y;
+                            switch (opc) {
+                                case 0: r = (x == y); break;
+                                case 1: r = (x >= y); break;
+                                case 2: r = (x > y); break;
+                                case 3: r = (sx >= sy); break;
+                                case 4: r = (sx > sy); break;
+                                case 5: r = (x > y); break;
+                                case 6: r = (x >= y); break;
+                                default: r = false; break;
+                            }
+                        }
+                        memset(po, r ? 0xFF : 0x00, esize);
+                    }
+                };
+                do_lane(in1_lo, in2_lo, out_lo);
+                do_lane(in1_hi, in2_hi, out_hi);
+                memcpy(&cpu.v_lo[inst.dest], out_lo, 8);
+                memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
+                break;
+            }
 
             case IROp::FP_F2I: {
                 // FP→int conversion. Result width is determined by sf
