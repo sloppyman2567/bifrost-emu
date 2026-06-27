@@ -234,7 +234,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     // Provide a minimal but realistic environment.
     std::vector<uint64_t> envp_addrs;
     const char* envs[] = {
-        "PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+        "PATH=/tmp/aarch64-bin:/bin:/usr/bin:/sbin:/usr/sbin",
         "HOME=/root",
         "SHELL=/bin/sh",
         "TERM=linux",
