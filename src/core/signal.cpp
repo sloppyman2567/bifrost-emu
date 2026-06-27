@@ -242,8 +242,12 @@ int SignalTable::set_altstack(Memory& mem, uint64_t new_addr, uint64_t old_addr)
 //   = 0xD4000001
 
 uint64_t map_sigreturn_trampoline(Memory& mem) {
-    static bool mapped = false;
-    if (mapped) return TRAMPOLINE_ADDR;
+    // Use the Memory object's own state to detect whether the trampoline
+    // page is already mapped, instead of a process-lifetime static bool.
+    // This is fork-safe: after fork(), the child has its own Memory, and
+    // is_mapped() will correctly report whether the trampoline is present
+    // in the child's address space.
+    if (mem.is_mapped(TRAMPOLINE_ADDR, 8)) return TRAMPOLINE_ADDR;
 
     // Map a page at TRAMPOLINE_ADDR.
     mem.map_range(TRAMPOLINE_ADDR, 4096);
@@ -252,7 +256,6 @@ uint64_t map_sigreturn_trampoline(Memory& mem) {
     const uint32_t code[2] = { 0xD2801168u, 0xD4000001u };
     mem.write(TRAMPOLINE_ADDR, code, sizeof(code));
 
-    mapped = true;
     return TRAMPOLINE_ADDR;
 }
 

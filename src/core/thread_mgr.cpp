@@ -12,6 +12,7 @@
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
 #include "core/emulator.h"
 #include "core/memory.h"
+#include "jit/frostjit.hpp"  // needed for jit_.reset() (full destructor)
 #include "bifrost/version.hpp"
 
 #include <cstdio>
@@ -195,8 +196,11 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
 
         // Disable the JIT in the child — the JIT code buffer's mprotect
         // state may be inconsistent after fork, and the JIT cache is
-        // not thread/process-safe. The interpreter is always safe.
+        // not thread/process-safe. Destroy the JIT object entirely so
+        // the child doesn't hold stale mappings. The interpreter is
+        // always safe.
         jit_enabled_ = false;
+        jit_.reset();  // release mmap'd code buffer + block cache
 
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.

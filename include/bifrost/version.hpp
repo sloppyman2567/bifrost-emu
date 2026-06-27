@@ -6,7 +6,7 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// 1.4.0-rc.0 (2026-06-27): Release candidate.
+// 1.4.0-rc.1 (2026-06-27): Release candidate — production hardening.
 //   - 39/39 JIT tests pass (also pass under interpreter).
 //   - JIT is the default execution mode (6.4x speedup on compute).
 //   - Production-ready signal delivery: proper siginfo_t/ucontext_t,
@@ -21,7 +21,10 @@ namespace arm64emu {
 //   - 40+ toybox commands verified working (echo, sort, wc, seq, factor,
 //     md5sum, sha256sum, base64, cut, cmp, cat, ls, stat, date, etc.).
 //   - ASan+UBSan clean on all 39 tests.
-constexpr const char* VERSION  = "1.4.0-rc.0";
+//   - rc.1: JIT mmap error handling, fork JIT cleanup, FP bounds checks,
+//     signal trampoline fork safety, W^X failure path hardening,
+//     --jit-threshold input validation, documentation refresh.
+constexpr const char* VERSION  = "1.4.0-rc.1";
 constexpr const char* CODENAME = "bifrost-emu";
 
 } // namespace arm64emu

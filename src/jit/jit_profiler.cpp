@@ -18,8 +18,10 @@
 // run_block (frostjit.cpp) because it needs tight coupling with the
 // block dispatch path.
 #include "jit/frostjit.hpp"
+#include "bifrost/version.hpp"  // CODENAME
 
 #include <sys/mman.h>
+#include <cerrno>
 #include <cstring>   // memcpy
 #include <cstdlib>   // getenv
 
@@ -42,7 +44,13 @@ FrostJIT::FrostJIT() {
         : (PROT_READ | PROT_WRITE);
     void* p = mmap(nullptr, CODE_BUF_SIZE, initial_prot,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p != MAP_FAILED) code_buf_ = static_cast<uint8_t*>(p);
+    if (p == MAP_FAILED) {
+        fprintf(stderr, "[%s] frostJIT: mmap code buffer failed (%zu bytes): %s\n",
+                CODENAME, CODE_BUF_SIZE, strerror(errno));
+        code_buf_ = nullptr;
+    } else {
+        code_buf_ = static_cast<uint8_t*>(p);
+    }
 
     // Initialize W^X state. If we started RW (no EXEC), enable W^X and
     // mark the buffer as currently writable (since we just allocated it
@@ -99,10 +107,20 @@ void FrostJIT::make_writable() {
             void* p = mmap(nullptr, CODE_BUF_SIZE,
                            PROT_READ | PROT_WRITE | PROT_EXEC,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (p != MAP_FAILED && p != code_buf_) {
-                memcpy(p, code_buf_, code_buf_used_);
-                munmap(code_buf_, CODE_BUF_SIZE);
-                code_buf_ = static_cast<uint8_t*>(p);
+            if (p != MAP_FAILED) {
+                if (p != code_buf_) {
+                    memcpy(p, code_buf_, code_buf_used_);
+                    munmap(code_buf_, CODE_BUF_SIZE);
+                    code_buf_ = static_cast<uint8_t*>(p);
+                }
+                // p == code_buf_ means the same address was reused (unlikely
+                // but valid) — no copy/munmap needed.
+            } else {
+                // Both mprotect AND mmap failed. The code buffer is in an
+                // unknown state — disable JIT to prevent silent corruption.
+                fprintf(stderr, "[%s] frostJIT: W^X fallback mmap also failed: %s\n",
+                        CODENAME, strerror(errno));
+                code_buf_ = nullptr;
             }
             return;
         }

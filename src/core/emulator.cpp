@@ -252,8 +252,15 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     sp -= 16;
     uint8_t rnd[16];
     FILE* ur = fopen("/dev/urandom", "rb");
-    if (ur) { fread(rnd, 1, 16, ur); fclose(ur); }
-    else { for (int i = 0; i < 16; i++) rnd[i] = static_cast<uint8_t>(rand()); }
+    if (ur) {
+        size_t nread = fread(rnd, 1, 16, ur);
+        fclose(ur);
+        // If we got fewer than 16 bytes, fill the rest with rand().
+        for (size_t i = nread; i < 16; i++)
+            rnd[i] = static_cast<uint8_t>(rand());
+    } else {
+        for (int i = 0; i < 16; i++) rnd[i] = static_cast<uint8_t>(rand());
+    }
     mem_.write(sp, rnd, 16);
     uint64_t random_addr = sp;
 

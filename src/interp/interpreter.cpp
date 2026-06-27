@@ -22,18 +22,22 @@ namespace arm64emu {
 // meant they were reconstructed on every FP instruction dispatch. Moving
 // them to file scope eliminates that overhead.
 static inline double read_fp_d(const CPU& cpu, int r) {
+    if (r < 0 || r > 31) r = 0;  // defensive: prevent OOB access
     uint64_t bits = cpu.v_lo[r];
     double d; memcpy(&d, &bits, 8); return d;
 }
 static inline float read_fp_s(const CPU& cpu, int r) {
+    if (r < 0 || r > 31) r = 0;  // defensive: prevent OOB access
     uint32_t bits = static_cast<uint32_t>(cpu.v_lo[r]);
     float f; memcpy(&f, &bits, 4); return f;
 }
 static inline void write_fp_d(CPU& cpu, int r, double d) {
+    if (r < 0 || r > 31) return;  // defensive: prevent OOB write
     uint64_t bits; memcpy(&bits, &d, 8);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
 static inline void write_fp_s(CPU& cpu, int r, float f) {
+    if (r < 0 || r > 31) return;  // defensive: prevent OOB write
     uint32_t bits; memcpy(&bits, &f, 4);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }

@@ -4,7 +4,7 @@
 // allowing it to be embedded in other applications (debuggers, IDE
 // plugins, test harnesses, etc.) without depending on C++.
 //
-// Version: 1.4.0-beta.2
+// Version: 1.4.0-rc.1
 //
 // Basic usage:
 //
@@ -175,7 +175,7 @@ int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats);
 
 // ── Version ─────────────────────────────────────────────────────────────
 
-// Get the library version string (e.g., "1.4.0-beta.2").
+// Get the library version string (e.g., "1.4.0-rc.1").
 const char* bifrost_version(void);
 
 #ifdef __cplusplus

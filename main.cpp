@@ -39,7 +39,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-using namespace arm64emu;
+using arm64emu::Emulator;
+using arm64emu::VERSION;
 
 // ── Banner (shown on no-args, --help) ────────────────────────────────────
 
@@ -193,7 +194,14 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "bifrost-emu: --jit-threshold requires a NUMBER argument\n");
                 return 2;
             }
-            jit_threshold = strtoull(argv[arg_i + 1], nullptr, 0);
+            char* endp = nullptr;
+            unsigned long long val = strtoull(argv[arg_i + 1], &endp, 0);
+            if (*endp != '\0' || endp == argv[arg_i + 1]) {
+                fprintf(stderr, "bifrost-emu: --jit-threshold: invalid number '%s'\n",
+                        argv[arg_i + 1]);
+                return 2;
+            }
+            jit_threshold = val;
             arg_i += 2;
             continue;
         }
