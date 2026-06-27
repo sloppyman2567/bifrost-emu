@@ -19,7 +19,7 @@
 #   CXXFLAGS       C++ compiler flags
 #   LDFLAGS        Linker flags
 #
-# Directory layout (v1.4.0-beta.3+):
+# Directory layout (v1.4.0-rc.0):
 #
 #   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
 #   src/vfs/          — VFS abstraction (VNode + FdTable + procfs + devfs)

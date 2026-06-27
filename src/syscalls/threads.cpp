@@ -182,8 +182,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
 
             // Set up a new initial stack.
             const uint64_t STACK_TOP = 0x8000000000ULL;
-            const uint64_t STACK_SIZE = 64 * 1024 * 1024;
-            uint64_t stack_base = STACK_TOP - STACK_SIZE;
             // The stack is already mapped from the parent; just reset SP.
             uint64_t sp = STACK_TOP;
 

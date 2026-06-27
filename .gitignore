@@ -18,10 +18,17 @@ bench.sh
 
 # External / downloaded test binaries (not part of the repo)
 toybox-aarch64
+toybox
 
 # Downloaded musl cross-toolchain (fetched on demand by tools/fetch-musl-toolchain.sh)
 tools/aarch64-linux-musl-cross/
 tools/aarch64-linux-musl-cross.tgz
+
+# Downloaded SDL2 .deb packages (for offline SDL2 build)
+tools/sdl2-debs/
+
+# SDL2 SDK (extracted by tools/fetch-sdl2-headers.sh)
+tools/sdl2-sdk/
 
 # Editor / IDE
 .vscode/
@@ -48,15 +55,8 @@ bifrost-emu-o1
 bifrost-emu-o2
 bifrost-emu-test*
 
-# External toolchains (downloaded by tools/fetch-musl-toolchain.sh)
-tools/aarch64-linux-musl-cross/
-tools/aarch64-linux-musl-cross.tgz
-
-# Downloaded SDL2 .deb packages (for offline SDL2 build)
-tools/sdl2-debs/
-
-# SDL2 SDK (extracted by tools/fetch-sdl2-headers.sh)
-tools/sdl2-sdk/
+# Audio dump files
+*.wav
 
 # Agent context file — local working notes for AI assistants.
 # NEVER commit this file; it is for cross-session continuity only.

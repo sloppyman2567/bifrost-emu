@@ -1036,11 +1036,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             struct iovec iovs[64];
             int iovcnt = static_cast<int>(a2);
             if (iovcnt > 64) iovcnt = 64;
+            if (iovcnt <= 0) { ret_host(0); return 0; }
             for (int i = 0; i < iovcnt; i++) {
                 try {
-                    uint64_t base = mem_.load<uint64_t>(a1 + i * 16);
-                    uint64_t len  = mem_.load<uint64_t>(a1 + i * 16 + 8);
-                    iovs[i].iov_base = malloc(len);
+                    uint64_t len = mem_.load<uint64_t>(a1 + i * 16 + 8);
+                    iovs[i].iov_base = len > 0 ? malloc(len) : nullptr;
                     iovs[i].iov_len = len;
                 } catch (...) { iovcnt = i; break; }
             }
@@ -1050,7 +1050,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 for (int i = 0; i < iovcnt && off < (uint64_t)r; i++) {
                     uint64_t base = mem_.load<uint64_t>(a1 + i * 16);
                     uint64_t len = std::min(iovs[i].iov_len, (size_t)(r - off));
-                    try { mem_.write(base, iovs[i].iov_base, len); } catch (...) {}
+                    if (base && iovs[i].iov_base) {
+                        try { mem_.write(base, iovs[i].iov_base, len); } catch (...) {}
+                    }
                     off += len;
                 }
             }
