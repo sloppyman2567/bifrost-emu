@@ -42,11 +42,23 @@ make
 # Pass arguments to the emulated program
 ./bifrost-emu cat.elf /etc/hostname
 
-# JIT is ON by default (36/36 tests pass, 6.4x speedup on compute)
+# JIT is ON by default (39/39 tests pass, 6.4x speedup on compute)
 ./bifrost-emu ctest_real/fib.elf
 
 # Use --no-jit to force the interpreter (fallback / debugging)
 ./bifrost-emu --no-jit ctest_real/fib.elf
+
+# Run toybox — a real-world AArch64 multicall binary
+./bifrost-emu toybox echo hello world
+./bifrost-emu toybox ls /
+./bifrost-emu toybox seq 1 10
+./bifrost-emu toybox sh -c 'echo $((3+4))'
+
+# Fork + execve works — run external AArch64 commands from sh
+mkdir -p /tmp/aarch64-bin
+ln -sf /path/to/toybox-aarch64 /tmp/aarch64-bin/cat
+ln -sf /path/to/toybox-aarch64 /tmp/aarch64-bin/seq
+./bifrost-emu toybox sh -c 'seq 1 5'
 
 # Show version
 ./bifrost-emu --version
@@ -256,7 +268,7 @@ bifrost-emu/
 
 ## What's Implemented
 
-**Instructions** — ~140 ARM64 instructions covering data processing
+**Instructions** — ~150 ARM64 instructions covering data processing
 (MOVZ/K/N, ADD/SUB/CMP family, AND/ORR/EOR, bitfield, conditional
 select, MUL/MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/UMULH/SMULH,
 UDIV/SDIV, RBIT/REV/CLZ/CLS, ADC/SBC with carry), branches
@@ -265,17 +277,49 @@ register, pair, sign-extended, unscaled, pre/post-index), LSE atomics
 (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS), acquire/release
 (STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
 (FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
-FCSEL, both S and D registers), FMOV Vd.D[1], a subset of SIMD/NEON
-(DUP, MOVI, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR, EOR, ORR, AND, BIC,
-REV16/32/64, STP/LDP pairs, EXT, INS, TBL/TBX), and system (SVC, MRS/MSR,
-BRK, HLT, CLREX, HINT, barriers).
+FCSEL, both S and D registers), FMOV Vd.D[1], SIMD/NEON
+(DUP, MOVI all cmode values, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR, SSHR,
+EOR, ORR, AND, BIC, ORN, EON, NOT, NEG, ADD/SUB/MUL vector, REV16/32/64,
+STP/LDP pairs including Q registers, EXT, INS, TBL/TBX), and system (SVC,
+MRS/MSR, BRK, HLT, CLREX, HINT, barriers).
 
-**Syscalls** — ~88 Linux AArch64 syscalls including file I/O (read/write/
-openat/close/readv/writev/statx/fstatat), process info (getpid/gettid/
-uname/prlimit64), timing (clock_gettime/nanosleep/clock_nanosleep),
-threading (clone, futex, set_tid_address), event loops (eventfd2, epoll,
-timerfd, ppoll), and misc (getrandom, ioctl, getcwd, rt_sigaction).
-Unsupported syscalls return `-ENOSYS` silently unless `-v` is set.
+**JIT (frostJIT)** — Native x86-64 code generation for most instructions.
+6.4x speedup over interpreter on compute workloads (571 MIPS). Features:
+self-loop chaining, lazy block chaining, IR optimization (DCE, const
+folding, copy propagation, store-load forwarding), W^X code buffer,
+--jit-threshold for hybrid mode. Native SIMD codegen via SSE2/SSE4.1
+(paddb/w/d/q, psubb/w/d/q, pmullw, pmulld, pcmpeqb/w/d/q, pand, por,
+pxor, pandn).
+
+**Syscalls** — ~170 Linux AArch64 syscalls including file I/O (read/write/
+openat/close/readv/writev/pwrite64/statx/fstatat/sendfile), process info
+(getpid/gettid/uname/prlimit64), timing (clock_gettime/nanosleep/
+clock_nanosleep), threading (clone, futex, set_tid_address), fork+execve
+(clone without CLONE_VM, execve with ELF reload), event loops (eventfd2,
+epoll, timerfd, ppoll), signal delivery (rt_sigaction, rt_sigprocmask,
+sigaltstack, rt_sigreturn, rt_sigpending, rt_sigqueueinfo), file system
+(mkdir, rmdir, rename, link, unlink, chmod, chown, fchmod, fchown, flock,
+sync, fsync, fdatasync, truncate, utimensat, fallocate), and misc
+(getrandom, ioctl, getcwd, waitid, unshare). Unsupported syscalls return
+`-ENOSYS` silently unless `-v` is set.
+
+**Signal Delivery** — Production-quality: proper AArch64 siginfo_t (128B)
+and ucontext_t (448B) per kernel uapi headers. Supports SIG_BLOCK/UNBLOCK/
+SETMASK (rt_sigprocmask), SS_ONSTACK/SS_DISABLE (sigaltstack), SA_RESETHAND,
+SA_NODEFER, SA_SIGINFO, SA_ONSTACK. SIGSEGV delivery with fault_addr and
+si_code (SEGV_MAPERR/SEGV_ACCERR). Host-to-guest signal forwarding for
+SIGINT/SIGTERM/SIGCHLD with low-latency syscall-boundary draining.
+
+**Dynamic Linker** — DT_NEEDED processing, shared library loading from
+multiarch paths, global symbol table, GOT/PLT relocations (RELATIVE, ABS64,
+GLOB_DAT, JUMP_SLOT, IRELATIVE). TLS relocations (TLS_DTPMOD, TLS_DTPREL,
+TLS_TPREL, TLSDESC) with static TLS model. Activate via
+`BIFROST_NATIVE_DYNLINK=1`.
+
+**Fork + execve** — fork() via host fork() with copy-on-write memory.
+Child disables JIT (interpreter-only), inherits CoW copy. execve() loads
+new AArch64 ELF, resets CPU state, flushes JIT cache. Parent's wait4()/
+waitid() forward to host. Enables external commands in toybox sh.
 
 **VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
 `/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random,tty}`,
@@ -283,12 +327,13 @@ Unsupported syscalls return `-ENOSYS` silently unless `-v` is set.
 descriptors.
 
 **TLS** — TPIDR_EL0 / TPIDRRO_EL0 via MRS/MSR; 64KB TLS scratch area
-pre-allocated; per-thread TLS via `clone(CLONE_SETTLS, ...)`.
+pre-allocated; per-thread TLS via `clone(CLONE_SETTLS, ...)`. Static TLS
+block allocation for dynamically-linked binaries.
 
-**ELF** — Static ELF64 AArch64 (ET_EXEC and ET_DYN, including static-PIE);
+**ELF** — Static and dynamically-linked ELF64 AArch64 (ET_EXEC and ET_DYN);
 PT_LOAD with BSS zero-fill; RELA relocations; PT_NOTE parsing for GNU
-property features (LSE detection); full initial stack with argc/argv/
-envp/auxv.
+property features (LSE detection); PT_INTERP loading; PT_TLS parsing;
+full initial stack with argc/argv/envp/auxv.
 
 **Graphics** — Virtual `/dev/fb0` framebuffer (memfd-backed, mmap-able).
 `FBIOGET_VSCREENINFO`/`FSCREENINFO` ioctls. Default 640x480@32bpp BGRA.
@@ -300,7 +345,10 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 36 JIT test programs pass under the default frostJIT path; the
+All 39 test programs pass under both the default frostJIT path and the
+interpreter (`--no-jit`). The test suite has been verified clean under
+ASan+UBSan. JIT is the default execution mode (6.4x speedup on compute
+workloads, 571 MIPS on bench_mips).
 `ctest/jit_*.elf` regression suite also passes under the interpreter
 (`--no-jit`) to catch decoder drift. See [TESTS.md](TESTS.md) for the
 full test matrix, including toybox compatibility (`echo`, `ls /`, `od`,

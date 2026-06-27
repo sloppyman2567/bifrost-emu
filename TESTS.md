@@ -39,13 +39,17 @@ with `STP Q0, Q0` for zeroing. Fixed by matching all cmode values.
 | String test | ✅ | `sh -c 'test "a" = "a" && echo match'` |
 | pwd | ✅ | `sh -c 'pwd'` → / |
 | Interactive | ✅ | `echo exit \| sh` |
-| External commands | ❌ | `sh -c 'seq 1 3'` — fork limitation |
-| Command substitution | ❌ | `sh -c 'echo $(echo nested)'` — fork limitation |
-| Pipes in sh | ❌ | `sh -c 'cat \| wc'` — fork limitation |
+| External commands (AArch64) | ✅ | `sh -c 'echo $(echo nested)'` → `nested` |
+| Command substitution | ✅ | `sh -c 'echo $(echo nested)'` → `nested` |
+| Fork + execve | ✅ | child exec's AArch64 ELF, parent waits |
+| External commands (x86 host) | ❌ | `sh -c 'seq 1 3'` — host /bin/seq is x86 |
+| Pipes in sh | ⚠️ | Requires AArch64 binaries in PATH |
 
-External commands, command substitution, and pipes fail because they
-require fork()+exec(), which has known limitations in the host fork()
-approach. Builtin commands and shell scripting work fully.
+External commands work when the target binary is AArch64 ELF. Host x86
+binaries are correctly rejected with "Exec format error". Create symlinks
+to an AArch64 multicall binary (e.g., toybox) in `/tmp/aarch64-bin/` to
+make external commands available in sh. Builtin commands and shell
+scripting work fully without any setup.
 
 ---
 

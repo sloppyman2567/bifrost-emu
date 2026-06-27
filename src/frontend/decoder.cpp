@@ -196,9 +196,16 @@ bool decode(DecodedInst& d, uint32_t inst) {
 
     // Load/Store Pair (offset V=0 / pre-index V=0).
     case 0x09: {
-        if (!((inst >> 29) & 1)) return false;
+        // GPR LDP/STP (signed offset, pre-index).
+        // Encoding: opc[31:30] 0 1 0 0 1 0/1 [22]=L ...
+        // bit[29] is 0 for GPR STP/LDP (it's part of the fixed pattern).
+        // The old code checked bit[29]=1 which excluded all GPR STP/LDP,
+        // causing 32-bit STP W to be silently dropped.
+        // Now: check bits[27:23] = 00100 (signed offset) or 00110 (pre-index).
         uint8_t mode_check = (inst >> 23) & 7;
         if (mode_check != 2 && mode_check != 3) return false;
+        // Also check that bit[26]=0 (GPR, not SIMD/FP).
+        if ((inst >> 26) & 1) return false;
         uint8_t opc = (inst >> 30) & 3;
         d.is_vec    = false;
         d.is_load   = (inst >> 22) & 1;
@@ -282,12 +289,22 @@ bool decode(DecodedInst& d, uint32_t inst) {
         uint8_t mode_check = (inst >> 23) & 7;
         if (mode_check != 1 && mode_check != 2 && mode_check != 3) return false;
         uint8_t opc = (inst >> 30) & 3;
-        d.is_vec    = true;
-        d.is_load   = (inst >> 22) & 1;
+        // bit[26] = V: 1 = SIMD/FP, 0 = GPR.
+        // GPR LDP/STP (opc=0 → 32-bit, opc=2 → 64-bit) must have is_vec=false
+        // so the interpreter uses the GPR path, not the vector path.
+        // Vector LDP/STP (opc=0 → S, opc=1 → D, opc=2 → Q) have V=1.
+        bool is_v = (inst >> 26) & 1;
+        d.is_vec    = is_v;
+        d.is_load   = is_v ? ((inst >> 22) & 1) : ((inst >> 22) & 1);
         d.mode      = mode_check;
         d.writeback = (mode_check == 1 || mode_check == 3);
         int16_t imm7 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 15) & 0x7F, 7));
-        int esize = (opc == 0) ? 4 : (opc == 1) ? 8 : 16;
+        int esize;
+        if (is_v) {
+            esize = (opc == 0) ? 4 : (opc == 1) ? 8 : 16;
+        } else {
+            esize = (opc == 2) ? 8 : 4;
+        }
         d.disp = imm7 * esize;
         d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
         return true;

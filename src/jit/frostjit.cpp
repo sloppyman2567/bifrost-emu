@@ -406,11 +406,23 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // emit_shift: mask CL to 6 bits (x86 shift counts are mod 64)
             // and emit `d = d shift_cl` for the current inst.op.
             auto emit_shift = [&](int d) {
-                emit_and_cl_imm8(0x3F);
-                int kind = (inst.op == IROp::SHL) ? 4
-                         : (inst.op == IROp::SHR) ? 5
-                         : (inst.op == IROp::SAR) ? 7 : 1;
-                emit_shift_cl(d, kind);
+                // For 32-bit ROR: mask CL to 5 bits and use 32-bit ROR
+                // (no REX.W) so rotation stays within the lower 32 bits.
+                // 64-bit ROR on a zero-extended 32-bit value loses wrap bits.
+                bool is_32bit_ror = (inst.op == IROp::ROR && inst.width == 32);
+                if (is_32bit_ror) {
+                    emit_and_cl_imm8(0x1F);  // mask to 5 bits for 32-bit
+                    // Emit 32-bit ROR: no REX.W prefix.
+                    emit_byte(rex(false, false, false, d >= 8));
+                    emit_byte(0xD3);
+                    emit_byte(modrm(3, 1, d & 7));
+                } else {
+                    emit_and_cl_imm8(0x3F);
+                    int kind = (inst.op == IROp::SHL) ? 4
+                             : (inst.op == IROp::SHR) ? 5
+                             : (inst.op == IROp::SAR) ? 7 : 1;
+                    emit_shift_cl(d, kind);
+                }
             };
 
             int d;

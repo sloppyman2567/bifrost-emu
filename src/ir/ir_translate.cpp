@@ -319,8 +319,19 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 case InstClass::ROR: op = IROp::ROR; break;
                 default: op = IROp::SHL; break;
             }
+            // 32-bit ASR: sign-extend from bit 31 before SAR, because
+            // x86's 64-bit SAR looks at bit 63 (which is 0 after a
+            // 32-bit register read zero-extends). Same fix as apply_shift.
+            if (d.cls == InstClass::ASR && !d.sf) {
+                uint16_t sext = g_alloc.alloc();
+                emit(block, IROp::SEXT, sext, a, 0, 32);
+                a = sext;
+            }
+            // 32-bit ROR: set width=32 so the JIT uses 32-bit ROR
+            // (64-bit ROR on a zero-extended 32-bit value loses wrap bits).
+            uint8_t width = (d.cls == InstClass::ROR && !d.sf) ? 32 : 0;
             uint16_t r = g_alloc.alloc();
-            emit(block, op, r, a, s);
+            emit(block, op, r, a, s, width);
             r = zext_if_32bit(block, r, d.sf);
             store_arm_reg(block, d.rd, r);
             return false;
@@ -564,13 +575,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::CLS: {
             uint16_t v = load_arm_reg(block, d.rn);
             int width = d.sf ? 64 : 32;
-            // 32-bit CLS: ZEXT the input first so the high bits are 0
-            // (SAR by 31 will then correctly sign-extend within the
-            // low 32 bits, and CLZ with width=32 will count only the
-            // low 32 bits).
+            // 32-bit CLS: SEXT the input first so the high bits match
+            // the sign bit (SAR by 31 will then correctly produce all-1s
+            // or all-0s). Using ZEXT was a bug: it clears the high bits,
+            // so x86's 64-bit SAR sees bit 63=0 and treats negative
+            // values as positive, breaking CLS for any value with the
+            // sign bit set (e.g., CLS(-1) returned -1 instead of 31).
             if (!d.sf) {
                 uint16_t z = g_alloc.alloc();
-                emit(block, IROp::ZEXT, z, v, 0, 32);
+                emit(block, IROp::SEXT, z, v, 0, 32);
                 v = z;
             }
             uint16_t sh = load_imm(block, static_cast<uint64_t>(width - 1));

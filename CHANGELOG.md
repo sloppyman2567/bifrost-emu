@@ -26,7 +26,9 @@ The JIT now has native SIMD arithmetic codegen, the signal delivery
 subsystem builds proper siginfo_t/ucontext_t frames, the dynamic
 linker processes DT_NEEDED and TLS relocations, and a new
 `--jit-threshold` flag enables hybrid interp/JIT mode for I/O-bound
-workloads. 38/38 tests pass (was 36), verified clean under ASan+UBSan.
+workloads. fork() + execve() support enables external commands in
+toybox sh. 20+ new syscalls added for broader compatibility.
+39/39 tests pass, verified clean under ASan+UBSan.
 
 ### Signal delivery — production-quality siginfo_t/ucontext_t
 
@@ -109,18 +111,55 @@ workloads. 38/38 tests pass (was 36), verified clean under ASan+UBSan.
 - `ctest/test_jit_native.c` — comprehensive test exercising integer
   arithmetic, bitfield, CSEL, FP, SIMD, memory, and loops.
 
+### Fork + execve support
+
+- **fork()** (clone without CLONE_VM): uses host fork() for CoW memory.
+  Child process disables JIT (interpreter-only), inherits CoW copy of
+  guest memory. Parent's wait4() forwards to host wait4().
+- **execve()** (syscall 221): was mislabeled as "clone3" and returned
+  -ENOSYS. Now properly reads the ELF path, validates AArch64 ELF,
+  loads new binary into guest memory, sets up new stack (argv, envp,
+  auxv), resets CPU state, flushes JIT cache, sets up fresh TLS.
+- **SVC PC propagation**: execve and rt_sigreturn change cpu.pc directly.
+  The interpreter now saves old_pc before syscall and only updates
+  next_pc if the syscall changed it (was always overwriting with old_pc+4).
+- **fork() SP fix**: fork() calls clone() with stack=0 (child uses same
+  stack). The old code set SP=0, crashing the child. Now only changes
+  SP when child_stack is non-zero.
+- **Result**: toybox sh can fork+exec external AArch64 binaries.
+  Command substitution works: `sh -c 'echo $(echo nested)'` → `nested`.
+
+### 20+ new syscalls
+
+Added: fchdir(28), unlinkat(36), link(42), fchmod(51), fchmodat(54),
+faccessat2(55), pwrite64(68), readv(69), sendfile(71), sync(81),
+fsync(82), fdatasync(83), sync_file_range(84), waitid(95), unshare(97),
+mkdir(122), rename(123), truncate(125), chown(140), fchown(141),
+flock(149), waitid(218), set_robust_list(219).
+
+### JIT carry-flag fix
+
+- **CMC re-invert for HI/LS**: When a BRCOND uses B.HI or B.LS after
+  ADDS/CMN, the JIT emits CMC to invert CF. After the JCC, the
+  materialize_flags_to_pstate() on both paths used the still-inverted
+  CF, producing wrong ARM C flag. Fixed by re-inverting CF before
+  materialization on both taken and fall-through paths.
+
 ### Test results
 
-- **38/38 JIT tests pass** (was 36; +test_simd_arith, +test_tls_static,
+- **39/39 JIT tests pass** (was 36; +test_simd_arith, +test_tls_static,
   +test_jit_native).
-- All 38 tests pass under ASan+UBSan debug build with zero errors.
+- All 39 tests pass under ASan+UBSan debug build with zero errors.
 - **Toybox**: 40+ commands verified working (echo, printf, sort, wc,
   head, tail, seq, factor, md5sum, sha1sum, sha256sum, cksum, crc32,
   base64, cut, cmp, cat, ls, stat, file, date, uptime, free, id, pwd,
   env, printenv, sleep, nl, tac, rev, strings, tee, expand, xargs,
   basename, dirname, uname, nproc, hostname, whoami, yes, true, false).
-- **bench_mips**: 1.4s (no regression).
-- **SIGSEGV delivery**: toybox sh -c exits 139 cleanly (was 134 crash).
+- **toybox sh**: echo, variables, arithmetic, if/for/while/case,
+  functions, exit codes, string tests, pwd, interactive mode, fork+
+  execve for external AArch64 commands.
+- **bench_mips**: 1.4s (571 MIPS, 6.4x speedup over interpreter).
+- **SIGSEGV delivery**: toybox sh -c exits cleanly with handler or rc=139.
 
 ## [1.4.0-rc.0] — 2026-06-26 (release candidate — JIT SIGSEGV delivery + docs cleanup)
 

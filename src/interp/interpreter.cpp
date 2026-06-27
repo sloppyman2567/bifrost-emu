@@ -579,12 +579,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         // UBFM
                         if (d.rd != 31) cpu.regs[d.rd] = extracted;
                     } else {
-                        // BFM (BFXIL): insert extracted at bits[imms:immr], preserve rest
+                        // BFM (BFXIL): extract field from src[imms:immr],
+                        // place in LOW bits of dest, preserve dest high bits.
+                        // ARM ARM: Wd[width-1:0] = Wn[imms:immr]
                         uint64_t cur = cpu.regs[d.rd];
                         if (!d.sf) cur &= 0xFFFFFFFF;
-                        uint64_t dst_mask = mask << immr;
+                        uint64_t dst_mask = mask;  // low 'len' bits
                         uint64_t keep = cur & ~dst_mask;
-                        if (d.rd != 31) cpu.regs[d.rd] = keep | ((extracted << immr) & dst_mask);
+                        if (d.rd != 31) cpu.regs[d.rd] = keep | (extracted & dst_mask);
                     }
                 } else {
                     // BFI / rotate case (imms < immr).
@@ -729,7 +731,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                                 ? (static_cast<int64_t>(b) >> d.shift)
                                 : (static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(b))) >> d.shift);
                             break;
-                        case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
+                        case 3: {
+                            // ROR: must rotate within the operation width, not 64 bits.
+                            // ror64 on a zero-extended 32-bit value loses wrap bits.
+                            if (width == 64) {
+                                b = ror64(b, d.shift);
+                            } else {
+                                uint32_t v = static_cast<uint32_t>(b);
+                                unsigned r = d.shift & 31;
+                                b = r ? ((v >> r) | (v << (32 - r))) : v;
+                            }
+                        } break;
                     }
                 }
                 if (!d.sf) { a &= 0xFFFFFFFF; b &= 0xFFFFFFFF; }
@@ -763,7 +775,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             ? (static_cast<int64_t>(b) >> d.shift)
                             : (static_cast<int64_t>(static_cast<int32_t>(static_cast<uint32_t>(b))) >> d.shift);
                         break;
-                    case 3: b = ror64(b, d.shift) & (width == 64 ? ~0ULL : 0xFFFFFFFF); break;
+                    case 3: {
+                        // ROR: must rotate within the operation width, not 64 bits.
+                        // ror64 on a zero-extended 32-bit value loses wrap bits.
+                        if (width == 64) {
+                            b = ror64(b, d.shift);
+                        } else {
+                            uint32_t v = static_cast<uint32_t>(b);
+                            unsigned r = d.shift & 31;
+                            b = r ? ((v >> r) | (v << (32 - r))) : v;
+                        }
+                    } break;
                 }
                 if (!d.sf) b &= 0xFFFFFFFF;
                 uint8_t opc = (d.raw >> 29) & 3;

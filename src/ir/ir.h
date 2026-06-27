@@ -186,7 +186,10 @@ inline uint16_t apply_shift(IRBlock& b, uint16_t v, uint8_t shift_type, uint8_t 
               : (shift_type == 1) ? IROp::SHR
               : (shift_type == 2) ? IROp::SAR
               : IROp::ROR;
-    emit(b, shop, shifted, v, sh);
+    // For 32-bit ROR: set width=32 so the JIT uses a 32-bit rotation
+    // (64-bit ROR on a zero-extended 32-bit value loses wrap bits).
+    uint8_t width = (shift_type == 3 && !sf) ? 32 : 0;
+    emit(b, shop, shifted, v, sh, width);
     return shifted;
 }
 

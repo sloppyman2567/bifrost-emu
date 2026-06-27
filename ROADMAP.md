@@ -15,7 +15,7 @@ status, see [TESTS.md](TESTS.md).
    with `STP Q0, Q0` for zeroing. Fixed by matching all cmode
    values. toybox sh now works: echo, variables, arithmetic, if/for/
    while/case, functions, exit codes, string tests, pwd, interactive
-   mode. External commands (fork+exec) still have limitations.
+   mode, fork+execve for external AArch64 commands.
 
 2. **Stabilize.** No new features — just bug fixes from the rc.0
    feedback. Once all `ctest_real/` and `toybox` non-sh programs
@@ -56,10 +56,9 @@ status, see [TESTS.md](TESTS.md).
    clean refactor — and would make the NEON bug above easier to
    isolate.
 
-3. **Real fork support** (copy-on-write guest memory) so toybox `sh`
-   and other fork-heavy programs work fully. Currently `clone()`
-   without `CLONE_VM` returns 0 (vfork semantics), which is enough
-   for `sh -c` but not for true multi-process pipelines.
+3. **~~Real fork support~~** ✅ DONE in rc.0 — fork() via host fork()
+   with CoW memory + execve() for running external AArch64 commands.
+   Child disables JIT, inherits CoW copy. Parent's wait4() works.
 
 4. **JIT I/O performance.** The JIT is ~9% slower than the
    interpreter for I/O-bound workloads (seq 1 10000) because the

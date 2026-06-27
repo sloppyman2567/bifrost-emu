@@ -304,7 +304,11 @@ inline bool is_fmov_imm(uint32_t op) {
 //   bit[21]=1, bits[14:10]=0b10000 (constant)
 // The 6-bit opcode is in bits[20:15] (= rmode:opcode in the ARM ARM).
 inline bool is_fp_1source(uint32_t op) {
-    return ((op >> 21) & 1) == 1 && ((op >> 10) & 0x1F) == 0x10;
+    // 1-source FP ops (FMOV/FABS/FNEG/FSQRT/FRINT*) have bit[17]=0.
+    // FCVT (between FP precisions) has bit[17]=1 — must be excluded
+    // so it falls through to the FCVT handler.
+    return ((op >> 21) & 1) == 1 && ((op >> 10) & 0x1F) == 0x10
+           && ((op >> 17) & 1) == 0;
 }
 
 // Extract the FP 1-source opcode (bits[20:15], 6 bits).
