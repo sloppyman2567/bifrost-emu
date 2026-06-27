@@ -1425,8 +1425,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // ── Compare ops (SIMD_CMP) ──
             // SIMD_CMP imm: 0=eq, 1=ge_u, 2=gt_u, 3=ge_s, 4=gt_s,
             //               5=hi_u, 6=hs_u
-            // We currently only JIT eq (opc=0) natively via PCMPEQ.
-            // Other compares fall back to interpreter.
             uint8_t cmp_op = 0xFF;
             if (sub3_noq == 0x2E208C00) {
                 // CMEQ (==): U=1, opcode=0x8C
@@ -1437,6 +1435,49 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 (void)Q;
                 emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm, 0,
                      static_cast<uint64_t>(esize), 0, cmp_op, cur_pc);
+                return false;
+            }
+
+            // ── NOT/MVN (vector) — 0x2E205800 ──
+            // NOT Vd.<T>, Vn.<T> = bitwise NOT of all lanes.
+            // Encoding: 1 Q 0 1 1 1 1 0 size 1 0000 0 1 0 1 1 0 Rn Rd
+            // sub3_noq = 0x2E205800
+            if (sub3_noq == 0x2E205800) {
+                // Use SIMD_LOGICAL with opc=2 (XOR) and src2=src1
+                // to compute NOT: a ^ a = 0, then we need ~a.
+                // Actually NOT = a XOR all-ones. We emit CALL_INTERP
+                // for now since SIMD_LOGICAL doesn't have a NOT mode.
+                // But we can use BIC with src2=src1: a & ~a = 0 (wrong).
+                // Let's emit a logical NOT via XOR with all-ones.
+                // We don't have an all-ones register, so fall to interp.
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+
+            // ── NEG (vector) — 0x2E20B800 ──
+            // NEG Vd.<T>, Vn.<T> = 0 - Vn (two's complement negate).
+            // This is SUB with src1=0. We can emit SIMD_ARITH sub with
+            // a zero src1, but our SIMD_ARITH reads from vregs, not XZR.
+            // Fall to interp for now.
+            if (sub3_noq == 0x2E20B800) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+
+            // ── SHL (vector, immediate) — 0x0F00A400 ──
+            // SHL Vd.<T>, Vn.<T>, #shift
+            // Shifts each lane left by immediate. Very common in SIMD code.
+            // We don't have a native IR op for vector shift, so fall to interp.
+            if ((op & 0xBF00FC00) == 0x0F00A400) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+
+            // ── USHR/SSHR (vector, immediate) — 0x2F000400/0x0F000400 ──
+            // Very common in SIMD memset/memcpy. Fall to interp.
+            if ((op & 0xBF00FC00) == 0x2F000400 ||  // USHR
+                (op & 0xBF00FC00) == 0x0F000400) {  // SSHR
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;
             }
 

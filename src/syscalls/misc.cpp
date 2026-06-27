@@ -46,6 +46,8 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/file.h>
+#include <sys/sendfile.h>
 
 namespace arm64emu {
 
@@ -983,6 +985,190 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         // ── getrandom (syscall 278) — already implemented above ──
+
+        // ── 15+ new syscalls for broader compatibility ──────────────
+
+        case 28: { // fchdir(fd) — AArch64 28
+            int r = ::fchdir(static_cast<int>(a0));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 36: { // unlinkat(dirfd, path, flags) — AArch64 36
+            std::string path = VFS::read_path(mem_, a1);
+            int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 42: { // link(old, new) — AArch64 42
+            std::string oldp = VFS::read_path(mem_, a0);
+            std::string newp = VFS::read_path(mem_, a1);
+            int r = ::link(oldp.c_str(), newp.c_str());
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 51: { // fchmod(fd, mode) — AArch64 51
+            int r = ::fchmod(static_cast<int>(a0), static_cast<mode_t>(a1));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 54: { // fchmodat(dirfd, path, mode, flags) — AArch64 54
+            std::string path = VFS::read_path(mem_, a1);
+            int r = ::fchmodat(static_cast<int>(a0), path.c_str(), static_cast<mode_t>(a2), static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 55: { // faccessat2(dirfd, path, mode, flags) — AArch64 55
+            std::string path = VFS::read_path(mem_, a1);
+            int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 68: { // pwrite64(fd, buf, count, offset) — AArch64 68
+            std::vector<uint8_t> buf(a2);
+            try { mem_.read(a1, buf.data(), a2); } catch (...) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0;
+            }
+            ssize_t r = ::pwrite(static_cast<int>(a0), buf.data(), a2, static_cast<off_t>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(r)); return 0;
+        }
+        case 69: { // readv(fd, iov, iovcnt) — AArch64 69
+            struct iovec iovs[64];
+            int iovcnt = static_cast<int>(a2);
+            if (iovcnt > 64) iovcnt = 64;
+            for (int i = 0; i < iovcnt; i++) {
+                try {
+                    uint64_t base = mem_.load<uint64_t>(a1 + i * 16);
+                    uint64_t len  = mem_.load<uint64_t>(a1 + i * 16 + 8);
+                    iovs[i].iov_base = malloc(len);
+                    iovs[i].iov_len = len;
+                } catch (...) { iovcnt = i; break; }
+            }
+            ssize_t r = ::readv(static_cast<int>(a0), iovs, iovcnt);
+            if (r > 0) {
+                uint64_t off = 0;
+                for (int i = 0; i < iovcnt && off < (uint64_t)r; i++) {
+                    uint64_t base = mem_.load<uint64_t>(a1 + i * 16);
+                    uint64_t len = std::min(iovs[i].iov_len, (size_t)(r - off));
+                    try { mem_.write(base, iovs[i].iov_base, len); } catch (...) {}
+                    off += len;
+                }
+            }
+            for (int i = 0; i < iovcnt; i++) free(iovs[i].iov_base);
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(static_cast<uint64_t>(r)); return 0;
+        }
+        case 71: { // sendfile(out_fd, in_fd, offset, count) — AArch64 71
+            off_t off = 0;
+            off_t *offp = nullptr;
+            if (a2 != 0) {
+                try { off = mem_.load<off_t>(a2); offp = &off; } catch (...) {}
+            }
+            ssize_t r = ::sendfile(static_cast<int>(a0), static_cast<int>(a1), offp, a3);
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (offp && a2) { try { mem_.store<off_t>(a2, off); } catch (...) {} }
+            ret_host(static_cast<uint64_t>(r)); return 0;
+        }
+        case 81: { // sync() — AArch64 81
+            ::sync(); ret_host(0); return 0;
+        }
+        case 82: { // fsync(fd) — AArch64 82
+            int r = ::fsync(static_cast<int>(a0));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 83: { // fdatasync(fd) — AArch64 83
+            int r = ::fdatasync(static_cast<int>(a0));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 84: { // sync_file_range(fd, offset, nbytes, flags) — AArch64 84
+            int r = ::sync_file_range(static_cast<int>(a0), static_cast<off_t>(a1), a2, static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 95: { // waitid(idtype, id, infop, options) — AArch64 95
+            siginfo_t si;
+            memset(&si, 0, sizeof(si));
+            int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (a2) {
+                // Write a simplified siginfo to guest memory.
+                try {
+                    mem_.store<uint32_t>(a2, si.si_signo);
+                    mem_.store<uint32_t>(a2 + 4, si.si_code);
+                    mem_.store<uint32_t>(a2 + 8, si.si_pid);
+                    mem_.store<uint32_t>(a2 + 12, si.si_uid);
+                    mem_.store<uint32_t>(a2 + 16, si.si_status);
+                } catch (...) {}
+            }
+            ret_host(0); return 0;
+        }
+        case 97: { // unshare(flags) — AArch64 97
+            int r = ::unshare(static_cast<int>(a0));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 122: { // mkdir(path, mode) — AArch64 122 (legacy)
+            std::string path = VFS::read_path(mem_, a0);
+            int r = ::mkdir(path.c_str(), static_cast<mode_t>(a1));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 123: { // rename(old, new) — AArch64 123 (legacy)
+            std::string oldp = VFS::read_path(mem_, a0);
+            std::string newp = VFS::read_path(mem_, a1);
+            int r = ::rename(oldp.c_str(), newp.c_str());
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 125: { // truncate(path, length) — AArch64 125 (legacy)
+            std::string path = VFS::read_path(mem_, a0);
+            int r = ::truncate(path.c_str(), static_cast<off_t>(a1));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 140: { // chown(path, owner, group) — AArch64 140 (legacy)
+            std::string path = VFS::read_path(mem_, a0);
+            int r = ::chown(path.c_str(), static_cast<uid_t>(a1), static_cast<gid_t>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 141: { // fchown(fd, owner, group) — AArch64 141 (legacy)
+            int r = ::fchown(static_cast<int>(a0), static_cast<uid_t>(a1), static_cast<gid_t>(a2));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 149: { // flock(fd, operation) — AArch64 149
+            int r = ::flock(static_cast<int>(a0), static_cast<int>(a1));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            ret_host(0); return 0;
+        }
+        case 218: { // waitid (AArch64 218 = wait4 alias)
+            // Forward to case 95 (waitid)
+            siginfo_t si;
+            memset(&si, 0, sizeof(si));
+            int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (a2) {
+                try {
+                    mem_.store<uint32_t>(a2, si.si_signo);
+                    mem_.store<uint32_t>(a2 + 4, si.si_code);
+                    mem_.store<uint32_t>(a2 + 8, si.si_pid);
+                    mem_.store<uint32_t>(a2 + 12, si.si_uid);
+                    mem_.store<uint32_t>(a2 + 16, si.si_status);
+                } catch (...) {}
+            }
+            ret_host(0); return 0;
+        }
+        case 219: { // set_robust_list(head, len) — AArch64 219
+            // No-op — we don't implement robust futex lists.
+            ret_host(0); return 0;
+        }
+        case 224: { // mremap(old_addr, old_size, new_size, flags, new_addr)
+            // Forward to mem.cpp handler.
+            return SYSCALL_NOT_HANDLED;  // handled by syscall_mem
+        }
 
         default:
             return SYSCALL_NOT_HANDLED;
