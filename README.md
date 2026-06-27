@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-rc.0
+  bifrost-emu  v1.4.0-rc.1
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-rc.0](https://img.shields.io/badge/version-1.4.0--rc.0-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0-rc.1](https://img.shields.io/badge/version-1.4.0--rc.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -183,9 +183,10 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of rc.0 (2026-06-26),
-all 37 test programs pass under JIT, including the
-`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion.
+JIT is ON by default; use `--no-jit` to opt out. As of rc.1 (2026-06-27),
+all 39 test programs pass under JIT, including the
+`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion
+and 19 real-world C programs in `ctest_real/`.
 
 ## Performance
 
@@ -364,7 +365,7 @@ make verify   # JIT divergence checker (slow, catches codegen bugs)
 
 ## Limitations
 
-This is beta-quality software. Key limitations:
+This is release-candidate quality software. Key limitations:
 
 - **Limited dynamic linking.** The dynamic linker (PT_INTERP) is loaded
   and its entry point is used, allowing simple dynamically-linked musl
@@ -373,15 +374,22 @@ This is beta-quality software. Key limitations:
   binaries are recommended. Full dynamic linking and glibc support are
   planned for v2.0 (see [ROADMAP.md](ROADMAP.md)).
 - **No ASLR.** Binaries load at their preferred vaddr.
-- **`fork()` is stubbed.** `clone()` without `CLONE_VM` returns 0 (vfork
-  semantics). Real fork with copy-on-write is planned for v1.4.x.
-- **Signal delivery is partial.** `rt_sigaction` installs handlers and
-  `kill`/`tgkill` deliver signals, but `siginfo_t`/`ucontext_t` contents,
-  `SA_RESTART`, and signal masks are not fully implemented.
-- **frostJIT is the default execution mode.** All 36 tests pass, including
-  the comprehensive int↔FP conversion test. The interpreter is available
-  via `--no-jit` as a fallback for programs that hit a JIT bug or for
-  debugging.
+- **`fork()` works via host fork().** `clone()` without `CLONE_VM` uses
+  host fork() with copy-on-write memory. The child disables JIT and uses
+  the interpreter. `execve()` loads a new ELF and resets CPU state.
+  Parent `wait4()`/`waitid()` forward to host. External AArch64 commands
+  work in toybox sh when symlinks exist in `/tmp/aarch64-bin/`.
+- **Signal delivery is production-quality.** `rt_sigaction` installs
+  handlers, `kill`/`tgkill` deliver signals, proper 128-byte `siginfo_t`
+  and 448-byte `ucontext_t` are constructed on the guest stack per kernel
+  uapi headers, `SA_RESTART`/`SA_RESETHAND`/`SA_NODEFER`/`SA_SIGINFO`/
+  `SA_ONSTACK` are all implemented, and host-to-guest signal forwarding
+  (SIGINT/SIGTERM/SIGCHLD/SIGWINCH) works with low-latency draining.
+  Pending blocked signals are dropped (no pending queue).
+- **frostJIT is the default execution mode.** All 39 tests pass, including
+  the comprehensive int↔FP conversion test and 19 real-world programs.
+  The interpreter is available via `--no-jit` as a fallback for programs
+  that hit a JIT bug or for debugging.
 - **`strtod("inf")` and `strtod("-inf")` now work correctly** (return
   `inf` / `-inf` respectively). The root cause was a 32-bit SCVTF
   misdecode — see CHANGELOG.md for the full fix. `strtod("-nan")`
@@ -398,9 +406,9 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-rc.0** (2026-06-26):
+current release is **v1.4.0-rc.1** (2026-06-27):
 
-- **JIT is now the default execution mode.** The 37-test suite,
+- **JIT is now the default execution mode.** The 39-test suite,
   toybox integration, and musl libc all pass under the JIT, and
   `bench_mips` shows a 6.4x speedup. Use `--no-jit` to opt out.
 - **JIT correctness overhaul** — 20+ bugs fixed across FP decode,

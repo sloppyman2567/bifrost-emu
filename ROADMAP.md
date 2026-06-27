@@ -6,7 +6,7 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.0 (final release — after rc.0 stabilization)
+## v1.4.0 (final release — after rc.1 stabilization)
 
 1. **~~Fix the `toybox sh` regression.~~** ✅ FIXED in rc.0.
    Root cause: MOVI (vector immediate) handler in the interpreter
@@ -17,8 +17,11 @@ status, see [TESTS.md](TESTS.md).
    while/case, functions, exit codes, string tests, pwd, interactive
    mode, fork+execve for external AArch64 commands.
 
-2. **Stabilize.** No new features — just bug fixes from the rc.0
-   feedback. Once all `ctest_real/` and `toybox` non-sh programs
+2. **Stabilize.** No new features — just bug fixes from the rc.1
+   feedback. rc.1 includes production hardening: JIT mmap error
+   handling, fork JIT cleanup, FP bounds checks, signal trampoline
+   fork safety, W^X failure path hardening, --jit-threshold input
+   validation. Once all `ctest_real/` and `toybox` non-sh programs
    pass under both interpreter and JIT, cut the final 1.4.0.
 
 3. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` in

@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, documentation)
+
+### Production robustness
+
+- **JIT mmap failure now diagnosed.** If `mmap()` for the 64 MB code buffer
+  fails at JIT construction time, the error is logged and `code_buf_` is set
+  to nullptr instead of silently continuing with a null buffer that causes
+  segfaults on first JIT compilation. Previously, a failed mmap would leave
+  the JIT in an unusable state with no diagnostic.
+- **W^X fallback failure path hardened.** When `mprotect()` fails (e.g., on
+  hardened kernels that reject `PROT_EXEC` on anonymous mappings) and the
+  fallback `mmap(RWX)` also fails, the code buffer is now set to nullptr and
+  the JIT is effectively disabled. Previously, the buffer was left in an
+  indeterminate state that could cause silent code corruption.
+- **Fork child now destroys JIT object.** After `fork()`, the child process
+  now calls `jit_.reset()` to release the mmap'd code buffer and block cache,
+  instead of merely setting `jit_enabled_ = false`. The JIT code buffer's
+  mprotect state may be inconsistent after fork (the W^X depth counter is
+  inherited from the parent), so keeping the object alive was risky.
+- **FP register bounds checking.** The interpreter's FP register access
+  helpers (`read_fp_d/s`, `write_fp_d/s`) now bounds-check the register
+  index (0–31) to prevent out-of-bounds access from decoder bugs that produce
+  invalid indices. Reads with an invalid index return register 0; writes with
+  an invalid index are silently ignored.
+- **Signal trampoline fork safety.** `map_sigreturn_trampoline()` no longer
+  uses a process-lifetime `static bool mapped` flag. After `fork()`, the child
+  inherits the flag as `true` even though its Memory object is a fresh CoW
+  copy. Now uses `mem.is_mapped()` to detect whether the trampoline page is
+  present, which is fork-safe since each process has its own Memory.
+- **`--jit-threshold` input validation.** The `--jit-threshold` CLI argument
+  now validates the input with `strtoull`'s `endptr`, rejecting non-numeric
+  input (e.g., `--jit-threshold abc`) instead of silently treating it as 0.
+- **`/dev/urandom` partial read handling.** `fread()` for the 16-byte
+  AT_RANDOM seed now checks the return value and fills any missing bytes
+  with `rand()`, instead of using a partially-initialized buffer.
+- **Namespace hygiene.** Replaced `using namespace arm64emu` in `main.cpp`
+  with targeted `using` declarations (`Emulator`, `VERSION`) to avoid global
+  namespace pollution.
+
+### Documentation
+
+- **API version updated.** `api/bifrost.h` version comment updated from
+  stale `1.4.0-beta.2` to `1.4.0-rc.1`.
+- **README.md refreshed.** Updated test count (37→39), version strings,
+  limitations section (fork is no longer stubbed, signal delivery is
+  production-quality, 39 tests pass).
+- **CHANGELOG.md** updated with rc.1 entry.
+- **context.md** created with architecture overview and known issues.
+- Version bumped to `1.4.0-rc.1`.
+
+### Git history cleanup
+
+- Squashed the last 5 commits (77fec2f..9039ed8) into one clean commit
+  (`fix: critical ARM64 emulation bugs — ROR, FCVT, CLS, ASR, MOVI, BFXIL,
+  STP W`). The squashed commits had overlapping bug fix descriptions that
+  were confusing to read in isolation; the single commit provides a coherent
+  narrative of all the fixes.
+
+---
+
 ## [1.4.0-rc.0] — 2026-06-27 (production hardening — MOVI fix, signal delivery, dynamic linker, SIMD JIT, TLS)
 
 ### Critical fix: toybox sh now works
