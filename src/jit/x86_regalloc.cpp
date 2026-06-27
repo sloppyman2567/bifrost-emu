@@ -63,7 +63,7 @@ static inline void check_vreg_bounds(int v) {
 // Called at block boundaries to catch maintenance bugs.
 bool FrostJIT::verify_dirty_host_regs_() const {
     if (!regalloc_check_enabled()) return true;
-    for (int r = 0; r < 16; r++) {
+    for (int r = 0; r < NUM_HOST_REGS; r++) {
         int v = reg_vreg_[r];
         bool bit_set = (dirty_host_regs_ >> r) & 1;
         bool should_set = (v >= 0 && v < 4096 && vreg_dirty_[v]);

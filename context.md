@@ -113,9 +113,22 @@ RW (during codegen) and RX (during execution). A reference-counted
 ### 6. Fork via host fork()
 
 `clone()` without `CLONE_VM` uses the host's `fork()`. The child inherits
-a CoW copy of the emulator's entire address space. The child destroys the
-JIT object and runs interpreter-only. The parent's `wait4()` forwards to
+a CoW copy of the emulator's entire address space. The child sets
+`jit_enabled_ = false` (but does NOT destroy the JIT object — the child
+is executing inside the JIT code buffer when the SVC fires, so
+`munmap()`-ing it would segfault). The parent's `wait4()` forwards to
 the host kernel.
+
+### 7. Function Multi-Versioning (FMV) via CPUID
+
+The JIT queries `cpu_features_` (detected once at construction via
+`CPUID` + `XGETBV`) to choose which x86 codegen variant to emit. The
+first consumer is FMA3 codegen for `FMADD`/`FMSUB`/`FNMADD`/`FNMSUB`:
+on FMA3+AVX hosts, the JIT emits `vfmadd231ss/sd` (single-rounded,
+IEEE 754-correct); on older hosts, it falls back to the decomposed
+`mulsd`+`addsd` path. `BIFROST_NO_FMA3=1` forces the decomposed path
+for debugging. Future FMV work: AVX2 256-bit SIMD, BMI2 `pdep`/`pext`,
+AVX-512 masked ops. See `include/jit/cpu_features.hpp`.
 
 ---
 
@@ -126,7 +139,7 @@ the host kernel.
 | **Decoder** | `decoder.cpp`, `decoder.hpp` | ~1,200 | ARM64 instruction decode |
 | **Interpreter** | `interpreter.cpp` | ~2,480 | Switch-based execution |
 | **IR** | `ir.h`, `ir.hpp`, `ir_builder`, `ir_translate`, `ir_optimize`, `ir_lower`, `ops` | ~3,600 | IR builder/translator/optimizer/executor |
-| **JIT** | `frostjit.cpp`, `x86_backend`, `x86_regalloc`, `jit_cache`, `jit_profiler`, `jit_glue`, `frostjit.hpp` | ~5,400 | Block-translation JIT |
+| **JIT** | `frostjit.cpp`, `x86_backend`, `x86_regalloc`, `jit_cache`, `jit_profiler`, `jit_glue`, `frostjit.hpp`, `cpu_features.hpp`, `cpu_features.cpp` | ~6,200 | Block-translation JIT + FMV (CPUID detection) |
 | **Core** | `emulator.h/cpp`, `cpu.h`, `memory.h/cpp`, `signal.h/cpp`, `thread_mgr.cpp` | ~2,600 | Engine core |
 | **Frontend** | `elf_loader.cpp`, `dynamic_linker.cpp/h` | ~1,040 | ELF loading + dynamic linking |
 | **Syscalls** | `syscalls.h/cpp`, `fs`, `mem`, `threads`, `time`, `ioctls`, `misc` | ~2,830 | Linux syscall emulation |
@@ -135,7 +148,7 @@ the host kernel.
 | **Audio** | `audio.h/cpp` | ~230 | /dev/dsp passthrough |
 | **CLI** | `main.cpp` | ~320 | Argument parsing + TTY |
 
-**Total:** ~25,500 lines of C++ across 57 source/header files.
+**Total:** ~26,200 lines of C++ across 59 source/header files.
 
 ---
 
@@ -143,12 +156,14 @@ the host kernel.
 
 ### Correctness
 
-1. **FMADD/FMSUB not truly fused.** Both the interpreter and JIT decompose
-   fused multiply-add into separate multiply and add, producing double-rounded
-   results for IEEE 754 edge cases. This is consistent (interpreter and JIT
-   agree) but incorrect per the ARM specification. Fixing this requires x86
-   FMA3 instructions (`vfmadd231sd` etc.), which are available on most modern
-   x86 CPUs but not universally.
+1. **~~FMADD/FMSUB not truly fused.~~** ✅ FIXED in rc.1 for FMA3-capable
+   hosts. The JIT now detects FMA3 support via CPUID and emits native
+   `vfmadd231ss/sd`, `vfnmadd231ss/sd`, `vfnmsub231ss/sd` — single-rounded
+   per IEEE 754. On non-FMA3 hosts, the decomposed mul+add path remains
+   (double-rounded, but interpreter and JIT agree). `BIFROST_NO_FMA3=1`
+   forces the decomposed path for debugging. See `include/jit/cpu_features.hpp`
+   for the FMV framework. The interpreter still decomposes (would need
+   `__builtin_fma` to match the JIT's FMA3 path).
 
 2. **No pending signal queue.** Blocked signals are silently dropped instead
    of being queued for later delivery. Programs that rely on `sigpending()`
@@ -158,12 +173,17 @@ the host kernel.
 3. **SIMD sub-decode is a catch-all.** The `SIMD_DP` and `FP_SCALAR`
    InstClass values are generic catch-alls that require sub-dispatching by
    raw instruction bits in both the interpreter and JIT. This makes it hard
-   to add new SIMD ops and is the source of the `toybox sh -c` regression.
-   The ROADMAP plans a hierarchical sub-decode refactor.
+   to add new SIMD ops and was the source of the `toybox sh -c` regression
+   (fixed in rc.0). The ROADMAP plans a hierarchical sub-decode refactor.
 
-4. **NEON/SIMD strtok bug.** `strtok`/`strtok_r` break in some musl code
-   paths, likely due to a `STR Qn`/`LDR Qn` byte-order mismatch or 128-bit
-   shift handling bug. Not yet isolated.
+4. **~~NEON/SIMD strtok bug.~~** ✅ MOSTLY FIXED in rc.1 — 10 NEON bugs
+   fixed: `immh` extraction (off by one bit), element-size rule, MOVI/shift
+   encoding collision, REV64/REV32 mask + size-awareness, USRA/SSRA/SLI/SRI
+   handlers added, INS/UMOV v_hi routing for Q=1, 32-bit ROR wrap-bit loss.
+   SHA-1/224/256/384/512 and CRC32 now produce correct hashes. MD5 is
+   improved (JIT and interpreter now agree) but still produces a wrong hash
+   in toybox's code path — a remaining issue to isolate. `strtok`/`strtok_r`
+   no longer break (the shift-handling bugs were the root cause).
 
 ### Performance
 
@@ -177,10 +197,11 @@ the host kernel.
    recency. For certain access patterns this causes pathological eviction.
    True LRU would require tracking recency timestamps.
 
-7. **FMADD/FMSUB decomposition loses a multiply-add fusion opportunity.**
-   On x86 CPUs with FMA3 support (most post-2013 CPUs), we could emit
-   `vfmadd231sd` instead of separate `mulsd`+`addsd`, gaining both
-   correctness and ~1 cycle per FMADD.
+7. **~~FMADD/FMSUB decomposition loses a multiply-add fusion opportunity.~~**
+   ✅ FIXED in rc.1 — on FMA3-capable hosts, the JIT now emits native
+   `vfmadd231ss/sd` etc., gaining both correctness (single-rounded) and
+   ~1 cycle per FMADD. The FMV framework (`cpu_features.hpp`) detects
+   FMA3 at startup. Non-FMA3 hosts still use the decomposed path.
 
 ### Safety
 

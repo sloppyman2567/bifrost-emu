@@ -196,11 +196,23 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
 
         // Disable the JIT in the child — the JIT code buffer's mprotect
         // state may be inconsistent after fork, and the JIT cache is
-        // not thread/process-safe. Destroy the JIT object entirely so
-        // the child doesn't hold stale mappings. The interpreter is
-        // always safe.
+        // not thread/process-safe.
+        //
+        // CRITICAL: do NOT call jit_.reset() here! The child is currently
+        // executing INSIDE the JIT code buffer — the SVC instruction was
+        // JIT'd, and jit_interp_step() was called from JIT code. The
+        // return address on the host stack points into the code buffer.
+        // If we munmap() the code buffer now, the return from
+        // jit_interp_step will SIGSEGV (instruction fetch from unmapped
+        // page). This broke fork+exec under JIT: `sh -c '/path/cmd'`
+        // crashed with rc=139.
+        //
+        // Instead, just set jit_enabled_ = false. The run loop will
+        // switch to interpreter-only on the next block dispatch. The
+        // JIT code buffer stays mapped (as a CoW copy) so the return
+        // from jit_interp_step works, but is never executed again.
+        // The buffer is freed automatically when the child process exits.
         jit_enabled_ = false;
-        jit_.reset();  // release mmap'd code buffer + block cache
 
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.

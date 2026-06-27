@@ -72,7 +72,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 int child_pid = emu.fork_guest(cpu, stack, flags,
                                                ptid_ptr, ctid_ptr, tls);
                 if (child_pid < 0) {
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                    ret_err(ENOMEM);
                 } else {
                     ret_host(static_cast<uint64_t>(child_pid));
                 }
@@ -89,7 +89,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
 
             int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls);
             if (child_tid < 0) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                ret_err(ENOMEM);
                 return 0;
             }
 
@@ -119,14 +119,14 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // safe — the parent is unaffected.
             std::string path = VFS::read_path(mem_, a0);
             if (path.empty()) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
+                ret_err(EFAULT);
                 return 0;
             }
 
             // Read the ELF file.
             FILE* f = fopen(path.c_str(), "rb");
             if (!f) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOENT)));
+                ret_err(ENOENT);
                 return 0;
             }
             fseek(f, 0, SEEK_END);
@@ -134,26 +134,26 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             fseek(f, 0, SEEK_SET);
             if (sz <= 0) {
                 fclose(f);
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                ret_err(ENOEXEC);
                 return 0;
             }
             std::vector<uint8_t> elf_data(sz);
             if (fread(elf_data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
                 fclose(f);
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EIO)));
+                ret_err(EIO);
                 return 0;
             }
             fclose(f);
 
             // Validate it's an AArch64 ELF.
             if (elf_data.size() < 64 || elf_data[0] != 0x7f || elf_data[1] != 'E') {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                ret_err(ENOEXEC);
                 return 0;
             }
             uint16_t e_machine;
             memcpy(&e_machine, elf_data.data() + 18, 2);
             if (e_machine != 183) {  // EM_AARCH64
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                ret_err(ENOEXEC);
                 return 0;
             }
 
@@ -306,7 +306,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // us sleeping forever.
                     uint32_t cur = mem_.load<uint32_t>(uaddr);
                     if (cur != val) {
-                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EAGAIN)));
+                        ret_err(EAGAIN);
                         return 0;
                     }
                     slot->waiters++;
@@ -367,7 +367,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 default:
                     // PI futexes and others: not supported
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+                    ret_err(ENOSYS);
                     return 0;
             }
         }

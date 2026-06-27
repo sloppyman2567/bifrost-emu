@@ -153,8 +153,25 @@ enum class IROp : uint8_t {
     FRINT,         // v_lo[dest] = round(v_lo[src1]); imm = rounding mode
                    // 0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(0), 4=I(current), 5=X(exact)
     // Native FP fused multiply-add (via x86 vfmadd or decomposition)
+    // FMADD:  v_lo[dest] =  v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
+    // FMSUB:  v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]  (= acc - src1*src2)
+    // FNMADD: v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]  (same numerical
+    //         result as FMSUB, but IEEE 754 sign rules differ on NaN/signed-zero
+    //         inputs — must be modeled as a fused op, not decomposed)
+    // FNMSUB: v_lo[dest] = -v_lo[src2] * v_lo[src1] - v_lo[acc]  (= -(src1*src2 + acc))
+    //
+    // On x86 with FMA3 (Haswell+, 2013+): emit vfmadd231ss/sd (FMADD),
+    // vfmsub231ss/sd (FMSUB), vfnmadd231ss/sd (FNMADD), vfnmsub231ss/sd
+    // (FNMSUB) — single-rounded, IEEE 754-correct fused mul-add.
+    //
+    // Without FMA3: decompose into mulsd+addsd (double-rounded, NOT
+    // IEEE 754-correct for edge cases — see context.md known issue #1).
+    // The decomposition path produces the same numerical result as the
+    // interpreter (which also decomposes), so JIT/interpreter agree.
     FMADD,         // v_lo[dest] = v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
     FMSUB,         // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
+    FNMADD,        // v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype (negated product)
+    FNMSUB,        // v_lo[dest] = -v_lo[src2] * v_lo[src1] - v_lo[acc]; width=ftype
     // System register access (TPIDR_EL0, NZCV, FPCR, FPSR)
     MRS,           // dest = system_reg[imm]  (imm = reg index)
     MSR,           // system_reg[imm] = src1

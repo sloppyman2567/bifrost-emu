@@ -556,17 +556,32 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 cpu.v_hi[inst.dest] = 0;
                 break;
             }
-            // FMADD/FMSUB: FP fused multiply-add
+            // FMADD/FMSUB/FNMADD/FNMSUB: FP fused multiply-add family
             case IROp::FMADD:
-            case IROp::FMSUB: {
+            case IROp::FMSUB:
+            case IROp::FNMADD:
+            case IROp::FNMSUB: {
                 bool is_double = (inst.width == 64);
                 uint16_t acc_vreg = static_cast<uint16_t>(inst.imm);
+                // Per ARM ARM:
+                //   FMADD:  Vd = c + a*b
+                //   FMSUB:  Vd = c - a*b
+                //   FNMADD: Vd = -a*b + c
+                //   FNMSUB: Vd = -a*b - c
                 if (is_double) {
                     double a, b, c;
                     memcpy(&a, &cpu.v_lo[inst.src1], 8);
                     memcpy(&b, &cpu.v_lo[inst.src2], 8);
                     memcpy(&c, &cpu.v_lo[acc_vreg], 8);
-                    double r = (inst.op == IROp::FMADD) ? (a * b + c) : (c - a * b);
+                    double prod = a * b;
+                    double r;
+                    switch (inst.op) {
+                        case IROp::FMADD:  r = prod + c;  break;
+                        case IROp::FMSUB:  r = c - prod;  break;
+                        case IROp::FNMADD: r = -prod + c; break;
+                        case IROp::FNMSUB: r = -prod - c; break;
+                        default: r = 0; break;  // unreachable
+                    }
                     memcpy(&cpu.v_lo[inst.dest], &r, 8);
                 } else {
                     float a, b, c;
@@ -576,7 +591,15 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     memcpy(&a, &ba, 4);
                     memcpy(&b, &bb, 4);
                     memcpy(&c, &bc, 4);
-                    float r = (inst.op == IROp::FMADD) ? (a * b + c) : (c - a * b);
+                    float prod = a * b;
+                    float r;
+                    switch (inst.op) {
+                        case IROp::FMADD:  r = prod + c;  break;
+                        case IROp::FMSUB:  r = c - prod;  break;
+                        case IROp::FNMADD: r = -prod + c; break;
+                        case IROp::FNMSUB: r = -prod - c; break;
+                        default: r = 0; break;  // unreachable
+                    }
                     uint32_t bits;
                     memcpy(&bits, &r, 4);
                     cpu.v_lo[inst.dest] = bits;

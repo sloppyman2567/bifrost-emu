@@ -1,7 +1,19 @@
 // syscalls/time.cpp — time syscalls: nanosleep/clock_gettime/gettimeofday/
-// clock_nanosleep/clock_getres.
+// clock_getres/clock_nanosleep.
 //
-// Extracted verbatim from the original syscalls.cpp.
+// Extracted from the original syscalls.cpp. All handlers now:
+//   - Check return values of libc calls (EINTR/EINVAL propagated as -errno).
+//   - Wrap guest-pointer reads in try/catch to return EFAULT on bad pointers
+//     instead of crashing the emulator with UnmappedMemory.
+//   - Use the ret_errno()/ret_err()/ret_ok() macros from syscalls.h for
+//     consistent error-return formatting.
+//
+// AArch64 syscall numbers (per asm-generic/unistd.h):
+//   101 = nanosleep         (NOT 35 — that's unlinkat)
+//   113 = clock_gettime
+//   114 = clock_getres
+//   115 = clock_nanosleep   (NOT 206 — that's getsockname, handled in misc.cpp)
+//   169 = gettimeofday
 #include "core/emulator.h"
 #include "core/memory.h"
 #include "core/cpu.h"
@@ -18,64 +30,119 @@ namespace arm64emu {
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
-    (void)a2; (void)a3; (void)a4; (void)a5;
+    (void)a4; (void)a5;  // a3 is used by clock_nanosleep
     auto& mem_ = emu.mem_;
 
     switch (num) {
-        case 101: { // nanosleep(req, rem) — AArch64 syscall 101
-            uint64_t req = a0;
-            uint64_t tv_sec  = mem_.load<uint64_t>(req);
-            uint64_t tv_nsec = mem_.load<uint64_t>(req + 8);
-            struct timespec ts = { (time_t)tv_sec, static_cast<long>(tv_nsec) };
-            ::nanosleep(&ts, nullptr);
-            ret_host(0);
-            return 0;
-        }
-
-        case 113: { // clock_gettime
-            uint64_t clk = a0;
-            uint64_t tp = a1;
+        case 101: { // nanosleep(req, rem) — AArch64 101
+            if (!a0) { ret_err(EFAULT); return 0; }
             struct timespec ts;
-            ::clock_gettime((clockid_t)clk, &ts);
-            mem_.store<uint64_t>(tp,     ts.tv_sec);
-            mem_.store<uint64_t>(tp + 8, ts.tv_nsec);
-            ret_host(0);
-            return 0;
-        }
-
-        case 169: { // gettimeofday
-            struct timeval tv;
-            ::gettimeofday(&tv, nullptr);
-            mem_.store<uint64_t>(a0,     tv.tv_sec);
-            mem_.store<uint64_t>(a0 + 8, tv.tv_usec);
-            ret_host(0);
-            return 0;
-        }
-
-        case 206: { // clock_nanosleep(clockid, flags, req, rem) — aarch64 206
-            if (a2) {
-                uint64_t sec = mem_.load<uint64_t>(a2);
-                uint64_t nsec = mem_.load<uint64_t>(a2 + 8);
-                struct timespec ts = { (time_t)sec, static_cast<long>(nsec) };
-                ::nanosleep(&ts, nullptr);
+            struct timespec rem;
+            try {
+                ts.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a0));
+                ts.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a0 + 8));
+            } catch (...) {
+                ret_err(EFAULT);
+                return 0;
             }
-            ret_host(0);
+            int r = ::nanosleep(&ts, &rem);
+            if (r < 0) {
+                // EINTR: write remaining time to `rem` if provided.
+                if (errno == EINTR && a1) {
+                    try {
+                        mem_.store<uint64_t>(a1,     static_cast<uint64_t>(rem.tv_sec));
+                        mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(rem.tv_nsec));
+                    } catch (...) {
+                        // Bad rem pointer — still return EINTR.
+                    }
+                }
+                ret_errno();
+                return 0;
+            }
+            ret_ok();
             return 0;
         }
 
-        case 114: { // clock_getres — AArch64 114
+        case 113: { // clock_gettime(clkid, tp) — AArch64 113
+            if (!a1) { ret_err(EFAULT); return 0; }
+            struct timespec ts;
+            int r = ::clock_gettime(static_cast<clockid_t>(a0), &ts);
+            if (r < 0) { ret_errno(); return 0; }
+            try {
+                mem_.store<uint64_t>(a1,     static_cast<uint64_t>(ts.tv_sec));
+                mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(ts.tv_nsec));
+            } catch (...) {
+                ret_err(EFAULT);
+                return 0;
+            }
+            ret_ok();
+            return 0;
+        }
+
+        case 114: { // clock_getres(clkid, res) — AArch64 114
+            // musl defaults CLOCK_REALTIME resolution to 1ns.
             if (a1) {
-                mem_.store<uint64_t>(a1, 0);       // tv_sec
-                mem_.store<uint64_t>(a1 + 8, 1);   // tv_nsec
+                try {
+                    mem_.store<uint64_t>(a1,     0);  // tv_sec
+                    mem_.store<uint64_t>(a1 + 8, 1);  // tv_nsec
+                } catch (...) {
+                    ret_err(EFAULT);
+                    return 0;
+                }
             }
-            ret_host(0);
+            ret_ok();
+            return 0;
+        }
+
+        case 115: { // clock_nanosleep(clkid, flags, req, rem) — AArch64 115
+            if (!a2) { ret_err(EFAULT); return 0; }
+            struct timespec ts;
+            struct timespec rem;
+            try {
+                ts.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a2));
+                ts.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a2 + 8));
+            } catch (...) {
+                ret_err(EFAULT);
+                return 0;
+            }
+            int r = ::clock_nanosleep(static_cast<clockid_t>(a0),
+                                      static_cast<int>(a1), &ts, &rem);
+            if (r < 0) {
+                // clock_nanosleep returns errno directly (not via -1+errno).
+                if (r == EINTR && a3) {
+                    try {
+                        mem_.store<uint64_t>(a3,     static_cast<uint64_t>(rem.tv_sec));
+                        mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(rem.tv_nsec));
+                    } catch (...) {
+                        // Bad rem pointer — still return EINTR.
+                    }
+                }
+                ret_host(static_cast<int64_t>(-r));
+                return 0;
+            }
+            ret_ok();
+            return 0;
+        }
+
+        case 169: { // gettimeofday(tv, tz) — AArch64 169
+            if (!a0) { ret_err(EFAULT); return 0; }
+            struct timeval tv;
+            int r = ::gettimeofday(&tv, nullptr);
+            if (r < 0) { ret_errno(); return 0; }
+            try {
+                mem_.store<uint64_t>(a0,     static_cast<uint64_t>(tv.tv_sec));
+                mem_.store<uint64_t>(a0 + 8, static_cast<uint64_t>(tv.tv_usec));
+            } catch (...) {
+                ret_err(EFAULT);
+                return 0;
+            }
+            ret_ok();
             return 0;
         }
 
         default:
             return SYSCALL_NOT_HANDLED;
     }
-    return 0;
 }
 
 } // namespace arm64emu

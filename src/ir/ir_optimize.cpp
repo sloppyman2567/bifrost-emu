@@ -600,6 +600,18 @@ void optimize_ir(IRBlock& block) {
             }
 
             default:
+                // Unknown op: conservatively invalidate the dest vreg's
+                // cache entry so we don't propagate stale constants or
+                // copies through it. Without this, a new IROp added to
+                // ir.hpp but not handled above would silently inherit
+                // the cache state of whatever vreg previously held dest,
+                // producing wrong code.
+                if (inst.dest) {
+                    invalidate_vreg_in_cache(inst.dest);
+                    consts.clear(inst.dest);
+                    copies.clear(inst.dest);
+                    last_def[inst.dest] = i;
+                }
                 break;
         }
     }
@@ -793,6 +805,8 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FRINT: return "FRINT";
                     case IROp::FMADD: return "FMADD";
                     case IROp::FMSUB: return "FMSUB";
+                    case IROp::FNMADD: return "FNMADD";
+                    case IROp::FNMSUB: return "FNMSUB";
                     case IROp::MRS: return "MRS";
                     case IROp::MSR: return "MSR";
                     default: return "?";

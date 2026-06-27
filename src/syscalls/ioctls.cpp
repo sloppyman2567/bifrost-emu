@@ -40,7 +40,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 struct winsize ws;
                 int r = ::ioctl(static_cast<int>(a0), TIOCGWINSZ, &ws);
                 if (r < 0) {
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                    ret_errno();
                 } else {
                     mem_.write(a2, &ws, sizeof(ws));
                     ret_host(0);
@@ -92,7 +92,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 struct termios t;
                 int r = ::ioctl(static_cast<int>(a0), TCGETS, &t);
                 if (r == 0) mem_.write(a2, &t, sizeof(t));
-                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                if (r < 0) ret_errno();
                 else       ret_host(r);
                 return 0;
             }
@@ -101,7 +101,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 struct termios t;
                 mem_.read(a2, &t, sizeof(t));
                 int r = ::ioctl(static_cast<int>(a0), static_cast<unsigned long>(a1), &t);
-                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                if (r < 0) ret_errno();
                 else       ret_host(r);
                 return 0;
             }
@@ -112,7 +112,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
                 int n = 0;
                 int r = ::ioctl(static_cast<int>(a0), FIONREAD, &n);
                 if (r == 0) mem_.store<int32_t>(a2, n);
-                if (r < 0) ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                if (r < 0) ret_errno();
                 else       ret_host(r);
                 return 0;
             }
@@ -120,7 +120,7 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             // Anything we don't recognize: return -ENOTTY so callers
             // (especially isatty()) can correctly distinguish ttys
             // from non-ttys.
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOTTY)));
+            ret_err(ENOTTY);
             return 0;
         }
 

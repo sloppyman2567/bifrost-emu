@@ -84,8 +84,21 @@ FrostJIT::FrostJIT() {
         vreg_dirty_[i] = false;
         vreg_slot_[i] = 0;
     }
-    for (int i = 0; i < 16; i++) reg_vreg_[i] = -1;
+    for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
+
+    // ── FMV: detect CPU features once at construction ──────────────
+    // The result is cached for the JIT's lifetime — CPU features don't
+    // change at runtime. Polled by compile_ir_inst() when emitting code
+    // for hot operations with multiple x86 codegen variants (currently
+    // only FMADD/FMSUB/FNMADD/FNMSUB → FMA3 vs. decomposed mul+add/sub).
+    //
+    // BIFROST_NO_FMA3=1 forces the decomposed path even on FMA3 CPUs.
+    // This is a debugging aid: it lets us A/B-test the FMA3 codegen
+    // against the decomposed codegen on the same machine, and it gives
+    // users a workaround if FMA3 codegen has a bug we haven't found yet.
+    cpu_features_ = detect_cpu_features();
+    no_fma3_ = (getenv("BIFROST_NO_FMA3") != nullptr);
 }
 
 FrostJIT::~FrostJIT() {
@@ -143,11 +156,16 @@ void FrostJIT::make_executable() {
 }
 
 void FrostJIT::flush_cache() {
-    // Ensure the buffer is writable before clearing block metadata.
-    // (The blocks_ map is cleared, but the code buffer itself is not zeroed
-    // — code_buf_used_ is reset to 0 so the next translate_block overwrites
-    // old code. We still need writable access for the next translation.)
-    make_writable();
+    // Clear block metadata. We don't need writable access for this —
+    // blocks_/back_refs_/hot_pc_counts_ are STL containers, not the code
+    // buffer. The old code called make_writable() here, leaving
+    // wex_write_depth_=1 (unbalanced). The next translate_block would
+    // then run with the buffer in RW state until its make_executable()
+    // at the end — a security hole (W^X violated during execution).
+    //
+    // Fix: don't touch wex_write_depth_ here. translate_block calls
+    // make_writable() at entry and make_executable() at exit, keeping
+    // the buffer RX whenever JIT code might run.
     blocks_.clear();
     back_refs_.clear();
     hot_pc_counts_.clear();  // clear hotness tracker

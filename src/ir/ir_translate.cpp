@@ -1073,12 +1073,24 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
                 return false;
             }
-            // FP arithmetic (2-source): bit[21]=1, bits[11:10]=0b10.
+            // FP arithmetic (2-source): bit[21]=1, bits[11:10]=0b10,
+            // AND bits[31:24]=0x1E (NOT 0x1F — that's the FMA encoding space).
             //
             // The ARM ARM distinguishes FP 2-source (FMUL/FADD/etc.) from
-            // FP→int (FCVTZS/FCVTZU) and int→FP (SCVTF/UCVTF) conversions
-            // by bits[11:10]: 2-source ops have bits[11:10]=0b10, while
-            // conversions have bits[11:10]=0b00 (with bits[15:10]=0b000000).
+            // FMA (FMADD/FMSUB/FNMADD/FNMSUB) by bits[31:24]:
+            //   0x1E = FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL)
+            //   0x1F = FMA 3-source (FMADD/FMSUB/FNMADD/FNMSUB)
+            //
+            // Both have bit[21]=1. The bits[11:10]=0b10 check was meant to
+            // distinguish 2-source from FCVTZS/SCVTF (which have
+            // bits[11:10]=0b00). But it ALSO matches FMA instructions when
+            // Ra's low 2 bits happen to be 0b10 (e.g. Ra=2, 6, 10, ...).
+            // This caused FNMADD with Ra=2 to be misdecoded as FP_BINOP
+            // (FMUL), silently producing a*b instead of -a*b+c.
+            //
+            // The fix: also require bits[31:24]=0x1E, excluding the FMA
+            // encoding space (0x1F). FMA instructions are handled by the
+            // dedicated check further below.
             //
             // The old check only excluded bits[15:10] in {0x04, 0x08, 0x10,
             // 0x14} (FMOV imm / FCMP / FP 1-source / FMOV imm alternate) —
@@ -1089,7 +1101,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // misdecoded as `fmul d1, d0, d24`. The fix is to require
             // bits[11:10]=0b10, which is the architectural encoding for
             // 2-source ops.
-            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10) {
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
+                && (op & 0xFF000000) == 0x1E000000) {
                 // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
                 if (opcode <= 6 && ftype <= 1) {
                     emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);
@@ -1184,19 +1197,40 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
-            // FMADD/FMSUB (FP fused multiply-add/subtract).
-            // Encoding: (op & 0xFF200000) == 0x1F000000, bit 15 = sub (1=FMSUB, 0=FMADD).
+            // FMADD/FMSUB/FNMADD/FNMSUB (FP fused multiply-add/subtract).
+            // Encoding: (op & 0xFF000000) == 0x1F000000.
+            //   bit 15 (o1): 0 = ADD-form, 1 = SUB-form
+            //   bit 21 (o2): 0 = positive product, 1 = negative product
             // ra = bits[14:10]. Operands: a=Vn, b=Vm, c=Va.
-            if ((op & 0xFF200000) == 0x1F000000) {
+            //
+            //   o2=0, o1=0: FMADD  → dest = a*b + c
+            //   o2=0, o1=1: FMSUB  → dest = c - a*b  (= -a*b + c)
+            //   o2=1, o1=0: FNMADD → dest = -a*b + c  (numerically same as
+            //                                        FMSUB but with different
+            //                                        IEEE 754 sign rules on
+            //                                        NaN/signed-zero inputs)
+            //   o2=1, o1=1: FNMSUB → dest = -a*b - c  (= -(a*b + c))
+            //
+            // The old code only matched (op & 0xFF200000) == 0x1F000000,
+            // which silently dropped FNMADD/FNMSUB (o2=1) — they fell
+            // through to the "Unknown FP instruction — NOP" path in the
+            // interpreter, returning whatever was already in Vd. This
+            // broke any guest program that used FNMADD/FNMSUB (e.g.
+            // musl's __muldf3 fallback for long double).
+            if ((op & 0xFF000000) == 0x1F000000) {
                 uint8_t ra = (op >> 10) & 0x1F;
-                bool sub = (op >> 15) & 1;
+                bool sub = (op >> 15) & 1;   // o1
+                bool neg = (op >> 21) & 1;   // o2
                 if (ftype <= 1) {
-                    // FMADD: dest = rn * rm + ra
-                    // FMSUB: dest = ra - rn * rm
+                    IROp op_e;
+                    if      (!neg && !sub) op_e = IROp::FMADD;
+                    else if (!neg &&  sub) op_e = IROp::FMSUB;
+                    else if ( neg && !sub) op_e = IROp::FNMADD;
+                    else                   op_e = IROp::FNMSUB;
                     // Pass FP register indices directly — the JIT reads
                     // operands from V_LO_OFF + idx*8. Do NOT use
                     // load_arm_reg (that loads GPRs, not FP regs).
-                    emit(block, sub ? IROp::FMSUB : IROp::FMADD,
+                    emit(block, op_e,
                          rd, rn, rm, ftype ? 64 : 32, 0, 0,
                          static_cast<uint64_t>(ra), cur_pc);
                     return false;
@@ -1477,21 +1511,21 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // ── SHL (vector, immediate) — 0x0F00A400 ──
-            // SHL Vd.<T>, Vn.<T>, #shift
-            // Shifts each lane left by immediate. Very common in SIMD code.
-            // We don't have a native IR op for vector shift, so fall to interp.
-            if ((op & 0xBF00FC00) == 0x0F00A400) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return false;
-            }
-
-            // ── USHR/SSHR (vector, immediate) — 0x2F000400/0x0F000400 ──
-            // Very common in SIMD memset/memcpy. Fall to interp.
-            if ((op & 0xBF00FC00) == 0x2F000400 ||  // USHR
-                (op & 0xBF00FC00) == 0x0F000400) {  // SSHR
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return false;
+            // ── Vector shift-by-immediate: SHL, USHR, SSHR, USRA, SSRA, SLI, SRI ──
+            // All fall to the interpreter (no native IR ops for vector shifts).
+            // Encoding constants (mask 0xBF00FC00, which strips Q):
+            //   SHL  0x0F005400   USHR 0x2F000400   SSHR 0x0F000400
+            //   USRA 0x2F001400   SSRA 0x0F001400
+            //   SLI  0x2F005400   SRI  0x2F004400
+            {
+                uint32_t sm = op & 0xBF00FC00;
+                if (sm == 0x0F005400 || sm == 0x2F000400 || sm == 0x0F000400 ||
+                    sm == 0x2F001400 || sm == 0x0F001400 ||
+                    sm == 0x2F005400 || sm == 0x2F004400 ||
+                    sm == 0x0F008400) {  // SHRN
+                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                    return false;
+                }
             }
 
             // Unrecognized SIMD_DP — fall back to interpreter.

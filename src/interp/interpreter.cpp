@@ -969,10 +969,37 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         res = (width == 64) ? static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 63))
                                             : static_cast<uint64_t>(static_cast<int32_t>(a) >> (b & 31));
                         break;
-                    case InstClass::ROR:
-                        res = (width == 64) ? ror64(a, b & 63)
-                                            : static_cast<uint32_t>(ror64(a, b & 31));
+                    case InstClass::ROR: {
+                        // ROR rotates a value RIGHT by `b` bits, with the
+                        // bits that fall off the bottom reappearing at the
+                        // top. The 32-bit and 64-bit forms have DIFFERENT
+                        // widths — the 32-bit form must rotate within 32 bits.
+                        //
+                        // BUGFIX: the old code called `ror64(a, b & 31)`
+                        // for the 32-bit case. ror64 does a 64-bit rotate,
+                        // so `v << (64 - r)` shifts the 32-bit value entirely
+                        // out of the low word (e.g. r=7 → <<57, bits land
+                        // at positions 57-88, all above bit 32). The result
+                        // was missing the high bits that should have wrapped
+                        // around — e.g. ROR(0x12345678, 7) returned 0x02468acf
+                        // instead of 0xf2468acf. This broke MD5 (which uses
+                        // 32-bit rotates in every round) and any other code
+                        // using ROR — the JIT was correct, the interpreter
+                        // was wrong, so verify mode flagged "false-positive"
+                        // divergences on every ROR-heavy block.
+                        if (width == 64) {
+                            res = ror64(a, b & 63);
+                        } else {
+                            uint32_t v = static_cast<uint32_t>(a);
+                            unsigned r = b & 31;
+                            if (r == 0) {
+                                res = v;
+                            } else {
+                                res = (v >> r) | (v << (32 - r));
+                            }
+                        }
                         break;
+                    }
                     default: break;
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
@@ -1514,12 +1541,30 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
                     uint64_t src = cpu.regs[rn];
-                    if (esize == 1) reinterpret_cast<uint8_t*>(&cpu.v_lo[rd])[idx] = src & 0xFF;
-                    else if (esize == 2) reinterpret_cast<uint16_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFF;
-                    else if (esize == 4) reinterpret_cast<uint32_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFFFFFF;
-                    else if (esize == 8) {
+                    // BUGFIX (rc.1): for Q=1 (128-bit), elements with idx >=
+                    // (8/esize) must write to v_hi, not v_lo. The old code
+                    // always wrote to v_lo, causing out-of-bounds writes for
+                    // lane indices >= 2 (32-bit) or >= 1 (64-bit). This broke
+                    // INS used by MD5 to load message words into vector lanes.
+                    int elems_per_qword = 8 / esize;
+                    if (esize == 1) {
+                        if (idx < elems_per_qword)
+                            reinterpret_cast<uint8_t*>(&cpu.v_lo[rd])[idx] = src & 0xFF;
+                        else if (Q)
+                            reinterpret_cast<uint8_t*>(&cpu.v_hi[rd])[idx - elems_per_qword] = src & 0xFF;
+                    } else if (esize == 2) {
+                        if (idx < elems_per_qword)
+                            reinterpret_cast<uint16_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFF;
+                        else if (Q)
+                            reinterpret_cast<uint16_t*>(&cpu.v_hi[rd])[idx - elems_per_qword] = src & 0xFFFF;
+                    } else if (esize == 4) {
+                        if (idx < elems_per_qword)
+                            reinterpret_cast<uint32_t*>(&cpu.v_lo[rd])[idx] = src & 0xFFFFFFFF;
+                        else if (Q)
+                            reinterpret_cast<uint32_t*>(&cpu.v_hi[rd])[idx - elems_per_qword] = src & 0xFFFFFFFF;
+                    } else if (esize == 8) {
                         if (idx == 0) cpu.v_lo[rd] = src;
-                        else if (idx == 1) cpu.v_hi[rd] = src;
+                        else if (idx == 1 && Q) cpu.v_hi[rd] = src;
                     }
                     return;
                 }
@@ -1634,25 +1679,32 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     int esize = 1 << esize_log2;  // bytes: 1, 2, 4, or 8
                     int index = imm5 >> (esize_log2 + 1);
-                    // UMOV: read from vector element, write to GPR
-                    // For 64-bit elements (D form), v_lo holds element 0,
-                    // v_hi holds element 1.
+                    // UMOV: read from vector element, write to GPR.
+                    // BUGFIX (rc.1): for Q=1 (128-bit), elements with index >=
+                    // (8/esize) must read from v_hi, not v_lo. The old code
+                    // always read from v_lo, returning wrong values for lane
+                    // indices >= 2 (32-bit) or >= 1 (64-bit).
+                    int elems_per_qword = 8 / esize;
+                    uint64_t val = 0;
                     if (esize == 8) {
-                        uint64_t val = (index == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
-                        if (rd != 31) cpu.regs[rd] = val;
+                        val = (index == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
                     } else if (esize == 4) {
-                        uint32_t* v = reinterpret_cast<uint32_t*>(&cpu.v_lo[rn]);
-                        uint64_t val = v[index];
-                        if (rd != 31) cpu.regs[rd] = val;
+                        if (index < elems_per_qword)
+                            val = reinterpret_cast<uint32_t*>(&cpu.v_lo[rn])[index];
+                        else
+                            val = reinterpret_cast<uint32_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
                     } else if (esize == 2) {
-                        uint16_t* v = reinterpret_cast<uint16_t*>(&cpu.v_lo[rn]);
-                        uint64_t val = v[index];
-                        if (rd != 31) cpu.regs[rd] = val;
+                        if (index < elems_per_qword)
+                            val = reinterpret_cast<uint16_t*>(&cpu.v_lo[rn])[index];
+                        else
+                            val = reinterpret_cast<uint16_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
                     } else {  // esize == 1
-                        uint8_t* v = reinterpret_cast<uint8_t*>(&cpu.v_lo[rn]);
-                        uint64_t val = v[index];
-                        if (rd != 31) cpu.regs[rd] = val;
+                        if (index < elems_per_qword)
+                            val = reinterpret_cast<uint8_t*>(&cpu.v_lo[rn])[index];
+                        else
+                            val = reinterpret_cast<uint8_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
                     }
+                    if (rd != 31) cpu.regs[rd] = val;
                     return;
                 }
                 // ── CMEQ two registers ──
@@ -1677,18 +1729,44 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 default: break;  // fall through to size-based checks below
                 }
 
-                // Sub-discriminator: bits[15:10] with size field, for ops
-                // that have a different mask shape (REV/CNT/UADDLV/CMEQ#0).
-                uint32_t sub2 = op & 0xBFFFFC00;  // mask off Q (30) and Rm (20:16)
+                // Sub-discriminator for 1-source vector ops (REV/CNT/CMEQ#0).
+                // Mask off Q (30), U (29), size (23:22), Rm (20:16), Rn (9:5), Rd (4:0).
+                //
+                // BUGFIX (rc.1): the old mask 0xBFFFFC00 did NOT mask off the
+                // size field (bits 23:22) or the U bit (29). This caused:
+                //   - REV64 v0.4s (size=2) to not match the REV64 constant (size=0)
+                //   - REV32 (U=1) to not match the REV64 case (U=0)
+                // Every REV with size != 0 or U=1 fell through and was silently
+                // NOP'd. This broke byte-swapping in MD5, SHA, and any NEON
+                // code using REV32/REV64 on non-8-bit data.
+                uint32_t sub2 = op & 0x9F3FFC00;  // mask Q, U, size, Rm, Rn, Rd
                 switch (sub2) {
-                // ── REV64 (vector) ──
-                case 0x0E200800: {
+                // ── REV64 (vector, U=0) / REV32 (vector, U=1) ──
+                // Both have bits[21:16] = 100000, bits[15:10] = 001000.
+                // U bit (29) distinguishes them: REV64 (U=0) reverses within
+                // 64-bit containers, REV32 (U=1) reverses within 32-bit words.
+                // Since we masked off U, we check it explicitly inside.
+                case 0x0E200800: {  // bits[21:16]=10, bits[15:10]=001000
+                    bool is_rev32 = (op >> 29) & 1;  // U=1 → REV32
+                    // size field determines the element size for reversal:
+                    //   size=0 → 8-bit elements, size=1 → 16-bit,
+                    //   size=2 → 32-bit, size=3 → 64-bit (REV64 only, reserved for REV32)
+                    // REV64 reverses elements within each 64-bit container.
+                    // REV32 reverses elements within each 32-bit word.
+                    int esize = (1 << size);  // bytes per element
+                    int container = is_rev32 ? 4 : 8;  // REV32: 32-bit, REV64: 64-bit
                     uint8_t buf[16];
                     memcpy(buf, &cpu.v_lo[rn], 8);
                     if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
                     int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i += 8) {
-                        for (int j = 0; j < 4; j++) std::swap(buf[i+j], buf[i+7-j]);
+                    for (int i = 0; i < nbytes; i += container) {
+                        // Reverse elements within this container
+                        for (int j = 0; j < container / 2; j += esize) {
+                            for (int k = 0; k < esize; k++) {
+                                std::swap(buf[i + j + k],
+                                          buf[i + container - esize - j + k]);
+                            }
+                        }
                     }
                     memcpy(&cpu.v_lo[rd], buf, 8);
                     if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
@@ -1702,21 +1780,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
                     int nbytes = Q ? 16 : 8;
                     for (int i = 0; i < nbytes; i += 2) std::swap(buf[i], buf[i+1]);
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
-                // ── REV32 (vector) ──
-                case 0x0E203800: {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                    int nbytes = Q ? 16 : 8;
-                    for (int i = 0; i < nbytes; i += 4) {
-                        std::swap(buf[i], buf[i+3]);
-                        std::swap(buf[i+1], buf[i+2]);
-                    }
                     memcpy(&cpu.v_lo[rd], buf, 8);
                     if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
                     else cpu.v_hi[rd] = 0;
@@ -1812,9 +1875,19 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // (cmode=0, used to zero V registers) to be silently ignored.
                 // This broke toybox sh's stack zeroing (STP Q0,Q0 after MOVI
                 // V0.4S,#0), corrupting the option parse node list.
-                // Check: bits[31:24]=0x0F, bit[23]=0 (distinguishes MOVI from
-                // SHL/SHRN which have bit[23]=1), bits[11:10]=01.
-                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400) {
+                //
+                // CRITICAL: must check immh (bits[23:20]) == 0 to distinguish
+                // MOVI from SSHR/USHR/SHL. The "Advanced SIMD modified immediate"
+                // and "Advanced SIMD shift by immediate" groups share bits[28:24]
+                // = 01110 and bit 23 = 0 (for 32-bit shifts where immh < 8).
+                // The ARM ARM resolves the ambiguity: if immh != 0, it's a shift;
+                // if immh == 0, it's MOVI. The old code didn't check immh, so
+                // SSHR/USHR/SHL with 32-bit elements were misdecoded as MOVI
+                // (writing an immediate instead of shifting). This silently broke
+                // every NEON shift by immediate — the root cause of the md5sum
+                // failure (toybox's MD5 uses vshrq_n_u32 for rotates).
+                if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
+                    && ((op >> 20) & 0xF) == 0) {  // immh == 0 → MOVI, not shift
                     uint8_t cmode = (op >> 12) & 0xF;
                     uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                     // U bit (bit 29): 0 = MOVI, 1 = MVNI (invert).
@@ -1874,15 +1947,33 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // SHL (vector, immediate) — mask 0xBF00FC00 excludes Q.
-                if ((op & 0xBF00FC00) == 0x0F00A400) {
-                    uint8_t immh = (op >> 19) & 0xF;
+                // Encoding: Q 0 1 1 0 1 1 1 1 0 immh immb 0 1 0 1 0 0 Rn Rd
+                //
+                // Element size from immh (the position of the highest set bit):
+                //   immh=0     → 8-bit  (esize=1)
+                //   immh=1     → 16-bit (esize=2)
+                //   immh=2,3   → 32-bit (esize=4)
+                //   immh=4-7   → 64-bit (esize=8)
+                //   immh=8-15  → reserved (treat as 64-bit)
+                // Shift = immh:immb - esize_bits
+                //   (e.g. shl v0.4s, #4 → immh:immb=0x24=36, esize=32, shift=36-32=4)
+                //
+                // BUGFIX (rc.1): the old code had TWO bugs:
+                // 1. immh extracted as (op>>19)&0xF — off by one bit (should be >>20).
+                // 2. Element size rule was wrong: used 'immh < N' thresholds that
+                //    gave 16-bit for immh=3 instead of 32-bit. The correct rule is
+                //    based on the highest set bit position of immh.
+                // These broke ALL vector shifts — e.g. `ushr v0.4s, #4` was treated
+                // as a 16-bit shift, producing 0x0000 instead of 0x01000000.
+                if ((op & 0xBF00FC00) == 0x0F005400) {
+                    uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
                     int esize, shift;
-                    if (immh == 0) return;
-                    else if (immh < 2) { esize = 1; shift = (immh & 1) << 4 | immb; }
-                    else if (immh < 4) { esize = 2; shift = (immh & 3) << 4 | immb; }
-                    else if (immh < 8) { esize = 4; shift = (immh & 7) << 4 | immb; }
-                    else { esize = 8; shift = (immh & 0xF) << 4 | immb; }
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = ((immh << 4) | immb) - (esize * 8);
                     int elems = (Q ? 16 : 8) / esize;
                     uint8_t buf[16];
                     memcpy(buf, &cpu.v_lo[rn], 8);
@@ -1900,15 +1991,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // USHR (vector, immediate) — mask 0xBF00FC00 excludes Q.
+                // Shift = (2 * esize_bits) - immh:immb
+                //   (e.g. ushr v0.4s, #4 → immh:immb=0x3C=60, esize=32,
+                //    shift = 64 - 60 = 4)
+                //
+                // BUGFIX (rc.1): same immh extraction + element size rule as SHL.
                 if ((op & 0xBF00FC00) == 0x2F000400) {
-                    uint8_t immh = (op >> 19) & 0xF;
+                    uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
                     int esize, shift;
-                    if (immh == 0) return;
-                    else if (immh < 2) { esize = 1; shift = (8 - (((immh & 1) << 4) | immb)); }
-                    else if (immh < 4) { esize = 2; shift = (16 - (((immh & 3) << 4) | immb)); }
-                    else if (immh < 8) { esize = 4; shift = (32 - (((immh & 7) << 4) | immb)); }
-                    else { esize = 8; shift = (64 - (((immh & 0xF) << 4) | immb)); }
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = (2 * esize * 8) - ((immh << 4) | immb);
                     int elems = (Q ? 16 : 8) / esize;
                     uint8_t buf[16];
                     memcpy(buf, &cpu.v_lo[rn], 8);
@@ -1924,14 +2020,176 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SHRN (vector, immediate) — mask 0xBF00FC00 excludes Q.
-                if ((op & 0xBF00FC00) == 0x0F008400) {
-                    uint8_t immh = (op >> 19) & 0xF;
+                // USRA (vector, immediate, accumulate) — mask 0xBF00FC00.
+                // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift)
+                // Encoding: same as USHR but bit 12 = 1 (bits[15:10] = 000101).
+                // Used by MD5 to implement vector rotate-left via:
+                //   ROTL(x,n) = (x << n) | (x >> (32-n))
+                //             = USRA(x << n, 32-n)  [accumulate the >> part]
+                // Without this, MD5's round function produced wrong hashes.
+                if ((op & 0xBF00FC00) == 0x2F001400) {
+                    uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
                     int esize, shift;
-                    if (immh < 2) { esize = 2; shift = (16 - ((immh & 1) << 4 | immb)); }
-                    else if (immh < 4) { esize = 4; shift = (32 - (((immh & 3) << 4) | immb)); }
-                    else { esize = 8; shift = (64 - (((immh & 7) << 4) | immb)); }
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = (2 * esize * 8) - ((immh << 4) | immb);
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    uint8_t acc[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    memcpy(acc, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t v = 0, a = 0;
+                        memcpy(&v, buf + i*esize, esize);
+                        memcpy(&a, acc + i*esize, esize);
+                        v >>= shift;
+                        a += v;  // accumulate (wraps per element width)
+                        a &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
+                        memcpy(acc + i*esize, &a, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], acc, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // SSRA (vector, immediate, signed accumulate) — mask 0xBF00FC00.
+                // Same as USRA but arithmetic (signed) shift right. Constant 0x0F001400.
+                if ((op & 0xBF00FC00) == 0x0F001400) {
+                    uint8_t immh = (op >> 20) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = (2 * esize * 8) - ((immh << 4) | immb);
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    uint8_t acc[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    memcpy(acc, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
+                    for (int i = 0; i < elems; i++) {
+                        if (esize == 1) {
+                            int8_t v; memcpy(&v, buf+i, 1);
+                            uint8_t a; memcpy(&a, acc+i, 1);
+                            v >>= shift; a += (uint8_t)v;
+                            memcpy(acc+i, &a, 1);
+                        } else if (esize == 2) {
+                            int16_t v; memcpy(&v, buf+i*2, 2);
+                            uint16_t a; memcpy(&a, acc+i*2, 2);
+                            v >>= shift; a += (uint16_t)v;
+                            memcpy(acc+i*2, &a, 2);
+                        } else if (esize == 4) {
+                            int32_t v; memcpy(&v, buf+i*4, 4);
+                            uint32_t a; memcpy(&a, acc+i*4, 4);
+                            v >>= shift; a += (uint32_t)v;
+                            memcpy(acc+i*4, &a, 4);
+                        } else {
+                            int64_t v; memcpy(&v, buf+i*8, 8);
+                            uint64_t a; memcpy(&a, acc+i*8, 8);
+                            v >>= shift; a += (uint64_t)v;
+                            memcpy(acc+i*8, &a, 8);
+                        }
+                    }
+                    memcpy(&cpu.v_lo[rd], acc, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // SLI (vector, immediate, shift left insert) — mask 0xBF00FC00.
+                // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd >> (esize-shift))
+                // Used heavily by MD5 to implement vector rotate-left:
+                //   ROTL(x, n) = SLI(x, x, n)  [when Vd==Vn]
+                // Without this, MD5's round function produced wrong hashes.
+                // Shift formula (same as SHL): shift = immh:immb - esize_bits
+                if ((op & 0xBF00FC00) == 0x2F005400) {
+                    uint8_t immh = (op >> 20) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = ((immh << 4) | immb) - (esize * 8);
+                    int esize_bits = esize * 8;
+                    int insert_shift = esize_bits - shift;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t vn[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vd, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t n = 0, d = 0;
+                        memcpy(&n, vn + i*esize, esize);
+                        memcpy(&d, vd + i*esize, esize);
+                        uint64_t hi = (n << shift) & mask;
+                        uint64_t lo = (insert_shift < esize_bits) ? (d >> insert_shift) : 0;
+                        uint64_t r = hi | lo;
+                        memcpy(vd + i*esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // SRI (vector, immediate, shift right insert) — mask 0xBF00FC00.
+                // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd << (esize-shift))
+                // Used for vector rotate-right: ROTR(x, n) = SRI(x, x, n)
+                // Shift formula (same as USHR): shift = (2*esize_bits) - immh:immb
+                if ((op & 0xBF00FC00) == 0x2F004400) {
+                    uint8_t immh = (op >> 20) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) { esize = 1; }
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    int esize_bits = esize * 8;
+                    shift = (2 * esize_bits) - ((immh << 4) | immb);
+                    int insert_shift = esize_bits - shift;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t vn[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vd, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t n = 0, d = 0;
+                        memcpy(&n, vn + i*esize, esize);
+                        memcpy(&d, vd + i*esize, esize);
+                        uint64_t lo = (n >> shift);
+                        uint64_t hi = (insert_shift < esize_bits) ? ((d << insert_shift) & mask) : 0;
+                        uint64_t r = hi | lo;
+                        memcpy(vd + i*esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // Narrowing shift right. immh determines SOURCE element size
+                // (2× the destination size). Shift = (2*esize_bits) - immh:immb,
+                // same formula as USHR but on the wider source element.
+                //
+                // BUGFIX (rc.1): same immh extraction + element size rule as SHL/USHR.
+                if ((op & 0xBF00FC00) == 0x0F008400) {
+                    uint8_t immh = (op >> 20) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = (2 * esize * 8) - ((immh << 4) | immb);
                     uint8_t buf[16];
                     memcpy(buf, &cpu.v_lo[rn], 8);
                     if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
@@ -2063,6 +2321,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // Fallback: NOP for SIMD ops we don't model. This is
                 // incorrect but lets glibc continue. Programs that actually
                 // depend on FP results will produce wrong output.
+                // Optional: log unhandled SIMD ops for debugging.
+                static const bool simd_trace_ = (getenv("BIFROST_SIMD_TRACE") != nullptr);
+                if (simd_trace_) {
+                    static uint64_t simd_unhandled_count_ = 0;
+                    if (simd_unhandled_count_ < 50) {
+                        fprintf(stderr, "[SIMD] unhandled op=0x%08x pc=0x%llx (Q=%d U=%d size=%d)\n",
+                                op, static_cast<unsigned long long>(cpu.pc),
+                                Q, (op>>29)&1, (op>>22)&3);
+                        simd_unhandled_count_++;
+                    }
+                }
                 return;
             }
 
@@ -2443,16 +2712,57 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // FMADD/FMSUB
-                if ((op & 0xFF200000) == 0x1F000000) {
+                // FMADD/FMSUB/FNMADD/FNMSUB
+                // Encoding: bits[31:24]=0x1F, bit 15=o1 (sub), bit 21=o2 (neg).
+                // The old code's mask (op & 0xFF200000) == 0x1F000000 only
+                // matched FMADD/FMSUB (o2=0); FNMADD/FNMSUB (o2=1) fell
+                // through to the "Unknown FP — NOP" path, silently
+                // returning whatever was in Vd. This broke any guest
+                // program that used FNMADD/FNMSUB (e.g. musl's __muldf3
+                // long-double fallback for printf %Lf).
+                //
+                // Per ARM ARM, the four FMA variants are:
+                //   FMADD  (o2=0, o1=0): Vd = Va + Vn*Vm       = c + a*b
+                //   FMSUB  (o2=0, o1=1): Vd = Va - Vn*Vm       = c - a*b
+                //   FNMADD (o2=1, o1=0): Vd = -Vn*Vm + Va      = -a*b + c
+                //   FNMSUB (o2=1, o1=1): Vd = -Vn*Vm - Va      = -a*b - c
+                //
+                // We model FMA3 fusion semantics by computing the product
+                // and add/sub in a single C++ expression. C++ does NOT
+                // guarantee single-rounding (the compiler may emit
+                // separate mul+add machine instructions), so this matches
+                // the JIT's non-FMA3 decomposed path — both produce
+                // double-rounded results. On hosts with FMA3, the JIT's
+                // FMA3 codegen produces single-rounded results, which
+                // diverges from the interpreter for IEEE 754 edge cases
+                // (e.g. mul=1e308 + acc=1e-300 → exact vs. ∞). This is
+                // documented in context.md known issue #1; the fix
+                // requires FMA3 codegen in the interpreter too (future
+                // work — currently we use the C++ mul+add path).
+                if ((op & 0xFF000000) == 0x1F000000) {
                     uint8_t ra = (op >> 10) & 0x1F;
-                    bool sub = (op >> 15) & 1;
+                    bool sub = (op >> 15) & 1;   // o1
+                    bool neg = (op >> 21) & 1;   // o2
                     if (ftype) {
-                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), c = read_fp_d(cpu, ra);
-                        write_fp_d(cpu, rd, sub ? (c - a * b) : (c + a * b));
+                        double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm),
+                               c = read_fp_d(cpu, ra);
+                        double prod = a * b;
+                        double r;
+                        if      (!neg && !sub) r = prod + c;        // FMADD
+                        else if (!neg &&  sub) r = c - prod;        // FMSUB
+                        else if ( neg && !sub) r = -prod + c;       // FNMADD
+                        else                   r = -prod - c;       // FNMSUB
+                        write_fp_d(cpu, rd, r);
                     } else {
-                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm), c = read_fp_s(cpu, ra);
-                        write_fp_s(cpu, rd, sub ? (c - a * b) : (c + a * b));
+                        float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm),
+                              c = read_fp_s(cpu, ra);
+                        float prod = a * b;
+                        float r;
+                        if      (!neg && !sub) r = prod + c;        // FMADD
+                        else if (!neg &&  sub) r = c - prod;        // FMSUB
+                        else if ( neg && !sub) r = -prod + c;       // FNMADD
+                        else                   r = -prod - c;       // FNMSUB
+                        write_fp_s(cpu, rd, r);
                     }
                     return;
                 }

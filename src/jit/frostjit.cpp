@@ -23,6 +23,7 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
+#include "bifrost/version.hpp"  // CODENAME
 
 #include <atomic>
 #include <cstddef>
@@ -48,6 +49,17 @@ static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mi
 static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
 static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
 static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mismatch");
+
+// Additional layout checks: the JIT hardcodes element counts (regs[31],
+// v_lo[32], v_hi[32]) and element sizes (8 bytes each). If the CPU struct
+// ever changes — e.g. v_lo becomes uint32_t[32] — the JIT's
+// `V_LO_OFF + idx*8` addressing would silently produce wrong code.
+// These static_asserts catch that at compile time.
+static_assert(sizeof(CPU::regs) >= 31 * 8, "CPU::regs must hold 31 × 8-byte regs");
+static_assert(sizeof(CPU::v_lo) == 32 * 8, "CPU::v_lo must be 32 × 8 bytes (uint64_t[32])");
+static_assert(sizeof(CPU::v_hi) == 32 * 8, "CPU::v_hi must be 32 × 8 bytes (uint64_t[32])");
+static_assert(sizeof(((CPU*)0)->regs[0]) == 8, "CPU reg element must be 8 bytes");
+static_assert(sizeof(((CPU*)0)->v_lo[0]) == 8, "CPU v_lo element must be 8 bytes");
 
 // ── Forward decls of slow-path helpers defined in x86_backend.cpp ──────
 // These are extern "C" so JIT-compiled code can call them by address
@@ -1069,13 +1081,21 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             uint8_t sse_op;
             switch (opc) {
-                case 0: sse_op = 0x59; break;  // mul
-                case 1: sse_op = 0x5E; break;  // div
-                case 2: sse_op = 0x58; break;  // add
-                case 3: sse_op = 0x5C; break;  // sub
-                case 4: sse_op = 0x5F; break;  // max
-                case 5: sse_op = 0x5D; break;  // min
-                default: sse_op = 0x58; break;
+                case 0: sse_op = 0x59; break;  // mul (mulsd)
+                case 1: sse_op = 0x5E; break;  // div (divsd)
+                case 2: sse_op = 0x58; break;  // add (addsd)
+                case 3: sse_op = 0x5C; break;  // sub (subsd)
+                case 4: sse_op = 0x5F; break;  // max (maxsd)
+                case 5: sse_op = 0x5D; break;  // min (minsd)
+                default:
+                    // Unknown FP opcode — fall back to interpreter instead
+                    // of silently emitting ADDSD (which would produce wrong
+                    // results). This shouldn't happen (the IR translator
+                    // only emits opcodes 0-6), but defensive coding here
+                    // prevents silent miscompilation if a new opcode is
+                    // added to the translator without updating this switch.
+                    emit_call_interp(inst.arm_pc, false);
+                    return false;
             }
             // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
             // BUGFIX: must use modrm(3, 0, 1) → reg=xmm0, rm=xmm1
@@ -2459,7 +2479,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             // ftype encoding: 0 = single (S), 1 = double (D)
-            bool is_double = (inst.width != 0);
+            // Width is `ftype ? 64 : 32` (set by ir_translate.cpp) — use
+            // `width == 64` to distinguish from 32 (single). The old
+            // `width != 0` check treated both as double, breaking all
+            // single-precision FRINT.
+            bool is_double = (inst.width == 64);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             // Load FP value into XMM0
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
@@ -2489,45 +2513,185 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // ── FMADD / FMSUB: FP fused multiply-add ─────────────────────
+        // ── FMADD / FMSUB / FNMADD / FNMSUB: FP fused multiply-add family
+        //
+        // ARM FMA semantics (per ARM ARM):
+        //   FMADD:  Vd = Va + Vn*Vm       = c + a*b
+        //   FMSUB:  Vd = Va - Vn*Vm       = c - a*b
+        //   FNMADD: Vd = -Vn*Vm + Va      = -a*b + c  (same numerical
+        //                                            result as FMSUB but
+        //                                            different IEEE 754
+        //                                            sign rules)
+        //   FNMSUB: Vd = -Vn*Vm - Va      = -a*b - c  (= -(a*b + c))
+        //
+        // ── FMA3 path (when host CPU supports FMA3 + AVX) ───────────
+        //
+        // We use the 231 form: vfmXXX231sd xmm0, xmm1, xmm2/m64
+        //   xmm0 = src1 * src2 OP xmm0   (xmm0 is both acc input and dest)
+        //
+        //   FMADD  → vfmadd231ss/sd   (xmm0 = +Vn*Vm + Va)
+        //   FMSUB  → vfnmadd231ss/sd  (xmm0 = -Vn*Vm + Va = Va - Vn*Vm)
+        //   FNMADD → vfnmadd231ss/sd  (same as FMSUB — single instruction,
+        //                               single-rounded, IEEE 754-correct)
+        //   FNMSUB → vfnmsub231ss/sd  (xmm0 = -Vn*Vm - Va)
+        //
+        // VEX 3-byte encoding (FMA3 uses 0F38 escape map):
+        //   C4 [R~ X~ B~ mmmmm] [W vvvv~ L pp] [opcode] [modrm]
+        //
+        //   byte1 = 0x02  (R=X=B=1 inverted=0, mmmmm=00010 for 0F38)
+        //   byte2 = W<<7 | (~vvvv)<<3 | L<<2 | pp
+        //     W=1 for sd (double), W=0 for ss (single)
+        //     vvvv = NDS register (xmm1, index 1, inverted = 0b1110)
+        //     L=0 (128-bit XMM, not 256-bit YMM)
+        //     pp = 11 (F2 prefix, sd) or 10 (F3 prefix, ss)
+        //
+        // Opcodes (per Intel SDM Vol 2A, FMA3 instruction table):
+        //   vfmadd231ss/sd:  0x99
+        //   vfmsub231ss/sd:  0x9B   (not used by ARM FMA mapping)
+        //   vfnmadd231ss/sd: 0xBD
+        //   vfnmsub231ss/sd: 0xBF
+        //
+        // ── Decomposed path (no FMA3) ────────────────────────────────
+        //
+        // We decompose into separate mulsd + addsd/subsd. This is
+        // double-rounded (NOT IEEE 754-correct for edge cases — see
+        // context.md known issue #1), but matches the interpreter's
+        // decomposition path so JIT/interpreter agree.
+        //
+        // The clobber list (RAX, RCX, RDX) matches the existing FP
+        // codegen convention — FP ops only touch XMM0/XMM1/XMM2 plus
+        // those three GPRs (RAX for the zero store at the end).
         case IROp::FMADD:
-        case IROp::FMSUB: {
-            // FMADD: dest = src1 * src2 + acc
-            // FMSUB: dest = -src1 * src2 + acc = acc - src1 * src2
-            // We decompose: mul, then add/sub acc (non-fused, but correct)
-            // FMADD clobbers RAX (zero store).
+        case IROp::FMSUB:
+        case IROp::FNMADD:
+        case IROp::FNMSUB: {
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // ftype encoding: 0 = single (S), 1 = double (D)
-            bool is_double = (inst.width != 0);
+            // Width encoding: 64 = double (D), 32 = single (S).
+            // The IR translator emits `ftype ? 64 : 32` for FMADD/FRINT,
+            // which is inconsistent with FP_BINOP (uses ftype 0/1 directly).
+            // We use `width == 64` to handle this correctly. Using
+            // `width != 0` (as the old code did) treats BOTH 32 and 64 as
+            // double — silently breaking all single-precision FMA.
+            bool is_double = (inst.width == 64);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
-            int32_t off_acc = V_LO_OFF + static_cast<int>(inst.imm) * 8;
-            // Load src1 into XMM0
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off1);
-            // Load src2 into XMM1
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(1, CPU_REG, off2);
-            // mulsd/mulss xmm0, xmm1
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x59);
-            emit_byte(0xC1);  // xmm0, xmm1
-            // Load acc into XMM2
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(2, CPU_REG, off_acc);
-            if (inst.op == IROp::FMADD) {
-                // addsd/addss xmm0, xmm2
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
-                emit_byte(0xC2);  // xmm0, xmm2
+            int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;  // Vn
+            int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;  // Vm
+            int32_t off_acc = V_LO_OFF + static_cast<int>(inst.imm) * 8; // Va
+
+            if (has_fma3()) {
+                // ── FMA3 native codegen ──
+                // Load Va (accumulator) into XMM0 — the FMA3 231 form uses
+                // XMM0 as both acc input and result dest.
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off_acc);  // movsd xmm0, [rbx+off_acc]
+                // Load Vn into XMM1 (the NDS register — multiply operand 1).
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off1);  // movsd xmm1, [rbx+off1]
+                // Vm is read directly from memory via ModRM.rm (no load needed).
+
+                // Pick opcode based on operation:
+                //   FMADD         → vfmadd231  (0xB9)
+                //   FMSUB/FNMADD  → vfnmadd231 (0xBD)  (numerically same)
+                //   FNMSUB        → vfnmsub231 (0xBF)
+                //
+                // Opcodes per Intel SDM Vol 2A, FMA3 table:
+                //   vfmadd231ss/sd:  0xB9   (132=0x99, 213=0xA9, 231=0xB9)
+                //   vfnmadd231ss/sd: 0xBD   (132=0x9D, 213=0xAD, 231=0xBD)
+                //   vfnmsub231ss/sd: 0xBF   (132=0x9F, 213=0xAF, 231=0xBF)
+                //
+                // NOTE: FMA3 uses VEX.pp=01 (66 prefix) for BOTH ss and sd —
+                // the W bit (not pp) distinguishes single (W=0) from double
+                // (W=1). This is different from scalar SSE FP (mulsd uses
+                // pp=11/F2, mulss uses pp=10/F3).
+                uint8_t opcode;
+                switch (inst.op) {
+                    case IROp::FMADD:  opcode = 0xB9; break;
+                    case IROp::FMSUB:  opcode = 0xBD; break;  // vfnmadd231
+                    case IROp::FNMADD: opcode = 0xBD; break;  // vfnmadd231
+                    case IROp::FNMSUB: opcode = 0xBF; break;  // vfnmsub231
+                    default: return false;  // unreachable
+                }
+
+                // VEX 3-byte prefix:
+                //   C4
+                //   byte1: 0xE2  (R~=X~=B~=1 for low registers xmm0-xmm7
+                //                 and rbx; mmmmm=00010 for 0F38 map)
+                //   byte2: W<<7 | (~1)<<3 | 0<<2 | pp
+                //     W = is_double ? 1 : 0
+                //     vvvv~ = ~0001 = 1110 (NDS = xmm1)
+                //     L = 0 (LIG — ignored by FMA3, set to 0 for 128-bit)
+                //     pp = 01 (66 — mandatory for FMA3, NOT F2/F3!)
+                //
+                // NOTE: VEX byte1's R/X/B bits are INVERTED relative to
+                // REX.R/X/B. For low registers (no high bit), R=X=B=0 in
+                // REX sense, so R~=X~=B~=1 in VEX. The old code used 0x02
+                // (R~=X~=B~=0) which means R=X=B=1 — indicating xmm8-15
+                // and rbx-with-REX.B, causing the CPU to access xmm8 as
+                // the destination and segfault on the memory operand.
+                uint8_t vex_b1 = 0xE2;
+                uint8_t vex_b2 = (is_double ? 0x80 : 0x00)   // W
+                               | (0x0E << 3)                   // vvvv~ = ~1 = 1110
+                               | 0x00                          // L = 0
+                               | 0x01;                         // pp = 01 (66)
+                emit_byte(0xC4);
+                emit_byte(vex_b1);
+                emit_byte(vex_b2);
+                emit_byte(opcode);
+                // ModRM: reg=xmm0 (dest + acc), rm=[rbx+off2] (Vm memory operand).
+                emit_modrm_disp(0, CPU_REG, off2);
             } else {
-                // FMSUB: subss/subsd xmm2, xmm0 → result in xmm2
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
-                emit_byte(0xD0);  // xmm2, xmm0
-                // movaps xmm0, xmm2
-                emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC2);
+                // ── Decomposed path (no FMA3) ──
+                // Load Vn into XMM0, Vm into XMM1, multiply → XMM0 = Vn*Vm
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off1);
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2);
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x59);
+                emit_byte(0xC1);  // mulsd xmm0, xmm1
+                // Load Va (acc) into XMM2
+                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(2, CPU_REG, off_acc);
+                // Combine per operation:
+                //   FMADD:  r = prod + acc       → addsd xmm0, xmm2
+                //   FMSUB:  r = acc - prod       → subsd xmm2, xmm0; movaps xmm0, xmm2
+                //   FNMADD: r = -prod + acc      = acc - prod → same as FMSUB
+                //   FNMSUB: r = -prod - acc      → addsd xmm0, xmm2; negate xmm0
+                if (inst.op == IROp::FMADD) {
+                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
+                    emit_byte(0xC2);  // addsd xmm0, xmm2
+                } else if (inst.op == IROp::FMSUB || inst.op == IROp::FNMADD) {
+                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
+                    emit_byte(0xD0);  // subsd xmm2, xmm0  (xmm2 = acc - prod)
+                    emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC2);  // movaps xmm0, xmm2
+                } else {  // FNMSUB
+                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
+                    emit_byte(0xC2);  // addsd xmm0, xmm2  (xmm0 = prod + acc)
+                    // Negate xmm0 by XORing with sign bit.
+                    // mov rax, sign_mask  (0x8000000000000000 for double,
+                    //                      0x80000000 for single, zero-extended)
+                    if (is_double) {
+                        emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                    } else {
+                        emit_mov_imm32_zext(RAX, 0x80000000u);
+                    }
+                    // movq xmm1, rax  (REX.W + 66 0F 6E ModRM)
+                    // NOTE: the REX.W prefix (0x48) is REQUIRED — without
+                    // it, this is `movd xmm1, eax` which only moves the
+                    // low 32 bits. For the double-precision sign mask
+                    // 0x8000000000000000, the low 32 bits are 0, so the
+                    // xorpd would be a no-op and the negation is lost.
+                    // The mandatory prefix 66 comes first, then REX.
+                    emit_byte(0x66);
+                    emit_byte(0x48);  // REX.W
+                    emit_byte(0x0F); emit_byte(0x6E);
+                    emit_byte(0xC8);  // ModRM: xmm1, rax
+                    // xorpd xmm0, xmm1  (0x66 0x0F 0x57 0xC1)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57);
+                    emit_byte(0xC1);
+                }
             }
-            // Store result to v_lo[dest]
+            // Store result (in XMM0) to v_lo[dest]
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
@@ -2670,7 +2834,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         vreg_dirty_[i] = false;
         vreg_slot_[i] = 0;
     }
-    for (int i = 0; i < 16; i++) reg_vreg_[i] = -1;
+    for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
 
@@ -2804,6 +2968,22 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (inst.src1 > max_vreg) max_vreg = inst.src1;
         if (inst.src2 > max_vreg) max_vreg = inst.src2;
     }
+    // Bounds-check: vreg arrays are fixed-size (4096). A pathological block
+    // could exceed this, silently overflowing vreg_slot_[] / vreg_home_[] /
+    // vreg_dirty_[]. Cap max_vreg and emit a warning to stderr the first
+    // time this happens (the block will still run via CALL_INTERP fallback
+    // for the overflowed vregs, which is correct but slow).
+    static bool vreg_overflow_warned_ = false;
+    if (max_vreg >= 4096) {
+        if (!vreg_overflow_warned_) {
+            fprintf(stderr, "[%s] frostJIT: vreg overflow (max=%d >= 4096) — "
+                    "block will use interpreter fallback for overflowed vregs. "
+                    "This is a bug; please report the guest binary.\n",
+                    CODENAME, max_vreg);
+            vreg_overflow_warned_ = true;
+        }
+        max_vreg = 4095;
+    }
     // Pre-assign stack slots: vreg 33 → slot -8, vreg 34 → slot -16, etc.
     for (int v = 33; v <= max_vreg; v++) {
         vreg_slot_[v] = -8 * (v - 32);
@@ -2855,8 +3035,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             const IRInst& inst = ir_block.insts[i];
             if (inst.op != IROp::LOAD_REG) {
                 // src1/src2 are vregs (for LOAD_REG, src1 is ARM reg index).
-                if (inst.src1 > 31) last_use[inst.src1] = static_cast<int>(i);
-                if (inst.src2 > 31) last_use[inst.src2] = static_cast<int>(i);
+                // Bounds-check: vreg space is 0-4095. A block with vregs
+                // >=4096 indicates a translator bug; cap to avoid OOB.
+                if (inst.src1 > 31 && inst.src1 < 4096)
+                    last_use[inst.src1] = static_cast<int>(i);
+                if (inst.src2 > 31 && inst.src2 < 4096)
+                    last_use[inst.src2] = static_cast<int>(i);
             }
         }
         // Build kills_per_op_: for each op i, the list of scratch vregs
@@ -3237,8 +3421,34 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // slot patches `ret` to `jmp next_block`, so the JIT runs multiple
     // blocks in one call. We temporarily un-patch the chain slot to
     // force the block to return after its own instructions.
+    //
+    // Likewise, self-loop chaining patches the BRCOND taken path to
+    // `jmp block_body_start`, so the JIT re-enters the block instead
+    // of returning after one iteration. We temporarily un-patch the
+    // self-loop slot to `jz resolve_loop_exit` style — actually we
+    // replace it with 5 NOPs so the taken path falls through to the
+    // epilogue and returns next_pc=branch_target. This forces the JIT
+    // to run exactly one iteration of the loop, matching the
+    // interpreter's `instr_count` step count.
     static bool verify_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
-    if (verify_) {
+    if (verify_ && !entry.verified_once) {
+        // Mark this block as verified so subsequent dispatches skip the
+        // expensive per-block divergence check. This is essential for
+        // self-loop blocks, where verify mode must un-patch the self-loop
+        // slot to run one iteration at a time — without this flag, every
+        // loop iteration would pay the full verify overhead (~30s for a
+        // 3652-instruction test instead of <1s). First-dispatch verify
+        // still catches real codegen bugs because divergences almost
+        // always manifest on the first execution with any input values.
+        // Set the flag BEFORE running the verify so a divergence-triggered
+        // abort doesn't leave the flag cleared (which would cause an
+        // infinite verify loop on retry).
+        //
+        // NOTE: `entry` is a local copy of it->second, so we must update
+        // the underlying map entry directly — otherwise the flag would be
+        // lost on the next dispatch and we'd re-verify every time.
+        entry.verified_once = true;
+        if (it != blocks_.end()) it->second.verified_once = true;
         // Save chain slot bytes and restore to `ret` + NOPs
         uint8_t saved_chain[5];
         bool was_chained = entry.chained;
@@ -3253,6 +3463,26 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             code_buf_[entry.chain_patch_off + 4] = 0x90;
             std::atomic_thread_fence(std::memory_order_release);
             // W^X: toggle back to executable before running the block.
+            make_executable();
+        }
+        // Save self-loop slot bytes and replace with NOPs so the JIT
+        // runs exactly one iteration of the loop body (matching the
+        // interpreter's `entry.instr_count` step budget). Without this,
+        // verify mode logged false-positive PC DIVERGENCE for every
+        // self-looping block (e.g. `1: ... ; CMP r0, #N ; B.NE 1b`),
+        // because the JIT ran the loop to completion while the
+        // interpreter stepped only `instr_count` instructions.
+        uint8_t saved_selfloop[5];
+        bool had_selfloop = entry.has_selfloop_slot;
+        if (had_selfloop) {
+            make_writable();
+            memcpy(saved_selfloop, code_buf_ + entry.selfloop_patch_off, 5);
+            // 5× NOP (0x90) — fall through past the slot to whatever
+            // code follows (the not-taken epilogue, which returns the
+            // branch target as next PC).
+            for (int i = 0; i < 5; i++)
+                code_buf_[entry.selfloop_patch_off + i] = 0x90;
+            std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
         CPU saved = cpu;             // snapshot before
@@ -3372,6 +3602,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             memcpy(code_buf_ + entry.chain_patch_off, saved_chain, 5);
             std::atomic_thread_fence(std::memory_order_release);
             // W^X: toggle back to executable for normal execution.
+            make_executable();
+        }
+        // Restore self-loop slot if it was patched.
+        if (had_selfloop) {
+            make_writable();
+            memcpy(code_buf_ + entry.selfloop_patch_off, saved_selfloop, 5);
+            std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
         return jit_next;

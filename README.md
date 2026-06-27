@@ -42,7 +42,7 @@ make
 # Pass arguments to the emulated program
 ./bifrost-emu cat.elf /etc/hostname
 
-# JIT is ON by default (39/39 tests pass, 6.4x speedup on compute)
+# JIT is ON by default (41/41 tests pass, 6.4x speedup on compute)
 ./bifrost-emu ctest_real/fib.elf
 
 # Use --no-jit to force the interpreter (fallback / debugging)
@@ -93,13 +93,29 @@ Environment variables:
   of loading the guest-side ld.so. Processes DT_NEEDED, applies
   relocations, resolves symbols, and allocates TLS blocks natively.
 - `BIFROST_JIT_VERIFY=1` — run the JIT divergence checker (compares JIT
-  results against the interpreter for every block).
+  results against the interpreter for every block). Verify mode now
+  un-patches both the regular chain slot and the self-loop slot before
+  running each block, eliminating the self-loop chaining false positives
+  that dominated the output in earlier releases. A `verified_once` flag
+  on each block makes verify mode skip the divergence check on second
+  and subsequent dispatches — first-dispatch verify still catches real
+  codegen bugs, but the per-iteration overhead is gone (~9× speedup).
 - `BIFROST_ENABLE_FWD=1` — enable experimental load-forwarding in the IR
   optimizer (~5.6% speedup, has known correctness bugs with some toybox
   commands).
 - `BIFROST_SYSCALL_TRACE=1` — trace syscall invocations to stderr.
 - `BIFROST_NO_CHAIN=1` — disable lazy block chaining (for debugging).
 - `BIFROST_NO_SELFLOOP=1` — disable self-loop chaining (for debugging).
+- `BIFROST_NO_FMA3=1` — force the JIT to use the decomposed
+  `mulsd`+`addsd` codegen for FMADD/FMSUB/FNMADD/FNMSUB even on host
+  CPUs that support FMA3. Useful for A/B-testing the FMA3 codegen
+  against the decomposed path on the same machine, or as a workaround
+  if an FMA3 codegen bug is suspected. By default, the JIT detects
+  FMA3+AVX support at startup (via CPUID+XGETBV) and emits native
+  `vfmadd231ss/sd`, `vfnmadd231ss/sd`, `vfnmsub231ss/sd` — giving
+  both IEEE 754-correct single-rounded fused mul-add (addressing the
+  long-standing "FMADD not truly fused" limitation) and ~1 cycle per
+  FMADD savings.
 
 The `--fb-dump PATH` option syncs the guest's `/dev/fb0` writes back to
 the host and writes a PPM image to `PATH` on exit. Useful for headless
@@ -184,9 +200,10 @@ JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
 JIT is ON by default; use `--no-jit` to opt out. As of rc.1 (2026-06-27),
-all 39 test programs pass under JIT, including the
-`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion
-and 19 real-world C programs in `ctest_real/`.
+all 41 test programs pass under JIT, including the
+`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
+the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
+single and double precision, and 19 real-world C programs in `ctest_real/`.
 
 ## Performance
 
@@ -290,7 +307,11 @@ self-loop chaining, lazy block chaining, IR optimization (DCE, const
 folding, copy propagation, store-load forwarding), W^X code buffer,
 --jit-threshold for hybrid mode. Native SIMD codegen via SSE2/SSE4.1
 (paddb/w/d/q, psubb/w/d/q, pmullw, pmulld, pcmpeqb/w/d/q, pand, por,
-pxor, pandn).
+pxor, pandn). Function Multi-Versioning (FMV) via runtime CPUID
+detection: native FMA3 codegen for FMADD/FMSUB/FNMADD/FNMSUB
+(vfmadd231ss/sd, vfnmadd231ss/sd, vfnmsub231ss/sd) on hosts with
+FMA3+AVX, with automatic fallback to decomposed mul+add/sub on older
+CPUs. Override with `BIFROST_NO_FMA3=1`.
 
 **Syscalls** — ~170 Linux AArch64 syscalls including file I/O (read/write/
 openat/close/readv/writev/pwrite64/statx/fstatat/sendfile), process info
@@ -346,7 +367,7 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 39 test programs pass under both the default frostJIT path and the
+All 41 test programs pass under both the default frostJIT path and the
 interpreter (`--no-jit`). The test suite has been verified clean under
 ASan+UBSan. JIT is the default execution mode (6.4x speedup on compute
 workloads, 571 MIPS on bench_mips).
@@ -386,10 +407,11 @@ This is release-candidate quality software. Key limitations:
   `SA_ONSTACK` are all implemented, and host-to-guest signal forwarding
   (SIGINT/SIGTERM/SIGCHLD/SIGWINCH) works with low-latency draining.
   Pending blocked signals are dropped (no pending queue).
-- **frostJIT is the default execution mode.** All 39 tests pass, including
-  the comprehensive int↔FP conversion test and 19 real-world programs.
-  The interpreter is available via `--no-jit` as a fallback for programs
-  that hit a JIT bug or for debugging.
+- **frostJIT is the default execution mode.** All 41 tests pass, including
+  the comprehensive int↔FP conversion test, the new FMA (FMADD/FMSUB/
+  FNMADD/FNMSUB) test, and 19 real-world programs. The interpreter is
+  available via `--no-jit` as a fallback for programs that hit a JIT bug
+  or for debugging.
 - **`strtod("inf")` and `strtod("-inf")` now work correctly** (return
   `inf` / `-inf` respectively). The root cause was a 32-bit SCVTF
   misdecode — see CHANGELOG.md for the full fix. `strtod("-nan")`

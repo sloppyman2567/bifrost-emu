@@ -122,6 +122,12 @@ test: $(TARGET)
 # divergences by running each block through both paths and comparing
 # CPU state. Slow (10-50x), but catches codegen bugs that produce
 # wrong results without crashing. Use this after any JIT codegen change.
+#
+# The recipe uses ${PIPESTATUS[0]} (a bash array) to capture the
+# emulator's exit code before the grep pipe consumes it. /bin/sh on
+# Debian is dash, which doesn't support PIPESTATUS, so we force SHELL
+# to /bin/bash for this target (and any other that needs bashisms).
+SHELL := /bin/bash
 verify: $(TARGET)
 	@echo "--- JIT verify mode (divergence check) ---"
 	@for f in ctest/jit_*.elf; do \

@@ -37,6 +37,7 @@
 
 #include "decoder.hpp"
 #include "ir/ir.hpp"
+#include "jit/cpu_features.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <unordered_map>
@@ -61,6 +62,22 @@ public:
 
     void set_direct_window(uint8_t* base) { window_base_ = base; }
     uint64_t run_block(CPU& cpu, Emulator& emu);
+
+    // ── Function Multi-Versioning (FMV) ─────────────────────────────
+    // The JIT queries these flags at codegen time to decide which x86
+    // instruction sequence to emit for hot operations. For example,
+    // FMADD/FMSUB/FNMADD/FNMSUB can use the FMA3 three-operand VEX
+    // encoding (vfmadd231ss/sd) when the host CPU supports it, giving
+    // both correctness (true single-rounded fused mul-add per IEEE 754)
+    // and ~1 cycle/insn savings. On CPUs without FMA3, the JIT falls
+    // back to the existing decomposed mulsd+addsd sequence.
+    //
+    // Detection runs once per FrostJIT (at construction). The result
+    // is cached for the JIT's lifetime — CPU features don't change at
+    // runtime. Override via BIFROST_NO_FMA3=1 to force the decomposed
+    // path even on FMA3-capable CPUs (debugging).
+    const CpuFeatures& cpu_features() const { return cpu_features_; }
+    bool has_fma3() const { return cpu_features_.has_fma3() && !no_fma3_; }
 
     uint64_t blocks_translated = 0;
     uint64_t blocks_executed   = 0;
@@ -131,12 +148,30 @@ public:
     static constexpr int EMU_REG = R14;
     static constexpr int WIN_REG = R10;
 
+    // Total number of host GPRs (RAX..R15). Used by the register
+    // allocator's bounds checks and the dirty_host_regs_ bitmask. The
+    // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
+    // jit_profiler.cpp:87, frostjit.cpp:2817) — centralizing here means
+    // a future change (e.g. adding XMM regs to the allocator) only
+    // needs one edit.
+    static constexpr int NUM_HOST_REGS = 16;
+    // Dirty-bitmask width must match NUM_HOST_REGS. uint16_t holds 16 bits.
+    static_assert(NUM_HOST_REGS <= 16, "dirty_host_regs_ is uint16_t; "
+                  "NUM_HOST_REGS must be <= 16");
+
 private:
     static constexpr size_t CODE_BUF_SIZE = 64 * 1024 * 1024;
     uint8_t* code_buf_ = nullptr;
     size_t   code_buf_used_ = 0;
     bool     code_buf_overflow_ = false;
     uint8_t* window_base_ = nullptr;
+
+    // ── CPU features (FMV) ──────────────────────────────────────────
+    // Detected once at construction via CPUID + XGETBV. Cached for the
+    // JIT's lifetime. Polled by compile_ir_inst() when emitting code
+    // for hot operations that have multiple x86 codegen variants.
+    CpuFeatures cpu_features_{};
+    bool no_fma3_ = false;  // true if BIFROST_NO_FMA3=1 (force decomposed path)
 
     // ── W^X (Write XOR Execute) protection ──────────────────────────
     // The code buffer is mapped PROT_READ|PROT_EXEC by default (no WRITE).
@@ -195,6 +230,18 @@ private:
         // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
         size_t  selfloop_patch_off = 0;  // offset of the 5-byte jmp slot in code_buf_
+        // Verify-mode: set true after the first BIFROST_JIT_VERIFY dispatch
+        // of this block. Subsequent dispatches skip the per-block divergence
+        // check (which is expensive due to mprotect toggling + interpreter
+        // replay). This is essential for self-loop blocks, where verify mode
+        // must un-patch the self-loop slot to run one iteration at a time —
+        // without this flag, every loop iteration would pay the verify
+        // overhead (~30s for a 3652-instruction test instead of <1s).
+        // First-dispatch verify still catches real codegen bugs because
+        // divergences almost always manifest on the first execution with
+        // any input values. The flag is only consulted when verify mode
+        // is active.
+        bool    verified_once = false;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 

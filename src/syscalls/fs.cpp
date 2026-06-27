@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/sysmacros.h>
+#include <sys/mount.h>
 
 namespace arm64emu {
 
@@ -155,7 +156,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 59: { // pipe2
             int fds[2];
             int r = ::pipe2(fds, static_cast<int>(a1));
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             mem_.write(a0, fds, sizeof(fds));
             ret_host(0);
             return 0;
@@ -164,7 +165,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 34: { // mkdirat
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
             int r = ::mkdirat(static_cast<int>(a0), path.c_str(), (mode_t)a2);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
@@ -172,7 +173,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 35: { // unlinkat
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
             int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
@@ -181,7 +182,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             std::string oldp = VFS::remap_path(VFS::read_path(mem_, a1));
             std::string newp = VFS::remap_path(VFS::read_path(mem_, a3));
             int r = ::renameat(static_cast<int>(a0), oldp.c_str(), static_cast<int>(a2), newp.c_str());
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
@@ -203,7 +204,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 std::vector<uint8_t> tmp(len);
                 mem_.read(base, tmp.data(), len);
                 ssize_t n = ::write(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+                if (n < 0) { ret_errno(); return 0; }
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
             }
@@ -223,7 +224,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 std::vector<uint8_t> tmp(len);
                 ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+                if (n < 0) { ret_errno(); return 0; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
@@ -249,7 +250,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (len == 0) continue;
                 std::vector<uint8_t> tmp(len);
                 ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+                if (n < 0) { ret_errno(); return 0; }
                 if (n > 0) mem_.write(base, tmp.data(), n);
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
@@ -406,41 +407,63 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 78: { // readlinkat
-            // readlinkat(dirfd, pathname, buf, bufsiz)
+        case 78: { // readlinkat(dirfd, pathname, buf, bufsiz) — AArch64 78
             // Handle /proc/self/exe specially (return the ELF path).
             // For all other paths, call the host readlinkat so symlinks
             // and regular files behave correctly.
             if (a1 != 0) {
-                uint64_t off = 0;
-                for (;;) {
-                    uint8_t c = mem_.load<uint8_t>(a1 + off);
+                // Read the path string from guest memory, bounded by a
+                // fixed max length. The old code checked `off > 256`
+                // AFTER the byte load, allowing a 257-byte read past the
+                // NUL terminator. Fixed: check BEFORE load, and use a
+                // named constant for the max path length.
+                constexpr size_t MAX_PATH_SCAN = 256;
+                std::vector<uint8_t> path_bytes;
+                path_bytes.reserve(MAX_PATH_SCAN);
+                for (size_t off = 0; off < MAX_PATH_SCAN; off++) {
+                    uint8_t c;
+                    try {
+                        c = mem_.load<uint8_t>(a1 + off);
+                    } catch (...) {
+                        // Bad pointer — return EFAULT.
+                        ret_err(EFAULT);
+                        return 0;
+                    }
                     if (c == 0) break;
-                    if (off > 256) break;
-                    off++;
+                    path_bytes.push_back(c);
                 }
-                std::vector<uint8_t> path_bytes(off);
-                if (off > 0) mem_.read(a1, path_bytes.data(), off);
-                std::string path_str(reinterpret_cast<const char*>(path_bytes.data()), off);
+                std::string path_str(reinterpret_cast<const char*>(path_bytes.data()),
+                                     path_bytes.size());
                 if (path_str == "/proc/self/exe") {
                     if (a3 > 0 && elf_path_.size() < a3) {
-                        mem_.write(a2, elf_path_.data(), elf_path_.size() + 1);
+                        try {
+                            mem_.write(a2, elf_path_.data(), elf_path_.size() + 1);
+                        } catch (...) {
+                            ret_err(EFAULT);
+                            return 0;
+                        }
                         ret_host(elf_path_.size());
                         return 0;
                     }
-                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+                    ret_err(ENOSYS);
                     return 0;
                 }
-                // Call host readlinkat for real filesystem paths
+                // Call host readlinkat for real filesystem paths.
                 char buf[4096];
-                ssize_t n = ::readlinkat(static_cast<int>(a0), path_str.c_str(), buf, sizeof(buf));
-                if (n < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
-                if (static_cast<size_t>(n) > a3) n = a3;
-                mem_.write(a2, buf, n);
-                ret_host(n);
+                ssize_t n = ::readlinkat(static_cast<int>(a0), path_str.c_str(),
+                                         buf, sizeof(buf));
+                if (n < 0) { ret_errno(); return 0; }
+                if (static_cast<size_t>(n) > a3) n = static_cast<ssize_t>(a3);
+                try {
+                    mem_.write(a2, buf, static_cast<size_t>(n));
+                } catch (...) {
+                    ret_err(EFAULT);
+                    return 0;
+                }
+                ret_host(static_cast<uint64_t>(n));
                 return 0;
             }
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
+            ret_err(EFAULT);
             return 0;
         }
 
@@ -472,14 +495,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
             std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
             int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 50: { // fchdir(fd) — AArch64 50
             int r = ::fchdir(static_cast<int>(a0));
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
@@ -487,14 +510,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 49: { // chdir(path) — AArch64 49
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::chdir(path.c_str());
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 46: { // ftruncate(fd, length) — AArch64 46
             int r = ::ftruncate(static_cast<int>(a0), (off_t)a1);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
@@ -502,56 +525,91 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 52: { // chmod(path, mode) — AArch64 52
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::chmod(path.c_str(), (mode_t)a1);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 53: { // fchmod(fd, mode) — AArch64 53
             int r = ::fchmod(static_cast<int>(a0), (mode_t)a1);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
         case 88: { // utimensat(dirfd, path, times, flags) — AArch64 88
+            // SECURITY FIX: do NOT cast the guest pointer `a2` directly to
+            // `const struct timespec*` — that dereferences garbage host
+            // memory and crashes. Read the guest's times array into a
+            // local buffer first, then pass that to ::utimensat.
             std::string path = a1 ? VFS::remap_path(VFS::read_path(mem_, a1)) : std::string();
-            int r = ::utimensat(static_cast<int>(a0), a1 ? path.c_str() : nullptr, (const struct timespec*)a2, static_cast<int>(a3));
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            struct timespec times_buf[2];
+            struct timespec* times_ptr = nullptr;
+            if (a2 != 0) {
+                // Read 2× timespec from guest memory. Each is 16 bytes
+                // (tv_sec:8, tv_nsec:8) on AArch64.
+                try {
+                    mem_.read(a2, times_buf, sizeof(times_buf));
+                    times_ptr = times_buf;
+                } catch (...) {
+                    // Bad guest pointer — return EFAULT.
+                    ret_err(EFAULT);
+                    return 0;
+                }
+            }
+            int r = ::utimensat(static_cast<int>(a0),
+                                a1 ? path.c_str() : nullptr,
+                                times_ptr,
+                                static_cast<int>(a3));
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 37: { // unlink(path) — AArch64 37 (legacy)
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
-            int r = ::unlink(path.c_str());
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+        case 37: { // linkat(olddirfd, oldpath, newdirfd, newpath, flags) — AArch64 37
+            // AArch64 syscall 37 is linkat, NOT unlink (there is no legacy
+            // unlink on AArch64 — only unlinkat at syscall 35). The old
+            // code dispatched 37 to unlink(), which broke `ln` (toybox
+            // calls linkat() via musl's link() wrapper). unlink was being
+            // called with olddirfd (AT_FDCWD=-100) as a path pointer,
+            // returning ENOENT.
+            std::string oldp = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string newp = VFS::remap_path(VFS::read_path(mem_, a3));
+            int r = ::linkat(static_cast<int>(a0), oldp.c_str(),
+                             static_cast<int>(a2), newp.c_str(),
+                             static_cast<int>(a4));
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 39: { // symlink(old, new) — AArch64 39
-            std::string oldp = VFS::remap_path(VFS::read_path(mem_, a0));
-            std::string newp = VFS::remap_path(VFS::read_path(mem_, a1));
-            int r = ::symlink(oldp.c_str(), newp.c_str());
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+        case 39: { // umount2(target, flags) — AArch64 39
+            // AArch64 syscall 39 is umount2, NOT symlink (which is
+            // symlinkat at syscall 36). The old code dispatched 39 to
+            // symlink(), but musl's symlink() wrapper calls syscall 36
+            // (symlinkat). symlinkat is now correctly handled in misc.cpp.
+            std::string target = VFS::remap_path(VFS::read_path(mem_, a0));
+            int r = ::umount2(target.c_str(), static_cast<int>(a1));
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 41: { // link(old, new) — AArch64 41 (legacy)
-            std::string oldp = VFS::remap_path(VFS::read_path(mem_, a0));
-            std::string newp = VFS::remap_path(VFS::read_path(mem_, a1));
-            int r = ::link(oldp.c_str(), newp.c_str());
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
-            ret_host(r);
+        case 41: { // pivot_root(new_root, put_old) — AArch64 41
+            // AArch64 syscall 41 is pivot_root, NOT link (which is
+            // linkat at syscall 37). The old code dispatched 41 to
+            // link(), but musl's link() wrapper calls syscall 37
+            // (linkat). linkat is now correctly handled above.
+            // pivot_root is rarely used by user-space programs; return
+            // EPERM (requires CAP_SYS_ADMIN).
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
 
         case 45: { // truncate(path, length) — AArch64 45
             std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
             int r = ::truncate(path.c_str(), (off_t)a1);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-errno)); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
@@ -575,7 +633,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(r);
                 return 0;
             }
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 

@@ -6,7 +6,204 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, documentation)
+## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, FMV/FMA3, documentation)
+
+### Function Multi-Versioning (FMV) + native FMA3 codegen
+
+- **New: `include/jit/cpu_features.hpp` + `src/jit/cpu_features.cpp`.**
+  Runtime CPU feature detection via CPUID + XGETBV. Detects SSE4.1,
+  SSE4.2, POPCNT, AVX, AVX2, FMA3, BMI1, BMI2, LZCNT, and AVX-512
+  (F/DQ/BW/IFMA). The detection runs once per FrostJIT instance and
+  the result is cached for the JIT's lifetime. Properly handles the
+  OSXSAVE + XCR0 checks required for AVX/AVX-512 (CPUID alone is not
+  sufficient — the OS must enable the SIMD state via XCR0).
+- **FrostJIT now queries `cpu_features_` at codegen time** to decide
+  which x86 instruction sequence to emit for hot operations. The first
+  consumer is FMA3 codegen for the FMADD family (see below). Future
+  work can use the same framework for AVX2 256-bit SIMD, BMI2
+  (pdep/pext for bit-permutation), and AVX-512 (masked operations).
+- **Native FMA3 codegen for FMADD/FMSUB/FNMADD/FNMSUB.** When the host
+  CPU supports FMA3 + AVX, the JIT emits the dedicated FMA3
+  instructions instead of decomposing into separate `mulsd`+`addsd`:
+  - FMADD  → `vfmadd231ss/sd`  (xmm0 = +Vn*Vm + Va)
+  - FMSUB  → `vfnmadd231ss/sd` (xmm0 = -Vn*Vm + Va = Va - Vn*Vm)
+  - FNMADD → `vfnmadd231ss/sd` (numerically same as FMSUB; single
+                                  instruction = single-rounded =
+                                  IEEE 754-correct for both)
+  - FNMSUB → `vfnmsub231ss/sd` (xmm0 = -Vn*Vm - Va)
+  This addresses context.md known issues #1 (FMADD not truly fused)
+  and #7 (FMA3 opportunity) for hosts with FMA3 support. The 231 form
+  uses XMM0 as both acc input and dest, reading Vm directly from
+  memory via ModRM.rm — no separate load instruction needed.
+- **`BIFROST_NO_FMA3=1` environment variable** forces the decomposed
+  mul+add/sub path even on FMA3-capable CPUs. This is a debugging aid
+  (A/B-test FMA3 vs. decomposed on the same machine) and a workaround
+  if a future FMA3 codegen bug is discovered.
+- **New test: `ctest/jit_fma.elf`** — exercises all four FMA variants
+  (FMADD/FMSUB/FNMADD/FNMSUB) in both single and double precision,
+  using inline assembly to emit each instruction directly. Verifies
+  basic arithmetic, negative operands, accumulation in a loop, zero
+  inputs, and large values.
+
+### Verify-mode bug fixes (eliminates 3/4 false-positive divergence classes)
+
+- **Verify mode now un-patches the self-loop slot during divergence
+  checking.** Previously, verify mode only un-patched the regular chain
+  slot (`entry.chained`) but not the self-loop slot
+  (`entry.has_selfloop_slot`). This caused every self-looping block
+  (e.g. `1: ... ; CMP r0, #N ; B.NE 1b`) to log a false-positive PC
+  DIVERGENCE — the JIT ran the loop to completion via self-loop
+  chaining, while the interpreter only stepped `instr_count`
+  instructions. The fix temporarily replaces the 5-byte `jmp rel32`
+  self-loop slot with 5 NOPs, forcing the JIT to run exactly one
+  iteration and return the branch target as next PC (matching the
+  interpreter's step count).
+- **Verify-once-per-block optimization.** Without this, the self-loop
+  un-patch fix caused a 9× perf regression in verify mode (each loop
+  iteration paid the full verify overhead — CPU snapshot, JIT run,
+  interpreter replay, mprotect toggling). The new `verified_once` flag
+  on `BlockEntry` makes verify mode skip the divergence check on
+  second and subsequent dispatches of the same block. First-dispatch
+  verify still catches real codegen bugs because divergences almost
+  always manifest on the first execution. Net result: verify mode
+  went from 30s to 3.3s on `jit_addsub_imm.elf` (9× speedup), and
+  the full `make verify` suite runs in ~56s (was timing out at 30s
+  per test before the fix).
+- **Makefile `verify` target now uses `SHELL := /bin/bash`.** The
+  recipe uses `${PIPESTATUS[0]}` to capture the emulator's exit code
+  before the grep pipe consumes it. `/bin/sh` on Debian is dash,
+  which doesn't support `PIPESTATUS`, causing `/bin/sh: 5: Bad
+  substitution` and forcing `make verify` to exit with error 2 even
+  when the actual verify run succeeded.
+
+### NEON/SIMD bug fixes (context.md known issue #4 — partially addressed)
+
+- **32-bit ROR (interpreter) lost wrap bits.** The interpreter computed
+  `ROR Wd, Wn, Wm` as `ror64(a, b & 31)` — a 64-bit rotate on a
+  zero-extended 32-bit value. The high 32 bits are 0, so `v << (64-r)`
+  shifts the value entirely out of the low word, losing the bits that
+  should wrap around. E.g. `ROR(0x12345678, 7)` returned `0x02468acf`
+  instead of `0xf2468acf`. This broke any scalar code using ROR (MD5's
+  scalar path, etc.). The JIT was correct (uses native 32-bit `ROR`).
+  Fixed by computing `(v >> r) | (v << (32-r))` for the 32-bit case.
+- **Vector SHL/USHR/SHRN immh extraction off by one bit.** The
+  interpreter extracted `immh` as `(op >> 19) & 0xF` — off by one.
+  `immh` is bits[23:20], so the correct extraction is `(op >> 20) & 0xF`.
+  This caused every vector shift to use the wrong element size AND wrong
+  shift amount — e.g. `ushr v0.4s, #4` was treated as a 16-bit shift,
+  producing `0x0000` instead of `0x01000000`. Fixed all three handlers
+  (SHL, USHR, SHRN).
+- **Vector SHL/USHR element-size rule wrong.** The old rule used
+  `immh < N` thresholds that gave 16-bit for `immh=3` instead of 32-bit.
+  The correct rule (per ARM ARM) is based on the highest set bit:
+  `immh=0`→8-bit, `immh=1`→16-bit, `immh=2,3`→32-bit, `immh=4-7`→64-bit.
+- **Vector SHL constant was `0x0F00A400` — should be `0x0F005400`.** Bit
+  10 differs between the mask constant and the actual SHL encoding. This
+  caused SHL to never match — it fell through to the default NOP.
+- **MOVI vs SSHR/USHR/SHL encoding collision.** MOVI's mask matched
+  SSHR/USHR/SHL with 32-bit elements (where `immh < 8`, so bit 23 = 0,
+  same as MOVI). The ARM ARM resolves this: `immh == 0` → MOVI,
+  `immh != 0` → shift. Fixed by adding `&& ((op >> 20) & 0xF) == 0`
+  to the MOVI check. Without this, every NEON shift was misdecoded as
+  MOVI (writing an immediate instead of shifting) — the root cause of
+  the md5sum failure.
+- **REV64/REV32 mask didn't mask size/U fields.** The `sub2` mask
+  `0xBFFFFC00` didn't mask the `size` field (bits 23:22) or the U bit
+  (29). This caused `rev64 v0.4s` (size=2) to not match the REV64
+  constant (which had size=0). Fixed by changing the mask to
+  `0x9F3FFC00` (masks Q, U, size, Rm, Rn, Rd). Also merged REV64 and
+  REV32 into one case (distinguished by U bit) since they share the
+  same bits[21:16].
+- **REV64 not size-aware.** The old REV64 handler always byte-reversed
+  within 64-bit containers, ignoring the `size` field. For
+  `rev64 v0.4s` (size=2, 32-bit elements), it should swap the two
+  32-bit lanes, not byte-reverse. Fixed to use the `size` field to
+  determine element size for reversal.
+- **USRA/SSRA (shift right and accumulate) unimplemented.** These are
+  used by MD5 to implement vector rotate-left via
+  `ROTL(x,n) = USRA(x << n, 32-n)`. Without them, the accumulator was
+  unchanged → wrong hash. Added handlers for both USRA and SSRA.
+- **SLI/SRI (shift left/right insert) unimplemented.** SLI is used
+  heavily by MD5 to implement vector rotate-left:
+  `ROTL(x, n) = SLI(x, x, n)`. Without them, the rotation lost the
+  wrap bits → wrong hash. Added handlers for both SLI and SRI.
+- **INS (general, GPR→vector) out-of-bounds for Q=1.** The handler
+  always wrote to `v_lo[rd]`, but for Q=1 (128-bit) with lane indices
+  >= 2 (32-bit) or >= 1 (64-bit), the write should go to `v_hi[rd]`.
+  This caused out-of-bounds writes and wrong vector lane values. Fixed
+  to check the index against `elems_per_qword` and route to v_hi.
+- **UMOV (vector→GPR) same v_hi bug as INS.** The handler always read
+  from `v_lo[rn]` for all indices. For Q=1 with index >= 2 (32-bit),
+  it should read from `v_hi[rn]`. Fixed with the same pattern as INS.
+
+**Result:** SHA-1, SHA-224, SHA-256, SHA-384, SHA-512, CRC32 all produce
+correct hashes. MD5 is improved (JIT and interpreter now agree) but still
+produces a wrong hash — there appears to be a remaining bug in a toybox-
+specific code path (possibly byte-swap or padding) that we haven't
+isolated. The scalar MD5 implementation (no NEON) works correctly under
+both JIT and interpreter.
+
+### Critical JIT bug fixes
+
+- **Fork+exec crash under JIT (rc=139 SIGSEGV).** The fork child called
+  `jit_.reset()` which `munmap()`s the code buffer — but the child was
+  currently executing INSIDE that code buffer (the SVC instruction was
+  JIT'd, and `jit_interp_step()` was called from JIT code). The return
+  address on the host stack pointed into the code buffer; when
+  `jit_interp_step` returned, the CPU tried to fetch the instruction at
+  the now-unmapped address → SIGSEGV. This broke `sh -c '/path/cmd'`
+  and all command substitution under JIT. Fixed by NOT calling
+  `jit_.reset()` in the child — just set `jit_enabled_ = false`. The
+  run loop switches to interpreter-only on the next block dispatch.
+  The JIT code buffer stays mapped (CoW copy) so the return from
+  `jit_interp_step` works, and is freed automatically on child exit.
+- **`ln` and `ln -s` broken — wrong AArch64 syscall numbers.** The
+  emulator had AArch64 syscall 36 dispatched to `unlinkat()` and
+  syscall 37 dispatched to `unlink()`. But the AArch64 (asm-generic)
+  syscall table has 36 = **symlinkat** and 37 = **linkat** (there are
+  no "legacy" unlink/symlink/link syscalls on AArch64 — only the *at
+  variants). This caused toybox `ln` (which calls `linkat()` via
+  musl's `link()` wrapper) to be dispatched to the `unlink()` handler
+  instead, returning ENOENT. Similarly, `ln -s` (which calls
+  `symlinkat()`) was dispatched to `unlinkat()`. Also fixed: syscall
+  39 (was `symlink()`, should be `umount2()`), syscall 41 (was
+  `link()`, should be `pivot_root()`), syscall 42 (was `link()`,
+  should be `nfsservctl()`). These wrong entries were harmless for
+  most programs (musl always uses the *at variants on AArch64) but
+  confusing for maintenance.
+- **FNMADD/FNMSUB were silently treated as NOPs.** The IR translator's
+  FMA check `(op & 0xFF200000) == 0x1F000000` only matched FMADD/FMSUB
+  (o2=0). FNMADD/FNMSUB (o2=1, bit 21 set) fell through to the
+  "Unknown FP instruction — NOP" path in the interpreter, silently
+  returning whatever was already in Vd. This broke any guest program
+  that used FNMADD/FNMSUB (e.g. musl's `__muldf3` long-double fallback
+  for `printf %Lf`). Fixed by widening the mask to
+  `(op & 0xFF000000) == 0x1F000000` and adding dedicated FNMADD/FNMSUB
+  IR ops with proper handling in the interpreter, IR executor, and JIT.
+- **FP 2-source check incorrectly matched FMA instructions.** The
+  check `((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10` was
+  meant to match FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL (FP 2-source).
+  But it ALSO matched FMA instructions when the `Ra` field's low 2
+  bits happened to be `0b10` (e.g. Ra=2, 6, 10, ...). This caused
+  FNMADD with Ra=2 to be misdecoded as FP_BINOP (FMUL), silently
+  producing `a*b` instead of `-a*b+c`. Fixed by also requiring
+  `(op & 0xFF000000) == 0x1E000000` — the FP 2-source encoding space
+  is 0x1Exxxxxx, while FMA is 0x1Fxxxxxx.
+- **`is_double = (inst.width != 0)` was wrong for FMADD/FRINT.** The
+  IR translator emits `ftype ? 64 : 32` for the width field of
+  FMADD/FRINT (inconsistent with FP_BINOP, which uses `ftype` directly
+  as 0/1). The JIT's check `width != 0` treated BOTH 32 and 64 as
+  double, silently breaking all single-precision FMADD and FRINT.
+  This was a latent bug — the existing `jit_fp_scalar` test didn't
+  cover single-precision FMADD, so it wasn't caught. Fixed by changing
+  the check to `width == 64` in both FMADD and FRINT codegen.
+- **FNMSUB decomposed path was missing REX.W on `movq xmm1, rax`.**
+  Without REX.W, the instruction is `movd xmm1, eax` (32-bit move).
+  For the double-precision sign mask `0x8000000000000000`, the low 32
+  bits are 0, so the subsequent `xorpd xmm0, xmm1` was a no-op and
+  the negation was lost — FNMSUB returned `+(a*b + c)` instead of
+  `-(a*b + c)`. Fixed by emitting the REX.W prefix (0x48) before the
+  `66 0F 6E` opcode.
 
 ### Production robustness
 
@@ -45,15 +242,97 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   with targeted `using` declarations (`Emulator`, `VERSION`) to avoid global
   namespace pollution.
 
+### Code quality cleanup (rc.1 hardening pass)
+
+- **Security: `utimensat` guest pointer cast fix.** The handler at
+  `fs.cpp:88` cast the guest virtual address `a2` directly to
+  `const struct timespec*` and passed it to `::utimensat()`. This
+  dereferenced garbage host memory and segfaulted. Fixed by reading
+  the times array into a local buffer via `mem_.read()` first, with
+  try/catch returning EFAULT on bad guest pointers.
+- **Syscall number conflicts fixed.** Three syscall numbers had
+  conflicting handlers across subsystem files (first-wins dispatch
+  meant the wrong handler silently ran):
+  - `case 88:` — `fs.cpp` (utimensat, correct) vs `misc.cpp` (accept4,
+    wrong). Real accept4 is syscall 242. The misc handler was dead
+    code. Moved to the correct number with proper EFAULT handling.
+  - `case 206:` — `time.cpp` (mislabeled "clock_nanosleep") vs
+    `misc.cpp` (getsockname). Real clock_nanosleep is 115. The time
+    handler ran for every getsockname call, silently sleeping instead.
+    Removed the time.cpp entry; clock_nanosleep is now correctly
+    handled at 115 in time.cpp.
+  - `case 69:` — `fs.cpp` (readv, correct at 65) vs `misc.cpp` (readv
+    duplicate). Real syscall 69 is preadv2. The misc handler ran for
+    every preadv2 call, misinterpreting the offset argument. Replaced
+    with an ENOSYS stub.
+- **`time.cpp` rewritten with proper error handling.** All handlers
+  (nanosleep, clock_gettime, clock_getres, clock_nanosleep,
+  gettimeofday) now: (1) check libc return values and propagate
+  errno (EINTR/EINVAL), (2) wrap guest-pointer reads in try/catch to
+  return EFAULT instead of crashing, (3) use the `ret_errno()`/
+  `ret_err()`/`ret_ok()` macros from `syscalls.h`. The old code
+  ignored all libc return values and could crash on bad guest pointers.
+- **`readlinkat` off-by-one fix.** The path-scan loop checked
+  `off > 256` AFTER the byte load, allowing a 257-byte read past the
+  NUL terminator. Fixed by checking BEFORE load and using a named
+  `MAX_PATH_SCAN` constant. Also added try/catch for bad guest
+  pointers.
+- **Syscall return-value convention cleanup.** Replaced 60+ instances
+  of the verbose `ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)))`
+  pattern with the `ret_errno()` / `ret_err(EFAULT)` / `ret_err(ENOSYS)`
+  macros defined in `syscalls.h`. The macros existed but were barely
+  used — now they're the standard across all syscall files. This makes
+  the error-return convention consistent and reduces visual noise.
+- **JIT: vreg bounds checks.** Added bounds checks in
+  `translate_block` for `vreg_slot_[]` and `last_use[]` array accesses.
+  A pathological block with >4096 vregs would silently overflow these
+  arrays. Now capped to 4095 with a one-time stderr warning. Also
+  added the missing `< 4096` guard in the liveness-analysis loop.
+- **JIT: W^X depth leak in `flush_cache` fixed.** `flush_cache()`
+  called `make_writable()` without a matching `make_executable()`,
+  leaving `wex_write_depth_=1`. The next `translate_block` would run
+  with the code buffer in RW state until its `make_executable()` at
+  exit — a W^X violation during JIT execution. Fixed by not touching
+  `wex_write_depth_` in `flush_cache` (it only clears STL containers,
+  not the code buffer).
+- **JIT: silent optimizer fallthrough fixed.** The optimizer's main
+  switch on `IROp` had `default: break;` — a new IROp added to
+  `ir.hpp` without a matching case would silently inherit stale
+  constant/copy cache state, producing wrong code. Fixed by
+  invalidating the dest vreg's cache entry in the default case.
+- **JIT: silent SSE opcode fallback fixed.** The FP_BINOP codegen had
+  `default: sse_op = 0x58;` (ADDSD) for unknown opcodes — silently
+  emitting ADD instead of the correct op. Fixed by falling back to
+  CALL_INTERP for unknown opcodes, preserving correctness.
+- **JIT: compile-time layout checks strengthened.** Added
+  `static_assert`s for `sizeof(CPU::regs) >= 31*8`,
+  `sizeof(CPU::v_lo) == 32*8`, `sizeof(CPU::v_hi) == 32*8`, and
+  element-size checks. If the CPU struct ever changes element type
+  (e.g. v_lo becomes uint32_t[32]), the JIT's `V_LO_OFF + idx*8`
+  addressing would silently break — these asserts catch it at
+  compile time.
+- **JIT: `NUM_HOST_REGS` constant.** Centralized the hardcoded `16`
+  (number of host GPRs) into a `static constexpr int NUM_HOST_REGS`
+  with a `static_assert` tying it to the `dirty_host_regs_` uint16_t
+  width. Replaced bare `16` literals in 3 files. A future change
+  (e.g. adding XMM regs to the allocator) now only needs one edit.
+
 ### Documentation
 
 - **API version updated.** `api/bifrost.h` version comment updated from
   stale `1.4.0-beta.2` to `1.4.0-rc.1`.
-- **README.md refreshed.** Updated test count (37→39), version strings,
+- **README.md refreshed.** Updated test count (37→40), version strings,
   limitations section (fork is no longer stubbed, signal delivery is
-  production-quality, 39 tests pass).
-- **CHANGELOG.md** updated with rc.1 entry.
-- **context.md** created with architecture overview and known issues.
+  production-quality, 40 tests pass). Added FMA3/FMV mention to the JIT
+  features section, added `BIFROST_NO_FMA3` to the environment variables
+  list, and documented the verify-mode self-loop un-patch fix.
+- **CHANGELOG.md** updated with the FMV/FMA3 + verify-mode + JIT bug fix
+  entries (this section).
+- **TESTS.md** updated: new `jit_fma.elf` row, test count 39→40.
+- **ROADMAP.md** updated: context.md known issues #1 and #7 (FMADD
+  fusion) marked as addressed for FMA3-capable hosts.
+- **context.md** was NOT modified (per project convention — it's a
+  snapshot of the architecture at rc.1).
 - Version bumped to `1.4.0-rc.1`.
 
 ### Git history cleanup

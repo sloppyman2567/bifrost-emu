@@ -60,7 +60,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
     switch (num) {
         case 117: { // ptrace — return -EPERM
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EPERM)));
+            ret_err(EPERM);
             return 0;
         }
 
@@ -83,7 +83,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (a0 != 0) {
                 uint64_t empty = 0;
                 try { mem_.store<uint64_t>(a0, empty); }
-                catch (...) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+                catch (...) { ret_err(EFAULT); return 0; }
             }
             ret_host(0);
             return 0;
@@ -98,7 +98,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 137: { // rt_sigtimedwait(sigset, info, timeout, sigsetsize)
             // No pending signals in our model; return -EAGAIN.
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EAGAIN)));
+            ret_err(EAGAIN);
             return 0;
         }
 
@@ -119,7 +119,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ::sigsuspend(&empty);
             // After the signal handler runs (and possibly rt_sigreturn
             // restores state), sigsuspend returns -EINTR.
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINTR)));
+            ret_err(EINTR);
             return 0;
         }
 
@@ -312,7 +312,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 198: { // socket (glibc may probe for IPC)
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 
@@ -335,7 +335,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
             // We can't marshal sockaddr from guest memory safely without
             // knowing the family, so return -ENOSYS for now.
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 
@@ -350,7 +350,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 
@@ -423,7 +423,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             int status = 0;
             pid_t r = ::waitpid((pid_t)a0, &status, static_cast<int>(a2));
             if (r < 0) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                ret_errno();
                 return 0;
             }
             if (a1) {
@@ -442,7 +442,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             struct rusage ru;
             pid_t r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
             if (r < 0) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                ret_errno();
                 return 0;
             }
             if (a1) {
@@ -480,7 +480,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             siginfo_t si;
             int r = ::waitid((idtype_t)a0, (id_t)a1, &si, static_cast<int>(a3));
             if (r < 0) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno)));
+                ret_errno();
                 return 0;
             }
             if (a2) {
@@ -503,23 +503,23 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (len > 256) len = 256;
             std::vector<uint8_t> tmp(len);
             FILE* ur = fopen("/dev/urandom", "rb");
-            if (!ur) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS))); return 0; }
+            if (!ur) { ret_err(ENOSYS); return 0; }
             size_t got = fread(tmp.data(), 1, len, ur);
             fclose(ur);
-            if (got == 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EIO))); return 0; }
+            if (got == 0) { ret_err(EIO); return 0; }
             mem_.write(a0, tmp.data(), got);
             ret_host(got);
             return 0;
         }
 
         case 281: { // execveat — not supported
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 
         case 293: { // rseq (restartable sequences, glibc probes at startup)
             // Return -ENOSYS so glibc disables rseq and uses regular paths.
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+            ret_err(ENOSYS);
             return 0;
         }
 
@@ -595,7 +595,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 86: { // timerfd_settime(fd, flags, new, old) — aarch64 syscall 86
-            if (!a2) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            if (!a2) { ret_err(EFAULT); return 0; }
             struct itimerspec newv;
             struct itimerspec oldv;
             newv.it_interval.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a2));
@@ -635,7 +635,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── inotify_init1 (syscall 75) ───────────────────────────────
         case 75: { // inotify_init1(flags)
             int fd = ::inotify_init1(static_cast<int>(a0));
-            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (fd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
@@ -645,7 +645,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             std::string path = VFS::read_path(mem_, a1);
             int wd = ::inotify_add_watch(static_cast<int>(a0), path.c_str(),
                                          static_cast<uint32_t>(a2));
-            if (wd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (wd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(wd));
             return 0;
         }
@@ -653,48 +653,48 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── inotify_rm_watch (syscall 77) ────────────────────────────
         case 77: { // inotify_rm_watch(fd, wd)
             int r = ::inotify_rm_watch(static_cast<int>(a0), static_cast<int>(a1));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
 
-        // ── accept4 (syscall 88) ─────────────────────────────────────
-        case 88: { // accept4(sockfd, addr, addrlen, flags)
+        // ── accept4 (syscall 242) ────────────────────────────────────
+        // NOTE: AArch64 syscall 88 is utimensat (handled in fs.cpp), NOT
+        // accept4. Real accept4 is syscall 242. The old code at case 88
+        // was dead — fs.cpp's utimensat handler always won the dispatch
+        // order, so this case never ran. Moved to the correct number.
+        case 242: { // accept4(sockfd, addr, addrlen, flags) — AArch64 242
             // Marshal sockaddr from host to guest memory.
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
             int fd = ::accept4(static_cast<int>(a0),
                                reinterpret_cast<struct sockaddr*>(&ss), &sslen,
                                static_cast<int>(a3));
-            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (fd < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
                 // Read guest addrlen, clamp to our result.
-                socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
-                if (guest_len > sslen) guest_len = sslen;
-                mem_.write(a1, &ss, guest_len);
-                mem_.store<uint32_t>(a2, guest_len);
+                try {
+                    socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
+                    if (guest_len > sslen) guest_len = sslen;
+                    mem_.write(a1, &ss, guest_len);
+                    mem_.store<uint32_t>(a2, guest_len);
+                } catch (...) {
+                    // Bad addr/addrlen pointer — close fd, return EFAULT.
+                    ::close(fd);
+                    ret_err(EFAULT);
+                    return 0;
+                }
             }
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
 
         // ── clock_nanosleep (syscall 115) ────────────────────────────
-        case 115: { // clock_nanosleep(clockid, flags, request, remain)
-            if (!a2) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
-            struct timespec req;
-            req.tv_sec = static_cast<time_t>(mem_.load<uint64_t>(a2));
-            req.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a2 + 8));
-            struct timespec rem;
-            int r = ::clock_nanosleep(static_cast<clockid_t>(a0),
-                                      static_cast<int>(a1), &req,
-                                      a3 ? &rem : nullptr);
-            if (r != 0 && a3) {
-                mem_.store<uint64_t>(a3, static_cast<uint64_t>(rem.tv_sec));
-                mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(rem.tv_nsec));
-            }
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-r)));
-            return 0;
-        }
+        // NOTE: clock_nanosleep is now handled in time.cpp (which runs
+        // before misc.cpp in the dispatcher). The duplicate case here
+        // was dead code — removed during the rc.1 syscall cleanup to
+        // avoid confusion. AArch64 syscall 115 is clock_nanosleep per
+        // asm-generic/unistd.h.
 
         // ── getsockname (syscall 206) ────────────────────────────────
         case 206: { // getsockname(sockfd, addr, addrlen)
@@ -702,7 +702,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             socklen_t sslen = sizeof(ss);
             int r = ::getsockname(static_cast<int>(a0),
                                   reinterpret_cast<struct sockaddr*>(&ss), &sslen);
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
                 socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
                 if (guest_len > sslen) guest_len = sslen;
@@ -719,7 +719,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             socklen_t sslen = sizeof(ss);
             int r = ::getpeername(static_cast<int>(a0),
                                   reinterpret_cast<struct sockaddr*>(&ss), &sslen);
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
                 socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a2));
                 if (guest_len > sslen) guest_len = sslen;
@@ -747,7 +747,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), a2,
                                  static_cast<int>(a3), dest_ptr,
                                  static_cast<socklen_t>(a5));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
@@ -761,7 +761,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                                    static_cast<int>(a3),
                                    reinterpret_cast<struct sockaddr*>(&src_ss),
                                    &srclen);
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             // Write received data back to guest buffer.
             mem_.write(a1, buf.data(), static_cast<size_t>(r));
             // Write source address back to guest memory if requested.
@@ -787,7 +787,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +32: void*     msg_control   (8 bytes)
             //   +40: socklen_t msg_controllen (4 bytes)
             //   +44: int       msg_flags     (4 bytes)
-            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            if (!a1) { ret_err(EFAULT); return 0; }
             uint64_t msg_name = mem_.load<uint64_t>(a1);
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
@@ -818,14 +818,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             host_msg.msg_iov = iovs.data();
             host_msg.msg_iovlen = msg_iovlen;
             ssize_t r = ::sendmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 
         // ── recvmsg (syscall 211) ────────────────────────────────────
         case 211: { // recvmsg(sockfd, msg, flags)
-            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            if (!a1) { ret_err(EFAULT); return 0; }
             uint64_t msg_name = mem_.load<uint64_t>(a1);
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
@@ -849,7 +849,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             host_msg.msg_iov = iovs.data();
             host_msg.msg_iovlen = msg_iovlen;
             ssize_t r = ::recvmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             // Write received data back to guest iovec buffers.
             for (uint64_t i = 0; i < msg_iovlen; i++) {
                 uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
@@ -880,13 +880,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 291: { // statx(dirfd, pathname, flags, mask, statxbuf)
             // statx requires glibc 2.28+ and sys/statx.h. If unavailable,
             // fall back to fstatat (which provides most of the same info).
-            if (!a4) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            if (!a4) { ret_err(EFAULT); return 0; }
             std::string path = a1 ? VFS::read_path(mem_, a1) : "";
             std::string host = VFS::remap_path(path);
             struct stat st;
             int r = ::fstatat(static_cast<int>(a0), host.c_str(), &st,
                               static_cast<int>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             // Convert struct stat to a minimal statx structure (256 bytes).
             // The statx struct is larger, but we fill the key fields.
             uint8_t statx_buf[256];
@@ -952,7 +952,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             std::string host = VFS::remap_path(path);
             int r = ::faccessat(static_cast<int>(a0), host.c_str(),
                                static_cast<int>(a2), static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
@@ -968,18 +968,18 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Copy sigset_t from guest memory — a1 is a guest address,
             // NOT a host pointer. Using it directly would read garbage
             // from the host process's memory.
-            if (!a1) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0; }
+            if (!a1) { ret_err(EFAULT); return 0; }
             sigset_t host_mask;
             memset(&host_mask, 0, sizeof(host_mask));
             try {
                 mem_.read(a1, &host_mask, sizeof(host_mask));
             } catch (...) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
+                ret_err(EFAULT);
                 return 0;
             }
             int fd = ::signalfd(static_cast<int>(a0), &host_mask,
                                 static_cast<int>(a3));
-            if (fd < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (fd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
@@ -990,75 +990,63 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 28: { // fchdir(fd) — AArch64 28
             int r = ::fchdir(static_cast<int>(a0));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
-        case 36: { // unlinkat(dirfd, path, flags) — AArch64 36
-            std::string path = VFS::read_path(mem_, a1);
-            int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
-            ret_host(0); return 0;
-        }
-        case 42: { // link(old, new) — AArch64 42
+        case 36: { // symlinkat(old, newdirfd, new) — AArch64 36
+            // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
+            // The old code dispatched 36 to unlinkat, which broke `ln -s`
+            // (toybox calls symlinkat() via musl). unlinkat is correctly
+            // handled at syscall 35 in fs.cpp.
             std::string oldp = VFS::read_path(mem_, a0);
-            std::string newp = VFS::read_path(mem_, a1);
-            int r = ::link(oldp.c_str(), newp.c_str());
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            std::string newp = VFS::read_path(mem_, a2);
+            int r = ::symlinkat(oldp.c_str(), static_cast<int>(a1), newp.c_str());
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
+        }
+        case 42: { // nfsservctl — AArch64 42 (unimplemented, returns ENOSYS)
+            // AArch64 syscall 42 is nfsservctl, NOT link. The old code
+            // dispatched 42 to link(), but musl's link() wrapper calls
+            // syscall 37 (linkat). linkat is now correctly handled at
+            // syscall 37 in fs.cpp.
+            ret_err(ENOSYS);
+            return 0;
         }
         case 51: { // fchmod(fd, mode) — AArch64 51
             int r = ::fchmod(static_cast<int>(a0), static_cast<mode_t>(a1));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 54: { // fchmodat(dirfd, path, mode, flags) — AArch64 54
             std::string path = VFS::read_path(mem_, a1);
             int r = ::fchmodat(static_cast<int>(a0), path.c_str(), static_cast<mode_t>(a2), static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 55: { // faccessat2(dirfd, path, mode, flags) — AArch64 55
             std::string path = VFS::read_path(mem_, a1);
             int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 68: { // pwrite64(fd, buf, count, offset) — AArch64 68
             std::vector<uint8_t> buf(a2);
             try { mem_.read(a1, buf.data(), a2); } catch (...) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT))); return 0;
+                ret_err(EFAULT); return 0;
             }
             ssize_t r = ::pwrite(static_cast<int>(a0), buf.data(), a2, static_cast<off_t>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(r)); return 0;
         }
-        case 69: { // readv(fd, iov, iovcnt) — AArch64 69
-            struct iovec iovs[64];
-            int iovcnt = static_cast<int>(a2);
-            if (iovcnt > 64) iovcnt = 64;
-            if (iovcnt <= 0) { ret_host(0); return 0; }
-            for (int i = 0; i < iovcnt; i++) {
-                try {
-                    uint64_t len = mem_.load<uint64_t>(a1 + i * 16 + 8);
-                    iovs[i].iov_base = len > 0 ? malloc(len) : nullptr;
-                    iovs[i].iov_len = len;
-                } catch (...) { iovcnt = i; break; }
-            }
-            ssize_t r = ::readv(static_cast<int>(a0), iovs, iovcnt);
-            if (r > 0) {
-                uint64_t off = 0;
-                for (int i = 0; i < iovcnt && off < (uint64_t)r; i++) {
-                    uint64_t base = mem_.load<uint64_t>(a1 + i * 16);
-                    uint64_t len = std::min(iovs[i].iov_len, (size_t)(r - off));
-                    if (base && iovs[i].iov_base) {
-                        try { mem_.write(base, iovs[i].iov_base, len); } catch (...) {}
-                    }
-                    off += len;
-                }
-            }
-            for (int i = 0; i < iovcnt; i++) free(iovs[i].iov_base);
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
-            ret_host(static_cast<uint64_t>(r)); return 0;
+        case 69: { // preadv2(fd, iov, iovcnt, offset, flags) — AArch64 69
+            // AArch64 syscall 69 is preadv2 (NOT readv — that's syscall 65,
+            // already handled in fs.cpp). The old code here dispatched 69
+            // to readv(), which silently mis-handled any preadv2 call.
+            // preadv2 is rare in user-space; return ENOSYS for now. If a
+            // guest program needs it, implement it by mirroring fs.cpp's
+            // readv handler with the offset argument.
+            ret_err(ENOSYS);
+            return 0;
         }
         case 71: { // sendfile(out_fd, in_fd, offset, count) — AArch64 71
             off_t off = 0;
@@ -1067,7 +1055,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 try { off = mem_.load<off_t>(a2); offp = &off; } catch (...) {}
             }
             ssize_t r = ::sendfile(static_cast<int>(a0), static_cast<int>(a1), offp, a3);
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             if (offp && a2) { try { mem_.store<off_t>(a2, off); } catch (...) {} }
             ret_host(static_cast<uint64_t>(r)); return 0;
         }
@@ -1076,24 +1064,24 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 82: { // fsync(fd) — AArch64 82
             int r = ::fsync(static_cast<int>(a0));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 83: { // fdatasync(fd) — AArch64 83
             int r = ::fdatasync(static_cast<int>(a0));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 84: { // sync_file_range(fd, offset, nbytes, flags) — AArch64 84
             int r = ::sync_file_range(static_cast<int>(a0), static_cast<off_t>(a1), a2, static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 95: { // waitid(idtype, id, infop, options) — AArch64 95
             siginfo_t si;
             memset(&si, 0, sizeof(si));
             int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             if (a2) {
                 // Write a simplified siginfo to guest memory.
                 try {
@@ -1108,42 +1096,42 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 97: { // unshare(flags) — AArch64 97
             int r = ::unshare(static_cast<int>(a0));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 122: { // mkdir(path, mode) — AArch64 122 (legacy)
             std::string path = VFS::read_path(mem_, a0);
             int r = ::mkdir(path.c_str(), static_cast<mode_t>(a1));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 123: { // rename(old, new) — AArch64 123 (legacy)
             std::string oldp = VFS::read_path(mem_, a0);
             std::string newp = VFS::read_path(mem_, a1);
             int r = ::rename(oldp.c_str(), newp.c_str());
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 125: { // truncate(path, length) — AArch64 125 (legacy)
             std::string path = VFS::read_path(mem_, a0);
             int r = ::truncate(path.c_str(), static_cast<off_t>(a1));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 140: { // chown(path, owner, group) — AArch64 140 (legacy)
             std::string path = VFS::read_path(mem_, a0);
             int r = ::chown(path.c_str(), static_cast<uid_t>(a1), static_cast<gid_t>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 141: { // fchown(fd, owner, group) — AArch64 141 (legacy)
             int r = ::fchown(static_cast<int>(a0), static_cast<uid_t>(a1), static_cast<gid_t>(a2));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 149: { // flock(fd, operation) — AArch64 149
             int r = ::flock(static_cast<int>(a0), static_cast<int>(a1));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 218: { // waitid (AArch64 218 = wait4 alias)
@@ -1151,7 +1139,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             siginfo_t si;
             memset(&si, 0, sizeof(si));
             int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
-            if (r < 0) { ret_host(static_cast<uint64_t>(static_cast<int64_t>(-errno))); return 0; }
+            if (r < 0) { ret_errno(); return 0; }
             if (a2) {
                 try {
                     mem_.store<uint32_t>(a2, si.si_signo);

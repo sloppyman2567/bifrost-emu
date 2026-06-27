@@ -21,8 +21,13 @@ status, see [TESTS.md](TESTS.md).
    feedback. rc.1 includes production hardening: JIT mmap error
    handling, fork JIT cleanup, FP bounds checks, signal trampoline
    fork safety, W^X failure path hardening, --jit-threshold input
-   validation. Once all `ctest_real/` and `toybox` non-sh programs
-   pass under both interpreter and JIT, cut the final 1.4.0.
+   validation, Function Multi-Versioning (FMV) + native FMA3 codegen
+   for FMADD/FMSUB/FNMADD/FNMSUB (addresses context.md known issues
+   #1 and #7 for FMA3-capable hosts), verify-mode self-loop un-patch
+   fix + verify-once optimization, FNMADD/FNMSUB silent-NOP fix,
+   FP 2-source vs FMA encoding collision fix. Once all `ctest_real/`
+   and `toybox` non-sh programs pass under both interpreter and JIT,
+   cut the final 1.4.0.
 
 3. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` in
    some musl code paths. Trace the `strspn` bitset construction
@@ -69,6 +74,60 @@ status, see [TESTS.md](TESTS.md).
    when most time is in syscalls. Consider a hybrid mode: interpreter
    for the first N instructions of each block, then switch to JIT
    only for hot blocks.
+
+5. **~~Native FMA3 codegen for FMADD/FMSUB/FNMADD/FNMSUB.~~**
+   ✅ DONE in rc.1 — Function Multi-Versioning (FMV) framework added
+   (`include/jit/cpu_features.hpp`, `src/jit/cpu_features.cpp`). The
+   FrostJIT constructor detects host CPU features via CPUID + XGETBV
+   (SSE4.1/SSE4.2/POPCNT/AVX/AVX2/FMA3/BMI1/BMI2/AVX-512). On
+   FMA3-capable hosts, FMADD/FMSUB/FNMADD/FNMSUB emit native
+   `vfmadd231ss/sd`, `vfnmadd231ss/sd`, `vfnmsub231ss/sd` — both
+   correct (single-rounded per IEEE 754) and ~1 cycle faster per
+   instruction. Falls back to decomposed mul+add/sub on non-FMA3
+   hosts; `BIFROST_NO_FMA3=1` forces the decomposed path for
+   debugging. This addresses context.md known issues #1 (FMADD not
+   truly fused) and #7 (FMA3 opportunity) for FMA3-capable hosts.
+   Future FMV work: AVX2 256-bit SIMD codegen, BMI2 (pdep/pext for
+   bit-permutation), AVX-512 (masked operations).
+
+6. **~~NEON/SIMD shift and REV fixes.~~** ✅ DONE in rc.1 — Fixed 10
+   NEON bugs: 32-bit ROR wrap-bit loss, vector SHL/USHR/SHRN immh
+   extraction (off by one bit), element-size rule, SHL constant,
+   MOVI/shift encoding collision, REV64/REV32 mask + size-awareness,
+   added USRA/SSRA/SLI/SRI handlers, fixed INS/UMOV v_hi routing for
+   Q=1. SHA-1/224/256/384/512 and CRC32 now produce correct hashes.
+   MD5 is improved but still has a remaining issue in toybox's code
+   path. Added `ctest/jit_neon.elf` regression test.
+
+---
+
+## v1.4.5-alpha (next feature release)
+
+The v1.4.5-alpha will be the first feature release after the 1.4.0
+final. It focuses on multimedia I/O and performance:
+
+1. **SDL2 audio + input.** The v1.4.0-alpha SDL2 video backend
+   (optional, `make USE_SDL2=1`) currently has no audio or input.
+   v1.4.5-alpha adds SDL2 audio output (replacing the OSS `/dev/dsp`
+   passthrough) and SDL2 input (keyboard/mouse → guest input events).
+   This enables interactive ARM64 SDL2 applications.
+
+2. **VFS bug fixes.** Several VFS edge cases need fixing: procfs
+   `status` field truncation, devfs `/dev/random` vs `/dev/urandom`
+   distinction, and `O_NONBLOCK` handling on virtual fds. Also
+   planned: proper `seek` on memfd-backed virtual files (currently
+   returns ESPIPE).
+
+3. **Better JIT performance.** Two areas: (a) implement true LRU
+   eviction in the register allocator (currently FIFO, see context.md
+   issue #6), and (b) use the FMV framework to emit AVX2 256-bit SIMD
+   codegen for vector ops that currently fall back to the interpreter
+   (SHL/USHR/USRA/SLI etc.).
+
+4. **New test.** Add a comprehensive `ctest/jit_neon_advanced.elf`
+   covering SIMD instructions not in the current `jit_neon.elf`:
+   EXT, TBL/TBX, UZP/ZIP/TRN, and the narrowing/widening shifts
+   (SHRN/SSHLL/USHLL).
 
 ---
 

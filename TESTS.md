@@ -10,11 +10,11 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 39 | 39 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 39 | 39 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 41 | 41 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 41 | 41 | 0 |
 
-All 39 JIT test programs pass under frostJIT as of rc.0 (2026-06-27),
-and all 39 also pass under the interpreter. The test suite has been
+All 41 JIT test programs pass under frostJIT as of rc.1 (2026-06-27),
+and all 41 also pass under the interpreter. The test suite has been
 verified clean under ASan+UBSan (debug build). JIT is the default
 execution mode (6.4x speedup on compute workloads).
 
@@ -98,6 +98,8 @@ natively. They are the regression suite for frostJIT codegen changes.
 | `ctest/jit_csel.elf` | ✅ | ✅ | CSEL/CSINC/CSINV/CSNEG |
 | `ctest/jit_extend.elf` | ✅ | ✅ | SXTB/SXTH/SXTW/UXTB/UXTH/UXTW |
 | `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests pass after FCMP/FABS/FNEG/FSQRT/FMOV-imm decode fixes) |
+| `ctest/jit_fma.elf` | ✅ | ✅ | FMADD/FMSUB/FNMADD/FNMSUB (single+double, 29/29 sub-tests). Native FMA3 codegen on FMA3 hosts (BIFROST_NO_FMA3=1 to force decomposed path). Added in rc.1. |
+| `ctest/jit_neon.elf` | ✅ | ✅ | NEON SIMD ops (10/10 sub-tests): SHL/USHR, SLI/SRI rotate, USRA, REV32/REV64, INS/UMOV, ADD/XOR. Added in rc.1 after the great NEON fix pass. |
 | `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests, added beta.3) |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |
