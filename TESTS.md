@@ -10,21 +10,42 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 38 | 38 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 38 | 38 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 39 | 39 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 39 | 39 | 0 |
 
-All 38 JIT test programs pass under frostJIT as of rc.0 (2026-06-27),
-and all 38 also pass under the interpreter. The test suite has been
+All 39 JIT test programs pass under frostJIT as of rc.0 (2026-06-27),
+and all 39 also pass under the interpreter. The test suite has been
 verified clean under ASan+UBSan (debug build). JIT is the default
 execution mode (6.4x speedup on compute workloads).
 
-New tests added in this release:
-- `ctest/test_simd_arith.c` — native SIMD arithmetic (8/16/32-bit lane
-  add/sub/mul) verified under both JIT and interpreter.
-- `ctest/test_tls_static.c` — static TLS (__thread variables) with
-  initial values and write/read verification.
-- `ctest/test_jit_native.c` — comprehensive JIT test: integer arithmetic,
-  bitfield, CSEL, FP, SIMD, memory ops, and a 1M-iteration loop.
+**toybox sh now works!** The root cause was a missing MOVI (vector
+immediate) handler for cmode≠0xE — `MOVI V0.4S, #0` was silently
+ignored, leaving V0 non-zero, which corrupted stack data when used
+with `STP Q0, Q0` for zeroing. Fixed by matching all cmode values.
+
+### toybox sh feature test results
+
+| Feature | Status | Example |
+|---------|--------|---------|
+| echo (builtin) | ✅ | `sh -c 'echo hello world'` |
+| Variables | ✅ | `sh -c 'x=42; echo $x'` |
+| Arithmetic | ✅ | `sh -c 'echo $((3+4))'` → 7 |
+| if/then/fi | ✅ | `sh -c 'if true; then echo yes; fi'` |
+| for loops | ✅ | `sh -c 'for i in 1 2 3; do echo $i; done'` |
+| while loops | ✅ | `sh -c 'i=0; while [ $i -lt 3 ]; do ...; done'` |
+| case/esac | ✅ | `sh -c 'case "b" in b) echo B;; esac'` |
+| Functions | ✅ | `sh -c 'f() { echo "func $1"; }; f hello'` |
+| Exit codes | ✅ | `sh -c 'false; echo $?'` → 1 |
+| String test | ✅ | `sh -c 'test "a" = "a" && echo match'` |
+| pwd | ✅ | `sh -c 'pwd'` → / |
+| Interactive | ✅ | `echo exit \| sh` |
+| External commands | ❌ | `sh -c 'seq 1 3'` — fork limitation |
+| Command substitution | ❌ | `sh -c 'echo $(echo nested)'` — fork limitation |
+| Pipes in sh | ❌ | `sh -c 'cat \| wc'` — fork limitation |
+
+External commands, command substitution, and pipes fail because they
+require fork()+exec(), which has known limitations in the host fork()
+approach. Builtin commands and shell scripting work fully.
 
 ---
 

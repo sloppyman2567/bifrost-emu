@@ -6,7 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0-rc.0] — 2026-06-27 (production hardening — signal delivery, dynamic linker, SIMD JIT, TLS)
+## [1.4.0-rc.0] — 2026-06-27 (production hardening — MOVI fix, signal delivery, dynamic linker, SIMD JIT, TLS)
+
+### Critical fix: toybox sh now works
+
+- **MOVI (vector immediate) handler fixed.** The interpreter only matched
+  `cmode=0xE` (64-bit broadcast). `MOVI V0.4S, #0` (cmode=0, used to zero
+  V registers) was silently ignored, leaving V0 non-zero. This corrupted
+  stack data when toybox sh used `STP Q0, Q0` to zero its option parse
+  node list, causing a NULL-pointer-like crash at `LDR W5, [X0, #16]`
+  (pc=0x400a8c). Fixed by matching all cmode values with proper
+  byte-placement logic per the ARM ARM.
 
 ### Summary
 

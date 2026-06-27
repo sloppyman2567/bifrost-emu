@@ -8,17 +8,14 @@ status, see [TESTS.md](TESTS.md).
 
 ## v1.4.0 (final release — after rc.0 stabilization)
 
-1. **Fix the `toybox sh` regression.** `toybox sh -c 'echo hi'`
-   exits 139 (SIGSEGV). Root cause identified: the toybox command
-   hash table lookup for "sh" fails (all entries are checked but
-   none match), causing a fallback code path that loads 8 bytes of
-   the "sh" argv string (`0x7473657463006873`) and uses it as a
-   pointer, crashing at `LDR W5, [X0, #16]` at pc=0x400a8c.
-   The hash table IS populated (the constructor at 0x400290 runs),
-   and entries ARE checked, but none match "sh". This suggests a
-   subtle emulator bug in the hash computation or string comparison
-   during the lookup. Requires deep debugging of the toybox
-   initialization and hash table construction.
+1. **~~Fix the `toybox sh` regression.~~** ✅ FIXED in rc.0.
+   Root cause: MOVI (vector immediate) handler in the interpreter
+   only matched cmode=0xE. `MOVI V0.4S, #0` (cmode=0) was silently
+   ignored, leaving V0 non-zero, corrupting stack data when used
+   with `STP Q0, Q0` for zeroing. Fixed by matching all cmode
+   values. toybox sh now works: echo, variables, arithmetic, if/for/
+   while/case, functions, exit codes, string tests, pwd, interactive
+   mode. External commands (fork+exec) still have limitations.
 
 2. **Stabilize.** No new features — just bug fixes from the rc.0
    feedback. Once all `ctest_real/` and `toybox` non-sh programs
@@ -30,7 +27,7 @@ status, see [TESTS.md](TESTS.md).
    byte-order mismatch or a 128-bit shift/extract high-half
    handling bug.
 
-4. **Complete signal delivery.** ✅ DONE in rc.0 — proper
+4. **~~Complete signal delivery.~~** ✅ DONE in rc.0 — proper
    `siginfo_t`/`ucontext_t`, `SA_RESTART`, signal masks,
    `sigaltstack`, and cross-thread delivery are all implemented.
    See CHANGELOG.md for details.
