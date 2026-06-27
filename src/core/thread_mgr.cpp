@@ -164,11 +164,17 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
 
     if (child_pid == 0) {
         // ── Child process ──
-        // Set up the child's CPU state: new stack, return value 0.
+        // Set up the child's CPU state: return value 0.
         // The child returns from clone() just like the parent — it
         // continues executing the guest from the instruction after SVC.
         // The normal run loop in main() will handle the child's exit.
-        parent_cpu.sp = child_stack;
+        //
+        // IMPORTANT: Only change SP if child_stack is non-zero.
+        // fork() calls clone() with stack=0, meaning "child uses the
+        // same stack as parent". Setting SP to 0 crashes the child.
+        if (child_stack != 0) {
+            parent_cpu.sp = child_stack;
+        }
         parent_cpu.regs[0] = 0;  // child return value
         parent_cpu.running = true;
 

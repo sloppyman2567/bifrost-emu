@@ -9,10 +9,14 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
+#include "vfs/vfs.h"
+#include "jit/frostjit.hpp"
 
 #include <errno.h>
 #include <signal.h>
 #include <mutex>
+#include <cstring>
+#include <vector>
 #include <thread>
 
 namespace arm64emu {
@@ -98,8 +102,163 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 221: { // clone3 - not supported (use clone)
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS)));
+        case 221: { // execve — AArch64 syscall 221
+            // execve(path, argv, envp) — replace the guest's memory image
+            // with a new ELF binary. This is called by the shell after
+            // fork() to run external commands.
+            //
+            // We implement this by:
+            //   1. Reading the path from guest memory
+            //   2. Checking if it's a valid AArch64 ELF
+            //   3. If yes: clear guest memory, reload the ELF, set up new
+            //      stack, jump to entry point
+            //   4. If no: return -ENOENT
+            //
+            // This is called in the child process after fork(). The child
+            // has a CoW copy of the parent's memory, so clearing it is
+            // safe — the parent is unaffected.
+            std::string path = VFS::read_path(mem_, a0);
+            if (path.empty()) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)));
+                return 0;
+            }
+
+            // Read the ELF file.
+            FILE* f = fopen(path.c_str(), "rb");
+            if (!f) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOENT)));
+                return 0;
+            }
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz <= 0) {
+                fclose(f);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                return 0;
+            }
+            std::vector<uint8_t> elf_data(sz);
+            if (fread(elf_data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
+                fclose(f);
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EIO)));
+                return 0;
+            }
+            fclose(f);
+
+            // Validate it's an AArch64 ELF.
+            if (elf_data.size() < 64 || elf_data[0] != 0x7f || elf_data[1] != 'E') {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                return 0;
+            }
+            uint16_t e_machine;
+            memcpy(&e_machine, elf_data.data() + 18, 2);
+            if (e_machine != 183) {  // EM_AARCH64
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOEXEC)));
+                return 0;
+            }
+
+            // Read argv from guest memory.
+            std::vector<std::string> new_argv;
+            uint64_t argv_ptr = a1;
+            while (true) {
+                uint64_t str_ptr;
+                try {
+                    str_ptr = mem_.load<uint64_t>(argv_ptr);
+                } catch (...) { break; }
+                if (str_ptr == 0) break;
+                std::string arg = VFS::read_path(mem_, str_ptr);
+                new_argv.push_back(arg);
+                argv_ptr += 8;
+            }
+            if (new_argv.empty()) new_argv.push_back(path);
+
+            // Clear the JIT cache (the old blocks are invalid after exec).
+            if (emu.jit()) emu.jit()->flush_cache();
+
+            // Reload the ELF into the existing Memory. The ElfLoader will
+            // map new PT_LOAD segments. Old mappings remain but are
+            // overwritten by the new binary's segments.
+            auto info = ElfLoader::load(mem_, elf_data);
+
+            // Set up a new initial stack.
+            const uint64_t STACK_TOP = 0x8000000000ULL;
+            const uint64_t STACK_SIZE = 64 * 1024 * 1024;
+            uint64_t stack_base = STACK_TOP - STACK_SIZE;
+            // The stack is already mapped from the parent; just reset SP.
+            uint64_t sp = STACK_TOP;
+
+            // Push argv strings.
+            std::vector<uint64_t> argv_addrs;
+            for (auto& a : new_argv) {
+                sp -= a.size() + 1;
+                mem_.write(sp, a.data(), a.size() + 1);
+                argv_addrs.push_back(sp);
+            }
+
+            // Push envp (just PATH).
+            std::vector<uint64_t> envp_addrs;
+            const char* env = "PATH=/bin:/usr/bin:/sbin:/usr/sbin";
+            sp -= strlen(env) + 1;
+            mem_.write(sp, env, strlen(env) + 1);
+            envp_addrs.push_back(sp);
+
+            // AT_RANDOM.
+            sp -= 16;
+            uint8_t rnd[16] = {0};
+            mem_.write(sp, rnd, 16);
+            uint64_t random_addr = sp;
+
+            // Build auxv.
+            std::vector<uint64_t> auxv = {
+                6, 4096,           // AT_PAGESZ
+                3, info.phdr_addr, // AT_PHDR
+                4, info.phent,     // AT_PHENT
+                5, info.phnum,     // AT_PHNUM
+                9, info.entry,     // AT_ENTRY
+                25, random_addr,   // AT_RANDOM
+                16, 0x3ff,         // AT_HWCAP (FP+ASIMD+ATOMICS)
+                7, 0,              // AT_BASE
+                0, 0,              // AT_NULL
+            };
+
+            // Compute total table size and align SP to 16.
+            uint64_t argc = new_argv.size();
+            uint64_t table_size = 8 + 8 * (argc + 1) + 8 * (envp_addrs.size() + 1) + 8 * auxv.size();
+            sp -= table_size;
+            sp &= ~0xFULL;
+
+            uint64_t p = sp;
+            auto push = [&](uint64_t v) { mem_.store<uint64_t>(p, v); p += 8; };
+            push(argc);
+            for (auto a : argv_addrs) push(a);
+            push(0);
+            for (auto e : envp_addrs) push(e);
+            push(0);
+            for (auto v : auxv) push(v);
+
+            // Set CPU state for the new program.
+            cpu.pc = info.entry;
+            cpu.sp = sp;
+            cpu.pstate = 0;
+            cpu.running = true;
+            cpu.exit_code = 0;
+            memset(cpu.regs, 0, sizeof(cpu.regs));
+            memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
+            memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
+            cpu.tid = static_cast<int>(getpid());
+
+            // Set up a fresh TLS scratch area (like load_elf_file does).
+            const uint64_t TLS_SCRATCH_SIZE = 65536;
+            uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
+            cpu.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
+            cpu.tpidrro_el0 = cpu.tpidr_el0;
+
+            // Map the zero page (NULL deref returns 0).
+            mem_.map_range(0, 4096);
+
+            // Return 0 to indicate execve succeeded (the syscall doesn't
+            // actually return on success — we just set PC to the entry
+            // point and continue).
             return 0;
         }
 

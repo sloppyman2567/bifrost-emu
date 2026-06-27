@@ -253,7 +253,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // The syscall number is in x8; args are in x0..x5; result
                 // goes back into x0. The SVC immediate is ignored (Linux
                 // doesn't use it).
-                syscall(cpu);
+                {
+                    // Save old PC to detect if the syscall changed it
+                    // (e.g., execve sets PC to new entry point, rt_sigreturn
+                    // restores PC from signal frame).
+                    uint64_t old_pc = cpu.pc;
+                    syscall(cpu);
+                    if (cpu.pc != old_pc) {
+                        // Syscall changed PC — propagate to next_pc so
+                        // step() doesn't overwrite it with old_pc + 4.
+                        next_pc = cpu.pc;
+                    }
+                }
                 return;
 
             case InstClass::BRK_IMM: {
