@@ -10,13 +10,41 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 41 | 41 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 41 | 41 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 62 | 62 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 62 | 62 | 0 |
+| frostJIT + FWD (`BIFROST_ENABLE_FWD=1`) | 62 | 62 | 0 |
 
-All 41 JIT test programs pass under frostJIT as of rc.1 (2026-06-27),
-and all 41 also pass under the interpreter. The test suite has been
-verified clean under ASan+UBSan (debug build). JIT is the default
-execution mode (6.4x speedup on compute workloads).
+All 62 test programs pass under frostJIT as of rc.1 (2026-06-28), and
+all 62 also pass under the interpreter and under FWD mode. The test
+suite is run via `scripts/run_tests.sh` (or `make check`), which
+categorizes tests, colorizes output, and prints a summary table. JIT
+is the default execution mode (6.4x speedup on compute workloads).
+
+### Test categories
+
+| Category | Count | Description |
+|----------|-------|-------------|
+| Unit tests | 23 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, etc.) |
+| Integration tests | 30 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, etc.) |
+| Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
+| Benchmarks | 1 | `bench_mips.elf` — performance benchmark (skipped with `--quick`) |
+
+### Running the tests
+
+```bash
+make check              # run all tests (JIT default, colorized summary)
+make check-quick        # skip slow benchmarks
+make check-nojit        # run under interpreter (--no-jit)
+make check-fwd          # run with BIFROST_ENABLE_FWD=1
+make check ARGS='--toybox'      # only toybox tests
+make check ARGS='--filter md5'  # only tests matching "md5"
+./scripts/run_tests.sh --help   # see all options
+```
+
+The `make check` target runs `scripts/run_tests.sh`, which detects
+pass/fail via exit code + output keyword scan (PASS/OK/ALL PASS, or a
+custom regex pattern per test). The old `make test` target is kept for
+backward compatibility — it runs a simple loop over all `.elf` files.
 
 **`sin_test.elf` K-table now correct.** The root cause was FCMPE #0.0
 being misdecoded as the register form — the `fcmp_with_zero` helper

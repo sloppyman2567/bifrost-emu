@@ -8,6 +8,21 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, FMV/FMA3, documentation)
 
+### Test infrastructure (post-rc.1)
+
+- **Added `scripts/run_tests.sh`** — a standalone, colorized test runner
+  that replaces the bare `make test` loop with a proper test harness.
+  Categorizes tests (unit, integration, toybox, bench), detects pass/fail
+  via exit code + output keyword scan, prints a summary table with counts
+  and timing, and supports filtering (`--unit`, `--toybox`, `--filter`,
+  `--no-jit`, `--fwd`, `--quick`, `--verbose`). Handles known-infinite
+  tests (toybox yes) — timeout is OK if output matches the expected pattern.
+
+- **Added `make check` targets** to the Makefile: `make check`,
+  `make check-quick`, `make check-nojit`, `make check-fwd`, and
+  `make check ARGS="..."` for passing options. The old `make test` target
+  is kept for backward compatibility.
+
 ### Critical correctness fixes (post-rc.1 stabilization)
 
 - **FCMPE #0.0 was misdecoded as the register form.** The `fcmp_with_zero`
