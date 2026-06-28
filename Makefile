@@ -89,6 +89,24 @@ debug: LDFLAGS = -pthread -fsanitize=address,undefined
 debug: $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $(TARGET)-dbg $(LDFLAGS)
 
+# ── Test runner ────────────────────────────────────────────────────────
+# `make check` runs the standalone test script (scripts/run_tests.sh),
+# which categorizes tests, colorizes output, and prints a summary table.
+# Supports filters: `make check ARGS="--toybox"` or `make check ARGS="--filter md5"`.
+# See `./scripts/run_tests.sh --help` for all options.
+.PHONY: check check-quick check-nojit check-fwd
+check: $(TARGET)
+	./scripts/run_tests.sh $(ARGS)
+
+check-quick: $(TARGET)
+	./scripts/run_tests.sh --quick
+
+check-nojit: $(TARGET)
+	./scripts/run_tests.sh --no-jit --quick
+
+check-fwd: $(TARGET)
+	./scripts/run_tests.sh --fwd --quick
+
 # Run all test programs.
 #
 # JIT is the default execution mode. The first loop runs every .elf

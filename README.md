@@ -126,9 +126,26 @@ debugging of programs that draw to the framebuffer.
 ```bash
 make          # release build with -O3
 make debug    # debug build with ASan + UBSan
-make test     # run the test suite
+make test     # run the test suite (basic loop over all .elf files)
+make check    # run the categorized test runner (colorized, summary table)
 make lib      # build libbifrost.a (static library for API consumers)
 make install  # install to /usr/local/bin/
+```
+
+The `make check` target runs `scripts/run_tests.sh`, which provides:
+- Categorized tests (unit, integration, toybox, bench)
+- Colorized pass/fail output with timing
+- Pattern-based pass detection (checks output for expected keywords)
+- Summary table with counts
+
+```bash
+make check              # run all tests (JIT, default)
+make check-quick        # skip slow benchmarks
+make check-nojit        # run under interpreter (--no-jit)
+make check-fwd          # run with BIFROST_ENABLE_FWD=1
+make check ARGS="--toybox"      # only toybox tests
+make check ARGS="--filter md5"  # only tests matching "md5"
+./scripts/run_tests.sh --help   # see all options
 ```
 
 No external libraries required for the default build. Only standard C++
