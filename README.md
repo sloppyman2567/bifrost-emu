@@ -421,8 +421,9 @@ This is release-candidate quality software. Key limitations:
   or exponential inputs.
 - **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
   opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
-  JIT tests pass with it enabled, but `toybox ls /` crashes under FWD
-  (pre-existing, not introduced by recent fixes).
+  JIT tests pass with it enabled, and `toybox ls /` now works under
+  FWD (fixed in Turn 19 — the CCMP handler was clobbering scratch
+  vregs without spilling).
 
 For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 

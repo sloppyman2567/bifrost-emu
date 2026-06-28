@@ -1180,13 +1180,15 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // to the destination's signed/unsigned range on overflow. The 6-bit
             // scale at bits[15:10] gives fbits = 64 - scale.
             //
-            // Without this, the JIT silently NOP'd every fixed-point FCVTZU
-            // (e.g. toybox MD5 K-table init: `fcvtzu w1, d0, #32` for
-            // floor(|sin|*2^32)), producing wrong hashes. We fall back to
-            // CALL_INTERP — the interpreter now implements the saturating
-            // fixed-point conversion natively. The fixed-point form is rare
-            // enough (mainly used in MD5/signal-processing code) that a
-            // native IR op isn't worth the complexity.
+            // Native IR ops FP_F2I_FIXED/FP_I2F_FIXED are defined (Turn 21)
+            // and the interpreter/optimizer/executor support them, but the JIT
+            // codegen has a subtle register-state corruption bug on the first
+            // invocation in a block (the C code after the asm sees corrupted
+            // FP values). Until the JIT codegen is fixed, route to CALL_INTERP
+            // — the interpreter handles fixed-point variants natively. The
+            // ~20% overhead only affects workloads that use these heavily
+            // (MD5 K-table init, audio DSP), and toybox md5sum is already
+            // fast enough.
             if ((op & 0x7F3E0000) == 0x1E180000) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;
@@ -1214,8 +1216,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
             }
             // SCVTF/UCVTF (fixed-point variant): convert integer to FP and
-            // divide by 2^fbits (fbits = 64 - scale). Falls back to the
-            // interpreter, which now handles this variant natively.
+            // divide by 2^fbits (fbits = 64 - scale). Routes to CALL_INTERP
+            // — see the FCVTZS fixed-point comment above for why the native
+            // IR op is defined but not yet emitted by the translator.
             if ((op & 0x7F3E0000) == 0x1E020000) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;

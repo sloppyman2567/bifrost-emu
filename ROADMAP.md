@@ -25,15 +25,14 @@ status, see [TESTS.md](TESTS.md).
    for FMADD/FMSUB/FNMADD/FNMSUB (addresses context.md known issues
    #1 and #7 for FMA3-capable hosts), verify-mode self-loop un-patch
    fix + verify-once optimization, FNMADD/FNMSUB silent-NOP fix,
-   FP 2-source vs FMA encoding collision fix. Once all `ctest_real/`
-   and `toybox` non-sh programs pass under both interpreter and JIT,
-   cut the final 1.4.0.
+   FP 2-source vs FMA encoding collision fix. Post-rc.1 stabilization
+   fixed FCMPE #0.0 misdecode, CCMP scratch vreg spill (FWD crash),
+   and added native IR ops for fixed-point FCVTZS/SCVTF variants.
+   Once all `ctest_real/` and `toybox` non-sh programs pass under
+   both interpreter and JIT, cut the final 1.4.0.
 
-3. **Fix the NEON/SIMD bug** that breaks `strtok`/`strtok_r` in
-   some musl code paths. Trace the `strspn` bitset construction
-   to pinpoint the exact instruction. Likely a `STR Qn`/`LDR Qn`
-   byte-order mismatch or a 128-bit shift/extract high-half
-   handling bug.
+3. **~~Fix the NEON/SIMD bug~~** that breaks `strtok`/`strtok_r` —
+   ✅ RESOLVED via the rc.1 NEON/SIMD overhaul (10 bugs fixed).
 
 4. **~~Complete signal delivery.~~** ✅ DONE in rc.0 — proper
    `siginfo_t`/`ucontext_t`, `SA_RESTART`, signal masks,

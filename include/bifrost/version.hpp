@@ -45,6 +45,14 @@ namespace arm64emu {
 //     the NOP left K[i] filled with stack garbage. Fixed by adding native
 //     interpreter handlers with saturating semantics; IR translator routes
 //     to CALL_INTERP.
+//   - rc.1 post-stabilization: FCMPE #0.0 misdecode fix (bit 3 is the #0.0
+//     indicator, not bits[4:0]==0x08 — FCMPE #0.0 was compared against d24
+//     instead of 0.0, breaking `s < 0 ? -s : s`); CCMP scratch vreg spill
+//     fix (flush_scratch_host_regs added — CCMP/emit_materialize_flags
+//     clobber RAX/RCX/RDX without spilling non-dirty scratch vregs, causing
+//     the toybox ls / FWD crash); native IR ops FP_F2I_FIXED/FP_I2F_FIXED
+//     defined (interpreter/optimizer/executor/JIT support added; translator
+//     still routes to CALL_INTERP pending JIT codegen stabilization).
 constexpr const char* VERSION  = "1.4.0-rc.1";
 constexpr const char* CODENAME = "bifrost-emu";
 

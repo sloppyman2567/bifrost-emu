@@ -951,6 +951,60 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 }
                 break;
             }
+            case IROp::FP_F2I_FIXED: {
+                // Fixed-point FP→int: scale FP value by 2^fbits, truncate
+                // toward zero, saturate to dest range. NaN → 0.
+                bool is_unsigned = (inst.imm == 1);
+                bool is_64bit = (inst.flags_op != 0);
+                int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
+                double a;
+                if (inst.width == 1) {
+                    memcpy(&a, &cpu.v_lo[inst.src1], 8);
+                } else {
+                    float f; uint32_t tb = static_cast<uint32_t>(cpu.v_lo[inst.src1]);
+                    memcpy(&f, &tb, 4);
+                    a = static_cast<double>(f);
+                }
+                double scaled = std::ldexp(a, fbits);
+                if (is_unsigned) {
+                    double hi = is_64bit ? 18446744073709551616.0 : 4294967296.0;
+                    uint64_t v = (std::isnan(a) || scaled < 0.0) ? 0
+                               : (scaled >= hi) ? (is_64bit ? ~0ULL : 0xFFFFFFFFu)
+                               : static_cast<uint64_t>(scaled);
+                    vregs[inst.dest] = is_64bit ? v : static_cast<uint32_t>(v);
+                } else {
+                    double hi = is_64bit ? 9223372036854775808.0 : 2147483648.0;
+                    double lo = -hi;
+                    int64_t v = std::isnan(a) ? 0
+                              : (scaled >= hi) ? (is_64bit ? INT64_MAX : INT32_MAX)
+                              : (scaled < lo)  ? (is_64bit ? INT64_MIN : INT32_MIN)
+                              : static_cast<int64_t>(scaled);
+                    vregs[inst.dest] = is_64bit ? static_cast<uint64_t>(v)
+                                                : static_cast<uint32_t>(static_cast<int32_t>(v));
+                }
+                break;
+            }
+            case IROp::FP_I2F_FIXED: {
+                // Fixed-point int→FP: convert integer to FP, divide by 2^fbits.
+                bool is_unsigned = (inst.imm == 1);
+                bool is_64bit = (inst.flags_op != 0);
+                int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
+                double v = is_unsigned
+                    ? static_cast<double>(is_64bit ? vregs[inst.src1]
+                                                   : static_cast<uint32_t>(vregs[inst.src1]))
+                    : static_cast<double>(is_64bit ? static_cast<int64_t>(vregs[inst.src1])
+                                                   : static_cast<int32_t>(vregs[inst.src1]));
+                double result = std::ldexp(v, -fbits);
+                if (inst.width == 1) {
+                    cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &result, 8);
+                    cpu.v_hi[inst.dest] = 0;
+                } else {
+                    float f = static_cast<float>(result);
+                    uint32_t tr; memcpy(&tr, &f, 4);
+                    cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
+                }
+                break;
+            }
             case IROp::FP_CMP: {
                 bool is_double = (inst.width == 1);
                 bool unordered = false;

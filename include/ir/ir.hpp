@@ -129,6 +129,23 @@ enum class IROp : uint8_t {
     FP_I2F,        // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
                    // imm = 0 (signed), 1 (unsigned); width = ftype
                    // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
+    // Native FP↔int fixed-point conversions (FCVTZS/FCVTZU/SCVTF/UCVTF with
+    // a 6-bit scale field). These are the fixed-point variants — the integer
+    // variants use FP_F2I/FP_I2F above. The fixed-point form scales the FP
+    // value by 2^fbits before/after conversion (fbits = 64 - scale, where
+    // scale comes from bits[15:10] of the ARM encoding).
+    //
+    // Until Turn 21, these routed to CALL_INTERP (~20% overhead on workloads
+    // that use them, like MD5 K-table init and audio DSP). Native IR ops
+    // avoid the interpreter round-trip.
+    FP_F2I_FIXED,  // regs[dest] = sat_trunc(v_lo[src1] * 2^fbits, signedness/range)
+                   // imm = 0 (signed), 1 (unsigned); width = ftype
+                   // flags_op = sf (0=32-bit dest, 1=64-bit dest)
+                   // immr = fbits (1..64)
+    FP_I2F_FIXED,  // v_lo[dest] = (float/double)(regs[src1]) / 2^fbits; v_hi=0
+                   // imm = 0 (signed), 1 (unsigned); width = ftype
+                   // flags_op = sf (0=32-bit GPR source, 1=64-bit GPR source)
+                   // immr = fbits (1..64)
     FP_CMP,        // compare v_lo[src1] vs v_lo[src2], set pstate
                    // imm bit 0 = 1 for FCMP Dn,#0.0 form, 0 for register form;
                    // width = ftype

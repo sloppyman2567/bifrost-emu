@@ -8,7 +8,29 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, FMV/FMA3, documentation)
 
-### Critical correctness fix (rc.1 final)
+### Critical correctness fixes (post-rc.1 stabilization)
+
+- **FCMPE #0.0 was misdecoded as the register form.** The `fcmp_with_zero`
+  decoder helper checked `(op & 0x1F) == 0x08`, which only matched FCMP
+  #0.0 (bits[4:0]=0b01000) but NOT FCMPE #0.0 (bits[4:0]=0b11000). Bit 3
+  is the #0.0 indicator; bit 4 is the E (exception trap) bit. FCMPE #0.0
+  fell through to the register-form path, comparing against d24 (an
+  uninitialized register) instead of 0.0. This broke `s < 0 ? -s : s`
+  (compiled to `fcmpe d0, #0.0; fcsel d1, d1, d0, mi`) — MI was never
+  set for negative d0, so FCSEL selected the negative value. Root cause
+  of the `sin_test.elf` K[3-5] failure. Fixed by checking bit 3 only.
+
+- **CCMP JIT handler clobbered scratch vregs without spilling.** The CCMP
+  codegen called `emit_materialize_flags` and `emit_mov_imm32_zext(RDX,
+  pstate_else)` without spilling scratch vregs cached in RAX/RCX/RDX.
+  When a scratch vreg (e.g., `new_sp` from a prior ADD) was in RDX, the
+  CCMP overwrote it with the pstate nzcv value, and the subsequent
+  STORE_MEM used the garbage RDX as the base address. This caused the
+  `toybox ls /` crash under `BIFROST_ENABLE_FWD=1` (decode error at
+  pc=0x13). Fixed by adding `flush_scratch_host_regs(mask)` that spills
+  ALL scratch vregs (v > 31) in a mask regardless of dirty status, and
+  calling it in `clobber_flags`, `materialize_flags_to_pstate`, and the
+  CCMP handler before the clobbering operation.
 
 - **FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants were silently NOP'd.**
   The integer-variant mask `(op & 0x7F3E0000) == 0x1E380000` (FCVTZ) and
@@ -33,9 +55,14 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   handlers are written once for S and D sources by promoting single
   precision to double up-front, eliminating the prior 4× duplication.
 
-- **IR translator now routes both fixed-point variants to CALL_INTERP.**
-  They are rare enough (mainly MD5 K-table init, audio DSP, fixed-point
-  signal code) that a native IR op would not pay back its complexity.
+- **Native IR ops for fixed-point variants (FP_F2I_FIXED, FP_I2F_FIXED).**
+  Added new IROp enum values with full support in the IR optimizer
+  (`is_pure`, `dump_ir`, cache invalidation), the IR executor (`ops.cpp`,
+  used by verify mode), and the JIT codegen (`frostjit.cpp`). The IR
+  translator currently still routes to CALL_INTERP for correctness —
+  the JIT codegen has a subtle register-state issue on the first
+  invocation in a block. The native ops are defined and tested so they
+  can be enabled once the codegen issue is resolved.
   The hot integer variants continue to use the native `FP_F2I`/`FP_I2F`
   IR ops.
 

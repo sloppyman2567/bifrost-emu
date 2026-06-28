@@ -112,6 +112,7 @@ static bool is_pure(IROp op) {
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_LDST:                          // write to v_lo/v_hi
         case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
+        case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED:  // fixed-point variants
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
@@ -599,6 +600,28 @@ void optimize_ir(IRBlock& block) {
                 break;
             }
 
+            case IROp::FP_F2I_FIXED: {
+                // Same as FP_F2I: writes directly to ARM reg vreg dest.
+                // See comment above for why arm_reg_cache must be updated.
+                invalidate_vreg_in_cache(inst.dest);
+                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                consts.clear(inst.dest);
+                copies.clear(inst.dest);
+                last_def[inst.dest] = i;
+                break;
+            }
+
+            case IROp::FP_I2F_FIXED: {
+                // Same as FP_I2F: writes to v_lo[dest] (FP reg file),
+                // not to an ARM reg vreg. Just invalidate dest's cache
+                // entry so we don't propagate a stale constant through it.
+                invalidate_vreg_in_cache(inst.dest);
+                consts.clear(inst.dest);
+                copies.clear(inst.dest);
+                last_def[inst.dest] = i;
+                break;
+            }
+
             default:
                 // Unknown op: conservatively invalidate the dest vreg's
                 // cache entry so we don't propagate stale constants or
@@ -790,6 +813,8 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_LDST: return "SIMD_LDST";
                     case IROp::FP_F2I: return "FP_F2I";
                     case IROp::FP_I2F: return "FP_I2F";
+                    case IROp::FP_F2I_FIXED: return "FP_F2I_FIXED";
+                    case IROp::FP_I2F_FIXED: return "FP_I2F_FIXED";
                     case IROp::FP_CMP: return "FP_CMP";
                     case IROp::FP_MOVI: return "FP_MOVI";
                     case IROp::UDIV: return "UDIV";

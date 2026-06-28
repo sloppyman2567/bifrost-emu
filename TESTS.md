@@ -18,6 +18,18 @@ and all 41 also pass under the interpreter. The test suite has been
 verified clean under ASan+UBSan (debug build). JIT is the default
 execution mode (6.4x speedup on compute workloads).
 
+**`sin_test.elf` K-table now correct.** The root cause was FCMPE #0.0
+being misdecoded as the register form — the `fcmp_with_zero` helper
+checked `(op & 0x1F) == 0x08` which only matched FCMP #0.0, not FCMPE
+#0.0 (bits[4:0]=0x18). Bit 3 is the #0.0 indicator; bit 4 is the E
+(exception trap) bit. Fixed by checking bit 3 only.
+
+**`toybox ls /` works under `BIFROST_ENABLE_FWD=1`.** The root cause
+was the CCMP JIT handler clobbering RAX/RCX/RDX without spilling
+scratch vregs cached in those regs. Fixed by adding
+`flush_scratch_host_regs` and calling it before `emit_materialize_flags`
+in `clobber_flags`, `materialize_flags_to_pstate`, and the CCMP handler.
+
 **toybox sh now works!** The root cause was a missing MOVI (vector
 immediate) handler for cmode≠0xE — `MOVI V0.4S, #0` was silently
 ignored, leaving V0 non-zero, which corrupted stack data when used
