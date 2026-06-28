@@ -286,10 +286,20 @@ inline bool is_fcmp(uint32_t op) {
 }
 
 // True iff this FCMP encoding is the "#0.0" form (vs register form).
-//   #0.0 form:    bits[4:0] = 0b01000 (Op = 8)
-//   register form: bits[4:0] = 0b00000, Rm in bits[20:16]
+//   #0.0 form:    bit[3] = 1 (distinguishes from register form)
+//   register form: bit[3] = 0, Rm in bits[20:16]
+// Note: bit[4] is the "E" bit (FCMPE vs FCMP), NOT the #0.0 indicator.
+//   fcmp d0, #0.0  = 0x1e602008, bits[4:0] = 0b01000
+//   fcmpe d0, #0.0 = 0x1e602018, bits[4:0] = 0b11000
+//   fcmp d0, d1    = 0x1e612000, bits[4:0] = 0b00000
+//   fcmpe d0, d1   = 0x1e612010, bits[4:0] = 0b10000
+// The previous check `(op & 0x1F) == 0x08` only matched FCMP #0.0,
+// NOT FCMPE #0.0 (0x18). This caused FCMPE #0.0 to be treated as
+// the register form, comparing against d24 (bits[4:0]=0x18→Rm=24)
+// instead of 0.0. This broke `s < 0 ? -s : s` in musl's sin_test
+// (compiler emits `fcmpe d0, #0.0; fcsel d1, d1, d0, mi`).
 inline bool fcmp_with_zero(uint32_t op) {
-    return (op & 0x1F) == 0x08;
+    return (op & 0x08) != 0;  // bit[3] = 1 for #0.0 form
 }
 
 // True iff `op` is an FMOV (scalar, immediate) encoding.
