@@ -367,6 +367,27 @@ void FrostJIT::invalidate_host_regs(uint16_t mask) {
     }
 }
 
+// Spill ALL scratch vregs (v > 31) in `mask`, even if not dirty.
+// See header comment for why this is necessary.
+void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
+    uint16_t m = mask;
+    while (m) {
+        int r = __builtin_ctz(m);
+        m &= m - 1;
+        int v = reg_vreg_[r];
+        if (v >= 0 && v > 31) {
+            // Scratch vreg: spill to its stack slot. (If it's dirty,
+            // flush_dirty_host_regs already spilled it — the redundant
+            // store is harmless and cheaper than tracking dirty state.)
+            int32_t off = vreg_stack_slot(v);
+            emit_store(RBP, off, r);
+            // Mark as non-dirty (we just wrote it to its home).
+            vreg_dirty_[v] = false;
+            dirty_host_regs_ &= ~(1u << r);
+        }
+    }
+}
+
 // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ────────────
 // These wrap the "load vreg to host reg" / "store host reg to vreg"
 // patterns. load_vreg_to_reg is cache-aware: if v is already cached in

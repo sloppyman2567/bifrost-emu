@@ -2136,6 +2136,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             }
 
+            // CCMP clobbers RAX, RCX, RDX (via emit_materialize_flags on the
+            // compare path, and via emit_mov_imm32_zext(RDX,...) on the else
+            // path). force_two_vregs_to handled RAX/RCX eviction, but RDX
+            // may still hold a live vreg (e.g., new_sp from a prior ADD).
+            // Spill it before clobbering. Without this, the vreg in RDX is
+            // lost — its value is only in the host reg, and the CCMP
+            // overwrites it. This was the root cause of the FWD crash on
+            // `toybox ls /` (v37 = new_sp was in RDX, lost to CCMP, then
+            // STORE_MEM [v37+0x40] used garbage as the base address).
+            flush_invalidate_host_regs((1u << RDX) | (1u << RAX) | (1u << RCX));
+
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
             // --- else path: cond FALSE, set pstate = nzcv ---
@@ -2158,6 +2169,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             patch_jcc_rel32(jcc_to_compare, rel_compare);
             int32_t rel_end = static_cast<int32_t>(end_off - (jmp_to_end + 5));
             patch_jmp_rel32(jmp_to_end, rel_end);
+
+            // After both paths, RAX/RCX/RDX hold garbage (materialize_flags
+            // or mov_imm32 clobbered them). Drop any stale cache mappings
+            // so later instructions reload from memory instead of using
+            // the clobbered host regs.
+            invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
 
             flags_in_host_ = false;
             return false;
@@ -2714,15 +2731,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 void FrostJIT::clobber_flags() {
     if (flags_in_host_) {
         // emit_materialize_flags clobbers RAX, RCX, RDX.
-        // use targeted flush+invalidate via the bitmask
-        // instead of two open-coded 3-reg loops.
+        // Spill dirty vregs AND non-dirty scratch vregs BEFORE the
+        // materialize — otherwise non-dirty scratch vregs cached in
+        // RAX/RCX/RDX are lost (their value is only in the host reg,
+        // and materialize overwrites it before invalidate_host_regs
+        // can drop the mapping). This was the root cause of the FWD
+        // crash on `toybox ls /` (x30 store using a stale/garbage value).
         constexpr uint16_t FLAGS_CLOBBER =
             (1u << RAX) | (1u << RCX) | (1u << RDX);
         flush_dirty_host_regs(FLAGS_CLOBBER);
+        flush_scratch_host_regs(FLAGS_CLOBBER);
         emit_materialize_flags(flags_from_sub_);
         flags_in_host_ = false;
-        // Drop cache mappings for RAX/RCX/RDX (values were evicted above
-        // if dirty; non-dirty values can be safely reloaded from memory).
+        // Drop cache mappings for RAX/RCX/RDX (values were spilled above).
         invalidate_host_regs(FLAGS_CLOBBER);
     }
 }
@@ -2738,6 +2759,7 @@ void FrostJIT::materialize_flags_to_pstate() {
     constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
     emit_pushfq();  // save RFLAGS (materialize clobbers them)
     flush_dirty_host_regs(FLAGS3);
+    flush_scratch_host_regs(FLAGS3);
     emit_materialize_flags(flags_from_sub_);
     emit_popfq();
     invalidate_host_regs(FLAGS3);

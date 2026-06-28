@@ -498,12 +498,26 @@ private:
     // Used by FP JIT codegen — FP ops only clobber XMM0/XMM1 plus a small
     // fixed set of GPRs (RAX/RCX/RDX), so flushing just those is enough.
     void flush_dirty_host_regs(uint16_t mask);
+    // Spill ALL scratch vregs (v > 31) cached in host regs selected by
+    // `mask`, regardless of dirty status. Arch vregs (v <= 31) are NOT
+    // spilled — their value is also in cpu.regs[], so dropping the cache
+    // mapping is safe (load_vreg_to_reg reloads from cpu.regs[]).
+    //
+    // This is needed BEFORE operations that clobber host regs (like
+    // emit_materialize_flags or the MEM_CLOBBER set in LOAD_MEM/STORE_MEM)
+    // when those host regs hold non-dirty scratch vregs. Without this,
+    // the non-dirty scratch vreg's value is lost — it was computed in the
+    // host reg but never written to its stack slot, and the clobbering op
+    // destroys it before invalidate_host_regs drops the mapping.
+    void flush_scratch_host_regs(uint16_t mask);
     // Drop cache mappings for host regs in `mask` (no spill — caller must
     // have already flushed if any were dirty). Companion to above.
     void invalidate_host_regs(uint16_t mask);
     // Convenience: flush + invalidate in one call (the common pattern).
+    // Spills dirty vregs AND non-dirty scratch vregs before invalidating.
     inline void flush_invalidate_host_regs(uint16_t mask) {
         flush_dirty_host_regs(mask);
+        flush_scratch_host_regs(mask);
         invalidate_host_regs(mask);
     }
     // Debug-only: verify the dirty_host_regs_ invariant. Returns true if OK.
