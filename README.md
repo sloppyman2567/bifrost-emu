@@ -295,7 +295,8 @@ register, pair, sign-extended, unscaled, pre/post-index), LSE atomics
 (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS), acquire/release
 (STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
 (FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
-FCSEL, both S and D registers), FMOV Vd.D[1], SIMD/NEON
+FCSEL, both S and D registers, including the **fixed-point FCVTZS/FCVTZU/
+SCVTF/UCVTF variants** that broke MD5 in rc.1), FMOV Vd.D[1], SIMD/NEON
 (DUP, MOVI all cmode values, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR, SSHR,
 EOR, ORR, AND, BIC, ORN, EON, NOT, NEG, ADD/SUB/MUL vector, REV16/32/64,
 STP/LDP pairs including Q registers, EXT, INS, TBL/TBX), and system (SVC,
@@ -430,7 +431,15 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
 current release is **v1.4.0-rc.1** (2026-06-27):
 
-- **JIT is now the default execution mode.** The 39-test suite,
+- **MD5 now produces correct hashes.** The root cause was the
+  FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd
+  (the integer-variant mask required bit 21 = 1; the fixed-point variant
+  has bit 21 = 0 with a 6-bit scale field). Toybox MD5's K-table init
+  uses `fcvtzu w1, d0, #32` to compute `floor(|sin(i+1)| * 2^32)`; with
+  the NOP, K[i] was filled with stack garbage and the hash output was
+  unrelated to the input. MD5 now joins SHA-1/224/256/384/512/CRC32 in
+  the "verified correct under both JIT and interpreter" set.
+- **JIT is now the default execution mode.** The 41-test suite,
   toybox integration, and musl libc all pass under the JIT, and
   `bench_mips` shows a 6.4x speedup. Use `--no-jit` to opt out.
 - **JIT correctness overhaul** — 20+ bugs fixed across FP decode,

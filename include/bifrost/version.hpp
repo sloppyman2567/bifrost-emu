@@ -16,7 +16,7 @@ namespace arm64emu {
 //     MOVI (all cmode values), STP/LDP Q (128-bit), LD1/ST1 multi-reg.
 //   - NEON/SIMD fixes: 10 bugs fixed (immh extraction, MOVI/shift collision,
 //     REV64/REV32 size-aware, USRA/SSRA/SLI/SRI handlers, INS/UMOV v_hi,
-//     32-bit ROR). SHA-1/256/384/512 + CRC32 now produce correct hashes.
+//     32-bit ROR). SHA-1/256/384/512 + CRC32 + MD5 now produce correct hashes.
 //   - Function Multi-Versioning (FMV): runtime CPUID detection of SSE4.1/
 //     AVX/AVX2/FMA3/BMI1/BMI2/AVX-512. Native FMA3 codegen for
 //     FMADD/FMSUB/FNMADD/FNMSUB (vfmadd231ss/sd, vfnmadd231ss/sd,
@@ -27,7 +27,7 @@ namespace arm64emu {
 //     while/case, functions, exit codes, interactive mode.
 //   - --jit-threshold flag for hybrid interp/JIT mode on I/O-bound workloads.
 //   - 40+ toybox commands verified working (echo, sort, wc, seq, factor,
-//     sha256sum, base64, cut, cmp, cat, ls, stat, date, etc.).
+//     sha256sum, md5sum, sha1sum, base64, cut, cmp, cat, ls, stat, date, etc.).
 //   - ASan+UBSan clean on all 41 tests.
 //   - rc.1 final: FMV/FMA3 codegen, verify-mode self-loop un-patch fix +
 //     verify-once optimization, FNMADD/FNMSUB silent-NOP fix, FP 2-source
@@ -38,6 +38,13 @@ namespace arm64emu {
 //     ret_errno() macro sweep, vreg bounds checks, W^X depth leak fix,
 //     optimizer/SSE silent-fallthrough fixes, NUM_HOST_REGS constant,
 //     documentation refresh.
+//   - rc.1 MD5 fix: FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants were
+//     silently NOP'd (integer-variant mask required bit 21 = 1; fixed-point
+//     variant has bit 21 = 0 with a 6-bit scale field). Toybox MD5 K-table
+//     init uses `fcvtzu w1, d0, #32` to compute floor(|sin(i+1)| * 2^32);
+//     the NOP left K[i] filled with stack garbage. Fixed by adding native
+//     interpreter handlers with saturating semantics; IR translator routes
+//     to CALL_INTERP.
 constexpr const char* VERSION  = "1.4.0-rc.1";
 constexpr const char* CODENAME = "bifrost-emu";
 

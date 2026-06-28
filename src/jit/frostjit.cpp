@@ -3346,8 +3346,9 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             //   2. Genuine translation failure (code buf overflow, etc.)
             // Case 1: run the interp_only block.
             // Case 2: single-step the interpreter.
-            if (blocks_.count(pc) && blocks_[pc].interp_only) {
-                entry = blocks_[pc];
+            auto it = blocks_.find(pc);
+            if (it != blocks_.end() && it->second.interp_only) {
+                entry = it->second;
                 blocks_executed++;
                 instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
@@ -3377,11 +3378,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (watchdog_count_ > WATCHDOG_LIMIT) {
             // Mark this block as interp_only permanently — the JIT
             // codegen for it is buggy, so always use the interpreter.
-            if (blocks_.count(pc) && !blocks_[pc].interp_only) {
-                blocks_[pc].interp_only = true;
-                blocks_[pc].interp_only_count = blocks_[pc].instr_count;
-                blocks_[pc].fn = nullptr;
-                blocks_[pc].chained = false;
+            auto it = blocks_.find(pc);
+            if (it != blocks_.end() && !it->second.interp_only) {
+                it->second.interp_only = true;
+                it->second.interp_only_count = it->second.instr_count;
+                it->second.fn = nullptr;
+                it->second.chained = false;
             }
             interpreter_fallbacks++;
             emu.step_public(cpu);

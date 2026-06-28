@@ -24,6 +24,11 @@ toybox
 tools/aarch64-linux-musl-cross/
 tools/aarch64-linux-musl-cross.tgz
 
+# Downloaded glibc cross-toolchain (fetched on demand by tools/fetch-glibc-toolchain.sh)
+tools/aarch64-linux-gnu-cross/
+tools/aarch64-linux-gnu-cross.tgz
+tools/aarch64-linux-gnu-cross.tgz.xz
+
 # Downloaded SDL2 .deb packages (for offline SDL2 build)
 tools/sdl2-debs/
 

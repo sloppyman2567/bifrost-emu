@@ -8,6 +8,60 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, FMV/FMA3, documentation)
 
+### Critical correctness fix (rc.1 final)
+
+- **FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants were silently NOP'd.**
+  The integer-variant mask `(op & 0x7F3E0000) == 0x1E380000` (FCVTZ) and
+  `0x1E220000` (SCVTF) requires bit 21 = 1. The fixed-point variant has
+  bit 21 = 0 with a 6-bit `scale` field at bits[15:10] (fbits = 64 - scale),
+  and was therefore not matching any handler — falling through to the
+  "Unknown FP — NOP" path in the interpreter and to `CALL_INTERP`-less
+  fallthrough in the IR translator. The destination register was left
+  unchanged, returning stale stack/register garbage to the guest.
+
+  This was the root cause of **toybox `md5sum` producing wrong hashes**
+  (the last remaining correctness gap from the NEON/SIMD overhaul).
+  Toybox's MD5 K-table initializer computes `floor(|sin(i+1)| * 2^32)`
+  via `fcvtzu w1, d0, #32`; with the NOP bug, every K[i] was filled
+  with stack garbage, and the hash output was unrelated to the input.
+
+- **Added native interpreter handlers for both fixed-point variants.**
+  FCVTZS/FCVTZU: scale by `2^fbits` via `std::ldexp`, then truncate
+  toward zero with saturating semantics (NaN → 0, overflow → INT_MAX
+  or UINT_MAX per the destination's signedness and width). SCVTF/UCVTF:
+  convert the integer to `double`, then divide by `2^fbits`. Both
+  handlers are written once for S and D sources by promoting single
+  precision to double up-front, eliminating the prior 4× duplication.
+
+- **IR translator now routes both fixed-point variants to CALL_INTERP.**
+  They are rare enough (mainly MD5 K-table init, audio DSP, fixed-point
+  signal code) that a native IR op would not pay back its complexity.
+  The hot integer variants continue to use the native `FP_F2I`/`FP_I2F`
+  IR ops.
+
+- **Verification.** `toybox md5sum` now produces correct MD5 hashes for
+  all test inputs (`""`, `"a"`, `"abc"`, `"hello"`, `"hello world"`,
+  `"The quick brown fox"`). MD5 joins SHA-1/SHA-224/SHA-256/SHA-384/
+  SHA-512/CRC32 in the "verified correct under both JIT and interpreter"
+  set. All 41 JIT tests still pass under JIT and interpreter; `make verify`
+  shows no new divergences. New `ctest_real/fcvtzu_test2.elf` exercises
+  the fixed-point variants directly (W/X destination, S/D source, fbits
+  1/16/32, signed/unsigned, saturation on overflow).
+
+### JIT micro-optimizations (rc.1 final)
+
+- **Eliminated redundant `blocks_` hash-table lookups.** In
+  `chain_back_references` and the JIT dispatcher's interp_only / watchdog
+  paths, `blocks_.count(pc) && blocks_[pc].X` patterns were replaced
+  with a single `blocks_.find(pc)` iterator lookup, removing one
+  hash-table probe per block-cache miss on the hot path.
+
+- **Reduced duplicate NEON-shift boilerplate comments.** The
+  "BUGFIX (rc.1): same immh extraction + element size rule as SHL"
+  comment block that was repeated 6× across the USHR/USRA/SSRA/SLI/SRI/
+  SHRN handlers was consolidated into shorter cross-references back to
+  the canonical SHL comment, reducing the file by ~60 lines of noise.
+
 ### Function Multi-Versioning (FMV) + native FMA3 codegen
 
 - **New: `include/jit/cpu_features.hpp` + `src/jit/cpu_features.cpp`.**
@@ -2444,7 +2498,7 @@ and future JIT compiler).
   calc (bits 24:23) works for musl but corrupts toybox's stack. Proper fix
   requires hierarchical decoder restructuring — planned for v2.0 alongside JIT.
 - **glibc 2.36+ static binaries** hit a decode error on an unhandled instruction.
-- **No signal delivery** — `rt_sigaction` is a no-op. Planned for 1.2.0.
+- **No signal delivery** — `rt_sigaction` is a no-op. Implemented in 1.4.0-rc.0.
 - **No dynamic linking** — static binaries only.
 
 ### Compatibility Matrix

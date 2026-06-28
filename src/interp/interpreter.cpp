@@ -1991,11 +1991,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // USHR (vector, immediate) — mask 0xBF00FC00 excludes Q.
-                // Shift = (2 * esize_bits) - immh:immb
-                //   (e.g. ushr v0.4s, #4 → immh:immb=0x3C=60, esize=32,
-                //    shift = 64 - 60 = 4)
-                //
-                // BUGFIX (rc.1): same immh extraction + element size rule as SHL.
+                // Shift = (2 * esize_bits) - immh:immb.
+                // (rc.1 fixed immh extraction + element-size rule — see SHL above.)
                 if ((op & 0xBF00FC00) == 0x2F000400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2021,12 +2018,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // USRA (vector, immediate, accumulate) — mask 0xBF00FC00.
-                // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift)
-                // Encoding: same as USHR but bit 12 = 1 (bits[15:10] = 000101).
-                // Used by MD5 to implement vector rotate-left via:
-                //   ROTL(x,n) = (x << n) | (x >> (32-n))
-                //             = USRA(x << n, 32-n)  [accumulate the >> part]
-                // Without this, MD5's round function produced wrong hashes.
+                // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift).
+                // Used by MD5 to implement vector ROTL via
+                //   ROTL(x,n) = USRA(x << n, 32-n).
                 if ((op & 0xBF00FC00) == 0x2F001400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2057,8 +2051,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SSRA (vector, immediate, signed accumulate) — mask 0xBF00FC00.
-                // Same as USRA but arithmetic (signed) shift right. Constant 0x0F001400.
+                // SSRA (vector, immediate, signed accumulate) — 0x0F001400.
+                // Same as USRA but arithmetic (signed) shift right.
                 if ((op & 0xBF00FC00) == 0x0F001400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2103,12 +2097,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SLI (vector, immediate, shift left insert) — mask 0xBF00FC00.
-                // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd >> (esize-shift))
-                // Used heavily by MD5 to implement vector rotate-left:
-                //   ROTL(x, n) = SLI(x, x, n)  [when Vd==Vn]
-                // Without this, MD5's round function produced wrong hashes.
-                // Shift formula (same as SHL): shift = immh:immb - esize_bits
+                // SLI (vector, immediate, shift left insert) — 0x2F005400.
+                // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd >> (esize-shift)).
+                // Used by MD5 for vector ROTL: ROTL(x, n) = SLI(x, x, n) when Vd==Vn.
                 if ((op & 0xBF00FC00) == 0x2F005400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2141,10 +2132,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SRI (vector, immediate, shift right insert) — mask 0xBF00FC00.
-                // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd << (esize-shift))
-                // Used for vector rotate-right: ROTR(x, n) = SRI(x, x, n)
-                // Shift formula (same as USHR): shift = (2*esize_bits) - immh:immb
+                // SRI (vector, immediate, shift right insert) — 0x2F004400.
+                // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd << (esize-shift)).
+                // Used for vector ROTR: ROTR(x, n) = SRI(x, x, n).
                 if ((op & 0xBF00FC00) == 0x2F004400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2177,11 +2167,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // Narrowing shift right. immh determines SOURCE element size
-                // (2× the destination size). Shift = (2*esize_bits) - immh:immb,
-                // same formula as USHR but on the wider source element.
-                //
-                // BUGFIX (rc.1): same immh extraction + element size rule as SHL/USHR.
+                // Narrowing shift right (SHRN). immh determines SOURCE element size
+                // (2× the destination size). Shift = (2*esize_bits) - immh:immb.
                 if ((op & 0xBF00FC00) == 0x0F008400) {
                     uint8_t immh = (op >> 20) & 0xF;
                     uint8_t immb = (op >> 16) & 0xF;
@@ -2648,9 +2635,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     write_fp_d(cpu, rd, d);
                     return;
                 }
-                // FCVTZS/FCVTZU
-                // Mask 0x7F3E0000 excludes bit 16 (the U/S selector) so both
-                // FCVTZS (bit 16=0) and FCVTZU (bit 16=1) match.
+                // FCVTZS/FCVTZU (integer variant)
+                // Mask 0x7F3E0000 with constant 0x1E380000 requires bit 21 = 1
+                // (integer variant). The fixed-point variant (bit 21 = 0) is
+                // handled separately below.
                 if ((op & 0x7F3E0000) == 0x1E380000) {  // FCVTZS/FCVTZU
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
@@ -2675,9 +2663,48 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // SCVTF/UCVTF
-                // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
-                // and UCVTF (bit 16=1) match.
+                // FCVTZS/FCVTZU (fixed-point variant)
+                // Same encoding as the integer variant but bit 21 = 0 and a
+                // 6-bit scale field at bits[15:10] selects the number of
+                // fractional bits (fbits = 64 - scale). Semantics: scale the
+                // FP value by 2^fbits, convert to integer with truncation
+                // toward zero, and saturate to the destination's range on
+                // overflow. NaN → 0.
+                //
+                // Without this handler, every fixed-point FCVTZU (e.g.
+                // toybox MD5 K-table init: `fcvtzu w1, d0, #32` for
+                // floor(|sin|*2^32)) was silently NOP'd, leaving the
+                // destination register unchanged and producing wrong hashes.
+                if ((op & 0x7F3E0000) == 0x1E180000) {
+                    bool is_unsigned = ((op >> 16) & 1);
+                    bool is_64bit = sf_val;
+                    int fbits = 64 - static_cast<int>((op >> 10) & 0x3F);
+                    double a = ftype ? read_fp_d(cpu, rn)
+                                     : static_cast<double>(read_fp_s(cpu, rn));
+                    double scaled = std::ldexp(a, fbits);
+                    // Saturating conversion. NaN maps to 0 (ARM ARM).
+                    if (is_unsigned) {
+                        double hi = is_64bit ? 18446744073709551616.0
+                                             : 4294967296.0;
+                        uint64_t v = (std::isnan(a) || scaled < 0.0) ? 0
+                                   : (scaled >= hi) ? (is_64bit ? ~0ULL : 0xFFFFFFFFu)
+                                   : static_cast<uint64_t>(scaled);
+                        cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
+                    } else {
+                        double hi = is_64bit ? 9223372036854775808.0
+                                             : 2147483648.0;
+                        double lo = -hi;
+                        int64_t v = std::isnan(a) ? 0
+                                  : (scaled >= hi) ? (is_64bit ? INT64_MAX : INT32_MAX)
+                                  : (scaled < lo)  ? (is_64bit ? INT64_MIN : INT32_MIN)
+                                  : static_cast<int64_t>(scaled);
+                        cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v)
+                                                : static_cast<uint32_t>(static_cast<int32_t>(v));
+                    }
+                    return;
+                }
+                // SCVTF/UCVTF (integer variant)
+                // Mask 0x7F3E0000 with constant 0x1E220000 requires bit 21 = 1.
                 if ((op & 0x7F3E0000) == 0x1E220000) {  // SCVTF/UCVTF
                     bool is_unsigned = ((op >> 16) & 1);
                     bool is_64bit = sf_val;
@@ -2698,6 +2725,25 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             write_fp_s(cpu, rd, static_cast<float>(v));
                         }
                     }
+                    return;
+                }
+                // SCVTF/UCVTF (fixed-point variant)
+                // Bit 21 = 0 distinguishes from the integer variant; the 6-bit
+                // scale at bits[15:10] selects fractional bits (fbits = 64 - scale).
+                // Semantics: convert integer to FP and divide by 2^fbits — i.e.
+                // treat the source integer as a fixed-point value.
+                if ((op & 0x7F3E0000) == 0x1E020000) {
+                    bool is_unsigned = ((op >> 16) & 1);
+                    bool is_64bit = sf_val;
+                    int fbits = 64 - static_cast<int>((op >> 10) & 0x3F);
+                    double v = is_unsigned
+                        ? static_cast<double>(is_64bit ? cpu.regs[rn]
+                                                       : static_cast<uint32_t>(cpu.regs[rn]))
+                        : static_cast<double>(is_64bit ? static_cast<int64_t>(cpu.regs[rn])
+                                                       : static_cast<int32_t>(cpu.regs[rn]));
+                    double result = std::ldexp(v, -fbits);
+                    if (ftype) write_fp_d(cpu, rd, result);
+                    else       write_fp_s(cpu, rd, static_cast<float>(result));
                     return;
                 }
                 // FCSEL

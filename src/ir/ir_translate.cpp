@@ -1175,6 +1175,22 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return false;
                 }
             }
+            // FCVTZS/FCVTZU (fixed-point variant): scale FP value by 2^fbits
+            // then convert to integer with truncation toward zero, saturating
+            // to the destination's signed/unsigned range on overflow. The 6-bit
+            // scale at bits[15:10] gives fbits = 64 - scale.
+            //
+            // Without this, the JIT silently NOP'd every fixed-point FCVTZU
+            // (e.g. toybox MD5 K-table init: `fcvtzu w1, d0, #32` for
+            // floor(|sin|*2^32)), producing wrong hashes. We fall back to
+            // CALL_INTERP — the interpreter now implements the saturating
+            // fixed-point conversion natively. The fixed-point form is rare
+            // enough (mainly used in MD5/signal-processing code) that a
+            // native IR op isn't worth the complexity.
+            if ((op & 0x7F3E0000) == 0x1E180000) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
             // SCVTF/UCVTF: int→FP
             // Encoding: (op & 0x7F3E0000) == 0x1E220000
             // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
@@ -1196,6 +1212,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          sf, is_unsigned, cur_pc);
                     return false;
                 }
+            }
+            // SCVTF/UCVTF (fixed-point variant): convert integer to FP and
+            // divide by 2^fbits (fbits = 64 - scale). Falls back to the
+            // interpreter, which now handles this variant natively.
+            if ((op & 0x7F3E0000) == 0x1E020000) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return false;
             }
             // FMADD/FMSUB/FNMADD/FNMSUB (FP fused multiply-add/subtract).
             // Encoding: (op & 0xFF000000) == 0x1F000000.

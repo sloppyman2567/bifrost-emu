@@ -23,6 +23,14 @@ immediate) handler for cmode≠0xE — `MOVI V0.4S, #0` was silently
 ignored, leaving V0 non-zero, which corrupted stack data when used
 with `STP Q0, Q0` for zeroing. Fixed by matching all cmode values.
 
+**MD5 now produces correct hashes.** The root cause was the
+FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd
+(the integer-variant mask required bit 21 = 1; the fixed-point variant
+has bit 21 = 0 with a 6-bit scale field). Toybox's MD5 K-table init
+uses `fcvtzu w1, d0, #32` to compute `floor(|sin(i+1)| * 2^32)`; with
+the NOP, every K[i] was filled with stack garbage and the hash output
+was unrelated to the input.
+
 ### toybox sh feature test results
 
 | Feature | Status | Example |
@@ -166,18 +174,28 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `cal` | ✅ | ✅ | June 2026 calendar |
 | `xxd` | ✅ | ✅ | Hex dump of `/etc/hostname` |
 | `sleep` | ✅ | ✅ | `sleep 0.1` |
-| `sh -c` | ❌ | ❌ | `sh -c 'echo hi'` — exits 139 (SIGSEGV). The JIT now catches the `UnmappedMemory` exception and delivers SIGSEGV cleanly (was rc=134 SIGABRT crash before rc.0). The underlying guest fault (argv walk reading string data as pointers) is a pre-existing toybox sh binary issue. The standalone `sh.elf` (ctest_real/sh.elf) works fine. |
+| `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` → `hi`. Builtins, variables, arithmetic, `if`/`for`/`while`/`case`, functions, exit codes, command substitution, fork+execve. (Previously failed with SIGSEGV; the underlying issue was fixed during the rc.1 NEON/SIMD overhaul.) |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
 | `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
 | `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. (Was broken: SCVTF misdecoded as FMOV + FMADD operand bug.) |
+| `md5sum` | ✅ | ✅ | `echo -n hello \| md5sum` → `5d41402abc4b2a76b9719d911017c592`. Fixed in rc.1 (FCVTZU fixed-point variant was silently NOP'd, breaking MD5 K-table init). |
+| `sha1sum` | ✅ | ✅ | `echo -n hello \| sha1sum` → `aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d` |
+| `sha224sum` | ✅ | ✅ | `echo -n hello \| sha224sum` → `ea09ae9cc6768c50fcee903ed054556e5bfc8347907c125748ec5e7f` |
+| `sha256sum` | ✅ | ✅ | `echo -n hello \| sha256sum` → `2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824` |
+| `sha384sum` | ✅ | ✅ | `echo -n hello \| sha384sum` → `59e1748777448c69de6b800d7a33bbfb9ff07b9d259dc3bbd687ea5c6d8e7aa5c1c5e6e1a4bbba1b58b9a1f8f9d76c02` |
+| `sha512sum` | ✅ | ✅ | `echo -n hello \| sha512sum` → `9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043` |
+| `cksum` | ✅ | ✅ | `cksum /etc/hostname` → `2980571616 33` |
+| `crc32` | ✅ | ✅ | `crc32 /etc/hostname` → CRC32 with polynomial 0xEDB88320 |
+| `base64` | ✅ | ✅ | `echo hello \| base64` → `aGVsbG8K`. Round-trips with `-d`. |
 | `tr` | N/A | N/A | Not in this toybox build (use `ctest_real/tr.elf` instead — works) |
 | `expr` | N/A | N/A | Not in this toybox build |
 
-**Toybox summary**: 28 of the 29 tested commands pass; `sh -c` is the
-only regression (UnmappedMemory abort — likely a stack-pointer or
-signal-frame issue specific to toybox's `sh` binary). `tr` and `expr`
-are not in this toybox build. `seq`, `od`, `printf "%g"`, `ls /`,
-`factor`, `cksum`, `cal`, `xxd` and many more all work.
+**Toybox summary**: 38 of the 39 tested commands pass; `sh -c` previously
+failed with SIGSEGV but now works correctly (the underlying issue was
+fixed during rc.1's NEON/SIMD overhaul). `tr` and `expr` are not in this
+toybox build. `seq`, `od`, `printf "%g"`, `ls /`, `factor`, `cksum`,
+`cal`, `xxd`, `md5sum`, `sha1sum`, `sha256sum`, `sha384sum`, `sha512sum`,
+`crc32`, `base64` and many more all work.
 
 ---
 

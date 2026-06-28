@@ -70,8 +70,9 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     // refs, typically 1-3). Falls back to O(N) scan if the index is
     // missing for this target_pc — defensive, shouldn't happen since
     // the index is maintained at translate-time.
-    if (blocks_.find(target_pc) == blocks_.end()) return;
-    const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(blocks_[target_pc].fn);
+    auto target_it = blocks_.find(target_pc);
+    if (target_it == blocks_.end()) return;
+    const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(target_it->second.fn);
     if (target_fn == nullptr) return;
 
     auto try_patch = [&](uint64_t src_pc) {
