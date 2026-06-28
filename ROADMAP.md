@@ -22,8 +22,8 @@ status, see [TESTS.md](TESTS.md).
    handling, fork JIT cleanup, FP bounds checks, signal trampoline
    fork safety, W^X failure path hardening, --jit-threshold input
    validation, Function Multi-Versioning (FMV) + native FMA3 codegen
-   for FMADD/FMSUB/FNMADD/FNMSUB (addresses context.md known issues
-   #1 and #7 for FMA3-capable hosts), verify-mode self-loop un-patch
+   for FMADD/FMSUB/FNMADD/FNMSUB (addresses the FMA correctness and
+   performance items for FMA3-capable hosts), verify-mode self-loop un-patch
    fix + verify-once optimization, FNMADD/FNMSUB silent-NOP fix,
    FP 2-source vs FMA encoding collision fix. Post-rc.1 stabilization
    fixed FCMPE #0.0 misdecode, CCMP scratch vreg spill (FWD crash),
@@ -84,8 +84,9 @@ status, see [TESTS.md](TESTS.md).
    correct (single-rounded per IEEE 754) and ~1 cycle faster per
    instruction. Falls back to decomposed mul+add/sub on non-FMA3
    hosts; `BIFROST_NO_FMA3=1` forces the decomposed path for
-   debugging. This addresses context.md known issues #1 (FMADD not
-   truly fused) and #7 (FMA3 opportunity) for FMA3-capable hosts.
+   debugging. This addresses the FMA correctness (decomposed path is
+   double-rounded) and performance (FMA3 single-rounded) items for
+   FMA3-capable hosts.
    Future FMV work: AVX2 256-bit SIMD codegen, BMI2 (pdep/pext for
    bit-permutation), AVX-512 (masked operations).
 
@@ -118,8 +119,8 @@ final. It focuses on multimedia I/O and performance:
    returns ESPIPE).
 
 3. **Better JIT performance.** Two areas: (a) implement true LRU
-   eviction in the register allocator (currently FIFO, see context.md
-   issue #6), and (b) use the FMV framework to emit AVX2 256-bit SIMD
+   eviction in the register allocator (currently FIFO), and (b) use
+   the FMV framework to emit AVX2 256-bit SIMD
    codegen for vector ops that currently fall back to the interpreter
    (SHL/USHR/USRA/SLI etc.).
 

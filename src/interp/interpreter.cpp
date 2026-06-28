@@ -2782,9 +2782,9 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // FMA3 codegen produces single-rounded results, which
                 // diverges from the interpreter for IEEE 754 edge cases
                 // (e.g. mul=1e308 + acc=1e-300 → exact vs. ∞). This is
-                // documented in context.md known issue #1; the fix
-                // requires FMA3 codegen in the interpreter too (future
-                // work — currently we use the C++ mul+add path).
+                // a known limitation; the fix requires FMA3 codegen in
+                // the interpreter too (future work — currently we use
+                // the C++ mul+add path).
                 if ((op & 0xFF000000) == 0x1F000000) {
                     uint8_t ra = (op >> 10) & 0x1F;
                     bool sub = (op >> 15) & 1;   // o1

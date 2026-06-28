@@ -127,9 +127,9 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
                                   instruction = single-rounded =
                                   IEEE 754-correct for both)
   - FNMSUB → `vfnmsub231ss/sd` (xmm0 = -Vn*Vm - Va)
-  This addresses context.md known issues #1 (FMADD not truly fused)
-  and #7 (FMA3 opportunity) for hosts with FMA3 support. The 231 form
-  uses XMM0 as both acc input and dest, reading Vm directly from
+  This addresses the FMA correctness (decomposed path was double-rounded)
+  and performance (FMA3 single-rounded) items for hosts with FMA3
+  support. The 231 form uses XMM0 as both acc input and dest, reading Vm directly from
   memory via ModRM.rm — no separate load instruction needed.
 - **`BIFROST_NO_FMA3=1` environment variable** forces the decomposed
   mul+add/sub path even on FMA3-capable CPUs. This is a debugging aid
@@ -172,7 +172,7 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   substitution` and forcing `make verify` to exit with error 2 even
   when the actual verify run succeeded.
 
-### NEON/SIMD bug fixes (context.md known issue #4 — partially addressed)
+### NEON/SIMD bug fixes (partially addressed)
 
 - **32-bit ROR (interpreter) lost wrap bits.** The interpreter computed
   `ROR Wd, Wn, Wm` as `ror64(a, b & 31)` — a 64-bit rotate on a
@@ -425,10 +425,8 @@ both JIT and interpreter.
 - **CHANGELOG.md** updated with the FMV/FMA3 + verify-mode + JIT bug fix
   entries (this section).
 - **TESTS.md** updated: new `jit_fma.elf` row, test count 39→40.
-- **ROADMAP.md** updated: context.md known issues #1 and #7 (FMADD
-  fusion) marked as addressed for FMA3-capable hosts.
-- **context.md** was NOT modified (per project convention — it's a
-  snapshot of the architecture at rc.1).
+- **ROADMAP.md** updated: FMA fusion items marked as addressed for
+  FMA3-capable hosts.
 - Version bumped to `1.4.0-rc.1`.
 
 ### Git history cleanup

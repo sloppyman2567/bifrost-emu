@@ -2796,9 +2796,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         // ── Decomposed path (no FMA3) ────────────────────────────────
         //
         // We decompose into separate mulsd + addsd/subsd. This is
-        // double-rounded (NOT IEEE 754-correct for edge cases — see
-        // context.md known issue #1), but matches the interpreter's
-        // decomposition path so JIT/interpreter agree.
+        // double-rounded (NOT IEEE 754-correct for edge cases — a
+        // known limitation), but matches the interpreter's decomposition
+        // path so JIT/interpreter agree.
         //
         // The clobber list (RAX, RCX, RDX) matches the existing FP
         // codegen convention — FP ops only touch XMM0/XMM1/XMM2 plus

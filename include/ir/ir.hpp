@@ -182,7 +182,7 @@ enum class IROp : uint8_t {
     // (FNMSUB) — single-rounded, IEEE 754-correct fused mul-add.
     //
     // Without FMA3: decompose into mulsd+addsd (double-rounded, NOT
-    // IEEE 754-correct for edge cases — see context.md known issue #1).
+    // IEEE 754-correct for edge cases — a known limitation).
     // The decomposition path produces the same numerical result as the
     // interpreter (which also decomposes), so JIT/interpreter agree.
     FMADD,         // v_lo[dest] = v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
