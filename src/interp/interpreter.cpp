@@ -1600,12 +1600,66 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // ── TBL/TBX (stub: copy Vn to Vd) ──
-                case 0x0E000000:
-                case 0x0E001000: {
-                    cpu.v_lo[rd] = cpu.v_lo[rn];
-                    if (Q) cpu.v_hi[rd] = cpu.v_hi[rn];
-                    else cpu.v_hi[rd] = 0;
+                // ── TBL/TBX (Table Lookup) ──
+                // AArch64 TBL/TBX permute bytes from one or two source
+                // vectors using indices from a third vector. Each byte
+                // index in the index vector selects a byte from the
+                // concatenated source(s). Indices >= the source length:
+                //   TBL: result byte = 0
+                //   TBX: result byte unchanged (in-place update)
+                //
+                // The SIMD_DP sub-dispatch uses mask 0xFFE0FC00 with Q
+                // (bit 30) and L (bit 20) stripped, but op2 (bit 21)
+                // kept. So:
+                //   - TBL (op2=0) matches case 0x0E000000 (both Q and L
+                //     variants).
+                //   - TBX (op2=1) matches case 0x0E200000.
+                // We read Q (bit 30) and L (bit 20) from the raw op.
+                //
+                // The old code was a stub that just copied Vn to Vd — any
+                // code doing byte shuffles (hex encode, UTF-8 conversion,
+                // base64) would get wrong results silently.
+                case 0x0E000000:   // TBL (op2=0; Q and L stripped)
+                case 0x0E200000: { // TBX (op2=1; Q and L stripped)
+                    bool is_tbx     = (op & 0x200000) != 0;  // op2 bit (bit 21)
+                    bool is_two_src = (op & 0x1000)   != 0;  // L bit (bit 20)
+                    // Q bit (bit 30) — already extracted as `Q` above.
+                    // Build the source table: 16 (single) or 32 (two) bytes.
+                    uint8_t table[32];
+                    memcpy(table,    &cpu.v_lo[rn], 8);
+                    memcpy(table+8,  &cpu.v_hi[rn], 8);
+                    if (is_two_src) {
+                        int rn2 = (rn + 1) & 31;
+                        memcpy(table+16, &cpu.v_lo[rn2], 8);
+                        memcpy(table+24, &cpu.v_hi[rn2], 8);
+                    }
+                    int table_len = is_two_src ? 32 : 16;
+                    // Read the index vector Vm.
+                    uint8_t idx[16];
+                    memcpy(idx,    &cpu.v_lo[rm], 8);
+                    memcpy(idx+8,  &cpu.v_hi[rm], 8);
+                    int out_len = Q ? 16 : 8;
+                    // Read current Vd (for TBX in-place update).
+                    uint8_t out[16];
+                    memcpy(out,    &cpu.v_lo[rd], 8);
+                    memcpy(out+8,  &cpu.v_hi[rd], 8);
+                    for (int i = 0; i < out_len; i++) {
+                        uint8_t b = idx[i];
+                        if (b < table_len) {
+                            out[i] = table[b];
+                        } else if (!is_tbx) {
+                            // TBL: out-of-range indices produce 0.
+                            out[i] = 0;
+                        }
+                        // TBX: out-of-range indices leave out[i] unchanged.
+                    }
+                    cpu.v_lo[rd] = 0;
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) {
+                        memcpy(&cpu.v_hi[rd], out+8, 8);
+                    } else {
+                        cpu.v_hi[rd] = 0;
+                    }
                     return;
                 }
                 // ── CMHS (vector) ──

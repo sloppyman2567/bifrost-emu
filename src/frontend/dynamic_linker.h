@@ -54,6 +54,7 @@
 #include "bifrost/types.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -135,12 +136,27 @@ public:
     const std::vector<LoadedObject>& objects() const { return objects_; }
     const std::string& error() const { return error_; }
 
+    // ── ifunc resolver callback ────────────────────────────────────
+    // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
+    // resolver ADDRESS) instead of calling the resolver to get the
+    // actual function pointer. This silently corrupted any program
+    // using ifuncs (e.g., glibc memcpy variants selected at load time
+    // based on CPU features). Now the Emulator registers a callback
+    // that runs the resolver function in a scratch CPU and returns X0.
+    // The callback returns 0 on failure (which leaves the GOT slot 0,
+    // and the guest will crash on the first call — visible, not silent).
+    void set_ifunc_resolver(std::function<uint64_t(uint64_t)> cb) {
+        ifunc_resolver_ = std::move(cb);
+    }
+
 private:
     Memory& mem_;
     std::vector<LoadedObject> objects_;
     // Global symbol table: name → absolute address.
     std::unordered_map<std::string, uint64_t> symbols_;
     std::string error_;
+    // Optional ifunc resolver callback (set by Emulator before link()).
+    std::function<uint64_t(uint64_t)> ifunc_resolver_;
 
     // TLS state.
     uint64_t static_tls_size_ = 0;  // total bytes (aligned)

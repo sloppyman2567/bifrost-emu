@@ -78,6 +78,14 @@ public:
     // path even on FMA3-capable CPUs (debugging).
     const CpuFeatures& cpu_features() const { return cpu_features_; }
     bool has_fma3() const { return cpu_features_.has_fma3() && !no_fma3_; }
+    // BUGFIX: SSE4.1 opcodes (pmulld, pminud, pmaxud, pminsb, pmaxsb,
+    // pminsd, pmaxsd, pcmpeqq, roundsd, roundss) were emitted
+    // unconditionally without a runtime guard. They would SIGILL on
+    // pre-Westmere CPUs (2009 and earlier). The detection has always
+    // existed in CpuFeatures; we just weren't querying it at the
+    // codegen sites. Now we do, falling back to CALL_INTERP on hosts
+    // without SSE4.1.
+    bool has_sse41() const { return cpu_features_.has_sse41(); }
 
     uint64_t blocks_translated = 0;
     uint64_t blocks_executed   = 0;

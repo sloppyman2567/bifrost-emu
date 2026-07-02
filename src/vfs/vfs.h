@@ -33,9 +33,11 @@
 #include "bifrost/types.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -46,6 +48,7 @@ namespace arm64emu {
 
 class GraphicsBackend;
 class Audio;
+class Memory;
 
 // ── VNode: abstract file handle ────────────────────────────────────────
 class VNode {
@@ -120,11 +123,59 @@ public:
     // Wire up the audio backend (for /dev/dsp, /dev/snd). May be null.
     void set_audio(Audio* audio) { audio_ = audio; }
 
+    // ── Live memory layout for /proc/self/maps ─────────────────────
+    // The Emulator registers a callback that returns the current
+    // allocations + brk range so /proc/self/maps can show a real layout
+    // instead of the old hardcoded 5-line string. The callback returns
+    // a vector of (start, size, label) tuples; label is "rwxp" style
+    // permissions + optional [stack]/[heap]/[anon] annotation.
+    struct MapEntry {
+        uint64_t    start;
+        uint64_t    end;
+        char        perms[5];  // "rwxp\0"
+        std::string label;     // "" or "[stack]"/"[heap]"/etc.
+    };
+    void set_maps_provider(std::function<std::vector<MapEntry>()> cb) {
+        maps_provider_ = std::move(cb);
+    }
+
+    // ── Guest cwd tracking (chdir/getcwd) ──────────────────────────
+    // The Emulator registers the guest's current working directory
+    // here so the getcwd syscall can return the real path (the host
+    // cwd is meaningless because BIFROST_ROOT sandboxing decouples
+    // them). Updated by chdir/fchdir; queried by getcwd.
+    void set_cwd_provider(std::function<std::string()> getter,
+                          std::function<bool(const std::string&)> setter) {
+        cwd_getter_ = std::move(getter);
+        cwd_setter_ = std::move(setter);
+    }
+    const std::string& cwd() const { return guest_cwd_; }
+    void set_cwd(const std::string& c) { guest_cwd_ = c; }
+    bool has_cwd_provider() const { return cwd_setter_ != nullptr; }
+    bool apply_chdir(const std::string& path) {
+        if (cwd_setter_) return cwd_setter_(path);
+        return false;
+    }
+
+    // Expose the maps provider for /proc/self/maps.
+    const std::function<std::vector<MapEntry>()>& maps_provider() const {
+        return maps_provider_;
+    }
+    // Expose the cwd getter for getcwd syscall.
+    bool has_cwd_getter() const { return cwd_getter_ != nullptr; }
+    std::string get_cwd() const {
+        return cwd_getter_ ? cwd_getter_() : guest_cwd_;
+    }
+
 private:
     std::string elf_path_;
     std::vector<std::string> argv_;
     GraphicsBackend* gfx_ = nullptr;
     Audio* audio_ = nullptr;
+    std::function<std::vector<MapEntry>()> maps_provider_;
+    std::function<std::string()> cwd_getter_;
+    std::function<bool(const std::string&)> cwd_setter_;
+    std::string guest_cwd_ = "/";
 
     // Sub-resolvers (defined in vfs_procfs.cpp / vfs_devfs.cpp /
     // vfs_host.cpp). Each returns nullptr if it doesn't handle the path.

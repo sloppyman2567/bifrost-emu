@@ -206,7 +206,11 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
 
     if (can_grow_in_place) {
         map_range(extra_start, extra_end - extra_start);
-        std::shared_lock<std::shared_mutex> g(mu_);
+        // BUGFIX: must hold a *unique* lock to mutate allocations_. The
+        // old code used shared_lock, which is a data race (UB) if another
+        // thread is concurrently reading allocations_ via mremap_grow()
+        // or untrack_allocation().
+        std::unique_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
             it->second = new_aligned;
@@ -227,18 +231,47 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         write(new_addr, buf.data(), old_size);
     }
     {
-        std::shared_lock<std::shared_mutex> g(mu_);
+        // BUGFIX: unique_lock, not shared_lock — we're mutating allocations_.
+        std::unique_lock<std::shared_mutex> g(mu_);
         allocations_.erase(old_addr);
     }
     return new_addr;
 }
 
 void Memory::untrack_allocation(uint64_t addr) {
-    std::shared_lock<std::shared_mutex> g(mu_);
+    // BUGFIX: must hold a *unique* lock to mutate allocations_. The old
+    // code used shared_lock, which is a data race (UB) if another thread
+    // is concurrently reading allocations_ via mremap_grow().
+    std::unique_lock<std::shared_mutex> g(mu_);
     allocations_.erase(addr);
 }
 
 bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
+    // BUGFIX: the old code only consulted the sparse pages_ map and never
+    // the 4 GiB direct window. For any atomic address below 4 GiB (which
+    // is where ALL user-space code, data, and futex words live in our
+    // memory model), the CAS would silently create a *separate* pages_
+    // entry that was independent of the direct-window storage — so
+    // plain writes via Memory::write() went to the window, but CAS
+    // read/wrote a stale duplicate. This broke LSE atomics (LDADD/CAS/
+    // SWP) and futex for any address below 4 GiB.
+    //
+    // The fix: for addresses in the direct window, operate directly on
+    // the window storage. We use a std::atomic<uint32_t> ref to get a
+    // well-defined CAS without invoking UB by racing on a plain uint32_t.
+    // The direct window is mmap'd MAP_PRIVATE|MAP_ANONYMOUS, so we own it
+    // exclusively — no other process can touch it, and we serialize
+    // cross-vCPU access via the shared_mutex below for the pages_ path.
+    if (direct_window_ && addr + 4 <= DIRECT_WINDOW_SIZE) {
+        // Page-aligned check: the entire 4-byte word must be within the
+        // window (already checked above). Use an atomic CAS on the
+        // underlying storage. This is safe because the window is private
+        // to this process.
+        std::atomic<uint32_t>* slot =
+            reinterpret_cast<std::atomic<uint32_t>*>(direct_window_ + addr);
+        return slot->compare_exchange_strong(expected, desired,
+                                              std::memory_order_acq_rel);
+    }
     std::unique_lock<std::shared_mutex> g(mu_);
     auto it = pages_.find(addr / PAGE_SIZE);
     if (it == pages_.end()) {
@@ -257,6 +290,13 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
 }
 
 bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
+    // See atomic_cas_32 for the direct-window rationale.
+    if (direct_window_ && addr + 8 <= DIRECT_WINDOW_SIZE) {
+        std::atomic<uint64_t>* slot =
+            reinterpret_cast<std::atomic<uint64_t>*>(direct_window_ + addr);
+        return slot->compare_exchange_strong(expected, desired,
+                                              std::memory_order_acq_rel);
+    }
     std::unique_lock<std::shared_mutex> g(mu_);
     auto it = pages_.find(addr / PAGE_SIZE);
     if (it == pages_.end()) {

@@ -111,6 +111,20 @@ public:
         return pages_;
     }
 
+    // Snapshot of currently-tracked allocations (start → page-aligned size).
+    // Used by /proc/self/maps to produce a real memory layout instead of
+    // a hardcoded one. Returns a copy under the lock so callers can iterate
+    // without holding the mutex.
+    std::vector<std::pair<uint64_t, uint64_t>> allocations_snapshot() const {
+        std::shared_lock<std::shared_mutex> g(mu_);
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        out.reserve(allocations_.size());
+        for (const auto& kv : allocations_) {
+            out.emplace_back(kv.first, kv.second);
+        }
+        return out;
+    }
+
     // ── Fork support ──────────────────────────────────────────────────
     // Create a deep copy of this Memory object for fork(). The new
     // Memory has its own direct window and pages_ map, with all

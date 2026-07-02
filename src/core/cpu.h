@@ -94,6 +94,24 @@ public:
     // futex wake is performed on it. Required for pthread_join to work.
     uint64_t clear_child_tid = 0;
 
+    // ── Per-CPU signal state ────────────────────────────────────────
+    // BUGFIX: the old code stored sigmask and altstack in SignalTable
+    // (shared across all vCPUs). That broke multi-threaded signal
+    // handling — one thread's rt_sigprocmask would clobber another
+    // thread's mask. Now each CPU has its own mask and altstack, set
+    // by rt_sigprocmask/sigaltstack and read by deliver_signal.
+    uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo` set = blocked)
+    struct AltStack {
+        uint64_t sp    = 0;     // base address
+        uint64_t size  = 0;     // size in bytes
+        uint32_t flags = 0;     // SS_ONSTACK / SS_DISABLE
+        static constexpr uint32_t SS_ONSTACK_EMU  = 1;
+        static constexpr uint32_t SS_DISABLE_EMU  = 2;
+        bool active() const { return (flags & SS_ONSTACK_EMU) != 0; }
+        bool disabled() const { return (flags & SS_DISABLE_EMU) != 0 || size == 0; }
+        uint64_t top() const { return sp + size; }
+    } altstack;
+
     // ── Local Exclusive Monitor ─────────────────────────────────────
     // AArch64 LL/SC atomics use an "exclusive monitor" — a single-entry
     // hardware tag that records the address of the most recent LDXR/LDAXR.

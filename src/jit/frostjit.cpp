@@ -1876,18 +1876,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             } else if (opc == 2) {  // MUL
                 if (esize == 2) {
                     op_byte = 0xD5;        // pmullw (66 0F D5)
-                } else if (esize == 4) {
-                    // pmulld (SSE4.1): 66 0F 38 5F
+                } else if (esize == 4 && has_sse41()) {
+                    // pmulld (SSE4.1): 66 0F 38 5F. Guarded — SIGILL on
+                    // pre-Westmere CPUs without the runtime check.
                     needs_38_prefix = true;
                     op_byte = 0x5F;
                 } else {
-                    supported = false;  // size=1 or 8: no native multiply
+                    supported = false;  // size=1/8 or no SSE4.1: no native multiply
                 }
             } else if (opc == 3 || opc == 4) {  // unsigned min/max
                 if (esize == 1) {
                     op_byte = (opc == 3) ? 0xDA : 0xDE;  // pminub/pmaxub
-                } else if (esize == 4) {
-                    // pminud = 66 0F 38 3B ; pmaxud = 66 0F 38 3F
+                } else if (esize == 4 && has_sse41()) {
+                    // pminud = 66 0F 38 3B ; pmaxud = 66 0F 38 3F (SSE4.1)
                     needs_38_prefix = true;
                     op_byte = (opc == 3) ? 0x3B : 0x3F;
                 } else {
@@ -1896,7 +1897,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             } else if (opc == 5 || opc == 6) {  // signed min/max
                 if (esize == 2) {
                     op_byte = (opc == 5) ? 0xEA : 0xEE;  // pminsw/pmaxsw
-                } else if (esize == 1 || esize == 4) {
+                } else if ((esize == 1 || esize == 4) && has_sse41()) {
                     needs_38_prefix = true;
                     if (esize == 1) {
                         // pminsb = 66 0F 38 38 ; pmaxsb = 66 0F 38 3C
@@ -1965,7 +1966,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 case 1: op_byte = 0x74; break;  // pcmpeqb
                 case 2: op_byte = 0x75; break;  // pcmpeqw
                 case 4: op_byte = 0x76; break;  // pcmpeqd
-                case 8: op_byte = 0x29; break;  // pcmpeqq (SSE4.1: 66 0F 38 29)
+                case 8:  // pcmpeqq requires SSE4.1
+                    if (!has_sse41()) {
+                        emit_call_interp(inst.arm_pc, false);
+                        return false;
+                    }
+                    op_byte = 0x29; break;  // pcmpeqq (SSE4.1: 66 0F 38 29)
             }
             bool needs_38_prefix = (esize == 8);
 
@@ -2716,6 +2722,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
 
         // ── FRINT: FP round to integer ───────────────────────────────
         case IROp::FRINT: {
+            // roundsd/roundss are SSE4.1 instructions. Fall back to
+            // CALL_INTERP on hosts without SSE4.1 to avoid SIGILL.
+            // BUGFIX: previously emitted unconditionally.
+            if (!has_sse41()) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
             // FRINT only clobbers RAX (zero store).
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));

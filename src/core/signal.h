@@ -51,6 +51,7 @@
 #pragma once
 
 #include "bifrost/types.hpp"
+#include "core/cpu.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -142,6 +143,15 @@ struct SignalFrame {
     uint64_t fault_addr;  // si_addr for SIGSEGV/SIGBUS
     int      si_code;     // si_code for siginfo_t
     bool     on_altstack; // was the handler entered on the altstack?
+    // BUGFIX: FP/SIMD state was NOT preserved across signal handlers.
+    // Handlers using NEON (crypto, DSP, image processing) would see
+    // corrupted V registers. Now we save/restore the full FP file +
+    // FPCR/FPSR. The guest-visible ucontext_t also gets an fpsimd_context
+    // written into its 4 KiB reserved area (see build_ucontext).
+    uint64_t v_lo[32];    // bits 63:0 of each V register
+    uint64_t v_hi[32];    // bits 127:64 of each V register
+    uint32_t fpcr;
+    uint32_t fpsr;
 };
 
 // Per-signal action recorded by rt_sigaction.
@@ -153,6 +163,8 @@ struct SigAction {
 };
 
 // Alternate signal stack (sigaltstack).
+// Kept as a free struct for backwards compat with code that constructs
+// one directly. The per-CPU state lives in CPU::altstack.
 struct AltStack {
     uint64_t sp       = 0;   // base address of stack
     uint64_t size     = 0;   // size in bytes
@@ -187,32 +199,28 @@ public:
     bool has_pending() const { return !frames_.empty(); }
     size_t frame_count() const { return frames_.size(); }
 
-    // ── Signal mask (per-CPU, but stored centrally for simplicity) ───
-    // The emulator sets/restores these from CPU state when delivering
-    // signals and when handling rt_sigprocmask/rt_sigreturn.
-    uint64_t mask() const { return mask_; }
-    void set_mask(uint64_t m) { mask_ = m; }
-    bool is_blocked(int signo) const {
+    // ── Per-CPU signal mask & altstack ──────────────────────────────
+    // BUGFIX: mask and altstack used to live in SignalTable (shared
+    // across all vCPUs). They're now per-CPU (in CPU::sigmask and
+    // CPU::altstack). These helpers take a CPU& and operate on the
+    // per-CPU state.
+    static bool is_blocked(const CPU& cpu, int signo) {
         if (signo < 1 || signo > 63) return false;
-        return (mask_ >> signo) & 1;
+        return (cpu.sigmask >> signo) & 1;
     }
 
-    // Apply a rt_sigprocmask `how` operation. Returns 0 on success,
-    // -EINVAL for an invalid `how`. If `old_set_addr` is non-zero, writes
-    // the previous mask there.
-    int procmask(Memory& mem, int how, uint64_t new_set_addr,
-                 uint64_t old_set_addr, size_t sigsetsize);
+    // Apply a rt_sigprocmask `how` operation to `cpu.sigmask`. Returns 0
+    // on success, -EINVAL for an invalid `how`. If `old_set_addr` is
+    // non-zero, writes the previous mask there.
+    static int procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
+                        uint64_t old_set_addr, size_t sigsetsize);
 
-    // ── Alternate signal stack (sigaltstack) ─────────────────────────
-    const AltStack& altstack() const { return altstack_; }
-    AltStack& altstack_mut() { return altstack_; }
-    int set_altstack(Memory& mem, uint64_t new_addr, uint64_t old_addr);
-    void clear_altstack_on_return() {
-        altstack_.flags &= ~AltStack::SS_ONSTACK_EMU;
-    }
-    void set_altstack_active(bool active) {
-        if (active) altstack_.flags |= AltStack::SS_ONSTACK_EMU;
-        else        altstack_.flags &= ~AltStack::SS_ONSTACK_EMU;
+    // Set/query `cpu.altstack`. Returns 0 on success, -errno on failure.
+    static int set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr);
+
+    static void set_altstack_active(CPU& cpu, bool active) {
+        if (active) cpu.altstack.flags |= CPU::AltStack::SS_ONSTACK_EMU;
+        else        cpu.altstack.flags &= ~CPU::AltStack::SS_ONSTACK_EMU;
     }
     // Clear a handler (SA_RESETHAND one-shot behavior).
     void clear_handler(int signo) {
@@ -224,8 +232,6 @@ public:
 private:
     SigAction actions_[MAX_SIGNAL + 1];  // indexed by signo (1..31)
     std::vector<SignalFrame> frames_;
-    uint64_t mask_ = 0;     // current blocked-signal mask
-    AltStack altstack_;
 };
 
 // Map the sigreturn trampoline into the guest's address space.

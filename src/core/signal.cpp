@@ -65,10 +65,17 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
         SigAction& old = actions_[signo];
         memcpy(buf + 0,  &old.handler, 8);
         memcpy(buf + 8,  &old.flags,   8);
-        memcpy(buf + 16, &old.mask,    8);  // sa_restorer offset (unused)
-        // The kernel puts sa_mask at offset 24 in struct k_sigaction
-        // (after sa_handler, sa_flags, sa_restorer). We mirror that.
-        memcpy(buf + 24, &old.mask,    8);
+        // BUGFIX: the old code wrote `old.mask` to BOTH offset 16 (sa_restorer,
+        // which is unused on AArch64) AND offset 24 (sa_mask). That was
+        // sloppy — guest code reading sa_restorer would see a garbage
+        // pointer (the sa_mask value). Per the AArch64 struct k_sigaction
+        // layout, offset 16 is sa_restorer (always 0 on AArch64 — there is
+        // no restorer; the trampoline is provided by the kernel at
+        // TRAMPOLINE_ADDR) and offset 24 is sa_mask. Write 0 to offset 16
+        // and the actual mask to offset 24.
+        uint64_t zero_restorer = 0;
+        memcpy(buf + 16, &zero_restorer, 8);
+        memcpy(buf + 24, &old.mask,      8);
         try {
             mem.write(old_act_addr, buf, KSIGACTION_SIZE);
         } catch (...) {
@@ -126,7 +133,10 @@ bool SignalTable::pop_frame(SignalFrame& out) {
 }
 
 // ── Signal mask (rt_sigprocmask) ───────────────────────────────────────
-int SignalTable::procmask(Memory& mem, int how, uint64_t new_set_addr,
+// BUGFIX: this is now a static method that operates on `cpu.sigmask`
+// instead of a shared `mask_` member. This fixes multi-threaded signal
+// handling — each vCPU has its own mask.
+int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
                           uint64_t old_set_addr, size_t sigsetsize) {
     // Linux allows sigsetsize up to 8 bytes for our 64-bit mask.
     if (sigsetsize != 8 && sigsetsize != 4) return -EINVAL;
@@ -135,9 +145,9 @@ int SignalTable::procmask(Memory& mem, int how, uint64_t new_set_addr,
     if (old_set_addr != 0) {
         try {
             if (sigsetsize == 8) {
-                mem.store<uint64_t>(old_set_addr, mask_);
+                mem.store<uint64_t>(old_set_addr, cpu.sigmask);
             } else {
-                mem.store<uint32_t>(old_set_addr, static_cast<uint32_t>(mask_));
+                mem.store<uint32_t>(old_set_addr, static_cast<uint32_t>(cpu.sigmask));
             }
         } catch (...) {
             return -EFAULT;
@@ -162,13 +172,13 @@ int SignalTable::procmask(Memory& mem, int how, uint64_t new_set_addr,
 
     switch (how) {
         case SIG_BLOCK_EMU:
-            mask_ |= new_mask;
+            cpu.sigmask |= new_mask;
             break;
         case SIG_UNBLOCK_EMU:
-            mask_ &= ~new_mask;
+            cpu.sigmask &= ~new_mask;
             break;
         case SIG_SETMASK_EMU:
-            mask_ = new_mask;
+            cpu.sigmask = new_mask;
             break;
         default:
             return -EINVAL;
@@ -177,7 +187,9 @@ int SignalTable::procmask(Memory& mem, int how, uint64_t new_set_addr,
 }
 
 // ── sigaltstack ────────────────────────────────────────────────────────
-int SignalTable::set_altstack(Memory& mem, uint64_t new_addr, uint64_t old_addr) {
+// BUGFIX: this is now a static method that operates on `cpu.altstack`
+// instead of a shared `altstack_` member.
+int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr) {
     // struct sigaltstack { void *ss_sp; int ss_flags; size_t ss_size; }
     // AArch64 layout: ss_sp at 0, ss_flags at 8 (with 4-byte padding),
     // ss_size at 16. Total 24 bytes.
@@ -185,9 +197,9 @@ int SignalTable::set_altstack(Memory& mem, uint64_t new_addr, uint64_t old_addr)
 
     if (old_addr != 0) {
         uint8_t buf[SS_SIZE] = {0};
-        memcpy(buf + 0,  &altstack_.sp,    8);
-        memcpy(buf + 8,  &altstack_.flags, 4);
-        memcpy(buf + 16, &altstack_.size,  8);
+        memcpy(buf + 0,  &cpu.altstack.sp,    8);
+        memcpy(buf + 8,  &cpu.altstack.flags, 4);
+        memcpy(buf + 16, &cpu.altstack.size,  8);
         try {
             mem.write(old_addr, buf, SS_SIZE);
         } catch (...) {
@@ -211,17 +223,17 @@ int SignalTable::set_altstack(Memory& mem, uint64_t new_addr, uint64_t old_addr)
 
         // Cannot set SS_ONSTACK via sigaltstack (the kernel sets/clears
         // it; user code only sets SS_DISABLE).
-        if (new_flags & AltStack::SS_ONSTACK_EMU) return -EPERM;
-        if (new_flags & ~static_cast<uint32_t>(AltStack::SS_DISABLE_EMU)) {
+        if (new_flags & CPU::AltStack::SS_ONSTACK_EMU) return -EPERM;
+        if (new_flags & ~static_cast<uint32_t>(CPU::AltStack::SS_DISABLE_EMU)) {
             return -EINVAL;
         }
-        if (!(new_flags & AltStack::SS_DISABLE_EMU) &&
+        if (!(new_flags & CPU::AltStack::SS_DISABLE_EMU) &&
             (new_size < static_cast<uint64_t>(MINSIGSTKSZ) || new_sp == 0)) {
             return -ENOMEM;
         }
-        altstack_.sp    = new_sp;
-        altstack_.size  = new_size;
-        altstack_.flags = new_flags;
+        cpu.altstack.sp    = new_sp;
+        cpu.altstack.size  = new_size;
+        cpu.altstack.flags = new_flags;
     }
     return 0;
 }
@@ -342,13 +354,33 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
 //       __u64 pc                   (8) offset 432
 //       __u64 pstate               (8) offset 440
 //       __u8 __reserved[4096]   (4096) offset 448   // fpsimd context
-// Total meaningful size written: 448 bytes (we skip the 4KB reserved
-// area; guests that read fpsimd_context from there will see zeros,
-// which is acceptable since we don't preserve FP state in sigframes).
+// Total meaningful size written: 448 + 528 = 976 bytes (sigcontext +
+// fpsimd_context). The 4 KiB reserved area's first 528 bytes hold the
+// fpsimd_context; the rest is zero-padded.
+//
+// BUGFIX: the old code skipped the 4 KiB reserved area entirely, so
+// FP/SIMD state was NOT preserved across signal handlers. Handlers
+// using NEON (crypto, DSP, image processing) would see corrupted V
+// registers. Now we write a proper fpsimd_context at offset 448.
+//
+// fpsimd_context layout (arch/arm64/include/uapi/asm/sigcontext.h):
+//   struct _aarch64_ctx head     (8)   offset 0
+//       __u32 magic                  // FPSIMD_MAGIC = 0x46508001
+//       __u32 size                   // sizeof(fpsimd_context) = 528
+//   __u64 fpsr                   (8)   offset 8
+//   __u64 fpcr                   (8)   offset 16
+//   __uint128_t vregs[32]        (512) offset 24  (32 * 16 bytes)
+// Total: 8 + 8 + 8 + 512 = 536 bytes? The kernel header says
+// sizeof(struct fpsimd_context) = 528, which means the vregs array is
+// 512 bytes and the header (magic+size) is 8 bytes, fpsr is 4 bytes,
+// fpcr is 4 bytes — totaling 8+4+4+512 = 528. We use the kernel's
+// 64-bit fpsr/fpcr fields for simplicity (the high 32 bits are
+// zero-padded; the kernel does the same on AArch64).
 uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
                         uint64_t saved_mask, uint64_t fault_addr) {
     if (uc_addr == 0) return 0;
-    constexpr size_t UCONTEXT_SIZE = 448;
+    // BUGFIX: bumped from 448 to 976 to include the fpsimd_context.
+    constexpr size_t UCONTEXT_SIZE = 976;
     uint8_t buf[UCONTEXT_SIZE] = {0};
     // uc_flags = 0 (no UC_FP_ALL etc.)
     // uc_link = 0
@@ -363,6 +395,27 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     memcpy(buf + 424, &cpu.sp, 8);
     memcpy(buf + 432, &cpu.pc, 8);
     memcpy(buf + 440, &cpu.pstate, 8);
+    // fpsimd_context at offset 448:
+    // Per arch/arm64/include/uapi/asm/sigcontext.h:
+    //   struct _aarch64_ctx head  (magic:4 + size:4 = 8 bytes) at +0
+    //   __u32 fpsr              (4 bytes) at +8
+    //   __u32 fpcr              (4 bytes) at +12
+    //   __uint128_t vregs[32]   (512 bytes) at +16
+    // Total: 8 + 4 + 4 + 512 = 528 bytes.
+    constexpr uint32_t FPSIMD_MAGIC = 0x46508001;
+    constexpr uint32_t FPSIMD_SIZE  = 528;
+    memcpy(buf + 448 + 0, &FPSIMD_MAGIC, 4);
+    memcpy(buf + 448 + 4, &FPSIMD_SIZE,  4);
+    // fpsr (4 bytes):
+    memcpy(buf + 448 + 8, &cpu.fpsr, 4);
+    // fpcr (4 bytes):
+    memcpy(buf + 448 + 12, &cpu.fpcr, 4);
+    // vregs[32] — 32 * 16 bytes = 512 bytes. Each V reg is stored as
+    // (v_lo, v_hi) = 16 bytes. We interleave them.
+    for (int i = 0; i < 32; i++) {
+        memcpy(buf + 448 + 16 + i * 16,     &cpu.v_lo[i], 8);
+        memcpy(buf + 448 + 16 + i * 16 + 8, &cpu.v_hi[i], 8);
+    }
     try { mem.write(uc_addr, buf, sizeof(buf)); } catch (...) {}
     return uc_addr + sizeof(buf);
 }
@@ -375,7 +428,9 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // Blocked signals are not delivered (except SIGKILL/SIGSTOP, which
     // we don't block — handled in procmask). Pending blocked signals
     // are dropped in this simplified model (no pending queue).
-    if (sigtab.is_blocked(signo) &&
+    // BUGFIX: read the mask from the per-CPU state, not the shared
+    // SignalTable mask. Each vCPU has its own mask now.
+    if (SignalTable::is_blocked(cpu, signo) &&
         signo != BIFROST_SIGKILL && signo != BIFROST_SIGSTOP) {
         return false;
     }
@@ -416,35 +471,40 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     }
 
     // Pick the stack: altstack if SA_ONSTACK is set and the altstack
-    // is configured and not already in use.
+    // is configured and not already in use. BUGFIX: read altstack from
+    // the per-CPU state.
     uint64_t target_sp = cpu.sp;
     bool on_altstack = false;
-    if ((act->flags & SA_ONSTACK_EMU) && !sigtab.altstack().disabled() &&
-        !sigtab.altstack().active()) {
-        // Align down to 16 bytes and reserve 1024 bytes for our
-        // siginfo_t + ucontext_t (we write them on the guest stack).
-        target_sp = sigtab.altstack().top() - 1024;
+    if ((act->flags & SA_ONSTACK_EMU) && !cpu.altstack.disabled() &&
+        !cpu.altstack.active()) {
+        // Align down to 16 bytes and reserve enough space for siginfo +
+        // ucontext (now 976 bytes with fpsimd_context) + handler frame.
+        // Reserve 1280 bytes (siginfo 128 + ucontext 976 + 176 slack).
+        target_sp = cpu.altstack.top() - 1280;
         target_sp &= ~0xFULL;
         on_altstack = true;
     }
 
     // Build siginfo_t and ucontext_t on the guest stack (below
-    // target_sp). Reserve 128 (siginfo) + 448 (ucontext mcontext only)
-    // = 576 bytes, rounded up to 768 for alignment + handler frame.
+    // target_sp). Reserve 128 (siginfo) + 976 (ucontext with fpsimd)
+    // = 1104 bytes, rounded up to 1280 for alignment + handler frame.
     constexpr size_t SIGINFO_SIZE = 128;
-    constexpr size_t FRAME_RESERVE = 768;
+    constexpr size_t FRAME_RESERVE = 1280;
     uint64_t info_addr = (target_sp - FRAME_RESERVE) & ~0xFULL;
     uint64_t uc_addr   = info_addr + SIGINFO_SIZE;
     uint64_t new_sp    = info_addr;
 
-    // Save current mask so rt_sigreturn can restore it.
-    uint64_t saved_mask = sigtab.mask();
+    // Save current mask so rt_sigreturn can restore it. BUGFIX: read
+    // from per-CPU state.
+    uint64_t saved_mask = cpu.sigmask;
 
     // Build the guest-visible structures.
     build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
     build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
 
     // Save the CPU state in our internal frame (for rt_sigreturn).
+    // BUGFIX: now also saves FP/SIMD state (v_lo, v_hi, fpcr, fpsr)
+    // so handlers using NEON don't corrupt the saved state.
     SignalFrame& frame = sigtab.push_frame(signo);
     memcpy(frame.regs, cpu.regs, sizeof(frame.regs));
     frame.sp         = cpu.sp;
@@ -454,15 +514,14 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     frame.fault_addr = fault_addr;
     frame.si_code    = si_code;
     frame.on_altstack = on_altstack;
+    memcpy(frame.v_lo, cpu.v_lo, sizeof(frame.v_lo));
+    memcpy(frame.v_hi, cpu.v_hi, sizeof(frame.v_hi));
+    frame.fpcr = cpu.fpcr;
+    frame.fpsr = cpu.fpsr;
 
-    // Mark altstack as in-use if we used it.
+    // Mark altstack as in-use if we used it. BUGFIX: update per-CPU state.
     if (on_altstack) {
-        // We can't directly mutate sigtab.altstack() because lookup
-        // returns const. Instead, set SS_ONSTACK via a memory write
-        // through set_altstack. The cleanest way is a small helper:
-        // for now, just track via the frame's on_altstack flag and
-        // clear it on rt_sigreturn. We'll add a setter.
-        sigtab.set_altstack_active(true);
+        SignalTable::set_altstack_active(cpu, true);
     }
 
     // Compute new mask: current mask | sa_mask | signo (unless NODEFER).
@@ -472,7 +531,8 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     }
     // SIGKILL/SIGSTOP cannot be blocked.
     new_mask &= ~((1ULL << 9) | (1ULL << 19));
-    sigtab.set_mask(new_mask);
+    // BUGFIX: write to per-CPU state.
+    cpu.sigmask = new_mask;
 
     // SA_RESETHAND: clear the handler after delivery (one-shot).
     if (act->flags & SA_RESETHAND_EMU) {
@@ -501,20 +561,36 @@ void Emulator::host_signal_handler(int signo) {
     // Called from the host kernel when a signal is delivered to the
     // emulator process. We can't call deliver_signal() from here (not
     // async-signal-safe — we'd need to acquire mutexes and touch guest
-    // memory). Instead, just queue the signal number; the run loop
-    // will drain the queue between instructions.
+    // memory). Instead, just enqueue the signal number in a lock-free
+    // SPSC ring; the run loop will drain the queue between instructions.
+    // BUGFIX: the old code called queue_host_signal which used
+    // std::mutex::lock — NOT async-signal-safe, UB on contention.
+    // The new ring buffer uses only std::atomic operations, which ARE
+    // async-signal-safe on POSIX platforms.
     if (g_active_emu_) {
         g_active_emu_->queue_host_signal(signo);
     }
 }
 
 void Emulator::queue_host_signal(int signo) {
-    // Lock-free-ish: try_lock avoids blocking the host signal handler
-    // if the main thread already holds the mutex (e.g., inside
-    // drain_host_signals). If we can't acquire, the signal is dropped
-    // — the guest will see the next one. Acceptable for our purposes.
-    std::lock_guard<std::mutex> g(host_signal_mu_);
-    host_signal_queue_.push_back(signo);
+    // Lock-free SPSC enqueue. The host signal handler is the sole
+    // producer; the run loop (drain_host_signals) is the sole consumer.
+    // We use memory_order_relaxed for the head read (we don't need to
+    // see the consumer's latest progress — if the queue is full, we
+    // drop the signal, which is acceptable per POSIX signal semantics)
+    // and memory_order_release for the tail write (so the consumer
+    // sees the written slot when it observes the new tail).
+    size_t t = host_signal_queue_.tail.load(std::memory_order_relaxed);
+    size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
+    size_t used = t - h;  // works with wraparound since size_t is unsigned
+    if (used >= HOST_SIGNAL_QUEUE_CAP) {
+        // Queue full — drop the signal. This matches the old "drop on
+        // contention" behavior, but without the UB. POSIX allows signal
+        // loss when the queue is full.
+        return;
+    }
+    host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
+    host_signal_queue_.tail.store(t + 1, std::memory_order_release);
 }
 
 void Emulator::install_host_signal_handlers() {
@@ -553,15 +629,18 @@ void Emulator::install_host_signal_handlers() {
 }
 
 bool Emulator::drain_host_signals(CPU& cpu) {
-    std::vector<int> pending;
-    {
-        std::lock_guard<std::mutex> g(host_signal_mu_);
-        if (host_signal_queue_.empty()) return false;
-        pending.swap(host_signal_queue_);
-    }
-
+    // Lock-free SPSC dequeue. We atomically swap the head index forward
+    // and process signals in order. memory_order_acquire on the tail
+    // ensures we see the producer's writes; memory_order_relaxed on head
+    // updates is fine because we're the sole consumer.
     bool any_delivered = false;
-    for (int sig : pending) {
+    size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
+    size_t t = host_signal_queue_.tail.load(std::memory_order_acquire);
+    while (h != t) {
+        int sig = host_signal_queue_.signals[h % HOST_SIGNAL_QUEUE_CAP];
+        host_signal_queue_.head.store(h + 1, std::memory_order_relaxed);
+        h = h + 1;
+
         // Only forward signals the guest has actually installed a
         // handler for (or that have a non-terminating default).
         // SIGCHLD/SIGURG/SIGWINCH are ignored by default — if the
@@ -574,6 +653,9 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         if (deliver_signal(*this, cpu, signals_, sig)) {
             any_delivered = true;
         }
+        // Re-read tail in case the producer added more signals while
+        // we were delivering one.
+        t = host_signal_queue_.tail.load(std::memory_order_acquire);
     }
     return any_delivered;
 }

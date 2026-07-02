@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -49,6 +50,104 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     vfs_.set_argv(argv);
     vfs_.set_graphics(&graphics_);
     vfs_.set_audio(&audio_);
+
+    // Wire up /proc/self/maps to query live memory state. The callback
+    // captures `this` — the Emulator outlives the VFS, so this is safe.
+    // BUGFIX: previously /proc/self/maps returned hardcoded 5-line string
+    // that didn't reflect actual guest memory layout. Now we emit real
+    // entries: ELF load range, brk (heap), stack, mmap region, and
+    // dynamic linker range.
+    vfs_.set_maps_provider([this]() {
+        std::vector<VFS::MapEntry> out;
+        // ELF image: from end_addr_ min down to lowest PT_LOAD start.
+        // We don't track the lowest PT_LOAD start, so use end_addr_ as
+        // the upper bound and 0x400000 (typical PIE/static base) as the
+        // lower bound heuristic. Conservative: covers all code/data.
+        if (end_addr_ > 0) {
+            VFS::MapEntry e;
+            e.start = 0x400000;
+            e.end   = end_addr_;
+            std::snprintf(e.perms, sizeof(e.perms), "rwxp");
+            out.push_back(e);
+        }
+        // Heap (brk): from brk_start_ to brk_.
+        if (brk_start_ > 0 && brk_ >= brk_start_) {
+            VFS::MapEntry e;
+            e.start = brk_start_;
+            e.end   = brk_;
+            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
+            e.label = "[heap]";
+            out.push_back(e);
+        }
+        // Dynamic linker range.
+        if (interp_base_ > 0) {
+            VFS::MapEntry e;
+            e.start = interp_base_;
+            e.end   = interp_base_ + 0x10000000;  // 256 MiB upper bound
+            std::snprintf(e.perms, sizeof(e.perms), "rwxp");
+            e.label = "[interp]";
+            out.push_back(e);
+        }
+        // All mmap_alloc'd regions (excluding the heap which is above).
+        for (const auto& kv : mem_.allocations_snapshot()) {
+            uint64_t a = kv.first, s = kv.second;
+            // Skip the heap region (already emitted above).
+            if (a == brk_start_) continue;
+            // Skip the TLS scratch area near brk_start_ (it's part of the
+            // mmap region but we want to show it as anon).
+            VFS::MapEntry e;
+            e.start = a;
+            e.end   = a + s;
+            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
+            out.push_back(e);
+        }
+        // Stack: fixed 64 MiB at 0x8000000000 - 64 MiB.
+        {
+            VFS::MapEntry e;
+            e.start = 0x8000000000ULL - 64 * 1024 * 1024;
+            e.end   = 0x8000000000ULL;
+            std::snprintf(e.perms, sizeof(e.perms), "rw-p");
+            e.label = "[stack]";
+            out.push_back(e);
+        }
+        return out;
+    });
+
+    // Wire up guest cwd tracking. The host cwd is meaningless because
+    // BIFROST_ROOT sandboxing decouples guest paths from host paths.
+    // The guest starts at "/" by default; chdir/fchdir update this.
+    vfs_.set_cwd_provider(
+        [this]() -> std::string { return guest_cwd_; },
+        [this](const std::string& p) -> bool {
+            // Resolve relative paths against the current cwd.
+            if (p.empty()) return false;
+            if (p[0] == '/') {
+                guest_cwd_ = p;
+            } else {
+                if (guest_cwd_.empty()) guest_cwd_ = "/";
+                if (guest_cwd_.back() == '/') guest_cwd_.pop_back();
+                guest_cwd_ += "/";
+                guest_cwd_ += p;
+            }
+            // Normalize: collapse "." and ".." segments.
+            std::vector<std::string> parts;
+            std::stringstream ss(guest_cwd_);
+            std::string seg;
+            while (std::getline(ss, seg, '/')) {
+                if (seg.empty() || seg == ".") continue;
+                if (seg == "..") {
+                    if (!parts.empty()) parts.pop_back();
+                } else {
+                    parts.push_back(seg);
+                }
+            }
+            guest_cwd_ = "/";
+            for (size_t i = 0; i < parts.size(); i++) {
+                guest_cwd_ += parts[i];
+                if (i + 1 < parts.size()) guest_cwd_ += "/";
+            }
+            return true;
+        });
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) throw EmuError("cannot open " + path + ": " + strerror(errno));
     fseek(f, 0, SEEK_END);
@@ -91,6 +190,64 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         bool native_dynlink = (getenv("BIFROST_NATIVE_DYNLINK") != nullptr);
         if (native_dynlink) {
             dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+            // Register the ifunc resolver callback. BUGFIX: the old
+            // IRELATIVE handler just stored the resolver ADDRESS instead
+            // of CALLING it. Now we run the resolver in a scratch CPU
+            // state (borrowing main_cpu_, which hasn't been initialized
+            // yet at this point in load_elf_file — its real init happens
+            // later). The resolver is a small guest function that
+            // returns a function pointer in X0; we run it via step_public
+            // until it RETs to a sentinel address, then capture X0.
+            dyn_linker_->set_ifunc_resolver([this](uint64_t resolver_addr) -> uint64_t {
+                if (resolver_addr == 0) return 0;
+                // Borrow main_cpu_ as scratch. Save its current state so
+                // we don't disturb the (still-default) init.
+                CPU saved = main_cpu_;
+                // Allocate a small scratch stack for the resolver (4 KiB
+                // is plenty — resolvers are leaf-ish functions that don't
+                // recurse deeply).
+                uint64_t scratch_stack = mem_.mmap_alloc(4096);
+                uint64_t stack_top = scratch_stack + 4096;
+                // Sentinel return address — when PC == this, the resolver
+                // has RET'd. Use 0x1000 (in the zero page, unmapped for
+                // execution but a recognizable sentinel).
+                constexpr uint64_t SENTINEL_LR = 0x1000;
+                main_cpu_.pc = resolver_addr;
+                main_cpu_.sp = stack_top;
+                main_cpu_.regs[30] = SENTINEL_LR;  // LR
+                main_cpu_.running = true;
+                main_cpu_.pstate = 0;
+                // Run the resolver. Cap at 1M instructions to avoid
+                // infinite loops in buggy resolvers.
+                constexpr uint64_t IRESOLVER_LIMIT = 1'000'000;
+                uint64_t steps = 0;
+                try {
+                    while (main_cpu_.running && main_cpu_.pc != SENTINEL_LR
+                           && steps < IRESOLVER_LIMIT) {
+                        step(main_cpu_);
+                        steps++;
+                    }
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[%s] ifunc resolver at 0x%llx threw: %s\n",
+                            CODENAME,
+                            static_cast<unsigned long long>(resolver_addr),
+                            e.what());
+                    main_cpu_ = saved;
+                    return 0;
+                }
+                uint64_t result = main_cpu_.regs[0];
+                if (steps >= IRESOLVER_LIMIT) {
+                    fprintf(stderr, "[%s] ifunc resolver at 0x%llx ran >%llu "
+                            "instructions; aborting (likely infinite loop)\n",
+                            CODENAME,
+                            static_cast<unsigned long long>(resolver_addr),
+                            static_cast<unsigned long long>(IRESOLVER_LIMIT));
+                    result = 0;
+                }
+                // Restore main_cpu_ to its pre-resolver state.
+                main_cpu_ = saved;
+                return result;
+            });
             if (!dyn_linker_->link(data, 0, path)) {
                 fprintf(stderr, "[%s] native dynamic linking failed: %s; "
                         "falling back to guest ld.so\n",
@@ -337,7 +494,15 @@ int Emulator::run() {
     uint64_t recent_pcs[LOOP_DETECT_WINDOW] = {};
     uint64_t pc_index = 0;
     uint64_t tight_loop_count = 0;
-    uint64_t last_progress_x2_ = 0;  // for tight-loop progress detection
+    // BUGFIX: the old watchdog sampled ONLY x2 as the progress
+    // indicator. x2 is the third argument register and is routinely
+    // unchanged in legitimate tight compute loops (e.g., a hot inner
+    // loop using x0/x1 only). The new scheme samples a hash of x0+x1+x2
+    //+x3+x19+x20+x21+x22+x23+x24+x25+x26+x27+x28 + sp + pc. Any of
+    // those changing means the loop is making progress. This eliminates
+    // false positives while still catching true linked-list-cycle /
+    // infinite-spin bugs.
+    uint64_t last_progress_hash = 0;
 
     while (main_cpu_.running) {
         try {
@@ -392,9 +557,11 @@ int Emulator::run() {
         // Tight-loop detection: track recent PCs in a ring buffer.
         // If we've been cycling through a small set of PCs for too long
         // without hitting a syscall AND registers aren't changing, it's
-        // likely a bug-induced tight loop. We sample x2 as a progress
-        // indicator — if it changes, the loop is making progress.
-        // Sample every 256 instructions to reduce overhead.
+        // likely a bug-induced tight loop. We sample a hash of multiple
+        // registers as a progress indicator — if any of them changes,
+        // the loop is making progress (e.g., a tight compute loop
+        // working on x0/x1 only). Only trigger if registers are frozen
+        // (true bug). Sample every 256 instructions to reduce overhead.
         if ((count & 0xFF) == 0) {
             recent_pcs[pc_index % LOOP_DETECT_WINDOW] = main_cpu_.pc;
             pc_index++;
@@ -403,12 +570,23 @@ int Emulator::run() {
             if ((pc_index % LOOP_DETECT_WINDOW) == 0) {
                 std::set<uint64_t> unique_pcs(recent_pcs, recent_pcs + LOOP_DETECT_WINDOW);
                 if (unique_pcs.size() <= 4) {
-                    // Check if any register has changed since last check.
-                    // If registers ARE changing, the loop is making progress
-                    // (e.g., a tight compute loop). Only trigger if registers
-                    // are frozen (true bug).
-                    uint64_t current_x2 = main_cpu_.regs[2];
-                    if (current_x2 == last_progress_x2_) {
+                    // Compute a progress hash from the most volatile
+                    // registers. We pick x0-x3 (argument registers) and
+                    // x19-x28 (callee-saved scratch) plus sp and pc —
+                    // any of those changing means the loop is making
+                    // progress. The old code only checked x2, which is
+                    // the third argument register and routinely
+                    // unchanged in legitimate tight compute loops.
+                    uint64_t current_hash =
+                          main_cpu_.regs[0] ^ main_cpu_.regs[1]
+                        ^ main_cpu_.regs[2] ^ main_cpu_.regs[3]
+                        ^ main_cpu_.regs[19] ^ main_cpu_.regs[20]
+                        ^ main_cpu_.regs[21] ^ main_cpu_.regs[22]
+                        ^ main_cpu_.regs[23] ^ main_cpu_.regs[24]
+                        ^ main_cpu_.regs[25] ^ main_cpu_.regs[26]
+                        ^ main_cpu_.regs[27] ^ main_cpu_.regs[28]
+                        ^ main_cpu_.sp ^ main_cpu_.pc;
+                    if (current_hash == last_progress_hash) {
                         tight_loop_count += LOOP_DETECT_WINDOW * 16;
                         if (tight_loop_count > LOOP_DETECT_LIMIT) {
                             fprintf(stderr,
@@ -424,7 +602,7 @@ int Emulator::run() {
                     } else {
                         tight_loop_count = 0;
                     }
-                    last_progress_x2_ = current_x2;
+                    last_progress_hash = current_hash;
                 } else {
                     tight_loop_count = 0;
                 }

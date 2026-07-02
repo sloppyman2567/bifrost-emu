@@ -501,14 +501,29 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 50: { // fchdir(fd) — AArch64 50
+            // We can't reverse-resolve a host fd to a guest path in
+            // general (the host fd may have been opened via a remapped
+            // path). The pragmatic fix: call host fchdir to validate the
+            // fd is a directory, then read the host's new cwd via
+            // getcwd() and store it in the guest cwd. The guest sees
+            // the remapped path which is correct for sandboxed operation.
             int r = ::fchdir(static_cast<int>(a0));
             if (r < 0) { ret_errno(); return 0; }
+            char buf[PATH_MAX];
+            if (::getcwd(buf, sizeof(buf))) {
+                emu.vfs_.apply_chdir(std::string(buf));
+            }
             ret_host(r);
             return 0;
         }
 
         case 49: { // chdir(path) — AArch64 49
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
+            std::string guest_path = VFS::read_path(mem_, a0);
+            // Update the guest-side cwd first (resolves relative paths
+            // against the current cwd). Then call host chdir on the
+            // remapped path so any subsequent host-relative opens work.
+            emu.vfs_.apply_chdir(guest_path);
+            std::string path = VFS::remap_path(guest_path);
             int r = ::chdir(path.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -651,10 +666,18 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 17: { // getcwd(buf, size) — AArch64 syscall 17
-            // We report "/" as the cwd. The buffer must be at least 2
-            // bytes (NUL terminator included).
-            mem_.write(a0, "/", 2);
-            ret_host(1);
+            // BUGFIX: the old code always returned "/" regardless of
+            // chdir() calls. Now we track the guest cwd in the VFS
+            // (updated by chdir/fchdir) and return the real path here.
+            // The host cwd is meaningless because BIFROST_ROOT sandboxing
+            // decouples them.
+            std::string cwd = emu.vfs_.get_cwd();
+            size_t need = cwd.size() + 1;  // include NUL terminator
+            if (a1 < need) { ret_err(ERANGE); return 0; }
+            try {
+                mem_.write(a0, cwd.data(), need);
+            } catch (...) { ret_err(EFAULT); return 0; }
+            ret_host(static_cast<uint64_t>(cwd.size()));
             return 0;
         }
 

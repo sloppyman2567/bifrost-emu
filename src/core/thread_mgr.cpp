@@ -27,11 +27,46 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // host thread was created. We just run it to completion.
     CPU& cpu = gt->cpu;
 
+    // BUGFIX: spawned threads previously had no signal draining, no
+    // watchdog, and no graphics refresh — only a PC-mapped check every
+    // 1 Mi instructions. Now we drain host signals periodically and
+    // run a lightweight same-PC watchdog. (We still don't refresh SDL2
+    // graphics from spawned threads — that's the main thread's job in
+    // single-threaded mode. JIT also stays off for spawned threads per
+    // the existing fork safety constraint.)
+    constexpr uint64_t HANG_LIMIT = 50'000'000;
+    uint64_t last_pc = static_cast<uint64_t>(-1);
+    uint64_t same_pc_count = 0;
     uint64_t count = 0;
     try {
         while (cpu.running) {
             emu->step_public(cpu);
             count++;
+
+            // Same-PC hang watchdog.
+            if (cpu.pc == last_pc) {
+                same_pc_count++;
+                if (same_pc_count > HANG_LIMIT) {
+                    fprintf(stderr,
+                        "[%s] thread %d: hang watchdog: PC=0x%llx executed "
+                        "%llu times without progress; aborting\n",
+                        CODENAME, cpu.tid,
+                        static_cast<unsigned long long>(cpu.pc),
+                        static_cast<unsigned long long>(same_pc_count));
+                    break;
+                }
+            } else {
+                last_pc = cpu.pc;
+                same_pc_count = 0;
+            }
+
+            // Drain host-forwarded signals every ~4K instructions so
+            // spawned threads can receive SIGINT/SIGTERM/etc. Without
+            // this, only the main thread sees host signals.
+            if ((count & 0xFFF) == 0) {
+                emu->drain_host_signals_public(cpu);
+            }
+
             if ((count & 0xFFFFF) == 0) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) {
                     fprintf(stderr,
@@ -54,6 +89,26 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         {
             std::lock_guard<std::mutex> lk(slot->mu);
             slot->cv.notify_all();
+        }
+    }
+
+    // set_tid_address: Linux's set_tid_address(2) records a pointer that
+    // the kernel writes the exiting thread's TID to (and performs a
+    // futex wake on) when the thread exits. This is the mechanism
+    // pthread_detach + pthread_tryjoin_np rely on. Without it, processes
+    // using set_tid_address for futex-based join (instead of
+    // CLONE_CHILD_CLEARTID) would hang forever waiting for the futex.
+    if (cpu.set_tid_address_ptr) {
+        try {
+            emu->mem().store<uint32_t>(cpu.set_tid_address_ptr,
+                                       static_cast<uint32_t>(cpu.tid));
+            auto* slot = emu->get_futex(cpu.set_tid_address_ptr);
+            {
+                std::lock_guard<std::mutex> lk(slot->mu);
+                slot->cv.notify_all();
+            }
+        } catch (...) {
+            // Pointer no longer mapped — nothing we can do; ignore.
         }
     }
 

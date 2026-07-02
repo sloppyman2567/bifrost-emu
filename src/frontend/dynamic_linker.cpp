@@ -270,15 +270,40 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             mem_.store<uint64_t>(target, S + A);
                         }
                     } else if (type == R_AARCH64_IRELATIVE_) {
-                        // ifunc: call the resolver at base + A.
-                        // We can't call guest code directly; just use
-                        // the resolver address as the result (the ifunc
-                        // will be called when first invoked). For now,
-                        // store the resolver address — the guest will
-                        // call it and we'll get the right value.
-                        // Better: skip for now, leave a 0 and hope the
-                        // program doesn't use the ifunc.
-                        mem_.store<uint64_t>(target, obj.base_addr + A);
+                        // ifunc: call the resolver at base + A to get the
+                        // real function pointer. The resolver is a small
+                        // guest function that returns a pointer to one of
+                        // several implementations (selected by CPU
+                        // features, e.g., glibc's memcpy variants).
+                        // BUGFIX: the old code just stored `base + A` (the
+                        // resolver ADDRESS) instead of CALLING the resolver.
+                        // This silently corrupted any program using ifuncs.
+                        // Now we invoke the resolver via the Emulator's
+                        // callback (which runs it in a scratch CPU and
+                        // returns X0). If no callback is registered (e.g.,
+                        // when DynamicLinker is used standalone), fall back
+                        // to the old behavior with a warning.
+                        uint64_t resolver_addr = obj.base_addr + A;
+                        uint64_t resolved = 0;
+                        if (ifunc_resolver_) {
+                            resolved = ifunc_resolver_(resolver_addr);
+                        }
+                        if (resolved == 0) {
+                            // Fallback: store the resolver address. The
+                            // guest will call it as if it were the real
+                            // function — wrong, but visible (it'll crash
+                            // or return garbage) instead of silently
+                            // using the wrong implementation.
+                            if (!ifunc_resolver_) {
+                                fprintf(stderr, "[%s] IRELATIVE at 0x%llx: "
+                                        "no ifunc resolver registered; storing "
+                                        "resolver address as fallback\n",
+                                        "bifrost-emu",
+                                        static_cast<unsigned long long>(target));
+                            }
+                            resolved = resolver_addr;
+                        }
+                        mem_.store<uint64_t>(target, resolved);
                     } else if (type == R_AARCH64_TLS_DTPMOD_) {
                         // TLS_DTPMOD: store the module ID of the symbol's
                         // defining object. If sym==0, it's the current

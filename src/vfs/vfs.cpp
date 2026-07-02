@@ -72,14 +72,36 @@ std::unique_ptr<VNode> VFS::open_procfs(const std::string& path,
         if (cmdline.empty()) cmdline = elf_path_ + '\0';
         return serve(cmdline);
     }
-    // /proc/self/maps → basic memory map
+    // /proc/self/maps → real memory layout
+    // BUGFIX: the old code hardcoded 5 fixed address ranges that did not
+    // reflect the actual guest memory layout. Programs parsing
+    // /proc/self/maps (debuggers, profilers, libunwind) got wrong answers.
+    // The Emulator registers a maps_provider() callback that returns the
+    // live allocations + brk + stack range; we format them per the
+    // /proc/self/maps spec: "start-end perms offset dev inode pathname".
     if (path == "/proc/self/maps") {
         std::string maps;
-        maps += "00400000-004bf000 r-xp 00000000 00:00 0\n";
-        maps += "004bf000-004ce000 r--p 00000000 00:00 0\n";
-        maps += "004ce000-004df000 rw-p 00000000 00:00 0\n";
-        maps += "5000000000-5001000000 rw-p 00000000 00:00 0\n";
-        maps += "7fff000000-8000000000 rw-p 00000000 00:00 0 [stack]\n";
+        if (maps_provider_) {
+            for (const auto& e : maps_provider_()) {
+                char line[160];
+                snprintf(line, sizeof(line),
+                    "%08llx-%08llx %s 00000000 00:00 0%s%s\n",
+                    static_cast<unsigned long long>(e.start),
+                    static_cast<unsigned long long>(e.end),
+                    e.perms,
+                    e.label.empty() ? "" : "  ",
+                    e.label.c_str());
+                maps += line;
+            }
+        }
+        if (maps.empty()) {
+            // Fallback if no provider is registered.
+            maps += "00400000-004bf000 r-xp 00000000 00:00 0\n";
+            maps += "004bf000-004ce000 r--p 00000000 00:00 0\n";
+            maps += "004ce000-004df000 rw-p 00000000 00:00 0\n";
+            maps += "5000000000-5001000000 rw-p 00000000 00:00 0\n";
+            maps += "7fff000000-8000000000 rw-p 00000000 00:00 0 [stack]\n";
+        }
         return serve(maps);
     }
     // /proc/self/status → basic process info

@@ -79,6 +79,10 @@ public:
     int  run();
     void step_public(CPU& cpu) { step(cpu); }
     void syscall_public(CPU& cpu) { syscall(cpu); }
+    // Allow spawned threads (in thread_mgr.cpp) to drain host-forwarded
+    // signals on their own CPU. Without this, only the main thread sees
+    // SIGINT/SIGTERM/SIGCHLD/etc.
+    bool drain_host_signals_public(CPU& cpu) { return drain_host_signals(cpu); }
 
     // ── Configuration (public) ────────────────────────────────────────
     void set_verbose(bool v) { verbose_ = v; }
@@ -177,6 +181,10 @@ private:
     bool trace_ = false;
     bool brk_verbose_ = true;
     std::string elf_path_;
+    // Guest-side current working directory. Decoupled from the host cwd
+    // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
+    // chdir/fchdir; returned by getcwd. Defaults to "/".
+    std::string guest_cwd_ = "/";
 
     // Decode cache type alias (constants + CacheEntry type live on CPU).
     using CacheEntry = CPU::CacheEntry;
@@ -220,8 +228,21 @@ private:
     SignalTable signals_;
 
     // ── Host-to-guest signal forwarding ───────────────────────────────
-    std::mutex host_signal_mu_;
-    std::vector<int> host_signal_queue_;
+    // BUGFIX: the old code used std::mutex to protect host_signal_queue_.
+    // std::mutex::lock is NOT async-signal-safe — calling it from a host
+    // signal handler is undefined behavior (can deadlock if the main
+    // thread holds the mutex when the signal arrives). We now use a
+    // fixed-size lock-free SPSC ring buffer: the host signal handler
+    // (producer) writes to tail with memory_order_release; the run loop
+    // (consumer) reads from head with memory_order_acquire. No locks,
+    // no UB.
+    static constexpr size_t HOST_SIGNAL_QUEUE_CAP = 64;
+    struct HostSignalQueue {
+        std::atomic<size_t> head{0};  // consumer index
+        std::atomic<size_t> tail{0};  // producer index
+        int signals[HOST_SIGNAL_QUEUE_CAP];
+    };
+    HostSignalQueue host_signal_queue_;
     static Emulator* g_active_emu_;  // for host signal handler (single active emu)
     static void host_signal_handler(int signo);
     void install_host_signal_handlers();

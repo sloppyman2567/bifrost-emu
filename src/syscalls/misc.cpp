@@ -71,7 +71,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 132: { // sigaltstack(new, old) — AArch64 132
             // Set or query the alternate signal stack.
-            int r = signals_.set_altstack(mem_, a0, a1);
+            // BUGFIX: now operates on per-CPU altstack state.
+            int r = SignalTable::set_altstack(mem_, cpu, a0, a1);
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
@@ -136,8 +137,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 135: { // rt_sigprocmask(how, new_set, old_set, sigsetsize)
             // Per-CPU signal mask. Supports SIG_BLOCK/SIG_UNBLOCK/
             // SIG_SETMASK. SIGKILL/SIGSTOP cannot be blocked.
-            int r = signals_.procmask(mem_, static_cast<int>(a0), a1, a2,
-                                      static_cast<size_t>(a3));
+            // BUGFIX: now operates on per-CPU sigmask state.
+            int r = SignalTable::procmask(mem_, cpu, static_cast<int>(a0),
+                                          a1, a2, static_cast<size_t>(a3));
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
@@ -146,6 +148,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Pop the most recent signal frame, restore CPU state, and
             // restore the saved signal mask. Also clear the altstack
             // SS_ONSTACK flag if the handler was running on it.
+            // BUGFIX: now also restores FP/SIMD state (v_lo, v_hi,
+            // fpcr, fpsr) so handlers using NEON don't corrupt the
+            // saved state. Operates on per-CPU mask/altstack state.
             SignalFrame frame;
             if (signals_.pop_frame(frame)) {
                 memcpy(cpu.regs, frame.regs, sizeof(cpu.regs));
@@ -153,11 +158,16 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.pc     = frame.pc;
                 cpu.pstate = frame.pstate;
                 // Restore the signal mask saved at delivery time.
-                signals_.set_mask(frame.saved_mask);
+                cpu.sigmask = frame.saved_mask;
+                // Restore FP/SIMD state.
+                memcpy(cpu.v_lo, frame.v_lo, sizeof(cpu.v_lo));
+                memcpy(cpu.v_hi, frame.v_hi, sizeof(cpu.v_hi));
+                cpu.fpcr = frame.fpcr;
+                cpu.fpsr = frame.fpsr;
                 // If we entered the handler on the altstack, clear
                 // the in-use flag now.
                 if (frame.on_altstack) {
-                    signals_.set_altstack_active(false);
+                    SignalTable::set_altstack_active(cpu, false);
                 }
                 // Return value is whatever X0 was in the saved frame
                 // (already restored above). Don't overwrite it.
@@ -632,16 +642,25 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── inotify_init1 (syscall 75) ───────────────────────────────
-        case 75: { // inotify_init1(flags)
+        // ── inotify_init1 (syscall 26) ───────────────────────────────
+        // BUGFIX: AArch64 syscall numbers 75/76/77 are vmsplice/splice/tee,
+        // NOT inotify. The real inotify numbers per asm-generic/unistd.h are:
+        //   26 = inotify_init1
+        //   27 = inotify_add_watch
+        //   28 = inotify_rm_watch
+        // The old code misrouted any guest vmsplice/splice/tee call into
+        // inotify handlers (which would call host inotify with garbage
+        // args and fail). Real guest inotify_init1 (syscall 26) returned
+        // -ENOSYS. Fixed by renumbering to the correct AArch64 slots.
+        case 26: { // inotify_init1(flags)
             int fd = ::inotify_init1(static_cast<int>(a0));
             if (fd < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
 
-        // ── inotify_add_watch (syscall 76) ───────────────────────────
-        case 76: { // inotify_add_watch(fd, pathname, mask)
+        // ── inotify_add_watch (syscall 27) ───────────────────────────
+        case 27: { // inotify_add_watch(fd, pathname, mask)
             std::string path = VFS::read_path(mem_, a1);
             int wd = ::inotify_add_watch(static_cast<int>(a0), path.c_str(),
                                          static_cast<uint32_t>(a2));
@@ -650,13 +669,20 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── inotify_rm_watch (syscall 77) ────────────────────────────
-        case 77: { // inotify_rm_watch(fd, wd)
+        // ── inotify_rm_watch (syscall 28) ────────────────────────────
+        case 28: { // inotify_rm_watch(fd, wd)
             int r = ::inotify_rm_watch(static_cast<int>(a0), static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
+
+        // ── vmsplice / splice / tee (syscalls 75/76/77) ──────────────
+        // These are real AArch64 syscalls but we don't implement them.
+        // Return -ENOSYS so callers can fall back to read/write loops.
+        case 75: { ret_err(ENOSYS); return 0; }  // vmsplice
+        case 76: { ret_err(ENOSYS); return 0; }  // splice
+        case 77: { ret_err(ENOSYS); return 0; }  // tee
 
         // ── accept4 (syscall 242) ────────────────────────────────────
         // NOTE: AArch64 syscall 88 is utimensat (handled in fs.cpp), NOT
@@ -988,11 +1014,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── 15+ new syscalls for broader compatibility ──────────────
 
-        case 28: { // fchdir(fd) — AArch64 28
-            int r = ::fchdir(static_cast<int>(a0));
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0); return 0;
-        }
+        // NOTE: case 28 (formerly mislabeled "fchdir") removed — the real
+        // AArch64 syscall 28 is inotify_rm_watch (handled correctly at
+        // line 663 above). Real fchdir is syscall 50, handled in fs.cpp.
+
         case 36: { // symlinkat(old, newdirfd, new) — AArch64 36
             // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
             // The old code dispatched 36 to unlinkat, which broke `ln -s`
