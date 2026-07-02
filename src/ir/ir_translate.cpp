@@ -938,9 +938,60 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
-        case InstClass::LSE_ATOMIC:
+            // LL/SC atomics still need the interpreter (exclusive monitor +
+            // global monitor coordination). These are used by musl's
+            // pthread_mutex implementation; the sharded global monitor
+            // (Turn 27-28) handles correctness. LSE atomics (below) get
+            // native x86 codegen for ~20x speedup on game workloads.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
+
+        case InstClass::LSE_ATOMIC: {
+            // LSE atomics: native x86 lock-prefixed instructions.
+            // Fields:
+            //   d.atom_op: 0=LDADD,1=LDCLR,2=LDEOR,3=LDSET,4=SMAX,5=SMIN,
+            //               6=UMAX,7=UMIN,8=SWP,0xC-0xF=CAS
+            //   d.rs: source operand register
+            //   d.rt: destination register (old value, if is_load)
+            //   d.rn: base address register
+            //   d.is_load: 1=LD variant (return old value), 0=ST variant
+            //   d.size: 0=byte,1=half,2=word,3=double
+            uint16_t base = load_arm_reg(block, d.rn, true);  // rn=31 → SP
+            uint16_t src = load_arm_reg(block, d.rs);
+            int width_bytes = 1 << d.size;
+            if (d.atom_op >= 0xC) {
+                // CAS: old=[Xn]; if old==Ws(rs), [Xn]=Wt(rt); Ws=old.
+                // IR: src1=base, src2=desired(rt), imm=rs (expected input
+                // AND old-value output). The JIT loads expected from
+                // cpu.regs[rs] via emit_load_arm(inst.imm).
+                uint16_t desired = load_arm_reg(block, d.rt);
+                uint16_t dest = g_alloc.alloc();
+                IRInst inst{};
+                inst.op = IROp::ATOMIC;
+                inst.dest = dest;
+                inst.src1 = base;
+                inst.src2 = desired;  // desired (rt) → [mem] on match
+                inst.width = static_cast<uint8_t>(width_bytes);
+                inst.cond = d.atom_op;
+                inst.flags_op = 1;  // CAS always returns old
+                inst.imm = d.rs;    // ARM reg: expected (in) + old (out)
+                inst.arm_pc = cur_pc;
+                block.insts.push_back(inst);
+                store_arm_reg(block, d.rs, dest);  // rs = old value
+            } else {
+                // Non-CAS LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SWP/MAX/MIN).
+                // is_load = (rt != 31): LD* variants return old value to rt;
+                // ST* variants (rt=31/XZR) discard it. This lets the JIT
+                // use faster codegen for ST* (e.g., STADD → lock add instead
+                // of lock xadd, STSET → lock or instead of CAS-loop).
+                uint16_t dest = g_alloc.alloc();
+                emit(block, IROp::ATOMIC, dest, base, src,
+                     static_cast<uint8_t>(width_bytes),
+                     d.atom_op, (d.rt != 31) ? 1 : 0, d.rt, cur_pc);
+                store_arm_reg(block, d.rt, dest);
+            }
+            return false;
+        }
 
         // ── BRK / HLT (terminators) ─────────────────────────────────
         case InstClass::BRK: case InstClass::BRK_IMM:
@@ -1180,16 +1231,35 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // to the destination's signed/unsigned range on overflow. The 6-bit
             // scale at bits[15:10] gives fbits = 64 - scale.
             //
-            // Native IR ops FP_F2I_FIXED/FP_I2F_FIXED are defined (Turn 21)
-            // and the interpreter/optimizer/executor support them, but the JIT
-            // codegen has a subtle register-state corruption bug on the first
-            // invocation in a block (the C code after the asm sees corrupted
-            // FP values). Until the JIT codegen is fixed, route to CALL_INTERP
-            // — the interpreter handles fixed-point variants natively. The
-            // ~20% overhead only affects workloads that use these heavily
-            // (MD5 K-table init, audio DSP), and toybox md5sum is already
-            // fast enough.
+            // Native IR op FP_F2I_FIXED is emitted here; the JIT codegen
+            // (src/jit/frostjit.cpp) implements the saturating scaled
+            // truncation directly in x86. The codegen was fixed to properly
+            // flush XMM0/XMM1's prior contents before loading the operands
+            // (the previous "first FCVTZU produces 0" bug was caused by
+            // stale XMM state from a prior FP op not being cleared).
             if ((op & 0x7F3E0000) == 0x1E180000) {
+                bool is_unsigned = (op >> 16) & 1;
+                uint8_t sf = (op >> 31) & 1;
+                uint8_t scale = (op >> 10) & 0x3F;
+                uint8_t fbits = 64 - scale;
+                if (ftype <= 1) {
+                    // For 32-bit dest (sf=0), emit ZEXT to zero upper bits.
+                    uint16_t tmp = g_alloc.alloc();
+                    emit(block, IROp::FP_F2I_FIXED, tmp, rn, 0, ftype, 0,
+                         sf, is_unsigned, cur_pc);
+                    // Patch immr via the IRInst — the emit() helper doesn't
+                    // expose immr directly; set it on the just-pushed inst.
+                    block.insts.back().immr = fbits;
+                    if (!sf) {
+                        uint16_t z = g_alloc.alloc();
+                        emit(block, IROp::ZEXT, z, tmp, 0, 32);
+                        store_arm_reg(block, rd, z);
+                    } else {
+                        store_arm_reg(block, rd, tmp);
+                    }
+                    return false;
+                }
+                // ftype=3 (half) → fall through to CALL_INTERP.
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;
             }
@@ -1216,10 +1286,21 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
             }
             // SCVTF/UCVTF (fixed-point variant): convert integer to FP and
-            // divide by 2^fbits (fbits = 64 - scale). Routes to CALL_INTERP
-            // — see the FCVTZS fixed-point comment above for why the native
-            // IR op is defined but not yet emitted by the translator.
+            // divide by 2^fbits (fbits = 64 - scale). Native IR op
+            // FP_I2F_FIXED is emitted; the JIT codegen reuses the integer-
+            // variant FP_I2F codegen then multiplies by 2^-fbits.
             if ((op & 0x7F3E0000) == 0x1E020000) {
+                bool is_unsigned = (op >> 16) & 1;
+                uint8_t sf = (op >> 31) & 1;
+                uint8_t scale = (op >> 10) & 0x3F;
+                uint8_t fbits = 64 - scale;
+                if (ftype <= 1) {
+                    emit(block, IROp::FP_I2F_FIXED, rd, rn, 0, ftype, 0,
+                         sf, is_unsigned, cur_pc);
+                    block.insts.back().immr = fbits;
+                    return false;
+                }
+                // ftype=3 (half) → fall through to CALL_INTERP.
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;
             }

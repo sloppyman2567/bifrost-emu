@@ -122,6 +122,18 @@ UNIT_TESTS=(
     # Exercises clone/clone3 + futex (FUTEX_WAIT/WAKE/REQUEUE) +
     # set_tid_address + per-thread JIT + __tl_lock release-via-ctid.
     "test_pthread|ctest/test_pthread.elf||15|ALL PASS"
+    # POSIX threads primitive tests (Task 4). Cross-compiled with musl.
+    # Each tests a specific pthread/semaphore primitive at a conservative
+    # scale that stays within the emulator's current futex-wakeup throughput.
+    "test_pthread_mutex|ctest/test_pthread_mutex.elf||10|ALL PASS"
+    "test_pthread_cond|ctest/test_pthread_cond.elf||10|ALL PASS"
+    "test_pthread_rwlock|ctest/test_pthread_rwlock.elf||10|ALL PASS"
+    "test_sem|ctest/test_sem.elf||10|ALL PASS"
+    "test_pthread_once|ctest/test_pthread_once.elf||10|ALL PASS"
+    "test_producer_consumer|ctest/test_producer_consumer.elf||10|ALL PASS"
+    # High-contention atomic stress test (8 threads). Validates CAS, LL/SC
+    # (mutex), and LDADD atomics under game-scale contention.
+    "test_atomic_stress|ctest/test_atomic_stress.elf||30|ALL PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)

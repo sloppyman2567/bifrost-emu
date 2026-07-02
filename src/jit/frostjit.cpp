@@ -119,6 +119,14 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
 
 namespace arm64emu {
 
+// ── Thread-local per-thread JIT state (Task 3: shared-JIT mode) ────────
+// These are thread-local so that multiple threads sharing a single FrostJIT
+// instance don't corrupt each other's watchdog/hotness counters. Each
+// thread gets its own copy, initialized to the defaults.
+thread_local uint64_t FrostJIT::tls_watchdog_last_pc_ = UINT64_MAX;
+thread_local uint32_t FrostJIT::tls_watchdog_count_   = 0;
+thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_;
+
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                                 uint16_t src1, uint16_t dest) {
@@ -331,6 +339,169 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             load_vreg_to_reg(RAX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
             emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
+            return false;
+        }
+
+        case IROp::ATOMIC: {
+            // Native LSE atomics via x86 lock-prefixed instructions.
+            // Fast path: address < 4 GiB (direct window) → lock op on
+            // (window_base + addr). Slow path: addr ≥ 4 GiB → CALL_INTERP.
+            //
+            // Operations (atom_op in inst.cond):
+            //   CAS (≥0xC): lock cmpxchg       (32/64-bit only)
+            //   SWP (0x8):   lock xchg
+            //   LDADD (0x0): lock xadd (LD) / lock add (ST)
+            //   STSET (0x3): lock or   (ST only)
+            //   STCLR (0x1): lock and (ST only, ~src)
+            //   LDSET/LDCLR/LDEOR (LD): CAS-loop
+            //   SMAX/SMIN/UMAX/UMIN (4-7): CAS-loop with cmp+cmov
+            //
+            // inst.imm = ARM reg index (rt for non-CAS, rs for CAS) for
+            //   slow-path result reload.
+            // inst.immr = CAS desired vreg index (packed; only for CAS).
+            uint8_t atom_op = inst.cond;
+            bool is_load = (inst.flags_op != 0);
+            int w = inst.width;
+            bool is_64 = (w == 8);
+            bool is_16 = (w == 2);
+
+            // SMAX/SMIN/UMAX/UMIN need signed/unsigned compare + cmov.
+            // Fall back to CALL_INTERP for these (rare in practice).
+            if (atom_op >= 0x4 && atom_op <= 0x7) {
+                emit_call_interp(inst.arm_pc, false);
+                if (is_load && inst.dest != 0) {
+                    emit_load_arm(RAX, static_cast<int>(inst.imm));
+                    store_reg_to_vreg(inst.dest, RAX);
+                }
+                constexpr uint16_t MEM_CLOBBER =
+                    (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                    (1u << R8)  | (1u << R9)  | (1u << R11);
+                invalidate_host_regs(MEM_CLOBBER);
+                return false;
+            }
+
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+
+            // Load base address → RAX.
+            load_vreg_to_reg(RAX, inst.src1);
+
+            // Check if addr + w <= 4GB (direct window fast path).
+            emit_mov_imm64(RDX, Memory::DIRECT_WINDOW_SIZE - w);
+            emit_cmp_reg(RAX, RDX);
+            size_t jae_patch = emit_jcc_rel32_placeholder(7);  // JA → slow
+
+            // ── Fast path: direct window ──
+            emit_add_reg(RAX, WIN_REG);  // RAX = window_base + addr
+
+            // Load operand → RCX. For CAS, src2 = desired (rt). For others,
+            // src2 = operand (rs). CAS loads expected from cpu.regs[imm].
+            load_vreg_to_reg(RCX, inst.src2);  // RCX = desired (CAS) or operand
+
+            // Helper: emit REX + opcode + modrm for a lock instruction.
+            // reg = the register operand, base = RAX (host address).
+            auto emit_lock_op = [&](uint8_t opcode, int reg) {
+                emit_byte(0xF0);  // LOCK
+                if (is_64) emit_byte(0x48);
+                else if (is_16) emit_byte(0x66);
+                emit_byte(opcode);
+                emit_byte(modrm(0, reg & 7, RAX & 7));  // [rax], reg
+            };
+
+            if (atom_op >= 0xC) {
+                // CAS: lock cmpxchg [R9], RCX
+                // x86 cmpxchg: if RAX == [mem], [mem]=RCX; RAX = old always.
+                // ARM CAS: old=[Xn]; if old==Ws, [Xn]=Wt; Ws=old.
+                // Map: RAX=Ws(expected from cpu.regs[imm]), [mem]=Wt(RCX=desired).
+                emit_mov_reg(R9, RAX);              // R9 = host addr
+                emit_load_arm(RAX, static_cast<int>(inst.imm));  // RAX = expected
+                // lock cmpxchg [R9], RCX
+                emit_byte(0xF0);                    // LOCK
+                emit_byte(is_64 ? 0x49 : 0x41);     // REX.WB(64) or REX.B(32) for R9
+                if (is_16) emit_byte(0x66);         // operand-size prefix
+                emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
+                emit_byte(0x09);                    // modrm(0, rcx, r9)
+                if (is_load) {
+                    store_reg_to_vreg(inst.dest, RAX);
+                }
+            } else if (atom_op == 0x8) {
+                // SWP: lock xchg [RAX], RCX (RCX gets old value)
+                emit_lock_op(0x87, RCX);
+                if (is_load) store_reg_to_vreg(inst.dest, RCX);
+            } else if (atom_op == 0x0) {
+                // LDADD/STADD
+                if (is_load) {
+                    emit_lock_op(0x0F, 0xC1);  // xadd r/m, r (2-byte opcode)
+                    store_reg_to_vreg(inst.dest, RCX);
+                } else {
+                    emit_lock_op(0x01, RCX);   // add r/m, r
+                }
+            } else if (atom_op == 0x3 && !is_load) {
+                // STSET: lock or [RAX], RCX
+                emit_lock_op(0x09, RCX);
+            } else if (atom_op == 0x1 && !is_load) {
+                // STCLR: lock and [RAX], ~RCX
+                emit_not_reg(RCX);
+                emit_lock_op(0x21, RCX);  // and r/m, r
+            } else {
+                // LDSET/LDCLR/LDEOR (LD variants): CAS-loop.
+                //   R9 = addr, RAX = old (from mem), RCX = operand
+                //   R8 = old OP operand
+                //   retry: lock cmpxchg [R9], R8; jnz retry
+                //   dest = RAX (old value)
+                emit_mov_reg(R9, RAX);  // R9 = host addr
+                // Load current value → RAX (mov rax, [rax])
+                if (is_64) { emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00); }
+                else if (is_16) { emit_byte(0x66); emit_byte(0x8B); emit_byte(0x00); }
+                else { emit_byte(0x8B); emit_byte(0x00); }
+                // Compute new = old OP src into R8
+                emit_mov_reg(R8, RAX);  // R8 = old
+                switch (atom_op) {
+                    case 0x1: // LDCLR: new = old & ~src
+                        emit_not_reg(RCX);
+                        emit_byte(0x4C); emit_byte(0x21); emit_byte(0xC1);  // and r8, rcx
+                        break;
+                    case 0x2: // LDEOR: new = old ^ src
+                        emit_byte(0x4C); emit_byte(0x31); emit_byte(0xC1);  // xor r8, rcx
+                        break;
+                    case 0x3: // LDSET: new = old | src
+                        emit_byte(0x4C); emit_byte(0x09); emit_byte(0xC1);  // or r8, rcx
+                        break;
+                }
+                // CAS loop: retry until cmpxchg succeeds.
+                size_t loop_start = code_buf_used_;
+                emit_byte(0xF0);                    // LOCK
+                emit_byte(is_64 ? 0x49 : 0x41);     // REX for R9
+                if (is_16) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
+                emit_byte(0x01);                    // modrm(0, r8, r9)
+                // jnz loop_start (retry if CAS failed)
+                int32_t loop_rel = static_cast<int32_t>(loop_start - (code_buf_used_ + 6));
+                emit_byte(0x0F); emit_byte(0x85); emit_u32(static_cast<uint32_t>(loop_rel));
+                if (is_load) {
+                    store_reg_to_vreg(inst.dest, RAX);
+                }
+            }
+            // Jump past slow path.
+            size_t jmp_past = emit_jmp_rel32_placeholder();
+
+            // ── Slow path: addr ≥ 4 GiB → CALL_INTERP ──
+            size_t slow_path = code_buf_used_;
+            patch_jcc_rel32(jae_patch, static_cast<int32_t>(slow_path - (jae_patch + 6)));
+            emit_call_interp(inst.arm_pc, false);
+            // Reload result: inst.imm = ARM reg index (rt for non-CAS,
+            // rs for CAS). The interpreter wrote the old value there.
+            if (is_load && inst.dest != 0) {
+                emit_load_arm(RAX, static_cast<int>(inst.imm));
+                store_reg_to_vreg(inst.dest, RAX);
+            }
+            int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+            patch_jmp_rel32(jmp_past, end_rel);
+
+            invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
 
@@ -1442,7 +1613,25 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 // form, but we used 64-bit form. Manual clamp needed.
                 if (is_unsigned) {
                     // Clamp negative → 0, > UINT32_MAX → UINT32_MAX.
-                    // test rax, rax; JS negative_path
+                    // Code layout (after the test rax,rax):
+                    //   JS negative_path           ; if rax < 0, jump to negative path
+                    //   ; non-negative path:
+                    //   cmp rax, 0xFFFFFFFF
+                    //   JBE ok_path                ; if rax <= UINT32_MAX, ok
+                    //   mov eax, 0xFFFFFFFF        ; clamp to UINT32_MAX
+                    //   jmp done                   ; skip negative path
+                    // ok_path:
+                    //   jmp done                   ; (fall-through to done, skip negative)
+                    // negative_path:
+                    //   mov eax, 0                 ; clamp negative to 0
+                    // done:
+                    //
+                    // The previous code had a bug: `after_neg_target` was set
+                    // BEFORE the negative path's `mov eax, 0` was emitted, so
+                    // it pointed AT the negative path. The `jmp_past_neg`
+                    // (intended to skip the negative path) landed ON it,
+                    // causing every non-negative result to be overwritten
+                    // with 0. This was the "first FCVTZU produces 0" bug.
                     emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0);  // test rax, rax
                     size_t js_patch = emit_jcc_rel32_placeholder(0x8);  // JS (negative)
                     // Non-negative: cmp rax, 0xFFFFFFFF; jbe ok; else clamp.
@@ -1451,26 +1640,39 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     size_t jbe_patch = emit_jcc_rel32_placeholder(0x6);  // JBE
                     // Clamp to UINT32_MAX.
                     emit_mov_imm32_zext(RAX, 0xFFFFFFFFu);
-                    // ok_path: rax is already correct (either from cvttsd2si
-                    // or clamped to UINT32_MAX). Jump past the negative path.
+                    // Skip the negative path (jump to done, which is AFTER
+                    // the negative path's `mov eax, 0`).
                     size_t jmp_past_neg = emit_jmp_rel32_placeholder();
+                    // ok_path: rax is already correct (from cvttsd2si).
+                    // Also skip the negative path.
                     size_t ok_path = code_buf_used_;
                     patch_jcc_rel32(jbe_patch, static_cast<int32_t>(ok_path - (jbe_patch + 6)));
-                    size_t after_neg_target = code_buf_used_;
-                    patch_jmp_rel32(jmp_past_neg, static_cast<int32_t>(after_neg_target - (jmp_past_neg + 5)));
+                    size_t jmp_ok_done = emit_jmp_rel32_placeholder();
                     // negative_path (target of JS): rax = 0.
                     size_t negative_path = code_buf_used_;
                     patch_jcc_rel32(js_patch, static_cast<int32_t>(negative_path - (js_patch + 6)));
                     emit_mov_imm32_zext(RAX, 0);
+                    // done: both jmp_past_neg and jmp_ok_done land here.
+                    size_t done_target = code_buf_used_;
+                    patch_jmp_rel32(jmp_past_neg, static_cast<int32_t>(done_target - (jmp_past_neg + 5)));
+                    patch_jmp_rel32(jmp_ok_done, static_cast<int32_t>(done_target - (jmp_ok_done + 5)));
                 } else {
                     // Signed 32-bit: clamp to [INT32_MIN, INT32_MAX].
+                    // NOTE: INT32_MIN must be sign-extended to 64-bit for the
+                    // comparison. `emit_mov_imm32_zext` zero-extends, which
+                    // would make 0x80000000 → 0x0000000080000000 (positive
+                    // 2147483648) instead of 0xFFFFFFFF80000000 (negative
+                    // -2147483648). The 64-bit `cmp rax, rcx` would then
+                    // compare against the wrong value, clamping valid
+                    // positive results to INT32_MIN. Use emit_mov_imm64 with
+                    // the sign-extended value.
                     emit_mov_imm32_zext(RCX, static_cast<uint32_t>(INT32_MAX));
                     emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8);  // cmp rax, rcx
                     size_t jle_patch = emit_jcc_rel32_placeholder(0xE);  // JLE
                     emit_mov_imm32_zext(RAX, static_cast<uint32_t>(INT32_MAX));
                     size_t after_hi = code_buf_used_;
                     patch_jcc_rel32(jle_patch, static_cast<int32_t>(after_hi - (jle_patch + 6)));
-                    emit_mov_imm32_zext(RCX, static_cast<uint32_t>(INT32_MIN));
+                    emit_mov_imm64(RCX, static_cast<uint64_t>(static_cast<int64_t>(INT32_MIN)));
                     emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8);  // cmp rax, rcx
                     size_t jge_patch = emit_jcc_rel32_placeholder(0xD);  // JGE
                     emit_mov_imm32_zext(RAX, static_cast<uint32_t>(INT32_MIN));
@@ -2338,6 +2540,16 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
+                // emit_load_flags_from_pstate sets x86 CF = ARM C XOR from_sub.
+                // Normalize to SUB convention (x86 CF = NOT ARM C) so the
+                // default arm_cond_to_x86() mapping works correctly for ALL
+                // conditions (CS/CC/HI/LS included) regardless of whether
+                // the flags originally came from ADD or SUB. Without this
+                // normalization, CCMP after ADDS would use the wrong Jcc
+                // for the CC/CS condition (taking the wrong branch), causing
+                // pstate divergences like jit=0x8000000 ref=0x88000000
+                // (JIT skipped the compare; interpreter did it).
+                emit_normalize_cf_to_sub_convention();
                 // Drop all cache mappings WITHOUT clearing flags_in_host_.
                 // use invalidate_all_vregs but preserve flags_in_host_.
                 {
@@ -2346,7 +2558,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     flags_in_host_ = saved_fih3;
                 }
                 flags_in_host_ = true;
-                flags_from_sub_ = false;
+                flags_from_sub_ = true;  // CF is now in SUB convention
             }
             if (need_cmc) emit_byte(0xF5);
 
@@ -3050,7 +3262,6 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
-        case InstClass::LSE_ATOMIC:
             return true;
         default:
             break;
@@ -3450,6 +3661,91 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
         code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
     }
+
+    // ── Verify-mode memory save/restore: populate store_infos ──────
+    // Walk the IR and record every STORE_MEM whose address operand can
+    // be statically resolved to (saved_arm_reg + offset). At verify
+    // time, we use this list to snapshot the original memory values
+    // before the JIT runs and restore them before the interpreter
+    // re-runs the block. This eliminates false-positive divergences
+    // caused by the JIT's STORE_MEM being visible to the interpreter's
+    // LOAD_MEM (read-then-write-same-address pattern).
+    //
+    // Address tracing rules (forward dataflow over the IR):
+    //   LOAD_REG v ← arm_reg:           vreg_base[v] = arm_reg, vreg_off[v] = 0
+    //   IMM      v ← imm:               vreg_base[v] = 0xFF, vreg_off[v] = imm
+    //   ADD      v = v1 + v2 (one IMM): vreg_base[v] = vreg_base[v1], vreg_off[v] = vreg_off[v1] + imm
+    //   anything else:                  vreg_base[v] = 0xFF (unknown)
+    // STORE_MEM is recordable iff vreg_base[src1] is a valid ARM reg AND
+    // that ARM reg is NOT written by any STORE_REG in this block (otherwise
+    // the address would use the post-modification value, not the saved one).
+    {
+        // Forward dataflow: vreg → (base_arm_reg, accumulated_offset).
+        // base_arm_reg = 0xFF means "unknown" (not a simple base+off).
+        // We ALSO track which ARM regs have been modified SO FAR (up to
+        // the current instruction). A STORE_MEM is only recordable if its
+        // base ARM reg has NOT been modified before the STORE_MEM. This
+        // handles the common pattern where a block loads from [Xn, #imm],
+        // stores to [Xn, #imm], THEN does writeback (Xn = Xn + imm). The
+        // store uses the ORIGINAL Xn value, which matches the saved CPU
+        // state — so we can safely save/restore. The previous whole-block
+        // check was too conservative and skipped these stores, leaving
+        // false-positive divergences (e.g. fcvtzu_test's block at 0x1740
+        // where LDR x2,[x1] ... STR x0,[x1] ... ADD x1,x1,#4).
+        std::vector<uint8_t> vreg_base(4096, 0xFF);
+        std::vector<int64_t> vreg_off(4096, 0);
+        uint32_t modified_so_far = 0;  // bit i set if ARM reg i has been STORE_REG'd SO FAR
+        for (auto& inst : ir_block.insts) {
+            if (inst.op == IROp::LOAD_REG && inst.src1 <= 31) {
+                if (inst.dest < 4096) {
+                    vreg_base[inst.dest] = static_cast<uint8_t>(inst.src1);
+                    vreg_off[inst.dest]  = 0;
+                }
+            } else if (inst.op == IROp::IMM) {
+                if (inst.dest < 4096) {
+                    vreg_base[inst.dest] = 0xFE;  // marker: this is an IMM
+                    vreg_off[inst.dest]  = static_cast<int64_t>(inst.imm);
+                }
+            } else if (inst.op == IROp::ADD) {
+                // ADD v, v1, v2 — try to fold if one operand is IMM
+                uint8_t b1 = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
+                uint8_t b2 = (inst.src2 < 4096) ? vreg_base[inst.src2] : 0xFF;
+                if (b1 <= 31 && b2 == 0xFE && inst.dest < 4096) {
+                    // base + imm
+                    vreg_base[inst.dest] = b1;
+                    vreg_off[inst.dest]  = vreg_off[inst.src1] + vreg_off[inst.src2];
+                } else if (b2 <= 31 && b1 == 0xFE && inst.dest < 4096) {
+                    // imm + base (commutative)
+                    vreg_base[inst.dest] = b2;
+                    vreg_off[inst.dest]  = vreg_off[inst.src1] + vreg_off[inst.src2];
+                } else {
+                    if (inst.dest < 4096) vreg_base[inst.dest] = 0xFF;
+                }
+            } else if (inst.op == IROp::STORE_MEM) {
+                // Record if src1 traces back to an ARM reg that hasn't been
+                // modified SO FAR (before this STORE_MEM).
+                uint8_t b = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
+                if (b <= 31 && !(modified_so_far & (1u << b))) {
+                    BlockEntry::StoreInfo si;
+                    si.arm_reg = b;
+                    si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
+                    si.width   = inst.width;
+                    entry.store_infos.push_back(si);
+                }
+            } else if (inst.op == IROp::STORE_REG) {
+                // Mark the dest ARM reg as modified FROM THIS POINT ON.
+                if (inst.dest <= 31) {
+                    modified_so_far |= (1u << inst.dest);
+                }
+            } else {
+                // Any other op destroys the base-tracking property for dest.
+                if (inst.dest < 4096 && inst.op != IROp::STORE_REG) {
+                    vreg_base[inst.dest] = 0xFF;
+                }
+            }
+        }
+    }
+
     blocks_[start_pc] = entry;
     blocks_translated++;
 
@@ -3492,7 +3788,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
 // ── run_block ───────────────────────────────────────────────────────────
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
-    if (!code_buf_ || jit_disabled_) {
+    if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
         interpreter_fallbacks++;
         emu.step_public(cpu);
         return cpu.pc;
@@ -3502,16 +3798,37 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // blocks, the JIT is likely stuck in a codegen-bug-induced loop.
     // Disable the JIT permanently and fall back to pure interpreter.
     // This is a safety valve; normal programs never hit it.
-    if (++total_blocks_executed_ > GLOBAL_BLOCK_LIMIT) {
-        jit_disabled_ = true;
+    // Atomic for thread-safe increment in shared-JIT mode.
+    if (total_blocks_executed_.fetch_add(1, std::memory_order_relaxed) > GLOBAL_BLOCK_LIMIT) {
+        jit_disabled_.store(true, std::memory_order_relaxed);
         fprintf(stderr, "[JIT] global watchdog: %llu blocks executed — disabling JIT (likely codegen bug)\n",
-                static_cast<unsigned long long>(total_blocks_executed_));
+                static_cast<unsigned long long>(total_blocks_executed_.load()));
         interpreter_fallbacks++;
         emu.step_public(cpu);
         return cpu.pc;
     }
 
     uint64_t pc = cpu.pc;
+    // ── Shared-JIT locking strategy ────────────────────────────────
+    // The lock is held ONLY for table mutations (translate, chain,
+    // hotness promotion, watchdog demotion). It is RELEASED before
+    // block execution (entry.fn), which may block in syscalls
+    // (futex_wait, read, sleep). Holding the lock during execution
+    // would deadlock: thread A holds the lock and blocks in futex_wait
+    // waiting for thread B, which needs the lock to run the block that
+    // would wake A.
+    //
+    // Block execution is safe without the lock because:
+    //   - The code buffer is PROT_READ|PROT_EXEC (never mutated at runtime
+    //     except via patch_chain, which takes its own W^X toggle).
+    //   - `entry` is a local copy — other threads mutating blocks_[pc]
+    //     don't affect our copy.
+    //   - x86 JIT code is reentrant — multiple threads can execute the
+    //     same block concurrently (each has its own CPU/stack).
+    //
+    // Per-thread state (watchdog, hotness) is thread-local — no lock
+    // needed.
+    blocks_mutex_.lock();
     auto it = blocks_.find(pc);
     BlockEntry entry;
     if (it != blocks_.end()) {
@@ -3528,7 +3845,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // CALL_INTERPs) are always faster as JIT, especially with self-loop
         // chaining which eliminates dispatcher overhead for tight loops.
         if (!entry.interp_only && entry.fn && entry.call_interp_count > 0) {
-            auto& cnt = hot_pc_counts_[pc];
+            auto& cnt = tls_hot_pc_counts_[pc];
             if (++cnt >= HOT_PC_THRESHOLD) {
                 // Promote to interp_only. The interpreter runs the same
                 // instr_count instructions without dispatcher overhead.
@@ -3538,11 +3855,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 it->second.chained = false;
                 entry = it->second;
                 // Clear the hotness counter to save memory.
-                hot_pc_counts_.erase(pc);
+                tls_hot_pc_counts_.erase(pc);
             }
             // Bound the map size to prevent unbounded growth.
-            if (hot_pc_counts_.size() > HOT_PC_MAP_MAX) {
-                hot_pc_counts_.clear();
+            if (tls_hot_pc_counts_.size() > HOT_PC_MAP_MAX) {
+                tls_hot_pc_counts_.clear();
             }
         }
 
@@ -3560,7 +3877,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // PC changes or a max iteration count is reached. This eliminates
         // ~1us of dispatch overhead per iteration, speeding up soft-float
         // loops by 10-100x.
+        //
+        // The interpreter (step_public) may call blocking syscalls, so
+        // we MUST release the lock before this loop.
         if (entry.interp_only) {
+            blocks_mutex_.unlock();  // release — interpreter may block
             blocks_executed++;
             constexpr int TIGHT_LOOP_MAX = 1000000;  // safety cap
             int tight_iter = 0;
@@ -3606,9 +3927,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             //   2. Genuine translation failure (code buf overflow, etc.)
             // Case 1: run the interp_only block.
             // Case 2: single-step the interpreter.
-            auto it = blocks_.find(pc);
-            if (it != blocks_.end() && it->second.interp_only) {
-                entry = it->second;
+            auto it2 = blocks_.find(pc);
+            if (it2 != blocks_.end() && it2->second.interp_only) {
+                entry = it2->second;
+                blocks_mutex_.unlock();  // release — interpreter may block
                 blocks_executed++;
                 instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
@@ -3616,6 +3938,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 }
                 return cpu.pc;
             }
+            blocks_mutex_.unlock();  // release — interpreter may block
             interpreter_fallbacks++;
             instructions_executed++;
             emu.step_public(cpu);
@@ -3630,28 +3953,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // it as interp_only permanently so future hits also use the
     // interpreter (avoiding repeated watchdog triggers).
     //
-    // State is per-instance (not static) so multiple FrostJIT objects
-    // in the same process — e.g. one per worker thread — don't trample
-    // each other's counters.
-    if (pc == watchdog_last_pc_) {
-        watchdog_count_++;
-        if (watchdog_count_ > WATCHDOG_LIMIT) {
+    // State is thread-local so multiple threads sharing a single FrostJIT
+    // instance don't trample each other's counters.
+    if (pc == tls_watchdog_last_pc_) {
+        tls_watchdog_count_++;
+        if (tls_watchdog_count_ > WATCHDOG_LIMIT) {
             // Mark this block as interp_only permanently — the JIT
             // codegen for it is buggy, so always use the interpreter.
-            auto it = blocks_.find(pc);
-            if (it != blocks_.end() && !it->second.interp_only) {
-                it->second.interp_only = true;
-                it->second.interp_only_count = it->second.instr_count;
-                it->second.fn = nullptr;
-                it->second.chained = false;
+            auto wit = blocks_.find(pc);
+            if (wit != blocks_.end() && !wit->second.interp_only) {
+                wit->second.interp_only = true;
+                wit->second.interp_only_count = wit->second.instr_count;
+                wit->second.fn = nullptr;
+                wit->second.chained = false;
             }
+            blocks_mutex_.unlock();  // release — interpreter may block
             interpreter_fallbacks++;
             emu.step_public(cpu);
             return cpu.pc;
         }
     } else {
-        watchdog_last_pc_ = pc;
-        watchdog_count_ = 0;
+        tls_watchdog_last_pc_ = pc;
+        tls_watchdog_count_ = 0;
     }
 
     blocks_executed++;
@@ -3671,6 +3994,16 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(cpu.regs[31]));
         }
     }
+
+    // ── Release the lock before execution ──────────────────────────
+    // From here on, we execute JIT code (entry.fn) or interpreter steps
+    // that may block in syscalls. The lock is NOT needed for execution:
+    //   - The code buffer is PROT_READ|PROT_EXEC (concurrent reads OK).
+    //   - `entry` is a local copy (other threads can't mutate it).
+    //   - x86 JIT code is reentrant (each thread has its own CPU/stack).
+    // Verify-mode does code-buffer patching, but it's debug-only and
+    // patches only this block's own slots (no cross-block mutation).
+    blocks_mutex_.unlock();
 
     // ── BIFROST_JIT_VERIFY: divergence checker ──────────────────
     // Before running the JIT block, snapshot the CPU state. After the
@@ -3755,8 +4088,104 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
         }
 
+        // ── Verify-mode memory save/restore ─────────────────────────
+        // Snapshot the original memory values at every STORE_MEM address
+        // (resolved using the pre-JIT CPU state) so we can restore them
+        // after the JIT runs. Without this, the interpreter's LOAD_MEM
+        // would see the JIT's STORE_MEM writes, causing false-positive
+        // divergences for blocks that read-then-write the same address
+        // (e.g. the 0x44d65c block in toybox md5sum where LDP x21,x0,
+        // [x19,#0x18] precedes STR x0,[x19,#0x18] — the interpreter's
+        // LDP would read the JIT's stored x0 instead of the original,
+        // making x21 look "stale by 0x28"). With save+restore, both
+        // the JIT and the interpreter see the SAME original memory state
+        // for those addresses, eliminating the false positive.
+        //
+        // Each entry: (addr, width, original_value).
+        // We cap at 64 stores per block — beyond that, we accept false
+        // positives (no real-world block exceeds this; the cap is just
+        // a safety bound to avoid unbounded stack allocation).
+        struct SavedMem { uint64_t addr; uint8_t width; uint64_t value; };
+        SavedMem saved_mem[64];      // original values (pre-JIT)
+        SavedMem jit_written[64];    // JIT's written values (post-JIT)
+        int saved_mem_count = 0;
+        // Re-fetch the iterator: if we came from the cache-miss path, the
+        // original `it` is blocks_.end() and would segfault. The block was
+        // just translated and inserted into blocks_, so find() will succeed.
+        auto sit = blocks_.find(pc);
+        if (sit != blocks_.end()) {
+            for (const auto& si : sit->second.store_infos) {
+                if (saved_mem_count >= 64) break;
+                // ARM reg 31 = SP in this context (the translator marks rn=31
+                // as is_sp=true, which loads from cpu.sp via LOAD_REG src1=31).
+                uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
+                uint64_t addr = base + static_cast<uint64_t>(si.offset);
+                uint64_t val  = 0;
+                // The address might be unmapped (e.g., if the ARM reg holds
+                // a stale value at verify time that doesn't correspond to a
+                // real memory location). Skip those — accept the false
+                // positive for that store.
+                try {
+                    switch (si.width) {
+                        case 1: val = emu.mem().load<uint8_t>(addr);  break;
+                        case 2: val = emu.mem().load<uint16_t>(addr); break;
+                        case 4: val = emu.mem().load<uint32_t>(addr); break;
+                        case 8: val = emu.mem().load<uint64_t>(addr); break;
+                        default: continue;  // unknown width — skip
+                    }
+                } catch (...) {
+                    continue;  // unmapped address — skip this store
+                }
+                saved_mem[saved_mem_count].addr  = addr;
+                saved_mem[saved_mem_count].width = si.width;
+                saved_mem[saved_mem_count].value = val;
+                saved_mem_count++;
+            }
+        }
+
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
+
+        // Capture the JIT's written values at the STORE addresses (so we can
+        // restore them after the interpreter runs — the next block expects
+        // memory to be in the JIT's state, matching the JIT's cpu state).
+        for (int i = 0; i < saved_mem_count; i++) {
+            uint64_t v = 0;
+            try {
+                switch (saved_mem[i].width) {
+                    case 1: v = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
+                    case 2: v = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
+                    case 4: v = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
+                    case 8: v = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
+                }
+            } catch (...) { /* skip */ }
+            jit_written[i].addr  = saved_mem[i].addr;
+            jit_written[i].width = saved_mem[i].width;
+            jit_written[i].value = v;
+        }
+
+        // Restore the original memory values at every STORE_MEM address
+        // so the interpreter sees the pre-JIT memory state (eliminating
+        // the false-positive divergence from read-then-write patterns).
+        for (int i = 0; i < saved_mem_count; i++) {
+            try {
+                switch (saved_mem[i].width) {
+                    case 1: emu.mem().store<uint8_t>(saved_mem[i].addr,
+                                static_cast<uint8_t>(saved_mem[i].value)); break;
+                    case 2: emu.mem().store<uint16_t>(saved_mem[i].addr,
+                                static_cast<uint16_t>(saved_mem[i].value)); break;
+                    case 4: emu.mem().store<uint32_t>(saved_mem[i].addr,
+                                static_cast<uint32_t>(saved_mem[i].value)); break;
+                    case 8: emu.mem().store<uint64_t>(saved_mem[i].addr,
+                                saved_mem[i].value); break;
+                }
+            } catch (...) {
+                // Ignore — the JIT wrote here, so the address is writable
+                // from the JIT's perspective. If the restore fails, the
+                // interpreter will see the JIT's value (false positive),
+                // but we won't crash.
+            }
+        }
 
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
@@ -3856,6 +4285,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             fprintf(stderr, "[VERIFY] block @ 0x%llx: DIVERGENCE (pc=0x%llx steps=%d/%d) [logging only — may be false-positive]\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
                     steps, entry.instr_count);
+        }
+        // Restore the JIT's written values at every STORE_MEM address so
+        // memory is consistent with the JIT's cpu state for the NEXT block.
+        // (The interpreter overwrote these with its own values during the
+        // re-run; without this restore, subsequent blocks would see the
+        // interpreter's memory state while running on the JIT's cpu state,
+        // causing cascading false-positive divergences.)
+        for (int i = 0; i < saved_mem_count; i++) {
+            try {
+                switch (jit_written[i].width) {
+                    case 1: emu.mem().store<uint8_t>(jit_written[i].addr,
+                                static_cast<uint8_t>(jit_written[i].value)); break;
+                    case 2: emu.mem().store<uint16_t>(jit_written[i].addr,
+                                static_cast<uint16_t>(jit_written[i].value)); break;
+                    case 4: emu.mem().store<uint32_t>(jit_written[i].addr,
+                                static_cast<uint32_t>(jit_written[i].value)); break;
+                    case 8: emu.mem().store<uint64_t>(jit_written[i].addr,
+                                jit_written[i].value); break;
+                }
+            } catch (...) {
+                // Ignore — best-effort restore.
+            }
         }
         // Restore chain slot if it was patched.
         if (was_chained) {

@@ -38,8 +38,11 @@
 #include "decoder.hpp"
 #include "ir/ir.hpp"
 #include "jit/cpu_features.hpp"
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -95,17 +98,20 @@ public:
     uint64_t interpreter_fallbacks = 0;
     uint64_t block_chains_patched = 0;
 
-    // Loop watchdog state — per-instance so multiple FrostJIT objects
-    // (e.g. one per thread) don't share/corrupt each other's counters.
-    // Resets on any different PC; if the same PC runs > WATCHDOG_LIMIT
-    // times in a row, fall back to the interpreter to break the loop.
+    // Loop watchdog state — thread-local so multiple threads sharing a
+    // single FrostJIT instance (shared-JIT mode) don't corrupt each
+    // other's counters. Resets on any different PC; if the same PC runs
+    // > WATCHDOG_LIMIT times in a row, fall back to the interpreter to
+    // break the loop.
     // Raised from 100K to 500M: pure JIT blocks (no CALL_INTERPs) are no
     // longer demoted to interp_only, so tight loops legitimately run
     // 100M+ iterations through the dispatcher before self-loop chaining
     // kicks in.
     static constexpr uint32_t WATCHDOG_LIMIT = 500000000;
-    uint64_t watchdog_last_pc_ = UINT64_MAX;
-    uint32_t watchdog_count_   = 0;
+    // Per-thread watchdog state (thread_local because spawned threads
+    // share the main's FrostJIT in shared-JIT mode).
+    static thread_local uint64_t tls_watchdog_last_pc_;
+    static thread_local uint32_t tls_watchdog_count_;
 
     // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
     // PC has been dispatched (total, not consecutive). When a PC exceeds
@@ -115,9 +121,10 @@ public:
     // __multf3's ~10-block cycle) that the consecutive-PC watchdog can't
     // detect. The counter map is bounded by HOT_PC_MAP_MAX to prevent
     // unbounded memory growth; eviction is LRU-ish (clear on overflow).
+    // Thread-local for the same reason as the watchdog.
     static constexpr uint32_t HOT_PC_THRESHOLD = 5000;
     static constexpr size_t   HOT_PC_MAP_MAX   = 65536;
-    std::unordered_map<uint64_t, uint32_t> hot_pc_counts_;
+    static thread_local std::unordered_map<uint64_t, uint32_t> tls_hot_pc_counts_;
 
     // Global progress watchdog: if total block executions exceed this
     // limit, the JIT switches to interpreter-only mode permanently.
@@ -129,8 +136,17 @@ public:
     // (long double multiply, printf %Lf) can legitimately dispatch
     // 100M+ tiny interp_only blocks; 50M was too aggressive.
     static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000;
-    uint64_t total_blocks_executed_ = 0;
-    bool     jit_disabled_ = false;  // set by global watchdog
+    std::atomic<uint64_t> total_blocks_executed_{0};
+    std::atomic<bool>     jit_disabled_{false};  // set by global watchdog
+
+    // ── Shared-JIT mode (default) ───────────────────────────────────
+    // Spawned threads share the main thread's FrostJIT instance, saving
+    // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
+    // table and code-buffer writes. It is held ONLY for table mutations
+    // (translate, chain, hotness, watchdog) and RELEASED before block
+    // execution (entry.fn) so threads can block in syscalls without
+    // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
+    std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
 
     void flush_cache();
     size_t code_buf_used()  const { return code_buf_used_; }
@@ -250,6 +266,27 @@ private:
         // any input values. The flag is only consulted when verify mode
         // is active.
         bool    verified_once = false;
+
+        // Verify-mode memory save/restore: list of (arm_reg, offset, width)
+        // for every STORE_MEM in this block whose address can be statically
+        // resolved to (saved_arm_reg + offset). At verify time, we snapshot
+        // the original memory values at these addresses before the JIT runs,
+        // then restore them before the interpreter re-runs the block. This
+        // eliminates the false-positive divergences caused by the JIT's
+        // STORE_MEM being visible to the interpreter's LOAD_MEM (read-then-
+        // write-same-address pattern, e.g. the 0x44d65c block in toybox
+        // md5sum where LDP x21,x0,[x19,#0x18] is followed by STR x0,[x19,#0x18]
+        // — the JIT writes the new x0, then the interpreter's LDP reads that
+        // new value instead of the original, making x21 look "stale by 0x28").
+        // Stores whose base ARM reg is modified within the block (so the
+        // saved pre-JIT value would be wrong) are excluded — we accept the
+        // false positive for those rare cases.
+        struct StoreInfo {
+            uint8_t  arm_reg;   // 0..31 (or 32 for XZR — never stored, so N/A)
+            int64_t  offset;    // signed displacement
+            uint8_t  width;     // 1, 2, 4, or 8
+        };
+        std::vector<StoreInfo> store_infos;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 

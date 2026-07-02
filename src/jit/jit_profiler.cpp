@@ -68,11 +68,11 @@ FrostJIT::FrostJIT() {
     interpreter_fallbacks = 0;
     block_chains_patched = 0;
 
-    // Watchdog state.
-    watchdog_last_pc_ = UINT64_MAX;
-    watchdog_count_   = 0;
-    total_blocks_executed_ = 0;
-    jit_disabled_ = false;
+    // Watchdog state (thread-local — reset for this thread).
+    tls_watchdog_last_pc_ = UINT64_MAX;
+    tls_watchdog_count_   = 0;
+    total_blocks_executed_.store(0, std::memory_order_relaxed);
+    jit_disabled_.store(false, std::memory_order_relaxed);
 
     // Initialize vreg arrays — prev_max_vreg_ must be large enough that
     // the first translate_block() clears all 4096 entries. Without this,
@@ -168,7 +168,7 @@ void FrostJIT::flush_cache() {
     // the buffer RX whenever JIT code might run.
     blocks_.clear();
     back_refs_.clear();
-    hot_pc_counts_.clear();  // clear hotness tracker
+    tls_hot_pc_counts_.clear();  // clear hotness tracker (thread-local)
     code_buf_used_ = 0;
 }
 
