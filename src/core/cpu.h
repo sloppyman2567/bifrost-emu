@@ -85,9 +85,31 @@ public:
         std::vector<uint8_t>((DECODE_CACHE_SETS + 7) / 8, 0);
 
     // Address set via set_tid_address() — used by futex on child
-    // termination (set_child_tid). Currently informational; we don't
-    // reap children.
+    // termination (set_child_tid). When this thread exits, the kernel
+    // writes the TID to *tid_address and performs a futex wake on it.
+    // (Turn 23: the exit-time write+wake is now implemented in
+    // thread_entry.)
     uint64_t set_tid_address_ptr = 0;
+
+    // ── Robust futex list ───────────────────────────────────────────
+    // set_robust_list(head, len) records the head of a linked list of
+    // robust futexes held by this thread. When the thread exits (or is
+    // killed), the kernel walks the list and unlocks each futex with
+    // FUTEX_OWNER_DIED. This is how pthread_mutex with
+    // PTHREAD_MUTEX_ROBUST behaves when a thread dies holding the lock.
+    //
+    // Each list entry is a struct robust_list_head + per-futex nodes:
+    //   struct robust_list { struct robust_list *next; };
+    //   struct robust_list_head {
+    //       struct robust_list list;
+    //       long futex_offset;
+    //       struct robust_list __user *pending_list;
+    //   };
+    // The futex word is at (node + futex_offset). We walk via `next`
+    // until we hit the head again (circular list) or a limit (to avoid
+    // infinite loops on corrupt lists).
+    uint64_t robust_list_head = 0;   // guest VA of robust_list_head.list
+    uint64_t robust_list_len  = 0;   // len passed to set_robust_list (sanity)
 
     // Clear-child-tid pointer set via clone(CLONE_CHILD_CLEARTID, ...).
     // When this thread exits, the word at this address is zeroed and a

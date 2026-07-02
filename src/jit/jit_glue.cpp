@@ -21,23 +21,53 @@ void Emulator::enable_jit() {
 
 void Emulator::print_jit_stats() {
     if (!jit_ || !jit_enabled_) return;
-    fprintf(stderr, "[%s] frostJIT: %llu blocks translated, %llu executed "
-            "(%llu instructions, %llu cache hits, %llu misses, %llu fallbacks, "
-            "%llu chains)\n",
-            CODENAME,
-            static_cast<unsigned long long>(jit_->blocks_translated),
-            static_cast<unsigned long long>(jit_->blocks_executed),
-            static_cast<unsigned long long>(jit_->instructions_executed),
-            static_cast<unsigned long long>(jit_->cache_hits),
-            static_cast<unsigned long long>(jit_->cache_misses),
-            static_cast<unsigned long long>(jit_->interpreter_fallbacks),
-            static_cast<unsigned long long>(jit_->block_chains_patched));
+    // Aggregate main JIT + all per-thread JITs for a complete picture.
+    uint64_t blocks_translated = jit_->blocks_translated;
+    uint64_t blocks_executed   = jit_->blocks_executed;
+    uint64_t instructions      = jit_->instructions_executed;
+    uint64_t cache_hits        = jit_->cache_hits;
+    uint64_t cache_misses      = jit_->cache_misses;
+    uint64_t fallbacks         = jit_->interpreter_fallbacks;
+    uint64_t chains            = jit_->block_chains_patched;
+    size_t    code_used        = jit_->code_buf_used();
+    size_t    code_size        = jit_->code_buf_size();
+    size_t    cache_entries    = jit_->cache_entries();
+    size_t    num_jits         = 1;  // main JIT
+
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        for (auto& gt : threads_) {
+            if (gt->jit) {
+                blocks_translated += gt->jit->blocks_translated;
+                blocks_executed   += gt->jit->blocks_executed;
+                instructions      += gt->jit->instructions_executed;
+                cache_hits        += gt->jit->cache_hits;
+                cache_misses      += gt->jit->cache_misses;
+                fallbacks         += gt->jit->interpreter_fallbacks;
+                chains            += gt->jit->block_chains_patched;
+                code_used         += gt->jit->code_buf_used();
+                cache_entries     += gt->jit->cache_entries();
+                num_jits++;
+            }
+        }
+    }
+
+    fprintf(stderr, "[%s] frostJIT (%zu thread%s): %llu blocks translated, "
+            "%llu executed (%llu instructions, %llu cache hits, %llu misses, "
+            "%llu fallbacks, %llu chains)\n",
+            CODENAME, num_jits, num_jits == 1 ? "" : "s",
+            static_cast<unsigned long long>(blocks_translated),
+            static_cast<unsigned long long>(blocks_executed),
+            static_cast<unsigned long long>(instructions),
+            static_cast<unsigned long long>(cache_hits),
+            static_cast<unsigned long long>(cache_misses),
+            static_cast<unsigned long long>(fallbacks),
+            static_cast<unsigned long long>(chains));
     fprintf(stderr, "[%s] frostJIT: code cache %zu/%zu bytes, %zu blocks\n",
-            CODENAME, jit_->code_buf_used(), jit_->code_buf_size(),
-            jit_->cache_entries());
-    if (jit_->blocks_executed > 0) {
-        double avg = static_cast<double>(jit_->instructions_executed) /
-                     static_cast<double>(jit_->blocks_executed);
+            CODENAME, code_used, code_size * num_jits, cache_entries);
+    if (blocks_executed > 0) {
+        double avg = static_cast<double>(instructions) /
+                     static_cast<double>(blocks_executed);
         fprintf(stderr, "[%s] frostJIT: avg %.1f instructions/block\n",
                 CODENAME, avg);
     }

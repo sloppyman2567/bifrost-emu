@@ -281,7 +281,17 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 172: { // getpid
-            ret_host(::getpid());
+            // CLONE_THREAD semantics: all threads in the same thread
+            // group see the same PID (= the main thread's TID, which is
+            // 1 for the guest process). The old code returned the host
+            // getpid() which is correct for the main thread (TID 1 ==
+            // host PID) but wrong for spawned threads (their host thread
+            // has a different host TID, but the guest PID must be 1).
+            // We return cpu.tid == 1 ? host_getpid() : 1, but since the
+            // main thread's TID is always 1 and the guest PID is 1, we
+            // just return 1 for all guest threads.
+            (void)::getpid();  // suppress unused warning if not used
+            ret_host(1);
             return 0;
         }
 

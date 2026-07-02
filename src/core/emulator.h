@@ -193,6 +193,14 @@ private:
     struct GuestThread {
         CPU cpu;
         std::thread host_thread;
+        // Per-thread FrostJIT instance. Each spawned thread gets its own
+        // 64 MiB code cache + block cache + regalloc state, so JIT
+        // execution is fully lock-free (no contention with other threads
+        // or with the main thread's JIT). Translation work is duplicated
+        // across threads, but the simplicity and lock-free execution
+        // outweigh the memory cost for typical 1-8 thread guests.
+        // nullptr if JIT is disabled (thread uses interpreter only).
+        std::unique_ptr<FrostJIT> jit;
         uint64_t stack_top = 0;
         uint64_t stack_size = 0;
         uint64_t tls_base = 0;
