@@ -98,11 +98,26 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // We support two paths:
             //   1. CLONE_VM (threads): spawn a vCPU on a host thread.
             //   2. No CLONE_VM (fork): host fork() with CoW memory.
+            // AArch64 clone() syscall argument order (per the kernel's
+            // SYSCALL_DEFINE5(clone, flags, newsp, parent_tidptr, tls,
+            // child_tidptr) in arch/arm64/kernel/process.c):
+            //   x0 = flags
+            //   x1 = stack (newsp)
+            //   x2 = parent_tidptr (ptid)
+            //   x3 = tls              ← NOT ctid!
+            //   x4 = child_tidptr (ctid)  ← NOT tls!
+            //
+            // BUGFIX: the old code had ctid/tls swapped (ctid=a3, tls=a4).
+            // This is the OPPOSITE of x86_64's clone ABI. On AArch64,
+            // x3=tls and x4=ctid. The swap meant spawned threads got the
+            // wrong TPIDR_EL0 (set to the ctid address instead of the TLS
+            // pointer), breaking pthread_join which computes the pthread
+            // struct base as TPIDR_EL0 - 0xc8.
             uint64_t flags = a0;
             uint64_t stack = a1;
             uint64_t ptid_ptr = a2;
-            uint64_t ctid_ptr = a3;
-            uint64_t tls = a4;
+            uint64_t tls = a3;       // AArch64: x3 = tls
+            uint64_t ctid_ptr = a4;  // AArch64: x4 = ctid
 
             if (!(flags & clone_flags::VM)) {
                 // ── Fork path (no CLONE_VM) ──

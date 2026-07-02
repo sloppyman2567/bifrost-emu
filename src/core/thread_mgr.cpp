@@ -227,10 +227,11 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     }
 
     // For CLONE_CHILD_CLEARTID/CLONE_CHILD_SETTID, the ctid pointer is
-    // in x3 (a3) of the parent's clone() call. The spawn_thread wrapper
-    // receives it via parent_cpu.regs[3] (the syscall handler doesn't
-    // pass it as a separate parameter — it's part of the clone ABI).
-    uint64_t ctid_ptr = parent_cpu.regs[3];
+    // in x4 (a4) of the parent's clone() call on AArch64.
+    // BUGFIX: the old code read ctid from regs[3] (x3), but on AArch64
+    // x3=tls and x4=ctid (opposite of x86_64). The syscall handler
+    // passes tls correctly (from a3); here we read ctid from regs[4].
+    uint64_t ctid_ptr = parent_cpu.regs[4];
 
     if (flags & BIFROST_CLONE_CHILD_CLEARTID) {
         gt->cpu.clear_child_tid = ctid_ptr;
@@ -244,15 +245,15 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         mem_.store<uint32_t>(ctid_ptr, child_tid);
     }
 
-    // ── Create per-thread JIT instance ──
-    // If the main JIT is enabled, give the spawned thread its own
-    // FrostJIT. This is the key multi-threading optimization: spawned
-    // threads get the same 6.4x JIT speedup as the main thread, with
-    // fully lock-free execution (each thread has its own 64 MiB code
-    // cache + block cache). If JIT is disabled or the per-thread JIT
-    // fails to allocate (rare — only if mmap fails), the thread falls
-    // back to the interpreter.
-    if (jit_enabled_ && jit_) {
+    // ── Per-thread JIT instance ──
+    // Per-thread FrostJIT instances have a known issue where the child
+    // thread crashes during early execution (likely a JIT codegen issue
+    // with the child's CPU state). For now, spawned threads use the
+    // interpreter (the pre-Turn-24 behavior). The per-thread JIT
+    // infrastructure (GuestThread::jit, JIT dispatch in thread_entry)
+    // is kept for future debugging. Set BIFROST_THREAD_JIT=1 to
+    // experimentally enable per-thread JIT.
+    if (jit_enabled_ && jit_ && getenv("BIFROST_THREAD_JIT")) {
         gt->jit = std::make_unique<FrostJIT>();
         if (gt->jit) {
             gt->jit->set_direct_window(mem_.direct_window());
