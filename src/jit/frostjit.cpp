@@ -365,9 +365,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             bool is_64 = (w == 8);
             bool is_16 = (w == 2);
 
-            // SMAX/SMIN/UMAX/UMIN need signed/unsigned compare + cmov.
-            // Fall back to CALL_INTERP for these (rare in practice).
-            if (atom_op >= 0x4 && atom_op <= 0x7) {
+            // SMAX/SMIN/UMAX/UMIN and 8-bit/16-bit CAS need special handling
+            // that the fast path doesn't support. Fall back to CALL_INTERP.
+            // 8-bit CAS needs cmpxchg r/m8 (0x0F 0xB0); the fast path only
+            // emits cmpxchg r/m32/r64 (0x0F 0xB1). 16-bit CAS also works
+            // but let's be conservative and fall back for sub-32-bit CAS.
+            if ((atom_op >= 0x4 && atom_op <= 0x7) ||
+                (atom_op >= 0xC && w < 4)) {
                 emit_call_interp(inst.arm_pc, false);
                 if (is_load && inst.dest != 0) {
                     emit_load_arm(RAX, static_cast<int>(inst.imm));
@@ -434,10 +438,17 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             } else if (atom_op == 0x0) {
                 // LDADD/STADD
                 if (is_load) {
-                    emit_lock_op(0x0F, 0xC1);  // xadd r/m, r (2-byte opcode)
+                    // LDADD: lock xadd [RAX], RCX (RCX gets old value)
+                    // XADD is a 2-byte opcode (0F C1) — can't use emit_lock_op.
+                    emit_byte(0xF0);  // LOCK
+                    if (is_64) emit_byte(0x48);
+                    else if (is_16) emit_byte(0x66);
+                    emit_byte(0x0F); emit_byte(0xC1);  // xadd r/m, r
+                    emit_byte(modrm(0, RCX & 7, RAX & 7));
                     store_reg_to_vreg(inst.dest, RCX);
                 } else {
-                    emit_lock_op(0x01, RCX);   // add r/m, r
+                    // STADD: lock add [RAX], RCX
+                    emit_lock_op(0x01, RCX);
                 }
             } else if (atom_op == 0x3 && !is_load) {
                 // STSET: lock or [RAX], RCX
@@ -457,27 +468,35 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 if (is_64) { emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00); }
                 else if (is_16) { emit_byte(0x66); emit_byte(0x8B); emit_byte(0x00); }
                 else { emit_byte(0x8B); emit_byte(0x00); }
-                // Compute new = old OP src into R8
-                emit_mov_reg(R8, RAX);  // R8 = old
+                // Compute new = old OP src into R8.
+                // R8 = old (mov r8, rax = 4C 8B C0)
+                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xC0);  // mov r8, rax
+                // RCX already has src (operand).
+                // AND/XOR/OR: result goes into R8 (the rm field with REX.B).
+                // Opcode 0x21=AND, 0x31=XOR, 0x09=OR (rm, r form).
+                // REX.WRB (0x4D) = W=1, R=1(extends reg to R8-15), B=1(extends rm to R8-15).
+                // modrm(3, rcx, r8) = 11 001 000 = 0xC8 → rm=R8, reg=RCX.
                 switch (atom_op) {
                     case 0x1: // LDCLR: new = old & ~src
-                        emit_not_reg(RCX);
-                        emit_byte(0x4C); emit_byte(0x21); emit_byte(0xC1);  // and r8, rcx
+                        emit_not_reg(RCX);  // RCX = ~src
+                        emit_byte(0x4D); emit_byte(0x21); emit_byte(0xC8);  // and r8, rcx
                         break;
                     case 0x2: // LDEOR: new = old ^ src
-                        emit_byte(0x4C); emit_byte(0x31); emit_byte(0xC1);  // xor r8, rcx
+                        emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC8);  // xor r8, rcx
                         break;
                     case 0x3: // LDSET: new = old | src
-                        emit_byte(0x4C); emit_byte(0x09); emit_byte(0xC1);  // or r8, rcx
+                        emit_byte(0x4D); emit_byte(0x09); emit_byte(0xC8);  // or r8, rcx
                         break;
                 }
                 // CAS loop: retry until cmpxchg succeeds.
+                // lock cmpxchg [R9], R8
+                // REX.WRB (0x4D) = W=1, R=1(reg→R8), B=1(rm→R9).
                 size_t loop_start = code_buf_used_;
                 emit_byte(0xF0);                    // LOCK
-                emit_byte(is_64 ? 0x49 : 0x41);     // REX for R9
+                emit_byte(is_64 ? 0x4D : 0x45);     // REX.WRB(64) or REX.RB(32)
                 if (is_16) emit_byte(0x66);
                 emit_byte(0x0F); emit_byte(0xB1);   // cmpxchg r/m, r
-                emit_byte(0x01);                    // modrm(0, r8, r9)
+                emit_byte(0x01);                    // modrm(0, r8, r9) = 00 000 001
                 // jnz loop_start (retry if CAS failed)
                 int32_t loop_rel = static_cast<int32_t>(loop_start - (code_buf_used_ + 6));
                 emit_byte(0x0F); emit_byte(0x85); emit_u32(static_cast<uint32_t>(loop_rel));
@@ -4205,13 +4224,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             }
         }
         // Run interpreter from saved state for the same number of instrs.
-        // NOTE: the interpreter sees the JIT's memory writes (STORE_MEM
-        // already happened). For blocks that read-then-write the same
-        // address, this can cause false-positive divergences. This is
-        // a known limitation of the verify mode — a full fix would
-        // require saving/restoring memory state, which is too expensive
-        // for the 4GB direct window. We accept this limitation and
-        // manually inspect any divergence to determine if it's real.
+        // Memory at STORE_MEM addresses was snapshotted before the JIT ran
+        // and restored after, so the interpreter sees pre-JIT memory state
+        // (eliminating false-positive divergences from read-then-write
+        // patterns). After the comparison, the JIT's written values are
+        // restored so the next block sees JIT-consistent memory.
         CPU ref = saved;
         ref.pc = saved.pc;
         int steps = 0;

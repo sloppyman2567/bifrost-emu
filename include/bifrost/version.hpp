@@ -6,7 +6,7 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// 1.4.0-rc.1 (2026-06-27): Release candidate — production hardening.
+// 1.4.0 (2026-06-27): Release candidate — production hardening.
 //   - 41/41 JIT tests pass (also pass under interpreter).
 //   - JIT is the default execution mode (6.4x speedup on compute).
 //   - Production-ready signal delivery: proper siginfo_t/ucontext_t,
@@ -53,7 +53,7 @@ namespace arm64emu {
 //     the toybox ls / FWD crash); native IR ops FP_F2I_FIXED/FP_I2F_FIXED
 //     defined (interpreter/optimizer/executor/JIT support added; translator
 //     still routes to CALL_INTERP pending JIT codegen stabilization).
-constexpr const char* VERSION  = "1.4.0-rc.1";
+constexpr const char* VERSION  = "1.4.0";
 constexpr const char* CODENAME = "bifrost-emu";
 
 } // namespace arm64emu

@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0-rc.1
+  bifrost-emu  v1.4.0
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0-rc.1](https://img.shields.io/badge/version-1.4.0--rc.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0--rc.1-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -447,7 +447,7 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0-rc.1** (2026-06-27):
+current release is **v1.4.0** (2026-06-27):
 
 - **MD5 now produces correct hashes.** The root cause was the
   FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd

@@ -559,22 +559,17 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (slot2 && nr_requeue > 0) {
                         int to_move = std::min(nr_requeue, slot1->waiters);
                         if (to_move > 0) {
-                            slot1->cv.notify_all();   // wake remaining
-                            slot1->waiters = 0;
-                            slot2->waiters += to_move;
-                            // The woken waiters will return from their
-                            // cv.wait() and re-check *uaddr. Since we
-                            // didn't change *uaddr, they'd re-block on
-                            // slot1 — but we want them on slot2. We can't
-                            // force them to move. The pragmatic fix: the
-                            // guest's futex API contract says requeued
-                            // waiters wake on uaddr2, so they'll re-check
-                            // uaddr2 and block there if needed. Our
-                            // "requeue" effectively becomes a wake — the
-                            // guest sees a spurious wakeup and re-loops.
-                            // This matches the old behavior but with the
-                            // uaddr2 waiter count bumped so a future WAKE
-                            // on uaddr2 sees the right count.
+                            // Wake the requeued waiters with notify_all.
+                            // They'll return from cv.wait() on slot1, do
+                            // slot1->waiters--, then re-check *uaddr via
+                            // the guest's futex loop and re-block on slot2
+                            // (incrementing slot2->waiters themselves).
+                            // We must NOT manually set slot1->waiters=0 or
+                            // bump slot2->waiters here — the woken threads'
+                            // own decrement/increment handles it. Setting
+                            // slot1->waiters=0 would make their decrement
+                            // go negative; bumping slot2 would double-count.
+                            slot1->cv.notify_all();
                             requeued = to_move;
                         }
                     }

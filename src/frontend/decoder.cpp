@@ -173,16 +173,18 @@ bool decode(DecodedInst& d, uint32_t inst) {
             return true;
         }
         if ((inst & 0x3F000000) != 0x08000000) return false;
-        // Check for CAS family (bit[21]=1). CAS is in a different
-        // encoding group (bits[29:27]=001) than LDADD etc. (bits[29:27]=111).
-        // The decoder's case 0x18 handles LDADD/LDCLR/LDSET/SWP etc.
-        // but CAS lives here in case 0x08.
+        // Check for CAS family (bit[21]=1). CAS is in encoding group 0x08
+        // (bits[29:27]=001), separate from LDADD etc. in group 0x18
+        // (bits[29:27]=111). In group 0x08, bits[15:12]=0111 for ALL CAS
+        // variants — the acquire/release semantics are in bits[23:22], NOT
+        // in bits[15:12] like group 0x18. So we hardcode atom_op=0xC (CAS)
+        // to match the interpreter's CAS check (atom_op >= 0xC).
         if ((inst >> 21) & 1) {
             d.size    = (inst >> 30) & 3;
             d.acquire = (inst >> 23) & 1;
             d.is_load = 1;  // CAS always returns old value
             d.rs      = (inst >> 16) & 0x1F;
-            d.atom_op = (inst >> 12) & 0xF;
+            d.atom_op = 0xC;  // CAS (hardcoded — group 0x08 has different opc encoding)
             d.rn      = (inst >> 5) & 0x1F;
             d.rt      = inst & 0x1F;
             d.cls     = InstClass::LSE_ATOMIC;

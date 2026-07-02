@@ -236,10 +236,6 @@ private:
         return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
     }
 
-    // Invalidate OTHER CPUs' reservations at addr. Called from STLR;
-    // STXR does invalidation inline under the shard lock.
-    void global_excl_invalidate(CPU& writer, uint64_t addr, uint32_t size);
-
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;

@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.4.0] — 2026-07-02 (stable release)
+
+### JIT correctness (post-rc.1 stabilization)
+
+- **Verify-mode memory save/restore** — eliminated ~41 false-positive
+  divergences by snapshotting STORE_MEM addresses before JIT execution
+  and restoring them for interpreter replay. Divergence count: 0.
+- **CCMP flag normalization** — CCMP after ADDS used the wrong Jcc for
+  CC/CS conditions (missing `emit_normalize_cf_to_sub_convention`).
+- **FP_F2I_FIXED native codegen** — fixed unsigned 32-bit saturation
+  jump-target bug (every non-negative result was 0) and signed 32-bit
+  INT32_MIN sign-extension. Flipped IR translator from CALL_INTERP to
+  native ops.
+- **Native LSE atomics** — CAS (`lock cmpxchg`), LDADD (`lock xadd`),
+  STADD (`lock add`), SWP (`lock xchg`), STSET (`lock or`), STCLR
+  (`lock and`), LDSET/LDCLR/LDEOR (CAS-loop). ~20x speedup over
+  CALL_INTERP for atomic-heavy workloads.
+- **CAS decode fix** — CAS in encoding group 0x08 has `bits[15:12]=0x7`
+  (not 0xC like group 0x18). Hardcoded `atom_op=0xC` in the decoder.
+- **CAS old-value destination** — ARM CAS writes old to Ws (rs), not
+  Wt (rt). Added XZR guard.
+- **LSE is_load semantics** — bit[22] is acquire/release, not load/store.
+  The "load" is determined by `Rt != 31` (XZR).
+
+### Threading (high-contention game support)
+
+- **Shared-JIT (default)** — spawned threads share the main's FrostJIT,
+  saving 64 MiB per thread. `blocks_mutex_` released before block
+  execution to avoid deadlocks. Opt out via `BIFROST_NO_SHARED_JIT=1`.
+- **Sharded global exclusive monitor** — 16 stripes by address bits for
+  parallel LL/SC atomics on different addresses. Fixes lost-update race.
+- **FUTEX_CMP_REQUEUE deadlock** — recursive-lock bug (EDEADLK) fixed
+  with `std::defer_lock` + address-ordered locking. Also handles
+  `uaddr2==uaddr` (same-slot) to avoid double-locking.
+- **FUTEX_CMP_REQUEUE waiter-count corruption** — `slot1->waiters=0`
+  drove counts negative on woken threads' decrement. Fixed by letting
+  woken threads' own decrement/increment handle the count naturally.
+
+### Tests
+
+- **8 new pthread/semaphore tests** — mutex, cond (4 concurrent waiters),
+  rwlock, sem, once, producer_consumer, atomic_stress (8-thread),
+  lse_inline (inline-asm CAS/LDADD/LDSET/LDCLR/LDEOR/SWP).
+- **71/71 tests pass** (was 62 at rc.1). 0 verify divergences.
+
+### Code quality
+
+- **Removed 9 stale duplicate files** (4,200 lines of dead code) from
+  the pre-1.4.0-beta.1 refactor.
+- **Removed dead code**: `global_excl_register/clear`, `tls_chain_overrides_`.
+- **Cleaned stale comments**: ATOMIC IR doc, thread_entry, shared-JIT,
+  monitor, verify-mode.
+
 ## [1.4.0-rc.1] — 2026-06-27 (production hardening — robustness, bug fixes, FMV/FMA3, documentation)
 
 ### Test infrastructure (post-rc.1)
