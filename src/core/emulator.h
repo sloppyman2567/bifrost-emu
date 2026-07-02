@@ -215,6 +215,31 @@ private:
     std::mutex futex_table_mu_;
     std::unordered_map<uint64_t, FutexSlot> futex_table_;
 
+    // ── Global exclusive monitor (LL/SC atomics) ──────────────────────
+    // AArch64's LDXR/STXR (load-linked / store-conditional) atomics rely
+    // on a GLOBAL exclusive monitor that tracks all CPUs' reservations.
+    // When any CPU stores to a reserved address, OTHER CPUs' reservations
+    // for that address are invalidated. This is what makes LL/SC correct.
+    //
+    // The monitor is SHARDED into 16 stripes by address bits ((addr>>3)&0xF)
+    // so independent atomics on different addresses proceed in parallel.
+    // Two CPUs only contend if they map to the same stripe.
+    static constexpr size_t EXCL_MONITOR_SHARDS = 16;
+    struct ExclMonitorShard {
+        std::mutex mu;
+        // Map: address → set of CPU* with a reservation at that address.
+        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
+    };
+    ExclMonitorShard excl_monitor_shards_[EXCL_MONITOR_SHARDS];
+
+    static size_t excl_shard_idx(uint64_t addr) {
+        return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
+    }
+
+    // Invalidate OTHER CPUs' reservations at addr. Called from STLR;
+    // STXR does invalidation inline under the shard lock.
+    void global_excl_invalidate(CPU& writer, uint64_t addr, uint32_t size);
+
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;

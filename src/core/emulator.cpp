@@ -43,6 +43,31 @@ namespace arm64emu {
 Emulator::Emulator() = default;
 Emulator::~Emulator() = default;
 
+// ── Global exclusive monitor (LL/SC atomics) — sharded ────────────────
+// See emulator.h for the design rationale. The monitor is sharded into
+// 16 stripes by address bits so independent atomics on different addresses
+// proceed in parallel. LDXR/STXR/STLR do their registration/invalidation
+// inline under the shard lock (in interpreter.cpp). This function is only
+// called from the STLR path (which can't use the inline pattern because
+// it doesn't check the local monitor).
+void Emulator::global_excl_invalidate(CPU& writer, uint64_t addr, uint32_t size) {
+    (void)size;
+    auto& shard = excl_monitor_shards_[excl_shard_idx(addr)];
+    std::lock_guard<std::mutex> g(shard.mu);
+    auto it = shard.reservations.find(addr);
+    if (it == shard.reservations.end()) return;
+    for (CPU* p : it->second) {
+        if (p != &writer && p->excl_tag_valid) {
+            p->excl_tag_valid = false;
+        }
+    }
+    auto& vec = it->second;
+    vec.erase(std::remove(vec.begin(), vec.end(), &writer), vec.end());
+    if (vec.empty()) {
+        shard.reservations.erase(it);
+    }
+}
+
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     elf_path_ = path;

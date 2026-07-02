@@ -10,12 +10,34 @@ namespace arm64emu {
 
 void Emulator::enable_jit() {
     if (jit_) return;
+    // Shared-JIT mode (default): spawned threads share the main's FrostJIT,
+    // saving 64 MiB per thread. This requires the code buffer to be RWX
+    // (not W^X) so translation (writes) and execution (reads/exec) can
+    // happen concurrently. W^X would toggle mprotect on the WHOLE buffer,
+    // crashing any thread executing JIT code.
+    // We force-disable W^X by setting BIFROST_NO_WEX before the FrostJIT
+    // constructor runs (it checks the env var at construction).
+    // Opt out via BIFROST_NO_SHARED_JIT=1 for per-thread JIT (lock-free,
+    // W^X-protected, but 64 MiB per thread).
+    // Security tradeoff: acceptable — the emulator is a single-process
+    // user-mode emulator; the only code in the JIT buffer is generated
+    // from the trusted guest binary.
+    static bool shared_jit_checked = false;
+    static bool shared_jit_mode = false;
+    if (!shared_jit_checked) {
+        shared_jit_mode = (getenv("BIFROST_NO_SHARED_JIT") == nullptr);
+        shared_jit_checked = true;
+    }
+    if (shared_jit_mode) {
+        setenv("BIFROST_NO_WEX", "1", 1);
+    }
     jit_ = std::make_unique<FrostJIT>();
     jit_enabled_ = (jit_ != nullptr);
     if (jit_enabled_) {
         jit_->set_direct_window(mem_.direct_window());
         if (verbose_)
-            fprintf(stderr, "[%s] frostJIT enabled (x86 codegen)\n", CODENAME);
+            fprintf(stderr, "[%s] frostJIT enabled (x86 codegen, %s mode)\n",
+                    CODENAME, shared_jit_mode ? "shared" : "per-thread");
     }
 }
 

@@ -36,15 +36,16 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // host thread was created. We just run it to completion.
     CPU& cpu = gt->cpu;
 
-    // ── Per-thread JIT dispatch ──
-    // Each spawned thread gets its own FrostJIT instance (created in
-    // spawn_thread). This gives multi-threaded guests the same 6.4x
-    // speedup as single-threaded guests, with fully lock-free
-    // execution (no contention between threads' code caches).
-    //
-    // If JIT is disabled globally or the per-thread JIT failed to
-    // allocate, fall back to the interpreter.
+    // ── JIT dispatch ──
+    // Default (shared-JIT): spawned threads share the main's FrostJIT
+    // (emu->jit_), saving 64 MiB per thread. blocks_mutex_ is held only
+    // for table mutations, released before block execution.
+    // Opt out via BIFROST_NO_SHARED_JIT=1 for per-thread JIT (lock-free,
+    // 64 MiB per thread).
     FrostJIT* thread_jit = gt->jit.get();
+    if (thread_jit == nullptr) {
+        thread_jit = emu->jit_.get();  // shared mode
+    }
     bool use_jit = (thread_jit != nullptr);
 
     constexpr uint64_t HANG_LIMIT = 50'000'000;
@@ -54,9 +55,10 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     try {
         while (cpu.running) {
             if (use_jit) {
-                // JIT dispatch — same as the main thread's jit_step().
-                // The per-thread FrostJIT has its own code cache and
-                // block cache, so this is lock-free.
+                // JIT dispatch — uses either the per-thread FrostJIT
+                // (BIFROST_NO_SHARED_JIT=1) or the shared main FrostJIT
+                // (default, Task 3). The shared mode serializes run_block
+                // via blocks_mutex_; the per-thread mode is lock-free.
                 thread_jit->run_block(cpu, *emu);
             } else {
                 emu->step_public(cpu);
@@ -254,33 +256,25 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         mem_.store<uint32_t>(ctid_ptr, child_tid);
     }
 
-    // ── Per-thread JIT instance ──
-    // Each spawned thread gets its own FrostJIT (64 MiB code cache,
-    // block cache, register allocator state). This gives multi-threaded
-    // guests the same 6.4x throughput advantage as single-threaded
-    // guests, with fully lock-free execution (no contention between
-    // threads' code caches). Translation work is duplicated across
-    // threads, but the simplicity and lock-free execution outweigh
-    // the memory cost for typical 1-8 thread guests.
+    // ── Shared-JIT mode (default) ──
+    // Spawned threads share the main thread's FrostJIT instance, saving
+    // 64 MiB of code-cache memory per thread (8 threads = 512 MiB saved).
+    // The block table is protected by blocks_mutex_ (held only for table
+    // mutations, released before block execution so threads can block in
+    // syscalls without deadlocking). Per-thread state (watchdog, hotness)
+    // is thread-local. The code buffer is RWX (W^X disabled in shared
+    // mode) so translation and execution can happen concurrently.
     //
-    // Turn 24 left this disabled (BIFROST_THREAD_JIT=1 to opt in)
-    // because the child appeared to "crash" during early execution.
-    // Turn 25 root-caused that as a deadlock symptom, not a JIT
-    // codegen bug: musl's pthread_exit intentionally leaves __tl_lock
-    // held on exit (the kernel's clear_child_tid mechanism releases
-    // it), but our set_tid_address cleanup was overwriting the lock
-    // with the child's TID after the clear_child_tid zeroing — so
-    // every subsequent __tl_lock acquirer (including the child
-    // itself, when its start function called __tl_lock for thread-
-    // list insertion) deadlocked. The child appeared to "hang" or
-    // "crash" because it was spinning in the futex retry loop.
+    // Opt OUT via BIFROST_NO_SHARED_JIT=1: each spawned thread gets its
+    // own FrostJIT (64 MiB code cache, lock-free execution). Use this
+    // for compute-bound multi-threaded guests where lock contention on
+    // blocks_mutex_ hurts throughput more than the memory cost.
     //
-    // After the Turn 25 deadlock fix, per-thread JIT is enabled by
-    // default. Set BIFROST_NO_THREAD_JIT=1 to disable (children fall
-    // back to the interpreter — useful for isolating JIT codegen
-    // bugs without the multi-thread variable).
-    static bool no_thread_jit = (getenv("BIFROST_NO_THREAD_JIT") != nullptr);
-    if (jit_enabled_ && jit_ && !no_thread_jit) {
+    // Turn 25 fixed the __tl_lock deadlock that previously prevented
+    // per-thread JIT from working. Turn 28 made shared-JIT deadlock-safe
+    // by releasing blocks_mutex_ before block execution.
+    static bool no_shared_jit = (getenv("BIFROST_NO_SHARED_JIT") != nullptr);
+    if (jit_enabled_ && jit_ && no_shared_jit) {
         gt->jit = std::make_unique<FrostJIT>();
         if (gt->jit) {
             gt->jit->set_direct_window(mem_.direct_window());

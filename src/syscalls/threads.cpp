@@ -516,16 +516,25 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                     Emulator::FutexSlot* slot1 = get_futex(uaddr);
                     Emulator::FutexSlot* slot2 = (uaddr2 != 0) ? get_futex(uaddr2) : nullptr;
-                    // Lock both slots in a consistent order (by address)
-                    // to avoid deadlock with a concurrent REQUEUE in the
-                    // opposite direction.
-                    std::unique_lock<std::mutex> lk1(slot1->mu);
+                    // Lock both slots in address order to avoid deadlock with
+                    // a concurrent REQUEUE in the opposite direction. Use
+                    // defer_lock so we can acquire in the right order.
+                    // Special case: if uaddr2 == uaddr, slot2 == slot1 — lock
+                    // only once (Linux returns EINVAL for this, but some guests
+                    // pass it; locking the same mutex twice would deadlock).
+                    std::unique_lock<std::mutex> lk1(slot1->mu, std::defer_lock);
                     std::unique_lock<std::mutex> lk2;
-                    if (slot2 && uaddr2 > uaddr) {
-                        lk2 = std::unique_lock<std::mutex>(slot2->mu);
-                    } else if (slot2) {
-                        lk2 = std::unique_lock<std::mutex>(slot2->mu);
-                        lk1.lock();
+                    if (slot2 && slot2 != slot1) {
+                        lk2 = std::unique_lock<std::mutex>(slot2->mu, std::defer_lock);
+                        if (uaddr2 > uaddr) {
+                            lk1.lock();
+                            lk2.lock();
+                        } else {
+                            lk2.lock();
+                            lk1.lock();
+                        }
+                    } else {
+                        lk1.lock();  // slot2 is null or same as slot1
                     }
                     // Wake up to nr_wake waiters on uaddr.
                     int woken = std::min(nr_wake, slot1->waiters);
