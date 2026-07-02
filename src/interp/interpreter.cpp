@@ -1126,66 +1126,26 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
 
             // ── LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS) ──
-            // Decoder classifies any bit-21=1 encoding in the 111000 group
-            // as LSE_ATOMIC. We check has_lse_ here: if the binary didn't
-            // declare LSE via PT_NOTE, fall through to LDUR/STUR handling.
+            // The decoder classifies LSE atomics by encoding (mode_b==0b00,
+            // V=0). If the decoder says LSE_ATOMIC, it IS an LSE atomic —
+            // the has_lse_ PT_NOTE check was too conservative (musl GCC
+            // 11.2.1 doesn't emit .gnu.property even with -march=armv8.1-a+lse).
             case InstClass::LSE_ATOMIC: {
-                if (!has_lse_) {
-                    // Binary doesn't declare LSE — this encoding is LDUR/STUR.
-                    // Fall through to the LDUR/STUR handler by re-dispatching
-                    // on the (synthetic) LDR_UNS/STR_UNS class. We do this by
-                    // re-decoding the instruction with the LSE bit ignored.
-                    // Simplest: handle it inline as LDUR/STUR.
-                    int width_bytes = 1 << d.size;
-                    uint8_t opc_ls = (d.raw >> 22) & 3;
-                    bool is_vec = (d.raw >> 26) & 1;
-                    bool is_load = is_vec ? (opc_ls & 1)
-                                          : ((opc_ls & 2) || (opc_ls & 1));
-                    int16_t imm9 = sign_extend((d.raw >> 12) & 0x1FF, 9);
-                    uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-                    uint64_t addr = base + imm9;
-                    if (is_vec) {
-                        bool is_q = (opc_ls & 2) && d.size == 0;
-                        int nbytes = is_q ? 16 : (1 << d.size);
-                        if (is_load) {
-                            uint64_t lo = 0, hi = 0;
-                            mem_.read(addr, &lo, std::min(nbytes, 8), pcache);
-                            if (nbytes > 8) mem_.read(addr + 8, &hi, nbytes - 8, pcache);
-                            cpu.v_lo[d.rt] = lo;
-                            cpu.v_hi[d.rt] = (nbytes >= 16) ? hi : 0;
-                        } else {
-                            uint64_t lo = cpu.v_lo[d.rt];
-                            mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
-                            if (nbytes > 8) {
-                                uint64_t hi = cpu.v_hi[d.rt];
-                                mem_.write(addr + 8, &hi, nbytes - 8, pcache);
-                            }
-                        }
-                    } else {
-                        if (is_load) {
-                            uint64_t v = 0;
-                            mem_.read(addr, &v, width_bytes, pcache);
-                            if (d.rt != 31) {
-                                if (opc_ls & 2) v = sign_extend(v, width_bytes * 8);
-                                cpu.regs[d.rt] = v;
-                            }
-                        } else {
-                            uint64_t v = (d.rt == 31) ? 0 : cpu.regs[d.rt];
-                            uint64_t mask = (width_bytes == 8) ? ~0ULL
-                                          : ((1ULL << (width_bytes * 8)) - 1);
-                            v &= mask;
-                            mem_.write(addr, &v, width_bytes, pcache);
-                        }
-                    }
-                    return;
-                }
-                // has_lse_ is true — execute as an LSE atomic.
+                // Execute as an LSE atomic.
+                // For LSE atomics, the "load" (return old value) is determined
+                // by Rt != 31 (XZR), NOT by bit 22 (which is the acquire/release
+                // flag o0). STADD = LDADD with Rt=31, STCLR = LDCLR with Rt=31, etc.
                 int width_bytes = 1 << d.size;
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 uint64_t mask = (width_bytes == 8) ? ~0ULL
                               : ((1ULL << (width_bytes * 8)) - 1);
+                bool returns_old = (d.rt != 31);
 
                 // CAS family (atom_op >= 0xC): compare-and-swap.
+                // ARM CAS Ws, Wt, [Xn]:
+                //   old = [Xn]; if old == Ws, [Xn] = Wt; Ws = old
+                // Ws (rs) is BOTH the expected (input) AND old value (output).
+                // Wt (rt) is the desired value (unchanged).
                 if (d.atom_op >= 0xC) {
                     uint64_t old = 0;
                     mem_.read(base, &old, width_bytes, pcache);
@@ -1195,7 +1155,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t newv = cpu.regs[d.rt] & mask;
                         mem_.write(base, &newv, width_bytes, pcache);
                     }
-                    if (d.rt != 31) cpu.regs[d.rt] = old;
+                    // OLD value goes to Ws (rs), NOT Wt (rt). Guard XZR.
+                    if (d.rs != 31) cpu.regs[d.rs] = old;
                     return;
                 }
 
@@ -1206,7 +1167,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     old &= mask;
                     uint64_t newv = cpu.regs[d.rs] & mask;
                     mem_.write(base, &newv, width_bytes, pcache);
-                    if (d.is_load && d.rt != 31) cpu.regs[d.rt] = old;
+                    if (returns_old) cpu.regs[d.rt] = old;
                     return;
                 }
 
@@ -1236,7 +1197,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     default:  newv = a & mask; break;
                 }
                 mem_.write(base, &newv, width_bytes, pcache);
-                if (d.is_load && d.rt != 31) cpu.regs[d.rt] = a;
+                if (returns_old) cpu.regs[d.rt] = a;
                 return;
             }
 
@@ -1409,6 +1370,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (!d.is_load) {
                     // Store-exclusive (STXR/STLXR) or store-release (STLR).
                     if (use_monitor) {
+                        // STXR must atomically: (1) check this CPU's
+                        // reservation, (2) write memory, (3) invalidate
+                        // OTHER CPUs' reservations at this address. Steps
+                        // 1-3 must be atomic w.r.t. other CPUs' LDXR/STXR
+                        // — otherwise a race between this CPU's check and
+                        // write lets two CPUs both succeed. We hold the
+                        // SHARD lock (selected by address hash) for the
+                        // entire sequence. Sharding lets independent
+                        // atomics on different addresses proceed in
+                        // parallel — critical for high-contention workloads.
+                        auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                        std::lock_guard<std::mutex> gmon(shard.mu);
                         bool ok = cpu.excl_check(base, width_bytes);
                         if (ok) {
                             uint64_t v = cpu.regs[d.rt];
@@ -1416,24 +1389,67 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                                           : ((1ULL << (width_bytes * 8)) - 1);
                             v &= mask;
                             mem_.write(base, &v, width_bytes, pcache);
+                            // Invalidate OTHER CPUs' reservations at this
+                            // address (inline, since we hold the shard lock).
+                            auto it = shard.reservations.find(base);
+                            if (it != shard.reservations.end()) {
+                                for (CPU* p : it->second) {
+                                    if (p != &cpu && p->excl_tag_valid) {
+                                        p->excl_tag_valid = false;
+                                    }
+                                }
+                                it->second.erase(
+                                    std::remove(it->second.begin(), it->second.end(), &cpu),
+                                    it->second.end());
+                                if (it->second.empty()) {
+                                    shard.reservations.erase(it);
+                                }
+                            }
                         }
                         if (d.rs != 31) cpu.regs[d.rs] = ok ? 0 : 1;
                         cpu.excl_clear();
                     } else {
-                        // STLR: store-release (no monitor check, always succeeds)
+                        // STLR: store-release (no monitor check, always succeeds).
+                        // Must hold the shard lock during the write + invalidate
+                        // so a concurrent STXR can't sneak in between them.
                         uint64_t v = cpu.regs[d.rt];
                         uint64_t mask = (width_bytes == 8) ? ~0ULL
                                       : ((1ULL << (width_bytes * 8)) - 1);
                         v &= mask;
+                        auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                        std::lock_guard<std::mutex> gmon(shard.mu);
                         mem_.write(base, &v, width_bytes, pcache);
+                        // Invalidate OTHER CPUs' reservations at this address.
+                        auto it = shard.reservations.find(base);
+                        if (it != shard.reservations.end()) {
+                            for (CPU* p : it->second) {
+                                if (p != &cpu && p->excl_tag_valid) {
+                                    p->excl_tag_valid = false;
+                                }
+                            }
+                            shard.reservations.erase(it);
+                        }
                     }
                 } else {
                     // Load-exclusive (LDXR/LDAXR) or load-acquire (LDAR).
+                    // LDXR must atomically: (1) read memory, (2) mark this
+                    // CPU's reservation, (3) register globally. We hold the
+                    // SHARD lock so that a concurrent STXR on the same
+                    // address can't sneak in between our read and registration.
+                    auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                    std::lock_guard<std::mutex> gmon(shard.mu);
                     uint64_t v = 0;
                     mem_.read(base, &v, width_bytes, pcache);
                     cpu.regs[d.rt] = v;
                     if (use_monitor) {
                         cpu.excl_mark(base, width_bytes);
+                        // Register globally (inline, since we hold the lock).
+                        auto& vec = shard.reservations[base];
+                        bool found = false;
+                        for (auto*& p : vec) {
+                            if (p == &cpu) { found = true; break; }
+                        }
+                        if (!found) vec.push_back(&cpu);
                     }
                 }
                 return;

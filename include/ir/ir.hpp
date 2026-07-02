@@ -192,6 +192,18 @@ enum class IROp : uint8_t {
     // System register access (TPIDR_EL0, NZCV, FPCR, FPSR)
     MRS,           // dest = system_reg[imm]  (imm = reg index)
     MSR,           // system_reg[imm] = src1
+    // Native LSE atomics (via x86 lock-prefixed instructions)
+    // ATOMIC: atomic operation on mem[src1].
+    //   src1 = base address vreg
+    //   src2 = operand vreg (rs for non-CAS; desired=rt for CAS)
+    //   dest = destination vreg (old value, 0 if store-only)
+    //   width = 1/2/4/8
+    //   cond = atom_op (0=LDADD,1=LDCLR,2=LDEOR,3=LDSET,4=SMAX,5=SMIN,
+    //                    6=UMAX,7=UMIN,8=SWP,0xC-0xF=CAS)
+    //   flags_op = is_load (1=return old value, 0=store-only)
+    //   imm = ARM reg index for slow-path result reload (rt for non-CAS,
+    //         rs for CAS — also the expected-value source for CAS)
+    ATOMIC,
 };
 
 // Condition codes (same encoding as ARM64 cond field).

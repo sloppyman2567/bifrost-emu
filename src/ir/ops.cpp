@@ -119,6 +119,69 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            case IROp::ATOMIC: {
+                // LSE atomic operation (verify-mode executor).
+                // Runs single-threaded, so load-compute-store is correct.
+                // Note: imm is the ARM reg index for slow-path result reload,
+                // NOT an address offset. LSE atomics use [Xn] with no offset.
+                uint64_t addr = vregs[inst.src1];
+                uint64_t src = vregs[inst.src2];
+                int w = inst.width;
+                uint64_t mask = (w == 8) ? ~0ULL : ((1ULL << (w * 8)) - 1);
+                uint64_t old = 0;
+                if (window_base && addr + w <= Memory::DIRECT_WINDOW_SIZE) {
+                    memcpy(&old, window_base + addr, w);
+                } else {
+                    emu.mem().read(addr, &old, w);
+                }
+                old &= mask;
+                src &= mask;
+                uint64_t newv = old;
+                uint8_t atom_op = inst.cond;
+                bool is_load = (inst.flags_op != 0);
+                if (atom_op >= 0xC) {
+                    // CAS: src2 = desired, imm = ARM reg (rs) for expected.
+                    // Load expected from cpu.regs[imm].
+                    uint64_t expected = cpu.regs[inst.imm] & mask;
+                    uint64_t desired = src & mask;  // src2 = desired
+                    if (old == expected) {
+                        newv = desired;
+                    } else {
+                        newv = old;
+                    }
+                } else {
+                    switch (atom_op) {
+                        case 0x0: newv = (old + src) & mask; break;   // LDADD
+                        case 0x1: newv = (old & ~src) & mask; break;  // LDCLR
+                        case 0x2: newv = (old ^ src) & mask; break;   // LDEOR
+                        case 0x3: newv = (old | src) & mask; break;   // LDSET
+                        case 0x4: { // SMAX
+                            int64_t sa = static_cast<int64_t>(old << (64 - w*8)) >> (64 - w*8);
+                            int64_t sb = static_cast<int64_t>(src << (64 - w*8)) >> (64 - w*8);
+                            newv = (sa > sb ? sa : sb) & mask; break;
+                        }
+                        case 0x5: { // SMIN
+                            int64_t sa = static_cast<int64_t>(old << (64 - w*8)) >> (64 - w*8);
+                            int64_t sb = static_cast<int64_t>(src << (64 - w*8)) >> (64 - w*8);
+                            newv = (sa < sb ? sa : sb) & mask; break;
+                        }
+                        case 0x6: newv = (old > src ? old : src) & mask; break;  // UMAX
+                        case 0x7: newv = (old < src ? old : src) & mask; break;  // UMIN
+                        case 0x8: newv = src; break;  // SWP
+                        default: newv = old; break;
+                    }
+                }
+                if (window_base && addr + w <= Memory::DIRECT_WINDOW_SIZE) {
+                    memcpy(window_base + addr, &newv, w);
+                } else {
+                    emu.mem().write(addr, &newv, w);
+                }
+                if (is_load) {
+                    vregs[inst.dest] = old;
+                }
+                break;
+            }
+
             case IROp::ADD:
                 vregs[inst.dest] = vregs[inst.src1] + vregs[inst.src2];
                 break;

@@ -114,6 +114,7 @@ static bool is_pure(IROp op) {
         case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
         case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED:  // fixed-point variants
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
+        case IROp::ATOMIC:                               // read/write memory
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:
@@ -360,7 +361,9 @@ void optimize_ir(IRBlock& block) {
             }
 
             case IROp::STORE_MEM:
-                // Side-effecting — no value produced.
+            case IROp::ATOMIC:
+                // Side-effecting (writes memory) — skip constant folding
+                // even if dest is unused.
                 break;
 
             case IROp::ADD: case IROp::SUB: case IROp::MUL:
@@ -834,6 +837,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FNMSUB: return "FNMSUB";
                     case IROp::MRS: return "MRS";
                     case IROp::MSR: return "MSR";
+                    case IROp::ATOMIC: return "ATOMIC";
                     default: return "?";
                     }
                     return "?";
