@@ -580,10 +580,31 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 96: { // set_tid_address
-            // Stores the tid_address pointer in the calling thread's CPU
-            // state. Real Linux writes the TID to *tid_address when the
-            // thread terminates (used by futex on child termination).
+            // Stores the tid_address pointer in the calling thread's
+            // clear_child_tid field. On real Linux, set_tid_address(2)
+            // and CLONE_CHILD_CLEARTID share the SAME task->clear_child_tid
+            // field: whichever was set last wins. When the thread exits,
+            // the kernel writes 0 to *clear_child_tid and performs a
+            // FUTEX_WAKE on it — see exit_mm() in kernel/exit.c.
+            //
+            // musl relies on this: it calls set_tid_address(&__thread_list_lock)
+            // at startup, then spawns threads via clone() with
+            // CLONE_CHILD_CLEARTID | ctid=&__thread_list_lock. When the
+            // child exits, the kernel clears the lock to 0 and wakes any
+            // waiter of __tl_lock — which is how the orphaned lock is
+            // released when a thread exits while holding __tl_lock
+            // (musl's pthread_exit intentionally does NOT call
+            // __tl_unlock before SYS_exit; see the comment in
+            // pthread_create.c: "the lock is released, which only
+            // happens after SYS_exit has been called, via the exit
+            // futex address pointing at the lock").
+            //
+            // We track set_tid_address_ptr separately only so the
+            // get_robust_list-style introspection can still report it;
+            // the exit-time cleanup is handled by the clear_child_tid
+            // path in thread_entry (which writes 0 + FUTEX_WAKE).
             cpu.set_tid_address_ptr = a0;
+            cpu.clear_child_tid     = a0;
             ret_host(cpu.tid);
             return 0;
         }

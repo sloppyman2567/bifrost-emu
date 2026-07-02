@@ -81,16 +81,29 @@ void Emulator::syscall(CPU& cpu) {
             case 80: name = "fstat"; break;
             case 221: name = "execve"; break;
             case 220: name = "clone"; break;
+            case 435: name = "clone3"; break;
             case 93: name = "exit"; break;
             case 94: name = "exit_group"; break;
+            case 96: name = "set_tid_address"; break;
+            case 98: name = "futex"; break;
+            case 99: name = "set_robust_list"; break;
+            case 100: name = "get_robust_list"; break;
+            case 129: name = "kill"; break;
+            case 130: name = "tkill"; break;
+            case 131: name = "tgkill"; break;
             default: break;
         }
         if (name) {
-            fprintf(stderr, "[syscall] %llu %s a0=0x%llx a1=0x%llx a2=0x%llx\n",
+            fprintf(stderr, "[syscall t%d] %llu %s a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx a4=0x%llx a5=0x%llx pc=0x%llx\n",
+                    cpu.tid,
                     static_cast<unsigned long long>(num), name,
                     static_cast<unsigned long long>(cpu.regs[0]),
                     static_cast<unsigned long long>(cpu.regs[1]),
-                    static_cast<unsigned long long>(cpu.regs[2]));
+                    static_cast<unsigned long long>(cpu.regs[2]),
+                    static_cast<unsigned long long>(cpu.regs[3]),
+                    static_cast<unsigned long long>(cpu.regs[4]),
+                    static_cast<unsigned long long>(cpu.regs[5]),
+                    static_cast<unsigned long long>(cpu.pc));
         }
     }
 

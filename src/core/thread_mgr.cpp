@@ -140,8 +140,31 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         }
     }
 
-    // CLONE_CHILD_CLEARTID: zero the word at clear_child_tid and
-    // perform a futex wake on it. This is how pthread_join unblocks.
+    // CLONE_CHILD_CLEARTID / set_tid_address: zero the word at
+    // clear_child_tid and perform a futex wake on it. This is how
+    // pthread_join unblocks, AND — critically for musl — how an
+    // orphaned __tl_lock is released when a thread exits while
+    // holding it (musl's pthread_exit deliberately leaves __tl_lock
+    // held on exit; the kernel's exit-time clear_child_tid handling
+    // is what releases it).
+    //
+    // On real Linux, set_tid_address(2) and CLONE_CHILD_CLEARTID
+    // share the same task->clear_child_tid field. We model the same
+    // behavior in CPU state: set_tid_address() updates clear_child_tid
+    // directly. So a single clear_child_tid write here covers both
+    // the CLONE_CHILD_CLEARTID and set_tid_address contracts.
+    //
+    // BUGFIX (Turn 25): the old code had a separate set_tid_address_ptr
+    // path that wrote cpu.tid (not 0) to the address. When musl's
+    // main thread called set_tid_address(&__thread_list_lock) and
+    // then spawned a child with CLONE_CHILD_CLEARTID | ctid=&__thread_list_lock,
+    // BOTH fields pointed to the same address. The clear_child_tid
+    // path correctly wrote 0, but the set_tid_address_ptr path then
+    // OVERWROTE it with the child's TID — leaving the lock orphaned
+    // at value=tid after exit. This caused a deadlock in musl's
+    // __tl_lock when the next pthread_create/pthread_join tried to
+    // acquire it (CAS 0→tid failed, FUTEX_WAIT val=tid blocked
+    // forever because no one would ever unlock).
     if (cpu.clear_child_tid) {
         emu->mem().store<uint32_t>(cpu.clear_child_tid, 0);
         auto* slot = emu->get_futex(cpu.clear_child_tid);
@@ -151,25 +174,11 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         }
     }
 
-    // set_tid_address: Linux's set_tid_address(2) records a pointer that
-    // the kernel writes the exiting thread's TID to (and performs a
-    // futex wake on) when the thread exits. This is the mechanism
-    // pthread_detach + pthread_tryjoin_np rely on. Without it, processes
-    // using set_tid_address for futex-based join (instead of
-    // CLONE_CHILD_CLEARTID) would hang forever waiting for the futex.
-    if (cpu.set_tid_address_ptr) {
-        try {
-            emu->mem().store<uint32_t>(cpu.set_tid_address_ptr,
-                                       static_cast<uint32_t>(cpu.tid));
-            auto* slot = emu->get_futex(cpu.set_tid_address_ptr);
-            {
-                std::lock_guard<std::mutex> lk(slot->mu);
-                slot->cv.notify_all();
-            }
-        } catch (...) {
-            // Pointer no longer mapped — nothing we can do; ignore.
-        }
-    }
+    // set_tid_address_ptr is now redundant with clear_child_tid (they
+    // share the same field per Linux semantics — see set_tid_address
+    // syscall handler). The cleanup above already wrote 0 and woke
+    // any waiters. We keep the field in CPU state only for debugging
+    // / introspection; no second write is needed here.
 
     emu->decrement_alive_threads();
 }
@@ -246,14 +255,32 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     }
 
     // ── Per-thread JIT instance ──
-    // Per-thread FrostJIT instances have a known issue where the child
-    // thread crashes during early execution (likely a JIT codegen issue
-    // with the child's CPU state). For now, spawned threads use the
-    // interpreter (the pre-Turn-24 behavior). The per-thread JIT
-    // infrastructure (GuestThread::jit, JIT dispatch in thread_entry)
-    // is kept for future debugging. Set BIFROST_THREAD_JIT=1 to
-    // experimentally enable per-thread JIT.
-    if (jit_enabled_ && jit_ && getenv("BIFROST_THREAD_JIT")) {
+    // Each spawned thread gets its own FrostJIT (64 MiB code cache,
+    // block cache, register allocator state). This gives multi-threaded
+    // guests the same 6.4x throughput advantage as single-threaded
+    // guests, with fully lock-free execution (no contention between
+    // threads' code caches). Translation work is duplicated across
+    // threads, but the simplicity and lock-free execution outweigh
+    // the memory cost for typical 1-8 thread guests.
+    //
+    // Turn 24 left this disabled (BIFROST_THREAD_JIT=1 to opt in)
+    // because the child appeared to "crash" during early execution.
+    // Turn 25 root-caused that as a deadlock symptom, not a JIT
+    // codegen bug: musl's pthread_exit intentionally leaves __tl_lock
+    // held on exit (the kernel's clear_child_tid mechanism releases
+    // it), but our set_tid_address cleanup was overwriting the lock
+    // with the child's TID after the clear_child_tid zeroing — so
+    // every subsequent __tl_lock acquirer (including the child
+    // itself, when its start function called __tl_lock for thread-
+    // list insertion) deadlocked. The child appeared to "hang" or
+    // "crash" because it was spinning in the futex retry loop.
+    //
+    // After the Turn 25 deadlock fix, per-thread JIT is enabled by
+    // default. Set BIFROST_NO_THREAD_JIT=1 to disable (children fall
+    // back to the interpreter — useful for isolating JIT codegen
+    // bugs without the multi-thread variable).
+    static bool no_thread_jit = (getenv("BIFROST_NO_THREAD_JIT") != nullptr);
+    if (jit_enabled_ && jit_ && !no_thread_jit) {
         gt->jit = std::make_unique<FrostJIT>();
         if (gt->jit) {
             gt->jit->set_direct_window(mem_.direct_window());

@@ -118,6 +118,10 @@ UNIT_TESTS=(
     "test_malloc|ctest/test_malloc.elf||5|malloc test done"
     "test_simd_arith|ctest/test_simd_arith.elf||10|ALL PASS"
     "test_tls_static|ctest/test_tls_static.elf||10|ALL PASS"
+    # Multi-threaded pthread test (default: 4 threads, fib(35)).
+    # Exercises clone/clone3 + futex (FUTEX_WAIT/WAKE/REQUEUE) +
+    # set_tid_address + per-thread JIT + __tl_lock release-via-ctid.
+    "test_pthread|ctest/test_pthread.elf||15|ALL PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)
@@ -196,6 +200,24 @@ run_test() {
 
     # Apply filter
     if [ -n "$FILTER" ] && ! echo "$name" | grep -qi "$FILTER"; then
+        return 0
+    fi
+
+    # Skip if the test binary doesn't exist (e.g., ctest/*.elf files
+    # are gitignored and must be cross-compiled on demand with
+    # `make cross SRC=... OUT=...`). This keeps `make check` useful
+    # even when the developer hasn't built every optional test.
+    #
+    # The file field may contain args (e.g. "ctest_real/toybox echo hello"),
+    # so we extract just the first whitespace-separated token as the
+    # binary path to test for existence.
+    local bin_path="${file%% *}"
+    if [ ! -f "$bin_path" ]; then
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+        if [ "$VERBOSE" = "1" ]; then
+            echo -e "  ${C_YLW}SKIP${C_RST}    $name"
+            echo -e "         (binary $bin_path not found — build with 'make cross SRC=...')"
+        fi
         return 0
     fi
 
@@ -299,6 +321,9 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
     echo -ne "${C_RED}Fail: $FAIL_COUNT${C_RST}"
 else
     echo -ne "${C_DIM}Fail: $FAIL_COUNT${C_RST}"
+fi
+if [ "$SKIP_COUNT" -gt 0 ]; then
+    echo -ne "  ${C_DIM}Skip: $SKIP_COUNT${C_RST}"
 fi
 echo -e "  ${C_DIM}(${ELAPSED}s)${C_RST}"
 
