@@ -19,7 +19,7 @@ Linux host without needing qemu or a cross-compiler.
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0--rc.1-orange.svg)](CHANGELOG.md)
+[![Version: 1.4.0](https://img.shields.io/badge/version-1.4.0-blue.svg)](CHANGELOG.md)
 
 ## Quick Start
 

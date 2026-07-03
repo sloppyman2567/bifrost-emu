@@ -211,6 +211,33 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
 void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
 
+    // BUGFIX (v1.4.0): Detect whether this block contains any ATOMIC,
+    // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
+    // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
+    // ops have complex memory + register side effects that the FWD
+    // optimizer can't model correctly:
+    //   - ATOMIC reads cpu.regs[imm] directly (bypassing vregs)
+    //   - ATOMIC writes memory (invalidates forwarded loads)
+    //   - LL/SC ops interact with the exclusive monitor
+    // Forwarding stale values across these ops causes LSE atomic
+    // correctness bugs (CAS writes wrong desired value, etc.).
+    // FWD is a ~5.6% speedup on compute loops — we skip it only for
+    // blocks with atomics, which are rare in compute workloads.
+    static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
+    bool block_has_atomics = false;
+    if (enable_fwd_) {
+        for (const auto& inst : block.insts) {
+            if (inst.op == IROp::ATOMIC ||
+                inst.op == IROp::LDXR_FAST ||
+                inst.op == IROp::STXR_FAST ||
+                inst.op == IROp::STLR_FAST) {
+                block_has_atomics = true;
+                break;
+            }
+        }
+    }
+    bool fwd_enabled = enable_fwd_ && !block_has_atomics;
+
     ConstMap consts;
     CopyMap  copies;
     // Last vreg → index in insts that defined it (for store-load fwd).
@@ -319,8 +346,9 @@ void optimize_ir(IRBlock& block) {
                 //
                 // Enable with BIFROST_ENABLE_FWD=1 (bench_mips gets ~5.6%
                 // speedup). Without FWD, the JIT still achieves 571 MIPS.
-                static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
-                auto it = enable_fwd_ ? arm_reg_cache.find(ar) : arm_reg_cache.end();
+                // Disabled for blocks containing ATOMIC/LL/SC ops (see
+                // block_has_atomics above).
+                auto it = fwd_enabled ? arm_reg_cache.find(ar) : arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
                     // Reuse cached vreg: turn this into MOV.
                     inst.op = IROp::MOV;
@@ -366,6 +394,20 @@ void optimize_ir(IRBlock& block) {
             case IROp::ATOMIC:
                 // Side-effecting (writes memory) — skip constant folding
                 // even if dest is unused.
+                // BUGFIX (v1.4.0): ATOMIC has complex memory + register
+                // side effects (reads cpu.regs[imm] directly, writes old
+                // value to an ARM reg via subsequent STORE_REG, and does
+                // a memory RMW). Clear the entire arm_reg_cache to be
+                // safe — ATOMICs are rare enough (not in tight compute
+                // loops) that this doesn't hurt performance. Without this,
+                // the FWD cache can forward stale values for ARM regs that
+                // were cached before the atomic's memory side effect.
+                if (inst.op == IROp::ATOMIC) {
+                    invalidate_vreg_in_cache(inst.dest);
+                    arm_reg_cache.clear();
+                    consts.clear_all();
+                    copies.clear_all();
+                }
                 break;
 
             case IROp::ADD: case IROp::SUB: case IROp::MUL:
@@ -674,6 +716,22 @@ void optimize_ir(IRBlock& block) {
             } else if (inst.op == IROp::LOAD_REG) {
                 last_store_to.erase(inst.src1);
             } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
+                last_store_to.clear();
+            } else if (inst.op == IROp::ATOMIC) {
+                // BUGFIX (v1.4.0): ATOMIC reads cpu.regs[imm] directly
+                // (e.g., CAS reads the expected value from Ws=imm). If a
+                // preceding STORE_REG to that ARM reg is DCE'd, the ATOMIC
+                // reads a stale value. Prevent this by treating ATOMIC as
+                // a LOAD_REG of imm — erase the last_store_to entry so the
+                // preceding STORE_REG is preserved.
+                // Also clear the entire map to be safe: ATOMIC has memory
+                // side effects that may affect any subsequent load.
+                last_store_to.erase(static_cast<uint16_t>(inst.imm));
+            } else if (inst.op == IROp::LDXR_FAST ||
+                       inst.op == IROp::STXR_FAST ||
+                       inst.op == IROp::STLR_FAST) {
+                // LL/SC ops also read/write ARM regs and memory — clear
+                // all pending store info to be safe.
                 last_store_to.clear();
             }
         }

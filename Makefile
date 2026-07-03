@@ -40,14 +40,16 @@ TARGET   := bifrost-emu
 LIB      := libbifrost.a
 
 # Auto-discover all .cpp under src/, plus main.cpp at the root.
+# api/bifrost_capi.cpp is included in LIB_SOURCES so libbifrost.a exposes
+# the C API (bifrost.h).
 SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphics src/interp src/audio
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
 OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)   # auto-generated header dependency files
 
-# Library objects (everything except main.cpp)
-LIB_SOURCES := $(filter-out main.cpp,$(SOURCES))
+# Library objects (everything except main.cpp, PLUS the C API wrapper)
+LIB_SOURCES := $(filter-out main.cpp,$(SOURCES)) api/bifrost_capi.cpp
 LIB_OBJECTS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(LIB_SOURCES))
 
 HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
