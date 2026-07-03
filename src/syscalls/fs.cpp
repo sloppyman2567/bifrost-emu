@@ -96,20 +96,42 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── dup / dup2 / dup3 — VFS-aware ─────────────────────────────
+        // ── dup / dup3 — VFS-aware ─────────────────────────────
+        // BUGFIX: AArch64 has NO dup2 syscall (only dup3 at 24). The old
+        // case 33 was labeled "dup2" but 33 is actually mknodat — when
+        // the guest called mknodat(dirfd, path, mode, dev), the code
+        // called fds_.dup2(dirfd, (int)path_ptr), treating the path
+        // pointer as an fd. Removed the dup2-at-33 handler; dup is at 23
+        // and dup3 is at 24 (both kept).
         case 23: { // dup
             int r = fds_.dup(static_cast<int>(a0));
             ret_host(r);
             return 0;
         }
-        case 33: { // dup2
+        case 24: { // dup3(oldfd, newfd, flags) — AArch64 24
+            // BUGFIX: AArch64 has no dup2, only dup3. dup3 requires
+            // oldfd != newfd (returns -EINVAL otherwise) and honors
+            // O_CLOEXEC in flags.
+            if (static_cast<int>(a0) == static_cast<int>(a1)) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINVAL));
+                return 0;
+            }
+            // Note: O_CLOEXEC tracking is not yet implemented in FdTable;
+            // for now we accept the flag and ignore it (no execve in
+            // single-process guests, so FD_CLOEXEC is moot).
             int r = fds_.dup2(static_cast<int>(a0), static_cast<int>(a1));
             ret_host(r);
             return 0;
         }
-        case 24: { // dup3 - rare but possible
-            int r = fds_.dup2(static_cast<int>(a0), static_cast<int>(a1));
-            ret_host(r);
+        case 33: { // mknodat(dirfd, path, mode, dev) — AArch64 33
+            // BUGFIX: previously implemented as dup2 (which doesn't exist
+            // on AArch64). The real syscall at 33 is mknodat. Forward to
+            // host mknodat.
+            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            int r = ::mknodat(static_cast<int>(a0), path.c_str(),
+                              static_cast<mode_t>(a2), static_cast<dev_t>(a3));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
             return 0;
         }
 
@@ -153,11 +175,20 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 59: { // pipe2
-            int fds[2];
-            int r = ::pipe2(fds, static_cast<int>(a1));
+        case 59: { // pipe2(pipefd, flags) — AArch64 59
+            // BUGFIX: previously wrote raw host fds directly to guest
+            // memory without registering them in FdTable. Subsequent
+            // read/write/close calls on those fds went through FdTable::get()
+            // → nullptr → -EBADF. Fix: wrap each pipe end in a HostVNode
+            // and register via FdTable::allocate, returning the guest fds.
+            int hfds[2];
+            int r = ::pipe2(hfds, static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
-            mem_.write(a0, fds, sizeof(fds));
+            int g0 = fds_.allocate(std::make_shared<HostVNode>(hfds[0], O_RDONLY));
+            int g1 = fds_.allocate(std::make_shared<HostVNode>(hfds[1], O_WRONLY));
+            uint32_t out[2] = { static_cast<uint32_t>(g0), static_cast<uint32_t>(g1) };
+            try { mem_.write(a0, out, sizeof(out)); }
+            catch (...) { ret_err(EFAULT); return 0; }
             ret_host(0);
             return 0;
         }
@@ -187,10 +218,16 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 66: { // writev
+        case 66: { // writev(fd, iov, iovcnt) — AArch64 66
             // a0=fd, a1=iovec ptr, a2=count
+            // BUGFIX: previously called ::write(guest_fd, ...) directly,
+            // bypassing FdTable. Resolve via FdTable so virtual fds
+            // (memfd-backed /proc/*, /dev/fb0) work. Also cap iovcnt
+            // at IOV_MAX (1024) to prevent OOM from a corrupted count.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             uint64_t iov = a1;
-            uint64_t cnt = a2;
+            uint64_t cnt = std::min<uint64_t>(a2, 1024);  // IOV_MAX
             ssize_t total = 0;
             for (uint64_t i = 0; i < cnt; i++) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
@@ -203,8 +240,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 std::vector<uint8_t> tmp(len);
                 mem_.read(base, tmp.data(), len);
-                ssize_t n = ::write(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { ret_errno(); return 0; }
+                ssize_t n = node->write(UINT64_MAX, tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
             }
@@ -212,9 +249,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 65: { // readv(fd, iov, iovcnt) — AArch64 syscall 65
+        case 65: { // readv(fd, iov, iovcnt) — AArch64 65
+            // BUGFIX: previously called ::read(guest_fd, ...) directly,
+            // bypassing FdTable. Resolve via FdTable. Also cap iovcnt
+            // at IOV_MAX (1024).
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             uint64_t iov = a1;
-            uint64_t cnt = a2;
+            uint64_t cnt = std::min<uint64_t>(a2, 1024);  // IOV_MAX
             ssize_t total = 0;
             for (uint64_t i = 0; i < cnt; i++) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
@@ -223,9 +265,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Defensive cap (same as writev).
                 if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 std::vector<uint8_t> tmp(len);
-                ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { ret_errno(); return 0; }
-                if (n > 0) mem_.write(base, tmp.data(), n);
+                ssize_t n = node->read(UINT64_MAX, tmp.data(), len);
+                if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
+                if (n > 0) mem_.write(base, tmp.data(), static_cast<size_t>(n));
                 total += n;
                 if (static_cast<size_t>(n) < len) break;
             }
@@ -233,30 +275,21 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 67: { // preadv64(fd, iov, iovcnt, offset) — AArch64 syscall 67
-            // Same as readv but with explicit file offset. We handle the
-            // common case by calling preadv if available; otherwise fall
-            // back to lseek+readv+lseek.
-            uint64_t iov = a1;
-            uint64_t cnt = a2;
-            off_t offset = (off_t)a3;
-            ssize_t total = 0;
-            off_t saved = ::lseek(static_cast<int>(a0), 0, SEEK_CUR);
-            if (saved < 0) saved = 0;
-            ::lseek(static_cast<int>(a0), offset, SEEK_SET);
-            for (uint64_t i = 0; i < cnt; i++) {
-                uint64_t base = mem_.load<uint64_t>(iov + i * 16);
-                uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
-                if (len == 0) continue;
-                std::vector<uint8_t> tmp(len);
-                ssize_t n = ::read(static_cast<int>(a0), tmp.data(), len);
-                if (n < 0) { ret_errno(); return 0; }
-                if (n > 0) mem_.write(base, tmp.data(), n);
-                total += n;
-                if (static_cast<size_t>(n) < len) break;
-            }
-            ::lseek(static_cast<int>(a0), saved, SEEK_SET);
-            ret_host(total);
+        case 67: { // pread64(fd, buf, count, offset) — AArch64 67
+            // BUGFIX: previously implemented as preadv64 (iovec array),
+            // but 67 is pread64 (single buffer). The old code interpreted
+            // the guest's `buf` pointer as an iovec array, reading garbage
+            // memory as (base, len) pairs. Fix: read into a single buffer.
+            // Also: resolve via FdTable so virtual fds (memfd-backed
+            // /proc/*, /dev/fb0) work correctly.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            if (a2 == 0) { ret_host(0); return 0; }
+            std::vector<uint8_t> tmp(a2);
+            ssize_t n = node->read(static_cast<uint64_t>(a3), tmp.data(), a2);
+            if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
+            if (n > 0) mem_.write(a1, tmp.data(), static_cast<size_t>(n));
+            ret_host(static_cast<uint64_t>(n));
             return 0;
         }
 
@@ -467,9 +500,84 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 25: { // fcntl - stub, return 0
-            ret_host(0);
-            return 0;
+        case 25: { // fcntl(fd, cmd, arg) — AArch64 25
+            // BUGFIX: previously a no-op stub returning 0. This broke
+            // F_GETFL/F_SETFL (O_NONBLOCK never applied), F_GETFD/F_SETFD
+            // (FD_CLOEXEC never tracked), and F_DUPFD. We now implement
+            // the common cmds by forwarding to the host fd (resolved via
+            // FdTable) when one exists.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            int cmd = static_cast<int>(a1);
+            int hfd = node->host_fd();
+            switch (cmd) {
+                case F_DUPFD: {  // 0
+                    int r = fds_.dup(static_cast<int>(a0));
+                    ret_host(r);
+                    return 0;
+                }
+                case F_GETFD: {  // 1 — get fd flags (FD_CLOEXEC)
+                    if (hfd >= 0) {
+                        int r = ::fcntl(hfd, F_GETFD);
+                        ret_host(r < 0 ? 0 : r);
+                    } else {
+                        ret_host(0);
+                    }
+                    return 0;
+                }
+                case F_SETFD: {  // 2 — set fd flags (FD_CLOEXEC)
+                    if (hfd >= 0) {
+                        int r = ::fcntl(hfd, F_SETFD, static_cast<int>(a2));
+                        if (r < 0) { ret_errno(); return 0; }
+                        ret_host(r);
+                    } else {
+                        ret_host(0);
+                    }
+                    return 0;
+                }
+                case F_GETFL: {  // 3 — get file status flags
+                    // Query the host fd for live flags (including any
+                    // previously applied via F_SETFL). Fall back to the
+                    // VNode's stored flags if there's no host fd (virtual
+                    // VNodes like /dev/fb0, memfd-backed /proc/*).
+                    if (hfd >= 0) {
+                        int r = ::fcntl(hfd, F_GETFL);
+                        ret_host(r < 0 ? node->flags() : r);
+                    } else {
+                        ret_host(node->flags());
+                    }
+                    return 0;
+                }
+                case F_SETFL: {  // 4 — set file status flags (O_NONBLOCK etc.)
+                    if (hfd >= 0) {
+                        // Only apply flags that can be changed via F_SETFL:
+                        // O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME.
+                        int settable = a2 & (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME);
+                        int r = ::fcntl(hfd, F_SETFL, settable);
+                        if (r < 0) { ret_errno(); return 0; }
+                    }
+                    ret_host(0);
+                    return 0;
+                }
+                case F_GETLK:    // 5
+                case F_SETLK:    // 6
+                case F_SETLKW: { // 7
+                    // POSIX file locks — forward to host for real fds.
+                    if (hfd >= 0) {
+                        int r = ::fcntl(hfd, cmd, reinterpret_cast<void*>(a2));
+                        if (r < 0) { ret_errno(); return 0; }
+                        ret_host(r);
+                    } else {
+                        ret_host(0);
+                    }
+                    return 0;
+                }
+                default:
+                    // Unknown cmd — return 0 (success) to avoid breaking
+                    // guests that probe exotic fcntl cmds.
+                    ret_host(0);
+                    return 0;
+            }
         }
 
         case 44: { // fstatfs
@@ -501,13 +609,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 50: { // fchdir(fd) — AArch64 50
-            // We can't reverse-resolve a host fd to a guest path in
-            // general (the host fd may have been opened via a remapped
-            // path). The pragmatic fix: call host fchdir to validate the
-            // fd is a directory, then read the host's new cwd via
-            // getcwd() and store it in the guest cwd. The guest sees
-            // the remapped path which is correct for sandboxed operation.
-            int r = ::fchdir(static_cast<int>(a0));
+            // BUGFIX: previously called ::fchdir(guest_fd, ...) directly,
+            // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            int r = ::fchdir(hfd);
             if (r < 0) { ret_errno(); return 0; }
             char buf[PATH_MAX];
             if (::getcwd(buf, sizeof(buf))) {
@@ -531,22 +637,35 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 46: { // ftruncate(fd, length) — AArch64 46
-            int r = ::ftruncate(static_cast<int>(a0), (off_t)a1);
+            // BUGFIX: previously called ::ftruncate(guest_fd, ...) directly,
+            // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            int r = ::ftruncate(hfd, (off_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 52: { // chmod(path, mode) — AArch64 52
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
-            int r = ::chmod(path.c_str(), (mode_t)a1);
+        case 52: { // fchmod(fd, mode) — AArch64 52
+            // BUGFIX: previously labeled "chmod" but AArch64 has no chmod
+            // (only fchmodat at 53). The real syscall at 52 is fchmod.
+            // Resolve via FdTable so virtual fds work.
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            int r = ::fchmod(hfd, (mode_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
         }
 
-        case 53: { // fchmod(fd, mode) — AArch64 53
-            int r = ::fchmod(static_cast<int>(a0), (mode_t)a1);
+        case 53: { // fchmodat(dirfd, path, mode, flags) — AArch64 53
+            // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
+            // The old code called ::fchmod(fd, mode) treating the dirfd as
+            // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
+            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            int r = ::fchmodat(static_cast<int>(a0), path.c_str(),
+                               (mode_t)a2, static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
@@ -630,38 +749,33 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 47: { // fallocate(fd, mode, offset, len) — aarch64 47
-            // toybox's sh hits fallocate during line-edit
-            // setup. We can't safely allocate guest memory from a host
-            // fallocate (the fd may be a memfd with host-side backing),
-            // but we *can* just let the host kernel handle it for fds that
-            // are real host fds. For guest-mapped fds (memfd-backed VFS
-            // files), fallocate extending the file also has to extend the
-            // guest's mmap'd view — too complex for the common case.
-            // Return success for mode=0 (allocate) on regular host fds;
-            // return -ENOSYS for modes we can't honour (punch-hole, collapse).
-            int fd = static_cast<int>(a0);
+            // BUGFIX: previously rejected any mode != 0, but
+            // FALLOC_FL_KEEP_SIZE (0x01) is a commonly-supported mode that
+            // we can pass through safely. Also: resolve via FdTable so
+            // virtual fds work. Only punch-hole / collapse-range /
+            // zero-range / insert-range / collate-range modes are rejected.
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
             int mode = static_cast<int>(a1);
-            if (mode == 0) {
-                // FALLOC_FL_KEEP_SIZE is 0x01; pure allocate (mode=0)
-                // is the only one we can pass through safely.
-                int r = ::fallocate(fd, mode, (off_t)a2, (off_t)a3);
-                ret_host(r);
-                return 0;
-            }
-            ret_err(ENOSYS);
+            // FALLOC_FL_KEEP_SIZE = 0x01 (allowed). All other bits
+            // (PUNCH_HOLE=0x02, COLLAPSE_RANGE=0x08, ZERO_RANGE=0x10,
+            // INSERT_RANGE=0x20, COLLATE_RANGE=0x40) require kernel
+            // support that may not be present and may interact badly
+            // with our memory model. Reject them.
+            if (mode & ~0x01) { ret_err(ENOSYS); return 0; }
+            int r = ::fallocate(hfd, mode, (off_t)a2, (off_t)a3);
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(r);
             return 0;
         }
 
-        case 40: { // sendfile(out_fd, in_fd, offset, count) — aarch64 71
-            // Note: aarch64 sendfile is 71, but we use 40 here to avoid
-            // conflict with case 71 (recvfrom placeholder). This is a known
-            // limitation — guests using real sendfile will get -ENOSYS via
-            // the default case. Document in CHANGELOG.
-            off_t off = 0;
-            if (a2) off = (off_t)mem_.load<uint64_t>(a2);
-            ssize_t r = ::sendfile(static_cast<int>(a0), static_cast<int>(a1), a2 ? &off : nullptr, static_cast<size_t>(a3));
-            if (a2 && r >= 0) mem_.store<uint64_t>(a2, static_cast<uint64_t>(off));
-            ret_host(r);
+        case 40: { // mount(source, target, fstype, flags, data) — AArch64 40
+            // BUGFIX: previously implemented as sendfile (which is at 71,
+            // already handled in misc.cpp). The old code dereferenced
+            // `fstype` (a string pointer) as an `off_t*` and passed
+            // `source`/`target` (string pointers) as fds to ::sendfile.
+            // We don't support mount; return -ENOSYS (or -EPERM).
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
 

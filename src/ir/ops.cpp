@@ -1136,7 +1136,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     else if (a == b) cpu.pstate = 0x60000000;
                     else cpu.pstate = 0x20000000;
                 }
-                if (unordered) cpu.pstate = 0x28000000; // N=0, Z=0, C=1, V=1
+                if (unordered) cpu.pstate = 0x30000000; // N=0, Z=0, C=1, V=1
                 break;
             }
             case IROp::FP_MOVI:

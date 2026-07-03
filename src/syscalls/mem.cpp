@@ -92,7 +92,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // written via the brk extension is not zeroed out.
 
             // If a file fd is given, read its contents in
-            if (static_cast<int64_t>(a4) != -1 && (a3 & 0x2) == 0 /* not MAP_ANONYMOUS */) {
+            // MAP_ANONYMOUS is 0x20 on Linux AArch64. The old code checked
+            // 0x2 (MAP_PRIVATE), so file-backed MAP_PRIVATE mmaps (the
+            // standard mechanism for mapping executables and shared
+            // libraries) skipped the file-load branch and the guest saw
+            // zero pages. Fix: check the correct bit.
+            if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0 /* not MAP_ANONYMOUS */) {
                 struct stat st;
                 if (::fstat(static_cast<int>(a4), &st) == 0) {
                     std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));

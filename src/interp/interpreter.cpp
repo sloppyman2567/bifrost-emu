@@ -1094,18 +1094,27 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     addr = base + disp;
                 }
                 if (d.is_vec) {
+                    // BUGFIX: previously hardcoded 8 bytes per FP register
+                    // for the lo/hi halves. For S-form (esize=4, single-
+                    // precision), this corrupted the high 32 bits of v_lo
+                    // and read 4 garbage bytes past the proper range. Fix:
+                    // use esize for the per-register transfer, and only
+                    // touch v_hi for 128-bit (Q-form) registers. The GPR
+                    // path below already correctly uses esize.
                     if (d.is_load) {
                         uint64_t lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
-                        mem_.read(addr, &lo1, 8, pcache);
+                        mem_.read(addr, &lo1, esize, pcache);
                         if (esize >= 16) mem_.read(addr + 8, &hi1, 8, pcache);
-                        mem_.read(addr + esize, &lo2, 8, pcache);
+                        mem_.read(addr + esize, &lo2, esize, pcache);
                         if (esize >= 16) mem_.read(addr + esize + 8, &hi2, 8, pcache);
-                        cpu.v_lo[d.rt] = lo1; cpu.v_hi[d.rt] = hi1;
-                        cpu.v_lo[d.rt2] = lo2; cpu.v_hi[d.rt2] = hi2;
+                        cpu.v_lo[d.rt] = lo1;
+                        cpu.v_hi[d.rt] = (esize >= 16) ? hi1 : 0;
+                        cpu.v_lo[d.rt2] = lo2;
+                        cpu.v_hi[d.rt2] = (esize >= 16) ? hi2 : 0;
                     } else {
-                        mem_.write(addr, &cpu.v_lo[d.rt], 8, pcache);
+                        mem_.write(addr, &cpu.v_lo[d.rt], esize, pcache);
                         if (esize >= 16) mem_.write(addr + 8, &cpu.v_hi[d.rt], 8, pcache);
-                        mem_.write(addr + esize, &cpu.v_lo[d.rt2], 8, pcache);
+                        mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize, pcache);
                         if (esize >= 16) mem_.write(addr + esize + 8, &cpu.v_hi[d.rt2], 8, pcache);
                     }
                 } else {
@@ -1140,6 +1149,16 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t mask = (width_bytes == 8) ? ~0ULL
                               : ((1ULL << (width_bytes * 8)) - 1);
                 bool returns_old = (d.rt != 31);
+
+                // BUGFIX: take the exclusive-monitor shard lock around the
+                // entire RMW sequence. The old code did read→compute→write
+                // without any lock, so concurrent LSE atomics from multiple
+                // vCPUs could lose updates (and CAS could see stale values).
+                // The JIT path uses `lock`-prefixed x86 instructions and is
+                // correct, so this was also a JIT/interpreter divergence.
+                // The LDXR/STXR handler above uses the same shard mutex.
+                auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
+                std::lock_guard<std::mutex> gatom(shard.mu);
 
                 // CAS family (atom_op >= 0xC): compare-and-swap.
                 // ARM CAS Ws, Wt, [Xn]:
@@ -1440,7 +1459,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     std::lock_guard<std::mutex> gmon(shard.mu);
                     uint64_t v = 0;
                     mem_.read(base, &v, width_bytes, pcache);
-                    cpu.regs[d.rt] = v;
+                    // Guard XZR: writes to regs[31] must be dropped (XZR
+                    // always reads as 0). Other load handlers (LDR_IMM,
+                    // LDR_UNS, LDR_REG) do this; LDXR was missing the guard.
+                    if (d.rt != 31) cpu.regs[d.rt] = v;
                     if (use_monitor) {
                         cpu.excl_mark(base, width_bytes);
                         // Register globally (inline, since we hold the lock).
@@ -2536,11 +2558,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     uint32_t nzcv;
                     auto set_nzcv = [&](bool unordered, bool less, bool equal) {
                         // ARM FCMP NZCV (bits[31:28] = N Z C V):
-                        //   unordered: N=0 Z=0 C=1 V=1 = 0x28000000
+                        //   unordered: N=0 Z=0 C=1 V=1 = 0x30000000
                         //   less:      N=1 Z=0 C=0 V=0 = 0x80000000
                         //   equal:     N=0 Z=1 C=1 V=0 = 0x60000000
                         //   greater:   N=0 Z=0 C=1 V=0 = 0x20000000
-                        if (unordered)      nzcv = 0x28000000;
+                        // (Previous code used 0x28000000 for unordered, which
+                        //  decodes as N=0 Z=0 C=1 V=0 — same as "greater" —
+                        //  diverging from both the JIT and the ARM ARM.)
+                        if (unordered)      nzcv = 0x30000000;
                         else if (less)       nzcv = 0x80000000;
                         else if (equal)      nzcv = 0x60000000;
                         else                 nzcv = 0x20000000;
@@ -2562,7 +2587,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         else if (a > b) set_nzcv(false, false, false);
                         else            set_nzcv(false, false, true);
                     } else {
-                        nzcv = 0x28000000;  // half-precision: treat as unordered
+                        nzcv = 0x30000000;  // half-precision: treat as unordered
                     }
                     cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | nzcv;
                     return;

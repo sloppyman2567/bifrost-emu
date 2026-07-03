@@ -51,6 +51,9 @@ static inline bool is_power_of_two(uint64_t x) { return x && !(x & (x - 1)); }
 
 static inline uint64_t ror64(uint64_t v, unsigned r) {
     r &= 63;
+    // Shift by 64 is undefined behavior in C++; ARM ROR by 0 (or 64)
+    // is a valid no-op encoding, so guard the r==0 case explicitly.
+    if (r == 0) return v;
     return (v >> r) | (v << (64 - r));
 }
 

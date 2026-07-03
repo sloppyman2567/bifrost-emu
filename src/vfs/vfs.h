@@ -217,8 +217,6 @@ public:
 private:
     // guest fd → shared VNode. shared_ptr so dup()/dup2() can alias.
     std::unordered_map<int, std::shared_ptr<VNode>> table_;
-
-    int next_fd_ = 3;  // 0/1/2 reserved for stdin/stdout/stderr
 };
 
 } // namespace arm64emu

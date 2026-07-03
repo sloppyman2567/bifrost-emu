@@ -107,8 +107,11 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             int r = ::clock_nanosleep(static_cast<clockid_t>(a0),
                                       static_cast<int>(a1), &ts, &rem);
-            if (r < 0) {
-                // clock_nanosleep returns errno directly (not via -1+errno).
+            // clock_nanosleep returns 0 on success or a *positive* errno
+            // (e.g. EINTR=4) — never negative, never -1+errno. The old
+            // `if (r < 0)` check meant EINTR/EINVAL were never reported;
+            // every sleep appeared to succeed. Fix: check `r != 0`.
+            if (r != 0) {
                 if (r == EINTR && a3) {
                     try {
                         mem_.store<uint64_t>(a3,     static_cast<uint64_t>(rem.tv_sec));

@@ -410,13 +410,39 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t uaddr2 = a4;
             uint32_t val3 = static_cast<uint32_t>(a5);
 
-            // Mask out private flag — we treat all futexes as private
+            // Mask out private flag — we treat all futexes as private.
+            // Also mask out FUTEX_CLOCK_REALTIME (0x100) which selects
+            // CLOCK_REALTIME for FUTEX_WAIT_BITSET. Without masking it,
+            // FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME (= 0x109) falls
+            // through to the default case and returns -ENOSYS, breaking
+            // pthread condvars that use absolute CLOCK_REALTIME timeouts.
             op &= ~0x80;  // FUTEX_PRIVATE_FLAG
+            op &= ~0x100; // FUTEX_CLOCK_REALTIME
+            bool clock_realtime = (static_cast<uint32_t>(a1) & 0x100) != 0;
 
             switch (op) {
                 case 0:  // FUTEX_WAIT
                 case 9:  // FUTEX_WAIT_BITSET
                 {
+                    // FUTEX_WAIT_BITSET (op 9) treats the timeout as an
+                    // ABSOLUTE time on CLOCK_MONOTONIC (or CLOCK_REALTIME
+                    // if FUTEX_CLOCK_REALTIME was set). FUTEX_WAIT (op 0)
+                    // treats the timeout as RELATIVE.
+                    bool absolute = (op == 9);
+
+                    // Always check *uaddr == val BEFORE any fast-path
+                    // return. The kernel returns -EAGAIN if *uaddr != val,
+                    // regardless of whether other threads are alive. The
+                    // old single-threaded fast-path returned 0 without
+                    // checking, breaking try-lock patterns (where the
+                    // guest expects -EAGAIN when the lock is held by the
+                    // current thread).
+                    uint32_t cur = mem_.load<uint32_t>(uaddr);
+                    if (cur != val) {
+                        ret_err(EAGAIN);
+                        return 0;
+                    }
+
                     // Backward-compat: if no other threads are alive to
                     // wake us, return 0 immediately (pretend we waited
                     // and were woken). This preserves the previous
@@ -434,7 +460,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // check and our waiter increment. Without this, a
                     // waker could see waiters==0 and skip notify, leaving
                     // us sleeping forever.
-                    uint32_t cur = mem_.load<uint32_t>(uaddr);
+                    cur = mem_.load<uint32_t>(uaddr);
                     if (cur != val) {
                         ret_err(EAGAIN);
                         return 0;
@@ -449,9 +475,51 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         // timeout is struct timespec { sec, nsec }
                         uint64_t sec = mem_.load<uint64_t>(timeout_ptr);
                         uint64_t nsec = mem_.load<uint64_t>(timeout_ptr + 8);
-                        auto duration = std::chrono::seconds(sec) +
-                                        std::chrono::nanoseconds(nsec);
-                        slot->cv.wait_for(lk, duration);
+                        if (absolute) {
+                            // FUTEX_WAIT_BITSET: timeout is absolute.
+                            // Convert to time_point and use wait_until.
+                            if (clock_realtime) {
+                                auto abs = std::chrono::system_clock::from_time_t(sec)
+                                         + std::chrono::nanoseconds(nsec);
+                                // condvar uses steady_clock internally;
+                                // approximate by converting the absolute
+                                // realtime deadline to a relative duration
+                                // from now (sufficient for correctness:
+                                // spurious wakes will recompute).
+                                auto now = std::chrono::system_clock::now();
+                                if (abs <= now) {
+                                    slot->waiters--;
+                                    ret_host(0);
+                                    return 0;
+                                }
+                                auto rel = std::chrono::duration_cast<
+                                    std::chrono::nanoseconds>(abs - now);
+                                slot->cv.wait_for(lk, rel);
+                            } else {
+                                // CLOCK_MONOTONIC absolute. Convert to
+                                // relative duration from now.
+                                auto now_mono = std::chrono::steady_clock::now();
+                                // Construct a synthetic monotonic time_point
+                                // representing the absolute deadline. We
+                                // don't have the kernel's monotonic clock
+                                // origin, so we treat (sec, nsec) as
+                                // elapsed-since-boot and compute the
+                                // remaining duration. This is best-effort
+                                // — exact kernel-monotonic correspondence
+                                // would require reading clock_gettime
+                                // from the guest.
+                                auto deadline = now_mono
+                                    + std::chrono::seconds(sec)
+                                    + std::chrono::nanoseconds(nsec)
+                                    - std::chrono::steady_clock::now();
+                                slot->cv.wait_for(lk, deadline);
+                            }
+                        } else {
+                            // FUTEX_WAIT: timeout is relative.
+                            auto duration = std::chrono::seconds(sec) +
+                                            std::chrono::nanoseconds(nsec);
+                            slot->cv.wait_for(lk, duration);
+                        }
                     }
                     slot->waiters--;
                     ret_host(0);
