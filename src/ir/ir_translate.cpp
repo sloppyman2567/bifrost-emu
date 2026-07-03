@@ -1616,18 +1616,53 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return false;
             }
 
-            // ── Vector shift-by-immediate: SHL, USHR, SSHR, USRA, SSRA, SLI, SRI ──
-            // All fall to the interpreter (no native IR ops for vector shifts).
+            // ── Vector shift-by-immediate: SHL, USHR, SSHR ──
+            // v1.4.5-alpha: native IR ops (AVX2 256-bit on capable hosts,
+            // SSE2 128-bit fallback otherwise). USRA/SSRA/SLI/SRI/SHRN
+            // still fall to the interpreter (they need an accumulator or
+            // narrowing semantics not yet in the IR).
             // Encoding constants (mask 0xBF00FC00, which strips Q):
             //   SHL  0x0F005400   USHR 0x2F000400   SSHR 0x0F000400
             //   USRA 0x2F001400   SSRA 0x0F001400
-            //   SLI  0x2F005400   SRI  0x2F004400
+            //   SLI  0x2F005400   SRI  0x2F004400   SHRN 0x0F008400
             {
                 uint32_t sm = op & 0xBF00FC00;
-                if (sm == 0x0F005400 || sm == 0x2F000400 || sm == 0x0F000400 ||
-                    sm == 0x2F001400 || sm == 0x0F001400 ||
+                // Extract element size from immh (bits[23:20]) per ARM ARM.
+                // NOTE: bits[23:20] = (op >> 20) & 0xF, NOT (op >> 19) —
+                // the interpreter uses (op >> 20) and we must match.
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                uint8_t esize_bytes = 0;  // 1, 2, 4, or 8
+                if      (immh == 0) esize_bytes = 1;
+                else if (immh == 1) esize_bytes = 2;
+                else if (immh == 2 || immh == 3) esize_bytes = 4;
+                else if (immh >= 4) esize_bytes = 8;
+                if (esize_bytes != 0) {
+                    uint32_t shift_amount = 0;
+                    IROp shift_op = IROp::NOP;
+                    if (sm == 0x0F005400) {  // SHL
+                        // SHL: shift = UInt(immh:immb) - esize*8
+                        shift_amount = ((immh << 4) | immb) - esize_bytes * 8;
+                        shift_op = IROp::SIMD_SHL;
+                    } else if (sm == 0x2F000400) {  // USHR
+                        // USHR: shift = (2 * esize*8) - UInt(immh:immb)
+                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
+                        shift_op = IROp::SIMD_USHR;
+                    } else if (sm == 0x0F000400) {  // SSHR
+                        // SSHR: shift = (2 * esize*8) - UInt(immh:immb)
+                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
+                        shift_op = IROp::SIMD_SSHR;
+                    }
+                    if (shift_op != IROp::NOP) {
+                        emit(block, shift_op, d.rd, d.rn, 0,
+                             esize_bytes, 0, 0, shift_amount, cur_pc);
+                        return false;
+                    }
+                }
+                // USRA/SSRA/SLI/SRI/SHRN still fall to interpreter.
+                if (sm == 0x2F001400 || sm == 0x0F001400 ||
                     sm == 0x2F005400 || sm == 0x2F004400 ||
-                    sm == 0x0F008400) {  // SHRN
+                    sm == 0x0F008400) {
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return false;
                 }

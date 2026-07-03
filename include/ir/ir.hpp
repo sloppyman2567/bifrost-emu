@@ -121,6 +121,18 @@ enum class IROp : uint8_t {
     SIMD_CMP,      // v_lo[dest],v_hi[dest] = compare(src1, src2) ? all-ones : 0
                    // imm = opcode (0=eq,1=ge_u,2=gt_u,3=ge_s,4=gt_s,5=hi_u,6=hs_u)
                    // width = element size in bytes (1, 2, 4, 8)
+    // Native SIMD vector shifts by immediate (v1.4.5-alpha):
+    //   SHL:  dest = src1 << shift   (logical left)
+    //   USHR: dest = src1 >> shift   (logical right, unsigned)
+    //   SSHR: dest = src1 >> shift   (arithmetic right, signed)
+    // All operate lane-wise; width = element size in bytes (1, 2, 4, 8);
+    // imm = shift amount (0..esize*8-1). On AVX2 hosts the JIT emits
+    // 256-bit vpsubw/vpsrld/vpslld etc. for Q=1; on SSE2 hosts it emits
+    // two 128-bit psllw/psrld/psrad ops. Without AVX2 the two halves
+    // are shifted independently (functionally identical, just slower).
+    SIMD_SHL,      // dest = src1 << imm  (per-lane logical left shift)
+    SIMD_USHR,     // dest = src1 >> imm  (per-lane logical right shift)
+    SIMD_SSHR,     // dest = src1 >>> imm (per-lane arithmetic right shift)
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

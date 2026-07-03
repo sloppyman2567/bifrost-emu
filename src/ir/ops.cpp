@@ -1001,6 +1001,91 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            // ── SIMD vector shifts by immediate (v1.4.5-alpha) ──
+            // Lane-wise shift of src1 by inst.imm. width = esize bytes
+            // (1/2/4/8). SHL = logical left, USHR = logical right,
+            // SSHR = arithmetic right (sign-extends).
+            case IROp::SIMD_SHL:
+            case IROp::SIMD_USHR:
+            case IROp::SIMD_SSHR: {
+                int esize = static_cast<int>(inst.width);
+                if (esize < 1 || esize > 8) esize = 8;
+                uint32_t shift = static_cast<uint32_t>(inst.imm);
+                uint32_t mask = (esize * 8) - 1;
+                shift &= mask;  // ARM: shift amounts are taken modulo esize*8
+                uint8_t out_lo[16] = {0}, out_hi[16] = {0};
+                uint8_t in_lo[16] = {0}, in_hi[16] = {0};
+                memcpy(in_lo, &cpu.v_lo[inst.src1], 8);
+                memcpy(in_hi, &cpu.v_hi[inst.src1], 8);
+                int lanes = 8 / esize;
+                auto do_lane = [&](uint8_t* in, uint8_t* out) {
+                    for (int i = 0; i < lanes; i++) {
+                        uint8_t* pi = in + i * esize;
+                        uint8_t* po = out + i * esize;
+                        if (inst.op == IROp::SIMD_SHL) {
+                            // Logical left shift (zero-fill)
+                            if (esize == 1) {
+                                uint8_t v = pi[0];
+                                po[0] = static_cast<uint8_t>(v << shift);
+                            } else if (esize == 2) {
+                                uint16_t v; memcpy(&v, pi, 2);
+                                v = static_cast<uint16_t>(v << shift);
+                                memcpy(po, &v, 2);
+                            } else if (esize == 4) {
+                                uint32_t v; memcpy(&v, pi, 4);
+                                v <<= shift;
+                                memcpy(po, &v, 4);
+                            } else {
+                                uint64_t v; memcpy(&v, pi, 8);
+                                v <<= shift;
+                                memcpy(po, &v, 8);
+                            }
+                        } else if (inst.op == IROp::SIMD_USHR) {
+                            // Logical right shift (zero-fill)
+                            if (esize == 1) {
+                                uint8_t v = pi[0];
+                                po[0] = static_cast<uint8_t>(v >> shift);
+                            } else if (esize == 2) {
+                                uint16_t v; memcpy(&v, pi, 2);
+                                v = static_cast<uint16_t>(v >> shift);
+                                memcpy(po, &v, 2);
+                            } else if (esize == 4) {
+                                uint32_t v; memcpy(&v, pi, 4);
+                                v >>= shift;
+                                memcpy(po, &v, 4);
+                            } else {
+                                uint64_t v; memcpy(&v, pi, 8);
+                                v >>= shift;
+                                memcpy(po, &v, 8);
+                            }
+                        } else {  // SIMD_SSHR
+                            // Arithmetic right shift (sign-extend)
+                            if (esize == 1) {
+                                int8_t v = static_cast<int8_t>(pi[0]);
+                                po[0] = static_cast<uint8_t>(v >> shift);
+                            } else if (esize == 2) {
+                                int16_t v; memcpy(&v, pi, 2);
+                                v >>= shift;
+                                memcpy(po, &v, 2);
+                            } else if (esize == 4) {
+                                int32_t v; memcpy(&v, pi, 4);
+                                v >>= shift;
+                                memcpy(po, &v, 4);
+                            } else {
+                                int64_t v; memcpy(&v, pi, 8);
+                                v >>= shift;
+                                memcpy(po, &v, 8);
+                            }
+                        }
+                    }
+                };
+                do_lane(in_lo, out_lo);
+                do_lane(in_hi, out_hi);
+                memcpy(&cpu.v_lo[inst.dest], out_lo, 8);
+                memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
+                break;
+            }
+
             case IROp::FP_F2I: {
                 // FP→int conversion. Result width is determined by sf
                 // (flags_op), NOT by the FP precision: FCVTZS Xd, Sn writes

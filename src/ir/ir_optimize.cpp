@@ -111,6 +111,7 @@ static bool is_pure(IROp op) {
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_LDST:                          // write to v_lo/v_hi
+        case IROp::SIMD_SHL: case IROp::SIMD_USHR: case IROp::SIMD_SSHR: // v1.4.5-alpha
         case IROp::FP_F2I: case IROp::FP_I2F:          // read/write v_lo/regs
         case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED:  // fixed-point variants
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
@@ -860,6 +861,11 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_LOGICAL: return "SIMD_LOGICAL";
                     case IROp::SIMD_DUP: return "SIMD_DUP";
                     case IROp::SIMD_LDST: return "SIMD_LDST";
+                    case IROp::SIMD_ARITH: return "SIMD_ARITH";
+                    case IROp::SIMD_CMP:   return "SIMD_CMP";
+                    case IROp::SIMD_SHL:   return "SIMD_SHL";
+                    case IROp::SIMD_USHR:  return "SIMD_USHR";
+                    case IROp::SIMD_SSHR:  return "SIMD_SSHR";
                     case IROp::FP_F2I: return "FP_F2I";
                     case IROp::FP_I2F: return "FP_I2F";
                     case IROp::FP_F2I_FIXED: return "FP_F2I_FIXED";
