@@ -62,13 +62,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // entries: ELF load range, brk (heap), stack, mmap region, and
     // dynamic linker range.
     vfs_.set_maps_provider([this]() {
-        std::vector<VFS::MapEntry> out;
+        std::vector<yggdrasil::Yggdrasil::MapEntry> out;
         // ELF image: from end_addr_ min down to lowest PT_LOAD start.
         // We don't track the lowest PT_LOAD start, so use end_addr_ as
         // the upper bound and 0x400000 (typical PIE/static base) as the
         // lower bound heuristic. Conservative: covers all code/data.
         if (end_addr_ > 0) {
-            VFS::MapEntry e;
+            yggdrasil::Yggdrasil::MapEntry e;
             e.start = 0x400000;
             e.end   = end_addr_;
             std::snprintf(e.perms, sizeof(e.perms), "rwxp");
@@ -76,7 +76,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         // Heap (brk): from brk_start_ to brk_.
         if (brk_start_ > 0 && brk_ >= brk_start_) {
-            VFS::MapEntry e;
+            yggdrasil::Yggdrasil::MapEntry e;
             e.start = brk_start_;
             e.end   = brk_;
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
@@ -85,7 +85,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         // Dynamic linker range.
         if (interp_base_ > 0) {
-            VFS::MapEntry e;
+            yggdrasil::Yggdrasil::MapEntry e;
             e.start = interp_base_;
             e.end   = interp_base_ + 0x10000000;  // 256 MiB upper bound
             std::snprintf(e.perms, sizeof(e.perms), "rwxp");
@@ -99,7 +99,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (a == brk_start_) continue;
             // Skip the TLS scratch area near brk_start_ (it's part of the
             // mmap region but we want to show it as anon).
-            VFS::MapEntry e;
+            yggdrasil::Yggdrasil::MapEntry e;
             e.start = a;
             e.end   = a + s;
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
@@ -107,7 +107,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         // Stack: fixed 64 MiB at 0x8000000000 - 64 MiB.
         {
-            VFS::MapEntry e;
+            yggdrasil::Yggdrasil::MapEntry e;
             e.start = 0x8000000000ULL - 64 * 1024 * 1024;
             e.end   = 0x8000000000ULL;
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");

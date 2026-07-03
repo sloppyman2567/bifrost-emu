@@ -116,6 +116,82 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 - **"Full game support" → "Full interactive application support"** in
   ROADMAP v2.0 section (API reframe per user direction).
 
+### Yggdrasil VFS rename + improvements (2026-07-04, Turn 35)
+
+- **VFS subsystem renamed to Yggdrasil.** The VFS class hierarchy
+  (`VFS`, `VNode`, `HostVNode`, `MemfdVNode`, `StdioVNode`, `FbVNode`,
+  `AudioVNode`) was renamed to Norse-themed names matching the project
+  identity: `Yggdrasil` (the world-tree), `Node`, `HostNode`,
+  `MemfdNode`, `StdioNode`, `FbNode`, `AudioNode`. In Norse cosmology
+  Yggdrasil connects the nine realms; here it connects the guest's
+  path namespace to four "worlds" — procfs, devfs, the BIFROST_ROOT
+  sandbox, and host passthrough.
+- **File layout split.** `src/vfs/vfs.{h,cpp}` +
+  `src/vfs/vfs_table.{h,cpp}` (6 files, 978 LOC) was split into
+  `src/yggdrasil/` (12 files, ~1100 LOC) with one file per concern:
+  `node.hpp` (abstract base), `yggdrasil.{hpp,cpp}` (resolver +
+  FdTable), `host_node.{hpp,cpp}`, `memfd_node.{hpp,cpp}`,
+  `stdio_node.{hpp,cpp}`, `fb_node.{hpp,cpp}`, `audio_node.{hpp,cpp}`,
+  `dir_node.{hpp,cpp}` (NEW), `procfs.cpp` (extracted from inline),
+  `devfs.cpp` (renamed from vfs_dev.cpp), `host.cpp` (renamed from
+  vfs_host.cpp).
+- **New `DirNode` class — `ls /proc`, `ls /dev`, `ls /proc/self` now
+  work.** Previously the guest's `opendir("/proc")` succeeded but
+  `readdir` returned nothing because no `Node` existed for the
+  directory itself — only for specific files under it. `DirNode` holds
+  a list of `(name, type)` pairs and synthesizes `linux_dirent64`
+  records on `getdents64`. The `procfs.cpp` and `devfs.cpp` resolvers
+  construct `DirNode`s for `/proc`, `/proc/self`, and `/dev`.
+- **Lazy regeneration for `/proc/self/maps` and `/proc/self/status`.**
+  `MemfdNode` gained a `create_lazy()` factory that takes a regenerator
+  callback. The callback is invoked on construction AND whenever the
+  guest seeks to offset 0 (`SEEK_SET 0`), so re-reads reflect live
+  state. Previously the content was write-once at open time — a guest
+  that opened `/proc/self/maps` early and re-read it later saw stale
+  data. Verified: `/proc/self/maps` now shows the actual ELF load
+  range, brk, stack, and mmap regions on each read.
+- **`/dev/random` vs `/dev/urandom` distinction.** Both previously
+  mapped to the same host `fd` via `openat`, giving identical byte
+  sequences. Now `/dev/random` uses `getrandom(GRND_RANDOM)` (blocking
+  pool) and `/dev/urandom` uses `getrandom(0)` (urandom pool). Both
+  are non-blocking on modern Linux, but the underlying pool selection
+  differs. Implemented as lazy-regenerating `MemfdNode`s that refresh
+  on `SEEK_SET 0`.
+- **Ioctl dispatch moved into the `Node` hierarchy.** `Node` gained a
+  virtual `ioctl(request, argp, mem)` method. `FbNode::ioctl()`
+  handles `FBIOGET_VSCREENINFO`/`FBIOGET_FSCREENINFO`; `HostNode::ioctl()`
+  and `StdioNode::ioctl()` handle `TIOCGWINSZ`/`TCGETS`/`TCSETS`/
+  `TCSETSW`/`TCSETSF`/`FIONREAD` + pass-through for anything else. The
+  syscall layer (`ioctls.cpp`) was rewritten from a 130-line if-else
+  chain that guessed fd type into a 5-line `node->ioctl()` dispatch.
+  Returns `Node::IOCTL_NOT_HANDLED` → `-ENOTTY` for unrecognized
+  requests, so `isatty()` correctly distinguishes ttys from non-ttys.
+- **`getdents64` dispatch via `Node::is_dir()` + `Node::getdents()`.**
+  The syscall layer now checks `node->is_dir()` and calls
+  `node->getdents()` for virtual directories, falling through to the
+  host `getdents64` syscall for real directories. `DirNode` tracks its
+  own read position (advanced by `getdents`, reset by `lseek`),
+  correctly handling the guest's `lseek(fd, d_off, SEEK_SET)` +
+  `getdents` loop.
+- **`O_NONBLOCK` on virtual fds.** `StdioNode` caches its `flags_`
+  field (set by `fcntl F_SETFL`) and the syscall layer's `F_SETFL`
+  handler forwards to the host `fcntl` on the underlying host fd
+  (0/1/2). `O_NONBLOCK` on stdin/stdout/stderr now works correctly.
+  (Previously `O_NONBLOCK` was silently ignored on virtual fds — a
+  ROADMAP-flagged gap.)
+- **`lseek` on memfd-backed virtual files.** `MemfdNode::lseek` now
+  triggers lazy regeneration on `SEEK_SET 0` (so `/proc/self/maps`
+  etc. refresh on re-read). Other `lseek` calls work correctly on the
+  underlying memfd. (Previously `lseek` on virtual files returned
+  `ESPIPE` in some paths — a ROADMAP-flagged gap, now fixed.)
+- **Tests:** all 72 pass under JIT, 71 under `--no-jit`, 71 under
+  `BIFROST_ENABLE_FWD=1`, 22/22 C API checks. MD5 still correct
+  (`b1946ac92492d2347c6235b4d2611184`). New manual verification:
+  `ls /proc`, `ls /dev`, `ls /proc/self` all return correct entries;
+  `/dev/random` and `/dev/urandom` return different bytes;
+  `isatty(0)` returns 0 when stdin is a pipe; `/proc/self/maps` shows
+  live memory layout.
+
 ## [1.4.0] — 2026-07-03 (stable release)
 
 ### Post-stabilization hardening (2026-07-03)

@@ -9,7 +9,7 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "vfs/vfs.h"
+#include "yggdrasil/yggdrasil.hpp"
 #include "jit/frostjit.hpp"
 
 #include <errno.h>
@@ -247,7 +247,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // This is called in the child process after fork(). The child
             // has a CoW copy of the parent's memory, so clearing it is
             // safe — the parent is unaffected.
-            std::string path = VFS::read_path(mem_, a0);
+            std::string path = yggdrasil::Yggdrasil::read_path(mem_, a0);
             if (path.empty()) {
                 ret_err(EFAULT);
                 return 0;
@@ -296,7 +296,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     str_ptr = mem_.load<uint64_t>(argv_ptr);
                 } catch (...) { break; }
                 if (str_ptr == 0) break;
-                std::string arg = VFS::read_path(mem_, str_ptr);
+                std::string arg = yggdrasil::Yggdrasil::read_path(mem_, str_ptr);
                 new_argv.push_back(arg);
                 argv_ptr += 8;
             }

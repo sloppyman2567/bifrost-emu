@@ -154,11 +154,16 @@ feature releases.
    backend. Build with `make USE_SDL2=1` to enable the window backend;
    audio output currently goes through OSS `/dev/dsp` passthrough.
 
-2. **VFS bug fixes.** Several VFS edge cases need fixing: procfs
-   `status` field truncation, devfs `/dev/random` vs `/dev/urandom`
-   distinction, and `O_NONBLOCK` handling on virtual fds. Also
-   planned: proper `seek` on memfd-backed virtual files (currently
-   returns ESPIPE).
+2. **~~VFS bug fixes.~~** ✅ DONE in 1.4.5-alpha (Turn 35, Yggdrasil
+   rename). `/dev/random` vs `/dev/urandom` now use distinct pools via
+   `getrandom(GRND_RANDOM)` vs `getrandom(0)`. `O_NONBLOCK` on virtual
+   fds works via the host-fd passthrough in `fcntl F_SETFL`. `lseek`
+   on memfd-backed virtual files works (and triggers lazy regeneration
+   on `SEEK_SET 0` for `/proc/self/maps` etc.). procfs `status` field
+   truncation was already fixed in Turn 29. The remaining "VFS edge
+   cases" item is now `DirNode` support for nested virtual directories
+   (e.g. `/proc/self/fd`, `/proc/net/*`) — see "More procfs coverage"
+   below.
 
 3. **Better JIT performance.** Two areas: (a) implement true LRU
    eviction in the register allocator (currently FIFO), and (b) use

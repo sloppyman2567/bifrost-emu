@@ -22,7 +22,7 @@
 # Directory layout (v1.4.5-alpha):
 #
 #   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
-#   src/vfs/          — VFS abstraction (VNode + FdTable + procfs + devfs)
+#   src/yggdrasil/          — Yggdrasil VFS (Node + FdTable + procfs + devfs)
 #   src/ir/           — IR builder/translator/optimizer/executor
 #   src/jit/          — FrostJIT (split into x86_backend, x86_regalloc,
 #                       jit_cache, jit_profiler, frostjit, jit_glue)
@@ -42,7 +42,7 @@ LIB      := libbifrost.a
 # Auto-discover all .cpp under src/, plus main.cpp at the root.
 # api/bifrost_capi.cpp is included in LIB_SOURCES so libbifrost.a exposes
 # the C API (bifrost.h).
-SRC_DIRS := src/core src/vfs src/ir src/jit src/syscalls src/frontend src/graphics src/interp src/audio
+SRC_DIRS := src/core src/yggdrasil src/ir src/jit src/syscalls src/frontend src/graphics src/interp src/audio
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
 OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))

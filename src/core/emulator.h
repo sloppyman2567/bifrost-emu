@@ -19,7 +19,17 @@
 #include "core/signal.h"
 #include "graphics.hpp"
 #include "audio/audio.h"
-#include "vfs/vfs.h"
+#include "yggdrasil/yggdrasil.hpp"
+
+// Bring Yggdrasil and FdTable into the arm64emu namespace so existing
+// callers (Emulator::vfs(), Emulator::fds(), syscall handlers) can refer
+// to them unqualified. The yggdrasil:: prefix is still required in the
+// .cpp files that #include the node headers directly.
+namespace arm64emu {
+    using yggdrasil::Yggdrasil;
+    using yggdrasil::FdTable;
+    using yggdrasil::Node;
+}
 
 #include <atomic>
 #include <condition_variable>
@@ -107,7 +117,7 @@ public:
     GraphicsBackend& graphics() { return graphics_; }
     Audio&          audio()    { return audio_; }
     SignalTable&    signals()  { return signals_; }
-    VFS&            vfs()      { return vfs_; }
+    Yggdrasil&      vfs()      { return vfs_; }
     FdTable&        fds()      { return fds_; }
     const std::string& elf_path() const { return elf_path_; }
     CPU&            main_cpu() { return main_cpu_; }
@@ -266,12 +276,12 @@ private:
     // ── Audio backend (virtual /dev/dsp, /dev/snd) ────────────────────
     Audio audio_;
 
-    // ── VFS + fd table ────────────────────────────────
-    // Replaces the inline /proc//dev/ chains in syscalls.cpp.
-    // VFS resolves guest paths to VNodes; FdTable maps guest fds to
-    // VNodes. Owned by Emulator so all vCPUs share the same view.
-    VFS vfs_;
-    FdTable fds_;
+    // ── Yggdrasil VFS + fd table ────────────────────────────────────
+    // Yggdrasil (the world-tree) resolves guest paths to Nodes; FdTable
+    // maps guest fds to Nodes. Owned by Emulator so all vCPUs share the
+    // same view. (v1.4.5-alpha: renamed from VFS/VNode to Yggdrasil/Node.)
+    Yggdrasil vfs_;
+    FdTable   fds_;
 
     // ── Signal delivery ───────────────────────────────────────────────
     SignalTable signals_;

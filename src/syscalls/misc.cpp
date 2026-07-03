@@ -738,7 +738,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── inotify_add_watch (syscall 27) ───────────────────────────
         case 27: { // inotify_add_watch(fd, pathname, mask)
-            std::string path = VFS::read_path(mem_, a1);
+            std::string path = Yggdrasil::read_path(mem_, a1);
             int wd = ::inotify_add_watch(static_cast<int>(a0), path.c_str(),
                                          static_cast<uint32_t>(a2));
             if (wd < 0) { ret_errno(); return 0; }
@@ -984,8 +984,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // statx requires glibc 2.28+ and sys/statx.h. If unavailable,
             // fall back to fstatat (which provides most of the same info).
             if (!a4) { ret_err(EFAULT); return 0; }
-            std::string path = a1 ? VFS::read_path(mem_, a1) : "";
-            std::string host = VFS::remap_path(path);
+            std::string path = a1 ? Yggdrasil::read_path(mem_, a1) : "";
+            std::string host = Yggdrasil::remap_path(path);
             struct stat st;
             int r = ::fstatat(static_cast<int>(a0), host.c_str(), &st,
                               static_cast<int>(a2));
@@ -1037,7 +1037,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 437: { // openat2(dirfd, pathname, how, size)
             uint64_t flags = a2 ? mem_.load<uint64_t>(a2) : 0;
             uint64_t mode = a2 ? mem_.load<uint64_t>(a2 + 8) : 0;
-            std::string path = VFS::read_path(mem_, a1);
+            std::string path = Yggdrasil::read_path(mem_, a1);
             int err = 0;
             auto node = emu.vfs().open(path, static_cast<int>(flags),
                                        static_cast<mode_t>(mode), &err);
@@ -1051,8 +1051,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── faccessat2 (syscall 439) ─────────────────────────────────
         case 439: { // faccessat2(dirfd, pathname, mode, flags)
-            std::string path = VFS::read_path(mem_, a1);
-            std::string host = VFS::remap_path(path);
+            std::string path = Yggdrasil::read_path(mem_, a1);
+            std::string host = Yggdrasil::remap_path(path);
             int r = ::faccessat(static_cast<int>(a0), host.c_str(),
                                static_cast<int>(a2), static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
@@ -1100,8 +1100,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // The old code dispatched 36 to unlinkat, which broke `ln -s`
             // (toybox calls symlinkat() via musl). unlinkat is correctly
             // handled at syscall 35 in fs.cpp.
-            std::string oldp = VFS::read_path(mem_, a0);
-            std::string newp = VFS::read_path(mem_, a2);
+            std::string oldp = Yggdrasil::read_path(mem_, a0);
+            std::string newp = Yggdrasil::read_path(mem_, a2);
             int r = ::symlinkat(oldp.c_str(), static_cast<int>(a1), newp.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
@@ -1124,7 +1124,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 54: { // fchownat(dirfd, path, owner, group, flags) — AArch64 54
             // BUGFIX: was previously labeled "fchmodat" but fchmodat is
             // at 53 (handled in fs.cpp). The real syscall at 54 is fchownat.
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = Yggdrasil::remap_path(Yggdrasil::read_path(mem_, a1));
             int r = ::fchownat(static_cast<int>(a0), path.c_str(),
                                static_cast<uid_t>(a2), static_cast<gid_t>(a3),
                                static_cast<int>(a4));

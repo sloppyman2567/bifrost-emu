@@ -6,8 +6,8 @@
 //
 // All case bodies are extracted verbatim from the original syscalls.cpp
 //  EXCEPT case 56 (openat), which has been rewritten to
-// use the new VFS abstraction (src/vfs/) instead of inline /proc//dev/
-// else-if chains.
+// use the Yggdrasil VFS abstraction (src/yggdrasil/) instead of inline
+// /proc//dev/ else-if chains.
 //
 // References to private Emulator members (mem_, elf_path_, graphics_)
 // work via the friend declaration in core/emulator.h.
@@ -16,8 +16,9 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-#include "vfs/vfs.h"
-#include "vfs/vfs_table.h"
+#include "yggdrasil/yggdrasil.hpp"
+#include "yggdrasil/host_node.hpp"
+#include "yggdrasil/node.hpp"
 
 #include <cerrno>
 #include <sys/statfs.h>
@@ -50,10 +51,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     switch (num) {
         // ── openat — REWRITTEN to use VFS ─────────────────────────────
         // The original 164-line inline /proc//dev/ chain is replaced by
-        // a single VFS::open() call. The VFS dispatches to procfs/devfs/
+        // a single yggdrasil::Yggdrasil::open() call. The VFS dispatches to procfs/devfs/
         // host passthrough internally.
         case 56: { // openat
-            std::string path = VFS::read_path(mem_, a1);
+            std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int err = 0;
             auto node = vfs_.open(path, static_cast<int>(a2), (mode_t)a3, &err);
             if (!node) {
@@ -61,7 +62,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             // Adopt into the FdTable.
-            int guest_fd = fds_.allocate(std::shared_ptr<VNode>(std::move(node)));
+            int guest_fd = fds_.allocate(std::shared_ptr<yggdrasil::Node>(std::move(node)));
             ret_host(guest_fd);
             return 0;
         }
@@ -127,7 +128,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously implemented as dup2 (which doesn't exist
             // on AArch64). The real syscall at 33 is mknodat. Forward to
             // host mknodat.
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             int r = ::mknodat(static_cast<int>(a0), path.c_str(),
                               static_cast<mode_t>(a2), static_cast<dev_t>(a3));
             if (r < 0) { ret_errno(); return 0; }
@@ -179,13 +180,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously wrote raw host fds directly to guest
             // memory without registering them in FdTable. Subsequent
             // read/write/close calls on those fds went through FdTable::get()
-            // → nullptr → -EBADF. Fix: wrap each pipe end in a HostVNode
+            // → nullptr → -EBADF. Fix: wrap each pipe end in a yggdrasil::HostNode
             // and register via FdTable::allocate, returning the guest fds.
             int hfds[2];
             int r = ::pipe2(hfds, static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
-            int g0 = fds_.allocate(std::make_shared<HostVNode>(hfds[0], O_RDONLY));
-            int g1 = fds_.allocate(std::make_shared<HostVNode>(hfds[1], O_WRONLY));
+            int g0 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[0], O_RDONLY));
+            int g1 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[1], O_WRONLY));
             uint32_t out[2] = { static_cast<uint32_t>(g0), static_cast<uint32_t>(g1) };
             try { mem_.write(a0, out, sizeof(out)); }
             catch (...) { ret_err(EFAULT); return 0; }
@@ -194,7 +195,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 34: { // mkdirat
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             int r = ::mkdirat(static_cast<int>(a0), path.c_str(), (mode_t)a2);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -202,7 +203,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 35: { // unlinkat
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -210,8 +211,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 38: { // renameat
-            std::string oldp = VFS::remap_path(VFS::read_path(mem_, a1));
-            std::string newp = VFS::remap_path(VFS::read_path(mem_, a3));
+            std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
+            std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
             int r = ::renameat(static_cast<int>(a0), oldp.c_str(), static_cast<int>(a2), newp.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -294,14 +295,25 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 61: { // getdents64(fd, dirent_buf, count)
-            // Read real directory entries from the host and convert to
-            // the AArch64 linux_dirent64 layout.
+            // v1.4.5-alpha: dispatch via the Node. DirNode synthesizes
+            // linux_dirent64 records for virtual directories (/proc,
+            // /proc/self, /dev); HostNode-equivalent paths fall through
+            // to the host getdents64 syscall via host_fd().
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_host(-EBADF); return 0; }
-            // Use the host fd directly if it's a HostVNode.
+            // Virtual directory (DirNode)? Use the Node's getdents().
+            if (node->is_dir()) {
+                char buf[8192];
+                ssize_t n = node->getdents(0, buf, sizeof(buf));
+                if (n < 0) { ret_host(static_cast<int>(n)); return 0; }
+                if (static_cast<size_t>(n) > a2) n = a2;  // truncate to count
+                mem_.write(a1, buf, static_cast<size_t>(n));
+                ret_host(n);
+                return 0;
+            }
+            // Otherwise: real directory via host fd.
             int host_fd = node->host_fd();
             if (host_fd < 0) { ret_host(-ENOTDIR); return 0; }
-            // Call the host getdents64.
             char host_buf[8192];
             int n = ::syscall(SYS_getdents64, host_fd, host_buf, sizeof(host_buf));
             if (n < 0) { ret_host(-errno); return 0; }
@@ -314,8 +326,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 291: { // statx (Linux 4.11+, glibc uses it for fstatat fallback)
             // statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
             // Do a real stat on the (remapped) host path and convert to statx.
-            std::string path = VFS::read_path(mem_, a1);
-            std::string host_path = VFS::remap_path(path);
+            std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            std::string host_path = yggdrasil::Yggdrasil::remap_path(path);
             struct stat st;
             int r;
             int host_flags = static_cast<int>(a2);
@@ -382,7 +394,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
             // Do a real stat on the (mapped) host path so guest programs
             // see correct file sizes, types, and permissions.
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             struct stat st;
             int r;
             if (static_cast<int>(a0) == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
@@ -538,7 +550,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 case F_GETFL: {  // 3 — get file status flags
                     // Query the host fd for live flags (including any
                     // previously applied via F_SETFL). Fall back to the
-                    // VNode's stored flags if there's no host fd (virtual
+                    // yggdrasil::Node's stored flags if there's no host fd (virtual
                     // VNodes like /dev/fb0, memfd-backed /proc/*).
                     if (hfd >= 0) {
                         int r = ::fcntl(hfd, F_GETFL);
@@ -601,7 +613,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -624,12 +636,12 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 49: { // chdir(path) — AArch64 49
-            std::string guest_path = VFS::read_path(mem_, a0);
+            std::string guest_path = yggdrasil::Yggdrasil::read_path(mem_, a0);
             // Update the guest-side cwd first (resolves relative paths
             // against the current cwd). Then call host chdir on the
             // remapped path so any subsequent host-relative opens work.
             emu.vfs_.apply_chdir(guest_path);
-            std::string path = VFS::remap_path(guest_path);
+            std::string path = yggdrasil::Yggdrasil::remap_path(guest_path);
             int r = ::chdir(path.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -663,7 +675,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
             // The old code called ::fchmod(fd, mode) treating the dirfd as
             // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a1));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             int r = ::fchmodat(static_cast<int>(a0), path.c_str(),
                                (mode_t)a2, static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
@@ -676,7 +688,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // `const struct timespec*` — that dereferences garbage host
             // memory and crashes. Read the guest's times array into a
             // local buffer first, then pass that to ::utimensat.
-            std::string path = a1 ? VFS::remap_path(VFS::read_path(mem_, a1)) : std::string();
+            std::string path = a1 ? yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1)) : std::string();
             struct timespec times_buf[2];
             struct timespec* times_ptr = nullptr;
             if (a2 != 0) {
@@ -707,8 +719,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // calls linkat() via musl's link() wrapper). unlink was being
             // called with olddirfd (AT_FDCWD=-100) as a path pointer,
             // returning ENOENT.
-            std::string oldp = VFS::remap_path(VFS::read_path(mem_, a1));
-            std::string newp = VFS::remap_path(VFS::read_path(mem_, a3));
+            std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
+            std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
             int r = ::linkat(static_cast<int>(a0), oldp.c_str(),
                              static_cast<int>(a2), newp.c_str(),
                              static_cast<int>(a4));
@@ -722,7 +734,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // symlinkat at syscall 36). The old code dispatched 39 to
             // symlink(), but musl's symlink() wrapper calls syscall 36
             // (symlinkat). symlinkat is now correctly handled in misc.cpp.
-            std::string target = VFS::remap_path(VFS::read_path(mem_, a0));
+            std::string target = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a0));
             int r = ::umount2(target.c_str(), static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -741,7 +753,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 45: { // truncate(path, length) — AArch64 45
-            std::string path = VFS::remap_path(VFS::read_path(mem_, a0));
+            std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a0));
             int r = ::truncate(path.c_str(), (off_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);

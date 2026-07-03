@@ -285,7 +285,7 @@ bifrost-emu/
 │   ├── ir/               IR builder, translator, optimizer, lowerer, executor
 │   ├── jit/              frostjit.cpp, x86_backend, x86_regalloc, cache, profiler
 │   ├── syscalls/         Linux AArch64 syscall layer (~170 syscalls, split by concern)
-│   ├── vfs/              Virtual filesystem (VNode + FdTable + procfs + devfs)
+│   ├── yggdrasil/        Yggdrasil VFS (Node + FdTable + procfs + devfs)
 │   ├── graphics/         /dev/fb0 backend (headless or SDL2)
 │   └── audio/            OSS /dev/dsp passthrough + WAV dump
 ├── api/bifrost.h         Public C API for libbifrost
@@ -361,10 +361,16 @@ Child disables JIT (interpreter-only), inherits CoW copy. execve() loads
 new AArch64 ELF, resets CPU state, flushes JIT cache. Parent's wait4()/
 waitid() forward to host. Enables external commands in toybox sh.
 
-**VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
+**Yggdrasil VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
 `/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random,tty}`,
 `/dev/{fb0,dsp,snd}`. Uses `memfd_create` for seekable virtual file
-descriptors.
+descriptors. (v1.4.5-alpha: renamed from `VFS` to `Yggdrasil`; added
+`DirNode` so `ls /proc` and `ls /dev` work; `/proc/self/maps` and
+`/proc/self/status` now use lazy regeneration to reflect live state;
+`/dev/random` vs `/dev/urandom` now use distinct entropy pools via
+`getrandom(GRND_RANDOM)` vs `getrandom(0)`; ioctl dispatch moved from
+the syscall layer into the Node subclasses — `FbNode` owns framebuffer
+ioctls, `HostNode`/`StdioNode` own terminal ioctls.)
 
 **TLS** — TPIDR_EL0 / TPIDRRO_EL0 via MRS/MSR; 64KB TLS scratch area
 pre-allocated; per-thread TLS via `clone(CLONE_SETTLS, ...)`. Static TLS
@@ -504,7 +510,9 @@ mode. On top of the 1.4.0 stable foundation:
   saving 64 MiB per thread. Sharded global exclusive monitor (16
   stripes) for parallel LL/SC atomics.
 - **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
-- **VFS abstraction** — VNode + FdTable + procfs + devfs.
+- **Yggdrasil VFS abstraction** — Node + FdTable + procfs + devfs. (Was
+  "VFS abstraction" / "VNode + FdTable"; renamed to Yggdrasil in
+  v1.4.5-alpha.)
 - **~170 Linux AArch64 syscalls** including file I/O, threading,
   signals, timing, fork+execve, event loops, and filesystem operations.
 
