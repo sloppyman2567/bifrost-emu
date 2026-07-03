@@ -87,8 +87,7 @@ public:
     // Address set via set_tid_address() — used by futex on child
     // termination (set_child_tid). When this thread exits, the kernel
     // writes the TID to *tid_address and performs a futex wake on it.
-    // (Turn 23: the exit-time write+wake is now implemented in
-    // thread_entry.)
+    // The exit-time write+wake is implemented in thread_entry.
     uint64_t set_tid_address_ptr = 0;
 
     // ── Robust futex list ───────────────────────────────────────────

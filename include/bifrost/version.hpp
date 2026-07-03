@@ -6,8 +6,8 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// 1.4.0 (2026-06-27): Release candidate — production hardening.
-//   - 41/41 JIT tests pass (also pass under interpreter).
+// 1.4.0 (2026-07-02): Stable release.
+//   - 72/72 JIT tests pass (also pass under interpreter and FWD mode).
 //   - JIT is the default execution mode (6.4x speedup on compute).
 //   - Production-ready signal delivery: proper siginfo_t/ucontext_t,
 //     rt_sigprocmask, sigaltstack, SA_RESTART/RESETHAND/NODEFER/SIGINFO.

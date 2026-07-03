@@ -196,7 +196,7 @@ public:
     int allocate(std::shared_ptr<VNode> node);
 
     // Look up the VNode for `fd`. Returns nullptr if fd is not open.
-    std::shared_ptr<VNode> get(int fd);
+    std::shared_ptr<VNode> get(int fd) const;
 
     // Close `fd`. Returns 0 on success, -errno on failure.
     int close(int fd);

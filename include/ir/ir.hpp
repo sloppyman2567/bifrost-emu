@@ -252,7 +252,6 @@ struct IRBlock {
     // Optimization stats (filled by optimize_ir)
     int dce_removed = 0;
     int fold_subst  = 0;
-    int peephole_folded = 0;
 
     IRBlock() = default;
 };

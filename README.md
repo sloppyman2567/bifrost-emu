@@ -42,7 +42,7 @@ make
 # Pass arguments to the emulated program
 ./bifrost-emu cat.elf /etc/hostname
 
-# JIT is ON by default (41/41 tests pass, 6.4x speedup on compute)
+# JIT is ON by default (72/72 tests pass, 6.4x speedup on compute)
 ./bifrost-emu ctest_real/fib.elf
 
 # Use --no-jit to force the interpreter (fallback / debugging)
@@ -216,8 +216,8 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of rc.1 (2026-06-27),
-all 41 test programs pass under JIT, including the
+JIT is ON by default; use `--no-jit` to opt out. As of 1.4.0 (2026-07-02),
+all 72 test programs pass under JIT, including the
 `ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
 the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
 single and double precision, and 19 real-world C programs in `ctest_real/`.
@@ -385,7 +385,7 @@ window backend via `make USE_SDL2=1`.
 
 ## Test Status
 
-All 41 test programs pass under both the default frostJIT path and the
+All 72 test programs pass under both the default frostJIT path and the
 interpreter (`--no-jit`). The test suite has been verified clean under
 ASan+UBSan. JIT is the default execution mode (6.4x speedup on compute
 workloads, 571 MIPS on bench_mips).
@@ -404,7 +404,7 @@ make verify   # JIT divergence checker (slow, catches codegen bugs)
 
 ## Limitations
 
-This is release-candidate quality software. Key limitations:
+This is stable release quality software. Key limitations:
 
 - **Limited dynamic linking.** The dynamic linker (PT_INTERP) is loaded
   and its entry point is used, allowing simple dynamically-linked musl
@@ -425,7 +425,7 @@ This is release-candidate quality software. Key limitations:
   `SA_ONSTACK` are all implemented, and host-to-guest signal forwarding
   (SIGINT/SIGTERM/SIGCHLD/SIGWINCH) works with low-latency draining.
   Pending blocked signals are dropped (no pending queue).
-- **frostJIT is the default execution mode.** All 41 tests pass, including
+- **frostJIT is the default execution mode.** All 72 tests pass, including
   the comprehensive int↔FP conversion test, the new FMA (FMADD/FMSUB/
   FNMADD/FNMSUB) test, and 19 real-world programs. The interpreter is
   available via `--no-jit` as a fallback for programs that hit a JIT bug

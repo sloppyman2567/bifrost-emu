@@ -17,19 +17,16 @@ status, see [TESTS.md](TESTS.md).
    while/case, functions, exit codes, string tests, pwd, interactive
    mode, fork+execve for external AArch64 commands.
 
-2. **Stabilize.** No new features — just bug fixes from the rc.1
-   feedback. rc.1 includes production hardening: JIT mmap error
-   handling, fork JIT cleanup, FP bounds checks, signal trampoline
-   fork safety, W^X failure path hardening, --jit-threshold input
-   validation, Function Multi-Versioning (FMV) + native FMA3 codegen
-   for FMADD/FMSUB/FNMADD/FNMSUB (addresses the FMA correctness and
-   performance items for FMA3-capable hosts), verify-mode self-loop un-patch
-   fix + verify-once optimization, FNMADD/FNMSUB silent-NOP fix,
-   FP 2-source vs FMA encoding collision fix. Post-rc.1 stabilization
-   fixed FCMPE #0.0 misdecode, CCMP scratch vreg spill (FWD crash),
-   and added native IR ops for fixed-point FCVTZS/SCVTF variants.
-   Once all `ctest_real/` and `toybox` non-sh programs pass under
-   both interpreter and JIT, cut the final 1.4.0.
+2. **~~Stabilize.~~** ✅ DONE — 1.4.0 shipped (2026-07-02). All 72 tests
+   pass under JIT, interpreter, and FWD mode. Production hardening
+   includes JIT mmap error handling, fork JIT cleanup, FP bounds checks,
+   signal trampoline fork safety, W^X failure path hardening,
+   --jit-threshold input validation, Function Multi-Versioning (FMV) +
+   native FMA3 codegen, verify-mode self-loop un-patch fix + verify-once
+   optimization, FNMADD/FNMSUB silent-NOP fix, FP 2-source vs FMA
+   encoding collision fix, FCMPE #0.0 misdecode fix, CCMP scratch vreg
+   spill fix, native IR ops for fixed-point FCVTZS/SCVTF variants, and
+   the FWD LSE atomic fix (block-level FWD disable for atomic blocks).
 
 3. **~~Fix the NEON/SIMD bug~~** that breaks `strtok`/`strtok_r` —
    ✅ RESOLVED via the rc.1 NEON/SIMD overhaul (10 bugs fixed).
@@ -96,8 +93,8 @@ status, see [TESTS.md](TESTS.md).
    MOVI/shift encoding collision, REV64/REV32 mask + size-awareness,
    added USRA/SSRA/SLI/SRI handlers, fixed INS/UMOV v_hi routing for
    Q=1. SHA-1/224/256/384/512 and CRC32 now produce correct hashes.
-   MD5 is improved but still has a remaining issue in toybox's code
-   path. Added `ctest/jit_neon.elf` regression test.
+   MD5 now produces correct hashes (fixed via the FCVTZU fixed-point
+   variant fix). Added `ctest/jit_neon.elf` regression test.
 
 ---
 

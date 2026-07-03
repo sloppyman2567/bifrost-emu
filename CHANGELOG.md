@@ -30,7 +30,7 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 - **LSE is_load semantics** — bit[22] is acquire/release, not load/store.
   The "load" is determined by `Rt != 31` (XZR).
 
-### Threading (high-contention game support)
+### Threading (high-contention multi-threaded workloads)
 
 - **Shared-JIT (default)** — spawned threads share the main's FrostJIT,
   saving 64 MiB per thread. `blocks_mutex_` released before block
@@ -49,7 +49,8 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 - **8 new pthread/semaphore tests** — mutex, cond (4 concurrent waiters),
   rwlock, sem, once, producer_consumer, atomic_stress (8-thread),
   lse_inline (inline-asm CAS/LDADD/LDSET/LDCLR/LDEOR/SWP).
-- **71/71 tests pass** (was 62 at rc.1). 0 verify divergences.
+- **72/72 tests pass** (was 62 at rc.1). 0 verify divergences. FWD mode
+  also 72/72 (LSE atomic forwarding bug fixed in 1.4.0 final).
 
 ### Code quality
 

@@ -1,8 +1,9 @@
 // api/bifrost_capi.cpp — C API implementation for libbifrost.
 //
 // Wraps the C++ Emulator class in a stable C interface so the library
-// can be embedded in debuggers, IDE plugins, game engines, test harnesses,
-// and any C/C++ application without depending on C++ ABI details.
+// can be embedded in other programs — debuggers, IDE plugins, test
+// harnesses, CI runners, static analyzers, and other tooling — without
+// depending on C++ ABI details.
 //
 // All functions validate their arguments and return meaningful error codes.
 // NULL pointers and out-of-range indices are rejected with -1 or NULL.
@@ -11,6 +12,7 @@
 #include "core/emulator.h"
 #include "core/cpu.h"
 #include "core/memory.h"
+#include "jit/frostjit.hpp"
 
 #include <cstring>
 #include <new>
@@ -366,35 +368,36 @@ int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats) 
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || !stats) return -1;
     memset(stats, 0, sizeof(*stats));
-    auto* jit = const_cast<arm64emu::Emulator&>(e->emu).jit();
+    auto& emu_ref = const_cast<arm64emu::Emulator&>(e->emu);
+    auto* jit = emu_ref.jit();
     if (!jit) return -1;
-    // The FrostJIT class exposes stats via its public interface.
-    // We populate what we can from the JIT object.
-    stats->code_cache_size = 64 * 1024 * 1024;  // 64 MiB
+    // Populate from FrostJIT's public counters.
+    stats->blocks_translated     = jit->blocks_translated;
+    stats->blocks_executed       = jit->blocks_executed;
+    stats->cache_hits            = jit->cache_hits;
+    stats->cache_misses          = jit->cache_misses;
+    stats->interpreter_fallbacks = jit->interpreter_fallbacks;
+    stats->block_chains_patched  = jit->block_chains_patched;
+    stats->code_cache_used       = jit->code_buf_used();
+    stats->code_cache_size       = jit->code_buf_size();
+    stats->cache_entries         = jit->cache_entries();
     return 0;
 }
 
 // ── Breakpoints ────────────────────────────────────────────────────────
-// Simple PC-based breakpoints. The caller sets a breakpoint at a guest
-// address, then calls bifrost_step_n() in a loop. When the PC matches
-// a breakpoint, the caller can inspect/modify state before continuing.
-// This is a polling model (no signal-based interruption) for simplicity
-// and portability.
-
-#define BIFROST_MAX_BREAKPOINTS 64
+// NOTE: Hardware breakpoint injection is not yet implemented. These
+// functions are reserved for future use — callers should poll
+// bifrost_get_pc() after bifrost_step()/bifrost_step_n() to detect
+// when a target address is reached. See api/bifrost.h for details.
 
 int bifrost_set_breakpoint(bifrost_emu_t* emu, uint64_t addr) {
-    // Breakpoints are managed by the caller (compare PC after each step).
-    // This function is a placeholder for future hardware-breakpoint support.
-    // For now, we just return 0 (success) — the caller polls with
-    // bifrost_get_pc() after bifrost_step().
     (void)emu; (void)addr;
-    return 0;
+    return 0;  // reserved — see note above
 }
 
 int bifrost_remove_breakpoint(bifrost_emu_t* emu, uint64_t addr) {
     (void)emu; (void)addr;
-    return 0;
+    return 0;  // reserved — see note above
 }
 
 // ── Error reporting ────────────────────────────────────────────────────

@@ -279,7 +279,7 @@ int FdTable::allocate(std::shared_ptr<VNode> node) {
     return fd;
 }
 
-std::shared_ptr<VNode> FdTable::get(int fd) {
+std::shared_ptr<VNode> FdTable::get(int fd) const {
     auto it = table_.find(fd);
     if (it == table_.end()) return nullptr;
     return it->second;

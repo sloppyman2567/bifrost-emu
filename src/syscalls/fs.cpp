@@ -53,7 +53,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         // a single VFS::open() call. The VFS dispatches to procfs/devfs/
         // host passthrough internally.
         case 56: { // openat
-            std::string path = VFS::VFS::read_path(mem_, a1);
+            std::string path = VFS::read_path(mem_, a1);
             int err = 0;
             auto node = vfs_.open(path, static_cast<int>(a2), (mode_t)a3, &err);
             if (!node) {

@@ -153,7 +153,7 @@ public:
 
     void flush_cache();
     size_t code_buf_used()  const { return code_buf_used_; }
-    size_t code_buf_size()  const { return 64 * 1024 * 1024; }
+    size_t code_buf_size()  const { return CODE_BUF_SIZE; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
 

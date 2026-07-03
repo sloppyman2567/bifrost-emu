@@ -533,14 +533,17 @@ extern "C" {
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
             return 0;  // cpu->running is now false (or handler installed)
         }
-        if (getenv("BIFROST_MEM_TRACE")) {
+        // Cache the env lookup — this runs on every JIT slow-path memory access.
+        static const bool mem_trace_ = (getenv("BIFROST_MEM_TRACE") != nullptr);
+        if (mem_trace_) {
             fprintf(stderr, "    [load] addr=0x%llx w=%d → 0x%llx\n",
                     static_cast<unsigned long long>(addr), width, static_cast<unsigned long long>(val));
         }
         return val;
     }
     void jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
-        if (getenv("BIFROST_MEM_TRACE")) {
+        static const bool mem_trace_ = (getenv("BIFROST_MEM_TRACE") != nullptr);
+        if (mem_trace_) {
             fprintf(stderr, "    [store] addr=0x%llx val=0x%llx w=%d\n",
                     static_cast<unsigned long long>(addr), static_cast<unsigned long long>(val), width);
         }

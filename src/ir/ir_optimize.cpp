@@ -911,8 +911,8 @@ void dump_ir(const IRBlock& block, FILE* out) {
                 static_cast<unsigned long long>(inst.arm_pc),
                 inst.immr, inst.imms, inst.sf);
     }
-    fprintf(out, "  (dce_removed=%d fold_subst=%d peephole=%d)\n",
-            block.dce_removed, block.fold_subst, block.peephole_folded);
+    fprintf(out, "  (dce_removed=%d fold_subst=%d)\n",
+            block.dce_removed, block.fold_subst);
 }
 
 } // namespace arm64emu
