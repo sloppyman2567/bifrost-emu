@@ -6,6 +6,47 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
+## v1.4.5-alpha — SHIPPED (2026-07-03)
+
+**1.4.5-alpha** is the first feature release after the 1.4.0 stable.
+It adds native SSE2 codegen for SIMD vector shifts (SHL/USHR/SSHR),
+fixes a missing SSHR-by-immediate handler in the interpreter, and keeps
+all 72 tests passing under JIT, interpreter, and FWD mode.
+
+### Completed in 1.4.5-alpha
+
+1. **Native SIMD vector shift codegen.** SHL/USHR/SSHR (vector, by
+   immediate) now emit native SSE2 `psllw/pslld/psllq`,
+   `psrlw/psrld/psrlq`, and `psraw/psrad` respectively. Previously
+   these fell back to `CALL_INTERP` (~20% overhead on SIMD-heavy
+   workloads). 8-bit element shifts fall back (no `psllb` in SSE2);
+   64-bit SSHR falls back (needs AVX-512 `psraq`).
+
+2. **Missing SSHR-by-immediate interpreter handler.** The vector
+   SSHR-by-immediate instruction (encoding `0x0F000400` with immh!=0)
+   was silently NOP'd in the interpreter — the dispatcher's MOVI check
+   at the same encoding only fires for immh==0, and the fall-through had
+   no SSHR handler. This broke `sshr v0.8h, v0.8h, #2` etc. in both
+   interpreter and JIT (JIT falls back to the interpreter via
+   `CALL_INTERP`). Now implemented as a proper arithmetic-shift-right
+   per-lane handler.
+
+3. **New IR ops: `SIMD_SHL`, `SIMD_USHR`, `SIMD_SSHR`** with executor
+   support for verify-mode comparison.
+
+4. **New test: `ctest/jit_neon_advanced.elf`** — 11 checks covering
+   SHL/USHR/SSHR for 16/32/64-bit elements, shift-by-zero,
+   shift-by-max, and a combined shift+add pattern. All 11 pass under
+   both JIT and interpreter (was 9/11 before the SSHR fix).
+
+5. **Version consistency sweep.** All version references in
+   `version.hpp`, `main.cpp`, `api/bifrost.h`, `Makefile`, `README.md`,
+   `TESTS.md`, `ROADMAP.md`, `src/graphics/graphics.cpp`, and
+   `ctest/test_capi.c` now say `1.4.5-alpha`. Previously many still
+   said `1.4.0`, causing `test_capi` to fail its version check.
+
+---
+
 ## v1.4.0 — SHIPPED (2026-07-03)
 
 **1.4.0 stable release.** All 72 tests pass under JIT, interpreter, and
@@ -53,7 +94,7 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 
 ---
 
-## v1.4.x (feature work)
+## v1.4.x (feature work — most items shipped in 1.4.0 or 1.4.5-alpha)
 
 1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
    backend. Build with `make USE_SDL2=1` to enable the window backend;
@@ -104,16 +145,14 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 
 ---
 
-## v1.4.5-alpha (next feature release)
+## v1.4.5-alpha and beyond (future feature work)
 
-The v1.4.5-alpha will be the first feature release after the 1.4.0
-final. It focuses on multimedia I/O and performance:
+Items below this point were NOT in 1.4.5-alpha and are open for future
+feature releases.
 
-1. **SDL2 audio + input.** The v1.4.0-alpha SDL2 video backend
-   (optional, `make USE_SDL2=1`) currently has no audio or input.
-   v1.4.5-alpha adds SDL2 audio output (replacing the OSS `/dev/dsp`
-   passthrough) and SDL2 input (keyboard/mouse → guest input events).
-   This enables interactive ARM64 SDL2 applications.
+1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
+   backend. Build with `make USE_SDL2=1` to enable the window backend;
+   audio output currently goes through OSS `/dev/dsp` passthrough.
 
 2. **VFS bug fixes.** Several VFS edge cases need fixing: procfs
    `status` field truncation, devfs `/dev/random` vs `/dev/urandom`
@@ -123,11 +162,10 @@ final. It focuses on multimedia I/O and performance:
 
 3. **Better JIT performance.** Two areas: (a) implement true LRU
    eviction in the register allocator (currently FIFO), and (b) use
-   the FMV framework to emit AVX2 256-bit SIMD
-   codegen for vector ops that currently fall back to the interpreter
-   (SHL/USHR/USRA/SLI etc.).
+   the FMV framework to emit AVX2 256-bit SIMD codegen for vector ops
+   that currently fall back to the interpreter (USRA/SSRA/SLI/SRI etc.).
 
-4. **New test.** Add a comprehensive `ctest/jit_neon_advanced.elf`
+4. **More SIMD coverage.** Add a comprehensive `ctest/jit_neon_advanced.elf`
    covering SIMD instructions not in the current `jit_neon.elf`:
    EXT, TBL/TBX, UZP/ZIP/TRN, and the narrowing/widening shifts
    (SHRN/SSHLL/USHLL).

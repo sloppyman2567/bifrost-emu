@@ -12,7 +12,7 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.0
+  bifrost-emu  v1.4.5-alpha
   x86_64 ◄─────────────────► ARM64
 ```
 
@@ -216,7 +216,7 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of 1.4.0 (2026-07-03),
+JIT is ON by default; use `--no-jit` to opt out. As of 1.4.5-alpha (2026-07-03),
 all 72 test programs pass under JIT, including the
 `ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
 the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
@@ -447,8 +447,17 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0** (2026-07-03):
+current release is **v1.4.5-alpha** (2026-07-03) — the first feature
+release after the 1.4.0 stable. It adds native SSE2 codegen for SIMD
+vector shifts (SHL/USHR/SSHR) and a missing SSHR-by-immediate handler
+in the interpreter. All 72 tests pass under JIT, interpreter, and FWD
+mode. On top of the 1.4.0 stable foundation:
 
+- **Native SIMD vector shift codegen (1.4.5-alpha).** SHL/USHR/SSHR
+  (vector, by immediate) now emit native SSE2 `psllw/pslld/psllq`,
+  `psrlw/psrld/psrlq`, and `psraw/psrad` respectively, instead of
+  falling back to `CALL_INTERP`. 8-bit element shifts and 64-bit SSHR
+  still fall back (no `psllb` in SSE2; `psraq` requires AVX-512).
 - **30+ bug fixes across syscall layer, VFS, interpreter, and IR.**
   Comprehensive audit fixed 13 wrong AArch64 syscall numbers (verified
   against `asm-generic/unistd.h`), 8 syscall logic bugs (clock_nanosleep,

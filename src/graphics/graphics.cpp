@@ -1,4 +1,4 @@
-// graphics.cpp — Graphics backend for bifrost-emu (v1.4.0).
+// graphics.cpp — Graphics backend for bifrost-emu (v1.4.5-alpha).
 //
 // Provides a virtual /dev/fb0 backed by a memfd_create'd file
 // descriptor. The guest mmaps the fd and writes pixels directly into

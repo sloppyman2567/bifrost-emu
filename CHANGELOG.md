@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.5-alpha] — 2026-07-03 (first feature release after 1.4.0 stable)
+## [1.4.5-alpha] — 2026-07-04 (first feature release after 1.4.0 stable)
 
 ### Native SIMD vector shift codegen
 
@@ -14,16 +14,41 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   immediate operations that previously fell back to `CALL_INTERP` (~20%
   overhead on SIMD-heavy workloads). The IR translator now emits these
   for `SHL`/`USHR`/`SSHR` (vector, immediate) with 16/32/64-bit elements.
-- **SSE2 native codegen** via `psllw`/`pslld`/`psllq` (logical left),
-  `psrlw`/`psrld`/`psrlq` (logical right), `psraw`/`psrad` (arithmetic
-  right). 64-bit SSHR falls back to `CALL_INTERP` (needs AVX-512 `psraq`).
-  8-bit element shifts fall back (no `psllb` in SSE2).
+- **SSE2 native codegen in the JIT** (`src/jit/frostjit.cpp`) via
+  `psllw`/`pslld`/`psllq` (logical left), `psrlw`/`psrld`/`psrlq`
+  (logical right), `psraw`/`psrad` (arithmetic right). 64-bit SSHR falls
+  back to `CALL_INTERP` (needs AVX-512 `psraq`). 8-bit element shifts
+  fall back (no `psllb` in SSE2). Previously the IR ops were defined
+  and emitted by the translator, but the JIT had no handler — so all
+  three ops fell back to `CALL_INTERP` via the JIT's `default:` case.
+  The CHANGELOG entry in the original 1.4.5-alpha tarball claimed the
+  SSE2 codegen was already done; it wasn't. This release actually
+  implements it.
+- **CRITICAL bug fix in the SSE2 load/store encoding.** The new JIT
+  handler must use `movsd` (`F2 0F 10` / `F2 0F 11`) — the 64-bit
+  scalar move — NOT `movss` (`F3 0F 10` / `F3 0F 11`) which is the
+  32-bit scalar move. With `movss`, only the low 32 bits (lane 0) of
+  each 64-bit vreg half are loaded, the SSE2 shift only shifts lane 0,
+  and only lane 0 is stored back — corrupting lanes 1 and 3 of the
+  result. (The existing `SIMD_LOGICAL`/`SIMD_ARITH` handlers also use
+  `movss`, but their native paths are not triggered for the current
+  test suite — the IR translator routes most SIMD ops to `CALL_INTERP`
+  — so the latent bug there is not exercised. Left as-is for release
+  stability; future cleanup.)
 - **AVX2 detection already in place** (`cpu_features.has_avx2()`); future
   work can emit 256-bit `vpsllw` etc. for Q=1 forms (currently two 128-bit
   ops, functionally identical).
 - **IR executor support** — `ops.cpp` implements all three ops for
   verify-mode comparison (lane-wise shift with correct sign-extension
-  for SSHR).
+  for SSHR). The executor previously did `shift &= (esize*8)-1`, which
+  truncated `shift = esize*8` to 0 (turning "clear all bits" into a
+  no-op for `USHR`/`SSHR #N` where N == esize_bits, e.g.
+  `ushr v.4s, #32`). This caused verify mode to flag false-positive
+  divergences vs the JIT/interpreter, which correctly clear the lane.
+  The fix is to NOT mask and to use a 64-bit intermediate so that
+  `shift == esize_bits` is well-defined (clears for SHL/USHR,
+  sign-fills for SSHR). The IR translator guarantees
+  `shift ∈ [0, esize*8]`, so no out-of-range shifts are possible.
 - **Optimizer integration** — added to `is_pure()` (never DCE'd) and
   `dump_ir` (debug printing).
 - **Shift amount calculation** — matches the interpreter's formula:
@@ -33,22 +58,61 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   interpreter (NOT bits[22:19] as in the ARM ARM text — the interpreter's
   extraction is correct per the encoding diagram).
 
+### Missing SSHR-by-immediate interpreter handler (bug fix)
+
+- **The vector SSHR-by-immediate instruction was silently NOP'd in the
+  interpreter.** The dispatcher's MOVI/shift ambiguity check (encoding
+  `0x0F000400` with mask `0xFF800C00`) only fires for `immh == 0` (MOVI);
+  for `immh != 0` (actual SSHR), control fell through past the USHR
+  handler (which has U=1, `0x2F000400`) and past the SHL handler (which
+  has a different low byte, `0x0F005400`), landing in the generic
+  "unknown instruction" NOP path. Result: every vector SSHR-by-immediate
+  was silently a no-op, leaving `Vd` unchanged. This broke
+  `sshr v0.8h, v0.8h, #2` etc. under both interpreter and JIT (the JIT
+  routes `SIMD_SHL`/`SIMD_USHR`/`SIMD_SSHR` to `CALL_INTERP` for the
+  executor). Now implemented as a proper arithmetic-shift-right per-lane
+  handler, mirroring the existing USHR handler but with signed types.
+  The `ctest/jit_neon_advanced.elf` SSHR tests now pass (was 9/11, now
+  11/11).
+
+### Version consistency sweep
+
+- All version references across the tree now say `1.4.5-alpha`:
+  `version.hpp` (was already correct), `main.cpp` (was already correct),
+  `api/bifrost.h` (was `1.4.0`), `Makefile` (was `v1.4.0`),
+  `README.md` banner and release-history section (was `v1.4.0`),
+  `TESTS.md` (was `1.4.0`), `ROADMAP.md` (1.4.5-alpha now marked SHIPPED),
+  `src/graphics/graphics.cpp` (was `v1.4.0`), and `ctest/test_capi.c`
+  (was checking for `"1.4.0"` and failing). The C API test now passes
+  22/22 checks (was 21/22).
+
 ### Tests
 
-- **New test: `ctest/jit_neon_advanced.elf`** — 11 checks covering
-  SHL/USHR/SSHR for 16/32/64-bit elements, shift-by-zero, shift-by-max,
-  and a combined shift+add pattern. 9/11 pass (2 SSHR failures are
-  test-harness issues where the compiler optimizes away the inline asm;
-  the existing `jit_neon.elf` already covers SSHR via the interpreter
-  path and passes).
+- **`ctest/jit_neon_advanced.elf`** — 11 checks covering SHL/USHR/SSHR
+  for 16/32/64-bit elements, shift-by-zero, shift-by-max, and a combined
+  shift+add pattern. All 11 pass under both JIT and interpreter (was
+  9/11 before the SSHR fix; the previous CHANGELOG entry incorrectly
+  blamed the 2 failures on "test-harness issues where the compiler
+  optimizes away the inline asm" — they were actually caused by the
+  missing SSHR handler).
 - **All 72 existing tests pass** under JIT, interpreter, and FWD mode.
-  0 JIT verify-mode divergences.
+  0 JIT verify-mode divergences (the single `jit_neon_advanced.elf`
+  verify-mode line is the known false-positive documented in
+  `context.md` gotcha #6 — JIT memory writes are visible to the
+  interpreter's re-execution).
+- **C API: 22/22 checks pass** (was 21/22 — the version check was
+  failing because `test_capi.c` expected `"1.4.0"` but `version.hpp`
+  says `"1.4.5-alpha"`).
+- **MD5 still correct:** `echo hello | toybox md5sum` =
+  `b1946ac92492d2347c6235b4d2611184` ✓
+- **No performance regression:** `bench_mips` runs in 1.415s (was
+  1.401s 10-run average; 571 MIPS — within noise).
 
 ### Roadmap cleanup
 
-- **ROADMAP.md v1.4.5-alpha section** — item 2 (VFS bug fixes) is mostly
-  done (Turn 29 fixed /proc/self/status, /proc/self/maps, FdTable reuse,
-  fcntl O_NONBLOCK). Updated to reflect current state.
+- **ROADMAP.md v1.4.5-alpha section** — marked SHIPPED with details.
+  Item 2 (VFS bug fixes) is mostly done (Turn 29 fixed
+  /proc/self/status, /proc/self/maps, FdTable reuse, fcntl O_NONBLOCK).
 - **"Full game support" → "Full interactive application support"** in
   ROADMAP v2.0 section (API reframe per user direction).
 

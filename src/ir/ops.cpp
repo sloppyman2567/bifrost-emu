@@ -1005,14 +1005,25 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             // Lane-wise shift of src1 by inst.imm. width = esize bytes
             // (1/2/4/8). SHL = logical left, USHR = logical right,
             // SSHR = arithmetic right (sign-extends).
+            //
+            // BUGFIX (1.4.5-alpha): the previous version did
+            // `shift &= (esize*8)-1`, which truncated shift=esize*8 to 0
+            // (turning "clear all bits" into a no-op for USHR/SSHR #N where
+            // N == esize_bits, e.g. `ushr v.4s, #32`). This caused verify
+            // mode to flag false-positive divergences vs the JIT/interpreter,
+            // which correctly clear the lane. The fix is to NOT mask and to
+            // use a 64-bit intermediate so that shift == esize_bits is
+            // well-defined (clears for SHL/USHR, sign-fills for SSHR).
+            // The IR translator guarantees shift ∈ [0, esize*8], so we don't
+            // need to worry about shifts larger than esize*8.
             case IROp::SIMD_SHL:
             case IROp::SIMD_USHR:
             case IROp::SIMD_SSHR: {
                 int esize = static_cast<int>(inst.width);
                 if (esize < 1 || esize > 8) esize = 8;
-                uint32_t shift = static_cast<uint32_t>(inst.imm);
-                uint32_t mask = (esize * 8) - 1;
-                shift &= mask;  // ARM: shift amounts are taken modulo esize*8
+                int shift = static_cast<int>(inst.imm);
+                if (shift < 0) shift = 0;
+                if (shift > esize * 8) shift = esize * 8;
                 uint8_t out_lo[16] = {0}, out_hi[16] = {0};
                 uint8_t in_lo[16] = {0}, in_hi[16] = {0};
                 memcpy(in_lo, &cpu.v_lo[inst.src1], 8);
@@ -1023,59 +1034,40 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                         uint8_t* pi = in + i * esize;
                         uint8_t* po = out + i * esize;
                         if (inst.op == IROp::SIMD_SHL) {
-                            // Logical left shift (zero-fill)
-                            if (esize == 1) {
-                                uint8_t v = pi[0];
-                                po[0] = static_cast<uint8_t>(v << shift);
-                            } else if (esize == 2) {
-                                uint16_t v; memcpy(&v, pi, 2);
-                                v = static_cast<uint16_t>(v << shift);
-                                memcpy(po, &v, 2);
-                            } else if (esize == 4) {
-                                uint32_t v; memcpy(&v, pi, 4);
-                                v <<= shift;
-                                memcpy(po, &v, 4);
-                            } else {
-                                uint64_t v; memcpy(&v, pi, 8);
-                                v <<= shift;
-                                memcpy(po, &v, 8);
-                            }
+                            // Logical left shift (zero-fill).
+                            // Use 64-bit intermediate so shift == esize*8
+                            // is well-defined (clears lane).
+                            uint64_t v = 0; memcpy(&v, pi, esize);
+                            v = (shift >= 64) ? 0 : (v << shift);
+                            v &= (esize == 8) ? ~0ULL
+                                  : ((1ULL << (esize*8)) - 1);
+                            memcpy(po, &v, esize);
                         } else if (inst.op == IROp::SIMD_USHR) {
-                            // Logical right shift (zero-fill)
-                            if (esize == 1) {
-                                uint8_t v = pi[0];
-                                po[0] = static_cast<uint8_t>(v >> shift);
-                            } else if (esize == 2) {
-                                uint16_t v; memcpy(&v, pi, 2);
-                                v = static_cast<uint16_t>(v >> shift);
-                                memcpy(po, &v, 2);
-                            } else if (esize == 4) {
-                                uint32_t v; memcpy(&v, pi, 4);
-                                v >>= shift;
-                                memcpy(po, &v, 4);
-                            } else {
-                                uint64_t v; memcpy(&v, pi, 8);
-                                v >>= shift;
-                                memcpy(po, &v, 8);
-                            }
+                            // Logical right shift (zero-fill).
+                            // Use 64-bit intermediate so shift == esize*8
+                            // is well-defined (clears lane).
+                            uint64_t v = 0; memcpy(&v, pi, esize);
+                            v = (shift >= 64) ? 0 : (v >> shift);
+                            memcpy(po, &v, esize);
                         } else {  // SIMD_SSHR
-                            // Arithmetic right shift (sign-extend)
-                            if (esize == 1) {
-                                int8_t v = static_cast<int8_t>(pi[0]);
-                                po[0] = static_cast<uint8_t>(v >> shift);
-                            } else if (esize == 2) {
-                                int16_t v; memcpy(&v, pi, 2);
-                                v >>= shift;
-                                memcpy(po, &v, 2);
-                            } else if (esize == 4) {
-                                int32_t v; memcpy(&v, pi, 4);
-                                v >>= shift;
-                                memcpy(po, &v, 4);
+                            // Arithmetic right shift (sign-extend).
+                            // Promote to int64_t with sign extension so
+                            // shift == esize*8 sign-fills the lane.
+                            int64_t v = 0;
+                            if (esize == 1) v = static_cast<int8_t>(pi[0]);
+                            else if (esize == 2) { int16_t t; memcpy(&t, pi, 2); v = t; }
+                            else if (esize == 4) { int32_t t; memcpy(&t, pi, 4); v = t; }
+                            else { int64_t t; memcpy(&t, pi, 8); v = t; }
+                            // Arithmetic shift by 63 on int64_t is well-defined;
+                            // for shift == 64 we need to handle separately
+                            // (sign-fill). Since esize <= 8, shift <= 64,
+                            // so we only need the special case for shift=64.
+                            if (shift >= 64) {
+                                v = (v < 0) ? -1 : 0;
                             } else {
-                                int64_t v; memcpy(&v, pi, 8);
                                 v >>= shift;
-                                memcpy(po, &v, 8);
                             }
+                            memcpy(po, &v, esize);
                         }
                     }
                 };

@@ -2109,6 +2109,59 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
+                // SSHR (vector, immediate, signed) — mask 0xBF00FC00 excludes Q.
+                // Encoding: Q 0 1 1 0 1 1 1 1 0 immh immb 0 1 0 0 0 0 Rn Rd
+                // Shift = (2 * esize_bits) - immh:immb (same as USHR, but
+                // the shift is arithmetic — the sign bit is propagated).
+                //
+                // BUGFIX (1.4.5-alpha): This handler was missing entirely.
+                // The MOVI/shift ambiguity check above (line ~1981) catches
+                // this encoding only when immh == 0 (MOVI); for immh != 0
+                // (actual SSHR), control fell through past the USHR handler
+                // (which has U=1, 0x2F...) and past the SHL handler (which
+                // has a different low byte, 0x0F005400), landing in the
+                // generic "unknown instruction" NOP path. Result: every
+                // vector SSHR-by-immediate was silently a no-op, leaving
+                // Vd unchanged. This broke `sshr v0.8h, v0.8h, #2` etc.
+                // under both interpreter and JIT (the JIT routes SIMD_SHL/
+                // SIMD_USHR/SIMD_SSHR to CALL_INTERP for the executor).
+                if ((op & 0xBF00FC00) == 0x0F000400) {
+                    uint8_t immh = (op >> 20) & 0xF;
+                    uint8_t immb = (op >> 16) & 0xF;
+                    int esize, shift;
+                    if (immh == 0) { esize = 1; }       // unreachable (MOVI guard above)
+                    else if (immh == 1) { esize = 2; }
+                    else if (immh <= 3) { esize = 4; }
+                    else { esize = 8; }
+                    shift = (2 * esize * 8) - ((immh << 4) | immb);
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf[16];
+                    memcpy(buf, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        if (esize == 1) {
+                            int8_t v; memcpy(&v, buf + i, 1);
+                            v >>= shift;
+                            memcpy(buf + i, &v, 1);
+                        } else if (esize == 2) {
+                            int16_t v; memcpy(&v, buf + i*2, 2);
+                            v >>= shift;
+                            memcpy(buf + i*2, &v, 2);
+                        } else if (esize == 4) {
+                            int32_t v; memcpy(&v, buf + i*4, 4);
+                            v >>= shift;
+                            memcpy(buf + i*4, &v, 4);
+                        } else {
+                            int64_t v; memcpy(&v, buf + i*8, 8);
+                            v >>= shift;
+                            memcpy(buf + i*8, &v, 8);
+                        }
+                    }
+                    memcpy(&cpu.v_lo[rd], buf, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
                 // USRA (vector, immediate, accumulate) — mask 0xBF00FC00.
                 // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift).
                 // Used by MD5 to implement vector ROTL via

@@ -5,7 +5,7 @@
 // test harnesses, CI runners, static analyzers, emulators, and other
 // tooling — without depending on C++ ABI details.
 //
-// Version: 1.4.0
+// Version: 1.4.5-alpha
 //
 // Basic usage:
 //
@@ -16,7 +16,7 @@
 //     int exit_code = bifrost_run(emu);
 //     bifrost_destroy(emu);
 //
-// With JIT enabled (default in 1.4.0):
+// With JIT enabled (default since 1.4.0; current release 1.4.5-alpha):
 //
 //     bifrost_emu_t* emu = bifrost_create();
 //     bifrost_load_elf(emu, "hello.elf", argc, argv);
@@ -136,7 +136,7 @@ void bifrost_set_verbose(bifrost_emu_t* emu, int enable);
 // execution and caches them. Subsequent executions of the same block
 // run the cached native code directly, skipping decode + interpret.
 //
-// JIT is the default execution mode in 1.4.0. It improves performance on
+// JIT is the default execution mode in 1.4.5-alpha. It improves performance on
 // compute-heavy workloads (~6.4x over the interpreter on bench_mips).
 // Use bifrost_set_jit_verify() to catch divergences during development.
 //
@@ -254,7 +254,7 @@ const char* bifrost_get_error(const bifrost_emu_t* emu);
 
 // ── Version ─────────────────────────────────────────────────────────────
 
-// Get the library version string (e.g., "1.4.0").
+// Get the library version string (e.g., "1.4.5-alpha").
 const char* bifrost_version(void);
 
 #ifdef __cplusplus
