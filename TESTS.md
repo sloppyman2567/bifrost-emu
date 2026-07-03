@@ -14,11 +14,13 @@ their current status under both the frostJIT (default) and interpreter
 | Interpreter (`./bifrost-emu --no-jit`) | 72 | 72 | 0 |
 | frostJIT + FWD (`BIFROST_ENABLE_FWD=1`) | 72 | 72 | 0 |
 
-All 72 test programs pass under frostJIT as of 1.4.0 (2026-07-02), and
+All 72 test programs pass under frostJIT as of 1.4.0 (2026-07-03), and
 all 72 also pass under the interpreter and under FWD mode. The test
 suite is run via `scripts/run_tests.sh` (or `make check`), which
 categorizes tests, colorizes output, and prints a summary table. JIT
 is the default execution mode (6.4x speedup on compute workloads).
+The C API (`libbifrost.a` + `api/bifrost.h`) is verified by
+`ctest/test_capi.c` (22 checks, all pass).
 
 ### Test categories
 

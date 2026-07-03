@@ -216,7 +216,7 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of 1.4.0 (2026-07-02),
+JIT is ON by default; use `--no-jit` to opt out. As of 1.4.0 (2026-07-03),
 all 72 test programs pass under JIT, including the
 `ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
 the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
@@ -284,7 +284,7 @@ bifrost-emu/
 │   ├── interp/           interpreter.cpp (switch on d.cls)
 │   ├── ir/               IR builder, translator, optimizer, lowerer, executor
 │   ├── jit/              frostjit.cpp, x86_backend, x86_regalloc, cache, profiler
-│   ├── syscalls/         Linux AArch64 syscall layer (~88 syscalls, split by concern)
+│   ├── syscalls/         Linux AArch64 syscall layer (~170 syscalls, split by concern)
 │   ├── vfs/              Virtual filesystem (VNode + FdTable + procfs + devfs)
 │   ├── graphics/         /dev/fb0 backend (headless or SDL2)
 │   └── audio/            OSS /dev/dsp passthrough + WAV dump
@@ -313,7 +313,7 @@ register, pair, sign-extended, unscaled, pre/post-index), LSE atomics
 (STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
 (FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
 FCSEL, both S and D registers, including the **fixed-point FCVTZS/FCVTZU/
-SCVTF/UCVTF variants** that broke MD5 in rc.1), FMOV Vd.D[1], SIMD/NEON
+SCVTF/UCVTF variants** that broke MD5 in 1.4.0-rc.1), FMOV Vd.D[1], SIMD/NEON
 (DUP, MOVI all cmode values, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR, SSHR,
 EOR, ORR, AND, BIC, ORN, EON, NOT, NEG, ADD/SUB/MUL vector, REV16/32/64,
 STP/LDP pairs including Q registers, EXT, INS, TBL/TBX), and system (SVC,
@@ -447,8 +447,26 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.0** (2026-06-27):
+current release is **v1.4.0** (2026-07-03):
 
+- **30+ bug fixes across syscall layer, VFS, interpreter, and IR.**
+  Comprehensive audit fixed 13 wrong AArch64 syscall numbers (verified
+  against `asm-generic/unistd.h`), 8 syscall logic bugs (clock_nanosleep,
+  mmap MAP_ANONYMOUS bit, fcntl, pipe2 FdTable registration, VFS bypass
+  in writev/readv/etc.), 3 futex fixes, 4 VFS fixes (/proc/self/status
+  expanded to ~50 fields, /proc/self/maps no truncation, FdTable
+  lowest-fd reuse), and 5 interpreter/JIT fixes (ror64 UB, LDXR XZR,
+  FCMP unordered NZCV, LSE_ATOMIC lock, STP/LDP vector S-form).
+- **FWD-mode LSE atomic fix** — the load-forwarding optimizer now
+  disables FWD for blocks containing ATOMIC/LL/SC ops. All 72 tests
+  pass under FWD mode (was 71/72).
+- **C API implementation** — `api/bifrost_capi.cpp` (300+ lines) now
+  implements all 25+ functions in `api/bifrost.h`. Added FP/SIMD
+  register access, PSTATE/flag access, FPSR/FPCR, `step_n`, error
+  reporting. `bifrost_get_jit_stats` now populates all 9 fields.
+- **Hot-path scalability** — BlockEntry `store_infos` changed to
+  `shared_ptr` (eliminates per-dispatch vector deep-copy). Hot-path
+  `getenv()` calls cached as `static const bool`.
 - **MD5 now produces correct hashes.** The root cause was the
   FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd
   (the integer-variant mask required bit 21 = 1; the fixed-point variant
@@ -457,30 +475,29 @@ current release is **v1.4.0** (2026-06-27):
   the NOP, K[i] was filled with stack garbage and the hash output was
   unrelated to the input. MD5 now joins SHA-1/224/256/384/512/CRC32 in
   the "verified correct under both JIT and interpreter" set.
-- **JIT is now the default execution mode.** The 41-test suite,
-  toybox integration, and musl libc all pass under the JIT, and
-  `bench_mips` shows a 6.4x speedup. Use `--no-jit` to opt out.
+- **JIT is the default execution mode.** All 72 tests pass under JIT,
+  interpreter, and FWD mode. `bench_mips` shows a 6.4x speedup (571
+  MIPS). Use `--no-jit` to opt out.
 - **JIT correctness overhaul** — 20+ bugs fixed across FP decode,
   32-bit shift semantics, int↔FP conversion (SCVTF/UCVTF/FCVTZS/
   FCVTZU), and system register reads. `toybox seq`, `printf "%g"`,
   `strtod("inf")`, `ls /`, and `od` all work now.
 - **JIT SIGSEGV delivery** — memory faults in JIT'd code are now
   caught and delivered as SIGSEGV to the guest (rc=139), instead of
-  crashing with `std::terminate` (rc=134). JIT'd code has no DWARF
-  unwind info, so C++ exceptions can't propagate through it — the
-  C-helper boundary (`jit_load_mem_slow`/`jit_store_mem_slow`/
-  `jit_interp_step`) now catches `UnmappedMemory` and calls
-  `deliver_signal()`.
+  crashing with `std::terminate` (rc=134).
 - **JIT performance overhaul** — 571 MIPS on bench_mips (6.4x over
   interpreter, 10-run average) via self-loop chaining, liveness-based
   register freeing, and register-cache-aware ALU codegen.
-- **Shared `fp_decode` helpers** in `decoder.hpp` keep the interpreter
-  and JIT's IR translator in sync.
+- **Native LSE atomics** — CAS/LDADD/STADD/SWP/STSET/STCLR/LDSET/LDCLR/
+  LDEOR via `lock`-prefixed x86 instructions (~20x speedup over
+  CALL_INTERP for atomic-heavy workloads).
+- **Shared-JIT (default)** — spawned threads share the main's FrostJIT,
+  saving 64 MiB per thread. Sharded global exclusive monitor (16
+  stripes) for parallel LL/SC atomics.
 - **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
 - **VFS abstraction** — VNode + FdTable + procfs + devfs.
-- **~16 new syscalls** (networking, inotify, statx).
-- **frostJIT** — native UDIV/SDIV, SMADDL/UMADDL, MRS/MSR, 15 new FP
-  instructions.
+- **~170 Linux AArch64 syscalls** including file I/O, threading,
+  signals, timing, fork+execve, event loops, and filesystem operations.
 
 ## Forking
 

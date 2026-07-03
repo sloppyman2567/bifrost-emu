@@ -6,9 +6,15 @@
 namespace arm64emu {
 
 // ── Version ────────────────────────────────────────────────────────────
-// 1.4.0 (2026-07-02): Stable release.
-//   - 72/72 JIT tests pass (also pass under interpreter and FWD mode).
-//   - JIT is the default execution mode (6.4x speedup on compute).
+// 1.4.0 (2026-07-03): Stable release.
+//   - 72/72 tests pass under JIT, interpreter, AND FWD mode (BIFROST_ENABLE_FWD=1).
+//   - C API: 22/22 checks pass (ctest/test_capi.c, compiled as pure C).
+//   - JIT is the default execution mode (6.4x speedup on compute, 571 MIPS).
+//   - 30+ bug fixes across syscall layer (13 wrong syscall numbers, 8 logic
+//     bugs), VFS (4 fixes), interpreter (5 fixes), and futex (3 fixes).
+//   - FWD-mode LSE atomic fix: load-forwarding disabled for atomic blocks.
+//   - C API implemented (api/bifrost_capi.cpp, 300+ lines, 25+ functions).
+//   - Hot-path scalability: BlockEntry store_infos → shared_ptr, getenv cached.
 //   - Production-ready signal delivery: proper siginfo_t/ucontext_t,
 //     rt_sigprocmask, sigaltstack, SA_RESTART/RESETHAND/NODEFER/SIGINFO.
 //   - Dynamic linker: DT_NEEDED, TLS relocations, GOT/PLT, symbol resolution.
@@ -19,40 +25,21 @@ namespace arm64emu {
 //     32-bit ROR). SHA-1/256/384/512 + CRC32 + MD5 now produce correct hashes.
 //   - Function Multi-Versioning (FMV): runtime CPUID detection of SSE4.1/
 //     AVX/AVX2/FMA3/BMI1/BMI2/AVX-512. Native FMA3 codegen for
-//     FMADD/FMSUB/FNMADD/FNMSUB (vfmadd231ss/sd, vfnmadd231ss/sd,
-//     vfnmsub231ss/sd) on FMA3-capable hosts; decomposed mul+add/sub
+//     FMADD/FMSUB/FNMADD/FNMSUB on FMA3-capable hosts; decomposed mul+add/sub
 //     fallback otherwise (BIFROST_NO_FMA3=1 forces the decomposed path).
+//   - Native LSE atomics: CAS/LDADD/STADD/SWP/STSET/STCLR/LDSET/LDCLR/LDEOR
+//     via lock-prefixed x86 instructions (~20x over CALL_INTERP).
+//   - Shared-JIT (default): spawned threads share the main's FrostJIT,
+//     saving 64 MiB per thread. Sharded exclusive monitor (16 stripes).
 //   - fork() + execve() support for running external commands.
 //   - toybox sh works: builtins, scripting, variables, arithmetic, if/for/
 //     while/case, functions, exit codes, interactive mode.
 //   - --jit-threshold flag for hybrid interp/JIT mode on I/O-bound workloads.
 //   - 40+ toybox commands verified working (echo, sort, wc, seq, factor,
 //     sha256sum, md5sum, sha1sum, base64, cut, cmp, cat, ls, stat, date, etc.).
-//   - ASan+UBSan clean on all 41 tests.
-//   - rc.1 final: FMV/FMA3 codegen, verify-mode self-loop un-patch fix +
-//     verify-once optimization, FNMADD/FNMSUB silent-NOP fix, FP 2-source
-//     vs FMA encoding collision fix, is_double=(width!=0) latent bug fix,
-//     FNMSUB movq REX.W fix, NEON/SIMD shift+REV+INS+USRA+SLI/SRI fixes,
-//     syscall number conflict fixes (36/37/39/41/42/69/88/115/206),
-//     fork+exec JIT crash fix, utimensat guest-pointer security fix,
-//     ret_errno() macro sweep, vreg bounds checks, W^X depth leak fix,
-//     optimizer/SSE silent-fallthrough fixes, NUM_HOST_REGS constant,
-//     documentation refresh.
-//   - rc.1 MD5 fix: FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants were
-//     silently NOP'd (integer-variant mask required bit 21 = 1; fixed-point
-//     variant has bit 21 = 0 with a 6-bit scale field). Toybox MD5 K-table
-//     init uses `fcvtzu w1, d0, #32` to compute floor(|sin(i+1)| * 2^32);
-//     the NOP left K[i] filled with stack garbage. Fixed by adding native
-//     interpreter handlers with saturating semantics; IR translator routes
-//     to CALL_INTERP.
-//   - rc.1 post-stabilization: FCMPE #0.0 misdecode fix (bit 3 is the #0.0
-//     indicator, not bits[4:0]==0x08 — FCMPE #0.0 was compared against d24
-//     instead of 0.0, breaking `s < 0 ? -s : s`); CCMP scratch vreg spill
-//     fix (flush_scratch_host_regs added — CCMP/emit_materialize_flags
-//     clobber RAX/RCX/RDX without spilling non-dirty scratch vregs, causing
-//     the toybox ls / FWD crash); native IR ops FP_F2I_FIXED/FP_I2F_FIXED
-//     defined (interpreter/optimizer/executor/JIT support added; translator
-//     still routes to CALL_INTERP pending JIT codegen stabilization).
+//   - ASan+UBSan clean on all 72 tests.
+//   - ~170 Linux AArch64 syscalls (file I/O, threading, signals, timing,
+//     fork+execve, event loops, filesystem operations).
 constexpr const char* VERSION  = "1.4.0";
 constexpr const char* CODENAME = "bifrost-emu";
 

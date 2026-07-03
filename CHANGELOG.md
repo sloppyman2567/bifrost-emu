@@ -6,7 +6,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.0] — 2026-07-02 (stable release)
+## [1.4.0] — 2026-07-03 (stable release)
+
+### Post-stabilization hardening (2026-07-03)
+
+- **30+ bug fixes across syscall layer, VFS, interpreter, and IR** —
+  comprehensive audit found and fixed: 13 wrong AArch64 syscall numbers
+  (sched_yield, getpgid, getcpu, readahead, mincore, process_vm_readv,
+  kcmp, setresgid, flock, mknodat, mount, fchmod/fchmodat, pread64,
+  chroot, fchownat, fchown — all verified against
+  `/usr/include/asm-generic/unistd.h`); 8 syscall logic bugs
+  (clock_nanosleep positive-errno check, mmap MAP_ANONYMOUS bit 0x20
+  not 0x02, fcntl F_GETFL/F_SETFL/F_GETFD/F_SETFD/F_DUPFD, pipe2
+  FdTable registration, VFS bypass in writev/readv/pwrite64/ftruncate/
+  fchmod/fallocate/fchdir/fsync/fdatasync, fallocate FALLOC_FL_KEEP_SIZE,
+  dup3 EINVAL); 3 futex fixes (FUTEX_CLOCK_REALTIME mask,
+  FUTEX_WAIT_BITSET absolute timeout, *uaddr==val check before fast-path);
+  4 VFS fixes (/proc/self/status 10→50 fields with live VmSize,
+  /proc/self/maps no-truncation, /proc/self/environ size fix, FdTable
+  lowest-fd reuse); 5 interpreter/JIT fixes (ror64 UB guard, LDXR XZR
+  guard, FCMP unordered NZCV 0x30000000, LSE_ATOMIC shard lock,
+  STP/LDP vector S-form esize).
+- **FWD-mode LSE atomic fix** — the IR optimizer's load-forwarding (FWD)
+  pass didn't model ATOMIC ops' side effects, causing `test_lse_inline`
+  to fail 6/8 sub-tests under `BIFROST_ENABLE_FWD=1`. Fixed by disabling
+  FWD for blocks containing ATOMIC/LDXR_FAST/STXR_FAST/STLR_FAST ops.
+  All 72 tests now pass under FWD mode (was 71/72).
+- **C API implementation** — `api/bifrost_capi.cpp` (300+ lines) now
+  implements all 25+ functions declared in `api/bifrost.h`. Previously
+  the header existed but had no implementation. Added 15 new functions:
+  `bifrost_step_n`, FP/SIMD register access, PSTATE/flag access,
+  FPSR/FPCR access, `set_jit_threshold`, breakpoints, `get_error`.
+  `bifrost_get_jit_stats` now populates all 9 fields (was 1 of 9).
+- **API reframe** — documentation reframed from "game-ready" to
+  "embeddable in other programs: debuggers, IDE plugins, test harnesses,
+  CI runners, static analyzers, emulators, and other tooling" per user
+  direction. Removed stale `v1.4.0-beta.2+` section tags.
+- **Hot-path getenv caching** — `BIFROST_MEM_TRACE` and
+  `BIFROST_STEP_TRACE` were called via `getenv()` on every JIT slow-path
+  memory access and every CALL_INTERP fallback; now cached as
+  `static const bool`.
+- **BlockEntry deep-copy eliminated** — `store_infos` changed from
+  `std::vector<StoreInfo>` to `std::shared_ptr<std::vector<StoreInfo>>`.
+  The hot-path `entry = it->second` copy is now an atomic refcount
+  increment instead of a vector deep-copy. The vector is lazily
+  allocated only in verify mode.
+- **Removed `_public` wrapper pattern** — `step_public`, `syscall_public`,
+  `drain_host_signals_public`, `install_host_signal_handlers_public`,
+  `main_cpu_public` wrappers removed; underlying methods made public.
+  20+ callers updated across 8 files.
+- **Deduplicated DSE passes** — Pass 0 and Pass 1.5 in `ir_optimize.cpp`
+  had duplicated dead-store-elimination logic. Extracted a shared
+  `dse_pass` lambda. Pass 0 now correctly handles ATOMIC/LL/SC ops
+  (fixing a latent bug where a STORE_REG before an ATOMIC could be
+  incorrectly NOP'd).
+- **Code hygiene** — `VFS::VFS::read_path` typo fixed, `FdTable::get()`
+  made `const`, `code_buf_size()` uses `CODE_BUF_SIZE` constant (was
+  duplicated magic number), removed dead `peephole_folded` field and
+  `BIFROST_MAX_BREAKPOINTS` macro, removed "Turn 23" internal-dev
+  reference.
+- **Documentation refresh** — all test counts updated to 72/72 across
+  README.md, TESTS.md, main.cpp, version.hpp. Version strings all say
+  "1.4.0" (no -rc.N suffix). "release-candidate quality" → "stable
+  release quality". ROADMAP.md stale items fixed.
 
 ### JIT correctness (post-rc.1 stabilization)
 

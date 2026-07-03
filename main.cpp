@@ -273,7 +273,7 @@ int main(int argc, char** argv) {
     emu.set_brk_verbose(debug && !quiet);  // -d shows BRKs unless -q
     if (use_jit) emu.enable_jit();
     emu.set_jit_threshold(jit_threshold);
-    emu.install_host_signal_handlers();  // v1.4.0-alpha.1: forward host signals to guest
+    emu.install_host_signal_handlers();  // forward host signals to guest
 
     try {
         emu.load_elf_file(elf_path, guest_argv);

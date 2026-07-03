@@ -6,7 +6,13 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.0 (final release — after rc.1 stabilization)
+## v1.4.0 — SHIPPED (2026-07-03)
+
+**1.4.0 stable release.** All 72 tests pass under JIT, interpreter, and
+FWD mode. C API (22/22 checks) implemented and verified. See
+[CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### Completed in 1.4.0
 
 1. **~~Fix the `toybox sh` regression.~~** ✅ FIXED in rc.0.
    Root cause: MOVI (vector immediate) handler in the interpreter
@@ -17,7 +23,7 @@ status, see [TESTS.md](TESTS.md).
    while/case, functions, exit codes, string tests, pwd, interactive
    mode, fork+execve for external AArch64 commands.
 
-2. **~~Stabilize.~~** ✅ DONE — 1.4.0 shipped (2026-07-02). All 72 tests
+2. **~~Stabilize.~~** ✅ DONE — 1.4.0 shipped (2026-07-03). All 72 tests
    pass under JIT, interpreter, and FWD mode. Production hardening
    includes JIT mmap error handling, fork JIT cleanup, FP bounds checks,
    signal trampoline fork safety, W^X failure path hardening,
@@ -153,8 +159,9 @@ expansion.
    requires expanding the syscall surface (glibc uses many more
    syscalls than musl) and handling glibc's initialization sequence.
 
-3. **Full game support** — framebuffer/DRM, audio, input. Long-term
-   goal: statically-linked ARM64 SDL2 games at playable framerates.
+3. **Full interactive application support** — framebuffer/DRM, audio, input.
+   Long-term goal: statically-linked ARM64 SDL2 applications at interactive
+   framerates.
    Builds on the v1.4.x SDL2 audio + input work.
 
 4. **ASLR** — binaries currently load at their preferred vaddr;
