@@ -204,7 +204,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // state (borrowing main_cpu_, which hasn't been initialized
             // yet at this point in load_elf_file — its real init happens
             // later). The resolver is a small guest function that
-            // returns a function pointer in X0; we run it via step_public
+            // returns a function pointer in X0; we run it via step
             // until it RETs to a sentinel address, then capture X0.
             dyn_linker_->set_ifunc_resolver([this](uint64_t resolver_addr) -> uint64_t {
                 if (resolver_addr == 0) return 0;
@@ -522,7 +522,7 @@ int Emulator::run() {
             if (use_jit_now) {
                 // JIT dispatch — defined in src/jit/jit_glue.cpp so the
                 // FrostJIT definition is available. Falls back to
-                // step_public() for any instruction it can't handle.
+                // step() for any instruction it can't handle.
                 jit_step(main_cpu_);
             } else {
                 step(main_cpu_);

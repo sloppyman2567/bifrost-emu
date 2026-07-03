@@ -108,8 +108,8 @@ int bifrost_step(bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return -1;
     try {
-        auto& cpu = e->emu.main_cpu_public();
-        e->emu.step_public(cpu);
+        auto& cpu = e->emu.main_cpu();
+        e->emu.step(cpu);
         return 0;
     } catch (const std::exception& ex) {
         set_error(e, ex.what());
@@ -126,9 +126,9 @@ int bifrost_step_n(bifrost_emu_t* emu, uint64_t count) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return -1;
     try {
-        auto& cpu = e->emu.main_cpu_public();
+        auto& cpu = e->emu.main_cpu();
         for (uint64_t i = 0; i < count; i++) {
-            e->emu.step_public(cpu);
+            e->emu.step(cpu);
         }
         return 0;
     } catch (const std::exception& ex) {
@@ -155,7 +155,7 @@ int bifrost_get_exit_code(const bifrost_emu_t* emu) {
 uint64_t bifrost_get_reg(const bifrost_emu_t* emu, int reg) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return 0;
-    auto& cpu = const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public();
+    auto& cpu = const_cast<arm64emu::Emulator&>(e->emu).main_cpu();
     if (reg == 31) return 0;  // XZR
     return cpu.regs[reg];
 }
@@ -163,7 +163,7 @@ uint64_t bifrost_get_reg(const bifrost_emu_t* emu, int reg) {
 void bifrost_set_reg(bifrost_emu_t* emu, int reg, uint64_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return;
-    auto& cpu = e->emu.main_cpu_public();
+    auto& cpu = e->emu.main_cpu();
     if (reg == 31) return;  // XZR — discard
     cpu.regs[reg] = value;
 }
@@ -171,25 +171,25 @@ void bifrost_set_reg(bifrost_emu_t* emu, int reg, uint64_t value) {
 uint64_t bifrost_get_sp(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().sp;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().sp;
 }
 
 void bifrost_set_sp(bifrost_emu_t* emu, uint64_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu_public().sp = value;
+    e->emu.main_cpu().sp = value;
 }
 
 uint64_t bifrost_get_pc(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().pc;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().pc;
 }
 
 void bifrost_set_pc(bifrost_emu_t* emu, uint64_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu_public().pc = value;
+    e->emu.main_cpu().pc = value;
 }
 
 // ── FP / SIMD register access ──────────────────────────────────────────
@@ -199,20 +199,20 @@ void bifrost_set_pc(bifrost_emu_t* emu, uint64_t value) {
 uint64_t bifrost_get_fp_reg_lo(const bifrost_emu_t* emu, int reg) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().v_lo[reg];
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v_lo[reg];
 }
 
 uint64_t bifrost_get_fp_reg_hi(const bifrost_emu_t* emu, int reg) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().v_hi[reg];
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().v_hi[reg];
 }
 
 void bifrost_set_fp_reg(bifrost_emu_t* emu, int reg,
                         uint64_t lo, uint64_t hi) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e || reg < 0 || reg > 31) return;
-    auto& cpu = e->emu.main_cpu_public();
+    auto& cpu = e->emu.main_cpu();
     cpu.v_lo[reg] = lo;
     cpu.v_hi[reg] = hi;
 }
@@ -223,20 +223,20 @@ void bifrost_set_fp_reg(bifrost_emu_t* emu, int reg,
 uint32_t bifrost_get_pstate(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().pstate;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().pstate;
 }
 
 void bifrost_set_pstate(bifrost_emu_t* emu, uint32_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu_public().pstate = value;
+    e->emu.main_cpu().pstate = value;
 }
 
 int bifrost_get_flag(const bifrost_emu_t* emu, int flag) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e || flag < 0 || flag > 3) return 0;
     // flag: 0=N, 1=Z, 2=C, 3=V
-    auto& cpu = const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public();
+    auto& cpu = const_cast<arm64emu::Emulator&>(e->emu).main_cpu();
     switch (flag) {
         case 0: return cpu.flag_n() ? 1 : 0;
         case 1: return cpu.flag_z() ? 1 : 0;
@@ -249,7 +249,7 @@ int bifrost_get_flag(const bifrost_emu_t* emu, int flag) {
 void bifrost_set_flag(bifrost_emu_t* emu, int flag, int value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e || flag < 0 || flag > 3) return;
-    auto& cpu = e->emu.main_cpu_public();
+    auto& cpu = e->emu.main_cpu();
     bool v = value != 0;
     switch (flag) {
         case 0: cpu.set_flag_n(v); break;
@@ -264,25 +264,25 @@ void bifrost_set_flag(bifrost_emu_t* emu, int flag, int value) {
 uint32_t bifrost_get_fpsr(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().fpsr;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().fpsr;
 }
 
 void bifrost_set_fpsr(bifrost_emu_t* emu, uint32_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu_public().fpsr = value;
+    e->emu.main_cpu().fpsr = value;
 }
 
 uint32_t bifrost_get_fpcr(const bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<const bifrost_emu*>(emu);
     if (!e) return 0;
-    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu_public().fpcr;
+    return const_cast<arm64emu::Emulator&>(e->emu).main_cpu().fpcr;
 }
 
 void bifrost_set_fpcr(bifrost_emu_t* emu, uint32_t value) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
-    e->emu.main_cpu_public().fpcr = value;
+    e->emu.main_cpu().fpcr = value;
 }
 
 // ── Memory access ──────────────────────────────────────────────────────

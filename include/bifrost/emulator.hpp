@@ -20,5 +20,5 @@
 
 // Pull in the full class definition. The private members are visible but
 // external code should only use the public API (load_elf_file / run /
-// step_public / set_* / accessors / enable_jit / jit_step).
+// step / set_* / accessors / enable_jit / jit_step).
 #include "core/emulator.h"

@@ -77,12 +77,17 @@ public:
     // ── Lifecycle (public) ────────────────────────────────────────────
     void load_elf_file(const std::string& path, std::vector<std::string>& argv);
     int  run();
-    void step_public(CPU& cpu) { step(cpu); }
-    void syscall_public(CPU& cpu) { syscall(cpu); }
-    // Allow spawned threads (in thread_mgr.cpp) to drain host-forwarded
-    // signals on their own CPU. Without this, only the main thread sees
-    // SIGINT/SIGTERM/SIGCHLD/etc.
-    bool drain_host_signals_public(CPU& cpu) { return drain_host_signals(cpu); }
+    // Execute one instruction on the given CPU. Used by the interpreter,
+    // JIT CALL_INTERP fallback, IR executor, and thread manager.
+    void step(CPU& cpu);
+    // Execute a syscall on the given CPU (reads x8 for number, x0-x5 for
+    // args, writes return to x0). Used by the IR executor for SVC.
+    void syscall(CPU& cpu);
+    // Drain any host-forwarded signals (SIGINT/SIGTERM/SIGCHLD) to the
+    // guest. Called by spawned threads at syscall boundaries.
+    bool drain_host_signals(CPU& cpu);
+    // Install host signal handlers for forwarding to the guest.
+    void install_host_signal_handlers();
 
     // ── Configuration (public) ────────────────────────────────────────
     void set_verbose(bool v) { verbose_ = v; }
@@ -105,15 +110,13 @@ public:
     VFS&            vfs()      { return vfs_; }
     FdTable&        fds()      { return fds_; }
     const std::string& elf_path() const { return elf_path_; }
-    CPU&            main_cpu_public() { return main_cpu_; }
+    CPU&            main_cpu() { return main_cpu_; }
     FrostJIT*       jit() { return jit_.get(); }
     void            enable_jit();
 
     // Defined in src/jit/jit_glue.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);
     void print_jit_stats();
-
-    void install_host_signal_handlers_public() { install_host_signal_handlers(); }
 
     // ── vCPU management ───────────────────────────────────────────────
     // Futex table: maps a guest address → (mutex, condvar, waiter count).
@@ -291,9 +294,7 @@ private:
     HostSignalQueue host_signal_queue_;
     static Emulator* g_active_emu_;  // for host signal handler (single active emu)
     static void host_signal_handler(int signo);
-    void install_host_signal_handlers();
     void queue_host_signal(int signo);
-    bool drain_host_signals(CPU& cpu);
 
     // ── frostJIT ──────────────────────────────────────────────────────
     std::unique_ptr<FrostJIT> jit_;
@@ -325,9 +326,7 @@ private:
                                  std::vector<std::string>& argv,
                                  ElfLoader::Loaded& info);
 
-    void step(CPU& cpu);
     void execute(uint32_t inst, uint64_t& next_pc, CPU& cpu);
-    void syscall(CPU& cpu);
 
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);

@@ -29,7 +29,7 @@
 // ── Inline interpreter fallback ───────────────────────────────────────
 // For unsupported IR ops (CALL_INTERP for ARM64 instructions we don't
 // model in IR), we spill all dirty vregs, set cpu.pc, call
-// emu->step_public(cpu), reload vregs, and check if PC changed. The
+// emu->step(cpu), reload vregs, and check if PC changed. The
 // block does NOT split — the interpreter call is inline. This is the
 // "inline interpreter fallback" pattern that avoids block-splitting
 // overhead.
@@ -41,6 +41,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -289,7 +290,10 @@ private:
             int64_t  offset;    // signed displacement
             uint8_t  width;     // 1, 2, 4, or 8
         };
-        std::vector<StoreInfo> store_infos;
+        // shared_ptr so the hot-path `entry = it->second` copy is cheap
+        // (atomic refcount increment) instead of deep-copying the vector.
+        // Null by default; only populated in BIFROST_JIT_VERIFY mode.
+        std::shared_ptr<std::vector<StoreInfo>> store_infos;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
 

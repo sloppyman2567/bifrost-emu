@@ -259,11 +259,18 @@ void optimize_ir(IRBlock& block) {
         }
     };
 
-    // ── Pass 0: dead-store elimination for STORE_REG ───────────────
+    // ── Helper: dead-store elimination for STORE_REG ───────────────
     // If a STORE_REG to arch reg R is followed by another STORE_REG to
-    // the same R (no intervening LOAD_REG of R or CALL_INTERP/SVC),
-    // the first is dead. NOP it out.
-    {
+    // the same R (no intervening LOAD_REG of R, CALL_INTERP/SVC, ATOMIC,
+    // or LL/SC op), the first is dead. NOP it out.
+    //
+    // ATOMIC reads cpu.regs[imm] directly (e.g., CAS reads expected from
+    // Ws=imm), so a preceding STORE_REG to that ARM reg must be preserved.
+    // LL/SC ops (LDXR_FAST/STXR_FAST/STLR_FAST) read/write ARM regs and
+    // memory — clear all pending store info to be safe.
+    //
+    // Used by both Pass 0 (pre-FWD) and Pass 1.5 (post-substitution).
+    auto dse_pass = [&block]() {
         std::unordered_map<uint16_t, size_t> last_store_to;
         for (size_t i = 0; i < block.insts.size(); i++) {
             IRInst& inst = block.insts[i];
@@ -278,9 +285,20 @@ void optimize_ir(IRBlock& block) {
                 last_store_to.erase(inst.src1);
             } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
                 last_store_to.clear();
+            } else if (inst.op == IROp::ATOMIC) {
+                // ATOMIC reads cpu.regs[imm] directly — preserve preceding
+                // STORE_REG to that ARM reg.
+                last_store_to.erase(static_cast<uint16_t>(inst.imm));
+            } else if (inst.op == IROp::LDXR_FAST ||
+                       inst.op == IROp::STXR_FAST ||
+                       inst.op == IROp::STLR_FAST) {
+                last_store_to.clear();
             }
         }
-    }
+    };
+
+    // ── Pass 0: dead-store elimination for STORE_REG ───────────────
+    dse_pass();
 
     // Pass 1: walk forward, fold constants, propagate copies, cache
     // ARM64 register loads.
@@ -701,40 +719,8 @@ void optimize_ir(IRBlock& block) {
     // still present and this pass is mostly a no-op. It's still correct
     // to run, just less impactful. Disable with BIFROST_NO_DSE=1.
     static bool no_dse_ = (getenv("BIFROST_NO_DSE") != nullptr);
-    if (!no_dse_)
-    {
-        std::unordered_map<uint16_t, size_t> last_store_to;
-        for (size_t i = 0; i < block.insts.size(); i++) {
-            IRInst& inst = block.insts[i];
-            if (inst.op == IROp::STORE_REG) {
-                auto it = last_store_to.find(inst.dest);
-                if (it != last_store_to.end()) {
-                    block.insts[it->second].op = IROp::NOP;
-                    block.dce_removed++;
-                }
-                last_store_to[inst.dest] = i;
-            } else if (inst.op == IROp::LOAD_REG) {
-                last_store_to.erase(inst.src1);
-            } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
-                last_store_to.clear();
-            } else if (inst.op == IROp::ATOMIC) {
-                // BUGFIX (v1.4.0): ATOMIC reads cpu.regs[imm] directly
-                // (e.g., CAS reads the expected value from Ws=imm). If a
-                // preceding STORE_REG to that ARM reg is DCE'd, the ATOMIC
-                // reads a stale value. Prevent this by treating ATOMIC as
-                // a LOAD_REG of imm — erase the last_store_to entry so the
-                // preceding STORE_REG is preserved.
-                // Also clear the entire map to be safe: ATOMIC has memory
-                // side effects that may affect any subsequent load.
-                last_store_to.erase(static_cast<uint16_t>(inst.imm));
-            } else if (inst.op == IROp::LDXR_FAST ||
-                       inst.op == IROp::STXR_FAST ||
-                       inst.op == IROp::STLR_FAST) {
-                // LL/SC ops also read/write ARM regs and memory — clear
-                // all pending store info to be safe.
-                last_store_to.clear();
-            }
-        }
+    if (!no_dse_) {
+        dse_pass();
     }
 
     // Pass 2: dead code elimination.

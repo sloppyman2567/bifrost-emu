@@ -76,7 +76,7 @@ extern "C" {
 // the interpreter. Optional BIFROST_STEP_TRACE env var logs each step.
 //
 // CRITICAL: this is extern "C" — C++ exceptions cannot propagate
-// through it. The interpreter's step_public() may throw UnmappedMemory
+// through it. The interpreter's step() may throw UnmappedMemory
 // (e.g., when the guest touches an unmapped page). Catch it here and
 // translate to a SIGSEGV delivery, matching the run loop's behavior.
 // Without this catch, the exception would call std::terminate because
@@ -98,7 +98,7 @@ extern "C" void jit_interp_step(Emulator* emu, CPU* cpu) {
                 cpu->pstate);
     }
     try {
-        emu->step_public(*cpu);
+        emu->step(*cpu);
     } catch (UnmappedMemory& e) {
         // Deliver SIGSEGV with the fault address and proper si_code.
         // SEGV_MAPERR (1) = address not mapped; SEGV_ACCERR (2) = wrong
@@ -3806,7 +3806,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                     si.arm_reg = b;
                     si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
                     si.width   = inst.width;
-                    entry.store_infos.push_back(si);
+                    // Lazily create the vector on first store (shared_ptr
+                    // so hot-path BlockEntry copy is cheap — atomic
+                    // refcount++ instead of vector deep-copy).
+                    if (!entry.store_infos) {
+                        entry.store_infos = std::make_shared<std::vector<BlockEntry::StoreInfo>>();
+                    }
+                    entry.store_infos->push_back(si);
                 }
             } else if (inst.op == IROp::STORE_REG) {
                 // Mark the dest ARM reg as modified FROM THIS POINT ON.
@@ -3866,7 +3872,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
         interpreter_fallbacks++;
-        emu.step_public(cpu);
+        emu.step(cpu);
         return cpu.pc;
     }
 
@@ -3880,7 +3886,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         fprintf(stderr, "[JIT] global watchdog: %llu blocks executed — disabling JIT (likely codegen bug)\n",
                 static_cast<unsigned long long>(total_blocks_executed_.load()));
         interpreter_fallbacks++;
-        emu.step_public(cpu);
+        emu.step(cpu);
         return cpu.pc;
     }
 
@@ -3947,7 +3953,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             int tight_iter = 0;
             do {
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
-                    emu.step_public(cpu);
+                    emu.step(cpu);
                 }
                 instructions_executed += entry.interp_only_count;
                 tight_iter++;
@@ -3991,14 +3997,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 blocks_executed++;
                 instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
-                    emu.step_public(cpu);
+                    emu.step(cpu);
                 }
                 return cpu.pc;
             }
             blocks_mutex_.unlock();
             interpreter_fallbacks++;
             instructions_executed++;
-            emu.step_public(cpu);
+            emu.step(cpu);
             return cpu.pc;
         }
         entry = blocks_[pc];
@@ -4029,7 +4035,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             }
             blocks_mutex_.unlock();
             interpreter_fallbacks++;
-            emu.step_public(cpu);
+            emu.step(cpu);
             return cpu.pc;
         }
     } else {
@@ -4170,28 +4176,30 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         SavedMem saved_mem[64];      // original values (pre-JIT)
         SavedMem jit_written[64];    // JIT's written values (post-JIT)
         int saved_mem_count = 0;
-        // Use entry.store_infos (local copy made while lock was held).
+        // Use entry.store_infos (shared_ptr — cheap copy, no deep-copy).
         // Don't access blocks_ here — no lock is held (shared-JIT safe).
-        for (const auto& si : entry.store_infos) {
-            if (saved_mem_count >= 64) break;
-            uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
-            uint64_t addr = base + static_cast<uint64_t>(si.offset);
-            uint64_t val  = 0;
-            try {
-                switch (si.width) {
-                    case 1: val = emu.mem().load<uint8_t>(addr);  break;
-                    case 2: val = emu.mem().load<uint16_t>(addr); break;
-                    case 4: val = emu.mem().load<uint32_t>(addr); break;
-                    case 8: val = emu.mem().load<uint64_t>(addr); break;
-                    default: continue;
+        if (entry.store_infos) {
+            for (const auto& si : *entry.store_infos) {
+                if (saved_mem_count >= 64) break;
+                uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
+                uint64_t addr = base + static_cast<uint64_t>(si.offset);
+                uint64_t val  = 0;
+                try {
+                    switch (si.width) {
+                        case 1: val = emu.mem().load<uint8_t>(addr);  break;
+                        case 2: val = emu.mem().load<uint16_t>(addr); break;
+                        case 4: val = emu.mem().load<uint32_t>(addr); break;
+                        case 8: val = emu.mem().load<uint64_t>(addr); break;
+                        default: continue;
+                    }
+                } catch (...) {
+                    continue;
                 }
-            } catch (...) {
-                continue;
+                saved_mem[saved_mem_count].addr  = addr;
+                saved_mem[saved_mem_count].width = si.width;
+                saved_mem[saved_mem_count].value = val;
+                saved_mem_count++;
             }
-            saved_mem[saved_mem_count].addr  = addr;
-            saved_mem[saved_mem_count].width = si.width;
-            saved_mem[saved_mem_count].value = val;
-            saved_mem_count++;
         }
 
         uint64_t jit_next = entry.fn(&cpu, &emu);
@@ -4265,7 +4273,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         ref.pc = saved.pc;
         int steps = 0;
         while (steps < entry.instr_count && ref.running) {
-            emu.step_public(ref);
+            emu.step(ref);
             steps++;
         }
         // Compare PC first — if PCs differ, the JIT took a different path.

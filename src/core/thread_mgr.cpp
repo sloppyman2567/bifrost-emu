@@ -61,7 +61,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 // via blocks_mutex_; the per-thread mode is lock-free.
                 thread_jit->run_block(cpu, *emu);
             } else {
-                emu->step_public(cpu);
+                emu->step(cpu);
             }
             count++;
 
@@ -86,7 +86,7 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             // spawned threads can receive SIGINT/SIGTERM/etc. Without
             // this, only the main thread sees host signals.
             if ((count & 0xFFF) == 0) {
-                emu->drain_host_signals_public(cpu);
+                emu->drain_host_signals(cpu);
             }
 
             if ((count & 0xFFFFF) == 0) {

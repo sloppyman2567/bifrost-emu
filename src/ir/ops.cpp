@@ -5,7 +5,7 @@
 // disabled or when a block can't be compiled (e.g., the code buffer is
 // full). The JIT (frostjit.cpp) compiles the same IR to native x86-64.
 //
-// For CALL_INTERP ops, the executor calls emu.step_public(cpu) inline
+// For CALL_INTERP ops, the executor calls emu.step(cpu) inline
 // — the block does NOT split. After the call, if PC changed (branch),
 // the executor returns immediately.
 
@@ -481,7 +481,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 // correctness in the executor path. The JIT (frostjit.cpp)
                 // has direct codegen for these.
                 cpu.pc = inst.arm_pc;
-                emu.step_public(cpu);
+                emu.step(cpu);
                 // Sync vregs from cpu state.
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
@@ -515,7 +515,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
                 cpu.sp = vregs[31];
                 cpu.pc = inst.arm_pc;
-                emu.step_public(cpu);
+                emu.step(cpu);
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
                 if (cpu.pc != inst.arm_pc + 4) {
@@ -565,7 +565,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
                 cpu.sp = vregs[31];
                 cpu.pc = inst.arm_pc;
-                emu.step_public(cpu);
+                emu.step(cpu);
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
                 break;
@@ -575,7 +575,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
                 cpu.sp = vregs[31];
                 cpu.pc = inst.arm_pc;
-                emu.step_public(cpu);
+                emu.step(cpu);
                 for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
                 vregs[31] = cpu.sp;
                 break;
@@ -717,7 +717,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
                 cpu.sp = vregs[31];
                 cpu.pc = inst.arm_pc;
-                emu.syscall_public(cpu);
+                emu.syscall(cpu);
                 // SVC always ends the block — return new PC.
                 return cpu.pc;
             }
