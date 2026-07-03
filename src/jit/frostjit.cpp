@@ -3977,6 +3977,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
     } else {
         // Cache miss — need exclusive lock for translation.
+        cache_misses++;
         blocks_mutex_.unlock_shared();
         blocks_mutex_.lock();
         auto fn = translate_block(emu, pc);
@@ -4096,11 +4097,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // abort doesn't leave the flag cleared (which would cause an
         // infinite verify loop on retry).
         //
-        // NOTE: `entry` is a local copy of it->second, so we must update
-        // the underlying map entry directly — otherwise the flag would be
-        // lost on the next dispatch and we'd re-verify every time.
+        // Set flag on local copy and on the map entry (brief exclusive lock).
         entry.verified_once = true;
-        if (it != blocks_.end()) it->second.verified_once = true;
+        blocks_mutex_.lock();
+        auto vit = blocks_.find(pc);
+        if (vit != blocks_.end()) vit->second.verified_once = true;
+        blocks_mutex_.unlock();
         // Save chain slot bytes and restore to `ret` + NOPs
         uint8_t saved_chain[5];
         bool was_chained = entry.chained;
@@ -4166,38 +4168,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         SavedMem saved_mem[64];      // original values (pre-JIT)
         SavedMem jit_written[64];    // JIT's written values (post-JIT)
         int saved_mem_count = 0;
-        // Re-fetch the iterator: if we came from the cache-miss path, the
-        // original `it` is blocks_.end() and would segfault. The block was
-        // just translated and inserted into blocks_, so find() will succeed.
-        auto sit = blocks_.find(pc);
-        if (sit != blocks_.end()) {
-            for (const auto& si : sit->second.store_infos) {
-                if (saved_mem_count >= 64) break;
-                // ARM reg 31 = SP in this context (the translator marks rn=31
-                // as is_sp=true, which loads from cpu.sp via LOAD_REG src1=31).
-                uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
-                uint64_t addr = base + static_cast<uint64_t>(si.offset);
-                uint64_t val  = 0;
-                // The address might be unmapped (e.g., if the ARM reg holds
-                // a stale value at verify time that doesn't correspond to a
-                // real memory location). Skip those — accept the false
-                // positive for that store.
-                try {
-                    switch (si.width) {
-                        case 1: val = emu.mem().load<uint8_t>(addr);  break;
-                        case 2: val = emu.mem().load<uint16_t>(addr); break;
-                        case 4: val = emu.mem().load<uint32_t>(addr); break;
-                        case 8: val = emu.mem().load<uint64_t>(addr); break;
-                        default: continue;  // unknown width — skip
-                    }
-                } catch (...) {
-                    continue;  // unmapped address — skip this store
+        // Use entry.store_infos (local copy made while lock was held).
+        // Don't access blocks_ here — no lock is held (shared-JIT safe).
+        for (const auto& si : entry.store_infos) {
+            if (saved_mem_count >= 64) break;
+            uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
+            uint64_t addr = base + static_cast<uint64_t>(si.offset);
+            uint64_t val  = 0;
+            try {
+                switch (si.width) {
+                    case 1: val = emu.mem().load<uint8_t>(addr);  break;
+                    case 2: val = emu.mem().load<uint16_t>(addr); break;
+                    case 4: val = emu.mem().load<uint32_t>(addr); break;
+                    case 8: val = emu.mem().load<uint64_t>(addr); break;
+                    default: continue;
                 }
-                saved_mem[saved_mem_count].addr  = addr;
-                saved_mem[saved_mem_count].width = si.width;
-                saved_mem[saved_mem_count].value = val;
-                saved_mem_count++;
+            } catch (...) {
+                continue;
             }
+            saved_mem[saved_mem_count].addr  = addr;
+            saved_mem[saved_mem_count].width = si.width;
+            saved_mem[saved_mem_count].value = val;
+            saved_mem_count++;
         }
 
         uint64_t jit_next = entry.fn(&cpu, &emu);
