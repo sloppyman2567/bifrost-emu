@@ -22,6 +22,7 @@
 #include "jit/frostjit.hpp"
 #include "arm64_emu.hpp"  // Emulator complete type (for slow-path helpers)
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -548,6 +549,92 @@ extern "C" {
         } catch (UnmappedMemory& e) {
             (void)e;
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+        }
+    }
+
+    // ── Fast LL/SC helpers (bypass interpreter decode) ──────────────
+    // These are called directly from JIT-compiled code (like jit_load_mem_slow)
+    // to avoid the full interpreter step overhead (decode cache → switch →
+    // handler). They implement the same global exclusive monitor logic as
+    // the interpreter's LDXR/STXR/STLR handlers, but skip decode entirely.
+    //
+    // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
+    // Returns (LDXR): the loaded value in RAX.
+    // Returns (STXR): 0=success, 1=failure in RAX.
+
+    uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
+        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
+        std::lock_guard<std::mutex> g(shard->mu);
+        uint64_t v = 0;
+        try {
+            emu->mem().read(addr, &v, width);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+            return 0;
+        }
+        cpu->excl_mark(addr, width);
+        auto& vec = shard->reservations[addr];
+        bool found = false;
+        for (auto*& p : vec) {
+            if (p == cpu) { found = true; break; }
+        }
+        if (!found) vec.push_back(cpu);
+        return v;
+    }
+
+    // STXR: returns 0=success, 1=failure. val is in R8 (passed as 5th arg).
+    uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
+        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
+        std::lock_guard<std::mutex> g(shard->mu);
+        bool ok = cpu->excl_check(addr, width);
+        if (ok) {
+            try {
+                emu->mem().write(addr, &val, width);
+            } catch (UnmappedMemory& e) {
+                (void)e;
+                deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+                return 1;
+            }
+            // Invalidate OTHER CPUs' reservations at this address.
+            auto it = shard->reservations.find(addr);
+            if (it != shard->reservations.end()) {
+                for (CPU* p : it->second) {
+                    if (p != cpu && p->excl_tag_valid) {
+                        p->excl_tag_valid = false;
+                    }
+                }
+                it->second.erase(
+                    std::remove(it->second.begin(), it->second.end(), (CPU*)cpu),
+                    it->second.end());
+                if (it->second.empty()) {
+                    shard->reservations.erase(it);
+                }
+            }
+        }
+        cpu->excl_clear();
+        return ok ? 0 : 1;
+    }
+
+    // STLR: store-release (always succeeds, invalidates other CPUs).
+    void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
+        auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
+        std::lock_guard<std::mutex> g(shard->mu);
+        try {
+            emu->mem().write(addr, &val, width);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+            return;
+        }
+        auto it = shard->reservations.find(addr);
+        if (it != shard->reservations.end()) {
+            for (CPU* p : it->second) {
+                if (p != cpu && p->excl_tag_valid) {
+                    p->excl_tag_valid = false;
+                }
+            }
+            shard->reservations.erase(it);
         }
     }
 }

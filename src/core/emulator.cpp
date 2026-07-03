@@ -43,6 +43,10 @@ namespace arm64emu {
 Emulator::Emulator() = default;
 Emulator::~Emulator() = default;
 
+void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
+    return &excl_monitor_shards_[excl_shard_idx(addr)];
+}
+
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     elf_path_ = path;
@@ -187,7 +191,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         // First, try the native (in-emulator) dynamic linker. This is
         // faster and more reliable because we don't depend on the
         // guest-side ld.so working correctly under emulation.
-        bool native_dynlink = (getenv("BIFROST_NATIVE_DYNLINK") != nullptr);
+        // Default: use the native (in-emulator) dynamic linker. It's faster
+        // and more reliable than depending on the guest-side ld.so under
+        // emulation. Set BIFROST_NO_NATIVE_DYNLINK=1 to fall back to the
+        // guest-side ld.so (for debugging).
+        bool native_dynlink = (getenv("BIFROST_NO_NATIVE_DYNLINK") == nullptr);
         if (native_dynlink) {
             dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
             // Register the ifunc resolver callback. BUGFIX: the old

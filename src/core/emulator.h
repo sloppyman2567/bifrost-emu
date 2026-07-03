@@ -132,6 +132,16 @@ public:
     // Per-thread lookup (for tgkill, etc.)
     CPU* find_cpu_by_tid(int tid);
 
+    // Public accessor for JIT fast LL/SC helpers.
+    struct ExclMonitorShardAccess {
+        std::mutex mu;
+        std::unordered_map<uint64_t, std::vector<CPU*>> reservations;
+    };
+    static size_t excl_shard_idx_pub(uint64_t addr) {
+        return (addr >> 3) & 15;
+    }
+    void* excl_monitor_shard_pub(uint64_t addr);
+
     // ── Fork support (clone without CLONE_VM) ────────────────────────
     // Fork the guest: snapshot the current memory + CPU state and
     // create a child "process" that runs in a host thread with its own
@@ -235,6 +245,13 @@ private:
     static size_t excl_shard_idx(uint64_t addr) {
         return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
     }
+    // jit_ldxr/jit_stxr/jit_stlr are extern "C" functions defined in
+    // x86_backend.cpp. They access excl_monitor_shards_ directly.
+    // No friend declaration needed — the functions are in the global
+    // namespace (extern "C") and access the shards via the public
+    // excl_shard_idx + the shard array (both in the private section,
+    // but extern "C" functions can't be friends in standard C++).
+    // Instead, we provide a public accessor.
 
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;

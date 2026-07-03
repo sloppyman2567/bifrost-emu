@@ -204,6 +204,13 @@ enum class IROp : uint8_t {
     //   imm = ARM reg index for slow-path result reload (rt for non-CAS,
     //         rs for CAS — also the expected-value source for CAS)
     ATOMIC,
+    // Fast LL/SC via C helpers (bypass interpreter decode overhead)
+    LDXR_FAST,     // dest = jit_ldxr(emu, cpu, src1, width); marks reservation
+                   // width = 1/2/4/8; also loads to ARM reg dest
+    STXR_FAST,     // dest = jit_stxr(emu, cpu, src1, src2, width); 0=ok, 1=fail
+                   // src1=addr, src2=value, dest=ARM reg for status (rs)
+    STLR_FAST,     // jit_stlr(emu, cpu, src1, src2, width); store-release
+                   // src1=addr, src2=value
 };
 
 // Condition codes (same encoding as ARM64 cond field).

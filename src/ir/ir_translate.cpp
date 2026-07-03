@@ -935,14 +935,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
 
         // ── Atomics (LDXR/STXR/LDAR/STLR/LSE_ATOMIC) ───────────────
+        // LDXR/STXR/STLR use CALL_INTERP for now — the fast C helper path
+        // (jit_ldxr/jit_stxr/jit_stlr) is defined but needs more testing
+        // before enabling in a stable release. LSE atomics get native JIT.
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
-            // LL/SC atomics still need the interpreter (exclusive monitor +
-            // global monitor coordination). These are used by musl's
-            // pthread_mutex implementation; the sharded global monitor
-            // (Turn 27-28) handles correctness. LSE atomics (below) get
-            // native x86 codegen for ~20x speedup on game workloads.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
 

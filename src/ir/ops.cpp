@@ -182,6 +182,48 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            case IROp::LDXR_FAST: {
+                // Verify-mode: single-threaded, so no monitor needed.
+                // Just do a regular load.
+                uint64_t addr = vregs[inst.src1];
+                int w = inst.width;
+                uint64_t v = 0;
+                if (window_base && addr + w <= Memory::DIRECT_WINDOW_SIZE) {
+                    memcpy(&v, window_base + addr, w);
+                } else {
+                    emu.mem().read(addr, &v, w);
+                }
+                vregs[inst.dest] = v;
+                break;
+            }
+
+            case IROp::STXR_FAST: {
+                // Verify-mode: single-threaded, always succeeds.
+                uint64_t addr = vregs[inst.src1];
+                uint64_t val = vregs[inst.src2];
+                int w = inst.width;
+                if (window_base && addr + w <= Memory::DIRECT_WINDOW_SIZE) {
+                    memcpy(window_base + addr, &val, w);
+                } else {
+                    emu.mem().write(addr, &val, w);
+                }
+                vregs[inst.dest] = 0;  // success
+                break;
+            }
+
+            case IROp::STLR_FAST: {
+                // Verify-mode: single-threaded, just store.
+                uint64_t addr = vregs[inst.src1];
+                uint64_t val = vregs[inst.src2];
+                int w = inst.width;
+                if (window_base && addr + w <= Memory::DIRECT_WINDOW_SIZE) {
+                    memcpy(window_base + addr, &val, w);
+                } else {
+                    emu.mem().write(addr, &val, w);
+                }
+                break;
+            }
+
             case IROp::ADD:
                 vregs[inst.dest] = vregs[inst.src1] + vregs[inst.src2];
                 break;

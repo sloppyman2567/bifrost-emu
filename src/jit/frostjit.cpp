@@ -524,6 +524,61 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
+        case IROp::LDXR_FAST: {
+            // Fast LDXR via C helper — bypasses interpreter decode.
+            // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_reg(RDI, EMU_REG);
+            emit_mov_reg(RSI, CPU_REG);
+            load_vreg_to_reg(RDX, inst.src1);
+            emit_mov_imm32(RCX, inst.width);
+            emit_call_aligned(&jit_ldxr, 0);
+            store_reg_to_vreg(inst.dest, RAX);
+            invalidate_host_regs(MEM_CLOBBER);
+            return false;
+        }
+
+        case IROp::STXR_FAST: {
+            // Fast STXR via C helper — bypasses interpreter decode.
+            // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_reg(RDI, EMU_REG);
+            emit_mov_reg(RSI, CPU_REG);
+            load_vreg_to_reg(RDX, inst.src1);
+            load_vreg_to_reg(RCX, inst.src2);
+            emit_mov_imm32(R8, inst.width);
+            emit_call_aligned(&jit_stxr, 0);
+            store_reg_to_vreg(inst.dest, RAX);
+            invalidate_host_regs(MEM_CLOBBER);
+            return false;
+        }
+
+        case IROp::STLR_FAST: {
+            // Fast STLR via C helper — bypasses interpreter decode.
+            // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+            emit_mov_reg(RDI, EMU_REG);
+            emit_mov_reg(RSI, CPU_REG);
+            load_vreg_to_reg(RDX, inst.src1);
+            load_vreg_to_reg(RCX, inst.src2);
+            emit_mov_imm32(R8, inst.width);
+            emit_call_aligned(&jit_stlr, 0);
+            invalidate_host_regs(MEM_CLOBBER);
+            return false;
+        }
+
         // ── Binary ALU ops ──
         // Use src1 and src2 in whatever host regs they're already cached in.
         // Only allocate a fresh reg for dest when dest != src1 && dest != src2.
@@ -3847,62 +3902,46 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //
     // Per-thread state (watchdog, hotness) is thread-local — no lock
     // needed.
-    blocks_mutex_.lock();
+    // Use a SHARED lock for block lookup (concurrent reads OK). Release
+    // before execution — entry is a local copy, no lock needed to run it.
+    blocks_mutex_.lock_shared();
     auto it = blocks_.find(pc);
     BlockEntry entry;
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
 
-        // Per-PC hotness tracking. If a PC with CALL_INTERP fallbacks is
-        // dispatched > HOT_PC_THRESHOLD times, mark it interp_only so future
-        // hits skip the dispatcher. This catches tight multi-block cycles
-        // (e.g. soft-float routines) where the interpreter is genuinely
-        // faster — it avoids the prologue/epilogue/CALL_INTERP overhead.
-        //
-        // Only applied to blocks with CALL_INTERPs. Pure JIT blocks (no
-        // CALL_INTERPs) are always faster as JIT, especially with self-loop
-        // chaining which eliminates dispatcher overhead for tight loops.
+        // Per-PC hotness tracking (thread-local, no lock needed for the
+        // counter, but promoting to interp_only needs exclusive lock).
         if (!entry.interp_only && entry.fn && entry.call_interp_count > 0) {
             auto& cnt = tls_hot_pc_counts_[pc];
             if (++cnt >= HOT_PC_THRESHOLD) {
-                // Promote to interp_only. The interpreter runs the same
-                // instr_count instructions without dispatcher overhead.
-                it->second.interp_only = true;
-                it->second.interp_only_count = it->second.instr_count;
-                it->second.fn = nullptr;
-                it->second.chained = false;
-                entry = it->second;
-                // Clear the hotness counter to save memory.
+                // Promote to interp_only — upgrade to exclusive.
+                blocks_mutex_.unlock_shared();
+                blocks_mutex_.lock();
+                it = blocks_.find(pc);
+                if (it != blocks_.end()) {
+                    it->second.interp_only = true;
+                    it->second.interp_only_count = it->second.instr_count;
+                    it->second.fn = nullptr;
+                    it->second.chained = false;
+                    entry = it->second;
+                }
+                blocks_mutex_.unlock();
+                blocks_mutex_.lock_shared();
+                it = blocks_.find(pc);
                 tls_hot_pc_counts_.erase(pc);
             }
-            // Bound the map size to prevent unbounded growth.
             if (tls_hot_pc_counts_.size() > HOT_PC_MAP_MAX) {
                 tls_hot_pc_counts_.clear();
             }
         }
 
-        // ── interp_only shortcut ──────────────────────────────────
-        // Blocks that are too CALL_INTERP-heavy to JIT (e.g. __multf3)
-        // are marked interp_only at translate-time. Run them through
-        // the interpreter directly — no prologue/epilogue/CALL_INTERP
-        // overhead. The interpreter steps exactly interp_only_count
-        // instructions, matching what the JIT block would have done.
-        //
-        // tight-loop accelerator. If after running the
-        // block once the PC is back at the same block start, we're in
-        // a tight self-loop (common for soft-float routines). Re-run
-        // the block in a tight loop (no dispatcher overhead) until the
-        // PC changes or a max iteration count is reached. This eliminates
-        // ~1us of dispatch overhead per iteration, speeding up soft-float
-        // loops by 10-100x.
-        //
-        // The interpreter (step_public) may call blocking syscalls, so
-        // we MUST release the lock before this loop.
+        // interp_only shortcut — release lock, run interpreter.
         if (entry.interp_only) {
-            blocks_mutex_.unlock();  // release — interpreter may block
+            blocks_mutex_.unlock_shared();
             blocks_executed++;
-            constexpr int TIGHT_LOOP_MAX = 1000000;  // safety cap
+            constexpr int TIGHT_LOOP_MAX = 1000000;
             int tight_iter = 0;
             do {
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
@@ -3911,45 +3950,41 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 instructions_executed += entry.interp_only_count;
                 tight_iter++;
                 if (tight_iter >= TIGHT_LOOP_MAX) break;
-                // If PC unchanged, the block is a tight self-loop — re-run.
-                // Otherwise, exit to the dispatcher.
             } while (cpu.running && cpu.pc == pc);
             return cpu.pc;
         }
 
-        // ── Lazy block chaining ───────────────────────────────────
-        // Opportunistically try to chain this block to its target on
-        // every cache hit. The target may have been translated AFTER
-        // this block (so the translate-time try_chain_block call was
-        // a no-op). Also call chain_back_references(pc) to patch any
-        // OTHER blocks whose chain_target_pc == pc — now O(k) via
-        // back_refs_, cheap enough per-hit.
+        // Lazy block chaining — release shared, try exclusive (non-blocking).
+        // If we can't get exclusive, skip chaining (optimization, not correctness).
         if (!entry.chained) {
             static bool no_chain_hit_ = (getenv("BIFROST_NO_CHAIN") != nullptr);
-            if (!no_chain_hit_) {
+            blocks_mutex_.unlock_shared();
+            if (!no_chain_hit_ && blocks_mutex_.try_lock()) {
                 if (entry.chain_target_pc != 0) {
-                    try_chain_block(pc, it->second);
-                    entry = it->second;
+                    auto chain_it = blocks_.find(pc);
+                    if (chain_it != blocks_.end()) {
+                        try_chain_block(pc, chain_it->second);
+                    }
                 }
                 auto brit = back_refs_.find(pc);
                 if (brit != back_refs_.end()) {
                     chain_back_references(pc);
                 }
+                blocks_mutex_.unlock();
             }
+        } else {
+            blocks_mutex_.unlock_shared();
         }
     } else {
-        cache_misses++;
+        // Cache miss — need exclusive lock for translation.
+        blocks_mutex_.unlock_shared();
+        blocks_mutex_.lock();
         auto fn = translate_block(emu, pc);
         if (!fn) {
-            // translate_block returns nullptr for two reasons:
-            //   1. Block is interp_only (already stored in blocks_[pc])
-            //   2. Genuine translation failure (code buf overflow, etc.)
-            // Case 1: run the interp_only block.
-            // Case 2: single-step the interpreter.
             auto it2 = blocks_.find(pc);
             if (it2 != blocks_.end() && it2->second.interp_only) {
                 entry = it2->second;
-                blocks_mutex_.unlock();  // release — interpreter may block
+                blocks_mutex_.unlock();
                 blocks_executed++;
                 instructions_executed += entry.interp_only_count;
                 for (int i = 0; i < entry.interp_only_count && cpu.running; i++) {
@@ -3957,14 +3992,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 }
                 return cpu.pc;
             }
-            blocks_mutex_.unlock();  // release — interpreter may block
+            blocks_mutex_.unlock();
             interpreter_fallbacks++;
             instructions_executed++;
             emu.step_public(cpu);
             return cpu.pc;
         }
         entry = blocks_[pc];
+        blocks_mutex_.unlock();
     }
+
+    // ── Lock is released. Execution below does NOT hold any lock. ──
 
     // Loop watchdog — if the same block runs > WATCHDOG_LIMIT times
     // consecutively, it's likely stuck in an infinite loop due to a JIT
@@ -3977,8 +4015,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (pc == tls_watchdog_last_pc_) {
         tls_watchdog_count_++;
         if (tls_watchdog_count_ > WATCHDOG_LIMIT) {
-            // Mark this block as interp_only permanently — the JIT
-            // codegen for it is buggy, so always use the interpreter.
+            // Mark this block as interp_only permanently — needs exclusive.
+            blocks_mutex_.lock();
             auto wit = blocks_.find(pc);
             if (wit != blocks_.end() && !wit->second.interp_only) {
                 wit->second.interp_only = true;
@@ -3986,7 +4024,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 wit->second.fn = nullptr;
                 wit->second.chained = false;
             }
-            blocks_mutex_.unlock();  // release — interpreter may block
+            blocks_mutex_.unlock();
             interpreter_fallbacks++;
             emu.step_public(cpu);
             return cpu.pc;
@@ -4022,7 +4060,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //   - x86 JIT code is reentrant (each thread has its own CPU/stack).
     // Verify-mode does code-buffer patching, but it's debug-only and
     // patches only this block's own slots (no cross-block mutation).
-    blocks_mutex_.unlock();
+    // (Lock was already released above — no unlock needed here.)
 
     // ── BIFROST_JIT_VERIFY: divergence checker ──────────────────
     // Before running the JIT block, snapshot the CPU state. After the

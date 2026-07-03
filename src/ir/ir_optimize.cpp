@@ -115,6 +115,8 @@ static bool is_pure(IROp op) {
         case IROp::FP_F2I_FIXED: case IROp::FP_I2F_FIXED:  // fixed-point variants
         case IROp::FP_CMP: case IROp::FP_MOVI:          // write pstate/v_lo
         case IROp::ATOMIC:                               // read/write memory
+        case IROp::LDXR_FAST: case IROp::STXR_FAST:     // read/write + monitor
+        case IROp::STLR_FAST:                            // write + monitor
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:
@@ -838,6 +840,9 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::MRS: return "MRS";
                     case IROp::MSR: return "MSR";
                     case IROp::ATOMIC: return "ATOMIC";
+                    case IROp::LDXR_FAST: return "LDXR_FAST";
+                    case IROp::STXR_FAST: return "STXR_FAST";
+                    case IROp::STLR_FAST: return "STLR_FAST";
                     default: return "?";
                     }
                     return "?";
