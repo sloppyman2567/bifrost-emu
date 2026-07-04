@@ -31,6 +31,20 @@
 // host's implementation — no GPU emulation, just marshalling. See
 // `thunk.cpp` and the `GraphicThunk` class below.
 //
+// v1.4.5-alpha (Turn 38): SMARTER SDL2 INIT + INPUT EVENTS.
+//   - SDL2 is now initialized lazily on first init() or poll_events()
+//     call, not eagerly when the framebuffer is opened. Headless
+//     programs that never display the fb won't open an SDL2 window.
+//   - Window resize is now handled: the SDL2 renderer auto-scales the
+//     fb texture to the window size, so guest programs that hardcode a
+//     640x480 fb still display correctly in a larger window.
+//   - Input events (keyboard, mouse) are captured by the SDL2 event
+//     loop and exposed via the `FrostInput` instance owned by
+//     FrostGraphics. The guest reads them via /dev/input/eventX
+//     (wired through Yggdrasil DevFS).
+//   - New `set_window_title()` and `set_window_size()` methods for
+//     programs that want to control the window size.
+//
 // Usage from the emulator:
 //   FrostGraphics gfx;
 //   gfx.init(640, 480);          // 640x480, 32-bit BGRA
@@ -52,6 +66,8 @@ namespace arm64emu {
 
 // Forward-declare GraphicThunk (defined in src/frost_graphics/thunk.cpp).
 class GraphicThunk;
+// Forward-declare FrostInput (defined in frost/input.hpp).
+class FrostInput;
 
 // Linux framebuffer ioctl numbers (from <linux/fb.h>).
 // We define them here so we don't have to #include <linux/fb.h> in
@@ -195,6 +211,31 @@ public:
     // list of supported entry points.
     GraphicThunk* thunk();
 
+    // ── Input events (v1.4.5-alpha, Turn 38) ──────────────────────
+    // Returns the FrostInput instance owned by this FrostGraphics.
+    // The input backend captures keyboard/mouse events from the SDL2
+    // window and exposes them as Linux input_event records. The guest
+    // reads them via /dev/input/eventX (wired through Yggdrasil DevFS).
+    //
+    // In headless builds (no SDL2), the input instance exists but is
+    // always empty — reads return 0 (EOF). This keeps the API uniform
+    // regardless of build configuration.
+    FrostInput* input();
+
+    // ── Window management (v1.4.5-alpha, Turn 38) ─────────────────
+    // Set the SDL2 window title. No-op in headless mode. Safe to call
+    // before init() — the title is cached and applied when the window
+    // is created.
+    void set_window_title(const std::string& title);
+
+    // Resize the SDL2 window. No-op in headless mode. The framebuffer
+    // dimensions are NOT changed — the SDL2 renderer auto-scales the
+    // fb texture to the new window size.
+    void set_window_size(uint32_t width, uint32_t height);
+
+    // Whether the SDL2 window is currently open (diagnostic).
+    bool has_window() const;
+
 private:
     uint32_t      width_         = 0;
     uint32_t      height_        = 0;
@@ -207,11 +248,20 @@ private:
     // Stored as void* to avoid pulling SDL2.h into this header.
     void*         sdl_state_     = nullptr;  // struct SDLWindowState*
     bool          sdl_init_done_ = false;    // SDL_Init succeeded
+    bool          sdl_window_open_ = false;  // SDL_CreateWindow succeeded
+    std::string   window_title_  = "bifrost-emu /dev/fb0";
+    uint32_t      window_width_  = 0;        // 0 = use fb dimensions
+    uint32_t      window_height_ = 0;        // 0 = use fb dimensions
 
     // GraphicThunk instance (lazily created by thunk()). Stored as
     // unique_ptr to avoid pulling the GraphicThunk definition into
     // this header.
     std::unique_ptr<GraphicThunk> thunk_;
+
+    // FrostInput instance (created in the constructor, always present).
+    // Stored as unique_ptr to avoid pulling FrostInput's full definition
+    // into this header — FrostInput is forward-declared above.
+    std::unique_ptr<FrostInput> input_;
 };
 
 // Backward-compatibility alias. Existing call sites use `GraphicsBackend`;

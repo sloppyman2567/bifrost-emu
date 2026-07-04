@@ -288,6 +288,62 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   break anything when enabled. No performance regression (bench_mips
   1.4s, 571 MIPS).
 
+### SDL2 audio + input events + smarter FrostGraphics (2026-07-04, Turn 38)
+
+- **SDL2 audio backend.** The `Audio` class now supports three
+  backends, tried in order: SDL2 (preferred — cross-platform, low
+  latency via callback), OSS `/dev/dsp` (legacy), headless (buffer +
+  WAV dump, always available). The SDL2 backend uses a lock-free SPSC
+  ring buffer (64 KiB, power-of-2 capacity) — the guest's `write()`
+  is the producer, SDL2's audio callback is the consumer. No mutex on
+  the hot path. Sample format is negotiated with SDL2 (8-bit unsigned,
+  16-bit signed, or 32-bit float). New `backend_name()` diagnostic
+  returns `"sdl2"` / `"oss"` / `"none"`.
+- **Input event handling.** New `FrostInput` class
+  (`include/frost/input.hpp` + `src/frost_graphics/input.cpp`)
+  captures keyboard and mouse events from the SDL2 window and
+  translates them to Linux `input_event` records (24 bytes on
+  AArch64: 16-byte timeval + 2-byte type + 2-byte code + 4-byte
+  value). Translation table covers common keys (letters, digits,
+  arrows, modifiers, navigation) and all mouse buttons + motion +
+  wheel. Bounded SPSC ring buffer (256 events) with drop-oldest on
+  overflow. Wired through Yggdrasil DevFS as `/dev/input/event0`,
+  `/dev/input/mice`, `/dev/input/mouse0`, `/dev/input/js0` — all
+  return the same event stream. In headless builds (no SDL2), the
+  input instance exists but is always empty (reads return 0).
+- **FrostGraphics smarter SDL2 init.** The SDL2 window is now
+  `SDL_WINDOW_RESIZABLE`; the framebuffer texture is created at the
+  fb's native resolution and auto-scales to the window size via
+  `SDL_RenderCopy` (resizing the window doesn't lose pixel data or
+  require texture recreation). New methods: `set_window_title()`,
+  `set_window_size()`, `has_window()`. The window title and size are
+  cached and applied when the window is created — safe to call before
+  `init()`. `poll_events()` now delegates to `FrostInput::poll()` so
+  keyboard/mouse events are captured alongside the SDL_QUIT check.
+- **SDL2 SDK fetcher fix.** `tools/fetch-sdl2-headers.sh` now copies
+  `_real_SDL_config.h` from the Debian multiarch include path
+  (`usr/include/x86_64-linux-gnu/SDL2/`) to the SDK's flat include
+  dir. Without this, `#include <SDL2/SDL.h>` failed with
+  `fatal error: SDL2/_real_SDL_config.h: No such file or directory`
+  because Debian's `SDL_config.h` is a thin wrapper that includes the
+  real config from the multiarch path.
+- **New test: `ctest_real/test_input.c`** — opens `/dev/input/event0`,
+  reads `input_event` records, prints them. Exits after 5 events or
+  when the queue is empty. Passes under both headless (returns "no
+  events") and SDL2 (returns events if the user clicks/types, else
+  "no events") builds.
+- **Toolchains installed.** `tools/aarch64-linux-musl-cross/` (musl,
+  GCC 11.2.1, 104 MB) and `tools/aarch64-linux-gnu-cross/` (glibc,
+  Arm GNU 13.2.rel1, 133 MB) are now present for cross-compiling
+  test programs. `tools/sdl2-sdk/` (SDL2 dev headers + .so, ~2 MB)
+  is also present. All are gitignored — fetch on demand via the
+  `tools/fetch-*.sh` scripts.
+- **Tests:** 72/72 pass under JIT (was 71 — added `input_test`),
+  72/72 under `--no-jit`, 72/72 under FWD mode, 22/22 C API checks.
+  Both headless and SDL2 builds pass all tests (SDL2 build uses
+  `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` for headless CI).
+  No performance regression (bench_mips 1.4s, 571 MIPS).
+
 ## [1.4.0] — 2026-07-03 (stable release)
 
 ### Post-stabilization hardening (2026-07-03)

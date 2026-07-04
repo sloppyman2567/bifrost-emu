@@ -105,6 +105,21 @@ if [ -d "$SDK_DIR/usr" ]; then
     fi
 fi
 
+# ── Copy _real_SDL_config.h from the multiarch include path ──────────
+# Debian's libsdl2-dev ships SDL_config.h as a thin wrapper that
+# #includes <SDL2/_real_SDL_config.h> from the multiarch include dir
+# (e.g. usr/include/x86_64-linux-gnu/SDL2/_real_SDL_config.h). The
+# wrapper lives in usr/include/SDL2/ (which we moved to sdk/include/SDL2/),
+# but the real config header is in the multiarch path. The data.tar.xz
+# of the .deb contains both — find the multiarch copy and move it
+# alongside the wrapper so `#include <SDL2/_real_SDL_config.h>` works
+# with just `-Itools/sdl2-sdk/include`.
+REAL_CONFIG=$(find "$SDK_DIR" -name "_real_SDL_config.h" -type f 2>/dev/null | head -1)
+if [ -n "$REAL_CONFIG" ] && [ ! -f "$SDK_DIR/include/SDL2/_real_SDL_config.h" ]; then
+    cp "$REAL_CONFIG" "$SDK_DIR/include/SDL2/_real_SDL_config.h"
+    echo "  Copied _real_SDL_config.h (Debian multiarch config header)"
+fi
+
 # Also extract the runtime .so from libsdl2-2.0-0
 RT_DEB=$(ls "$DEB_DIR"/libsdl2-2.0-0_*.deb 2>/dev/null | head -1)
 if [ -n "$RT_DEB" ]; then

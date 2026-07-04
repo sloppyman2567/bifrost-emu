@@ -24,9 +24,11 @@
 #include "yggdrasil/memfd_node.hpp"
 #include "yggdrasil/fb_node.hpp"
 #include "yggdrasil/audio_node.hpp"
+#include "yggdrasil/input_node.hpp"
 #include "yggdrasil/dir_node.hpp"
 #include "audio/audio.h"
 #include "frost/graphics.hpp"
+#include "frost/input.hpp"
 
 #include <cerrno>
 #include <cstdint>
@@ -54,8 +56,22 @@ static std::vector<DirNode::Entry> dev_entries() {
         {"dsp",     0x2 /*DT_CHR*/},
         {"snd",     0x2 /*DT_CHR*/},
         {"audio",   0x2 /*DT_CHR*/},
+        {"input",   0x4 /*DT_DIR*/},
         {"ptmx",    0x2 /*DT_CHR*/},
         {"pts",     0x4 /*DT_DIR*/},
+    };
+}
+
+// /dev/input directory listing. We expose a single event device
+// (event0) that aggregates keyboard + mouse events from the SDL2
+// window. Real Linux has /dev/input/event0..eventN (one per device);
+// we collapse them into one for simplicity.
+static std::vector<DirNode::Entry> dev_input_entries() {
+    return {
+        {"event0", 0x2 /*DT_CHR*/},
+        {"mice",   0x2 /*DT_CHR*/},
+        {"mouse0", 0x2 /*DT_CHR*/},
+        {"js0",    0x2 /*DT_CHR*/},
     };
 }
 
@@ -154,6 +170,32 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         int fd = ::openat(AT_FDCWD, "/dev/null", flags, mode);
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
+    }
+
+    // /dev/input → directory listing (Turn 38)
+    if (path == "/dev/input" || path == "/dev/input/") {
+        return std::make_unique<DirNode>("/dev/input", dev_input_entries(), flags);
+    }
+
+    // /dev/input/eventX, /dev/input/mice, /dev/input/mouse0, /dev/input/js0
+    // → input backend (FrostInput, owned by FrostGraphics).
+    // All of these return the same input_event stream — we don't
+    // distinguish mice vs event vs js0 in the backend. The guest's
+    // choice of which to open is mostly cosmetic.
+    if (path.rfind("/dev/input/", 0) == 0) {
+        std::string name = path.substr(strlen("/dev/input/"));
+        if (name == "event0" || name == "mice" ||
+            name == "mouse0" || name == "js0") {
+            if (gfx_) {
+                FrostInput* in = gfx_->input();
+                if (in) {
+                    return std::make_unique<InputNode>(in, flags);
+                }
+            }
+            // No graphics backend — return -ENODEV.
+            *err_out = -ENODEV;
+            return nullptr;
+        }
     }
 
     // /dev/ptmx → pseudo-terminal master (passthrough for interactive apps)

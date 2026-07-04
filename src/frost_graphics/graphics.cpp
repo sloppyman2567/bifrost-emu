@@ -13,6 +13,7 @@
 
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"  // GraphicThunk full definition (for unique_ptr dtor)
+#include "frost/input.hpp"  // FrostInput full definition (for unique_ptr dtor)
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -102,9 +103,11 @@ struct fb_fix_screeninfo {
 };
 
 // ── Constructor / Destructor ───────────────────────────────────────────
-// Out-of-line because the unique_ptr<GraphicThunk> member needs the
-// full GraphicThunk type (defined in thunk.cpp).
-FrostGraphics::FrostGraphics() = default;
+// Out-of-line because the unique_ptr<GraphicThunk> and unique_ptr<FrostInput>
+// members need the full types (defined in thunk.cpp and input.cpp).
+FrostGraphics::FrostGraphics() {
+    input_ = std::make_unique<FrostInput>();
+}
 
 FrostGraphics::~FrostGraphics() {
 #if defined(BIFROST_USE_SDL2)
@@ -191,6 +194,11 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
     // Initialize SDL2 (only video subsystem). If this fails, we silently
     // fall back to headless mode — the framebuffer still works for
     // dump_to_ppm() etc., just without a live window.
+    //
+    // Turn 38: SDL2 init is deferred to first refresh()/poll_events()
+    // call, NOT done eagerly in init(). This lets headless programs
+    // (which never display the fb) avoid opening an SDL2 window. The
+    // sdl_init_done_ flag tracks whether SDL_Init has been called.
     if (!sdl_init_done_) {
         if (SDL_Init(SDL_INIT_VIDEO) == 0) {
             sdl_init_done_ = true;
@@ -201,11 +209,14 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
     }
     if (sdl_init_done_ && !sdl_state_) {
         auto* s = new SDLWindowState();
+        // Use the cached window dimensions if set, otherwise the fb size.
+        uint32_t win_w = window_width_  ? window_width_  : width_;
+        uint32_t win_h = window_height_ ? window_height_ : height_;
         s->window = SDL_CreateWindow(
-            "bifrost-emu /dev/fb0",
+            window_title_.c_str(),
             SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            static_cast<int>(width_), static_cast<int>(height_),
-            SDL_WINDOW_SHOWN);
+            static_cast<int>(win_w), static_cast<int>(win_h),
+            SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
         if (s->window) {
             s->renderer = SDL_CreateRenderer(
                 s->window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -213,6 +224,11 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
                 s->renderer = SDL_CreateRenderer(s->window, -1, SDL_RENDERER_SOFTWARE);
             }
             if (s->renderer) {
+                // The texture is created at the fb's native resolution;
+                // SDL2's RenderCopy auto-scales it to the window size on
+                // present. This means resizing the window doesn't
+                // require recreating the texture (and doesn't lose the
+                // fb's pixel data).
                 s->texture = SDL_CreateTexture(
                     s->renderer,
                     SDL_PIXELFORMAT_BGRA8888,
@@ -230,6 +246,7 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
             // Don't set sdl_state_; fall through to headless mode.
         } else {
             sdl_state_ = s;
+            sdl_window_open_ = true;
             SDL_SetRenderDrawColor(s->renderer, 0, 0, 0, 255);
             SDL_RenderClear(s->renderer);
             SDL_RenderPresent(s->renderer);
@@ -343,9 +360,27 @@ void FrostGraphics::sync_from(const void* src) {
 // ── poll_events() ──────────────────────────────────────────────────────
 // Pumps the SDL2 event loop. Returns false if the user has requested
 // window close (caller may terminate the guest). No-op in headless mode.
+//
+// Turn 38: also pumps the FrostInput event queue, translating SDL2
+// keyboard/mouse events into Linux input_event records. The guest
+// reads them via /dev/input/eventX.
 bool FrostGraphics::poll_events() {
 #if defined(BIFROST_USE_SDL2)
-    if (!sdl_state_) return true;
+    if (!sdl_state_) {
+        // Even without a window, drain SDL2 events to FrostInput if
+        // SDL2 was initialized (e.g., by the audio backend).
+        if (input_ && sdl_init_done_) {
+            return input_->poll();
+        }
+        return true;
+    }
+    // Let FrostInput handle the SDL2 events — it translates keyboard/
+    // mouse events to Linux input_event records AND handles SDL_QUIT
+    // (returning false if the user requested window close).
+    if (input_) {
+        return input_->poll();
+    }
+    // Fallback: drain SDL2 events ourselves (no input translation).
     auto* s = sdl_state(sdl_state_);
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
@@ -492,5 +527,48 @@ int FrostGraphics::ioctl(uint32_t request, void* guest_buf) {
 // signature in the header; the body is in thunk.cpp.
 //
 // (See frost/graphics.hpp for the design rationale.)
+
+// ── input() — return the FrostInput instance (Turn 38) ─────────────────
+FrostInput* FrostGraphics::input() {
+    return input_.get();
+}
+
+// ── set_window_title() — set the SDL2 window title (Turn 38) ───────────
+void FrostGraphics::set_window_title(const std::string& title) {
+    window_title_ = title;
+#if defined(BIFROST_USE_SDL2)
+    if (sdl_state_) {
+        auto* s = sdl_state(sdl_state_);
+        if (s && s->window) {
+            SDL_SetWindowTitle(s->window, title.c_str());
+        }
+    }
+#endif
+}
+
+// ── set_window_size() — resize the SDL2 window (Turn 38) ───────────────
+void FrostGraphics::set_window_size(uint32_t width, uint32_t height) {
+    window_width_ = width;
+    window_height_ = height;
+#if defined(BIFROST_USE_SDL2)
+    if (sdl_state_) {
+        auto* s = sdl_state(sdl_state_);
+        if (s && s->window) {
+            SDL_SetWindowSize(s->window,
+                              static_cast<int>(width),
+                              static_cast<int>(height));
+        }
+    }
+#endif
+}
+
+// ── has_window() — whether the SDL2 window is open (Turn 38) ───────────
+bool FrostGraphics::has_window() const {
+#if defined(BIFROST_USE_SDL2)
+    return sdl_window_open_;
+#else
+    return false;
+#endif
+}
 
 } // namespace arm64emu

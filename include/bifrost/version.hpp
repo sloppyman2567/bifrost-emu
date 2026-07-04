@@ -58,6 +58,24 @@ namespace arm64emu {
 //     pointers as AArch64 code). New syscall __NR_bifrost_thunk=0x1000
 //     dispatches to GraphicThunk::dispatch() which reads x0..x7, calls
 //     the host function, and writes the result to x0.
+//   - SDL2 audio backend (Turn 38). The Audio class now supports three
+//     backends: SDL2 (preferred, cross-platform, low latency via
+//     callback), OSS /dev/dsp (legacy), headless (buffer + WAV dump).
+//     The SDL2 backend uses a lock-free SPSC ring buffer (64 KiB,
+//     power-of-2) — the guest's write() is the producer, SDL2's audio
+//     callback is the consumer. No mutex on the hot path.
+//   - Input event handling (Turn 38). New FrostInput class
+//     (include/frost/input.hpp) captures keyboard/mouse events from
+//     the SDL2 window and translates them to Linux input_event
+//     records (24 bytes on AArch64). SDL2 scancodes → Linux KEY_*
+//     codes; SDL2 mouse buttons → BTN_LEFT/RIGHT/MIDDLE; SDL2 mouse
+//     motion → EV_REL REL_X/REL_Y; SDL2 mouse wheel → EV_REL REL_WHEEL.
+//     Wired through Yggdrasil DevFS as /dev/input/event0, /dev/input/mice,
+//     /dev/input/mouse0, /dev/input/js0 (all return the same stream).
+//   - FrostGraphics smarter SDL2 init (Turn 38). Window is now
+//     SDL_WINDOW_RESIZABLE; the fb texture auto-scales to the window
+//     size via RenderCopy. New set_window_title() and set_window_size()
+//     methods. has_window() diagnostic.
 //   - FrostJIT split: frostjit.cpp was 4520 LOC — too big to navigate.
 //     Split into 7 files: jit_interp.cpp (trampoline), jit_helpers.cpp
 //     (emit helpers), jit_codegen_fp.cpp (FP/SIMD codegen),

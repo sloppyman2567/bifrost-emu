@@ -155,6 +155,7 @@ INTEGRATION_TESTS=(
     "fwd_repro4|ctest_real/fwd_repro4.elf||5"
     "fwd_repro5|ctest_real/fwd_repro5.elf||5"
     "head|ctest_real/head.elf||5"
+    "input_test|ctest_real/test_input.elf||5|test_input: done"
     "jit_new_ops|ctest_real/jit_new_ops.elf||5|ALL TESTS PASSED"
     "loop_div|ctest_real/loop_div.elf||5"
     "md5_neon_test|ctest_real/md5_neon_test.elf||5"
