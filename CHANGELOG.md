@@ -234,6 +234,60 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   (`b1946ac92492d2347c6235b4d2611184`). No performance regression
   (bench_mips 1.4s, 571 MIPS).
 
+### GraphicThunk wired to dynamic linker + VFS hygiene (2026-07-04, Turn 37)
+
+- **GraphicThunk REDESIGNED.** The Turn 36 implementation returned raw
+  host function pointers via `dlsym(RTLD_DEFAULT, ...)`. This was
+  fundamentally broken: those are x86-64 function pointers, and the
+  guest would try to execute them as AArch64 code (SIGILL or worse).
+  Turn 37 replaces this with a proper trampoline-based design:
+  - The thunk allocates a 64 KiB guest trampoline page on `init(mem)`.
+  - Each registered symbol gets a 16-byte AArch64 trampoline:
+    `movz x9, #sym_id; movz x8, #__NR_thunk; svc #0; nop`.
+  - The thunk's `resolve(lib, sym)` returns the trampoline's GUEST
+    address — guest-callable, not a host pointer.
+  - A new syscall `__NR_bifrost_thunk = 0x1000` (handled in
+    `src/syscalls/misc.cpp`) dispatches to `GraphicThunk::dispatch()`,
+    which reads `x9` for the symbol_id, reads args from `x0..x7`,
+    calls the host function, and writes the return value to `x0`.
+- **GraphicThunk wired into DynamicLinker.** New
+  `DynamicLinker::set_thunk_resolver()` callback. When
+  `find_library()` returns empty for a graphic library soname
+  (`libGL.so*`, `libEGL.so*`, `libSDL2*`, `libGLESv2.so*`), the
+  dynamic linker calls `register_thunk_library_()` which synthesizes
+  a `LoadedObject` (no PT_LOAD, no PT_DYNAMIC) and populates the
+  global symbol table via the thunk resolver. The Emulator wires
+  `FrostGraphics::thunk()` into the dynamic linker after creating
+  both.
+- **Thunk symbol enumeration API.** `GraphicThunk::enumerate_symbols(lib, cb)`
+  yields `(name, addr)` pairs for a library. The dynamic linker uses
+  this to populate its symbol table — the thunk is the single source
+  of truth for its symbol inventory (no duplicated hardcoded list
+  that could drift).
+- **VFS hygiene: shared terminal ioctl dispatch.** New
+  `src/yggdrasil/terminal_ioctls.hpp` extracts the duplicated
+  `TIOCGWINSZ`/`TCGETS`/`TCSETS`/`TCSETSW`/`TCSETSF`/`FIONREAD`/
+  `FIONBIO` dispatch from `HostNode::ioctl()` and `StdioNode::ioctl()`
+  into a single `dispatch_terminal_ioctl()` helper. Named constants
+  (`ioctl_num::REQ_TIOCGWINSZ` etc.) replace the magic `0x5413`/
+  `0x5401`/`0x541B` hex values. (The `REQ_` prefix avoids collision
+  with the system header macros of the same names.)
+- **DynamicLinker hygiene: fixed latent `next_base` bug.** The
+  `load_shared_library()` function used a `static uint64_t next_base`
+  function-local — shared across all `DynamicLinker` instances. This
+  was a latent bug if the Emulator ever created two linkers (e.g.,
+  for fork() with separate Memory). Promoted to a member variable
+  `next_lib_base_`.
+- **DynamicLinker hygiene: removed dead `resolve_plt_entry()` stub.**
+  The function was declared and defined but never called — a stub for
+  a future "lazy PLT binding" feature that was never implemented (the
+  linker uses eager binding). Removed from both header and source.
+- **Tests:** all 71 pass under JIT, 71 under `--no-jit`, 72 under FWD
+  mode (incl. bench_mips), 22/22 C API checks. With
+  `BIFROST_THUNK_GRAPHICS=1`: 71/71 pass — the thunk init doesn't
+  break anything when enabled. No performance regression (bench_mips
+  1.4s, 571 MIPS).
+
 ## [1.4.0] — 2026-07-03 (stable release)
 
 ### Post-stabilization hardening (2026-07-03)

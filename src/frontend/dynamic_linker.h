@@ -113,11 +113,12 @@ public:
     // absolute address, or 0 if not found.
     uint64_t resolve_symbol(const std::string& name) const;
 
-    // Resolve a single PLT entry lazily: look up the symbol named in
-    // the JUMP_SLOT relocation at `plt_entry_idx` and write its address
-    // into the GOT. Returns the resolved function address (so the
-    // guest can jump to it directly).
-    uint64_t resolve_plt_entry(uint64_t got_slot_addr);
+    // resolve_plt_entry was a stub for a future "lazy PLT binding"
+    // feature that was never implemented (the linker uses eager
+    // binding). Removed in Turn 37 as dead code — the dynamic linker
+    // resolves all JUMP_SLOT relocations during link(), not on first
+    // call. If you need lazy binding in the future, re-add this with
+    // a real implementation that tracks the GOT-slot → symbol mapping.
 
     // ── TLS ────────────────────────────────────────────────────────
     // Total size of the static TLS block across all loaded objects
@@ -149,6 +150,35 @@ public:
         ifunc_resolver_ = std::move(cb);
     }
 
+    // ── Graphic API thunk resolver (Turn 37) ───────────────────────
+    // When `find_library()` returns empty for a graphic library soname
+    // (libGL.so*, libEGL.so*, libSDL2.so*, libGLESv2.so*), the dynamic
+    // linker consults the thunk resolver to populate the global symbol
+    // table for that library. The callback receives the lib_soname and
+    // returns a list of (symbol_name, guest_trampoline_addr) pairs.
+    //
+    // Using a list (instead of one-at-a-time lookups) keeps the thunk
+    // as the single source of truth for its symbol inventory — the
+    // dynamic linker doesn't need a hardcoded list of GL/EGL/SDL2
+    // entry points that could drift out of sync with the thunk's
+    // actual registrations.
+    //
+    // The Emulator wires FrostGraphics::thunk() into this callback
+    // after creating both. When BIFROST_THUNK_GRAPHICS=1 is unset, the
+    // thunk returns an empty list — the dynamic linker falls through
+    // to its existing "library not found" path.
+    using ThunkSymbolList = std::vector<std::pair<std::string, uint64_t>>;
+    using ThunkResolver = std::function<ThunkSymbolList(const std::string&)>;
+    void set_thunk_resolver(ThunkResolver cb) {
+        thunk_resolver_ = std::move(cb);
+    }
+
+    // Enumerate the libraries the thunk resolver supports. Used by
+    // `link()` to decide which DT_NEEDED entries to handle as synthetic
+    // thunk-backed libraries instead of trying to load them from disk.
+    // Returns true if `soname` is a known graphic library.
+    static bool is_thunk_supported_lib_(const std::string& soname);
+
 private:
     Memory& mem_;
     std::vector<LoadedObject> objects_;
@@ -157,11 +187,23 @@ private:
     std::string error_;
     // Optional ifunc resolver callback (set by Emulator before link()).
     std::function<uint64_t(uint64_t)> ifunc_resolver_;
+    // Optional thunk resolver callback (set by Emulator before link()).
+    // When set, graphic library DT_NEEDED entries that can't be loaded
+    // from disk fall back to this resolver instead of failing.
+    ThunkResolver thunk_resolver_;
 
     // TLS state.
     uint64_t static_tls_size_ = 0;  // total bytes (aligned)
     uint64_t static_tls_base_ = 0;  // guest VA where the block is mapped
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
+
+    // Next base address for load_shared_library(). Was a function-local
+    // static in Turn 15; promoted to a member in Turn 37 so multiple
+    // DynamicLinker instances don't share the same allocator (latent
+    // bug if the Emulator ever creates two linkers, e.g., for fork()
+    // with separate Memory). 0 = not yet initialized; first call sets
+    // it to 0x5000000000.
+    uint64_t next_lib_base_ = 0;
 
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
@@ -186,6 +228,13 @@ private:
     // fresh base address. Records the object in `objects_` and its
     // symbols in `symbols_`. Returns the base address, or 0 on failure.
     uint64_t load_shared_library(const std::string& soname);
+
+    // Register a synthetic LoadedObject for a graphic library that
+    // couldn't be loaded from disk but is supported by the thunk
+    // resolver. Populates `symbols_` with thunk-resolved addresses.
+    // Returns a synthetic (non-zero) base address, or 0 if the thunk
+    // resolver declined to handle this library.
+    uint64_t register_thunk_library_(const std::string& soname);
 
     // Map PT_LOAD segments from `data` at `base`. Returns the highest
     // mapped address + 1 (i.e., the new end_addr). Sets `entry` to

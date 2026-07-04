@@ -9,6 +9,7 @@
 // openat() unchanged.
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/host_node.hpp"
+#include "yggdrasil/terminal_ioctls.hpp"  // shared ioctl dispatch
 #include "core/memory.h"
 
 #include <cerrno>
@@ -84,49 +85,14 @@ int HostNode::fstat(struct stat* st) {
 
 // HostNode::ioctl — handle terminal and FIONREAD ioctls by forwarding
 // to the host fd. v1.4.5-alpha: moved here from ioctls.cpp's heuristic
-// dispatch. The syscall layer now calls node->ioctl() for every ioctl;
-// if it returns Node::IOCTL_NOT_HANDLED, the syscall layer returns
-// -ENOTTY.
+// dispatch. Turn 37: refactored to use the shared
+// dispatch_terminal_ioctl() helper (was duplicated in StdioNode).
 int HostNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
-    // TIOCGWINSZ — query terminal window size.
-    if (request == 0x5413 /*TIOCGWINSZ*/) {
-        struct winsize ws;
-        int r = ::ioctl(fd_, TIOCGWINSZ, &ws);
-        if (r < 0) return -errno;
-        mem.write(argp, &ws, sizeof(ws));
-        return 0;
-    }
-    // TCGETS — read terminal attributes.
-    if (request == 0x5401 /*TCGETS*/) {
-        struct termios t;
-        int r = ::ioctl(fd_, TCGETS, &t);
-        if (r < 0) return -errno;
-        mem.write(argp, &t, sizeof(t));
-        return 0;
-    }
-    // TCSETS / TCSETSW / TCSETSF — write terminal attributes.
-    if (request == 0x5402 /*TCSETS*/ || request == 0x5403 /*TCSETSW*/ ||
-        request == 0x5404 /*TCSETSF*/) {
-        struct termios t;
-        mem.read(argp, &t, sizeof(t));
-        int r = ::ioctl(fd_, static_cast<unsigned long>(request), &t);
-        if (r < 0) return -errno;
-        return 0;
-    }
-    // FIONREAD — bytes available to read without blocking.
-    if (request == 0x541B /*FIONREAD*/) {
-        int n = 0;
-        int r = ::ioctl(fd_, FIONREAD, &n);
-        if (r < 0) return -errno;
-        mem.store<int32_t>(argp, n);
-        return 0;
-    }
+    int r = dispatch_terminal_ioctl(fd_, request, argp, mem);
+    if (r != Node::IOCTL_NOT_HANDLED) return r;
     // Anything else: pass through to the host. The host will return
     // -ENOTTY for unrecognized ioctls, which is what we want.
-    int r = ::ioctl(fd_, static_cast<unsigned long>(request),
-                    reinterpret_cast<void*>(argp));
-    if (r < 0) return -errno;
-    return r;
+    return pass_through_ioctl(fd_, request, argp);
 }
 
 } // namespace arm64emu::yggdrasil

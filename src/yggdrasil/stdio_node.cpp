@@ -4,7 +4,10 @@
 // TIOCGWINSZ / TCGETS / TCSETS / FIONREAD). Previously ioctls.cpp
 // dispatched on the request code with a big if-else chain and guessed
 // the fd type — now the Node owns its ioctls.
+// Turn 37: refactored to use the shared dispatch_terminal_ioctl()
+// helper. Was duplicated verbatim in HostNode.
 #include "yggdrasil/stdio_node.hpp"
+#include "yggdrasil/terminal_ioctls.hpp"  // shared ioctl dispatch
 #include "core/memory.h"
 
 #include <cerrno>
@@ -37,41 +40,12 @@ int StdioNode::fstat(struct stat* st) {
 }
 
 // StdioNode::ioctl — same set as HostNode (terminal + FIONREAD).
-// Forward to the underlying host fd (0/1/2).
+// Forward to the underlying host fd (0/1/2) via the shared helper.
 int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
-    if (request == 0x5413 /*TIOCGWINSZ*/) {
-        struct winsize ws;
-        int r = ::ioctl(fd_, TIOCGWINSZ, &ws);
-        if (r < 0) return -errno;
-        mem.write(argp, &ws, sizeof(ws));
-        return 0;
-    }
-    if (request == 0x5401 /*TCGETS*/) {
-        struct termios t;
-        int r = ::ioctl(fd_, TCGETS, &t);
-        if (r < 0) return -errno;
-        mem.write(argp, &t, sizeof(t));
-        return 0;
-    }
-    if (request == 0x5402 || request == 0x5403 || request == 0x5404) {
-        struct termios t;
-        mem.read(argp, &t, sizeof(t));
-        int r = ::ioctl(fd_, static_cast<unsigned long>(request), &t);
-        if (r < 0) return -errno;
-        return 0;
-    }
-    if (request == 0x541B /*FIONREAD*/) {
-        int n = 0;
-        int r = ::ioctl(fd_, FIONREAD, &n);
-        if (r < 0) return -errno;
-        mem.store<int32_t>(argp, n);
-        return 0;
-    }
+    int r = dispatch_terminal_ioctl(fd_, request, argp, mem);
+    if (r != Node::IOCTL_NOT_HANDLED) return r;
     // Pass-through for anything else.
-    int r = ::ioctl(fd_, static_cast<unsigned long>(request),
-                    reinterpret_cast<void*>(argp));
-    if (r < 0) return -errno;
-    return r;
+    return pass_through_ioctl(fd_, request, argp);
 }
 
 } // namespace arm64emu::yggdrasil

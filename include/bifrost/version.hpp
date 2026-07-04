@@ -47,6 +47,17 @@ namespace arm64emu {
 //     to the host's equivalent libraries. Enabled via
 //     BIFROST_THUNK_GRAPHICS=1 env var. Proof-of-concept — only a
 //     subset of entry points are thunked.
+//     Turn 37: REDESIGNED. The thunk now allocates a guest trampoline
+//     page; each registered symbol gets a 16-byte AArch64 trampoline
+//     (movz x9,#sym_id; movz x8,#__NR_thunk; svc #0; nop). The thunk
+//     is wired into the dynamic linker via a set_thunk_resolver()
+//     callback — when find_library() fails for libGL*/libEGL*/libSDL2*/
+//     libGLESv2*, a synthetic LoadedObject is registered whose symbols
+//     resolve to trampoline addresses. The previous design returned
+//     raw host function pointers (broken: guests can't call x86-64
+//     pointers as AArch64 code). New syscall __NR_bifrost_thunk=0x1000
+//     dispatches to GraphicThunk::dispatch() which reads x0..x7, calls
+//     the host function, and writes the result to x0.
 //   - FrostJIT split: frostjit.cpp was 4520 LOC — too big to navigate.
 //     Split into 7 files: jit_interp.cpp (trampoline), jit_helpers.cpp
 //     (emit helpers), jit_codegen_fp.cpp (FP/SIMD codegen),

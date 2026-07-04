@@ -16,6 +16,7 @@
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
+#include "frost/thunk.hpp"  // GraphicThunk full definition (for init/resolve)
 #include "jit/frostjit.hpp"
 
 #include <algorithm>
@@ -198,6 +199,43 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         bool native_dynlink = (getenv("BIFROST_NO_NATIVE_DYNLINK") == nullptr);
         if (native_dynlink) {
             dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+
+            // ── Wire GraphicThunk into the dynamic linker (Turn 37) ──
+            // When BIFROST_THUNK_GRAPHICS=1 is set, the thunk forwards
+            // guest GL/EGL/SDL2 calls to the host. We init the thunk
+            // (allocates the guest trampoline page) and register a
+            // resolver callback so the dynamic linker can populate the
+            // global symbol table for graphic libraries that couldn't
+            // be loaded from disk.
+            //
+            // We always wire the resolver (even if the thunk is
+            // disabled) — when disabled, enumerate_symbols() returns 0
+            // and the dynamic linker falls through to its existing
+            // "library not found" path. This keeps the code path
+            // uniform.
+            if (auto* thunk = graphics_.thunk()) {
+                if (thunk->enabled()) {
+                    thunk->init(mem_);
+                }
+                // Capture the thunk pointer (not `this`) so the
+                // callback doesn't depend on the Emulator's lifetime
+                // beyond the thunk's. The thunk is owned by graphics_,
+                // which is owned by the Emulator — they have the same
+                // lifetime.
+                GraphicThunk* thunk_ptr = thunk;
+                dyn_linker_->set_thunk_resolver(
+                    [thunk_ptr](const std::string& lib)
+                        -> DynamicLinker::ThunkSymbolList {
+                        DynamicLinker::ThunkSymbolList out;
+                        if (!thunk_ptr->enabled()) return out;
+                        thunk_ptr->enumerate_symbols(lib,
+                            [&](const std::string& sym, uint64_t addr) {
+                                out.emplace_back(sym, addr);
+                            });
+                        return out;
+                    });
+            }
+
             // Register the ifunc resolver callback. BUGFIX: the old
             // IRELATIVE handler just stored the resolver ADDRESS instead
             // of CALLING it. Now we run the resolver in a scratch CPU

@@ -619,13 +619,27 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
 uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
     std::string path;
     auto data = find_library(soname, path);
-    if (data.empty()) return 0;
+    if (data.empty()) {
+        // Library not found on disk. If a thunk resolver is registered
+        // and this is a known graphic library, register a synthetic
+        // LoadedObject whose symbols resolve via the thunk (Turn 37).
+        // This lets dynamically-linked guest programs that use GL/EGL/
+        // SDL2 work without the host having the AArch64 versions of
+        // those libraries installed.
+        if (thunk_resolver_ && is_thunk_supported_lib_(soname)) {
+            return register_thunk_library_(soname);
+        }
+        return 0;
+    }
 
-    // Allocate a fresh base address. Use a monotonically-increasing
-    // allocator starting at 0x5000000000 (above the main binary's
-    // typical 0x400000 region, below the stack at 0x8000000000).
-    static uint64_t next_base = 0x5000000000ULL;
-    uint64_t base = next_base;
+    // Allocate a fresh base address. We use a member variable (not a
+    // function-local static) so multiple DynamicLinker instances don't
+    // share the same allocator — that was a latent bug if the Emulator
+    // ever created two linkers (e.g., for fork() with separate Memory).
+    // The base starts at 0x5000000000 (above the main binary's typical
+    // 0x400000 region, below the stack at 0x8000000000).
+    if (next_lib_base_ == 0) next_lib_base_ = 0x5000000000ULL;
+    uint64_t base = next_lib_base_;
     // Advance by the library's highest PT_LOAD end (page-aligned).
     uint64_t max_end = 0;
     if (data.size() >= 56) {
@@ -647,7 +661,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
             }
         }
     }
-    next_base = (base + max_end + 0xFFFFF) & ~0xFFFFFULL;  // 1 MiB align
+    next_lib_base_ = (base + max_end + 0xFFFFF) & ~0xFFFFFULL;  // 1 MiB align
 
     LoadedObject obj;
     obj.name = soname;
@@ -665,6 +679,73 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     return base;
+}
+
+// ── register_thunk_library_ (Turn 37) ──────────────────────────────────
+// Synthesize a LoadedObject for a graphic library that's supported by
+// the thunk resolver but couldn't be loaded from disk. The object has
+// no PT_LOAD segments, no PT_DYNAMIC, no PT_TLS — its only purpose is
+// to provide symbol addresses via the global `symbols_` map.
+//
+// The thunk resolver is called once with `soname` and returns the full
+// list of (symbol_name, guest_trampoline_addr) pairs it supports for
+// that library. We insert each into the global symbol table.
+uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
+    if (!thunk_resolver_) return 0;
+
+    // Use a synthetic base address in a high region that won't collide
+    // with real libraries. We don't actually map anything at this
+    // address — it's just a sentinel for the LoadedObject record.
+    // The "real" addresses live in the thunk's trampoline page.
+    constexpr uint64_t THUNK_LIB_BASE = 0x6000000000ULL;
+
+    LoadedObject obj;
+    obj.name = soname;
+    obj.base_addr = THUNK_LIB_BASE;  // synthetic; never dereferenced
+    obj.is_main = false;
+    obj.dyn_addr = 0;     // no PT_DYNAMIC
+    obj.symtab_addr = 0;  // no .dynsym
+    obj.strtab_addr = 0;  // no .dynstr
+    objects_.push_back(std::move(obj));
+
+    // Ask the thunk for all symbols it supports for this library.
+    // The thunk is the single source of truth for its symbol inventory;
+    // we don't need a hardcoded list of GL/EGL/SDL2 entry points here.
+    ThunkSymbolList syms = thunk_resolver_(soname);
+
+    size_t added = 0;
+    for (const auto& [sym, addr] : syms) {
+        if (addr == 0) continue;
+        // First definition wins (matches the existing index_symbols
+        // behavior). Don't override a strong symbol from a real lib.
+        if (symbols_.count(sym) == 0) {
+            symbols_[sym] = addr;
+            added++;
+        }
+    }
+
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] registered thunk library '%s': "
+                "%zu/%zu symbols\n",
+                soname.c_str(), added, syms.size());
+    }
+    return THUNK_LIB_BASE;
+}
+
+// ── is_thunk_supported_lib_ ────────────────────────────────────────────
+// Returns true if `soname` matches the naming pattern of a graphic
+// library that the thunk resolver might handle. We accept any libGL*,
+// libEGL*, libSDL2*, or libGLESv2* soname (with or without version
+// suffix). The thunk itself does the final accept/reject — this is
+// just a fast filter to avoid calling the resolver for libc/libm/etc.
+bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
+    auto starts_with = [](const std::string& s, const char* p) {
+        return s.rfind(p, 0) == 0;
+    };
+    return starts_with(soname, "libGL.so")
+        || starts_with(soname, "libEGL.so")
+        || starts_with(soname, "libSDL2")
+        || starts_with(soname, "libGLESv2.so");
 }
 
 // ── parse_tls ──────────────────────────────────────────────────────────
@@ -841,16 +922,6 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     auto it = symbols_.find(name);
     if (it == symbols_.end()) return 0;
     return it->second;
-}
-
-// ── resolve_plt_entry (lazy binding stub) ──────────────────────────────
-uint64_t DynamicLinker::resolve_plt_entry(uint64_t got_slot_addr) {
-    // For lazy binding, we'd look up the JUMP_SLOT relocation whose
-    // r_offset matches got_slot_addr, resolve the symbol, and write
-    // the address into the GOT slot. We don't track that mapping here
-    // (lazy binding is not the default), so just return 0.
-    (void)got_slot_addr;
-    return 0;
 }
 
 } // namespace arm64emu
