@@ -106,8 +106,16 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
         // SA_RESETHAND: clear the handler after first delivery. We
         // record the flag; deliver_signal() performs the reset.
     } else {
-        // act_addr == 0 means "uninstall" — reset to default.
-        actions_[signo] = SigAction{};
+        // act_addr == 0 means "query only" — do NOT change the handler.
+        // BUGFIX (Turn 42): the old code reset the handler to SIG_DFL
+        // when act_addr was 0. This broke musl's raise(): musl calls
+        // sigaction(signo, NULL, &old) to QUERY the current handler,
+        // then later calls sigaction(signo, &old, NULL) to restore it.
+        // The old code uninstalled the handler during the query, so
+        // when the signal was finally delivered (after being unblocked),
+        // there was no handler → SIG_DFL → process terminated.
+        // Correct behavior per POSIX: "If act is NULL, then the signal
+        // handler is not changed."
     }
 
     return 0;
@@ -423,19 +431,47 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
 // ── deliver_signal ──────────────────────────────────────────────────────
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
+    if (getenv("BIFROST_SIGNAL_TRACE")) {
+        fprintf(stderr, "[signal] deliver_signal: signo=%d si_code=%d "
+                "fault_addr=0x%llx cpu.tid=%d cpu.sigmask=0x%llx\n",
+                signo, si_code,
+                static_cast<unsigned long long>(fault_addr),
+                cpu.tid,
+                static_cast<unsigned long long>(cpu.sigmask));
+    }
     if (signo < 1 || signo > MAX_SIGNAL) return false;
 
-    // Blocked signals are not delivered (except SIGKILL/SIGSTOP, which
-    // we don't block — handled in procmask). Pending blocked signals
-    // are dropped in this simplified model (no pending queue).
-    // BUGFIX: read the mask from the per-CPU state, not the shared
-    // SignalTable mask. Each vCPU has its own mask now.
+    // Blocked signals are queued as pending (not dropped). They'll be
+    // delivered when rt_sigprocmask unblocks them. SIGKILL/SIGSTOP are
+    // always delivered immediately.
+    // BUGFIX (Turn 42): the old code DROPPED blocked signals. This broke
+    // raise()/kill() — musl's raise() does: block all signals → tkill →
+    // unblock. The signal was delivered during tkill but was blocked,
+    // so it was dropped. Now we queue it as pending and deliver it when
+    // the mask is restored.
     if (SignalTable::is_blocked(cpu, signo) &&
         signo != BIFROST_SIGKILL && signo != BIFROST_SIGSTOP) {
+        cpu.sigpending |= (1ULL << signo);
+        if (getenv("BIFROST_SIGNAL_TRACE")) {
+            fprintf(stderr, "[signal] signo=%d is blocked — queued as "
+                    "pending (sigpending=0x%llx)\n",
+                    signo,
+                    static_cast<unsigned long long>(cpu.sigpending));
+        }
         return false;
     }
 
     const SigAction* act = sigtab.lookup(signo);
+
+    if (getenv("BIFROST_SIGNAL_TRACE")) {
+        fprintf(stderr, "[signal] signo=%d: act=%p", signo, (void*)act);
+        if (act) {
+            fprintf(stderr, " handler=0x%llx installed=%d",
+                    static_cast<unsigned long long>(act->handler),
+                    act->installed);
+        }
+        fprintf(stderr, "\n");
+    }
 
     // SIG_IGN (handler == 1): drop the signal.
     if (act && act->handler == 1) {
@@ -552,7 +588,54 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     cpu.pc       = act->handler;
     cpu.sp       = new_sp;
 
+    if (getenv("BIFROST_SIGNAL_TRACE")) {
+        fprintf(stderr, "[signal] delivered sig %d: handler=0x%llx "
+                "sp=0x%llx x30=0x%llx info=0x%llx uc=0x%llx\n",
+                signo,
+                static_cast<unsigned long long>(act->handler),
+                static_cast<unsigned long long>(new_sp),
+                static_cast<unsigned long long>(tramp),
+                static_cast<unsigned long long>(info_addr),
+                static_cast<unsigned long long>(uc_addr));
+    }
+
     return true;
+}
+
+// ── deliver_pending_signals ────────────────────────────────────────────
+// Check for signals that were queued as pending (because they were
+// blocked at delivery time) and are now unblocked. Deliver them.
+// Called after rt_sigprocmask changes the mask.
+int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
+    int delivered = 0;
+    // Check each pending signal bit.
+    uint64_t pending = cpu.sigpending;
+    while (pending) {
+        int signo = __builtin_ctzll(pending);
+        pending &= pending - 1;  // clear lowest set bit
+
+        // Skip if still blocked (shouldn't happen — we only check
+        // signals that are both pending AND unblocked).
+        if (SignalTable::is_blocked(cpu, signo) &&
+            signo != BIFROST_SIGKILL && signo != BIFROST_SIGSTOP) {
+            continue;
+        }
+
+        // Clear the pending bit and deliver.
+        cpu.sigpending &= ~(1ULL << signo);
+        if (getenv("BIFROST_SIGNAL_TRACE")) {
+            fprintf(stderr, "[signal] delivering pending signal %d "
+                    "(unblocked)\n", signo);
+        }
+        deliver_signal(emu, cpu, sigtab, signo);
+        delivered++;
+        // Only deliver one signal per call — the handler will modify
+        // cpu.pc, and we need to return so the run loop picks up the
+        // new PC. Multiple pending signals will be delivered one at a
+        // time as the run loop calls us again.
+        break;
+    }
+    return delivered;
 }
 
 // ── Host-to-guest signal forwarding ──────────────────

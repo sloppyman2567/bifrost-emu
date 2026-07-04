@@ -193,7 +193,34 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: now operates on per-CPU sigmask state.
             int r = SignalTable::procmask(mem_, cpu, static_cast<int>(a0),
                                           a1, a2, static_cast<size_t>(a3));
-            ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
+            // BUGFIX (Turn 42): after changing the mask, check for
+            // newly-unblocked pending signals and deliver them. Without
+            // this, raise()/kill() to a blocked signal was silently
+            // dropped — musl's raise() blocks all signals, calls tkill,
+            // then unblocks. The signal was queued during tkill but
+            // never delivered when the mask was restored.
+            bool signal_delivered = false;
+            if (r == 0 && cpu.sigpending != 0) {
+                if (getenv("BIFROST_SIGNAL_TRACE")) {
+                    fprintf(stderr, "[signal] rt_sigprocmask: pending=0x%llx, "
+                            "delivering...\n",
+                            static_cast<unsigned long long>(cpu.sigpending));
+                }
+                int n = deliver_pending_signals(emu, cpu, signals_);
+                if (n > 0) {
+                    // A signal was delivered — the handler is now set up
+                    // (cpu.pc = handler, cpu.regs[0] = signo). DON'T
+                    // overwrite x0 with the syscall return value — the
+                    // handler expects x0=signo, not 0. The rt_sigprocmask
+                    // return value is lost, but that's fine: musl's
+                    // raise() ignores it (it only cares that the signal
+                    // was delivered).
+                    signal_delivered = true;
+                }
+            }
+            if (!signal_delivered) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
+            }
             return 0;
         }
 

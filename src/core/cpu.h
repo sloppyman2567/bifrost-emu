@@ -122,6 +122,7 @@ public:
     // thread's mask. Now each CPU has its own mask and altstack, set
     // by rt_sigprocmask/sigaltstack and read by deliver_signal.
     uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo` set = blocked)
+    uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo` set = pending)
     struct AltStack {
         uint64_t sp    = 0;     // base address
         uint64_t size  = 0;     // size in bytes

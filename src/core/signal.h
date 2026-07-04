@@ -287,4 +287,8 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
 
+// Deliver any pending signals that are no longer blocked. Called after
+// rt_sigprocmask unblocks signals. Returns the number of signals delivered.
+int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab);
+
 } // namespace arm64emu
