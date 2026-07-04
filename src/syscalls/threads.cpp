@@ -946,7 +946,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             int sig = static_cast<int>(a1);
             if (sig == 0) { ret_host(0); return 0; }
             if (sig < 1 || sig > MAX_SIGNAL) { ret_err(EINVAL); return 0; }
-            if (pid == 0 || pid < 0 || pid == static_cast<int>(::getpid())) {
+            // Guest PID 1 = self (the main guest process, which always
+            // has PID 1 in our model). Also treat pid == 0, pid < 0,
+            // and pid == host PID as self.
+            if (pid == 1 || pid == 0 || pid < 0 ||
+                pid == static_cast<int>(::getpid())) {
                 // Self-process: deliver to the main thread (TID 1) or
                 // the caller if it's the main thread.
                 if (cpu.tid == 1) {
@@ -956,10 +960,16 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (main) deliver_signal(emu, *main, signals_, sig);
                 }
             } else {
-                // Other process — we can't deliver cross-process.
-                // Return ESRCH for unknown pids.
-                ret_err(ESRCH);
-                return 0;
+                // Other process — forward to host kill() so the target
+                // (a forked child process) receives the signal via its
+                // host signal handler. This makes kill(child_pid, sig)
+                // work for inter-process signaling between forked
+                // children.
+                int r = ::kill(pid, sig);
+                if (r < 0) {
+                    ret_err(ESRCH);
+                    return 0;
+                }
             }
             ret_host(0);
             return 0;

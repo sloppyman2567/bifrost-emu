@@ -1,16 +1,31 @@
-// test_sigint_handler.c — Verify that a real SIGINT handler runs when
-// Ctrl+C is pressed during a blocking read.
+// test_sigint_handler.c — Self-contained signal handler test (no pty needed).
 //
-// Installs a SIGINT handler that sets a flag, then blocks on read().
-// When SIGINT arrives, the handler should run (setting the flag), and
-// then read() should return -EINTR. The program verifies the flag is
-// set BEFORE read() returns.
+// Verifies that when a signal arrives during a blocking read(), the
+// guest's signal handler runs BEFORE read() returns -EINTR. This tests
+// the Turn 43 signal delivery fix (handle_eintr + SVC PC advancement).
+//
+// How it works:
+//   1. Install a SIGINT handler that sets a flag.
+//   2. Fork a child process.
+//   3. Child: usleep(200ms), then kill(getppid(), SIGINT), then _exit(0).
+//   4. Parent: block on read(0, ...) — no input, so it blocks.
+//   5. After 200ms, the child sends SIGINT to the parent (host process).
+//   6. The emulator's host signal handler catches it and queues it.
+//   7. The host read() returns -EINTR.
+//   8. The read() syscall handler calls handle_eintr(), which drains the
+//      pending SIGINT. The guest handler runs (setting the flag).
+//   9. read() returns -EINTR to the guest.
+//  10. Parent verifies: handler ran (flag set) AND read returned -EINTR.
+//
+// Build: make cross SRC=ctest_real/test_sigint_handler.c OUT=ctest_real/test_sigint_handler.elf
+// Run:   ./bifrost-emu ctest_real/test_sigint_handler.elf
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 static volatile sig_atomic_t got_sigint = 0;
 
@@ -27,14 +42,35 @@ int main(void) {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;  // no SA_RESTART — read should return -EINTR
     if (sigaction(SIGINT, &sa, NULL) != 0) {
-        perror("sigaction");
+        write(2, "FAIL: sigaction failed\n", 23);
         return 1;
     }
 
-    write(2, "READING\n", 8);
+    // Fork a child that will send SIGINT after 200ms.
+    pid_t child = fork();
+    if (child < 0) {
+        write(2, "FAIL: fork failed\n", 18);
+        return 1;
+    }
+    if (child == 0) {
+        // Child: wait 200ms, then signal parent.
+        usleep(200000);
+        kill(getppid(), SIGINT);
+        _exit(0);
+    }
 
+    // Parent: block on read(). We use a pipe (not stdin) so the test
+    // works even when stdin is /dev/null (as the test runner does).
+    // The write end is kept open but never written to, so read() blocks
+    // until the SIGINT from the child interrupts it.
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        write(2, "FAIL: pipe failed\n", 18);
+        return 1;
+    }
+    write(2, "READING\n", 8);
     char buf[16];
-    ssize_t n = read(0, buf, sizeof(buf));
+    ssize_t n = read(pipefd[0], buf, sizeof(buf));
 
     {
         char msg[128];
@@ -44,6 +80,9 @@ int main(void) {
         write(2, msg, len);
     }
 
+    // Reap the child.
+    waitpid(child, NULL, 0);
+
     if (n < 0 && errno == EINTR) {
         if (got_sigint) {
             write(2, "PASS: handler ran before read returned -EINTR\n", 46);
@@ -52,14 +91,8 @@ int main(void) {
             write(2, "FAIL: read returned -EINTR but handler did not run\n", 51);
             return 1;
         }
-    } else if (n > 0) {
-        char msg[64];
-        int len = snprintf(msg, sizeof(msg),
-                           "FAIL: read succeeded, got %zd bytes: 0x%02x\n", n, (unsigned)buf[0]);
-        write(2, msg, len);
-        return 1;
-    } else if (n == 0) {
-        write(2, "FAIL: read returned 0 (EOF)\n", 28);
+    } else if (n >= 0) {
+        write(2, "FAIL: read was not interrupted\n", 31);
         return 1;
     } else {
         char msg[64];

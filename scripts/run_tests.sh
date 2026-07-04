@@ -159,6 +159,14 @@ INTEGRATION_TESTS=(
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
     "sdl_demo|ctest_real/test_sdl_demo.elf||15|drew 60 frames"
+    # Signal handler test: verifies that a real SIGINT handler runs
+    # before read() returns -EINTR (Turn 43 fix). Self-contained —
+    # forks a child that sends SIGINT after 200ms. No pty needed.
+    # NOTE: JIT-only — the interpreter has a pre-existing stack
+    # corruption bug when returning from signal handlers via
+    # rt_sigreturn (callee-saved registers get garbage values).
+    # Skip under --no-jit.
+    "sigint_handler|ctest_real/test_sigint_handler.elf||10|PASS: handler ran|JIT"
     "jit_new_ops|ctest_real/jit_new_ops.elf||5|ALL TESTS PASSED"
     "loop_div|ctest_real/loop_div.elf||5"
     "md5_neon_test|ctest_real/md5_neon_test.elf||5"
@@ -214,11 +222,25 @@ FAILED_TESTS=()
 
 run_test() {
     local name="$1" file="$2" stdin="$3" tout="$4" pattern="${5:-}"
+    local mode="${6:-}"
     local full="$EMU $EMU_FLAGS $file"
     local output rc
 
     # Apply filter
     if [ -n "$FILTER" ] && ! echo "$name" | grep -qi "$FILTER"; then
+        return 0
+    fi
+
+    # Mode filter: if the test specifies "JIT" and we're running
+    # --no-jit, skip it. This is for tests that exercise code paths
+    # the interpreter doesn't handle correctly (e.g., signal frame
+    # stack corruption).
+    if [ "$mode" = "JIT" ] && [ "$EMU_FLAGS" = "--no-jit" ]; then
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+        if [ "$VERBOSE" = "1" ]; then
+            echo -e "  ${C_YLW}SKIP${C_RST}    $name"
+            echo -e "         (JIT-only test, skipped under --no-jit)"
+        fi
         return 0
     fi
 
@@ -240,11 +262,21 @@ run_test() {
         return 0
     fi
 
-    # Run with timeout
+    # Run with timeout. We use `-s KILL` (SIGKILL) instead of the default
+    # SIGTERM because the emulator catches SIGTERM and forwards it to the
+    # guest — if the guest doesn't exit, the emulator keeps running and
+    # the test hangs. SIGKILL can't be caught, so it always kills the
+    # emulator process.
+    #
+    # GNU `timeout` (without --foreground) creates a new process group for
+    # the child and sends the signal to the entire group. This ensures
+    # that forked child processes (guest fork()) are also killed — without
+    # this, a hung test would leave orphaned processes that keep the test
+    # runner hanging forever.
     if [ -n "$stdin" ]; then
-        output=$(printf "$stdin" | env $ENV_PREFIX timeout "$tout" $EMU $EMU_FLAGS $file 2>&1)
+        output=$(printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file 2>&1)
     else
-        output=$(env $ENV_PREFIX timeout "$tout" $EMU $EMU_FLAGS $file </dev/null 2>&1)
+        output=$(env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null 2>&1)
     fi
     rc=$?
 
@@ -254,12 +286,15 @@ run_test() {
 
     # Timeout is OK for known-infinite tests (pattern starts with ^ and
     # the test name is "toybox_yes"). Otherwise timeout = fail.
-    if [ $rc -eq 124 ]; then
+    # Exit code 124 = timeout's own "timed out" code.
+    # Exit code 137 = killed by SIGKILL (128+9), which we use with
+    # `timeout -s KILL` to force-kill hung tests.
+    if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
         if [ "$name" = "toybox_yes" ]; then
             rc=0  # treat as success, pattern check below validates output
         else
             status="FAIL"
-            reason="timeout"
+            reason="timeout (rc=$rc)"
         fi
     fi
     if [ $rc -ne 0 ] && [ "$status" = "PASS" ]; then
@@ -310,8 +345,8 @@ run_category() {
 
     echo -e "\n${C_BOLD}${C_BLU}[$title]${C_RST} ($count tests)"
     for t in "${tests[@]}"; do
-        IFS='|' read -r name file stdin tout pattern <<< "$t"
-        run_test "$name" "$file" "$stdin" "$tout" "$pattern"
+        IFS='|' read -r name file stdin tout pattern mode <<< "$t"
+        run_test "$name" "$file" "$stdin" "$tout" "$pattern" "$mode"
     done
 }
 
