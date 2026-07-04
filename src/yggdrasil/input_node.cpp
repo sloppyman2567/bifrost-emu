@@ -1,10 +1,13 @@
-// yggdrasil/input_node.cpp — InputNode implementation (Turn 38).
+// yggdrasil/input_node.cpp — InputNode implementation (Turn 38-39).
 //
-// Reads return input_event records (24 bytes each on AArch64) from the
-// FrostInput ring buffer. When the queue is empty, reads return 0 (EOF)
-// — the guest should poll or sleep and retry.
+// Reads return event records from the FrostInput ring buffer. The format
+// depends on the InputDevice type passed to the constructor:
+//   - InputDevice::Event: 24-byte input_event records
+//   - InputDevice::Js:    8-byte js_event records
+//   - InputDevice::Mouse: not yet implemented (returns -ENOSYS)
+//
+// When the queue is empty, reads return 0 (EOF).
 #include "yggdrasil/input_node.hpp"
-#include "frost/input.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -17,8 +20,7 @@ namespace arm64emu::yggdrasil {
 ssize_t InputNode::read(uint64_t /*off*/, void* buf, size_t n) {
     if (!input_) return -ENODEV;
     if (n == 0) return 0;
-    // FrostInput::read returns bytes read (multiple of 24) or -errno.
-    return input_->read(static_cast<uint8_t*>(buf), n, /*blocking=*/false);
+    return input_->read(static_cast<uint8_t*>(buf), n, dev_, /*blocking=*/false);
 }
 
 ssize_t InputNode::write(uint64_t /*off*/, const void* /*buf*/, size_t /*n*/) {

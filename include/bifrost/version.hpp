@@ -76,6 +76,35 @@ namespace arm64emu {
 //     SDL_WINDOW_RESIZABLE; the fb texture auto-scales to the window
 //     size via RenderCopy. New set_window_title() and set_window_size()
 //     methods. has_window() diagnostic.
+//   - Game controller support (Turn 39). FrostInput now opens all
+//     connected SDL2 game controllers via SDL_GameControllerOpen and
+//     translates their events to both EV_ABS/EV_KEY (for
+//     /dev/input/eventX) and JS_EVENT (for /dev/input/js0). Hot-plug
+//     (SDL_CONTROLLERDEVICEADDED/REMOVED) is handled. Full button +
+//     axis mapping: A/B/X/Y, shoulders, triggers, sticks, D-pad,
+//     Start/Back/Guide. New has_game_controller() and
+//     game_controller_count() diagnostics.
+//   - Dynamic linker bug fixes (Turn 39). Three bugs that broke ALL
+//     dynamically-linked binaries (glibc AND musl):
+//     1. PT_DYNAMIC parsing read p_offset (file offset) into dyn_vaddr
+//        instead of p_vaddr (virtual address). Fixed.
+//     2. DT_JMPREL (PLT relocations) was completely ignored — only
+//        DT_RELA was processed. JUMP_SLOT relocations for libc
+//        functions (printf, malloc, __libc_start_main) were never
+//        applied, so GOT entries stayed 0 → PLT stubs jumped to 0 →
+//        decode error at pc=0x0. Fixed: DT_JMPREL now processed
+//        separately with eager binding.
+//     3. d_val for DT_RELA/DT_JMPREL in shared libraries is a vaddr
+//        RELATIVE to the library's load base. The old code used d_val
+//        directly, which worked for the main binary (base=0) but read
+//        from wrong addresses for shared libs (e.g., libc's DT_JMPREL
+//        at 0x2a880 was read from low memory instead of
+//        0x500002a880). Fixed: obj.base_addr added to d_val.
+//     After these fixes, dynamically-linked binaries progress much
+//     further (symbols resolve, PLT works). Glibc binaries still hang
+//     in libc init (needs vDSO/signal frame work — future enhancement).
+//     Musl dynamic binaries also progress further (was decode error
+//     at 0x0, now reaches libc init).
 //   - FrostJIT split: frostjit.cpp was 4520 LOC — too big to navigate.
 //     Split into 7 files: jit_interp.cpp (trampoline), jit_helpers.cpp
 //     (emit helpers), jit_codegen_fp.cpp (FP/SIMD codegen),

@@ -274,21 +274,33 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         steps++;
                     }
                 } catch (const std::exception& e) {
-                    fprintf(stderr, "[%s] ifunc resolver at 0x%llx threw: %s\n",
-                            CODENAME,
-                            static_cast<unsigned long long>(resolver_addr),
-                            e.what());
+                    if (getenv("BIFROST_IFUNC_TRACE")) {
+                        fprintf(stderr, "[%s] ifunc resolver at 0x%llx threw: %s\n",
+                                CODENAME,
+                                static_cast<unsigned long long>(resolver_addr),
+                                e.what());
+                    }
                     main_cpu_ = saved;
                     return 0;
                 }
                 uint64_t result = main_cpu_.regs[0];
                 if (steps >= IRESOLVER_LIMIT) {
-                    fprintf(stderr, "[%s] ifunc resolver at 0x%llx ran >%llu "
-                            "instructions; aborting (likely infinite loop)\n",
+                    if (getenv("BIFROST_IFUNC_TRACE")) {
+                        fprintf(stderr, "[%s] ifunc resolver at 0x%llx ran >%llu "
+                                "instructions; aborting (likely infinite loop)\n",
+                                CODENAME,
+                                static_cast<unsigned long long>(resolver_addr),
+                                static_cast<unsigned long long>(IRESOLVER_LIMIT));
+                    }
+                    result = 0;
+                }
+                if (getenv("BIFROST_IFUNC_TRACE")) {
+                    fprintf(stderr, "[%s] ifunc resolver at 0x%llx returned 0x%llx "
+                            "(steps=%llu)\n",
                             CODENAME,
                             static_cast<unsigned long long>(resolver_addr),
-                            static_cast<unsigned long long>(IRESOLVER_LIMIT));
-                    result = 0;
+                            static_cast<unsigned long long>(result),
+                            static_cast<unsigned long long>(steps));
                 }
                 // Restore main_cpu_ to its pre-resolver state.
                 main_cpu_ = saved;

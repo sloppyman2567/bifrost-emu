@@ -344,6 +344,57 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy` for headless CI).
   No performance regression (bench_mips 1.4s, 571 MIPS).
 
+### Game controller support + dynamic linker bug fixes (2026-07-04, Turn 39)
+
+- **Dynamic linker: 3 critical bug fixes.** All three bugs affected ALL
+  dynamically-linked binaries (glibc AND musl). They were latent because
+  the existing test suite only used STATICALLY-linked binaries (toybox
+  is static; all ctest_real/*.elf are static).
+  - **Bug 1: PT_DYNAMIC p_offset vs p_vaddr.** `parse_dynamic()` read
+    the PT_DYNAMIC segment's `p_offset` (file offset) into `dyn_vaddr`
+    instead of `p_vaddr` (virtual address). The ELF64 program header
+    layout is: p_type@0, p_flags@4, p_offset@8, p_vaddr@16, p_paddr@24,
+    p_filesz@32, p_memsz@40, p_align@48. The old code used `p+8`
+    (p_offset) instead of `p+16` (p_vaddr).
+  - **Bug 2: DT_JMPREL completely ignored.** The relocation loop only
+    processed DT_RELA (.rela.dyn) and ignored DT_JMPREL (.rela.plt)
+    entirely. JUMP_SLOT relocations (the PLT entries for libc functions
+    like printf, malloc, __libc_start_main) were never applied — GOT
+    entries stayed 0, PLT stubs jumped to 0 → decode error at pc=0x0.
+  - **Bug 3: d_val base offset for shared libs.** `d_val` for
+    DT_RELA/DT_JMPREL in shared libraries is a vaddr RELATIVE to the
+    library's load base. The old code used `d_val` directly, which
+    worked for the main binary (base=0) but read from wrong addresses
+    for shared libs (libc's DT_JMPREL at 0x2a880 was read from low
+    memory instead of 0x500002a880).
+  - After all three fixes: dynamically-linked glibc binaries progress
+    much further — symbols resolve, PLT works, _start calls
+    __libc_start_main. They still hang in libc init (needs vDSO/signal
+    work — future enhancement).
+- **Game controller support.** FrostInput now opens all connected SDL2
+  game controllers via `SDL_GameControllerOpen` and translates their
+  events:
+  - SDL_CONTROLLERBUTTONDOWN/UP → EV_KEY (BTN_GAMEPAD/BTN_EAST/
+    BTN_NORTH/BTN_WEST/BTN_TL/BTN_TR/BTN_THUMBL/BTN_THUMBR/
+    BTN_START/BTN_SELECT/BTN_MODE/BTN_DPAD_*) + JS_EVENT_BUTTON
+  - SDL_CONTROLLERAXISMOTION → EV_ABS (ABS_X/ABS_Y/ABS_RX/ABS_RY/
+    ABS_BRAKE/ABS_GAS) + JS_EVENT_AXIS
+  - SDL_CONTROLLERDEVICEADDED/REMOVED → hot-plug/hot-unplug
+  - New methods: `has_game_controller()`, `game_controller_count()`.
+- **Separate js_event queue.** FrostInput now has TWO ring buffers:
+  `event_queue_` (24-byte input_event for /dev/input/eventX) and
+  `js_queue_` (8-byte js_event for /dev/input/js0). Both are fed by
+  the same SDL2 event handler. Game controller events go to BOTH.
+- **InputDevice enum.** `FrostInput::read()` takes an `InputDevice`
+  parameter (Event/Js/Mouse) selecting the event format. InputNode
+  passes the right device based on which /dev/input path was opened.
+- **New tests.** `ctest_real/test_gamepad.c` (game controller test)
+  and `ctest_real/test_dynlink.c` (dynamic linker regression test).
+- **Tests:** 74/74 pass under JIT (was 72 — added gamepad_test +
+  dynlink_test), 75/75 under `--no-jit`, 75/75 under FWD mode, 22/22
+  C API checks. Both headless and SDL2 builds pass. No performance
+  regression (bench_mips 1.4s, 571 MIPS).
+
 ## [1.4.0] — 2026-07-03 (stable release)
 
 ### Post-stabilization hardening (2026-07-03)

@@ -179,23 +179,32 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
 
     // /dev/input/eventX, /dev/input/mice, /dev/input/mouse0, /dev/input/js0
     // → input backend (FrostInput, owned by FrostGraphics).
-    // All of these return the same input_event stream — we don't
-    // distinguish mice vs event vs js0 in the backend. The guest's
-    // choice of which to open is mostly cosmetic.
+    // Turn 39: different paths return different event formats:
+    //   - eventX: 24-byte input_event records (EV_KEY/EV_REL/EV_ABS)
+    //   - js0:    8-byte js_event records (JS_EVENT_BUTTON/AXIS)
+    //   - mice/mouse0: ImPS/2 packets (not yet implemented)
     if (path.rfind("/dev/input/", 0) == 0) {
         std::string name = path.substr(strlen("/dev/input/"));
-        if (name == "event0" || name == "mice" ||
-            name == "mouse0" || name == "js0") {
-            if (gfx_) {
-                FrostInput* in = gfx_->input();
-                if (in) {
-                    return std::make_unique<InputNode>(in, flags);
-                }
-            }
-            // No graphics backend — return -ENODEV.
-            *err_out = -ENODEV;
+        ::arm64emu::InputDevice dev = ::arm64emu::InputDevice::Event;
+        if (name == "event0") {
+            dev = ::arm64emu::InputDevice::Event;
+        } else if (name == "js0") {
+            dev = ::arm64emu::InputDevice::Js;
+        } else if (name == "mice" || name == "mouse0") {
+            dev = ::arm64emu::InputDevice::Mouse;
+        } else {
+            // Unknown /dev/input/ path — fall through to host passthrough.
+            *err_out = 0;
             return nullptr;
         }
+        if (gfx_) {
+            FrostInput* in = gfx_->input();
+            if (in) {
+                return std::make_unique<InputNode>(in, dev, flags);
+            }
+        }
+        *err_out = -ENODEV;
+        return nullptr;
     }
 
     // /dev/ptmx → pseudo-terminal master (passthrough for interactive apps)

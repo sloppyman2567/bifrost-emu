@@ -226,16 +226,36 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         if (obj.dyn_addr == 0) continue;
         try {
             // Find DT_RELA / DT_RELASZ / DT_JMPREL / DT_PLTRELSZ.
+            // BUGFIX (Turn 39): d_val for these tags is a vaddr RELATIVE
+            // to the object's load base. For the main binary (non-PIE,
+            // base=0) this is already absolute. For shared libraries
+            // (PIE, base!=0) we MUST add obj.base_addr to get the
+            // absolute address. The old code used d_val directly, which
+            // worked for the main binary but read from wrong addresses
+            // for shared libs (e.g., libc's DT_JMPREL at 0x2a880 was
+            // read from low memory instead of 0x500002a880). This caused
+            // libc's PLT GOT entries to never be filled → PLT stubs
+            // jumped to PLT0 → jumped to GOT[2] (resolver) = 0 → crash.
             uint64_t rela_addr = 0, rela_size = 0;
             uint64_t jmprel_addr = 0, jmprel_size = 0;
             Elf64_Dyn dyn;
             for (uint64_t p = obj.dyn_addr; ; p += sizeof(dyn)) {
                 mem_.read(p, &dyn, sizeof(dyn));
                 if (dyn.d_tag == DT_NULL_) break;
-                if (dyn.d_tag == DT_RELA_)      rela_addr = dyn.d_val;
+                if (dyn.d_tag == DT_RELA_)      rela_addr = obj.base_addr + dyn.d_val;
                 else if (dyn.d_tag == DT_RELASZ_)    rela_size = dyn.d_val;
-                else if (dyn.d_tag == DT_JMPREL_)    jmprel_addr = dyn.d_val;
+                else if (dyn.d_tag == DT_JMPREL_)    jmprel_addr = obj.base_addr + dyn.d_val;
                 else if (dyn.d_tag == DT_PLTRELSZ_)  jmprel_size = dyn.d_val;
+            }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dynlink] obj '%s' base=0x%llx: "
+                        "RELA=0x%llx/%llu JMPREL=0x%llx/%llu\n",
+                        obj.name.c_str(),
+                        static_cast<unsigned long long>(obj.base_addr),
+                        static_cast<unsigned long long>(rela_addr),
+                        static_cast<unsigned long long>(rela_size),
+                        static_cast<unsigned long long>(jmprel_addr),
+                        static_cast<unsigned long long>(jmprel_size));
             }
             // DT_RELA entries are absolute addresses already (relocated
             // by R_AARCH64_RELATIVE during the main binary's load).
@@ -426,12 +446,50 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     }
                 }
             }
-            // PLT relocations (DT_JMPREL) — we bind eagerly above as
-            // part of the RELA pass if DT_BIND_NOW or DF_BIND_NOW is set.
-            // For lazy binding, we'd leave the PLT stub in place and
-            // resolve on first call. For now, eagerly bind JUMP_SLOT
-            // entries too (handled in the RELA pass).
-            (void)jmprel_addr; (void)jmprel_size;
+            // PLT relocations (DT_JMPREL) — eager binding.
+            // BUGFIX (Turn 39): the old code only processed DT_RELA and
+            // ignored DT_JMPREL entirely. JUMP_SLOT relocations (the PLT
+            // entries that point to libc functions like printf, malloc,
+            // __libc_start_main) live in DT_JMPREL, NOT in DT_RELA. The
+            // old code's JUMP_SLOT case (inside the DT_RELA loop) never
+            // fired because JUMP_SLOTs aren't in DT_RELA. This meant
+            // dynamically-linked glibc binaries crashed at _start because
+            // the GOT entries for __libc_start_main etc. were never
+            // filled (they stayed 0, so `br x17` jumped to 0 → decode
+            // error at pc=0x0). Musl binaries happened to work because
+            // musl's ld.so does its own lazy PLT binding at runtime.
+            // The fix: process DT_JMPREL separately, eagerly binding
+            // each JUMP_SLOT relocation.
+            if (jmprel_addr && jmprel_size) {
+                for (uint64_t off = 0; off + sizeof(Elf64_Rela) <= jmprel_size;
+                     off += sizeof(Elf64_Rela)) {
+                    Elf64_Rela r;
+                    mem_.read(jmprel_addr + off, &r, sizeof(r));
+                    uint32_t type = ELF64_R_TYPE_(r.r_info);
+                    uint32_t sym  = ELF64_R_SYM_(r.r_info);
+                    uint64_t target = obj.base_addr + r.r_offset;
+                    int64_t A = r.r_addend;
+
+                    if (type == R_AARCH64_JUMP_SLOT_) {
+                        if (sym == 0) {
+                            mem_.store<uint64_t>(target, obj.base_addr + A);
+                        } else {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            std::string name = read_guest_cstr(
+                                mem_, obj.strtab_addr + s.st_name);
+                            uint64_t S = resolve_symbol(name);
+                            if (S == 0) S = obj.base_addr + s.st_value;
+                            mem_.store<uint64_t>(target, S + A);
+                        }
+                    }
+                    // Other relocation types in DT_JMPREL (rare) fall
+                    // through unprocessed — they'd need the same handling
+                    // as in the DT_RELA loop above. JUMP_SLOT is the only
+                    // type that should appear in DT_JMPREL per the ELF ABI.
+                }
+            }
         } catch (...) {
             // Relocation failed for this object — continue.
         }
@@ -444,7 +502,11 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
 bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
                                   uint64_t base, LoadedObject& obj) {
     // Read ELF header.
-    if (data.size() < 64) return false;
+    if (data.size() < 64) {
+        error_ = "parse_dynamic: ELF file too small (" +
+                 std::to_string(data.size()) + " < 64)";
+        return false;
+    }
     uint64_t e_phoff, e_shoff;
     uint16_t e_phentsize, e_phnum, e_shentsize, e_shnum;
     memcpy(&e_phoff,     data.data() + 32, 8);
@@ -462,8 +524,25 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         uint32_t p_type;
         memcpy(&p_type, p + 0, 4);
         if (p_type == 2) {  // PT_DYNAMIC
-            memcpy(&dyn_vaddr,  p + 8,  8);
-            memcpy(&dyn_filesz, p + 32, 8);
+            // BUGFIX (Turn 39): the field at p+8 is p_offset, NOT p_vaddr.
+            // The ELF64 program header layout is:
+            //   offset 0:  p_type   (4 bytes)
+            //   offset 4:  p_flags  (4 bytes)
+            //   offset 8:  p_offset (8 bytes)  ← file offset
+            //   offset 16: p_vaddr  (8 bytes)  ← virtual address
+            //   offset 24: p_paddr  (8 bytes)
+            //   offset 32: p_filesz (8 bytes)
+            //   offset 40: p_memsz  (8 bytes)
+            //   offset 48: p_align  (8 bytes)
+            // The old code read p_offset into dyn_vaddr, which happened
+            // to work for some musl PIE binaries where p_offset happened
+            // to fall inside a LOAD segment's p_vaddr range, but broke
+            // for glibc executables where the DYNAMIC segment's p_offset
+            // (0xfdd8) didn't match any LOAD segment's p_vaddr range
+            // (LOAD2 vaddr = 0x41fdd8). The fix reads p_vaddr (p+16)
+            // into dyn_vaddr, which is the correct field.
+            memcpy(&dyn_vaddr,  p + 16, 8);  // p_vaddr (was p+8 = p_offset)
+            memcpy(&dyn_filesz, p + 32, 8);  // p_filesz
             break;
         }
     }
@@ -493,7 +572,11 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             break;
         }
     }
-    if (!found) return false;
+    if (!found) {
+        error_ = "parse_dynamic: no PT_DYNAMIC segment found in " +
+                 obj.name;
+        return false;
+    }
 
     // Iterate Elf64_Dyn entries.
     uint64_t symtab_vaddr = 0, strtab_vaddr = 0;
@@ -920,7 +1003,18 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
 // ── resolve_symbol ─────────────────────────────────────────────────────
 uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     auto it = symbols_.find(name);
-    if (it == symbols_.end()) return 0;
+    if (it == symbols_.end()) {
+        if (getenv("BIFROST_DYNLINK_TRACE")) {
+            fprintf(stderr, "[dynlink] resolve_symbol: '%s' NOT FOUND\n",
+                    name.c_str());
+        }
+        return 0;
+    }
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] resolve_symbol: '%s' -> 0x%llx\n",
+                name.c_str(),
+                static_cast<unsigned long long>(it->second));
+    }
     return it->second;
 }
 
