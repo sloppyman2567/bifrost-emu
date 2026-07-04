@@ -200,13 +200,17 @@ public:
     size_t frame_count() const { return frames_.size(); }
 
     // ── Per-CPU signal mask & altstack ──────────────────────────────
-    // BUGFIX: mask and altstack used to live in SignalTable (shared
-    // across all vCPUs). They're now per-CPU (in CPU::sigmask and
-    // CPU::altstack). These helpers take a CPU& and operate on the
+    // The signal mask and altstack are per-CPU state (in CPU::sigmask
+    // and CPU::altstack). These helpers take a CPU& and operate on the
     // per-CPU state.
+    //
+    // Bit numbering: matches the Linux kernel ABI — bit `signo-1` (1-based
+    // signal numbers). So SIGUSR1 (signo=10) is bit 9 in the sigset,
+    // SIGKILL (signo=9) is bit 8, etc. This matches what
+    // rt_sigprocmask/rt_sigpending read/write in guest memory.
     static bool is_blocked(const CPU& cpu, int signo) {
         if (signo < 1 || signo > 63) return false;
-        return (cpu.sigmask >> signo) & 1;
+        return (cpu.sigmask >> (signo - 1)) & 1;
     }
 
     // Apply a rt_sigprocmask `how` operation to `cpu.sigmask`. Returns 0

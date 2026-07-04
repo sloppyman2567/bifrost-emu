@@ -8,6 +8,91 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ## [1.4.5-alpha] — 2026-07-04 (first feature release after 1.4.0 stable)
 
+### Signal registration overhaul (Turn 46, 2026-07-04)
+
+Fixed four correctness bugs in the signal subsystem and refactored the
+signal delivery code for production quality. All fixes are covered by a
+new comprehensive `test_sigaction.elf` test (21 checks) and a focused
+`test_sigsuspend.elf` test.
+
+**Bug 1: SA_RESETHAND caused `decode error at pc=0x0`.** `deliver_signal()`
+looked up the `SigAction` pointer, then called `clear_handler()` (for
+SA_RESETHAND one-shot semantics) which assigns `actions_[signo] = SigAction{}`
+— invalidating the very struct the pointer references. The subsequent
+`cpu.pc = act->handler` then read 0 (the default-initialized handler),
+jumping to address 0 and crashing. Fix: snapshot `handler`, `flags`, and
+`mask` into locals BEFORE any mutation of the actions table.
+
+**Bug 2: 1-based vs 0-based sigset bit numbering mismatch.** The Linux
+kernel sigset_t uses 1-based numbering — signal `N` corresponds to bit
+`N-1`. `rt_sigprocmask` correctly stored the user-provided mask as-is,
+but `SignalTable::is_blocked()` checked bit `signo` (0-based) instead of
+`signo-1` (1-based). This meant `sigprocmask(SIG_BLOCK, {SIGUSR1})` set
+bit 9 in `cpu.sigmask`, but `is_blocked(cpu, SIGUSR1=10)` checked bit 10
+— always reporting SIGUSR1 as unblocked. Result: blocked signals were
+delivered immediately instead of being queued as pending, breaking
+`raise()` of a blocked signal. Fix: use `signo-1` consistently in
+`is_blocked()`, `sigpending` bit operations, and `UNBLOCKABLE_MASK`.
+
+**Bug 3: `rt_sigpending` always returned an empty mask.** The handler
+unconditionally wrote 0 to the user buffer, ignoring `cpu.sigpending`.
+Programs that call `sigpending()` to check for queued signals always saw
+"nothing pending" — even when signals WERE pending. Fix: return the
+actual `cpu.sigpending` value, honoring the `sigsetsize` argument (4 or
+8 bytes).
+
+**Bug 4: `rt_sigprocmask` + signal delivery lost the syscall return value.**
+When `deliver_pending_signals()` delivered a signal during
+`rt_sigprocmask`, the signal frame captured `cpu.regs[0]` as the syscall's
+INPUT argument (e.g., `how=SIG_UNBLOCK`), not its return value (0). After
+`rt_sigreturn` restored the frame, `cpu.regs[0]` was the input arg — so
+the libc wrapper saw a non-zero return and reported failure. Fix: pre-set
+`cpu.regs[0] = r` (the syscall return value) BEFORE calling
+`deliver_pending_signals()`, so the signal frame captures the correct
+value.
+
+**`rt_sigsuspend` rewrite.** The previous implementation called host
+`sigsuspend` with an empty mask (ignoring the guest's mask) and never
+drained pending signals — so a `raise()` before `sigsuspend` would hang
+forever. The new implementation: (1) translates the guest mask to a host
+sigset, (2) updates `cpu.sigmask` so `drain_host_signals → deliver_signal`
+sees the sigsuspend mask, (3) drains pending guest signals and queued host
+signals BEFORE blocking (so `raise()` before `sigsuspend` works), (4)
+blocks on host `sigsuspend` only if no pending signal was delivered, (5)
+restores the original mask if no signal was delivered.
+
+**Code hygiene and refactoring:**
+- `src/core/signal.cpp` — rewrote `deliver_signal()` with snapshot-before-
+  mutation discipline, extracted `default_terminates`/`default_dumps_core`/
+  `is_uncatchable`/`sig_bit` helpers into an anonymous namespace, replaced
+  per-call `getenv("BIFROST_SIGNAL_TRACE")` with a cached `std::atomic<bool>`
+  (safe to read from the host signal handler), consolidated magic numbers
+  into named constants (`SA_SUPPORTED_FLAGS`, `UNBLOCKABLE_MASK`,
+  `SIGINFO_SIZE`, `UCONTEXT_SIZE`, `FRAME_RESERVE`, `FPSIMD_MAGIC`,
+  `FPSIMD_SIZE`).
+- `src/core/signal.h` — updated `is_blocked()` to use 1-based bit
+  numbering, documented the bit-numbering convention.
+- `src/core/cpu.h` — updated `sigmask`/`sigpending` comments to document
+  1-based bit numbering.
+- `src/syscalls/misc.cpp` — cleaned up stale "BUGFIX (Turn NN)" historical
+  comments, cached the trace flag in `rt_sigprocmask`, fixed
+  `rt_sigpending` to return the actual pending mask, rewrote
+  `rt_sigsuspend` with proper mask translation and pending-signal draining,
+  pre-set the syscall return value before signal delivery in
+  `rt_sigprocmask`.
+- `src/syscalls/time.cpp` — cached the trace flag, clarified comments.
+
+**New tests:**
+- `ctest_real/test_sigaction.c` — 21 checks covering `rt_sigaction`
+  install/query/SA_RESETHAND/SIG_IGN/SIGKILL-EINVAL, `rt_sigprocmask`
+  block/unblock/setmask, `rt_sigpending`, and `rt_sigsuspend`. Marked
+  JIT-only (the interpreter has a pre-existing stack-corruption bug when
+  returning from signal handlers via `rt_sigreturn`).
+- `ctest_real/test_sigsuspend.c` — focused `rt_sigsuspend` test with a
+  forked child that sends SIGUSR1 after 100ms. JIT-only.
+- `make check` now runs 79 tests (was 77); all pass under JIT, --no-jit
+  (75 pass + 4 skip), and --fwd (78 pass + 1 skip).
+
 ### Native SIMD vector shift codegen
 
 - **New IR ops: `SIMD_SHL`, `SIMD_USHR`, `SIMD_SSHR`** — vector shift-by-

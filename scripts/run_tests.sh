@@ -167,6 +167,16 @@ INTEGRATION_TESTS=(
     # rt_sigreturn (callee-saved registers get garbage values).
     # Skip under --no-jit.
     "sigint_handler|ctest_real/test_sigint_handler.elf||10|PASS: handler ran|JIT"
+    # Comprehensive signal registration test: rt_sigaction install/query/
+    # SA_RESETHAND/SIG_IGN/SIGKILL-EINVAL, rt_sigprocmask block/unblock/
+    # setmask, rt_sigpending, rt_sigsuspend. Validates the Turn 46 fixes
+    # (SA_RESETHAND dangling-pointer, 1-based bit numbering, rt_sigpending
+    # returns actual pending mask, sigsuspend drains pending before blocking).
+    # NOTE: JIT-only — the interpreter has a pre-existing stack corruption
+    # bug when returning from signal handlers via rt_sigreturn.
+    "sigaction|ctest_real/test_sigaction.elf||10|ALL PASS|JIT"
+    # Focused sigsuspend test: forked child sends SIGUSR1 after 100ms.
+    "sigsuspend|ctest_real/test_sigsuspend.elf||10|PASS|JIT"
     "jit_new_ops|ctest_real/jit_new_ops.elf||5|ALL TESTS PASSED"
     "loop_div|ctest_real/loop_div.elf||5"
     "md5_neon_test|ctest_real/md5_neon_test.elf||5"

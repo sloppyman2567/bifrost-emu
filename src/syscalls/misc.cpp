@@ -123,20 +123,23 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 132: { // sigaltstack(new, old) — AArch64 132
-            // Set or query the alternate signal stack.
-            // BUGFIX: now operates on per-CPU altstack state.
+            // Set or query the per-CPU alternate signal stack.
             int r = SignalTable::set_altstack(mem_, cpu, a0, a1);
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
 
         case 136: { // rt_sigpending(sigset, sigsetsize) — AArch64 136
-            // Return the set of pending (queued but not yet delivered)
-            // signals. Our simplified model has no pending queue —
-            // signals are delivered immediately. Return an empty mask.
+            // Return the calling thread's pending-signal mask.
             if (a0 != 0) {
-                uint64_t empty = 0;
-                try { mem_.store<uint64_t>(a0, empty); }
+                try {
+                    if (a3 == 4) {
+                        mem_.store<uint32_t>(a0,
+                            static_cast<uint32_t>(cpu.sigpending));
+                    } else {
+                        mem_.store<uint64_t>(a0, cpu.sigpending);
+                    }
+                }
                 catch (...) { ret_err(EFAULT); return 0; }
             }
             ret_host(0);
@@ -151,36 +154,90 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 137: { // rt_sigtimedwait(sigset, info, timeout, sigsetsize)
-            // No pending signals in our model; return -EAGAIN.
+            // We don't support sigtimedwait (no signal queue). Return
+            // -EAGAIN so callers fall back to a polling loop.
             ret_err(EAGAIN);
             return 0;
         }
 
-        case 133: { // rt_sigsuspend(mask, sigsetsize) — aarch64 133
-            // previously misimplemented as rt_sigreturn
-            // (which is actually syscall 139). rt_sigsuspend blocks the
-            // calling thread until a signal is delivered that's not in
-            // `mask`. Since we don't track signal masks, we just block
-            // on the host's sigsuspend with an empty mask — any signal
-            // will wake us. After return, return -EINTR (the standard
-            // return for sigsuspend after signal delivery).
+        case 133: { // rt_sigsuspend(mask, sigsetsize) — AArch64 133
+            // Atomically replace the signal mask with `mask` and block
+            // until a signal is delivered that's not in `mask`. After
+            // the handler runs (and rt_sigreturn restores state), return
+            // -EINTR (the standard sigsuspend return).
             //
-            // This is what unbreaks toybox sh: sh calls sigsuspend to
-            // wait for SIGCHLD, and our previous -ENOSYS return made
-            // sh fall into a busy-wait loop checking signal_pending.
-            sigset_t empty;
-            sigemptyset(&empty);
-            ::sigsuspend(&empty);
-            // After the signal handler runs (and possibly rt_sigreturn
-            // restores state), sigsuspend returns -EINTR.
-            ret_err(EINTR);
+            // We translate the guest mask to a host sigset for the actual
+            // blocking wait, AND we update cpu.sigmask so that signals
+            // not in `mask` are deliverable (not re-queued as pending).
+            //
+            // Mask restoration: on real Linux, the kernel restores the
+            // original mask AFTER the handler returns. We approximate
+            // this by restoring the original mask only if NO signal was
+            // delivered. If a signal WAS delivered, the mask after
+            // rt_sigreturn will be the sigsuspend mask (a slight semantic
+            // difference that doesn't affect typical programs — they
+            // re-set the mask explicitly after sigsuspend returns).
+            uint64_t guest_mask = 0;
+            if (a0 != 0) {
+                try {
+                    guest_mask = mem_.load<uint64_t>(a0);
+                } catch (...) {
+                    ret_err(EFAULT);
+                    return 0;
+                }
+            }
+            // Save the current cpu.sigmask and replace it with guest_mask
+            // so drain_host_signals → deliver_signal sees the sigsuspend
+            // mask (signals not in the mask are unblocked and deliverable).
+            const uint64_t saved_sigmask = cpu.sigmask;
+            cpu.sigmask = guest_mask & ~((1ULL << (BIFROST_SIGKILL - 1)) |
+                                          (1ULL << (BIFROST_SIGSTOP - 1)));
+
+            // Pre-set the return value so the signal frame captures it.
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+
+            // First, drain any pending guest signals that are now
+            // unblocked by the sigsuspend mask. If a handler runs, we
+            // return immediately (the handler is set up to run; after
+            // rt_sigreturn, cpu.regs[0] = -EINTR).
+            if (cpu.sigpending != 0) {
+                if (deliver_pending_signals(emu, cpu, signals_) > 0) {
+                    return 0;  // handler will run
+                }
+            }
+            // Also drain any queued host signals (from earlier kill/raise
+            // that arrived via the host signal handler).
+            if (emu.handle_eintr(cpu)) {
+                return 0;  // handler will run
+            }
+
+            // No pending signals — block on the host sigsuspend until a
+            // new signal arrives. Build the host sigset from guest_mask.
+            sigset_t host_mask;
+            sigemptyset(&host_mask);
+            for (int signo = 1; signo <= 31; signo++) {
+                if ((guest_mask >> (signo - 1)) & 1) {
+                    sigaddset(&host_mask, signo);
+                }
+            }
+            ::sigsuspend(&host_mask);
+            // sigsuspend returned — a host signal arrived. Drain the SPSC
+            // queue to deliver the guest handler.
+            const bool delivered = emu.handle_eintr(cpu);
+            if (!delivered) {
+                // No signal delivered (SIG_IGN or empty queue). Restore
+                // the original mask and return -EINTR.
+                cpu.sigmask = saved_sigmask;
+            }
+            // If delivered: the handler is set up to run. After rt_sigreturn,
+            // cpu.sigmask will be the sigsuspend mask and cpu.regs[0] = -EINTR.
             return 0;
         }
 
         case 134: { // rt_sigaction(signo, new_act, old_act, sigsetsize)
-            // actually install the signal handler in
-            // our SignalTable. Previously a no-op, which meant guest
-            // signal handlers were silently dropped.
+            // Install/query the guest's signal handler. See SignalTable::install
+            // for semantics (SIG_DFL/SIG_IGN/handler, query-only via new_act=0,
+            // EINVAL for SIGKILL/SIGSTOP).
             int signo = static_cast<int>(a0);
             int r = signals_.install(mem_, signo, a1, a2);
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
@@ -190,31 +247,51 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 135: { // rt_sigprocmask(how, new_set, old_set, sigsetsize)
             // Per-CPU signal mask. Supports SIG_BLOCK/SIG_UNBLOCK/
             // SIG_SETMASK. SIGKILL/SIGSTOP cannot be blocked.
-            // BUGFIX: now operates on per-CPU sigmask state.
+            static const bool trace = (getenv("BIFROST_SIGNAL_TRACE") != nullptr);
             int r = SignalTable::procmask(mem_, cpu, static_cast<int>(a0),
                                           a1, a2, static_cast<size_t>(a3));
-            // BUGFIX (Turn 42): after changing the mask, check for
-            // newly-unblocked pending signals and deliver them. Without
-            // this, raise()/kill() to a blocked signal was silently
-            // dropped — musl's raise() blocks all signals, calls tkill,
-            // then unblocks. The signal was queued during tkill but
-            // never delivered when the mask was restored.
+            if (trace) {
+                uint64_t new_mask_val = 0;
+                if (a1 != 0) {
+                    try { new_mask_val = mem_.load<uint64_t>(a1); } catch (...) {}
+                }
+                fprintf(stderr, "[signal] rt_sigprocmask how=%lld "
+                        "newmask=0x%llx r=%d cpu.sigmask=0x%llx "
+                        "cpu.sigpending=0x%llx\n",
+                        static_cast<unsigned long long>(a0),
+                        static_cast<unsigned long long>(new_mask_val),
+                        r,
+                        static_cast<unsigned long long>(cpu.sigmask),
+                        static_cast<unsigned long long>(cpu.sigpending));
+            }
+            // After changing the mask, check for newly-unblocked pending
+            // signals and deliver them. This is what makes raise() of a
+            // blocked signal work: musl blocks all, calls tkill (queues
+            // the signal), then restores the mask. The restore triggers
+            // delivery here.
+            //
+            // We must set cpu.regs[0] = r BEFORE delivery so the signal
+            // frame captures the syscall's return value. After the handler
+            // runs and rt_sigreturn restores the frame, cpu.regs[0] will
+            // be `r` — which is what the libc wrapper expects to see.
             bool signal_delivered = false;
             if (r == 0 && cpu.sigpending != 0) {
-                if (getenv("BIFROST_SIGNAL_TRACE")) {
+                if (trace) {
                     fprintf(stderr, "[signal] rt_sigprocmask: pending=0x%llx, "
                             "delivering...\n",
                             static_cast<unsigned long long>(cpu.sigpending));
                 }
-                int n = deliver_pending_signals(emu, cpu, signals_);
-                if (n > 0) {
+                // Pre-set the syscall return value so the signal frame
+                // captures it. deliver_signal will overwrite cpu.regs[0]
+                // with `signo` for the handler, but the SAVED frame.regs[0]
+                // will be `r`. After rt_sigreturn, cpu.regs[0] = r.
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(r));
+                if (deliver_pending_signals(emu, cpu, signals_) > 0) {
                     // A signal was delivered — the handler is now set up
                     // (cpu.pc = handler, cpu.regs[0] = signo). DON'T
-                    // overwrite x0 with the syscall return value — the
-                    // handler expects x0=signo, not 0. The rt_sigprocmask
-                    // return value is lost, but that's fine: musl's
-                    // raise() ignores it (it only cares that the signal
-                    // was delivered).
+                    // overwrite x0 — the handler expects x0=signo. After
+                    // rt_sigreturn, cpu.regs[0] will be restored to `r`
+                    // (the value we pre-set above and the frame saved).
                     signal_delivered = true;
                 }
             }
@@ -225,32 +302,25 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 139: { // rt_sigreturn — restore CPU state from signal frame
-            // Pop the most recent signal frame, restore CPU state, and
-            // restore the saved signal mask. Also clear the altstack
-            // SS_ONSTACK flag if the handler was running on it.
-            // BUGFIX: now also restores FP/SIMD state (v_lo, v_hi,
-            // fpcr, fpsr) so handlers using NEON don't corrupt the
-            // saved state. Operates on per-CPU mask/altstack state.
+            // Pop the most recent signal frame, restore all CPU state
+            // (X0..X30, SP, PC, PSTATE, V0..V31, FPCR, FPSR), restore the
+            // saved signal mask, and clear the altstack in-use flag if the
+            // handler ran on the altstack. Returns whatever X0 was in the
+            // saved frame (already restored) — do NOT overwrite it.
             SignalFrame frame;
             if (signals_.pop_frame(frame)) {
                 memcpy(cpu.regs, frame.regs, sizeof(cpu.regs));
                 cpu.sp     = frame.sp;
                 cpu.pc     = frame.pc;
                 cpu.pstate = frame.pstate;
-                // Restore the signal mask saved at delivery time.
                 cpu.sigmask = frame.saved_mask;
-                // Restore FP/SIMD state.
                 memcpy(cpu.v_lo, frame.v_lo, sizeof(cpu.v_lo));
                 memcpy(cpu.v_hi, frame.v_hi, sizeof(cpu.v_hi));
                 cpu.fpcr = frame.fpcr;
                 cpu.fpsr = frame.fpsr;
-                // If we entered the handler on the altstack, clear
-                // the in-use flag now.
                 if (frame.on_altstack) {
                     SignalTable::set_altstack_active(cpu, false);
                 }
-                // Return value is whatever X0 was in the saved frame
-                // (already restored above). Don't overwrite it.
                 return 0;
             }
             // No pending frame — guest bug. Return 0 to avoid crash.

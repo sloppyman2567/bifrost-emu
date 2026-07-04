@@ -116,13 +116,13 @@ public:
     uint64_t clear_child_tid = 0;
 
     // ── Per-CPU signal state ────────────────────────────────────────
-    // BUGFIX: the old code stored sigmask and altstack in SignalTable
-    // (shared across all vCPUs). That broke multi-threaded signal
-    // handling — one thread's rt_sigprocmask would clobber another
-    // thread's mask. Now each CPU has its own mask and altstack, set
-    // by rt_sigprocmask/sigaltstack and read by deliver_signal.
-    uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo` set = blocked)
-    uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo` set = pending)
+    // The signal mask and altstack live in the CPU so each vCPU has its
+    // own state (set by rt_sigprocmask/sigaltstack, read by
+    // deliver_signal). Bit numbering is 1-based: bit `signo-1` is set
+    // when `signo` is blocked/pending — this matches the Linux kernel
+    // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
+    uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo-1` set = blocked)
+    uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo-1` set = pending)
     struct AltStack {
         uint64_t sp    = 0;     // base address
         uint64_t size  = 0;     // size in bytes

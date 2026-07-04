@@ -32,6 +32,7 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;  // a3 is used by clock_nanosleep
     auto& mem_ = emu.mem_;
+    static const bool trace = (getenv("BIFROST_SIGNAL_TRACE") != nullptr);
 
     switch (num) {
         case 101: { // nanosleep(req, rem) — AArch64 101
@@ -45,7 +46,7 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(EFAULT);
                 return 0;
             }
-            if (getenv("BIFROST_SIGNAL_TRACE")) {
+            if (trace) {
                 fprintf(stderr, "[signal] nanosleep(%lds, %ldns) called\n",
                         (long)ts.tv_sec, (long)ts.tv_nsec);
             }
@@ -60,14 +61,15 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
                         // Bad rem pointer — still return EINTR.
                     }
                 }
-                // Pre-set cpu.regs[0] = -EINTR, then drain signals.
+                // Pre-set cpu.regs[0] = -EINTR so the signal frame
+                // captures it. After sigreturn, cpu.regs[0] = -EINTR.
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
-                // No signal delivered (SIG_IGN). Return -EINTR.
-                if (getenv("BIFROST_SIGNAL_TRACE")) {
+                // No signal delivered (SIG_IGN). cpu.regs[0] is -EINTR.
+                if (trace) {
                     fprintf(stderr, "[signal] nanosleep returned -EINTR (SIG_IGN)\n");
                 }
-                return 0;  // cpu.regs[0] is already -EINTR
+                return 0;
             }
             if (r < 0) { ret_errno(); return 0; }
             ret_ok();
