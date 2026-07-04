@@ -148,7 +148,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // instruction after SVC. The child must start at SVC+4 so it
             // falls through to the "cbnz x0, parent_return" / "ldr fn/arg
             // / blr fn" sequence in musl's __clone wrapper.
-            uint64_t entry_pc = cpu.pc + 4;  // instruction after SVC
+            //
+            // NOTE: The interpreter's SVC_IMM handler advances cpu.pc to
+            // SVC+4 BEFORE calling syscall(), so cpu.pc is already the
+            // correct entry point (the instruction after SVC). We use
+            // cpu.pc directly, NOT cpu.pc + 4.
+            uint64_t entry_pc = cpu.pc;  // already SVC+4 (set by SVC_IMM handler)
             uint64_t arg = 0;  // x0 will be set to 0 for child
 
             int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls);
@@ -221,8 +226,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             }
 
             // Thread path. Entry point = instruction after SVC (same as
-            // clone case 220 above).
-            uint64_t entry_pc = cpu.pc + 4;
+            // clone case 220 above). The interpreter's SVC_IMM handler
+            // advances cpu.pc to SVC+4 before calling syscall(), so
+            // cpu.pc is already the correct entry point.
+            uint64_t entry_pc = cpu.pc;  // already SVC+4
             int tid = spawn_thread(cpu, flags, stack_top, entry_pc, 0, tls);
             if (tid < 0) { ret_err(ENOMEM); return 0; }
             if ((flags & clone_flags::PARENT_SETTID) && parent_tid) {
