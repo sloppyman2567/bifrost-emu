@@ -752,4 +752,44 @@ bool Emulator::drain_host_signals(CPU& cpu) {
     return any_delivered;
 }
 
+// ── handle_eintr ───────────────────────────────────────────────────────
+// Called by blocking syscall handlers after a host syscall returns -EINTR.
+// The caller MUST pre-set cpu.regs[0] = -EINTR before calling this
+// function, so that if a signal is delivered, the signal frame saves
+// -EINTR (not the syscall args). After sigreturn, cpu.regs[0] will be
+// restored to -EINTR.
+//
+// Drains pending host signals. Returns true if a signal was delivered
+// to a real guest handler (the handler is set up to run next; cpu.pc =
+// handler, cpu.regs[0] = signo). In this case, the caller should
+// return immediately WITHOUT overwriting cpu.regs[0] — the handler
+// expects x0 = signo, and after sigreturn, x0 will be restored to
+// -EINTR (the saved value).
+//
+// Returns false if no signal was delivered to a real handler (the
+// signal was SIG_IGN and dropped, or no signal was pending). In this
+// case, cpu.regs[0] is still -EINTR (as pre-set by the caller), and
+// the caller should return normally (the guest sees -EINTR).
+//
+// We do NOT retry the host syscall. Rationale:
+//   - In real Linux, SIG_IGN signals do NOT interrupt syscalls. However,
+//     the host kernel doesn't know about the guest's disposition and
+//     always interrupts our host syscall. Retrying would make the guest
+//     never see -EINTR, which breaks shells (like toybox sh) that set
+//     SIGINT to SIG_IGN but still rely on -EINTR from read()/nanosleep()
+//     to detect "user wants to interrupt".
+//   - Many guest programs (cat, sleep, etc.) exit on -EINTR, which
+//     effectively kills the foreground command when the user presses
+//     Ctrl+C. This is the behavior users expect from an interactive
+//     shell, even though it's technically incorrect per POSIX.
+//   - For programs with real signal handlers, the handler runs first
+//     (via drain_host_signals), then -EINTR is returned after sigreturn.
+//     This is correct behavior.
+bool Emulator::handle_eintr(CPU& cpu) {
+    // Drain pending host signals. This may invoke guest signal handlers
+    // (which modify cpu.pc, cpu.regs, etc.) or drop signals (SIG_IGN).
+    // Returns true if a signal was delivered to a real handler.
+    return drain_host_signals(cpu);
+}
+
 } // namespace arm64emu

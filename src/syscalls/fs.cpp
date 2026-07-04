@@ -72,7 +72,20 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             std::vector<uint8_t> tmp(std::max<uint64_t>(a2, 1));
-            ssize_t r = node->read(UINT64_MAX, tmp.data(), a2);
+            ssize_t r;
+            while (true) {
+                r = node->read(UINT64_MAX, tmp.data(), a2);
+                if (r != -EINTR) break;
+                // Pre-set cpu.regs[0] = -EINTR so the signal frame (if a
+                // signal is delivered) saves -EINTR. After sigreturn,
+                // cpu.regs[0] will be restored to -EINTR.
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                // Drain signals. If a signal was delivered to a real
+                // handler, return immediately (the handler is set up to
+                // run; cpu.regs[0] = signo). Otherwise, return -EINTR.
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
             if (r > 0) mem_.write(a1, tmp.data(), r);
             ret_host(r);
@@ -266,7 +279,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Defensive cap (same as writev).
                 if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 std::vector<uint8_t> tmp(len);
-                ssize_t n = node->read(UINT64_MAX, tmp.data(), len);
+                ssize_t n;
+                while (true) {
+                    n = node->read(UINT64_MAX, tmp.data(), len);
+                    if (n != -EINTR) break;
+                    cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                    if (emu.handle_eintr(cpu)) return 0;
+                    break;
+                }
                 if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
                 if (n > 0) mem_.write(base, tmp.data(), static_cast<size_t>(n));
                 total += n;
@@ -287,7 +307,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             if (a2 == 0) { ret_host(0); return 0; }
             std::vector<uint8_t> tmp(a2);
-            ssize_t n = node->read(static_cast<uint64_t>(a3), tmp.data(), a2);
+            ssize_t n;
+            while (true) {
+                n = node->read(static_cast<uint64_t>(a3), tmp.data(), a2);
+                if (n != -EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;
+                break;
+            }
             if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
             if (n > 0) mem_.write(a1, tmp.data(), static_cast<size_t>(n));
             ret_host(static_cast<uint64_t>(n));

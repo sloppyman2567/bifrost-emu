@@ -98,6 +98,12 @@ public:
     bool drain_host_signals(CPU& cpu);
     // Install host signal handlers for forwarding to the guest.
     void install_host_signal_handlers();
+    // Helper for blocking syscalls that returned -EINTR. Drains pending
+    // host signals (so any guest signal handler runs before the guest
+    // sees -EINTR) and always returns false (the caller should return
+    // -EINTR to the guest). The guest's libc wrapper then decides
+    // whether to retry or propagate the error.
+    bool handle_eintr(CPU& cpu);
 
     // ── Configuration (public) ────────────────────────────────────────
     void set_verbose(bool v) { verbose_ = v; }

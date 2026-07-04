@@ -258,15 +258,34 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // goes back into x0. The SVC immediate is ignored (Linux
                 // doesn't use it).
                 {
-                    // Save old PC to detect if the syscall changed it
-                    // (e.g., execve sets PC to new entry point, rt_sigreturn
-                    // restores PC from signal frame).
+                    // Advance cpu.pc to the return address (the instruction
+                    // after SVC) BEFORE calling the syscall handler. This
+                    // matters for signal delivery: if a signal arrives
+                    // during a blocking syscall (e.g., read), the signal
+                    // frame's saved PC must be the return address, NOT the
+                    // SVC instruction. Otherwise, after the handler runs
+                    // and calls rt_sigreturn, the SVC would be re-executed,
+                    // re-entering the blocking syscall forever.
+                    //
+                    // The check `cpu.pc != old_pc` below still works for
+                    // detecting syscalls that change PC (execve, sigreturn):
+                    // we save old_pc as the SVC address, set cpu.pc to
+                    // SVC+4, call syscall(). If the syscall changes cpu.pc
+                    // (e.g., to the new entry point for execve), the check
+                    // sees cpu.pc != SVC+4 and propagates the new PC.
                     uint64_t old_pc = cpu.pc;
+                    uint64_t return_pc = old_pc + 4;
+                    cpu.pc = return_pc;
                     syscall(cpu);
-                    if (cpu.pc != old_pc) {
-                        // Syscall changed PC — propagate to next_pc so
-                        // step() doesn't overwrite it with old_pc + 4.
+                    if (cpu.pc != return_pc) {
+                        // Syscall changed PC (execve, rt_sigreturn, or
+                        // signal delivery) — propagate to next_pc so
+                        // step() doesn't overwrite it.
                         next_pc = cpu.pc;
+                    } else {
+                        // Normal syscall — cpu.pc is at return_pc.
+                        // next_pc was set to old_pc + 4 by step(), which
+                        // equals return_pc, so no update needed.
                     }
                 }
                 return;

@@ -565,7 +565,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 247: { // waitpid (legacy, same as wait4) — aarch64 247
             int status = 0;
-            pid_t r = ::waitpid((pid_t)a0, &status, static_cast<int>(a2));
+            pid_t r;
+            while (true) {
+                r = ::waitpid((pid_t)a0, &status, static_cast<int>(a2));
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             if (r < 0) {
                 ret_errno();
                 return 0;
@@ -584,7 +591,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             int options = static_cast<int>(a2);
             int status = 0;
             struct rusage ru;
-            pid_t r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
+            pid_t r;
+            while (true) {
+                r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             if (r < 0) {
                 ret_errno();
                 return 0;
@@ -666,18 +680,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 72: { // pselect6(nfds, rfds, wfds, efds, ts, sig) — aarch64 72
             // Delegate to host select. FD sets are bitmaps (1024 bits = 128 bytes).
-            fd_set rfds, wfds, efds;
-            FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
             int nfds = static_cast<int>(a0);
-            if (a1) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                if (mem_.load<uint8_t>(a1 + fd/8) & (1 << (fd%8))) FD_SET(fd, &rfds);
-            }
-            if (a2) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                if (mem_.load<uint8_t>(a2 + fd/8) & (1 << (fd%8))) FD_SET(fd, &wfds);
-            }
-            if (a3) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                if (mem_.load<uint8_t>(a3 + fd/8) & (1 << (fd%8))) FD_SET(fd, &efds);
-            }
             struct timeval tv;
             struct timeval* tvp = nullptr;
             if (a4) {
@@ -685,16 +688,36 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 tv.tv_usec = (suseconds_t)mem_.load<uint64_t>(a4 + 8);
                 tvp = &tv;
             }
-            int r = ::select(nfds, a1 ? &rfds : nullptr, a2 ? &wfds : nullptr,
-                             a3 ? &efds : nullptr, tvp);
-            auto write_back = [&](uint64_t addr, fd_set* set) {
-                std::vector<uint8_t> buf(128, 0);
-                for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                    if (FD_ISSET(fd, set)) buf[fd/8] |= (1 << (fd%8));
+            int r;
+            fd_set rfds, wfds, efds;
+            while (true) {
+                // Rebuild fd_sets each iteration — select modifies them
+                // in place, so on EINTR retry we need fresh copies.
+                FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
+                if (a1) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
+                    if (mem_.load<uint8_t>(a1 + fd/8) & (1 << (fd%8))) FD_SET(fd, &rfds);
                 }
-                mem_.write(addr, buf.data(), 128);
-            };
+                if (a2) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
+                    if (mem_.load<uint8_t>(a2 + fd/8) & (1 << (fd%8))) FD_SET(fd, &wfds);
+                }
+                if (a3) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
+                    if (mem_.load<uint8_t>(a3 + fd/8) & (1 << (fd%8))) FD_SET(fd, &efds);
+                }
+                r = ::select(nfds, a1 ? &rfds : nullptr, a2 ? &wfds : nullptr,
+                             a3 ? &efds : nullptr, tvp);
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             if (r >= 0) {
+                auto write_back = [&](uint64_t addr, fd_set* set) {
+                    std::vector<uint8_t> buf(128, 0);
+                    for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
+                        if (FD_ISSET(fd, set)) buf[fd/8] |= (1 << (fd%8));
+                    }
+                    mem_.write(addr, buf.data(), 128);
+                };
                 if (a1) write_back(a1, &rfds);
                 if (a2) write_back(a2, &wfds);
                 if (a3) write_back(a3, &efds);
@@ -722,7 +745,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (sec == 0 && nsec == 0) timeout_ms = 0;
                 else { uint64_t ms = (sec > 2000000ULL) ? 2000000000ULL : sec * 1000; ms += nsec / 1000000; timeout_ms = (ms > 2000000000ULL) ? 2000000000 : static_cast<int>(ms); }
             }
-            int r = ::poll(pfds.data(), nfds, timeout_ms);
+            int r;
+            while (true) {
+                r = ::poll(pfds.data(), nfds, timeout_ms);
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             for (int i = 0; i < nfds; i++) {
                 mem_.store<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 6, pfds[i].revents);
             }
@@ -1299,7 +1329,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 95: { // waitid(idtype, id, infop, options) — AArch64 95
             siginfo_t si;
             memset(&si, 0, sizeof(si));
-            int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+            int r;
+            while (true) {
+                r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
+                if (r >= 0 || errno != EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                break;  // no signal delivered, return -EINTR
+            }
             if (r < 0) { ret_errno(); return 0; }
             if (a2) {
                 // Write a simplified siginfo to guest memory.
