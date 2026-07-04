@@ -329,7 +329,19 @@ bool decode(DecodedInst& d, uint32_t inst) {
 
     // SIMD data processing (catch-all). v0's mask doesn't cover bit 24
     // but requires bit 31 = 0.
-    case 0x0E: case 0x0F: {
+    //
+    // Turn 41: added 0x2E, 0x4E, 0x6E, 0x4F to cover Q=1 and U=1 variants.
+    // The AArch64 SIMD encoding uses bits[31:29] to distinguish:
+    //   0x0E = Q=0, U=0  (e.g., ADD v.8b)
+    //   0x2E = Q=0, U=1  (e.g., SUB v.8b — unsigned sub is 0x2E208400)
+    //   0x4E = Q=1, U=0  (e.g., ADD v.16b — 128-bit variant)
+    //   0x6E = Q=1, U=1  (e.g., SUB v.16b — 128-bit unsigned sub)
+    //   0x0F, 0x4F = additional SIMD variants
+    // Without these, Q=1 (128-bit) and U=1 (unsigned/modified) SIMD
+    // instructions were rejected as "decode error", breaking real-world
+    // programs that use 128-bit NEON operations.
+    case 0x0E: case 0x0F: case 0x2E:
+    case 0x4E: case 0x6E: case 0x4F: {
         if ((inst >> 31) & 1) return false;
         d.is_vec = true;
         d.cls    = InstClass::SIMD_DP;
