@@ -827,7 +827,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // used by toybox seq. The IR translator's FP_SCALAR case will
         // fall back to CALL_INTERP for vector-specific encodings it
         // doesn't handle natively.
-        if (op31_24 != 0x1E && op31_24 != 0x9E && op31_24 != 0x5E) return false;
+        //
+        // Turn 40: added 0x7E — 'Advanced SIMD three same, extra'
+        // (SQRDMLAH/SQRDMLSH — saturating rounding multiply-add).
+        // Used by libc's printf formatting code (NEON for wide-char
+        // operations). Without this, `toybox uptime` crashes with
+        // "decode error at pc=0x... inst=0x7e61d821". The instruction
+        // falls through to CALL_INTERP which uses the interpreter.
+        if (op31_24 != 0x1E && op31_24 != 0x9E &&
+            op31_24 != 0x5E && op31_24 != 0x7E) return false;
         d.is_vec    = true;
         d.cls       = InstClass::FP_SCALAR;
         d.ftype     = (inst >> 22) & 3;

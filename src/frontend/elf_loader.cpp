@@ -104,6 +104,18 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                 throw EmuError("PT_LOAD file range out of bounds");
             mem.write(vaddr, data.data() + h.p_offset, h.p_filesz);
         }
+        // BUGFIX (Turn 40): zero the BSS area (from p_filesz to
+        // p_memsz). On real Linux, the kernel gives zero pages for
+        // the BSS. Our map_range may leave stale data from a previous
+        // binary (e.g., after execve). Without this, musl's global
+        // variables (malloc locks, FILE structs) have garbage values,
+        // causing assertion failures (BRK #1000 = musl's a_crash()).
+        if (h.p_memsz > h.p_filesz) {
+            uint64_t bss_start = vaddr + h.p_filesz;
+            uint64_t bss_size = h.p_memsz - h.p_filesz;
+            std::vector<uint8_t> zeros(bss_size, 0);
+            mem.write(bss_start, zeros.data(), bss_size);
+        }
         uint64_t end = vaddr + h.p_memsz;
         if (end > info.end_addr) info.end_addr = end;
     }

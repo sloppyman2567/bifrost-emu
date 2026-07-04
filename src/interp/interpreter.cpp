@@ -283,6 +283,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (brk_verbose_) {
                     fprintf(stderr, "[emu] BRK #%u at pc=0x%llx (terminating)\n",
                             imm, static_cast<unsigned long long>(cpu.pc));
+                    fflush(stderr);
                 }
                 cpu.running = false;
                 cpu.exit_code = 128 + 5;  // SIGTRAP

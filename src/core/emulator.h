@@ -202,7 +202,7 @@ private:
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;
-    bool brk_verbose_ = true;
+    bool brk_verbose_ = true; // Turn 40: always true
     std::string elf_path_;
     // Guest-side current working directory. Decoupled from the host cwd
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by

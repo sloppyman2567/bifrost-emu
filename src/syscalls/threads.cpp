@@ -384,8 +384,56 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
 
             if (new_argv.empty()) new_argv.push_back(path);
 
-            // Clear the JIT cache (the old blocks are invalid after exec).
-            if (emu.jit()) emu.jit()->flush_cache();
+            // BUGFIX (Turn 40): do NOT call flush_cache() here! After
+            // fork(), the child is executing INSIDE the JIT code buffer
+            // (the fork/execve syscall was JIT'd, and jit_interp_step()
+            // was called from JIT code). flush_cache() resets
+            // code_buf_used_ to 0, so the next block translation would
+            // write at offset 0, OVERWRITING the currently-executing
+            // JIT code → host SIGTRAP (exit code 133). This broke
+            // `toybox sh /tmp/script.sh` (fork+exec from script file)
+            // while `sh -c 'cmd'` worked (different code path).
+            //
+            // Fix: set jit_disabled_ = true atomically. This prevents
+            // new block translations (run_block falls back to interpreter)
+            // without touching the code buffer. The stale JIT code can
+            // finish executing safely (it just returns to run_block,
+            // which calls emu.step() because jit_disabled_ is true).
+            // After the current block ends, the run loop checks
+            // jit_enabled_ (false after fork) and switches to pure
+            // interpreter mode for the new binary.
+            if (emu.jit()) {
+                emu.jit()->jit_disabled_.store(true, std::memory_order_relaxed);
+            }
+
+            // BUGFIX (Turn 40): clear old high-memory allocations to
+            // simulate execve's memory image replacement. On real Linux,
+            // execve() removes ALL old mappings (heap, mmap, etc.) and
+            // only the new binary's PT_LOAD segments + stack remain.
+            // Without this, the new binary's musl finds stale data from
+            // the old binary (malloc locks, thread structures) and hits
+            // an assertion failure (BRK #1000 = musl's a_crash()).
+            //
+            // We zero out the pages in the mmap_alloc region. This
+            // clears stale heap data, malloc locks, and thread structures.
+            // The new binary's musl will see zeroed memory and initialize
+            // fresh. We don't zero the stack (at 0x8000000000) or the
+            // binary's own PT_LOAD segments (below 0x40000000).
+            {
+                auto allocs = mem_.allocations_snapshot();
+                for (auto& [addr, size] : allocs) {
+                    if (addr >= 0x40000000ULL && addr < 0x8000000000ULL) {
+                        // Zero out the pages at this allocation.
+                        try {
+                            std::vector<uint8_t> zeros(size, 0);
+                            mem_.write(addr, zeros.data(), size);
+                        } catch (...) {
+                            // Page might not be mapped — skip.
+                        }
+                        mem_.untrack_allocation(addr);
+                    }
+                }
+            }
 
             // Reload the ELF into the existing Memory. The ElfLoader will
             // map new PT_LOAD segments. Old mappings remain but are
@@ -456,6 +504,24 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
             memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
             cpu.tid = static_cast<int>(getpid());
+
+            // BUGFIX (Turn 40): invalidate the decode cache. After execve,
+            // the new binary loads at the same addresses as the old one
+            // (e.g., 0x400000). The decode cache matches on PC, so stale
+            // entries from the old binary would match new PCs but return
+            // wrong decoded instructions — causing the child to execute
+            // garbage and exit with code 133 (SIGTRAP from a BRK in the
+            // wrongly-decoded instruction stream). Setting all tags to
+            // UINT64_MAX (the "empty" sentinel) forces a fresh decode.
+            for (auto& ce : cpu.decode_cache) ce.tag = UINT64_MAX;
+
+            if (getenv("BIFROST_EXEC_TRACE")) {
+                fprintf(stderr, "[exec] post-execve: pc=0x%llx sp=0x%llx "
+                        "tid=%d regs zeroed, decode cache invalidated\n",
+                        static_cast<unsigned long long>(cpu.pc),
+                        static_cast<unsigned long long>(cpu.sp),
+                        cpu.tid);
+            }
 
             // Set up a fresh TLS scratch area (like load_elf_file does).
             const uint64_t TLS_SCRATCH_SIZE = 65536;
