@@ -395,6 +395,18 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // The buffer is freed automatically when the child process exits.
         jit_enabled_ = false;
 
+        // BUGFIX (Turn 42): reinstall host signal handlers in the child.
+        // After fork(), the child inherits g_active_emu_ from the parent,
+        // which points to the PARENT's Emulator — a dangling pointer in
+        // the child's address space. When SIGINT (Ctrl-C) arrives in the
+        // child, the host signal handler dereferences the dangling
+        // pointer, either crashing or silently dropping the signal. This
+        // is why Ctrl-C doesn't interrupt `toybox sh -c 'sleep 5'` —
+        // the child (running sleep) gets SIGINT but can't forward it.
+        // Fix: call install_host_signal_handlers() which sets
+        // g_active_emu_ = this (the child's own Emulator).
+        install_host_signal_handlers();
+
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.
         return 0;

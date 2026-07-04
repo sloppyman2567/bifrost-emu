@@ -45,9 +45,30 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(EFAULT);
                 return 0;
             }
+            if (getenv("BIFROST_SIGNAL_TRACE")) {
+                fprintf(stderr, "[signal] nanosleep(%lds, %ldns) called\n",
+                        (long)ts.tv_sec, (long)ts.tv_nsec);
+            }
             int r = ::nanosleep(&ts, &rem);
+            if (getenv("BIFROST_SIGNAL_TRACE")) {
+                fprintf(stderr, "[signal] nanosleep returned %d (errno=%d)\n",
+                        r, r < 0 ? errno : 0);
+            }
             if (r < 0) {
                 // EINTR: write remaining time to `rem` if provided.
+                // BUGFIX (Turn 42): when nanosleep is interrupted by a
+                // host signal (e.g., SIGINT from Ctrl-C), we need to
+                // deliver the signal to the guest. The host signal
+                // handler already queued it in host_signal_queue_. But
+                // we need to return -EINTR so the guest's libc can
+                // deliver the pending signal (musl checks for pending
+                // signals after EINTR). We also need to call
+                // drain_host_signals here so the signal is delivered
+                // immediately rather than waiting for the next 4K-
+                // instruction check.
+                if (errno == EINTR) {
+                    emu.drain_host_signals(cpu);
+                }
                 if (errno == EINTR && a1) {
                     try {
                         mem_.store<uint64_t>(a1,     static_cast<uint64_t>(rem.tv_sec));

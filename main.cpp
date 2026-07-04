@@ -270,7 +270,8 @@ int main(int argc, char** argv) {
     Emulator emu;
     emu.set_verbose(verbose);
     emu.set_trace(debug);
-    emu.set_brk_verbose(true); // Turn 40: always show BRK  // -d shows BRKs unless -q
+    emu.set_brk_verbose(true); // Turn 40: always show BRK
+    (void)quiet; // Turn 42: brk_verbose_ is always true now; -q kept for CLI compat
     if (use_jit) emu.enable_jit();
     emu.set_jit_threshold(jit_threshold);
     emu.install_host_signal_handlers();  // forward host signals to guest

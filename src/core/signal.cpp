@@ -679,6 +679,15 @@ void Emulator::queue_host_signal(int signo) {
 void Emulator::install_host_signal_handlers() {
     g_active_emu_ = this;
 
+    // BUGFIX (Turn 42): the shell sets SIGINT and SIGQUIT to SIG_IGN
+    // for background processes (launched with &). We need to RESET
+    // these to SIG_DFL first, then install our handler. Without this,
+    // a background emulator process inherits SIG_IGN for SIGINT, so
+    // Ctrl-C never reaches it — the signal is silently ignored by the
+    // host kernel before our handler can forward it to the guest.
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+
     // Install host handlers for the signals we want to forward.
     // SIGKILL (9) and SIGSTOP (19) cannot be caught — the host kernel
     // handles them directly, which is correct (they always terminate
