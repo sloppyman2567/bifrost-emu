@@ -6,7 +6,7 @@
 // fd type from the request code.
 #include "yggdrasil/fb_node.hpp"
 #include "core/memory.h"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -17,7 +17,7 @@
 
 namespace arm64emu::yggdrasil {
 
-FbNode::FbNode(int guest_fd, int flags, ::arm64emu::GraphicsBackend* gfx)
+FbNode::FbNode(int guest_fd, int flags, ::arm64emu::FrostGraphics* gfx)
     : fd_(guest_fd), flags_(flags), gfx_(gfx) {}
 
 FbNode::~FbNode() {

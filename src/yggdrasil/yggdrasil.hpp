@@ -48,7 +48,7 @@
 // declared at the arm64emu scope so the yggdrasil namespace can refer
 // to them without qualification.
 namespace arm64emu {
-    class GraphicsBackend;
+    class FrostGraphics;
     class Audio;
     class Memory;
 }
@@ -91,7 +91,7 @@ public:
 
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.
-    void set_graphics(::arm64emu::GraphicsBackend* gfx) { gfx_ = gfx; }
+    void set_graphics(::arm64emu::FrostGraphics* gfx) { gfx_ = gfx; }
 
     // Wire up the audio backend (for /dev/dsp, /dev/snd). May be null.
     void set_audio(::arm64emu::Audio* audio) { audio_ = audio; }
@@ -143,7 +143,7 @@ public:
 private:
     std::string elf_path_;
     std::vector<std::string> argv_;
-    ::arm64emu::GraphicsBackend* gfx_ = nullptr;
+    ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
     std::function<std::vector<MapEntry>()> maps_provider_;
     std::function<std::string()> cwd_getter_;

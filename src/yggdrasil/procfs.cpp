@@ -14,7 +14,7 @@
 #include "yggdrasil/memfd_node.hpp"
 #include "yggdrasil/dir_node.hpp"
 #include "core/memory.h"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>

@@ -19,5 +19,5 @@
 #include "decoder.hpp"
 #include "ir/ir.hpp"
 #include "jit/frostjit.hpp"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 #include "core/signal.h"

@@ -19,7 +19,7 @@
 #include "syscalls/syscalls.h"
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/node.hpp"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 
 #include <errno.h>
 #include <fcntl.h>

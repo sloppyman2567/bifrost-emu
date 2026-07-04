@@ -11,7 +11,8 @@
 // method opens an SDL2 window and pushes the framebuffer to it on
 // every call, allowing graphical guest programs to run interactively.
 
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
+#include "frost/thunk.hpp"  // GraphicThunk full definition (for unique_ptr dtor)
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -100,8 +101,12 @@ struct fb_fix_screeninfo {
     uint16_t reserved[2];
 };
 
-// ── Destructor ─────────────────────────────────────────────────────────
-GraphicsBackend::~GraphicsBackend() {
+// ── Constructor / Destructor ───────────────────────────────────────────
+// Out-of-line because the unique_ptr<GraphicThunk> member needs the
+// full GraphicThunk type (defined in thunk.cpp).
+FrostGraphics::FrostGraphics() = default;
+
+FrostGraphics::~FrostGraphics() {
 #if defined(BIFROST_USE_SDL2)
     if (sdl_state_) {
         auto* s = sdl_state(sdl_state_);
@@ -125,7 +130,7 @@ GraphicsBackend::~GraphicsBackend() {
 }
 
 // ── init() ─────────────────────────────────────────────────────────────
-bool GraphicsBackend::init(uint32_t width, uint32_t height) {
+bool FrostGraphics::init(uint32_t width, uint32_t height) {
     // Reject absurd sizes early. Real fb programs sometimes probe with
     // 0x0 to query capabilities; we treat that as a config error.
     if (width == 0 || height == 0 || width > 8192 || height > 8192) {
@@ -247,7 +252,7 @@ bool GraphicsBackend::init(uint32_t width, uint32_t height) {
 }
 
 // ── open_dev_fb0() ─────────────────────────────────────────────────────
-int GraphicsBackend::open_dev_fb0() {
+int FrostGraphics::open_dev_fb0() {
     if (!ready()) {
         // Auto-init with a sensible default. Real Linux fbdev defaults
         // vary (often the actual console mode); 640x480x32 is a safe
@@ -269,7 +274,7 @@ int GraphicsBackend::open_dev_fb0() {
 }
 
 // ── dump_to_ppm() ──────────────────────────────────────────────────────
-bool GraphicsBackend::dump_to_ppm(const std::string& path) const {
+bool FrostGraphics::dump_to_ppm(const std::string& path) const {
     if (!fb_data_ || fb_data_ == MAP_FAILED) {
         fprintf(stderr, "[graphics] dump_to_ppm: framebuffer not mapped\n");
         return false;
@@ -316,7 +321,7 @@ bool GraphicsBackend::dump_to_ppm(const std::string& path) const {
 }
 
 // ── owns_fd() ──────────────────────────────────────────────────────────
-bool GraphicsBackend::owns_fd(int fd) const {
+bool FrostGraphics::owns_fd(int fd) const {
     if (fd < 0 || fb_fd_ < 0) return false;
     if (fd == fb_fd_) return true;
     // Compare file identity (inode + device) via fstat. This catches
@@ -329,7 +334,7 @@ bool GraphicsBackend::owns_fd(int fd) const {
 }
 
 // ── sync_from() ────────────────────────────────────────────────────────
-void GraphicsBackend::sync_from(const void* src) {
+void FrostGraphics::sync_from(const void* src) {
     if (fb_data_ && fb_data_ != MAP_FAILED && src) {
         memcpy(fb_data_, src, size());
     }
@@ -338,7 +343,7 @@ void GraphicsBackend::sync_from(const void* src) {
 // ── poll_events() ──────────────────────────────────────────────────────
 // Pumps the SDL2 event loop. Returns false if the user has requested
 // window close (caller may terminate the guest). No-op in headless mode.
-bool GraphicsBackend::poll_events() {
+bool FrostGraphics::poll_events() {
 #if defined(BIFROST_USE_SDL2)
     if (!sdl_state_) return true;
     auto* s = sdl_state(sdl_state_);
@@ -358,7 +363,7 @@ bool GraphicsBackend::poll_events() {
 }
 
 // ── refresh() ──────────────────────────────────────────────────────────
-void GraphicsBackend::refresh() {
+void FrostGraphics::refresh() {
     if (!ready()) {
         return;  // nothing to refresh
     }
@@ -413,7 +418,7 @@ void GraphicsBackend::refresh() {
 }
 
 // ── ioctl() ────────────────────────────────────────────────────────────
-int GraphicsBackend::ioctl(uint32_t request, void* guest_buf) {
+int FrostGraphics::ioctl(uint32_t request, void* guest_buf) {
     if (!ready()) {
         return -ENODEV;
     }
@@ -480,5 +485,12 @@ int GraphicsBackend::ioctl(uint32_t request, void* guest_buf) {
             return 0;
     }
 }
+
+// ── thunk() — experimental graphic API thunking (v1.4.5-alpha) ─────────
+// The thunk() implementation lives in thunk.cpp (where the full
+// GraphicThunk type is visible). This file just declares the method
+// signature in the header; the body is in thunk.cpp.
+//
+// (See frost/graphics.hpp for the design rationale.)
 
 } // namespace arm64emu

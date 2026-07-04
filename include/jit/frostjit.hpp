@@ -645,7 +645,26 @@ private:
     // IR compiler helpers.
     struct BranchPatch { size_t patch_off; int target_kind; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
+
+    // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha (Turn 36):
+    // split into two files for readability. The dispatch stays in
+    // frostjit.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()
+    // in jit_codegen_fp.cpp, and integer/memory/branch cases stay in
+    // compile_ir_inst() in jit_codegen_int.cpp. The split is purely
+    // organizational — no behavior change.
+    //
+    // Returns true if the block should end after this op (branch/call),
+    // false otherwise.
     bool compile_ir_inst(const IRInst& inst);
+
+    // FP/SIMD IR-op codegen. Called from compile_ir_inst() for the
+    // FP_* and SIMD_* opcodes. Sets fp_handled_ to true if the op was
+    // an FP/SIMD op (regardless of whether it ends the block), and
+    // returns the "ends_block" bool. If fp_handled_ is false after
+    // the call, the caller falls through to the integer switch.
+    // Defined in jit_codegen_fp.cpp.
+    bool compile_ir_inst_fp_(const IRInst& inst);
+    bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
 
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;

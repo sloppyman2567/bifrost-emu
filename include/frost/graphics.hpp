@@ -1,4 +1,4 @@
-// graphics.hpp — Graphics backend for bifrost-emu.
+// frost/graphics.hpp — FrostGraphics: graphics backend for bifrost-emu.
 //
 // Provides a virtual framebuffer device (/dev/fb0) that guest programs
 // can mmap and write pixels to. The framebuffer is backed by a memfd
@@ -15,23 +15,43 @@
 //      graphical guest programs interactively. SDL2 dev headers must
 //      be available on the build host.
 //
+// v1.4.5-alpha (Turn 36): renamed from `GraphicsBackend` to
+// `FrostGraphics` to match the FrostJIT naming convention. The class
+// is now in `include/frost/graphics.hpp` and the implementation in
+// `src/frost_graphics/`. `GraphicsBackend` is kept as a typedef alias
+// for backward compatibility with existing call sites — new code
+// should use `FrostGraphics`.
+//
+// v1.4.5-alpha (Turn 36): EXPERIMENTAL graphic API thunking. The
+// `FrostGraphics::thunk()` method returns a `GraphicThunk*` that the
+// emulator's dynamic linker uses to intercept guest `dlsym` calls for
+// `libGL.so` / `libEGL.so` / `libSDL2.so` / `libGLESv2.so` and forward
+// them to the host's equivalent libraries. This lets guest programs
+// that link against OpenGL/EGL/SDL2 run by thunking every call to the
+// host's implementation — no GPU emulation, just marshalling. See
+// `thunk.cpp` and the `GraphicThunk` class below.
+//
 // Usage from the emulator:
-//   GraphicsBackend gfx;
+//   FrostGraphics gfx;
 //   gfx.init(640, 480);          // 640x480, 32-bit BGRA
 //   int fb_fd = gfx.open_dev_fb0();  // guest-visible fd (memfd-backed)
 //   // ... guest mmaps fb_fd and writes pixels ...
 //   gfx.refresh();               // dump to PPM (headless) or SDL present
 //   gfx.dump_to_ppm("out.ppm");  // explicit dump (always available)
 //
-// Integration: the Emulator class owns a GraphicsBackend instance and
+// Integration: the Emulator class owns a FrostGraphics instance and
 // wires /dev/fb0 openat() and FBIOGET_* ioctls in syscalls.cpp to it.
 #pragma once
 
 #include <cstdint>
 #include <cstddef>
+#include <memory>
 #include <string>
 
 namespace arm64emu {
+
+// Forward-declare GraphicThunk (defined in src/frost_graphics/thunk.cpp).
+class GraphicThunk;
 
 // Linux framebuffer ioctl numbers (from <linux/fb.h>).
 // We define them here so we don't have to #include <linux/fb.h> in
@@ -46,13 +66,25 @@ namespace arm64emu {
 constexpr uint32_t FBIOGET_VSCREENINFO = 0x4600;
 constexpr uint32_t FBIOGET_FSCREENINFO = 0x4602;
 
-class GraphicsBackend {
+// ── FrostGraphics: framebuffer + (optional) window + (optional) thunk ──
+//
+// "FrostGraphics" matches the project's Norse/cold theme (bifrost,
+// FrostJIT, Yggdrasil). The class wraps:
+//   - a memfd-backed framebuffer (always available)
+//   - an optional SDL2 window (build with USE_SDL2=1)
+//   - an optional GraphicThunk for forwarding guest GL/EGL/SDL2 calls
+//     to the host (experimental, v1.4.5-alpha)
+class FrostGraphics {
 public:
-    GraphicsBackend() = default;
-    ~GraphicsBackend();
+    // Default ctor and destructor must be out-of-line (defined in
+    // graphics.cpp) because the unique_ptr<GraphicThunk> member needs
+    // the full GraphicThunk type to construct/destroy, and GraphicThunk
+    // is only forward-declared here.
+    FrostGraphics();
+    ~FrostGraphics();
 
-    GraphicsBackend(const GraphicsBackend&) = delete;
-    GraphicsBackend& operator=(const GraphicsBackend&) = delete;
+    FrostGraphics(const FrostGraphics&) = delete;
+    FrostGraphics& operator=(const FrostGraphics&) = delete;
 
     // Initialize the framebuffer with the given dimensions.
     // width x height pixels, 32 bits per pixel (BGRA/XRGB).
@@ -138,6 +170,31 @@ public:
     //   FBIOGET_FSCREENINFO (0x4602) — write struct fb_fix_screeninfo
     int ioctl(uint32_t request, void* guest_buf);
 
+    // ── EXPERIMENTAL: Graphic API thunking (v1.4.5-alpha, Turn 36) ──
+    //
+    // Returns the GraphicThunk instance owned by this FrostGraphics.
+    // The thunk intercepts guest dlsym calls for libGL/libEGL/libSDL2/
+    // libGLESv2 and forwards them to the host's equivalent libraries.
+    // The thunk is lazily created on first call — if the guest never
+    // uses GL/EGL/SDL2, no host libraries are loaded.
+    //
+    // The thunk is EXPERIMENTAL:
+    //   - Only a subset of GL/EGL/SDL2 entry points are thunked (the
+    //     most common ones: glClear, glBegin, glEnd, glVertex3f,
+    //     eglGetDisplay, eglInitialize, SDL_Init, SDL_CreateWindow,
+    //     SDL_GL_SwapWindow, etc.).
+    //   - Pointer arguments that are guest addresses (e.g. vertex
+    //     arrays, shader source strings) are translated via the
+    //     emulator's Memory — the thunk needs an Emulator& to do this.
+    //   - The thunk is opt-in: set BIFROST_THUNK_GRAPHICS=1 in the
+    //     environment to enable. Without it, the thunk returns
+    //     nullptr for every dlsym, so the guest falls back to its
+    //     own software rendering (or fails gracefully).
+    //
+    // See src/frost_graphics/thunk.cpp for the implementation and the
+    // list of supported entry points.
+    GraphicThunk* thunk();
+
 private:
     uint32_t      width_         = 0;
     uint32_t      height_        = 0;
@@ -150,6 +207,16 @@ private:
     // Stored as void* to avoid pulling SDL2.h into this header.
     void*         sdl_state_     = nullptr;  // struct SDLWindowState*
     bool          sdl_init_done_ = false;    // SDL_Init succeeded
+
+    // GraphicThunk instance (lazily created by thunk()). Stored as
+    // unique_ptr to avoid pulling the GraphicThunk definition into
+    // this header.
+    std::unique_ptr<GraphicThunk> thunk_;
 };
+
+// Backward-compatibility alias. Existing call sites use `GraphicsBackend`;
+// new code should use `FrostGraphics`. The alias is in the public
+// header so external consumers (libbifrost users) don't break.
+using GraphicsBackend = FrostGraphics;
 
 } // namespace arm64emu

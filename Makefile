@@ -28,7 +28,7 @@
 #                       jit_cache, jit_profiler, frostjit, jit_glue)
 #   src/syscalls/     — Linux AArch64 syscall layer (split by concern)
 #   src/frontend/     — decoder + ELF loader
-#   src/graphics/     — /dev/fb0 backend (headless or SDL2)
+#   src/frost_graphics/  — FrostGraphics + GraphicThunk (fb + GL thunking)
 #   src/interp/       — switch-based instruction interpreter
 
 CXX      ?= g++
@@ -42,7 +42,7 @@ LIB      := libbifrost.a
 # Auto-discover all .cpp under src/, plus main.cpp at the root.
 # api/bifrost_capi.cpp is included in LIB_SOURCES so libbifrost.a exposes
 # the C API (bifrost.h).
-SRC_DIRS := src/core src/yggdrasil src/ir src/jit src/syscalls src/frontend src/graphics src/interp src/audio
+SRC_DIRS := src/core src/yggdrasil src/ir src/jit src/syscalls src/frontend src/frost_graphics src/interp src/audio
 SOURCES  := $(shell find $(SRC_DIRS) -name '*.cpp') main.cpp
 OBJDIR   := build
 OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
@@ -58,8 +58,16 @@ HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
 ifeq ($(USE_SDL2),1)
     SDL2_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null)
     SDL2_LIBS   ?= $(shell sdl2-config --libs   2>/dev/null)
-    CXXFLAGS += $(SDL2_CFLAGS) -DBIFROST_USE_SDL2
+    CXXFLAGS += $(SDL2_CFLAGS) -DBIFROST_USE_SDL2 -DBIFROST_THUNK_HAVE_SDL2
     LDFLAGS  += $(SDL2_LIBS)
+endif
+
+# ── Graphic API thunking (experimental, opt-in) ─────────────────────────
+# When USE_THUNK_GL=1, GraphicThunk forwards guest GL/EGL calls to host.
+# Enable at runtime via BIFROST_THUNK_GRAPHICS=1 env var.
+ifeq ($(USE_THUNK_GL),1)
+    CXXFLAGS += -DBIFROST_THUNK_HAVE_GL -DBIFROST_THUNK_HAVE_EGL
+    LDFLAGS  += -lGL -lEGL
 endif
 
 .PHONY: all test clean install uninstall lib debug

@@ -36,7 +36,7 @@ class Emulator;
 class ElfLoader;
 class FrostJIT;
 class SignalTable;
-class GraphicsBackend;
+class FrostGraphics;
 struct IRBlock;
 struct IRInst;
 

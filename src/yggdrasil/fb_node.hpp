@@ -10,14 +10,14 @@
 #include "yggdrasil/node.hpp"
 
 namespace arm64emu {
-    class GraphicsBackend;
+    class FrostGraphics;
 }
 
 namespace arm64emu::yggdrasil {
 
 class FbNode : public Node {
 public:
-    explicit FbNode(int guest_fd, int flags, ::arm64emu::GraphicsBackend* gfx);
+    explicit FbNode(int guest_fd, int flags, ::arm64emu::FrostGraphics* gfx);
     ~FbNode() override;
 
     ssize_t read(uint64_t off, void* buf, size_t n) override;
@@ -33,7 +33,7 @@ public:
 private:
     int fd_;
     int flags_;
-    ::arm64emu::GraphicsBackend* gfx_;
+    ::arm64emu::FrostGraphics* gfx_;
 };
 
 } // namespace arm64emu::yggdrasil

@@ -192,6 +192,48 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   `isatty(0)` returns 0 when stdin is a pipe; `/proc/self/maps` shows
   live memory layout.
 
+### FrostGraphics rename + graphic API thunking + FrostJIT split (2026-07-04, Turn 36)
+
+- **GraphicsBackend renamed to FrostGraphics.** The class is now in
+  `include/frost/graphics.hpp` (was `include/graphics.hpp`) and the
+  implementation in `src/frost_graphics/` (was `src/graphics/`).
+  `GraphicsBackend` is kept as a `using` alias for backward compat.
+  The rename matches the project's Norse/cold theme (bifrost,
+  FrostJIT, Yggdrasil, FrostGraphics).
+- **EXPERIMENTAL: graphic API thunking.** New `GraphicThunk` class
+  (`include/frost/thunk.hpp` + `src/frost_graphics/thunk.cpp`)
+  intercepts guest `dlsym` calls for `libGL.so` / `libEGL.so` /
+  `libSDL2.so` / `libGLESv2.so` and forwards them to the host's
+  equivalent libraries. This lets guest programs that link against
+  OpenGL/EGL/SDL2 run by thunking every call to the host's
+  implementation — no GPU emulation, just marshalling. Enabled via
+  `BIFROST_THUNK_GRAPHICS=1` env var. Without it, the thunk returns
+  nullptr for every lookup (guest falls back to software rendering).
+  This is a proof-of-concept: only a subset of GL/EGL/SDL2 entry
+  points are thunked, and pointer-argument marshalling is minimal.
+  See `frost/thunk.hpp` for the full limitations list.
+- **FrostJIT split into 7 files.** `src/jit/frostjit.cpp` was 4520
+  LOC — too big to navigate. Split into:
+  - `jit_interp.cpp` (72 LOC) — `jit_interp_step` extern "C" trampoline
+  - `jit_helpers.cpp` (123 LOC) — `emit_fmov_helper`, `emit_call_interp`
+  - `jit_codegen_fp.cpp` (1484 LOC) — FP/SIMD IR-op codegen (extracted
+    from `compile_ir_inst`'s switch via a new `compile_ir_inst_fp_`
+    method + `fp_handled_` flag)
+  - `jit_flags.cpp` (79 LOC) — `clobber_flags`, `materialize_flags_to_pstate`
+  - `jit_translate.cpp` (582 LOC) — `translate_block` (ARM64 → x86)
+  - `jit_dispatch.cpp` (571 LOC) — `run_block` (block cache + dispatch)
+  - `frostjit.cpp` (1798 LOC) — integer/memory/branch IR-op codegen +
+    layout checks + thread-local state (down from 4520)
+  Total: 13 JIT .cpp files (was 7). No behavior change — the split is
+  purely organizational. The FP codegen extraction uses a `fp_handled_`
+  flag protocol: `compile_ir_inst` calls `compile_ir_inst_fp_` first;
+  if `fp_handled_` is true, returns the FP handler's result; otherwise
+  falls through to the integer switch.
+- **Tests:** all 72 pass under JIT, 71 under `--no-jit`, 71 under FWD
+  mode, 22/22 C API checks. MD5 still correct
+  (`b1946ac92492d2347c6235b4d2611184`). No performance regression
+  (bench_mips 1.4s, 571 MIPS).
+
 ## [1.4.0] — 2026-07-03 (stable release)
 
 ### Post-stabilization hardening (2026-07-03)

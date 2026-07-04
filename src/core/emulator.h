@@ -17,7 +17,7 @@
 #include "core/cpu.h"
 #include "core/memory.h"
 #include "core/signal.h"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 #include "audio/audio.h"
 #include "yggdrasil/yggdrasil.hpp"
 
@@ -114,7 +114,7 @@ public:
 
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
-    GraphicsBackend& graphics() { return graphics_; }
+    FrostGraphics& graphics() { return graphics_; }
     Audio&          audio()    { return audio_; }
     SignalTable&    signals()  { return signals_; }
     Yggdrasil&      vfs()      { return vfs_; }
@@ -271,7 +271,7 @@ private:
     std::vector<std::unique_ptr<ForkChild>> fork_children_;
 
     // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
-    GraphicsBackend graphics_;
+    FrostGraphics graphics_;
 
     // ── Audio backend (virtual /dev/dsp, /dev/snd) ────────────────────
     Audio audio_;

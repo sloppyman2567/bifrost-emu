@@ -38,6 +38,21 @@ namespace arm64emu {
 //   - O_NONBLOCK on virtual fds now works (via host-fd passthrough).
 //   - lseek on memfd-backed virtual files works (was ESPIPE in some
 //     paths); triggers lazy regeneration on SEEK_SET 0.
+//   - GraphicsBackend renamed to FrostGraphics (matching the
+//     FrostJIT/Yggdrasil theme). Header moved to include/frost/graphics.hpp;
+//     implementation moved to src/frost_graphics/. GraphicsBackend is
+//     kept as a using alias for backward compat.
+//   - EXPERIMENTAL: graphic API thunking. New GraphicThunk class
+//     (include/frost/thunk.hpp) forwards guest GL/EGL/SDL2 dlsym calls
+//     to the host's equivalent libraries. Enabled via
+//     BIFROST_THUNK_GRAPHICS=1 env var. Proof-of-concept — only a
+//     subset of entry points are thunked.
+//   - FrostJIT split: frostjit.cpp was 4520 LOC — too big to navigate.
+//     Split into 7 files: jit_interp.cpp (trampoline), jit_helpers.cpp
+//     (emit helpers), jit_codegen_fp.cpp (FP/SIMD codegen),
+//     jit_flags.cpp (flag materialization), jit_translate.cpp
+//     (translate_block), jit_dispatch.cpp (run_block), and frostjit.cpp
+//     (integer codegen, now 1798 LOC). No behavior change.
 //   - Version consistency sweep: all version refs across the tree now
 //     say 1.4.5-alpha (previously many said 1.4.0; test_capi was
 //     checking for "1.4.0" and failing).

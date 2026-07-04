@@ -273,20 +273,24 @@ cache hit rate for any program.
 bifrost-emu/
 ├── include/
 │   ├── bifrost/          Public API headers (types, version, emulator)
+│   ├── frost/            FrostGraphics + GraphicThunk (graphic API thunking)
 │   ├── jit/              frostjit.hpp — block translator interface
 │   ├── ir/               IR block / IR inst definitions
 │   ├── arm64_emu.hpp     Legacy umbrella header (redirects to bifrost/)
-│   ├── graphics.hpp      Framebuffer / SDL2 interface
 │   └── decoder.hpp       DecodedInst struct, InstClass enum, fp_decode helpers
 ├── src/
 │   ├── core/             Emulator, Memory, CPU, Signal, ThreadMgr (headers + .cpp)
 │   ├── frontend/         decoder.cpp + elf_loader.cpp
 │   ├── interp/           interpreter.cpp (switch on d.cls)
 │   ├── ir/               IR builder, translator, optimizer, lowerer, executor
-│   ├── jit/              frostjit.cpp, x86_backend, x86_regalloc, cache, profiler
+│   ├── jit/              FrostJIT — split by concern: frostjit (integer
+│   │                     codegen), jit_codegen_fp (FP/SIMD), jit_translate,
+│   │                     jit_dispatch, jit_helpers, jit_flags, jit_interp,
+│   │                     x86_backend, x86_regalloc, jit_cache, jit_profiler
 │   ├── syscalls/         Linux AArch64 syscall layer (~170 syscalls, split by concern)
 │   ├── yggdrasil/        Yggdrasil VFS (Node + FdTable + procfs + devfs)
-│   ├── graphics/         /dev/fb0 backend (headless or SDL2)
+│   ├── frost_graphics/   FrostGraphics — /dev/fb0 backend (headless or SDL2)
+│   │                     + GraphicThunk (experimental GL/EGL/SDL2 forwarding)
 │   └── audio/            OSS /dev/dsp passthrough + WAV dump
 ├── api/bifrost.h         Public C API for libbifrost
 ├── test/                 Sample ARM64 programs (.s sources + assembled .elf)

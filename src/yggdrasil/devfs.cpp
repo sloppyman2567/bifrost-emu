@@ -26,7 +26,7 @@
 #include "yggdrasil/audio_node.hpp"
 #include "yggdrasil/dir_node.hpp"
 #include "audio/audio.h"
-#include "graphics.hpp"
+#include "frost/graphics.hpp"
 
 #include <cerrno>
 #include <cstdint>
