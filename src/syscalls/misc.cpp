@@ -425,15 +425,19 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 172: { // getpid
             // CLONE_THREAD semantics: all threads in the same thread
             // group see the same PID (= the main thread's TID, which is
-            // 1 for the guest process). The old code returned the host
-            // getpid() which is correct for the main thread (TID 1 ==
-            // host PID) but wrong for spawned threads (their host thread
-            // has a different host TID, but the guest PID must be 1).
-            // We return cpu.tid == 1 ? host_getpid() : 1, but since the
-            // main thread's TID is always 1 and the guest PID is 1, we
-            // just return 1 for all guest threads.
-            (void)::getpid();  // suppress unused warning if not used
-            ret_host(1);
+            // 1 for the guest process). Forked children (clone without
+            // CLONE_VM) are separate processes — they must report a
+            // DIFFERENT PID so that getpid() != parent_pid, which lets
+            // the child detect it's a forked process and reset signal
+            // handlers to SIG_DFL (e.g., toybox sh line 2711:
+            // "if (getpid() != TT.pid) signal(SIGINT, SIG_DFL)").
+            // Without this, the forked child inherits SIG_IGN from the
+            // parent and Ctrl+C can't interrupt foreground commands.
+            if (cpu.is_fork_process) {
+                ret_host(static_cast<uint64_t>(cpu.tid));
+            } else {
+                ret_host(1);
+            }
             return 0;
         }
 

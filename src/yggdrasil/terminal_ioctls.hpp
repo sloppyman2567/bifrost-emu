@@ -46,11 +46,14 @@ namespace ioctl_num {
     constexpr uint32_t REQ_TCSETS     = 0x5402;  // write termios
     constexpr uint32_t REQ_TCSETSW    = 0x5403;  // drain output, then write
     constexpr uint32_t REQ_TCSETSF    = 0x5404;  // drain input, then write
+    constexpr uint32_t REQ_TIOCSCTTY  = 0x540E;  // set controlling tty
+    constexpr uint32_t REQ_TIOCGPGRP  = 0x540F;  // get foreground pgrp
+    constexpr uint32_t REQ_TIOCSPGRP  = 0x5410;  // set foreground pgrp
     constexpr uint32_t REQ_TIOCGWINSZ = 0x5413;  // get window size
     constexpr uint32_t REQ_FIONREAD   = 0x541B;  // bytes available to read
     constexpr uint32_t REQ_FIONBIO    = 0x5421;  // set/clear non-blocking I/O
     constexpr uint32_t REQ_TIOCNOTTY  = 0x5422;  // detach controlling tty
-    constexpr uint32_t REQ_TIOCSCTTY  = 0x540E;  // set controlling tty
+    constexpr uint32_t REQ_TIOCGSID   = 0x5429;  // get session id
 }  // namespace ioctl_num
 
 // ── dispatch_terminal_ioctl — shared ioctl handler ─────────────────────
@@ -117,6 +120,30 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
             mem.read(argp, &n, sizeof(n));
             int r = ::ioctl(host_fd, FIONBIO, &n);
             if (r < 0) return -errno;
+            return 0;
+        }
+        case ioctl_num::REQ_TIOCGPGRP: {
+            // Get the foreground process group of the terminal.
+            //
+            // The guest is a single-process model: getpid()=1, getpgid()=1.
+            // If we forwarded to the host, tcgetpgrp() would return the
+            // HOST foreground pgrp (e.g., 12345), which would never match
+            // getpgrp()=1 — making the guest think it's a background job.
+            // Shells (toybox sh, bash) check tcgetpgrp(0)==getpgrp() to
+            // decide if they're interactive; if not, they set SIGINT to
+            // SIG_IGN, breaking Ctrl+C. Return 1 (the guest PGID) so the
+            // shell sees itself as the foreground process group.
+            mem.store<int32_t>(argp, 1);
+            return 0;
+        }
+        case ioctl_num::REQ_TIOCSPGRP: {
+            // Set the foreground process group. No-op in the single-process
+            // guest model — there's only one process group (PGID=1).
+            return 0;
+        }
+        case ioctl_num::REQ_TIOCGSID: {
+            // Get the session ID. Return 1 (guest PID = session leader).
+            mem.store<int32_t>(argp, 1);
             return 0;
         }
         default:

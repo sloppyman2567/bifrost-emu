@@ -52,8 +52,12 @@ public:
     uint64_t tpidrro_el0 = 0;
 
     // Thread ID (guest TID). Main thread is 1; cloned threads get 2, 3, ...
-    // Used by getpid/gettid/tgkill and as the futex owner field.
+    // Forked children (clone without CLONE_VM) get the host PID as their
+    // tid, and is_fork_process is set so getpid() returns the host PID
+    // instead of 1. This lets the child detect it's a forked process
+    // (getpid() != parent_pid) and reset signal handlers accordingly.
     int tid = 1;
+    bool is_fork_process = false;  // true for fork() children (no CLONE_VM)
 
     // Per-CPU memory page cache for the hot path. Avoids mutex+hash on
     // every memory access to the same page. Each CPU (thread) has its

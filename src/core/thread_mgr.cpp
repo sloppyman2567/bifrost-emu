@@ -367,6 +367,7 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
 
         int child_tid = static_cast<int>(getpid());
         parent_cpu.tid = child_tid;
+        parent_cpu.is_fork_process = true;  // getpid() returns host PID, not 1
 
         if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
             mem_.store<uint32_t>(ctid_ptr, child_tid);
