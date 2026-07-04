@@ -715,15 +715,18 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
         return 0;
     }
 
-    // Allocate a fresh base address. We use a member variable (not a
-    // function-local static) so multiple DynamicLinker instances don't
-    // share the same allocator — that was a latent bug if the Emulator
-    // ever created two linkers (e.g., for fork() with separate Memory).
-    // The base starts at 0x5000000000 (above the main binary's typical
-    // 0x400000 region, below the stack at 0x8000000000).
-    if (next_lib_base_ == 0) next_lib_base_ = 0x5000000000ULL;
-    uint64_t base = next_lib_base_;
-    // Advance by the library's highest PT_LOAD end (page-aligned).
+    // Allocate a fresh base address via the Memory's mmap_alloc().
+    // BUGFIX (Turn 39): the old code used a separate next_lib_base_
+    // counter starting at 0x5000000000 — the SAME address as
+    // mmap_alloc()'s starting region. This meant the thunk's trampoline
+    // page (allocated via mmap_alloc in GraphicThunk::init) could
+    // collide with the first library loaded here, causing the library
+    // to overwrite the trampolines → "decode error at pc=0x5000000020
+    // inst=0x00000040" when the guest tried to call a thunked function.
+    // The fix: use mem_.mmap_alloc() for library bases, so the
+    // allocator tracks ALL high-memory allocations and prevents
+    // collisions. next_lib_base_ is now unused (kept in the header for
+    // ABI compat but never read).
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff;
@@ -744,7 +747,13 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
             }
         }
     }
-    next_lib_base_ = (base + max_end + 0xFFFFF) & ~0xFFFFFULL;  // 1 MiB align
+    // Allocate via mmap_alloc (page-aligned, collision-free with other
+    // high-memory allocations like the thunk's trampoline page).
+    // We round up to 1 MiB alignment to match the old behavior (libraries
+    // are typically 1 MiB aligned in real ld.so).
+    max_end = (max_end + 0xFFFFF) & ~0xFFFFFULL;  // 1 MiB align
+    uint64_t base = mem_.mmap_alloc(max_end);
+    if (base == 0) return 0;
 
     LoadedObject obj;
     obj.name = soname;

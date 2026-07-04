@@ -85,6 +85,7 @@ void Emulator::syscall(CPU& cpu) {
             case 93: name = "exit"; break;
             case 94: name = "exit_group"; break;
             case 96: name = "set_tid_address"; break;
+            case 180: name = "sysinfo"; break;
             case 98: name = "futex"; break;
             case 99: name = "set_robust_list"; break;
             case 100: name = "get_robust_list"; break;
@@ -103,6 +104,14 @@ void Emulator::syscall(CPU& cpu) {
                     static_cast<unsigned long long>(cpu.regs[3]),
                     static_cast<unsigned long long>(cpu.regs[4]),
                     static_cast<unsigned long long>(cpu.regs[5]),
+                    static_cast<unsigned long long>(cpu.pc));
+        } else if (getenv("BIFROST_SYSCALL_TRACE_ALL")) {
+            fprintf(stderr, "[syscall t%d] %llu (unknown) a0=0x%llx a1=0x%llx a2=0x%llx pc=0x%llx\n",
+                    cpu.tid,
+                    static_cast<unsigned long long>(num),
+                    static_cast<unsigned long long>(cpu.regs[0]),
+                    static_cast<unsigned long long>(cpu.regs[1]),
+                    static_cast<unsigned long long>(cpu.regs[2]),
                     static_cast<unsigned long long>(cpu.pc));
         }
     }

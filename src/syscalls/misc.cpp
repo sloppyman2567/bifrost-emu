@@ -371,6 +371,57 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        case 180: { // sysinfo(struct sysinfo *info) — AArch64 syscall 180
+            // Fills a struct sysinfo (112 bytes on 64-bit) with system
+            // memory/load info. Used by `free`, `top`, and other tools.
+            // We return reasonable fake values so these tools don't
+            // crash or show garbage.
+            //
+            // struct sysinfo layout (64-bit, 112 bytes):
+            //   offset  0: uptime (8 bytes)
+            //   offset  8: loads[3] (24 bytes)
+            //   offset 32: totalram (8 bytes)
+            //   offset 40: freeram (8 bytes)
+            //   offset 48: sharedram (8 bytes)
+            //   offset 56: bufferram (8 bytes)
+            //   offset 64: totalswap (8 bytes)
+            //   offset 72: freeswap (8 bytes)
+            //   offset 80: procs (2 bytes)
+            //   offset 82: pad (2 bytes)
+            //   offset 88: totalhigh (8 bytes)
+            //   offset 96: freehigh (8 bytes)
+            //   offset 104: mem_unit (4 bytes)
+            //   offset 108: padding (4 bytes)
+            if (a0 == 0) { ret_err(EFAULT); return 0; }
+            try {
+                // uptime: seconds since emulator start (fake 100s)
+                mem_.store<uint64_t>(a0 + 0, 100);
+                // loads: 1/5/15 min load averages (scaled by 65536)
+                mem_.store<uint64_t>(a0 + 8,  0);  // 1 min
+                mem_.store<uint64_t>(a0 + 16, 0);  // 5 min
+                mem_.store<uint64_t>(a0 + 24, 0);  // 15 min
+                // Memory: 16 GB total, 8 GB free (in 1 KB units since
+                // mem_unit=1). These match /proc/meminfo's fake values.
+                mem_.store<uint64_t>(a0 + 32, 16777216);  // totalram
+                mem_.store<uint64_t>(a0 + 40, 8388608);   // freeram
+                mem_.store<uint64_t>(a0 + 48, 0);         // sharedram
+                mem_.store<uint64_t>(a0 + 56, 4194304);   // bufferram
+                mem_.store<uint64_t>(a0 + 64, 0);         // totalswap
+                mem_.store<uint64_t>(a0 + 72, 0);         // freeswap
+                // procs: 1 process (the guest)
+                mem_.store<uint16_t>(a0 + 80, 1);
+                mem_.store<uint16_t>(a0 + 82, 0);  // pad
+                mem_.store<uint64_t>(a0 + 88, 0);  // totalhigh
+                mem_.store<uint64_t>(a0 + 96, 0);  // freehigh
+                mem_.store<uint32_t>(a0 + 104, 1); // mem_unit (1 byte)
+                mem_.store<uint32_t>(a0 + 108, 0); // padding
+                ret_host(0);
+            } catch (...) {
+                ret_err(EFAULT);
+            }
+            return 0;
+        }
+
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
             ret_host(::eventfd((unsigned int)a0, static_cast<int>(a1)));
             return 0;

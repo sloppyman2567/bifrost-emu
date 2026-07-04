@@ -51,6 +51,8 @@ static std::vector<DirNode::Entry> proc_entries() {
         {"meminfo",    0x1 /*DT_REG*/},
         {"cpuinfo",    0x1 /*DT_REG*/},
         {"version",    0x1 /*DT_REG*/},
+        {"mounts",     0x2 /*DT_LNK*/},
+        {"filesystems",0x1 /*DT_REG*/},
         {"sys",        0x4 /*DT_DIR*/},
     };
 }
@@ -64,6 +66,8 @@ static std::vector<DirNode::Entry> proc_self_entries() {
         {"auxv",    0x1 /*DT_REG*/},
         {"environ", 0x1 /*DT_REG*/},
         {"limits",  0x1 /*DT_REG*/},
+        {"mounts",  0x1 /*DT_REG*/},
+        {"fd",      0x4 /*DT_DIR*/},
     };
 }
 
@@ -206,12 +210,50 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
 
     // ── Static-content files ────────────────────────────────────────
     if (path == "/proc/meminfo") {
+        // Field order matters! toybox's `free` reads fields consecutively
+        // by name (MemTotal, MemFree, Buffers, Cached, Shmem, SwapTotal,
+        // SwapFree, SwapCached) and breaks when a name doesn't match.
+        // We put those 8 fields FIRST, then the rest. Format matches
+        // Linux's /proc/meminfo exactly (field name, colons, right-
+        // justified width, " kB").
         std::string s;
+        // ── Fields read by toybox `free` (must be consecutive) ──────
         s += "MemTotal:       16777216 kB\n";
         s += "MemFree:         8388608 kB\n";
-        s += "MemAvailable:   12582912 kB\n";
         s += "Buffers:               0 kB\n";
         s += "Cached:          4194304 kB\n";
+        s += "Shmem:                 0 kB\n";
+        s += "SwapTotal:             0 kB\n";
+        s += "SwapFree:              0 kB\n";
+        s += "SwapCached:            0 kB\n";
+        // ── Other fields (order doesn't matter for `free`) ──────────
+        s += "MemAvailable:   12582912 kB\n";
+        s += "Active:          4194304 kB\n";
+        s += "Inactive:        2097152 kB\n";
+        s += "Active(anon):    2097152 kB\n";
+        s += "Inactive(anon):        0 kB\n";
+        s += "Active(file):    2097152 kB\n";
+        s += "Inactive(file):  2097152 kB\n";
+        s += "Unevictable:           0 kB\n";
+        s += "Mlocked:               0 kB\n";
+        s += "Dirty:                 0 kB\n";
+        s += "Writeback:             0 kB\n";
+        s += "AnonPages:       2097152 kB\n";
+        s += "Mapped:           524288 kB\n";
+        s += "KReclaimable:     262144 kB\n";
+        s += "Slab:             262144 kB\n";
+        s += "SReclaimable:     262144 kB\n";
+        s += "SUnreclaim:             0 kB\n";
+        s += "KernelStack:        8192 kB\n";
+        s += "PageTables:        16384 kB\n";
+        s += "CommitLimit:     8388608 kB\n";
+        s += "Committed_AS:    2097152 kB\n";
+        s += "VmallocTotal:    8388608 kB\n";
+        s += "VmallocUsed:      262144 kB\n";
+        s += "VmallocChunk:    8126464 kB\n";
+        s += "HugePages_Total:       0\n";
+        s += "HugePages_Free:        0\n";
+        s += "Hugepagesize:       2048 kB\n";
         return serve_static(s, flags);
     }
     if (path == "/proc/cpuinfo") {
@@ -248,6 +290,49 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         s += "Max processes             unlimited            unlimited            processes \n";
         s += "Max open files            1024                 4096                 files     \n";
         return serve_static(s, flags);
+    }
+
+    // ── /proc/mounts + /proc/self/mounts (Turn 40) ──────────────────
+    // Many programs (df, mount, findmnt) read /proc/mounts. On real
+    // Linux, /proc/mounts is a symlink to /proc/self/mounts. We serve
+    // the same content from both paths so programs that open either
+    // work. The content is a minimal mount table with the root fs and
+    // /proc.
+    if (path == "/proc/mounts" || path == "/proc/self/mounts") {
+        std::string s;
+        s += "rootfs / rootfs rw 0 0\n";
+        s += "/dev/root / ext4 rw,relatime 0 0\n";
+        s += "proc /proc proc rw,relatime 0 0\n";
+        s += "sysfs /sys sysfs rw,relatime 0 0\n";
+        s += "devtmpfs /dev devtmpfs rw,relatime 0 0\n";
+        s += "tmpfs /tmp tmpfs rw,relatime 0 0\n";
+        return serve_static(s, flags);
+    }
+
+    // ── /proc/filesystems ───────────────────────────────────────────
+    if (path == "/proc/filesystems") {
+        std::string s;
+        s += "nodev\trootfs\n";
+        s += "nodev\tproc\n";
+        s += "nodev\tsysfs\n";
+        s += "nodev\tdevtmpfs\n";
+        s += "nodev\ttmpfs\n";
+        s += "\text4\n";
+        return serve_static(s, flags);
+    }
+
+    // ── /proc/self/fd → directory of open fds (Turn 40) ─────────────
+    // `ls /proc/self/fd` lists the guest's open file descriptors. We
+    // return a DirNode with entries for 0, 1, 2 (stdin/stdout/stderr).
+    // Real Linux has symlinks here (0 -> /dev/stdin etc.); we just
+    // list them as regular files since we don't support readlink on
+    // virtual paths yet.
+    if (path == "/proc/self/fd" || path == "/proc/self/fd/") {
+        std::vector<DirNode::Entry> fd_entries;
+        fd_entries.push_back({"0", 0x2 /*DT_LNK*/});
+        fd_entries.push_back({"1", 0x2 /*DT_LNK*/});
+        fd_entries.push_back({"2", 0x2 /*DT_LNK*/});
+        return serve_dir("/proc/self/fd", fd_entries, flags);
     }
 
     *err_out = 0;

@@ -242,52 +242,31 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             //   2. Checking if it's a valid AArch64 ELF
             //   3. If yes: clear guest memory, reload the ELF, set up new
             //      stack, jump to entry point
-            //   4. If no: return -ENOENT
+            //   4. If no (wrong arch): try multi-call binary redirect
+            //      (see below)
             //
             // This is called in the child process after fork(). The child
             // has a CoW copy of the parent's memory, so clearing it is
             // safe — the parent is unaffected.
+            //
+            // ── Multi-call binary redirect (Turn 40) ───────────────────
+            // When the guest runs `toybox sh -c 'ls /'`, the shell does
+            // a PATH lookup for `ls`, finds the host's `/bin/ls` (x86-64),
+            // and calls execve("/bin/ls", ...). The host binary is not
+            // AArch64, so we'd return -ENOEXEC. But toybox is a multi-
+            // call binary — `/bin/ls` should be a symlink to toybox.
+            // The fix: when execve gets a non-AArch64 binary, check if
+            // the basename (e.g. "ls") matches a command the currently-
+            // running ELF supports. If so, re-exec the current ELF with
+            // argv[0] = basename. This is exactly how BusyBox/toybox
+            // multi-call binaries work on real Linux.
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a0);
             if (path.empty()) {
                 ret_err(EFAULT);
                 return 0;
             }
 
-            // Read the ELF file.
-            FILE* f = fopen(path.c_str(), "rb");
-            if (!f) {
-                ret_err(ENOENT);
-                return 0;
-            }
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            if (sz <= 0) {
-                fclose(f);
-                ret_err(ENOEXEC);
-                return 0;
-            }
-            std::vector<uint8_t> elf_data(sz);
-            if (fread(elf_data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
-                fclose(f);
-                ret_err(EIO);
-                return 0;
-            }
-            fclose(f);
-
-            // Validate it's an AArch64 ELF.
-            if (elf_data.size() < 64 || elf_data[0] != 0x7f || elf_data[1] != 'E') {
-                ret_err(ENOEXEC);
-                return 0;
-            }
-            uint16_t e_machine;
-            memcpy(&e_machine, elf_data.data() + 18, 2);
-            if (e_machine != 183) {  // EM_AARCH64
-                ret_err(ENOEXEC);
-                return 0;
-            }
-
-            // Read argv from guest memory.
+            // Read argv from guest memory (needed for both paths).
             std::vector<std::string> new_argv;
             uint64_t argv_ptr = a1;
             while (true) {
@@ -300,6 +279,109 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 new_argv.push_back(arg);
                 argv_ptr += 8;
             }
+
+            // Read the ELF file.
+            FILE* f = fopen(path.c_str(), "rb");
+            bool is_aarch64 = false;
+            std::vector<uint8_t> elf_data;
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (sz > 0) {
+                    elf_data.resize(sz);
+                    if (fread(elf_data.data(), 1, sz, f) == static_cast<size_t>(sz)) {
+                        if (elf_data.size() >= 64 && elf_data[0] == 0x7f &&
+                            elf_data[1] == 'E') {
+                            uint16_t e_machine;
+                            memcpy(&e_machine, elf_data.data() + 18, 2);
+                            if (e_machine == 183) {  // EM_AARCH64
+                                is_aarch64 = true;
+                            }
+                        }
+                    }
+                }
+                fclose(f);
+            }
+
+            if (!is_aarch64) {
+                // ── Multi-call binary redirect ────────────────────────
+                // The requested binary is not AArch64 (or doesn't exist).
+                // Check if the currently-running ELF (emu.elf_path()) can
+                // act as a multi-call binary for the requested command.
+                // This makes `toybox sh -c 'ls /'` work: the shell tries
+                // to exec /bin/ls (host x86-64), we redirect to running
+                // toybox with argv[0]="ls".
+                std::string basename = path;
+                size_t slash = basename.rfind('/');
+                if (slash != std::string::npos) {
+                    basename = basename.substr(slash + 1);
+                }
+
+                // Don't redirect if the basename IS the current ELF's
+                // basename (infinite loop guard).
+                std::string elf_path = emu.elf_path();
+                std::string elf_basename = elf_path;
+                size_t eslash = elf_basename.rfind('/');
+                if (eslash != std::string::npos) {
+                    elf_basename = elf_basename.substr(eslash + 1);
+                }
+                if (basename == elf_basename) {
+                    // Same binary — return the original error.
+                    if (f) {
+                        ret_err(ENOEXEC);
+                    } else {
+                        ret_err(ENOENT);
+                    }
+                    return 0;
+                }
+
+                // Try to re-exec the current ELF with argv[0] = basename.
+                FILE* ef = fopen(elf_path.c_str(), "rb");
+                if (!ef) {
+                    if (f) {
+                        ret_err(ENOEXEC);
+                    } else {
+                        ret_err(ENOENT);
+                    }
+                    return 0;
+                }
+                fseek(ef, 0, SEEK_END);
+                long esz = ftell(ef);
+                fseek(ef, 0, SEEK_SET);
+                if (esz <= 0) {
+                    fclose(ef);
+                    ret_err(ENOEXEC);
+                    return 0;
+                }
+                elf_data.resize(esz);
+                if (fread(elf_data.data(), 1, esz, ef) != static_cast<size_t>(esz)) {
+                    fclose(ef);
+                    ret_err(EIO);
+                    return 0;
+                }
+                fclose(ef);
+
+                // Replace argv[0] with the basename so the multi-call
+                // binary knows which command to run.
+                if (new_argv.empty()) {
+                    new_argv.push_back(basename);
+                } else {
+                    new_argv[0] = basename;
+                }
+
+                if (getenv("BIFROST_EXEC_TRACE")) {
+                    fprintf(stderr, "[exec] multi-call redirect: '%s' -> "
+                            "'%s %s'\n", path.c_str(), elf_path.c_str(),
+                            basename.c_str());
+                }
+            }
+
+            if (elf_data.empty()) {
+                ret_err(ENOENT);
+                return 0;
+            }
+
             if (new_argv.empty()) new_argv.push_back(path);
 
             // Clear the JIT cache (the old blocks are invalid after exec).
