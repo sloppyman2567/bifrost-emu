@@ -41,7 +41,7 @@ TOOLCHAIN_GLIBC="tools/aarch64-linux-gnu-cross"
 TOOLCHAIN_MUSL="tools/aarch64-linux-musl-cross"
 
 echo "Setting up rootfs at: $ROOTFS"
-mkdir -p "$ROOTFS"/{lib,usr/lib,etc,bin,tmp,proc,dev,var/run,root}
+mkdir -p "$ROOTFS"/{lib,lib64,usr/lib,usr/lib64,usr/bin,usr/sbin,etc,bin,sbin,tmp,proc,dev,sys,var/run,var/log,var/tmp,root,home,run,dev/pts,dev/shm}
 
 # ── Copy glibc libraries ──────────────────────────────────────────────
 if [ -d "$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/lib64" ]; then
@@ -88,6 +88,9 @@ if [ -d "$TOOLCHAIN_MUSL/aarch64-linux-musl/lib" ]; then
         cp -f "$src" "$ROOTFS/lib/ld-musl-aarch64.so.1"
         # Also as libc.musl-aarch64.so.1 (some binaries reference this)
         cp -f "$src" "$ROOTFS/lib/libc.musl-aarch64.so.1"
+        # BUGFIX (Turn 53): musl's DT_NEEDED is "libc.so" (not libc.so.6
+        # like glibc). Create a symlink so the dynamic linker finds it.
+        ln -sf ld-musl-aarch64.so.1 "$ROOTFS/lib/libc.so"
     fi
 fi
 
@@ -126,6 +129,45 @@ EOF
 cat > "$ROOTFS/etc/resolv.conf" <<'EOF'
 nameserver 127.0.0.1
 EOF
+
+# /etc/os-release — identifies the system for programs that check it
+# (e.g., systemd, package managers). We claim "Bifrost Linux" to make
+# it clear this is an emulated environment.
+cat > "$ROOTFS/etc/os-release" <<'EOF'
+NAME="Bifrost Linux"
+ID=bifrost
+VERSION_ID=1.4.5
+PRETTY_NAME="Bifrost Linux 1.4.5-alpha (AArch64 Emulator)"
+HOME_URL="https://github.com/sloppyman2567/bifrost-emu"
+EOF
+
+# /etc/profile — minimal shell profile for interactive shells
+cat > "$ROOTFS/etc/profile" <<'EOF'
+# /etc/profile — system-wide shell profile
+export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+export HOME=/root
+export TERM=linux
+export PS1='$ '
+EOF
+
+# /etc/shells — list of valid login shells
+cat > "$ROOTFS/etc/shells" <<'EOF'
+/bin/sh
+/bin/bash
+EOF
+
+# /etc/ld.so.conf — dynamic linker configuration
+cat > "$ROOTFS/etc/ld.so.conf" <<'EOF'
+/lib
+/usr/lib
+/lib64
+/usr/lib64
+EOF
+
+# /etc/ld.so.cache — empty (the dynamic linker would normally generate
+# this; we don't have ldconfig, so the dynamic linker falls back to
+# the default search paths in /etc/ld.so.conf)
+: > "$ROOTFS/etc/ld.so.cache"
 
 # ── /tmp (writable) ───────────────────────────────────────────────────
 chmod 1777 "$ROOTFS/tmp"

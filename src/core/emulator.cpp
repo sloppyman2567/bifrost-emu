@@ -306,7 +306,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 main_cpu_ = saved;
                 return result;
             });
-            if (!dyn_linker_->link(data, 0, path)) {
+            if (!dyn_linker_->link(data, info.base_addr, path)) {
                 fprintf(stderr, "[%s] native dynamic linking failed: %s; "
                         "falling back to guest ld.so\n",
                         CODENAME, dyn_linker_->error().c_str());

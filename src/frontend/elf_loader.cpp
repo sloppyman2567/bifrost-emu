@@ -75,6 +75,22 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     info.phdr_addr = 0;
     info.end_addr  = 0;
     info.has_lse   = false;
+    info.base_addr = 0;  // load bias (0 for ET_EXEC, non-zero for ET_DYN/PIE)
+
+    // BUGFIX (Turn 53): for PIE (ET_DYN) executables, p_vaddr fields
+    // are relative (start at 0). The Linux kernel loads PIE at a random
+    // base address. We load at a fixed base (0x400000) to match the
+    // non-PIE convention and avoid colliding with the zero page (which
+    // we map for NULL-deref safety). Without this, PIE binaries overlap
+    // with the zero page — the first PT_LOAD (vaddr=0) overwrites the
+    // zero page, and NULL dereferences crash instead of returning 0.
+    // This affected musl dynamic binaries (which are PIE by default),
+    // causing host SIGSEGV during dynamic linker initialization.
+    constexpr uint64_t PIE_BASE = 0x400000ULL;
+    if (e_type == 3) {  // ET_DYN (PIE or shared library)
+        info.base_addr = PIE_BASE;
+        info.entry += PIE_BASE;
+    }
 
     // Detect PT_INTERP (dynamic linker path).
     for (auto& h : phdrs) {
@@ -91,13 +107,13 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
 
     for (auto& h : phdrs) {
         if (h.p_type == 6) {  // PT_PHDR
-            info.phdr_addr = h.p_vaddr;
+            info.phdr_addr = h.p_vaddr + info.base_addr;
         }
     }
 
     for (auto& h : phdrs) {
         if (h.p_type != 1) continue;  // PT_LOAD only
-        uint64_t vaddr = h.p_vaddr;
+        uint64_t vaddr = h.p_vaddr + info.base_addr;
         mem.map_range(vaddr, h.p_memsz);
         if (h.p_filesz > 0) {
             if (h.p_offset + h.p_filesz > data.size())
@@ -124,7 +140,7 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     if (info.phdr_addr == 0 && !phdrs.empty()) {
         for (auto& h : phdrs) {
             if (h.p_type == 1) {
-                info.phdr_addr = h.p_vaddr + e_phoff;
+                info.phdr_addr = h.p_vaddr + info.base_addr + e_phoff;
                 break;
             }
         }
@@ -204,10 +220,25 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                     //   1032 R_AARCH64_IRELATIVE  : *(addr) = Indirect(Delta + A)
                     // For static binaries (no PT_INTERP), S is always 0
                     // (no symbol resolution), so we just write A. The
-                    // Delta (= load bias) is 0 for non-PIE static binaries.
-                    if (rtype == 1026 || rtype == 1025 || rtype == 1027 ||
-                        rtype == 257 || rtype == 1032) {
-                        mem.store<uint64_t>(r_offset, r_addend);
+                    // Delta (= load bias) is info.base_addr (0 for ET_EXEC,
+                    // PIE_BASE for ET_DYN/PIE).
+                    // BUGFIX (Turn 53): for PIE binaries, r_offset is
+                    // relative to the load base. We MUST add info.base_addr
+                    // to get the actual guest VA. Without this, relocations
+                    // were written to low memory (near 0) instead of the
+                    // actual PIE load range, corrupting the zero page and
+                    // breaking PIE static binaries.
+                    uint64_t target = r_offset + info.base_addr;
+                    if (rtype == 1027) {
+                        // R_AARCH64_RELATIVE: *(addr) = Delta + A
+                        mem.store<uint64_t>(target, info.base_addr + r_addend);
+                    } else if (rtype == 1026 || rtype == 1025 ||
+                               rtype == 257 || rtype == 1032) {
+                        // For static binaries without symbol resolution,
+                        // S=0, so *(addr) = A. For PIE, the addend already
+                        // includes the relative offset; the dynamic linker
+                        // (if present) will handle symbol resolution.
+                        mem.store<uint64_t>(target, r_addend);
                     }
                 }
             }

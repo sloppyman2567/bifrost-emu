@@ -42,6 +42,7 @@ RUN_INTEGRATION=0
 RUN_INTERACTIVE=0
 RUN_TOYBOX=0
 RUN_BENCH=0
+RUN_DYNAMIC=0
 RUN_ALL=1
 VERBOSE=0
 QUICK=0
@@ -55,6 +56,7 @@ while [ $# -gt 0 ]; do
         --integration)  RUN_INTEGRATION=1; RUN_ALL=0 ;;
         --interactive)  RUN_INTERACTIVE=1; RUN_ALL=0 ;;
         --toybox)       RUN_TOYBOX=1; RUN_ALL=0 ;;
+        --dynamic)      RUN_DYNAMIC=1; RUN_ALL=0 ;;
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
         --no-jit)       EMU_FLAGS="--no-jit" ;;
         --fwd)          ENV_PREFIX="BIFROST_ENABLE_FWD=1" ;;
@@ -77,6 +79,8 @@ done
 if [ "$RUN_ALL" = "1" ]; then
     RUN_UNIT=1; RUN_INTEGRATION=1; RUN_INTERACTIVE=0; RUN_TOYBOX=1
     [ "$QUICK" = "0" ] && RUN_BENCH=1
+    # Dynamic tests require rootfs + toolchains; auto-enable if present.
+    [ -d "rootfs/lib" ] && [ -f "ctest_real/hello_dyn_musl.elf" ] && RUN_DYNAMIC=1
 fi
 
 # ── Check emulator exists ──────────────────────────────────────────────
@@ -197,6 +201,13 @@ INTEGRATION_TESTS=(
     # Heap stress test: exercises mremap_grow + munmap + mmap patterns
     # that previously corrupted musl's mallocng metadata (Turn 51 fix).
     "heap_stress|ctest_real/heap_stress.elf||10|heap_stress OK"
+)
+
+# Dynamic linking tests (Turn 53).
+# These require the rootfs and toolchains. Skipped if not present.
+# Uses a special env prefix (BIFROST_ROOT) to enable rootfs sandboxing.
+DYNAMIC_TESTS=(
+    "hello_dyn_musl|ctest_real/hello_dyn_musl.elf||5|Hello, dynamic world"
 )
 
 # Interactive tests (need stdin input)
@@ -375,6 +386,17 @@ START=$(date +%s)
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"
 [ "$RUN_BENCH" = "1" ]       && run_category "Benchmarks"        "${BENCH_TESTS[@]}"
+
+# Dynamic linking tests — use BIFROST_ROOT env prefix.
+# These run the same test binary but with BIFROST_ROOT set to the
+# rootfs directory, enabling shared library loading.
+if [ "$RUN_DYNAMIC" = "1" ]; then
+    # Save the original ENV_PREFIX and append BIFROST_ROOT.
+    OLD_ENV_PREFIX="$ENV_PREFIX"
+    ENV_PREFIX="BIFROST_ROOT=$PWD/rootfs ${ENV_PREFIX}"
+    run_category "Dynamic linking" "${DYNAMIC_TESTS[@]}"
+    ENV_PREFIX="$OLD_ENV_PREFIX"
+fi
 
 END=$(date +%s)
 ELAPSED=$((END - START))

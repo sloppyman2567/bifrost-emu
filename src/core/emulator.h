@@ -66,6 +66,7 @@ public:
         uint64_t phnum;
         uint64_t phent;
         uint64_t end_addr;   // highest mapped addr (for brk baseline)
+        uint64_t base_addr;  // load bias (0 for ET_EXEC, PIE_BASE for ET_DYN)
         bool     has_lse;    // ELF declared AArch64 LSE atomic feature
         std::string interp;  // PT_INTERP path (dynamic linker), empty if static
     };
