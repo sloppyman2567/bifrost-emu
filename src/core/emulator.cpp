@@ -703,6 +703,8 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
 int Emulator::run() {
     uint64_t count = 0;
     auto t0 = std::chrono::steady_clock::now();
+    // BUGFIX (Turn 62): record run start time for guest CPU time tracking.
+    run_start_time_ = t0;
 
     // ── Hang watchdog ───────────────────────────────────────────────
     // Detects infinite loops where the same PC is executed over and
@@ -866,6 +868,22 @@ int Emulator::run() {
             // tgkill/tkill/kill). This is the fix for the cross-thread
             // CPU-mutation race (Turn 57).
             drain_pending_signals(main_cpu_);
+            // BUGFIX (Turn 62): track guest instructions for accurate
+            // rusage/times. Add the ~4K instructions since last drain to
+            // the total. (Not exact — we add 4096 each time, but close
+            // enough for CPU time estimation.)
+            guest_instructions_total_.fetch_add(4096, std::memory_order_relaxed);
+        }
+
+        // BUGFIX (Turn 62): update MIPS estimate every ~1M instructions
+        // so guest_instr_to_seconds() has a real conversion factor.
+        if ((count & 0xFFFFF) == 0 && count > 0) {
+            auto now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(now - t0).count();
+            if (elapsed > 0.001) {  // avoid div-by-zero
+                double mips = static_cast<double>(count) / elapsed / 1e6;
+                mips_estimate_.store(mips, std::memory_order_relaxed);
+            }
         }
 
         if ((count & 0xFFFFF) == 0) {

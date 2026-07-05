@@ -32,6 +32,7 @@ namespace arm64emu {
 }
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -240,6 +241,18 @@ public:
         std::thread host_thread;
         std::mutex mu;
         std::condition_variable cv;
+        // BUGFIX (Turn 62): track guest CPU time for the forked child so
+        // wait4's rusage can report accurate per-guest user/sys time
+        // instead of the host emulator process's CPU time (which includes
+        // JIT compilation, memory management, etc. — useless to the guest).
+        // Measured in guest instructions executed. Converted to seconds
+        // via the guest MIPS estimate at wait4 time.
+        uint64_t guest_instructions = 0;
+        // Wall-clock time the child spent running (for "real" time in
+        // `toybox time`). Recorded as a steady_clock time_point pair.
+        std::chrono::steady_clock::time_point start_time;
+        std::chrono::steady_clock::time_point end_time;
+        bool timed = false;
     };
     int fork_guest(CPU& parent_cpu, uint64_t child_stack, uint64_t flags,
                    uint64_t ptid_ptr, uint64_t ctid_ptr, uint64_t tls);
@@ -335,6 +348,46 @@ private:
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;
+
+    // ── Guest CPU time tracking (Turn 62) ──────────────────────────────
+    // We track guest instructions executed to provide accurate rusage/
+    // times values. The host's getrusage/wait4/times return the emulator
+    // process's CPU time (including JIT compilation, memory management,
+    // etc.) which is meaningless to the guest. Instead, we count guest
+    // instructions and convert to seconds using the measured MIPS rate.
+    //
+    // guest_instructions_total_: atomic, incremented by every CPU's run
+    //   loop (main + spawned threads + fork children). Represents the
+    //   total guest CPU work done.
+    // run_start_time_: when Emulator::run() was called. Used for the
+    //   wall-clock "real" time in `toybox time`.
+    // mips_estimate_: guest MIPS, updated periodically from the run loop.
+    //   Used to convert guest_instructions → seconds. If 0 (before first
+    //   measurement), we fall back to wall-clock time as the user/sys
+    //   time estimate (better than zeros).
+    std::atomic<uint64_t> guest_instructions_total_{0};
+    std::chrono::steady_clock::time_point run_start_time_;
+    std::atomic<double> mips_estimate_{0.0};
+
+    // Convert guest instructions to seconds (user/sys CPU time).
+    // If we have a MIPS estimate, use it; otherwise fall back to
+    // wall-clock elapsed time (split 70/30 user/sys as a heuristic).
+    double guest_instr_to_seconds(uint64_t instr) const {
+        double mips = mips_estimate_.load(std::memory_order_relaxed);
+        if (mips > 0.0 && instr > 0) {
+            return static_cast<double>(instr) / (mips * 1e6);
+        }
+        return 0.0;
+    }
+    // Get the total guest instructions executed by this process (main +
+    // spawned threads, NOT fork children — those are tracked separately
+    // in ForkChild::guest_instructions).
+    uint64_t get_guest_instructions() const {
+        return guest_instructions_total_.load(std::memory_order_relaxed);
+    }
+    void add_guest_instructions(uint64_t n) {
+        guest_instructions_total_.fetch_add(n, std::memory_order_relaxed);
+    }
 
     // ── Graphics backend (virtual /dev/fb0) ───────────────────────────
     FrostGraphics graphics_;

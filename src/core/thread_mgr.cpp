@@ -91,6 +91,8 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
                 emu->drain_pending_signals(cpu);
+                // BUGFIX (Turn 62): track guest instructions for rusage.
+                emu->add_guest_instructions(4096);
             }
 
             if ((count & 0xFFFFF) == 0) {
