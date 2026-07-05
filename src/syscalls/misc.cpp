@@ -309,7 +309,24 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // saved frame (already restored) — do NOT overwrite it.
             SignalFrame frame;
             if (signals_.pop_frame(frame)) {
-                memcpy(cpu.regs, frame.regs, sizeof(cpu.regs));
+                // BUGFIX (Turn 55 — root cause of interpreter stack corruption):
+                // The old code used `sizeof(cpu.regs)` (32 entries, 256 bytes)
+                // but `frame.regs` only has 31 entries (248 bytes). The memcpy
+                // read 8 bytes PAST frame.regs, getting frame.sp and writing
+                // it into cpu.regs[31]. Since cpu.regs[31] is supposed to be
+                // XZR (always 0), any instruction that reads Rn=31 (like
+                // `mov w0, wzr` or `orr w0, wzr, w19`) would get the SP value
+                // instead of 0, corrupting the destination register.
+                //
+                // This was the root cause of the "interpreter rt_sigreturn
+                // stack-corruption bug" documented as a known issue since
+                // Turn 46. The JIT was unaffected because it doesn't use
+                // cpu.regs[31] for XZR — it emits a literal 0 in the codegen.
+                //
+                // Fix: copy exactly sizeof(frame.regs) bytes (31 entries),
+                // then explicitly zero cpu.regs[31] to maintain XZR semantics.
+                memcpy(cpu.regs, frame.regs, sizeof(frame.regs));
+                cpu.regs[31] = 0;  // XZR — must always be 0
                 cpu.sp     = frame.sp;
                 cpu.pc     = frame.pc;
                 cpu.pstate = frame.pstate;

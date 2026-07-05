@@ -575,13 +575,15 @@ int Emulator::run() {
                     strtoull(getenv("BIFROST_TRACE_PC_MAX"), nullptr, 10) : 10000ULL;
             static uint64_t trace_pc_count_ = 0;
             if (trace_pc_ && trace_pc_count_ < trace_pc_max_) {
-                fprintf(stderr, "[pc] 0x%llx sp=0x%llx x0=%llx x1=%llx x2=%llx x8=%llx\n",
+                fprintf(stderr, "[pc] 0x%llx sp=0x%llx x0=%llx x1=%llx x2=%llx x8=%llx x19=%llx x30=%llx\n",
                         (unsigned long long)main_cpu_.pc,
                         (unsigned long long)main_cpu_.sp,
                         (unsigned long long)main_cpu_.regs[0],
                         (unsigned long long)main_cpu_.regs[1],
                         (unsigned long long)main_cpu_.regs[2],
-                        (unsigned long long)main_cpu_.regs[8]);
+                        (unsigned long long)main_cpu_.regs[8],
+                        (unsigned long long)main_cpu_.regs[19],
+                        (unsigned long long)main_cpu_.regs[30]);
                 trace_pc_count_++;
             }
             // JIT warmup threshold: use the interpreter for the first

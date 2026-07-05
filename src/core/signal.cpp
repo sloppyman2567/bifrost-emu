@@ -387,7 +387,18 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     uint8_t buf[UCONTEXT_SIZE] = {0};
     memcpy(buf + 40,  &saved_mask, 8);
     memcpy(buf + 168, &fault_addr, 8);
-    memcpy(buf + 176, cpu.regs, sizeof(cpu.regs));
+    // BUGFIX (Turn 55): use sizeof of exactly 31 registers (248 bytes),
+    // NOT sizeof(cpu.regs) (256 bytes). The AArch64 ucontext_t has
+    // uc_mcontext.regs[31] (X0..X30) at offset 176, followed by sp at
+    // offset 424. The old code wrote 256 bytes starting at offset 176,
+    // which overwrote the sp field at offset 424 with cpu.regs[31]
+    // (which should be 0 but could be stale). Then the explicit
+    // memcpy(buf + 424, &cpu.sp, 8) would overwrite it again — so the
+    // bug was masked as long as cpu.regs[31] was 0. But if cpu.regs[31]
+    // was ever corrupted (e.g., by the rt_sigreturn sizeof bug above),
+    // the ucontext's sp would get the wrong value.
+    constexpr size_t REGS_BYTES = 31 * sizeof(uint64_t);  // 248
+    memcpy(buf + 176, cpu.regs, REGS_BYTES);
     memcpy(buf + 424, &cpu.sp,     8);
     memcpy(buf + 432, &cpu.pc,     8);
     memcpy(buf + 440, &cpu.pstate, 8);

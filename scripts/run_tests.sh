@@ -42,6 +42,7 @@ RUN_INTEGRATION=0
 RUN_INTERACTIVE=0
 RUN_TOYBOX=0
 RUN_BENCH=0
+RUN_REALWORLD=0
 RUN_DYNAMIC=0
 RUN_ALL=1
 VERBOSE=0
@@ -56,6 +57,7 @@ while [ $# -gt 0 ]; do
         --integration)  RUN_INTEGRATION=1; RUN_ALL=0 ;;
         --interactive)  RUN_INTERACTIVE=1; RUN_ALL=0 ;;
         --toybox)       RUN_TOYBOX=1; RUN_ALL=0 ;;
+        --realworld)    RUN_REALWORLD=1; RUN_ALL=0 ;;
         --dynamic)      RUN_DYNAMIC=1; RUN_ALL=0 ;;
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
         --no-jit)       EMU_FLAGS="--no-jit" ;;
@@ -78,6 +80,7 @@ done
 
 if [ "$RUN_ALL" = "1" ]; then
     RUN_UNIT=1; RUN_INTEGRATION=1; RUN_INTERACTIVE=0; RUN_TOYBOX=1
+    RUN_REALWORLD=1
     [ "$QUICK" = "0" ] && RUN_BENCH=1
     # Dynamic tests require rootfs + toolchains; auto-enable if present.
     [ -d "rootfs/lib" ] && [ -f "ctest_real/hello_dyn_musl.elf" ] && RUN_DYNAMIC=1
@@ -166,34 +169,35 @@ INTEGRATION_TESTS=(
     # Signal handler test: verifies that a real SIGINT handler runs
     # before read() returns -EINTR (Turn 43 fix). Self-contained —
     # forks a child that sends SIGINT after 200ms. No pty needed.
-    # NOTE: JIT-only — the interpreter has a pre-existing stack
-    # corruption bug when returning from signal handlers via
-    # rt_sigreturn (callee-saved registers get garbage values).
-    # Skip under --no-jit.
-    "sigint_handler|ctest_real/test_sigint_handler.elf||10|PASS: handler ran|JIT"
+    # Works under both JIT and interpreter (Turn 55 fixed the
+    # rt_sigreturn stack-corruption bug that previously made the
+    # interpreter lose x0/x19 after signal delivery).
+    "sigint_handler|ctest_real/test_sigint_handler.elf||10|PASS: handler ran"
     # Comprehensive signal registration test: rt_sigaction install/query/
     # SA_RESETHAND/SIG_IGN/SIGKILL-EINVAL, rt_sigprocmask block/unblock/
     # setmask, rt_sigpending, rt_sigsuspend. Validates the Turn 46 fixes
     # (SA_RESETHAND dangling-pointer, 1-based bit numbering, rt_sigpending
     # returns actual pending mask, sigsuspend drains pending before blocking).
-    # NOTE: JIT-only — the interpreter has a pre-existing stack corruption
-    # bug when returning from signal handlers via rt_sigreturn.
-    "sigaction|ctest_real/test_sigaction.elf||10|ALL PASS|JIT"
+    "sigaction|ctest_real/test_sigaction.elf||10|ALL PASS"
     # Focused sigsuspend test: forked child sends SIGUSR1 after 100ms.
-    "sigsuspend|ctest_real/test_sigsuspend.elf||10|PASS|JIT"
+    "sigsuspend|ctest_real/test_sigsuspend.elf||10|PASS"
     # NEW (Turn 54): signal subsystem production-hardening tests.
     # sigaltstack verifies SA_ONSTACK + sigaltstack() install/query/disable.
     # sig_nested verifies a handler can be interrupted by another signal.
     # sig_sa_mask verifies sa_mask blocks additional signals during handler.
     # sig_pending verifies multiple pending signals are delivered on unblock.
     # sig_callee_saved verifies x19-x28 are preserved across signal delivery.
-    # All 5 are JIT-only — the interpreter has a pre-existing stack
-    # corruption bug when returning from signal handlers via rt_sigreturn.
-    "sigaltstack|ctest_real/test_sigaltstack.elf||10|ALL PASS|JIT"
-    "sig_nested|ctest_real/test_sig_nested.elf||10|ALL PASS|JIT"
-    "sig_sa_mask|ctest_real/test_sig_sa_mask.elf||10|ALL PASS|JIT"
-    "sig_pending|ctest_real/test_sig_pending.elf||10|ALL PASS|JIT"
-    "sig_callee_saved|ctest_real/test_sig_callee_saved.elf||10|ALL PASS|JIT"
+    # All 5 now work under both JIT and interpreter (Turn 55 fix).
+    "sigaltstack|ctest_real/test_sigaltstack.elf||10|ALL PASS"
+    "sig_nested|ctest_real/test_sig_nested.elf||10|ALL PASS"
+    "sig_sa_mask|ctest_real/test_sig_sa_mask.elf||10|ALL PASS"
+    "sig_pending|ctest_real/test_sig_pending.elf||10|ALL PASS"
+    "sig_callee_saved|ctest_real/test_sig_callee_saved.elf||10|ALL PASS"
+    # NEW (Turn 55): regression test for the interpreter rt_sigreturn
+    # stack-corruption bug. Before Turn 55, this crashed the interpreter
+    # with SIGSEGV because cpu.regs[31] (XZR) was corrupted to hold SP.
+    # Must pass under both JIT and interpreter.
+    "sig_interp_regression|ctest_real/test_sig_interp_regression.elf||10|ALL PASS"
     "jit_new_ops|ctest_real/jit_new_ops.elf||5|ALL TESTS PASSED"
     "loop_div|ctest_real/loop_div.elf||5"
     "md5_neon_test|ctest_real/md5_neon_test.elf||5"
@@ -258,6 +262,25 @@ TOYBOX_TESTS=(
 # Benchmarks (slow, skipped with --quick)
 BENCH_TESTS=(
     "bench_mips|ctest_real/bench_mips.elf||30|done:"
+)
+
+# Real-world binary tests (Turn 55).
+# These use real AArch64 static binaries downloaded from the web:
+#   - busybox-aarch64: BusyBox v1.37.0 from files.serverless.industries
+#   - toybox-aarch64:  ToyBox 0.8.14 from landley.net
+#   - iperf2-aarch64:  iperf 2.2.1 from files.serverless.industries
+# Each tests a real-world program's ability to run basic commands.
+# Skipped if the binary doesn't exist (e.g., not downloaded yet).
+REALWORLD_TESTS=(
+    "rw_busybox_echo|ctest_real/realworld/busybox-aarch64 echo hello|hello|5|^hello$"
+    "rw_busybox_seq|ctest_real/realworld/busybox-aarch64 seq 1 5||5|^1$"
+    "rw_busybox_uname|ctest_real/realworld/busybox-aarch64 uname||5|^Linux$"
+    "rw_busybox_true|ctest_real/realworld/busybox-aarch64 true||5|"
+    "rw_busybox_printf|ctest_real/realworld/busybox-aarch64 printf %d 42||5|^42$"
+    "rw_toybox_echo|ctest_real/realworld/toybox-aarch64 echo hello|hello|5|^hello$"
+    "rw_toybox_seq|ctest_real/realworld/toybox-aarch64 seq 1 5||5|^1$"
+    "rw_toybox_uname|ctest_real/realworld/toybox-aarch64 uname||5|^Linux$"
+    "rw_iperf2_ver|ctest_real/realworld/iperf2-aarch64 --version||5|^iperf version 2"
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -408,6 +431,7 @@ START=$(date +%s)
 [ "$RUN_INTEGRATION" = "1" ] && run_category "Integration tests" "${INTEGRATION_TESTS[@]}"
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"
+[ "$RUN_REALWORLD" = "1" ]   && run_category "Real-world binaries" "${REALWORLD_TESTS[@]}"
 [ "$RUN_BENCH" = "1" ]       && run_category "Benchmarks"        "${BENCH_TESTS[@]}"
 
 # Dynamic linking tests — use BIFROST_ROOT env prefix.

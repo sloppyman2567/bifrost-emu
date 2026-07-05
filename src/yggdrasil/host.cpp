@@ -45,6 +45,16 @@ std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
                                            int flags, mode_t mode, int* err_out) {
     std::string host_path = map_guest_path(guest_path);
     int fd = ::openat(AT_FDCWD, host_path.c_str(), flags, mode);
+    // BUGFIX (Turn 55): O_DIRECT fails with EINVAL when opening directories
+    // on x86_64 hosts (the kernel rejects it). But on real AArch64 Linux,
+    // O_DIRECT is silently ignored for directories. BusyBox's `ls` opens
+    // directories with O_RDONLY|O_DIRECTORY|O_NONBLOCK|O_CLOEXEC (and
+    // sometimes O_DIRECT from certain code paths), so we need to handle
+    // this difference. If the open fails with EINVAL and O_DIRECT is set,
+    // retry without O_DIRECT.
+    if (fd < 0 && errno == EINVAL && (flags & O_DIRECT)) {
+        fd = ::openat(AT_FDCWD, host_path.c_str(), flags & ~O_DIRECT, mode);
+    }
     if (fd < 0) {
         *err_out = -errno;
         return nullptr;
