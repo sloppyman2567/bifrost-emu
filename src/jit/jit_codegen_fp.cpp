@@ -734,12 +734,25 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
 
             emit_byte(0x58);  // pop rax (discard)
 
-            // Store pstate (mask NZCV bits, OR in new value)
+            // Store pstate (mask NZCV bits, OR in new value).
+            // BUGFIX: bit 27 of pstate is the JIT-internal `from_sub` flag
+            // used by BRCOND/ADCS/SBCS/CCMP to disambiguate CF semantics.
+            // FCMP produces architectural NZCV directly from a float
+            // comparison, NOT from a subtraction, so from_sub MUST be 0
+            // after FCMP. The old mask 0x0FFFFFFF preserved bits 0–27,
+            // leaving a stale from_sub from the prior SUBS — any flag
+            // consumer that didn't normalize would read inverted CF.
+            //
+            // Correct mask: 0x07FFFFFF (clear bit 27 AND NZCV bits 28-31,
+            // preserve bits 0-26 of other JIT-internal state).
             emit_load32(RCX, CPU_REG, PSTATE_OFF);
-            emit_byte(0x81); emit_byte(0xE1); emit_u32(0x0FFFFFFF);  // and ecx, 0x0FFFFFFF
+            emit_byte(0x81); emit_byte(0xE1); emit_u32(0x07FFFFFF);  // and ecx, 0x07FFFFFF (clear from_sub + NZCV)
             emit_byte(0x48); emit_byte(0x09); emit_byte(0xCA);  // or rdx, rcx
             emit_store32(CPU_REG, PSTATE_OFF, RDX);
             flags_in_host_ = false;
+            // Defensive: clear from_sub so a future flag-setter that forgets
+            // to set flags_from_sub_ doesn't read a stale value.
+            flags_from_sub_ = false;
             return false;
         }
 

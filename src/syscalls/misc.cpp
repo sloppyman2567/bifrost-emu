@@ -479,27 +479,45 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 173: { // getppid
-            ret_host(::getppid());
+            // BUGFIX: was returning the emulator's host parent PID for ALL
+            // guests. For the main process, the host ppid is the launching
+            // shell, but the guest should see init (PID 1) as its parent.
+            // For a forked child (fork_guest uses host fork), the host
+            // ppid IS the parent emulator's PID, which is the correct
+            // guest ppid — and critically, the child uses getppid() to
+            // send signals back to its parent (e.g. test_sigint_handler
+            // does `kill(getppid(), SIGINT)`), so we MUST return the
+            // real host ppid for forked children.
+            if (cpu.is_fork_process) {
+                ret_host(::getppid());
+            } else {
+                ret_host(1);  // main process: parent is init
+            }
             return 0;
         }
 
-        case 174: { // getuid
-            ret_host(::getuid());
+        case 174: { // getuid — return 0 (root) so setuid programs work
+            // BUGFIX: was returning the host's real UID. If the emulator
+            // runs as a normal user (uid 1000), the guest saw uid 1000
+            // instead of 0 (root), breaking setuid programs, file
+            // ownership checks, and any program expecting to run as root
+            // in the rootfs. The guest is a single-user sandbox → root.
+            ret_host(0);
             return 0;
         }
 
-        case 175: { // geteuid
-            ret_host(::geteuid());
+        case 175: { // geteuid — return 0 (root)
+            ret_host(0);
             return 0;
         }
 
-        case 176: { // getgid
-            ret_host(::getgid());
+        case 176: { // getgid — return 0 (root)
+            ret_host(0);
             return 0;
         }
 
-        case 177: { // getegid
-            ret_host(::getegid());
+        case 177: { // getegid — return 0 (root)
+            ret_host(0);
             return 0;
         }
 
@@ -1020,8 +1038,18 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // avoid confusion. AArch64 syscall 115 is clock_nanosleep per
         // asm-generic/unistd.h.
 
-        // ── getsockname (syscall 206) ────────────────────────────────
-        case 206: { // getsockname(sockfd, addr, addrlen)
+        // ── getsockname (syscall 204) ────────────────────────────────
+        // BUGFIX: AArch64 syscall numbers per asm-generic/unistd.h:
+        //   198=socket 199=socketpair 200=bind 201=listen 202=accept
+        //   203=connect 204=getsockname 205=getpeername
+        //   206=sendto 207=recvfrom 208=setsockopt 209=getsockopt
+        //   210=shutdown 211=sendmsg 212=recvmsg
+        // The previous code had all six cases 206–211 mislabeled — each
+        // function did what its comment said, but at the wrong syscall
+        // number. The renumbering below fixes that: each handler moves to
+        // its correct number, and the three previously-missing handlers
+        // (setsockopt, getsockopt, shutdown) are added.
+        case 204: { // getsockname(sockfd, addr, addrlen)
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
             int r = ::getsockname(static_cast<int>(a0),
@@ -1037,8 +1065,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── getpeername (syscall 207) ────────────────────────────────
-        case 207: { // getpeername(sockfd, addr, addrlen)
+        // ── getpeername (syscall 205) ────────────────────────────────
+        case 205: { // getpeername(sockfd, addr, addrlen)
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
             int r = ::getpeername(static_cast<int>(a0),
@@ -1054,11 +1082,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── sendto (syscall 208) ─────────────────────────────────────
-        case 208: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
-            // Copy data buffer from guest memory.
-            std::vector<uint8_t> buf(a2);
-            mem_.read(a1, buf.data(), a2);
+        // ── sendto (syscall 206) ─────────────────────────────────────
+        case 206: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+            // Cap buffer size to prevent bad_alloc on absurd lengths.
+            size_t len = a2;
+            if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+            std::vector<uint8_t> buf(len);
+            if (len) mem_.read(a1, buf.data(), len);
             // Marshal dest_addr from guest memory if present.
             struct sockaddr_storage dest_ss;
             struct sockaddr* dest_ptr = nullptr;
@@ -1068,7 +1098,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.read(a4, &dest_ss, addrlen);
                 dest_ptr = reinterpret_cast<struct sockaddr*>(&dest_ss);
             }
-            ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), a2,
+            ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), len,
                                  static_cast<int>(a3), dest_ptr,
                                  static_cast<socklen_t>(a5));
             if (r < 0) { ret_errno(); return 0; }
@@ -1076,18 +1106,20 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── recvfrom (syscall 209) ───────────────────────────────────
-        case 209: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
-            std::vector<uint8_t> buf(a2);
+        // ── recvfrom (syscall 207) ───────────────────────────────────
+        case 207: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
+            size_t len = a2;
+            if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+            std::vector<uint8_t> buf(len);
             struct sockaddr_storage src_ss;
             socklen_t srclen = sizeof(src_ss);
-            ssize_t r = ::recvfrom(static_cast<int>(a0), buf.data(), a2,
+            ssize_t r = ::recvfrom(static_cast<int>(a0), buf.data(), len,
                                    static_cast<int>(a3),
                                    reinterpret_cast<struct sockaddr*>(&src_ss),
                                    &srclen);
             if (r < 0) { ret_errno(); return 0; }
             // Write received data back to guest buffer.
-            mem_.write(a1, buf.data(), static_cast<size_t>(r));
+            if (r > 0) mem_.write(a1, buf.data(), static_cast<size_t>(r));
             // Write source address back to guest memory if requested.
             if (a4 && a5) {
                 socklen_t guest_len = static_cast<socklen_t>(mem_.load<uint32_t>(a5));
@@ -1099,8 +1131,46 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── sendmsg (syscall 210) ────────────────────────────────────
-        case 210: { // sendmsg(sockfd, msg, flags)
+        // ── setsockopt (syscall 208) ─────────────────────────────────
+        case 208: { // setsockopt(sockfd, level, optname, optval, optlen)
+            if (a3 == 0 || a4 == 0) { ret_err(EFAULT); return 0; }
+            size_t optlen = a4;
+            if (optlen > 4096) optlen = 4096;  // sanity cap
+            std::vector<uint8_t> optval(optlen);
+            mem_.read(a3, optval.data(), optlen);
+            int r = ::setsockopt(static_cast<int>(a0), static_cast<int>(a1),
+                                 static_cast<int>(a2), optval.data(),
+                                 static_cast<socklen_t>(optlen));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── getsockopt (syscall 209) ─────────────────────────────────
+        case 209: { // getsockopt(sockfd, level, optname, optval, optlen*)
+            if (a4 == 0) { ret_err(EFAULT); return 0; }
+            socklen_t host_optlen = static_cast<socklen_t>(mem_.load<uint32_t>(a4));
+            if (host_optlen > 4096) host_optlen = 4096;
+            std::vector<uint8_t> optval(host_optlen);
+            int r = ::getsockopt(static_cast<int>(a0), static_cast<int>(a1),
+                                 static_cast<int>(a2), optval.data(), &host_optlen);
+            if (r < 0) { ret_errno(); return 0; }
+            if (a3) mem_.write(a3, optval.data(), host_optlen);
+            mem_.store<uint32_t>(a4, host_optlen);
+            ret_host(0);
+            return 0;
+        }
+
+        // ── shutdown (syscall 210) ───────────────────────────────────
+        case 210: { // shutdown(sockfd, how)
+            int r = ::shutdown(static_cast<int>(a0), static_cast<int>(a1));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
+            return 0;
+        }
+
+        // ── sendmsg (syscall 211) ────────────────────────────────────
+        case 211: { // sendmsg(sockfd, msg, flags)
             // Marshal msghdr + iovec from guest memory.
             // Guest msghdr layout (AArch64):
             //   +0:  void*     msg_name      (8 bytes)
@@ -1147,8 +1217,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── recvmsg (syscall 211) ────────────────────────────────────
-        case 211: { // recvmsg(sockfd, msg, flags)
+        // ── recvmsg (syscall 212) ────────────────────────────────────
+        // BUGFIX: was at case 211 (wrong — 211 is sendmsg). Moved to 212
+        // which is the correct AArch64 syscall number per asm-generic/unistd.h.
+        case 212: { // recvmsg(sockfd, msg, flags)
             if (!a1) { ret_err(EFAULT); return 0; }
             uint64_t msg_name = mem_.load<uint64_t>(a1);
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
@@ -1200,56 +1272,15 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        // ── statx (syscall 291) ──────────────────────────────────────
-        case 291: { // statx(dirfd, pathname, flags, mask, statxbuf)
-            // statx requires glibc 2.28+ and sys/statx.h. If unavailable,
-            // fall back to fstatat (which provides most of the same info).
-            if (!a4) { ret_err(EFAULT); return 0; }
-            std::string path = a1 ? Yggdrasil::read_path(mem_, a1) : "";
-            std::string host = Yggdrasil::remap_path(path);
-            struct stat st;
-            int r = ::fstatat(static_cast<int>(a0), host.c_str(), &st,
-                              static_cast<int>(a2));
-            if (r < 0) { ret_errno(); return 0; }
-            // Convert struct stat to a minimal statx structure (256 bytes).
-            // The statx struct is larger, but we fill the key fields.
-            uint8_t statx_buf[256];
-            memset(statx_buf, 0, sizeof(statx_buf));
-            // stx_mask = STATX_BASIC_STATS (0x7ff)
-            *reinterpret_cast<uint32_t*>(statx_buf + 0) = 0x7ff;
-            // stx_blksize
-            *reinterpret_cast<uint32_t*>(statx_buf + 4) = static_cast<uint32_t>(st.st_blksize);
-            // stx_attributes = 0
-            // stx_nlink
-            *reinterpret_cast<uint32_t*>(statx_buf + 16) = static_cast<uint32_t>(st.st_nlink);
-            // stx_uid, stx_gid
-            *reinterpret_cast<uint32_t*>(statx_buf + 20) = st.st_uid;
-            *reinterpret_cast<uint32_t*>(statx_buf + 24) = st.st_gid;
-            // stx_mode (16-bit at offset 28)
-            *reinterpret_cast<uint16_t*>(statx_buf + 28) = static_cast<uint16_t>(st.st_mode);
-            // stx_ino
-            *reinterpret_cast<uint64_t*>(statx_buf + 32) = st.st_ino;
-            // stx_size
-            *reinterpret_cast<uint64_t*>(statx_buf + 40) = st.st_size;
-            // stx_blocks
-            *reinterpret_cast<uint64_t*>(statx_buf + 48) = st.st_blocks;
-            // stx_atime, stx_mtime, stx_ctime (each 16 bytes: sec + nsec)
-            *reinterpret_cast<uint64_t*>(statx_buf + 64) = st.st_atim.tv_sec;
-            *reinterpret_cast<uint64_t*>(statx_buf + 72) = st.st_atim.tv_nsec;
-            *reinterpret_cast<uint64_t*>(statx_buf + 80) = st.st_mtim.tv_sec;
-            *reinterpret_cast<uint64_t*>(statx_buf + 88) = st.st_mtim.tv_nsec;
-            *reinterpret_cast<uint64_t*>(statx_buf + 96) = st.st_ctim.tv_sec;
-            *reinterpret_cast<uint64_t*>(statx_buf + 104) = st.st_ctim.tv_nsec;
-            mem_.write(a4, statx_buf, sizeof(statx_buf));
-            ret_host(0);
-            return 0;
-        }
-
         // ── close_range (syscall 436) ────────────────────────────────
+        // BUGFIX: cap iteration to the actually-open fd range. The previous
+        // loop iterated from a0 to a1 inclusive; if a1 was INT_MAX, this
+        // looped 2 billion times calling fds_.close() on every integer.
+        // We now iterate only over the FdTable's open entries.
         case 436: { // close_range(first, last, flags)
-            for (int fd = static_cast<int>(a0); fd <= static_cast<int>(a1); fd++) {
-                emu.fds().close(fd);
-            }
+            int first = static_cast<int>(a0);
+            int last  = static_cast<int>(a1);
+            emu.fds().close_range(first, last);
             ret_host(0);
             return 0;
         }

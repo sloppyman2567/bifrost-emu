@@ -343,14 +343,21 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // linux_dirent64 records for virtual directories (/proc,
             // /proc/self, /dev); HostNode-equivalent paths fall through
             // to the host getdents64 syscall via host_fd().
+            //
+            // BUGFIX: pass min(count, sizeof(buf)) as the buffer size to the
+            // underlying getdents implementation so the kernel/DirNode only
+            // returns COMPLETE dirent records. The previous code read up to
+            // 8192 bytes then post-truncated to `count`, which could split a
+            // dirent record mid-way and corrupt the guest's readdir parsing.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_host(-EBADF); return 0; }
             // Virtual directory (DirNode)? Use the Node's getdents().
             if (node->is_dir()) {
                 char buf[8192];
-                ssize_t n = node->getdents(0, buf, sizeof(buf));
+                size_t this_count = std::min<size_t>(a2, sizeof(buf));
+                ssize_t n = node->getdents(0, buf, this_count);
                 if (n < 0) { ret_host(static_cast<int>(n)); return 0; }
-                if (static_cast<size_t>(n) > a2) n = a2;  // truncate to count
+                // n is guaranteed to contain only complete records; write as-is.
                 mem_.write(a1, buf, static_cast<size_t>(n));
                 ret_host(n);
                 return 0;
@@ -359,10 +366,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             int host_fd = node->host_fd();
             if (host_fd < 0) { ret_host(-ENOTDIR); return 0; }
             char host_buf[8192];
-            int n = ::syscall(SYS_getdents64, host_fd, host_buf, sizeof(host_buf));
+            size_t this_count = std::min<size_t>(a2, sizeof(host_buf));
+            int n = ::syscall(SYS_getdents64, host_fd, host_buf, this_count);
             if (n < 0) { ret_host(-errno); return 0; }
-            if (n > static_cast<int>(a2)) n = a2;  // truncate to count
-            mem_.write(a1, host_buf, n);
+            mem_.write(a1, host_buf, static_cast<size_t>(n));
             ret_host(n);
             return 0;
         }
@@ -370,6 +377,26 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 291: { // statx (Linux 4.11+, glibc uses it for fstatat fallback)
             // statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
             // Do a real stat on the (remapped) host path and convert to statx.
+            //
+            // struct statx_timestamp layout (16 bytes):
+            //   +0:  int64_t  tv_sec
+            //   +8:  uint32_t tv_nsec
+            //   +12: uint32_t __reserved  ← MUST be 0; the previous code
+            //                                omitted this field, shifting every
+            //                                timestamp after atime by 4 bytes.
+            // struct statx layout (256 bytes):
+            //   +0x00: stx_mask (u32), +0x04: stx_blksize (u32),
+            //   +0x08: stx_attributes (u64), +0x10: stx_nlink (u32),
+            //   +0x14: stx_uid (u32), +0x18: stx_gid (u32),
+            //   +0x1C: stx_mode (u16), +0x1E: __spare0 (u16),
+            //   +0x20: stx_ino (u64), +0x28: stx_size (u64),
+            //   +0x30: stx_blocks (u64), +0x38: stx_attributes_mask (u64),
+            //   +0x40: stx_atime (16), +0x50: stx_btime (16),
+            //   +0x60: stx_ctime (16), +0x70: stx_mtime (16),
+            //   +0x80: stx_rdev_major (u32), +0x84: stx_rdev_minor (u32),
+            //   +0x88: stx_dev_major (u32),  +0x8C: stx_dev_minor (u32),
+            //   +0x90: stx_mnt_id (u64), +0x98: stx_dio_mem_align (u32),
+            //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             std::string host_path = yggdrasil::Yggdrasil::remap_path(path);
             struct stat st;
@@ -383,7 +410,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 r = ::fstatat(static_cast<int>(a0), host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
             }
             if (r < 0) { ret_host(-errno); return 0; }
-            // Build statx structure (256 bytes).
+            // Build statx structure (256 bytes), zero-initialized so all
+            // __reserved fields and padding are correctly zero.
             uint8_t buf[256];
             memset(buf, 0, sizeof(buf));
             uint32_t stx_mask = 0x7FF; // STATX_BASIC_STATS
@@ -409,27 +437,28 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             memcpy(buf + 0x30, &blocks, 8);
             uint64_t attr_mask = 0;
             memcpy(buf + 0x38, &attr_mask, 8);
+            // Timestamps: 16 bytes each (sec:8 + nsec:4 + reserved:4).
+            // memset(buf,0,...) above already filled the __reserved fields.
             uint64_t atime_sec = st.st_atim.tv_sec;
             uint32_t atime_nsec = st.st_atim.tv_nsec;
             memcpy(buf + 0x40, &atime_sec, 8);
             memcpy(buf + 0x48, &atime_nsec, 4);
-            uint64_t btime_sec = 0; uint32_t btime_nsec = 0;
-            memcpy(buf + 0x4C, &btime_sec, 8);
-            memcpy(buf + 0x54, &btime_nsec, 4);
+            // btime (creation time) — Linux only fills it on supported filesystems;
+            // we don't have it from struct stat, leave as zero (already memset).
             uint64_t ctime_sec = st.st_ctim.tv_sec;
             uint32_t ctime_nsec = st.st_ctim.tv_nsec;
-            memcpy(buf + 0x58, &ctime_sec, 8);
-            memcpy(buf + 0x60, &ctime_nsec, 4);
+            memcpy(buf + 0x60, &ctime_sec, 8);
+            memcpy(buf + 0x68, &ctime_nsec, 4);
             uint64_t mtime_sec = st.st_mtim.tv_sec;
             uint32_t mtime_nsec = st.st_mtim.tv_nsec;
-            memcpy(buf + 0x64, &mtime_sec, 8);
-            memcpy(buf + 0x6C, &mtime_nsec, 4);
+            memcpy(buf + 0x70, &mtime_sec, 8);
+            memcpy(buf + 0x78, &mtime_nsec, 4);
             uint32_t rdev_major = major(st.st_rdev), rdev_minor = minor(st.st_rdev);
-            memcpy(buf + 0x70, &rdev_major, 4);
-            memcpy(buf + 0x74, &rdev_minor, 4);
+            memcpy(buf + 0x80, &rdev_major, 4);
+            memcpy(buf + 0x84, &rdev_minor, 4);
             uint32_t dev_major = major(st.st_dev), dev_minor = minor(st.st_dev);
-            memcpy(buf + 0x78, &dev_major, 4);
-            memcpy(buf + 0x7C, &dev_minor, 4);
+            memcpy(buf + 0x88, &dev_major, 4);
+            memcpy(buf + 0x8C, &dev_minor, 4);
             mem_.write(a4, buf, 256);
             ret_host(0);
             return 0;

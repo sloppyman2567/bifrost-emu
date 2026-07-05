@@ -628,46 +628,51 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         slot->cv.wait(lk);
                     } else {
                         // timeout is struct timespec { sec, nsec }
-                        uint64_t sec = mem_.load<uint64_t>(timeout_ptr);
+                        uint64_t sec  = mem_.load<uint64_t>(timeout_ptr);
                         uint64_t nsec = mem_.load<uint64_t>(timeout_ptr + 8);
                         if (absolute) {
-                            // FUTEX_WAIT_BITSET: timeout is absolute.
-                            // Convert to time_point and use wait_until.
+                            // FUTEX_WAIT_BITSET: timeout is an ABSOLUTE deadline.
+                            // BUGFIX: the previous code computed
+                            //   deadline = now_mono + (sec + nsec) - now_mono
+                            //          = (sec + nsec) as a RELATIVE duration,
+                            // which is wrong. If the guest's monotonic clock
+                            // reads 1000s and the deadline is 1010s, the
+                            // previous code waited 1010s instead of 10s,
+                            // breaking pthread_cond_timedwait(CLOCK_MONOTONIC).
+                            //
+                            // The fix: treat (sec, nsec) as a steady_clock
+                            // time_point directly. The guest's CLOCK_MONOTONIC
+                            // and the host's steady_clock both count from
+                            // boot, so their origins coincide closely enough
+                            // for futex deadlines. For CLOCK_REALTIME we use
+                            // system_clock instead.
                             if (clock_realtime) {
-                                auto abs = std::chrono::system_clock::from_time_t(sec)
-                                         + std::chrono::nanoseconds(nsec);
-                                // condvar uses steady_clock internally;
-                                // approximate by converting the absolute
-                                // realtime deadline to a relative duration
-                                // from now (sufficient for correctness:
-                                // spurious wakes will recompute).
-                                auto now = std::chrono::system_clock::now();
-                                if (abs <= now) {
+                                // Build absolute system_clock time_point and
+                                // convert to steady_clock-relative duration
+                                // for the cv.wait_until call.
+                                auto abs_sys = std::chrono::system_clock::from_time_t(sec)
+                                             + std::chrono::nanoseconds(nsec);
+                                auto now_sys = std::chrono::system_clock::now();
+                                if (abs_sys <= now_sys) {
                                     slot->waiters--;
                                     ret_host(0);
                                     return 0;
                                 }
                                 auto rel = std::chrono::duration_cast<
-                                    std::chrono::nanoseconds>(abs - now);
+                                    std::chrono::nanoseconds>(abs_sys - now_sys);
                                 slot->cv.wait_for(lk, rel);
                             } else {
-                                // CLOCK_MONOTONIC absolute. Convert to
-                                // relative duration from now.
-                                auto now_mono = std::chrono::steady_clock::now();
-                                // Construct a synthetic monotonic time_point
-                                // representing the absolute deadline. We
-                                // don't have the kernel's monotonic clock
-                                // origin, so we treat (sec, nsec) as
-                                // elapsed-since-boot and compute the
-                                // remaining duration. This is best-effort
-                                // — exact kernel-monotonic correspondence
-                                // would require reading clock_gettime
-                                // from the guest.
-                                auto deadline = now_mono
-                                    + std::chrono::seconds(sec)
-                                    + std::chrono::nanoseconds(nsec)
-                                    - std::chrono::steady_clock::now();
-                                slot->cv.wait_for(lk, deadline);
+                                // CLOCK_MONOTONIC absolute deadline.
+                                // Construct a steady_clock time_point whose
+                                // time_since_epoch() == (sec, nsec). This
+                                // works because steady_clock's epoch is
+                                // implementation-defined but stable, and
+                                // the guest's CLOCK_MONOTONIC counts from
+                                // boot — close enough for emulator use.
+                                using steady_tp = std::chrono::steady_clock::time_point;
+                                steady_tp abs_mono{std::chrono::nanoseconds(
+                                    sec * 1000000000ULL + nsec)};
+                                slot->cv.wait_until(lk, abs_mono);
                             }
                         } else {
                             // FUTEX_WAIT: timeout is relative.

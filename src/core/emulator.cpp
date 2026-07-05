@@ -463,18 +463,42 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         envp_addrs.push_back(sp);
     }
 
-    // AT_RANDOM — 16 random bytes
+    // AT_RANDOM — 16 random bytes used by glibc for stack canary init and
+    // pointer guard. MUST be high-quality random; never fall back to rand()
+    // (which is unseeded by default → predictable canary → stack-overflow
+    // exploits in the guest become trivial).
     sp -= 16;
     uint8_t rnd[16];
-    FILE* ur = fopen("/dev/urandom", "rb");
-    if (ur) {
-        size_t nread = fread(rnd, 1, 16, ur);
-        fclose(ur);
-        // If we got fewer than 16 bytes, fill the rest with rand().
-        for (size_t i = nread; i < 16; i++)
-            rnd[i] = static_cast<uint8_t>(rand());
-    } else {
-        for (int i = 0; i < 16; i++) rnd[i] = static_cast<uint8_t>(rand());
+    bool got_random = false;
+    // Prefer the host kernel's getrandom(2) (no fd needed, never blocks
+    // after boot, doesn't fail under seccomp unless explicitly blocked).
+#ifdef SYS_getrandom
+    long gr = ::syscall(SYS_getrandom, rnd, 16, 0);
+    if (gr == 16) {
+        got_random = true;
+    }
+#endif
+    if (!got_random) {
+        FILE* ur = fopen("/dev/urandom", "rb");
+        if (ur) {
+            size_t nread = fread(rnd, 1, 16, ur);
+            fclose(ur);
+            if (nread == 16) got_random = true;
+        }
+    }
+    if (!got_random) {
+        // Last-resort fallback: mix a stack address (ASLR'd) with the
+        // monotonic clock. Better than rand() but still not great.
+        uint64_t mix = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&rnd))
+                     ^ static_cast<uint64_t>(std::chrono::steady_clock::now()
+                                              .time_since_epoch().count());
+        for (int i = 0; i < 16; i += 8) {
+            uint64_t v = mix;
+            // Simple LCG mixing
+            v = v * 6364136223846793005ULL + 1442695040888963407ULL;
+            mix ^= v;
+            memcpy(rnd + i, &mix, 8);
+        }
     }
     mem_.write(sp, rnd, 16);
     uint64_t random_addr = sp;
@@ -492,21 +516,43 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     // AT_EXECFN: pointer to the program name string on the stack
     uint64_t execfn_addr = argv_addrs[0];
 
+    // AT_PLATFORM: aarch64 string (some libc ifunc resolvers consult it).
+    sp -= 8;
+    const char platform_str[] = "aarch64";
+    mem_.write(sp, platform_str, sizeof(platform_str));
+    uint64_t platform_addr = sp;
+
     std::vector<uint64_t> auxv = {
-        6, 4096,           // AT_PAGESZ
-        3, phdr_addr_,     // AT_PHDR
-        4, phent_,         // AT_PHENT
-        5, phnum_,         // AT_PHNUM
-        9, prog_entry_,    // AT_ENTRY (original binary's entry, not interp's)
-        25, random_addr,   // AT_RANDOM
-        16, hwcap,         // AT_HWCAP
-        26, 0,             // AT_HWCAP2 (no BTI, no PAC)
-        23, 0,             // AT_SECURE (not setuid)
-        31, execfn_addr,   // AT_EXECFN (program name)
-        7, interp_base_,   // AT_BASE (interpreter load address, 0 if static)
-        33, 0,             // AT_SYSINFO_EHDR (no vDSO)
-        51, 0,             // AT_MINSIGSTKSZ
-        0, 0,              // AT_NULL
+        6,  4096,            // AT_PAGESZ
+        3,  phdr_addr_,      // AT_PHDR
+        4,  phent_,          // AT_PHENT
+        5,  phnum_,          // AT_PHNUM
+        9,  prog_entry_,     // AT_ENTRY (original binary's entry, not interp's)
+        25, random_addr,     // AT_RANDOM
+        16, hwcap,           // AT_HWCAP
+        26, 0,               // AT_HWCAP2 (no BTI, no PAC)
+        23, 0,               // AT_SECURE (not setuid)
+        31, execfn_addr,     // AT_EXECFN (program name)
+        7,  interp_base_,    // AT_BASE (interpreter load address, 0 if static)
+        33, 0,               // AT_SYSINFO_EHDR (no vDSO)
+        // BUGFIX: AT_MINSIGSTKSZ was 0, which glibc uses to size altstacks.
+        // A zero value can cause glibc to allocate an undersized altstack
+        // and overflow into unmapped memory in signal handlers. The kernel
+        // reports ~6 KiB on AArch64; we use the same value.
+        51, 6144,            // AT_MINSIGSTKSZ
+        // BUGFIX: missing AT_UID/AT_EUID/AT_GID/AT_EGID/AT_PLATFORM/AT_CLKTCK.
+        // glibc reads these in __libc_start_main / _dl_aux_init; musl reads
+        // AT_UID/AT_EUID to set the getuid/geteuid caches. AT_CLKTCK backs
+        // sysconf(_SC_CLK_TCK); without it, sysconf returns -1 and tools
+        // like top/ps miscompute CPU%. We return 0 for UID/GID (sandbox
+        // is single-user root) and 100 for CLKTCK (the standard value).
+        11, 0,               // AT_UID
+        12, 0,               // AT_EUID
+        13, 0,               // AT_GID
+        14, 0,               // AT_EGID
+        15, platform_addr,   // AT_PLATFORM ("aarch64")
+        17, 100,             // AT_CLKTCK (sysconf(_SC_CLK_TCK))
+        0,  0,               // AT_NULL
     };
 
     // Compute total table size and align SP to 16

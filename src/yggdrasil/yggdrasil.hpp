@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -161,6 +162,13 @@ private:
 };
 
 // ── FdTable: guest fd → Node mapping ──────────────────────────────────
+//
+// BUGFIX (v1.4.5-alpha): added a mutex to protect `table_`. Multiple guest
+// threads (each on its own host thread) call openat/close/read/write/dup
+// concurrently, all touching `table_`. Without a lock, concurrent insert +
+// erase + find on std::unordered_map is undefined behavior — the map can
+// be corrupted, causing crashes, wrong fd lookups, or use-after-free of
+// Node pointers. All public methods now take `mu_` internally.
 class FdTable {
 public:
     FdTable();
@@ -175,20 +183,27 @@ public:
     int close(int fd);
 
     // Duplicate `fd` to the lowest available fd. Returns new fd or -errno.
-    int dup(int fd);
+    // If `min_fd` > 0, scan for the lowest free fd >= min_fd (F_DUPFD).
+    int dup(int fd, int min_fd = 0);
 
     // Duplicate `fd` to `new_fd` (closing `new_fd` if open). Returns
     // `new_fd` on success or -errno.
     int dup2(int fd, int new_fd);
 
+    // Close every open fd in [first, last]. Used by close_range(2).
+    // Iterates only over the open fds (not every integer in the range),
+    // so a huge range with few open fds is O(open_fds), not O(range).
+    void close_range(int first, int last);
+
     // True if `fd` is open.
-    bool is_open(int fd) const { return table_.count(fd) != 0; }
+    bool is_open(int fd) const;
 
     // Number of open fds.
-    size_t size() const { return table_.size(); }
+    size_t size() const;
 
 private:
     // guest fd → shared Node. shared_ptr so dup()/dup2() can alias.
+    mutable std::mutex mu_;
     std::unordered_map<int, std::shared_ptr<Node>> table_;
 };
 

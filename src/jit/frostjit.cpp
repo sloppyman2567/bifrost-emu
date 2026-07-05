@@ -338,39 +338,75 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_lock_op(0x21, RCX);  // and r/m, r
             } else {
                 // LDSET/LDCLR/LDEOR (LD variants): CAS-loop.
-                //   R9 = addr, RAX = old (from mem), RCX = operand
-                //   R8 = old OP operand
-                //   retry: lock cmpxchg [R9], R8; jnz retry
+                //   R9 = addr
+                //   RCX = src (operand, preserved across iterations)
+                //   RDX = ~src (for LDCLR only; preserved across iterations)
+                //   retry:
+                //     RAX = [R9]                 ; reload old
+                //     R8  = RAX                  ; copy old
+                //     R8  = R8 OP RCX (or RDX)   ; recompute new from CURRENT old
+                //     lock cmpxchg [R9], R8      ; if RAX == [R9], [R9]=R8
+                //     jnz retry                  ; else RAX = [R9] (new old), retry
                 //   dest = RAX (old value)
+                //
+                // BUGFIX 1: previously `R8 = old OP src` was computed ONCE before
+                //   the loop. On CAS failure, RAX was updated to the new [mem]
+                //   but R8 was not recomputed — the retrying cmpxchg wrote the
+                //   ORIGINAL old OP src instead of the CURRENT old OP src. Under
+                //   multi-threaded contention this produced silently wrong RMW
+                //   results for LDCLR/LDEOR/LDSET (e.g. broken atomic flags).
+                //
+                // BUGFIX 2: the original AND/XOR/OR opcodes used REX prefix
+                //   0x4D (W,R,B all set), but REX.R=1 extends the reg field
+                //   from rcx (1) to r9 (9). The intended instruction was
+                //   `and r8, rcx` but the bytes encoded `and r8, r9`. Since
+                //   R9 held the host address (a pointer, not the operand),
+                //   the result was garbage. The correct REX is 0x49 (W=1,
+                //   R=0, B=1) so reg stays rcx and rm extends to r8.
                 emit_mov_reg(R9, RAX);  // R9 = host addr
-                // Load current value → RAX (mov rax, [rax])
-                if (is_64) { emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00); }
-                else if (is_16) { emit_byte(0x66); emit_byte(0x8B); emit_byte(0x00); }
-                else { emit_byte(0x8B); emit_byte(0x00); }
-                // Compute new = old OP src into R8.
-                // R8 = old (mov r8, rax = 4C 8B C0)
-                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xC0);  // mov r8, rax
-                // RCX already has src (operand).
-                // AND/XOR/OR: result goes into R8 (the rm field with REX.B).
-                // Opcode 0x21=AND, 0x31=XOR, 0x09=OR (rm, r form).
-                // REX.WRB (0x4D) = W=1, R=1(extends reg to R8-15), B=1(extends rm to R8-15).
-                // modrm(3, rcx, r8) = 11 001 000 = 0xC8 → rm=R8, reg=RCX.
+                // For LDCLR, precompute ~src into RDX (preserved across iterations).
+                // RDX is already invalidated above and clobbered by idiv; safe to use.
+                if (atom_op == 0x1) {
+                    // mov rdx, rcx (48 89 CA)
+                    emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);
+                    // not rdx — width-sensitive
+                    if (is_16) emit_byte(0x66);
+                    if (is_64) { emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD2); }
+                    else       {                  emit_byte(0xF7); emit_byte(0xD2); }
+                    invalidate_host_regs(1u << RDX);
+                }
+                // CAS loop start: reload old value from memory.
+                size_t loop_start = code_buf_used_;
+                // RAX = [R9] (mov rax, [r9])
+                if (is_64)      { emit_byte(0x49); emit_byte(0x8B); emit_byte(0x01); }
+                else if (is_16) { emit_byte(0x66); emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
+                else            { emit_byte(0x41); emit_byte(0x8B); emit_byte(0x01); }
+                // R8 = RAX (mov r8, rax = 4C 8B C0)
+                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xC0);
+                // Compute new = R8 OP RCX (or R8 AND RDX for LDCLR).
+                // REX: W=1 (64-bit) or 0 (32/16-bit), R=0 (reg = rcx/rdx, no extend), B=1 (rm = r8)
+                //   → 0x49 for 64-bit, 0x41 for 32/16-bit
+                // modrm: 11 001 000 = 0xC8 (reg=001=rcx, rm=000=r8-low-3) for XOR/OR
+                // modrm: 11 010 000 = 0xD0 (reg=010=rdx, rm=000=r8-low-3) for LDCLR's AND
                 switch (atom_op) {
-                    case 0x1: // LDCLR: new = old & ~src
-                        emit_not_reg(RCX);  // RCX = ~src
-                        emit_byte(0x4D); emit_byte(0x21); emit_byte(0xC8);  // and r8, rcx
+                    case 0x1: // LDCLR: new = old & ~src = r8 & rdx
+                        if (is_16) emit_byte(0x66);
+                        if (is_64) emit_byte(0x49); else emit_byte(0x41);
+                        emit_byte(0x21); emit_byte(0xD0);  // and r8, rdx
                         break;
-                    case 0x2: // LDEOR: new = old ^ src
-                        emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC8);  // xor r8, rcx
+                    case 0x2: // LDEOR: new = old ^ src = r8 ^ rcx
+                        if (is_16) emit_byte(0x66);
+                        if (is_64) emit_byte(0x49); else emit_byte(0x41);
+                        emit_byte(0x31); emit_byte(0xC8);  // xor r8, rcx
                         break;
-                    case 0x3: // LDSET: new = old | src
-                        emit_byte(0x4D); emit_byte(0x09); emit_byte(0xC8);  // or r8, rcx
+                    case 0x3: // LDSET: new = old | src = r8 | rcx
+                        if (is_16) emit_byte(0x66);
+                        if (is_64) emit_byte(0x49); else emit_byte(0x41);
+                        emit_byte(0x09); emit_byte(0xC8);  // or r8, rcx
                         break;
                 }
-                // CAS loop: retry until cmpxchg succeeds.
                 // lock cmpxchg [R9], R8
-                // REX.WRB (0x4D) = W=1, R=1(reg→R8), B=1(rm→R9).
-                size_t loop_start = code_buf_used_;
+                // REX.WRB (0x4D) = W=1, R=1(reg→r8), B=1(rm→r9).
                 emit_byte(0xF0);                    // LOCK
                 emit_byte(is_64 ? 0x4D : 0x45);     // REX.WRB(64) or REX.RB(32)
                 if (is_16) emit_byte(0x66);
@@ -1555,6 +1591,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // ARM64 UDIV/SDIV by zero returns 0 (no exception).
             // x86 div/idiv by zero raises SIGFPE. We emit a test+jz
             // to skip the div and set result=0 when divisor is zero.
+            //
+            // ARM64 SDIV of INT_MIN / -1 returns INT_MIN (no trap); x86 idiv
+            // raises #DE → SIGFPE → guest crash. We detect the (INT_MIN, -1)
+            // pair and short-circuit to INT_MIN before the idiv. Same fix
+            // applies to the 32-bit form (INT32_MIN / -1 → INT32_MIN).
             clobber_flags();
             // use bitmask helpers instead of open-coded loop.
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
@@ -1576,6 +1617,60 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // jz zero_div (jump to xor eax,eax if divisor == 0)
             size_t jz_patch = emit_jcc_rel32_placeholder(4);  // JE
             // --- non-zero divisor path ---
+
+            // For SDIV, also guard the (INT_MIN, -1) case to avoid x86 #DE.
+            // Layout:
+            //   cmp rcx, -1           ; is divisor -1?
+            //   jne skip_ovfl         ; if not, do normal idiv
+            //   cmp rax, INT_MIN      ; is dividend INT_MIN?
+            //   jne skip_ovfl         ; if not, do normal idiv
+            //   mov rax, INT_MIN      ; short-circuit result
+            //   jmp past_zero
+            // skip_ovfl:
+            //   <idiv>
+            size_t overflow_jmp_patch = 0;
+            if (inst.op == IROp::SDIV) {
+                // cmp rcx, -1
+                if (inst.width == 64) {
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xF9); emit_byte(0xFF);
+                } else {
+                    emit_byte(0x83);  emit_byte(0xF9); emit_byte(0xFF);
+                }
+                // jne skip_ovfl
+                size_t jne1_patch = emit_jcc_rel32_placeholder(5);  // JNE
+                // Compare dividend to INT_MIN. We use RDX as scratch since
+                // it is already invalidated above and idiv clobbers it anyway.
+                if (inst.width == 64) {
+                    // mov rdx, 0x8000000000000000 (10 bytes: 48 BA <imm64>)
+                    emit_byte(0x48); emit_byte(0xBA);
+                    emit_u32(0x00000000); emit_u32(0x80000000);
+                    // cmp rax, rdx (3 bytes: 48 39 D0)
+                    emit_byte(0x48); emit_byte(0x39); emit_byte(0xD0);
+                } else {
+                    // 32-bit: cmp eax, 0x80000000 (5 bytes: 3D 00 00 00 80)
+                    emit_byte(0x3D); emit_u32(0x80000000);
+                }
+                // jne skip_ovfl
+                size_t jne2_patch = emit_jcc_rel32_placeholder(5);  // JNE
+                // Both checks matched → result = INT_MIN, jump past div.
+                if (inst.width == 64) {
+                    // mov rax, 0x8000000000000000 (10 bytes)
+                    emit_byte(0x48); emit_byte(0xB8);
+                    emit_u32(0x00000000); emit_u32(0x80000000);
+                } else {
+                    // mov eax, 0x80000000 (5 bytes)
+                    emit_byte(0xB8); emit_u32(0x80000000);
+                }
+                // jmp past_zero
+                overflow_jmp_patch = emit_jmp_rel32_placeholder();
+                // patch both jne to skip this overflow-short-circuit
+                size_t skip_off = code_buf_used_;
+                patch_jcc_rel32(jne1_patch, static_cast<int32_t>(skip_off - (jne1_patch + 6)));
+                patch_jcc_rel32(jne2_patch, static_cast<int32_t>(skip_off - (jne2_patch + 6)));
+                // mark RDX as invalidated (we used it as scratch)
+                invalidate_host_regs(1u << RDX);
+            }
+
             if (inst.width == 32) {
                 // 32-bit division: use div/idiv on EAX.
                 // xor edx, edx (clear upper for unsigned) or cdq (sign-extend)
@@ -1605,6 +1700,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // --- past_zero ---
             size_t past_off = code_buf_used_;
             patch_jmp_rel32(jmp_patch, static_cast<int32_t>(past_off - (jmp_patch + 5)));
+            if (inst.op == IROp::SDIV && overflow_jmp_patch != 0) {
+                patch_jmp_rel32(overflow_jmp_patch,
+                                static_cast<int32_t>(past_off - (overflow_jmp_patch + 5)));
+            }
 
             // For 32-bit results, writing to EAX zero-extends to RAX.
             int d = alloc_reg_for(inst.dest, RAX);

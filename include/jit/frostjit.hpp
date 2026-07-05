@@ -94,13 +94,18 @@ public:
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
 
-    uint64_t blocks_translated = 0;
-    uint64_t blocks_executed   = 0;
-    uint64_t instructions_executed = 0;  // sum of instr_count over executed blocks
-    uint64_t cache_hits        = 0;
-    uint64_t cache_misses      = 0;
-    uint64_t interpreter_fallbacks = 0;
-    uint64_t block_chains_patched = 0;
+    // BUGFIX (v1.4.5-alpha): these counters were plain uint64_t, but in
+    // shared-JIT mode they're incremented by multiple host threads
+    // concurrently → data race / UB. Made them std::atomic with relaxed
+    // ordering (we don't need cross-thread synchronization, just atomic
+    // increments to avoid torn writes).
+    std::atomic<uint64_t> blocks_translated{0};
+    std::atomic<uint64_t> blocks_executed{0};
+    std::atomic<uint64_t> instructions_executed{0};
+    std::atomic<uint64_t> cache_hits{0};
+    std::atomic<uint64_t> cache_misses{0};
+    std::atomic<uint64_t> interpreter_fallbacks{0};
+    std::atomic<uint64_t> block_chains_patched{0};
 
     // Loop watchdog state — thread-local so multiple threads sharing a
     // single FrostJIT instance (shared-JIT mode) don't corrupt each

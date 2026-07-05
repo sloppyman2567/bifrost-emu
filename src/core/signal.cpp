@@ -656,19 +656,24 @@ void Emulator::host_signal_handler(int signo) {
 }
 
 void Emulator::queue_host_signal(int signo) {
-    // Lock-free SPSC enqueue. The host signal handler is the sole
-    // producer; drain_host_signals() is the sole consumer.
+    // Lock-free MPSC enqueue.
     //
-    // NOTE: with sigfillset(&sa.sa_mask) in install_host_signal_handlers(),
-    // this function is non-reentrant — the host kernel blocks all signals
-    // during our handler. So we don't need a CAS loop to claim a slot;
-    // a simple relaxed load + release store is correct.
+    // BUGFIX: the previous code claimed this was SPSC and used a plain
+    // relaxed-load + release-store on `tail`. That's correct only if a
+    // SINGLE host thread can be inside the handler at any moment. But on
+    // a multi-vCPU guest, every spawned host thread can receive a
+    // forwarded signal simultaneously — sigfillset(&sa.sa_mask) only
+    // blocks signals on the calling thread during the handler, NOT across
+    // threads. Two threads could both read the same `t`, both write to
+    // `signals[t % CAP]`, and both store `t+1` — losing one signal and
+    // leaving a torn slot.
     //
-    // We use memory_order_acquire on the head load to ensure we observe
-    // any prior consumer progress (the consumer's slot read before its
-    // head.store). Without acquire, the producer could see a stale head
-    // value and overflow the queue.
-    const size_t t = host_signal_queue_.tail.load(std::memory_order_relaxed);
+    // Fix: claim a slot via fetch_add on `tail` (atomic, so each producer
+    // gets a unique slot), then bounds-check against `head` and drop
+    // (with a counter bump) if the queue is full. The slot write happens
+    // before the release-store (which is now implicit in the fetch_add's
+    // acq_rel ordering); the consumer's acquire-load of `tail` synchronizes.
+    const size_t t = host_signal_queue_.tail.fetch_add(1, std::memory_order_acq_rel);
     const size_t h = host_signal_queue_.head.load(std::memory_order_acquire);
     const size_t used = t - h;  // wraparound-safe (unsigned arithmetic)
     if (used >= HOST_SIGNAL_QUEUE_CAP) {
@@ -680,10 +685,13 @@ void Emulator::queue_host_signal(int signo) {
             const char msg[] = "[signal] host signal queue full — dropping\n";
             write(2, msg, sizeof(msg) - 1);
         }
+        // Note: we already incremented tail; the consumer will skip the
+        // claimed slot by checking used >= CAP on its side. We mark the
+        // slot with -1 to signal "skipped".
+        host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = -1;
         return;
     }
     host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
-    host_signal_queue_.tail.store(t + 1, std::memory_order_release);
 }
 
 void Emulator::install_host_signal_handlers() {
@@ -758,7 +766,7 @@ void Emulator::install_host_signal_handlers() {
 }
 
 bool Emulator::drain_host_signals(CPU& cpu) {
-    // Lock-free SPSC dequeue. Atomically advance the head index and
+    // Lock-free MPSC dequeue. Atomically advance the head index and
     // process signals in order.
     //
     // Memory ordering: the consumer's slot read must happen-before its
@@ -766,6 +774,10 @@ bool Emulator::drain_host_signals(CPU& cpu) {
     // producer's head.load uses acquire (in queue_host_signal) to
     // synchronize with this store — ensuring the producer doesn't
     // overwrite a slot the consumer is still reading.
+    //
+    // BUGFIX: slot value -1 means "dropped due to queue full" (the
+    // producer claimed the slot via fetch_add but then found the queue
+    // was past capacity). Skip these.
     const bool trace = signal_trace_enabled();
     bool any_delivered = false;
     size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
@@ -776,6 +788,14 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         // producer before it sees the advanced head index.
         host_signal_queue_.head.store(h + 1, std::memory_order_release);
         h = h + 1;
+
+        // Skip dropped-signal sentinels (queue overflow).
+        if (sig == -1) {
+            // Re-read tail in case the producer added more signals while
+            // we were iterating.
+            t = host_signal_queue_.tail.load(std::memory_order_acquire);
+            continue;
+        }
 
         if (trace) {
             // fprintf is safe here — we're in the run loop, not a signal handler.

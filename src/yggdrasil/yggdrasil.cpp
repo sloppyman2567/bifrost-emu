@@ -51,6 +51,7 @@ std::unique_ptr<Node> Yggdrasil::open(const std::string& guest_path,
 // ── FdTable ───────────────────────────────────────────────────────────
 FdTable::FdTable() {
     // Pre-populate fd 0/1/2 with StdioNode so close(0/1/2) doesn't crash.
+    // (constructor runs on a single thread; no lock needed here.)
     table_[0] = std::make_shared<StdioNode>(0, O_RDONLY);
     table_[1] = std::make_shared<StdioNode>(1, O_WRONLY);
     table_[2] = std::make_shared<StdioNode>(2, O_WRONLY);
@@ -64,6 +65,7 @@ int FdTable::allocate(std::shared_ptr<Node> node) {
     // idiom) but got a higher fd instead. Fix: scan from 0 upward and
     // return the first fd not in table_. (0/1/2 are pre-populated, so
     // in the common case the scan returns 3 immediately.)
+    std::lock_guard<std::mutex> g(mu_);
     int fd = 0;
     while (table_.count(fd)) fd++;
     table_[fd] = std::move(node);
@@ -71,33 +73,72 @@ int FdTable::allocate(std::shared_ptr<Node> node) {
 }
 
 std::shared_ptr<Node> FdTable::get(int fd) const {
+    std::lock_guard<std::mutex> g(mu_);
     auto it = table_.find(fd);
     if (it == table_.end()) return nullptr;
     return it->second;
 }
 
 int FdTable::close(int fd) {
+    std::lock_guard<std::mutex> g(mu_);
     auto it = table_.find(fd);
     if (it == table_.end()) return -EBADF;
     table_.erase(it);
     return 0;
 }
 
-int FdTable::dup(int fd) {
-    auto node = get(fd);
-    if (!node) return -EBADF;
-    return allocate(node);
+int FdTable::dup(int fd, int min_fd) {
+    // Lock once for both lookup and allocate to avoid a TOCTOU race
+    // where another thread closes/reuses the fd between get() and
+    // allocate(). We inline the allocation logic under the same lock.
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = table_.find(fd);
+    if (it == table_.end()) return -EBADF;
+    auto node = it->second;
+    int new_fd = std::max(min_fd, 0);
+    while (table_.count(new_fd)) new_fd++;
+    table_[new_fd] = node;
+    return new_fd;
 }
 
 int FdTable::dup2(int fd, int new_fd) {
-    auto node = get(fd);
-    if (!node) return -EBADF;
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = table_.find(fd);
+    if (it == table_.end()) return -EBADF;
     if (fd == new_fd) return new_fd;
     // Close new_fd if open
-    auto it = table_.find(new_fd);
-    if (it != table_.end()) table_.erase(it);
-    table_[new_fd] = node;
+    auto existing = table_.find(new_fd);
+    if (existing != table_.end()) table_.erase(existing);
+    table_[new_fd] = it->second;
     return new_fd;
+}
+
+void FdTable::close_range(int first, int last) {
+    if (first > last) return;
+    std::lock_guard<std::mutex> g(mu_);
+    // Iterate only over the open fds in the range, not every integer.
+    // This makes close_range(0, INT_MAX) O(open_fds), not O(2^31).
+    // std::unordered_map has no lower_bound, so we collect-then-erase.
+    std::vector<int> to_close;
+    to_close.reserve(table_.size());
+    for (const auto& kv : table_) {
+        if (kv.first >= first && kv.first <= last) {
+            to_close.push_back(kv.first);
+        }
+    }
+    for (int fd : to_close) {
+        table_.erase(fd);
+    }
+}
+
+bool FdTable::is_open(int fd) const {
+    std::lock_guard<std::mutex> g(mu_);
+    return table_.count(fd) != 0;
+}
+
+size_t FdTable::size() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return table_.size();
 }
 
 } // namespace arm64emu::yggdrasil

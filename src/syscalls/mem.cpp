@@ -38,7 +38,55 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
 
-            constexpr uint64_t BIFROST_MAP_FIXED = 0x10;
+            constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
+            constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
+
+            // ── MAP_FIXED_NOREPLACE ─────────────────────────────────────
+            // BUGFIX: previously MAP_FIXED_NOREPLACE was silently ignored
+            // (treated as a non-FIXED mmap), so the kernel could place the
+            // mapping at a different address than requested. The Linux
+            // kernel guarantees MAP_FIXED_NOREPLACE either returns the
+            // exact requested address or -EEXIST if it overlaps an existing
+            // allocation. Game engines and allocators use this flag to
+            // reserve address ranges without overwriting mappings.
+            if (flags & BIFROST_MAP_FIXED_NOREPLACE) {
+                // Check if [addr, addr+length) overlaps any existing allocation.
+                auto allocs = mem_.allocations_snapshot();
+                for (const auto& [base, size] : allocs) {
+                    uint64_t other_end = base + size;
+                    if (addr < other_end && base < addr + length) {
+                        // Overlap → reject without replacing.
+                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
+                        return 0;
+                    }
+                }
+                // No overlap: place at the exact address (treat like MAP_FIXED
+                // from here on, but with no overwrite of existing pages since
+                // we just verified there are none in range).
+                uint64_t mapped = mem_.mmap_alloc(length, addr);
+                (void)mapped;
+                // Map succeeded — fall through to the file-load branch below
+                // using `addr` as both the requested and actual address.
+                // We continue into the regular MAP_FIXED path by setting
+                // the BIFROST_MAP_FIXED bit conceptually (no-op since we
+                // already placed the allocation).
+                if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0) {
+                    struct stat st;
+                    if (::fstat(static_cast<int>(a4), &st) == 0) {
+                        std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
+                        off_t old = ::lseek(static_cast<int>(a4), 0, SEEK_CUR);
+                        ::lseek(static_cast<int>(a4), a5, SEEK_SET);
+                        ssize_t n = ::read(static_cast<int>(a4), buf.data(), buf.size());
+                        ::lseek(static_cast<int>(a4), old, SEEK_SET);
+                        if (n > 0) mem_.write(addr, buf.data(), n);
+                    }
+                    if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
+                        graphics_.set_guest_fb_addr(addr);
+                    }
+                }
+                ret_host(addr);
+                return 0;
+            }
 
             // ── MAP_FIXED overlap with brk region ──────────────────────
             // musl's mallocng uses MAP_FIXED to carve pages out of the brk
