@@ -91,9 +91,23 @@ constexpr int BIFROST_SIGWINCH  = 28;
 constexpr int BIFROST_SIGIO     = 29;
 constexpr int BIFROST_SIGSYS    = 31;
 
-constexpr int MAX_SIGNAL = 31;
+// Real-time signal range (Linux SIGRTMIN..SIGRTMAX).
+// SIGRTMIN is 32 on AArch64 Linux (glibc reserves 32-35 internally, but
+// the kernel's SIGRTMIN is 32). SIGRTMAX is 64. We support all 33 RT
+// signals (32..64) so glibc's pthread_cancel, timer_create, setxid,
+// and musl's timer delivery all work. Turn 57.
+constexpr int BIFROST_SIGRTMIN  = 32;
+constexpr int BIFROST_SIGRTMAX  = 64;
 
-// Signal mask is 64-bit (covers signals 1..63; we only use 1..31).
+// BUGFIX (Turn 57): was 31, blocking all real-time signals. glibc's
+// libpthread uses SIGRTMIN (32) for pthread_cancel/__pthread_signal_cancel
+// and the setxid mechanism; musl uses SIGRTMIN for timer delivery and
+// SIGCANCEL for cancellation. Without RT signal support, those silently
+// disappear — pthread_cancel hangs, timer_create never fires, getpwuid
+// (setxid) deadlocks. Bumped to 64 to cover the full RT range.
+constexpr int MAX_SIGNAL = 64;
+
+// Signal mask is 64-bit (covers signals 1..64, including RT signals).
 using sigset_t_emu = uint64_t;
 
 // sigprocmask `how` values.

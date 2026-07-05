@@ -296,7 +296,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
-        CPU saved = cpu;             // snapshot before
+        // BUGFIX (Turn 57): CPU is non-copyable (mutex + atomic members
+        // for the per-CPU pending signal queue). Snapshot only the
+        // architectural state for verify-mode comparison.
+        CPU saved;                  // default-constructed, then populated
+        saved.copy_arch_state_from(cpu);
+        // The pending-queue state isn't part of architectural state, so
+        // saved's pending queue is empty. That's fine for verify mode —
+        // verify runs single-threaded and no signals should be pending.
         // Debug: print entry state for specific blocks
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] entry block @ 0x%llx x0=0x%llx x1=0x%llx pstate=0x%x\n",
@@ -418,7 +425,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // (eliminating false-positive divergences from read-then-write
         // patterns). After the comparison, the JIT's written values are
         // restored so the next block sees JIT-consistent memory.
-        CPU ref = saved;
+        CPU ref;
+        ref.copy_arch_state_from(saved);
         ref.pc = saved.pc;
         int steps = 0;
         while (steps < entry.instr_count && ref.running) {

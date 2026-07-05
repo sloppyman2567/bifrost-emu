@@ -246,9 +246,51 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // until it RETs to a sentinel address, then capture X0.
             dyn_linker_->set_ifunc_resolver([this](uint64_t resolver_addr) -> uint64_t {
                 if (resolver_addr == 0) return 0;
-                // Borrow main_cpu_ as scratch. Save its current state so
-                // we don't disturb the (still-default) init.
-                CPU saved = main_cpu_;
+                // Borrow main_cpu_ as scratch. Save its architectural state
+                // (regs, sp, pc, pstate, FP file, TLS, sigmask) so we don't
+                // disturb the (still-default) init. We can't copy the whole
+                // CPU struct because it has mutex + atomic members that are
+                // non-copyable (added Turn 57 for per-CPU pending signal
+                // queue). The pending-queue state is irrelevant here —
+                // ifunc resolution runs at load time before any threads
+                // exist, so no signals can be pending.
+                struct SavedState {
+                    uint64_t regs[32];
+                    uint64_t sp, pc;
+                    uint32_t pstate;
+                    uint64_t v_lo[32], v_hi[32];
+                    uint32_t fpcr, fpsr;
+                    uint64_t tpidr_el0, tpidrro_el0;
+                    uint64_t sigmask;
+                    bool running;
+                } saved;
+                static_assert(sizeof(saved.regs) == sizeof(main_cpu_.regs), "");
+                std::memcpy(saved.regs, main_cpu_.regs, sizeof(saved.regs));
+                saved.sp = main_cpu_.sp;
+                saved.pc = main_cpu_.pc;
+                saved.pstate = main_cpu_.pstate;
+                std::memcpy(saved.v_lo, main_cpu_.v_lo, sizeof(saved.v_lo));
+                std::memcpy(saved.v_hi, main_cpu_.v_hi, sizeof(saved.v_hi));
+                saved.fpcr = main_cpu_.fpcr;
+                saved.fpsr = main_cpu_.fpsr;
+                saved.tpidr_el0 = main_cpu_.tpidr_el0;
+                saved.tpidrro_el0 = main_cpu_.tpidrro_el0;
+                saved.sigmask = main_cpu_.sigmask;
+                saved.running = main_cpu_.running;
+                auto restore = [&]() {
+                    std::memcpy(main_cpu_.regs, saved.regs, sizeof(saved.regs));
+                    main_cpu_.sp = saved.sp;
+                    main_cpu_.pc = saved.pc;
+                    main_cpu_.pstate = saved.pstate;
+                    std::memcpy(main_cpu_.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                    std::memcpy(main_cpu_.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    main_cpu_.fpcr = saved.fpcr;
+                    main_cpu_.fpsr = saved.fpsr;
+                    main_cpu_.tpidr_el0 = saved.tpidr_el0;
+                    main_cpu_.tpidrro_el0 = saved.tpidrro_el0;
+                    main_cpu_.sigmask = saved.sigmask;
+                    main_cpu_.running = saved.running;
+                };
                 // Allocate a small scratch stack for the resolver (4 KiB
                 // is plenty — resolvers are leaf-ish functions that don't
                 // recurse deeply).
@@ -280,7 +322,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                                 static_cast<unsigned long long>(resolver_addr),
                                 e.what());
                     }
-                    main_cpu_ = saved;
+                    restore();
                     return 0;
                 }
                 uint64_t result = main_cpu_.regs[0];
@@ -303,7 +345,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                             static_cast<unsigned long long>(steps));
                 }
                 // Restore main_cpu_ to its pre-resolver state.
-                main_cpu_ = saved;
+                restore();
                 return result;
             });
             if (!dyn_linker_->link(data, info.base_addr, path)) {
@@ -738,6 +780,10 @@ int Emulator::run() {
         // Drain the host-signal queue every ~4K instructions.
         if ((count & 0xFFF) == 0) {
             drain_host_signals(main_cpu_);
+            // Also drain per-CPU pending signals (queued by cross-thread
+            // tgkill/tkill/kill). This is the fix for the cross-thread
+            // CPU-mutation race (Turn 57).
+            drain_pending_signals(main_cpu_);
         }
 
         if ((count & 0xFFFFF) == 0) {

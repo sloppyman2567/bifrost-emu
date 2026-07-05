@@ -682,6 +682,16 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         }
                     }
                     slot->waiters--;
+                    // NOTE: we do NOT reclaim the FutexSlot here even if
+                    // waiters==0. The slot is owned by the shard's
+                    // unordered_map, and erasing it while another thread
+                    // holds a FutexSlot* from get_futex() would be a
+                    // use-after-free. The sharded design (64 shards)
+                    // already eliminates the contention problem; slot
+                    // reclamation needs epoch-based reclamation or a
+                    // free-list and is deferred. The memory cost is
+                    // ~88 bytes per distinct futex word ever waited on —
+                    // acceptable for typical game workloads.
                     ret_host(0);
                     return 0;
                 }
@@ -689,7 +699,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 case 10: // FUTEX_WAKE_BITSET
                 {
                     Emulator::FutexSlot* slot = get_futex(uaddr);
-                    std::lock_guard<std::mutex> lk(slot->mu);
+                    std::unique_lock<std::mutex> lk(slot->mu);
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
                     int woken = std::min(to_wake, slot->waiters);
@@ -897,19 +907,28 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Self-delivery.
                 deliver_signal(emu, cpu, signals_, sig);
             } else {
-                // Cross-thread delivery: find the target CPU and queue
-                // the signal via the host-signal queue mechanism. The
-                // target's run loop will drain it at the next syscall
-                // boundary or ~4K instruction check.
+                // Cross-thread delivery: push onto the target CPU's
+                // pending queue. The target's run loop drains it at the
+                // next 4K-instruction boundary (drain_pending_signals).
+                //
+                // BUGFIX (Turn 57): the old code called deliver_signal()
+                // directly on the target CPU while the target's host
+                // thread was concurrently executing on it — a textbook
+                // data race (regs/pc/sp/sigmask/sigpending mutated under
+                // the target's feet). Now we queue and let the target
+                // drain itself, matching the kernel's per-task
+                // task->pending queue semantics.
                 CPU* target = emu.find_cpu_by_tid(tid);
                 if (target) {
-                    // Deliver directly to the target CPU. This is safe
-                    // because deliver_signal only modifies the target
-                    // CPU's state (regs, pc, sp, sigmask) — it doesn't
-                    // touch shared state under the target's feet. The
-                    // target's host thread will pick up the new PC/regs
-                    // on its next instruction.
-                    deliver_signal(emu, *target, signals_, sig);
+                    if (!target->push_pending(sig, SI_USER_EMU, 0)) {
+                        // Queue full — fall back to setting the bit in
+                        // sigpending so the signal isn't lost. The
+                        // bit-based delivery path in deliver_pending_signals
+                        // will pick it up. (This matches kernel behavior
+                        // when task->pending is full — the signal is
+                        // recorded in sigpending but loses siginfo.)
+                        target->sigpending |= (1ULL << (sig - 1));
+                    }
                 } else {
                     // Target thread doesn't exist — ESRCH.
                     ret_err(ESRCH);
@@ -928,9 +947,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (tid == cpu.tid || tid == 0) {
                 deliver_signal(emu, cpu, signals_, sig);
             } else {
+                // Cross-thread: queue on target (see tgkill above).
                 CPU* target = emu.find_cpu_by_tid(tid);
                 if (target) {
-                    deliver_signal(emu, *target, signals_, sig);
+                    if (!target->push_pending(sig, SI_USER_EMU, 0)) {
+                        target->sigpending |= (1ULL << (sig - 1));
+                    }
                 } else {
                     ret_err(ESRCH);
                     return 0;
@@ -961,8 +983,14 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (cpu.tid == 1) {
                     deliver_signal(emu, cpu, signals_, sig);
                 } else {
+                    // Cross-thread: queue on main thread's pending queue
+                    // (see tgkill above for rationale).
                     CPU* main = emu.find_cpu_by_tid(1);
-                    if (main) deliver_signal(emu, *main, signals_, sig);
+                    if (main) {
+                        if (!main->push_pending(sig, SI_USER_EMU, 0)) {
+                            main->sigpending |= (1ULL << (sig - 1));
+                        }
+                    }
                 }
             } else {
                 // Other process — forward to host kill() so the target

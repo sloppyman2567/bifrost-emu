@@ -88,6 +88,11 @@ bool default_terminates(int signo) {
         default:
             // SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG,
             // SIGWINCH — default is ignore (or stop, for SIGSTOP/SIGTSTP).
+            // Real-time signals (SIGRTMIN..SIGRTMAX, 32..64) default to
+            // terminate per Linux signal(7). Turn 57.
+            if (signo >= BIFROST_SIGRTMIN && signo <= BIFROST_SIGRTMAX) {
+                return true;
+            }
             return false;
     }
 }
@@ -746,12 +751,22 @@ void Emulator::install_host_signal_handlers() {
 
     // Forwardable signals. SIGKILL (9) and SIGSTOP (19) cannot be caught
     // — the host kernel handles them directly, which is correct.
+    // Includes real-time signals SIGRTMIN..SIGRTMAX (Turn 57) so glibc's
+    // pthread_cancel/timer_create/setxid mechanisms work.
     static constexpr int forwarded[] = {
         BIFROST_SIGHUP,    BIFROST_SIGINT,  BIFROST_SIGQUIT, BIFROST_SIGUSR1,
         BIFROST_SIGUSR2,   BIFROST_SIGPIPE, BIFROST_SIGALRM, BIFROST_SIGTERM,
         BIFROST_SIGCHLD,   BIFROST_SIGCONT, BIFROST_SIGTSTP, BIFROST_SIGTTIN,
         BIFROST_SIGTTOU,   BIFROST_SIGURG,  BIFROST_SIGXCPU, BIFROST_SIGXFSZ,
         BIFROST_SIGVTALRM, BIFROST_SIGPROF, BIFROST_SIGWINCH, BIFROST_SIGIO,
+        // Real-time signals. glibc's libpthread uses SIGRTMIN (32) for
+        // pthread_cancel and setxid; musl uses SIGRTMIN for timer
+        // delivery. Forwarding them lets the guest's signal handlers
+        // see them. (SIGRTMIN is the kernel's 32; glibc's user-visible
+        // SIGRTMIN is 35 because glibc reserves 32-34, but the kernel
+        // signal number is what we forward.)
+        32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
     };
     for (int sig : forwarded) {
         ::sigaction(sig, &sa, nullptr);
@@ -849,6 +864,48 @@ bool Emulator::drain_host_signals(CPU& cpu) {
 // from read()/nanosleep() to detect "user wants to interrupt".
 bool Emulator::handle_eintr(CPU& cpu) {
     return drain_host_signals(cpu);
+}
+
+// ── drain_pending_signals ─────────────────────────────────────────────
+// Drains per-CPU pending signals queued by cross-thread tgkill/tkill/kill.
+// Called by every CPU's run loop at the 4K-instruction boundary (same
+// point as drain_host_signals). Each CPU drains its OWN queue — no
+// cross-thread mutation, which is the whole point of the per-CPU queue.
+//
+// Signals blocked by cpu.sigmask are left in the queue (we don't pop
+// them). When rt_sigprocmask unblocks them, the next drain call will
+// deliver them. This matches kernel semantics: blocked signals stay
+// pending until unblocked.
+//
+// Returns true if any signal was actually delivered to a handler.
+bool Emulator::drain_pending_signals(CPU& cpu) {
+    bool any_delivered = false;
+    CPU::PendingSig sig;
+    while (cpu.pop_pending(sig)) {
+        // If the signal is blocked, re-queue it (push back) and stop
+        // draining — kernel preserves order within pending signals,
+        // and we shouldn't deliver a later signal before an earlier
+        // blocked one. In practice this means we leave it in the
+        // queue. Since we already popped it, we have to push it back.
+        // To avoid reordering, we stop draining on the first blocked
+        // signal we encounter.
+        if (sig.signo >= 1 && sig.signo <= 63 &&
+            SignalTable::is_blocked(cpu, sig.signo)) {
+            // Re-push and stop.
+            cpu.push_pending(sig.signo, sig.si_code, sig.fault_addr);
+            break;
+        }
+        if (deliver_signal(*this, cpu, signals_, sig.signo,
+                           sig.si_code, sig.fault_addr)) {
+            any_delivered = true;
+            // deliver_signal sets up the handler frame and changes
+            // cpu.pc. Don't drain more — let the handler run first.
+            // The next drain pass (after the handler returns via
+            // rt_sigreturn) will pick up any further pending signals.
+            break;
+        }
+    }
+    return any_delivered;
 }
 
 } // namespace arm64emu

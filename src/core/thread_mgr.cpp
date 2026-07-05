@@ -85,8 +85,12 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             // Drain host-forwarded signals every ~4K instructions so
             // spawned threads can receive SIGINT/SIGTERM/etc. Without
             // this, only the main thread sees host signals.
+            // Also drain per-CPU pending signals (queued by cross-thread
+            // tgkill/tkill/kill) — fix for the cross-thread CPU-mutation
+            // race (Turn 57).
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
+                emu->drain_pending_signals(cpu);
             }
 
             if ((count & 0xFFFFF) == 0) {
@@ -206,7 +210,13 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     //   robust_list_head = 0 (child starts with no robust futexes)
     //   sigmask = parent's sigmask (CLONE_THREAD shares signal handlers,
     //            but each thread has its own mask per Turn 23's fix)
-    gt->cpu = parent_cpu;
+    //
+    // BUGFIX (Turn 57): CPU is non-copyable (mutex + atomic members for
+    // the per-CPU pending signal queue). Use copy_arch_state_from() which
+    // copies the architectural fields without touching the pending queue
+    // or exclusive monitor. The reset block below then explicitly clears
+    // sigpending, altstack, etc. per Linux clone() semantics.
+    gt->cpu.copy_arch_state_from(parent_cpu);
     gt->cpu.regs[0] = 0;
     gt->cpu.pc = entry_pc;
     gt->cpu.sp = stack_top;

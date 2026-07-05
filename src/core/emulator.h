@@ -97,6 +97,11 @@ public:
     // Drain any host-forwarded signals (SIGINT/SIGTERM/SIGCHLD) to the
     // guest. Called by spawned threads at syscall boundaries.
     bool drain_host_signals(CPU& cpu);
+    // Drain any per-CPU pending signals queued by cross-thread tgkill/
+    // tkill/kill. Called by every CPU's run loop at the same 4K-instr
+    // boundary as drain_host_signals(). This is the fix for the
+    // cross-thread CPU-mutation race (Turn 57).
+    bool drain_pending_signals(CPU& cpu);
     // Install host signal handlers for forwarding to the guest.
     void install_host_signal_handlers();
     // Helper for blocking syscalls that returned -EINTR. Drains pending
@@ -138,14 +143,68 @@ public:
     // ── vCPU management ───────────────────────────────────────────────
     // Futex table: maps a guest address → (mutex, condvar, waiter count).
     // Used by clone-spawned threads for synchronization.
+    //
+    // BUGFIX (Turn 57): the old design used a single std::mutex +
+    // std::unordered_map for the whole table. Every FUTEX_WAIT/WAKE/REQUEUE
+    // took the same lock, serializing all futex ops across all vCPUs.
+    // Real games have dozens to hundreds of distinct futex words (one per
+    // pthread mutex/cond/barrier); each op contended on the same lock.
+    //
+    // New design: 64 shards keyed by (addr >> 3) & 63 (mirror the exclusive
+    // monitor's design, but with 4x more shards for better scalability on
+    // 8+ vCPU guests). Two futex ops only contend if their addresses map
+    // to the same shard — unlikely for unrelated mutexes.
+    //
+    // Also: when a FutexSlot's waiters transitions to 0, the slot is
+    // erased from its shard (reclaim memory for freed mutexes). The
+    // caller (FUTEX_WAIT/WAKE) is responsible for calling
+    // release_futex(addr) when waiters hits 0.
     struct FutexSlot {
         std::mutex mu;
         std::condition_variable cv;
         int waiters = 0;
     };
+    static constexpr size_t FUTEX_SHARDS = 64;
+    struct FutexShard {
+        std::mutex mu;
+        std::unordered_map<uint64_t, std::unique_ptr<FutexSlot>> slots;
+    };
+    FutexShard futex_shards_[FUTEX_SHARDS];
+    static size_t futex_shard_idx(uint64_t addr) {
+        return (addr >> 3) & (FUTEX_SHARDS - 1);
+    }
+    // Look up (or create) the FutexSlot for `addr`. Returns a pointer
+    // owned by the shard. The caller MUST NOT hold the shard mutex when
+    // calling wait/wake on the slot.
     FutexSlot* get_futex(uint64_t addr) {
-        std::lock_guard<std::mutex> g(futex_table_mu_);
-        return &futex_table_[addr];
+        size_t idx = futex_shard_idx(addr);
+        std::lock_guard<std::mutex> g(futex_shards_[idx].mu);
+        auto& shard = futex_shards_[idx].slots;
+        auto it = shard.find(addr);
+        if (it == shard.end()) {
+            auto slot = std::make_unique<FutexSlot>();
+            FutexSlot* raw = slot.get();
+            shard.emplace(addr, std::move(slot));
+            return raw;
+        }
+        return it->second.get();
+    }
+    // Erase a FutexSlot when its waiter count hits 0 (called by FUTEX_WAKE
+    // after notifying). Reclaims memory for freed mutexes — without this,
+    // a long-running game that allocates/frees millions of mutexes would
+    // leak indefinitely.
+    void release_futex_if_empty(uint64_t addr) {
+        size_t idx = futex_shard_idx(addr);
+        std::lock_guard<std::mutex> g(futex_shards_[idx].mu);
+        auto& shard = futex_shards_[idx].slots;
+        auto it = shard.find(addr);
+        if (it == shard.end()) return;
+        // Double-check waiters under the shard lock (the slot's own mu
+        // is NOT held here, but the shard lock prevents new waiters from
+        // finding this slot between the check and the erase).
+        if (it->second->waiters == 0) {
+            shard.erase(it);
+        }
     }
     void decrement_alive_threads() { alive_threads_.fetch_sub(1); }
 
@@ -242,8 +301,8 @@ private:
     std::atomic<int> alive_threads_{0};
 
     // ── Futex table ───────────────────────────────────────────────────
-    std::mutex futex_table_mu_;
-    std::unordered_map<uint64_t, FutexSlot> futex_table_;
+    // (sharded — see futex_shards_ above. The old single-mutex + single-map
+    // design was removed in Turn 57 for scalability.)
 
     // ── Global exclusive monitor (LL/SC atomics) ──────────────────────
     // AArch64's LDXR/STXR (load-linked / store-conditional) atomics rely

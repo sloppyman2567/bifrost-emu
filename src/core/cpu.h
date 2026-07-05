@@ -16,7 +16,10 @@
 #include "bifrost/types.hpp"
 #include "core/memory.h"
 
+#include <atomic>
 #include <cstdint>
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace arm64emu {
@@ -127,6 +130,59 @@ public:
     // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
     uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo-1` set = blocked)
     uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo-1` set = pending)
+
+    // ── Per-CPU pending-signal queue ─────────────────────────────────
+    // BUGFIX (Turn 57): tgkill/tkill/kill targeting another thread used
+    // to call deliver_signal() directly on the target CPU while the
+    // target's host thread was concurrently executing on it — a textbook
+    // data race (regs/pc/sp/sigmask/sigpending mutated under the target's
+    // feet). Now cross-thread signal delivery pushes (signo, si_code,
+    // fault_addr) onto the target's pending queue under a mutex, and the
+    // target's run loop drains its own queue at the next 4K-instruction
+    // boundary (the existing drain_host_signals() call point). This
+    // matches the kernel's per-task task->pending queue semantics.
+    //
+    // The queue is small (64 entries) — kernel task->pending is also
+    // bounded (default 32, max _NSIG_WORDS*8). If overflow happens we
+    // coalesce by setting the bit in `sigpending` so the signal is at
+    // least not lost (the bit-based pending delivery path still works).
+    struct PendingSig {
+        int      signo;
+        int      si_code;
+        uint64_t fault_addr;
+    };
+    static constexpr size_t PENDING_QUEUE_CAP = 64;
+    std::mutex              pending_mu;
+    PendingSig              pending_queue[PENDING_QUEUE_CAP];
+    std::atomic<size_t>     pending_head{0};  // consumer index
+    std::atomic<size_t>     pending_tail{0};  // producer index
+    // Producer (other thread delivering signal) — returns true if queued,
+    // false if the queue is full (caller should fall back to setting the
+    // bit in sigpending so the signal isn't completely lost).
+    bool push_pending(int signo, int si_code, uint64_t fault_addr) {
+        const size_t t = pending_tail.load(std::memory_order_relaxed);
+        const size_t h = pending_head.load(std::memory_order_acquire);
+        const size_t used = t - h;  // wraparound-safe
+        if (used >= PENDING_QUEUE_CAP) return false;
+        pending_queue[t % PENDING_QUEUE_CAP] = PendingSig{signo, si_code, fault_addr};
+        pending_tail.store(t + 1, std::memory_order_release);
+        return true;
+    }
+    // Consumer (this CPU's run loop) — pops one pending signal, or
+    // returns false if the queue is empty.
+    bool pop_pending(PendingSig& out) {
+        const size_t h = pending_head.load(std::memory_order_relaxed);
+        const size_t t = pending_tail.load(std::memory_order_acquire);
+        if (h == t) return false;
+        out = pending_queue[h % PENDING_QUEUE_CAP];
+        pending_head.store(h + 1, std::memory_order_release);
+        return true;
+    }
+    bool has_pending_signals() const {
+        return pending_head.load(std::memory_order_acquire) !=
+               pending_tail.load(std::memory_order_acquire);
+    }
+
     // Set when SIGINT was received from the terminal (Ctrl+C) but the
     // guest has SIGINT set to SIG_IGN. The read() handler checks this
     // flag and injects a newline byte so the shell prints a new prompt
@@ -186,6 +242,41 @@ public:
     uint64_t r(int r) const { return regs[r & 31]; }
     // Write a register operand; writes to XZR (31) are discarded.
     void w(int r, uint64_t v) { if (r != 31) regs[r] = v; }
+
+    // ── Architectural-state copy ─────────────────────────────────────
+    // BUGFIX (Turn 57): CPU is non-copyable because the per-CPU pending
+    // signal queue has mutex + atomic members. clone() and the ifunc
+    // resolver need to copy/restore the architectural state (everything
+    // except the pending queue, which is per-thread and shouldn't be
+    // inherited anyway). copy_arch_state_from() copies all architectural
+    // fields; the caller is responsible for resetting the pending queue
+    // and exclusive monitor as needed (see thread_mgr.cpp spawn_thread).
+    void copy_arch_state_from(const CPU& src) {
+        std::memcpy(regs, src.regs, sizeof(regs));
+        sp = src.sp;
+        pc = src.pc;
+        pstate = src.pstate;
+        running = src.running;
+        exit_code = src.exit_code;
+        std::memcpy(v_lo, src.v_lo, sizeof(v_lo));
+        std::memcpy(v_hi, src.v_hi, sizeof(v_hi));
+        fpcr = src.fpcr;
+        fpsr = src.fpsr;
+        tpidr_el0 = src.tpidr_el0;
+        tpidrro_el0 = src.tpidrro_el0;
+        tid = src.tid;
+        is_fork_process = src.is_fork_process;
+        // page_cache, decode_cache: NOT copied (per-thread, fresh in child)
+        set_tid_address_ptr = 0;   // child starts with no clear_child_tid
+        robust_list_head = 0;
+        robust_list_len = 0;
+        sigmask = src.sigmask;
+        // sigpending, altstack: reset by caller (per Linux semantics)
+        // pending queue: untouched (each CPU has its own, empty at init)
+        excl_tag_valid = false;    // fresh exclusive monitor
+        excl_tag_addr = 0;
+        excl_tag_size = 0;
+    }
 };
 
 } // namespace arm64emu
