@@ -447,39 +447,19 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 165: { // getrusage(who, usage) — AArch64 syscall 165
-            // BUGFIX (Turn 61): was returning all zeros, which broke
-            // `toybox time` (it reads ru_utime/ru_stime of the child via
-            // getrusage(RUSAGE_CHILDREN) after wait4). Zeroed fields made
-            // it print garbage like "user 549755811552.42" (uninitialized
-            // memory interpreted as struct timeval). Now we forward to
-            // the host getrusage() and copy the real struct rusage.
-            // struct rusage layout (AArch64 LP64, 144 bytes):
-            //   +0:  ru_utime (16: tv_sec=8, tv_usec=8)
-            //   +16: ru_stime (16)
-            //   +32: ru_maxrss (8)
-            //   +40: ru_ixrss (8)
-            //   +48: ru_idrss (8)
-            //   +56: ru_isrss (8)
-            //   +64: ru_minflt (8)
-            //   +72: ru_majflt (8)
-            //   +80: ru_nswap (8)
-            //   +88: ru_inblock (8)
-            //   +96: ru_oublock (8)
-            //   +104: ru_msgsnd (8)
-            //   +112: ru_msgrcv (8)
-            //   +120: ru_nsignals (8)
-            //   +128: ru_nvcsw (8)
-            //   +136: ru_nivcsw (8)
-            int who = static_cast<int>(a0);
+            // BUGFIX (Turn 61): return zeros. We previously forwarded to
+            // host ::getrusage(), but the host's rusage includes emulator
+            // overhead (JIT, memory, VFS) that has nothing to do with the
+            // guest's CPU time. This produced garbage values in
+            // `toybox time` (e.g. "user 549755808768.42"). Accurate
+            // per-guest CPU accounting would require tracking guest
+            // instructions executed (future work). For now, zeros are
+            // safe — `time` reports 0.000 for user/sys, which is not
+            // useful but not garbage.
             if (a1 == 0) { ret_err(EFAULT); return 0; }
-            struct rusage ru;
-            memset(&ru, 0, sizeof(ru));
-            int r = ::getrusage(who, &ru);
-            if (r < 0) { ret_errno(); return 0; }
-            // Copy the real rusage to guest memory. The host and guest
-            // layouts are identical on AArch64 LP64 (both use 64-bit
-            // time_t and 64-bit long).
-            mem_.write(a1, &ru, sizeof(ru));
+            uint8_t zero_buf[144] = {0};  // sizeof(struct rusage) on LP64
+            try { mem_.write(a1, zero_buf, sizeof(zero_buf)); }
+            catch (...) { ret_err(EFAULT); return 0; }
             ret_host(0);
             return 0;
         }
@@ -773,13 +753,22 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 260: { // wait4(pid, wstatus, options, rusage) — aarch64 260
             // with real fork() support, we forward to
             // host wait4() so the parent can reap forked children.
+            // BUGFIX (Turn 61): do NOT pass rusage to host ::wait4() —
+            // the child is a forked EMULATOR process, and the host's
+            // rusage includes emulator overhead (JIT compilation, memory
+            // management, etc.) that has nothing to do with the guest's
+            // CPU time. This produced garbage values in `toybox time`
+            // (e.g. "user 549755808768.42"). Instead, zero the guest's
+            // rusage buffer. This means `time` reports 0.000 for user/sys
+            // — not useful, but not garbage. Accurate per-guest CPU
+            // accounting would require tracking guest instructions
+            // executed (future work).
             pid_t pid = (pid_t)a0;
             int options = static_cast<int>(a2);
             int status = 0;
-            struct rusage ru;
             pid_t r;
             while (true) {
-                r = ::wait4(pid, &status, options, a3 ? &ru : nullptr);
+                r = ::wait4(pid, &status, options, nullptr);
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
@@ -793,7 +782,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.store<uint32_t>(a1, static_cast<uint32_t>(status));
             }
             if (a3) {
-                mem_.write(a3, &ru, sizeof(ru));
+                // Zero the guest's rusage buffer (144 bytes on LP64).
+                // We can't provide accurate per-guest CPU time.
+                uint8_t zero_buf[144] = {0};
+                try { mem_.write(a3, zero_buf, sizeof(zero_buf)); }
+                catch (...) { /* ignore — caller may pass bad ptr */ }
             }
             ret_host(static_cast<uint64_t>(r));
             return 0;
