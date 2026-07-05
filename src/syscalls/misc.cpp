@@ -43,6 +43,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
+#include <sys/times.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -373,6 +374,32 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        case 153: { // times(struct tms *buf) — AArch64 153
+            // times() returns the number of clock ticks since an arbitrary
+            // point in the past, and fills struct tms:
+            //   +0:  tms_utime  (clock ticks of user CPU time)
+            //   +8:  tms_stime  (clock ticks of system CPU time)
+            //   +16: tms_cutime (user CPU time of children)
+            //   +24: tms_cstime (system CPU time of children)
+            // We forward to host times() — for RUSAGE_SELF the host's
+            // times include emulator overhead, but that's the best we
+            // can do without per-guest accounting. For RUSAGE_CHILDREN,
+            // host times() is correct (fork_guest uses real fork()).
+            // Without this, `toybox time` and any program using times()
+            // for benchmarking sees -ENOSYS and can't report CPU time.
+            struct tms t;
+            memset(&t, 0, sizeof(t));
+            clock_t r = ::times(a0 ? &t : nullptr);
+            if (r == static_cast<clock_t>(-1)) { ret_errno(); return 0; }
+            if (a0) {
+                try {
+                    mem_.write(a0, &t, sizeof(t));
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
+
         case 158: { // sched_setaffinity — no-op (alias of 122, some guests use 158)
             // Note: AArch64 158 is actually rseqg, but some musl versions
             // probe sched_setaffinity here on legacy builds. Treat as no-op.
@@ -420,9 +447,39 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 165: { // getrusage(who, usage) — AArch64 syscall 165
-            // Return zeroed struct rusage (60 bytes on LP64).
-            char buf[144] = {0};  // generous; covers ru_maxrss etc.
-            mem_.write(a1, buf, sizeof(buf));
+            // BUGFIX (Turn 61): was returning all zeros, which broke
+            // `toybox time` (it reads ru_utime/ru_stime of the child via
+            // getrusage(RUSAGE_CHILDREN) after wait4). Zeroed fields made
+            // it print garbage like "user 549755811552.42" (uninitialized
+            // memory interpreted as struct timeval). Now we forward to
+            // the host getrusage() and copy the real struct rusage.
+            // struct rusage layout (AArch64 LP64, 144 bytes):
+            //   +0:  ru_utime (16: tv_sec=8, tv_usec=8)
+            //   +16: ru_stime (16)
+            //   +32: ru_maxrss (8)
+            //   +40: ru_ixrss (8)
+            //   +48: ru_idrss (8)
+            //   +56: ru_isrss (8)
+            //   +64: ru_minflt (8)
+            //   +72: ru_majflt (8)
+            //   +80: ru_nswap (8)
+            //   +88: ru_inblock (8)
+            //   +96: ru_oublock (8)
+            //   +104: ru_msgsnd (8)
+            //   +112: ru_msgrcv (8)
+            //   +120: ru_nsignals (8)
+            //   +128: ru_nvcsw (8)
+            //   +136: ru_nivcsw (8)
+            int who = static_cast<int>(a0);
+            if (a1 == 0) { ret_err(EFAULT); return 0; }
+            struct rusage ru;
+            memset(&ru, 0, sizeof(ru));
+            int r = ::getrusage(who, &ru);
+            if (r < 0) { ret_errno(); return 0; }
+            // Copy the real rusage to guest memory. The host and guest
+            // layouts are identical on AArch64 LP64 (both use 64-bit
+            // time_t and 64-bit long).
+            mem_.write(a1, &ru, sizeof(ru));
             ret_host(0);
             return 0;
         }
