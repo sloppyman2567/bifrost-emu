@@ -486,7 +486,30 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t act_flags    = act->flags;
     const uint64_t act_mask     = act->mask;
 
-    // Make sure the trampoline is mapped.
+    // BUGFIX (production hardening): validate handler address alignment.
+    // AArch64 instructions must be 4-byte aligned. If a buggy guest
+    // installs a handler at an unaligned address (e.g., due to a
+    // corrupted function pointer), setting cpu.pc to that address
+    // would cause a "decode error" or "PC ran into unmapped memory"
+    // crash with no useful diagnostic. We treat this as a fatal guest
+    // bug and apply the default disposition instead.
+    if ((handler_addr & 0x3ULL) != 0 || handler_addr < 0x1000) {
+        fprintf(stderr,
+            "[%s] signal %d: refusing to jump to invalid handler 0x%llx "
+            "(must be 4-byte aligned and >= 0x1000); applying default "
+            "disposition\n",
+            CODENAME, signo,
+            static_cast<unsigned long long>(handler_addr));
+        if (default_terminates(signo)) {
+            cpu.running = false;
+            cpu.exit_code = 128 + signo;
+        }
+        return false;
+    }
+
+    // Make sure the trampoline is mapped. This is also pre-mapped at
+    // install_host_signal_handlers() time, but the call is idempotent
+    // and cheap (single is_mapped check) so we keep it as a safety net.
     const uint64_t tramp = map_sigreturn_trampoline(emu.mem());
     if (tramp == 0) {
         if (default_terminates(signo)) {
@@ -624,12 +647,28 @@ void Emulator::host_signal_handler(int signo) {
 void Emulator::queue_host_signal(int signo) {
     // Lock-free SPSC enqueue. The host signal handler is the sole
     // producer; drain_host_signals() is the sole consumer.
+    //
+    // NOTE: with sigfillset(&sa.sa_mask) in install_host_signal_handlers(),
+    // this function is non-reentrant — the host kernel blocks all signals
+    // during our handler. So we don't need a CAS loop to claim a slot;
+    // a simple relaxed load + release store is correct.
+    //
+    // We use memory_order_acquire on the head load to ensure we observe
+    // any prior consumer progress (the consumer's slot read before its
+    // head.store). Without acquire, the producer could see a stale head
+    // value and overflow the queue.
     const size_t t = host_signal_queue_.tail.load(std::memory_order_relaxed);
-    const size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
+    const size_t h = host_signal_queue_.head.load(std::memory_order_acquire);
     const size_t used = t - h;  // wraparound-safe (unsigned arithmetic)
     if (used >= HOST_SIGNAL_QUEUE_CAP) {
         // Queue full — drop. POSIX allows signal loss when the queue
-        // is full; this is acceptable.
+        // is full; this is acceptable. We log to stderr only if signal
+        // tracing is enabled (avoid async-signal-unsafe I/O otherwise).
+        if (signal_trace_enabled()) {
+            // write() is async-signal-safe per POSIX.
+            const char msg[] = "[signal] host signal queue full — dropping\n";
+            write(2, msg, sizeof(msg) - 1);
+        }
         return;
     }
     host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
@@ -640,21 +679,51 @@ void Emulator::install_host_signal_handlers() {
     g_active_emu_ = this;
     init_signal_trace_flag();
 
-    // Shells set SIGINT and SIGQUIT to SIG_IGN for background processes
-    // (launched with `&`). Reset to SIG_DFL first so our handler actually
-    // receives these signals instead of being silently dropped by the
-    // host kernel before we ever see them.
-    signal(SIGINT,  SIG_DFL);
-    signal(SIGQUIT, SIG_DFL);
+    // Shells set certain signals to SIG_IGN when launching background
+    // processes (e.g. `cmd &`). When a signal is SIG_IGN'd at the host
+    // kernel level, our handler is NEVER called — the kernel silently
+    // drops the signal before we see it. This breaks guest programs
+    // that install handlers for those signals.
+    //
+    // POSIX signals that shells commonly set to SIG_IGN:
+    //   SIGINT  — background processes (`cmd &`)
+    //   SIGQUIT — background processes
+    //   SIGTSTP — background processes (some shells)
+    //   SIGTTIN — background processes reading from terminal
+    //   SIGTTOU — background processes writing to terminal
+    //   SIGPIPE — pipelines whose reader has exited (some shells)
+    //   SIGCHLD — `disown` or non-monitoring shells
+    //
+    // Reset ALL of these to SIG_DFL first so our handler actually
+    // receives them. This is a SUBTLE BUG FIX: previously only SIGINT
+    // and SIGQUIT were reset, which meant SIGPIPE from a closed pipe
+    // (e.g., `yes | head -1`) and SIGCHLD from `wait()` could be
+    // silently lost when the parent shell set them to SIG_IGN.
+    static const int kResetToDefault[] = {
+        SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU,
+        SIGPIPE, SIGCHLD, SIGURG, SIGWINCH,
+    };
+    for (int sig : kResetToDefault) {
+        ::signal(sig, SIG_DFL);
+    }
 
     // Install one host handler that forwards to the guest via the SPSC
     // queue. SA_RESTART is intentionally NOT set — we want blocking
     // syscalls to be interrupted so the run loop can drain signals.
+    //
+    // BUGFIX (production hardening): the old code used sigemptyset(&sa.sa_mask),
+    // which means only the SAME signal is blocked during its handler. This
+    // created a re-entrancy race in queue_host_signal: if SIGTERM arrived
+    // while SIGINT's handler was running, both invocations could read the
+    // same tail index, both write to the same slot, and both store tail+1
+    // — losing one of the signals. We now fill sa_mask with ALL forwardable
+    // signals so the host kernel serializes our handler invocations.
+    // This makes queue_host_signal non-reentrant, eliminating the race.
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = &Emulator::host_signal_handler;
-    sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
+    sigfillset(&sa.sa_mask);  // block ALL signals during handler execution
 
     // Forwardable signals. SIGKILL (9) and SIGSTOP (19) cannot be caught
     // — the host kernel handles them directly, which is correct.
@@ -671,18 +740,30 @@ void Emulator::install_host_signal_handlers() {
     // SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGABRT/SIGSYS are NOT
     // forwarded via host handlers — they're delivered synchronously by
     // the emulator when it detects the corresponding guest fault.
+
+    // Pre-map the sigreturn trampoline so the first signal delivery
+    // doesn't pay a map_range cost on the hot path. Idempotent.
+    map_sigreturn_trampoline(mem_);
 }
 
 bool Emulator::drain_host_signals(CPU& cpu) {
     // Lock-free SPSC dequeue. Atomically advance the head index and
     // process signals in order.
+    //
+    // Memory ordering: the consumer's slot read must happen-before its
+    // head.store, so we use release ordering on the head.store. The
+    // producer's head.load uses acquire (in queue_host_signal) to
+    // synchronize with this store — ensuring the producer doesn't
+    // overwrite a slot the consumer is still reading.
     const bool trace = signal_trace_enabled();
     bool any_delivered = false;
     size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
     size_t t = host_signal_queue_.tail.load(std::memory_order_acquire);
     while (h != t) {
         const int sig = host_signal_queue_.signals[h % HOST_SIGNAL_QUEUE_CAP];
-        host_signal_queue_.head.store(h + 1, std::memory_order_relaxed);
+        // Release ordering ensures the slot read above is visible to the
+        // producer before it sees the advanced head index.
+        host_signal_queue_.head.store(h + 1, std::memory_order_release);
         h = h + 1;
 
         if (trace) {

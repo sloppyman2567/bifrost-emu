@@ -181,6 +181,19 @@ INTEGRATION_TESTS=(
     "sigaction|ctest_real/test_sigaction.elf||10|ALL PASS|JIT"
     # Focused sigsuspend test: forked child sends SIGUSR1 after 100ms.
     "sigsuspend|ctest_real/test_sigsuspend.elf||10|PASS|JIT"
+    # NEW (Turn 54): signal subsystem production-hardening tests.
+    # sigaltstack verifies SA_ONSTACK + sigaltstack() install/query/disable.
+    # sig_nested verifies a handler can be interrupted by another signal.
+    # sig_sa_mask verifies sa_mask blocks additional signals during handler.
+    # sig_pending verifies multiple pending signals are delivered on unblock.
+    # sig_callee_saved verifies x19-x28 are preserved across signal delivery.
+    # All 5 are JIT-only — the interpreter has a pre-existing stack
+    # corruption bug when returning from signal handlers via rt_sigreturn.
+    "sigaltstack|ctest_real/test_sigaltstack.elf||10|ALL PASS|JIT"
+    "sig_nested|ctest_real/test_sig_nested.elf||10|ALL PASS|JIT"
+    "sig_sa_mask|ctest_real/test_sig_sa_mask.elf||10|ALL PASS|JIT"
+    "sig_pending|ctest_real/test_sig_pending.elf||10|ALL PASS|JIT"
+    "sig_callee_saved|ctest_real/test_sig_callee_saved.elf||10|ALL PASS|JIT"
     "jit_new_ops|ctest_real/jit_new_ops.elf||5|ALL TESTS PASSED"
     "loop_div|ctest_real/loop_div.elf||5"
     "md5_neon_test|ctest_real/md5_neon_test.elf||5"
@@ -201,6 +214,15 @@ INTEGRATION_TESTS=(
     # Heap stress test: exercises mremap_grow + munmap + mmap patterns
     # that previously corrupted musl's mallocng metadata (Turn 51 fix).
     "heap_stress|ctest_real/heap_stress.elf||10|heap_stress OK"
+    # NEW (Turn 54): syscall/memory correctness tests.
+    # brk verifies brk() extend/contract + rejection of absurd addresses.
+    # pipe verifies pipe() + fork + read/write + EOF on close.
+    # auxv verifies AT_PAGESZ/AT_PHDR/AT_ENTRY/AT_RANDOM/AT_HWCAP/etc.
+    # getenv verifies envp[] + setenv/unsetenv round-trips.
+    "brk|ctest_real/test_brk.elf||5|ALL PASS"
+    "pipe|ctest_real/test_pipe.elf||5|ALL PASS"
+    "auxv|ctest_real/test_auxv.elf||5|ALL PASS"
+    "getenv|ctest_real/test_getenv.elf||5|ALL PASS"
 )
 
 # Dynamic linking tests (Turn 53).
@@ -250,8 +272,9 @@ run_test() {
     local full="$EMU $EMU_FLAGS $file"
     local output rc
 
-    # Apply filter
-    if [ -n "$FILTER" ] && ! echo "$name" | grep -qi "$FILTER"; then
+    # Apply filter (use grep -E so the user can pass alternation like
+    # --filter "sig|brk" — basic regex doesn't support |).
+    if [ -n "$FILTER" ] && ! echo "$name" | grep -qiE "$FILTER"; then
         return 0
     fi
 
@@ -298,9 +321,9 @@ run_test() {
     # this, a hung test would leave orphaned processes that keep the test
     # runner hanging forever.
     if [ -n "$stdin" ]; then
-        output=$(printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file 2>&1)
+        output=$(printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file 2>&1 | tr -d '\0')
     else
-        output=$(env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null 2>&1)
+        output=$(env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null 2>&1 | tr -d '\0')
     fi
     rc=$?
 

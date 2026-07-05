@@ -234,6 +234,26 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             std::lock_guard<std::mutex> g(brk_mu_);
             if (a0 == 0) { ret_host(brk_); return 0; }
             if (a0 < brk_start_) { ret_host(brk_); return 0; }
+
+            // BUGFIX (production hardening): reject unreasonable brk
+            // extensions. The Linux kernel checks the new break against
+            // RLIMIT_DATA and the available address space; without this
+            // check, a buggy (or malicious) guest could request
+            // brk(0xFFFFFFFFFFFFFFFF) and the emulator would try to
+            // map_range() ~2^64 bytes, exhausting host memory or
+            // hanging for minutes.
+            //
+            // We use a generous 1 GiB upper bound on the heap — way
+            // more than any reasonable program needs, but small enough
+            // to prevent runaway allocations. If a program legitimately
+            // needs a bigger heap, it should use mmap() directly.
+            constexpr uint64_t MAX_BRK_SIZE = 1ULL << 30;  // 1 GiB
+            if (a0 - brk_start_ > MAX_BRK_SIZE) {
+                // Reject: return the current brk unchanged.
+                ret_host(brk_);
+                return 0;
+            }
+
             if (a0 > brk_) {
                 mem_.map_range(brk_, a0 - brk_);
             }

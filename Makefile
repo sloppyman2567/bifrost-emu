@@ -70,7 +70,7 @@ ifeq ($(USE_THUNK_GL),1)
     LDFLAGS  += -lGL -lEGL
 endif
 
-.PHONY: all test clean install uninstall lib debug
+.PHONY: all test clean install uninstall lib debug setup setup-tests check-all
 
 all: $(TARGET)
 
@@ -177,13 +177,48 @@ cross:
 	@$(CROSS_CC) -static -O2 -o $(OUT) $(SRC)
 	@echo "Built $(OUT)"
 
-# Install to /usr/local/bin
+# Install to /usr/local/bin (override with `make install DESTDIR=/prefix PREFIX=/opt`)
+PREFIX ?= /usr/local
 install: $(TARGET)
-	install -d $(DESTDIR)/usr/local/bin
-	install -m 755 $(TARGET) $(DESTDIR)/usr/local/bin/
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/
 
 uninstall:
-	rm -f $(DESTDIR)/usr/local/bin/$(TARGET)
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(TARGET)
 
 clean:
 	rm -rf $(OBJDIR) $(TARGET) $(TARGET)-dbg *.o $(LIB)
+
+# ── One-click setup ───────────────────────────────────────────────────
+# `make setup` runs the bundled bootstrap script: builds the emulator,
+# fetches the musl toolchain (if missing), cross-compiles every test,
+# sets up the rootfs, and runs the test suite. Idempotent.
+setup: $(TARGET)
+	./scripts/setup.sh
+
+# `make setup-tests` only fetches the toolchain and cross-compiles the
+# test .elf files — it does NOT run the test suite or build the rootfs.
+# Useful for CI jobs that want to build tests once and run them later.
+setup-tests:
+	@if [ ! -x tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc ]; then \
+		echo "Fetching musl toolchain ..."; \
+		./tools/fetch-musl-toolchain.sh; \
+	fi
+	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	count=0; \
+	for src in ctest/*.c ctest_real/*.c; do \
+		[ -f "$$src" ] || continue; \
+		elf="$${src%.c}.elf"; \
+		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		if $$CC -static -O2 -o "$$elf" "$$src" 2>/dev/null; then \
+			count=$$((count + 1)); \
+		fi; \
+	done; \
+	echo "Cross-compiled $$count test binaries."
+
+# `make check-all` is the "everything" target: build, fetch toolchain,
+# cross-compile tests, set up rootfs, and run the full test suite.
+# This is what CI should run for a complete validation pass.
+check-all: setup-tests $(TARGET)
+	@./scripts/setup-rootfs.sh 2>/dev/null || true
+	@./scripts/run_tests.sh

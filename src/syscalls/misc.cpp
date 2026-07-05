@@ -321,6 +321,26 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (frame.on_altstack) {
                     SignalTable::set_altstack_active(cpu, false);
                 }
+                // BUGFIX (production hardening): after restoring the saved
+                // mask, check for newly-unblocked pending signals. Without
+                // this, a signal that was queued while the handler was
+                // running (e.g., SIGUSR2 raised inside the SIGUSR1 handler
+                // with SIGUSR2 in sa_mask) would never be delivered — the
+                // run loop only drains EXTERNAL (host) signals, not guest
+                // pending signals.
+                //
+                // We return 0 to the run loop with cpu.pc = the restored
+                // PC. The run loop will then call drain_host_signals, but
+                // that doesn't touch cpu.sigpending. So we MUST do it here.
+                if (cpu.sigpending != 0) {
+                    deliver_pending_signals(emu, cpu, signals_);
+                    // Note: if a signal was delivered, cpu.pc is now the
+                    // handler's PC (NOT the restored PC). The restored PC
+                    // is saved in the new signal frame, and will be
+                    // restored when this handler returns via rt_sigreturn.
+                    // If no signal was delivered (all pending still
+                    // blocked), cpu.pc is unchanged.
+                }
                 return 0;
             }
             // No pending frame — guest bug. Return 0 to avoid crash.
