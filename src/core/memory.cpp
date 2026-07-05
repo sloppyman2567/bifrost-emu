@@ -51,12 +51,20 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
 
 bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
     if (size == 0) return true;
-    if (direct_window_ && addr + size <= DIRECT_WINDOW_SIZE) {
+    // BUGFIX: avoid integer overflow when addr + size wraps around.
+    // If addr is near UINT64_MAX, addr + size can wrap to a small value,
+    // which would falsely satisfy `<= DIRECT_WINDOW_SIZE`. Use a safe
+    // range check instead: addr < DIRECT_WINDOW_SIZE AND size <= DIRECT_WINDOW_SIZE - addr.
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
+        size <= DIRECT_WINDOW_SIZE - addr) {
         return true;
     }
     std::shared_lock<std::shared_mutex> g(mu_);
     uint64_t start = addr & ~PAGE_MASK;
+    // BUGFIX: also guard the page-iteration end against overflow.
+    // If addr + size wraps, the loop would terminate prematurely.
     uint64_t end = addr + size;
+    if (end < addr) end = UINT64_MAX;  // saturate
     for (; start < end; start += PAGE_SIZE) {
         if (!pages_.count(start / PAGE_SIZE)) return false;
     }
@@ -66,7 +74,12 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
 void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
     if (n == 0) return;
     // Fast path: direct window for addresses < 4 GiB.
-    if (direct_window_ && addr + n <= DIRECT_WINDOW_SIZE) {
+    // BUGFIX: avoid integer overflow. `addr + n` can wrap to a small
+    // value when addr is near UINT64_MAX, causing the check to pass
+    // and the subsequent memcpy to write out-of-bounds at
+    // `direct_window_ + addr` (a huge offset). Use a safe range check.
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
+        n <= DIRECT_WINDOW_SIZE - addr) {
         memcpy(direct_window_ + addr, src, n);
         return;
     }
@@ -103,7 +116,11 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
 
 void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
     if (n == 0) return;
-    if (direct_window_ && addr + n <= DIRECT_WINDOW_SIZE) {
+    // BUGFIX: same integer-overflow guard as write() — `addr + n` can
+    // wrap when addr is near UINT64_MAX, causing the direct-window fast
+    // path to fire for an out-of-bounds address.
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
+        n <= DIRECT_WINDOW_SIZE - addr) {
         memcpy(dst, direct_window_ + addr, n);
         return;
     }
@@ -148,14 +165,34 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         mmap_next_ = std::max(mmap_next_, base + aligned_size);
     }
     uint64_t start = base & ~PAGE_MASK;
-    uint64_t end = base + size;
+    uint64_t end = base + aligned_size;  // page-aligned end
     for (; start < end; start += PAGE_SIZE) {
-        auto it = pages_.find(start / PAGE_SIZE);
-        if (it == pages_.end()) {
-            pages_.emplace(start / PAGE_SIZE,
-                           std::vector<uint8_t>(PAGE_SIZE, 0));
+        uint64_t pn = start / PAGE_SIZE;
+        // For addresses in the direct window (< 4 GiB), the window IS
+        // the storage — no need to create a pages_ entry.
+        if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
+            continue;
         }
-        // Preserve existing pages on MAP_FIXED (don't zero). Needed
+        auto it = pages_.find(pn);
+        if (it == pages_.end()) {
+            pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
+        } else if (hint == 0) {
+            // BUGFIX: non-MAP_FIXED mmap MUST return zero-initialized
+            // pages — the Linux kernel guarantees this for anonymous
+            // mappings, and musl's mallocng relies on it (meta_area
+            // pages are assumed zero except for the header). Previously
+            // we preserved existing data unconditionally, which let
+            // stale bytes from a previously-freed allocation leak into
+            // a fresh mmap returned by the bump allocator after a
+            // mremap_grow + munmap cycle. Zero the page now.
+            //
+            // (hint != 0 = MAP_FIXED path: preserve existing data —
+            // musl's mallocng uses MAP_FIXED for guard pages and meta
+            // areas carved out of the brk region, and zeroing would
+            // destroy its metadata.)
+            std::fill(it->second.begin(), it->second.end(), 0);
+        }
+        // MAP_FIXED path: preserve existing pages (don't zero). Needed
         // because musl's mallocng uses MAP_FIXED for guard pages, and
         // zeroing would corrupt metadata.
     }
@@ -184,46 +221,71 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     }
 
     // Grow: check for collision with the pages just past the current
-    // allocation's end. Done under the same lock that protects pages_
-    // and allocations_ so a concurrent mmap can't slip in.
+    // allocation's end. The collision check, the in-place extension,
+    // and the allocations_/mmap_next_ updates must all happen under
+    // the SAME unique lock — otherwise a concurrent mmap_alloc (which
+    // also takes the unique lock) could slip in between the check and
+    // the extension and grab the very pages we're about to grow into.
+    //
+    // The previous code used a shared_lock for the check, released it,
+    // then re-acquired a unique_lock for the update — a classic TOCTOU
+    // race. It also failed to bump mmap_next_ after an in-place grow,
+    // so a subsequent mmap_alloc(NULL,...) could return an address
+    // inside the just-grown region (because the bump pointer still
+    // pointed at the pre-grow end). Combined with munmap, this caused
+    // musl's mallocng to receive "fresh" mmap pages that were actually
+    // dirty with leftover data, corrupting its meta_area headers and
+    // crashing with BRK #1000 on the next free().
     uint64_t extra_start = (old_addr + old_aligned) & ~PAGE_MASK;
     uint64_t extra_end   = (old_addr + new_aligned) & ~PAGE_MASK;
 
     bool can_grow_in_place = true;
-    {
-        std::shared_lock<std::shared_mutex> g(mu_);
-        for (const auto& kv : allocations_) {
-            uint64_t other_base = kv.first;
-            uint64_t other_size = kv.second;
-            if (other_base == old_addr) continue;
-            uint64_t other_end = other_base + other_size;
-            if (extra_start < other_end && other_base < extra_end) {
-                can_grow_in_place = false;
-                break;
-            }
+    std::unique_lock<std::shared_mutex> g(mu_);
+    for (const auto& kv : allocations_) {
+        uint64_t other_base = kv.first;
+        uint64_t other_size = kv.second;
+        if (other_base == old_addr) continue;
+        uint64_t other_end = other_base + other_size;
+        if (extra_start < other_end && other_base < extra_end) {
+            can_grow_in_place = false;
+            break;
         }
     }
 
     if (can_grow_in_place) {
-        map_range(extra_start, extra_end - extra_start);
-        // BUGFIX: must hold a *unique* lock to mutate allocations_. The
-        // old code used shared_lock, which is a data race (UB) if another
-        // thread is concurrently reading allocations_ via mremap_grow()
-        // or untrack_allocation().
-        std::unique_lock<std::shared_mutex> g(mu_);
+        // Inline the map_range logic so we keep holding the unique lock
+        // (map_range would otherwise re-acquire it → deadlock).
+        for (uint64_t s = extra_start; s < extra_end; s += PAGE_SIZE) {
+            uint64_t pn = s / PAGE_SIZE;
+            if (direct_window_ && s < DIRECT_WINDOW_SIZE) {
+                continue;
+            }
+            auto it = pages_.find(pn);
+            if (it == pages_.end()) {
+                pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
+            }
+            // else: preserve existing page data — mremap_grow is
+            // extending the mapping, not zeroing it. musl's realloc
+            // expects the old data to be preserved at the start.
+        }
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
             it->second = new_aligned;
         } else {
             allocations_[old_addr] = new_aligned;
         }
+        // BUGFIX: bump mmap_next_ past the grown region. Without this,
+        // a subsequent mmap_alloc(NULL,...) would return an address
+        // inside the grown (and possibly already-freed) region.
+        mmap_next_ = std::max(mmap_next_, old_addr + new_aligned);
         return old_addr;
     }
 
     // Collision detected: allocate a fresh region, copy the data, and
-    // return the new address. Old pages stay mapped (munmap is a no-op
-    // in our sparse model) — safe because musl's metadata will be
-    // updated to point at the new address.
+    // return the new address. We must release the unique lock here
+    // because mmap_alloc/read/write all acquire it themselves.
+    g.unlock();
+
     uint64_t new_addr = mmap_alloc(new_size, 0);
     if (old_size > 0) {
         std::vector<uint8_t> buf(old_size);
@@ -232,7 +294,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     }
     {
         // BUGFIX: unique_lock, not shared_lock — we're mutating allocations_.
-        std::unique_lock<std::shared_mutex> g(mu_);
+        std::unique_lock<std::shared_mutex> g2(mu_);
         allocations_.erase(old_addr);
     }
     return new_addr;
@@ -262,7 +324,8 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
     // The direct window is mmap'd MAP_PRIVATE|MAP_ANONYMOUS, so we own it
     // exclusively — no other process can touch it, and we serialize
     // cross-vCPU access via the shared_mutex below for the pages_ path.
-    if (direct_window_ && addr + 4 <= DIRECT_WINDOW_SIZE) {
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
+        4 <= DIRECT_WINDOW_SIZE - addr) {
         // Page-aligned check: the entire 4-byte word must be within the
         // window (already checked above). Use an atomic CAS on the
         // underlying storage. This is safe because the window is private
@@ -291,7 +354,9 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
 
 bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
     // See atomic_cas_32 for the direct-window rationale.
-    if (direct_window_ && addr + 8 <= DIRECT_WINDOW_SIZE) {
+    // BUGFIX: same integer-overflow guard as atomic_cas_32.
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
+        8 <= DIRECT_WINDOW_SIZE - addr) {
         std::atomic<uint64_t>* slot =
             reinterpret_cast<std::atomic<uint64_t>*>(direct_window_ + addr);
         return slot->compare_exchange_strong(expected, desired,
@@ -330,16 +395,47 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
     }
 
     // 2. Pages from the direct window (addresses < 4 GiB).
-    // We scan the window in page-sized chunks and copy any non-zero
-    // page. A page is "mapped" if any byte in it is non-zero OR if it
-    // was explicitly mapped via map_range. Since we don't track which
-    // window pages are mapped, we copy any page that has at least one
-    // non-zero byte. This misses pages that are intentionally all-zeros
-    // (e.g., .bss), but those are rare and zero pages are the default
-    // anyway — a read from an unmapped page returns 0 in our model.
+    //
+    // BUGFIX: the previous implementation only copied pages that had at
+    // least one non-zero byte. This silently dropped all-zero mapped
+    // pages (e.g., BSS, freshly-mmap'd pages that haven't been written
+    // yet). The previous comment incorrectly claimed "a read from an
+    // unmapped page returns 0 in our model" — actually, Memory::read()
+    // throws UnmappedMemory for unmapped pages, which the JIT slow path
+    // converts to SIGSEGV. So a forked child that inherited an all-zero
+    // mapped page would crash with SIGSEGV on first access.
+    //
+    // The fix: iterate allocations_ (which tracks every mmap'd region)
+    // and copy ALL pages within those regions — including all-zero ones.
+    // We also do a full scan of the direct window to catch pages that
+    // were mapped implicitly (e.g., via map_range for the brk region,
+    // which doesn't go through mmap_alloc and therefore isn't in
+    // allocations_). Pages outside any tracked region that are all-zero
+    // are still skipped (they're genuinely unmapped).
     if (direct_window_) {
+        // 2a. Copy every page within a tracked allocation.
+        //     This catches all-zero pages (BSS, fresh mmaps).
+        std::vector<bool> copied(DIRECT_WINDOW_SIZE / PAGE_SIZE, false);
+        for (const auto& [base, size] : allocations_) {
+            if (base >= DIRECT_WINDOW_SIZE) continue;
+            uint64_t end = base + size;
+            if (end < base || end > DIRECT_WINDOW_SIZE) end = DIRECT_WINDOW_SIZE;
+            for (uint64_t a = base & ~PAGE_MASK; a < end; a += PAGE_SIZE) {
+                uint64_t pn = a / PAGE_SIZE;
+                if (pn < copied.size() && !copied[pn]) {
+                    const uint8_t* page = direct_window_ + a;
+                    out.push_back({a, std::vector<uint8_t>(page, page + PAGE_SIZE)});
+                    copied[pn] = true;
+                }
+            }
+        }
+        // 2b. Scan the direct window for any other non-zero pages
+        //     (e.g., brk pages, ELF-loaded pages — these may not be
+        //     tracked in allocations_). Pages that are all-zero AND
+        //     not in any allocation are skipped (genuinely unmapped).
         const uint64_t num_pages = DIRECT_WINDOW_SIZE / PAGE_SIZE;
         for (uint64_t p = 0; p < num_pages; p++) {
+            if (copied[p]) continue;
             const uint8_t* page = direct_window_ + p * PAGE_SIZE;
             // Quick check: if the first 64 bytes are all zero, skip
             // (most pages are zero). This is a heuristic — we might
@@ -378,6 +474,21 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
             // Write to the sparse pages_ map.
             child->map_range(snap.addr, snap.data.size());
             child->write(snap.addr, snap.data.data(), snap.data.size());
+        }
+    }
+    // BUGFIX: also copy mmap_next_ and allocations_ so the child's
+    // future mmaps don't collide with pages already copied from the
+    // parent. Without this, a child that calls mmap(NULL, ...) after
+    // fork could get an address that overlaps with the parent's
+    // (now-copied) data — silently corrupting the child's heap.
+    {
+        std::shared_lock<std::shared_mutex> g(mu_);
+        child->mmap_next_ = mmap_next_;
+        // Copy allocations_ entries for addresses in the direct window
+        // too — the child needs to know about ALL of the parent's
+        // tracked regions so mremap_grow's collision check works.
+        for (const auto& [base, size] : allocations_) {
+            child->allocations_[base] = size;
         }
     }
     return child;

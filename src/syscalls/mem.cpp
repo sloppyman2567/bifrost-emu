@@ -12,6 +12,8 @@
 #include "syscalls/syscalls.h"
 
 #include <errno.h>
+#include <cstdio>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <mutex>
 
@@ -85,6 +87,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
 
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
+            if (getenv("BIFROST_TRACE_MMAP")) {
+                fprintf(stderr, "[mmap(addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
+                        (unsigned long long)addr,
+                        (unsigned long)length,
+                        (unsigned long)prot,
+                        (unsigned long long)flags,
+                        (long long)(int64_t)a4,
+                        (unsigned long long)a5,
+                        (unsigned long long)mapped);
+            }
             // Note: musl's mallocng uses MAP_FIXED with PROT_NONE to carve
             // pages from the brk region, then calls mprotect to make them
             // usable. The mmap_alloc above preserves existing pages on
@@ -131,6 +143,11 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // mmap use, even though we happen to keep the page data
             // around (the guest won't access it again because musl
             // has dropped its pointer to it).
+            if (getenv("BIFROST_TRACE_MMAP")) {
+                fprintf(stderr, "[munmap(0x%llx, %lu)]\n",
+                        (unsigned long long)a0,
+                        (unsigned long)a1);
+            }
             mem_.untrack_allocation(a0);
             ret_host(0);
             return 0;
@@ -181,11 +198,23 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // meta_area init path). Treat that as a plain mmap.
             if (old_addr == 0 && old_size == 0) {
                 uint64_t mapped = mem_.mmap_alloc(new_size, 0);
+                if (getenv("BIFROST_TRACE_MMAP")) {
+                    fprintf(stderr, "[mremap(0,0,%lu) → 0x%llx]\n",
+                            (unsigned long)new_size,
+                            (unsigned long long)mapped);
+                }
                 ret_host(mapped);
                 return 0;
             }
 
             uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size);
+            if (getenv("BIFROST_TRACE_MMAP")) {
+                fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
+                        (unsigned long long)old_addr,
+                        (unsigned long)old_size,
+                        (unsigned long)new_size,
+                        (unsigned long long)result);
+            }
             ret_host(result);
             return 0;
         }

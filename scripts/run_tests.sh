@@ -194,6 +194,9 @@ INTEGRATION_TESTS=(
     "extr|test/extr.elf||5|OK"
     "fib_basic|test/fib.elf||5|832040"
     "hello|test/hello.elf||5|Hello, ARM64"
+    # Heap stress test: exercises mremap_grow + munmap + mmap patterns
+    # that previously corrupted musl's mallocng metadata (Turn 51 fix).
+    "heap_stress|ctest_real/heap_stress.elf||10|heap_stress OK"
 )
 
 # Interactive tests (need stdin input)

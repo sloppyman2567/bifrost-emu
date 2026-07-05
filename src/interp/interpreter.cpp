@@ -12,6 +12,8 @@
 #include "core/emulator.h"
 #include "decoder.hpp"
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -302,6 +304,80 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (brk_verbose_) {
                     fprintf(stderr, "[emu] BRK #%u at pc=0x%llx (terminating)\n",
                             imm, static_cast<unsigned long long>(cpu.pc));
+                    fflush(stderr);
+                }
+                // Debug aid: when musl's a_crash() fires (BRK #1000),
+                // dump registers + chunk header so we can see what
+                // malloc/free was unhappy about. x0 typically holds
+                // the chunk pointer in musl's mallocng sanity path.
+                if (imm == 1000 && getenv("BIFROST_TRACE_CRASH")) {
+                    fprintf(stderr, "[emu] regs at BRK #1000:\n");
+                    for (int i = 0; i < 31; i++) {
+                        fprintf(stderr, "  x%d=0x%llx", i,
+                                (unsigned long long)cpu.regs[i]);
+                        if ((i & 3) == 3) fprintf(stderr, "\n");
+                    }
+                    fprintf(stderr, "  sp=0x%llx pc=0x%llx\n",
+                            (unsigned long long)cpu.sp,
+                            (unsigned long long)cpu.pc);
+                    // Try to dump chunk header at [x6-8 .. x6+24]
+                    // (x6 holds the original x0 in the crash path,
+                    // since the crash function does mov x6, x0).
+                    uint64_t chunk = cpu.regs[6];
+                    if (chunk > 0x1000) {
+                        uint8_t buf[64];
+                        try {
+                            mem_.read(chunk - 16, buf, 64);
+                            fprintf(stderr, "  [x6-16 .. x6+48]:");
+                            for (int i = 0; i < 64; i++) {
+                                if ((i & 15) == 0) fprintf(stderr, "\n   ");
+                                fprintf(stderr, " %02x", buf[i]);
+                            }
+                            fprintf(stderr, "\n");
+                        } catch (...) {
+                            fprintf(stderr, "  (chunk unreadable)\n");
+                        }
+                        // Also dump the page containing x6, in 64-byte
+                        // chunks, to see the surrounding mallocng state.
+                        uint64_t page = chunk & ~0xFFFULL;
+                        fprintf(stderr, "  page @0x%llx:\n",
+                                (unsigned long long)page);
+                        for (int row = 0; row < 64; row++) {
+                            uint8_t line[16];
+                            try {
+                                mem_.read(page + row * 16, line, 16);
+                                fprintf(stderr, "   %03llx:",
+                                        (unsigned long long)(row * 16));
+                                for (int i = 0; i < 16; i++) {
+                                    fprintf(stderr, " %02x", line[i]);
+                                }
+                                fprintf(stderr, "  ");
+                                for (int i = 0; i < 16; i++) {
+                                    unsigned char c = line[i];
+                                    fprintf(stderr, "%c",
+                                            (c >= 32 && c < 127) ? c : '.');
+                                }
+                                fprintf(stderr, "\n");
+                            } catch (...) {
+                                fprintf(stderr, "   (page unreadable from row %d)\n", row);
+                                break;
+                            }
+                        }
+                    }
+                    // Dump stack: 16 uint64_t values starting at sp.
+                    // The saved x30 (caller of FuncB) is at [sp+32]
+                    // in the crash path. This lets us trace back.
+                    uint64_t sp_v = cpu.sp;
+                    fprintf(stderr, "  stack @0x%llx (16 entries):\n",
+                            (unsigned long long)sp_v);
+                    for (int i = 0; i < 16; i++) {
+                        uint64_t v = 0;
+                        try {
+                            mem_.read(sp_v + i * 8, &v, 8);
+                        } catch (...) { v = 0; }
+                        fprintf(stderr, "   [sp+0x%02x] 0x%llx\n",
+                                i * 8, (unsigned long long)v);
+                    }
                     fflush(stderr);
                 }
                 cpu.running = false;
