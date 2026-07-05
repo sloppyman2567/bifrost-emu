@@ -88,25 +88,18 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
                 if (cpu.sigint_ignored) {
                     // SIGINT was received but the guest has it set to
-                    // SIG_IGN. Inject a newline byte so the shell's
-                    // read() returns an empty line, causing it to print
-                    // a new prompt. This matches what bash/dash do
-                    // (they install real handlers that print \n + prompt;
-                    // toybox sh uses SIG_IGN, so we simulate the effect).
+                    // SIG_IGN (e.g., toybox sh in interactive mode).
+                    // On real Linux, the shell would just ignore it and
+                    // stay blocked on read(). But for usability, we exit
+                    // the emulator — this lets the user kill the shell
+                    // with Ctrl+C (matching the expectation that Ctrl+C
+                    // exits the foreground program). During a running
+                    // command, the child gets killed first (it has
+                    // SIG_DFL), so this only fires at the empty prompt.
                     cpu.sigint_ignored = false;
-                    // Echo \n to the terminal so the new prompt appears
-                    // on a fresh line (the terminal driver echoed ^C but
-                    // no newline; bash's handler would have printed \n).
-                    // Write to fd 2 (stderr) since shells write prompts to
-                    // stderr in interactive mode.
-                    auto out_node = fds_.get(2);
-                    if (out_node) {
-                        const char nl = '\n';
-                        out_node->write(UINT64_MAX, &nl, 1);
-                    }
-                    tmp[0] = '\n';
-                    r = 1;
-                    break;
+                    cpu.running = false;
+                    cpu.exit_code = 130;  // 128 + SIGINT(2)
+                    return 0;
                 }
                 break;  // no signal delivered, return -EINTR
             }
