@@ -723,7 +723,23 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // sign-extended loads. (Matching the interpreter, which
                 // checks `opc_ls & 2` directly.)
                 bool sign_ext = !d.is_vec && (d.opc_ls & 2);
-                if (sign_ext) {
+                if (d.is_vec) {
+                    // BUGFIX (Turn 57): FP registers live in cpu.v_lo[],
+                    // NOT cpu.regs[]. Use store_fp_reg to write to the
+                    // correct array. For 32-bit FP loads (width=4), the
+                    // upper 32 bits of v_lo are already zeroed by the
+                    // ZEXT below — but we skip ZEXT for FP and rely on
+                    // LOAD_MEM loading the right number of bytes + the
+                    // store_fp_reg writing the full 64-bit vreg to v_lo.
+                    if (width < 8) {
+                        // Zero-extend to 64 bits (upper bytes of v_lo = 0).
+                        uint16_t ext = g_alloc.alloc();
+                        emit(block, IROp::ZEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
+                        store_fp_reg(block, d.rt, ext);
+                    } else {
+                        store_fp_reg(block, d.rt, val);
+                    }
+                } else if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
                     emit(block, IROp::SEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
@@ -735,7 +751,8 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     store_arm_reg(block, d.rt, val);
                 }
             } else {
-                uint16_t val = load_arm_reg(block, d.rt);
+                // BUGFIX (Turn 57): for FP stores, load from v_lo[] not regs[].
+                uint16_t val = d.is_vec ? load_fp_reg(block, d.rt) : load_arm_reg(block, d.rt);
                 emit(block, IROp::STORE_MEM, 0, addr, val, static_cast<uint8_t>(width),
                      0, 0, static_cast<uint64_t>(mem_off));
             }
@@ -1272,6 +1289,27 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return false;
             }
+            // FCVT (float ↔ double conversion).
+            // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
+            // BUGFIX (Turn 57): MUST be checked BEFORE SCVTF/UCVTF — the
+            // SCVTF mask 0x7F3E0000 also matches FCVT (0x1E22C000 &
+            // 0x7F3E0000 == 0x1E220000 == SCVTF mask), causing FCVT to be
+            // misidentified as SCVTF (int→FP) and emitted as FP_I2F instead
+            // of FCVT_S2D/FCVT_D2S. This was the root cause of all 32-bit
+            // FP loads from memory reading as 0.0 under the JIT: the LDR S0
+            // loaded the float correctly, but the subsequent FCVT D0,S0 was
+            // treated as SCVTF D0,X0 (reading garbage from x0 instead of
+            // the float in v0).
+            if ((op & 0xFFFFFC00) == 0x1E624000) {
+                // FCVT Sd, Dn (double → single)
+                emit(block, IROp::FCVT_D2S, rd, rn, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
+            if ((op & 0xFFFFFC00) == 0x1E22C000) {
+                // FCVT Dd, Sn (single → double)
+                emit(block, IROp::FCVT_S2D, rd, rn, 0, 0, 0, 0, 0, cur_pc);
+                return false;
+            }
             // SCVTF/UCVTF: int→FP
             // Encoding: (op & 0x7F3E0000) == 0x1E220000
             // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
@@ -1353,24 +1391,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
             }
 
-            // FCVT (float ↔ double conversion).
-            // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
-            if ((op & 0xFFFFFC00) == 0x1E624000) {
-                // FCVT Sd, Dn (double → single)
-                uint16_t src = load_arm_reg(block, rn);
-                uint16_t r = g_alloc.alloc();
-                emit(block, IROp::FCVT_D2S, r, src, 0, 0, 0, 0, 0, cur_pc);
-                store_arm_reg(block, rd, r);
-                return false;
-            }
-            if ((op & 0xFFFFFC00) == 0x1E22C000) {
-                // FCVT Dd, Sn (single → double)
-                uint16_t src = load_arm_reg(block, rn);
-                uint16_t r = g_alloc.alloc();
-                emit(block, IROp::FCVT_S2D, r, src, 0, 0, 0, 0, 0, cur_pc);
-                store_arm_reg(block, rd, r);
-                return false;
-            }
+            // FCVT check was moved above SCVTF (see BUGFIX Turn 57 above).
+            // The old FCVT check here is removed — it was unreachable because
+            // the SCVTF mask caught FCVT first.
 
             // FRINT (FP round to integer).
             // The FRINT* instructions have multiple encodings. The common ones:

@@ -98,6 +98,41 @@ inline void store_arm_reg(IRBlock& b, uint8_t ar, uint8_t v, bool is_sp = false)
     emit(b, IROp::STORE_REG, ar, v);
 }
 
+// ── FP register load/store ────────────────────────────────────────────
+// BUGFIX (Turn 57): FP registers (V0-V31) live in cpu.v_lo[], NOT
+// cpu.regs[]. The old LOAD_REG/STORE_REG always accessed cpu.regs[],
+// so FP loads/stores via LDR/STR wrote to the wrong array. This caused
+// all 32-bit FP loads from memory (e.g., `ldr s0, [x1]` for a global
+// float variable) to read 0.0 under the JIT.
+//
+// Fix: use the `sf` field as an `is_fp` flag on LOAD_REG/STORE_REG.
+// When is_fp=1, the JIT and IR executor access cpu.v_lo[] instead of
+// cpu.regs[]. This is only used for LDR/STR with d.is_vec=true —
+// all other FP ops (SCVTF, FCVT, FADD, etc.) access v_lo directly
+// via their own codegen.
+inline uint16_t load_fp_reg(IRBlock& b, uint8_t ar) {
+    if (ar == 31) ar = 32;  // same mapping as GPR
+    if (ar == 32) return load_imm(b, 0);
+    uint16_t v = g_alloc.alloc();
+    IRInst inst{};
+    inst.op = IROp::LOAD_REG;
+    inst.dest = v;
+    inst.src1 = ar;
+    inst.sf = 1;  // is_fp
+    b.insts.push_back(inst);
+    return v;
+}
+
+inline void store_fp_reg(IRBlock& b, uint8_t ar, uint8_t v) {
+    if (ar == 31) return;  // XZR — discard
+    IRInst inst{};
+    inst.op = IROp::STORE_REG;
+    inst.dest = ar;
+    inst.src1 = v;
+    inst.sf = 1;  // is_fp
+    b.insts.push_back(inst);
+}
+
 // Zero-extend a value to 32 bits (sf=0) or pass-through (sf=1).
 // We always emit the op; the optimizer peephole removes redundant ZEXTs
 // after ops whose x86 encoding already zero-extends.

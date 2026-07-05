@@ -147,6 +147,10 @@ UNIT_TESTS=(
     # NEW (Turn 56): CCMP 32-bit flag computation test. Validates the fix
     # for the JIT using 64-bit sub for 32-bit CCMP (wrong Sign Flag).
     "jit_ccmp|ctest/jit_ccmp.elf||5|ALL PASS"
+    # NEW (Turn 57): FCVT and FP load/store test. Validates the fix for
+    # FCVT being misidentified as SCVTF (mask collision), and FP LDR/STR
+    # accessing cpu.regs[] instead of cpu.v_lo[].
+    "jit_fcvt|ctest/jit_fcvt.elf||5|ALL PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)

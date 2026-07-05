@@ -140,6 +140,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // cause of `fcvtzs w1, d0; add w19, w19, w1` losing the
             // conversion result: FP_F2I cached vreg 1, then LOAD_REG v34, x1
             // reloaded the stale cpu.regs[1] instead of the cached vreg 1.
+            //
+            // BUGFIX (Turn 57): when inst.sf=1 (is_fp), load from cpu.v_lo[]
+            // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
                 kill_vreg(inst.dest);
                 int d;
@@ -147,6 +150,10 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     int s = vreg_home_[inst.src1];
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
+                } else if (inst.sf == 1) {
+                    // FP register: load from cpu.v_lo[src1]
+                    d = alloc_reg();
+                    emit_load(d, CPU_REG, V_LO_OFF + 8 * inst.src1);
                 } else {
                     d = alloc_reg();
                     emit_load_arm(d, inst.src1);
@@ -156,15 +163,23 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
 
         case IROp::STORE_REG:
-            // arm64_reg[dest] = src1. Write to cpu.regs[dest].
+            // arm64_reg[dest] = src1. Write to cpu.regs[dest] (or v_lo if is_fp).
             // DON'T cache dest — leave it uncached so it reloads from
             // cpu.regs[dest] if needed (correct value, just written).
             // DON'T touch src1 — it stays cached in its reg.
             // This avoids all aliasing problems and eliminates spills.
+            //
+            // BUGFIX (Turn 57): when inst.sf=1 (is_fp), write to cpu.v_lo[]
+            // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
                 int s = ensure_vreg(inst.src1);
-                emit_store_arm(inst.dest, s);
-                // Kill any stale dest mapping (dest's value is now in cpu.regs).
+                if (inst.sf == 1 && inst.dest <= 30) {
+                    // FP register: store to cpu.v_lo[dest]
+                    emit_store(CPU_REG, V_LO_OFF + 8 * inst.dest, s);
+                } else {
+                    emit_store_arm(inst.dest, s);
+                }
+                // Kill any stale dest mapping (dest's value is now in cpu.regs/v_lo).
                 if (inst.dest <= 31) {
                     kill_vreg(inst.dest);
                 }

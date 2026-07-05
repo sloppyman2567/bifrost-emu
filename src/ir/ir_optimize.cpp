@@ -272,24 +272,34 @@ void optimize_ir(IRBlock& block) {
     //
     // Used by both Pass 0 (pre-FWD) and Pass 1.5 (post-substitution).
     auto dse_pass = [&block]() {
-        std::unordered_map<uint16_t, size_t> last_store_to;
+        // BUGFIX (Turn 57): key includes is_fp flag so GPR and FP stores
+        // to the same register index are treated as different destinations.
+        // GPR reg 0 writes cpu.regs[0]; FP reg 0 writes cpu.v_lo[0].
+        auto store_key = [](const IRInst& inst) -> uint32_t {
+            return (static_cast<uint32_t>(inst.dest) << 1) | inst.sf;
+        };
+        std::unordered_map<uint32_t, size_t> last_store_to;
         for (size_t i = 0; i < block.insts.size(); i++) {
             IRInst& inst = block.insts[i];
             if (inst.op == IROp::STORE_REG) {
-                auto it = last_store_to.find(inst.dest);
+                uint32_t key = store_key(inst);
+                auto it = last_store_to.find(key);
                 if (it != last_store_to.end()) {
                     block.insts[it->second].op = IROp::NOP;
                     block.dce_removed++;
                 }
-                last_store_to[inst.dest] = i;
+                last_store_to[key] = i;
             } else if (inst.op == IROp::LOAD_REG) {
-                last_store_to.erase(inst.src1);
+                // BUGFIX (Turn 57): include is_fp in the key so FP and GPR
+                // loads don't cross-invalidate each other's stores.
+                uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
+                last_store_to.erase(key);
             } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
                 last_store_to.clear();
             } else if (inst.op == IROp::ATOMIC) {
                 // ATOMIC reads cpu.regs[imm] directly — preserve preceding
-                // STORE_REG to that ARM reg.
-                last_store_to.erase(static_cast<uint16_t>(inst.imm));
+                // STORE_REG to that ARM reg. (GPR only — is_fp=0.)
+                last_store_to.erase(static_cast<uint32_t>(inst.imm) << 1);
             } else if (inst.op == IROp::LDXR_FAST ||
                        inst.op == IROp::STXR_FAST ||
                        inst.op == IROp::STLR_FAST) {

@@ -74,7 +74,12 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
 
             case IROp::LOAD_REG: {
                 uint8_t ar = inst.src1;
-                if (ar < 31)      vregs[inst.dest] = cpu.regs[ar];
+                // BUGFIX (Turn 57): sf=1 means is_fp — access v_lo, not regs.
+                if (inst.sf == 1) {
+                    if (ar < 31) vregs[inst.dest] = cpu.v_lo[ar];
+                    else if (ar == 31) vregs[inst.dest] = cpu.sp;
+                    else vregs[inst.dest] = 0;
+                } else if (ar < 31)      vregs[inst.dest] = cpu.regs[ar];
                 else if (ar == 31) vregs[inst.dest] = cpu.sp;
                 else               vregs[inst.dest] = 0;  // XZR
                 break;
@@ -83,7 +88,16 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             case IROp::STORE_REG: {
                 uint8_t ar = inst.dest;
                 uint64_t v = vregs[inst.src1];
-                if (ar < 31) {
+                // BUGFIX (Turn 57): sf=1 means is_fp — write to v_lo, not regs.
+                if (inst.sf == 1) {
+                    if (ar < 31) {
+                        cpu.v_lo[ar] = v;
+                        vregs[ar] = v;
+                    } else if (ar == 31) {
+                        cpu.sp = v;
+                        vregs[31] = v;
+                    }
+                } else if (ar < 31) {
                     cpu.regs[ar] = v;
                     vregs[ar] = v;  // keep vregs in sync
                 }
