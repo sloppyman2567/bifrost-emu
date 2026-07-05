@@ -1486,8 +1486,34 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             size_t jmp_to_end = emit_jmp_rel32_placeholder();
             // --- cond TRUE path: do the compare ---
             size_t compare_off = code_buf_used_;
-            if (is_sub) emit_sub_reg(RAX, RCX);
-            else        emit_add_reg(RAX, RCX);
+            // BUGFIX (Turn 56): use 32-bit sub/add for 32-bit CCMP/CCMN.
+            // The old code always used emit_sub_reg/emit_add_reg (64-bit),
+            // which computes the x86 Sign Flag from bit 63 instead of
+            // bit 31. For 32-bit operations like `ccmp w3, #2`, if the
+            // result is e.g. 0xFFFFFFFD (w3=0xFFFFFFFF, w3-2), the 64-bit
+            // sub gives SF=0 (positive) while the 32-bit sub gives SF=1
+            // (negative). This caused the ARM N flag to be wrong, leading
+            // to incorrect conditional branches and eventually crashes
+            // in programs that use 32-bit ccmp (e.g., curl --version).
+            bool is_32bit_ccmp = (inst.sf == 0);
+            if (is_sub) {
+                if (is_32bit_ccmp) {
+                    // 32-bit: sub eax, ecx (no REX.W)
+                    bool need_rex = (RAX >= 8) || (RCX >= 8);
+                    if (need_rex) emit_byte(rex(false, RCX>=8, false, RAX>=8));
+                    emit_byte(0x29); emit_byte(modrm(3, RCX&7, RAX&7));
+                } else {
+                    emit_sub_reg(RAX, RCX);
+                }
+            } else {
+                if (is_32bit_ccmp) {
+                    bool need_rex = (RAX >= 8) || (RCX >= 8);
+                    if (need_rex) emit_byte(rex(false, RCX>=8, false, RAX>=8));
+                    emit_byte(0x01); emit_byte(modrm(3, RCX&7, RAX&7));
+                } else {
+                    emit_add_reg(RAX, RCX);
+                }
+            }
             // Materialize flags to pstate.
             emit_materialize_flags(is_sub);
             size_t end_off = code_buf_used_;

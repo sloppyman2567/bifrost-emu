@@ -144,6 +144,9 @@ UNIT_TESTS=(
     # LSE inline-asm test — forces CAS/LDADD/LDSET/LDCLR/LDEOR/SWP via
     # -march=armv8.1-a+lse, testing the JIT's native lock-prefixed codegen.
     "test_lse_inline|ctest/test_lse_inline.elf||10|ALL PASS"
+    # NEW (Turn 56): CCMP 32-bit flag computation test. Validates the fix
+    # for the JIT using 64-bit sub for 32-bit CCMP (wrong Sign Flag).
+    "jit_ccmp|ctest/jit_ccmp.elf||5|ALL PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)
@@ -277,6 +280,15 @@ REALWORLD_TESTS=(
     "rw_busybox_uname|ctest_real/realworld/busybox-aarch64 uname||5|^Linux$"
     "rw_busybox_true|ctest_real/realworld/busybox-aarch64 true||5|"
     "rw_busybox_printf|ctest_real/realworld/busybox-aarch64 printf %d 42||5|^42$"
+    "rw_busybox_hostname|ctest_real/realworld/busybox-aarch64 hostname||5|"
+    "rw_busybox_nproc|ctest_real/realworld/busybox-aarch64 nproc||5|^[0-9]+$"
+    "rw_busybox_id|ctest_real/realworld/busybox-aarch64 id||5|^uid="
+    "rw_busybox_basename|ctest_real/realworld/busybox-aarch64 basename /tmp/foo.txt||5|^foo.txt$"
+    "rw_busybox_dirname|ctest_real/realworld/busybox-aarch64 dirname /tmp/foo.txt||5|^/tmp$"
+    "rw_busybox_sha256sum|ctest_real/realworld/busybox-aarch64 sha256sum|hello\n|5|^5891b5b5"
+    "rw_busybox_base64|ctest_real/realworld/busybox-aarch64 base64|hello\n|5|^aGVsbG8K"
+    "rw_busybox_factor|ctest_real/realworld/busybox-aarch64 factor 42||5|^42: 2 3 7$"
+    "rw_busybox_expr|ctest_real/realworld/busybox-aarch64 expr 6 + 7||5|^13$"
     "rw_toybox_echo|ctest_real/realworld/toybox-aarch64 echo hello|hello|5|^hello$"
     "rw_toybox_seq|ctest_real/realworld/toybox-aarch64 seq 1 5||5|^1$"
     "rw_toybox_uname|ctest_real/realworld/toybox-aarch64 uname||5|^Linux$"

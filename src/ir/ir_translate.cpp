@@ -504,6 +504,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // CCMP: if cond then set flags from rn - rm else set imm nzcv.
             emit(block, IROp::CCMP, 0, rn_v, rm_v, d.nzcv_field,
                  d.cond, is_sub ? 1 : 0, 0, cur_pc);
+            // BUGFIX (Turn 56): store the 32/64-bit width in the sf field
+            // so the JIT can emit the correct sub/add width. Without this,
+            // the JIT always uses 64-bit sub, which computes the Sign Flag
+            // from bit 63 instead of bit 31 for 32-bit CCMP — causing the
+            // N flag to be wrong when the 32-bit result is negative but
+            // the 64-bit result is positive (e.g., w3=0xFFFFFFFF, w3-2 =
+            // 0xFFFFFFFD: 32-bit N=1, 64-bit N=0). This was the root cause
+            // of the curl --version crash: a 32-bit ccmp w3, #2, #0, cs
+            // computed wrong N, which caused a downstream conditional
+            // branch to take the wrong path, leading to a NULL deref.
+            block.insts.back().sf = d.sf ? 1 : 0;
             return false;
         }
 
