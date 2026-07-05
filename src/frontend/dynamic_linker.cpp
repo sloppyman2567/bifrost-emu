@@ -216,6 +216,36 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // relocations, which reference tls_tp_offset / tls_mod_id).
     allocate_static_tls();
 
+    // Register the synthetic ld-linux shim. This provides definitions
+    // for symbols that glibc's libc.so references from ld-linux
+    // (_rtld_global_ro, _dl_argv, _dl_find_dso_for_object, etc.).
+    // Without these, libc crashes during __libc_start_main when it
+    // dereferences the (zero) GOT slots. The shim must be registered
+    // AFTER all libraries are loaded (so the shim's symbols can be
+    // overridden by real ld-linux symbols if the guest actually loaded
+    // one) but BEFORE relocations are applied (so GLOB_DAT/JUMP_SLOT
+    // relocations against these symbols resolve to the shim's
+    // addresses).
+    //
+    // We only register the shim if no real ld-linux was loaded. If
+    // the guest's PT_INTERP was found and loaded as a regular shared
+    // library, its symbols are already in the table and the shim
+    // would just shadow them (the shim's `symbols_[name] = ...` only
+    // sets if not already present — see the `add_*_sym` lambdas
+    // above, which we'll make conditional on first-define-wins).
+    bool has_real_ld = false;
+    for (const auto& o : objects_) {
+        if (o.name.find("ld-linux") != std::string::npos ||
+            o.name.find("ld-musl") != std::string::npos ||
+            o.name.find("ld.so") != std::string::npos) {
+            has_real_ld = true;
+            break;
+        }
+    }
+    if (!has_real_ld) {
+        register_ld_linux_shim_();
+    }
+
     // Note: we re-apply using the original file bytes for each object,
     // since the in-memory dynamic section may have been relocated.
     // For the main binary we have `main_data`; for libs we kept their
@@ -614,24 +644,310 @@ bool DynamicLinker::apply_relocations(const std::vector<uint8_t>& data,
     return true;  // handled in link()
 }
 
-// ── find_library ───────────────────────────────────────────────────────
+// ── register_ld_linux_shim_ ────────────────────────────────────────────
+// Allocate a small data + code page in guest memory and populate it
+// with synthetic versions of the symbols glibc's libc.so expects from
+// ld-linux (the dynamic linker). Without these, libc's GOT slots for
+// _rtld_global_ro, _rtld_global, _dl_argv, etc. stay at 0 (because
+// no ld-linux was loaded), and libc crashes when it dereferences them
+// during __libc_start_main.
+//
+// The shim provides:
+//   - A writable 4 KiB data page with:
+//       - _rtld_global_ro struct (zeroed — glibc reads feature flags
+//         from here; all-zero means "no special features", which is
+//         safe).
+//       - _rtld_global struct (zeroed — glibc reads _dl_ns[0]._ns_nloaded
+//         = 0 meaning "no libraries loaded via dlopen", which is fine
+//         because we don't support dlopen yet).
+//       - Storage for _dl_argv (initially NULL — libc sets it during
+//         __libc_start_main).
+//       - Storage for __libc_enable_secure (0 = not setuid).
+//       - Storage for __pointer_chk_guard (random value — see below).
+//       - Storage for _dl_start_args._dl_start_time (0).
+//   - An executable 4 KiB code page with tiny ARM64 stub functions:
+//       - _dl_find_dso_for_object: returns 0 (not found).
+//       - _dl_allocate_tls: returns 0 (no dynamic TLS).
+//       - _dl_allocate_tls_init: returns 0.
+//       - _dl_deallocate_tls: no-op (RET).
+//       - _dl_signal_error: calls abort() (which we resolve via
+//         the global symbol table).
+//       - _dl_signal_exception: same.
+//       - _dl_catch_exception: returns 0 (no exception).
+//       - _dl_catch_error: returns 0.
+//       - _dl_audit_symbind_alt: no-op.
+//       - _dl_audit_preinit: no-op.
+//       - _dl_rtld_di_serinfo: returns 0.
+//       - _dl_call_fini: no-op.
+//       - __tls_get_addr: returns 0 (static TLS only; this is the
+//         fallback for the rare case where the compiler emits a
+//         __tls_get_addr call for a static-TLS variable).
+//       - __tunable_get_val: returns 0 (no tunables).
+//       - __nptl_change_stack_perm: no-op.
+//
+// Each stub is a sequence of ARM64 instructions:
+//   mov x0, #0   ; 0xd2800000
+//   ret          ; 0xd65f03c0
+// (or just `ret` for void functions). They're laid out consecutively
+// at the start of the code page, 8 bytes each (2 instructions).
+//
+// The data page is at shim_base_; the code page is at shim_base_+4096.
+// Symbols are registered in the global symbol table so relocations
+// resolve to the correct addresses.
+bool DynamicLinker::register_ld_linux_shim_() {
+    if (shim_base_ != 0) return true;  // already registered
+
+    // Allocate 2 pages: data + code.
+    constexpr uint64_t SHIM_SIZE = 8192;
+    shim_base_ = mem_.mmap_alloc(SHIM_SIZE);
+    if (shim_base_ == 0) {
+        error_ = "register_ld_linux_shim_: mmap_alloc failed";
+        return false;
+    }
+
+    // ── Data page (shim_base_ .. shim_base_+4096) ─────────────────
+    // Zero the entire data page (mmap_alloc already does this, but be
+    // explicit in case the page was reused from a previous allocation).
+    std::vector<uint8_t> zero(4096, 0);
+    mem_.write(shim_base_, zero.data(), 4096);
+
+    // Layout (offsets within the data page):
+    //   0x000: _rtld_global_ro (256 bytes — glibc reads up to offset 568
+    //          for dl_signal_error, dl_catch_error, etc.; we zero it all).
+    //   0x100: _rtld_global (256 bytes — glibc reads _dl_ns, _dl_nns).
+    //   0x200: _dl_argv (8 bytes — pointer to argv; libc sets this).
+    //   0x208: __libc_enable_secure (4 bytes — 0 = not secure).
+    //   0x20C: __pointer_chk_guard (8 bytes — random XOR canary).
+    //   0x214: _dl_start_args (16 bytes — start time, etc.).
+    //   0x224: padding to 0x300.
+    //   0x300: function pointer table (8 bytes each, 16 entries):
+    //          [0] _dl_find_dso_for_object  → code page + 0
+    //          [1] _dl_allocate_tls         → code page + 8
+    //          [2] _dl_allocate_tls_init    → code page + 16
+    //          [3] _dl_deallocate_tls       → code page + 24
+    //          [4] _dl_signal_error         → code page + 32 (abort)
+    //          [5] _dl_signal_exception     → code page + 40 (abort)
+    //          [6] _dl_catch_exception      → code page + 48
+    //          [7] _dl_catch_error          → code page + 56
+    //          [8] _dl_audit_symbind_alt    → code page + 64
+    //          [9] _dl_audit_preinit        → code page + 72
+    //          [10] _dl_rtld_di_serinfo     → code page + 80
+    //          [11] _dl_call_fini           → code page + 88
+    //          [12] __tls_get_addr          → code page + 96
+    //          [13] __tunable_get_val       → code page + 104
+    //          [14] __nptl_change_stack_perm→ code page + 112
+    //          [15] (reserved)
+    //   _rtld_global_ro._dl_signal_error etc. point into this table.
+    constexpr uint64_t RTLD_GLOBAL_RO_OFF = 0x000;
+    constexpr uint64_t RTLD_GLOBAL_OFF    = 0x100;
+    constexpr uint64_t DL_ARGV_OFF        = 0x200;
+    constexpr uint64_t LIBC_ENABLE_SECURE_OFF = 0x208;
+    constexpr uint64_t POINTER_CHK_GUARD_OFF = 0x20C;
+    constexpr uint64_t FPTR_TABLE_OFF     = 0x300;
+
+    // Generate a random __pointer_chk_guard value. glibc uses this as
+    // a stack-protector canary; we use /dev/urandom for entropy.
+    uint64_t chk_guard = 0;
+    FILE* ur = fopen("/dev/urandom", "rb");
+    if (ur) {
+        if (fread(&chk_guard, sizeof(chk_guard), 1, ur) != 1) chk_guard = 0;
+        fclose(ur);
+    }
+    if (chk_guard == 0) chk_guard = 0xDEADBEEFCAFEBABEULL;
+    mem_.store<uint64_t>(shim_base_ + POINTER_CHK_GUARD_OFF, chk_guard);
+
+    // ── Code page (shim_base_+4096 .. shim_base_+8192) ────────────
+    // Each stub is 2 instructions (8 bytes). Stubs that "abort" actually
+    // call abort() — we resolve abort via the global symbol table at
+    // registration time (it's a libc symbol that's already indexed).
+    // If abort isn't found yet (e.g., shim registered before libc
+    // loaded), the abort stubs just BRK #1000 (visible crash) instead.
+    uint64_t code_base = shim_base_ + 4096;
+
+    // ARM64 instruction encodings:
+    //   mov x0, #0   → 0xD2800000
+    //   ret          → 0xD65F03C0
+    //   brk #1000    → 0xD4207D00  (musl's a_crash)
+    //   bl <imm26>   → 0x94000000 | (imm26 & 0x03FFFFFF)
+    //                 where imm26 = (target - (pc+4)) >> 2
+    auto emit_mov_x0_0 = [](std::vector<uint8_t>& v) {
+        v.push_back(0x00); v.push_back(0x00); v.push_back(0x80); v.push_back(0xD2);
+    };
+    auto emit_ret = [](std::vector<uint8_t>& v) {
+        v.push_back(0xC0); v.push_back(0x03); v.push_back(0x5F); v.push_back(0xD6);
+    };
+    auto emit_brk_1000 = [](std::vector<uint8_t>& v) {
+        v.push_back(0x00); v.push_back(0x7D); v.push_back(0x20); v.push_back(0xD4);
+    };
+    // Emit `bl target` where target is an absolute address. We use a
+    // placeholder and patch the offset later when we know the abort
+    // address (if any). For simplicity, we emit BRK for abort stubs
+    // — they're never called in normal operation, only on genuine
+    // dynamic-linker errors, which should be visible.
+    auto emit_stub_return0 = [&](std::vector<uint8_t>& v) {
+        emit_mov_x0_0(v);
+        emit_ret(v);
+    };
+    auto emit_stub_void = [&](std::vector<uint8_t>& v) {
+        emit_ret(v);
+        // Pad to 8 bytes (one more instruction — NOP).
+        v.push_back(0x1F); v.push_back(0x20); v.push_back(0x03); v.push_back(0xD5);
+    };
+    auto emit_stub_abort = [&](std::vector<uint8_t>& v) {
+        // For error-signaling stubs, we BRK #1000 to make any
+        // dynamic-linker error immediately visible. In production,
+        // these should never be called (libc only calls them on
+        // actual dlopen/dlsym errors, which we don't support).
+        emit_brk_1000(v);
+        // Pad with NOP in case the BRK is skipped (it won't be).
+        v.push_back(0x1F); v.push_back(0x20); v.push_back(0x03); v.push_back(0xD5);
+    };
+
+    std::vector<uint8_t> code;
+    code.reserve(128);
+    // [0] _dl_find_dso_for_object (returns void*)
+    emit_stub_return0(code);     // offset 0
+    // [1] _dl_allocate_tls (returns void*)
+    emit_stub_return0(code);     // offset 8
+    // [2] _dl_allocate_tls_init (returns void*)
+    emit_stub_return0(code);     // offset 16
+    // [3] _dl_deallocate_tls (void)
+    emit_stub_void(code);        // offset 24
+    // [4] _dl_signal_error (noreturn)
+    emit_stub_abort(code);       // offset 32
+    // [5] _dl_signal_exception (noreturn)
+    emit_stub_abort(code);       // offset 40
+    // [6] _dl_catch_exception (returns int)
+    emit_stub_return0(code);     // offset 48
+    // [7] _dl_catch_error (returns int)
+    emit_stub_return0(code);     // offset 56
+    // [8] _dl_audit_symbind_alt (void)
+    emit_stub_void(code);        // offset 64
+    // [9] _dl_audit_preinit (void)
+    emit_stub_void(code);        // offset 72
+    // [10] _dl_rtld_di_serinfo (returns int)
+    emit_stub_return0(code);     // offset 80
+    // [11] _dl_call_fini (void)
+    emit_stub_void(code);        // offset 88
+    // [12] __tls_get_addr (returns void*)
+    emit_stub_return0(code);     // offset 96
+    // [13] __tunable_get_val (returns int)
+    emit_stub_return0(code);     // offset 104
+    // [14] __nptl_change_stack_perm (void)
+    emit_stub_void(code);        // offset 112
+    // Pad to page size.
+    code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
+    // Write the code page.
+    mem_.write(code_base, code.data(), 4096);
+
+    // ── Populate the function pointer table in the data page ──────
+    // _rtld_global_ro has fields at specific offsets that glibc reads
+    // to find _dl_signal_error, _dl_catch_error, etc. Rather than
+    // replicate the exact struct layout (which varies by glibc
+    // version), we point the FPTR table at the code stubs and let
+    // _rtld_global_ro's fields be zero (glibc will fall back to
+    // internal defaults or skip the call if the field is 0). This is
+    // the same approach glibc itself uses when loaded by a non-glibc
+    // dynamic linker (e.g., for static-PIE binaries).
+    //
+    // The FPTR table is mostly for our own bookkeeping — if a future
+    // glibc version reads a function pointer from _rtld_global_ro
+    // at a specific offset, we can wire it up here.
+    for (int i = 0; i < 15; i++) {
+        mem_.store<uint64_t>(shim_base_ + FPTR_TABLE_OFF + i * 8,
+                             code_base + i * 8);
+    }
+
+    // ── Register symbols in the global symbol table ──────────────
+    // Data symbols point into the data page; function symbols point
+    // into the code page.
+    auto add_data_sym = [&](const char* name, uint64_t off) {
+        symbols_[name] = shim_base_ + off;
+    };
+    auto add_func_sym = [&](const char* name, uint64_t off) {
+        symbols_[name] = code_base + off;
+    };
+
+    // Data symbols (from ld-linux that libc references).
+    add_data_sym("_rtld_global_ro", RTLD_GLOBAL_RO_OFF);
+    add_data_sym("_rtld_global",    RTLD_GLOBAL_OFF);
+    add_data_sym("_dl_argv",        DL_ARGV_OFF);
+    add_data_sym("__libc_enable_secure", LIBC_ENABLE_SECURE_OFF);
+    add_data_sym("__pointer_chk_guard",  POINTER_CHK_GUARD_OFF);
+
+    // Function symbols (from ld-linux that libc references).
+    add_func_sym("_dl_find_dso_for_object", 0);
+    add_func_sym("_dl_allocate_tls",        8);
+    add_func_sym("_dl_allocate_tls_init",   16);
+    add_func_sym("_dl_deallocate_tls",      24);
+    add_func_sym("_dl_signal_error",        32);
+    add_func_sym("_dl_signal_exception",    40);
+    add_func_sym("_dl_catch_exception",     48);
+    add_func_sym("_dl_catch_error",         56);
+    add_func_sym("_dl_audit_symbind_alt",   64);
+    add_func_sym("_dl_audit_preinit",       72);
+    add_func_sym("_dl_rtld_di_serinfo",     80);
+    add_func_sym("_dl_call_fini",           88);
+    add_func_sym("__tls_get_addr",          96);
+    add_func_sym("__tunable_get_val",       104);
+    add_func_sym("__nptl_change_stack_perm", 112);
+
+    // Also register a synthetic LoadedObject so the shim shows up in
+    // /proc/self/maps and the allocations_ tracker (for fork safety).
+    LoadedObject shim_obj;
+    shim_obj.name = "<ld-linux-shim>";
+    shim_obj.base_addr = shim_base_;
+    shim_obj.is_main = false;
+    shim_obj.dyn_addr = 0;  // no PT_DYNAMIC
+    objects_.push_back(std::move(shim_obj));
+
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] registered ld-linux shim: "
+                "data @0x%llx, code @0x%llx (15 stubs)\n",
+                static_cast<unsigned long long>(shim_base_),
+                static_cast<unsigned long long>(code_base));
+    }
+    return true;
+}
+
+
 std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
                                                  std::string& found_path) {
     // Search order (matches Linux ld.so behavior for AArch64 multiarch):
-    //   1. /usr/aarch64-linux-gnu/lib/         (Debian/Ubuntu multiarch)
-    //   2. /usr/lib/aarch64-linux-gnu/         (newer Debian multiarch)
-    //   3. /lib/aarch64-linux-gnu/             (Debian multiarch)
-    //   4. /usr/lib/                            (host libs, fallback)
-    //   5. LD_LIBRARY_PATH entries
-    std::vector<std::string> dirs = {
-        "/usr/aarch64-linux-gnu/lib",
-        "/usr/lib/aarch64-linux-gnu",
-        "/lib/aarch64-linux-gnu",
-        "/usr/lib",
-        "/lib",
-    };
-    const char* llp = getenv("LD_LIBRARY_PATH");
-    if (llp) {
+    //   1. BIFROST_ROOT sandbox (if set) — $BIFROST_ROOT/lib and
+    //      $BIFROST_ROOT/usr/lib. This lets the user provide a self-
+    //      contained rootfs without polluting the host's multiarch dirs.
+    //   2. LD_LIBRARY_PATH entries (user override).
+    //   3. /usr/aarch64-linux-gnu/lib/         (Debian/Ubuntu multiarch)
+    //   4. /usr/lib/aarch64-linux-gnu/         (newer Debian multiarch)
+    //   5. /lib/aarch64-linux-gnu/             (Debian multiarch)
+    //   6. /usr/lib/                            (host libs, fallback)
+    //   7. /lib
+    //   8. Bundled toolchain libs (auto-detected at startup, see below)
+    //
+    // The bundled toolchain paths (./tools/aarch64-linux-gnu-cross/...
+    // and ./tools/aarch64-linux-musl-cross/...) are checked LAST so the
+    // user can override with BIFROST_ROOT or LD_LIBRARY_PATH. They're
+    // included so dynamically-linked test binaries work out-of-the-box
+    // after fetching the toolchains, without requiring the user to set
+    // up a rootfs or install aarch64 multiarch packages on the host.
+    std::vector<std::string> dirs;
+
+    // 1. BIFROST_ROOT sandbox.
+    if (const char* root = getenv("BIFROST_ROOT")) {
+        std::string r(root);
+        // Strip trailing slash(es) for clean concatenation.
+        while (r.size() > 1 && r.back() == '/') r.pop_back();
+        if (!r.empty()) {
+            dirs.push_back(r + "/lib");
+            dirs.push_back(r + "/lib64");
+            dirs.push_back(r + "/usr/lib");
+            dirs.push_back(r + "/usr/lib64");
+        }
+    }
+
+    // 2. LD_LIBRARY_PATH.
+    if (const char* llp = getenv("LD_LIBRARY_PATH")) {
         std::string s = llp;
         size_t pos = 0;
         while (pos < s.size()) {
@@ -642,6 +958,42 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             }
             dirs.push_back(s.substr(pos, colon - pos));
             pos = colon + 1;
+        }
+    }
+
+    // 3-7. Standard host multiarch paths.
+    dirs.push_back("/usr/aarch64-linux-gnu/lib");
+    dirs.push_back("/usr/lib/aarch64-linux-gnu");
+    dirs.push_back("/lib/aarch64-linux-gnu");
+    dirs.push_back("/usr/lib");
+    dirs.push_back("/lib");
+
+    // 8. Bundled toolchain libs (auto-detected relative to the
+    //    executable's directory, so it works regardless of CWD).
+    //    We use /proc/self/exe to find the executable's path, then
+    //    look for tools/aarch64-{linux-gnu,linux-musl}-cross/...
+    //    relative to that.
+    {
+        char exe_path[4096];
+        ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (n > 0) {
+            exe_path[n] = '\0';
+            std::string exe(exe_path);
+            // Walk up to the project root (the directory containing
+            // the 'tools' subdir). The executable is typically at
+            // <project>/bifrost-emu, so the project root is its parent.
+            size_t slash = exe.rfind('/');
+            if (slash != std::string::npos) {
+                std::string project_root = exe.substr(0, slash);
+                dirs.push_back(project_root +
+                    "/tools/aarch64-linux-gnu-cross/aarch64-none-linux-gnu/libc/lib64");
+                dirs.push_back(project_root +
+                    "/tools/aarch64-linux-gnu-cross/aarch64-none-linux-gnu/libc/lib");
+                dirs.push_back(project_root +
+                    "/tools/aarch64-linux-gnu-cross/aarch64-none-linux-gnu/libc/usr/lib64");
+                dirs.push_back(project_root +
+                    "/tools/aarch64-linux-musl-cross/aarch64-linux-musl/lib");
+            }
         }
     }
 

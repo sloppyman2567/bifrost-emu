@@ -564,6 +564,26 @@ int Emulator::run() {
 
     while (main_cpu_.running) {
         try {
+            // Optional PC trace for debugging. Gated by env var so
+            // it's a no-op in production. Set BIFROST_TRACE_PC=1 to
+            // log every instruction's PC + first 16 register values.
+            // Use BIFROST_TRACE_PC_MAX=N to cap the trace at N
+            // instructions (default 10000).
+            static const bool trace_pc_ = (getenv("BIFROST_TRACE_PC") != nullptr);
+            static const uint64_t trace_pc_max_ =
+                getenv("BIFROST_TRACE_PC_MAX") ?
+                    strtoull(getenv("BIFROST_TRACE_PC_MAX"), nullptr, 10) : 10000ULL;
+            static uint64_t trace_pc_count_ = 0;
+            if (trace_pc_ && trace_pc_count_ < trace_pc_max_) {
+                fprintf(stderr, "[pc] 0x%llx sp=0x%llx x0=%llx x1=%llx x2=%llx x8=%llx\n",
+                        (unsigned long long)main_cpu_.pc,
+                        (unsigned long long)main_cpu_.sp,
+                        (unsigned long long)main_cpu_.regs[0],
+                        (unsigned long long)main_cpu_.regs[1],
+                        (unsigned long long)main_cpu_.regs[2],
+                        (unsigned long long)main_cpu_.regs[8]);
+                trace_pc_count_++;
+            }
             // JIT warmup threshold: use the interpreter for the first
             // `jit_threshold_` instructions, then switch to JIT. This
             // avoids JIT compilation overhead for short programs.

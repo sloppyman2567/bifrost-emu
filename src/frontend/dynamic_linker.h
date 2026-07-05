@@ -236,6 +236,32 @@ private:
     // resolver declined to handle this library.
     uint64_t register_thunk_library_(const std::string& soname);
 
+    // ── Synthetic ld-linux shim (Turn 52) ──────────────────────────
+    // glibc's libc.so references many symbols that are normally
+    // provided by ld-linux (the dynamic linker): _rtld_global,
+    // _rtld_global_ro, _dl_argv, _dl_find_dso_for_object, etc. When
+    // we use our own native dynamic linker (instead of running the
+    // guest ld-linux), these symbols are undefined and the GOT slots
+    // stay at 0, causing crashes when libc dereferences them.
+    //
+    // The shim allocates a small writable page in guest memory and
+    // populates it with:
+    //   - A struct rtld_global_ro with safe defaults (all zeros +
+    //     a few function pointers that return 0 / do nothing).
+    //   - A struct rtld_global with a few stub function pointers.
+    //   - Storage for _dl_argv, __libc_enable_secure, etc.
+    //
+    // The shim also registers synthetic symbol table entries so
+    // relocations against these symbols resolve to the shim's
+    // addresses. The functions themselves are tiny ARM64 stubs that
+    // return 0 (so a libc that calls _dl_find_dso_for_object gets 0
+    // = "not found" instead of crashing).
+    //
+    // This is similar to how Android's Bionic libc provides its own
+    // __libc_init instead of depending on ld-linux, except we do it
+    // at the dynamic-linker level rather than the libc level.
+    bool register_ld_linux_shim_();
+
     // Map PT_LOAD segments from `data` at `base`. Returns the highest
     // mapped address + 1 (i.e., the new end_addr). Sets `entry` to
     // the absolute entry point.
@@ -255,6 +281,11 @@ private:
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).
     uint64_t resolve_reloc_symbol(const LoadedObject& obj, uint32_t sym_idx);
+
+    // ── ld-linux shim state ────────────────────────────────────────
+    // Guest VA of the synthetic ld-linux data page (allocated by
+    // register_ld_linux_shim_()). 0 if the shim hasn't been registered.
+    uint64_t shim_base_ = 0;
 };
 
 } // namespace arm64emu

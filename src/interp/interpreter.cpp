@@ -1796,8 +1796,55 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                     return;
                 }
-                // ── CMHS (vector) ──
-                case 0x2E203400: {
+                // ── CMGE / CMHS (vector) ──
+                // BUGFIX (Turn 52): the old case 0x2E203400 was labeled
+                // "CMHS" but was actually CMGE (signed >=, opcode 0x0D).
+                // The code used unsigned comparison, so it was implementing
+                // CMHS behavior under the wrong case label. The actual CMHS
+                // instruction (opcode 0x0F → case 0x2E203C00 after sub_noq)
+                // was not matched at all and fell through silently.
+                //
+                // This broke glibc's strchrnul SIMD loop, which uses CMHS
+                // (unsigned >=) to detect both the search character AND
+                // the NUL terminator in one comparison. Without CMHS
+                // matching, the loop never detected the NUL terminator
+                // and ran forever through unmapped zero pages.
+                //
+                // Encoding (SIMD two-register misc, bits 15:10 = opcode):
+                //   CMGE (signed >=):   U=0, opcode=0b001101 → sub_noq=0x2E203400
+                //   CMHS (unsigned >=): U=1, opcode=0b001111 → sub_noq=0x2E203C00
+                // Note: sub_noq = (op & 0xFFE0FC00) with Q (bit 30) stripped.
+                // The U bit (29) IS kept in sub_noq, so CMGE and CMHS have
+                // DIFFERENT sub_noq values (0x2E203400 vs 0x2E203C00) because
+                // they have different opcodes (0x0D vs 0x0F), NOT because of U.
+                // (U=0 vs U=1 alone wouldn't change sub_noq since both 0x2E...
+                // and 0x6E... strip to 0x2E... after removing Q.)
+                case 0x2E203400: {  // CMGE (signed >=, opcode 0x0D)
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t buf_n[16], buf_m[16];
+                    memcpy(buf_n, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf_m, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    uint8_t out[16] = {0};
+                    for (int i = 0; i < elems; i++) {
+                        // Sign-extend for signed comparison.
+                        int64_t n = 0, m = 0;
+                        memcpy(&n, buf_n + i*esize, esize);
+                        memcpy(&m, buf_m + i*esize, esize);
+                        if (esize == 1) { n = (int8_t)n; m = (int8_t)m; }
+                        else if (esize == 2) { n = (int16_t)n; m = (int16_t)m; }
+                        else if (esize == 4) { n = (int32_t)n; m = (int32_t)m; }
+                        bool ge = (n >= m);
+                        memset(out + i*esize, ge ? 0xFF : 0x00, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                case 0x2E203C00: {  // CMHS (unsigned >=, opcode 0x0F)
                     int esize = 1 << size;
                     int elems = (Q ? 16 : 8) / esize;
                     uint8_t buf_n[16], buf_m[16];
@@ -1810,7 +1857,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         uint64_t n = 0, m = 0;
                         memcpy(&n, buf_n + i*esize, esize);
                         memcpy(&m, buf_m + i*esize, esize);
-                        bool ge = (n >= m);
+                        bool ge = (n >= m);  // unsigned
                         memset(out + i*esize, ge ? 0xFF : 0x00, esize);
                     }
                     memcpy(&cpu.v_lo[rd], out, 8);
@@ -1819,8 +1866,39 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // ── UMAXP/UMINP/SMAXP/SMINP family ──
-                case 0x2E20A400: {
-                    bool C = (op >> 15) & 1;
+                // BUGFIX (Turn 52): the old code used uint64_t comparison
+                // (unsigned) for what was labeled SMAXP/SMINP (U=0, signed).
+                // For byte elements with values 0x80-0xFF, signed vs unsigned
+                // differ. We now use int64_t with sign-extension for the
+                // signed (U=0) path.
+                //
+                // Encoding: 0 Q U 01110 size Rm 01101 0 Rn Rd
+                //   U=0, C=0: SMAXP (signed pairwise max)
+                //   U=0, C=1: SMINP (signed pairwise min)
+                //   U=1, C=0: UMAXP (unsigned pairwise max)
+                //   U=1, C=1: UMINP (unsigned pairwise min)
+                // After sub_noq (Q stripped, U kept):
+                //   U=0 → sub_noq = 0x2E20A400
+                //   U=1 → sub_noq = 0x6E20A400
+                // Wait — 0x6E... & ~(1<<30) = 0x2E... So both U=0 and U=1
+                // map to sub_noq = 0x2E20A400! The U bit (29) is NOT
+                // distinguished by sub_noq because sub_noq only strips Q (30).
+                //
+                // Actually: 0x2E = 0010 1110 (bit 29=1, bit 30=0)
+                //           0x6E = 0110 1110 (bit 29=1, bit 30=1)
+                // After stripping Q (bit 30): both become 0x2E.
+                // So U=0 and U=1 BOTH map to 0x2E20A400 after sub_noq!
+                // That means the existing case 0x2E20A400 already handles
+                // BOTH SMAXP/SMINP (U=0) AND UMAXP/UMINP (U=1).
+                //
+                // The bug was NOT that UMAXP didn't match — it DID match
+                // (via sub_noq). The bug was that the code used unsigned
+                // comparison (uint64_t), which is correct for UMAXP but
+                // WRONG for SMAXP. We now check the U bit at runtime to
+                // select signed vs unsigned comparison.
+                case 0x2E20A400: {  // SMAXP/SMINP (U=0) / UMAXP/UMINP (U=1)
+                    bool C = (op >> 15) & 1;   // 0=max, 1=min
+                    bool U = (op >> 29) & 1;   // 0=signed, 1=unsigned
                     int esize = 1 << size;
                     int elems = (Q ? 16 : 8) / esize;
                     uint8_t buf_n[16], buf_m[16];
@@ -1830,21 +1908,31 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
                     uint8_t out[16] = {0};
                     for (int i = 0; i < elems / 2; i++) {
-                        uint64_t n0=0, n1=0, m0=0, m1=0;
-                        memcpy(&n0, buf_n + (2*i) * esize, esize);
-                        memcpy(&n1, buf_n + (2*i+1) * esize, esize);
-                        memcpy(&m0, buf_m + (2*i) * esize, esize);
-                        memcpy(&m1, buf_m + (2*i+1) * esize, esize);
-                        uint64_t pn, pm;
+                        auto load_elem = [&](const uint8_t* p) -> int64_t {
+                            uint64_t u = 0;
+                            memcpy(&u, p, esize);
+                            if (!U) {
+                                if (esize == 1) return (int8_t)u;
+                                if (esize == 2) return (int16_t)u;
+                                if (esize == 4) return (int32_t)u;
+                                return (int64_t)u;
+                            }
+                            return (int64_t)u;
+                        };
+                        int64_t n0 = load_elem(buf_n + (2*i) * esize);
+                        int64_t n1 = load_elem(buf_n + (2*i+1) * esize);
+                        int64_t m0 = load_elem(buf_m + (2*i) * esize);
+                        int64_t m1 = load_elem(buf_m + (2*i+1) * esize);
+                        int64_t pn, pm;
                         if (C == 0) {
                             pn = (n0 > n1) ? n0 : n1;
                             pm = (m0 > m1) ? m0 : m1;
-                            uint64_t res = (pn > pm) ? pn : pm;
+                            int64_t res = (pn > pm) ? pn : pm;
                             memcpy(out + i * esize, &res, esize);
                         } else {
                             pn = (n0 < n1) ? n0 : n1;
                             pm = (m0 < m1) ? m0 : m1;
-                            uint64_t res = (pn < pm) ? pn : pm;
+                            int64_t res = (pn < pm) ? pn : pm;
                             memcpy(out + i * esize, &res, esize);
                         }
                     }
@@ -1896,7 +1984,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 // ── CMEQ two registers ──
-                case 0x2E208C00: {
+                // CMEQ encoding: 0 Q U 01110 size Rm 100011 1 Rn Rd
+                // Both U=0 and U=1 are valid and produce the same result
+                // (equality is sign-agnostic). After sub_noq masking
+                // (Q stripped, U kept), both map to 0x2E208C00 because
+                // the U bit (29) is the same for 0x2E... and 0x6E...
+                // after Q (bit 30) is removed: 0x6E... & ~(1<<30) = 0x2E...
+                // So a single case 0x2E208C00 handles both encodings.
+                case 0x2E208C00: { // CMEQ (U=0 or U=1, after sub_noq)
                     int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
                     int elems = (Q ? 16 : 8) / esize;
                     uint8_t buf_rn[16], buf_rm[16];
