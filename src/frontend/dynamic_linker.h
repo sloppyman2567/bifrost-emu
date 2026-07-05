@@ -95,6 +95,18 @@ struct LoadedObject {
     uint64_t    init_array_size = 0;  // DT_INIT_ARRAYSZ (bytes; count = size/8)
     uint64_t    fini_array_addr = 0;  // DT_FINI_ARRAY
     uint64_t    fini_array_size = 0;  // DT_FINI_ARRAYSZ
+    // BUGFIX (Turn 60, C5): symbol versioning info.
+    // DT_VERSYM  = address of the .gnu.version section (uint16_t per symbol,
+    //              index into the version definition/needed tables).
+    // DT_VERDEF  = address of the .gnu.version_d section (this object's
+    //              version definitions — what versions THIS lib exports).
+    // DT_VERNEED = address of the .gnu.version_r section (what versions
+    //              this object NEEDS from its dependencies).
+    uint64_t    versym_addr  = 0;
+    uint64_t    verdef_addr  = 0;
+    uint64_t    verdef_num   = 0;
+    uint64_t    verneed_addr = 0;
+    uint64_t    verneed_num  = 0;
     bool        is_main = false;  // main binary vs shared lib
 
     // TLS info.
@@ -215,6 +227,15 @@ private:
     // "first strong wins" instead of "last strong wins" (H6).
     struct SymEntry { uint64_t addr; uint8_t bind; };
     std::unordered_map<std::string, SymEntry> symbols_;
+    // BUGFIX (Turn 60, C5): versioned symbol table. Keyed by
+    // "name@version" (e.g. "memcpy@GLIBC_2.17"). When a relocation
+    // requests a specific version (via .gnu.version_r), we look up
+    // the versioned entry first, then fall back to the unversioned
+    // `symbols_` table. This prevents wrong-version symbol selection
+    // (e.g. GLIBC_2.17 memcpy vs GLIBC_2.29 memcpy with ERMS support,
+    // or stat@GLIBC_2.33 returning a different struct layout than
+    // stat@GLIBC_2.17).
+    std::unordered_map<std::string, SymEntry> versioned_symbols_;
     std::string error_;
     // Optional ifunc resolver callback (set by Emulator before link()).
     std::function<uint64_t(uint64_t)> ifunc_resolver_;
@@ -314,6 +335,17 @@ private:
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
     void index_symbols(const LoadedObject& obj);
 
+    // BUGFIX (Turn 60, C5): parse symbol versioning sections
+    // (.gnu.version, .gnu.version_d, .gnu.version_r) and populate
+    // versioned_symbols_ with "name@version" keys.
+    void parse_versions_(const LoadedObject& obj);
+
+    // Resolve a symbol by name AND version. Looks up versioned_symbols_
+    // first (key "name@version"), then falls back to unversioned
+    // symbols_. Returns 0 if not found.
+    uint64_t resolve_versioned_symbol(const std::string& name,
+                                       const std::string& version) const;
+
     // Allocate the static TLS block and assign TP-offsets to each
     // object with a PT_TLS segment. Must be called after all libraries
     // are loaded but before relocations are applied.
@@ -327,6 +359,11 @@ private:
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).
+    // BUGFIX (Turn 60, C5): if the object has .gnu.version_r (version
+    // requirements), look up the version for this symbol and use
+    // resolve_versioned_symbol. This prevents wrong-version symbol
+    // selection (e.g. GLIBC_2.17 stat vs GLIBC_2.33 stat with different
+    // struct layouts).
     uint64_t resolve_reloc_symbol(const LoadedObject& obj, uint32_t sym_idx);
 
     // ── ld-linux shim state ────────────────────────────────────────

@@ -68,6 +68,13 @@ constexpr int DT_FINI_ARRAYSZ_  = 28;
 constexpr int DT_RUNPATH_   = 29;
 constexpr int DT_FLAGS_     = 30;
 
+// BUGFIX (Turn 60, C5): symbol versioning tags.
+constexpr int DT_VERSYM_    = 0x6FFFFFF0;
+constexpr int DT_VERDEF_    = 0x6FFFFFFC;
+constexpr int DT_VERDEFNUM_ = 0x6FFFFFFD;
+constexpr int DT_VERNEED_   = 0x6FFFFFFE;
+constexpr int DT_VERNEEDNUM_= 0x6FFFFFFF;
+
 // AArch64 relocation types (ELF64 codes), per ARM IHI 0056B.
 constexpr uint32_t R_AARCH64_ABS64_         = 257;
 constexpr uint32_t R_AARCH64_GLOB_DAT_      = 1025;
@@ -143,6 +150,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                          const std::string& main_path) {
     objects_.clear();
     symbols_.clear();
+    versioned_symbols_.clear();  // Turn 60, C5
     error_.clear();
 
     // Index the main binary.
@@ -156,6 +164,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     parse_tls(main_data, main_obj);
     objects_.push_back(std::move(main_obj));
     index_symbols(objects_.back());
+    parse_versions_(objects_.back());  // Turn 60, C5
 
     // Recursively load DT_NEEDED libraries. We use a worklist to handle
     // transitive dependencies (libc → ld-musl, libm → libc, etc.).
@@ -327,7 +336,11 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            uint64_t S = resolve_symbol(name);
+                            // BUGFIX (Turn 60, C5): use resolve_reloc_symbol
+                            // which consults versioned_symbols_ when the
+                            // object has .gnu.version_r. This prevents
+                            // wrong-version symbol selection.
+                            uint64_t S = resolve_reloc_symbol(obj, sym);
                             // BUGFIX (Turn 59, C3): undefined-weak symbols
                             // must resolve to 0, NOT obj.base_addr. The old
                             // fallback `S = obj.base_addr + s.st_value` ran
@@ -490,7 +503,8 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            uint64_t S = resolve_symbol(name);
+                            // BUGFIX (Turn 60, C5): versioned resolution.
+                            uint64_t S = resolve_reloc_symbol(obj, sym);
                             // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
                             if (S == 0 && s.st_shndx != SHN_UNDEF_) {
                                 S = obj.base_addr + s.st_value;
@@ -533,7 +547,8 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            uint64_t S = resolve_symbol(name);
+                            // BUGFIX (Turn 60, C5): versioned resolution.
+                            uint64_t S = resolve_reloc_symbol(obj, sym);
                             // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
                             if (S == 0 && s.st_shndx != SHN_UNDEF_) {
                                 S = obj.base_addr + s.st_value;
@@ -728,6 +743,12 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             case DT_SONAME_:        soname_off = dyn.d_val; break;
             case DT_RPATH_:         rpath_off = dyn.d_val; break;
             case DT_RUNPATH_:       runpath_off = dyn.d_val; break;
+            // BUGFIX (Turn 60, C5): capture symbol versioning section addrs.
+            case DT_VERSYM_:        obj.versym_addr = base + dyn.d_val; break;
+            case DT_VERDEF_:        obj.verdef_addr = base + dyn.d_val; break;
+            case DT_VERDEFNUM_:     obj.verdef_num = dyn.d_val; break;
+            case DT_VERNEED_:       obj.verneed_addr = base + dyn.d_val; break;
+            case DT_VERNEEDNUM_:    obj.verneed_num = dyn.d_val; break;
             default: break;
         }
     }
@@ -1338,6 +1359,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     parse_tls(data, obj);
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
+    parse_versions_(objects_.back());  // Turn 60, C5
     return base;
 }
 
@@ -1522,6 +1544,11 @@ int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
 }
 
 // ── resolve_reloc_symbol ───────────────────────────────────────────────
+// BUGFIX (Turn 60, C5): if the object has .gnu.version, look up the
+// version index for this symbol and try the versioned symbol table first.
+// This lets relocations that request a specific version (e.g. memcpy@GLIBC_2.17)
+// resolve to the correct implementation rather than whichever unversioned
+// symbol happened to be indexed first.
 uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
                                              uint32_t sym_idx) {
     if (sym_idx == 0) return 0;
@@ -1532,6 +1559,217 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
         return 0;
     }
     std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
+    if (name.empty()) return 0;
+
+    // Look up the version requirement for this symbol.
+    // .gnu.version (DT_VERSYM) is an array of uint16_t, one per .dynsym
+    // entry. The value is an index into the verneed/verdef tables.
+    // For an UNDEF symbol being resolved against a dependency, the version
+    // comes from .gnu.version_r (DT_VERNEED). For simplicity, we look up
+    // the version name from the object's own .gnu.version + the defining
+    // object's verdef — but that requires knowing which object defines
+    // the symbol. Instead, we take a simpler approach: try every
+    // versioned entry for this name (by scanning versioned_symbols_ for
+    // keys starting with "name@"). This is O(n) but n is small per name.
+    //
+    // Actually, the cleanest approach: look up the version index from
+    // THIS object's .gnu.version[sym_idx], then find the corresponding
+    // version name from THIS object's .gnu.version_r (DT_VERNEED).
+    // Then resolve_versioned_symbol(name, version_name).
+    if (obj.versym_addr != 0 && obj.verneed_addr != 0) {
+        try {
+            uint16_t vidx = 0;
+            mem_.read(obj.versym_addr + sym_idx * 2, &vidx, 2);
+            uint16_t real_idx = vidx & 0x7FFF;
+            if (real_idx >= 2) {
+                // Find the version name from verneed. Walk the Verneed
+                // chain and find the Vernaux with matching vna_other
+                // (which is the version index used in .gnu.version).
+                // Elf64_Verneed (16 bytes):
+                //   +0: uint16_t vn_version
+                //   +2: uint16_t vn_cnt (number of Vernaux)
+                //   +4: uint32_t vn_file (strtab offset of dep soname)
+                //   +8: uint32_t vn_aux (offset to first Vernaux)
+                //   +12: uint32_t vn_next (offset to next Verneed)
+                // Elf64_Vernaux (16 bytes):
+                //   +0: uint32_t vna_hash
+                //   +4: uint16_t vna_flags
+                //   +6: uint16_t vna_other (version index, matches .gnu.version)
+                //   +8: uint32_t vna_name (strtab offset of version name)
+                //   +12: uint32_t vna_next
+                std::string version_name;
+                uint64_t p = obj.verneed_addr;
+                for (uint64_t i = 0; i < obj.verneed_num; i++) {
+                    uint16_t vn_cnt;
+                    uint32_t vn_aux, vn_next;
+                    mem_.read(p + 2, &vn_cnt, 2);
+                    mem_.read(p + 8, &vn_aux, 4);
+                    mem_.read(p + 12, &vn_next, 4);
+                    uint64_t ap = p + vn_aux;
+                    for (uint16_t j = 0; j < vn_cnt; j++) {
+                        uint16_t vna_other;
+                        uint32_t vna_name, vna_next;
+                        mem_.read(ap + 6, &vna_other, 2);
+                        mem_.read(ap + 8, &vna_name, 4);
+                        mem_.read(ap + 12, &vna_next, 4);
+                        if (vna_other == real_idx) {
+                            version_name = read_guest_cstr(mem_, obj.strtab_addr + vna_name);
+                            break;
+                        }
+                        if (vna_next == 0) break;
+                        ap += vna_next;
+                    }
+                    if (!version_name.empty()) break;
+                    if (vn_next == 0) break;
+                    p += vn_next;
+                }
+                if (!version_name.empty()) {
+                    uint64_t addr = resolve_versioned_symbol(name, version_name);
+                    if (addr != 0) return addr;
+                    // else fall back to unversioned.
+                }
+            }
+        } catch (...) {
+            // corrupt version info — fall back to unversioned
+        }
+    }
+
+    return resolve_symbol(name);
+}
+
+// ── parse_versions_ (Turn 60, C5) ──────────────────────────────────────
+// Parse the GNU symbol versioning sections and populate
+// versioned_symbols_ with "name@version" keys. This lets relocations
+// that request a specific version (via .gnu.version_r) resolve to the
+// correct symbol implementation.
+//
+// ELF versioning structures (from elf.h):
+//   .gnu.version (DT_VERSYM): array of uint16_t, one per .dynsym entry.
+//     Values: 0=local, 1=global (base), 2+=index into verdef/verneed.
+//     Bit 15 (0x8000) set = "hidden" version (preferred for resolution).
+//   .gnu.version_d (DT_VERDEF): array of Elf64_Verdef structures, each
+//     describing a version THIS object exports. Each Verdef has a chain
+//     of Verdaux entries (name + hash).
+//   .gnu.version_r (DT_VERNEED): array of Elf64_Verneed structures,
+//     each describing a version THIS object needs from a dependency.
+//     Each Verneed has a chain of Vernaux entries (version name + hash).
+//
+// We build a mapping: symbol_index → version_name (from verdef for
+// exported symbols). Then index_symbols can store both "name" (default)
+// and "name@version" (versioned) in versioned_symbols_.
+//
+// For simplicity, we ONLY parse verdef (exported versions). verneed
+// (needed versions) is consulted at relocation time to look up the
+// correct versioned symbol in dependencies.
+void DynamicLinker::parse_versions_(const LoadedObject& obj) {
+    if (obj.versym_addr == 0 || obj.verdef_addr == 0) return;
+    if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
+
+    // Build verdef index → version name map.
+    // Elf64_Verdef layout (20 bytes):
+    //   +0:  uint16_t vd_version (always 1)
+    //   +2:  uint16_t vd_flags
+    //   +4:  uint16_t vd_ndx (version index, matches .gnu.version entries)
+    //   +6:  uint16_t vd_cnt (number of Verdaux entries)
+    //   +8:  uint32_t vd_hash
+    //   +12: uint32_t vd_aux (offset to first Verdaux, from this Verdef)
+    //   +16: uint32_t vd_next (offset to next Verdef, from this Verdef)
+    // Elf64_Verdaux layout (16 bytes):
+    //   +0:  uint32_t vda_name (offset into strtab of version string)
+    //   +4:  uint32_t vda_next (offset to next Verdaux, from this Verdaux)
+    std::unordered_map<uint16_t, std::string> verdef_names;
+    try {
+        uint64_t p = obj.verdef_addr;
+        for (uint64_t i = 0; i < obj.verdef_num; i++) {
+            uint16_t vd_ndx, vd_cnt;
+            uint32_t vd_aux, vd_next;
+            mem_.read(p + 4, &vd_ndx, 2);
+            mem_.read(p + 6, &vd_cnt, 2);
+            mem_.read(p + 12, &vd_aux, 4);
+            mem_.read(p + 16, &vd_next, 4);
+            // First Verdaux is the version name.
+            if (vd_cnt > 0 && vd_aux != 0) {
+                uint32_t vda_name;
+                mem_.read(p + vd_aux, &vda_name, 4);
+                std::string vname = read_guest_cstr(mem_, obj.strtab_addr + vda_name);
+                if (!vname.empty()) {
+                    verdef_names[vd_ndx] = vname;
+                }
+            }
+            if (vd_next == 0) break;
+            p += vd_next;
+        }
+    } catch (...) {
+        return;  // corrupt verdef — skip versioning for this object
+    }
+
+    if (verdef_names.empty()) return;
+
+    // Now iterate .dynsym and for each symbol with a version index > 1,
+    // store "name@version" in versioned_symbols_.
+    constexpr size_t MAX_SYMS = 8192;
+    size_t count = obj.symtab_count;
+    if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;
+    constexpr uint8_t STT_GNU_IFUNC_ = 10;
+    auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
+
+    for (size_t i = 0; i < count; i++) {
+        Elf64_Sym s;
+        try {
+            mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
+        } catch (...) { break; }
+        if (s.st_name == 0 && s.st_value == 0 && s.st_shndx == 0) break;
+        if (s.st_shndx == SHN_UNDEF_) continue;  // only defined symbols
+        uint8_t bind = ST_BIND_(s.st_info);
+        if (bind != STB_GLOBAL_ && bind != STB_WEAK_) continue;
+
+        // Read the version index for this symbol from .gnu.version.
+        uint16_t vidx = 0;
+        try {
+            mem_.read(obj.versym_addr + i * 2, &vidx, 2);
+        } catch (...) { continue; }
+
+        // Bit 15 = hidden flag. Mask it off to get the real index.
+        uint16_t real_idx = vidx & 0x7FFF;
+        if (real_idx < 2) continue;  // 0=local, 1=global (unversioned)
+
+        auto vit = verdef_names.find(real_idx);
+        if (vit == verdef_names.end()) continue;
+
+        std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
+        if (name.empty()) continue;
+
+        uint64_t addr = obj.base_addr + s.st_value;
+        // STT_GNU_IFUNC: call resolver (same as index_symbols).
+        if (ST_TYPE_(s.st_info) == STT_GNU_IFUNC_ && ifunc_resolver_) {
+            uint64_t resolved = ifunc_resolver_(addr);
+            if (resolved != 0) addr = resolved;
+        }
+
+        std::string key = name + "@" + vit->second;
+        // First-strong-wins (same as index_symbols).
+        auto it = versioned_symbols_.find(key);
+        if (it == versioned_symbols_.end()) {
+            versioned_symbols_[key] = SymEntry{addr, bind};
+        } else {
+            if (it->second.bind == STB_WEAK_ && bind == STB_GLOBAL_) {
+                it->second = SymEntry{addr, bind};
+            }
+        }
+    }
+}
+
+// ── resolve_versioned_symbol ────────────────────────────────────────────
+uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
+                                                   const std::string& version) const {
+    if (!version.empty()) {
+        std::string key = name + "@" + version;
+        auto it = versioned_symbols_.find(key);
+        if (it != versioned_symbols_.end()) {
+            return it->second.addr;
+        }
+    }
+    // Fall back to unversioned.
     return resolve_symbol(name);
 }
 

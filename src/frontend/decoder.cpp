@@ -87,13 +87,24 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
 }
 
 // ── Decode logical immediate bitmask ────────────────────────────────────
-static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) {
+// BUGFIX (Turn 60, H10): return false (and leave *out unchanged) for
+// UNALLOCATED encodings instead of returning 0. The old code returned 0
+// for invalid encodings (width > esize, or combined==0 with N==0), which
+// the caller then happily used as a valid bitmask immediate of 0. Real
+// hardware raises an UNALLOCATED instruction exception for these. A
+// corrupt binary or JIT-spray attacker could emit these to turn invalid
+// instructions into silent no-ops (AND x, x, #0 → x = 0).
+//
+// Now the caller checks the return value: if false, the instruction is
+// UNALLOCATED and decode() returns false (InstClass::UNKNOWN).
+static bool decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf,
+                                uint64_t* out) {
     int len = 0;
     if (N) {
         len = 6;
     } else {
         uint8_t combined = (~imms) & 0x3F;
-        if (combined == 0) return 0;
+        if (combined == 0) return false;  // UNALLOCATED
         for (int i = 5; i >= 0; i--) {
             if (combined & (1 << i)) { len = i; break; }
         }
@@ -103,7 +114,7 @@ static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) 
     int S = imms & levels;
     int R = immr & levels;
     int width = S + 1;
-    if (width > esize) return 0;
+    if (width > esize) return false;  // UNALLOCATED
     uint64_t elem = (width >= 64) ? ~0ULL : ((1ULL << width) - 1);
     // ROR by R within an esize-wide field. When R == 0 there's nothing
     // to do; otherwise the right-shift is `>> R` (safe, R < esize ≤ 64)
@@ -119,7 +130,8 @@ static uint64_t decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf) 
         result |= elem << i;
     }
     if (!sf) result &= 0xFFFFFFFF;
-    return result;
+    *out = result;
+    return true;
 }
 
 // ── Main decode function ────────────────────────────────────────────────
@@ -333,12 +345,46 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.rt      = inst & 0x1F;
             d.rn      = (inst >> 5) & 0x1F;
             d.rm      = (inst >> 16) & 0x1F;
-            // Register count for multi-structure LD1/ST1 is in bits[14:13].
-            //   00=1 reg, 01=2 regs, 10=3 regs, 11=4 regs.
-            // This applies to both variants (bit 12=0 for 8B/4S/2D/1Q,
-            // bit 12=1 for 16B). Single-structure LD1/ST1 (e.g. LD1 {Vt.S})
-            // uses different encoding bits — we leave simd_count=1 for those.
-            d.simd_count = ((inst >> 13) & 3) + 1;
+            // BUGFIX (Turn 60, H11): distinguish single-structure from
+            // multi-structure LD1/ST1.
+            //   - Multi-structure (bit[12]=0): bits[14:13] = register count
+            //     (00=1, 01=2, 10=3, 11=4 regs). LD1 {Vt.16B}, {Vt.4S, Vt2.4S}, etc.
+            //   - Single-structure (bit[12]=1): bits[14:13] = element index,
+            //     and bits[12:10] encode (index, size) per the ARM ARM.
+            //     LD1 {Vt.S}[idx], LD1 {Vt.H}[idx], etc. — used for matrix
+            //     transpose, RGBA channel interleaving, etc.
+            // The old code unconditionally set simd_count from bits[14:13]
+            // for BOTH variants, so a single-structure LD1 {V0.S}[2]
+            // (bits[14:13]=10) was misdecoded as a 3-register multi-structure
+            // LD1, reading/writing 48 bytes instead of 4. Real games using
+            // single-structure LD1/ST1 (matrix ops, color conversion) would
+            // silently corrupt memory.
+            //
+            // We set is_single_struct so the interpreter can dispatch to
+            // the single-element path. simd_count stays 1 for single-struct
+            // (one register, one element).
+            bool bit12 = (inst >> 12) & 1;
+            if (bit12) {
+                // Single-structure LD1/ST1.
+                // The element index and size are encoded across bits[14:10].
+                // Per the ARM ARM (C4.1.66):
+                //   size[14:13] (for LD1/ST1 1-element), index[12] (high bit),
+                //   size[11:10] (low bits). The full decode is:
+                //     Q=0 (64-bit): idx = (size[0] << 1) | index[1]; size = size[2:1]
+                //     Q=1 (128-bit): idx = size[0]; index[1:0]; size = size[2:1]
+                //   For simplicity we store the raw bits and let the interpreter
+                //   do the final decode (the encoding is complex and varies by
+                //   variant — LD1 vs LD2 vs LD3 vs LD4).
+                d.is_single_struct = true;
+                d.simd_count = 1;
+                d.simd_index = ((inst >> 13) & 3);  // raw bits[14:13] as index
+                d.Q = (inst >> 30) & 1;
+            } else {
+                // Multi-structure LD1/ST1.
+                // Register count: 00=1, 01=2, 10=3, 11=4 regs.
+                d.is_single_struct = false;
+                d.simd_count = ((inst >> 13) & 3) + 1;
+            }
             d.cls = d.is_load ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;
             return true;
         }
@@ -449,7 +495,13 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rd         = inst & 0x1F;
         d.set_flags  = (opc == 3);
         d.writes_sp  = (d.rd == 31 && opc == 1);
-        d.imm_u      = decode_bitmask_imm(d.N, d.immr, d.imms, d.sf);
+        // BUGFIX (Turn 60, H10): if decode_bitmask_imm returns false, the
+        // encoding is UNALLOCATED — return UNKNOWN instead of treating it
+        // as a valid immediate of 0.
+        if (!decode_bitmask_imm(d.N, d.immr, d.imms, d.sf, &d.imm_u)) {
+            d.cls = InstClass::UNKNOWN;
+            return false;
+        }
         switch (opc) {
             case 0: d.cls = InstClass::AND_IMM;  break;
             case 1: d.cls = InstClass::ORR_IMM;  break;

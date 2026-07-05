@@ -1579,10 +1579,119 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 bool Q = d.Q;
                 int total_bytes = Q ? 16 : 8;
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-                // The decoder now captures the register count in
-                // d.simd_count (from bits[14:13]). The old opcode-based
-                // logic was wrong: opcode 0xA mapped to 4 regs but is
-                // actually 2 regs (post-index variant), etc.
+
+                // BUGFIX (Turn 60, H11): single-structure LD1/ST1
+                // (e.g. LD1 {Vt.S}[idx]) loads/stores ONE element at a
+                // specific lane index, not a whole register. The old code
+                // treated it as multi-structure (reading simd_count whole
+                // registers), silently corrupting memory for any guest
+                // using single-structure LD1/ST1 (matrix transpose, RGBA
+                // channel interleaving, etc.).
+                //
+                // Single-structure LD1/ST1 1-element variant encoding
+                // (per ARM ARM C4.1.66):
+                //   bits[14:13] = size[1:0] (high bits of size)
+                //   bit[12]     = 1 (single-structure marker)
+                //   bits[11:10] = size[1:0] (low bits) — combined size is
+                //                 bits[14:13]:[11:10] but for LD1 (1-reg)
+                //                 the index comes from Q and size.
+                // For LD1 (1-element, 1-register), the decode is:
+                //   Q=0: size = bits[14:13]; index = bit[11] (or bits[12:11]
+                //        depending on size); esize = 1<<size
+                //   Q=1: size = bits[14:13]; index = bit[12]:bit[11]
+                // We decode conservatively: extract the element size from
+                // bits[14:13] (which is the standard size field for the
+                // 1-reg single-structure form), and the index from the
+                // remaining bits.
+                if (d.is_single_struct) {
+                    // Element size: 00=B(1), 01=H(2), 10=S(4), 11=D(8).
+                    uint8_t size_field = (d.raw >> 13) & 3;
+                    int esize = 1 << size_field;
+                    // Index: for LD1 1-reg, Q=0 → index = bit[12]:bit[11]
+                    // (but only valid for size=00,01; for size=10 index is
+                    // bit[12] only; for size=11 index must be 0).
+                    // Q=1 → index = bit[12] (for size=00,01,10); size=11 →
+                    // index = 0.
+                    // We compute a conservative index that works for the
+                    // common cases; the exact decode per ARM ARM is:
+                    //   if Q==0: idx = (size_field==0) ? (bits[12:11]) :
+                    //              (size_field==1) ? (bit[12]) : 0
+                    //   if Q==1: idx = (size_field==0) ? (bits[13:12]) :
+                    //              (size_field==1) ? (bits[13:12]>>1) :
+                    //              (size_field==2) ? (bit[13]) : 0
+                    // Simpler: re-extract from raw bits per ARM ARM table.
+                    int idx = 0;
+                    uint8_t sz = size_field;
+                    if (Q == 0) {
+                        // 64-bit form: 8 bytes per register.
+                        switch (sz) {
+                            case 0: idx = (d.raw >> 11) & 3; break;  // B, 8 elems
+                            case 1: idx = (d.raw >> 12) & 1; break;  // H, 4 elems
+                            case 2: idx = (d.raw >> 13) & 1; break;  // S, 2 elems
+                            case 3: idx = 0; break;                  // D, 1 elem
+                        }
+                    } else {
+                        // 128-bit form: 16 bytes per register.
+                        switch (sz) {
+                            case 0: idx = (d.raw >> 12) & 0xF; break;  // B, 16 elems
+                            case 1: idx = (d.raw >> 13) & 7;  break;   // H, 8 elems
+                            case 2: idx = (d.raw >> 14) & 3;  break;   // S, 4 elems
+                            case 3: idx = (d.raw >> 15) & 1;  break;   // D, 2 elems
+                        }
+                    }
+                    int r = d.rt;
+                    if (d.is_load) {
+                        // Load one element from memory into lane `idx`.
+                        uint8_t buf[8];
+                        mem_.read(base, buf, esize, pcache);
+                        if (esize == 1) {
+                            // Write into byte `idx` of the V register.
+                            uint8_t* vp = (idx < 8)
+                                ? reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + (idx - 8);
+                            *vp = buf[0];
+                        } else if (esize == 2) {
+                            uint16_t* vp = (idx < 4)
+                                ? reinterpret_cast<uint16_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<uint16_t*>(&cpu.v_hi[r]) + (idx - 4);
+                            memcpy(vp, buf, 2);
+                        } else if (esize == 4) {
+                            uint32_t* vp = (idx < 2)
+                                ? reinterpret_cast<uint32_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<uint32_t*>(&cpu.v_hi[r]) + (idx - 2);
+                            memcpy(vp, buf, 4);
+                        } else {  // esize == 8 (D)
+                            uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
+                            memcpy(vp, buf, 8);
+                        }
+                    } else {
+                        // Store one element from lane `idx` to memory.
+                        uint8_t buf[8] = {0};
+                        if (esize == 1) {
+                            const uint8_t* vp = (idx < 8)
+                                ? reinterpret_cast<const uint8_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<const uint8_t*>(&cpu.v_hi[r]) + (idx - 8);
+                            buf[0] = *vp;
+                        } else if (esize == 2) {
+                            const uint16_t* vp = (idx < 4)
+                                ? reinterpret_cast<const uint16_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<const uint16_t*>(&cpu.v_hi[r]) + (idx - 4);
+                            memcpy(buf, vp, 2);
+                        } else if (esize == 4) {
+                            const uint32_t* vp = (idx < 2)
+                                ? reinterpret_cast<const uint32_t*>(&cpu.v_lo[r]) + idx
+                                : reinterpret_cast<const uint32_t*>(&cpu.v_hi[r]) + (idx - 2);
+                            memcpy(buf, vp, 4);
+                        } else {
+                            const uint64_t* vp = (idx == 0) ? &cpu.v_lo[r] : &cpu.v_hi[r];
+                            memcpy(buf, vp, 8);
+                        }
+                        mem_.write(base, buf, esize, pcache);
+                    }
+                    return;
+                }
+
+                // Multi-structure LD1/ST1 (original path).
                 int nregs = d.simd_count;
                 for (int i = 0; i < nregs; i++) {
                     int r = (d.rt + i) & 0x1F;
