@@ -698,6 +698,14 @@ bool Emulator::drain_host_signals(CPU& cpu) {
                      sig == BIFROST_SIGWINCH || sig == BIFROST_SIGCONT)) {
             continue;
         }
+        // Check if SIGINT is SIG_IGN. If so, set the sigint_ignored flag
+        // so the read() handler can inject a newline (mimicking bash/dash
+        // behavior of printing a new prompt after Ctrl+C). Without this,
+        // Ctrl+C at an empty prompt would do nothing visible — the signal
+        // is silently dropped and the shell stays blocked on read().
+        if (sig == BIFROST_SIGINT && act && act->handler == 1) {
+            cpu.sigint_ignored = true;
+        }
         if (deliver_signal(*this, cpu, signals_, sig)) {
             any_delivered = true;
         }

@@ -127,6 +127,13 @@ public:
     // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
     uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo-1` set = blocked)
     uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo-1` set = pending)
+    // Set when SIGINT was received from the terminal (Ctrl+C) but the
+    // guest has SIGINT set to SIG_IGN. The read() handler checks this
+    // flag and injects a newline byte so the shell prints a new prompt
+    // (mimicking bash/dash behavior). Without this, Ctrl+C at an empty
+    // prompt would do nothing visible — the signal is silently dropped
+    // and the shell stays blocked on read().
+    bool sigint_ignored = false;
     struct AltStack {
         uint64_t sp    = 0;     // base address
         uint64_t size  = 0;     // size in bytes

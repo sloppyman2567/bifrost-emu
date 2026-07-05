@@ -82,8 +82,32 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
                 // Drain signals. If a signal was delivered to a real
                 // handler, return immediately (the handler is set up to
-                // run; cpu.regs[0] = signo). Otherwise, return -EINTR.
+                // run; cpu.regs[0] = signo). Otherwise, check if SIGINT
+                // was ignored — if so, inject a newline so the shell
+                // prints a new prompt (mimicking bash/dash behavior).
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
+                if (cpu.sigint_ignored) {
+                    // SIGINT was received but the guest has it set to
+                    // SIG_IGN. Inject a newline byte so the shell's
+                    // read() returns an empty line, causing it to print
+                    // a new prompt. This matches what bash/dash do
+                    // (they install real handlers that print \n + prompt;
+                    // toybox sh uses SIG_IGN, so we simulate the effect).
+                    cpu.sigint_ignored = false;
+                    // Echo \n to the terminal so the new prompt appears
+                    // on a fresh line (the terminal driver echoed ^C but
+                    // no newline; bash's handler would have printed \n).
+                    // Write to fd 2 (stderr) since shells write prompts to
+                    // stderr in interactive mode.
+                    auto out_node = fds_.get(2);
+                    if (out_node) {
+                        const char nl = '\n';
+                        out_node->write(UINT64_MAX, &nl, 1);
+                    }
+                    tmp[0] = '\n';
+                    r = 1;
+                    break;
+                }
                 break;  // no signal delivered, return -EINTR
             }
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
