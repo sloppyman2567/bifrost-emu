@@ -75,6 +75,9 @@ struct TlsSegment {
 // Information about one loaded ELF object (main binary or shared lib).
 struct LoadedObject {
     std::string name;             // soname or path
+    std::string soname;           // DT_SONAME (for dedup; empty if not present)
+    std::string runpath;          // DT_RUNPATH (semicolon-separated, $ORIGIN expanded)
+    std::string rpath;            // DT_RPATH (deprecated, but still used by some binaries)
     uint64_t    base_addr = 0;    // load base (0 for main binary if not PIE)
     uint64_t    entry     = 0;    // entry point (absolute)
     uint64_t    dyn_addr  = 0;    // PT_DYNAMIC vaddr (absolute)
@@ -83,6 +86,15 @@ struct LoadedObject {
     uint64_t    symtab_count = 0; // number of symbols in .dynsym
     uint64_t    jmprel_addr = 0;  // DT_JMPREL (absolute)
     uint64_t    jmprel_size = 0;  // DT_PLTRELSZ
+    // BUGFIX (Turn 59): DT_INIT_ARRAY/DT_FINI_ARRAY/DT_INIT/DT_FINI addresses
+    // and sizes. The linker invokes these after relocations are applied
+    // (C++ static constructors, glibc hooks, etc.).
+    uint64_t    init_addr       = 0;  // DT_INIT (legacy _init() function)
+    uint64_t    fini_addr       = 0;  // DT_FINI (legacy _fini() function)
+    uint64_t    init_array_addr = 0;  // DT_INIT_ARRAY (array of function ptrs)
+    uint64_t    init_array_size = 0;  // DT_INIT_ARRAYSZ (bytes; count = size/8)
+    uint64_t    fini_array_addr = 0;  // DT_FINI_ARRAY
+    uint64_t    fini_array_size = 0;  // DT_FINI_ARRAYSZ
     bool        is_main = false;  // main binary vs shared lib
 
     // TLS info.
@@ -150,6 +162,21 @@ public:
         ifunc_resolver_ = std::move(cb);
     }
 
+    // ── Constructor/init callback (Turn 59) ────────────────────────
+    // After relocations are applied, the linker must invoke DT_INIT and
+    // DT_INIT_ARRAY for each loaded object (in dependency order: libs
+    // first, main binary last). These run C++ static constructors,
+    // glibc __libc_start_main hooks, etc. Without them, every C++ game
+    // runs with uninitialized globals (vtables, std::mutex, std::string).
+    //
+    // The callback runs a guest function at `addr` and returns when the
+    // function returns. The Emulator implements this by borrowing the
+    // main CPU (saving/restoring architectural state) and stepping until
+    // RET to a sentinel LR.
+    void set_init_runner(std::function<void(uint64_t)> cb) {
+        init_runner_ = std::move(cb);
+    }
+
     // ── Graphic API thunk resolver (Turn 37) ───────────────────────
     // When `find_library()` returns empty for a graphic library soname
     // (libGL.so*, libEGL.so*, libSDL2.so*, libGLESv2.so*), the dynamic
@@ -182,11 +209,18 @@ public:
 private:
     Memory& mem_;
     std::vector<LoadedObject> objects_;
-    // Global symbol table: name → absolute address.
-    std::unordered_map<std::string, uint64_t> symbols_;
+    // Global symbol table: name → (absolute address, binding).
+    // BUGFIX (Turn 59): was `unordered_map<string, uint64_t>`. Changed to
+    // track the binding (STB_GLOBAL vs STB_WEAK) so we can implement
+    // "first strong wins" instead of "last strong wins" (H6).
+    struct SymEntry { uint64_t addr; uint8_t bind; };
+    std::unordered_map<std::string, SymEntry> symbols_;
     std::string error_;
     // Optional ifunc resolver callback (set by Emulator before link()).
     std::function<uint64_t(uint64_t)> ifunc_resolver_;
+    // Optional init runner callback (set by Emulator before link()).
+    // Used to invoke DT_INIT_ARRAY entries (C++ static constructors).
+    std::function<void(uint64_t)> init_runner_;
     // Optional thunk resolver callback (set by Emulator before link()).
     // When set, graphic library DT_NEEDED entries that can't be loaded
     // from disk fall back to this resolver instead of failing.
@@ -221,13 +255,21 @@ private:
 
     // Find a shared library by soname. Checks standard multiarch paths
     // and returns the file bytes (empty if not found).
+    // BUGFIX (Turn 59, C6): parent_runpath/parent_rpath are the parent
+    // object's DT_RUNPATH/DT_RPATH (semicolon-separated, $ORIGIN expanded).
+    // find_library searches these BEFORE the standard multiarch paths so
+    // games bundling their own libs (DT_RUNPATH=$ORIGIN/lib) find them.
     std::vector<uint8_t> find_library(const std::string& soname,
-                                      std::string& found_path);
+                                      std::string& found_path,
+                                      const std::string& parent_runpath = "",
+                                      const std::string& parent_rpath = "");
 
     // Load a shared library's PT_LOAD segments into guest memory at a
     // fresh base address. Records the object in `objects_` and its
     // symbols in `symbols_`. Returns the base address, or 0 on failure.
-    uint64_t load_shared_library(const std::string& soname);
+    uint64_t load_shared_library(const std::string& soname,
+                                 const std::string& parent_runpath = "",
+                                 const std::string& parent_rpath = "");
 
     // Register a synthetic LoadedObject for a graphic library that
     // couldn't be loaded from disk but is supported by the thunk
@@ -276,6 +318,11 @@ private:
     // object with a PT_TLS segment. Must be called after all libraries
     // are loaded but before relocations are applied.
     void allocate_static_tls();
+
+    // BUGFIX (Turn 59): invoke DT_INIT and DT_INIT_ARRAY for each loaded
+    // object (libs first, main last). Runs C++ static constructors.
+    // Requires init_runner_ to be set; no-ops if not.
+    void run_init_arrays_();
 
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the

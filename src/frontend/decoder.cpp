@@ -173,15 +173,32 @@ bool decode(DecodedInst& d, uint32_t inst) {
             return true;
         }
         if ((inst & 0x3F000000) != 0x08000000) return false;
-        // Check for CAS family (bit[21]=1). CAS is in encoding group 0x08
-        // (bits[29:27]=001), separate from LDADD etc. in group 0x18
-        // (bits[29:27]=111). In group 0x08, bits[15:12]=0111 for ALL CAS
-        // variants — the acquire/release semantics are in bits[23:22], NOT
-        // in bits[15:12] like group 0x18. So we hardcode atom_op=0xC (CAS)
-        // to match the interpreter's CAS check (atom_op >= 0xC).
-        if ((inst >> 21) & 1) {
+        // Check for CAS family (bit[21]=1 AND bit[23]=1).
+        // BUGFIX (Turn 59, C7): the old check was only `if ((inst >> 21) & 1)`,
+        // which matches BOTH the CAS family (bit[23]=1, e.g. CAS, CASA,
+        // CASL, CASAL) AND the pair-exclusive ops (bit[23]=0: STXP, LDXP,
+        // STLXP, LDAXP). Bit 21 is set for both families, but bit 23
+        // distinguishes them:
+        //   - bit[23]=1 → CAS family (single-word CAS)
+        //   - bit[23]=0 → pair-exclusive (STXP/LDXP/STLXP/LDAXP, 16-byte)
+        // The old code routed pair-exclusive ops to LSE_ATOMIC with
+        // atom_op=0xC (CAS), silently dropping the second source register
+        // (Rt2 in bits[14:10]) and corrupting 16-byte atomics
+        // (std::atomic<__int128>, lock-free queues, some mutex impls).
+        // Fix: require bit[23]=1 for CAS. Pair-exclusive ops (bit[23]=0,
+        // bit[21]=1) fall through to the exclusive decoder below, which
+        // already handles them via excl_low6 (0x1F for STXP/LDXP, 0x3F
+        // for STLXP/LDAXP). The interpreter's LDP/STP path handles the
+        // 16-byte pair access.
+        bool is_cas = ((inst >> 21) & 1) && ((inst >> 23) & 1);
+        if (is_cas) {
             d.size    = (inst >> 30) & 3;
-            d.acquire = (inst >> 23) & 1;
+            // BUGFIX (M4): bit 23 is the L (release) bit, not the acquire
+            // bit. Bit 22 is the A (acquire) bit. The field was named
+            // `acquire` but actually held the release bit. Keep the name
+            // for now (callers check d.acquire for "ordered" semantics)
+            // but document the truth.
+            d.acquire = (inst >> 23) & 1;  // actually the L (release) bit
             d.is_load = 1;  // CAS always returns old value
             d.rs      = (inst >> 16) & 0x1F;
             d.atom_op = 0xC;  // CAS (hardcoded — group 0x08 has different opc encoding)
@@ -193,17 +210,39 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.size      = (inst >> 30) & 3;
         d.acquire   = (inst >> 23) & 1;
         d.is_load   = (inst >> 22) & 1;
-        d.rs        = (inst >> 16) & 0x1F;
+        d.rs        = (inst >> 16) & 0x1F;  // Rs (STXR source) or 0x1F for LDAR/STLR
         d.rn        = (inst >> 5) & 0x1F;
         d.rt        = inst & 0x1F;
+        d.rt2       = (inst >> 10) & 0x1F;  // Rt2 (pair-exclusive second register)
         d.excl_low6 = (inst >> 10) & 0x3F;
         switch (d.excl_low6) {
-            case 0x0F: case 0x1F:
+            // BUGFIX (Turn 59, M2): removed bogus case 0x0F (no valid A64
+            // exclusive instruction has excl_low6 == 0x0F; STXR/LDXR use
+            // 0x1F, STLXR/LDAXR/STLR/LDAR use 0x3F). The old case was
+            // unreachable dead code.
+            case 0x1F:
+                // STXR/LDXR family (with Rs at bits[20:16]).
+                // d.is_load distinguishes LDXR (1) from STXR (0).
+                // d.acquire (bit 23) distinguishes LDAXR/STLXR (1) from
+                // LDXR/STXR (0). The interpreter reconstructs the correct
+                // behavior from these bits.
                 d.cls = d.is_load ? (d.acquire ? InstClass::LDAXR : InstClass::LDXR)
                                   : (d.acquire ? InstClass::STLXR : InstClass::STXR);
                 return true;
             case 0x3F:
-                d.cls = d.is_load ? InstClass::LDAR : InstClass::STLR;
+                // STLXR/LDAXR/STLR/LDAR family.
+                // BUGFIX (Turn 59, M3): distinguish by d.acquire (bit 23).
+                //   bit[23]=1 (d.acquire=1): STLR/LDAR (acquire-release)
+                //   bit[23]=0: STLXR/LDAXR (exclusive with acquire-release)
+                // The old code always classified as STLR/LDAR, which is
+                // wrong for STLXR/LDAXR. The interpreter happened to work
+                // because it reconstructs from the raw bits, but d.cls was
+                // misleading for JIT/trace consumers.
+                if (d.acquire) {
+                    d.cls = d.is_load ? InstClass::LDAR : InstClass::STLR;
+                } else {
+                    d.cls = d.is_load ? InstClass::LDAXR : InstClass::STLXR;
+                }
                 return true;
             default:
                 d.cls = InstClass::UNKNOWN;

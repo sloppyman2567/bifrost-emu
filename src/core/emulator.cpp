@@ -348,6 +348,88 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 restore();
                 return result;
             });
+            // BUGFIX (Turn 59, C1): register an init runner so the
+            // dynamic linker can invoke DT_INIT_ARRAY entries (C++ static
+            // constructors, glibc hooks, etc.). Uses the same borrow-CPU
+            // pattern as the ifunc resolver, but doesn't capture X0 —
+            // just runs the function until it RETs.
+            dyn_linker_->set_init_runner([this](uint64_t fn_addr) {
+                if (fn_addr == 0) return;
+                // Save architectural state (same pattern as ifunc resolver).
+                struct SavedState {
+                    uint64_t regs[32];
+                    uint64_t sp, pc;
+                    uint32_t pstate;
+                    uint64_t v_lo[32], v_hi[32];
+                    uint32_t fpcr, fpsr;
+                    uint64_t tpidr_el0, tpidrro_el0;
+                    uint64_t sigmask;
+                    bool running;
+                } saved;
+                std::memcpy(saved.regs, main_cpu_.regs, sizeof(saved.regs));
+                saved.sp = main_cpu_.sp;
+                saved.pc = main_cpu_.pc;
+                saved.pstate = main_cpu_.pstate;
+                std::memcpy(saved.v_lo, main_cpu_.v_lo, sizeof(saved.v_lo));
+                std::memcpy(saved.v_hi, main_cpu_.v_hi, sizeof(saved.v_hi));
+                saved.fpcr = main_cpu_.fpcr;
+                saved.fpsr = main_cpu_.fpsr;
+                saved.tpidr_el0 = main_cpu_.tpidr_el0;
+                saved.tpidrro_el0 = main_cpu_.tpidrro_el0;
+                saved.sigmask = main_cpu_.sigmask;
+                saved.running = main_cpu_.running;
+                auto restore = [&]() {
+                    std::memcpy(main_cpu_.regs, saved.regs, sizeof(saved.regs));
+                    main_cpu_.sp = saved.sp;
+                    main_cpu_.pc = saved.pc;
+                    main_cpu_.pstate = saved.pstate;
+                    std::memcpy(main_cpu_.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                    std::memcpy(main_cpu_.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    main_cpu_.fpcr = saved.fpcr;
+                    main_cpu_.fpsr = saved.fpsr;
+                    main_cpu_.tpidr_el0 = saved.tpidr_el0;
+                    main_cpu_.tpidrro_el0 = saved.tpidrro_el0;
+                    main_cpu_.sigmask = saved.sigmask;
+                    main_cpu_.running = saved.running;
+                };
+                // Scratch stack for the constructor.
+                uint64_t scratch_stack = mem_.mmap_alloc(4096);
+                uint64_t stack_top = scratch_stack + 4096;
+                constexpr uint64_t SENTINEL_LR = 0x1000;
+                main_cpu_.pc = fn_addr;
+                main_cpu_.sp = stack_top;
+                main_cpu_.regs[30] = SENTINEL_LR;
+                main_cpu_.running = true;
+                main_cpu_.pstate = 0;
+                // Constructors may call libc functions (e.g., printf for
+                // debug logging), which may themselves use atomics / TLS.
+                // Cap at 10M instructions to avoid infinite loops in
+                // buggy constructors.
+                constexpr uint64_t INIT_LIMIT = 10'000'000;
+                uint64_t steps = 0;
+                try {
+                    while (main_cpu_.running && main_cpu_.pc != SENTINEL_LR
+                           && steps < INIT_LIMIT) {
+                        step(main_cpu_);
+                        steps++;
+                    }
+                } catch (const std::exception& e) {
+                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                        fprintf(stderr, "[%s] init_array @ 0x%llx threw: %s\n",
+                                CODENAME,
+                                static_cast<unsigned long long>(fn_addr),
+                                e.what());
+                    }
+                }
+                if (steps >= INIT_LIMIT && getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[%s] init_array @ 0x%llx ran >%llu "
+                            "instructions; aborting (likely infinite loop)\n",
+                            CODENAME,
+                            static_cast<unsigned long long>(fn_addr),
+                            static_cast<unsigned long long>(INIT_LIMIT));
+                }
+                restore();
+            });
             if (!dyn_linker_->link(data, info.base_addr, path)) {
                 fprintf(stderr, "[%s] native dynamic linking failed: %s; "
                         "falling back to guest ld.so\n",

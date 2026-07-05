@@ -233,12 +233,28 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                         // R_AARCH64_RELATIVE: *(addr) = Delta + A
                         mem.store<uint64_t>(target, info.base_addr + r_addend);
                     } else if (rtype == 1026 || rtype == 1025 ||
-                               rtype == 257 || rtype == 1032) {
+                               rtype == 257) {
                         // For static binaries without symbol resolution,
                         // S=0, so *(addr) = A. For PIE, the addend already
                         // includes the relative offset; the dynamic linker
                         // (if present) will handle symbol resolution.
                         mem.store<uint64_t>(target, r_addend);
+                    } else if (rtype == 1032) {
+                        // R_AARCH64_IRELATIVE: *(addr) = call_resolver(Delta + A)
+                        // BUGFIX (Turn 59, C2): for static binaries we can't
+                        // call the resolver here (no CPU available in
+                        // elf_loader). Store info.base_addr + r_addend so at
+                        // least the resolver ADDRESS is correct for PIE
+                        // (was just r_addend, which was wrong for PIE). The
+                        // dynamic linker (dynamic_linker.cpp) handles
+                        // IRELATIVE correctly for dynamically-linked binaries
+                        // by calling the resolver via the ifunc_resolver_
+                        // callback. Static-PIE binaries with ifuncs are rare
+                        // (most ifunc users are glibc functions like memcpy
+                        // which aren't in static binaries); if encountered,
+                        // the guest will call the resolver body as the
+                        // function (visible failure, not silent corruption).
+                        mem.store<uint64_t>(target, info.base_addr + r_addend);
                     }
                 }
             }

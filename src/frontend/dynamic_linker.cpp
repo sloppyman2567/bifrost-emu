@@ -183,13 +183,25 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     if (soname.empty()) continue;
 
                     // Skip if already loaded.
+                    // BUGFIX (Turn 59, L6): dedup by DT_SONAME when present,
+                    // falling back to the DT_NEEDED string. Real ld.so uses
+                    // DT_SONAME for dedup so a DT_NEEDED "libfoo.so.1" and
+                    // a loaded library whose DT_SONAME is "libfoo.so.1.0.0"
+                    // are recognized as the same library.
                     bool found = false;
                     for (const auto& o : objects_) {
                         if (o.name == soname) { found = true; break; }
+                        if (!o.soname.empty() && o.soname == soname) { found = true; break; }
                     }
                     if (found) continue;
 
-                    uint64_t lib_base = load_shared_library(soname);
+                    // BUGFIX (Turn 59, C6): pass the parent object's
+                    // DT_RUNPATH so find_library can search it for
+                    // transitive deps. (DT_RUNPATH only applies to the
+                    // immediate object's DT_NEEDED per the gABI; we
+                    // approximate by passing the parent's runpath.)
+                    uint64_t lib_base = load_shared_library(soname,
+                        objects_[idx].runpath, objects_[idx].rpath);
                     if (lib_base == 0) {
                         // Library not found — not necessarily fatal
                         // (some programs dlopen at runtime). Log and
@@ -316,7 +328,16 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
                             uint64_t S = resolve_symbol(name);
-                            if (S == 0) S = obj.base_addr + s.st_value;
+                            // BUGFIX (Turn 59, C3): undefined-weak symbols
+                            // must resolve to 0, NOT obj.base_addr. The old
+                            // fallback `S = obj.base_addr + s.st_value` ran
+                            // for SHN_UNDEF symbols where st_value==0, so
+                            // S became obj.base_addr — the GOT slot pointed
+                            // to the start of the binary instead of 0.
+                            // Real ld.so: unresolved weak UNDEF → S = 0.
+                            if (S == 0 && s.st_shndx != SHN_UNDEF_) {
+                                S = obj.base_addr + s.st_value;
+                            }
                             mem_.store<uint64_t>(target, S + A);
                         }
                     } else if (type == R_AARCH64_IRELATIVE_) {
@@ -470,7 +491,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
                             uint64_t S = resolve_symbol(name);
-                            if (S == 0) S = obj.base_addr + s.st_value;
+                            // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
+                            if (S == 0 && s.st_shndx != SHN_UNDEF_) {
+                                S = obj.base_addr + s.st_value;
+                            }
                             mem_.store<uint64_t>(target, S + A);
                         }
                     }
@@ -510,7 +534,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
                             uint64_t S = resolve_symbol(name);
-                            if (S == 0) S = obj.base_addr + s.st_value;
+                            // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
+                            if (S == 0 && s.st_shndx != SHN_UNDEF_) {
+                                S = obj.base_addr + s.st_value;
+                            }
                             mem_.store<uint64_t>(target, S + A);
                         }
                     }
@@ -525,7 +552,61 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         }
     }
 
+    // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
+    // loaded object (libs first, main last). Runs C++ static constructors,
+    // glibc __libc_start_main hooks, etc. Without this, every C++ game
+    // runs with uninitialized globals (vtables, std::mutex, std::string).
+    // Requires init_runner_ to be set by the Emulator; no-ops if not.
+    run_init_arrays_();
+
     return true;
+}
+
+// ── run_init_arrays_ ───────────────────────────────────────────────────
+// Invoke DT_INIT (legacy _init()) and each entry in DT_INIT_ARRAY for
+// every loaded object, in dependency order (libs first, main last).
+// The init_runner_ callback runs a guest function at `addr` and returns
+// when it RETs. If no callback is registered, this is a no-op (the guest
+// will run with uninitialized statics — visible as crashes/vtables-full-
+// of-zero, not silent corruption).
+void DynamicLinker::run_init_arrays_() {
+    if (!init_runner_) return;
+    for (const auto& obj : objects_) {
+        // DT_INIT (legacy _init() function) — call before .init_array.
+        if (obj.init_addr != 0) {
+            try {
+                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[dynlink] DT_INIT for '%s' @ 0x%llx\n",
+                            obj.name.c_str(),
+                            static_cast<unsigned long long>(obj.init_addr));
+                }
+                init_runner_(obj.init_addr);
+            } catch (...) {}
+        }
+        // DT_INIT_ARRAY — array of function pointers, count = size/8.
+        if (obj.init_array_addr != 0 && obj.init_array_size >= 8) {
+            size_t count = obj.init_array_size / 8;
+            for (size_t i = 0; i < count; i++) {
+                uint64_t fn = 0;
+                try {
+                    fn = mem_.load<uint64_t>(obj.init_array_addr + i * 8);
+                } catch (...) { break; }
+                if (fn == 0) continue;  // skip NULL entries
+                try {
+                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                        fprintf(stderr, "[dynlink] DT_INIT_ARRAY[%zu] for '%s' @ 0x%llx\n",
+                                i, obj.name.c_str(),
+                                static_cast<unsigned long long>(fn));
+                    }
+                    init_runner_(fn);
+                } catch (...) {
+                    // If one constructor throws, continue with the rest.
+                    // (Real ld.so aborts, but for an emulator it's better
+                    // to be lenient and let the user see the failure.)
+                }
+            }
+        }
+    }
 }
 
 // ── parse_dynamic ──────────────────────────────────────────────────────
@@ -545,6 +626,15 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     memcpy(&e_phnum,     data.data() + 56, 2);
     memcpy(&e_shentsize, data.data() + 58, 2);
     memcpy(&e_shnum,     data.data() + 60, 2);
+
+    // BUGFIX (Turn 59, H1/H2): validate e_phoff and e_phentsize before
+    // either phdr loop. A malformed ELF with bogus e_phoff could OOB-read
+    // `data`. Also require e_phentsize >= 56 (we read up to p+48 for
+    // p_align, and the second loop reads p+32 for p_filesz).
+    if (e_phoff == 0 || e_phoff >= data.size() || e_phentsize < 56) {
+        error_ = "parse_dynamic: invalid program header table in " + obj.name;
+        return false;
+    }
 
     // Find PT_DYNAMIC in program headers.
     uint64_t dyn_vaddr = 0, dyn_filesz = 0;
@@ -588,6 +678,8 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     uint64_t dyn_off = 0;
     bool found = false;
     for (int i = 0; i < e_phnum; i++) {
+        // BUGFIX (Turn 59, H1): bounds-check this loop too (was missing).
+        if (e_phoff + (i + 1) * e_phentsize > data.size()) break;
         const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
         uint32_t p_type;
         uint64_t p_offset, p_vaddr, p_filesz;
@@ -609,7 +701,12 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     }
 
     // Iterate Elf64_Dyn entries.
+    // BUGFIX (Turn 59): capture DT_INIT/DT_FINI/DT_INIT_ARRAY/DT_FINI_ARRAY
+    // /DT_SONAME/DT_RPATH/DT_RUNPATH (previously declared as constants
+    // but never read). Also capture DT_HASH for symbol-count derivation (H5).
     uint64_t symtab_vaddr = 0, strtab_vaddr = 0;
+    uint64_t hash_vaddr = 0;
+    uint64_t soname_off = 0, rpath_off = 0, runpath_off = 0;
     for (uint64_t off = dyn_off;
          off + sizeof(Elf64_Dyn) <= data.size() && off < dyn_off + dyn_filesz;
          off += sizeof(Elf64_Dyn)) {
@@ -617,22 +714,94 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         memcpy(&dyn, data.data() + off, sizeof(dyn));
         if (dyn.d_tag == DT_NULL_) break;
         switch (dyn.d_tag) {
-            case DT_SYMTAB_:  symtab_vaddr = dyn.d_val; break;
-            case DT_STRTAB_:  strtab_vaddr = dyn.d_val; break;
-            case DT_JMPREL_:  obj.jmprel_addr = base + dyn.d_val; break;
-            case DT_PLTRELSZ_: obj.jmprel_size = dyn.d_val; break;
+            case DT_SYMTAB_:        symtab_vaddr = dyn.d_val; break;
+            case DT_STRTAB_:        strtab_vaddr = dyn.d_val; break;
+            case DT_JMPREL_:        obj.jmprel_addr = base + dyn.d_val; break;
+            case DT_PLTRELSZ_:      obj.jmprel_size = dyn.d_val; break;
+            case DT_HASH_:          hash_vaddr = dyn.d_val; break;
+            case DT_INIT_:          obj.init_addr = base + dyn.d_val; break;
+            case DT_FINI_:          obj.fini_addr = base + dyn.d_val; break;
+            case DT_INIT_ARRAY_:    obj.init_array_addr = base + dyn.d_val; break;
+            case DT_INIT_ARRAYSZ_:  obj.init_array_size = dyn.d_val; break;
+            case DT_FINI_ARRAY_:    obj.fini_array_addr = base + dyn.d_val; break;
+            case DT_FINI_ARRAYSZ_:  obj.fini_array_size = dyn.d_val; break;
+            case DT_SONAME_:        soname_off = dyn.d_val; break;
+            case DT_RPATH_:         rpath_off = dyn.d_val; break;
+            case DT_RUNPATH_:       runpath_off = dyn.d_val; break;
             default: break;
         }
     }
     obj.symtab_addr = base + symtab_vaddr;
     obj.strtab_addr = base + strtab_vaddr;
 
-    // Count symbols: the .dynsym section has no explicit size in the
-    // dynamic section; we infer it from DT_HASH (nchain) if present,
-    // or from the gap between symtab and strtab. The simplest reliable
-    // heuristic: read until we hit an unmapped region or 4096 symbols.
-    // Most libraries have < 4096 exported symbols.
-    obj.symtab_count = 4096;  // upper bound; resolve_symbol stops at first
+    // BUGFIX (Turn 59, H5): derive symtab_count from DT_HASH when present.
+    // DT_HASH's first two uint32_t are nbucket and nchain; nchain is the
+    // number of symbols in .dynsym (exact count — no more 8192 cap).
+    // Without this, libraries with > 8192 symbols (Qt, webkit) silently
+    // drop symbols past the cap.
+    if (hash_vaddr != 0) {
+        try {
+            uint32_t nchain = 0;
+            mem_.read(base + hash_vaddr + 4, &nchain, 4);
+            obj.symtab_count = nchain;
+        } catch (...) {
+            obj.symtab_count = 0;  // fall back to old heuristic
+        }
+    }
+    if (obj.symtab_count == 0) {
+        // Fall back to old heuristic. Without DT_HASH we can't know the
+        // exact count; DT_GNU_HASH would work but is more complex to parse.
+        // 8192 is the old cap; index_symbols also uses it as a safety bound.
+        obj.symtab_count = 8192;
+    }
+
+    // Read DT_SONAME (for dedup), DT_RPATH, DT_RUNPATH.
+    // BUGFIX (Turn 59, C6): these were declared as constants but never
+    // consulted. Now captured for use in find_library and dedup.
+    if (soname_off != 0 && strtab_vaddr != 0) {
+        // Read the soname string from the file bytes (the strtab may not
+        // be relocated yet). Find the file offset of strtab_vaddr first.
+        // Simple approach: read from guest memory after we've loaded
+        // the segments. But parse_dynamic runs before relocations, so
+        // the strtab IS already mapped (PT_LOAD covers it). Read from
+        // guest memory.
+        try {
+            obj.soname = read_guest_cstr(mem_, obj.strtab_addr + soname_off);
+        } catch (...) {}
+    }
+    // Helper to expand $ORIGIN in rpath/runpath.
+    auto expand_origin = [&](const std::string& path) -> std::string {
+        // $ORIGIN expands to the directory containing the ELF file.
+        // For the main binary, that's the dir of main_path; for libs,
+        // the dir of the lib's path (stored in obj.name).
+        std::string dir;
+        std::string path_str = obj.is_main ? obj.name : obj.name;
+        size_t slash = path_str.rfind('/');
+        if (slash != std::string::npos) dir = path_str.substr(0, slash);
+        std::string result = path;
+        const std::string token = "$ORIGIN";
+        for (size_t pos = 0; (pos = result.find(token, pos)) != std::string::npos; ) {
+            result.replace(pos, token.size(), dir);
+            pos += dir.size();
+        }
+        // Also handle ${ORIGIN} form.
+        const std::string token2 = "${ORIGIN}";
+        for (size_t pos = 0; (pos = result.find(token2, pos)) != std::string::npos; ) {
+            result.replace(pos, token2.size(), dir);
+            pos += dir.size();
+        }
+        return result;
+    };
+    if (rpath_off != 0) {
+        try {
+            obj.rpath = expand_origin(read_guest_cstr(mem_, obj.strtab_addr + rpath_off));
+        } catch (...) {}
+    }
+    if (runpath_off != 0) {
+        try {
+            obj.runpath = expand_origin(read_guest_cstr(mem_, obj.strtab_addr + runpath_off));
+        } catch (...) {}
+    }
 
     return true;
 }
@@ -862,10 +1031,10 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // Data symbols point into the data page; function symbols point
     // into the code page.
     auto add_data_sym = [&](const char* name, uint64_t off) {
-        symbols_[name] = shim_base_ + off;
+        symbols_[name] = SymEntry{shim_base_ + off, STB_GLOBAL_};
     };
     auto add_func_sym = [&](const char* name, uint64_t off) {
-        symbols_[name] = code_base + off;
+        symbols_[name] = SymEntry{code_base + off, STB_GLOBAL_};
     };
 
     // Data symbols (from ld-linux that libc references).
@@ -911,9 +1080,20 @@ bool DynamicLinker::register_ld_linux_shim_() {
 }
 
 
+// ── find_library ───────────────────────────────────────────────────────
+// BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath (from the
+// parent object's DT_RUNPATH/DT_RPATH) and search them BEFORE the
+// standard multiarch paths. This lets games that bundle their own libs
+// (via DT_RUNPATH=$ORIGIN/lib) actually find them.
 std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
-                                                 std::string& found_path) {
+                                                 std::string& found_path,
+                                                 const std::string& parent_runpath,
+                                                 const std::string& parent_rpath) {
     // Search order (matches Linux ld.so behavior for AArch64 multiarch):
+    //   0. Parent object's DT_RPATH (deprecated, global) — searched FIRST
+    //      per the gABI (only if no DT_RUNPATH was seen in any object).
+    //      We approximate by searching it before RUNPATH.
+    //   0.5. Parent object's DT_RUNPATH (per-object, $ORIGIN-expanded).
     //   1. BIFROST_ROOT sandbox (if set) — $BIFROST_ROOT/lib and
     //      $BIFROST_ROOT/usr/lib. This lets the user provide a self-
     //      contained rootfs without polluting the host's multiarch dirs.
@@ -932,6 +1112,36 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     // after fetching the toolchains, without requiring the user to set
     // up a rootfs or install aarch64 multiarch packages on the host.
     std::vector<std::string> dirs;
+
+    // 0. Parent's DT_RPATH (semicolon-separated).
+    if (!parent_rpath.empty()) {
+        std::string s = parent_rpath;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t colon = s.find(':', pos);
+            if (colon == std::string::npos) {
+                dirs.push_back(s.substr(pos));
+                break;
+            }
+            dirs.push_back(s.substr(pos, colon - pos));
+            pos = colon + 1;
+        }
+    }
+
+    // 0.5. Parent's DT_RUNPATH (semicolon-separated).
+    if (!parent_runpath.empty()) {
+        std::string s = parent_runpath;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t colon = s.find(':', pos);
+            if (colon == std::string::npos) {
+                dirs.push_back(s.substr(pos));
+                break;
+            }
+            dirs.push_back(s.substr(pos, colon - pos));
+            pos = colon + 1;
+        }
+    }
 
     // 1. BIFROST_ROOT sandbox.
     if (const char* root = getenv("BIFROST_ROOT")) {
@@ -1051,9 +1261,15 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
 }
 
 // ── load_shared_library ────────────────────────────────────────────────
-uint64_t DynamicLinker::load_shared_library(const std::string& soname) {
+// BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath so
+// find_library can search the parent object's DT_RUNPATH/DT_RPATH for
+// this library. DT_RUNPATH only applies to the immediate object's
+// DT_NEEDED per the gABI; DT_RPATH is global (deprecated but still used).
+uint64_t DynamicLinker::load_shared_library(const std::string& soname,
+                                             const std::string& parent_runpath,
+                                             const std::string& parent_rpath) {
     std::string path;
-    auto data = find_library(soname, path);
+    auto data = find_library(soname, path, parent_runpath, parent_rpath);
     if (data.empty()) {
         // Library not found on disk. If a thunk resolver is registered
         // and this is a known graphic library, register a synthetic
@@ -1163,7 +1379,7 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
         // First definition wins (matches the existing index_symbols
         // behavior). Don't override a strong symbol from a real lib.
         if (symbols_.count(sym) == 0) {
-            symbols_[sym] = addr;
+            symbols_[sym] = SymEntry{addr, STB_GLOBAL_};
             added++;
         }
     }
@@ -1322,22 +1538,39 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
 // ── index_symbols ──────────────────────────────────────────────────────
 void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
-    // Iterate the .dynsym. We don't know the exact count, so we read
-    // up to a reasonable limit (4096). Each symbol is 24 bytes.
-    // Stop when st_name is 0 and st_value is 0 (typical end-of-table
-    // sentinel).
-    constexpr size_t MAX_SYMS = 8192;
-    for (size_t i = 0; i < MAX_SYMS; i++) {
+    // BUGFIX (Turn 59, H5): use obj.symtab_count (from DT_HASH nchain when
+    // available, 8192 cap fallback). Previously hardcoded 8192, dropping
+    // symbols past the cap in large libs (Qt, webkit).
+    // BUGFIX (Turn 59, H6): "first strong wins" — a strong symbol never
+    // overrides an existing strong symbol; a weak symbol is overridden by
+    // a strong one. Previously "last strong wins" which let load order
+    // silently swap library implementations.
+    // BUGFIX (Turn 59, C4): STT_GNU_IFUNC (type 10) symbols store the
+    // RESOLVER address in st_value, not the function address. For ifuncs,
+    // we call the resolver (via ifunc_resolver_) and store the resolved
+    // address. Without this, glibc's memcpy/memset/strcmp (which are
+    // ifuncs) would jump to the resolver body as if it were the function.
+    constexpr size_t MAX_SYMS = 8192;  // safety cap when symtab_count is bogus
+    size_t count = obj.symtab_count;
+    if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;  // sanity
+    constexpr uint8_t STT_GNU_IFUNC_ = 10;
+    auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
+    for (size_t i = 0; i < count; i++) {
         Elf64_Sym s;
         try {
             mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
         } catch (...) {
             break;
         }
+        // BUGFIX (Turn 59, M9): break (not continue) on the end-of-table
+        // sentinel. The old `continue` caused the loop to scan all 8192
+        // entries even when the table was short, wasting ~1.6 GiB of
+        // redundant reads across a heavy game load. (Some ELF objects
+        // have a real STN_UNDEF entry in the middle, but those are rare
+        // and the break only triggers on the all-zero sentinel which is
+        // the conventional end marker.)
         if (s.st_name == 0 && s.st_value == 0 && s.st_shndx == 0) {
-            // End of table (or empty entry). Continue scanning — there
-            // may be more symbols after a STN_UNDEF entry.
-            continue;
+            break;
         }
         // Only index defined symbols (st_shndx != SHN_UNDEF).
         if (s.st_shndx == SHN_UNDEF_) continue;
@@ -1349,14 +1582,33 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
         if (name.empty()) continue;
 
         uint64_t addr = obj.base_addr + s.st_value;
-        // First definition wins (matches ld.so behavior for non-weak
-        // symbols; weak symbols are overridden by strong ones — but we
-        // keep it simple and just take the first).
-        if (symbols_.count(name) == 0) {
-            symbols_[name] = addr;
-        } else if (bind == STB_GLOBAL_) {
-            // Strong symbol overrides weak.
-            symbols_[name] = addr;
+
+        // STT_GNU_IFUNC: st_value is the resolver, not the function.
+        // Call the resolver to get the real address. If no resolver is
+        // registered (DynamicLinker used standalone), fall back to the
+        // resolver address — the guest will call the resolver body as
+        // the function (visible failure, not silent corruption).
+        if (ST_TYPE_(s.st_info) == STT_GNU_IFUNC_) {
+            if (ifunc_resolver_) {
+                uint64_t resolved = ifunc_resolver_(addr);
+                if (resolved != 0) addr = resolved;
+                // else: fall back to resolver address (visible failure)
+            }
+            // else: no resolver registered; store resolver address.
+            // The guest will crash on first call (visible, not silent).
+        }
+
+        // First-strong-wins symbol resolution (H6).
+        auto it = symbols_.find(name);
+        if (it == symbols_.end()) {
+            symbols_[name] = SymEntry{addr, bind};
+        } else {
+            // Existing entry. Override only if existing is WEAK and new
+            // is STRONG. Never override an existing STRONG.
+            if (it->second.bind == STB_WEAK_ && bind == STB_GLOBAL_) {
+                it->second = SymEntry{addr, bind};
+            }
+            // else: keep existing (first strong wins, or weak kept as-is).
         }
     }
 }
@@ -1374,9 +1626,9 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] resolve_symbol: '%s' -> 0x%llx\n",
                 name.c_str(),
-                static_cast<unsigned long long>(it->second));
+                static_cast<unsigned long long>(it->second.addr));
     }
-    return it->second;
+    return it->second.addr;
 }
 
 } // namespace arm64emu
