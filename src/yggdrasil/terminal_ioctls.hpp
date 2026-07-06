@@ -152,20 +152,26 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
 }
 
 // ── pass_through_ioctl — last-resort host fd passthrough ───────────────
-// For ioctls we don't recognize, pass them straight to the host fd.
-// The argp is interpreted as a raw pointer; for most ioctls this works
-// because the guest's argp is a guest virtual address that maps to a
-// host address via the emulator's Memory direct window (low 4 GiB).
+// For ioctls we don't recognize, we previously passed them straight to
+// the host fd with the guest's argp reinterpreted as a host pointer.
+// This was DANGEROUS: the guest's virtual address space is separate
+// from the host's, so the host ioctl would dereference garbage memory
+// (EFAULT) or, worse, corrupt host memory if the guest address happened
+// to map to a valid host region.
 //
-// For ioctls whose argp lives above the 4 GiB window, this would need
-// to marshal through Memory — but those are rare enough (mostly DRM/
-// KMS ioctls on modern Linux) that we accept the limitation rather
-// than complicate the common path.
-inline int pass_through_ioctl(int host_fd, uint32_t request, uint64_t argp) {
-    int r = ::ioctl(host_fd, static_cast<unsigned long>(request),
-                    reinterpret_cast<void*>(argp));
-    if (r < 0) return -errno;
-    return r;
+// BUGFIX (Turn 65): we now return -ENOTTY for unrecognized ioctls instead
+// of passing them through. This is safer and matches what the kernel
+// returns for ioctls the fd doesn't support. Programs that rely on
+// exotic ioctls (DRM/KMS, media devices, etc.) will get -ENOTTY and
+// can fall back to other code paths.
+//
+// The ioctls we DO handle (TCGETS, TCSETS, FIONREAD, TIOCGWINSZ, etc.)
+// are dispatched by dispatch_terminal_ioctl() above, which correctly
+// marshals the argp through the guest's Memory.
+inline int pass_through_ioctl(int /*host_fd*/, uint32_t /*request*/, uint64_t /*argp*/) {
+    // Return -ENOTTY (Inappropriate ioctl for device). This is what the
+    // kernel returns for ioctls the fd doesn't support.
+    return -ENOTTY;
 }
 
 }  // namespace arm64emu::yggdrasil

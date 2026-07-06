@@ -64,6 +64,7 @@ static std::vector<DirNode::Entry> proc_self_entries() {
     return {
         {"exe",     0x2 /*DT_LNK*/},
         {"cmdline", 0x1 /*DT_REG*/},
+        {"comm",    0x1 /*DT_REG*/},
         {"maps",    0x1 /*DT_REG*/},
         {"status",  0x1 /*DT_REG*/},
         {"auxv",    0x1 /*DT_REG*/},
@@ -97,6 +98,28 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         for (auto& a : argv_) { cmdline += a; cmdline.push_back('\0'); }
         if (cmdline.empty()) cmdline = elf_path_ + '\0';
         return serve_static(cmdline, flags);
+    }
+
+    // ── /proc/self/comm → process name (set by prctl PR_SET_NAME) ────
+    // The kernel returns the basename of the executable by default,
+    // which prctl(PR_SET_NAME) can override. Tools like `ps`, `top`,
+    // and `htop` display this field.
+    if (path == "/proc/self/comm") {
+        // Use lazy so changes via prctl(PR_SET_NAME) are reflected.
+        return serve_lazy([this]() -> std::string {
+            std::string comm;
+            if (comm_provider_) {
+                comm = comm_provider_();
+            } else {
+                // Fallback: ELF basename.
+                comm = elf_path_;
+                size_t slash = comm.find_last_of('/');
+                if (slash != std::string::npos) comm = comm.substr(slash + 1);
+                if (comm.size() > 15) comm = comm.substr(0, 15);
+            }
+            comm.push_back('\n');
+            return comm;
+        }, flags);
     }
 
     // ── /proc/self/maps → real memory layout (LAZY) ─────────────────

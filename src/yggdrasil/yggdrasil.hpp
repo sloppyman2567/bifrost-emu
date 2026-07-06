@@ -113,6 +113,13 @@ public:
         maps_provider_ = std::move(cb);
     }
 
+    // ── Guest process name (comm) for /proc/self/comm ─────────────
+    // The Emulator registers a callback that returns the current
+    // guest_comm_ (set by prctl PR_SET_NAME, defaults to ELF basename).
+    void set_comm_provider(std::function<std::string()> cb) {
+        comm_provider_ = std::move(cb);
+    }
+
     // ── Guest cwd tracking (chdir/getcwd) ──────────────────────────
     // The Emulator registers the guest's current working directory
     // here so the getcwd syscall can return the real path (the host
@@ -147,6 +154,7 @@ private:
     ::arm64emu::FrostGraphics* gfx_ = nullptr;
     ::arm64emu::Audio* audio_ = nullptr;
     std::function<std::vector<MapEntry>()> maps_provider_;
+    std::function<std::string()> comm_provider_;
     std::function<std::string()> cwd_getter_;
     std::function<bool(const std::string&)> cwd_setter_;
     std::string guest_cwd_ = "/";

@@ -51,6 +51,15 @@ void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     elf_path_ = path;
+    // Initialize the guest process name (comm) to the ELF basename.
+    // This matches the Linux kernel behavior: the initial comm is the
+    // executable's basename, truncated to 15 chars. prctl(PR_SET_NAME)
+    // can override it later.
+    {
+        size_t slash = path.find_last_of('/');
+        std::string base = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+        set_guest_comm(base);
+    }
     vfs_.set_elf_path(path);
     vfs_.set_argv(argv);
     vfs_.set_graphics(&graphics_);
@@ -153,6 +162,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
             return true;
         });
+
+    // Wire up /proc/self/comm — returns the guest process name (set by
+    // prctl PR_SET_NAME, defaults to ELF basename).
+    vfs_.set_comm_provider([this]() -> std::string {
+        return guest_comm_;
+    });
+
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) throw EmuError("cannot open " + path + ": " + strerror(errno));
     fseek(f, 0, SEEK_END);

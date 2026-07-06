@@ -245,6 +245,11 @@ INTEGRATION_TESTS=(
     # NEW (Turn 64): host env var propagation (TZ, LANG, LC_*). Verifies
     # core env vars are set and localtime/strftime/setenv work.
     "env|ctest_real/test_env.elf||5|ALL PASS"
+
+    # NEW (Turn 65): prctl — PR_SET_NAME/PR_GET_NAME round-trip,
+    # truncation, PR_GET_DUMPABLE, PR_GET_NO_NEW_PRIVS, unknown option
+    # returns -EINVAL.
+    "prctl|ctest_real/test_prctl.elf||5|ALL PASS"
 )
 
 # Dynamic linking tests (Turn 53).

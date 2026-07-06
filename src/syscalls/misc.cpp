@@ -81,21 +81,47 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-        case 122: { // sched_setaffinity — no-op, return 0
-            // BUGFIX: this is the real sched_setaffinity (was at 124).
-            // Return 0 to indicate the affinity "call" succeeded.
+        case 122: { // sched_setaffinity(pid, cpusetsize, mask) — no-op
+            // AArch64 122. We accept any affinity mask and pretend it
+            // succeeded. The guest is a single-process sandbox; we don't
+            // enforce CPU affinity.
+            // BUGFIX (Turn 65): validate the mask pointer to avoid EFAULT
+            // later. The old code didn't even read a1/a2.
+            if (a2 != 0 && a1 > 0) {
+                // Touch the mask to validate the pointer.
+                try { (void)mem_.load<uint8_t>(a2); }
+                catch (...) { ret_err(EFAULT); return 0; }
+            }
             ret_host(0);
             return 0;
         }
-        case 123: { // sched_getaffinity — return full mask
-            // AArch64 123. Write an 8-byte affinity mask (all CPUs = 1).
-            if (a1 >= 8 && a2 != 0) {
-                try { mem_.store<uint64_t>(a2, 1ULL); }
-                catch (...) { ret_err(EFAULT); return 0; }
-                ret_host(8);
-                return 0;
-            }
-            ret_host(0);
+        case 123: { // sched_getaffinity(pid, cpusetsize, mask) — AArch64 123
+            // Returns the CPU affinity mask. The kernel fills in
+            // min(cpusetsize, ceil(ncpus/8)) bytes and returns that count.
+            // We advertise 8 CPUs (a reasonable default for modern systems),
+            // so the mask is 1 byte (0xFF) — but we fill the full
+            // cpusetsize with the mask pattern so guests requesting larger
+            // masks get valid data.
+            //
+            // BUGFIX (Turn 65): the old code only wrote 8 bytes and returned
+            // 8, ignoring the cpusetsize argument. This broke programs that
+            // request larger masks (e.g., Python's os.sched_getaffinity(0)
+            // on systems with > 64 CPUs) — they'd see the 8-byte mask but
+            // interpret the missing bytes as zero, thinking only CPUs 0-5
+            // were available.
+            if (a2 == 0) { ret_err(EFAULT); return 0; }
+            if (a1 == 0) { ret_err(EINVAL); return 0; }
+            // Advertise 8 CPUs (mask = 0xFF in the first byte, 0 elsewhere).
+            // Cap the cpusetsize at 256 bytes (2048 CPUs) to prevent OOM
+            // from a corrupted size argument.
+            uint64_t cpusetsize = std::min<uint64_t>(a1, 256);
+            std::vector<uint8_t> mask(cpusetsize, 0);
+            // Set the first byte to 0xFF (8 CPUs available).
+            mask[0] = 0xFF;
+            try { mem_.write(a2, mask.data(), cpusetsize); }
+            catch (...) { ret_err(EFAULT); return 0; }
+            // Return the number of bytes written.
+            ret_host(static_cast<uint64_t>(cpusetsize));
             return 0;
         }
         case 125: { // sched_get_priority_max(policy) — AArch64 125
@@ -507,9 +533,172 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 167: { // prctl - handle PR_SET_NAME etc as no-op
-            ret_host(0);
-            return 0;
+        case 167: { // prctl — process/thread control
+            // Implemented the most common prctl options. Unknown options
+            // return -EINVAL (matching kernel behavior). Previously ALL
+            // options silently returned 0, which broke PR_GET_NAME (returned
+            // garbage), PR_SET_PDEATHSIG (silently ignored), etc.
+            //
+            // PR_* constants per <linux/prctl.h>. We define them locally
+            // (not via #include <sys/prctl.h>) because the host's glibc
+            // header may not have all the recent ones.
+            enum {
+                PR_SET_PDEATHSIG   = 1,
+                PR_GET_PDEATHSIG   = 2,
+                PR_GET_DUMPABLE    = 3,
+                PR_SET_DUMPABLE    = 4,
+                PR_GET_KEEPCAPS    = 7,
+                PR_SET_KEEPCAPS    = 8,
+                PR_GET_TIMING      = 13,
+                PR_SET_TIMING      = 14,
+                PR_SET_NAME        = 15,
+                PR_GET_NAME        = 16,
+                PR_GET_SECCOMP     = 21,
+                PR_SET_SECCOMP     = 22,
+                PR_CAPBSET_READ    = 23,
+                PR_CAPBSET_DROP    = 24,
+                PR_GET_TSC         = 25,
+                PR_SET_TSC         = 26,
+                PR_GET_SECUREBITS  = 27,
+                PR_SET_SECUREBITS  = 28,
+                PR_SET_TIMERSLACK  = 29,
+                PR_GET_TIMERSLACK  = 30,
+                PR_TASK_PERF_EVENTS_DISABLE = 31,
+                PR_TASK_PERF_EVENTS_ENABLE  = 32,
+                PR_MCE_KILL        = 33,
+                PR_MCE_KILL_GET    = 34,
+                PR_SET_MM          = 35,
+                PR_SET_PTRACER     = 0x59616d61,
+                PR_SET_CHILD_SUBREAPER = 36,
+                PR_GET_CHILD_SUBREAPER = 37,
+                PR_SET_NO_NEW_PRIVS    = 38,
+                PR_GET_NO_NEW_PRIVS    = 39,
+                PR_GET_TID_ADDRESS     = 40,
+                PR_SET_THP_DISABLE     = 41,
+                PR_GET_THP_DISABLE     = 42,
+                PR_CAP_AMBIENT         = 47,
+            };
+            uint32_t option = static_cast<uint32_t>(a0);
+            switch (option) {
+                case PR_SET_NAME: {  // 15 — set process name (comm)
+                    // Read the name from guest memory (a1). Max 16 bytes
+                    // (15 + NUL). The kernel truncates, doesn't error.
+                    char name[17] = {0};
+                    try {
+                        for (size_t i = 0; i < 16; i++) {
+                            uint8_t c = mem_.load<uint8_t>(a1 + i);
+                            if (c == 0) break;
+                            name[i] = static_cast<char>(c);
+                        }
+                        name[16] = '\0';
+                    } catch (...) {
+                        ret_err(EFAULT);
+                        return 0;
+                    }
+                    emu.set_guest_comm(name);
+                    ret_host(0);
+                    return 0;
+                }
+                case PR_GET_NAME: {  // 16 — get process name (comm)
+                    // Write the name to guest memory (a1). Always 16 bytes
+                    // (NUL-padded).
+                    if (a1 == 0) { ret_err(EFAULT); return 0; }
+                    char buf[16] = {0};
+                    const std::string& comm = emu.guest_comm();
+                    size_t n = comm.size() > 15 ? 15 : comm.size();
+                    memcpy(buf, comm.data(), n);
+                    try { mem_.write(a1, buf, 16); }
+                    catch (...) { ret_err(EFAULT); return 0; }
+                    ret_host(0);
+                    return 0;
+                }
+                case PR_SET_PDEATHSIG:  // 1 — set parent-death signal
+                case PR_SET_DUMPABLE:   // 4
+                case PR_SET_KEEPCAPS:   // 8
+                case PR_SET_TIMING:     // 14
+                case PR_SET_SECCOMP:    // 22 — we don't implement seccomp
+                case PR_CAPBSET_DROP:   // 24
+                case PR_SET_TSC:        // 26
+                case PR_SET_SECUREBITS: // 28
+                case PR_SET_TIMERSLACK: // 29
+                case PR_TASK_PERF_EVENTS_DISABLE:
+                case PR_TASK_PERF_EVENTS_ENABLE:
+                case PR_MCE_KILL:       // 33
+                case PR_SET_CHILD_SUBREAPER: // 36
+                case PR_SET_NO_NEW_PRIVS:   // 38
+                case PR_SET_THP_DISABLE:    // 41
+                case PR_SET_PTRACER:        // 0x59616d61
+                    // Accept and ignore — we don't enforce these in the
+                    // sandbox. Returning 0 (success) is safe.
+                    ret_host(0);
+                    return 0;
+                case PR_GET_PDEATHSIG: {  // 2 — return parent-death signal
+                    // Write 0 (no signal) to the guest pointer in a1.
+                    if (a1) {
+                        try { mem_.store<uint32_t>(a1, 0); }
+                        catch (...) { ret_err(EFAULT); return 0; }
+                    }
+                    ret_host(0);
+                    return 0;
+                }
+                case PR_GET_DUMPABLE:    // 3
+                    ret_host(1);  // SUID_DUMP_USER
+                    return 0;
+                case PR_GET_KEEPCAPS:    // 7
+                    ret_host(0);
+                    return 0;
+                case PR_GET_TIMING:      // 13
+                    ret_host(0);  // PR_TIMING_STATISTICAL
+                    return 0;
+                case PR_GET_SECCOMP:     // 21
+                    ret_host(0);  // SECCOMP_MODE_DISABLED
+                    return 0;
+                case PR_CAPBSET_READ:    // 23 — capability bounding set
+                    ret_host(1);  // capability is in bounding set
+                    return 0;
+                case PR_GET_TSC:         // 25
+                    ret_host(0);  // PR_TSC_ENABLE
+                    return 0;
+                case PR_GET_SECUREBITS:  // 27
+                    ret_host(0);
+                    return 0;
+                case PR_GET_TIMERSLACK:  // 30
+                    ret_host(50000);  // 50 us default
+                    return 0;
+                case PR_MCE_KILL_GET:    // 34
+                    ret_host(0);  // PR_MCE_KILL_DEFAULT
+                    return 0;
+                case PR_GET_CHILD_SUBREAPER: // 37
+                    if (a1) {
+                        try { mem_.store<uint32_t>(a1, 0); }
+                        catch (...) { ret_err(EFAULT); return 0; }
+                    }
+                    ret_host(0);
+                    return 0;
+                case PR_GET_NO_NEW_PRIVS:    // 39
+                    ret_host(0);  // not set
+                    return 0;
+                case PR_GET_TID_ADDRESS: {  // 40
+                    // Write the address of the TID field to a1.
+                    if (a1) {
+                        try { mem_.store<uint64_t>(a1, cpu.set_tid_address_ptr); }
+                        catch (...) { ret_err(EFAULT); return 0; }
+                    }
+                    ret_host(0);
+                    return 0;
+                }
+                case PR_GET_THP_DISABLE:  // 42
+                    ret_host(0);
+                    return 0;
+                case PR_CAP_AMBIENT:  // 47 — sub-operations via a1
+                    // PR_CAP_AMBIENT_IS_SET/RAISE/etc. Return 0.
+                    ret_host(0);
+                    return 0;
+                default:
+                    // Unknown prctl option — return -EINVAL (matches kernel).
+                    ret_err(EINVAL);
+                    return 0;
+            }
         }
 
         case 168: { // getcpu(cpu, node, tcache) — AArch64 168

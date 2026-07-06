@@ -135,6 +135,13 @@ public:
         guest_env_ = envs;
     }
     const std::vector<std::string>& guest_env() const { return guest_env_; }
+    // Guest process name (comm). Set by prctl(PR_SET_NAME), returned by
+    // prctl(PR_GET_NAME) and /proc/self/comm.
+    void set_guest_comm(const std::string& name) {
+        // Linux kernel truncates to 16 bytes (15 + NUL).
+        guest_comm_ = name.size() > 15 ? name.substr(0, 15) : name;
+    }
+    const std::string& guest_comm() const { return guest_comm_; }
     // Build the default guest environment, propagating locale/timezone-
     // related host env vars. Used by build_initial_stack when set_guest_env
     // was not called. Also used by execve to give the new process image
@@ -307,6 +314,10 @@ private:
     // set_guest_env() or by build_initial_stack() using
     // build_default_guest_env() when empty.
     std::vector<std::string> guest_env_;
+    // Guest process name (set by prctl(PR_SET_NAME), returned by
+    // prctl(PR_GET_NAME) and /proc/self/comm). Max 16 bytes (15 + NUL)
+    // per Linux kernel. Defaults to the ELF basename.
+    std::string guest_comm_ = "bifrost";
 
     // Decode cache type alias (constants + CacheEntry type live on CPU).
     using CacheEntry = CPU::CacheEntry;
