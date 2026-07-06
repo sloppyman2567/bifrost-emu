@@ -85,7 +85,7 @@ void Emulator::syscall(CPU& cpu) {
             case 93: name = "exit"; break;
             case 94: name = "exit_group"; break;
             case 96: name = "set_tid_address"; break;
-            case 180: name = "sysinfo"; break;
+            case 179: name = "sysinfo"; break;
             case 98: name = "futex"; break;
             case 99: name = "set_robust_list"; break;
             case 100: name = "get_robust_list"; break;

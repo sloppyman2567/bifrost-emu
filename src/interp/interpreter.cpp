@@ -3194,6 +3194,88 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     else       write_fp_s(cpu, rd, static_cast<float>(result));
                     return;
                 }
+                // ── SIMD scalar int↔FP conversions (FP source/dest) ───────────────
+                // These are in the "Advanced SIMD scalar two-register miscellaneous"
+                // group (bits[31:24]=0x5E, bit 30=Q=1 for scalar form). They
+                // differ from the standard FP scalar forms (0x1E...) by having
+                // the integer source/dest in an FP register (Dn/Sn) instead of
+                // a GPR (Xn/Wn). GCC/clang emit these for `(double)long_var`
+                // when the long is already in an FP register from a load —
+                // saving a GPR move.
+                //
+                // Encoding layout (after masking out U/size/opcode/Rn/Rd):
+                //   bits[31:24] = 0x5E (constant — scalar SIMD)
+                //   bit 29      = U (0=signed, 1=unsigned)
+                //   bits[23:22] = size (prec + int width, see per-op below)
+                //   bits[21:17] = 10000 (constant)
+                //   bits[16:12] = opcode (5 bits)
+                //   bits[11:10] = 10 (constant)
+                //   bits[9:5]   = Rn (source FP reg)
+                //   bits[4:0]   = Rd (dest FP reg)
+                //
+                // Group mask: 0xDF3E0C00 (bit 29 = U, allowed to vary),
+                // group constant: 0x5E200800 (with U=0).
+                // SCVTF/UCVTF opcode = 11101 (0x1D) → constant 0x5E21D800.
+                // FCVTZS/FCVTZU opcode = 11011 (0x1B) → constant 0x5E21B800.
+                //
+                // For SCVTF/UCVTF (int→FP):
+                //   size=01 → 64-bit int src, double-precision dest (Dd, Dn)
+                //   size=00 → 32-bit int src, single-precision dest (Sd, Sn)
+                // For FCVTZS/FCVTZU (FP→int):
+                //   size=11 → double-precision src, 64-bit int dest (Dd, Dn)
+                //   size=10 → single-precision src, 32-bit int dest (Sd, Sn)
+                if ((op & 0xDF3E0C00) == 0x5E200800) {
+                    bool is_unsigned = (op >> 29) & 1;
+                    uint8_t opcode = (op >> 12) & 0x1F;
+                    bool is_double = (op >> 22) & 1;  // also doubles as "is 64-bit int"
+
+                    if (opcode == 0x1D) {  // SCVTF/UCVTF (int → FP, FP source)
+                        // Read integer bits from FP source register.
+                        uint64_t src_bits = cpu.v_lo[rn];
+                        if (is_double) {
+                            // 64-bit int → double-precision float
+                            double v = is_unsigned
+                                ? static_cast<double>(static_cast<uint64_t>(src_bits))
+                                : static_cast<double>(static_cast<int64_t>(src_bits));
+                            write_fp_d(cpu, rd, v);
+                        } else {
+                            // 32-bit int → single-precision float
+                            float v = is_unsigned
+                                ? static_cast<float>(static_cast<uint32_t>(src_bits))
+                                : static_cast<float>(static_cast<int32_t>(src_bits));
+                            write_fp_s(cpu, rd, v);
+                        }
+                        return;
+                    }
+                    if (opcode == 0x1B) {  // FCVTZS/FCVTZU (FP → int, FP dest)
+                        if (is_double) {
+                            // double-precision → 64-bit int
+                            double v = read_fp_d(cpu, rn);
+                            uint64_t out = is_unsigned
+                                ? static_cast<uint64_t>(v >= 18446744073709551616.0 ? UINT64_MAX
+                                                       : v < 0.0 ? 0 : static_cast<uint64_t>(v))
+                                : static_cast<uint64_t>(v >=  9223372036854775808.0 ? INT64_MAX
+                                                       : v < -9223372036854775808.0 ? INT64_MIN
+                                                       : static_cast<int64_t>(v));
+                            cpu.v_lo[rd] = out;
+                        } else {
+                            // single-precision → 32-bit int
+                            float v = read_fp_s(cpu, rn);
+                            uint64_t out = is_unsigned
+                                ? static_cast<uint64_t>(static_cast<uint32_t>(v >= 4294967296.0f ? UINT32_MAX
+                                                       : v < 0.0f ? 0 : static_cast<uint32_t>(v)))
+                                : static_cast<uint64_t>(static_cast<uint32_t>(v >= 2147483648.0f ? INT32_MAX
+                                                       : v < -2147483648.0f ? INT32_MIN
+                                                       : static_cast<int32_t>(v)));
+                            // Zero-extend 32-bit result into 64-bit FP register
+                            cpu.v_lo[rd] = out & 0xFFFFFFFFULL;
+                        }
+                        return;
+                    }
+                    // Other opcodes in this group (FRINTN, FABS, etc.) are
+                    // encoded in the 0x1E... group, not 0x5E.... Fall through
+                    // to "Unknown FP" if we ever see a different opcode here.
+                }
                 // FCSEL
                 if ((op & 0xFF200C00) == 0x1E200C00) {  // FCSEL (bit 21=0, bits[13:10]=1100)
                     uint8_t cond = (op >> 12) & 0xF;

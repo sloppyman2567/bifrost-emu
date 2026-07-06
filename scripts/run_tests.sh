@@ -151,6 +151,13 @@ UNIT_TESTS=(
     # FCVT being misidentified as SCVTF (mask collision), and FP LDR/STR
     # accessing cpu.regs[] instead of cpu.v_lo[].
     "jit_fcvt|ctest/jit_fcvt.elf||5|ALL PASS"
+
+    # NEW (Turn 63): SCVTF/UCVTF/FCVTZS/FCVTZU with FP source/dest —
+    # the "Advanced SIMD scalar two-register miscellaneous" group (0x5E...).
+    # GCC emits these for `(double)long_var` when the long is already in
+    # an FP register. Without this fix, `(double)19` returned 0.0, which
+    # broke toybox `time` (rusage delta computation used SCVTF).
+    "jit_scvtf_fp|ctest/jit_scvtf_fp.elf||5|ALL PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)

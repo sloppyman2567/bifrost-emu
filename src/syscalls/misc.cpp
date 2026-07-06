@@ -404,14 +404,22 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 158: { // sched_setaffinity — no-op (alias of 122, some guests use 158)
-            // Note: AArch64 158 is actually rseqg, but some musl versions
-            // probe sched_setaffinity here on legacy builds. Treat as no-op.
-            ret_host(0);
+        case 158: { // getgroups(size, gid_t list[]) — AArch64 syscall 158
+            // Return just the effective GID (0 = root) in the supplied list.
+            // Most guests call getgroups(0, NULL) first to get the count, then
+            // allocate and call again. We return 1 group (GID 0).
+            if (a0 == 0) { ret_host(1); return 0; }  // query count
+            if (a1 == 0) { ret_err(EFAULT); return 0; }
+            try {
+                mem_.store<uint32_t>(a1, 0);  // GID 0 (root)
+            } catch (...) { ret_err(EFAULT); return 0; }
+            ret_host(1);
             return 0;
         }
 
-        case 159: { // sethostname — no-op for emulation
+        case 159: { // setgroups(size, list[]) — AArch64 syscall 159
+            // No-op for emulation. The guest is a single-user sandbox; we
+            // accept any setgroups() call and pretend it succeeded.
             ret_host(0);
             return 0;
         }
@@ -590,11 +598,16 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 180: { // sysinfo(struct sysinfo *info) — AArch64 syscall 180
+        case 179: { // sysinfo(struct sysinfo *info) — AArch64 syscall 179
             // Fills a struct sysinfo (112 bytes on 64-bit) with system
             // memory/load info. Used by `free`, `top`, and other tools.
             // We return reasonable fake values so these tools don't
             // crash or show garbage.
+            //
+            // NOTE: AArch64 syscall 179 is sysinfo (per asm-generic/unistd.h).
+            // An earlier version of this code had it at case 180, which is
+            // actually mq_open — causing musl's sysinfo() to return -ENOSYS
+            // and `toybox uptime` to show garbage uptime/loadavg.
             //
             // struct sysinfo layout (64-bit, 112 bytes):
             //   offset  0: uptime (8 bytes)
@@ -718,8 +731,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 217: { // munlock — no-op
-            ret_host(0);
+        case 217: { // add_key — AArch64 syscall 217 (kernel keyring)
+            // We don't implement the kernel keyring. Return -ENOSYS so
+            // callers fall back to non-keyring code paths.
+            // (The previous comment said "munlock" but munlock is actually
+            // syscall 229. This case was silently intercepting any guest
+            // add_key() call and returning success — wrong.)
+            ret_err(ENOSYS);
             return 0;
         }
 
@@ -1603,30 +1621,32 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
-        case 218: { // waitid (AArch64 218 = wait4 alias)
-            // BUGFIX (Turn 62 rev 3): ALWAYS write siginfo to guest.
-            siginfo_t si;
-            memset(&si, 0, sizeof(si));
-            int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
-            if (a2) {
-                try {
-                    mem_.store<uint32_t>(a2, si.si_signo);
-                    mem_.store<uint32_t>(a2 + 4, si.si_code);
-                    mem_.store<uint32_t>(a2 + 8, si.si_pid);
-                    mem_.store<uint32_t>(a2 + 12, si.si_uid);
-                    mem_.store<uint32_t>(a2 + 16, si.si_status);
-                } catch (...) {}
-            }
-            if (r < 0) { ret_errno(); return 0; }
-            ret_host(0); return 0;
+        case 218: { // request_key — AArch64 syscall 218 (kernel keyring)
+            // We don't implement the kernel keyring. Return -ENOSYS.
+            // (The previous comment said "waitid" but waitid is actually
+            // syscall 95, already correctly handled elsewhere. This case
+            // was silently intercepting request_key() calls and invoking
+            // host ::waitid() with garbage args — wrong and dangerous.)
+            ret_err(ENOSYS);
+            return 0;
         }
-        case 219: { // set_robust_list(head, len) — AArch64 219
-            // No-op — we don't implement robust futex lists.
-            ret_host(0); return 0;
+        case 219: { // keyctl — AArch64 syscall 219 (kernel keyring)
+            // We don't implement the kernel keyring. Return -ENOSYS.
+            // (The previous comment said "set_robust_list" but that's
+            // syscall 99, already handled in threads.cpp. This case was
+            // silently intercepting keyctl() calls — wrong.)
+            ret_err(ENOSYS);
+            return 0;
         }
-        case 224: { // mremap(old_addr, old_size, new_size, flags, new_addr)
-            // Forward to mem.cpp handler.
-            return SYSCALL_NOT_HANDLED;  // handled by syscall_mem
+        case 224: { // swapon — AArch64 syscall 224
+            // We don't implement swap. Return -ENOSYS.
+            // (The previous comment said "mremap" but mremap is actually
+            // syscall 216, handled in mem.cpp. This case was returning
+            // NOT_HANDLED which let the call fall through to the default
+            // -ENOSYS handler anyway, so behavior is unchanged — but
+            // the label was misleading.)
+            ret_err(ENOSYS);
+            return 0;
         }
 
         // ── Bifrost-emu internal thunk syscall (Turn 37) ────────────
