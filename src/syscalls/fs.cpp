@@ -177,31 +177,36 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── fstat — VFS-aware ─────────────────────────────────────────
         case 80: { // fstat(fd, statbuf) — AArch64 80
+            // BUGFIX (Turn 62 rev 3): ALWAYS write stat buf to guest.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             struct stat st{};
             int r = node->fstat(&st);
-            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
             // Build AArch64 struct stat (128 bytes) — same layout as fstatat.
             uint8_t buf[128] = {0};
-            uint64_t* p = reinterpret_cast<uint64_t*>(buf);
-            p[0] = st.st_dev;
-            p[1] = st.st_ino;
-            reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
-            reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
-            reinterpret_cast<uint32_t*>(&p[3])[0] = st.st_uid;
-            reinterpret_cast<uint32_t*>(&p[3])[1] = st.st_gid;
-            p[4] = st.st_rdev;
-            p[6] = st.st_size;
-            reinterpret_cast<uint32_t*>(&p[7])[0] = st.st_blksize;
-            p[8] = st.st_blocks;
-            p[9]  = st.st_atim.tv_sec;
-            p[10] = st.st_atim.tv_nsec;
-            p[11] = st.st_mtim.tv_sec;
-            p[12] = st.st_mtim.tv_nsec;
-            p[13] = st.st_ctim.tv_sec;
-            p[14] = st.st_ctim.tv_nsec;
-            mem_.write(a1, buf, 128);
+            if (r >= 0) {
+                uint64_t* p = reinterpret_cast<uint64_t*>(buf);
+                p[0] = st.st_dev;
+                p[1] = st.st_ino;
+                reinterpret_cast<uint32_t*>(&p[2])[0] = st.st_mode;
+                reinterpret_cast<uint32_t*>(&p[2])[1] = st.st_nlink;
+                reinterpret_cast<uint32_t*>(&p[3])[0] = st.st_uid;
+                reinterpret_cast<uint32_t*>(&p[3])[1] = st.st_gid;
+                p[4] = st.st_rdev;
+                p[6] = st.st_size;
+                reinterpret_cast<uint32_t*>(&p[7])[0] = st.st_blksize;
+                p[8] = st.st_blocks;
+                p[9]  = st.st_atim.tv_sec;
+                p[10] = st.st_atim.tv_nsec;
+                p[11] = st.st_mtim.tv_sec;
+                p[12] = st.st_mtim.tv_nsec;
+                p[13] = st.st_ctim.tv_sec;
+                p[14] = st.st_ctim.tv_nsec;
+            }
+            // ALWAYS write the buffer (zeros on error, real data on success).
+            try { mem_.write(a1, buf, 128); }
+            catch (...) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT)); return 0; }
+            if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(r); return 0; }
             ret_host(0);
             return 0;
         }

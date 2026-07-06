@@ -755,6 +755,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 247: { // waitpid (legacy, same as wait4) — aarch64 247
+            // BUGFIX (Turn 62 rev 3): ALWAYS write status to guest.
             int status = 0;
             pid_t r;
             while (true) {
@@ -764,27 +765,27 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
                 break;  // no signal delivered, return -EINTR
             }
+            if (a1) {
+                try { mem_.store<uint32_t>(a1, static_cast<uint32_t>(status)); }
+                catch (...) {}
+            }
             if (r < 0) {
                 ret_errno();
                 return 0;
-            }
-            if (a1) {
-                mem_.store<uint32_t>(a1, static_cast<uint32_t>(status));
             }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 
         case 260: { // wait4(pid, wstatus, options, rusage) — aarch64 260
-            // with real fork() support, we forward to
-            // host wait4() so the parent can reap forked children.
-            // BUGFIX (Turn 62): forward rusage to host ::wait4(). The
-            // child is a forked emulator process, and the host's rusage
-            // gives the child's real CPU time (user+sys). This is the
-            // closest we can get to guest CPU time. The garbage values
-            // seen in Turn 61 were from the zeroed-buffer bug, not from
-            // host rusage. struct rusage is identical layout on x86-64
-            // host and AArch64 guest (both LP64, 64-bit time_t).
+            // BUGFIX (Turn 62 rev 3): ALWAYS write to guest buffers (a1
+            // wstatus, a3 rusage) even on error. The old code returned
+            // ret_errno() without writing, leaving the guest's struct
+            // rusage uninitialized with deterministic stack garbage.
+            // This was the ACTUAL root cause of `toybox time` showing
+            // "user 549755811552.42" — wait4 failed (ECHILD or EINTR),
+            // the rusage buffer was never written, and the guest read
+            // its uninitialized stack.
             pid_t pid = (pid_t)a0;
             int options = static_cast<int>(a2);
             int status = 0;
@@ -798,16 +799,19 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
                 break;  // no signal delivered, return -EINTR
             }
-            if (r < 0) {
-                ret_errno();
-                return 0;
-            }
+            // ALWAYS write wstatus and rusage to guest memory, even on
+            // error, so the guest never sees uninitialized stack data.
             if (a1) {
-                mem_.store<uint32_t>(a1, static_cast<uint32_t>(status));
+                try { mem_.store<uint32_t>(a1, static_cast<uint32_t>(status)); }
+                catch (...) {}
             }
             if (a3) {
                 try { mem_.write(a3, &ru, sizeof(ru)); }
-                catch (...) { /* ignore — caller may pass bad ptr */ }
+                catch (...) {}
+            }
+            if (r < 0) {
+                ret_errno();
+                return 0;
             }
             ret_host(static_cast<uint64_t>(r));
             return 0;
@@ -1540,6 +1544,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 95: { // waitid(idtype, id, infop, options) — AArch64 95
+            // BUGFIX (Turn 62 rev 3): ALWAYS write siginfo to guest.
             siginfo_t si;
             memset(&si, 0, sizeof(si));
             int r;
@@ -1550,9 +1555,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (emu.handle_eintr(cpu)) return 0;  // handler will run
                 break;  // no signal delivered, return -EINTR
             }
-            if (r < 0) { ret_errno(); return 0; }
+            // ALWAYS write siginfo to guest, even on error.
             if (a2) {
-                // Write a simplified siginfo to guest memory.
                 try {
                     mem_.store<uint32_t>(a2, si.si_signo);
                     mem_.store<uint32_t>(a2 + 4, si.si_code);
@@ -1561,6 +1565,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     mem_.store<uint32_t>(a2 + 16, si.si_status);
                 } catch (...) {}
             }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 97: { // unshare(flags) — AArch64 97
@@ -1593,11 +1598,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 218: { // waitid (AArch64 218 = wait4 alias)
-            // Forward to case 95 (waitid)
+            // BUGFIX (Turn 62 rev 3): ALWAYS write siginfo to guest.
             siginfo_t si;
             memset(&si, 0, sizeof(si));
             int r = ::waitid(static_cast<idtype_t>(a0), static_cast<id_t>(a1), &si, static_cast<int>(a3));
-            if (r < 0) { ret_errno(); return 0; }
             if (a2) {
                 try {
                     mem_.store<uint32_t>(a2, si.si_signo);
@@ -1607,6 +1611,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     mem_.store<uint32_t>(a2 + 16, si.si_status);
                 } catch (...) {}
             }
+            if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
         case 219: { // set_robust_list(head, len) — AArch64 219
