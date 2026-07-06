@@ -77,10 +77,23 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 113: { // clock_gettime(clkid, tp) — AArch64 113
+            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
+            // even on error. The old code returned ret_errno() without
+            // writing, leaving the guest's timespec uninitialized with
+            // deterministic stack garbage.
             if (!a1) { ret_err(EFAULT); return 0; }
             struct timespec ts;
+            memset(&ts, 0, sizeof(ts));
             int r = ::clock_gettime(static_cast<clockid_t>(a0), &ts);
-            if (r < 0) { ret_errno(); return 0; }
+            if (r < 0) {
+                // Host clock_gettime failed — write zeros (not garbage).
+                try {
+                    mem_.store<uint64_t>(a1, 0);
+                    mem_.store<uint64_t>(a1 + 8, 0);
+                } catch (...) { ret_err(EFAULT); return 0; }
+                ret_errno();
+                return 0;
+            }
             try {
                 mem_.store<uint64_t>(a1,     static_cast<uint64_t>(ts.tv_sec));
                 mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(ts.tv_nsec));
@@ -146,10 +159,19 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 169: { // gettimeofday(tv, tz) — AArch64 169
+            // BUGFIX (Turn 62 rev 2): ALWAYS write to guest buffer.
             if (!a0) { ret_err(EFAULT); return 0; }
             struct timeval tv;
+            memset(&tv, 0, sizeof(tv));
             int r = ::gettimeofday(&tv, nullptr);
-            if (r < 0) { ret_errno(); return 0; }
+            if (r < 0) {
+                try {
+                    mem_.store<uint64_t>(a0, 0);
+                    mem_.store<uint64_t>(a0 + 8, 0);
+                } catch (...) { ret_err(EFAULT); return 0; }
+                ret_errno();
+                return 0;
+            }
             try {
                 mem_.store<uint64_t>(a0,     static_cast<uint64_t>(tv.tv_sec));
                 mem_.store<uint64_t>(a0 + 8, static_cast<uint64_t>(tv.tv_usec));

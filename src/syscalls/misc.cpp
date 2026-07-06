@@ -376,21 +376,24 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 153: { // times(struct tms *buf) — AArch64 153
             // times() returns the number of clock ticks since an arbitrary
-            // point in the past, and fills struct tms:
-            //   +0:  tms_utime  (clock ticks of user CPU time)
-            //   +8:  tms_stime  (clock ticks of system CPU time)
-            //   +16: tms_cutime (user CPU time of children)
-            //   +24: tms_cstime (system CPU time of children)
-            // We forward to host times() — for RUSAGE_SELF the host's
-            // times include emulator overhead, but that's the best we
-            // can do without per-guest accounting. For RUSAGE_CHILDREN,
-            // host times() is correct (fork_guest uses real fork()).
-            // Without this, `toybox time` and any program using times()
-            // for benchmarking sees -ENOSYS and can't report CPU time.
+            // point in the past, and fills struct tms.
+            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
+            // even on error. The old code returned ret_errno() without
+            // writing, leaving the guest's struct tms uninitialized with
+            // deterministic stack garbage. Now we zero-fill first, then
+            // try host times(). If it fails, the guest gets zeros.
             struct tms t;
             memset(&t, 0, sizeof(t));
             clock_t r = ::times(a0 ? &t : nullptr);
-            if (r == static_cast<clock_t>(-1)) { ret_errno(); return 0; }
+            if (r == static_cast<clock_t>(-1)) {
+                // Host times() failed — still write zeros to guest.
+                if (a0) {
+                    try { mem_.write(a0, &t, sizeof(t)); }
+                    catch (...) { ret_err(EFAULT); return 0; }
+                }
+                ret_errno();
+                return 0;
+            }
             if (a0) {
                 try {
                     mem_.write(a0, &t, sizeof(t));
@@ -450,20 +453,39 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX (Turn 62): forward to host ::getrusage(). The host's
             // rusage includes emulator overhead, but for RUSAGE_CHILDREN
             // (used by `toybox time` after wait4) it's the forked emulator
-            // child's CPU time — the closest we can get to guest CPU time
-            // without per-guest instruction tracking. The garbage values
-            // seen earlier were from a zeroed buffer, not from host rusage.
+            // child's CPU time — the closest we can get to guest CPU time.
             // struct rusage is 144 bytes on LP64, identical layout on
             // x86-64 host and AArch64 guest (both use 64-bit time_t).
+            //
+            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
+            // even on error. The old code returned ret_errno() without
+            // writing, leaving the guest's stack buffer uninitialized
+            // with deterministic garbage (e.g. "user 549755811552.42").
+            // Now we zero-fill first, then try host getrusage. If it
+            // fails, the guest gets zeros (not garbage).
             int who = static_cast<int>(a0);
             if (a1 == 0) { ret_err(EFAULT); return 0; }
+            // Zero-fill first so the guest NEVER sees uninitialized data.
             struct rusage ru;
             memset(&ru, 0, sizeof(ru));
             int r = ::getrusage(who, &ru);
-            if (r < 0) { ret_errno(); return 0; }
+            if (r < 0) {
+                // Host getrusage failed — write zeros (not garbage).
+                if (getenv("BIFROST_TRACE_RUSAGE")) {
+                    fprintf(stderr, "[getrusage] who=%d FAILED errno=%d — "
+                            "writing zeros\n", who, errno);
+                }
+            } else {
+                if (getenv("BIFROST_TRACE_RUSAGE")) {
+                    fprintf(stderr, "[getrusage] who=%d OK: utime=%ld.%06ld "
+                            "stime=%ld.%06ld\n", who,
+                            (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
+                            (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec);
+                }
+            }
             try { mem_.write(a1, &ru, sizeof(ru)); }
             catch (...) { ret_err(EFAULT); return 0; }
-            ret_host(0);
+            ret_host(r < 0 ? static_cast<uint64_t>(static_cast<int64_t>(-errno)) : 0);
             return 0;
         }
 
