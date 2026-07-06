@@ -20,6 +20,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/sysinfo.h>
 #include <unistd.h>
 
 namespace arm64emu::yggdrasil {
@@ -53,6 +54,8 @@ static std::vector<DirNode::Entry> proc_entries() {
         {"version",    0x1 /*DT_REG*/},
         {"mounts",     0x2 /*DT_LNK*/},
         {"filesystems",0x1 /*DT_REG*/},
+        {"uptime",     0x1 /*DT_REG*/},
+        {"loadavg",    0x1 /*DT_REG*/},
         {"sys",        0x4 /*DT_DIR*/},
     };
 }
@@ -333,6 +336,47 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         fd_entries.push_back({"1", 0x2 /*DT_LNK*/});
         fd_entries.push_back({"2", 0x2 /*DT_LNK*/});
         return serve_dir("/proc/self/fd", fd_entries, flags);
+    }
+
+    // ── /proc/uptime (Turn 62 rev 3) ─────────────────────────────────
+    // toybox `uptime` reads /proc/uptime for the system uptime (seconds
+    // with fractional part) and idle time. Without this, uptime showed
+    // garbage (230961:11:19) because it read a non-existent file.
+    // Format: "uptime_seconds idle_seconds\n"
+    if (path == "/proc/uptime") {
+        return serve_lazy([this]() -> std::string {
+            struct sysinfo si;
+            memset(&si, 0, sizeof(si));
+            ::sysinfo(&si);
+            char buf[128];
+            // uptime with 2 decimal places, idle = uptime (we have 1 CPU)
+            snprintf(buf, sizeof(buf), "%llu.%02llu %llu.%02llu\n",
+                     (unsigned long long)si.uptime,
+                     (unsigned long long)0,
+                     (unsigned long long)si.uptime,
+                     (unsigned long long)0);
+            return std::string(buf);
+        }, flags);
+    }
+
+    // ── /proc/loadavg (Turn 62 rev 3) ────────────────────────────────
+    // toybox `uptime` and `top` read /proc/loadavg for load averages.
+    // Format: "1min 5min 15min running/total last_pid\n"
+    if (path == "/proc/loadavg") {
+        return serve_lazy([this]() -> std::string {
+            struct sysinfo si;
+            memset(&si, 0, sizeof(si));
+            ::sysinfo(&si);
+            char buf[128];
+            // sysinfo returns loads scaled by 65536 (1 << SI_LOAD_SHIFT)
+            double load1  = static_cast<double>(si.loads[0])  / 65536.0;
+            double load5  = static_cast<double>(si.loads[1])  / 65536.0;
+            double load15 = static_cast<double>(si.loads[2])  / 65536.0;
+            snprintf(buf, sizeof(buf), "%.2f %.2f %.2f %d/%d %d\n",
+                     load1, load5, load15,
+                     1, 1, 1);  // 1 running process, 1 total, PID 1
+            return std::string(buf);
+        }, flags);
     }
 
     *err_out = 0;

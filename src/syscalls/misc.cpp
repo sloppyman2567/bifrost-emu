@@ -42,6 +42,7 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/times.h>
 #include <sys/types.h>
@@ -611,27 +612,32 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             //   offset 104: mem_unit (4 bytes)
             //   offset 108: padding (4 bytes)
             if (a0 == 0) { ret_err(EFAULT); return 0; }
+            // BUGFIX (Turn 62 rev 3): forward to host ::sysinfo() for real
+            // uptime and load averages. The old code returned fake uptime=100
+            // and zero loads, which broke `toybox uptime` (showed "230961:11:19").
+            struct sysinfo si;
+            memset(&si, 0, sizeof(si));
+            ::sysinfo(&si);
             try {
-                // uptime: seconds since emulator start (fake 100s)
-                mem_.store<uint64_t>(a0 + 0, 100);
+                // uptime: real host uptime (seconds since boot)
+                mem_.store<uint64_t>(a0 + 0, si.uptime);
                 // loads: 1/5/15 min load averages (scaled by 65536)
-                mem_.store<uint64_t>(a0 + 8,  0);  // 1 min
-                mem_.store<uint64_t>(a0 + 16, 0);  // 5 min
-                mem_.store<uint64_t>(a0 + 24, 0);  // 15 min
-                // Memory: 16 GB total, 8 GB free (in 1 KB units since
-                // mem_unit=1). These match /proc/meminfo's fake values.
-                mem_.store<uint64_t>(a0 + 32, 16777216);  // totalram
-                mem_.store<uint64_t>(a0 + 40, 8388608);   // freeram
-                mem_.store<uint64_t>(a0 + 48, 0);         // sharedram
-                mem_.store<uint64_t>(a0 + 56, 4194304);   // bufferram
-                mem_.store<uint64_t>(a0 + 64, 0);         // totalswap
-                mem_.store<uint64_t>(a0 + 72, 0);         // freeswap
-                // procs: 1 process (the guest)
-                mem_.store<uint16_t>(a0 + 80, 1);
+                mem_.store<uint64_t>(a0 + 8,  si.loads[0]);
+                mem_.store<uint64_t>(a0 + 16, si.loads[1]);
+                mem_.store<uint64_t>(a0 + 24, si.loads[2]);
+                // Memory: use host's real values
+                mem_.store<uint64_t>(a0 + 32, si.totalram);
+                mem_.store<uint64_t>(a0 + 40, si.freeram);
+                mem_.store<uint64_t>(a0 + 48, si.sharedram);
+                mem_.store<uint64_t>(a0 + 56, si.bufferram);
+                mem_.store<uint64_t>(a0 + 64, si.totalswap);
+                mem_.store<uint64_t>(a0 + 72, si.freeswap);
+                // procs: use host's real proc count
+                mem_.store<uint16_t>(a0 + 80, si.procs);
                 mem_.store<uint16_t>(a0 + 82, 0);  // pad
-                mem_.store<uint64_t>(a0 + 88, 0);  // totalhigh
-                mem_.store<uint64_t>(a0 + 96, 0);  // freehigh
-                mem_.store<uint32_t>(a0 + 104, 1); // mem_unit (1 byte)
+                mem_.store<uint64_t>(a0 + 88, si.totalhigh);
+                mem_.store<uint64_t>(a0 + 96, si.freehigh);
+                mem_.store<uint32_t>(a0 + 104, si.mem_unit);
                 mem_.store<uint32_t>(a0 + 108, 0); // padding
                 ret_host(0);
             } catch (...) {
