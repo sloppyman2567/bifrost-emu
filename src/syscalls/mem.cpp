@@ -38,6 +38,20 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
 
+            // Sanity-check the length: real Linux rejects absurdly large
+            // mmaps based on RLIMIT_AS and available address space. Without
+            // this, a buggy/malicious guest passing length = SIZE_MAX could
+            // OOM the host. We use a generous 64 GiB cap — way more than
+            // any reasonable program needs, but small enough to prevent
+            // runaway allocations. (Game engines typically mmap 1-4 GiB
+            // for texture streaming pools; databases rarely exceed 32 GiB
+            // for shared buffers.)
+            constexpr uint64_t MAX_MMAP_LENGTH = 64ULL * 1024 * 1024 * 1024;
+            if (length > MAX_MMAP_LENGTH) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM));
+                return 0;
+            }
+
             constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
             constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
 

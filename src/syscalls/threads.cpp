@@ -460,12 +460,25 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 argv_addrs.push_back(sp);
             }
 
-            // Push envp (just PATH).
+            // Push envp. Use the Emulator's guest_env_ (which was either
+            // set via set_guest_env() or built by build_default_guest_env()
+            // at startup). This propagates TZ, LANG, LC_*, etc. from the
+            // host so locale-aware programs work correctly in the new
+            // process image too.
+            //
+            // BUGFIX: the old code only pushed "PATH=..." here, dropping
+            // TZ and all locale vars in execve'd processes. This meant
+            // `toybox sh -c 'uptime'` showed UTC time even when the
+            // parent shell had TZ set correctly.
             std::vector<uint64_t> envp_addrs;
-            const char* env = "PATH=/bin:/usr/bin:/sbin:/usr/sbin";
-            sp -= strlen(env) + 1;
-            mem_.write(sp, env, strlen(env) + 1);
-            envp_addrs.push_back(sp);
+            const auto& envs = emu.guest_env().empty()
+                ? Emulator::build_default_guest_env()
+                : emu.guest_env();
+            for (const auto& e : envs) {
+                sp -= e.size() + 1;
+                mem_.write(sp, e.data(), e.size() + 1);
+                envp_addrs.push_back(sp);
+            }
 
             // AT_RANDOM.
             sp -= 16;

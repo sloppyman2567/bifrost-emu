@@ -241,6 +241,10 @@ INTEGRATION_TESTS=(
     "pipe|ctest_real/test_pipe.elf||5|ALL PASS"
     "auxv|ctest_real/test_auxv.elf||5|ALL PASS"
     "getenv|ctest_real/test_getenv.elf||5|ALL PASS"
+
+    # NEW (Turn 64): host env var propagation (TZ, LANG, LC_*). Verifies
+    # core env vars are set and localtime/strftime/setenv work.
+    "env|ctest_real/test_env.elf||5|ALL PASS"
 )
 
 # Dynamic linking tests (Turn 53).

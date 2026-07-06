@@ -21,6 +21,7 @@
 #include "yggdrasil/node.hpp"
 
 #include <cerrno>
+#include <climits>
 #include <sys/statfs.h>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,43 @@
 #include <sys/mount.h>
 
 namespace arm64emu {
+
+// ── Helper: resolve a guest dirfd to a host dirfd ─────────────────────
+// The guest passes a dirfd to *at syscalls (openat, fstatat, unlinkat, etc.).
+// This can be:
+//   - AT_FDCWD (-100): use the current working directory (host fd = AT_FDCWD)
+//   - A guest fd from the FdTable: resolve to the underlying host fd
+//   - An invalid fd: return -1 (caller should return -EBADF)
+//
+// BUGFIX (Turn 64): the old code passed `static_cast<int>(a0)` directly
+// to host ::mkdirat/::unlinkat/etc. The FdTable uses arbitrary indices
+// (allocated starting at 3) that have NO relationship to host fds. When
+// a guest program opened a directory and passed its dirfd to fstatat,
+// the host received a meaningless fd number and either returned EBADF
+// or, worse, operated on the wrong file. This broke find, tar, cp -r,
+// rsync, Python os.scandir, and every other program that uses the
+// POSIX *at API.
+//
+// This helper resolves the guest dirfd to a real host fd that can be
+// passed to host *at syscalls. For virtual Nodes (memfd, /proc, /dev),
+// there is no host fd — in that case we return -1 and the caller should
+// fall back to a path-based approach or return -EOPNOTSUPP.
+static int resolve_dirfd(FdTable& fds, uint64_t guest_dirfd) {
+    constexpr int AT_FDCWD_LINUX = -100;  // Linux AT_FDCWD value
+    int dirfd = static_cast<int>(static_cast<int64_t>(guest_dirfd));
+    if (dirfd == AT_FDCWD_LINUX) {
+        return AT_FDCWD_LINUX;  // pass through to host
+    }
+    if (dirfd < 0) {
+        return -1;  // invalid (other negative values are reserved)
+    }
+    auto node = fds.get(dirfd);
+    if (!node) {
+        return -1;  // EBADF
+    }
+    int hfd = node->host_fd();
+    return hfd;  // may be -1 for virtual nodes
+}
 
 int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
@@ -71,6 +109,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 63: { // read
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            // Sanity-check the buffer size: real Linux caps read() at
+            // SSIZE_MAX (~2 GiB on 64-bit). A buggy/malicious guest
+            // passing a2 = SIZE_MAX would otherwise OOM the host.
+            if (a2 > static_cast<uint64_t>(SSIZE_MAX)) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT));
+                return 0;
+            }
             std::vector<uint8_t> tmp(std::max<uint64_t>(a2, 1));
             ssize_t r;
             while (true) {
@@ -113,6 +158,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 64: { // write
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            // Sanity-check the buffer size: real Linux caps write() at
+            // SSIZE_MAX (~2 GiB on 64-bit). A buggy/malicious guest
+            // passing a2 = SIZE_MAX would otherwise OOM the host.
+            if (a2 > static_cast<uint64_t>(SSIZE_MAX)) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT));
+                return 0;
+            }
             std::vector<uint8_t> tmp(a2);
             if (a2 > 0) mem_.read(a1, tmp.data(), a2);
             ssize_t r = node->write(UINT64_MAX, tmp.data(), a2);
@@ -158,8 +210,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously implemented as dup2 (which doesn't exist
             // on AArch64). The real syscall at 33 is mknodat. Forward to
             // host mknodat.
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::mknodat(static_cast<int>(a0), path.c_str(),
+            int r = ::mknodat(hfd, path.c_str(),
                               static_cast<mode_t>(a2), static_cast<dev_t>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
@@ -229,26 +286,43 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 34: { // mkdirat
+        case 34: { // mkdirat(dirfd, path, mode)
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable, not
+            // static_cast<int>(a0) which passed the guest fd index
+            // directly to the host.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::mkdirat(static_cast<int>(a0), path.c_str(), (mode_t)a2);
+            int r = ::mkdirat(hfd, path.c_str(), (mode_t)a2);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
 
-        case 35: { // unlinkat
+        case 35: { // unlinkat(dirfd, path, flags)
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::unlinkat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2));
+            int r = ::unlinkat(hfd, path.c_str(), static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
         }
 
-        case 38: { // renameat
+        case 38: { // renameat(olddirfd, oldpath, newdirfd, newpath)
+            int old_hfd = resolve_dirfd(fds_, a0);
+            int new_hfd = resolve_dirfd(fds_, a2);
+            if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
+                (new_hfd == -1 && static_cast<int64_t>(a2) != -100)) {
+                ret_err(EBADF); return 0;
+            }
             std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
-            int r = ::renameat(static_cast<int>(a0), oldp.c_str(), static_cast<int>(a2), newp.c_str());
+            int r = ::renameat(old_hfd, oldp.c_str(), new_hfd, newp.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
@@ -328,6 +402,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             if (a2 == 0) { ret_host(0); return 0; }
+            // Sanity-check the buffer size (same as read/write).
+            if (a2 > static_cast<uint64_t>(SSIZE_MAX)) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EFAULT));
+                return 0;
+            }
             std::vector<uint8_t> tmp(a2);
             ssize_t n;
             while (true) {
@@ -404,15 +483,21 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             std::string host_path = yggdrasil::Yggdrasil::remap_path(path);
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             struct stat st;
             int r;
             int host_flags = static_cast<int>(a2);
             // AT_SYMLINK_NOFOLLOW → don't follow symlinks
             // AT_EMPTY_PATH → stat the fd itself
-            if (static_cast<int>(a0) == AT_FDCWD || (host_path.size() > 0 && host_path[0] == '/')) {
+            // If the path is absolute, the dirfd is ignored (per POSIX).
+            if (host_path.size() > 0 && host_path[0] == '/') {
                 r = ::fstatat(AT_FDCWD, host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
             } else {
-                r = ::fstatat(static_cast<int>(a0), host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
+                r = ::fstatat(hfd, host_path.c_str(), &st, host_flags & AT_SYMLINK_NOFOLLOW);
             }
             if (r < 0) { ret_host(-errno); return 0; }
             // Build statx structure (256 bytes), zero-initialized so all
@@ -472,13 +557,20 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
             // Do a real stat on the (mapped) host path so guest programs
             // see correct file sizes, types, and permissions.
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             struct stat st;
             int r;
-            if (static_cast<int>(a0) == AT_FDCWD || (path.size() > 0 && path[0] == '/')) {
+            // If the path is absolute, the dirfd is ignored (per POSIX).
+            // Pass AT_FDCWD to avoid issues with stale host dirfds.
+            if (path.size() > 0 && path[0] == '/') {
                 r = ::fstatat(AT_FDCWD, path.c_str(), &st, static_cast<int>(a3));
             } else {
-                r = ::fstatat(static_cast<int>(a0), path.c_str(), &st, static_cast<int>(a3));
+                r = ::fstatat(hfd, path.c_str(), &st, static_cast<int>(a3));
             }
             if (r < 0) {
                 ret_host(-errno);
@@ -572,8 +664,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 // Call host readlinkat for real filesystem paths.
+                // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+                int hfd = resolve_dirfd(fds_, a0);
+                if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                    ret_err(EBADF); return 0;
+                }
                 char buf[4096];
-                ssize_t n = ::readlinkat(static_cast<int>(a0), path_str.c_str(),
+                ssize_t n = ::readlinkat(hfd, path_str.c_str(),
                                          buf, sizeof(buf));
                 if (n < 0) { ret_errno(); return 0; }
                 if (static_cast<size_t>(n) > a3) n = static_cast<ssize_t>(a3);
@@ -601,8 +698,33 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             int cmd = static_cast<int>(a1);
             int hfd = node->host_fd();
             switch (cmd) {
-                case F_DUPFD: {  // 0
-                    int r = fds_.dup(static_cast<int>(a0));
+                case F_DUPFD: {  // 0 — duplicate fd, new fd >= arg
+                    // BUGFIX (Turn 64): F_DUPFD takes a `min_fd` argument
+                    // in a2. The old code ignored it and always allocated
+                    // the lowest available fd, breaking programs that rely
+                    // on F_DUPFD returning a fd >= the requested minimum
+                    // (e.g., Python's os.dup(fd, min_fd=3)).
+                    int min_fd = static_cast<int>(a2);
+                    if (min_fd < 0) min_fd = 0;
+                    int r = fds_.dup(static_cast<int>(a0), min_fd);
+                    if (r < 0) { ret_err(EBADF); return 0; }
+                    ret_host(r);
+                    return 0;
+                }
+                case F_DUPFD_CLOEXEC: {  // 1030 — duplicate fd with FD_CLOEXEC
+                    // BUGFIX (Turn 64): the old code fell through to the
+                    // default case, returning 0 (success). This made the
+                    // guest think it got fd=0 (stdin), corrupting stdin
+                    // for Python's os.dup, Java fd management, etc.
+                    // We don't track per-fd FD_CLOEXEC in FdTable, but we
+                    // can still allocate a new fd pointing to the same Node.
+                    // The FD_CLOEXEC flag is lost — that's a known
+                    // limitation (only matters if the guest later execve's,
+                    // which is rare). The fd allocation is correct.
+                    int min_fd = static_cast<int>(a2);
+                    if (min_fd < 0) min_fd = 0;
+                    int r = fds_.dup(static_cast<int>(a0), min_fd);
+                    if (r < 0) { ret_err(EBADF); return 0; }
                     ret_host(r);
                     return 0;
                 }
@@ -663,9 +785,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 default:
-                    // Unknown cmd — return 0 (success) to avoid breaking
-                    // guests that probe exotic fcntl cmds.
-                    ret_host(0);
+                    // Unknown cmd — return -EINVAL (not 0!) so the guest
+                    // knows the cmd is unsupported. The old code returned 0
+                    // (success), which made F_DUPFD_CLOEXEC silently return
+                    // "fd 0" (stdin) — corrupting stdin for Python/Java.
+                    ret_err(EINVAL);
                     return 0;
             }
         }
@@ -691,8 +815,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::faccessat(static_cast<int>(a0), path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
+            int r = ::faccessat(hfd, path.c_str(), static_cast<int>(a2), static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
             return 0;
@@ -701,8 +830,12 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 50: { // fchdir(fd) — AArch64 50
             // BUGFIX: previously called ::fchdir(guest_fd, ...) directly,
             // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            // BUGFIX (Turn 64): if the node has no host_fd (virtual node),
+            // return EBADF instead of passing the guest fd index to the host.
             auto node = fds_.get(static_cast<int>(a0));
-            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (!node) { ret_err(EBADF); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             int r = ::fchdir(hfd);
             if (r < 0) { ret_errno(); return 0; }
             char buf[PATH_MAX];
@@ -729,8 +862,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 46: { // ftruncate(fd, length) — AArch64 46
             // BUGFIX: previously called ::ftruncate(guest_fd, ...) directly,
             // bypassing FdTable. Resolve via FdTable so virtual fds work.
+            // BUGFIX (Turn 64): return EBADF for virtual fds without host_fd.
             auto node = fds_.get(static_cast<int>(a0));
-            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (!node) { ret_err(EBADF); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EINVAL); return 0; }
             int r = ::ftruncate(hfd, (off_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -741,8 +877,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously labeled "chmod" but AArch64 has no chmod
             // (only fchmodat at 53). The real syscall at 52 is fchmod.
             // Resolve via FdTable so virtual fds work.
+            // BUGFIX (Turn 64): return EBADF for virtual fds without host_fd.
             auto node = fds_.get(static_cast<int>(a0));
-            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (!node) { ret_err(EBADF); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EINVAL); return 0; }
             int r = ::fchmod(hfd, (mode_t)a1);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -753,8 +892,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
             // The old code called ::fchmod(fd, mode) treating the dirfd as
             // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::fchmodat(static_cast<int>(a0), path.c_str(),
+            int r = ::fchmodat(hfd, path.c_str(),
                                (mode_t)a2, static_cast<int>(a3));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);
@@ -766,6 +910,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // `const struct timespec*` — that dereferences garbage host
             // memory and crashes. Read the guest's times array into a
             // local buffer first, then pass that to ::utimensat.
+            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
+            int hfd = resolve_dirfd(fds_, a0);
+            if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
+                ret_err(EBADF); return 0;
+            }
             std::string path = a1 ? yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1)) : std::string();
             struct timespec times_buf[2];
             struct timespec* times_ptr = nullptr;
@@ -781,7 +930,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
             }
-            int r = ::utimensat(static_cast<int>(a0),
+            int r = ::utimensat(hfd,
                                 a1 ? path.c_str() : nullptr,
                                 times_ptr,
                                 static_cast<int>(a3));
@@ -797,10 +946,17 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // calls linkat() via musl's link() wrapper). unlink was being
             // called with olddirfd (AT_FDCWD=-100) as a path pointer,
             // returning ENOENT.
+            // BUGFIX (Turn 64): resolve guest dirfds via FdTable.
+            int old_hfd = resolve_dirfd(fds_, a0);
+            int new_hfd = resolve_dirfd(fds_, a2);
+            if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
+                (new_hfd == -1 && static_cast<int64_t>(a2) != -100)) {
+                ret_err(EBADF); return 0;
+            }
             std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
             std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
-            int r = ::linkat(static_cast<int>(a0), oldp.c_str(),
-                             static_cast<int>(a2), newp.c_str(),
+            int r = ::linkat(old_hfd, oldp.c_str(),
+                             new_hfd, newp.c_str(),
                              static_cast<int>(a4));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(r);

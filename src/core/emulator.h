@@ -125,6 +125,22 @@ public:
     void set_jit_threshold(uint64_t n) { jit_threshold_ = n; }
     uint64_t jit_threshold() const { return jit_threshold_; }
 
+    // ── Guest environment ─────────────────────────────────────────────
+    // Replace the guest's environment with `envs` (each string "KEY=VALUE").
+    // If never called, build_initial_stack() uses a sensible default
+    // environment that propagates a curated set of host env vars (TZ,
+    // LANG, LC_*, etc.) so locale-aware programs (toybox uptime, date,
+    // ls, etc.) display correct local time and language conventions.
+    void set_guest_env(const std::vector<std::string>& envs) {
+        guest_env_ = envs;
+    }
+    const std::vector<std::string>& guest_env() const { return guest_env_; }
+    // Build the default guest environment, propagating locale/timezone-
+    // related host env vars. Used by build_initial_stack when set_guest_env
+    // was not called. Also used by execve to give the new process image
+    // a consistent environment.
+    static std::vector<std::string> build_default_guest_env();
+
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
     FrostGraphics& graphics() { return graphics_; }
@@ -287,6 +303,10 @@ private:
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
     // chdir/fchdir; returned by getcwd. Defaults to "/".
     std::string guest_cwd_ = "/";
+    // Guest environment (each string "KEY=VALUE"). Populated by
+    // set_guest_env() or by build_initial_stack() using
+    // build_default_guest_env() when empty.
+    std::vector<std::string> guest_env_;
 
     // Decode cache type alias (constants + CacheEntry type live on CPU).
     using CacheEntry = CPU::CacheEntry;

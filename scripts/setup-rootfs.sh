@@ -169,6 +169,63 @@ EOF
 # the default search paths in /etc/ld.so.conf)
 : > "$ROOTFS/etc/ld.so.cache"
 
+# ── Timezone setup ─────────────────────────────────────────────────────
+# Propagate the host's timezone to the guest rootfs so locale-aware
+# programs (date, uptime, ls -l's month names, etc.) display the user's
+# local time. We try (in order):
+#   1. /etc/localtime on the host (canonical zoneinfo file or symlink)
+#   2. $TZ env var → /usr/share/zoneinfo/$TZ
+#   3. Fallback: copy /usr/share/zoneinfo/UTC (always available)
+# We also write /etc/timezone with the zone name (e.g., "America/New_York")
+# — some programs (e.g., toybox date) read this directly.
+ZONEINFO_DIR="$ROOTFS/usr/share/zoneinfo"
+mkdir -p "$ZONEINFO_DIR"
+TZ_NAME=""
+if [ -n "${TZ:-}" ]; then
+    TZ_NAME="$TZ"
+elif [ -f /etc/timezone ]; then
+    TZ_NAME="$(cat /etc/timezone)"
+elif [ -L /etc/localtime ]; then
+    # /etc/localtime is a symlink → zoneinfo path is in the link target
+    LINK_TARGET="$(readlink -f /etc/localtime 2>/dev/null || true)"
+    case "$LINK_TARGET" in
+        */zoneinfo/*)
+            TZ_NAME="${LINK_TARGET##*zoneinfo/}"
+            ;;
+    esac
+fi
+
+# Resolve the zoneinfo file to copy.
+TZ_FILE=""
+if [ -n "$TZ_NAME" ] && [ -f "/usr/share/zoneinfo/$TZ_NAME" ]; then
+    TZ_FILE="/usr/share/zoneinfo/$TZ_NAME"
+elif [ -f /etc/localtime ]; then
+    # /etc/localtime is a regular file (copy of zoneinfo)
+    TZ_FILE="/etc/localtime"
+    TZ_NAME="${TZ_NAME:-UTC}"
+elif [ -f /usr/share/zoneinfo/UTC ]; then
+    TZ_FILE="/usr/share/zoneinfo/UTC"
+    TZ_NAME="UTC"
+fi
+
+if [ -n "$TZ_FILE" ]; then
+    # Create the zoneinfo subdirectory structure (e.g., America/New_York
+    # needs /usr/share/zoneinfo/America/ to exist).
+    if [ -n "$TZ_NAME" ] && [[ "$TZ_NAME" == */* ]]; then
+        TZ_DIR="${TZ_NAME%/*}"
+        mkdir -p "$ZONEINFO_DIR/$TZ_DIR"
+        cp -f "$TZ_FILE" "$ZONEINFO_DIR/$TZ_NAME"
+    fi
+    # /etc/localtime — copy (not symlink) so the guest doesn't need to
+    # resolve a host path.
+    cp -f "$TZ_FILE" "$ROOTFS/etc/localtime"
+    # /etc/timezone — text file with the zone name
+    echo "$TZ_NAME" > "$ROOTFS/etc/timezone"
+    echo "Timezone set to: $TZ_NAME"
+else
+    echo "Warning: could not find a zoneinfo file. Guest will default to UTC."
+fi
+
 # ── /tmp (writable) ───────────────────────────────────────────────────
 chmod 1777 "$ROOTFS/tmp"
 

@@ -554,6 +554,69 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     main_cpu_.set_tid_address_ptr = 0;
 }
 
+// ── Default guest environment ──────────────────────────────────────────
+// Builds a minimal but realistic environment for the guest, propagating
+// locale/timezone-related host env vars so programs like `toybox uptime`,
+// `date`, `ls` display correct local time and language conventions.
+//
+// Propagated vars (if set on host):
+//   TZ, LANG, LC_ALL, LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE,
+//   LC_MONETARY, LC_MESSAGES, LC_PAPER, LC_NAME, LC_ADDRESS,
+//   LC_TELEPHONE, LC_MEASUREMENT, LC_IDENTIFICATION,
+//   LESSCHARSET, LESSUTFCHARDEF, COLORTERM, COLORFGBG
+//
+// NOT propagated (sandbox/security):
+//   LD_PRELOAD, LD_LIBRARY_PATH (would break the emulated loader),
+//   BIFROST_* (emulator-internal flags must not leak to guest).
+std::vector<std::string> Emulator::build_default_guest_env() {
+    std::vector<std::string> envs;
+    // Core environment every guest needs.
+    envs.push_back("PATH=/tmp/aarch64-bin:/bin:/usr/bin:/sbin:/usr/sbin");
+    envs.push_back("HOME=/root");
+    envs.push_back("SHELL=/bin/sh");
+    envs.push_back("TERM=linux");
+    envs.push_back("PWD=/");
+    envs.push_back("SHLVL=1");
+    envs.push_back("_=/bin/sh");
+
+    // Propagate locale + timezone vars from the host so locale-aware
+    // programs (date, uptime, ls -l's month names, etc.) work correctly.
+    // Without TZ, musl defaults to UTC and `toybox uptime` shows UTC time
+    // instead of the user's local time.
+    static const char* const propagate[] = {
+        "TZ",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "LC_COLLATE",
+        "LC_MONETARY",
+        "LC_MESSAGES",
+        "LC_PAPER",
+        "LC_NAME",
+        "LC_ADDRESS",
+        "LC_TELEPHONE",
+        "LC_MEASUREMENT",
+        "LC_IDENTIFICATION",
+        "LESSCHARSET",
+        "LESSUTFCHARDEF",
+        "COLORTERM",
+        "COLORFGBG",
+        "PAGER",
+        "EDITOR",
+        "VISUAL",
+        nullptr,
+    };
+    for (size_t i = 0; propagate[i]; ++i) {
+        const char* v = getenv(propagate[i]);
+        if (v && v[0] != '\0') {
+            envs.push_back(std::string(propagate[i]) + "=" + v);
+        }
+    }
+    return envs;
+}
+
 // ── Initial stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ─────
 uint64_t Emulator::build_initial_stack(uint64_t stack_top,
                                        std::vector<std::string>& argv,
@@ -569,21 +632,18 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         argv_addrs.push_back(sp);
     }
 
-    // Push envp. toybox sh and other programs need more than just PATH.
-    // Provide a minimal but realistic environment.
+    // Push envp. If guest_env_ was set via set_guest_env(), use it.
+    // Otherwise, build a default environment that propagates locale/
+    // timezone-related host env vars (TZ, LANG, LC_*, etc.) so programs
+    // like `toybox uptime`, `date`, `ls` display correct local time and
+    // language conventions.
+    if (guest_env_.empty()) {
+        guest_env_ = build_default_guest_env();
+    }
     std::vector<uint64_t> envp_addrs;
-    const char* envs[] = {
-        "PATH=/tmp/aarch64-bin:/bin:/usr/bin:/sbin:/usr/sbin",
-        "HOME=/root",
-        "SHELL=/bin/sh",
-        "TERM=linux",
-        "PWD=/",
-        "SHLVL=1",
-        "_=/bin/sh",
-    };
-    for (const char* e : envs) {
-        sp -= strlen(e) + 1;
-        mem_.write(sp, e, strlen(e) + 1);
+    for (const auto& e : guest_env_) {
+        sp -= e.size() + 1;
+        mem_.write(sp, e.data(), e.size() + 1);
         envp_addrs.push_back(sp);
     }
 

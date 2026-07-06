@@ -32,6 +32,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <algorithm>
 #include <poll.h>
 #include <signal.h>
 #include <syscall.h>
@@ -874,23 +875,41 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 278: { // getrandom(buf, buflen, flags) — AArch64 278
-            // Provide real random bytes from /dev/urandom. With TLS
-            // properly set up, glibc's per-thread getrandom state is
-            // zero-initialized (state->buf == NULL), so it tries to
-            // initialize via this syscall; returning the requested
-            // bytes sets state->cap > 0.
+            // Provide real random bytes from the host kernel's getrandom
+            // syscall. This is the correct source — /dev/urandom requires
+            // a file descriptor (which can be exhausted under heavy
+            // thread creation), while getrandom(2) never blocks after
+            // boot and doesn't need an fd.
+            //
+            // BUGFIX (Turn 64): the old code capped buflen at 256 bytes.
+            // The kernel's actual limit is 256 bytes ONLY when
+            // GRND_RANDOM is used (rare — arc4random, OpenSSL). For the
+            // default GRND_NONBLOCK/GRND_DEFAULT urandom pool, the limit
+            // is much higher (effectively unlimited). The 256-byte cap
+            // broke OpenSSL's RAND_bytes for RSA key generation and
+            // arc4random's periodic re-seed.
             if (a1 == 0 || a0 == 0) { ret_host(0); return 0; }
-            // Cap at 256 bytes to prevent huge allocations — the kernel
-            // itself caps getrandom at 256 per call for GRND_NONBLOCK.
-            size_t len = a1;
-            if (len > 256) len = 256;
+            // Reasonable upper bound to prevent OOM: 1 MiB per call.
+            // (The kernel itself has a similar internal cap.)
+            size_t len = std::min<uint64_t>(a1, 1u << 20);
             std::vector<uint8_t> tmp(len);
-            FILE* ur = fopen("/dev/urandom", "rb");
-            if (!ur) { ret_err(ENOSYS); return 0; }
-            size_t got = fread(tmp.data(), 1, len, ur);
-            fclose(ur);
-            if (got == 0) { ret_err(EIO); return 0; }
-            mem_.write(a0, tmp.data(), got);
+            ssize_t got = ::syscall(SYS_getrandom, tmp.data(), len,
+                                    static_cast<unsigned int>(a2));
+            if (got < 0) {
+                // Fall back to /dev/urandom if the host kernel doesn't
+                // support getrandom (very old kernels, < 3.17).
+                FILE* ur = fopen("/dev/urandom", "rb");
+                if (!ur) { ret_err(ENOSYS); return 0; }
+                size_t n = fread(tmp.data(), 1, len, ur);
+                fclose(ur);
+                if (n == 0) { ret_err(EIO); return 0; }
+                try { mem_.write(a0, tmp.data(), n); }
+                catch (...) { ret_err(EFAULT); return 0; }
+                ret_host(n);
+                return 0;
+            }
+            try { mem_.write(a0, tmp.data(), static_cast<size_t>(got)); }
+            catch (...) { ret_err(EFAULT); return 0; }
             ret_host(got);
             return 0;
         }
@@ -1569,6 +1588,22 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 95: { // waitid(idtype, id, infop, options) — AArch64 95
             // BUGFIX (Turn 62 rev 3): ALWAYS write siginfo to guest.
+            // BUGFIX (Turn 64): siginfo_t layout was wrong — si_code was
+            // written at offset 4 (where si_errno belongs) and si_pid at
+            // offset 8 (where si_code belongs). The correct AArch64
+            // siginfo_t layout is:
+            //   offset  0: si_signo  (4 bytes)
+            //   offset  4: si_errno  (4 bytes)
+            //   offset  8: si_code   (4 bytes)
+            //   offset 12: __pad     (4 bytes)
+            //   offset 16: _sigchld.si_pid    (4 bytes)
+            //   offset 20: _sigchld.si_uid    (4 bytes)
+            //   offset 24: _sigchld.si_status (4 bytes)
+            //   offset 28: __pad              (4 bytes)
+            //   offset 32: _sigchld.si_utime  (8 bytes)
+            //   offset 40: _sigchld.si_stime  (8 bytes)
+            // This matches build_siginfo() in src/core/signal.cpp and the
+            // Linux kernel's struct siginfo for AArch64.
             siginfo_t si;
             memset(&si, 0, sizeof(si));
             int r;
@@ -1582,11 +1617,16 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // ALWAYS write siginfo to guest, even on error.
             if (a2) {
                 try {
-                    mem_.store<uint32_t>(a2, si.si_signo);
-                    mem_.store<uint32_t>(a2 + 4, si.si_code);
-                    mem_.store<uint32_t>(a2 + 8, si.si_pid);
-                    mem_.store<uint32_t>(a2 + 12, si.si_uid);
-                    mem_.store<uint32_t>(a2 + 16, si.si_status);
+                    mem_.store<uint32_t>(a2 + 0,  static_cast<uint32_t>(si.si_signo));
+                    mem_.store<uint32_t>(a2 + 4,  0);  // si_errno (always 0)
+                    mem_.store<uint32_t>(a2 + 8,  static_cast<uint32_t>(si.si_code));
+                    mem_.store<uint32_t>(a2 + 12, 0);  // __pad
+                    mem_.store<uint32_t>(a2 + 16, static_cast<uint32_t>(si.si_pid));
+                    mem_.store<uint32_t>(a2 + 20, static_cast<uint32_t>(si.si_uid));
+                    mem_.store<uint32_t>(a2 + 24, static_cast<uint32_t>(si.si_status));
+                    mem_.store<uint32_t>(a2 + 28, 0);  // __pad
+                    // si_utime / si_stime (offset 32/40) — only valid when
+                    // si_code == CLD_TRAPPED with WUNTRACED; leave as 0.
                 } catch (...) {}
             }
             if (r < 0) { ret_errno(); return 0; }
