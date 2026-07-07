@@ -1,0 +1,250 @@
+// jit/jit_codegen_branch.cpp — FrostJIT branch/call IR-op codegen.
+//
+// v1.4.5-alpha (Turn 37): split out of frostjit.cpp. This file holds the
+// BRCOND_ZERO / BRCOND_BIT / BRCOND / BRCOND_FALLTHRU / CALL_INTERP /
+// SVC case bodies of the IR-op switch, extracted into a separate method
+// (compile_ir_branch) for readability. The main switch in frostjit.cpp
+// dispatches to this method before its residual cases.
+//
+// No behavior change — pure file split. The method is a member of
+// FrostJIT (declared in include/jit/frostjit.hpp) so it has full access
+// to the JIT's emit_*, alloc_*, flush_*, etc. helpers.
+//
+// Return value (int — see frostjit.hpp):
+//   -1 = op not handled here (caller falls through to next dispatcher)
+//    0 = op handled, does NOT end the block
+//    1 = op handled AND ends the block
+// All branch/call ops in this file return 1 except CALL_INTERP, which
+// returns 0 (it doesn't end the block).
+#include "jit/frostjit.hpp"
+#include "core/emulator.h"
+#include "ir/ir.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
+
+namespace arm64emu {
+
+// ── FrostJIT::compile_ir_branch ────────────────────────────────────────
+// Handles conditional/unconditional branch ops and supervisor calls.
+// All of these set rax_holds_next_pc_=true and return 1 (ends block)
+// except CALL_INTERP, which returns 0.
+int FrostJIT::compile_ir_branch(const IRInst& inst) {
+    switch (inst.op) {
+        case IROp::BRCOND_ZERO: {
+            // CBZ/CBNZ: branch on (val == 0) without touching flags.
+            // cond=0 (EQ) → branch if val == 0
+            // cond=1 (NE) → branch if val != 0
+            // We emit: test val, val; jcc (JE for EQ, JNE for NE)
+            // The test sets ZF but we don't materialize flags (CBZ/CBNZ
+            // don't modify architectural flags). We save/restore RFLAGS
+            // around the test to avoid clobbering pending flags.
+            //
+            // the previous code did
+            //   int s1 = ensure_vreg(inst.src1, RAX);
+            //   if (s1 != RAX) emit_mov_reg(RAX, s1);
+            // which would overwrite RAX without evicting whatever dirty
+            // vreg was cached there — typically the value computed by the
+            // immediately preceding SBFM/UBFM/ADDS that wrote to an
+            // architectural reg. The epilogue's flush_all_vregs() would
+            // then write the next-PC value (left in RAX by this branch)
+            // to that architectural reg, corrupting it.
+            //
+            // Fix: evict any dirty vreg in RAX BEFORE loading the test
+            // value, and drop RAX's cache mapping so flush_all_vregs
+            // can't miswrite it.
+            clobber_flags();  // materialize any pending flags first
+            // use drop_vreg — evicts if dirty, drops if not.
+            if (reg_vreg_[RAX] >= 0) {
+                drop_vreg(reg_vreg_[RAX]);
+            }
+            int s1 = ensure_vreg(inst.src1, RAX);
+            if (s1 != RAX) emit_mov_reg(RAX, s1);
+            // RAX now holds the test value. Drop RAX's cache mapping so
+            // the upcoming `mov eax, <pc>` doesn't corrupt any vreg.
+            // use drop_vreg — if RAX holds a dirty vreg,
+            // evict it to memory first so the value is preserved.
+            if (reg_vreg_[RAX] >= 0) {
+                drop_vreg(reg_vreg_[RAX]);
+            }
+            // Save RFLAGS (CBZ/CBNZ don't modify architectural flags).
+            emit_pushfq();
+            // test rax, rax
+            emit_test_reg(RAX, RAX);
+            // jcc to taken target
+            uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
+            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+            // Not taken: RAX = fall-through.
+            uint64_t fall = inst.arm_pc + 4;
+            emit_mov_imm_to_rax(fall);
+            // Restore RFLAGS before jumping to epilogue
+            emit_popfq();
+            size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
+            branch_target_patches_.push_back({jmp_to_epilogue, 0});
+            // Taken: patch jcc to here.
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
+            patch_jcc_rel32(jcc_patch, taken_rel);
+            // Restore RFLAGS (CBZ/CBNZ don't modify flags)
+            emit_popfq();
+            emit_mov_imm_to_rax(inst.imm);
+            rax_holds_next_pc_ = true;
+            unchainable_end_ = true;  // conditional branch
+            return 1;
+        }
+
+        case IROp::BRCOND_BIT: {
+            // TBZ/TBNZ: branch on ((val >> bit) & 1) without touching flags.
+            // cond=0 (EQ) → branch if bit == 0 (TBZ)
+            // cond=1 (NE) → branch if bit == 1 (TBNZ)
+            // We emit: bt rax, bit; jcc (JNC for bit==0, JC for bit==1)
+            // BT sets CF = (val >> bit) & 1. We save/restore RFLAGS.
+            // same RAX eviction as BRCOND_ZERO —
+            // see the comment there for the rationale.
+            clobber_flags();
+            // use drop_vreg — evicts if dirty, drops if not.
+            if (reg_vreg_[RAX] >= 0) {
+                drop_vreg(reg_vreg_[RAX]);
+            }
+            int s1 = ensure_vreg(inst.src1, RAX);
+            if (s1 != RAX) emit_mov_reg(RAX, s1);
+            // use drop_vreg — if RAX holds a dirty vreg,
+            // evict it to memory first so the value is preserved.
+            if (reg_vreg_[RAX] >= 0) {
+                drop_vreg(reg_vreg_[RAX]);
+            }
+            emit_pushfq();
+            // bt rax, imm8  — 0x48 0x0F 0xBA /5 r/m, imm8
+            emit_byte(rex(true, false, false, RAX >= 8));
+            emit_byte(0x0F); emit_byte(0xBA);
+            emit_byte(modrm(3, 5, RAX & 7));
+            emit_byte(inst.width);  // bit number
+            // jcc: TBZ (cond=0, EQ) → JNC (bit==0, CF=0) → JAE (cc=3)
+            //      TBNZ (cond=1, NE) → JC (bit==1, CF=1) → JB (cc=2)
+            uint8_t cc = (inst.cond == 0) ? 3 /*JNC/JAE*/ : 2 /*JC/JB*/;
+            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+            // Not taken: RAX = fall-through.
+            uint64_t fall = inst.arm_pc + 4;
+            emit_mov_imm_to_rax(fall);
+            emit_popfq();
+            size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
+            branch_target_patches_.push_back({jmp_to_epilogue, 0});
+            // Taken: patch jcc to here.
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
+            patch_jcc_rel32(jcc_patch, taken_rel);
+            emit_popfq();
+            emit_mov_imm_to_rax(inst.imm);
+            rax_holds_next_pc_ = true;
+            unchainable_end_ = true;
+            return 1;
+        }
+
+        case IROp::BRCOND: {
+            if (!flags_in_host_) {
+                flush_all_vregs();
+                emit_load_flags_from_pstate();
+                // Normalize CF to SUB convention so the default
+                // arm_cond_to_x86() mapping works for all conditions.
+                emit_normalize_cf_to_sub_convention();
+                flags_from_sub_ = true;  // CF is now in SUB convention
+                invalidate_all_vregs();
+                flags_in_host_ = true;
+            }
+            // Resolve condition code, handling carry polarity (ADD/TST vs SUB).
+            // With flags_from_sub_=true (SUB convention, whether originally
+            // from SUB or normalized), the default mapping is used.
+            bool need_cmc_for_hi_ls = false;
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
+
+            // Emit the JCC first — it consumes host RFLAGS directly, so no
+            // flag materialization is needed before it. Flags are materialized
+            // to pstate on each path separately (the next block may read pstate).
+            // Stores don't clobber RFLAGS, so flush_all_vregs needs no
+            // pushfq/popfq wrapper here.
+            flush_all_vregs();
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
+            }
+            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+
+            // ── Fall-through path: materialize flags, set RAX = fall-through PC ──
+            // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
+            // materialize_flags_to_pstate sees the original carry flag.
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — restore CF to original
+            }
+            materialize_flags_to_pstate();
+            emit_mov_imm_to_rax(inst.arm_pc + 4);
+            size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
+            branch_target_patches_.push_back({jmp_to_epilogue, 0});
+
+            // ── Taken path ──
+            int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
+            patch_jcc_rel32(jcc_patch, taken_rel);
+
+            // If CMC was emitted, re-invert CF before materializing flags.
+            if (need_cmc_for_hi_ls) {
+                emit_byte(0xF5);  // cmc — restore CF to original
+            }
+            // Materialize flags to pstate (the taken-target block may read them).
+            materialize_flags_to_pstate();
+
+            // ── Self-loop chaining ──
+            // If the taken target is the block's own start PC, emit a 5-byte
+            // `jmp rel32` placeholder. After the block is fully compiled,
+            // translate_block patches this slot to jump directly to the block
+            // body start, creating a tight loop that skips the epilogue,
+            // dispatcher, and prologue. This is the single biggest win for
+            // tight loops (e.g. bench_mips: 7.4s → 1.4s).
+            //
+            // The placeholder is followed by the normal epilogue path
+            // (set RAX = target PC, store PC, restore regs, ret) as a
+            // fallback. translate_block overwrites the placeholder with
+            // the real jmp, so the fallback only runs if the slot is not
+            // patched (which never happens in practice — the slot is always
+            // patched when has_selfloop_slot_ is true).
+            //
+            // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
+            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            bool is_selfloop = (inst.imm == current_start_pc_);
+            if (is_selfloop && !no_selfloop_) {
+                has_selfloop_slot_ = true;
+                selfloop_patch_off_ = code_buf_used_;
+                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
+            }
+
+            emit_mov_imm_to_rax(inst.imm);
+            rax_holds_next_pc_ = true;
+            flags_in_host_ = false;
+            unchainable_end_ = true;  // conditional branch — runtime-dependent next PC
+            return 1;
+        }
+
+        case IROp::BRCOND_FALLTHRU: {
+            flush_all_vregs();
+            emit_mov_imm_to_rax(inst.imm);
+            rax_holds_next_pc_ = true;
+            // Unconditional branch with statically-known target — record
+            // it for block chaining. try_chain_block() will patch the
+            // epilogue's chain slot to jmp directly to the target block
+            // once it has been translated.
+            chain_target_pc_ = inst.imm;
+            return 1;
+        }
+
+        case IROp::CALL_INTERP:
+            emit_call_interp(inst.arm_pc, false);
+            return 0;
+
+        case IROp::SVC:
+            emit_call_interp(inst.arm_pc, true);
+            rax_holds_next_pc_ = true;
+            unchainable_end_ = true;  // syscall may modify PC
+            return 1;
+
+        default:
+            return -1;  // not handled — caller falls through
+    }
+}
+
+} // namespace arm64emu

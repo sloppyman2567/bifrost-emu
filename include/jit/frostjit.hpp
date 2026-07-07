@@ -671,6 +671,32 @@ private:
     bool compile_ir_inst_fp_(const IRInst& inst);
     bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
 
+    // ── ALU / memory / branch codegen (v1.4.5-alpha, Turn 37) ────────
+    // Three sub-dispatchers split out of compile_ir_inst() for
+    // readability. Each is a member function so it has full access to
+    // the JIT's emit_*, alloc_*, flush_*, etc. helpers.
+    //
+    // Return value (int, NOT bool):
+    //   -1  → op not handled by this dispatcher (caller falls through
+    //          to the next dispatcher or the residual switch)
+    //    0  → op handled, does NOT end the block
+    //         (caller returns false from compile_ir_inst)
+    //    1  → op handled AND ends the block
+    //         (caller returns true from compile_ir_inst)
+    //
+    // Defined in:
+    //   jit_codegen_alu.cpp    — ADD/SUB/MUL/AND/OR/XOR/SHL/SHR/SAR/ROR/
+    //                            NOT/NEG/SEXT/ZEXT/CLZ/REV64/CSEL/SBFM/
+    //                            UBFM/BFM/EXTR/RBIT/CLS/REV16/REV32/CCMP/
+    //                            UDIV/SDIV/SMADDL/UMADDL/SMSUBL/UMSUBL/
+    //                            MOV/IMM
+    //   jit_codegen_mem.cpp    — LOAD_MEM/STORE_MEM/LOAD_REG/STORE_REG
+    //   jit_codegen_branch.cpp — BRCOND_ZERO/BRCOND_BIT/BRCOND/
+    //                            BRCOND_FALLTHRU/CALL_INTERP/SVC
+    int compile_ir_alu(const IRInst& inst);
+    int compile_ir_mem(const IRInst& inst);
+    int compile_ir_branch(const IRInst& inst);
+
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;
     std::vector<BranchPatch> branch_target_patches_;
