@@ -488,6 +488,21 @@ private:
 
     void execute(uint32_t inst, uint64_t& next_pc, CPU& cpu);
 
+    // ── Interpreter dispatch helpers ───────────────────────────────────
+    // v1.4.5-alpha refactor: the giant switch in execute() was split into
+    // per-category member functions, each handling a group of InstClass
+    // cases. They live in src/interp/interp_{fp,branch}.cpp and have full
+    // access to Emulator state (mem_, brk_verbose_, syscall(), etc.).
+    // The signature mirrors execute() (inst + next_pc + cpu + d) so the
+    // dispatcher can call them with the same locals it already has.
+    //   execute_fp     — FMOV_VD1, FMOV_RVD1, SIMD_LD1, SIMD_ST1,
+    //                    SIMD_DP, FP_SCALAR  (src/interp/interp_fp.cpp)
+    //   execute_branch — B, BL, Bcond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET,
+    //                    SVC_IMM, BRK_IMM, HLT_IMM, CLREX_INST, HINT,
+    //                    MRS_SYS, MSR_SYS    (src/interp/interp_branch.cpp)
+    void execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
+    void execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const DecodedInst& d);
+
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
