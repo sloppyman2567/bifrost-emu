@@ -105,6 +105,7 @@ enum class InstClass : uint16_t {
     REV,            // reverse bytes (64-bit)
     CLZ,            // count leading zeros
     CLS,            // count leading sign bits
+    CRC32,          // CRC32/CRC32C (B/H/W/X variants)
     CSEL,           // conditional select
     CSINC,          // conditional select increment
     CSINV,          // conditional select invert

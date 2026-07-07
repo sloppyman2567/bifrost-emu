@@ -1407,34 +1407,43 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else { cpu.v_lo[rd] &= 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
                 return;
             }
-            // FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FNMUL
-            // bits[11:10]=0b10 distinguishes from FCMP (bits[11:10]=0b00).
+            // FP arithmetic (2-source): FADD/FSUB/FMUL/FDIV/FMAX/FMIN/
+            // FMAXNM/FMINNM/FNMUL.
+            // Per ARMv8 ARM C4.2.28:
+            //   0x0=FMUL, 0x1=FDIV, 0x2=FADD, 0x3=FSUB,
+            //   0x4=FMAX, 0x5=FMIN, 0x6=FMAXNM, 0x7=FMINNM, 0x8=FNMUL
+            // BUGFIX: opcode 0x6 was FNMUL (should be FMAXNM), 0x7 was
+            // missing (FMINNM), 0x8 (FNMUL) fell through to default=0.
             if ((op & 0xFF200000) == 0x1E200000 && ((op >> 21) & 1) == 1
                 && ((op >> 10) & 0x3) == 0x2) {
                 uint8_t opcode = (op >> 12) & 0xF;
                 if (ftype) {
                     double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm), r = 0;
                     switch (opcode) {
-                        case 0x2: r = a + b; break;
-                        case 0x3: r = a - b; break;
-                        case 0x0: r = a * b; break;
-                        case 0x1: r = a / b; break;
-                        case 0x4: r = (a > b) ? a : b; break;
-                        case 0x5: r = (a < b) ? a : b; break;
-                        case 0x6: r = -(a * b); break;
+                        case 0x0: r = a * b; break;                      // FMUL
+                        case 0x1: r = a / b; break;                      // FDIV
+                        case 0x2: r = a + b; break;                      // FADD
+                        case 0x3: r = a - b; break;                      // FSUB
+                        case 0x4: r = std::fmax(a, b); break;            // FMAX
+                        case 0x5: r = std::fmin(a, b); break;            // FMIN
+                        case 0x6: r = std::fmax(a, b); break;            // FMAXNM
+                        case 0x7: r = std::fmin(a, b); break;            // FMINNM
+                        case 0x8: r = -(a * b); break;                   // FNMUL
                         default: r = 0; break;
                     }
                     write_fp_d(cpu, rd, r);
                 } else {
                     float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm), r = 0;
                     switch (opcode) {
-                        case 0x2: r = a + b; break;
-                        case 0x3: r = a - b; break;
-                        case 0x0: r = a * b; break;
-                        case 0x1: r = a / b; break;
-                        case 0x4: r = (a > b) ? a : b; break;
-                        case 0x5: r = (a < b) ? a : b; break;
-                        case 0x6: r = -(a * b); break;
+                        case 0x0: r = a * b; break;                      // FMUL
+                        case 0x1: r = a / b; break;                      // FDIV
+                        case 0x2: r = a + b; break;                      // FADD
+                        case 0x3: r = a - b; break;                      // FSUB
+                        case 0x4: r = std::fmax(a, b); break;            // FMAX
+                        case 0x5: r = std::fmin(a, b); break;            // FMIN
+                        case 0x6: r = std::fmax(a, b); break;            // FMAXNM
+                        case 0x7: r = std::fmin(a, b); break;            // FMINNM
+                        case 0x8: r = -(a * b); break;                   // FNMUL
                         default: r = 0; break;
                     }
                     write_fp_s(cpu, rd, r);

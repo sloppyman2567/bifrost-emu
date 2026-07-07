@@ -42,7 +42,12 @@ namespace arm64emu {
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in signal.cpp
 
 Emulator::Emulator() = default;
-Emulator::~Emulator() = default;
+Emulator::~Emulator() {
+    // Clear the active-emu pointer so host signal handlers don't
+    // dereference freed memory. Without this, a signal arriving after
+    // the destructor runs would crash with UAF.
+    g_active_emu_ = nullptr;
+}
 
 void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
     return &excl_monitor_shards_[excl_shard_idx(addr)];

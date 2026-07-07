@@ -887,6 +887,18 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     case 9:  d.cls = InstClass::LSR;  return true;
                     case 10: d.cls = InstClass::ASR;  return true;
                     case 11: d.cls = InstClass::ROR;  return true;
+                    // CRC32 instructions (opcodes 0x10-0x1F).
+                    // Encoding: bits[20:16]=size(00=B,01=H,10=W,11=X),
+                    // bit[21]=1 for CRC32C (castagnoli), 0 for CRC32.
+                    // We use dp_opcode to carry the full opcode + size info.
+                    case 0x10: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 0; return true; // CRC32B
+                    case 0x11: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 1; return true; // CRC32H
+                    case 0x12: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 2; return true; // CRC32W
+                    case 0x14: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 3; return true; // CRC32X
+                    case 0x18: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 0; return true; // CRC32CB
+                    case 0x19: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 1; return true; // CRC32CH
+                    case 0x1A: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 2; return true; // CRC32CW
+                    case 0x1C: d.cls = InstClass::CRC32;  d.is_sub = 1; d.imm = 3; return true; // CRC32CX
                     default: d.cls = InstClass::UNKNOWN; return false;
                 }
             }

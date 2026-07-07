@@ -14,6 +14,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
+#include "yggdrasil/host_node.hpp"
 
 #include <errno.h>
 #include <poll.h>
@@ -22,6 +23,7 @@
 #include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/timerfd.h>
 
 namespace arm64emu {
@@ -226,6 +228,29 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
 
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
             ret_err(ENOSYS);
+            return 0;
+        }
+
+        case 279: { // memfd_create(name, flags) — AArch64 279
+            // Forward to host memfd_create. Used by glibc tmpfile(),
+            // Rust memmap, Wayland, Chrome IPC.
+            // Read the name string from guest memory.
+            std::string name;
+            if (a0 != 0) {
+                try {
+                    for (size_t i = 0; i < 256; i++) {
+                        uint8_t c = mem_.load<uint8_t>(a0 + i);
+                        if (c == 0) break;
+                        name.push_back(static_cast<char>(c));
+                    }
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            int hfd = ::syscall(SYS_memfd_create, name.c_str(),
+                                static_cast<unsigned int>(a1));
+            if (hfd < 0) { ret_errno(); return 0; }
+            // Register in FdTable.
+            int gfd = emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, O_RDWR));
+            ret_host(gfd);
             return 0;
         }
 

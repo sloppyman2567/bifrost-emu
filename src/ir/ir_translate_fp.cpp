@@ -176,8 +176,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // 2-source ops.
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
                 && (op & 0xFF000000) == 0x1E000000) {
-                // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5, FNMUL=0x6
-                if (opcode <= 6 && ftype <= 1) {
+                // FADD=0x2, FSUB=0x3, FMUL=0x0, FDIV=0x1, FMAX=0x4, FMIN=0x5,
+                // FMAXNM=0x6, FMINNM=0x7, FNMUL=0x8.
+                // BUGFIX: 0x6 was labeled FNMUL (actually FMAXNM); 0x7
+                // (FMINNM) and 0x8 (FNMUL) were missing.
+                if (opcode <= 8 && ftype <= 1) {
                     emit(block, IROp::FP_BINOP, rd, rn, rm, ftype, 0, 0, opcode, cur_pc);
                     return true;
                 }

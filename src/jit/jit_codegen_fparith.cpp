@@ -100,15 +100,12 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 case 1: sse_op = 0x5E; break;  // div (divsd)
                 case 2: sse_op = 0x58; break;  // add (addsd)
                 case 3: sse_op = 0x5C; break;  // sub (subsd)
-                case 4: sse_op = 0x5F; break;  // max (maxsd)
-                case 5: sse_op = 0x5D; break;  // min (minsd)
+                case 4: sse_op = 0x5F; break;  // max (maxsd) — FMAX
+                case 5: sse_op = 0x5D; break;  // min (minsd) — FMIN
+                case 6: sse_op = 0x5F; break;  // max (maxsd) — FMAXNM
+                case 7: sse_op = 0x5D; break;  // min (minsd) — FMINNM
+                case 8: sse_op = 0x59; break;  // mul (mulsd) — FNMUL (negate after)
                 default:
-                    // Unknown FP opcode — fall back to interpreter instead
-                    // of silently emitting ADDSD (which would produce wrong
-                    // results). This shouldn't happen (the IR translator
-                    // only emits opcodes 0-6), but defensive coding here
-                    // prevents silent miscompilation if a new opcode is
-                    // added to the translator without updating this switch.
                     emit_call_interp(inst.arm_pc, false);
                     return true;
             }
@@ -120,7 +117,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(0x0F); emit_byte(sse_op);
             emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
 
-            if (opc == 6) {  // FNMUL: negate
+            if (opc == 8) {  // FNMUL: negate the product
                 emit_mov_imm64(RAX, 0x8000000000000000ULL);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);

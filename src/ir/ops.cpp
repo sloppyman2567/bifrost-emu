@@ -761,9 +761,11 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                         case 1: r = a / b; break;
                         case 2: r = a + b; break;
                         case 3: r = a - b; break;
-                        case 4: r = (a > b) ? a : b; break;
-                        case 5: r = (a < b) ? a : b; break;
-                        case 6: r = -(a * b); break;
+                        case 4: r = std::fmax(a, b); break;   // FMAX
+                        case 5: r = std::fmin(a, b); break;   // FMIN
+                        case 6: r = std::fmax(a, b); break;   // FMAXNM
+                        case 7: r = std::fmin(a, b); break;   // FMINNM
+                        case 8: r = -(a * b); break;          // FNMUL
                     }
                     cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
                     cpu.v_hi[inst.dest] = 0;
@@ -777,9 +779,11 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                         case 1: r = a / b; break;
                         case 2: r = a + b; break;
                         case 3: r = a - b; break;
-                        case 4: r = (a > b) ? a : b; break;
-                        case 5: r = (a < b) ? a : b; break;
-                        case 6: r = -(a * b); break;
+                        case 4: r = std::fmax(a, b); break;   // FMAX
+                        case 5: r = std::fmin(a, b); break;   // FMIN
+                        case 6: r = std::fmax(a, b); break;   // FMAXNM
+                        case 7: r = std::fmin(a, b); break;   // FMINNM
+                        case 8: r = -(a * b); break;          // FNMUL
                     }
                     uint32_t tr; memcpy(&tr, &r, 4);
                     cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;

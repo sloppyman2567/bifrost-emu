@@ -1081,6 +1081,49 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        case 276: { // renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
+            // Forward to host renameat2. Used for atomic file swap,
+            // RENAME_NOREPLACE, RENAME_EXCHANGE.
+            int old_hfd = resolve_dirfd(fds_, a0);
+            int new_hfd = resolve_dirfd(fds_, a2);
+            if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
+                (new_hfd == -1 && static_cast<int64_t>(a2) != -100)) {
+                ret_err(EBADF); return 0;
+            }
+            std::string oldp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
+            std::string newp = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a3));
+#ifdef SYS_renameat2
+            int r = ::syscall(SYS_renameat2, old_hfd, oldp.c_str(),
+                              new_hfd, newp.c_str(),
+                              static_cast<unsigned int>(a4));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
+#else
+            // Fallback: plain renameat (no flags support)
+            if (a4 != 0) { ret_err(ENOSYS); return 0; }
+            int r = ::renameat(old_hfd, oldp.c_str(), new_hfd, newp.c_str());
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
+#endif
+            return 0;
+        }
+
+        case 267: { // syncfs(fd) — AArch64 267
+            // Forward to host syncfs.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { ret_err(EBADF); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_host(0); return 0; }  // virtual fd — no-op
+#ifdef SYS_syncfs
+            int r = ::syscall(SYS_syncfs, hfd);
+            if (r < 0) { ret_errno(); return 0; }
+#else
+            ::sync();  // fallback: sync everything
+#endif
+            ret_host(0);
+            return 0;
+        }
+
         default:
             return SYSCALL_NOT_HANDLED;
     }
