@@ -326,6 +326,9 @@ void optimize_ir(IRBlock& block) {
             inst.src1 = copies.find(inst.src1);
         if (inst.src2 && copies.parent.count(inst.src2))
             inst.src2 = copies.find(inst.src2);
+        // BUGFIX (Turn 66): also substitute inst.aux (SMADDL/SMSUBL accumulator).
+        if (inst.aux && copies.parent.count(inst.aux))
+            inst.aux = copies.find(inst.aux);
 
         switch (inst.op) {
             case IROp::NOP:
@@ -775,6 +778,10 @@ void optimize_ir(IRBlock& block) {
                 // Normal op: src1 and src2 are vregs.
                 if (inst.src1) live.insert(inst.src1);
                 if (inst.src2) live.insert(inst.src2);
+                // BUGFIX (Turn 66): aux is also a vreg source (SMADDL/
+                // SMSUBL accumulator). Mark it live so DCE doesn't remove
+                // the instruction that defines it.
+                if (inst.aux) live.insert(inst.aux);
             }
         } else {
             used[i - 1] = false;

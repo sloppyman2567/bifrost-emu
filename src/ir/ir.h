@@ -42,10 +42,25 @@ inline void emit(IRBlock& b, IROp op, uint16_t dest = 0,
     inst.dest = dest;
     inst.src1 = src1;
     inst.src2 = src2;
+    inst.aux = 0;
     inst.width = width;
     inst.cond = cond;
     inst.flags_op = flags_op;
     inst.imm = imm;
+    inst.arm_pc = arm_pc;
+    b.insts.push_back(inst);
+}
+
+// Emit with auxiliary vreg (for SMADDL/SMSUBL accumulator). [Turn 66]
+inline void emit_aux(IRBlock& b, IROp op, uint16_t dest,
+                     uint16_t src1, uint16_t src2, uint16_t aux_vreg,
+                     uint64_t arm_pc) {
+    IRInst inst{};
+    inst.op = op;
+    inst.dest = dest;
+    inst.src1 = src1;
+    inst.src2 = src2;
+    inst.aux = aux_vreg;
     inst.arm_pc = arm_pc;
     b.insts.push_back(inst);
 }

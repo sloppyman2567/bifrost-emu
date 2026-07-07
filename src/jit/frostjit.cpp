@@ -1743,18 +1743,12 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
-            // Load accumulator from cpu.regs[inst.cond] directly.
-            // inst.cond is the ARM64 register index (0-31). If 31 (XZR),
-            // the accumulator is 0 (xor rdx, rdx). Otherwise, load from
-            // cpu.regs[cond] = [CPU_REG + cond*8].
-            if (inst.cond == 31) {
-                // XZR — accumulator is 0
-                emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2);  // xor rdx, rdx
-            } else {
-                // Load cpu.regs[cond] into RDX
-                int32_t acc_off = REGS_OFF + static_cast<int>(inst.cond) * 8;
-                emit_load(RDX, CPU_REG, acc_off);
-            }
+            // BUGFIX (Turn 66): Load accumulator vreg via the vreg cache
+            // (inst.aux), not directly from cpu.regs[]. The old code read
+            // cpu.regs[inst.cond] which bypassed the vreg cache and could
+            // read stale values if the accumulator was modified earlier
+            // in the same block.
+            load_vreg_to_reg(RDX, inst.aux);
             // add rax, rdx
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xD0);
             int d = alloc_reg_for(inst.dest, RAX);
@@ -1912,12 +1906,8 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(0x89); emit_byte(0xC9);  // mov ecx, ecx
             }
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);  // imul rax, rcx
-            // Load accumulator
-            if (inst.cond == 31) {
-                emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2);  // xor rdx, rdx
-            } else {
-                emit_load(RDX, CPU_REG, REGS_OFF + static_cast<int>(inst.cond) * 8);
-            }
+            // BUGFIX (Turn 66): Load accumulator vreg via the vreg cache.
+            load_vreg_to_reg(RDX, inst.aux);
             // sub rdx, rax (dest = acc - product)
             emit_byte(0x48); emit_byte(0x29); emit_byte(0xC2);  // sub rdx, rax
             int d = alloc_reg_for(inst.dest, RDX);

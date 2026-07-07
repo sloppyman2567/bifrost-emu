@@ -1529,15 +1529,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::SMADDL: case InstClass::UMADDL: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
+            // BUGFIX (Turn 66): load the accumulator as a vreg and pass
+            // it via the `aux` field. The old approach passed the ARM
+            // register index in `cond` and read cpu.regs[] directly in
+            // the JIT, bypassing the vreg cache. If the accumulator
+            // register was modified earlier in the same block, the new
+            // value was still in a dirty vreg and cpu.regs[] held the
+            // stale value, causing divergent results.
+            uint16_t acc = load_arm_reg(block, d.ra);
             uint16_t r = g_alloc.alloc();
-            // Encode the accumulator register index (d.ra) in the `cond`
-            // field. The JIT loads cpu.regs[d.ra] directly. This avoids
-            // creating a vreg for the accumulator that could be DCE'd by
-            // the optimizer (which would leave the SMADDL with a stale
-            // vreg reference). If d.ra == 31 (XZR), cond=31 and the JIT
-            // uses 0 as the accumulator.
-            emit(block, d.cls == InstClass::SMADDL ? IROp::SMADDL : IROp::UMADDL,
-                 r, a, b, 0, d.ra & 0x1F, 0, 0, cur_pc);
+            emit_aux(block, d.cls == InstClass::SMADDL ? IROp::SMADDL : IROp::UMADDL,
+                     r, a, b, acc, cur_pc);
             store_arm_reg(block, d.rd, r);
             return false;
         }
@@ -1547,10 +1549,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::UMSUBL: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
+            // BUGFIX (Turn 66): load accumulator as vreg via `aux` field.
+            uint16_t acc = load_arm_reg(block, d.ra);
             uint16_t r = g_alloc.alloc();
-            // Accumulator register index in cond field (31=XZR → 0).
-            emit(block, d.cls == InstClass::SMSUBL ? IROp::SMSUBL : IROp::UMSUBL,
-                 r, a, b, 0, d.ra & 0x1F, 0, 0, cur_pc);
+            emit_aux(block, d.cls == InstClass::SMSUBL ? IROp::SMSUBL : IROp::UMSUBL,
+                     r, a, b, acc, cur_pc);
             store_arm_reg(block, d.rd, r);
             return false;
         }

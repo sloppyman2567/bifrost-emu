@@ -242,6 +242,7 @@ struct IRInst {
     uint16_t dest;   // destination vreg (0 if no dest)  [was uint8_t]
     uint16_t src1;   // source vreg 1                     [was uint8_t]
     uint16_t src2;   // source vreg 2                     [was uint8_t]
+    uint16_t aux;    // auxiliary vreg (SMADDL/SMSUBL accumulator) [Turn 66]
     uint8_t width;   // for LOAD_MEM/STORE_MEM: 1/2/4/8; for SEXT/ZEXT: bits; for BFM/UBFM/SBFM/EXTR: encoded
     uint8_t cond;    // for CSEL*/CCMP/BRCOND: ARM64 condition code
     uint8_t flags_op;// for ADDS/SUBS/ADCS/SBCS: 0=add, 1=sub (controls C flag inversion)
