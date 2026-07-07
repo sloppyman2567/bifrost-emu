@@ -671,6 +671,24 @@ private:
     bool compile_ir_inst_fp_(const IRInst& inst);
     bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
 
+    // ── FP-arithmetic / SIMD sub-dispatchers (split out of
+    //    compile_ir_inst_fp_() for readability). Each returns:
+    //      true  → op handled here (caller returns false; FP ops never
+    //              end a block)
+    //      false → op not handled here (caller falls through to the
+    //              next dispatcher or the residual switch in
+    //              compile_ir_inst_fp_())
+    //
+    // Defined in:
+    //   jit_codegen_fparith.cpp — FMOV_*, FP_BINOP, FP_UNOP, FP_CMP,
+    //                             FP_MOVI, FP_F2I, FP_I2F, FP_F2I_FIXED,
+    //                             FP_I2F_FIXED, FCVT_S2D, FCVT_D2S
+    //   jit_codegen_simd.cpp    — SIMD_LOGICAL, SIMD_ARITH, SIMD_CMP,
+    //                             SIMD_DUP, SIMD_LDST, SIMD_SHL,
+    //                             SIMD_USHR, SIMD_SSHR
+    bool compile_ir_fparith(const IRInst& inst);
+    bool compile_ir_simd(const IRInst& inst);
+
     // ── ALU / memory / branch codegen (v1.4.5-alpha, Turn 37) ────────
     // Three sub-dispatchers split out of compile_ir_inst() for
     // readability. Each is a member function so it has full access to
