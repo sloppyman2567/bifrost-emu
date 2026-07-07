@@ -468,6 +468,153 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             return true;
         }
 
+        // ── v1.5.0.alpha: AES / PMULL native codegen ──────────────────
+        // Uses AES-NI (aesenc/aesdec/aesimc/aesmc) and PCLMULQDQ
+        // (pclmulqdq) when the host CPU supports them. Falls back to
+        // CALL_INTERP on hosts without these extensions.
+        //
+        // The 128-bit V register is stored as v_lo (bits[63:0]) +
+        // v_hi (bits[127:64]). We load both halves into XMM0 (low in
+        // bits[63:0], high in bits[127:64]), perform the 128-bit op,
+        // then store back.
+        //
+        // XMM register usage:
+        //   XMM0 = state (src1) → result (dest)
+        //   XMM1 = key (src2) for AES, or second operand for PMULL
+        //
+        // AES-NI instruction encodings (66 0F 38 DC/DE/DD/DF /r):
+        //   AESE   = 66 0F 38 DC /r  (aesenc)
+        //   AESD   = 66 0F 38 DE /r  (aesdec)
+        //   AESMC  = 66 0F 38 DD /r  (aesimc — note: AESMC maps to aesimc,
+        //                              AESIMC maps to aesmc; the x86 and
+        //                              ARM names are swapped relative to
+        //                              each other — see below)
+        //   AESIMC = 66 0F 38 DF /r
+        //
+        // IMPORTANT: ARM and x86 AES instructions are NOT identical:
+        //   ARM AESE  = AddRoundKey + SubBytes + ShiftRows
+        //   x86 AESENC = SubBytes + ShiftRows + MixColumns + XOR roundkey
+        // The x86 instruction includes MixColumns, which ARM's AESE does
+        // NOT. ARM splits this into AESE (no MixColumns) + AESMC
+        // (MixColumns). To emulate ARM AESE on x86, we would need to
+        // use the AESENC instruction WITHOUT the MixColumns step, which
+        // x86 doesn't expose directly.
+        //
+        // However, in practice, ARM code always pairs AESE+AESMC (the
+        // ARM ARM shows them used together in every AES round). The
+        // x86 AESENC instruction does both in one step. So we can't
+        // directly map them 1:1.
+        //
+        // For correctness, we fall back to CALL_INTERP for AESE/AESD
+        // (which uses the interpreter's software table-driven
+        // implementation). We DO use AES-NI for AESMC/AESIMC via the
+        // aesimc/aesmc x86 instructions... actually those also have
+        // semantic differences.
+        //
+        // Given the semantic mismatch, the safest approach is to
+        // emit CALL_INTERP for all AES ops. The native AES-NI path is
+        // left as a future optimization that requires careful mapping
+        // of ARM's split semantics to x86's combined semantics.
+        //
+        // For PMULL/PMULL2, the semantics ARE identical (carry-less
+        // multiplication is the same on both architectures), so we
+        // use PCLMULQDQ natively when available.
+        case IROp::AES_CRYPTO: {
+            uint8_t sub_op = static_cast<uint8_t>(inst.imm);
+
+            // PMULL/PMULL2 — use PCLMULQDQ when available.
+            if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
+                clobber_flags();
+                flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+
+                int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+                int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+                int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
+                int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
+                int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+                int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+
+                // Load src1 into XMM0 (low 64 bits in bits[63:0]).
+                // movsd xmm0, [rbx+off1lo]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off1lo);
+                // Load src2 into XMM1 (low 64 bits in bits[63:0]).
+                // movsd xmm1, [rbx+off2lo]
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off2lo);
+
+                if (sub_op == 4) {
+                    // PMULL: multiply low 64 bits, produce 128-bit result.
+                    // pclmulqdq xmm0, xmm1, 0x00  (imm=0x00 selects low×low)
+                    // Encoding: 66 0F 3A 44 /r ib
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
+                    emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
+                    emit_byte(0x00);  // imm8 = 0x00 (low × low)
+                } else {
+                    // PMULL2: multiply high 64 bits, produce 128-bit result.
+                    // Need to load the high halves into bits[63:0] of XMM0/XMM1
+                    // because pclmulqdq operates on the low 64 bits of each
+                    // operand (selected by the imm).
+                    //
+                    // Actually, pclmulqdq imm bits select which 64-bit half
+                    // of each source to use:
+                    //   imm[0] = 0: src1 low 64, 1: src1 high 64
+                    //   imm[4] = 0: src2 low 64, 1: src2 high 64
+                    // So for PMULL2 (high × high), imm = 0x11.
+                    // We need the full 128-bit values in XMM0/XMM1.
+                    //
+                    // Reload with movdqa (128-bit load) instead of movsd.
+                    // movdqa xmm0, [rbx+off1lo]  (requires 16-byte aligned;
+                    //   our v_lo/v_hi are 8-byte apart, NOT 16-byte aligned)
+                    // Use movdqu (unaligned) instead: F3 0F 6F /r
+                    // But we need to load v_lo AND v_hi into one XMM.
+                    // v_lo is at V_LO_OFF + src1*8, v_hi is at V_HI_OFF + src1*8.
+                    // V_LO_OFF = 288, V_HI_OFF = 544. They're 256 bytes apart,
+                    // NOT adjacent. So we can't load both with one movdqu.
+                    //
+                    // Instead: load v_lo into bits[63:0] of xmm0, v_hi into
+                    // bits[127:64] via pinsrq.
+                    // movsd  xmm0, [rbx+off1lo]   ; bits[63:0] = v_lo, bits[127:64] = 0
+                    // pinsrq xmm0, [rbx+off1hi], 1 ; bits[127:64] = v_hi
+                    // pinsrq = 66 0F 3A 22 /r ib
+                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                    emit_modrm_disp(0, CPU_REG, off1lo);
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
+                    emit_modrm_disp(0, CPU_REG, off1hi);
+                    emit_byte(0x01);  // imm8 = 1 (high 64 bits)
+
+                    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                    emit_modrm_disp(1, CPU_REG, off2lo);
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
+                    emit_modrm_disp(1, CPU_REG, off2hi);
+                    emit_byte(0x01);
+
+                    // pclmulqdq xmm0, xmm1, 0x11  (high × high)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
+                    emit_byte(0xC1);
+                    emit_byte(0x11);  // imm8 = 0x11 (high × high)
+                }
+
+                // Store the 128-bit result: bits[63:0] → v_lo, bits[127:64] → v_hi.
+                // movsd [rbx+offdlo], xmm0
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offdlo);
+                // pextrq [rbx+offdhi], xmm0, 1  (extract bits[127:64])
+                // pextrq = 66 0F 3A 16 /r ib
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x16);
+                emit_modrm_disp(0, CPU_REG, offdhi);
+                emit_byte(0x01);  // imm8 = 1 (high 64 bits)
+                return true;
+            }
+
+            // AESE/AESD/AESMC/AESIMC — fall back to CALL_INTERP.
+            // (The ARM-vs-x86 semantic mismatch makes direct AES-NI
+            // mapping incorrect. The interpreter's table-driven
+            // implementation is correct.)
+            emit_call_interp(inst.arm_pc, false);
+            return true;
+        }
+
         default:
             return false;  // not handled — caller falls through
     }

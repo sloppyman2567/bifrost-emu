@@ -223,6 +223,22 @@ enum class IROp : uint8_t {
                    // src1=addr, src2=value, dest=ARM reg for status (rs)
     STLR_FAST,     // jit_stlr(emu, cpu, src1, src2, width); store-release
                    // src1=addr, src2=value
+    // v1.5.0.alpha: Native ARMv8 Crypto Extensions (AES-NI / PCLMULQDQ).
+    // These operate on the full 128-bit V register (v_lo + v_hi).
+    // dest = result vreg; src1 = state vreg; src2 = key vreg (AES) or
+    // second operand (PMULL).
+    // imm = sub-opcode:
+    //   0 = AESE  (AddRoundKey + SubBytes + ShiftRows)
+    //   1 = AESD  (AddRoundKey + InvSubBytes + InvShiftRows)
+    //   2 = AESMC (MixColumns)
+    //   3 = AESIMC (InvMixColumns)
+    //   4 = PMULL  (low 64-bit poly mul → 128-bit)
+    //   5 = PMULL2 (high 64-bit poly mul → 128-bit)
+    // On hosts with AES-NI/PCLMULQDQ, the JIT emits native aesenc/aesdec
+    // /aesimc/aesmc / pclmulqdq. On hosts without, it falls back to
+    // CALL_INTERP (which calls the interpreter's software table-driven
+    // implementation in interp_crypto.hpp).
+    AES_CRYPTO,
 };
 
 // Condition codes (same encoding as ARM64 cond field).

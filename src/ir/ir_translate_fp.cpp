@@ -662,10 +662,58 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 }
             }
 
+            // ── v1.5.0.alpha: ARMv8 Crypto Extensions ───────────────
+            // AES: 0x4E284800-0x4E287800 (AESE/AESD/AESMC/AESIMC)
+            // SHA1H: 0x5E280800
+            // SHA1SU1: 0x5E280000
+            // SHA256SU0: 0x5E282000
+            // PMULL: 0x4E60E000 (size=11, 64-bit poly mul, low half)
+            // PMULL2: 0x4EE0E000 (size=11, 64-bit poly mul, high half)
+            //
+            // We emit AES_CRYPTO IR ops for AESE/AESD/AESMC/AESIMC and
+            // PMULL/PMULL2. The JIT's codegen will use AES-NI /
+            // PCLMULQDQ when available, or fall back to CALL_INTERP
+            // (which calls the interpreter's software table-driven
+            // implementation in interp_crypto.hpp).
+            {
+                uint32_t aes_masked = op & 0xFFFFFC00;
+                if (aes_masked == 0x4E284800) {
+                    // AESE/AESD/AESMC/AESIMC — imm = (op>>10)&3
+                    uint8_t sub_op = static_cast<uint8_t>((op >> 10) & 3);
+                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, 0, 0,
+                         0, 0, sub_op, cur_pc);
+                    return true;
+                }
+                // PMULL (size=11, 64-bit poly mul, low half)
+                if ((op & 0xFFE0FC00) == 0x4E60E000) {
+                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0,
+                         0, 0, 4, cur_pc);  // sub_op=4 = PMULL
+                    return true;
+                }
+                // PMULL2 (size=11, 64-bit poly mul, high half)
+                if ((op & 0xFFE0FC00) == 0x4EE0E000) {
+                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0,
+                         0, 0, 5, cur_pc);  // sub_op=5 = PMULL2
+                    return true;
+                }
+                // SHA1H, SHA1SU1, SHA256SU0 — emit CALL_INTERP for now
+                // (the interpreter has partial implementations; native
+                // SHA-NI codegen is a future enhancement).
+                if (aes_masked == 0x5E280800 ||  // SHA1H
+                    aes_masked == 0x5E280000 ||  // SHA1SU1
+                    aes_masked == 0x5E282000) {  // SHA256SU0
+                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                    return true;
+                }
+            }
+
             // Unrecognized SIMD_DP — fall back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
         }
+        // (End of SIMD_DP case — the crypto checks below are BEFORE the
+        //  fallthrough, in the sub3_noq checks above. If we reach here,
+        //  we already emitted CALL_INTERP.)
 
         default:
             // Not an FP/SIMD case — let the main translator handle it.

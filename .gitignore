@@ -69,3 +69,5 @@ bifrost-emu-test*
 context.md
 rootfs/
 test_capi
+busybox-glibc
+busybox-musl

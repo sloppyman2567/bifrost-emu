@@ -149,10 +149,84 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
 
         // ── LDP/STP ──────────────────────────────────────────────────
         // Native IR translation for GPR pair load/store.
-        // SIMD LDP/STP (is_vec=true) still falls back to interpreter.
+        // v1.5.0.alpha: SIMD LDP/STP (is_vec=true) now gets native IR
+        // translation using LOAD_MEM/STORE_MEM + SIMD_LDST, matching
+        // the pattern used by SIMD_LD1/ST1. This eliminates a major
+        // CALL_INTERP fallback for FP/SIMD-heavy code (function
+        // prologues/epilogues that save/restore D8-D15 pairs).
         case InstClass::LDP: case InstClass::STP: {
             if (d.is_vec) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                // SIMD LDP/STP: opc=0 → S (32-bit), opc=1 → D (64-bit),
+                // opc=2 → Q (128-bit). The decoder doesn't set d.Q for
+                // LDP/STP, so we derive it from opc here.
+                uint8_t opc = (d.raw >> 30) & 3;
+                bool Q = (opc == 2);  // 128-bit
+                bool is_load = d.is_load;
+                uint16_t base = load_arm_reg(block, d.rn, true);
+                bool post_index = (d.mode == 1);
+                bool pre_index = (d.mode == 3);
+                int64_t mem_off = post_index ? 0 : d.disp;
+                int stride = Q ? 16 : 8;
+
+                if (is_load) {
+                    // LDP Vrt, Vrt2, [base, #disp]
+                    // Load rt: v_lo from [base+mem_off], v_hi from [base+mem_off+8]
+                    uint16_t lo1 = g_alloc.alloc();
+                    emit(block, IROp::LOAD_MEM, lo1, base, 0, 8, 0, 0,
+                         static_cast<uint64_t>(mem_off));
+                    if (Q) {
+                        uint16_t hi1 = g_alloc.alloc();
+                        emit(block, IROp::LOAD_MEM, hi1, base, 0, 8, 0, 0,
+                             static_cast<uint64_t>(mem_off + 8));
+                        emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 1, 0, 0, 0, cur_pc);
+                    } else {
+                        // 64-bit load: v_hi = 0
+                        emit(block, IROp::SIMD_LDST, d.rt, lo1, 0, 1, 0, 0, 0, cur_pc);
+                        // SIMD_LDST with src2=0 writes 0 to v_hi (vreg 0 is
+                        // always 0 in our IR since it's the zero register).
+                    }
+                    // Load rt2
+                    uint16_t lo2 = g_alloc.alloc();
+                    emit(block, IROp::LOAD_MEM, lo2, base, 0, 8, 0, 0,
+                         static_cast<uint64_t>(mem_off + stride));
+                    if (Q) {
+                        uint16_t hi2 = g_alloc.alloc();
+                        emit(block, IROp::LOAD_MEM, hi2, base, 0, 8, 0, 0,
+                             static_cast<uint64_t>(mem_off + stride + 8));
+                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 1, 0, 0, 0, cur_pc);
+                    } else {
+                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, 0, 1, 0, 0, 0, cur_pc);
+                    }
+                } else {
+                    // STP Vrt, Vrt2, [base, #disp]
+                    // Store rt: v_lo to [base+mem_off], v_hi to [base+mem_off+8]
+                    uint16_t lo1 = g_alloc.alloc();
+                    uint16_t hi1 = g_alloc.alloc();
+                    emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 0, 0, 0, 0, cur_pc);
+                    emit(block, IROp::STORE_MEM, 0, base, lo1, 8, 0, 0,
+                         static_cast<uint64_t>(mem_off));
+                    if (Q) {
+                        emit(block, IROp::STORE_MEM, 0, base, hi1, 8, 0, 0,
+                             static_cast<uint64_t>(mem_off + 8));
+                    }
+                    uint16_t lo2 = g_alloc.alloc();
+                    uint16_t hi2 = g_alloc.alloc();
+                    emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 0, 0, 0, 0, cur_pc);
+                    emit(block, IROp::STORE_MEM, 0, base, lo2, 8, 0, 0,
+                         static_cast<uint64_t>(mem_off + stride));
+                    if (Q) {
+                        emit(block, IROp::STORE_MEM, 0, base, hi2, 8, 0, 0,
+                             static_cast<uint64_t>(mem_off + stride + 8));
+                    }
+                }
+                // Writeback
+                if (d.writeback || post_index || pre_index) {
+                    bool rn_is_sp = (d.rn == 31);
+                    uint16_t off = load_imm(block, static_cast<uint64_t>(d.disp));
+                    uint16_t new_base = g_alloc.alloc();
+                    emit(block, IROp::ADD, new_base, base, off);
+                    store_arm_reg(block, d.rn, new_base, rn_is_sp);
+                }
                 return true;
             }
             // GPR LDP/STP: decode esize from opc (bits[31:30])

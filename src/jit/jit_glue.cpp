@@ -35,9 +35,13 @@ void Emulator::enable_jit() {
     jit_enabled_ = (jit_ != nullptr);
     if (jit_enabled_) {
         jit_->set_direct_window(mem_.direct_window());
-        if (verbose_)
-            fprintf(stderr, "[%s] frostJIT enabled (x86 codegen, %s mode)\n",
-                    CODENAME, shared_jit_mode ? "shared" : "per-thread");
+        if (verbose_) {
+            const auto& cf = jit_->cpu_features();
+            fprintf(stderr, "[%s] frostJIT enabled (x86 codegen, %s mode, "
+                    "features: %s)\n",
+                    CODENAME, shared_jit_mode ? "shared" : "per-thread",
+                    cpu_features_string(cf));
+        }
     }
 }
 

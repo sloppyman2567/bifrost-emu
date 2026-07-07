@@ -76,9 +76,13 @@ CpuFeatures detect_cpu_features() {
         const uint32_t ecx_osxsave = 1u << 27;
         const uint32_t ecx_avx     = 1u << 28;
         const uint32_t ecx_fma3    = 1u << 12;
+        const uint32_t ecx_aesni   = 1u << 25;  // AES-NI (Westmere+)
+        const uint32_t ecx_pclmulqdq = 1u << 1; // PCLMULQDQ (Westmere+)
         f.sse41  = (c & ecx_sse41)  != 0;
         f.sse42  = (c & ecx_sse42)  != 0;
         f.popcnt = (c & ecx_popcnt) != 0;
+        f.aesni  = (c & ecx_aesni)  != 0;
+        f.pclmulqdq = (c & ecx_pclmulqdq) != 0;
 
         // AVX / FMA3 require OS support (OSXSAVE) and YMM state in XCR0.
         // Cache the XCR0 value — it's also needed for AVX-512 below.
@@ -128,9 +132,12 @@ CpuFeatures detect_cpu_features() {
         const uint32_t ebx_avx512dq= 1u << 17;
         const uint32_t ebx_avx512ifma = 1u << 21;
         const uint32_t ebx_avx512bw = 1u << 30;
+        // EBX bit 29: SHA-NI (Intel Goldmont+ / AMD Zen+)
+        const uint32_t ebx_sha     = 1u << 29;
 
         f.bmi1 = (b & ebx_bmi1) != 0;
         f.bmi2 = (b & ebx_bmi2) != 0;
+        f.sha  = (b & ebx_sha)  != 0;
 
         // AVX2 requires AVX + YMM state (already checked for f.avx).
         bool avx_ok = f.avx;  // AVX implies YMM-enabled XCR0
@@ -181,6 +188,9 @@ const char* cpu_features_string(const CpuFeatures& f) {
     if (f.sse42)     append("sse4.2");
     if (f.popcnt)    append("popcnt");
     if (f.lzcnt)     append("lzcnt");
+    if (f.aesni)     append("aesni");
+    if (f.pclmulqdq) append("pclmulqdq");
+    if (f.sha)       append("sha");
     if (f.avx)       append("avx");
     if (f.avx2)      append("avx2");
     if (f.fma3)      append("fma3");

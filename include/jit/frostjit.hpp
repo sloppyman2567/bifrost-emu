@@ -93,6 +93,10 @@ public:
     // codegen sites. Now we do, falling back to CALL_INTERP on hosts
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
+    // v1.5.0.alpha: crypto instruction set detection.
+    bool has_aesni()     const { return cpu_features_.has_aesni(); }
+    bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
+    bool has_sha()       const { return cpu_features_.has_sha(); }
 
     // BUGFIX (v1.4.5-alpha): these counters were plain uint64_t, but in
     // shared-JIT mode they're incremented by multiple host threads

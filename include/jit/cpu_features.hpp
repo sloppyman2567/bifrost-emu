@@ -55,6 +55,9 @@ struct CpuFeatures {
     bool avx512dq     : 1;  // AVX-512 DWord/Double — vpmullq, fp-class
     bool avx512ifma   : 1;  // AVX-512 IFMA — 52-bit integer mul-add (crypto)
     bool lzcnt        : 1;  // LZCNT (ABM) — leading-zero count, distinct from BMI1
+    bool aesni        : 1;  // AES-NI — aesenc/aesdec/aesimc/aesmc (Westmere+)
+    bool pclmulqdq    : 1;  // PCLMULQDQ — carry-less multiply (Westmere+)
+    bool sha          : 1;  // SHA-NI — sha1rnds4/sha256rnds2 (Goldmont+)
 
     // True iff the JIT should emit FMA3 codegen for FMADD/FMSUB/
     // FNMADD/FNMSUB. Requires both FMA3 and AVX support (FMA3 ops use
@@ -70,6 +73,11 @@ struct CpuFeatures {
     // True iff the JIT can use SSE4.1 codegen (roundss/roundsd,
     // pblendw, etc.). This is the most common "modern" baseline.
     bool has_sse41() const { return sse41; }
+
+    // v1.5.0.alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
+    bool has_aesni()     const { return aesni; }
+    bool has_pclmulqdq() const { return pclmulqdq; }
+    bool has_sha()       const { return sha; }
 };
 
 // Detect the host CPU's features via CPUID + XGETBV.
