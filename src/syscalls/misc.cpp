@@ -57,6 +57,12 @@
 namespace arm64emu {
 
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
+    // Turn 68 refactor: dispatch to sub-handlers first. Each returns
+    // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
+    if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
+    if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
+    if (syscall_misc_process(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
+
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a3; (void)a4; (void)a5;
