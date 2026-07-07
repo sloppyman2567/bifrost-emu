@@ -37,6 +37,7 @@ namespace arm64emu {
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/types.h>  // mode_t
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -142,6 +143,10 @@ public:
         guest_comm_ = name.size() > 15 ? name.substr(0, 15) : name;
     }
     const std::string& guest_comm() const { return guest_comm_; }
+    // Guest umask (tracked separately from host for sandbox isolation
+    // and JIT verify-mode correctness).
+    mode_t guest_umask() const { return guest_umask_; }
+    void set_guest_umask(mode_t m) { guest_umask_ = m & 0777; }
     // Build the default guest environment, propagating locale/timezone-
     // related host env vars. Used by build_initial_stack when set_guest_env
     // was not called. Also used by execve to give the new process image
@@ -318,6 +323,10 @@ private:
     // prctl(PR_GET_NAME) and /proc/self/comm). Max 16 bytes (15 + NUL)
     // per Linux kernel. Defaults to the ELF basename.
     std::string guest_comm_ = "bifrost";
+    // Guest umask (tracked separately from host so JIT verify mode
+    // doesn't see false-positive divergences from the host umask being
+    // changed twice). Also provides sandbox isolation.
+    mode_t guest_umask_ = 0022;  // default: rwxr-xr-x → rw-r--r--
 
     // Decode cache type alias (constants + CacheEntry type live on CPU).
     using CacheEntry = CPU::CacheEntry;

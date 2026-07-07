@@ -145,9 +145,12 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 166: { // umask(new_mask) — aarch64 166
-            // toybox sh calls umask(0) during init and
-            // umask(prev) at shutdown. Just pass through to the host.
-            mode_t old = ::umask((mode_t)a0);
+            // Track guest umask separately from host. The old code called
+            // ::umask() which modifies the host process's umask — this
+            // caused JIT verify-mode false-positives (stateful syscall run
+            // twice gives different results) and broke sandbox isolation.
+            mode_t old = emu.guest_umask();
+            emu.set_guest_umask(static_cast<mode_t>(a0));
             ret_host(static_cast<uint64_t>(old));
             return 0;
         }

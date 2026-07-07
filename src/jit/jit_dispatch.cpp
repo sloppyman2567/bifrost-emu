@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <sys/types.h>  // mode_t
 #include <unordered_map>
 #include <vector>
 
@@ -358,8 +359,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             }
         }
 
+        // Save guest umask BEFORE the JIT runs (for stateful-syscall
+        // verify correctness — umask is stateful, so running it twice
+        // gives different results without save/restore).
+        mode_t saved_umask = emu.guest_umask();
+
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
+
+        // Save the JIT's umask value, restore pre-JIT for the interpreter.
+        mode_t jit_umask = emu.guest_umask();
+        emu.set_guest_umask(saved_umask);
 
         // Capture the JIT's written values at the STORE addresses (so we can
         // restore them after the interpreter runs — the next block expects
@@ -433,6 +443,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             emu.step(ref);
             steps++;
         }
+        // Restore the JIT's umask so the next block sees JIT-consistent state.
+        emu.set_guest_umask(jit_umask);
         // Compare PC first — if PCs differ, the JIT took a different path.
         // This is a real codegen bug — log it and abort.
         if (ref.pc != jit_next) {

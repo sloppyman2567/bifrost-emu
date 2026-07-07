@@ -94,7 +94,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 56: { // openat
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             int err = 0;
-            auto node = vfs_.open(path, static_cast<int>(a2), (mode_t)a3, &err);
+            // Apply guest umask to the creation mode (kernel behavior).
+            mode_t mode = static_cast<mode_t>(a3) & ~emu.guest_umask();
+            auto node = vfs_.open(path, static_cast<int>(a2), mode, &err);
             if (!node) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(err != 0 ? err : -ENOENT));
                 return 0;
@@ -295,7 +297,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(EBADF); return 0;
             }
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a1));
-            int r = ::mkdirat(hfd, path.c_str(), (mode_t)a2);
+            mode_t mode = static_cast<mode_t>(a2) & ~emu.guest_umask();
+            int r = ::mkdirat(hfd, path.c_str(), mode);
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
