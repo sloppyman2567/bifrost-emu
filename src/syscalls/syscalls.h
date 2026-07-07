@@ -62,4 +62,11 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num);  // sigactio
 int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num);      // epoll/eventfd/timerfd/socket/poll
 int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num); // getpid/wait/rlimit/prctl/etc
 
+// ── misc_process.cpp sub-handlers (Turn 69 refactor) ──────────────────
+// syscall_misc_process() dispatches to these in order. Each returns
+// SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
+int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num);  // ptrace/sched_*/priority/getpgid/getcpu
+int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num);     // getuid/getpid/uname/sysinfo/getrandom/etc
+int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num);   // times/waitpid/wait4
+
 } // namespace arm64emu
