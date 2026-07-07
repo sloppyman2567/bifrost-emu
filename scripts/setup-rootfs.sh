@@ -137,7 +137,7 @@ cat > "$ROOTFS/etc/os-release" <<'EOF'
 NAME="Bifrost Linux"
 ID=bifrost
 VERSION_ID=1.4.5
-PRETTY_NAME="Bifrost Linux 1.4.5-alpha (AArch64 Emulator)"
+PRETTY_NAME="Bifrost Linux 1.5.0.alpha (AArch64 Emulator)"
 HOME_URL="https://github.com/sloppyman2567/bifrost-emu"
 EOF
 

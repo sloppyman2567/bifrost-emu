@@ -1,5 +1,9 @@
 // frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha, Turn 37).
 //
+// v1.5.0.alpha: also hosts the FrostGraphics::audio_thunk() and
+// FrostGraphics::display_thunk() lazy-creator methods (the AudioThunk
+// and DisplayThunk implementations live in their own .cpp files).
+//
 // ── Overview ──────────────────────────────────────────────────────────
 // bifrost-emu runs AArch64 guests on x86-64 hosts. A guest that uses
 // OpenGL/EGL/SDL2 normally links against the AArch64 versions of those
@@ -72,6 +76,8 @@
 // for the FrostGraphics::thunk() accessor.
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
+#include "frost/audio_thunk.hpp"    // v1.5.0.alpha: AudioThunk full def
+#include "frost/display_thunk.hpp"  // v1.5.0.alpha: DisplayThunk full def
 #include "core/cpu.h"
 #include "core/memory.h"
 
@@ -656,6 +662,25 @@ GraphicThunk* FrostGraphics::thunk() {
         thunk_ = std::unique_ptr<GraphicThunk>(new GraphicThunk());
     }
     return thunk_.get();
+}
+
+// v1.5.0.alpha: audio_thunk() and display_thunk() — same lazy pattern.
+// They live here for the same reason thunk() does: the FrostGraphics
+// header only forward-declares AudioThunk / DisplayThunk, so the
+// unique_ptr ctor needs the full type, which is only visible in this
+// .cpp (which includes frost/audio_thunk.hpp and frost/display_thunk.hpp).
+AudioThunk* FrostGraphics::audio_thunk() {
+    if (!audio_thunk_) {
+        audio_thunk_ = std::unique_ptr<AudioThunk>(new AudioThunk());
+    }
+    return audio_thunk_.get();
+}
+
+DisplayThunk* FrostGraphics::display_thunk() {
+    if (!display_thunk_) {
+        display_thunk_ = std::unique_ptr<DisplayThunk>(new DisplayThunk());
+    }
+    return display_thunk_.get();
 }
 
 } // namespace arm64emu

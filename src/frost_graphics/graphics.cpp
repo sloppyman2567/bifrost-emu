@@ -12,8 +12,10 @@
 // every call, allowing graphical guest programs to run interactively.
 
 #include "frost/graphics.hpp"
-#include "frost/thunk.hpp"  // GraphicThunk full definition (for unique_ptr dtor)
-#include "frost/input.hpp"  // FrostInput full definition (for unique_ptr dtor)
+#include "frost/thunk.hpp"          // GraphicThunk full definition (for unique_ptr dtor)
+#include "frost/audio_thunk.hpp"    // v1.5.0.alpha: AudioThunk
+#include "frost/display_thunk.hpp"  // v1.5.0.alpha: DisplayThunk
+#include "frost/input.hpp"          // FrostInput full definition (for unique_ptr dtor)
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

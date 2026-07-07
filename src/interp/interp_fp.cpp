@@ -13,6 +13,7 @@
 // the interpreter had before the split.
 #include "core/emulator.h"
 #include "decoder.hpp"
+#include "interp/interp_crypto.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -268,6 +269,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rd = op & 0x1F;
             (void)U;
+
+            // v1.5.0.alpha: ARMv8 Crypto Extensions (AES, SHA1, SHA256,
+            // PMULL). These are checked first because their encodings
+            // overlap with regular SIMD ops in the same major group
+            // (bits[28:24]=0b01110) but have specific high-bit patterns
+            // that aren't covered by the regular sub-dispatch.
+            if (exec_crypto(op, cpu)) return;
 
             // Sub-discriminator: bits[15:10] select the SIMD DP operation.
             // We mask off the Q bit (30) so both Q=0 (8-byte) and Q=1

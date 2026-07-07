@@ -1415,19 +1415,43 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
 }
 
 // ── is_thunk_supported_lib_ ────────────────────────────────────────────
-// Returns true if `soname` matches the naming pattern of a graphic
-// library that the thunk resolver might handle. We accept any libGL*,
-// libEGL*, libSDL2*, or libGLESv2* soname (with or without version
-// suffix). The thunk itself does the final accept/reject — this is
-// just a fast filter to avoid calling the resolver for libc/libm/etc.
+// Returns true if `soname` matches the naming pattern of a library that
+// the thunk resolver might handle. We accept:
+//   - Graphics (GraphicThunk): libGL*, libEGL*, libSDL2*, libGLESv2*
+//   - Audio (AudioThunk, v1.5.0.alpha): libasound*, libpulse*,
+//     libopenal*
+//   - Display (DisplayThunk, v1.5.0.alpha): libvulkan*, libwayland-*,
+//     libX11*, libgbm*
+// (libSDL2 is in both graphics and audio — both thunks will try to
+// resolve its symbols, and the dispatcher tries graphics first.)
+//
+// The thunk itself does the final accept/reject — this is just a fast
+// filter to avoid calling the resolver for libc/libm/etc.
 bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
     auto starts_with = [](const std::string& s, const char* p) {
         return s.rfind(p, 0) == 0;
     };
-    return starts_with(soname, "libGL.so")
+    // Graphics (v1.4.5-alpha).
+    if (starts_with(soname, "libGL.so")
         || starts_with(soname, "libEGL.so")
         || starts_with(soname, "libSDL2")
-        || starts_with(soname, "libGLESv2.so");
+        || starts_with(soname, "libGLESv2.so")) {
+        return true;
+    }
+    // Audio (v1.5.0.alpha).
+    if (starts_with(soname, "libasound")
+        || starts_with(soname, "libpulse")
+        || starts_with(soname, "libopenal")) {
+        return true;
+    }
+    // Display (v1.5.0.alpha).
+    if (starts_with(soname, "libvulkan")
+        || starts_with(soname, "libwayland-")
+        || starts_with(soname, "libX11")
+        || starts_with(soname, "libgbm")) {
+        return true;
+    }
+    return false;
 }
 
 // ── parse_tls ──────────────────────────────────────────────────────────

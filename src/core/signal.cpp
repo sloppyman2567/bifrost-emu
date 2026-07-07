@@ -229,11 +229,37 @@ bool SignalTable::pop_frame(SignalFrame& out) {
 // ── rt_sigprocmask ─────────────────────────────────────────────────────
 // Per-CPU signal mask. SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK. SIGKILL and
 // SIGSTOP cannot be blocked.
+//
+// v1.5.0.alpha BUGFIX: the old code wrote the old mask to `old_set_addr`
+// BEFORE reading the new mask from `new_set_addr`. If the caller passes
+// the same pointer for both (which is technically allowed by POSIX as a
+// "swap" pattern), the read of new_mask would read the OLD mask that we
+// just wrote — making the operation a no-op instead of a swap.
+//
+// The fix reads new_mask FIRST, then writes old_mask. This makes the
+// aliasing case work correctly (it becomes a true swap), and is also
+// what the Linux kernel does (see kernel/signal.c:sigprocmask()).
 int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
                           uint64_t old_set_addr, size_t sigsetsize) {
     if (sigsetsize != 8 && sigsetsize != 4) return -EINVAL;
 
-    // Always return the previous mask if requested.
+    // Read the new mask FIRST (before writing the old mask), so the
+    // aliasing case (old_set_addr == new_set_addr) works as a swap.
+    uint64_t new_mask = 0;
+    if (new_set_addr != 0) {
+        try {
+            if (sigsetsize == 8) {
+                new_mask = mem.load<uint64_t>(new_set_addr);
+            } else {
+                new_mask = mem.load<uint32_t>(new_set_addr);
+            }
+        } catch (...) {
+            return -EFAULT;
+        }
+        new_mask &= ~UNBLOCKABLE_MASK;
+    }
+
+    // Now write the old mask (the previous cpu.sigmask value).
     if (old_set_addr != 0) {
         try {
             if (sigsetsize == 8) {
@@ -249,19 +275,6 @@ int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
     if (new_set_addr == 0) {
         return 0;  // query only
     }
-
-    uint64_t new_mask = 0;
-    try {
-        if (sigsetsize == 8) {
-            new_mask = mem.load<uint64_t>(new_set_addr);
-        } else {
-            new_mask = mem.load<uint32_t>(new_set_addr);
-        }
-    } catch (...) {
-        return -EFAULT;
-    }
-
-    new_mask &= ~UNBLOCKABLE_MASK;
 
     switch (how) {
         case SIG_BLOCK_EMU:   cpu.sigmask |= new_mask;            break;

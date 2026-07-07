@@ -68,3 +68,4 @@ bifrost-emu-test*
 # NEVER commit this file; it is for cross-session continuity only.
 context.md
 rootfs/
+test_capi

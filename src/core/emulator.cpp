@@ -16,7 +16,9 @@
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
-#include "frost/thunk.hpp"  // GraphicThunk full definition (for init/resolve)
+#include "frost/thunk.hpp"        // GraphicThunk full definition (for init/resolve)
+#include "frost/audio_thunk.hpp"  // v1.5.0.alpha: AudioThunk
+#include "frost/display_thunk.hpp"// v1.5.0.alpha: DisplayThunk
 #include "jit/frostjit.hpp"
 
 #include <algorithm>
@@ -253,6 +255,45 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                             [&](const std::string& sym, uint64_t addr) {
                                 out.emplace_back(sym, addr);
                             });
+                        return out;
+                    });
+            }
+
+            // v1.5.0.alpha: also init AudioThunk and DisplayThunk if
+            // enabled. They share the thunk syscall (0x1000) with
+            // GraphicThunk; the dispatcher in misc.cpp tries each in
+            // order. The dynamic linker's thunk_resolver_ is set to
+            // GraphicThunk's enumerate_symbols, so audio/display symbols
+            // need a different wiring path — we extend the resolver to
+            // also consult the other thunks. (See set_thunk_resolver
+            // extension below.)
+            if (auto* athunk = graphics_.audio_thunk()) {
+                if (athunk->enabled()) athunk->init(mem_);
+            }
+            if (auto* dthunk = graphics_.display_thunk()) {
+                if (dthunk->enabled()) dthunk->init(mem_);
+            }
+            // Extend the thunk resolver to consult all three thunks.
+            // Each thunk has its own per-library symbol enumeration; we
+            // merge their results so the dynamic linker sees the union.
+            {
+                GraphicThunk* gthunk = graphics_.thunk();
+                AudioThunk*   athunk = graphics_.audio_thunk();
+                DisplayThunk* dthunk = graphics_.display_thunk();
+                dyn_linker_->set_thunk_resolver(
+                    [gthunk, athunk, dthunk](const std::string& lib)
+                        -> DynamicLinker::ThunkSymbolList {
+                        DynamicLinker::ThunkSymbolList out;
+                        auto add_all = [&](auto* t) {
+                            if (!t || !t->enabled()) return;
+                            t->enumerate_symbols(lib,
+                                [&](const std::string& sym, uint64_t addr) {
+                                    out.emplace_back(sym, addr);
+                                });
+                        };
+                        add_all(gthunk);
+                        add_all(athunk);
+                        add_all(dthunk);
                         return out;
                     });
             }

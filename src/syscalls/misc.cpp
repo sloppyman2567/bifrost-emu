@@ -41,6 +41,8 @@
 #include "core/signal.h"
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
+#include "frost/audio_thunk.hpp"    // v1.5.0.alpha
+#include "frost/display_thunk.hpp"  // v1.5.0.alpha
 #include "syscalls/syscalls.h"
 
 #include <errno.h>
@@ -72,6 +74,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
     if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_process(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
+
+    // v1.5.0.alpha: extended syscalls (xattr, kcmp, membarrier,
+    // copy_file_range, pkey_*, pidfd_*, io_uring stubs, capget/capset,
+    // personality, mseal, etc.).
+    if (syscall_misc_extended(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
 
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -716,18 +723,47 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // when disabled, this case is unreachable (no trampolines are
         // ever written to guest memory).
         case GraphicThunk::SYSCALL_NUMBER: {
-            auto* thunk = emu.graphics_.thunk();
-            if (!thunk || !thunk->enabled()) {
-                ret_err(ENOSYS);
-                return 0;
-            }
+            // v1.5.0.alpha: the thunk syscall is shared by GraphicThunk,
+            // AudioThunk, and DisplayThunk. Each has its own per-thunk
+            // symbol_id namespace starting from 0, so we try each in
+            // order until one accepts the symbol_id.
+            //
+            // We try GraphicThunk first because most guests use it; if
+            // it returns -ENOENT (symbol_id out of range), we fall
+            // through to AudioThunk, then DisplayThunk.
             uint32_t sym_id = static_cast<uint32_t>(cpu.regs[9]);
-            int64_t r = thunk->dispatch(cpu, sym_id);
-            if (r < 0) {
-                ret_host(r);  // negative = -errno
+
+            auto* gthunk = emu.graphics_.thunk();
+            if (gthunk && gthunk->enabled()) {
+                int64_t r = gthunk->dispatch(cpu, sym_id);
+                if (r == 0) return 0;            // handled
+                if (r != -ENOENT) {               // real error from GraphicThunk
+                    ret_host(r);
+                    return 0;
+                }
             }
-            // On success, dispatch() already wrote the return value to
-            // cpu.regs[0]; we just need to return 0 (handled).
+            // Try AudioThunk.
+            auto* athunk = emu.graphics_.audio_thunk();
+            if (athunk && athunk->enabled()) {
+                int64_t r = athunk->dispatch(cpu, sym_id);
+                if (r == 0) return 0;
+                if (r != -ENOENT) {
+                    ret_host(r);
+                    return 0;
+                }
+            }
+            // Try DisplayThunk.
+            auto* dthunk = emu.graphics_.display_thunk();
+            if (dthunk && dthunk->enabled()) {
+                int64_t r = dthunk->dispatch(cpu, sym_id);
+                if (r == 0) return 0;
+                if (r != -ENOENT) {
+                    ret_host(r);
+                    return 0;
+                }
+            }
+            // None of the thunks recognized the symbol_id.
+            ret_err(ENOSYS);
             return 0;
         }
 

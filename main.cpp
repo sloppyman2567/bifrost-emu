@@ -2,7 +2,7 @@
 //
 // "A bridge between worlds" — runs static AArch64 Linux binaries on x86_64.
 //
-// Version: 1.4.5-alpha
+// Version: 1.5.0.alpha
 //
 // Usage:
 //   bifrost-emu [options] <elf-file> [args...]
@@ -30,6 +30,7 @@
 // output.
 
 #include "bifrost/emulator.hpp"
+#include "bifrost/config.hpp"
 #include "decoder.hpp"
 #include <string>
 #include <vector>
@@ -175,6 +176,36 @@ int main(int argc, char** argv) {
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
     int  arg_i   = 1;
 
+    // ── Config (v1.5.0.alpha) ─────────────────────────────────────────
+    // Resolution order: CLI > env var > config file > defaults.
+    // We load the config file first, then env vars, then CLI flags
+    // override on top.
+    arm64emu::Config cfg = arm64emu::Config::defaults();
+    std::string config_path = arm64emu::find_config_file();
+    bool print_config_only = false;
+
+    // First pass: scan for --config PATH so we can load it before parsing
+    // the rest of the flags. Other flags are parsed in the main loop
+    // below, AFTER the config file is loaded, so they override config.
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--config") {
+            if (i + 1 < argc) { config_path = argv[i + 1]; i++; }
+        } else if (a == "--print-config") {
+            print_config_only = true;
+        }
+    }
+    if (!config_path.empty()) {
+        std::string err;
+        if (!cfg.load_from_file(config_path, err)) {
+            fprintf(stderr, "bifrost-emu: config error in '%s': %s\n",
+                    config_path.c_str(), err.c_str());
+            return 2;
+        }
+    }
+    // Apply env vars (they override the file).
+    cfg.apply_env();
+
     while (arg_i < argc) {
         std::string a = argv[arg_i];
         if (a == "-h" || a == "--help")     { print_banner();   return 0; }
@@ -185,6 +216,8 @@ int main(int argc, char** argv) {
         if (a == "--raw-tty")               { raw_tty = true;  arg_i++; continue; }
         if (a == "--jit")                   { use_jit = true;  arg_i++; continue; }
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
+        if (a == "--config")                { arg_i += 2; continue; }  // already handled
+        if (a == "--print-config")          { arg_i++; continue; }
         // --jit-threshold N: use the interpreter for the first N
         // instructions, then switch to JIT. Useful for short programs
         // where JIT compilation overhead exceeds the runtime. Typical
@@ -240,6 +273,26 @@ int main(int argc, char** argv) {
         break;
     }
 
+    // CLI overrides config file values (highest precedence).
+    if (debug)               cfg.log_trace = true;
+    if (verbose)             cfg.log_verbose = true;
+    if (!use_jit)            cfg.jit_enabled = false;
+    if (jit_threshold)       cfg.jit_threshold = jit_threshold;
+    if (!fb_dump_path.empty())     cfg.fb_dump_path = fb_dump_path;
+    if (!audio_dump_path.empty())  cfg.audio_dump_path = audio_dump_path;
+
+    cfg.validate();
+
+    // --print-config: dump the resolved config and exit. Useful for
+    // debugging "why isn't my config taking effect?"
+    if (print_config_only) {
+        std::string dump;
+        cfg.dump(dump);
+        fprintf(stderr, "# Resolved config (config_path=%s)\n", config_path.c_str());
+        fputs(dump.c_str(), stderr);
+        return 0;
+    }
+
     // No file given → show the Banner
     if (arg_i >= argc) { print_banner(); return 0; }
 
@@ -268,13 +321,16 @@ int main(int argc, char** argv) {
     if (raw_tty) set_raw_terminal();
 
     Emulator emu;
-    emu.set_verbose(verbose);
-    emu.set_trace(debug);
-    emu.set_brk_verbose(true); // Turn 40: always show BRK
-    (void)quiet; // Turn 42: brk_verbose_ is always true now; -q kept for CLI compat
-    if (use_jit) emu.enable_jit();
-    emu.set_jit_threshold(jit_threshold);
-    emu.install_host_signal_handlers();  // forward host signals to guest
+    emu.set_verbose(cfg.log_verbose);
+    emu.set_trace(cfg.log_trace);
+    emu.set_brk_verbose(cfg.log_brk_verbose);
+    (void)quiet; // -q kept for CLI compat; brk_verbose_ now driven by config
+    (void)verbose; (void)debug; // now driven by cfg
+    if (cfg.jit_enabled) emu.enable_jit();
+    emu.set_jit_threshold(cfg.jit_threshold);
+    if (cfg.forward_host_signals) {
+        emu.install_host_signal_handlers();  // forward host signals to guest
+    }
 
     try {
         emu.load_elf_file(elf_path, guest_argv);
@@ -283,7 +339,7 @@ int main(int argc, char** argv) {
 
         // Optional framebuffer dump on exit. Useful for headless
         // debugging of programs that draw to /dev/fb0.
-        if (!fb_dump_path.empty() && emu.graphics().ready()) {
+        if (!cfg.fb_dump_path.empty() && emu.graphics().ready()) {
             // Sync the guest's framebuffer writes back to the host's
             // fb_data_ before dumping. The emulator's mmap handler
             // allocates separate pages for the guest and does NOT
@@ -299,21 +355,21 @@ int main(int argc, char** argv) {
                     // guest address no longer mapped — skip sync
                 }
             }
-            if (emu.graphics().dump_to_ppm(fb_dump_path)) {
-                if (verbose) {
+            if (emu.graphics().dump_to_ppm(cfg.fb_dump_path)) {
+                if (cfg.log_verbose) {
                     fprintf(stderr, "[emu] framebuffer dumped to '%s'\n",
-                            fb_dump_path.c_str());
+                            cfg.fb_dump_path.c_str());
                 }
             } else {
                 fprintf(stderr, "[emu] framebuffer dump failed\n");
             }
         }
         // Optional audio dump on exit — writes accumulated PCM to a WAV file.
-        if (!audio_dump_path.empty() && emu.audio().ready()) {
-            if (emu.audio().dump_to_wav(audio_dump_path)) {
-                if (verbose) {
+        if (!cfg.audio_dump_path.empty() && emu.audio().ready()) {
+            if (emu.audio().dump_to_wav(cfg.audio_dump_path)) {
+                if (cfg.log_verbose) {
                     fprintf(stderr, "[emu] audio dumped to '%s'\n",
-                            audio_dump_path.c_str());
+                            cfg.audio_dump_path.c_str());
                 }
             } else {
                 fprintf(stderr, "[emu] audio dump failed (no data?)\n");

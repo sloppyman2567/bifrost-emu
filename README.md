@@ -12,14 +12,14 @@ Linux host without needing qemu or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.4.5-alpha
+  bifrost-emu  v1.5.0.alpha
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.4.5-alpha](https://img.shields.io/badge/version-1.4.5--alpha-orange.svg)](CHANGELOG.md)
+[![Version: 1.5.0.alpha](https://img.shields.io/badge/version-1.5.0.alpha-orange.svg)](CHANGELOG.md)
 
 ## Quick Start
 
@@ -121,6 +121,75 @@ The `--fb-dump PATH` option syncs the guest's `/dev/fb0` writes back to
 the host and writes a PPM image to `PATH` on exit. Useful for headless
 debugging of programs that draw to the framebuffer.
 
+## Configuration (v1.5.0.alpha)
+
+bifrost-emu supports a TOML-subset config file that unifies all the
+`BIFROST_*` env vars into one place. Resolution precedence (highest
+to lowest):
+
+1. **CLI flag** (e.g. `--no-jit`, `--fb-dump PATH`)
+2. **Env var** (e.g. `BIFROST_NO_JIT=1`)
+3. **Config file** (`bifrost.toml`, `~/.config/bifrost/config.toml`,
+   `~/.bifrost.toml`, `/etc/bifrost.toml`, or `--config PATH`)
+4. **Built-in defaults**
+
+### Config file search order
+
+The emulator looks for a config file in these locations (first match
+wins):
+
+1. `$BIFROST_CONFIG` (if set and non-empty)
+2. `./bifrost.toml` (current directory)
+3. `$XDG_CONFIG_HOME/bifrost/config.toml` (or `~/.config/bifrost/config.toml`)
+4. `~/.bifrost.toml`
+5. `/etc/bifrost.toml`
+
+### CLI flags
+
+- `--config PATH` — load a config file (overrides the search order)
+- `--print-config` — dump the resolved config and exit (useful for
+  debugging "why isn't my config taking effect?")
+
+### Example config
+
+See `bifrost.toml.sample` for a fully-documented example. Quick start:
+
+```toml
+[jit]
+enabled     = true
+threshold   = 0           # 0 = use JIT from start
+thread_jit  = true
+
+[fb]
+width  = 1280
+height = 720
+bpp    = 32
+
+[audio]
+sample_rate = 44100
+channels    = 2
+
+[thunk]
+graphics = false          # BIFROST_THUNK_GRAPHICS
+audio    = false          # BIFROST_THUNK_AUDIO (NEW in 1.5.0.alpha)
+display  = false          # BIFROST_THUNK_DISPLAY (NEW in 1.5.0.alpha)
+
+[paths]
+rootfs = ""               # BIFROST_ROOT
+cwd    = "/"
+
+[signal]
+forward_host    = true
+trace_syscalls  = false
+
+[log]
+verbose = false
+trace   = false
+```
+
+All existing env vars still work and override the config file — no
+breaking change for existing scripts.
+
 ## Build
 
 ```bash
@@ -216,7 +285,7 @@ instruction.
 JIT that translates AArch64 basic blocks into x86_64 machine code in a
 64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
 and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of 1.4.5-alpha (2026-07-03),
+JIT is ON by default; use `--no-jit` to opt out. As of 1.5.0.alpha (2026-07-03),
 all 72 test programs pass under JIT, including the
 `ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
 the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
@@ -368,7 +437,7 @@ waitid() forward to host. Enables external commands in toybox sh.
 **Yggdrasil VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
 `/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random,tty}`,
 `/dev/{fb0,dsp,snd}`. Uses `memfd_create` for seekable virtual file
-descriptors. (v1.4.5-alpha: renamed from `VFS` to `Yggdrasil`; added
+descriptors. (v1.5.0.alpha: renamed from `VFS` to `Yggdrasil`; added
 `DirNode` so `ls /proc` and `ls /dev` work; `/proc/self/maps` and
 `/proc/self/status` now use lazy regeneration to reflect live state;
 `/dev/random` vs `/dev/urandom` now use distinct entropy pools via
@@ -457,13 +526,13 @@ For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
 ## Release History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.4.5-alpha** (2026-07-03) — the first feature
+current release is **v1.5.0.alpha** (2026-07-03) — the first feature
 release after the 1.4.0 stable. It adds native SSE2 codegen for SIMD
 vector shifts (SHL/USHR/SSHR) and a missing SSHR-by-immediate handler
 in the interpreter. All 72 tests pass under JIT, interpreter, and FWD
 mode. On top of the 1.4.0 stable foundation:
 
-- **Native SIMD vector shift codegen (1.4.5-alpha).** SHL/USHR/SSHR
+- **Native SIMD vector shift codegen (1.5.0.alpha).** SHL/USHR/SSHR
   (vector, by immediate) now emit native SSE2 `psllw/pslld/psllq`,
   `psrlw/psrld/psrlq`, and `psraw/psrad` respectively, instead of
   falling back to `CALL_INTERP`. 8-bit element shifts and 64-bit SSHR
@@ -516,7 +585,7 @@ mode. On top of the 1.4.0 stable foundation:
 - **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
 - **Yggdrasil VFS abstraction** — Node + FdTable + procfs + devfs. (Was
   "VFS abstraction" / "VNode + FdTable"; renamed to Yggdrasil in
-  v1.4.5-alpha.)
+  v1.5.0.alpha.)
 - **~170 Linux AArch64 syscalls** including file I/O, threading,
   signals, timing, fork+execve, event loops, and filesystem operations.
 

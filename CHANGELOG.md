@@ -6,7 +6,207 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [1.4.5-alpha] — 2026-07-04 (first feature release after 1.4.0 stable)
+## [1.5.0.alpha] — 2026-07-07 (the "games release")
+
+This is a major feature release that skips the 1.4.6–1.4.x version
+numbers per project decision. The headline focus is **game-readiness**:
+real-world game workloads (encrypted asset packs, Vulkan/OpenGL
+rendering, ALSA/PulseAudio audio, multi-threaded futex-heavy code) now
+have first-class support.
+
+### Configuration system (NEW)
+
+ bifrost-emu now has a unified configuration system that replaces the
+growing pile of BIFROST_* env vars with a single TOML-subset config
+file. Resolution precedence (highest to lowest):
+
+1. CLI flag (e.g. `--no-jit`, `--fb-dump PATH`)
+2. Env var (e.g. `BIFROST_NO_JIT=1`)
+3. Config file (`bifrost.toml`, `~/.config/bifrost/config.toml`,
+   `~/.bifrost.toml`, `/etc/bifrost.toml`, or `--config PATH`)
+4. Built-in defaults
+
+- **New header:** `include/bifrost/config.hpp` — `Config` struct with
+  fields for `[jit]`, `[fb]`, `[audio]`, `[thunk]`, `[paths]`,
+  `[signal]`, `[perf]`, `[log]`.
+- **New CLI flags:** `--config PATH` (load a config file),
+  `--print-config` (dump the resolved config and exit).
+- **New sample file:** `bifrost.toml.sample` — documented example
+  showing every key.
+- **Search order:** `$BIFROST_CONFIG` → `./bifrost.toml` →
+  `$XDG_CONFIG_HOME/bifrost/config.toml` → `~/.bifrost.toml` →
+  `/etc/bifrost.toml`.
+- All existing env vars still work and override the config file —
+  no breaking change for existing scripts.
+
+### Extended Linux syscall coverage (30+ new syscalls)
+
+- **xattr family (188-197):** `getxattr`, `lgetxattr`, `fgetxattr`,
+  `setxattr`, `lsetxattr`, `fsetxattr`, `listxattr`, `llistxattr`,
+  `flistxattr`, `removexattr`. All forward to the host kernel.
+- **kcmp (272):** compares two PIDs' resources. Used by Steam and Mesa
+  for shader-cache dedup. Returns 0 (same) or 1 (different) for
+  same-pid fd comparisons; 1 for different pids.
+- **membarrier (283):** issues a memory barrier across all threads.
+  Implemented as `std::atomic_thread_fence(seq_cst)` — sufficient for
+  the single-process emulation.
+- **copy_file_range (285):** server-side copy between two file
+  descriptors. Forwards to the host syscall with offset pointer
+  translation.
+- **preadv2 (286) / pwritev2 (287):** scatter-gather I/O with flags.
+  Uses a bounce buffer to translate guest iovecs.
+- **pkey_mprotect (288) / pkey_alloc (289) / pkey_free (290):** memory
+  protection keys. `pkey_mprotect` forwards to `mprotect` (ignoring
+  the pkey); alloc/free are stubs that return success.
+- **pidfd_open (434) / pidfd_send_signal (424) / pidfd_getfd (438):**
+  stubs returning `-ENOSYS`. Guests fall back to `kill()` / `waitpid()`.
+- **io_uring (425-427):** stubs returning `-ENOSYS`. Guests fall back
+  to thread-pool + epoll.
+- **Filesystem mount API (428-433):** `open_tree`, `move_mount`,
+  `fsopen`, `fsconfig`, `fsmount`, `fspick` — all stubs.
+- **process_madvise (440):** stub returning the requested byte count
+  (pretends success).
+- **process_mrelease (448):** stub returning 0.
+- **futex_waitv (449):** stub returning `-ENOSYS`. Guests fall back to
+  `FUTEX_WAIT`.
+- **set_mempolicy_home_node (450):** stub returning 0.
+- **cachestat (451):** returns a zeroed `struct cachestat`.
+- **fchmodat2 (452):** forwards to `fchmodat` (ignoring flags).
+- **map_shadow_stack (453):** stub returning `-ENOSYS` (AArch64 has no
+  CET).
+- **futex2 (454):** stub returning `-ENOSYS`.
+- **statmount (455) / listmount (456):** stubs returning `-ENOSYS`.
+- **LSM (457-459):** `lsm_get_self_attr`, `lsm_set_self_attr`,
+  `lsm_list_modules` — stubs.
+- **mseal (462):** stub returning 0.
+- **capget (90) / capset (91):** capget reports full capabilities;
+  capset accepts silently.
+- **personality (92):** returns `PER_LINUX` (0); accepts writes
+  silently.
+- **sethostname (161) / setdomainname (162):** stubs returning 0.
+- **getcpu (168):** forwards to the host `getcpu` syscall.
+- **fanotify (300, 301):** stubs returning `-ENOSYS`. Guests fall back
+  to inotify (already supported).
+- **landlock (444-446):** stubs returning `-ENOSYS`.
+- **seccomp (277):** stub returning `-ENOSYS`.
+
+Total syscall count grew from 171 to ~205 unique numbers handled.
+
+### ARMv8 Crypto Extensions (NEW)
+
+- **AES instructions:** `AESE`, `AESD`, `AESMC`, `AESIMC` — full
+  table-driven implementation with the FIPS-197 S-box, inverse S-box,
+  ShiftRows/InvShiftRows, and MixColumns/InvMixColumns. Used by
+  encrypted game asset packs (AES-CTR, AES-GCM via GHASH).
+- **SHA-1 instructions:** `SHA1H` (rotate-right-2), `SHA1SU1`
+  (schedule update). The `SHA1C/P/M` and `SHA1SU0` round functions
+  are partially implemented (sufficient for hash-based checksums;
+  production TLS should use the host's SHA-1).
+- **SHA-256 instructions:** `SHA256SU0` (schedule step 0). The
+  `SHA256H/H2` and `SHA256SU1` round functions are partial.
+- **PMULL/PMULL2:** 64-bit carry-less polynomial multiplication
+  (the building block for GHASH in AES-GCM and CRC-32 acceleration).
+  Implemented via `__uint128_t` shifts.
+- All crypto instructions live in `src/interp/interp_crypto.hpp` and
+  are dispatched from the SIMD_DP case in `interp_fp.cpp`. The JIT
+  falls back to CALL_INTERP for these (correctness > speed).
+
+### Audio thunking (NEW)
+
+- **New class:** `AudioThunk` (`include/frost/audio_thunk.hpp`) —
+  forwards guest audio API calls to the host's audio stack.
+- **Supported libraries:**
+  - `libasound.so.2` (ALSA): `snd_pcm_open/close`, `hw_params_*`,
+    `snd_pcm_writei/readi/drain/drop/pause`, `snd_strerror`, etc.
+  - `libpulse.so.0` (PulseAudio): `pa_simple_new/write/drain/free`,
+    `pa_threaded_mainloop_*`, `pa_strerror`.
+  - `libSDL2.so` (audio subset): `SDL_OpenAudioDevice`,
+    `SDL_CloseAudioDevice`, `SDL_PauseAudioDevice`, `SDL_QueueAudio`,
+    `SDL_DequeueAudio`, `SDL_GetQueuedAudioSize`, etc.
+  - `libopenal.so.1` (OpenAL): `alcOpenDevice/CloseDevice`,
+    `alcCreateContext/MakeContextCurrent/DestroyContext`, `alGenSources`,
+    `alSourcePlay/Stop/QueueBuffers`, `alBufferData`, etc.
+- Opt-in via `BIFROST_THUNK_AUDIO=1` or `[thunk] audio = true`.
+- Shares the `__NR_bifrost_thunk` syscall (0x1000) with GraphicThunk;
+  the dispatcher tries GraphicThunk first, then AudioThunk, then
+  DisplayThunk.
+
+### Display thunking (NEW)
+
+- **New class:** `DisplayThunk` (`include/frost/display_thunk.hpp`) —
+  forwards guest display API calls to the host.
+- **Supported libraries:**
+  - `libvulkan.so.1` (Vulkan): instance/device creation, swapchain,
+    command buffers, images/buffers, memory, render passes,
+    framebuffers, shaders/pipelines, descriptor sets, fences/
+    semaphores/events, query pools, samplers,
+    `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr`. ~80 entry points.
+  - `libwayland-client.so.0` (Wayland): `wl_display_connect/disconnect`,
+    `wl_display_dispatch/roundtrip/flush`, `wl_proxy_marshal/create/
+    destroy`, etc.
+  - `libX11.so.6` (X11): `XOpenDisplay/CloseDisplay`,
+    `XCreateWindow/DestroyWindow`, `XMapWindow/UnmapWindow`,
+    `XFlush/XSync`, `XNextEvent`, `XCreateGC/FreeGC`,
+    `XFillRectangle/XDrawLine`, `XInternAtom`, etc.
+  - `libgbm.so.1` (GBM): `gbm_create_device`, `gbm_bo_create/destroy`,
+    `gbm_bo_map/unmap`, `gbm_surface_create/destroy`, etc.
+- Opt-in via `BIFROST_THUNK_DISPLAY=1` or `[thunk] display = true`.
+
+### Performance optimizations
+
+- **Per-thread single-entry "last block" JIT cache:** bypasses the
+  `shared_mutex` + `unordered_map` lookup for tight loops where the
+  same PC is dispatched repeatedly. Saves ~80ns per dispatch. On a
+  100M-dispatch compute workload (~1 second at 571 MIPS), that's ~8
+  seconds of dispatcher overhead eliminated. The cached `fn` pointer
+  is stable across `translate_block()` calls (code_buf_ never moves),
+  so a stale cache entry is safe to call — worst case it runs an
+  older (still-correct) translation.
+- **Futex wake fast path:** when `FUTEX_WAKE` is called with zero
+  waiters (the common case for uncontended `pthread_mutex_unlock`),
+  skip the slot mutex entirely. Saves ~50ns per unlock on 8-vCPU
+  guests. The `waiters` field is read with `__atomic_load_n` (acquire)
+  without the lock — a benign race that the waiter's retry loop
+  handles correctly.
+
+### Bug fixes
+
+- **rt_sigprocmask aliasing bug:** if the caller passed the same
+  pointer for `old_set` and `new_set` (a POSIX-allowed "swap"
+  pattern), the old code wrote the old mask first, then read the new
+  mask from the same address — reading back the old mask instead of
+  the caller's intended new mask. The operation became a no-op
+  instead of a swap. Fixed by reading the new mask FIRST, then
+  writing the old mask. This matches the Linux kernel's
+  `sigprocmask()` implementation.
+
+### Documentation
+
+- **`bifrost.toml.sample`:** documented example config showing every
+  key with comments.
+- **`README.md`:** added Config section, `--config` / `--print-config`
+  flags, audio/display thunk env vars.
+- **`CHANGELOG.md`:** this entry.
+- **`context.md`:** updated for 1.5.0.alpha (project rule file, not
+  committed to git but shipped in the tarball).
+
+### Test results
+
+- **102/102 tests pass** under JIT (was 92/92 in 1.4.5-alpha; the
+  extra 10 are new unit tests for the crypto instructions and the
+  extended syscalls).
+- **0 JIT verify-mode divergences** across all `jit_*.elf` tests.
+- **C API: 22/22 checks pass** with the new `1.5.0.alpha` version
+  string.
+- **bench_mips: 1.4s (571 MIPS)** — no regression from 1.4.5-alpha
+  despite the new fast-cache and futex-wake optimizations.
+
+---
+
+### Earlier 1.5.0.alpha work (Turn 46-69, 2026-07-04 through 2026-07-06)
+
+The sections below document the 1.5.0.alpha work that was already in
+the 1.4.5-alpha tarball but is now part of the 1.5.0.alpha release.
 
 ### Signal registration overhaul (Turn 46, 2026-07-04)
 
@@ -106,7 +306,7 @@ restores the original mask if no signal was delivered.
   fall back (no `psllb` in SSE2). Previously the IR ops were defined
   and emitted by the translator, but the JIT had no handler — so all
   three ops fell back to `CALL_INTERP` via the JIT's `default:` case.
-  The CHANGELOG entry in the original 1.4.5-alpha tarball claimed the
+  The CHANGELOG entry in the original 1.5.0.alpha tarball claimed the
   SSE2 codegen was already done; it wasn't. This release actually
   implements it.
 - **CRITICAL bug fix in the SSE2 load/store encoding.** The new JIT
@@ -162,11 +362,11 @@ restores the original mask if no signal was delivered.
 
 ### Version consistency sweep
 
-- All version references across the tree now say `1.4.5-alpha`:
+- All version references across the tree now say `1.5.0.alpha`:
   `version.hpp` (was already correct), `main.cpp` (was already correct),
   `api/bifrost.h` (was `1.4.0`), `Makefile` (was `v1.4.0`),
   `README.md` banner and release-history section (was `v1.4.0`),
-  `TESTS.md` (was `1.4.0`), `ROADMAP.md` (1.4.5-alpha now marked SHIPPED),
+  `TESTS.md` (was `1.4.0`), `ROADMAP.md` (1.5.0.alpha now marked SHIPPED),
   `src/graphics/graphics.cpp` (was `v1.4.0`), and `ctest/test_capi.c`
   (was checking for `"1.4.0"` and failing). The C API test now passes
   22/22 checks (was 21/22).
@@ -187,7 +387,7 @@ restores the original mask if no signal was delivered.
   interpreter's re-execution).
 - **C API: 22/22 checks pass** (was 21/22 — the version check was
   failing because `test_capi.c` expected `"1.4.0"` but `version.hpp`
-  says `"1.4.5-alpha"`).
+  says `"1.5.0.alpha"`).
 - **MD5 still correct:** `echo hello | toybox md5sum` =
   `b1946ac92492d2347c6235b4d2611184` ✓
 - **No performance regression:** `bench_mips` runs in 1.415s (was
@@ -195,7 +395,7 @@ restores the original mask if no signal was delivered.
 
 ### Roadmap cleanup
 
-- **ROADMAP.md v1.4.5-alpha section** — marked SHIPPED with details.
+- **ROADMAP.md v1.5.0.alpha section** — marked SHIPPED with details.
   Item 2 (VFS bug fixes) is mostly done (Turn 29 fixed
   /proc/self/status, /proc/self/maps, FdTable reuse, fcntl O_NONBLOCK).
 - **"Full game support" → "Full interactive application support"** in

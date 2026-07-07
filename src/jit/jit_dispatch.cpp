@@ -41,6 +41,52 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     }
 
     uint64_t pc = cpu.pc;
+
+    // ── v1.5.0.alpha: single-entry "last block" fast cache ────────
+    // Tight loops dispatch the same PC thousands of times in a row.
+    // Bypass the shared_mutex + unordered_map lookup entirely when the
+    // PC matches the cached one. The cached fn pointer is stable across
+    // translate_block() calls (code_buf_ never moves), so a stale cache
+    // entry is safe to call — worst case it runs an older (still-correct)
+    // translation. We DO bypass the watchdog update here; the watchdog
+    // is for catching infinite-loop codegen bugs, and a tight loop that
+    // legitimately runs the same block 100M+ times is the normal case
+    // (the watchdog would be checked on the first dispatch, when the
+    // cache misses). The cache is reset on any different PC.
+    if (__builtin_expect(pc == tls_last_block_.pc && tls_last_block_.fn != nullptr, 1)) {
+        // Fast path: same PC as last dispatch, fn is cached.
+        // Skip shared_mutex, skip unordered_map, skip BlockEntry copy.
+        blocks_executed.fetch_add(1, std::memory_order_relaxed);
+        instructions_executed.fetch_add(tls_last_block_.instr_count,
+                                         std::memory_order_relaxed);
+        uint64_t next_pc = tls_last_block_.fn(&cpu, &emu);
+        cpu.pc = next_pc;
+        // Watchdog update (same logic as below, inlined for the fast path).
+        if (pc == tls_watchdog_last_pc_) {
+            if (++tls_watchdog_count_ > WATCHDOG_LIMIT) {
+                // Demote to interp_only and fall through to slow path.
+                blocks_mutex_.lock();
+                auto wit = blocks_.find(pc);
+                if (wit != blocks_.end() && !wit->second.interp_only) {
+                    wit->second.interp_only = true;
+                    wit->second.interp_only_count = wit->second.instr_count;
+                    wit->second.fn = nullptr;
+                    wit->second.chained = false;
+                }
+                blocks_mutex_.unlock();
+                tls_last_block_.pc = 0;  // invalidate cache
+                tls_last_block_.fn = nullptr;
+                interpreter_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                emu.step(cpu);
+                return cpu.pc;
+            }
+        } else {
+            tls_watchdog_last_pc_ = pc;
+            tls_watchdog_count_ = 0;
+        }
+        return next_pc;
+    }
+
     // ── Shared-JIT locking strategy ────────────────────────────────
     // The lock is held ONLY for table mutations (translate, chain,
     // hotness promotion, watchdog demotion). It is RELEASED before
@@ -195,6 +241,15 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
 
     blocks_executed++;
     instructions_executed += entry.instr_count;
+
+    // v1.5.0.alpha: populate the single-entry last-block cache so the
+    // next dispatch of the same PC can take the fast path. Only cache
+    // non-interp_only blocks with a valid fn pointer.
+    if (entry.fn && !entry.interp_only) {
+        tls_last_block_.pc = pc;
+        tls_last_block_.fn = entry.fn;
+        tls_last_block_.instr_count = entry.instr_count;
+    }
 
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);

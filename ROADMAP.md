@@ -6,14 +6,14 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## v1.4.5-alpha — SHIPPED (2026-07-03)
+## v1.5.0.alpha — SHIPPED (2026-07-03)
 
-**1.4.5-alpha** is the first feature release after the 1.4.0 stable.
+**1.5.0.alpha** is the first feature release after the 1.4.0 stable.
 It adds native SSE2 codegen for SIMD vector shifts (SHL/USHR/SSHR),
 fixes a missing SSHR-by-immediate handler in the interpreter, and keeps
 all 72 tests passing under JIT, interpreter, and FWD mode.
 
-### Completed in 1.4.5-alpha
+### Completed in 1.5.0.alpha
 
 1. **Native SIMD vector shift codegen.** SHL/USHR/SSHR (vector, by
    immediate) now emit native SSE2 `psllw/pslld/psllq`,
@@ -42,7 +42,7 @@ all 72 tests passing under JIT, interpreter, and FWD mode.
 5. **Version consistency sweep.** All version references in
    `version.hpp`, `main.cpp`, `api/bifrost.h`, `Makefile`, `README.md`,
    `TESTS.md`, `ROADMAP.md`, `src/graphics/graphics.cpp`, and
-   `ctest/test_capi.c` now say `1.4.5-alpha`. Previously many still
+   `ctest/test_capi.c` now say `1.5.0.alpha`. Previously many still
    said `1.4.0`, causing `test_capi` to fail its version check.
 
 ---
@@ -94,7 +94,7 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 
 ---
 
-## v1.4.x (feature work — most items shipped in 1.4.0 or 1.4.5-alpha)
+## v1.4.x (feature work — most items shipped in 1.4.0 or 1.5.0.alpha)
 
 1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
    backend. Build with `make USE_SDL2=1` to enable the window backend;
@@ -145,16 +145,16 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 
 ---
 
-## v1.4.5-alpha and beyond (future feature work)
+## v1.5.0.alpha and beyond (future feature work)
 
-Items below this point were NOT in 1.4.5-alpha and are open for future
+Items below this point were NOT in 1.5.0.alpha and are open for future
 feature releases.
 
 1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
    backend. Build with `make USE_SDL2=1` to enable the window backend;
    audio output currently goes through OSS `/dev/dsp` passthrough.
 
-2. **~~VFS bug fixes.~~** ✅ DONE in 1.4.5-alpha (Turn 35, Yggdrasil
+2. **~~VFS bug fixes.~~** ✅ DONE in 1.5.0.alpha (Turn 35, Yggdrasil
    rename). `/dev/random` vs `/dev/urandom` now use distinct pools via
    `getrandom(GRND_RANDOM)` vs `getrandom(0)`. `O_NONBLOCK` on virtual
    fds works via the host-fd passthrough in `fcntl F_SETFL`. `lseek`

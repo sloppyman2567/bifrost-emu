@@ -1,0 +1,72 @@
+# bifrost.toml — sample configuration file for bifrost-emu v1.5.0.alpha.
+#
+# Copy to one of these locations (searched in this order):
+#   1. $BIFROST_CONFIG (if set)
+#   2. ./bifrost.toml
+#   3. $XDG_CONFIG_HOME/bifrost/config.toml (or ~/.config/bifrost/config.toml)
+#   4. ~/.bifrost.toml
+#   5. /etc/bifrost.toml
+#
+# Or specify explicitly with `bifrost-emu --config /path/to/bifrost.toml`.
+#
+# Resolution precedence (highest to lowest):
+#   1. CLI flag (e.g. --no-jit, --fb-dump PATH)
+#   2. Env var (e.g. BIFROST_NO_JIT=1)
+#   3. This config file
+#   4. Built-in defaults
+#
+# All keys are optional; missing keys fall back to defaults. Unknown
+# sections / keys are silently ignored for forward-compat.
+
+# ── JIT / interpreter ─────────────────────────────────────────────────
+[jit]
+enabled     = true        # use FrostJIT (recommended — 6.4x speedup)
+threshold   = 0           # 0 = use JIT from start; N = interp for N instrs
+verify      = false       # BIFROST_JIT_VERIFY — slow, debug only
+fwd         = false       # BIFROST_ENABLE_FWD — experimental, has bugs
+thread_jit  = true        # give each thread its own JIT (BIFROST_NO_THREAD_JIT inverts)
+no_chain    = false       # disable lazy block chaining (debug)
+no_selfloop = false       # disable self-loop chaining (debug)
+no_wex      = false       # disable Write XOR Execute (perf vs security)
+no_fma3     = false       # force decomposed mul+add even on FMA3 hosts
+
+# ── Framebuffer (/dev/fb0) ────────────────────────────────────────────
+[fb]
+width  = 1280             # guest-visible fb width
+height = 720              # guest-visible fb height
+bpp    = 32               # bits per pixel (16, 24, or 32)
+dump   = ""               # write PPM here on exit (empty = no dump)
+
+# ── Audio (/dev/dsp, /dev/snd) ────────────────────────────────────────
+[audio]
+sample_rate = 44100
+channels    = 2           # stereo
+sample_size = 2           # bytes per sample (16-bit signed)
+dump        = ""          # write WAV here on exit (empty = no dump)
+
+# ── Thunking (forward guest library calls to host) ────────────────────
+[thunk]
+graphics = false          # BIFROST_THUNK_GRAPHICS — forward GL/EGL/SDL2
+audio    = false          # BIFROST_THUNK_AUDIO — forward ALSA/PulseAudio
+display  = false          # BIFROST_THUNK_DISPLAY — forward Vulkan/Wayland
+trace    = false          # BIFROST_THUNK_TRACE — log every thunked call
+
+# ── Filesystem paths ──────────────────────────────────────────────────
+[paths]
+rootfs = ""               # BIFROST_ROOT — chroot-like sandbox path
+cwd    = "/"              # guest-side current working directory
+
+# ── Signal handling ───────────────────────────────────────────────────
+[signal]
+forward_host    = true    # forward SIGINT/SIGTERM/SIGCHLD to guest
+trace_syscalls  = false   # BIFROST_SYSCALL_TRACE — log every syscall
+
+# ── Performance counters ──────────────────────────────────────────────
+[perf]
+stats_interval = 0        # print guest stats every N instrs (0 = silent)
+
+# ── Logging ───────────────────────────────────────────────────────────
+[log]
+verbose     = false       # -v — print execution stats on exit
+trace       = false       # -d — trace every instruction to stderr
+brk_verbose = true        # show BRK warnings (always on by default)

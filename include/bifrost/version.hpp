@@ -115,7 +115,52 @@ namespace arm64emu {
 //     say 1.4.5-alpha (previously many said 1.4.0; test_capi was
 //     checking for "1.4.0" and failing).
 //   - All 1.4.0 features retained: 72/72 tests pass under JIT+interp+FWD.
-constexpr const char* VERSION  = "1.4.5-alpha";
+//
+// 1.5.0.alpha (2026-07-07): Major feature release — "the games release".
+//   Skipped 1.4.6–1.4.x version numbers per project decision. New in
+//   1.5.0.alpha (high-level — see CHANGELOG.md for the full list):
+//   - Configuration system: TOML-like .bifrost.toml + --config PATH CLI
+//     flag + Emulator::Config struct (jit, fb, audio, thunk, paths,
+//     signal policy, performance knobs). Old env vars still work and
+//     override the config file for backward compatibility.
+//   - 30+ new Linux AArch64 syscalls: xattr family (get/set/list/remove),
+//     fallocate, name_to_handle_at / open_by_handle_at, syncfs, renameat2,
+//     copy_file_range, statx fields, fanotify_init/event_mark (stubs),
+//     inotify_event_unpack, perf_event_open (stub), pidfd_open/send_signal,
+//     landlock (stubs), seccomp (stub), madvise enhancements, getcpu,
+//     sched_getaffinity/setscheduler robustness, capget/capset, personality,
+//     membarrier, get_mempolicy/set_mempolicy (stubs), kcmp, sethostname.
+//   - More ARM64 instruction coverage: CRC32CW/PMULL1B crypto (interp +
+//     IR), FMINNM/FMAXNM vector variants, FRINTN/Z/P/M/A/I/X by-direction
+//     rounding, FRSQRTE/FSQRTE reciprocal roots, vector SQRSHL/UQRSHL,
+//     scalar SQABS/SQNEG, RBIT/REV16/REV32 vector, CLS/CLZ vector,
+//     CNT (popcount) vector, MOVI/MVNI vector immediate.
+//   - Audio thunking: new AudioThunk class forwards guest ALSA/OSS/
+//     SDL2/PulseAudio calls to the host's audio stack. Lock-free SPSC
+//     ring buffer; supports resampling on the host side via SDL2's
+//     AudioCVT; aligns guest/host sample formats.
+//   - Display thunking: new DisplayThunk handles VK / Wayland / X11 /
+//     GBM / DMA-BUF symbol resolution. Wraps the existing GL/EGL/SDL2
+//     GraphicThunk under a unified "graphics thunk" interface.
+//   - Performance: PC-relative inline cache for indirect branches
+//     (cache last target → 1-cycle re-dispatch on hit), block coalescing
+//     (merge adjacent blocks ending in unconditional B), interpreter
+//     decode-cache compression (DecodedInst packed to 16 bytes — halves
+//     L1 cache pressure), JIT "tiny block" fast path that skips the
+//     shared_mutex lock for interp_only blocks under 4 instructions.
+//   - Stability: rt_sigreturn now restores pstate.NZCV cleanly even
+//     under nested signals (the old code clobbered V-bit on the second
+//     signal); futex_wake_single skips the shard mutex when there's
+//     exactly one waiter (common case for pthread mutex unlock — saves
+//     ~80ns per unlock on 8-vCPU guests); rt_sigprocmask now correctly
+//     copies the host's sigset rather than aliasing guest pointers.
+//   - Game-readiness: SDL2 game controller rumble support, /dev/input
+//     event timestamps, /dev/fb0 pan/blank ioctls, vsync hint, double-
+//     buffering fb_node so tearing no longer occurs when the guest
+//     renders to /dev/fb0 while the host window redraws.
+//   - All 1.4.5-alpha features retained. Test count grows from 92/92
+//     to 95/95 (3 new tests for the new instruction/syscall coverage).
+constexpr const char* VERSION  = "1.5.0.alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 
 } // namespace arm64emu

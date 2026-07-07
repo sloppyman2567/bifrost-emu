@@ -69,4 +69,10 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num);  // ptrace/sc
 int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num);     // getuid/getpid/uname/sysinfo/getrandom/etc
 int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num);   // times/waitpid/wait4
 
+// ── misc_extended.cpp (v1.5.0.alpha) ────────────────────────────────
+// Extended syscalls: xattr, kcmp, membarrier, copy_file_range, pkey_*,
+// pidfd_*, io_uring stubs, mount-API stubs, capget/capset, personality,
+// fanotify stubs, landlock stubs, seccomp stub, mseal, etc.
+int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num);
+
 } // namespace arm64emu

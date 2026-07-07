@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (v1.4.5-alpha)
+# bifrost-emu Makefile (v1.5.0.alpha)
 #
 # Auto-discovers all .cpp files under src/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
@@ -19,7 +19,7 @@
 #   CXXFLAGS       C++ compiler flags
 #   LDFLAGS        Linker flags
 #
-# Directory layout (v1.4.5-alpha):
+# Directory layout (v1.5.0.alpha):
 #
 #   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
 #   src/yggdrasil/          — Yggdrasil VFS (Node + FdTable + procfs + devfs)
