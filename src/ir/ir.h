@@ -252,4 +252,15 @@ uint16_t rbit32_ir(IRBlock& b, uint16_t v);
 uint16_t rev16_64_ir(IRBlock& b, uint16_t v);
 uint16_t rev32_64_ir(IRBlock& b, uint16_t v);
 
+// ── Translator dispatch helpers (defined in ir_translate_*.cpp) ─────────
+// translate_to_ir() delegates FP/SIMD and memory load/store cases to these
+// helpers. Each returns `true` if it handled `d.cls` (in which case
+// translate_to_ir returns false — none of the extracted cases terminate a
+// block), or `false` to let translate_to_ir's own switch handle the case.
+//
+// Split out so the main translate_to_ir() function stays under ~1000 lines;
+// see ir_translate_fp.cpp and ir_translate_mem.cpp for the bodies.
+bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
+bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
+
 } // namespace arm64emu
