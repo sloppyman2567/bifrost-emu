@@ -64,6 +64,46 @@ else
     file "$PROJECT_ROOT/$BB_DEST"
 fi
 
+# ── iperf2 ─────────────────────────────────────────────────────────────
+IPERF_DEST="$DEST/iperf2-aarch64"
+
+if [ -x "$IPERF_DEST" ]; then
+    echo "iperf2 already present at $IPERF_DEST"
+else
+    echo ""
+    echo "=== Building iperf2 2.2.1 (static aarch64 musl) ==="
+    TMPDIR2=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR" "$TMPDIR2"' EXIT
+
+    if curl -fL -o "$TMPDIR2/iperf2.tar.gz" \
+        "https://sourceforge.net/projects/iperf2/files/iperf2-2.2.1.tar.gz/download" 2>/dev/null; then
+        tar xzf "$TMPDIR2/iperf2.tar.gz" -C "$TMPDIR2"
+        cd "$TMPDIR2"/iperf2-*
+        ./configure --host=aarch64-linux-musl --disable-shared --prefix=/usr \
+            CC=aarch64-linux-musl-gcc CFLAGS="-static -O2" LDFLAGS="-static" 2>&1 | tail -3
+        make -j"$(nproc)" 2>&1 | tail -3
+        cp src/iperf "$PROJECT_ROOT/$IPERF_DEST" 2>/dev/null || echo "  (iperf2 build failed — skipping)"
+        chmod +x "$PROJECT_ROOT/$IPERF_DEST" 2>/dev/null
+        [ -f "$PROJECT_ROOT/$IPERF_DEST" ] && echo "iperf2 built: $IPERF_DEST"
+    else
+        echo "  (could not download iperf2 source — skipping)"
+    fi
+fi
+
+# ── toybox (if not present in ctest_real/) ─────────────────────────────
+TOYBOX_DEST="ctest_real/toybox"
+if [ ! -f "$TOYBOX_DEST" ]; then
+    echo ""
+    echo "=== Downloading toybox ==="
+    if curl -fL -o "$TOYBOX_DEST" \
+        "https://landley.net/toybox/downloads/binaries/0.8.10/toybox-aarch64" 2>/dev/null; then
+        chmod +x "$TOYBOX_DEST"
+        echo "toybox downloaded: $TOYBOX_DEST"
+    else
+        echo "  (could not download toybox — skipping)"
+    fi
+fi
+
 echo ""
 echo "=== Real-world binaries ready ==="
 ls -lh "$DEST"/

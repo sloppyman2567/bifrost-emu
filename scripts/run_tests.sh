@@ -285,6 +285,10 @@ TOYBOX_TESTS=(
 # Benchmarks (slow, skipped with --quick)
 BENCH_TESTS=(
     "bench_mips|ctest_real/bench_mips.elf||30|done:"
+    "bench_memcpy|ctest_real/bench_memcpy.elf||30|MiB/s"
+    "bench_sort|ctest_real/bench_sort.elf||30|qsort:"
+    "bench_matrix|ctest_real/bench_matrix.elf||30|MFLOPS"
+    "bench_fib|ctest_real/bench_fib.elf||30|fib\(35\)"
 )
 
 # Real-world binary tests (Turn 55).
