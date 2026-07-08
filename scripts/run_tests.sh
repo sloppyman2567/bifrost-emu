@@ -335,6 +335,22 @@ REALWORLD_TESTS=(
     "rw_toybox_echo|ctest_real/toybox echo hello|hello|5|^hello$"
     "rw_toybox_seq|ctest_real/toybox seq 1 5||5|^1$"
     "rw_toybox_uname|ctest_real/toybox uname||5|^Linux$"
+    "rw_toybox_sed|ctest_real/toybox sed s/hello/hi/|hello world|5|^hi world$"
+    "rw_toybox_grep|ctest_real/toybox grep an|apple\nbanana\ncherry|5|banana"
+    "rw_toybox_cat|ctest_real/toybox cat|hello|5|^hello$"
+    "rw_toybox_wc|ctest_real/toybox wc|hello world|5|[0-9]"
+    "rw_toybox_sort|ctest_real/toybox sort -n|10\n2\n33\n1\n20|5|^1$"
+    "rw_toybox_head|ctest_real/toybox head -n1|line1\nline2|5|^line1$"
+    "rw_toybox_tail|ctest_real/toybox tail -n1|line1\nline2|5|^line2$"
+    "rw_toybox_date|ctest_real/toybox date||5|^[A-Z][a-z]"
+    "rw_toybox_id|ctest_real/toybox id||5|^uid="
+    "rw_toybox_pwd|ctest_real/toybox pwd||5|^/"
+    "rw_toybox_hostname|ctest_real/toybox hostname||5|."
+    "rw_toybox_whoami|ctest_real/toybox whoami||5|^root$"
+    "rw_toybox_env|ctest_real/toybox env||5|PATH="
+    "rw_toybox_printf|ctest_real/toybox printf %d 42||5|^42$"
+    "rw_toybox_md5sum|ctest_real/toybox md5sum|hello\n|5|^b1946ac9"
+    "rw_toybox_sha256sum|ctest_real/toybox sha256sum|hello\n|5|^5891b5b5"
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
