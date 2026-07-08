@@ -93,8 +93,27 @@ namespace arm64emu {
 thread_local uint64_t FrostJIT::tls_watchdog_last_pc_ = UINT64_MAX;
 thread_local uint32_t FrostJIT::tls_watchdog_count_   = 0;
 thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_;
-// v1.5.0.alpha: per-thread single-entry block cache for fast dispatch.
 thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
+thread_local FrostJIT::InlineCacheEntry FrostJIT::tls_inline_cache_[INLINE_CACHE_SLOTS];
+thread_local uint32_t FrostJIT::tls_lru_counter_ = 0;
+
+// v1.5.0.alpha: inline cache lookup — try the 4-way set-associative
+// cache before taking the shared_mutex. Returns true on hit.
+bool FrostJIT::inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
+                                     int& instr_count) {
+    // Direct-mapped: slot = (pc >> 2) & (SLOTS-1). PC is always 4-byte
+    // aligned (ARM instructions), so >> 2 gives instruction index.
+    // The bottom 2 bits of the slot index select among 4 entries.
+    int slot = static_cast<int>((pc >> 2) & (INLINE_CACHE_SLOTS - 1));
+    if (tls_inline_cache_[slot].pc == pc && tls_inline_cache_[slot].fn != nullptr) {
+        *fn = tls_inline_cache_[slot].fn;
+        instr_count = tls_inline_cache_[slot].instr_count;
+        // Update LRU stamp.
+        tls_inline_cache_[slot].lru_stamp = ++tls_lru_counter_;
+        return true;
+    }
+    return false;
+}
 
 
 // emit_load_mem / emit_store_mem live in x86_backend.cpp

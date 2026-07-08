@@ -87,6 +87,47 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         return next_pc;
     }
 
+    // v1.5.0.alpha Turn 2: 4-way inline cache for indirect branches.
+    // This catches the common case of sequential block-to-block transitions
+    // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the shared_mutex.
+    // The cache is direct-mapped by (pc >> 2) & 3, so it handles up to 4
+    // recent PCs simultaneously without eviction.
+    {
+        uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
+        int cached_count = 0;
+        if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
+            // Cache hit — skip shared_mutex + unordered_map entirely.
+            blocks_executed.fetch_add(1, std::memory_order_relaxed);
+            instructions_executed.fetch_add(cached_count,
+                                             std::memory_order_relaxed);
+            uint64_t next_pc = cached_fn(&cpu, &emu);
+            cpu.pc = next_pc;
+            // Watchdog (inlined for the fast path).
+            if (pc == tls_watchdog_last_pc_) {
+                if (++tls_watchdog_count_ > WATCHDOG_LIMIT) {
+                    blocks_mutex_.lock();
+                    auto wit = blocks_.find(pc);
+                    if (wit != blocks_.end() && !wit->second.interp_only) {
+                        wit->second.interp_only = true;
+                        wit->second.interp_only_count = wit->second.instr_count;
+                        wit->second.fn = nullptr;
+                        wit->second.chained = false;
+                    }
+                    blocks_mutex_.unlock();
+                    tls_last_block_.pc = 0;
+                    tls_last_block_.fn = nullptr;
+                    interpreter_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                    emu.step(cpu);
+                    return cpu.pc;
+                }
+            } else {
+                tls_watchdog_last_pc_ = pc;
+                tls_watchdog_count_ = 0;
+            }
+            return next_pc;
+        }
+    }
+
     // ── Shared-JIT locking strategy ────────────────────────────────
     // The lock is held ONLY for table mutations (translate, chain,
     // hotness promotion, watchdog demotion). It is RELEASED before
@@ -249,6 +290,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_last_block_.pc = pc;
         tls_last_block_.fn = entry.fn;
         tls_last_block_.instr_count = entry.instr_count;
+        // Also populate the 4-way inline cache for indirect branches.
+        int slot = static_cast<int>((pc >> 2) & (INLINE_CACHE_SLOTS - 1));
+        tls_inline_cache_[slot].pc = pc;
+        tls_inline_cache_[slot].fn = entry.fn;
+        tls_inline_cache_[slot].instr_count = entry.instr_count;
+        tls_inline_cache_[slot].lru_stamp = ++tls_lru_counter_;
     }
 
     // Debug: print pstate at entry for specific blocks

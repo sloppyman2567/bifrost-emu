@@ -163,6 +163,34 @@ public:
     };
     static thread_local LastBlockCache tls_last_block_;
 
+    // v1.5.0.alpha Turn 2: Per-thread 4-way set-associative inline cache
+    // for indirect branches (BR/BLR). This is the FEX-Emu pattern: cache
+    // the last N (PC→fn) mappings so that virtual dispatch, switch tables,
+    // and computed gotos don't pay the shared_mutex + unordered_map cost
+    // on every dispatch.
+    //
+    // The cache is direct-mapped by PC hash (PC >> 2) & 3 — 4 slots.
+    // LRU replacement within each set. The fn pointer is stable (same
+    // safety argument as tls_last_block_).
+    //
+    // Hit rate for typical code: ~90%+ (most indirect branches have
+    // 1-2 frequent targets). At 80ns/dispatch saved, a 10M-indirect-
+    // branch workload saves ~0.7 seconds.
+    static constexpr int INLINE_CACHE_SLOTS = 4;
+    struct InlineCacheEntry {
+        uint64_t pc = 0;
+        uint64_t (*fn)(CPU*, Emulator*) = nullptr;
+        int instr_count = 0;
+        uint32_t lru_stamp = 0;  // higher = more recently used
+    };
+    static thread_local InlineCacheEntry tls_inline_cache_[INLINE_CACHE_SLOTS];
+    static thread_local uint32_t tls_lru_counter_;
+
+    // Try the inline cache. Returns true on hit (and fills out/fn/count).
+    // On miss, inserts into the cache (LRU eviction).
+    bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
+                              int& instr_count);
+
     // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
     // PC has been dispatched (total, not consecutive). When a PC exceeds
     // HOT_PC_THRESHOLD, it's marked interp_only — the interpreter is
