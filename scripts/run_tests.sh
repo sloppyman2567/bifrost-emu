@@ -433,6 +433,10 @@ REALWORLD_TESTS=(
     "rw_coreutils_echo|ctest_real/realworld/echo hello||5|^hello$|DYN"
     "rw_coreutils_cat|ctest_real/realworld/cat|hello\n|5|^hello$|DYN"
     "rw_coreutils_echo_n|ctest_real/realworld/echo -n abc||5|^abc$|DYN"
+    # NEW (Turn 74 cont.): more real-world glibc dynamic tests
+    "rw_coreutils_uname|ctest_real/realworld/uname||5|^Linux$|DYN"
+    "rw_coreutils_date|ctest_real/realworld/date||5|^.{3} [A-Z][a-z]{2}|DYN"
+    "rw_coreutils_readlink|ctest_real/realworld/readlink /proc/self/exe||5|readlink|DYN"
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
