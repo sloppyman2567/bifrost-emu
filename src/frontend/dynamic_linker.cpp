@@ -314,7 +314,11 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     int64_t A = r.r_addend;
 
                     if (type == R_AARCH64_RELATIVE_) {
-                        mem_.store<uint64_t>(target, obj.base_addr + A);
+                        uint64_t value = obj.base_addr + A;
+                        mem_.store<uint64_t>(target, value);
+                        // BUGFIX (Turn 74): mirror .tdata relocations to
+                        // the TLS block copy. See apply_tls_mirror_().
+                        apply_tls_mirror_(obj, target, value);
                     } else if (type == R_AARCH64_COPY_) {
                         // R_AARCH64_COPY: defer until after all other
                         // relocations are applied. The COPY must read
@@ -334,8 +338,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         }
                     } else if (type == R_AARCH64_ABS64_ ||
                                type == R_AARCH64_GLOB_DAT_) {
+                        uint64_t value;
                         if (sym == 0) {
-                            mem_.store<uint64_t>(target, obj.base_addr + A);
+                            value = obj.base_addr + A;
+                            mem_.store<uint64_t>(target, value);
                         } else {
                             // Read symbol name from obj's symtab.
                             Elf64_Sym s;
@@ -358,8 +364,11 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             if (S == 0 && s.st_shndx != SHN_UNDEF_) {
                                 S = obj.base_addr + s.st_value;
                             }
-                            mem_.store<uint64_t>(target, S + A);
+                            value = S + A;
+                            mem_.store<uint64_t>(target, value);
                         }
+                        // BUGFIX (Turn 74): mirror .tdata relocations.
+                        apply_tls_mirror_(obj, target, value);
                     } else if (type == R_AARCH64_IRELATIVE_) {
                         // ifunc: call the resolver at base + A to get the
                         // real function pointer. The resolver is a small
@@ -659,6 +668,24 @@ void DynamicLinker::apply_pending_copies_() {
         }
     }
     pending_copies_.clear();
+}
+
+// ── apply_tls_mirror_ ──────────────────────────────────────────────────
+// If `target` falls within obj's PT_TLS (.tdata) segment, also store
+// `value` at the corresponding offset in the static TLS block. See
+// the header comment for why this is necessary.
+void DynamicLinker::apply_tls_mirror_(const LoadedObject& obj,
+                                       uint64_t target, uint64_t value) {
+    if (!obj.tls.present || obj.tls.filesz == 0) return;
+    if (static_tls_base_ == 0) return;
+    uint64_t tdata_start = obj.base_addr + obj.tls.vaddr;
+    uint64_t tdata_end = tdata_start + obj.tls.filesz;
+    if (target >= tdata_start && target < tdata_end) {
+        uint64_t tls_dst = static_tls_base_ +
+            obj.tls_block_offset +
+            (target - tdata_start);
+        mem_.store<uint64_t>(tls_dst, value);
+    }
 }
 
 // ── run_init_arrays_ ───────────────────────────────────────────────────
@@ -1640,6 +1667,9 @@ void DynamicLinker::allocate_static_tls() {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
         // Align cursor.
         cursor = (cursor + obj.tls.align - 1) & ~(obj.tls.align - 1);
+        // Record the offset of this object's TLS data within the block.
+        // Used later to translate .tdata relocations to the TLS block copy.
+        obj.tls_block_offset = cursor;
         // Finalize TP-offset (negative).
         obj.tls_tp_offset = static_cast<int64_t>(cursor) - static_cast<int64_t>(total);
 

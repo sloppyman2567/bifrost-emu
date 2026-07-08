@@ -114,6 +114,13 @@ struct LoadedObject {
     uint64_t   tls_mod_id   = 0;  // 1-based module ID (0 = no TLS)
     int64_t    tls_tp_offset = 0; // offset from TPIDR_EL0 to this block
                                   // (negative: block is below TP)
+    // BUGFIX (Turn 74): offset of this object's TLS data within the
+    // static TLS block. Used to translate .tdata relocations to the
+    // TLS block copy. Without this, RELATIVE relocations targeting
+    // .tdata (e.g., glibc's _nl_global_locale pointer in .tdata)
+    // were applied to the original .tdata location but NOT the TLS
+    // block copy, so the TLS block had pre-relocation (wrong) values.
+    uint64_t   tls_block_offset = 0;
 };
 
 class DynamicLinker {
@@ -379,6 +386,18 @@ private:
     // Apply all pending COPY relocations. Called after all objects'
     // RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are done.
     void apply_pending_copies_();
+
+    // BUGFIX (Turn 74): mirror a relocation to the TLS block copy.
+    // If `target` falls within obj's PT_TLS (.tdata) segment, also
+    // store `value` at the corresponding offset in the static TLS
+    // block. This is needed because allocate_static_tls() copies
+    // .tdata to the TLS block BEFORE relocations are applied, so the
+    // TLS block has pre-relocation values. Without this mirror,
+    // TLS variables containing pointers (e.g., glibc's
+    // _nl_global_locale pointer in .tdata) have wrong values,
+    // causing locale/stdio functions to dereference NULL.
+    void apply_tls_mirror_(const LoadedObject& obj,
+                           uint64_t target, uint64_t value);
 };
 
 } // namespace arm64emu
