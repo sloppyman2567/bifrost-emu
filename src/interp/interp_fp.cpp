@@ -1162,27 +1162,43 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             // Narrowing shift right (SHRN). immh determines SOURCE element size
             // (2× the destination size). Shift = (2*esize_bits) - immh:immb.
+            //
+            // BUGFIX (Turn 72): the source register is ALWAYS 128 bits (full
+            // Q register), even when Q=0. Q=0 means the destination is 64
+            // bits (SHRN), Q=1 means 128 bits (SHRN2, writes to upper half).
+            // The old code only processed 4 elements for Q=0 (8-byte dest)
+            // instead of 8, causing strchrnul's SIMD scan to miss half the
+            // bytes. This broke glibc's printf/sprintf — the format string
+            // scanner couldn't find '%' in the second half of each 16-byte
+            // chunk, so format specifiers were printed as literals.
             if ((op & 0xBF00FC00) == 0x0F008400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
                 int esize, shift;
-                if (immh == 1) { esize = 2; }
-                else if (immh <= 3) { esize = 4; }
-                else { esize = 8; }
+                if (immh == 1) { esize = 2; }      // 16-bit source → 8-bit dest
+                else if (immh <= 3) { esize = 4; }  // 32-bit source → 16-bit dest
+                else { esize = 8; }                 // 64-bit source → 32-bit dest
                 shift = (2 * esize * 8) - ((immh << 4) | immb);
+                // Source is ALWAYS the full 128-bit register (8/4/2 elements).
                 uint8_t buf[16];
                 memcpy(buf, &cpu.v_lo[rn], 8);
-                if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                uint8_t out[8] = {0};
-                int dst_elems = (Q ? 8 : 4) / (esize / 2);
+                memcpy(buf + 8, &cpu.v_hi[rn], 8);  // always read full 128 bits
+                int dst_elems = 16 / esize;  // 8 for 16-bit, 4 for 32-bit, 2 for 64-bit
+                uint8_t out[16] = {0};
                 for (int i = 0; i < dst_elems; i++) {
                     uint64_t v = 0;
                     memcpy(&v, buf + i * esize, esize);
                     v >>= shift;
                     memcpy(out + i * (esize / 2), &v, esize / 2);
                 }
-                memcpy(&cpu.v_lo[rd], out, 8);
-                cpu.v_hi[rd] = 0;
+                if (Q) {
+                    // SHRN2: write to upper 64 bits, preserve lower 64 bits.
+                    memcpy(&cpu.v_hi[rd], out, 8);
+                } else {
+                    // SHRN: write to lower 64 bits, zero upper 64 bits.
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    cpu.v_hi[rd] = 0;
+                }
                 return;
             }
             // ── Vector ADD/SUB/MUL (integer) ──────────────────────────

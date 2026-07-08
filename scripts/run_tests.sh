@@ -120,7 +120,13 @@ if [ "$RUN_ALL" = "1" ]; then
     RUN_REALWORLD=1
     [ "$QUICK" = "0" ] && RUN_BENCH=1
     # Dynamic tests require rootfs + toolchains; auto-enable if present.
-    [ -d "rootfs/lib" ] && [ -f "ctest_real/hello_dyn_musl.elf" ] && RUN_DYNAMIC=1
+    # Turn 72: also check for glibc libs (libc.so.6) so the glibc dynamic
+    # test (test_dyn_write) runs when the glibc toolchain was fetched.
+    if [ -d "rootfs/lib" ]; then
+        if [ -f "ctest_real/hello_dyn_musl.elf" ] || [ -f "rootfs/lib/libc.so.6" ]; then
+            RUN_DYNAMIC=1
+        fi
+    fi
 fi
 
 # ── Check emulator exists ──────────────────────────────────────────────
@@ -294,6 +300,7 @@ INTEGRATION_TESTS=(
 # Uses a special env prefix (BIFROST_ROOT) to enable rootfs sandboxing.
 DYNAMIC_TESTS=(
     "hello_dyn_musl|ctest_real/hello_dyn_musl.elf||5|Hello, dynamic world"
+    "test_dyn_write|ctest_real/test_dyn_write.elf||5|dyn_write_ok"
 )
 
 # Interactive tests (need stdin input)

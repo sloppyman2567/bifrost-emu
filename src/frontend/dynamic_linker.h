@@ -252,14 +252,6 @@ private:
     uint64_t static_tls_base_ = 0;  // guest VA where the block is mapped
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
 
-    // Next base address for load_shared_library(). Was a function-local
-    // static in Turn 15; promoted to a member in Turn 37 so multiple
-    // DynamicLinker instances don't share the same allocator (latent
-    // bug if the Emulator ever creates two linkers, e.g., for fork()
-    // with separate Memory). 0 = not yet initialized; first call sets
-    // it to 0x5000000000.
-    uint64_t next_lib_base_ = 0;
-
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
     // `base` is the load bias to convert vaddrs to absolute addresses.

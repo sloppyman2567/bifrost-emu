@@ -241,31 +241,20 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // for symbols that glibc's libc.so references from ld-linux
     // (_rtld_global_ro, _dl_argv, _dl_find_dso_for_object, etc.).
     // Without these, libc crashes during __libc_start_main when it
-    // dereferences the (zero) GOT slots. The shim must be registered
-    // AFTER all libraries are loaded (so the shim's symbols can be
-    // overridden by real ld-linux symbols if the guest actually loaded
-    // one) but BEFORE relocations are applied (so GLOB_DAT/JUMP_SLOT
-    // relocations against these symbols resolve to the shim's
-    // addresses).
+    // dereferences the (zero) GOT slots.
     //
-    // We only register the shim if no real ld-linux was loaded. If
-    // the guest's PT_INTERP was found and loaded as a regular shared
-    // library, its symbols are already in the table and the shim
-    // would just shadow them (the shim's `symbols_[name] = ...` only
-    // sets if not already present — see the `add_*_sym` lambdas
-    // above, which we'll make conditional on first-define-wins).
-    bool has_real_ld = false;
-    for (const auto& o : objects_) {
-        if (o.name.find("ld-linux") != std::string::npos ||
-            o.name.find("ld-musl") != std::string::npos ||
-            o.name.find("ld.so") != std::string::npos) {
-            has_real_ld = true;
-            break;
-        }
-    }
-    if (!has_real_ld) {
-        register_ld_linux_shim_();
-    }
+    // BUGFIX (Turn 72): ALWAYS register the shim, even when a real
+    // ld-linux was loaded. Reason: production glibc builds strip ld-linux's
+    // .symtab, leaving only a 40-entry .dynsym that does NOT export
+    // _rtld_global, _rtld_global_ro, _dl_argv, __libc_enable_secure,
+    // _dl_find_dso_for_object, etc. These symbols are referenced by
+    // libc.so.6's relocations (GLOB_DAT/JUMP_SLOT) and MUST resolve to
+    // valid addresses, or libc dereferences zero GOT slots and crashes.
+    //
+    // The shim's symbol registration uses "first-define-wins" so any
+    // real ld-linux .dynsym symbol (rare but possible in debug builds)
+    // takes precedence over the shim's stub.
+    register_ld_linux_shim_();
 
     // Note: we re-apply using the original file bytes for each object,
     // since the in-memory dynamic section may have been relocated.
@@ -1051,11 +1040,20 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // ── Register symbols in the global symbol table ──────────────
     // Data symbols point into the data page; function symbols point
     // into the code page.
+    // BUGFIX (Turn 72): first-define-wins. The old code unconditionally
+    // assigned `symbols_[name] = ...`, which would override a real
+    // ld-linux symbol if one was already indexed from .dynsym. Now we
+    // only insert if no prior definition exists, matching index_symbols'
+    // "first strong wins" semantics.
     auto add_data_sym = [&](const char* name, uint64_t off) {
-        symbols_[name] = SymEntry{shim_base_ + off, STB_GLOBAL_};
+        if (symbols_.count(name) == 0) {
+            symbols_[name] = SymEntry{shim_base_ + off, STB_GLOBAL_};
+        }
     };
     auto add_func_sym = [&](const char* name, uint64_t off) {
-        symbols_[name] = SymEntry{code_base + off, STB_GLOBAL_};
+        if (symbols_.count(name) == 0) {
+            symbols_[name] = SymEntry{code_base + off, STB_GLOBAL_};
+        }
     };
 
     // Data symbols (from ld-linux that libc references).
@@ -1199,6 +1197,24 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     dirs.push_back("/usr/lib");
     dirs.push_back("/lib");
 
+    // 3.5. Android-compatible library paths (Turn 72).
+    // Android games and Android-ported apps look for shared libraries
+    // in /system/lib64 and /vendor/lib64. When BIFROST_ROOT is set,
+    // these resolve to $BIFROST_ROOT/system/lib64 etc. (created by
+    // setup-rootfs.sh as symlinks to ../lib64). Adding them here lets
+    // Android-style DT_NEEDED entries (e.g., "libGLESv2.so") resolve
+    // from the rootfs.
+    if (const char* root = getenv("BIFROST_ROOT")) {
+        std::string r(root);
+        while (r.size() > 1 && r.back() == '/') r.pop_back();
+        if (!r.empty()) {
+            dirs.push_back(r + "/system/lib");
+            dirs.push_back(r + "/system/lib64");
+            dirs.push_back(r + "/vendor/lib");
+            dirs.push_back(r + "/vendor/lib64");
+        }
+    }
+
     // 8. Bundled toolchain libs (auto-detected relative to the
     //    executable's directory, so it works regardless of CWD).
     //    We use /proc/self/exe to find the executable's path, then
@@ -1314,8 +1330,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     // inst=0x00000040" when the guest tried to call a thunked function.
     // The fix: use mem_.mmap_alloc() for library bases, so the
     // allocator tracks ALL high-memory allocations and prevents
-    // collisions. next_lib_base_ is now unused (kept in the header for
-    // ABI compat but never read).
+    // collisions. (Turn 72: removed the dead next_lib_base_ member.)
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff;
@@ -1737,12 +1752,12 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
 
-    for (size_t i = 0; i < count; i++) {
+    for (size_t i = 1; i < count; i++) {  // Turn 72: skip STN_UNDEF (symbol 0)
         Elf64_Sym s;
         try {
             mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
         } catch (...) { break; }
-        if (s.st_name == 0 && s.st_value == 0 && s.st_shndx == 0) break;
+        if (s.st_name == 0 && s.st_value == 0 && s.st_shndx == 0) continue;
         if (s.st_shndx == SHN_UNDEF_) continue;  // only defined symbols
         uint8_t bind = ST_BIND_(s.st_info);
         if (bind != STB_GLOBAL_ && bind != STB_WEAK_) continue;
@@ -1817,22 +1832,28 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;  // sanity
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
-    for (size_t i = 0; i < count; i++) {
+    // BUGFIX (Turn 72): symbol 0 (STN_UNDEF) is ALWAYS the all-zero sentinel.
+    // The old code `break`ed on this sentinel, terminating the loop at i=0
+    // and indexing ZERO symbols. This broke every dynamically-linked binary:
+    // libc.so.6's 2973 defined symbols were never indexed, so every
+    // relocation against strlen/printf/puts/free/abort/__libc_start_main
+    // returned NOT FOUND, the GOT slots stayed at 0, and the program
+    // crashed with "decode error at pc=0x0 inst=0x00000000" on the first
+    // call. The fix: start at i=1 (skip STN_UNDEF) and use `continue`
+    // for any subsequent all-zero entry (defensive — should not happen
+    // in well-formed ELFs but cheap to check). Performance is fine because
+    // symtab_count from DT_HASH is the exact symbol count (no over-scan).
+    for (size_t i = 1; i < count; i++) {
         Elf64_Sym s;
         try {
             mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
         } catch (...) {
             break;
         }
-        // BUGFIX (Turn 59, M9): break (not continue) on the end-of-table
-        // sentinel. The old `continue` caused the loop to scan all 8192
-        // entries even when the table was short, wasting ~1.6 GiB of
-        // redundant reads across a heavy game load. (Some ELF objects
-        // have a real STN_UNDEF entry in the middle, but those are rare
-        // and the break only triggers on the all-zero sentinel which is
-        // the conventional end marker.)
+        // Defensive: skip any all-zero entry (should only be symbol 0,
+        // already skipped above, but be safe against malformed ELFs).
         if (s.st_name == 0 && s.st_value == 0 && s.st_shndx == 0) {
-            break;
+            continue;
         }
         // Only index defined symbols (st_shndx != SHN_UNDEF).
         if (s.st_shndx == SHN_UNDEF_) continue;

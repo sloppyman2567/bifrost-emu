@@ -169,6 +169,61 @@ EOF
 # the default search paths in /etc/ld.so.conf)
 : > "$ROOTFS/etc/ld.so.cache"
 
+# ── Android-compatible directory structure ────────────────────────────
+# Android uses /system/lib64 and /vendor/lib64 for its libraries.
+# Some Android games and Android-ported Linux programs look for libs
+# in these paths. Create them as symlinks to the standard FHS paths
+# so the dynamic linker can find them.
+mkdir -p "$ROOTFS/system" "$ROOTFS/vendor"
+[ -e "$ROOTFS/system/lib" ]   || ln -sf ../lib     "$ROOTFS/system/lib"
+[ -e "$ROOTFS/system/lib64" ] || ln -sf ../lib64   "$ROOTFS/system/lib64"
+[ -e "$ROOTFS/system/bin" ]   || ln -sf ../bin     "$ROOTFS/system/bin"
+[ -e "$ROOTFS/system/etc" ]   || ln -sf ../etc     "$ROOTFS/system/etc"
+[ -e "$ROOTFS/vendor/lib" ]   || ln -sf ../lib     "$ROOTFS/vendor/lib"
+[ -e "$ROOTFS/vendor/lib64" ] || ln -sf ../lib64   "$ROOTFS/vendor/lib64"
+
+# /system/build.prop — minimal Android-style properties file.
+# Some Android programs read this to detect the platform.
+cat > "$ROOTFS/system/build.prop" <<'EOF'
+# Bifrost-emu Android-compatible properties
+ro.build.version.sdk=29
+ro.build.version.release=10
+ro.product.cpu.abi=arm64-v8a
+ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi
+ro.hardware=bifrost
+ro.product.model=Bifrost Emulator
+ro.product.manufacturer=Bifrost
+ro.product.brand=Bifrost
+ro.product.name=bifrost
+ro.product.device=bifrost
+ro.board.platform=bifrost
+# Indicate this is an emulator (some apps check this)
+ro.kernel.qemu=1
+ro.boot.qemu=1
+EOF
+
+# /system/etc/permissions — minimal Android permissions file
+mkdir -p "$ROOTFS/system/etc/permissions"
+cat > "$ROOTFS/system/etc/permissions/handheld_core_hardware.xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <feature name="android.hardware.touchscreen" />
+    <feature name="android.hardware.audio.output" />
+    <feature name="android.hardware.microphone" />
+    <feature name="android.hardware.screen.landscape" />
+    <feature name="android.hardware.screen.portrait" />
+    <feature name="android.hardware.opengles.aep" />
+</permissions>
+EOF
+
+# /data — Android-style data directory (writable)
+mkdir -p "$ROOTFS/data/app" "$ROOTFS/data/data" "$ROOTFS/data/local/tmp"
+chmod 1777 "$ROOTFS/data/local/tmp"
+
+# /sdcard — Android external storage symlink
+[ -e "$ROOTFS/sdcard" ] || ln -sf /data/media/0 "$ROOTFS/sdcard"
+mkdir -p "$ROOTFS/data/media/0"
+
 # ── Timezone setup ─────────────────────────────────────────────────────
 # Propagate the host's timezone to the guest rootfs so locale-aware
 # programs (date, uptime, ls -l's month names, etc.) display the user's

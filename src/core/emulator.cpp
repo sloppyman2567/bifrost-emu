@@ -599,10 +599,21 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // its center. Many libc startup routines read TPIDR_EL0 before
     // __libc_setup_tls has set the real TCB. Pointing it to valid
     // zeroed memory prevents unmapped-read crashes.
-    const uint64_t TLS_SCRATCH_SIZE = 65536;  // 64 KiB
-    uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
-    main_cpu_.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
-    main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+    //
+    // BUGFIX (Turn 72): only do this for STATIC binaries. For dynamic
+    // binaries, the dynamic linker already set TPIDR_EL0 to the static
+    // TLS block (line ~507 above). Overwriting it here destroys libc's
+    // TLS — libc reads errno, stdin/stdout/stderr FILE pointers, locale
+    // pointers, etc. via TPIDR_EL0-relative loads. With the scratch
+    // area, all those reads return 0, causing stdio functions to crash
+    // (NULL vtable pointer → blr x16 with x16=0 → pc=0 → decode error).
+    // The dynamic linker's TPIDR_EL0 is correct and must be preserved.
+    if (!dyn_linker_) {
+        const uint64_t TLS_SCRATCH_SIZE = 65536;  // 64 KiB
+        uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
+        main_cpu_.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
+        main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+    }
 
     // Map the zero page so NULL dereferences return 0 instead of
     // crashing. libc code often has NULL checks that only work if
