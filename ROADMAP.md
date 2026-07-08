@@ -6,6 +6,42 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
+## Current Focus — Turn 73+ (2026-07-08)
+
+### In Progress
+
+1. **glibc printf SIMD fast-path.** glibc's strchrnul uses a SIMD loop
+   (CMEQ + CMHS + UMAXP + SHRN) to scan format strings for '%'. The
+   UMAXP C-bit fix (bit 11, not bit 15) and SHRN immh/shift fixes are
+   done, but MVNI inversion had to be reverted (causes soft-float
+   regressions). Need to debug the soft-float __muldf3 interaction
+   before re-enabling MVNI inversion.
+
+2. **MVNI inversion + soft-float debugging.** The MVNI fix is correct
+   per the ARM spec but exposes a bug in musl's __muldf3 soft-float
+   code path. Need to trace the soft-float multiplication to find the
+   emulator instruction that produces wrong results when the MVNI mask
+   is 0xFF instead of 0x00.
+
+### Planned
+
+3. **AArch32 (32-bit ARM) support.** Currently only AArch64 is supported.
+   Adding AArch32 would expand compatibility with older Android apps.
+
+4. **vDSO emulation.** Some clock_gettime paths are emulated rather than
+   using a real vDSO. This causes minor performance overhead for
+   clock-heavy programs.
+
+5. **dlopen() support.** The dynamic linker currently loads all
+   DT_NEEDED libraries at startup. Runtime dlopen() of TLS-using
+   libraries is not yet supported (would require dynamic TLS allocation).
+
+6. **More real-world binary testing.** Expand the real-world test suite
+   with more AArch64 static binaries (Python, Node.js, Go binaries,
+   Rust binaries).
+
+---
+
 ## v1.5.0.alpha — SHIPPED (2026-07-03)
 
 **1.5.0.alpha** is the first feature release after the 1.4.0 stable.

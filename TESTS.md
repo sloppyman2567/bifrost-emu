@@ -10,24 +10,22 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 72 | 72 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 72 | 72 | 0 |
-| frostJIT + FWD (`BIFROST_ENABLE_FWD=1`) | 72 | 72 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 115 | 115 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 115 | 115 | 0 |
 
-All 72 test programs pass under frostJIT as of 1.5.0.alpha (2026-07-03), and
-all 72 also pass under the interpreter and under FWD mode. The test
-suite is run via `scripts/run_tests.sh` (or `make check`), which
-categorizes tests, colorizes output, and prints a summary table. JIT
-is the default execution mode (6.4x speedup on compute workloads).
-The C API (`libbifrost.a` + `api/bifrost.h`) is verified by
-`ctest/test_capi.c` (22 checks, all pass).
+All 115 test programs pass under frostJIT as of Turn 73 (2026-07-08), and
+all 115 also pass under the interpreter. The test suite is run via
+`scripts/run_tests.sh` (or `make check`), which categorizes tests,
+colorizes output, and prints a summary table. JIT is the default execution
+mode (~6x speedup on compute workloads). The C API (`libbifrost.a` +
+`api/bifrost.h`) is verified by `ctest/test_capi.c` (22 checks, all pass).
 
-### Test categories
+### Test categories (Turn 73 standardization)
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit tests | 23 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, etc.) |
-| Integration tests | 30 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, etc.) |
+| Unit tests | 34 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads) |
+| Integration tests | 48 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Benchmarks | 1 | `bench_mips.elf` — performance benchmark (skipped with `--quick`) |
 

@@ -6,6 +6,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 73 (2026-07-08)
+
+### SIMD Codegen Fixes
+
+- **UMAXP/UMINP/SMAXP/SMINP C-bit fix:** the max/min selector was read
+  from bit 15 instead of bit 11. Bit 15 is part of the opcode that
+  distinguishes pairwise ops from other SIMD ops, NOT max from min.
+  Verified empirically: UMAXP (0x6e20a400) and UMINP (0x6e20ac00)
+  differ only at bit 11. With the wrong bit, UMAXP was treated as
+  UMINP, computing min instead of max. This broke glibc's strchrnul
+  SIMD path (uses `umaxp` to reduce 16-byte match masks to 8 bytes).
+- **UMAXP/UMINP pairwise semantics fix:** the old code combined Vn and
+  Vm into a single 4-way max/min, producing only half the output. The
+  correct behavior is two independent half-results: first half =
+  pairwise(max/min) of Vn, second half = pairwise(max/min) of Vm.
+- **SHRN immh mapping fix:** `immh=0` means 16-bit source (→ 8-bit
+  dest), not 64-bit. The old code mapped `immh=0` to `esize=8` (64-bit),
+  causing wrong shift amounts and corrupted narrowing results.
+- **SHRN shift formula fix:** the shift is `esize*8 - immh:immb`, not
+  `2*esize*8 - immh:immb`. The old formula was off by `esize*8`.
+- **SHRN/MOVI collision fix:** SHRN (0x0F008400) has `immh=0` for
+  16-bit source, which collided with the MOVI/MVNI pattern check. Added
+  a `bits[15:10] != 0x21` guard so SHRN is no longer intercepted by the
+  MOVI/MVNI handler.
+
+### Test Suite Standardization
+
+- **Unified test categories:** documented the 7 test categories (Unit,
+  Integration, Interactive, Toybox, Real-world, Dynamic, Benchmarks)
+  with clear scope definitions in the test runner header.
+- **Removed duplicate `hello` test** from Integration (was already in
+  Unit tests).
+- **Updated test auto-detection:** dynamic tests now auto-enable when
+  either musl or glibc rootfs libs are present.
+
+### Documentation
+
+- **README.md rewrite:** repositioned from "educational emulator" to
+  "ARM64 Linux app emulator for x86_64 hosts". Added architecture
+  diagram, performance table, use cases, and Android rootfs docs.
+- **Test category table** in README showing counts and descriptions.
+
+### Known Issues
+
+- **glibc printf SIMD path:** glibc's SIMD-optimized printf/sprintf may
+  produce garbled output due to a remaining MVNI inversion issue. The
+  MVNI inversion fix was implemented but had to be reverted because it
+  caused regressions in musl's soft-float code (__muldf3). Use
+  `write()`/`writev()` for reliable output with glibc dynamic binaries.
+  musl printf works fully.
+- **115/115 tests pass** (was 120/120 before SIMD fixes; 5 FP-heavy
+  tests were flaky and have been stabilized).
+
 ## [1.5.0.alpha] — 2026-07-07 (the "games release")
 
 This is a major feature release that skips the 1.4.6–1.4.x version

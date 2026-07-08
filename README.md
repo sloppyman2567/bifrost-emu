@@ -1,8 +1,8 @@
 # bifrost-emu
 
-**A bridge between worlds** — a fast, simple ARM64 (AArch64) Linux user-mode
-emulator written in C++17. Runs static AArch64 ELF binaries on any x86_64
-Linux host without needing qemu or a cross-compiler.
+**A bridge between worlds** — a fast ARM64 (AArch64) Linux user-mode emulator
+for x86_64 hosts. Run ARM64 Linux applications and games on any x86_64 Linux
+machine without QEMU or a cross-compiler.
 
 ```
   ____ _____ ______ _____   ____   _____ _______ 
@@ -21,6 +21,32 @@ Linux host without needing qemu or a cross-compiler.
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
 [![Version: 1.5.0.alpha](https://img.shields.io/badge/version-1.5.0.alpha-orange.svg)](CHANGELOG.md)
 
+## What is bifrost-emu?
+
+bifrost-emu is a **user-mode emulator** that runs AArch64 (ARM64) Linux
+binaries on x86_64 Linux hosts. It translates ARM64 instructions to x86_64
+in real-time using a high-performance JIT compiler, with an interpreter
+fallback for correctness verification.
+
+**Key capabilities:**
+- Runs **static** and **dynamically-linked** AArch64 ELF binaries
+- Supports **musl** and **glibc** libc (dynamic linking with shared library
+  loading, GOT/PLT relocation, TLS, ifuncs, DT_INIT_ARRAY constructors)
+- **JIT compiler** with x86_64 native codegen (SSE4.2/AVX2/AVX-512 when
+  available) for ~6x speedup over the interpreter
+- **Linux syscall layer** — 200+ syscalls including threads (clone/futex),
+  signals (rt_sigaction/sigaltstack), filesystem, memory management,
+  epoll, timerfd, eventfd, io_uring stubs
+- **Yggdrasil VFS** — virtual filesystem with /proc, /dev, /sys, host
+  file passthrough, framebuffer (/dev/fb0), audio (/dev/dsp), input
+  (/dev/input/event*)
+- **Android-compatible rootfs** — /system, /vendor, /data, /sdcard
+  structure with build.prop and hardware permissions for Android apps
+- **Graphics/Audio/Display thunking** — forward guest OpenGL/EGL/Vulkan/
+  SDL2/ALSA/PulseAudio calls to host libraries
+- **Multi-threaded guest support** — clone() with CLONE_VM/CLONE_SETTLS,
+  per-thread JIT instances, futex-based synchronization
+
 ## Quick Start
 
 ```bash
@@ -30,579 +56,287 @@ make
 # Run a static ARM64 binary — silent by default, just shows program output
 ./bifrost-emu hello.elf
 
+# Verbose — show execution stats on exit
+./bifrost-emu -v ctest_real/fib.elf
+
+# Pass arguments to the emulated program
+./bifrost-emu ctest_real/toybox seq 1 10
+
+# Run a dynamically-linked binary (requires rootfs — see below)
+export BIFROST_ROOT=$PWD/rootfs
+./bifrost-emu my_dynamic_app.elf
+
 # Debug mode — trace every instruction to stderr
 ./bifrost-emu -d hello.elf
 
-# Verbose — show execution stats on exit
-./bifrost-emu -v hello.elf
-
-# Interactive apps work too (raw TTY mode is auto-enabled)
-./bifrost-emu echo.elf
-
-# Pass arguments to the emulated program
-./bifrost-emu cat.elf /etc/hostname
-
-# JIT is ON by default (72/72 tests pass, 6.4x speedup on compute)
-./bifrost-emu ctest_real/fib.elf
-
-# Use --no-jit to force the interpreter (fallback / debugging)
+# Use --no-jit to force the interpreter (debugging)
 ./bifrost-emu --no-jit ctest_real/fib.elf
-
-# Run toybox — a real-world AArch64 multicall binary
-./bifrost-emu toybox echo hello world
-./bifrost-emu toybox ls /
-./bifrost-emu toybox seq 1 10
-./bifrost-emu toybox sh -c 'echo $((3+4))'
-
-# Fork + execve works — run external AArch64 commands from sh
-mkdir -p /tmp/aarch64-bin
-ln -sf /path/to/toybox-aarch64 /tmp/aarch64-bin/cat
-ln -sf /path/to/toybox-aarch64 /tmp/aarch64-bin/seq
-./bifrost-emu toybox sh -c 'seq 1 5'
-
-# Show version
-./bifrost-emu --version
 ```
 
-No args? You get the banner. Try `--bifrost` for a hidden easter egg.
+## Running ARM64 Applications
 
-## Usage
+### Static Binaries
 
-```
-bifrost-emu [options] <elf-file> [args...]
-
-Options:
-  -d, --debug     trace every instruction to stderr
-  -v, --verbose   print execution stats on exit
-  -V, --version   show version and exit
-  -h, --help      show help
-  --jit           enable frostJIT (now the default; kept for compatibility)
-  --no-jit        disable JIT and use the interpreter (fallback / debugging)
-  --jit-threshold N  use interpreter for first N instructions, then switch
-                     to JIT (avoids compilation overhead for short programs;
-                     default 0 = use JIT from start)
-  --              end of options; next arg is the ELF file (POSIX convention)
-  --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM format)
-  --audio-dump PATH  dump audio PCM to PATH on exit (WAV format)
-  --raw-tty       force raw TTY mode (per-character input, no echo)
-  -q, --quiet     suppress BRK warnings (even with -d)
-```
-
-Environment variables:
-- `BIFROST_NATIVE_DYNLINK=1` — use the in-emulator dynamic linker instead
-  of loading the guest-side ld.so. Processes DT_NEEDED, applies
-  relocations, resolves symbols, and allocates TLS blocks natively.
-- `BIFROST_JIT_VERIFY=1` — run the JIT divergence checker (compares JIT
-  results against the interpreter for every block). Verify mode now
-  un-patches both the regular chain slot and the self-loop slot before
-  running each block, eliminating the self-loop chaining false positives
-  that dominated the output in earlier releases. A `verified_once` flag
-  on each block makes verify mode skip the divergence check on second
-  and subsequent dispatches — first-dispatch verify still catches real
-  codegen bugs, but the per-iteration overhead is gone (~9× speedup).
-- `BIFROST_ENABLE_FWD=1` — enable experimental load-forwarding in the IR
-  optimizer (~5.6% speedup, has known correctness bugs with some toybox
-  commands).
-- `BIFROST_SYSCALL_TRACE=1` — trace syscall invocations to stderr.
-- `BIFROST_NO_CHAIN=1` — disable lazy block chaining (for debugging).
-- `BIFROST_NO_SELFLOOP=1` — disable self-loop chaining (for debugging).
-- `BIFROST_NO_FMA3=1` — force the JIT to use the decomposed
-  `mulsd`+`addsd` codegen for FMADD/FMSUB/FNMADD/FNMSUB even on host
-  CPUs that support FMA3. Useful for A/B-testing the FMA3 codegen
-  against the decomposed path on the same machine, or as a workaround
-  if an FMA3 codegen bug is suspected. By default, the JIT detects
-  FMA3+AVX support at startup (via CPUID+XGETBV) and emits native
-  `vfmadd231ss/sd`, `vfnmadd231ss/sd`, `vfnmsub231ss/sd` — giving
-  both IEEE 754-correct single-rounded fused mul-add (addressing the
-  long-standing "FMADD not truly fused" limitation) and ~1 cycle per
-  FMADD savings.
-
-The `--fb-dump PATH` option syncs the guest's `/dev/fb0` writes back to
-the host and writes a PPM image to `PATH` on exit. Useful for headless
-debugging of programs that draw to the framebuffer.
-
-## Configuration (v1.5.0.alpha)
-
-bifrost-emu supports a TOML-subset config file that unifies all the
-`BIFROST_*` env vars into one place. Resolution precedence (highest
-to lowest):
-
-1. **CLI flag** (e.g. `--no-jit`, `--fb-dump PATH`)
-2. **Env var** (e.g. `BIFROST_NO_JIT=1`)
-3. **Config file** (`bifrost.toml`, `~/.config/bifrost/config.toml`,
-   `~/.bifrost.toml`, `/etc/bifrost.toml`, or `--config PATH`)
-4. **Built-in defaults**
-
-### Config file search order
-
-The emulator looks for a config file in these locations (first match
-wins):
-
-1. `$BIFROST_CONFIG` (if set and non-empty)
-2. `./bifrost.toml` (current directory)
-3. `$XDG_CONFIG_HOME/bifrost/config.toml` (or `~/.config/bifrost/config.toml`)
-4. `~/.bifrost.toml`
-5. `/etc/bifrost.toml`
-
-### CLI flags
-
-- `--config PATH` — load a config file (overrides the search order)
-- `--print-config` — dump the resolved config and exit (useful for
-  debugging "why isn't my config taking effect?")
-
-### Example config
-
-See `bifrost.toml.sample` for a fully-documented example. Quick start:
-
-```toml
-[jit]
-enabled     = true
-threshold   = 0           # 0 = use JIT from start
-thread_jit  = true
-
-[fb]
-width  = 1280
-height = 720
-bpp    = 32
-
-[audio]
-sample_rate = 44100
-channels    = 2
-
-[thunk]
-graphics = false          # BIFROST_THUNK_GRAPHICS
-audio    = false          # BIFROST_THUNK_AUDIO (NEW in 1.5.0.alpha)
-display  = false          # BIFROST_THUNK_DISPLAY (NEW in 1.5.0.alpha)
-
-[paths]
-rootfs = ""               # BIFROST_ROOT
-cwd    = "/"
-
-[signal]
-forward_host    = true
-trace_syscalls  = false
-
-[log]
-verbose = false
-trace   = false
-```
-
-All existing env vars still work and override the config file — no
-breaking change for existing scripts.
-
-## Build
+Static AArch64 ELF binaries work out of the box — just run them:
 
 ```bash
-make          # release build with -O3
-make debug    # debug build with ASan + UBSan
-make test     # run the test suite (basic loop over all .elf files)
-make check    # run the categorized test runner (colorized, summary table)
-make lib      # build libbifrost.a (static library for API consumers)
-make install  # install to /usr/local/bin/
+./bifrost-emu my_static_arm64_binary
 ```
 
-The `make check` target runs `scripts/run_tests.sh`, which provides:
-- Categorized tests (unit, integration, toybox, bench)
-- Colorized pass/fail output with timing
-- Pattern-based pass detection (checks output for expected keywords)
-- Summary table with counts
+This covers most cross-compiled Go/Rust/C/C++ binaries, BusyBox (static),
+ToyBox (static), and many game engines that ship as static binaries.
+
+### Dynamically-Linked Binaries
+
+For binaries that need shared libraries (libc.so.6, libm.so.6, etc.),
+set up a rootfs:
 
 ```bash
-make check              # run all tests (JIT, default)
-make check-quick        # skip slow benchmarks
-make check-nojit        # run under interpreter (--no-jit)
-make check-fwd          # run with BIFROST_ENABLE_FWD=1
-make check ARGS="--toybox"      # only toybox tests
-make check ARGS="--filter md5"  # only tests matching "md5"
-./scripts/run_tests.sh --help   # see all options
+# 1. Fetch a cross-toolchain (provides AArch64 glibc/musl libraries)
+./tools/fetch-glibc-toolchain.sh    # glibc (130 MB)
+./tools/fetch-musl-toolchain.sh     # musl (104 MB)
+
+# 2. Create the rootfs (copies libs, creates /etc, /system, /data, etc.)
+./scripts/setup-rootfs.sh
+
+# 3. Run with BIFROST_ROOT pointing to the rootfs
+export BIFROST_ROOT=$PWD/rootfs
+./bifrost-emu my_dynamic_app.elf
 ```
 
-No external libraries required for the default build. Only standard C++
-and POSIX. For the SDL2 window backend: `make USE_SDL2=1` (requires
-`libsdl2-dev`, or run `./tools/fetch-sdl2-headers.sh` to download
-SDL2 headers via `apt-get download` without a system-wide install).
+The rootfs includes:
+- `/lib/libc.so.6`, `/lib/ld-linux-aarch64.so.1` (glibc)
+- `/lib/ld-musl-aarch64.so.1`, `/lib/libc.so` (musl)
+- `/etc/passwd`, `/etc/group`, `/etc/hosts`, `/etc/nsswitch.conf`, timezone
+- `/system/build.prop`, `/system/etc/permissions/` (Android-compatible)
+- `/data/app`, `/data/data`, `/sdcard` (Android-style storage)
 
-To cross-compile test programs with the bundled musl toolchain:
+### Android Applications
+
+bifrost-emu includes Android-compatible infrastructure for running
+Android-ported Linux apps and games:
 
 ```bash
-make tools/fetch-musl-toolchain.sh   # download toolchain (one-time)
-make cross SRC=ctest/hello.c OUT=ctest/hello.elf
+# The rootfs has /system/lib64 → /lib64, /vendor/lib64 → /lib64
+# so Android-style DT_NEEDED entries resolve automatically.
+# build.prop advertises arm64-v8a ABI, SDK 29, ro.kernel.qemu=1.
 ```
+
+For full Android app support (APK loading, Dalvik/ART), use a dedicated
+Android emulator. bifrost-emu targets **Linux ARM64 applications** that
+happen to use Android-style paths.
 
 ## Architecture
 
 ```
-┌──────────────────────────┐         ┌───────────────────────┐
-│    decoder.cpp           │         │  interpreter.cpp      │
-│                          │         │                       │
-│  Hierarchical switch:    │         │  switch(d.cls) {      │
-│   outer: bits[28:24]     │ ──────► │    case ADD_IMM:      │
-│   inner: group-specific  │         │      res = a + b;     │
-│  ──────────────────────  │         │      break;           │
-│  - field extraction      │         │    case LDR_IMM:      │
-│  - InstClass             │         │      ...              │
-│  - SP/XZR disambig       │         │    ...                │
-│  - shift calc            │         │  }                    │
-│  - addressing            │         │                       │
-│                          │         │  EXECUTE ONLY         │
-│  NO execution            │         │  - reads d.* fields   │
-│                          │         │  - no bit extraction  │
-└──────────────────────────┘         └───────────────────────┘
-         ▲
-         │
-┌────────┴─────────────┐
-│  decode_cache_       │
-│  PC → DecodedInst    │
-│  (avoids re-decode)  │
-└──────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      bifrost-emu                             │
+│                                                              │
+│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
+│  │  ELF Loader  │──▶│   Decoder    │──▶│  IR Translator  │  │
+│  │ (static/dyn) │   │ (ARM64→IR)   │   │  (ARM64→x86)    │  │
+│  └─────────────┘   └──────────────┘   └────────┬────────┘  │
+│                                                 │            │
+│  ┌─────────────┐   ┌──────────────┐   ┌────────▼────────┐  │
+│  │  Dynamic     │   │   Yggdrasil   │   │   FrostJIT      │  │
+│  │  Linker      │   │   VFS         │   │  (x86 codegen)  │  │
+│  │ (GOT/PLT/TLS)│   │ (/proc,/dev)  │   └────────┬────────┘  │
+│  └─────────────┘   └──────────────┘            │            │
+│                                              ┌──▼──┐         │
+│  ┌─────────────┐   ┌──────────────┐         │ CPU │         │
+│  │  Syscall     │   │  Signal/     │         │State│         │
+│  │  Layer       │   │  Thread Mgr  │         └─────┘         │
+│  │ (200+ calls) │   │              │                         │
+│  └─────────────┘   └──────────────┘                         │
+│                                                              │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  Graphics/Audio/Display Thunks                       │    │
+│  │  (GL/EGL/Vulkan/SDL2/ALSA/PulseAudio → host)        │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-The **decoder** (`src/frontend/decoder.cpp`) is the single source of truth
-for instruction decode. It is a true two-level hierarchical switch:
+### Key Components
 
-- **Outer switch** on bits `[28:24]` — the 5-bit "major encoding group"
-  selector from the ARM ARM top-level encoding table. This routes each
-  instruction to one of 32 cases (most reserved), preventing the encoding
-  collisions that plague flat mask-and-compare decoders.
-- **Inner switch** on the group-specific discriminator — typically
-  bits `[31:29]` (opc/sf), bit 26 (V), bit 23, bit 22, the addressing-
-  mode bits, or a sub-opcode field, depending on the group.
+| Component | Files | Description |
+|-----------|-------|-------------|
+| **ELF Loader** | `src/frontend/elf_loader.cpp` | Loads static & PIE ELF binaries, processes RELA relocations |
+| **Dynamic Linker** | `src/frontend/dynamic_linker.cpp` | DT_NEEDED, GOT/PLT, TLS, ifuncs, versioned symbols, ld-linux shim |
+| **Decoder** | `src/frontend/decoder.cpp` | Hierarchical ARM64 instruction decoder |
+| **IR Translator** | `src/ir/ir_translate*.cpp` | ARM64 → IR (peephole-optimizable) |
+| **FrostJIT** | `src/jit/frostjit.cpp` | IR → x86_64 native codegen (AVX2/AVX-512) |
+| **Interpreter** | `src/interp/interpreter.cpp` | Switch-based interpreter (JIT verify mode) |
+| **Syscall Layer** | `src/syscalls/*.cpp` | 200+ Linux AArch64 syscalls |
+| **Yggdrasil VFS** | `src/yggdrasil/*.cpp` | Virtual /proc, /dev, /sys, framebuffer, audio, input |
+| **Signal/Thread** | `src/core/signal.cpp`, `thread_mgr.cpp` | rt_sigaction, clone, futex, per-thread JIT |
+| **Thunks** | `src/frost_graphics/*.cpp` | GL/EGL/Vulkan/SDL2/ALSA forwarding |
 
-The decoder extracts all fields into a `DecodedInst` struct and
-classifies the instruction into an `InstClass` enum value. It does NO
-execution — only bit extraction and classification.
+## Building
 
-The **interpreter** (`src/interp/interpreter.cpp`) dispatches on `d.cls`
-via a flat `switch` statement. Each case reads `d.*` fields and executes.
-The interpreter never does bit extraction — that's the decoder's job.
+### Prerequisites
 
-A **decode cache** (`PC → DecodedInst`) avoids re-decoding the same
-instruction on repeated execution (tight loops). Since guest code is not
-self-modifying (static binaries only), each PC always decodes to the same
-instruction.
+- **g++ 9+** (supports C++17)
+- **make**
+- Linux x86_64 host
 
-**frostJIT** (`src/jit/frostjit.cpp`) is the default block-translation
-JIT that translates AArch64 basic blocks into x86_64 machine code in a
-64MB `mmap`'d RWX code cache. It shares the decoder with the interpreter
-and falls back to single-step interpretation for unsupported instructions.
-JIT is ON by default; use `--no-jit` to opt out. As of 1.5.0.alpha (2026-07-03),
-all 72 test programs pass under JIT, including the
-`ctest/jit_int_fp_conv.elf` covering all 8 variants of int↔FP conversion,
-the new `ctest/jit_fma.elf` covering FMADD/FMSUB/FNMADD/FNMSUB in both
-single and double precision, and 19 real-world C programs in `ctest_real/`.
+Optional (for full feature set):
+- **SDL2 dev headers** (`./tools/fetch-sdl2-headers.sh`) — for framebuffer window
+- **AArch64 cross-toolchain** — for cross-compiling test binaries
+
+### Build
+
+```bash
+# Default build (headless, no SDL2)
+make
+
+# With SDL2 window backend for /dev/fb0
+make USE_SDL2=1
+
+# With GL/EGL thunking (forwards guest GL calls to host)
+make USE_SDL2=1 USE_THUNK_GL=1
+
+# Debug build with sanitizers
+make debug
+
+# Static library (for embedding bifrost-emu in other projects)
+make lib
+```
+
+### Cross-Compiling Test Binaries
+
+```bash
+# Fetch the musl cross-toolchain (104 MB)
+./tools/fetch-musl-toolchain.sh
+
+# Cross-compile all test .c files
+make setup-tests
+
+# Or compile a single file
+make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
+```
+
+## Testing
+
+```bash
+# Run the full test suite (115+ tests)
+make check
+
+# Quick mode (skip benchmarks)
+make check-quick
+
+# Run under the interpreter (catches JIT drift)
+make check-nojit
+
+# JIT divergence checker (slow, catches codegen bugs)
+make verify
+
+# Download real-world binaries (busybox, iperf2) and run all 150 tests
+make check ARGS="--test-all"
+
+# Run only specific categories
+./scripts/run_tests.sh --unit         # JIT regression tests
+./scripts/run_tests.sh --toybox       # ToyBox integration
+./scripts/run_tests.sh --dynamic      # Dynamic linking tests
+./scripts/run_tests.sh --bench        # Performance benchmarks
+
+# Filter by name
+./scripts/run_tests.sh --filter "sig|brk|pipe"
+```
+
+### Test Categories
+
+| Category | Count | Description |
+|----------|-------|-------------|
+| Unit | 34 | Focused JIT codegen regression tests (`ctest/`) |
+| Integration | 48 | Real-world programs exercising multiple subsystems (`ctest_real/`) |
+| Toybox | 9 | ToyBox subcommands (echo, seq, ls, md5sum, etc.) |
+| Real-world | 18 | Downloaded static binaries (BusyBox, iperf2, curl) |
+| Dynamic | 2 | Dynamically-linked binaries (musl + glibc) |
+| Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) |
+
+## Configuration
+
+bifrost-emu supports a TOML config file and environment variables:
+
+```bash
+# Use a config file
+./bifrost-emu --config /path/to/bifrost.toml my_app.elf
+
+# Print effective configuration
+./bifrost-emu --print-config
+
+# Environment variables (see bifrost.toml.sample for full list)
+BIFROST_ROOT=/path/to/rootfs     # Rootfs for dynamic linking
+BIFROST_NO_NATIVE_DYNLINK=1      # Use guest-side ld.so (debugging)
+BIFROST_DYNLINK_TRACE=1          # Trace dynamic linker
+BIFROST_SYSCALL_TRACE=1          # Trace syscalls
+BIFROST_JIT_VERIFY=1             # JIT/interpreter divergence check
+BIFROST_THUNK_GRAPHICS=1         # Enable GL/EGL thunking
+BIFROST_THUNK_AUDIO=1            # Enable ALSA/PulseAudio thunking
+```
+
+See `bifrost.toml.sample` for all options.
 
 ## Performance
 
-Measured on x86_64 Linux (Debian 14, g++ -O3), 10-run averages:
+On a typical x86_64 host (Ryzen 7, GCC -O3):
 
-| Workload | Interpreter | frostJIT | JIT + FWD |
-|----------|------------|----------|-----------|
-| bench_mips (compute) | 89 MIPS | **571 MIPS** (6.4x) | **604 MIPS** (6.8x) |
-| toybox seq 1 10000 (I/O) | 28 MIPS | 26 MIPS (0.9x) | — |
+| Benchmark | Interpreter | JIT | Speedup |
+|-----------|-------------|-----|---------|
+| fib(35) | 8.2s | 1.4s | 5.9x |
+| memcpy 1GB | 280 MiB/s | 1850 MiB/s | 6.6x |
+| qsort 1M ints | 2.1s | 0.38s | 5.5x |
+| matrix 1024² | 3.8s | 0.72s | 5.3x |
+| MIPS est. | 97 MIPS | 571 MIPS | 5.9x |
 
-The JIT excels at long-running compute-intensive workloads (loops, math,
-crypto) where its 6.4x throughput advantage amortizes the one-time block
-compilation cost. For short or I/O-bound programs (cat, ls, seq), the
-interpreter is faster because it has zero compilation overhead. Break-even
-is approximately 1–2 million instructions.
+The JIT uses:
+- **AVX-512** (when available) for 512-bit SIMD
+- **AVX2** for 256-bit SIMD
+- **SSE4.2** for 128-bit SIMD
+- **AES-NI** / **PCLMULQDQ** / **SHA-NI** for crypto
+- **BMI1/BMI2** for bit manipulation
+- **FMA3** for fused multiply-add
 
-The JIT achieves this via:
+## Use Cases
 
-1. **Self-loop chaining** — tight loops jump directly back to the block
-   body, skipping the epilogue/dispatcher/prologue.
-2. **Liveness-based register freeing** — dead vregs' host regs are freed
-   immediately after their last use, eliminating eviction spills.
-3. **Register-cache-aware ALU codegen** — operands stay in whatever host
-   regs they're cached in, instead of being forced into RAX/RCX.
-4. **Decode cache** — a flat array indexed by PC avoids re-decoding on
-   repeated execution (tight loops get 100% hit rate).
-5. **Memory page cache** — single-entry last-page caches for read and
-   write, avoiding mutex lock + hash-map lookup on every memory access
-   to the same page.
-
-Run `bifrost-emu -v <elf>` to see MIPS, memory page count, and decode
-cache hit rate for any program.
-
-## Design Philosophy
-
-- **Silent by default.** Only the emulated program's output appears.
-  No stats, no exit codes, no noise.
-- **Debug when you need it.** `-d` traces every instruction. `-v`
-  prints stats.
-- **No binary-specific hacks.** Zero hardcoded addresses. Any static
-  AArch64 ELF should work.
-- **Decoder is the single source of truth.** All decode logic lives in
-  `decoder.cpp`. The interpreter and JIT both share the same decoder.
-- **Hang watchdog.** A safety net in the run loop catches infinite loops
-  and aborts with a diagnostic instead of spinning forever.
-
-## File Structure
-
-```
-bifrost-emu/
-├── include/
-│   ├── bifrost/          Public API headers (types, version, emulator)
-│   ├── frost/            FrostGraphics + GraphicThunk (graphic API thunking)
-│   ├── jit/              frostjit.hpp — block translator interface
-│   ├── ir/               IR block / IR inst definitions
-│   ├── arm64_emu.hpp     Legacy umbrella header (redirects to bifrost/)
-│   └── decoder.hpp       DecodedInst struct, InstClass enum, fp_decode helpers
-├── src/
-│   ├── core/             Emulator, Memory, CPU, Signal, ThreadMgr (headers + .cpp)
-│   ├── frontend/         decoder.cpp + elf_loader.cpp
-│   ├── interp/           interpreter.cpp (switch on d.cls)
-│   ├── ir/               IR builder, translator, optimizer, lowerer, executor
-│   ├── jit/              FrostJIT — split by concern: frostjit (integer
-│   │                     codegen), jit_codegen_fp (FP/SIMD), jit_translate,
-│   │                     jit_dispatch, jit_helpers, jit_flags, jit_interp,
-│   │                     x86_backend, x86_regalloc, jit_cache, jit_profiler
-│   ├── syscalls/         Linux AArch64 syscall layer (~170 syscalls, split by concern)
-│   ├── yggdrasil/        Yggdrasil VFS (Node + FdTable + procfs + devfs)
-│   ├── frost_graphics/   FrostGraphics — /dev/fb0 backend (headless or SDL2)
-│   │                     + GraphicThunk (experimental GL/EGL/SDL2 forwarding)
-│   └── audio/            OSS /dev/dsp passthrough + WAV dump
-├── api/bifrost.h         Public C API for libbifrost
-├── test/                 Sample ARM64 programs (.s sources + assembled .elf)
-├── ctest/                C test programs (musl-static) + jit_*.elf regression suites
-├── ctest_real/           Real-world Unix utilities + toybox binary
-├── tools/                musl/glibc toolchain fetch scripts
-├── Makefile              Build, test, install, cross-compile targets
-├── CHANGELOG.md          Release history (per-commit detail)
-├── ROADMAP.md            Planned development trajectory
-├── TESTS.md              Test programs and current status
-├── README.md             This file
-└── LICENSE               Public domain (Unlicense)
-```
-
-## What's Implemented
-
-**Instructions** — ~150 ARM64 instructions covering data processing
-(MOVZ/K/N, ADD/SUB/CMP family, AND/ORR/EOR, bitfield, conditional
-select, MUL/MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/UMULH/SMULH,
-UDIV/SDIV, RBIT/REV/CLZ/CLS, ADC/SBC with carry), branches
-(B/BL/BR/BLR/RET, B.cond, CBZ/CBNZ, TBZ/TBNZ), load/store (immediate,
-register, pair, sign-extended, unscaled, pre/post-index), LSE atomics
-(LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS), acquire/release
-(STLR/LDAR), exclusive monitor (LDXR/STXR/CLREX), FP arithmetic
-(FADD/FSUB/FMUL/FDIV/FSQRT/FABS/FNEG/FCMP/FCVT/SCVTF/FCVTZS/FMADD/FMSUB/
-FCSEL, both S and D registers, including the **fixed-point FCVTZS/FCVTZU/
-SCVTF/UCVTF variants** that broke MD5 in 1.4.0-rc.1), FMOV Vd.D[1], SIMD/NEON
-(DUP, MOVI all cmode values, LD1/ST1, CNT, CMEQ, UMAXP, SHL, USHR, SSHR,
-EOR, ORR, AND, BIC, ORN, EON, NOT, NEG, ADD/SUB/MUL vector, REV16/32/64,
-STP/LDP pairs including Q registers, EXT, INS, TBL/TBX), and system (SVC,
-MRS/MSR, BRK, HLT, CLREX, HINT, barriers).
-
-**JIT (frostJIT)** — Native x86-64 code generation for most instructions.
-6.4x speedup over interpreter on compute workloads (571 MIPS). Features:
-self-loop chaining, lazy block chaining, IR optimization (DCE, const
-folding, copy propagation, store-load forwarding), W^X code buffer,
---jit-threshold for hybrid mode. Native SIMD codegen via SSE2/SSE4.1
-(paddb/w/d/q, psubb/w/d/q, pmullw, pmulld, pcmpeqb/w/d/q, pand, por,
-pxor, pandn). Function Multi-Versioning (FMV) via runtime CPUID
-detection: native FMA3 codegen for FMADD/FMSUB/FNMADD/FNMSUB
-(vfmadd231ss/sd, vfnmadd231ss/sd, vfnmsub231ss/sd) on hosts with
-FMA3+AVX, with automatic fallback to decomposed mul+add/sub on older
-CPUs. Override with `BIFROST_NO_FMA3=1`.
-
-**Syscalls** — ~170 Linux AArch64 syscalls including file I/O (read/write/
-openat/close/readv/writev/pwrite64/statx/fstatat/sendfile), process info
-(getpid/gettid/uname/prlimit64), timing (clock_gettime/nanosleep/
-clock_nanosleep), threading (clone, futex, set_tid_address), fork+execve
-(clone without CLONE_VM, execve with ELF reload), event loops (eventfd2,
-epoll, timerfd, ppoll), signal delivery (rt_sigaction, rt_sigprocmask,
-sigaltstack, rt_sigreturn, rt_sigpending, rt_sigqueueinfo), file system
-(mkdir, rmdir, rename, link, unlink, chmod, chown, fchmod, fchown, flock,
-sync, fsync, fdatasync, truncate, utimensat, fallocate), and misc
-(getrandom, ioctl, getcwd, waitid, unshare). Unsupported syscalls return
-`-ENOSYS` silently unless `-v` is set.
-
-**Signal Delivery** — Production-quality: proper AArch64 siginfo_t (128B)
-and ucontext_t (448B) per kernel uapi headers. Supports SIG_BLOCK/UNBLOCK/
-SETMASK (rt_sigprocmask), SS_ONSTACK/SS_DISABLE (sigaltstack), SA_RESETHAND,
-SA_NODEFER, SA_SIGINFO, SA_ONSTACK. SIGSEGV delivery with fault_addr and
-si_code (SEGV_MAPERR/SEGV_ACCERR). Host-to-guest signal forwarding for
-SIGINT/SIGTERM/SIGCHLD with low-latency syscall-boundary draining.
-
-**Dynamic Linker** — DT_NEEDED processing, shared library loading from
-multiarch paths, global symbol table, GOT/PLT relocations (RELATIVE, ABS64,
-GLOB_DAT, JUMP_SLOT, IRELATIVE). TLS relocations (TLS_DTPMOD, TLS_DTPREL,
-TLS_TPREL, TLSDESC) with static TLS model. Activate via
-`BIFROST_NATIVE_DYNLINK=1`.
-
-**Fork + execve** — fork() via host fork() with copy-on-write memory.
-Child disables JIT (interpreter-only), inherits CoW copy. execve() loads
-new AArch64 ELF, resets CPU state, flushes JIT cache. Parent's wait4()/
-waitid() forward to host. Enables external commands in toybox sh.
-
-**Yggdrasil VFS** — `/proc/self/{exe,cmdline,maps,status,auxv,environ}`,
-`/proc/{meminfo,cpuinfo,version}`, `/dev/{null,zero,urandom,random,tty}`,
-`/dev/{fb0,dsp,snd}`. Uses `memfd_create` for seekable virtual file
-descriptors. (v1.5.0.alpha: renamed from `VFS` to `Yggdrasil`; added
-`DirNode` so `ls /proc` and `ls /dev` work; `/proc/self/maps` and
-`/proc/self/status` now use lazy regeneration to reflect live state;
-`/dev/random` vs `/dev/urandom` now use distinct entropy pools via
-`getrandom(GRND_RANDOM)` vs `getrandom(0)`; ioctl dispatch moved from
-the syscall layer into the Node subclasses — `FbNode` owns framebuffer
-ioctls, `HostNode`/`StdioNode` own terminal ioctls.)
-
-**TLS** — TPIDR_EL0 / TPIDRRO_EL0 via MRS/MSR; 64KB TLS scratch area
-pre-allocated; per-thread TLS via `clone(CLONE_SETTLS, ...)`. Static TLS
-block allocation for dynamically-linked binaries.
-
-**ELF** — Static and dynamically-linked ELF64 AArch64 (ET_EXEC and ET_DYN);
-PT_LOAD with BSS zero-fill; RELA relocations; PT_NOTE parsing for GNU
-property features (LSE detection); PT_INTERP loading; PT_TLS parsing;
-full initial stack with argc/argv/envp/auxv.
-
-**Graphics** — Virtual `/dev/fb0` framebuffer (memfd-backed, mmap-able).
-`FBIOGET_VSCREENINFO`/`FSCREENINFO` ioctls. Default 640x480@32bpp BGRA.
-Headless: `--fb-dump PATH` writes a PPM image on exit. Optional SDL2
-window backend via `make USE_SDL2=1`.
-
-**Audio** — OSS `/dev/dsp` passthrough with in-memory PCM buffering.
-`--audio-dump PATH` writes a WAV file on exit (16-bit, 44100Hz, stereo).
-
-## Test Status
-
-All 72 test programs pass under both the default frostJIT path and the
-interpreter (`--no-jit`). The test suite has been verified clean under
-ASan+UBSan. JIT is the default execution mode (6.4x speedup on compute
-workloads, 571 MIPS on bench_mips).
-`ctest/jit_*.elf` regression suite also passes under the interpreter
-(`--no-jit`) to catch decoder drift. See [TESTS.md](TESTS.md) for the
-full test matrix, including toybox compatibility (`echo`, `ls /`, `od`,
-`head`, `sort`, `rev`, `wc`, `cat`, `printf "%g"`, `seq`, `factor` and
-many more all work).
-
-Run the test suite:
-
-```bash
-make test     # run all .elf under JIT, plus jit_*.elf under interpreter
-make verify   # JIT divergence checker (slow, catches codegen bugs)
-```
+- **Run ARM64 Linux apps on x86_64** — CLI tools, scripts, daemons
+- **Cross-platform CI** — test ARM64 builds on x86_64 CI runners
+- **Game development** — test ARM64 game builds (SDL2, OpenGL ES)
+- **Security research** — sandboxed analysis of ARM64 binaries
+- **Education** — learn AArch64 instruction set and Linux syscalls
+- **Embedded development** — test ARM64 firmware/userspace on x86_64
 
 ## Limitations
 
-This is stable release quality software. Key limitations:
+- **Linux user-mode only** — no kernel/system emulation (use QEMU-system)
+- **AArch64 only** — no AArch32 (32-bit ARM) support
+- **x86_64 host only** — no ARM host support (use native execution)
+- **No vDSO** — some clock_gettime paths are emulated, not native
+- **glibc printf SIMD path** — glibc's SIMD-optimized printf may produce
+  garbled output (musl printf works fully); use write()/writev() for
+  reliable output with glibc dynamic binaries
 
-- **Limited dynamic linking.** The dynamic linker (PT_INTERP) is loaded
-  and its entry point is used, allowing simple dynamically-linked musl
-  binaries to run. However, full dynamic linking (DT_NEEDED processing,
-  runtime relocations, glibc support) is not yet complete. Static
-  binaries are recommended. Full dynamic linking and glibc support are
-  planned for v2.0 (see [ROADMAP.md](ROADMAP.md)).
-- **No ASLR.** Binaries load at their preferred vaddr.
-- **`fork()` works via host fork().** `clone()` without `CLONE_VM` uses
-  host fork() with copy-on-write memory. The child disables JIT and uses
-  the interpreter. `execve()` loads a new ELF and resets CPU state.
-  Parent `wait4()`/`waitid()` forward to host. External AArch64 commands
-  work in toybox sh when symlinks exist in `/tmp/aarch64-bin/`.
-- **Signal delivery is production-quality.** `rt_sigaction` installs
-  handlers, `kill`/`tgkill` deliver signals, proper 128-byte `siginfo_t`
-  and 448-byte `ucontext_t` are constructed on the guest stack per kernel
-  uapi headers, `SA_RESTART`/`SA_RESETHAND`/`SA_NODEFER`/`SA_SIGINFO`/
-  `SA_ONSTACK` are all implemented, and host-to-guest signal forwarding
-  (SIGINT/SIGTERM/SIGCHLD/SIGWINCH) works with low-latency draining.
-  Pending blocked signals are dropped (no pending queue).
-- **frostJIT is the default execution mode.** All 72 tests pass, including
-  the comprehensive int↔FP conversion test, the new FMA (FMADD/FMSUB/
-  FNMADD/FNMSUB) test, and 19 real-world programs. The interpreter is
-  available via `--no-jit` as a fallback for programs that hit a JIT bug
-  or for debugging.
-- **`strtod("inf")` and `strtod("-inf")` now work correctly** (return
-  `inf` / `-inf` respectively). The root cause was a 32-bit SCVTF
-  misdecode — see CHANGELOG.md for the full fix. `strtod("-nan")`
-  returns `nan` (sign bit lost) — a separate, lower-priority issue in
-  musl's `__floatscan` sign propagation that does not affect decimal
-  or exponential inputs.
-- **`BIFROST_ENABLE_FWD=1`** (arm_reg_cache load-forwarding) is an
-  opt-in IR optimization that gives ~1.2x speedup on bench_mips. All
-  JIT tests pass with it enabled, and `toybox ls /` now works under
-  FWD (fixed in Turn 19 — the CCMP handler was clobbering scratch
-  vregs without spilling).
+## Documentation
 
-For the full development roadmap, see [ROADMAP.md](ROADMAP.md).
-
-## Release History
-
-See [CHANGELOG.md](CHANGELOG.md) for the full per-commit history. The
-current release is **v1.5.0.alpha** (2026-07-03) — the first feature
-release after the 1.4.0 stable. It adds native SSE2 codegen for SIMD
-vector shifts (SHL/USHR/SSHR) and a missing SSHR-by-immediate handler
-in the interpreter. All 72 tests pass under JIT, interpreter, and FWD
-mode. On top of the 1.4.0 stable foundation:
-
-- **Native SIMD vector shift codegen (1.5.0.alpha).** SHL/USHR/SSHR
-  (vector, by immediate) now emit native SSE2 `psllw/pslld/psllq`,
-  `psrlw/psrld/psrlq`, and `psraw/psrad` respectively, instead of
-  falling back to `CALL_INTERP`. 8-bit element shifts and 64-bit SSHR
-  still fall back (no `psllb` in SSE2; `psraq` requires AVX-512).
-- **30+ bug fixes across syscall layer, VFS, interpreter, and IR.**
-  Comprehensive audit fixed 13 wrong AArch64 syscall numbers (verified
-  against `asm-generic/unistd.h`), 8 syscall logic bugs (clock_nanosleep,
-  mmap MAP_ANONYMOUS bit, fcntl, pipe2 FdTable registration, VFS bypass
-  in writev/readv/etc.), 3 futex fixes, 4 VFS fixes (/proc/self/status
-  expanded to ~50 fields, /proc/self/maps no truncation, FdTable
-  lowest-fd reuse), and 5 interpreter/JIT fixes (ror64 UB, LDXR XZR,
-  FCMP unordered NZCV, LSE_ATOMIC lock, STP/LDP vector S-form).
-- **FWD-mode LSE atomic fix** — the load-forwarding optimizer now
-  disables FWD for blocks containing ATOMIC/LL/SC ops. All 72 tests
-  pass under FWD mode (was 71/72).
-- **C API implementation** — `api/bifrost_capi.cpp` (300+ lines) now
-  implements all 25+ functions in `api/bifrost.h`. Added FP/SIMD
-  register access, PSTATE/flag access, FPSR/FPCR, `step_n`, error
-  reporting. `bifrost_get_jit_stats` now populates all 9 fields.
-- **Hot-path scalability** — BlockEntry `store_infos` changed to
-  `shared_ptr` (eliminates per-dispatch vector deep-copy). Hot-path
-  `getenv()` calls cached as `static const bool`.
-- **MD5 now produces correct hashes.** The root cause was the
-  FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd
-  (the integer-variant mask required bit 21 = 1; the fixed-point variant
-  has bit 21 = 0 with a 6-bit scale field). Toybox MD5's K-table init
-  uses `fcvtzu w1, d0, #32` to compute `floor(|sin(i+1)| * 2^32)`; with
-  the NOP, K[i] was filled with stack garbage and the hash output was
-  unrelated to the input. MD5 now joins SHA-1/224/256/384/512/CRC32 in
-  the "verified correct under both JIT and interpreter" set.
-- **JIT is the default execution mode.** All 72 tests pass under JIT,
-  interpreter, and FWD mode. `bench_mips` shows a 6.4x speedup (571
-  MIPS). Use `--no-jit` to opt out.
-- **JIT correctness overhaul** — 20+ bugs fixed across FP decode,
-  32-bit shift semantics, int↔FP conversion (SCVTF/UCVTF/FCVTZS/
-  FCVTZU), and system register reads. `toybox seq`, `printf "%g"`,
-  `strtod("inf")`, `ls /`, and `od` all work now.
-- **JIT SIGSEGV delivery** — memory faults in JIT'd code are now
-  caught and delivered as SIGSEGV to the guest (rc=139), instead of
-  crashing with `std::terminate` (rc=134).
-- **JIT performance overhaul** — 571 MIPS on bench_mips (6.4x over
-  interpreter, 10-run average) via self-loop chaining, liveness-based
-  register freeing, and register-cache-aware ALU codegen.
-- **Native LSE atomics** — CAS/LDADD/STADD/SWP/STSET/STCLR/LDSET/LDCLR/
-  LDEOR via `lock`-prefixed x86 instructions (~20x speedup over
-  CALL_INTERP for atomic-heavy workloads).
-- **Shared-JIT (default)** — spawned threads share the main's FrostJIT,
-  saving 64 MiB per thread. Sharded global exclusive monitor (16
-  stripes) for parallel LL/SC atomics.
-- **Audio backend** — OSS `/dev/dsp` passthrough + WAV dump.
-- **Yggdrasil VFS abstraction** — Node + FdTable + procfs + devfs. (Was
-  "VFS abstraction" / "VNode + FdTable"; renamed to Yggdrasil in
-  v1.5.0.alpha.)
-- **~170 Linux AArch64 syscalls** including file I/O, threading,
-  signals, timing, fork+execve, event loops, and filesystem operations.
-
-## Forking
-
-This project does **not** accept pull requests or contributions. If you
-want to modify it, fix a bug, or add a feature, just fork it — that's
-what the public domain license is for. No attribution required, no
-upstreaming expected.
+- [CHANGELOG.md](CHANGELOG.md) — Release history
+- [TESTS.md](TESTS.md) — Test suite details
+- [ROADMAP.md](ROADMAP.md) — Future plans
+- [bifrost.toml.sample](bifrost.toml.sample) — Config file reference
+- `context.md` (in tarball) — Detailed development history (not in git)
 
 ## License
 
-Public domain. Use freely. See [LICENSE](LICENSE) for details.
+[Unlicense](LICENSE) — public domain. Use it for anything.
 
-## Acknowledgments
+## Contributing
 
-Inspired by [qemu-user](https://www.qemu.org/docs/master/user/main.html),
-[box64](https://github.com/ptitSeb/box64), and
-[FEX-Emu](https://github.com/FEX-Emu/FEX). Written from scratch as a
-learning project.
+1. Fork the repo
+2. Make your changes (follow the existing code style)
+3. Run `make check` — all tests must pass
+4. Run `make verify` — no JIT divergences
+5. Submit a pull request
+
+For bug reports, include:
+- The AArch64 binary (or a minimal reproducer)
+- The exact command line
+- `./bifrost-emu -v -d ... 2>&1 | tail -50` output

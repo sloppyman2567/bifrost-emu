@@ -137,6 +137,21 @@ fi
 
 # ── Test definitions ───────────────────────────────────────────────────
 # Each test: name | file | stdin | timeout | expected_pattern (regex)
+#
+# Test categories (Turn 73 standardization):
+#   Unit        — ctest/*.elf, focused regression tests for specific JIT
+#                 codegen paths. Fast (<5s each), deterministic.
+#   Integration — ctest_real/*.elf, real-world test programs that exercise
+#                 multiple subsystems (signals, threads, FS, memory).
+#   Interactive — test/*.elf that need stdin input (echo, repl, sh, cat).
+#                 Not run by default; use --interactive.
+#   Toybox      — ctest_real/toybox with various subcommands.
+#   Real-world  — Downloaded static AArch64 binaries (busybox, toybox, iperf2).
+#                 Skipped if binaries not present. Use --test-all to download.
+#   Dynamic     — Dynamically-linked test binaries (musl + glibc). Requires
+#                 rootfs + toolchain. Skipped if rootfs not present.
+#   Benchmarks  — Performance benchmarks. Skipped with --quick.
+#
 # A test PASSES if:
 #   - exit code is 0, AND
 #   - output contains expected_pattern (or expected_pattern is empty)
@@ -271,7 +286,7 @@ INTEGRATION_TESTS=(
     "count|test/count.elf||5"
     "extr|test/extr.elf||5|OK"
     "fib_basic|test/fib.elf||5|832040"
-    "hello|test/hello.elf||5|Hello, ARM64"
+    "hello_basic|test/hello.elf||5|Hello, ARM64"
     # Heap stress test: exercises mremap_grow + munmap + mmap patterns
     # that previously corrupted musl's mallocng metadata (Turn 51 fix).
     "heap_stress|ctest_real/heap_stress.elf||10|heap_stress OK"
