@@ -419,6 +419,17 @@ REALWORLD_TESTS=(
     "rw_toybox_printf|ctest_real/toybox printf %d 42||5|^42$"
     "rw_toybox_md5sum|ctest_real/toybox md5sum|hello\n|5|^b1946ac9"
     "rw_toybox_sha256sum|ctest_real/toybox sha256sum|hello\n|5|^5891b5b5"
+    # NEW (Turn 74): real-world DYNAMICALLY-LINKED glibc binaries from
+    # Debian. These exercise the full dynamic linking stack (R_AARCH64_COPY,
+    # TLS .tdata mirroring, GLOB_DAT, JUMP_SLOT, ifuncs, init arrays).
+    # iperf3 needs libiperf + libcrypto; coreutils need libselinux + libpcre2.
+    # All run with BIFROST_ROOT=rootfs (set below in the dynamic section).
+    # We test actual functionality (not --help) to avoid the "no error if
+    # existing" text in --help output triggering the FAIL/ERROR heuristic.
+    "rw_iperf3_version|ctest_real/realworld/iperf3-aarch64 --version||10|^iperf 3.12|DYN"
+    "rw_coreutils_echo|ctest_real/realworld/echo hello||5|^hello$|DYN"
+    "rw_coreutils_cat|ctest_real/realworld/cat|hello\n|5|^hello$|DYN"
+    "rw_coreutils_echo_n|ctest_real/realworld/echo -n abc||5|^abc$|DYN"
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -450,6 +461,13 @@ run_test() {
             echo -e "         (JIT-only test, skipped under --no-jit)"
         fi
         return 0
+    fi
+
+    # NEW (Turn 74): DYN mode = dynamically-linked binary that requires
+    # BIFROST_ROOT to be set. Skip if BIFROST_ROOT is not in ENV_PREFIX
+    # (these are tested separately in the "Real-world dynamic" section).
+    if [ "$mode" = "DYN" ] && ! echo "$ENV_PREFIX" | grep -q "BIFROST_ROOT"; then
+        return 0  # silent skip — will run in the dynamic section
     fi
 
     # Skip if the test binary doesn't exist (e.g., ctest/*.elf files
@@ -570,6 +588,26 @@ START=$(date +%s)
 [ "$RUN_INTERACTIVE" = "1" ] && run_category "Interactive tests" "${INTERACTIVE_TESTS[@]}"
 [ "$RUN_TOYBOX" = "1" ]      && run_category "Toybox tests"      "${TOYBOX_TESTS[@]}"
 [ "$RUN_REALWORLD" = "1" ]   && run_category "Real-world binaries" "${REALWORLD_TESTS[@]}"
+
+# NEW (Turn 74): if rootfs exists, run the dynamically-linked glibc
+# real-world tests (iperf3, coreutils) with BIFROST_ROOT set so they
+# can find their shared libraries. These are SEPARATE from the static
+# real-world tests above (which don't need BIFROST_ROOT).
+if [ "$RUN_REALWORLD" = "1" ] && [ -d "rootfs/lib" ]; then
+    OLD_ENV_PREFIX="$ENV_PREFIX"
+    ENV_PREFIX="BIFROST_ROOT=$PWD/rootfs ${ENV_PREFIX}"
+    DYN_REALWORLD_TESTS=()
+    for t in "${REALWORLD_TESTS[@]}"; do
+        case "$t" in
+            rw_iperf3_*|rw_coreutils_*) DYN_REALWORLD_TESTS+=("$t") ;;
+        esac
+    done
+    if [ ${#DYN_REALWORLD_TESTS[@]} -gt 0 ]; then
+        run_category "Real-world dynamic (glibc)" "${DYN_REALWORLD_TESTS[@]}"
+    fi
+    ENV_PREFIX="$OLD_ENV_PREFIX"
+fi
+
 [ "$RUN_BENCH" = "1" ]       && run_category "Benchmarks"        "${BENCH_TESTS[@]}"
 
 # Dynamic linking tests — use BIFROST_ROOT env prefix.
