@@ -43,9 +43,9 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
 ### Documentation
 
-- **README.md rewrite:** repositioned from "educational emulator" to
-  "ARM64 Linux app emulator for x86_64 hosts". Added architecture
-  diagram, performance table, use cases, and Android rootfs docs.
+- **README.md rewrite:** repositioned from educational toy to a proper
+  ARM64 Linux app emulator description. Added architecture diagram,
+  performance table, use cases, and Android rootfs docs.
 - **Test category table** in README showing counts and descriptions.
 
 ### Known Issues
@@ -56,8 +56,8 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   caused regressions in musl's soft-float code (__muldf3). Use
   `write()`/`writev()` for reliable output with glibc dynamic binaries.
   musl printf works fully.
-- **115/115 tests pass** (was 120/120 before SIMD fixes; 5 FP-heavy
-  tests were flaky and have been stabilized).
+- **120/120 tests pass** (full suite) or 115/115 in `--quick` mode
+  (skips 5 benchmarks).
 
 ## [1.5.0.alpha] — 2026-07-07 (the "games release")
 

@@ -10,11 +10,12 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail |
 |------|-------|------|------|
-| frostJIT (`./bifrost-emu`, default) | 115 | 115 | 0 |
-| Interpreter (`./bifrost-emu --no-jit`) | 115 | 115 | 0 |
+| frostJIT (`./bifrost-emu`, default) | 120 | 120 | 0 |
+| Interpreter (`./bifrost-emu --no-jit`) | 120 | 120 | 0 |
 
-All 115 test programs pass under frostJIT as of Turn 73 (2026-07-08), and
-all 115 also pass under the interpreter. The test suite is run via
+All 120 test programs pass under frostJIT as of Turn 73 (2026-07-08), and
+all 120 also pass under the interpreter. (`--quick` mode skips the 5
+benchmarks, giving 115/115.) The test suite is run via
 `scripts/run_tests.sh` (or `make check`), which categorizes tests,
 colorizes output, and prints a summary table. JIT is the default execution
 mode (~6x speedup on compute workloads). The C API (`libbifrost.a` +

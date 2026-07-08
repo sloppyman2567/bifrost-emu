@@ -23,29 +23,24 @@ machine without QEMU or a cross-compiler.
 
 ## What is bifrost-emu?
 
-bifrost-emu is a **user-mode emulator** that runs AArch64 (ARM64) Linux
+bifrost-emu is a user-mode emulator that runs AArch64 (ARM64) Linux
 binaries on x86_64 Linux hosts. It translates ARM64 instructions to x86_64
-in real-time using a high-performance JIT compiler, with an interpreter
-fallback for correctness verification.
+at runtime using a JIT compiler, with a switch-based interpreter fallback.
 
-**Key capabilities:**
-- Runs **static** and **dynamically-linked** AArch64 ELF binaries
-- Supports **musl** and **glibc** libc (dynamic linking with shared library
-  loading, GOT/PLT relocation, TLS, ifuncs, DT_INIT_ARRAY constructors)
-- **JIT compiler** with x86_64 native codegen (SSE4.2/AVX2/AVX-512 when
-  available) for ~6x speedup over the interpreter
-- **Linux syscall layer** — 200+ syscalls including threads (clone/futex),
-  signals (rt_sigaction/sigaltstack), filesystem, memory management,
-  epoll, timerfd, eventfd, io_uring stubs
-- **Yggdrasil VFS** — virtual filesystem with /proc, /dev, /sys, host
-  file passthrough, framebuffer (/dev/fb0), audio (/dev/dsp), input
-  (/dev/input/event*)
-- **Android-compatible rootfs** — /system, /vendor, /data, /sdcard
-  structure with build.prop and hardware permissions for Android apps
-- **Graphics/Audio/Display thunking** — forward guest OpenGL/EGL/Vulkan/
-  SDL2/ALSA/PulseAudio calls to host libraries
-- **Multi-threaded guest support** — clone() with CLONE_VM/CLONE_SETTLS,
-  per-thread JIT instances, futex-based synchronization
+**What it can do:**
+- Run static and dynamically-linked AArch64 ELF binaries
+- Load shared libraries (musl and glibc) with GOT/PLT relocation, TLS,
+  ifuncs, and DT_INIT_ARRAY constructors
+- JIT-compile ARM64 to x86_64 native code (~6x faster than the interpreter)
+- Emulate 200+ Linux syscalls (threads, signals, filesystem, memory)
+- Provide a virtual filesystem (/proc, /dev, /sys, framebuffer, audio)
+- Forward GL/EGL/Vulkan/SDL2/ALSA calls to host libraries (thunking)
+- Run multi-threaded guest programs (clone + futex + per-thread JIT)
+
+**What it is NOT:**
+- Not a full-system emulator (no kernel — use QEMU-system for that)
+- Not an Android emulator (no APK/ART/Dalvik — it runs Linux ARM64 binaries)
+- Not as mature as QEMU-user — it's a smaller, simpler alternative
 
 ## Quick Start
 
@@ -218,10 +213,10 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (115+ tests)
+# Run the full test suite (120 tests)
 make check
 
-# Quick mode (skip benchmarks)
+# Quick mode (skip benchmarks, 115 tests)
 make check-quick
 
 # Run under the interpreter (catches JIT drift)
@@ -230,7 +225,7 @@ make check-nojit
 # JIT divergence checker (slow, catches codegen bugs)
 make verify
 
-# Download real-world binaries (busybox, iperf2) and run all 150 tests
+# Download real-world binaries (busybox, iperf2) and run all tests
 make check ARGS="--test-all"
 
 # Run only specific categories
@@ -299,12 +294,11 @@ The JIT uses:
 
 ## Use Cases
 
-- **Run ARM64 Linux apps on x86_64** — CLI tools, scripts, daemons
-- **Cross-platform CI** — test ARM64 builds on x86_64 CI runners
-- **Game development** — test ARM64 game builds (SDL2, OpenGL ES)
-- **Security research** — sandboxed analysis of ARM64 binaries
-- **Education** — learn AArch64 instruction set and Linux syscalls
-- **Embedded development** — test ARM64 firmware/userspace on x86_64
+- Run ARM64 Linux apps on x86_64 (CLI tools, scripts, daemons)
+- Test ARM64 builds on x86_64 CI runners
+- Test ARM64 game builds (SDL2, OpenGL ES) during development
+- Analyze ARM64 binaries in a sandboxed environment
+- Learn how AArch64 instruction emulation and Linux syscalls work
 
 ## Limitations
 
