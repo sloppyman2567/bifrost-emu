@@ -605,6 +605,28 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // relocated _IO_2_1_stdout_ address).
     apply_pending_copies_();
 
+    // BUGFIX (Turn 74): call __libc_early_init if libc.so.6 exports it.
+    // In glibc 2.34+, the dynamic linker (ld-linux) calls this function
+    // during early initialization. It calls __ctype_init() which sets up
+    // the thread-local character type tables (ctype_b, ctype_tolower,
+    // ctype_toupper). Without this, printf can't classify format
+    // characters, causing float formatting to produce wrong output
+    // (e.g., %.2f of 3.14 gives "3.1" instead of "3.14").
+    //
+    // Since we use our own native dynamic linker (not the guest's
+    // ld-linux), __libc_early_init is never called. We call it here,
+    // before DT_INIT_ARRAY, matching the order ld-linux uses.
+    if (init_runner_) {
+        uint64_t early_init = resolve_symbol("__libc_early_init");
+        if (early_init != 0) {
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dynlink] calling __libc_early_init @ 0x%llx\n",
+                        static_cast<unsigned long long>(early_init));
+            }
+            init_runner_(early_init);
+        }
+    }
+
     // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game

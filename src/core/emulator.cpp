@@ -454,6 +454,17 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     main_cpu_.sigmask = saved.sigmask;
                     main_cpu_.running = saved.running;
                 };
+                // BUGFIX (Turn 74): set TPIDR_EL0 to the static TLS block
+                // before running init functions. Constructors and
+                // __libc_early_init access TLS variables (e.g., ctype
+                // tables, locale pointers) via TPIDR_EL0. Without this,
+                // TLS variables are at wrong addresses and initialization
+                // fails silently.
+                if (dyn_linker_ && dyn_linker_->static_tls_size() > 0) {
+                    main_cpu_.tpidr_el0 = dyn_linker_->static_tls_base() +
+                                          dyn_linker_->static_tls_size();
+                    main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+                }
                 // Scratch stack for the constructor.
                 uint64_t scratch_stack = mem_.mmap_alloc(4096);
                 uint64_t stack_top = scratch_stack + 4096;
@@ -880,7 +891,7 @@ int Emulator::run() {
                     strtoull(getenv("BIFROST_TRACE_PC_MAX"), nullptr, 10) : 10000ULL;
             static uint64_t trace_pc_count_ = 0;
             if (trace_pc_ && trace_pc_count_ < trace_pc_max_) {
-                fprintf(stderr, "[pc] 0x%llx sp=0x%llx x0=%llx x1=%llx x2=%llx x8=%llx x19=%llx x30=%llx\n",
+                fprintf(stderr, "[pc] 0x%llx sp=0x%llx x0=%llx x1=%llx x2=%llx x8=%llx x19=%llx x22=%llx x24=%llx x25=%llx x26=%llx x27=%llx x30=%llx\n",
                         (unsigned long long)main_cpu_.pc,
                         (unsigned long long)main_cpu_.sp,
                         (unsigned long long)main_cpu_.regs[0],
@@ -888,6 +899,11 @@ int Emulator::run() {
                         (unsigned long long)main_cpu_.regs[2],
                         (unsigned long long)main_cpu_.regs[8],
                         (unsigned long long)main_cpu_.regs[19],
+                        (unsigned long long)main_cpu_.regs[22],
+                        (unsigned long long)main_cpu_.regs[24],
+                        (unsigned long long)main_cpu_.regs[25],
+                        (unsigned long long)main_cpu_.regs[26],
+                        (unsigned long long)main_cpu_.regs[27],
                         (unsigned long long)main_cpu_.regs[30]);
                 trace_pc_count_++;
             }
