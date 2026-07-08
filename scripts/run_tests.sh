@@ -316,6 +316,14 @@ INTEGRATION_TESTS=(
 DYNAMIC_TESTS=(
     "hello_dyn_musl|ctest_real/hello_dyn_musl.elf||5|Hello, dynamic world"
     "test_dyn_write|ctest_real/test_dyn_write.elf||5|dyn_write_ok"
+    # NEW (Turn 74): glibc dynamic tests. These verify the R_AARCH64_COPY
+    # relocation support and CMEQ #0 SIMD fix that enable glibc's printf
+    # and stdio to work under dynamic linking.
+    "hello_dyn_glibc|ctest_real/hello_dyn_glibc.elf||5|Hello, dynamic world"
+    "test_dyn_hello|ctest_real/test_dyn_hello.elf||5|Hello, glibc dynamic"
+    "test_dyn_malloc|ctest_real/test_dyn_malloc.elf||5|^done$"
+    "test_dyn_printf|ctest_real/test_dyn_printf.elf||10|^\\[done\\]$"
+    "test_dyn_full_musl|ctest_real/test_dyn_full_musl.elf||15|ALL PASS"
 )
 
 # Interactive tests (need stdin input)

@@ -362,6 +362,23 @@ private:
     // Guest VA of the synthetic ld-linux data page (allocated by
     // register_ld_linux_shim_()). 0 if the shim hasn't been registered.
     uint64_t shim_base_ = 0;
+
+    // ── Pending R_AARCH64_COPY relocations (Turn 74) ───────────────
+    // COPY relocations must be deferred until AFTER all other relocations
+    // are applied. The COPY reads the original symbol's value (which is
+    // set by the original object's RELATIVE relocations). If we apply
+    // COPY during the first pass, we read pre-relocation values.
+    struct PendingCopy {
+        uint64_t target;              // main binary .bss/.data address
+        std::string name;             // symbol name (e.g., "stdout")
+        uint64_t size;                // bytes to copy (from symtab st_size)
+        const LoadedObject* copy_obj; // the object containing the COPY reloc
+    };
+    std::vector<PendingCopy> pending_copies_;
+
+    // Apply all pending COPY relocations. Called after all objects'
+    // RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are done.
+    void apply_pending_copies_();
 };
 
 } // namespace arm64emu

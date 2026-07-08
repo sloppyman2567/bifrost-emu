@@ -77,6 +77,7 @@ constexpr int DT_VERNEEDNUM_= 0x6FFFFFFF;
 
 // AArch64 relocation types (ELF64 codes), per ARM IHI 0056B.
 constexpr uint32_t R_AARCH64_ABS64_         = 257;
+constexpr uint32_t R_AARCH64_COPY_          = 1024;  // R_AARCH64_COPY
 constexpr uint32_t R_AARCH64_GLOB_DAT_      = 1025;
 constexpr uint32_t R_AARCH64_JUMP_SLOT_     = 1026;
 constexpr uint32_t R_AARCH64_RELATIVE_      = 1027;
@@ -314,6 +315,23 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
 
                     if (type == R_AARCH64_RELATIVE_) {
                         mem_.store<uint64_t>(target, obj.base_addr + A);
+                    } else if (type == R_AARCH64_COPY_) {
+                        // R_AARCH64_COPY: defer until after all other
+                        // relocations are applied. The COPY must read
+                        // the ORIGINAL symbol's value AFTER the original
+                        // object's RELATIVE relocations have been applied
+                        // (otherwise we copy pre-relocation values).
+                        // We collect COPY relocations here and apply them
+                        // in a second pass after all objects are relocated.
+                        if (sym != 0) {
+                            Elf64_Sym s;
+                            mem_.read(obj.symtab_addr + sym * sizeof(s),
+                                      &s, sizeof(s));
+                            std::string name = read_guest_cstr(
+                                mem_, obj.strtab_addr + s.st_name);
+                            pending_copies_.push_back({
+                                target, name, s.st_size, &obj});
+                        }
                     } else if (type == R_AARCH64_ABS64_ ||
                                type == R_AARCH64_GLOB_DAT_) {
                         if (sym == 0) {
@@ -556,6 +574,14 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         }
     }
 
+    // BUGFIX (Turn 74): apply deferred R_AARCH64_COPY relocations AFTER
+    // all objects' RELATIVE/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are
+    // done. The COPY reads the original symbol's post-relocation value.
+    // If applied during the first pass, it reads pre-relocation values
+    // (e.g., libc's stdout variable before RELATIVE sets it to the
+    // relocated _IO_2_1_stdout_ address).
+    apply_pending_copies_();
+
     // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
@@ -564,6 +590,75 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     run_init_arrays_();
 
     return true;
+}
+
+// ── apply_pending_copies_ ──────────────────────────────────────────────
+// Apply all deferred R_AARCH64_COPY relocations. For each COPY:
+//   1. Find the original symbol definition in a shared library (skip
+//      the main binary's own copy).
+//   2. Copy st_size bytes from the original to the target (main binary's
+//      .bss/.data).
+//   3. Update the global symbol table so future resolutions of this
+//      symbol return `target` (the copy in the main binary). This
+//      ensures libc's own GLOB_DAT relocations for `stdout` resolve
+//      to the main binary's copy, so libc and the main binary share
+//      the same FILE* pointer.
+//
+// This MUST be called after ALL objects' RELATIVE/ABS64/GLOB_DAT/
+// JUMP_SLOT/IRELATIVE relocations are applied, so the original symbol's
+// value reflects post-relocation state (e.g., libc's `stdout` variable
+// contains a relocated pointer to `_IO_2_1_stdout_`).
+void DynamicLinker::apply_pending_copies_() {
+    for (const auto& cp : pending_copies_) {
+        uint64_t src_addr = 0;
+        uint64_t copy_size = cp.size;
+        // Find original definition in a shared lib (skip main binary
+        // and skip the object that contains the COPY reloc).
+        for (const auto& o : objects_) {
+            if (&o == cp.copy_obj) continue;
+            if (o.is_main) continue;
+            if (o.symtab_addr == 0) continue;
+            for (size_t i = 1; i < o.symtab_count && i < 8192*4; i++) {
+                Elf64_Sym os;
+                try {
+                    mem_.read(o.symtab_addr + i*sizeof(os), &os, sizeof(os));
+                } catch (...) { break; }
+                if (os.st_shndx == SHN_UNDEF_) continue;
+                uint8_t obind = ST_BIND_(os.st_info);
+                if (obind != STB_GLOBAL_ && obind != STB_WEAK_) continue;
+                std::string oname = read_guest_cstr(
+                    mem_, o.strtab_addr + os.st_name);
+                if (oname == cp.name) {
+                    src_addr = o.base_addr + os.st_value;
+                    if (copy_size == 0) copy_size = os.st_size;
+                    break;
+                }
+            }
+            if (src_addr) break;
+        }
+        if (src_addr && copy_size > 0 && copy_size <= 65536) {
+            std::vector<uint8_t> buf(copy_size);
+            mem_.read(src_addr, buf.data(), copy_size);
+            mem_.write(cp.target, buf.data(), copy_size);
+            // Update symbol table: future resolutions return the copy.
+            symbols_[cp.name] = SymEntry{cp.target, STB_GLOBAL_};
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr,
+                    "[dynlink] COPY %s: %llu bytes from 0x%llx to 0x%llx\n",
+                    cp.name.c_str(),
+                    (unsigned long long)copy_size,
+                    (unsigned long long)src_addr,
+                    (unsigned long long)cp.target);
+            }
+        } else if (getenv("BIFROST_DYNLINK_TRACE")) {
+            fprintf(stderr,
+                "[dynlink] COPY %s: src=0x%llx size=%llu (SKIPPED)\n",
+                cp.name.c_str(),
+                (unsigned long long)src_addr,
+                (unsigned long long)copy_size);
+        }
+    }
+    pending_copies_.clear();
 }
 
 // ── run_init_arrays_ ───────────────────────────────────────────────────

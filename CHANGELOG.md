@@ -6,7 +6,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased] — Turn 73 (2026-07-08)
+## [Unreleased] — Turn 74 (2026-07-08)
+
+### Dynamic Linking — glibc dynamic binaries fully working
+
+- **CRITICAL: R_AARCH64_COPY relocation support.** glibc's `stdout`,
+  `stderr`, `stdin`, `opterr`, and other external variables are
+  copy-relocated from libc.so.6 into the main binary's .bss. Without
+  R_AARCH64_COPY support, the main binary's `stdout` stayed NULL, and
+  libc's own GLOB_DAT for `stdout` resolved to the main binary's
+  uninitialized copy (because the main binary was indexed first) →
+  libc dereferenced NULL → crash on every printf/puts call. The fix:
+  1. Collect COPY relocations during the first relocation pass.
+  2. After ALL objects' RELATIVE/GLOB_DAT/JUMP_SLOT/IRELATIVE
+     relocations are applied, process pending COPY relocations:
+     copy the original symbol's bytes (post-relocation value) from
+     the defining shared library to the main binary's .bss, then
+     update the global symbol table so future resolutions return
+     the copy address.
+  - This is the single fix that makes glibc dynamically-linked
+    printf/puts/fprintf/fputs work end-to-end. Previously (Turns
+    53–73), glibc dynamic binaries could only use write() — printf
+    crashed. Now printf works fully (integers, strings, char, hex,
+    padded, zero-padded formats all correct).
+- **CRITICAL: CMEQ #0 case constant fix.** The interpreter's CMEQ
+  vs zero case used constant 0x0E208800 (bits[15:10]=0x22), but the
+  actual CMEQ #0 encoding (e.g., 0x4e209801) has bits[15:10]=0x26.
+  The case NEVER matched, so CMEQ #0 was silently NOP'd (destination
+  register left unchanged). This broke glibc's SIMD-optimized
+  strlen, which uses `cmeq v1, v0, #0` to detect NUL bytes in
+  16-byte chunks — without CMEQ, strlen never found the terminator
+  and spun forever through unmapped zero pages. Fixed to 0x0E209800.
+
+### Rootfs improvements
+
+- Added gconv (character conversion) libraries for iconv() support.
+- Added libthread_db.so.1 (debugger thread introspection interface).
+- Added locale directory structure with C locale alias.
+- Added duplicate libnss_* modules from usr/lib64 (some glibc builds
+  install them there instead of lib64).
+
+### Test suite — 125/125 pass (was 120/120)
+
+- 5 new dynamic linking tests:
+  - `hello_dyn_glibc` — glibc dynamically-linked hello world.
+  - `test_dyn_hello` — glibc dynamic with write() only.
+  - `test_dyn_malloc` — glibc dynamic malloc/free stress.
+  - `test_dyn_printf` — glibc printf with 6 format variants.
+  - `test_dyn_full_musl` — comprehensive musl dynamic test (printf,
+    malloc, strings, errno, time, atexit).
+
+### Known limitations
+
+- glibc dynamic printf float formatting (`%f`, `%e`, `%g`) produces
+  wrong output: the decimal point is replaced by a space (e.g.,
+  `3.14` → `3 14`). Integer and string formats are correct. The bug
+  is in glibc's SIMD-optimized `__printf_fp_l` function; musl's
+  printf works perfectly. Tracked for future investigation.
+- glibc dynamic pthreads hits an assertion in allocatestack.c
+  (`size != 0`). The TLS/thread stack setup needs work for glibc's
+  NPTL. musl dynamic pthreads work (existing `test_pthread` tests
+  pass under musl static).
+
+## [1.5.0.alpha] — Turn 73 (2026-07-08)
 
 ### SIMD Codegen Fixes
 

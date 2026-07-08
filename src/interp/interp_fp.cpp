@@ -766,7 +766,11 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── CMEQ vs zero ──
-            case 0x0E208800: {
+            // BUGFIX (Turn 74): case constant was 0x0E208800 (bits[15:10]=0x22)
+            // but actual CMEQ #0 encoding (e.g. 0x4e209801) has bits[15:10]=0x26.
+            // The old case NEVER matched — CMEQ #0 was silently NOP'd, breaking
+            // glibc's strlen SIMD path. Corrected to 0x0E209800.
+            case 0x0E209800: {
                 int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
                 int elems = (Q ? 16 : 8) / esize;
                 uint8_t buf[16];

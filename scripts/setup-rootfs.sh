@@ -70,6 +70,26 @@ if [ -d "$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/lib64" ]; then
         src="$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/usr/lib64/$lib"
         [ -f "$src" ] && cp -f "$src" "$ROOTFS/usr/lib/"
     done
+    # NEW (Turn 74): gconv (character conversion) libraries. glibc loads
+    # these dynamically when programs use iconv() with non-UTF-8 charsets.
+    # Without them, programs that convert between character sets fail.
+    GCONV_DIR="$ROOTFS/usr/lib/gconv"
+    mkdir -p "$GCONV_DIR"
+    SRC_GCONV="$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/usr/lib64/gconv"
+    if [ -d "$SRC_GCONV" ]; then
+        cp -f "$SRC_GCONV"/*.so "$GCONV_DIR/" 2>/dev/null || true
+        cp -f "$SRC_GCONV"/gconv-modules "$GCONV_DIR/" 2>/dev/null || true
+    fi
+    # libthread_db (debugger interface, loaded by gdb but also by some
+    # programs that introspect thread state).
+    src="$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/lib64/libthread_db.so.1"
+    [ -f "$src" ] && cp -f "$src" "$ROOTFS/lib/"
+    # libnss_* modules (glibc loads these dynamically for name resolution).
+    # Already copied above, but also copy libnss_compat if in usr/lib.
+    for lib in libnss_compat.so.2 libnss_files.so.2 libnss_dns.so.2; do
+        src="$TOOLCHAIN_GLIBC/aarch64-none-linux-gnu/libc/usr/lib64/$lib"
+        [ -f "$src" ] && cp -f "$src" "$ROOTFS/lib/" 2>/dev/null || true
+    done
     # Create ld-linux symlink (some programs look for it in /lib64)
     mkdir -p "$ROOTFS/lib64"
     [ -f "$ROOTFS/lib/ld-linux-aarch64.so.1" ] && \
@@ -280,6 +300,19 @@ if [ -n "$TZ_FILE" ]; then
 else
     echo "Warning: could not find a zoneinfo file. Guest will default to UTC."
 fi
+
+# ── Locale setup (Turn 74) ───────────────────────────────────────────
+# glibc programs use locale data for decimal separators, date formats,
+# character classification, etc. Without locale data, glibc falls back
+# to the C locale (which is usually fine, but some programs expect
+# locale.dir to exist).
+mkdir -p "$ROOTFS/usr/share/locale"
+mkdir -p "$ROOTFS/usr/share/locale/C/LC_MESSAGES"
+# Minimal C locale — glibc's default when no locale is set.
+cat > "$ROOTFS/usr/share/locale/locale.alias" <<'EOF'
+C C
+POSIX C
+EOF
 
 # ── /tmp (writable) ───────────────────────────────────────────────────
 chmod 1777 "$ROOTFS/tmp"
