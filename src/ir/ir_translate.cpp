@@ -143,10 +143,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── ADDS/SUBS (flag-setting) ─────────────────────────────────
         case InstClass::ADDS_REG: case InstClass::ADDS_IMM:
         case InstClass::SUBS_REG: case InstClass::SUBS_IMM: {
-            // For immediate forms with !set_flags, rn=31 reads SP.
-            // But ADDS/SUBS always set flags (set_flags=true), so rn=31 = XZR.
-            // (CMP = SUBS XZR — rn=31 = XZR here too.)
-            uint16_t a = load_arm_reg(block, d.rn, false);
+            // v1.5.0.alpha BUGFIX: for the EXTENDED REGISTER form of
+            // ADDS/SUBS (bit21=1), Rn=31 = SP (per ARM ARM). For the
+            // shifted register form (bit21=0), Rn=31 = XZR.
+            // We check the raw instruction bits directly (like the
+            // interpreter does) to avoid stale-field issues.
+            bool rn_is_sp = false;
+            if (d.cls == InstClass::ADDS_REG || d.cls == InstClass::SUBS_REG) {
+                bool extended = ((d.raw & 0x1FE00000) == 0x0B200000);
+                rn_is_sp = extended && (d.rn == 31);
+            }
+            uint16_t a = load_arm_reg(block, d.rn, rn_is_sp);
             uint8_t b;
             if (d.cls == InstClass::ADDS_IMM || d.cls == InstClass::SUBS_IMM) {
                 // apply d.shift (0 or 12) to d.imm_u,
