@@ -134,11 +134,31 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
         if (pc && __builtin_expect(pn == pc->read_page, 1)) {
             memcpy(p, pc->read_ptr + off, take);
         } else {
+            // v1.5.0.alpha: FEX-style demand paging. On real Linux, reads
+            // to unmapped pages in the user address space trigger a page
+            // fault, and the kernel zero-fills the page (for anonymous
+            // mappings). This is critical for programs that read past the
+            // end of heap/mmap allocations (common in regex engines,
+            // string processing, vectorized loops). Previously we threw
+            // UnmappedMemory, which caused SIGSEGV in busybox grep/sed.
+            //
+            // We still throw for addresses below PAGE_SIZE (the NULL page
+            // region) — genuine NULL pointer dereferences should fault.
+            if (cur < PAGE_SIZE) throw UnmappedMemory(cur, false);
+
             const std::vector<uint8_t>* page = nullptr;
             {
-                std::shared_lock<std::shared_mutex> g(mu_);
+                // Upgrade to unique_lock for auto-allocation. This is
+                // slightly slower than shared_lock but only fires on
+                // cache misses (first access to a page). Subsequent
+                // accesses hit the page cache.
+                std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
-                if (it == pages_.end()) throw UnmappedMemory(cur, false);
+                if (it == pages_.end()) {
+                    // Auto-allocate: zero-filled page, matching Linux's
+                    // behavior for anonymous mappings (MAP_ANONYMOUS).
+                    it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+                }
                 page = &it->second;
             }
             memcpy(p, page->data() + off, take);

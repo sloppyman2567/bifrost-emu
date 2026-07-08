@@ -170,7 +170,7 @@ private:
     // (write, map_range, mmap_alloc) take a unique lock. This reduces
     // contention for multi-threaded guests.
     mutable std::shared_mutex mu_;
-    std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
+    mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
     // Tracks the start address and page-aligned size of every region
     // handed out by mmap_alloc. Used by mremap_grow to detect when an
     // in-place growth would collide with a later allocation.
