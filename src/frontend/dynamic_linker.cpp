@@ -215,10 +215,24 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     if (lib_base == 0) {
                         // Library not found — not necessarily fatal
                         // (some programs dlopen at runtime). Log and
-                        // continue.
+                        // continue. If BIFROST_ROOT is not set, suggest
+                        // setting it up.
                         fprintf(stderr, "[%s] dynamic linker: could not "
                                 "find %s (continuing)\n",
                                 CODENAME, soname.c_str());
+                        // First-miss hint: if BIFROST_ROOT is unset or
+                        // the rootfs doesn't have libs, suggest setup.
+                        static bool hinted = false;
+                        if (!hinted) {
+                            const char* root = getenv("BIFROST_ROOT");
+                            if (!root || root[0] == '\0') {
+                                hinted = true;
+                                fprintf(stderr, "[%s] hint: set BIFROST_ROOT "
+                                        "or use --rootfs for dynamic linking "
+                                        "(run ./scripts/setup-rootfs.sh)\n",
+                                        CODENAME);
+                            }
+                        }
                         continue;
                     }
                     worklist.push_back(objects_.size() - 1);

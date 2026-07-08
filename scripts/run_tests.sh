@@ -238,6 +238,9 @@ INTEGRATION_TESTS=(
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
     "sdl_demo|ctest_real/test_sdl_demo.elf||15|drew 60 frames"
+    # NEW (Turn 74): comprehensive game demo — bouncing ball with
+    # framebuffer, input, audio, and game loop.
+    "game_demo|ctest_real/test_game_demo.elf||15|game: done"
     # Signal handler test: verifies that a real SIGINT handler runs
     # before read() returns -EINTR (Turn 43 fix). Self-contained —
     # forks a child that sends SIGINT after 200ms. No pty needed.

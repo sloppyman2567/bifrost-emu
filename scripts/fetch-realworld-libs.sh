@@ -52,17 +52,36 @@ fetch_deb "pool/main/o/openssl/libssl3_3.0.17-1~deb12u2_arm64.deb" || true
 # libiperf (needed by iperf3)
 fetch_deb "pool/main/i/iperf3/libiperf0_3.12-1+deb12u2_arm64.deb" || true
 
+# libz / zlib (needed by many programs for compression)
+fetch_deb "pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb" || true
+
+# libblkid (needed by many coreutils-like programs)
+fetch_deb "pool/main/u/util-linux/libblkid1_2.38.1-5+deb12u1_arm64.deb" || true
+
+# libmount (needed by some util-linux programs)
+fetch_deb "pool/main/u/util-linux/libmount1_2.38.1-5+deb12u1_arm64.deb" || true
+
+# libuuid (needed by some programs)
+fetch_deb "pool/main/u/util-linux/libuuid1_2.38.1-5+deb12u1_arm64.deb" || true
+
 # Fix symlinks (some .deb packages install versioned .so files but
 # the symlinks point to relative paths that don't exist in rootfs/lib/)
 cd "$ROOTFS/lib"
-for so_file in lib*.so.*.*.*; do
+for so_file in lib*.so.*; do
     [ -f "$so_file" ] || continue
-    # Extract the base name (e.g., libpcre2-8.so from libpcre2-8.so.0.11.2)
+    [ -L "$so_file" ] && continue  # skip existing symlinks
+    # libfoo.so.1.2.3 → base=libfoo.so, major=libfoo.so.1
     base=$(echo "$so_file" | sed 's/\.so\..*//').so
-    # Extract the major version (e.g., libpcre2-8.so.0 from libpcre2-8.so.0.11.2)
     major=$(echo "$so_file" | sed 's/\(\.so\.[0-9]*\)\..*/\1/')
-    [ -L "$base" ] || ln -sf "$so_file" "$base"
-    [ -L "$major" ] || ln -sf "$so_file" "$major"
+    [ -e "$base" ] || ln -sf "$so_file" "$base"
+    [ -e "$major" ] || ln -sf "$so_file" "$major"
+done
+# Also handle files like libfoo.so.1 (only major version, no minor)
+for so_file in lib*.so.[0-9]*; do
+    [ -f "$so_file" ] || continue
+    [ -L "$so_file" ] && continue
+    base=$(echo "$so_file" | sed 's/\.so\..*//').so
+    [ -e "$base" ] || ln -sf "$so_file" "$base"
 done
 
 echo ""
