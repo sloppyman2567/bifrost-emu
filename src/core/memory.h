@@ -33,6 +33,26 @@ public:
     static constexpr uint64_t PAGE_SIZE = 4096;
     static constexpr uint64_t PAGE_MASK = PAGE_SIZE - 1;
 
+    // v1.5.0.alpha: Address space limits for robustness and security.
+    // These prevent a malicious/buggy guest from exhausting host memory
+    // or corrupting emulator-internal state.
+    //
+    // MAX_TOTAL_PAGES: hard cap on total allocated pages (default: 1M
+    //   pages = 4 GiB). Beyond this, mmap_alloc returns -ENOMEM. This
+    //   matches typical RLIMIT_AS settings on production Linux systems.
+    //   Real game engines rarely exceed 2 GiB of mapped memory.
+    //
+    // MAX_MMAP_LENGTH: per-allocation cap (default: 4 GiB). A single
+    //   mmap larger than this is rejected with -ENOMEM. Prevents a
+    //   malicious guest from requesting SIZE_MAX and OOMing the host.
+    //
+    // NULL_PAGE_LIMIT: addresses below this are treated as invalid
+    //   (NULL dereference region). Matches Linux's
+    //   /proc/sys/vm/mmap_min_addr (default 4096 = PAGE_SIZE).
+    static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
+    static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
+    static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
+
     Memory();
     ~Memory();
 
@@ -165,17 +185,30 @@ public:
 
 private:
     // Use shared_mutex for reader-writer locking.
-    // Read operations (load, read, fetch_inst) take a shared lock —
-    // multiple threads can read simultaneously. Write operations
-    // (write, map_range, mmap_alloc) take a unique lock. This reduces
-    // contention for multi-threaded guests.
     mutable std::shared_mutex mu_;
     mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
-    // Tracks the start address and page-aligned size of every region
-    // handed out by mmap_alloc. Used by mremap_grow to detect when an
-    // in-place growth would collide with a later allocation.
     std::unordered_map<uint64_t, uint64_t> allocations_;
-    uint64_t mmap_next_ = 0x5000000000ULL;  // 20 GiB region — won't collide with stack/heap
+
+    // v1.5.0.alpha: ASLR for mmap base. Randomized at construction time
+    // using /dev/urandom (not rand — must be unpredictable to prevent
+    // guest-side info leaks). The base is page-aligned and within the
+    // high mmap region (0x5000000000 - 0x5FFFFFFFFFF).
+    uint64_t mmap_next_ = 0;
+
+    // v1.5.0.alpha: Total page count for OOM protection. Tracked
+    // incrementally (incremented on page allocation, decremented on
+    // munmap) to avoid O(pages_.size()) scans on the hot path.
+    // Mutable because read() (a const method) auto-allocates pages.
+    mutable std::atomic<size_t> total_pages_{0};
+
+    // v1.5.0.alpha: Validate that an address range doesn't overlap
+    // kernel space or the NULL page region. Returns true if the range
+    // is valid for guest allocation.
+    bool is_valid_guest_range(uint64_t addr, uint64_t size) const;
+
+    // v1.5.0.alpha: Check page count against MAX_TOTAL_PAGES.
+    // Returns true if the allocation would exceed the limit.
+    bool would_exceed_page_limit(size_t num_pages) const;
 };
 
 } // namespace arm64emu

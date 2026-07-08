@@ -7,8 +7,10 @@
 #include "core/memory.h"
 
 #include <algorithm>
+#include <fcntl.h>
 #include <shared_mutex>
 #include <sys/mman.h>
+#include <unistd.h>
 
 namespace arm64emu {
 
@@ -22,12 +24,69 @@ Memory::Memory() {
     if (p != MAP_FAILED) {
         direct_window_ = static_cast<uint8_t*>(p);
     }
+
+    // v1.5.0.alpha: ASLR for mmap base. Randomize the starting address
+    // for future mmap_alloc calls using /dev/urandom. The base is
+    // page-aligned and within the high mmap region (0x5000000000 +
+    // random offset up to 0x10000000000 = ~64 GiB of ASLR entropy).
+    // This prevents guest-side info leaks that rely on a fixed mmap
+    // base (common in sandbox escapes and ROP chain construction).
+    //
+    // We use /dev/urandom (not rand()) because:
+    // 1. rand() is predictable if the guest can observe any output
+    // 2. /dev/urandom is the standard kernel CSPRNG on Linux
+    // 3. It's async-signal-safe (no malloc, no locks)
+    {
+        int fd = ::open("/dev/urandom", O_RDONLY);
+        if (fd >= 0) {
+            uint64_t entropy = 0;
+            ssize_t n = ::read(fd, &entropy, sizeof(entropy));
+            ::close(fd);
+            if (n == sizeof(entropy)) {
+                // Mask to 36 bits (64 GiB range), page-align, add base.
+                // Base = 0x5000000000 (above the 4 GiB direct window).
+                entropy &= 0xFFFFFFFFFULL;
+                mmap_next_ = 0x5000000000ULL + (entropy & ~PAGE_MASK);
+            } else {
+                // Fallback: use address of a stack variable as entropy.
+                uint64_t stack_addr = reinterpret_cast<uint64_t>(&p);
+                mmap_next_ = 0x5000000000ULL + ((stack_addr ^ 0x5DEECE66DULL)
+                           & 0xFFFFFFFFFULL & ~PAGE_MASK);
+            }
+        } else {
+            // /dev/urandom not available (chroot? container?). Use the
+            // old fixed base — better than crashing.
+            mmap_next_ = 0x5000000000ULL;
+        }
+    }
 }
 
 Memory::~Memory() {
     if (direct_window_) {
         munmap(direct_window_, DIRECT_WINDOW_SIZE);
     }
+}
+
+// v1.5.0.alpha: Validate that an address range is within the guest's
+// usable address space. Rejects:
+//   - Addresses below NULL_PAGE_LIMIT (NULL dereference protection)
+//   - Addresses above 0x7FFFFFFFFFFF (kernel space on AArch64 Linux)
+//   - Ranges that would wrap around (addr + size < addr)
+bool Memory::is_valid_guest_range(uint64_t addr, uint64_t size) const {
+    if (size == 0) return true;
+    if (addr < NULL_PAGE_LIMIT) return false;
+    // AArch64 Linux user space is 0..0x7FFFFFFFFFFF (48-bit VA).
+    // The kernel uses 0xFFFF000000000000 and above.
+    if (addr > 0x7FFFFFFFFFFFULL) return false;
+    // Overflow check: addr + size must not wrap.
+    if (addr + size < addr) return false;
+    if (addr + size > 0x800000000000ULL) return false;
+    return true;
+}
+
+bool Memory::would_exceed_page_limit(size_t num_pages) const {
+    return total_pages_.load(std::memory_order_relaxed) + num_pages
+           > MAX_TOTAL_PAGES;
 }
 
 void Memory::map_range(uint64_t addr, uint64_t size) {
@@ -98,7 +157,12 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
                 std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) {
+                    // v1.5.0.alpha: OOM protection for write path.
+                    if (would_exceed_page_limit(1)) {
+                        throw UnmappedMemory(cur, true);
+                    }
                     it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+                    total_pages_.fetch_add(1, std::memory_order_relaxed);
                 }
                 page = &it->second;
             }
@@ -148,16 +212,18 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
 
             const std::vector<uint8_t>* page = nullptr;
             {
-                // Upgrade to unique_lock for auto-allocation. This is
-                // slightly slower than shared_lock but only fires on
-                // cache misses (first access to a page). Subsequent
-                // accesses hit the page cache.
                 std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) {
-                    // Auto-allocate: zero-filled page, matching Linux's
-                    // behavior for anonymous mappings (MAP_ANONYMOUS).
+                    // v1.5.0.alpha: OOM protection for demand paging.
+                    // If auto-allocation would exceed the page limit,
+                    // throw UnmappedMemory (causing SIGSEGV delivery)
+                    // instead of letting the host OOM.
+                    if (would_exceed_page_limit(1)) {
+                        throw UnmappedMemory(cur, false);
+                    }
                     it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+                    total_pages_.fetch_add(1, std::memory_order_relaxed);
                 }
                 page = &it->second;
             }
@@ -175,6 +241,11 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
 
 uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     if (size == 0) size = PAGE_SIZE;
+
+    // v1.5.0.alpha: Per-allocation size cap. Prevents a malicious guest
+    // from requesting SIZE_MAX and OOMing the host.
+    if (size > MAX_MMAP_LENGTH) return 0;  // caller maps 0 to -ENOMEM
+
     std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t base = hint;
     uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
@@ -182,40 +253,34 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         base = mmap_next_;
         mmap_next_ += aligned_size;
     } else {
+        // v1.5.0.alpha: Validate MAP_FIXED address range. Reject
+        // addresses in the NULL page region or kernel space.
+        if (!is_valid_guest_range(base, aligned_size)) return 0;
         mmap_next_ = std::max(mmap_next_, base + aligned_size);
     }
+
+    // v1.5.0.alpha: OOM protection. Check page count before allocating.
+    size_t num_new_pages = aligned_size / PAGE_SIZE;
+    if (would_exceed_page_limit(num_new_pages)) return 0;
+
     uint64_t start = base & ~PAGE_MASK;
     uint64_t end = base + aligned_size;  // page-aligned end
+    size_t pages_added = 0;
     for (; start < end; start += PAGE_SIZE) {
         uint64_t pn = start / PAGE_SIZE;
-        // For addresses in the direct window (< 4 GiB), the window IS
-        // the storage — no need to create a pages_ entry.
         if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
             continue;
         }
         auto it = pages_.find(pn);
         if (it == pages_.end()) {
             pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
+            pages_added++;
         } else if (hint == 0) {
-            // BUGFIX: non-MAP_FIXED mmap MUST return zero-initialized
-            // pages — the Linux kernel guarantees this for anonymous
-            // mappings, and musl's mallocng relies on it (meta_area
-            // pages are assumed zero except for the header). Previously
-            // we preserved existing data unconditionally, which let
-            // stale bytes from a previously-freed allocation leak into
-            // a fresh mmap returned by the bump allocator after a
-            // mremap_grow + munmap cycle. Zero the page now.
-            //
-            // (hint != 0 = MAP_FIXED path: preserve existing data —
-            // musl's mallocng uses MAP_FIXED for guard pages and meta
-            // areas carved out of the brk region, and zeroing would
-            // destroy its metadata.)
             std::fill(it->second.begin(), it->second.end(), 0);
         }
-        // MAP_FIXED path: preserve existing pages (don't zero). Needed
-        // because musl's mallocng uses MAP_FIXED for guard pages, and
-        // zeroing would corrupt metadata.
     }
+    // Track total pages atomically (relaxed — no cross-thread sync needed).
+    total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
     allocations_[base] = aligned_size;
     return base;
 }
@@ -504,12 +569,12 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
     {
         std::shared_lock<std::shared_mutex> g(mu_);
         child->mmap_next_ = mmap_next_;
-        // Copy allocations_ entries for addresses in the direct window
-        // too — the child needs to know about ALL of the parent's
-        // tracked regions so mremap_grow's collision check works.
         for (const auto& [base, size] : allocations_) {
             child->allocations_[base] = size;
         }
+        // v1.5.0.alpha: copy total page count for OOM tracking.
+        child->total_pages_.store(total_pages_.load(std::memory_order_relaxed),
+                                   std::memory_order_relaxed);
     }
     return child;
 }
