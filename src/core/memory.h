@@ -183,6 +183,22 @@ public:
         return direct_window_ && addr < DIRECT_WINDOW_SIZE;
     }
 
+    // v1.5.0.alpha (Turn 74): translate a guest address to a host pointer.
+    // Used by the graphic/audio/display thunks to pass pointer arguments
+    // to host GL/EGL/SDL2/ALSA functions. Returns nullptr if the address
+    // is not in the direct window (addresses ≥ 4 GiB can't be directly
+    // accessed — the thunk should copy the data to a buffer in the low
+    // 4 GiB region first).
+    //
+    // For addresses in the direct window, this is a simple pointer
+    // arithmetic: host_ptr = direct_window_ + guest_addr.
+    uint8_t* guest_to_host_ptr(uint64_t guest_addr) const {
+        if (in_direct_window(guest_addr)) {
+            return direct_window_ + guest_addr;
+        }
+        return nullptr;
+    }
+
 private:
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;

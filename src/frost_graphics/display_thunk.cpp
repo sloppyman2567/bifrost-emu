@@ -34,10 +34,15 @@ struct DisplayThunkImpl {
 
 DisplayThunk::DisplayThunk() {
     impl_ = std::make_unique<DisplayThunkImpl>();
-    impl_->enabled = (getenv("BIFROST_THUNK_DISPLAY") != nullptr);
+    // v1.5.0.alpha (Turn 74): display thunking enabled by default.
+    // Set BIFROST_NO_THUNK_DISPLAY=1 to disable.
+    const char* disable = getenv("BIFROST_NO_THUNK_DISPLAY");
+    impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
-        fprintf(stderr, "[display-thunk] display API thunking enabled "
-                "(EXPERIMENTAL, partial Vulkan/Wayland/X11/GBM support)\n");
+        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+            fprintf(stderr, "[display-thunk] display API thunking enabled "
+                    "(Vulkan/Wayland/X11/GBM → host, with fallback)\n");
+        }
     }
 }
 
@@ -74,7 +79,8 @@ void DisplayThunk::register_function_(const std::string& lib,
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     thunk_register(*impl_->mem, impl_->libs_, impl_->id_to_idx_,
                    impl_->trampoline_base, TRAMPOLINE_SIZE, MAX_SYMBOLS,
-                   static_cast<uint16_t>(SYSCALL_NUMBER), trace,
+                   static_cast<uint16_t>(SYSCALL_NUMBER),
+                   DisplayThunk::ID_BASE, trace,
                    lib, sym, host_fn);
 }
 
@@ -110,10 +116,15 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    if (symbol_id >= impl_->id_to_idx_.size()) {
+    // v1.5.0.alpha (Turn 74): check ID range to route correctly.
+    if ((symbol_id & DisplayThunk::ID_MASK) != DisplayThunk::ID_BASE) {
+        return -ENOENT;  // belongs to a different thunk
+    }
+    uint32_t local_id = symbol_id - DisplayThunk::ID_BASE;
+    if (local_id >= impl_->id_to_idx_.size()) {
         return -ENOENT;
     }
-    auto [lib_idx, ent_idx] = impl_->id_to_idx_[symbol_id];
+    auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);

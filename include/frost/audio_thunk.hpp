@@ -83,11 +83,14 @@ public:
     uint64_t trampoline_base() const;
 
     // Reuse GraphicThunk's syscall number — both thunks share the
-    // __NR_bifrost_thunk dispatcher. The thunk symbol_id namespace is
-    // per-thunk, so collisions are impossible.
+    // __NR_bifrost_thunk dispatcher. The thunk symbol_id namespace uses
+    // ID_BASE_AUDIO (0x1000) to avoid collisions with GraphicThunk.
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 1024;  // 16 KiB page
+    // v1.5.0.alpha (Turn 74): ID base for AudioThunk symbols.
+    static constexpr uint32_t ID_BASE = 0x1000;
+    static constexpr uint32_t ID_MASK = 0x3000;
 
 private:
     std::unique_ptr<AudioThunkImpl> impl_;

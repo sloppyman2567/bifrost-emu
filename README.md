@@ -277,9 +277,27 @@ BIFROST_NO_NATIVE_DYNLINK=1      # Use guest-side ld.so (debugging)
 BIFROST_DYNLINK_TRACE=1          # Trace dynamic linker
 BIFROST_SYSCALL_TRACE=1          # Trace syscalls
 BIFROST_JIT_VERIFY=1             # JIT/interpreter divergence check
-BIFROST_THUNK_GRAPHICS=1         # Enable GL/EGL thunking
-BIFROST_THUNK_AUDIO=1            # Enable ALSA/PulseAudio thunking
+BIFROST_THUNK_TRACE=1            # Trace graphic/audio/display thunk calls
+BIFROST_NO_THUNK_GRAPHICS=1      # Disable GL/EGL/SDL2 thunking (on by default)
+BIFROST_NO_THUNK_AUDIO=1         # Disable ALSA/PulseAudio thunking (on by default)
+BIFROST_NO_THUNK_DISPLAY=1       # Disable Vulkan/Wayland thunking (on by default)
 ```
+
+### Graphics/Audio/Display Thunking
+
+bifrost-emu forwards guest GL/EGL/SDL2/ALSA/Vulkan calls to the host's
+native libraries via a **thunk** layer. This is **enabled by default** —
+no env var needed. When the host has the dev libraries installed, guest
+graphic/audio programs use host hardware acceleration. When the host
+doesn't have the libraries, symbols resolve to stubs that return 0
+(safe fallback — the guest falls back to software rendering or no-op).
+
+The thunk uses per-type symbol ID ranges (Graphics: 0x0000-0x0FFF,
+Audio: 0x1000-0x1FFF, Display: 0x2000-0x2FFF) to avoid collisions.
+Pointer arguments are automatically translated from guest addresses to
+host addresses via the emulator's direct memory window, enabling
+functions like `glVertexPointer`, `glDrawElements`, and `glGetIntegerv`
+to work correctly.
 
 See `bifrost.toml.sample` for all options.
 

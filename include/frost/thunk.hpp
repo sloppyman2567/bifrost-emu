@@ -146,13 +146,28 @@ public:
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
 
+    // v1.5.0.alpha (Turn 74): per-thunk ID base to avoid collisions.
+    // Each thunk type gets a non-overlapping range of symbol_ids.
+    // The dispatch handler checks the range to route to the correct
+    // thunk without trying each one sequentially.
+    //   GraphicThunk: 0x0000 - 0x0FFF  (4096 symbols)
+    //   AudioThunk:   0x1000 - 0x1FFF  (4096 symbols)
+    //   DisplayThunk: 0x2000 - 0x2FFF  (4096 symbols)
+    static constexpr uint32_t ID_BASE_GRAPHICS = 0x0000;
+    static constexpr uint32_t ID_BASE_AUDIO    = 0x1000;
+    static constexpr uint32_t ID_BASE_DISPLAY  = 0x2000;
+    static constexpr uint32_t ID_MASK          = 0x3000;  // range selector
+
 private:
     std::unique_ptr<GraphicThunkImpl> impl_;
 
     // Per-library registration helpers (defined in thunk.cpp).
+    // v1.5.0.alpha (Turn 74): added pointer_args bitmask (bit N = arg N
+    // is a pointer needing guest→host translation).
     void register_function_(const std::string& lib,
                             const std::string& sym,
-                            void* host_fn);
+                            void* host_fn,
+                            uint8_t pointer_args = 0);
     void* resolve_gl_(const std::string& sym);
     void* resolve_egl_(const std::string& sym);
     void* resolve_sdl_(const std::string& sym);

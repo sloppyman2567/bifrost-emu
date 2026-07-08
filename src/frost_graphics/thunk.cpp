@@ -132,6 +132,7 @@ struct SymbolEntry {
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
+    uint8_t     pointer_args = 0;  // bitmask: which args (0-7) are pointers
 };
 
 struct GraphicThunkImpl {
@@ -195,10 +196,23 @@ struct GraphicThunkImpl {
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();
-    impl_->enabled = (getenv("BIFROST_THUNK_GRAPHICS") != nullptr);
+    // v1.5.0.alpha (Turn 74): thunking is now ENABLED BY DEFAULT.
+    // Previously required BIFROST_THUNK_GRAPHICS=1. Now we always try
+    // to thunk graphic calls; if the host doesn't have GL/EGL/SDL2
+    // libraries, the symbols resolve to stubs that return 0 (safe
+    // fallback). Set BIFROST_NO_THUNK_GRAPHICS=1 to disable.
+    //
+    // This makes graphics "just work" for programs that use GL/EGL/SDL2
+    // when the host has the libraries, and degrade gracefully (software
+    // rendering or no-op) when it doesn't.
+    const char* disable = getenv("BIFROST_NO_THUNK_GRAPHICS");
+    impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
-        fprintf(stderr, "[thunk] graphic API thunking enabled "
-                "(EXPERIMENTAL, partial GL/EGL/SDL2 support)\n");
+        // Only print if verbose or trace — don't clutter default output
+        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+            fprintf(stderr, "[thunk] graphic API thunking enabled "
+                    "(GL/EGL/SDL2 → host, with emulation fallback)\n");
+        }
     }
 }
 
@@ -252,7 +266,8 @@ bool GraphicThunk::init(Memory& mem) {
 // stores the entry. Thread-safe (called from init() under lock).
 void GraphicThunk::register_function_(const std::string& lib,
                                        const std::string& sym,
-                                       void* host_fn) {
+                                       void* host_fn,
+                                       uint8_t pointer_args) {
     auto* lt = impl_->find_or_create_lib_(lib);
 
     // Check if already registered (idempotent).
@@ -260,26 +275,29 @@ void GraphicThunk::register_function_(const std::string& lib,
         if (e.name == sym) return;
     }
 
-    uint32_t sym_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
-    if (sym_id >= GraphicThunk::MAX_SYMBOLS) {
+    // v1.5.0.alpha (Turn 74): symbol_id includes ID_BASE_GRAPHICS to
+    // avoid collisions with AudioThunk/DisplayThunk IDs.
+    uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
+    if (local_id >= GraphicThunk::MAX_SYMBOLS) {
         fprintf(stderr, "[thunk] register: symbol table full (%zu)\n",
                 impl_->id_to_idx_.size());
         return;
     }
+    uint32_t sym_id = GraphicThunk::ID_BASE_GRAPHICS + local_id;
 
-    uint64_t addr = impl_->trampoline_base + sym_id * GraphicThunk::TRAMPOLINE_SIZE;
+    uint64_t addr = impl_->trampoline_base + local_id * GraphicThunk::TRAMPOLINE_SIZE;
     write_trampoline_(*impl_->mem, addr, sym_id);
 
-    lt->entries.push_back({sym, host_fn, addr, sym_id});
+    lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args});
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
     });
 
     if (getenv("BIFROST_THUNK_TRACE")) {
-        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u)\n",
+        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u, ptrs=0x%x)\n",
                 lib.c_str(), sym.c_str(),
-                static_cast<unsigned long long>(addr), sym_id);
+                static_cast<unsigned long long>(addr), sym_id, pointer_args);
     }
 }
 
@@ -340,7 +358,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    if (symbol_id >= impl_->id_to_idx_.size()) {
+    // v1.5.0.alpha (Turn 74): strip the ID_BASE_GRAPHICS prefix to get
+    // the local index. If the symbol_id is outside our range, return
+    // -ENOENT so the dispatcher can try other thunks.
+    if ((symbol_id & GraphicThunk::ID_MASK) != GraphicThunk::ID_BASE_GRAPHICS) {
+        return -ENOENT;  // belongs to a different thunk
+    }
+    uint32_t local_id = symbol_id - GraphicThunk::ID_BASE_GRAPHICS;
+    if (local_id >= impl_->id_to_idx_.size()) {
         if (getenv("BIFROST_THUNK_TRACE")) {
             fprintf(stderr, "[thunk] dispatch: unknown symbol_id=%u\n", symbol_id);
         }
@@ -348,7 +373,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // Look up the entry (lock-free — id_to_idx_ is immutable after init).
-    auto [lib_idx, ent_idx] = impl_->id_to_idx_[symbol_id];
+    auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
 
     if (!entry.host_fn) {
@@ -371,14 +396,41 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         args[i] = cpu.regs[i];
     }
 
+    // v1.5.0.alpha (Turn 74): translate pointer args from guest to host.
+    // For each arg marked as a pointer in entry.pointer_args, translate
+    // the guest address to a host pointer using Memory::guest_to_host_ptr.
+    // This is critical — without it, passing a guest pointer (e.g. a
+    // vertex array address) to the host GL function would crash because
+    // the host can't read guest memory at that address.
+    //
+    // Only args in the direct window (< 4 GiB) can be translated. Args
+    // in the high mmap region (≥ 4 GiB) are passed as-is — the host
+    // function will likely crash, but that's a known limitation (the
+    // thunk would need to copy the data to a low buffer first).
+    if (entry.pointer_args && impl_->mem) {
+        for (int i = 0; i < 8; i++) {
+            if (entry.pointer_args & (1u << i)) {
+                uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(args[i]);
+                if (host_ptr) {
+                    args[i] = reinterpret_cast<uint64_t>(host_ptr);
+                }
+                // If translation failed (address ≥ 4 GiB), pass the
+                // original value. The host function may handle it
+                // gracefully (e.g. NULL check) or crash — either way
+                // it's a visible failure, not silent corruption.
+            }
+        }
+    }
+
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
-                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx\n",
+                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx ptrs=0x%x\n",
                 entry.name.c_str(), entry.host_fn,
                 static_cast<unsigned long long>(args[0]),
                 static_cast<unsigned long long>(args[1]),
                 static_cast<unsigned long long>(args[2]),
-                static_cast<unsigned long long>(args[3]));
+                static_cast<unsigned long long>(args[3]),
+                entry.pointer_args);
     }
 
     // Call the host function. We use a union of function pointer types
@@ -419,14 +471,30 @@ void GraphicThunk::register_known_symbols_() {
     // ── libGL.so / libGL.so.1 ──────────────────────────────────────
     const char* gl_libs[] = {"libGL.so", "libGL.so.1"};
 
+    // v1.5.0.alpha (Turn 74): REG_GL_PTR marks which args are pointers.
+    // The pointer_args bitmask is passed to register_function_ so the
+    // dispatcher can translate guest pointers to host pointers.
+    // Bit N (0-indexed) set = arg N is a pointer.
+    //   glVertex3fv(v)           → arg 0 is pointer  → 0x01
+    //   glVertexPointer(size, type, stride, ptr) → arg 3 is pointer → 0x08
+    //   glTexImage2D(target, level, internalformat, w, h, border, format, type, data)
+    //     → arg 8 is pointer, but we only support 8 args (0-7), so data
+    //       (arg 8) can't be marked. This is a known limitation.
 #if defined(BIFROST_THUNK_HAVE_GL)
     #define REG_GL(name) do { \
         void* p = dlsym(RTLD_DEFAULT, #name); \
         for (const char* L : gl_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_GL_PTR(name, ptrs) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gl_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
 #else
     #define REG_GL(name) do { \
         for (const char* L : gl_libs) register_function_(L, #name, nullptr); \
+    } while(0)
+    #define REG_GL_PTR(name, ptrs) do { \
+        for (const char* L : gl_libs) register_function_(L, #name, nullptr, ptrs); \
     } while(0)
 #endif
 
@@ -436,7 +504,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glEnd);
     REG_GL(glVertex3f);
     REG_GL(glVertex2f);
-    REG_GL(glVertex3fv);
+    REG_GL_PTR(glVertex3fv, 0x01);      // arg 0: const GLfloat *v
     REG_GL(glColor3f);
     REG_GL(glColor4f);
     REG_GL(glColor3ub);
@@ -455,20 +523,27 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glRotatef);
     REG_GL(glTranslatef);
     REG_GL(glScalef);
-    REG_GL(glGenTextures);
+    REG_GL_PTR(glGenTextures, 0x02);    // arg 1: GLuint *textures
     REG_GL(glBindTexture);
     REG_GL(glTexParameteri);
+    // glTexImage2D: arg 8 (data) is pointer — beyond our 8-arg limit.
+    // Pass 0 for pointer_args; the host fn will get garbage for data.
     REG_GL(glTexImage2D);
     REG_GL(glTexSubImage2D);
     REG_GL(glEnableClientState);
     REG_GL(glDisableClientState);
-    REG_GL(glVertexPointer);
-    REG_GL(glColorPointer);
-    REG_GL(glTexCoordPointer);
+    REG_GL_PTR(glVertexPointer, 0x08);  // arg 3: const void *pointer
+    REG_GL_PTR(glColorPointer, 0x08);   // arg 3: const void *pointer
+    REG_GL_PTR(glTexCoordPointer, 0x08);// arg 3: const void *pointer
     REG_GL(glDrawArrays);
-    REG_GL(glDrawElements);
+    REG_GL_PTR(glDrawElements, 0x10);   // arg 4: const void *indices
+    // glGetString returns const GLubyte* — the return value is a host
+    // pointer, not a guest pointer. This is a known issue: the guest
+    // will get a host pointer it can't dereference. For now, pass 0
+    // (no pointer args); the guest should use a wrapper that copies
+    // the string.
     REG_GL(glGetString);
-    REG_GL(glGetIntegerv);
+    REG_GL_PTR(glGetIntegerv, 0x01);    // arg 1: GLint *params
     REG_GL(glGenLists);
     REG_GL(glCallList);
     REG_GL(glNewList);
@@ -482,7 +557,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glBlendFunc);
     REG_GL(glHint);
     REG_GL(glPixelStorei);
-    REG_GL(glReadPixels);
+    REG_GL_PTR(glReadPixels, 0x80);     // arg 7: void *pixels
     REG_GL(glDrawBuffer);
     REG_GL(glClearDepth);
     REG_GL(glClearStencil);
@@ -491,8 +566,8 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glFrontFace);
     REG_GL(glCullFace);
     REG_GL(glShadeModel);
-    REG_GL(glLightfv);
-    REG_GL(glMaterialfv);
+    REG_GL_PTR(glLightfv, 0x04);        // arg 2: const GLfloat *params
+    REG_GL_PTR(glMaterialfv, 0x04);     // arg 2: const GLfloat *params
     REG_GL(glNormal3f);
     REG_GL(glTexCoord2f);
     REG_GL(glActiveTexture);

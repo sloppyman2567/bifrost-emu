@@ -71,6 +71,9 @@ public:
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 2048;  // 32 KiB page
+    // v1.5.0.alpha (Turn 74): ID base for DisplayThunk symbols.
+    static constexpr uint32_t ID_BASE = 0x2000;
+    static constexpr uint32_t ID_MASK = 0x3000;
 
 private:
     std::unique_ptr<DisplayThunkImpl> impl_;

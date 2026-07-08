@@ -30,10 +30,15 @@ struct AudioThunkImpl {
 // ── AudioThunk lifecycle ───────────────────────────────────────────────
 AudioThunk::AudioThunk() {
     impl_ = std::make_unique<AudioThunkImpl>();
-    impl_->enabled = (getenv("BIFROST_THUNK_AUDIO") != nullptr);
+    // v1.5.0.alpha (Turn 74): audio thunking enabled by default.
+    // Set BIFROST_NO_THUNK_AUDIO=1 to disable.
+    const char* disable = getenv("BIFROST_NO_THUNK_AUDIO");
+    impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
-        fprintf(stderr, "[audio-thunk] audio API thunking enabled "
-                "(EXPERIMENTAL, partial ALSA/PulseAudio/SDL2/OpenAL support)\n");
+        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+            fprintf(stderr, "[audio-thunk] audio API thunking enabled "
+                    "(ALSA/PulseAudio/SDL2/OpenAL → host, with fallback)\n");
+        }
     }
 }
 
@@ -70,7 +75,8 @@ void AudioThunk::register_function_(const std::string& lib,
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     thunk_register(*impl_->mem, impl_->libs_, impl_->id_to_idx_,
                    impl_->trampoline_base, TRAMPOLINE_SIZE, MAX_SYMBOLS,
-                   static_cast<uint16_t>(SYSCALL_NUMBER), trace,
+                   static_cast<uint16_t>(SYSCALL_NUMBER),
+                   AudioThunk::ID_BASE, trace,
                    lib, sym, host_fn);
 }
 
@@ -106,10 +112,15 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    if (symbol_id >= impl_->id_to_idx_.size()) {
+    // v1.5.0.alpha (Turn 74): check ID range to route correctly.
+    if ((symbol_id & AudioThunk::ID_MASK) != AudioThunk::ID_BASE) {
+        return -ENOENT;  // belongs to a different thunk
+    }
+    uint32_t local_id = symbol_id - AudioThunk::ID_BASE;
+    if (local_id >= impl_->id_to_idx_.size()) {
         return -ENOENT;
     }
-    auto [lib_idx, ent_idx] = impl_->id_to_idx_[symbol_id];
+    auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);

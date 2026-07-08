@@ -51,6 +51,12 @@ struct ThunkSymbolEntry {
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
+    // v1.5.0.alpha (Turn 74): bitmask indicating which args (0-7) are
+    // pointers that need guest→host translation. Bit N set = arg N is
+    // a pointer. 0 = no pointer args (all args passed verbatim).
+    // This is populated per-symbol by the registration code using
+    // the POINTER_ARGS macro in register_known_symbols_().
+    uint8_t     pointer_args = 0;
 };
 
 // Write a 16-byte trampoline at the given guest address for the given
@@ -130,25 +136,28 @@ inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
 
 // Register a (lib, sym, host_fn) entry. Allocates a sym_id, writes the
 // trampoline into guest memory, stores the entry. Idempotent.
+// v1.5.0.alpha (Turn 74): added id_base parameter so each thunk type
+// (Graphic/Audio/Display) gets a non-overlapping symbol_id range.
 inline void thunk_register(Memory& mem,
                             std::vector<ThunkLibTable>& libs,
                             std::vector<std::pair<uint32_t, uint32_t>>& id_to_idx,
                             uint64_t trampoline_base, uint64_t trampoline_size,
                             uint64_t max_symbols, uint16_t syscall_number,
-                            bool trace,
+                            uint32_t id_base, bool trace,
                             const std::string& lib,
                             const std::string& sym, void* host_fn) {
     ThunkLibTable* lt = find_or_create_lib(libs, lib);
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;  // idempotent
     }
-    uint32_t sym_id = static_cast<uint32_t>(id_to_idx.size());
-    if (sym_id >= max_symbols) {
+    uint32_t local_id = static_cast<uint32_t>(id_to_idx.size());
+    if (local_id >= max_symbols) {
         fprintf(stderr, "[thunk] register: symbol table full (%zu)\n",
                 id_to_idx.size());
         return;
     }
-    uint64_t addr = trampoline_base + sym_id * trampoline_size;
+    uint32_t sym_id = id_base + local_id;
+    uint64_t addr = trampoline_base + local_id * trampoline_size;
     write_thunk_trampoline(mem, addr, sym_id, syscall_number);
     lt->entries.push_back({sym, host_fn, addr, sym_id});
     id_to_idx.push_back({
