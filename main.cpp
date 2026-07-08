@@ -69,6 +69,7 @@ static void print_banner() {
         "    --raw-tty       force raw TTY mode (per-char input, no echo)\n"
         "    --no-jit        use interpreter only (JIT is on by default)\n"
         "    --jit           enable frostJIT (default; for compatibility)\n"
+        "    --rootfs PATH   set rootfs for dynamic linking (BIFROST_ROOT)\n"
         "    -V, --version   show version and exit\n"
         "    -h, --help      show this message\n"
         "\n"
@@ -218,6 +219,18 @@ int main(int argc, char** argv) {
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--config")                { arg_i += 2; continue; }  // already handled
         if (a == "--print-config")          { arg_i++; continue; }
+        // NEW (Turn 74): --rootfs PATH sets BIFROST_ROOT for the guest.
+        // Equivalent to `BIFROST_ROOT=PATH bifrost-emu ...` but more
+        // ergonomic and works even when the env var isn't inherited.
+        if (a == "--rootfs") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --rootfs requires a PATH argument\n");
+                return 2;
+            }
+            setenv("BIFROST_ROOT", argv[arg_i + 1], 1);
+            arg_i += 2;
+            continue;
+        }
         // --jit-threshold N: use the interpreter for the first N
         // instructions, then switch to JIT. Useful for short programs
         // where JIT compilation overhead exceeds the runtime. Typical

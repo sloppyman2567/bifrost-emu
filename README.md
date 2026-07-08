@@ -94,10 +94,21 @@ set up a rootfs:
 # 2. Create the rootfs (copies libs, creates /etc, /system, /data, etc.)
 ./scripts/setup-rootfs.sh
 
-# 3. Run with BIFROST_ROOT pointing to the rootfs
+# 3. (Optional) Fetch common real-world shared libraries
+./scripts/fetch-realworld-libs.sh   # libselinux, libpcre2, libssl, etc.
+
+# 4. Run with --rootfs (or BIFROST_ROOT env var)
+./bifrost-emu --rootfs $PWD/rootfs my_dynamic_app.elf
+# or:
 export BIFROST_ROOT=$PWD/rootfs
 ./bifrost-emu my_dynamic_app.elf
 ```
+
+Both **glibc** and **musl** dynamically-linked binaries are supported.
+glibc dynamic printf/puts/fprintf/fputs work fully (integers, strings,
+hex, padded formats). Float formatting (`%f`, `%e`, `%g`) has a
+remaining precision bug in glibc's SIMD `__printf_fp_l`; musl's printf
+works perfectly for all format specifiers.
 
 The rootfs includes:
 - `/lib/libc.so.6`, `/lib/ld-linux-aarch64.so.1` (glibc)
@@ -306,9 +317,12 @@ The JIT uses:
 - **AArch64 only** — no AArch32 (32-bit ARM) support
 - **x86_64 host only** — no ARM host support (use native execution)
 - **No vDSO** — some clock_gettime paths are emulated, not native
-- **glibc printf SIMD path** — glibc's SIMD-optimized printf may produce
-  garbled output (musl printf works fully); use write()/writev() for
-  reliable output with glibc dynamic binaries
+- **glibc float printf** — glibc's `%f`/`%e`/`%g` formatting has a
+  precision bug (one fewer digit than requested). Integer/string/hex
+  formats work correctly. musl's printf works perfectly for all formats.
+- **glibc dynamic pthreads** — glibc's NPTL thread allocation hits an
+  assertion in allocatestack.c. musl dynamic pthreads work. Static
+  pthread tests (musl) pass.
 
 ## Documentation
 
