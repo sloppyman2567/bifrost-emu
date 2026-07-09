@@ -107,7 +107,10 @@ export BIFROST_ROOT=$PWD/rootfs
 Both **glibc** and **musl** dynamically-linked binaries are supported.
 glibc dynamic printf/puts/fprintf/fputs work fully (integers, strings,
 hex, padded formats, float formatting). musl's printf works perfectly
-for all format specifiers. **glibc dynamic pthreads work end-to-end**
+for all format specifiers. **glibc 2.40+ (Arm GNU 14.2.Rel1) is
+supported** — the dynamic linker now processes DT_RELR (compact
+relative relocations) which glibc 2.40 ships by default. **glibc
+dynamic pthreads work end-to-end**
 (`pthread_create`/`pthread_join`, mutexes, condition variables,
 `__thread` TLS) — the emulator initializes NPTL's stack-cache list
 heads, routes `_dl_allocate_tls` through a native syscall, reports

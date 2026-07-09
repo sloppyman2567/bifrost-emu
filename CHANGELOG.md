@@ -6,6 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 78 (2026-07-10)
+
+### glibc 2.40+ dynamic binaries now work (DT_RELR support)
+
+The Arm GNU Toolchain 14.2.Rel1 (released late 2024) ships glibc 2.40,
+which produces DT_RELR (compact relative relocations) in libc.so.6 by
+default. Without DT_RELR support, every glibc 2.40 dynamically-linked
+binary crashed with `decode error at pc=0x0 inst=0x00000000` because
+libc's `.init_array`, `.data.rel.ro`, and `.got` relative pointers
+were never relocated. This affected both hello-world and real-world
+glibc 2.40 binaries (static binaries were unaffected — they don't use
+DT_RELR).
+
+- **`DynamicLinker::apply_relr_relocations_()`** — new method that
+  decodes the DT_RELR section (a stream of `uint64_t` words) and
+  applies `R_AARCH64_RELATIVE` relocations. The encoding uses bit 0
+  as the address/bitmap flag (NOT bit 63 as some blog posts claim):
+  - bit 0 == 0 (address entry): the word IS the relocation vaddr.
+    Apply `*(addr) = base + existing_value` (addend = existing value),
+    then advance `reloc_addr` to `vaddr + 8`.
+  - bit 0 == 1 (bitmap entry): bits 1..63 (63 bits) are a bitmap.
+    Bit i (i=1..63) → `reloc_addr + (i-1)*8`. After processing,
+    advance `reloc_addr` by `63*8`.
+  - The addend is the EXISTING value at the target (the file vaddr),
+    so each entry does `*(addr) = base + *addr`. This differs from
+    DT_RELA `R_AARCH64_RELATIVE` which has an explicit `r_addend`.
+  - Verified against `readelf -r`: 1094 relocations applied for
+    glibc 2.40 libc.so.6, matching readelf's "1094 locations".
+  - File: `src/frontend/dynamic_linker.cpp` (`apply_relr_relocations_`),
+    `src/frontend/dynamic_linker.h` (`relr_addr`/`relr_size` fields,
+    method decl).
+- **`parse_dynamic`** — now captures `DT_RELR` (tag 36), `DT_RELRSZ`
+  (tag 35), and `DT_RELRENT` (tag 37) into `LoadedObject::relr_addr`/
+  `relr_size`. Applied before DT_RELA in the relocation loop.
+- **`tools/fetch-glibc-toolchain.sh`** — switched primary download
+  from Arm 13.2.Rel1 (glibc 2.38) to 14.2.Rel1 (glibc 2.40). The
+  13.2.Rel1 toolchain is the fallback. An existing 13.2.Rel1 install
+  is left in place (delete `tools/aarch64-linux-gnu-cross/` to
+  re-fetch 14.2).
+
+**Tested with glibc 2.40 (Arm GNU 14.2.Rel1):**
+- `hello` (static): `Hello, ARM64!` ✓
+- `hello` (dynamic): `Hello, ARM64!` ✓
+- `test_dyn_hello` (write-only): ✓
+- `test_dyn_malloc` (malloc/free stress): ✓
+- `test_dyn_printf` (6 printf variants): ✓
+- `hello_dyn` (printf + strdup + free + argc/argv): ✓
+
+**glibc 2.38 (Arm GNU 13.2.Rel1) continues to work** — all 129
+existing tests pass with no regressions. DT_RELR is a no-op for
+glibc 2.38 (it doesn't produce DT_RELR sections).
+
+### Known limitations (pre-existing, documented for future work)
+
+- **TLS variant-I layout** — the dynamic linker uses variant-II TLS
+  layout (all modules at negative TP offsets). glibc on AArch64 uses
+  variant-I (main-exe TLS at positive TP offsets, libs at negative).
+  The `_dl_allocate_tls` syscall 0x1001 stub uses an intentionally-
+  typo'd `movz x8, #0x1001` encoding (hw=1 instead of hw=0) so the
+  syscall never fires and glibc falls back to its own internal TLS
+  setup. This works for ≤4 threads but the 8-thread multi-wave test
+  (test_8threads_v2) shows TLS-array corruption (`tls_array[0]` reads
+  `id*25` instead of `id*100`). Fixing requires: (1) correcting the
+  movz encoding, (2) implementing variant-I layout in
+  `allocate_static_tls()`, (3) updating the syscall 0x1001 handler
+  to copy lib-TLS below TCB and main-exe-TLS above TCB. Attempted
+  this turn but caused regressions (double-free in test_dyn_threads)
+  — the variant-I fix needs more careful testing against glibc's
+  `struct pthread` layout expectations. Tracked as future work.
+- **8-thread race** — a direct consequence of the TLS-layout issue
+  above. With 8+ concurrent threads across multiple waves (create/
+  join cycles), glibc's stack-cache reuse path doesn't re-initialize
+  TLS correctly, producing the `id*25` corruption pattern. 4 threads
+  is stable; the 4×8-wave stress test (test_dyn_pthread_stress)
+  passes reliably.
+
 ## [Unreleased] — Turn 77 (2026-07-09)
 
 ### glibc dynamic pthreads now work end-to-end

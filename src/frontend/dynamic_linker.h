@@ -86,6 +86,14 @@ struct LoadedObject {
     uint64_t    symtab_count = 0; // number of symbols in .dynsym
     uint64_t    jmprel_addr = 0;  // DT_JMPREL (absolute)
     uint64_t    jmprel_size = 0;  // DT_PLTRELSZ
+    // DT_RELR (compact relative relocations). glibc 2.36+ / binutils 2.38+
+    // produce these by default. Without processing them, libc's
+    // .init_array / .data.rel.ro / .got relative pointers stay at their
+    // (unrelocated) file vaddrs, so init_array entries point to low
+    // memory and the first DT_INIT_ARRAY call crashes with
+    // "decode error at pc=0x... inst=0x00000000".
+    uint64_t    relr_addr  = 0;   // DT_RELR (absolute)
+    uint64_t    relr_size  = 0;   // DT_RELRSZ (bytes)
     // BUGFIX (Turn 59): DT_INIT_ARRAY/DT_FINI_ARRAY/DT_INIT/DT_FINI addresses
     // and sizes. The linker invokes these after relocations are applied
     // (C++ static constructors, glibc hooks, etc.).
@@ -405,6 +413,16 @@ private:
     // Apply all pending COPY relocations. Called after all objects'
     // RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are done.
     void apply_pending_copies_();
+
+    // Turn 78: apply DT_RELR (compact relative relocations). glibc 2.36+
+    // produces these by default; without them, libc's .init_array / .got /
+    // .data.rel.ro relative pointers never get fixed up. RELR is a stream
+    // of uint64_t words encoding R_AARCH64_RELATIVE relocations in a
+    // bitmap format (1 bit per 8-byte slot, with periodic 2-word entries
+    // that reset the relocation address for sparse regions). See:
+    // https://maskray.me/blog/2021-10-31-relative-relocations-and-relr
+    void apply_relr_relocations_(const LoadedObject& obj,
+                                 uint64_t relr_addr, uint64_t relr_size);
 
     // Patch the resolved _rtld_global_ro to set dl_pagesize,
     // dl_tls_static_size, and dl_tls_static_align. Called after all

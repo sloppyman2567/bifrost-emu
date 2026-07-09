@@ -68,6 +68,28 @@ constexpr int DT_FINI_ARRAYSZ_  = 28;
 constexpr int DT_RUNPATH_   = 29;
 constexpr int DT_FLAGS_     = 30;
 
+// DT_RELR / DT_RELRSZ / DT_RELRENT — compact relative relocations.
+// Added in glibc 2.36+ and produced by default with binutils 2.38+ when
+// linking against glibc 2.36+ (so glibc 2.40 ships .relr.dyn in libc.so.6).
+// Without DT_RELR support, the relative relocations that fix up libc's
+// internal pointers (.init_array, .data.rel.ro, .got) never fire, so
+// init_array entries point to vaddr 0 → "decode error at pc=0x0
+// inst=0x00000000" on the first constructor call.
+//
+// Encoding (per glibc's elf_machine_relr in dl-machine.h):
+//   Each entry is uint64_t. Bit 0 is the flag.
+//   - bit 0 == 0 (address entry): the entry value IS the relocation vaddr.
+//     Apply R_AARCH64_RELATIVE there, then advance reloc_addr to vaddr + 8.
+//   - bit 0 == 1 (bitmap entry): bits 1..63 (63 bits) are a bitmap.
+//     Bit i (i=1..63) → reloc_addr + (i-1)*8. After processing,
+//     advance reloc_addr by 63*8 (the bitmap covers 63 slots, and the
+//     address entry's slot was already advanced past by +8).
+//   The addend is the existing value at *target (the file vaddr).
+//   R_AARCH64_RELATIVE: *(addr) = base + addend.
+constexpr int DT_RELR_      = 36;
+constexpr int DT_RELRSZ_    = 35;
+constexpr int DT_RELRENT_   = 37;
+
 // BUGFIX (Turn 60, C5): symbol versioning tags.
 constexpr int DT_VERSYM_    = 0x6FFFFFF0;
 constexpr int DT_VERDEF_    = 0x6FFFFFFC;
@@ -293,6 +315,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
             // jumped to PLT0 → jumped to GOT[2] (resolver) = 0 → crash.
             uint64_t rela_addr = 0, rela_size = 0;
             uint64_t jmprel_addr = 0, jmprel_size = 0;
+            uint64_t relr_addr = 0, relr_size = 0;
             Elf64_Dyn dyn;
             for (uint64_t p = obj.dyn_addr; ; p += sizeof(dyn)) {
                 mem_.read(p, &dyn, sizeof(dyn));
@@ -301,17 +324,33 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                 else if (dyn.d_tag == DT_RELASZ_)    rela_size = dyn.d_val;
                 else if (dyn.d_tag == DT_JMPREL_)    jmprel_addr = obj.base_addr + dyn.d_val;
                 else if (dyn.d_tag == DT_PLTRELSZ_)  jmprel_size = dyn.d_val;
+                else if (dyn.d_tag == DT_RELR_)      relr_addr = obj.base_addr + dyn.d_val;
+                else if (dyn.d_tag == DT_RELRSZ_)    relr_size = dyn.d_val;
             }
             if (getenv("BIFROST_DYNLINK_TRACE")) {
                 fprintf(stderr, "[dynlink] obj '%s' base=0x%llx: "
-                        "RELA=0x%llx/%llu JMPREL=0x%llx/%llu\n",
+                        "RELA=0x%llx/%llu JMPREL=0x%llx/%llu RELR=0x%llx/%llu\n",
                         obj.name.c_str(),
                         static_cast<unsigned long long>(obj.base_addr),
                         static_cast<unsigned long long>(rela_addr),
                         static_cast<unsigned long long>(rela_size),
                         static_cast<unsigned long long>(jmprel_addr),
-                        static_cast<unsigned long long>(jmprel_size));
+                        static_cast<unsigned long long>(jmprel_size),
+                        static_cast<unsigned long long>(relr_addr),
+                        static_cast<unsigned long long>(relr_size));
             }
+
+            // ── DT_RELR (compact relative relocations) ───────────────
+            // Apply BEFORE DT_RELA: DT_RELR only encodes R_AARCH64_RELATIVE
+            // (no symbol resolution), so order doesn't strictly matter,
+            // but applying first makes the trace easier to read and avoids
+            // any chance of a later GLOB_DAT/COPY reading a pre-RELR value.
+            // Each successful RELR writes `*(addr) = base + 0` (addend is
+            // implicit 0 in the RELR format).
+            if (relr_addr && relr_size) {
+                apply_relr_relocations_(obj, relr_addr, relr_size);
+            }
+
             // DT_RELA entries are absolute addresses already (relocated
             // by R_AARCH64_RELATIVE during the main binary's load).
             // For non-PIE main binaries, d_val is a vaddr; for PIE/libs,
@@ -983,6 +1022,115 @@ void DynamicLinker::apply_tls_mirror_(const LoadedObject& obj,
     }
 }
 
+// ── apply_relr_relocations_ (Turn 78) ──────────────────────────────────
+// Apply DT_RELR — compact relative relocations. Each bit in the bitmap
+// represents one 8-byte relocation slot. Two encoding forms:
+//
+//   1. "Bitmap" form (bit 63 set): the low 63 bits are a bitmap where
+//      bit i means "apply R_AARCH64_RELATIVE at addr + i*8". After
+//      processing, advance addr by 63*8 = 504 bytes.
+//
+//   2. "Address+bitmap" form (bit 63 clear): the current word is the
+//      new relocation address (raw vaddr, NOT shifted by base). The
+//      NEXT word in the stream is a 63-bit bitmap (bit 63 is reserved
+//      and ignored) where bit i means "apply at addr + i*8". After
+//      processing, advance addr = (new addr) + 63*8.
+//
+// The first word of the section is always an address+bitmap form
+// (bit 63 is clear because vaddrs in shared libs are < 2^63). After
+// that, the encoder chooses whichever form is more compact: bitmaps
+// for dense runs of relocations, address+bitmap for sparse regions
+// (skipping over zero runs without emitting padding words).
+//
+// Each RELR relocation is equivalent to:
+//     R_AARCH64_RELATIVE  *(addr) = base + 0
+//
+// This must be called BEFORE apply_tls_mirror_ would otherwise fire
+// for RELR targets — RELR has no symbol resolution, so there's no
+// overlap with GLOB_DAT/COPY. But RELR can target .tdata, so we
+// mirror to the TLS block copy here too.
+void DynamicLinker::apply_relr_relocations_(const LoadedObject& obj,
+                                             uint64_t relr_addr,
+                                             uint64_t relr_size) {
+    if (relr_size == 0 || relr_addr == 0) return;
+    // Read the entire RELR section up front. It's typically small
+    // (libc.so.6 glibc 2.40: 272 bytes = 34 words).
+    std::vector<uint8_t> buf(relr_size);
+    try {
+        mem_.read(relr_addr, buf.data(), relr_size);
+    } catch (...) {
+        return;  // unreadable — skip
+    }
+    // ── RELR encoding (per glibc's elf_machine_relr in dl-machine.h) ──
+    // Each entry is uint64_t. The LOW bit (bit 0) is the flag:
+    //
+    //   bit 0 == 0 (address entry):
+    //     The entry value IS the relocation address (vaddr). Apply
+    //     R_AARCH64_RELATIVE there, then advance the relocation pointer
+    //     to addr + 8 (i.e., the next 8-byte slot).
+    //
+    //   bit 0 == 1 (bitmap entry):
+    //     Bits 1..63 (63 bits) are a bitmap. Bit i (for i=1..63) means
+    //     "apply R_AARCH64_RELATIVE at reloc_addr + (i-1)*8". After
+    //     processing, advance reloc_addr by 62*8 (= 63 slots minus 1,
+    //     because the address entry's slot was already advanced past).
+    //
+    // NOTE: this is DIFFERENT from what some blog posts describe (they
+    // claim bit 63 is the flag). The actual glibc/binutils implementation
+    // uses bit 0. Without the correct flag bit, the decoder treats valid
+    // bitmap entries as addresses (or vice versa), producing wrong
+    // relocation targets and crashing on the first init_array call.
+    //
+    // Each R_AARCH64_RELATIVE: *(addr) += base. The addend is the
+    // existing value at *addr (the file vaddr), so we read it, add base,
+    // and write back. (RELR doesn't have an explicit r_addend field.)
+    const size_t n_words = relr_size / sizeof(uint64_t);
+    size_t applied = 0;
+    uint64_t reloc_addr = 0;  // current relocation address (raw vaddr)
+    auto apply_one = [&](uint64_t vaddr) {
+        uint64_t target = obj.base_addr + vaddr;
+        uint64_t addend = 0;
+        try {
+            mem_.read(target, &addend, sizeof(addend));
+        } catch (...) {
+            addend = 0;
+        }
+        uint64_t value = obj.base_addr + addend;
+        mem_.store<uint64_t>(target, value);
+        apply_tls_mirror_(obj, target, value);
+        applied++;
+    };
+    for (size_t i = 0; i < n_words; i++) {
+        uint64_t word;
+        memcpy(&word, buf.data() + i * sizeof(uint64_t), sizeof(uint64_t));
+        if ((word & 1) == 0) {
+            // Address entry: word IS the vaddr (bit 0 is 0, so word = vaddr).
+            reloc_addr = word;
+            apply_one(reloc_addr);
+            reloc_addr += 8;  // advance past this slot
+        } else {
+            // Bitmap entry: bits 1..63 (63 bits).
+            // Bit i (i=1..63) → reloc_addr + (i-1)*8.
+            for (int i = 1; i <= 63; i++) {
+                if (word & (1ULL << i)) {
+                    apply_one(reloc_addr + (i - 1) * 8);
+                }
+            }
+            // Advance by 63*8: the bitmap covers 63 slots (bits 1..63),
+            // and the address entry's slot was already advanced past (+8).
+            // So the next bitmap starts 63 slots after the current one.
+            // (NOT 62*8 — that would skip a slot and misalign all
+            // subsequent bitmaps, corrupting stdout->_lock and other
+            // critical pointers.)
+            reloc_addr += 63 * 8;
+        }
+    }
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] RELR obj '%s': %zu relocations applied\n",
+                obj.name.c_str(), applied);
+    }
+}
+
 // ── run_init_arrays_ ───────────────────────────────────────────────────
 // Invoke DT_INIT (legacy _init()) and each entry in DT_INIT_ARRAY for
 // every loaded object, in dependency order (libs first, main last).
@@ -1139,6 +1287,12 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             case DT_STRTAB_:        strtab_vaddr = dyn.d_val; break;
             case DT_JMPREL_:        obj.jmprel_addr = base + dyn.d_val; break;
             case DT_PLTRELSZ_:      obj.jmprel_size = dyn.d_val; break;
+            // Turn 78: DT_RELR (compact relative relocations). glibc 2.36+
+            // produces these by default. Without processing them, libc's
+            // internal pointers (init_array, .data.rel.ro, .got) never
+            // get fixed up → "decode error at pc=0x0" on first init call.
+            case DT_RELR_:          obj.relr_addr = base + dyn.d_val; break;
+            case DT_RELRSZ_:        obj.relr_size = dyn.d_val; break;
             case DT_HASH_:          hash_vaddr = dyn.d_val; break;
             case DT_INIT_:          obj.init_addr = base + dyn.d_val; break;
             case DT_FINI_:          obj.fini_addr = base + dyn.d_val; break;
@@ -1473,12 +1627,10 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // isolation. The correct encoding is now used, BUT exposing the
         // syscall revealed a deeper pre-existing TLS-layout issue: the
         // per-thread TLS block copy (static_tls_size bytes below the TCB)
-        // doesn't match glibc's expected layout, causing heap corruption
-        // with 4+ threads. Until the TLS layout is fixed, we keep the
-        // TYPO encoding (0x20) so _dl_allocate_tls returns -ENOSYS and
-        // glibc uses its own (correct) per-thread TLS setup via the
-        // internal _dl_allocate_tls_storage path. The proper fix
-        // (0x00) is documented above for when the TLS layout is corrected.
+        // doesn't match glibc's expected TLS variant-I layout (main-exe
+        // TLS at POSITIVE TP offsets), causing heap corruption with 4+
+        // threads. The typo encoding is KEPT for now (stable); the correct
+        // encoding and full TLS-layout fix are documented as future work.
         v.push_back(0x28); v.push_back(0x20); v.push_back(0x82); v.push_back(0xD2);
         // svc #0           →  0xD4000001
         v.push_back(0x01); v.push_back(0x00); v.push_back(0x00); v.push_back(0xD4);
