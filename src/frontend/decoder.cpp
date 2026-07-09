@@ -363,8 +363,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
             // We set is_single_struct so the interpreter can dispatch to
             // the single-element path. simd_count stays 1 for single-struct
             // (one register, one element).
-            bool bit12 = (inst >> 12) & 1;
-            if (bit12) {
+            // BUGFIX (Turn 75): the old code used bit[12] alone to distinguish
+            // single-structure from multi-structure. But LD1/ST1 multi (1 reg)
+            // has opcode 0b0111 which has bit[12]=1 — same as single-structure.
+            // The correct check: if bits[11:10]==00, there's no element index,
+            // so it's multi-structure. If bits[11:10]!=00, it's single-structure.
+            // This matches the ARM ARM: multi-structure has no index field,
+            // single-structure encodes the element index in bits[11:10].
+            bool is_single_struct = ((inst >> 12) & 1) && (((inst >> 10) & 3) != 0);
+            if (is_single_struct) {
                 // Single-structure LD1/ST1.
                 // The element index and size are encoded across bits[14:10].
                 // Per the ARM ARM (C4.1.66):
@@ -384,6 +391,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 // Register count: 00=1, 01=2, 10=3, 11=4 regs.
                 d.is_single_struct = false;
                 d.simd_count = ((inst >> 13) & 3) + 1;
+                d.Q = (inst >> 30) & 1;  // BUGFIX: Q was missing for multi-struct!
             }
             d.cls = d.is_load ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;
             return true;
