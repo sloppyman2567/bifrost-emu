@@ -355,6 +355,7 @@ DYNAMIC_TESTS=(
     # that make glibc dynamic pthread_create work end-to-end.
     "test_dyn_pthread_min|ctest_real/test_dyn_pthread_min.elf||10|joined, counter=1"
     "test_dyn_threads|ctest_real/test_dyn_threads.elf||20|test_dyn_threads: ALL PASS"
+    "test_dyn_pthread_stress|ctest_real/test_dyn_pthread_stress.elf||30|test_dyn_pthread_stress: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

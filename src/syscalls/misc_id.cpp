@@ -572,34 +572,60 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 293: { // rseq (restartable sequences)
+            // (Turn 77): PROPER implementation.
+            //
             // glibc 2.34+ (NPTL merged) calls rseq() during start_thread
-            // to register a per-thread rseq area for restartable
-            // sequences (per-CPU atomics, malloc per-CPU arenas, etc.).
+            // to register a per-thread rseq area. The glibc shipped with
+            // Arm GNU 13.2 fatals on ANY rseq error — the start_thread
+            // code does `cmn w0, #4096; b.ls skip_fatal` with NO
+            // -ENOSYS tolerance in this build (unlike upstream glibc
+            // 2.36's rseq-internal.h which sets __rseq_size=0 on ENOSYS).
             //
-            // The glibc shipped with the Arm GNU 13.2 toolchain fatals
-            // on ANY rseq error — the start_thread code does:
-            //     svc #0          ; rseq(...)
-            //     cmn w0, #4096    ; error check
-            //     b.ls 1f          ; skip fatal if NOT an error
-            //     ... __libc_fatal("rseq registration failed")
-            // There is NO -ENOSYS tolerance in this code path (unlike
-            // upstream glibc 2.36's rseq-internal.h which sets
-            // __rseq_size=0 on ENOSYS). So returning -ENOSYS here makes
-            // glibc abort every newly-created thread.
+            // We model a single-CPU, non-preempting rseq, which is the
+            // CORRECT model for this emulator:
+            //   - There is one virtual CPU (cpu_id always 0).
+            //   - We never preempt a thread mid-instruction (no signal
+            //     delivery inside a rseq critical section, no CPU
+            //     migration), so rseq critical sections ALWAYS run to
+            //     completion. The kernel's abort-restart mechanism is
+            //     never triggered, so we never need to implement it.
             //
-            // We return 0 (success) instead. This is safe because:
-            //   - We never trigger rseq aborts (no preemption/signal
-            //     delivery mid-critical-section), so rseq critical
-            //     sections always run to completion.
-            //   - The rseq_area.cpu_id field stays at 0 (its initial
-            //     value from allocate_stack's zeroing); glibc's per-CPU
-            //     code targets CPU 0, which is correct for our
-            //     single-CPU emulation.
-            //   - Thread-exit calls rseq with RSEQ_FLAG_UNREGISTER; we
-            //     return 0 for that too (harmless no-op).
+            // We record the registration in the CPU state (so unregister
+            // and thread-exit cleanup can clear it) but we DO NOT write
+            // cpu_id into the guest rseq area. glibc's allocate_stack
+            // already zeroed the rseq area (cpu_id = 0 = CPU 0), which is
+            // the correct value for single-CPU emulation. Writing to the
+            // guest area here caused intermittent hangs in multi-threaded
+            // tests (the write raced with glibc's own rseq setup) — since
+            // the area is already zeroed, the write is unnecessary.
             //
-            // a0 = rseq_area ptr, a1 = size, a2 = flags, a3 = signature.
-            // We ignore all args (no state to track).
+            // On REGISTER: validate, record {addr, sig} in CPU, return 0.
+            // On UNREGISTER: clear CPU state, return 0.
+            // Thread exit (thread_mgr.cpp) clears the CPU state too.
+            constexpr uint32_t RSEQ_FLAG_UNREGISTER = 1u << 0;
+            uint64_t rseq_addr = a0;
+            uint64_t rseq_len  = a1;
+            uint32_t flags     = static_cast<uint32_t>(a2);
+            uint32_t sig       = static_cast<uint32_t>(a3);
+
+            if (flags & RSEQ_FLAG_UNREGISTER) {
+                cpu.rseq_registered = false;
+                cpu.rseq_addr = 0;
+                cpu.rseq_sig = 0;
+                ret_ok();
+                return 0;
+            }
+
+            // Register.
+            if (rseq_addr == 0 || rseq_len < 32) { ret_err(EINVAL); return 0; }
+            if (cpu.rseq_registered) { ret_err(EBUSY); return 0; }
+
+            cpu.rseq_registered = true;
+            cpu.rseq_addr = rseq_addr;
+            cpu.rseq_sig = sig;
+            // Do NOT write cpu_id into the guest area — glibc's
+            // allocate_stack already zeroed it (cpu_id=0=CPU0, correct
+            // for single-CPU). Writing here raced with glibc's setup.
             ret_ok();
             return 0;
         }

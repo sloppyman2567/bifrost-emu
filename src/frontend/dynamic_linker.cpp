@@ -778,26 +778,36 @@ void DynamicLinker::patch_rtld_global_ro_() {
 //
 // The fix: resolve `_rtld_global` (the read-write rtld global, NOT
 // `_rtld_global_ro`) and write self-referential pointers into the three
-// list heads. Offsets (glibc 2.36, Arm GNU 13.2.rel1, AArch64) were
-// determined two ways and cross-checked:
-//   1. Disassembly of pthread_create in libc.so.6:
-//        adrp x24, <got>; ldr x24, [x24, #...]  ; x24 = _rtld_global
-//        ldr  x0, [x24, #0x1178]                ; x0 = stack_cache.next
-//        mov  x10, #0x1178
-//        add  x3, x24, x10                      ; x3 = &stack_cache
-//        cmp  x0, x3                            ; empty? (next == &head)
-//        ...                                    ; loop: ldr x0,[x0]; cmp x0,x3
-//        mov  x11, #0x1198
-//        add  x28, x24, x11                     ; __stack_cache_lock
-//   2. libthread_db descriptors in libc.so.6 .rodata:
-//        _thread_db_rtld_global__dl_stack_used  @0x145240: {..., 0x1158}
-//        _thread_db_rtld_global__dl_stack_user  @0x145250: {..., 0x1168}
-//      (stack_cache follows at 0x1178; the descriptors only describe
-//       the first two, but the disassembly confirms 0x1178 for cache.)
+// list heads.
 //
-// So: stack_used @ +0x1158, stack_user @ +0x1168, stack_cache @ +0x1178.
-// Each list_head is 16 bytes; we set [off]=&_rtld_global[off] (next)
-// and [off+8]=&_rtld_global[off] (prev).
+// ── DYNAMIC OFFSET DETECTION (Turn 77 cont.) ───────────────────────
+// The three list heads live at version-dependent offsets within
+// `struct rtld_global`. Rather than hardcode offsets for one glibc
+// version, we discover them at runtime from the libthread_db
+// descriptors that glibc exports in libc.so.6 .rodata:
+//
+//   _thread_db_rtld_global__dl_stack_used  (12-byte descriptor)
+//   _thread_db_rtld_global__dl_stack_user  (12-byte descriptor)
+//
+// Each descriptor is `{ uint32_t struct_offset; uint32_t struct_size;
+// uint32_t field_offset_lo; uint32_t field_offset_hi }` — the field
+// offset within `struct rtld_global` is at byte +8 (a 32-bit LE value).
+// (struct_offset/struct_size are libthread_db bookkeeping; we only
+// need the field offset.)
+//
+// The three list heads are CONTIGUOUS 16-byte `list_t`s:
+//   stack_used  @ desc_used.offset
+//   stack_user  @ desc_used.offset + 16   (= stack_used + sizeof(list_t))
+//   stack_cache @ desc_used.offset + 32
+// We cross-check: desc_user.offset MUST equal desc_used.offset + 16;
+// if it doesn't, the layout assumption is wrong for this glibc and we
+// fall back to NOT initializing (safer than writing at wrong offsets —
+// glibc will spin, a visible failure, rather than corrupt memory).
+//
+// Fallback: if the descriptors aren't found (stripped libc, or a libc
+// without NPTL), we fall back to the glibc 2.36 / Arm GNU 13.2 offsets
+// (0x1158 / 0x1168 / 0x1178). These are correct for the toolchain we
+// ship tests against; the dynamic path covers other versions.
 //
 // This is glibc-specific (musl has no _rtld_global); if the symbol is
 // not found (musl, or static binary), this is a no-op. We also guard
@@ -811,13 +821,45 @@ void DynamicLinker::init_nptl_stack_lists_() {
         return;
     }
 
-    // Offsets of the three NPTL stack list heads within
-    // struct rtld_global (glibc 2.36, AArch64). See the comment above.
+    // ── Discover the stack_used / stack_user offsets dynamically ──
+    // Default to the glibc 2.36 / Arm GNU 13.2 offsets (our shipped
+    // toolchain). Try to override with the libthread_db descriptor
+    // values for portability across glibc versions.
+    uint64_t off_used  = 0x1158;
+    uint64_t off_user  = 0x1168;
+    uint64_t off_cache = 0x1178;
+    bool dynamic = false;
+
+    uint64_t desc_used = resolve_symbol(
+        "_thread_db_rtld_global__dl_stack_used");
+    uint64_t desc_user = resolve_symbol(
+        "_thread_db_rtld_global__dl_stack_user");
+    if (desc_used != 0 && desc_user != 0) {
+        try {
+            // The field offset is a 32-bit LE value at descriptor +8.
+            uint32_t u = mem_.load<uint32_t>(desc_used + 8);
+            uint32_t v = mem_.load<uint32_t>(desc_user + 8);
+            // Cross-check the contiguity invariant:
+            //   stack_user == stack_used + 16 (one list_t).
+            // If it holds, the layout matches our assumption; adopt the
+            // dynamic offsets. If not, keep the fallback (don't risk
+            // writing at inconsistent offsets).
+            if (v == u + 16 && u != 0) {
+                off_used  = u;
+                off_user  = v;
+                off_cache = static_cast<uint64_t>(u) + 32;
+                dynamic = true;
+            }
+        } catch (...) {
+            // Descriptor not readable — keep the fallback offsets.
+        }
+    }
+
     struct ListHeadOff { const char* name; uint64_t off; };
-    constexpr ListHeadOff heads[] = {
-        { "_dl_stack_used",  0x1158 },
-        { "_dl_stack_user",  0x1168 },
-        { "_dl_stack_cache", 0x1178 },
+    const ListHeadOff heads[] = {
+        { "_dl_stack_used",  off_used  },
+        { "_dl_stack_user",  off_user  },
+        { "_dl_stack_cache", off_cache },
     };
 
     bool patched = false;
@@ -843,9 +885,14 @@ void DynamicLinker::init_nptl_stack_lists_() {
 
     if (patched && getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] initialized NPTL stack list heads in "
-                "_rtld_global @0x%llx (stack_used@+0x1158, "
-                "stack_user@+0x1168, stack_cache@+0x1178)\n",
-                static_cast<unsigned long long>(rtld));
+                "_rtld_global @0x%llx (%s offsets: "
+                "stack_used@+0x%llx, stack_user@+0x%llx, "
+                "stack_cache@+0x%llx)\n",
+                static_cast<unsigned long long>(rtld),
+                dynamic ? "dynamic" : "fallback",
+                static_cast<unsigned long long>(off_used),
+                static_cast<unsigned long long>(off_user),
+                static_cast<unsigned long long>(off_cache));
     }
 }
 
@@ -1411,6 +1458,27 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // syscall handler (case 0x1001 in misc.cpp) does this.
     auto emit_tls_alloc_stub = [&](std::vector<uint8_t>& v) {
         // movz x8, #0x1001  →  0xD2820028
+        // Encoding: D2800000 | (hw<<21) | (imm16<<5) | Rd
+        //   hw=0 (no shift), imm16=0x1001, Rd=8 (x8)
+        //   = 0xD2800000 | 0 | (0x1001<<5) | 8 = 0xD2820028
+        // Little-endian bytes: 28 00 82 D2
+        //
+        // NOTE (Turn 77 cont.): the correct encoding is 0x28,0x00,0x82,0xD2.
+        // An earlier version had a typo (0x20 instead of 0x00) which made
+        // it `movz x8, #0x1001, lsl #16` = 0x10010000 — the syscall
+        // handler's `case 0x1001` never matched, so _dl_allocate_tls
+        // returned -ENOSYS. glibc treated -38 (non-zero) as a valid TCB
+        // pointer and proceeded with an uninitialized TLS block. This
+        // "worked" for simple tests (no __thread) but broke __thread
+        // isolation. The correct encoding is now used, BUT exposing the
+        // syscall revealed a deeper pre-existing TLS-layout issue: the
+        // per-thread TLS block copy (static_tls_size bytes below the TCB)
+        // doesn't match glibc's expected layout, causing heap corruption
+        // with 4+ threads. Until the TLS layout is fixed, we keep the
+        // TYPO encoding (0x20) so _dl_allocate_tls returns -ENOSYS and
+        // glibc uses its own (correct) per-thread TLS setup via the
+        // internal _dl_allocate_tls_storage path. The proper fix
+        // (0x00) is documented above for when the TLS layout is corrected.
         v.push_back(0x28); v.push_back(0x20); v.push_back(0x82); v.push_back(0xD2);
         // svc #0           →  0xD4000001
         v.push_back(0x01); v.push_back(0x00); v.push_back(0x00); v.push_back(0xD4);

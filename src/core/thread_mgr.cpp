@@ -188,6 +188,15 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // any waiters. We keep the field in CPU state only for debugging
     // / introspection; no second write is needed here.
 
+    // (Turn 77) rseq cleanup: clear this thread's rseq registration
+    // state. We do NOT write cpu_id=-1 into the guest rseq area (the
+    // area may already be unmapped if the thread's stack was torn down,
+    // and the write raced with glibc's own cleanup in multi-threaded
+    // tests causing hangs). Just clear the CPU-side bookkeeping.
+    cpu.rseq_registered = false;
+    cpu.rseq_addr = 0;
+    cpu.rseq_sig = 0;
+
     emu->decrement_alive_threads();
 }
 

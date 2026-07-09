@@ -10,19 +10,19 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default) | 165 | 165 | 0 | With `--test-all` + rootfs set up |
-| frostJIT (default `make check`) | 151 | 121 | 0 | 30 skip (busybox not downloaded) |
-| Interpreter (`./bifrost-emu --no-jit`) | 165 | 165 | 0 | Same conditions as JIT row |
-| `make check-quick` | 146 | 116 | 0 | Skips 5 benchmarks |
+| frostJIT (`./bifrost-emu`, default) | 166 | 166 | 0 | With `--test-all` + rootfs set up |
+| frostJIT (default `make check`) | 151 | 122 | 0 | 30 skip (busybox not downloaded) |
+| Interpreter (`./bifrost-emu --no-jit`) | 166 | 166 | 0 | Same conditions as JIT row |
+| `make check-quick` | 146 | 117 | 0 | Skips 5 benchmarks |
 
-**165 test programs** are defined in `scripts/run_tests.sh` across six
-categories (see table below). Of these, **121 pass by default** with a
+**166 test programs** are defined in `scripts/run_tests.sh` across six
+categories (see table below). Of these, **122 pass by default** with a
 fresh checkout (no `--test-all`, no rootfs): the 30 real-world busybox
 tests are skipped because `busybox-aarch64` is not downloaded, and the
-9 dynamic tests + 7 dynamic-glibc real-world tests are skipped because
+10 dynamic tests + 7 dynamic-glibc real-world tests are skipped because
 no rootfs is set up. Running `./scripts/run_tests.sh --test-all` and
 setting up the rootfs (`./scripts/setup-rootfs.sh`) brings the count to
-165/165.
+166/166.
 
 All 121 default tests pass under frostJIT as of Turn 77 (2026-07-09),
 and all 121 also pass under the interpreter. The C API (`libbifrost.a`
@@ -39,10 +39,10 @@ pass).
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
 | Dynamic | 9 | Dynamically-linked musl + glibc tests (need rootfs) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **165** | |
+| **Total** | **166** | |
 
 Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
-`--interactive` and not counted in the 163.
+`--interactive` and not counted in the 166.
 
 ### Running the tests
 

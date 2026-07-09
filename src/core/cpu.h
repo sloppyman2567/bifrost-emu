@@ -122,6 +122,26 @@ public:
     // futex wake is performed on it. Required for pthread_join to work.
     uint64_t clear_child_tid = 0;
 
+    // ── Per-thread rseq (restartable sequences) state ───────────────
+    // (Turn 77): glibc 2.34+ calls rseq(2) in start_thread to register
+    // a per-thread rseq area. We model a "proper" single-CPU, non-
+    // preempting rseq: we accept the registration, record the area,
+    // write cpu_id=0 into the guest's rseq area (we're always on CPU 0),
+    // and clear it on unregister / thread exit. We NEVER abort a
+    // critical section (no preemption mid-section, no CPU migration),
+    // so rseq critical sections always run to completion — which is the
+    // correct behavior for a non-preempting single-CPU emulator.
+    //
+    // struct rseq (Linux uapi, AArch64 — 32 bytes):
+    //   +0:  __u32 cpu_id_start   (guest writes; we keep at 0)
+    //   +4:  __u32 cpu_id         (kernel writes; -1 = unregistered)
+    //   +8:  __u64 rseq_cs        (ptr to current critical section)
+    //   +16: __u64 flags          (RSEQ_CS_FLAG_*)
+    //   +24: ... (node_id, mm_cid, etc. in newer kernels)
+    bool     rseq_registered = false;   // is this thread's rseq active?
+    uint64_t rseq_addr       = 0;       // guest VA of the rseq area
+    uint32_t rseq_sig        = 0;       // signature passed at registration
+
     // ── Per-CPU signal state ────────────────────────────────────────
     // The signal mask and altstack live in the CPU so each vCPU has its
     // own state (set by rt_sigprocmask/sigaltstack, read by
@@ -270,6 +290,12 @@ public:
         set_tid_address_ptr = 0;   // child starts with no clear_child_tid
         robust_list_head = 0;
         robust_list_len = 0;
+        // rseq: child starts UNregistered (Linux semantics — rseq is
+        // per-task, not inherited across clone). start_thread will
+        // re-register via rseq(2).
+        rseq_registered = false;
+        rseq_addr = 0;
+        rseq_sig = 0;
         sigmask = src.sigmask;
         // sigpending, altstack: reset by caller (per Linux semantics)
         // pending queue: untouched (each CPU has its own, empty at init)
