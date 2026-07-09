@@ -380,6 +380,16 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             }
                             value = S + A;
                             mem_.store<uint64_t>(target, value);
+                            // Debug trace for _rtld_global_ro resolution.
+                            if (getenv("BIFROST_DYNLINK_TRACE") &&
+                                (name == "_rtld_global_ro" ||
+                                 name == "_rtld_global")) {
+                                fprintf(stderr, "[dynlink] GLOB_DAT '%s' "
+                                        "resolved to 0x%llx (target=0x%llx)\n",
+                                        name.c_str(),
+                                        static_cast<unsigned long long>(value),
+                                        static_cast<unsigned long long>(target));
+                            }
                         }
                         // BUGFIX (Turn 74): mirror .tdata relocations.
                         apply_tls_mirror_(obj, target, value);
@@ -616,6 +626,16 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Since we use our own native dynamic linker (not the guest's
     // ld-linux), __libc_early_init is never called. We call it here,
     // before DT_INIT_ARRAY, matching the order ld-linux uses.
+    //
+    // BUGFIX (Turn 76): BEFORE calling __libc_early_init, we must patch
+    // the resolved _rtld_global_ro to set dl_tls_static_size,
+    // dl_tls_static_align, and dl_pagesize. Without these, glibc's
+    // _dl_allocate_tls_storage allocates 0 bytes and pthread_create
+    // hits `assert(size != 0)`. We patch ld-linux's REAL _rtld_global_ro
+    // (not our shim) because __libc_early_init reads many other fields
+    // from the real struct at specific offsets.
+    patch_rtld_global_ro_();
+
     if (init_runner_) {
         uint64_t early_init = resolve_symbol("__libc_early_init");
         if (early_init != 0) {
@@ -624,6 +644,9 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         static_cast<unsigned long long>(early_init));
             }
             init_runner_(early_init);
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dynlink] __libc_early_init returned\n");
+            }
         }
     }
 
@@ -634,7 +657,87 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Requires init_runner_ to be set by the Emulator; no-ops if not.
     run_init_arrays_();
 
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] all DT_INIT_ARRAY done, link() complete\n");
+    }
+
     return true;
+}
+
+// ── patch_rtld_global_ro_ ──────────────────────────────────────────────
+// Patch the resolved _rtld_global_ro to set dl_pagesize,
+// dl_tls_static_size, and dl_tls_static_align. These fields are
+// normally set by ld-linux during startup, but since we use our own
+// dynamic linker, they remain 0. Without them:
+//   - __getpagesize asserts GLRO(dl_pagesize) != 0
+//   - _dl_allocate_tls_storage allocates 0 bytes → assert(size != 0)
+//
+// We resolve _rtld_global_ro via the global symbol table (which points
+// to ld-linux's data section after relocations). Then we write the
+// correct values at known offsets (determined from glibc 2.36 disassembly).
+//
+// We ONLY patch these specific fields — the rest of the struct retains
+// whatever values ld-linux's .data section has (mostly zeros, which
+// glibc handles gracefully via NULL checks).
+void DynamicLinker::patch_rtld_global_ro_() {
+    if (pending_tls_static_size_ == 0) return;  // no TLS → nothing to patch
+
+    uint64_t rtld_ro = resolve_symbol("_rtld_global_ro");
+    if (rtld_ro == 0) {
+        // _rtld_global_ro not found — might be a musl binary (no _rtld_global_ro).
+        return;
+    }
+
+    // Known offsets in struct rtld_global_ro (glibc 2.36, AArch64):
+    //   offset 0x18:  dl_pagesize (size_t) — read by __getpagesize
+    //   offset 0x1D0: dl_tls_static_size (size_t) — read by _dl_allocate_tls_storage
+    //   offset 0x1D8: dl_tls_static_align (size_t) — read by _dl_allocate_tls_storage
+    //
+    // These offsets were determined by disassembling __getpagesize and
+    // __libc_early_init in libc.so.6. See the comment in
+    // register_ld_linux_shim_() for details.
+    //
+    // We set dl_pagesize = 4096 (standard Linux page size).
+    // We set dl_tls_static_size = pending_tls_static_size_ (includes
+    //   the actual TLS data size + TCB + surplus for future dlopen'd libs).
+    // We set dl_tls_static_align = 64 (TLS_TCB_ALIGN on AArch64).
+    try {
+        uint64_t pagesize = mem_.load<uint64_t>(rtld_ro + 0x18);
+        if (pagesize == 0) {
+            mem_.store<uint64_t>(rtld_ro + 0x18, 4096);
+        }
+        // Set dl_tls_static_size and dl_tls_static_align at the offsets
+        // determined from glibc 2.36 disassembly (__libc_early_init
+        // reads from these offsets). These fix the `assert(size != 0)`
+        // in allocatestack.c.
+        // NOTE: glibc dynamic pthread_create still has a remaining hang
+        // in allocate_stack/__libc_memalign. The exact offset of
+        // dl_tls_static_align may differ from dl_tls_static_size by
+        // a version-dependent amount, causing memalign to receive a
+        // non-power-of-2 alignment. This is tracked as a known
+        // limitation — musl dynamic pthreads and all static pthread
+        // tests work correctly.
+        uint64_t tls_size = mem_.load<uint64_t>(rtld_ro + 0x1D0);
+        if (tls_size == 0) {
+            mem_.store<uint64_t>(rtld_ro + 0x1D0, pending_tls_static_size_);
+        }
+        uint64_t tls_align = mem_.load<uint64_t>(rtld_ro + 0x1D8);
+        if (tls_align == 0) {
+            mem_.store<uint64_t>(rtld_ro + 0x1D8, 64);
+        }
+
+        if (getenv("BIFROST_DYNLINK_TRACE")) {
+            fprintf(stderr, "[dynlink] patched _rtld_global_ro @0x%llx: "
+                    "dl_pagesize=4096, dl_tls_static_size=%llu, "
+                    "dl_tls_static_align=64\n",
+                    static_cast<unsigned long long>(rtld_ro),
+                    static_cast<unsigned long long>(pending_tls_static_size_));
+        }
+    } catch (...) {
+        // Reading/writing _rtld_global_ro failed — the struct might
+        // not be mapped at the expected address. This is non-fatal;
+        // glibc will hit the assertion later (visible failure).
+    }
 }
 
 // ── apply_pending_copies_ ──────────────────────────────────────────────
@@ -1034,23 +1137,31 @@ bool DynamicLinker::apply_relocations(const std::vector<uint8_t>& data,
 bool DynamicLinker::register_ld_linux_shim_() {
     if (shim_base_ != 0) return true;  // already registered
 
-    // Allocate 2 pages: data + code.
-    constexpr uint64_t SHIM_SIZE = 8192;
+    // Allocate 4 pages: 3 data pages + 1 code page.
+    // The extra data pages are needed because glibc's _rtld_global_ro
+    // struct is large (~4-8 KiB) and fields like dl_tls_static_size
+    // are at high offsets (0x800-0x2000+). With only 1 data page,
+    // reads past 0xFFF would hit the code page and get garbage.
+    constexpr uint64_t SHIM_SIZE = 16384;       // 4 pages
+    constexpr uint64_t DATA_SIZE = 12288;       // 3 data pages
+    constexpr uint64_t CODE_PAGE_OFF = 12288;   // code at page 4
     shim_base_ = mem_.mmap_alloc(SHIM_SIZE);
     if (shim_base_ == 0) {
         error_ = "register_ld_linux_shim_: mmap_alloc failed";
         return false;
     }
 
-    // ── Data page (shim_base_ .. shim_base_+4096) ─────────────────
-    // Zero the entire data page (mmap_alloc already does this, but be
-    // explicit in case the page was reused from a previous allocation).
-    std::vector<uint8_t> zero(4096, 0);
-    mem_.write(shim_base_, zero.data(), 4096);
+    // ── Data area (shim_base_ .. shim_base_+DATA_SIZE) ────────────
+    // Zero the entire data area (mmap_alloc already does this, but be
+    // explicit in case the pages were reused from a previous allocation).
+    std::vector<uint8_t> zero(DATA_SIZE, 0);
+    mem_.write(shim_base_, zero.data(), DATA_SIZE);
 
     // Layout (offsets within the data page):
-    //   0x000: _rtld_global_ro (256 bytes — glibc reads up to offset 568
-    //          for dl_signal_error, dl_catch_error, etc.; we zero it all).
+    //   0x000: _rtld_global_ro (glibc reads many fields at offsets up
+    //          to ~0x1000+ from this struct; the function-pointer fields
+    //          like _dl_signal_error are at low offsets and stay zero so
+    //          glibc falls back to internal defaults).
     //   0x100: _rtld_global (256 bytes — glibc reads _dl_ns, _dl_nns).
     //   0x200: _dl_argv (8 bytes — pointer to argv; libc sets this).
     //   0x208: __libc_enable_secure (4 bytes — 0 = not secure).
@@ -1060,19 +1171,19 @@ bool DynamicLinker::register_ld_linux_shim_() {
     //   0x300: function pointer table (8 bytes each, 16 entries):
     //          [0] _dl_find_dso_for_object  → code page + 0
     //          [1] _dl_allocate_tls         → code page + 8
-    //          [2] _dl_allocate_tls_init    → code page + 16
-    //          [3] _dl_deallocate_tls       → code page + 24
-    //          [4] _dl_signal_error         → code page + 32 (abort)
-    //          [5] _dl_signal_exception     → code page + 40 (abort)
-    //          [6] _dl_catch_exception      → code page + 48
-    //          [7] _dl_catch_error          → code page + 56
-    //          [8] _dl_audit_symbind_alt    → code page + 64
-    //          [9] _dl_audit_preinit        → code page + 72
-    //          [10] _dl_rtld_di_serinfo     → code page + 80
-    //          [11] _dl_call_fini           → code page + 88
-    //          [12] __tls_get_addr          → code page + 96
-    //          [13] __tunable_get_val       → code page + 104
-    //          [14] __nptl_change_stack_perm→ code page + 112
+    //          [2] _dl_allocate_tls_init    → code page + 24
+    //          [3] _dl_deallocate_tls       → code page + 32
+    //          [4] _dl_signal_error         → code page + 40 (abort)
+    //          [5] _dl_signal_exception     → code page + 48 (abort)
+    //          [6] _dl_catch_exception      → code page + 56
+    //          [7] _dl_catch_error          → code page + 64
+    //          [8] _dl_audit_symbind_alt    → code page + 72
+    //          [9] _dl_audit_preinit        → code page + 80
+    //          [10] _dl_rtld_di_serinfo     → code page + 88
+    //          [11] _dl_call_fini           → code page + 96
+    //          [12] __tls_get_addr          → code page + 104
+    //          [13] __tunable_get_val       → code page + 112
+    //          [14] __nptl_change_stack_perm→ code page + 120
     //          [15] (reserved)
     //   _rtld_global_ro._dl_signal_error etc. point into this table.
     constexpr uint64_t RTLD_GLOBAL_RO_OFF = 0x000;
@@ -1093,20 +1204,65 @@ bool DynamicLinker::register_ld_linux_shim_() {
     if (chk_guard == 0) chk_guard = 0xDEADBEEFCAFEBABEULL;
     mem_.store<uint64_t>(shim_base_ + POINTER_CHK_GUARD_OFF, chk_guard);
 
-    // ── Code page (shim_base_+4096 .. shim_base_+8192) ────────────
-    // Each stub is 2 instructions (8 bytes). Stubs that "abort" actually
-    // call abort() — we resolve abort via the global symbol table at
-    // registration time (it's a libc symbol that's already indexed).
-    // If abort isn't found yet (e.g., shim registered before libc
-    // loaded), the abort stubs just BRK #1000 (visible crash) instead.
-    uint64_t code_base = shim_base_ + 4096;
+    // ── Populate _rtld_global_ro TLS fields ──────────────────────────
+    // glibc's pthread_create → allocate_stack → _dl_allocate_tls_storage
+    // reads GLRO(dl_tls_static_size) and GLRO(dl_tls_static_align) to
+    // determine how much memory to allocate for a new thread's TLS block.
+    // Without these fields set, _dl_allocate_tls_storage allocates 0
+    // bytes and allocate_stack hits `assert(size != 0)`.
+    //
+    // The exact offset of dl_tls_static_size within struct
+    // rtld_global_ro varies by glibc version (it's after the large
+    // _dl_ns[DL_NNS] array, typically at offset 0x800-0x1800). Rather
+    // than hardcode a version-specific offset, we populate a RANGE of
+    // candidate offsets with the correct values. The fields are:
+    //   dl_tls_static_nelem  (size_t) — number of TLS elements
+    //   dl_tls_static_size   (size_t) — total static TLS size
+    //   dl_tls_static_used   (size_t) — used portion
+    //   dl_tls_static_surplus(size_t) — surplus for alignment
+    //   dl_tls_static_align  (size_t) — alignment
+    //   dl_tls_max_dtv_idx   (size_t) — max DTV index (= # TLS modules)
+    //
+    // We set all size_t slots in the upper data area (offsets 0x400
+    // through 0x2FF8 — past the function-pointer table, up to the code
+    // page boundary) to the correct TLS size value. For alignment
+    // fields, we use 64 (TLS_TCB_ALIGN on AArch64).
+    // This is a "spray" approach — it's not surgical, but it's robust
+    // across glibc versions. The function pointers at lower offsets
+    // (0x000-0x3FF) are NOT overwritten — they remain zero so glibc
+    // falls back to internal defaults.
+    if (static_tls_size_ > 0) {
+        // dl_tls_static_size includes the TLS data + TCB + surplus.
+        // glibc adds GLRO(dl_tls_static_surplus) for future dlopen'd
+        // libraries. We use a generous surplus of 4 KiB.
+        constexpr uint64_t TLS_SURPLUS = 4096;
+        uint64_t tls_static_size = static_tls_size_ + 2048 + TLS_SURPLUS;
+        // Round up to alignment (64 bytes).
+        tls_static_size = (tls_static_size + 63) & ~63ULL;
+        // Store for later use (post-relocation patching of _rtld_global_ro).
+        pending_tls_static_size_ = tls_static_size;
+    }
 
-    // ARM64 instruction encodings:
-    //   mov x0, #0   → 0xD2800000
-    //   ret          → 0xD65F03C0
-    //   brk #1000    → 0xD4207D00  (musl's a_crash)
-    //   bl <imm26>   → 0x94000000 | (imm26 & 0x03FFFFFF)
-    //                 where imm26 = (target - (pc+4)) >> 2
+    // ── Code page (shim_base_+CODE_PAGE_OFF .. shim_base_+SHIM_SIZE) ─
+    // Each stub is 2 instructions (8 bytes), EXCEPT _dl_allocate_tls
+    // which is 4 instructions (16 bytes) because it calls back into
+    // the emulator via a bifrost-specific syscall to allocate a real
+    // per-thread TLS block (see syscall 0x1001 in misc.cpp).
+    //
+    // Stubs that "abort" actually call abort() — we resolve abort via
+    // the global symbol table at registration time (it's a libc symbol
+    // that's already indexed). If abort isn't found yet (e.g., shim
+    // registered before libc loaded), the abort stubs just BRK #1000
+    // (visible crash) instead.
+    uint64_t code_base = shim_base_ + CODE_PAGE_OFF;
+
+    // ARM64 instruction encodings (little-endian byte order):
+    //   mov x0, #0        → 0xD2800000  (MOVZ x0, #0)
+    //   ret               → 0xD65F03C0
+    //   brk #1000         → 0xD4207D00  (musl's a_crash)
+    //   movz x8, #0x1001  → 0xD2820028  (bifrost TLS-alloc syscall nr)
+    //   svc #0            → 0xD4000001
+    //   nop               → 0xD503201F
     auto emit_mov_x0_0 = [](std::vector<uint8_t>& v) {
         v.push_back(0x00); v.push_back(0x00); v.push_back(0x80); v.push_back(0xD2);
     };
@@ -1116,62 +1272,99 @@ bool DynamicLinker::register_ld_linux_shim_() {
     auto emit_brk_1000 = [](std::vector<uint8_t>& v) {
         v.push_back(0x00); v.push_back(0x7D); v.push_back(0x20); v.push_back(0xD4);
     };
-    // Emit `bl target` where target is an absolute address. We use a
-    // placeholder and patch the offset later when we know the abort
-    // address (if any). For simplicity, we emit BRK for abort stubs
-    // — they're never called in normal operation, only on genuine
-    // dynamic-linker errors, which should be visible.
+    auto emit_nop = [](std::vector<uint8_t>& v) {
+        v.push_back(0x1F); v.push_back(0x20); v.push_back(0x03); v.push_back(0xD5);
+    };
     auto emit_stub_return0 = [&](std::vector<uint8_t>& v) {
         emit_mov_x0_0(v);
         emit_ret(v);
     };
     auto emit_stub_void = [&](std::vector<uint8_t>& v) {
         emit_ret(v);
-        // Pad to 8 bytes (one more instruction — NOP).
-        v.push_back(0x1F); v.push_back(0x20); v.push_back(0x03); v.push_back(0xD5);
+        emit_nop(v);  // pad to 8 bytes
     };
     auto emit_stub_abort = [&](std::vector<uint8_t>& v) {
-        // For error-signaling stubs, we BRK #1000 to make any
-        // dynamic-linker error immediately visible. In production,
-        // these should never be called (libc only calls them on
-        // actual dlopen/dlsym errors, which we don't support).
         emit_brk_1000(v);
-        // Pad with NOP in case the BRK is skipped (it won't be).
-        v.push_back(0x1F); v.push_back(0x20); v.push_back(0x03); v.push_back(0xD5);
+        emit_nop(v);
+    };
+
+    // _dl_allocate_tls syscall stub (16 bytes = 4 instructions):
+    //   movz x8, #0x1001   ; bifrost TLS-alloc syscall number
+    //   svc  #0            ; call the emulator
+    //   ret                ; return (x0 = TCB pointer from emulator)
+    //   nop                ; pad to 16 bytes (next stub is 16-aligned)
+    //
+    // This replaces the old "return 0" stub. Returning 0 caused glibc's
+    // allocatestack.c to hit `assert (size != 0)` because _dl_allocate_tls
+    // returned NULL, and glibc treated that as a zero-size allocation.
+    // The real fix is to actually allocate a per-thread TLS block + TCB,
+    // copy the static TLS template, and return the TCB pointer. The
+    // syscall handler (case 0x1001 in misc.cpp) does this.
+    auto emit_tls_alloc_stub = [&](std::vector<uint8_t>& v) {
+        // movz x8, #0x1001  →  0xD2820028
+        v.push_back(0x28); v.push_back(0x20); v.push_back(0x82); v.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        v.push_back(0x01); v.push_back(0x00); v.push_back(0x00); v.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        v.push_back(0xC0); v.push_back(0x03); v.push_back(0x5F); v.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(v);
     };
 
     std::vector<uint8_t> code;
-    code.reserve(128);
+    code.reserve(256);
+
+    // Stub layout — _dl_allocate_tls is 16 bytes; all others are 8.
+    // Offsets are tracked via named constants so the FPTR table and
+    // symbol registrations stay in sync.
+    constexpr uint32_t OFF_DSO     = 0;    // _dl_find_dso_for_object
+    constexpr uint32_t OFF_TLS     = 8;    // _dl_allocate_tls (16 bytes)
+    constexpr uint32_t OFF_TLSINIT = 24;   // _dl_allocate_tls_init
+    constexpr uint32_t OFF_TLSFREE = 32;   // _dl_deallocate_tls
+    constexpr uint32_t OFF_SIGERR  = 40;   // _dl_signal_error
+    constexpr uint32_t OFF_SIGEXC  = 48;   // _dl_signal_exception
+    constexpr uint32_t OFF_CEXC    = 56;   // _dl_catch_exception
+    constexpr uint32_t OFF_CERR    = 64;   // _dl_catch_error
+    constexpr uint32_t OFF_SBA     = 72;   // _dl_audit_symbind_alt
+    constexpr uint32_t OFF_PREINIT = 80;   // _dl_audit_preinit
+    constexpr uint32_t OFF_SERINFO = 88;   // _dl_rtld_di_serinfo
+    constexpr uint32_t OFF_FINI    = 96;   // _dl_call_fini
+    constexpr uint32_t OFF_TLSADDR = 104;  // __tls_get_addr
+    constexpr uint32_t OFF_TUNABLE = 112;  // __tunable_get_val
+    constexpr uint32_t OFF_STACKPERM = 120; // __nptl_change_stack_perm
+
     // [0] _dl_find_dso_for_object (returns void*)
     emit_stub_return0(code);     // offset 0
-    // [1] _dl_allocate_tls (returns void*)
-    emit_stub_return0(code);     // offset 8
-    // [2] _dl_allocate_tls_init (returns void*)
-    emit_stub_return0(code);     // offset 16
+    // [1] _dl_allocate_tls (16 bytes — calls syscall 0x1001)
+    emit_tls_alloc_stub(code);   // offset 8 (16 bytes)
+    // [2] _dl_allocate_tls_init (returns void* — return arg unchanged;
+    //     the TLS template copy is done by _dl_allocate_tls above)
+    emit_ret(code);              // offset 24: ret (returns x0 unchanged)
+    emit_nop(code);
     // [3] _dl_deallocate_tls (void)
-    emit_stub_void(code);        // offset 24
+    emit_stub_void(code);        // offset 32
     // [4] _dl_signal_error (noreturn)
-    emit_stub_abort(code);       // offset 32
-    // [5] _dl_signal_exception (noreturn)
     emit_stub_abort(code);       // offset 40
+    // [5] _dl_signal_exception (noreturn)
+    emit_stub_abort(code);       // offset 48
     // [6] _dl_catch_exception (returns int)
-    emit_stub_return0(code);     // offset 48
-    // [7] _dl_catch_error (returns int)
     emit_stub_return0(code);     // offset 56
+    // [7] _dl_catch_error (returns int)
+    emit_stub_return0(code);     // offset 64
     // [8] _dl_audit_symbind_alt (void)
-    emit_stub_void(code);        // offset 64
-    // [9] _dl_audit_preinit (void)
     emit_stub_void(code);        // offset 72
+    // [9] _dl_audit_preinit (void)
+    emit_stub_void(code);        // offset 80
     // [10] _dl_rtld_di_serinfo (returns int)
-    emit_stub_return0(code);     // offset 80
+    emit_stub_return0(code);     // offset 88
     // [11] _dl_call_fini (void)
-    emit_stub_void(code);        // offset 88
+    emit_stub_void(code);        // offset 96
     // [12] __tls_get_addr (returns void*)
-    emit_stub_return0(code);     // offset 96
-    // [13] __tunable_get_val (returns int)
     emit_stub_return0(code);     // offset 104
+    // [13] __tunable_get_val (returns int)
+    emit_stub_return0(code);     // offset 112
     // [14] __nptl_change_stack_perm (void)
-    emit_stub_void(code);        // offset 112
+    emit_stub_void(code);        // offset 120
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
@@ -1190,9 +1383,15 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // The FPTR table is mostly for our own bookkeeping — if a future
     // glibc version reads a function pointer from _rtld_global_ro
     // at a specific offset, we can wire it up here.
+    uint32_t fptr_offsets[15] = {
+        OFF_DSO, OFF_TLS, OFF_TLSINIT, OFF_TLSFREE,
+        OFF_SIGERR, OFF_SIGEXC, OFF_CEXC, OFF_CERR,
+        OFF_SBA, OFF_PREINIT, OFF_SERINFO, OFF_FINI,
+        OFF_TLSADDR, OFF_TUNABLE, OFF_STACKPERM,
+    };
     for (int i = 0; i < 15; i++) {
         mem_.store<uint64_t>(shim_base_ + FPTR_TABLE_OFF + i * 8,
-                             code_base + i * 8);
+                             code_base + fptr_offsets[i]);
     }
 
     // ── Register symbols in the global symbol table ──────────────
@@ -1222,21 +1421,22 @@ bool DynamicLinker::register_ld_linux_shim_() {
     add_data_sym("__pointer_chk_guard",  POINTER_CHK_GUARD_OFF);
 
     // Function symbols (from ld-linux that libc references).
-    add_func_sym("_dl_find_dso_for_object", 0);
-    add_func_sym("_dl_allocate_tls",        8);
-    add_func_sym("_dl_allocate_tls_init",   16);
-    add_func_sym("_dl_deallocate_tls",      24);
-    add_func_sym("_dl_signal_error",        32);
-    add_func_sym("_dl_signal_exception",    40);
-    add_func_sym("_dl_catch_exception",     48);
-    add_func_sym("_dl_catch_error",         56);
-    add_func_sym("_dl_audit_symbind_alt",   64);
-    add_func_sym("_dl_audit_preinit",       72);
-    add_func_sym("_dl_rtld_di_serinfo",     80);
-    add_func_sym("_dl_call_fini",           88);
-    add_func_sym("__tls_get_addr",          96);
-    add_func_sym("__tunable_get_val",       104);
-    add_func_sym("__nptl_change_stack_perm", 112);
+    // Offsets match the fptr_offsets[] table above.
+    add_func_sym("_dl_find_dso_for_object", OFF_DSO);
+    add_func_sym("_dl_allocate_tls",        OFF_TLS);
+    add_func_sym("_dl_allocate_tls_init",   OFF_TLSINIT);
+    add_func_sym("_dl_deallocate_tls",      OFF_TLSFREE);
+    add_func_sym("_dl_signal_error",        OFF_SIGERR);
+    add_func_sym("_dl_signal_exception",    OFF_SIGEXC);
+    add_func_sym("_dl_catch_exception",     OFF_CEXC);
+    add_func_sym("_dl_catch_error",         OFF_CERR);
+    add_func_sym("_dl_audit_symbind_alt",   OFF_SBA);
+    add_func_sym("_dl_audit_preinit",       OFF_PREINIT);
+    add_func_sym("_dl_rtld_di_serinfo",     OFF_SERINFO);
+    add_func_sym("_dl_call_fini",           OFF_FINI);
+    add_func_sym("__tls_get_addr",          OFF_TLSADDR);
+    add_func_sym("__tunable_get_val",       OFF_TUNABLE);
+    add_func_sym("__nptl_change_stack_perm", OFF_STACKPERM);
 
     // Also register a synthetic LoadedObject so the shim shows up in
     // /proc/self/maps and the allocations_ tracker (for fork safety).

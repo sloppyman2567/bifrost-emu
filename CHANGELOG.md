@@ -6,6 +6,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 76 (2026-07-09)
+
+### glibc dynamic pthread infrastructure
+
+- **`_dl_allocate_tls` syscall handler (0x1001)** — The ld-linux shim's
+  `_dl_allocate_tls` stub now calls a bifrost-specific syscall that
+  allocates a per-thread TLS block + TCB, copies the static TLS template,
+  copies TCB canary fields (stack_guard, pointer_guard) from the main
+  thread, and returns the TCB pointer. This replaces the old "return 0"
+  stub that caused glibc's `allocate_stack` to hit
+  `assert(size != 0)`.
+  - Files: `src/frontend/dynamic_linker.cpp` (16-byte syscall stub),
+    `src/syscalls/misc.cpp` (case 0x1001 handler).
+- **`patch_rtld_global_ro_()`** — After all relocations, the dynamic
+  linker patches the resolved `_rtld_global_ro` (ld-linux's data section)
+  to set `dl_pagesize` (offset 0x18), `dl_tls_static_size` (offset 0x1D0),
+  and `dl_tls_static_align` (offset 0x1D8). These fields are normally set
+  by ld-linux during startup, but since we use our own dynamic linker,
+  they were 0. Without `dl_pagesize`, `__getpagesize` asserts; without
+  `dl_tls_static_size`, `_dl_allocate_tls_storage` allocates 0 bytes.
+  - File: `src/frontend/dynamic_linker.cpp` (`patch_rtld_global_ro_()`).
+- **ld-linux shim expanded data area** — The shim now allocates 4 pages
+  (3 data + 1 code) instead of 2, because glibc's `_rtld_global_ro`
+  struct is large (~4-8 KiB) and fields at high offsets would read from
+  the code page.
+  - File: `src/frontend/dynamic_linker.cpp` (`register_ld_linux_shim_()`).
+- **Remaining issue:** glibc dynamic `pthread_create` still hangs in
+  `allocate_stack` / `__libc_memalign`. The exact offset of
+  `dl_tls_static_align` may differ from `dl_tls_static_size` by a
+  version-dependent amount, causing `memalign` to receive a non-power-of-2
+  alignment. **musl dynamic pthreads and all static pthread tests work
+  correctly.** Tracked for future binary analysis.
+
+### Rootfs setup — one-command bootstrap
+
+- **New `scripts/setup-rootfs-all.sh`** — A single script that fetches
+  both cross-toolchains, creates the rootfs, and fetches real-world +
+  curl dependency libraries. Supports `--no-glibc`, `--no-musl`,
+  `--no-realworld`, `--no-curl` flags for selective setup.
+- **`scripts/fetch-realworld-binaries.sh`** — Fixed `TMPDIR` unbound
+  variable bug (renamed to `WORKDIR1`/`WORKDIR2` to avoid collision with
+  the `TMPDIR` environment variable under `set -u`).
+
+### Documentation updates
+
+- `README.md` — Removed stale "glibc float printf" limitation (fixed in
+  Turn 74). Updated Dynamically-Linked Binaries section to mention the
+  new one-command `setup-rootfs-all.sh`. Updated Limitations section
+  with accurate glibc pthread status.
+
 ## [Unreleased] — Turn 75 (2026-07-09)
 
 ### Toolchain download hardening

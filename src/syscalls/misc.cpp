@@ -39,6 +39,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "frontend/dynamic_linker.h"  // DynamicLinker (for _dl_allocate_tls syscall)
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
 #include "frost/audio_thunk.hpp"    // v1.5.0.alpha
@@ -764,6 +765,148 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             // None of the thunks recognized the symbol_id.
             ret_err(ENOSYS);
+            return 0;
+        }
+
+        // ── Bifrost-emu internal TLS-alloc syscall (Turn 76) ──────────
+        // _dl_allocate_tls stub in the ld-linux shim calls this syscall
+        // (number 0x1001 = 4097) to allocate a per-thread TLS block.
+        //
+        // glibc's pthread_create calls _dl_allocate_tls(NULL) to get a
+        // fresh TCB + initialized static TLS block for each new thread.
+        // The old stub just returned 0 (NULL), which caused the assertion
+        // `allocatestack.c:333: size != 0` because glibc treated NULL
+        // as a zero-size allocation.
+        //
+        // This handler:
+        //   1. Reads the static TLS size from the dynamic linker.
+        //   2. Allocates static_tls_size + PTHREAD_SLACK bytes.
+        //   3. Places the TCB at the end (16-aligned), TLS data below it.
+        //   4. Copies the static TLS template (initialized .tdata + .bss)
+        //      from the main thread's static TLS block.
+        //   5. Copies the TCB header fields (stack_guard, pointer_guard,
+        //      etc.) from the main thread's TCB so canary checks pass.
+        //   6. Sets the TCB self-pointer (tcbhead_t.tcb at offset 0).
+        //   7. Returns the TCB pointer in x0.
+        //
+        // a0 (x0) is the `mem` argument from glibc:
+        //   - 0 → allocate a new block (the normal pthread_create path)
+        //   - non-zero → re-initialize the existing block at a0 (the
+        //     fork() re-init path; we leave it as-is since fork inherits
+        //     the parent's memory)
+        case 0x1001: {
+            // If glibc passes a non-NULL mem, it's the fork() re-init
+            // path — the child already has the parent's TLS (CoW), so
+            // just return mem unchanged.
+            if (a0 != 0) {
+                ret_host(a0);
+                return 0;
+            }
+
+            // Need the dynamic linker for static TLS info.
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || dl->static_tls_size() == 0) {
+                // No dynamic linker (static binary) or no TLS — return a
+                // minimal zeroed block so glibc doesn't crash. This path
+                // shouldn't be reached for static binaries (they don't
+                // call _dl_allocate_tls), but handle it gracefully.
+                constexpr uint64_t FALLBACK_SIZE = 4096;
+                uint64_t block = mem_.mmap_alloc(FALLBACK_SIZE);
+                if (block == 0) { ret_err(ENOMEM); return 0; }
+                std::vector<uint8_t> zeros(FALLBACK_SIZE, 0);
+                mem_.write(block, zeros.data(), FALLBACK_SIZE);
+                uint64_t tcb = (block + FALLBACK_SIZE - 16) & ~0xFULL;
+                mem_.store<uint64_t>(tcb, tcb);  // self pointer
+                ret_host(tcb);
+                return 0;
+            }
+
+            uint64_t tls_size = dl->static_tls_size();
+            // Extra space for the TCB header + struct pthread (glibc's
+            // pthread descriptor is ~2 KiB; 8 KiB gives generous headroom
+            // for future glibc versions and any additional fields).
+            constexpr uint64_t PTHREAD_SLACK = 8192;
+            uint64_t alloc_size = tls_size + PTHREAD_SLACK;
+            // Align the allocation to 64 bytes (TLS_TCB_ALIGN on AArch64).
+            alloc_size = (alloc_size + 63) & ~63ULL;
+
+            uint64_t block = mem_.mmap_alloc(alloc_size);
+            if (block == 0) { ret_err(ENOMEM); return 0; }
+
+            // Zero the whole block first (mmap_alloc gives zeros, but be
+            // explicit in case the page was reused).
+            std::vector<uint8_t> zeros(alloc_size, 0);
+            mem_.write(block, zeros.data(), alloc_size);
+
+            // TCB goes at the END of the block, 16-aligned.
+            // TLS data goes just below the TCB (TP-relative, negative offset).
+            uint64_t tcb = (block + alloc_size) & ~0xFULL;
+            // If alignment pushed tcb past the block end, back it up.
+            if (tcb > block + alloc_size - 16) tcb -= 16;
+            uint64_t tls_dst = tcb - tls_size;
+
+            // Copy the static TLS template (initialized .tdata values).
+            // The .bss portion (memsz - filesz) is already zeroed above.
+            if (tls_size > 0) {
+                try {
+                    std::vector<uint8_t> tpl(tls_size);
+                    mem_.read(dl->static_tls_base(), tpl.data(), tls_size);
+                    mem_.write(tls_dst, tpl.data(), tls_size);
+                } catch (...) {
+                    // If the read fails, leave the TLS zeroed — glibc
+                    // will reinitialize the critical fields itself.
+                }
+            }
+
+            // Copy TCB header fields from the main thread's TCB so that
+            // stack_guard, pointer_guard, and other canary values match.
+            // The main thread's TPIDR_EL0 points to its TCB.
+            uint64_t main_tp = emu.main_cpu_.tpidr_el0;
+            if (main_tp != 0) {
+                // TCB header on AArch64 glibc (tcbhead_t):
+                //   +0:  void *tcb           (self pointer — we set this below)
+                //   +8:  dtv_t *dtv
+                //   +16: void *thread
+                //   +24: void *self
+                //   +32: int multiple_threads
+                //   +36: int gscope_flag
+                //   +40: uintptr_t sysinfo
+                //   +48: uintptr_t stack_guard      ← must match main thread
+                //   +56: uintptr_t pointer_guard     ← must match main thread
+                //   +64: unsigned long vgetcpu_cache[2]
+                //   +80: ... more fields ...
+                //
+                // Copy the first 128 bytes to capture all canary fields.
+                // The self-pointer (offset 0) will be overwritten below.
+                try {
+                    std::vector<uint8_t> tcb_hdr(128);
+                    mem_.read(main_tp, tcb_hdr.data(), 128);
+                    mem_.write(tcb, tcb_hdr.data(), 128);
+                } catch (...) {
+                    // If the read fails, leave TCB zeroed — glibc will
+                    // set up the fields it needs.
+                }
+            }
+
+            // Set the TCB self-pointer (tcbhead_t.tcb at offset 0).
+            // This is critical: glibc reads TPIDR_EL0 to get the TCB,
+            // then reads tcb->tcb to verify it matches. Without this,
+            // __pthread_self() returns garbage.
+            mem_.store<uint64_t>(tcb, tcb);
+
+            // Set tcb->self (offset 24) = tcb as well (some glibc paths
+            // use the `self` field instead of `tcb`).
+            mem_.store<uint64_t>(tcb + 24, tcb);
+
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[tls-alloc] new TCB @0x%llx (TLS data "
+                        "@0x%llx, size=%llu)\n",
+                        static_cast<unsigned long long>(tcb),
+                        static_cast<unsigned long long>(tls_dst),
+                        static_cast<unsigned long long>(tls_size));
+            }
+
+            ret_host(tcb);
             return 0;
         }
 

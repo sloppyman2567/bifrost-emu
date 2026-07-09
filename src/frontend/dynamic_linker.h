@@ -159,6 +159,14 @@ public:
     uint64_t static_tls_base() const { return static_tls_base_; }
     void set_static_tls_base(uint64_t b) { static_tls_base_ = b; }
 
+    // ── ld-linux shim base address ─────────────────────────────────
+    // The shim's data page (_rtld_global_ro etc.) is at shim_base_,
+    // and the code page (function stubs) is at shim_base_ + 4096.
+    // Used by the _dl_allocate_tls syscall handler to populate
+    // GLRO(dl_tls_static_size) so glibc's _dl_allocate_tls_storage
+    // allocates the correct amount.
+    uint64_t shim_base() const { return shim_base_; }
+
     // Get the module ID for an object by name (0 if not found).
     uint64_t tls_mod_id(const std::string& name) const;
 
@@ -370,6 +378,17 @@ private:
     // register_ld_linux_shim_()). 0 if the shim hasn't been registered.
     uint64_t shim_base_ = 0;
 
+    // ── Pending TLS static size for post-relocation patching ──────
+    // After all relocations are applied, we patch the resolved
+    // _rtld_global_ro (which points to ld-linux's data section) to
+    // set dl_tls_static_size, dl_tls_static_align, and dl_pagesize.
+    // This is needed because ld-linux's initialization never runs,
+    // so these fields are 0, causing pthread_create to assert.
+    // We can't set them in the shim because overriding _rtld_global_ro
+    // breaks __libc_early_init (which reads other fields from the
+    // real struct at specific offsets).
+    uint64_t pending_tls_static_size_ = 0;
+
     // ── Pending R_AARCH64_COPY relocations (Turn 74) ───────────────
     // COPY relocations must be deferred until AFTER all other relocations
     // are applied. The COPY reads the original symbol's value (which is
@@ -386,6 +405,12 @@ private:
     // Apply all pending COPY relocations. Called after all objects'
     // RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are done.
     void apply_pending_copies_();
+
+    // Patch the resolved _rtld_global_ro to set dl_pagesize,
+    // dl_tls_static_size, and dl_tls_static_align. Called after all
+    // relocations (so _rtld_global_ro is resolved to ld-linux's data)
+    // but before __libc_early_init (which reads dl_pagesize).
+    void patch_rtld_global_ro_();
 
     // BUGFIX (Turn 74): mirror a relocation to the TLS block copy.
     // If `target` falls within obj's PT_TLS (.tdata) segment, also

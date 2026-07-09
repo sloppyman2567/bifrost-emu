@@ -50,13 +50,13 @@ if [ -x "$BB_DEST" ]; then
     echo "BusyBox already present at $BB_DEST"
 else
     echo "=== Building BusyBox $BB_VERSION (static aarch64 musl) ==="
-    TMPDIR=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR"' EXIT
+    WORKDIR1=$(mktemp -d) || { echo "Failed to create temp dir" >&2; exit 1; }
+    trap 'rm -rf "$WORKDIR1"' EXIT
 
-    curl "${CURL_OPTS[@]}" -o "$TMPDIR/busybox.tar.bz2" \
+    curl "${CURL_OPTS[@]}" -o "$WORKDIR1/busybox.tar.bz2" \
         "https://busybox.net/downloads/busybox-$BB_VERSION.tar.bz2"
-    tar xjf "$TMPDIR/busybox.tar.bz2" -C "$TMPDIR"
-    cd "$TMPDIR/busybox-$BB_VERSION"
+    tar xjf "$WORKDIR1/busybox.tar.bz2" -C "$WORKDIR1"
+    cd "$WORKDIR1/busybox-$BB_VERSION"
 
     make ARCH=arm64 CROSS_COMPILE=aarch64-linux-musl- defconfig
     # Static linking
@@ -79,13 +79,13 @@ if [ -x "$IPERF_DEST" ]; then
 else
     echo ""
     echo "=== Building iperf2 2.2.1 (static aarch64 musl) ==="
-    TMPDIR2=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR" "$TMPDIR2"' EXIT
+    WORKDIR2=$(mktemp -d) || { echo "Failed to create temp dir" >&2; exit 1; }
+    trap 'rm -rf "$WORKDIR1" "$WORKDIR2"' EXIT
 
-    if curl "${CURL_OPTS[@]}" -o "$TMPDIR2/iperf2.tar.gz" \
+    if curl "${CURL_OPTS[@]}" -o "$WORKDIR2/iperf2.tar.gz" \
         "https://sourceforge.net/projects/iperf2/files/iperf2-2.2.1.tar.gz/download" 2>/dev/null; then
-        tar xzf "$TMPDIR2/iperf2.tar.gz" -C "$TMPDIR2"
-        cd "$TMPDIR2"/iperf2-*
+        tar xzf "$WORKDIR2/iperf2.tar.gz" -C "$WORKDIR2"
+        cd "$WORKDIR2"/iperf2-*
         ./configure --host=aarch64-linux-musl --disable-shared --prefix=/usr \
             CC=aarch64-linux-musl-gcc CFLAGS="-static -O2" LDFLAGS="-static" 2>&1 | tail -3
         make -j"$(nproc)" 2>&1 | tail -3

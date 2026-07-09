@@ -84,20 +84,20 @@ ToyBox (static), and many game engines that ship as static binaries.
 ### Dynamically-Linked Binaries
 
 For binaries that need shared libraries (libc.so.6, libm.so.6, etc.),
-set up a rootfs:
+set up a rootfs with a single command:
 
 ```bash
-# 1. Fetch a cross-toolchain (provides AArch64 glibc/musl libraries)
-./tools/fetch-glibc-toolchain.sh    # glibc (130 MB)
-./tools/fetch-musl-toolchain.sh     # musl (104 MB)
+# One-command rootfs setup (fetches toolchains + libs, ~250 MB total):
+./scripts/setup-rootfs-all.sh
 
-# 2. Create the rootfs (copies libs, creates /etc, /system, /data, etc.)
-./scripts/setup-rootfs.sh
+# Or step-by-step:
+./tools/fetch-glibc-toolchain.sh     # glibc toolchain (130 MB)
+./tools/fetch-musl-toolchain.sh      # musl toolchain (104 MB)
+./scripts/setup-rootfs.sh            # create rootfs with glibc + musl libs
+./scripts/fetch-realworld-libs.sh    # libselinux, libpcre2, libssl, etc.
+./scripts/fetch-curl-deps.sh         # curl's 24 dependency libs
 
-# 3. (Optional) Fetch common real-world shared libraries
-./scripts/fetch-realworld-libs.sh   # libselinux, libpcre2, libssl, etc.
-
-# 4. Run with --rootfs (or BIFROST_ROOT env var)
+# Run with --rootfs (or BIFROST_ROOT env var):
 ./bifrost-emu --rootfs $PWD/rootfs my_dynamic_app.elf
 # or:
 export BIFROST_ROOT=$PWD/rootfs
@@ -106,9 +106,8 @@ export BIFROST_ROOT=$PWD/rootfs
 
 Both **glibc** and **musl** dynamically-linked binaries are supported.
 glibc dynamic printf/puts/fprintf/fputs work fully (integers, strings,
-hex, padded formats). Float formatting (`%f`, `%e`, `%g`) has a
-remaining precision bug in glibc's SIMD `__printf_fp_l`; musl's printf
-works perfectly for all format specifiers.
+hex, padded formats, float formatting). musl's printf works perfectly
+for all format specifiers.
 
 The rootfs includes:
 - `/lib/libc.so.6`, `/lib/ld-linux-aarch64.so.1` (glibc)
@@ -341,12 +340,14 @@ The JIT uses:
 - **AArch64 only** — no AArch32 (32-bit ARM) support
 - **x86_64 host only** — no ARM host support (use native execution)
 - **No vDSO** — some clock_gettime paths are emulated, not native
-- **glibc float printf** — glibc's `%f`/`%e`/`%g` formatting has a
-  precision bug (one fewer digit than requested). Integer/string/hex
-  formats work correctly. musl's printf works perfectly for all formats.
-- **glibc dynamic pthreads** — glibc's NPTL thread allocation hits an
-  assertion in allocatestack.c. musl dynamic pthreads work. Static
-  pthread tests (musl) pass.
+- **glibc dynamic pthreads** — glibc's NPTL `pthread_create` hangs in
+  `allocate_stack` because `_dl_allocate_tls_storage` reads
+  `GLRO(dl_tls_static_size)` from a glibc-version-specific offset in
+  `_rtld_global_ro`. The infrastructure to fix this is in place
+  (syscall 0x1001 for `_dl_allocate_tls`, `patch_rtld_global_ro_()`
+  for the size/align fields), but the exact field offset varies by
+  glibc version and needs more binary analysis. **musl dynamic
+  pthreads and all static pthread tests work correctly.**
 
 ## Documentation
 
