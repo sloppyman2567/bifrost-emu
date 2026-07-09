@@ -908,8 +908,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         break;
                     }
                     case InstClass::SMULH: {
-                        unsigned __int128 prod = (unsigned __int128)(static_cast<int64_t>(a) * static_cast<int64_t>(b));
-                        res = static_cast<uint64_t>(prod >> 64);
+                        // BUGFIX (Turn 75): the old code cast the int64_t
+                        // product to unsigned __int128 AFTER multiplying,
+                        // which truncated the result to 64 bits before
+                        // widening. This made SMULH always return 0 (or
+                        // sign-extended garbage) for the high 64 bits,
+                        // breaking glibc's __offtime which uses SMULH for
+                        // division-by-constant optimization. The fix: cast
+                        // each operand to __int128 BEFORE multiplying, so
+                        // the product is a full 128-bit signed value.
+                        __int128 prod = (static_cast<__int128>(static_cast<int64_t>(a)))
+                                      * (static_cast<__int128>(static_cast<int64_t>(b)));
+                        res = static_cast<uint64_t>(static_cast<unsigned __int128>(prod) >> 64);
                         break;
                     }
                     default: break;
