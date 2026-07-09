@@ -2,7 +2,8 @@
 # run_tests.sh — bifrost-emu test runner
 #
 # A clean, colorized test runner that:
-#   - Categorizes tests (unit / integration / interactive / toybox / bench)
+#   - Categorizes tests (unit / integration / interactive / toybox /
+#     real-world / dynamic / bench)
 #   - Detects pass/fail via exit code + output keyword scan
 #   - Prints a summary table with counts and timing
 #   - Supports filtering by category (--unit, --toybox, etc.)
@@ -10,7 +11,7 @@
 #
 # Usage:
 #   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 150 tests
+#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 163 tests
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -18,6 +19,20 @@
 #   ./scripts/run_tests.sh --verbose    # show full output of each test
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
+#
+# Test count breakdown (163 total defined):
+#   Unit         35  — ctest/*.elf focused JIT regression tests
+#   Integration  51  — ctest_real/*.elf + test/*.elf real programs
+#   Toybox        9  — ctest_real/toybox subcommands
+#   Real-world   56  — downloaded static + dynamic glibc binaries
+#                      (30 busybox + 19 toybox + 7 dynamic glibc)
+#   Dynamic       7  — dynamically-linked musl + glibc tests (need rootfs)
+#   Benchmarks    5  — performance (skipped with --quick)
+#
+# Without --test-all and without a rootfs, the runner reports 119 pass +
+# 30 skip (busybox not downloaded) + 7 silent DYN-mode skips + 7 dynamic
+# tests not attempted = 163 total defined. With --test-all + rootfs set
+# up, all 163 tests run.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -84,7 +99,13 @@ done
 # ── --test-all: download real-world binaries ──────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
-# After download, runs the full 150-test suite with 0 expected failures.
+# After download, runs the full 163-test suite with 0 expected failures
+# (assuming rootfs is set up — otherwise the 7 dynamic tests still skip).
+#
+# The download itself is bounded by a 90-second timeout — same cap as the
+# toolchain fetch scripts — so a stalled Alpine mirror can't hang the
+# test runner indefinitely.
+DOWNLOAD_TIMEOUT=90
 if [ "$DOWNLOAD_REALWORLD" = "1" ]; then
     echo -e "${C_BOLD}Downloading real-world binaries...${C_RST}"
     mkdir -p ctest_real/realworld
@@ -92,8 +113,9 @@ if [ "$DOWNLOAD_REALWORLD" = "1" ]; then
     # Alpine musl busybox (static AArch64, ~1.1 MB)
     if [ ! -f "ctest_real/realworld/busybox-aarch64" ]; then
         echo -n "  busybox-aarch64 (Alpine musl static)... "
-        if curl -fL -o /tmp/bb.apk \
-            "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r21.apk" 2>/dev/null; then
+        if curl -fL --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 \
+                -o /tmp/bb.apk \
+                "https://dl-cdn.alpinelinux.org/alpine/v3.19/main/aarch64/busybox-static-1.36.1-r21.apk" 2>/dev/null; then
             mkdir -p /tmp/bb_extract
             tar -xzf /tmp/bb.apk -C /tmp/bb_extract 2>/dev/null
             cp /tmp/bb_extract/bin/busybox.static ctest_real/realworld/busybox-aarch64

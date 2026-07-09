@@ -35,6 +35,13 @@ fi
 
 export PATH="$PROJECT_ROOT/$TOOLCHAIN/bin:$PATH"
 
+# Per-download hard timeout (seconds). Each source tarball is a few MB, but
+# sourceforge / busybox.net mirrors can stall — bound them so the script
+# fails fast instead of hanging indefinitely. Matches the toolchain fetch
+# scripts' 90 s cap for consistency.
+DOWNLOAD_TIMEOUT=90
+CURL_OPTS=(--connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 -fL)
+
 # ── BusyBox ────────────────────────────────────────────────────────────
 BB_VERSION="1.36.1"
 BB_DEST="$DEST/busybox-aarch64"
@@ -46,7 +53,7 @@ else
     TMPDIR=$(mktemp -d)
     trap 'rm -rf "$TMPDIR"' EXIT
 
-    curl -fL -o "$TMPDIR/busybox.tar.bz2" \
+    curl "${CURL_OPTS[@]}" -o "$TMPDIR/busybox.tar.bz2" \
         "https://busybox.net/downloads/busybox-$BB_VERSION.tar.bz2"
     tar xjf "$TMPDIR/busybox.tar.bz2" -C "$TMPDIR"
     cd "$TMPDIR/busybox-$BB_VERSION"
@@ -75,7 +82,7 @@ else
     TMPDIR2=$(mktemp -d)
     trap 'rm -rf "$TMPDIR" "$TMPDIR2"' EXIT
 
-    if curl -fL -o "$TMPDIR2/iperf2.tar.gz" \
+    if curl "${CURL_OPTS[@]}" -o "$TMPDIR2/iperf2.tar.gz" \
         "https://sourceforge.net/projects/iperf2/files/iperf2-2.2.1.tar.gz/download" 2>/dev/null; then
         tar xzf "$TMPDIR2/iperf2.tar.gz" -C "$TMPDIR2"
         cd "$TMPDIR2"/iperf2-*
@@ -95,7 +102,7 @@ TOYBOX_DEST="ctest_real/toybox"
 if [ ! -f "$TOYBOX_DEST" ]; then
     echo ""
     echo "=== Downloading toybox ==="
-    if curl -fL -o "$TOYBOX_DEST" \
+    if curl "${CURL_OPTS[@]}" -o "$TOYBOX_DEST" \
         "https://landley.net/toybox/downloads/binaries/0.8.10/toybox-aarch64" 2>/dev/null; then
         chmod +x "$TOYBOX_DEST"
         echo "toybox downloaded: $TOYBOX_DEST"

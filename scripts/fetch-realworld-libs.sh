@@ -8,6 +8,10 @@
 #
 # Downloads from Debian package mirrors (stable, arm64). Idempotent —
 # re-running only downloads missing libraries.
+#
+# Each individual .deb download is bounded by a 90-second timeout (matches
+# the toolchain fetch scripts), so one slow mirror can't hang the whole
+# bootstrap.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,6 +19,11 @@ cd "$PROJECT_ROOT"
 
 ROOTFS="${1:-$PROJECT_ROOT/rootfs}"
 MIRROR="http://deb.debian.org/debian"
+
+# Per-download hard timeout (seconds). A single .deb is typically < 2 MB,
+# so 90 s is more than generous; the cap just prevents a stalled mirror
+# from hanging the whole script.
+DOWNLOAD_TIMEOUT=90
 
 echo "Fetching real-world AArch64 shared libraries into $ROOTFS/lib/ ..."
 
@@ -24,7 +33,8 @@ fetch_deb() {
     local tmp_dir=$(mktemp -d)
     
     echo -n "  $pkg_name ... "
-    if curl -fsL -o "$tmp_dir/pkg.deb" "$MIRROR/$pkg_path" 2>/dev/null; then
+    if curl -fsL --connect-timeout 15 --max-time "$DOWNLOAD_TIMEOUT" --retry 1 \
+            -o "$tmp_dir/pkg.deb" "$MIRROR/$pkg_path" 2>/dev/null; then
         cd "$tmp_dir"
         ar x pkg.deb data.tar.xz 2>/dev/null
         tar -xJf data.tar.xz 2>/dev/null

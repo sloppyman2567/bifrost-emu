@@ -253,13 +253,14 @@ void Config::apply_env() {
     };
 
     // [jit]
-    env_bool("BIFROST_NO_JIT",         jit_enabled);            // inverted below
-    if (jit_enabled == false) {} // BIFROST_NO_JIT=1 sets jit_enabled to false; we need to flip
-    // (We handle BIFROST_NO_JIT separately because "NO" inverts.)
+    // BIFROST_NO_JIT is an INVERTED knob: BIFROST_NO_JIT=1 means
+    // jit_enabled=false, BIFROST_NO_JIT=0 means jit_enabled=true. We must
+    // NOT pass it through env_bool() directly because that would set
+    // jit_enabled to the parsed bool (inverted meaning). Handle it
+    // explicitly here.
     if (const char* v = getenv("BIFROST_NO_JIT")) {
         bool b;
-        if (parse_bool(v, b) && b) jit_enabled = false;
-        else if (parse_bool(v, b) && !b) jit_enabled = true;
+        if (parse_bool(v, b)) jit_enabled = !b;
     }
     env_bool("BIFROST_JIT_VERIFY",     jit_verify);
     env_bool("BIFROST_ENABLE_FWD",     jit_fwd);

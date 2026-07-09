@@ -12,6 +12,7 @@
 //   -v, --verbose   print execution stats on exit
 //   -q, --quiet     suppress BRK warnings (even with -d)
 //   --fb-dump PATH  dump the /dev/fb0 framebuffer to PATH on exit (PPM)
+//   --audio-dump PATH  dump /dev/dsp PCM to PATH on exit (WAV)
 //   --raw-tty       force raw TTY mode (per-character input, no echo)
 //                   default is to leave the host TTY alone so guest
 //                   line-buffered stdio (fgets, gets, readline) works
@@ -22,6 +23,13 @@
 //                   libc all pass under it (6.4x speedup on compute workloads).
 //   --jit           enable frostJIT (now the default; kept for backwards-
 //                   compatibility with existing scripts)
+//   --jit-threshold N  interpret for the first N instructions, then JIT.
+//                       0 = JIT from start (default). Useful for short
+//                       programs where JIT compilation overhead dominates.
+//   --rootfs PATH   set rootfs for dynamic linking (equivalent to
+//                   BIFROST_ROOT=PATH)
+//   --config PATH   load config from PATH (overrides the auto-search)
+//   --print-config  print the resolved config and exit
 //   -V, --version   show version and exit
 //   -h, --help      show this help
 //
@@ -62,16 +70,20 @@ static void print_banner() {
         "  Usage: bifrost-emu [options] <elf-file> [args...]\n"
         "\n"
         "  Options:\n"
-        "    -d, --debug     trace every instruction to stderr\n"
-        "    -v, --verbose   print execution stats on exit\n"
-        "    -q, --quiet     suppress BRK warnings (even with -d)\n"
-        "    --fb-dump PATH  dump /dev/fb0 to PATH on exit (PPM)\n"
-        "    --raw-tty       force raw TTY mode (per-char input, no echo)\n"
-        "    --no-jit        use interpreter only (JIT is on by default)\n"
-        "    --jit           enable frostJIT (default; for compatibility)\n"
-        "    --rootfs PATH   set rootfs for dynamic linking (BIFROST_ROOT)\n"
-        "    -V, --version   show version and exit\n"
-        "    -h, --help      show this message\n"
+        "    -d, --debug        trace every instruction to stderr\n"
+        "    -v, --verbose      print execution stats on exit\n"
+        "    -q, --quiet        suppress BRK warnings (even with -d)\n"
+        "    --fb-dump PATH     dump /dev/fb0 to PATH on exit (PPM)\n"
+        "    --audio-dump PATH  dump /dev/dsp to PATH on exit (WAV)\n"
+        "    --raw-tty          force raw TTY mode (per-char input, no echo)\n"
+        "    --no-jit           use interpreter only (JIT is on by default)\n"
+        "    --jit              enable frostJIT (default; for compatibility)\n"
+        "    --jit-threshold N  interpret for N insns then switch to JIT\n"
+        "    --rootfs PATH      set rootfs for dynamic linking (BIFROST_ROOT)\n"
+        "    --config PATH      load config from PATH\n"
+        "    --print-config     print resolved config and exit\n"
+        "    -V, --version      show version and exit\n"
+        "    -h, --help         show this message\n"
         "\n"
         "  Runs static AArch64 Linux ELF binaries on x86_64.\n"
         "  Default mode is silent — only program output is shown.\n"

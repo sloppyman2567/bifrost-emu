@@ -224,10 +224,12 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (120 tests)
+# Run the full test suite (163 tests defined; 119 pass + 30 skip without
+# --test-all because busybox-aarch64 is not downloaded, and 7 dynamic +
+# 7 dynamic-glibc real-world tests skip without a rootfs)
 make check
 
-# Quick mode (skip benchmarks, 115 tests)
+# Quick mode (skip benchmarks — 114 pass + 30 skip = 144 total attempted)
 make check-quick
 
 # Run under the interpreter (catches JIT drift)
@@ -253,12 +255,16 @@ make check ARGS="--test-all"
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit | 34 | Focused JIT codegen regression tests (`ctest/`) |
-| Integration | 48 | Real-world programs exercising multiple subsystems (`ctest_real/`) |
+| Unit | 35 | Focused JIT codegen regression tests (`ctest/`) |
+| Integration | 51 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
 | Toybox | 9 | ToyBox subcommands (echo, seq, ls, md5sum, etc.) |
-| Real-world | 18 | Downloaded static binaries (BusyBox, iperf2, curl) |
-| Dynamic | 2 | Dynamically-linked binaries (musl + glibc) |
-| Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) |
+| Real-world | 56 | Downloaded static + dynamic glibc binaries (BusyBox, iperf3, coreutils) |
+| Dynamic | 7 | Dynamically-linked binaries (musl + glibc) — need rootfs |
+| Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
+| **Total** | **163** | |
+
+Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
+`--interactive` and not counted in the 163.
 
 ## Configuration
 
