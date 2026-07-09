@@ -412,6 +412,24 @@ private:
     // but before __libc_early_init (which reads dl_pagesize).
     void patch_rtld_global_ro_();
 
+    // BUGFIX (Turn 77): initialize the NPTL stack-cache list heads in
+    // _rtld_global (the read-write rtld global, NOT _rtld_global_ro).
+    // glibc's pthread_create -> allocate_stack walks the _dl_stack_cache
+    // list (a circular doubly-linked list_t) looking for a reusable
+    // thread stack. An empty list must have head->next == head->prev ==
+    // &head (INIT_LIST_HEAD). Normally ld-linux's
+    // __pthread_initialize_minimal_internal does this during startup,
+    // but since we use our own dynamic linker, those list heads stay
+    // zeroed (.bss). bifrost-emu returns 0 for unmapped reads instead
+    // of faulting, so the loop follows NULL->next forever -> infinite
+    // spin (no futex, no syscall — a pure CPU loop). This initializes
+    // the three list heads (_dl_stack_used, _dl_stack_user,
+    // _dl_stack_cache) so the first pthread_create proceeds to allocate
+    // a fresh stack instead of spinning. Offsets determined from glibc
+    // 2.36 (Arm GNU 13.2) libc.so.6 disassembly of pthread_create and
+    // the _thread_db_rtld_global__dl_stack_* descriptors.
+    void init_nptl_stack_lists_();
+
     // BUGFIX (Turn 74): mirror a relocation to the TLS block copy.
     // If `target` falls within obj's PT_TLS (.tdata) segment, also
     // store `value` at the corresponding offset in the static TLS

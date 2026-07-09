@@ -838,12 +838,41 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             std::vector<uint8_t> zeros(alloc_size, 0);
             mem_.write(block, zeros.data(), alloc_size);
 
-            // TCB goes at the END of the block, 16-aligned.
-            // TLS data goes just below the TCB (TP-relative, negative offset).
-            uint64_t tcb = (block + alloc_size) & ~0xFULL;
-            // If alignment pushed tcb past the block end, back it up.
-            if (tcb > block + alloc_size - 16) tcb -= 16;
-            uint64_t tls_dst = tcb - tls_size;
+            // TCB / struct pthread placement (BUGFIX Turn 77):
+            //
+            // glibc's _dl_allocate_tls_storage allocates a block of
+            // dl_tls_static_size bytes and returns a pointer to the
+            // struct pthread, which sits at the TOP of the block:
+            //   [TLS data (modules)] [struct pthread (= TCB)]
+            //   ^block                          ^returned ptr   ^block+size
+            //
+            // struct pthread starts at the TCB (tcbhead_t at offset 0)
+            // and extends UPWARD for sizeof(struct pthread) (~2 KB on
+            // glibc 2.36/AArch64). glibc's allocate_stack then writes
+            // fields at positive offsets from the returned pointer:
+            //   pd->start_routine, pd->arg, pd->flags, pd->result,
+            //   pd->cancelhandling, pd->tid, ...
+            //
+            // The OLD code placed the TCB at the very END of the block
+            // (block + alloc_size), leaving ZERO bytes above it. Every
+            // write to pd->start_routine / pd->arg / etc. landed past
+            // the allocation → bifrost silently dropped the writes
+            // (unmapped) → start_thread read garbage for start_routine
+            // → the worker function never ran → the thread exited
+            // immediately via the exit(0) path, and pthread_join
+            // deadlocked on the (never-cleared) tid futex.
+            //
+            // FIX: place the TCB at block + tls_size, leaving
+            // PTHREAD_SLACK bytes ABOVE it for struct pthread fields.
+            // Layout:
+            //   [TLS data: block .. block+tls_size)
+            //   [struct pthread: block+tls_size .. block+alloc_size)
+            //   ^tls_dst        ^tcb (returned)            ^end
+            // block is page-aligned (mmap_alloc) and tls_size is a
+            // multiple of 64 (allocate_static_tls rounds up), so
+            // block + tls_size is already 64-aligned = TLS_TCB_ALIGN.
+            uint64_t tcb = block + tls_size;
+            uint64_t tls_dst = block;  // TLS data at the bottom
 
             // Copy the static TLS template (initialized .tdata values).
             // The .bss portion (memsz - filesz) is already zeroed above.

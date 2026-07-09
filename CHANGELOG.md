@@ -6,6 +6,94 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 77 (2026-07-09)
+
+### glibc dynamic pthreads now work end-to-end
+
+Turn 76 laid the infrastructure (the `_dl_allocate_tls` syscall 0x1001,
+the `_rtld_global_ro` patcher, the expanded ld-linux shim); this turn
+fixes the four remaining bugs that kept glibc dynamic
+`pthread_create` from completing:
+
+- **NPTL stack-cache list initialization** — glibc's `allocate_stack`
+  walks `_dl_stack_cache` (a circular `list_t` in `_rtld_global`)
+  looking for a reusable thread stack. An empty list must have
+  `head->next == head->prev == &head` (`INIT_LIST_HEAD`); ld-linux's
+  `__pthread_initialize_minimal_internal` sets this during startup,
+  but we use our own dynamic linker and skip that. With the head's
+  `next` left NULL, `list_for_each` dereferenced NULL → bifrost
+  returns 0 for unmapped reads (instead of faulting) → the loop
+  followed NULL→NULL forever, a pure CPU spin with no syscall (the
+  Turn 76 "futex deadlock" diagnosis was a red herring). Fix:
+  `DynamicLinker::init_nptl_stack_lists_()` resolves `_rtld_global`
+  and writes self-referential pointers into the three list heads at
+  offsets `+0x1158` (`_dl_stack_used`), `+0x1168` (`_dl_stack_user`),
+  `+0x1178` (`_dl_stack_cache`) — offsets cross-checked against both
+  the `pthread_create` disassembly and the `_thread_db_rtld_global__dl_stack_*`
+  libthread_db descriptors in `libc.so.6`. No-op for musl (no
+  `_rtld_global`).
+- **`_dl_allocate_tls` shim override** — glibc's `pthread_create` calls
+  `_dl_allocate_tls` via a versioned JUMP_SLOT (`@GLIBC_PRIVATE`). The
+  shim's "first-define-wins" registration let the real ld-linux's
+  `_dl_allocate_tls` take precedence; that version calls
+  `allocate_dtv`, which calls `calloc` through a function pointer
+  (`_rtld_global._dl_calloc`, populated only during ld-linux's own
+  `_dl_start` — which we bypass) → `blr x2` with `x2=0` → decode error
+  at `pc=0x0`. Fix: force-override both `_dl_allocate_tls` and
+  `_dl_allocate_tls_init` in the shim's symbol registration, in BOTH
+  the unversioned (`symbols_`) and versioned (`versioned_symbols_`)
+  tables, so libc's PLT resolves to our shim (which traps into the
+  emulator via syscall 0x1001 and allocates the TLS block + `struct
+  pthread` without touching ld-linux's uninitialized state).
+- **`rseq` syscall returns success** — glibc's `start_thread` calls
+  `rseq()` (syscall 293) to register a per-thread restartable-sequences
+  area and fatals on ANY error (`cmn w0, #4096; b.ls skip_fatal` — no
+  `-ENOSYS` tolerance in this build, unlike upstream glibc 2.36's
+  `rseq-internal.h`). The old `-ENOSYS` return aborted every newly
+  created thread with "Fatal glibc error: rseq registration failed".
+  Fix: return 0. Safe because bifrost never triggers rseq aborts (no
+  preemption mid-critical-section), so rseq critical sections always
+  run to completion; `rseq_area.cpu_id` stays 0, correct for
+  single-CPU emulation.
+- **TCB / `struct pthread` placement** — the syscall 0x1001 handler
+  placed the TCB at the very END of the allocated block, leaving zero
+  bytes above it. glibc's `allocate_stack` writes `struct pthread`
+  fields (`start_routine`, `arg`, `flags`, `result`, `tid`, ...) at
+  POSITIVE offsets from the returned TCB pointer (since `struct
+  pthread` starts at the TCB and extends upward). Those writes landed
+  past the allocation → bifrost silently dropped them → `start_thread`
+  read garbage for `start_routine` → the worker never ran → the
+  thread exited immediately and `pthread_join` deadlocked on the
+  never-cleared `tid` futex. Fix: place the TCB at `block + tls_size`,
+  leaving `PTHREAD_SLACK` (8 KiB) above it for `struct pthread`
+  fields.
+- **`clone3` `child_tid` propagation** — `spawn_thread()` reads the
+  ctid pointer from `parent_cpu.regs[4]` (x4), correct for legacy
+  `clone()` (x4=ctid on AArch64) but wrong for `clone3`, where ctid
+  lives in the `clone_args` struct at offset +16, not in a register.
+  Without this, `CLONE_CHILD_SETTID` wrote the new tid to a garbage
+  address and `CLONE_CHILD_CLEARTID` recorded a garbage
+  `clear_child_tid`; on thread exit, `thread_entry()` cleared the
+  wrong address and futex-waked it, so `&pd->tid` (the real ctid
+  passed by glibc) was never zeroed or woken → `pthread_join`'s
+  `lll_wait_tid` spun forever. Fix: stage the clone3 `child_tid` into
+  `cpu.regs[4]` before calling `spawn_thread()`.
+
+### Tests
+
+- **Two new glibc dynamic pthread tests** added to
+  `scripts/run_tests.sh`:
+  - `test_dyn_pthread_min` — single-thread create/join with a shared
+    counter (verifies the basic create→run→join→wake path).
+  - `test_dyn_threads` — 4 threads × 1000 iterations under a mutex
+    with a `__thread` variable (verifies mutual exclusion, TLS
+    isolation, and stack-cache reuse).
+- **128/128 tests pass** with the rootfs set up (glibc + musl
+  toolchains), under both JIT and interpreter. No regressions from
+  Turn 76. The 2 previously-skipped musl dynamic tests
+  (`hello_dyn_musl`, `test_dyn_full_musl`) now also pass once the
+  musl toolchain is fetched.
+
 ## [Unreleased] — Turn 76 (2026-07-09)
 
 ### glibc dynamic pthread infrastructure

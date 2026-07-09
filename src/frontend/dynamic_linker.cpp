@@ -636,6 +636,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // from the real struct at specific offsets.
     patch_rtld_global_ro_();
 
+    // BUGFIX (Turn 77): initialize the NPTL stack-cache list heads in
+    // _rtld_global. Must happen before __libc_early_init and before the
+    // program runs pthread_create. See init_nptl_stack_lists_() for the
+    // full rationale. (No-op for musl, which has no _rtld_global.)
+    init_nptl_stack_lists_();
+
     if (init_runner_) {
         uint64_t early_init = resolve_symbol("__libc_early_init");
         if (early_init != 0) {
@@ -737,6 +743,109 @@ void DynamicLinker::patch_rtld_global_ro_() {
         // Reading/writing _rtld_global_ro failed — the struct might
         // not be mapped at the expected address. This is non-fatal;
         // glibc will hit the assertion later (visible failure).
+    }
+}
+
+// ── init_nptl_stack_lists_ ────────────────────────────────────────────
+// Initialize the NPTL stack-cache list heads in _rtld_global so that
+// glibc's pthread_create -> allocate_stack does not spin forever.
+//
+// Background: glibc (2.34+, NPTL merged into libc) keeps three circular
+// doubly-linked lists in `struct rtld_global` to manage thread stacks:
+//
+//   _dl_stack_used   — threads currently using a stack
+//   _dl_stack_user   — threads which need a stack
+//   _dl_stack_cache  — cache of free, reusable stacks
+//
+// Each is a `list_t` (= `struct list_head { list_t *next, *prev; }`,
+// 16 bytes). An EMPTY list must have head->next == head->prev == &head
+// (the INIT_LIST_HEAD macro). `allocate_stack` walks `_dl_stack_cache`
+// via `list_for_each(entry, &GL(dl_stack_cache))`, which expands to
+// `for (entry = head->next; entry != head; entry = entry->next)`. If
+// the list is properly empty (head->next == head), the body is skipped
+// and a fresh stack is allocated.
+//
+// The bug: ld-linux's `__pthread_initialize_minimal_internal` calls
+// INIT_LIST_HEAD on all three heads during startup, but we use our own
+// dynamic linker (not the guest ld-linux), so those heads stay zeroed
+// (they live in ld-linux's .bss, mapped read-write). With head->next ==
+// NULL, the `list_for_each` loop dereferences NULL -> bifrost-emu
+// returns 0 for unmapped reads (instead of faulting) -> entry stays 0
+// forever -> infinite CPU spin (no syscall, no futex). This matches the
+// observed hang: test_dyn_pthread_min prints "start", then spins in
+// libc.so.6 + 0x8102c (inside pthread_create) without making any
+// syscall.
+//
+// The fix: resolve `_rtld_global` (the read-write rtld global, NOT
+// `_rtld_global_ro`) and write self-referential pointers into the three
+// list heads. Offsets (glibc 2.36, Arm GNU 13.2.rel1, AArch64) were
+// determined two ways and cross-checked:
+//   1. Disassembly of pthread_create in libc.so.6:
+//        adrp x24, <got>; ldr x24, [x24, #...]  ; x24 = _rtld_global
+//        ldr  x0, [x24, #0x1178]                ; x0 = stack_cache.next
+//        mov  x10, #0x1178
+//        add  x3, x24, x10                      ; x3 = &stack_cache
+//        cmp  x0, x3                            ; empty? (next == &head)
+//        ...                                    ; loop: ldr x0,[x0]; cmp x0,x3
+//        mov  x11, #0x1198
+//        add  x28, x24, x11                     ; __stack_cache_lock
+//   2. libthread_db descriptors in libc.so.6 .rodata:
+//        _thread_db_rtld_global__dl_stack_used  @0x145240: {..., 0x1158}
+//        _thread_db_rtld_global__dl_stack_user  @0x145250: {..., 0x1168}
+//      (stack_cache follows at 0x1178; the descriptors only describe
+//       the first two, but the disassembly confirms 0x1178 for cache.)
+//
+// So: stack_used @ +0x1158, stack_user @ +0x1168, stack_cache @ +0x1178.
+// Each list_head is 16 bytes; we set [off]=&_rtld_global[off] (next)
+// and [off+8]=&_rtld_global[off] (prev).
+//
+// This is glibc-specific (musl has no _rtld_global); if the symbol is
+// not found (musl, or static binary), this is a no-op. We also guard
+// against double-init: if a head already points to itself (or to a
+// non-zero value — meaning ld-linux init already ran), we leave it
+// alone so we never corrupt a populated list.
+void DynamicLinker::init_nptl_stack_lists_() {
+    uint64_t rtld = resolve_symbol("_rtld_global");
+    if (rtld == 0) {
+        // musl or static binary — no _rtld_global. Nothing to do.
+        return;
+    }
+
+    // Offsets of the three NPTL stack list heads within
+    // struct rtld_global (glibc 2.36, AArch64). See the comment above.
+    struct ListHeadOff { const char* name; uint64_t off; };
+    constexpr ListHeadOff heads[] = {
+        { "_dl_stack_used",  0x1158 },
+        { "_dl_stack_user",  0x1168 },
+        { "_dl_stack_cache", 0x1178 },
+    };
+
+    bool patched = false;
+    try {
+        for (const auto& h : heads) {
+            uint64_t head_addr = rtld + h.off;
+            uint64_t next = mem_.load<uint64_t>(head_addr);
+            // Only initialize if the head is still zero (uninitialized).
+            // If next is non-zero, either ld-linux already initialized it
+            // (self-pointer) or a previous pthread_create populated the
+            // list — in either case, leave it alone.
+            if (next == 0) {
+                // INIT_LIST_HEAD: head->next = head->prev = &head.
+                mem_.store<uint64_t>(head_addr,     head_addr);  // next
+                mem_.store<uint64_t>(head_addr + 8, head_addr);  // prev
+                patched = true;
+            }
+        }
+    } catch (...) {
+        // _rtld_global not mapped at the expected range — non-fatal.
+        // glibc will spin later (visible failure).
+    }
+
+    if (patched && getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] initialized NPTL stack list heads in "
+                "_rtld_global @0x%llx (stack_used@+0x1158, "
+                "stack_user@+0x1168, stack_cache@+0x1178)\n",
+                static_cast<unsigned long long>(rtld));
     }
 }
 
@@ -1437,6 +1546,35 @@ bool DynamicLinker::register_ld_linux_shim_() {
     add_func_sym("__tls_get_addr",          OFF_TLSADDR);
     add_func_sym("__tunable_get_val",       OFF_TUNABLE);
     add_func_sym("__nptl_change_stack_perm", OFF_STACKPERM);
+
+    // BUGFIX (Turn 77): force-override _dl_allocate_tls and
+    // _dl_allocate_tls_init with our shim's stubs, even if the real
+    // ld-linux already defined them in .dynsym. The real ld-linux's
+    // _dl_allocate_tls -> allocate_dtv calls calloc via a function
+    // pointer (_rtld_global._dl_calloc / the slot at ld-linux+0x3fb18)
+    // that is only populated during ld-linux's own _dl_start startup,
+    // which we bypass (we use our own dynamic linker). With that slot
+    // NULL, allocate_dtv does `blr x2` with x2=0 -> decode error at
+    // pc=0x0. Our shim's _dl_allocate_tls instead traps into the
+    // emulator via syscall 0x1001 (see misc.cpp case 0x1001), which
+    // allocates the per-thread TLS block + TCB, copies the static TLS
+    // template, copies the TCB canary fields, and returns the TCB
+    // pointer — all without touching ld-linux's uninitialized internal
+    // state. _dl_allocate_tls_init returns its argument unchanged
+    // (the TLS template copy is already done by the syscall handler).
+    //
+    // We override BOTH the unversioned table (symbols_) AND the
+    // versioned table (versioned_symbols_, keyed "name@GLIBC_PRIVATE")
+    // because libc's JUMP_SLOT relocations against these symbols are
+    // versioned (@GLIBC_PRIVATE), and resolve_versioned_symbol()
+    // consults versioned_symbols_ first. Without the versioned
+    // override, libc's PLT call would still resolve to the real
+    // ld-linux's _dl_allocate_tls. (Other real ld-linux symbols like
+    // _rtld_global remain first-define-wins via add_data_sym above.)
+    symbols_["_dl_allocate_tls"]      = SymEntry{code_base + OFF_TLS,     STB_GLOBAL_};
+    symbols_["_dl_allocate_tls_init"] = SymEntry{code_base + OFF_TLSINIT, STB_GLOBAL_};
+    versioned_symbols_["_dl_allocate_tls@GLIBC_PRIVATE"]      = SymEntry{code_base + OFF_TLS,     STB_GLOBAL_};
+    versioned_symbols_["_dl_allocate_tls_init@GLIBC_PRIVATE"] = SymEntry{code_base + OFF_TLSINIT, STB_GLOBAL_};
 
     // Also register a synthetic LoadedObject so the shim shows up in
     // /proc/self/maps and the allocations_ tracker (for fork safety).

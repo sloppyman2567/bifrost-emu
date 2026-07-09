@@ -571,9 +571,36 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 293: { // rseq (restartable sequences, glibc probes at startup)
-            // Return -ENOSYS so glibc disables rseq and uses regular paths.
-            ret_err(ENOSYS);
+        case 293: { // rseq (restartable sequences)
+            // glibc 2.34+ (NPTL merged) calls rseq() during start_thread
+            // to register a per-thread rseq area for restartable
+            // sequences (per-CPU atomics, malloc per-CPU arenas, etc.).
+            //
+            // The glibc shipped with the Arm GNU 13.2 toolchain fatals
+            // on ANY rseq error — the start_thread code does:
+            //     svc #0          ; rseq(...)
+            //     cmn w0, #4096    ; error check
+            //     b.ls 1f          ; skip fatal if NOT an error
+            //     ... __libc_fatal("rseq registration failed")
+            // There is NO -ENOSYS tolerance in this code path (unlike
+            // upstream glibc 2.36's rseq-internal.h which sets
+            // __rseq_size=0 on ENOSYS). So returning -ENOSYS here makes
+            // glibc abort every newly-created thread.
+            //
+            // We return 0 (success) instead. This is safe because:
+            //   - We never trigger rseq aborts (no preemption/signal
+            //     delivery mid-critical-section), so rseq critical
+            //     sections always run to completion.
+            //   - The rseq_area.cpu_id field stays at 0 (its initial
+            //     value from allocate_stack's zeroing); glibc's per-CPU
+            //     code targets CPU 0, which is correct for our
+            //     single-CPU emulation.
+            //   - Thread-exit calls rseq with RSEQ_FLAG_UNREGISTER; we
+            //     return 0 for that too (harmless no-op).
+            //
+            // a0 = rseq_area ptr, a1 = size, a2 = flags, a3 = signature.
+            // We ignore all args (no state to track).
+            ret_ok();
             return 0;
         }
 

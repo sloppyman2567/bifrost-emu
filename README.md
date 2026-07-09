@@ -107,7 +107,13 @@ export BIFROST_ROOT=$PWD/rootfs
 Both **glibc** and **musl** dynamically-linked binaries are supported.
 glibc dynamic printf/puts/fprintf/fputs work fully (integers, strings,
 hex, padded formats, float formatting). musl's printf works perfectly
-for all format specifiers.
+for all format specifiers. **glibc dynamic pthreads work end-to-end**
+(`pthread_create`/`pthread_join`, mutexes, condition variables,
+`__thread` TLS) — the emulator initializes NPTL's stack-cache list
+heads, routes `_dl_allocate_tls` through a native syscall, reports
+`rseq` success, and propagates `clone3`'s `child_tid` so thread exit
+wakes joiners. musl dynamic pthreads and all static pthread tests also
+pass under both JIT and interpreter.
 
 The rootfs includes:
 - `/lib/libc.so.6`, `/lib/ld-linux-aarch64.so.1` (glibc)
@@ -340,14 +346,6 @@ The JIT uses:
 - **AArch64 only** — no AArch32 (32-bit ARM) support
 - **x86_64 host only** — no ARM host support (use native execution)
 - **No vDSO** — some clock_gettime paths are emulated, not native
-- **glibc dynamic pthreads** — glibc's NPTL `pthread_create` hangs in
-  `allocate_stack` because `_dl_allocate_tls_storage` reads
-  `GLRO(dl_tls_static_size)` from a glibc-version-specific offset in
-  `_rtld_global_ro`. The infrastructure to fix this is in place
-  (syscall 0x1001 for `_dl_allocate_tls`, `patch_rtld_global_ro_()`
-  for the size/align fields), but the exact field offset varies by
-  glibc version and needs more binary analysis. **musl dynamic
-  pthreads and all static pthread tests work correctly.**
 
 ## Documentation
 

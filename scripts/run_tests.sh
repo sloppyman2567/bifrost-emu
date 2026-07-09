@@ -349,6 +349,12 @@ DYNAMIC_TESTS=(
     "test_dyn_malloc|ctest_real/test_dyn_malloc.elf||5|^done$"
     "test_dyn_printf|ctest_real/test_dyn_printf.elf||10|^\\[done\\]$"
     "test_dyn_full_musl|ctest_real/test_dyn_full_musl.elf||15|ALL PASS"
+    # NEW (Turn 77): glibc dynamic pthread tests. These verify the
+    # NPTL stack-list init, _dl_allocate_tls shim override, rseq
+    # success, TCB/struct-pthread placement, and clone3 ctid fixes
+    # that make glibc dynamic pthread_create work end-to-end.
+    "test_dyn_pthread_min|ctest_real/test_dyn_pthread_min.elf||10|joined, counter=1"
+    "test_dyn_threads|ctest_real/test_dyn_threads.elf||20|test_dyn_threads: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

@@ -229,6 +229,25 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // clone case 220 above). The interpreter's SVC_IMM handler
             // advances cpu.pc to SVC+4 before calling syscall(), so
             // cpu.pc is already the correct entry point.
+            //
+            // BUGFIX (Turn 77): spawn_thread() reads the ctid pointer
+            // from parent_cpu.regs[4] (x4) — correct for legacy clone()
+            // (where x4=ctid on AArch64) but WRONG for clone3, where
+            // ctid is in the clone_args struct at offset +16, not in a
+            // register. Without this, CLONE_CHILD_SETTID writes the new
+            // tid to a garbage address, and CLONE_CHILD_CLEARTID records
+            // a garbage clear_child_tid. The latter is fatal: when the
+            // child thread exits, thread_entry() clears *clear_child_tid
+            // (wrong address) and futex-wakes it — so the REAL ctid
+            // (&pd->tid, passed by glibc's allocate_stack) is never
+            // zeroed and never woken. pthread_join's lll_wait_tid loop
+            // then spins forever on &pd->tid (val stays == child tid).
+            //
+            // Fix: stage the clone3 child_tid (read from the struct
+            // above) into x4 so spawn_thread's regs[4] read sees the
+            // correct ctid. x4 is caller-saved across syscalls (only x0
+            // is preserved on return), so clobbering it here is safe.
+            cpu.regs[4] = child_tid;
             uint64_t entry_pc = cpu.pc;  // already SVC+4
             int tid = spawn_thread(cpu, flags, stack_top, entry_pc, 0, tls);
             if (tid < 0) { ret_err(ENOMEM); return 0; }

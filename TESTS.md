@@ -10,22 +10,22 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default) | 163 | 163 | 0 | With `--test-all` + rootfs set up |
-| frostJIT (default `make check`) | 149 | 119 | 0 | 30 skip (busybox not downloaded) |
-| Interpreter (`./bifrost-emu --no-jit`) | 163 | 163 | 0 | Same conditions as JIT row |
-| `make check-quick` | 144 | 114 | 0 | Skips 5 benchmarks |
+| frostJIT (`./bifrost-emu`, default) | 165 | 165 | 0 | With `--test-all` + rootfs set up |
+| frostJIT (default `make check`) | 151 | 121 | 0 | 30 skip (busybox not downloaded) |
+| Interpreter (`./bifrost-emu --no-jit`) | 165 | 165 | 0 | Same conditions as JIT row |
+| `make check-quick` | 146 | 116 | 0 | Skips 5 benchmarks |
 
-**163 test programs** are defined in `scripts/run_tests.sh` across six
-categories (see table below). Of these, **119 pass by default** with a
+**165 test programs** are defined in `scripts/run_tests.sh` across six
+categories (see table below). Of these, **121 pass by default** with a
 fresh checkout (no `--test-all`, no rootfs): the 30 real-world busybox
 tests are skipped because `busybox-aarch64` is not downloaded, and the
-7 dynamic tests + 7 dynamic-glibc real-world tests are skipped because
+9 dynamic tests + 7 dynamic-glibc real-world tests are skipped because
 no rootfs is set up. Running `./scripts/run_tests.sh --test-all` and
 setting up the rootfs (`./scripts/setup-rootfs.sh`) brings the count to
-163/163.
+165/165.
 
-All 119 default tests pass under frostJIT as of Turn 75 (2026-07-09),
-and all 119 also pass under the interpreter. The C API (`libbifrost.a`
+All 121 default tests pass under frostJIT as of Turn 77 (2026-07-09),
+and all 121 also pass under the interpreter. The C API (`libbifrost.a`
 + `api/bifrost.h`) is verified by `ctest/test_capi.c` (22 checks, all
 pass).
 
@@ -37,9 +37,9 @@ pass).
 | Integration tests | 51 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
-| Dynamic | 7 | Dynamically-linked musl + glibc tests (need rootfs) |
+| Dynamic | 9 | Dynamically-linked musl + glibc tests (need rootfs) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **163** | |
+| **Total** | **165** | |
 
 Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
 `--interactive` and not counted in the 163.
