@@ -6,7 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased] — Turn 74 (2026-07-08)
+## [Unreleased] — Turn 75 (2026-07-09)
+
+### Toolchain download hardening
+
+- All toolchain and real-world binary download scripts now enforce a
+  hard 90-second timeout (`curl --connect-timeout 15 --max-time 90
+  --retry 1` or `wget --timeout=90 --tries=1`). Without this cap, a
+  stalled mirror could hang the bootstrap indefinitely in CI.
+  Affected scripts: `tools/fetch-musl-toolchain.sh`,
+  `tools/fetch-glibc-toolchain.sh`, `scripts/fetch-realworld-libs.sh`,
+  `scripts/fetch-realworld-binaries.sh`, and the `--test-all` busybox
+  download in `scripts/run_tests.sh`.
+- New `scripts/fetch-curl-deps.sh` — downloads curl's deep dependency
+  tree (libnghttp2, libidn2, librtmp, libssh2, libpsl, libgssapi_krb5,
+  libldap, libzstd, libbrotli, libgnutls, etc.) from the Debian arm64
+  package mirror. Looks up correct pool paths dynamically via the
+  Packages.gz index so it's resilient to version bumps.
+
+### Bug fixes
+
+- `src/core/config.cpp` `apply_env()` — `BIFROST_NO_JIT` env-var
+  handling was a confusing two-stage dance (env_bool then re-parse-
+  and-flip). Replaced with a single explicit inversion matching the
+  `BIFROST_NO_THREAD_JIT` pattern. Behavior unchanged.
+- `main.cpp` help text — `--audio-dump PATH`, `--jit-threshold N`,
+  `--config PATH`, and `--print-config` were parsed by the arg loop
+  but never shown in `--help` or the banner. Added all four to both.
+
+### Test suite — 163/163 defined (119 pass by default, 44 skip)
+
+- Test counts were inconsistent across docs (`TESTS.md` said 120,
+  `README.md` said 120, `run_tests.sh` header said 150). Actual count
+  is 163: 35 unit + 51 integration + 9 toybox + 56 real-world + 7
+  dynamic + 5 bench. Of these, 119 pass by default (no `--test-all`,
+  no rootfs), 30 skip (busybox not downloaded), 14 silent skip (7
+  DYN-mode real-world + 7 dynamic tests need rootfs). Updated all
+  docs to consistently report 163/163 defined, 119 pass-by-default.
+
+### Real-world testing — busybox awk and curl now work under JIT
+
+- **busybox awk**: `echo -e "1\n2\n3" | busybox awk '{sum+=$1}
+  END{print sum}'` now correctly prints `6` under the JIT (default).
+  Previously (Turn 57) this printed `0` due to an FCVT misidentification
+  bug. The Turn 74 glibc float printf fix resolved the remaining
+  layer. Float printf (`%.2f`) also works.
+- **curl --version**: now prints the full version string, protocols,
+  and features under the JIT. The Turn 56 CCMP 32-bit flag bug was
+  the root cause; Turn 74's dynamic linker fixes completed the fix.
+  Requires running `scripts/fetch-curl-deps.sh` to populate the
+  rootfs with curl's 24 dependency libraries.
+
+### Known limitations
+
+- glibc dynamic pthreads hits an assertion in allocatestack.c
+  (`size != 0`). The TLS/thread stack setup needs work for glibc's
+  NPTL. musl dynamic pthreads work (existing `test_pthread` tests
+  pass under musl static).
+- **Interpreter tzfile assertion** — some dynamically-linked glibc
+  programs that parse timezone data (e.g. `curl --version`) hit a
+  glibc internal assertion in `tzfile.c:__tzfile_compute` under the
+  interpreter (`--no-jit`). The JIT (default) handles these correctly.
+  Tracked for future investigation.
+
+## [1.5.0.alpha] — Turn 74 (2026-07-08)
 
 ### Dynamic Linking — glibc dynamic binaries fully working
 
@@ -37,6 +100,14 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   strlen, which uses `cmeq v1, v0, #0` to detect NUL bytes in
   16-byte chunks — without CMEQ, strlen never found the terminator
   and spun forever through unmapped zero pages. Fixed to 0x0E209800.
+- **CRITICAL: glibc float printf fully fixed.** The root cause was a
+  chain of two missing initialization steps: (1) `__libc_early_init`
+  not called (needed for `__ctype_init()` to set up thread-local
+  character type tables); (2) TPIDR_EL0 not set during init_runner
+  (stale TPIDR_EL0 when init functions run inside `link()`). Fix:
+  call `__libc_early_init` from `DynamicLinker::link()` after
+  relocations, and set TPIDR_EL0 to the static TLS block pointer
+  inside the init_runner callback before running any guest function.
 
 ### Rootfs improvements
 
@@ -55,18 +126,6 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   - `test_dyn_printf` — glibc printf with 6 format variants.
   - `test_dyn_full_musl` — comprehensive musl dynamic test (printf,
     malloc, strings, errno, time, atexit).
-
-### Known limitations
-
-- glibc dynamic printf float formatting (`%f`, `%e`, `%g`) produces
-  wrong output: the decimal point is replaced by a space (e.g.,
-  `3.14` → `3 14`). Integer and string formats are correct. The bug
-  is in glibc's SIMD-optimized `__printf_fp_l` function; musl's
-  printf works perfectly. Tracked for future investigation.
-- glibc dynamic pthreads hits an assertion in allocatestack.c
-  (`size != 0`). The TLS/thread stack setup needs work for glibc's
-  NPTL. musl dynamic pthreads work (existing `test_pthread` tests
-  pass under musl static).
 
 ## [1.5.0.alpha] — Turn 73 (2026-07-08)
 

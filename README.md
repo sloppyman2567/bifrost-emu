@@ -341,12 +341,14 @@ The JIT uses:
 - **AArch64 only** — no AArch32 (32-bit ARM) support
 - **x86_64 host only** — no ARM host support (use native execution)
 - **No vDSO** — some clock_gettime paths are emulated, not native
-- **glibc float printf** — glibc's `%f`/`%e`/`%g` formatting has a
-  precision bug (one fewer digit than requested). Integer/string/hex
-  formats work correctly. musl's printf works perfectly for all formats.
 - **glibc dynamic pthreads** — glibc's NPTL thread allocation hits an
   assertion in allocatestack.c. musl dynamic pthreads work. Static
   pthread tests (musl) pass.
+- **Interpreter tzfile assertion** — some dynamically-linked glibc
+  programs that parse timezone data (e.g. `curl --version`) hit a
+  glibc internal assertion in `tzfile.c:__tzfile_compute` under the
+  interpreter (`--no-jit`). The JIT (default) handles these correctly.
+  Tracked for future investigation.
 
 ## Documentation
 
