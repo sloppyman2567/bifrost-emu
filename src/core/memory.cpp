@@ -36,7 +36,12 @@ Memory::Memory() {
     // 1. rand() is predictable if the guest can observe any output
     // 2. /dev/urandom is the standard kernel CSPRNG on Linux
     // 3. It's async-signal-safe (no malloc, no locks)
-    {
+    //
+    // BIFROST_NO_ASLR=1 disables randomization (for debugging and
+    // reproducible trace comparison between JIT and interpreter).
+    if (getenv("BIFROST_NO_ASLR")) {
+        mmap_next_ = 0x5000000000ULL;
+    } else {
         int fd = ::open("/dev/urandom", O_RDONLY);
         if (fd >= 0) {
             uint64_t entropy = 0;
