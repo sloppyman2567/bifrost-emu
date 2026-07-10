@@ -68,19 +68,42 @@ glibc 2.38 (it doesn't produce DT_RELR sections).
   syscall never fires and glibc falls back to its own internal TLS
   setup. This works for ≤4 threads but the 8-thread multi-wave test
   (test_8threads_v2) shows TLS-array corruption (`tls_array[0]` reads
-  `id*25` instead of `id*100`). Fixing requires: (1) correcting the
-  movz encoding, (2) implementing variant-I layout in
-  `allocate_static_tls()`, (3) updating the syscall 0x1001 handler
-  to copy lib-TLS below TCB and main-exe-TLS above TCB. Attempted
-  this turn but caused regressions (double-free in test_dyn_threads)
-  — the variant-I fix needs more careful testing against glibc's
-  `struct pthread` layout expectations. Tracked as future work.
+  `id*25` instead of `id*100`).
+
+  Turn 78 cont. investigation: correcting the movz encoding makes
+  syscall 0x1001 fire, which copies TLS data to [tcb, tcb+main_memsz).
+  But on AArch64 glibc, the main exe's TLS section starts at TP+0,
+  OVERLAPPING with the TCB header (tcbhead_t). The linker places TLS
+  variables at offsets that avoid critical TCB fields (stack_guard at
+  +40, pointer_guard at +48), but non-critical fields (tcb at +0, dtv
+  at +8, self at +16) CAN be overwritten. Glibc's `create_thread` sets
+  these TCB fields BEFORE clone; the syscall 0x1001 handler runs INSIDE
+  clone and destroys them, causing "resolv_conf.c assertion failed"
+  and "double free or corruption".
+
+  Additionally, `_dl_allocate_tls_init` (called on stack-cache reuse)
+  doesn't reach our shim — only 8 of 32 expected syscall 0x1001 calls
+  fire for an 8-thread × 4-wave test. The PLT resolution for
+  `_dl_allocate_tls_init@GLIBC_PRIVATE` appears to not resolve to our
+  shim, despite being registered in both `symbols_` and
+  `versioned_symbols_`.
+
+  The correct fix requires: (1) implementing variant-I layout where
+  main exe TLS does NOT overlap the TCB (place TCB at a negative offset
+  from TP, main exe TLS at TP+0), (2) ensuring `_dl_allocate_tls_init`
+  fires on stack-cache reuse (investigate PLT/GOT resolution), (3) NOT
+  copying TCB header fields in the syscall handler (let glibc's
+  `create_thread` and `start_thread` handle those). Tracked as future
+  work.
+
 - **8-thread race** — a direct consequence of the TLS-layout issue
   above. With 8+ concurrent threads across multiple waves (create/
   join cycles), glibc's stack-cache reuse path doesn't re-initialize
   TLS correctly, producing the `id*25` corruption pattern. 4 threads
   is stable; the 4×8-wave stress test (test_dyn_pthread_stress)
-  passes reliably.
+  passes reliably. Single-wave 8-thread tests also pass (glibc zeroes
+  struct pthread on first allocation, serving as zeroed TLS for .tbss
+  variables).
 
 ## [Unreleased] — Turn 77 (2026-07-09)
 
