@@ -56,10 +56,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/xattr.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace arm64emu {
@@ -83,32 +86,28 @@ static std::string read_path(Memory& mem, uint64_t addr) {
 }
 
 // ── xattr family ───────────────────────────────────────────────────────
-// AArch64 syscall numbers (asm-generic/unistd.h):
-//   188 = getxattr(path, name, value, size)
-//   189 = lgetxattr(path, name, value, size)
-//   190 = fgetxattr(fd, name, value, size)
-//   191 = setxattr(path, name, value, size, flags)
-//   192 = lsetxattr(path, name, value, size, flags)
-//   193 = fsetxattr(fd, name, value, size, flags)
-//   194 = listxattr(path, list, size)
-//   195 = llistxattr(path, list, size)
-//   196 = flistxattr(fd, list, size)
-//   197 = removexattr(path, name)
-//   198 = lremovexattr(path, name)  — wait, 198 is socket() on AArch64.
-//                                       The actual AArch64 numbers are:
-//   198..207 are socket calls (handled in misc_io.cpp).
-//   Actually, asm-generic/unistd.h has:
-//     188 getxattr, 189 lgetxattr, 190 fgetxattr,
-//     191 setxattr, 192 lsetxattr, 193 fsetxattr,
-//     194 listxattr, 195 llistxattr, 196 flistxattr,
-//     197 removexattr, 198 lremovexattr, 199 fremovexattr
-//   But AArch64 reuses 198..219 for socket syscalls. So the xattr
-//   "removexattr" family is at:
-//     197 removexattr
-//   and the next ones (lremovexattr, fremovexattr) collide with socket
-//   numbering — they're effectively not available on AArch64.
-//   We implement 188-197 (getxattr through removexattr) and treat the
-//   f*/l* variants of removexattr as -ENOSYS.
+// AArch64 syscall numbers (per asm-generic/unistd.h, which AArch64 follows):
+//   5  = setxattr(path, name, value, size, flags)
+//   6  = lsetxattr(path, name, value, size, flags)
+//   7  = fsetxattr(fd, name, value, size, flags)
+//   8  = getxattr(path, name, value, size)
+//   9  = lgetxattr(path, name, value, size)
+//   10 = fgetxattr(fd, name, value, size)
+//   11 = listxattr(path, list, size)
+//   12 = llistxattr(path, list, size)
+//   13 = flistxattr(fd, list, size)
+//   14 = removexattr(path, name)
+//   15 = lremovexattr(path, name)
+//   16 = fremovexattr(fd, name)
+//
+// BUGFIX (this turn): the previous version of this file mapped the xattr
+// family to syscall numbers 188-197. Those numbers are actually the SysV
+// IPC family (msgrcv, msgsnd, semget, semctl, semtimedop, semop, shmget,
+// shmctl, shmat, shmdt). Real AArch64 binaries calling xattr got -ENOSYS
+// because no handler existed at 5-16, while real binaries calling SysV
+// IPC silently got xattr behavior (wrong return value, no side effect).
+// Fixed by moving the cases to the correct numbers and adding -ENOSYS
+// stubs for the SysV IPC range so those callers see a clean error.
 
 static int64_t do_getxattr(Memory& mem, CPU& cpu, int kind) {
     // kind: 0=getxattr, 1=lgetxattr, 2=fgetxattr
@@ -190,23 +189,295 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
     (void)a5;
 
     switch (num) {
-        // ── xattr family (188-197) ────────────────────────────────────
-        case 188: return do_getxattr(mem_, cpu, 0);  // getxattr
-        case 189: return do_getxattr(mem_, cpu, 1);  // lgetxattr
-        case 190: return do_getxattr(mem_, cpu, 2);  // fgetxattr
-        case 191: return do_setxattr(mem_, cpu, 0);  // setxattr
-        case 192: return do_setxattr(mem_, cpu, 1);  // lsetxattr
-        case 193: return do_setxattr(mem_, cpu, 2);  // fsetxattr
-        case 194: return do_listxattr(mem_, cpu, 0); // listxattr
-        case 195: return do_listxattr(mem_, cpu, 1); // llistxattr
-        case 196: return do_listxattr(mem_, cpu, 2); // flistxattr
-        case 197: { // removexattr(path, name)
+        // ── xattr family (5-16, per asm-generic/unistd.h) ─────────────
+        case 5:  return do_setxattr(mem_, cpu, 0);  // setxattr
+        case 6:  return do_setxattr(mem_, cpu, 1);  // lsetxattr
+        case 7:  return do_setxattr(mem_, cpu, 2);  // fsetxattr
+        case 8:  return do_getxattr(mem_, cpu, 0);  // getxattr
+        case 9:  return do_getxattr(mem_, cpu, 1);  // lgetxattr
+        case 10: return do_getxattr(mem_, cpu, 2);  // fgetxattr
+        case 11: return do_listxattr(mem_, cpu, 0); // listxattr
+        case 12: return do_listxattr(mem_, cpu, 1); // llistxattr
+        case 13: return do_listxattr(mem_, cpu, 2); // flistxattr
+        case 14: { // removexattr(path, name)
             std::string path = read_path(mem_, a0);
             std::string name = read_path(mem_, a1);
             if (path.empty() || name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
             int r = ::removexattr(path.c_str(), name.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
+        }
+        case 15: { // lremovexattr(path, name)
+            std::string path = read_path(mem_, a0);
+            std::string name = read_path(mem_, a1);
+            if (path.empty() || name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
+            int r = ::lremovexattr(path.c_str(), name.c_str());
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0); return 0;
+        }
+        case 16: { // fremovexattr(fd, name)
+            std::string name = read_path(mem_, a1);
+            if (name.empty()) { ret_host(static_cast<int64_t>(-EFAULT)); return 0; }
+            int r = ::fremovexattr(static_cast<int>(a0), name.c_str());
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0); return 0;
+        }
+
+        // ── POSIX interval timers (102-103, 107-112) ──────────────────
+        // getitimer/setitimer (102/103) are widely used by signal-based
+        // profilers and SIGALRM-based timers. We forward to the host.
+        // timer_create/gettime/getoverrun/settime/delete (107-111) are
+        // POSIX per-thread timers; we stub them to -ENOSYS (glibc falls
+        // back to setitimer when timer_create fails).
+        case 102: { // getitimer(which, curr_value)
+            if (a1 == 0) { ret_err(EFAULT); return 0; }
+            struct itimerval v{};
+            int r = ::getitimer(static_cast<int>(a0), &v);
+            if (r < 0) { ret_errno(); return 0; }
+            try {
+                mem_.store<uint64_t>(a1,      static_cast<uint64_t>(v.it_interval.tv_sec));
+                mem_.store<uint64_t>(a1 + 8,  static_cast<uint64_t>(v.it_interval.tv_usec));
+                mem_.store<uint64_t>(a1 + 16, static_cast<uint64_t>(v.it_value.tv_sec));
+                mem_.store<uint64_t>(a1 + 24, static_cast<uint64_t>(v.it_value.tv_usec));
+            } catch (...) { ret_err(EFAULT); return 0; }
+            ret_host(0); return 0;
+        }
+        case 103: { // setitimer(which, new_value, old_value)
+            struct itimerval nv{}, ov{};
+            if (a1) {
+                try {
+                    nv.it_interval.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a1));
+                    nv.it_interval.tv_usec = static_cast<suseconds_t>(mem_.load<uint64_t>(a1 + 8));
+                    nv.it_value.tv_sec     = static_cast<time_t>(mem_.load<uint64_t>(a1 + 16));
+                    nv.it_value.tv_usec    = static_cast<suseconds_t>(mem_.load<uint64_t>(a1 + 24));
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            int r = ::setitimer(static_cast<int>(a0), a1 ? &nv : nullptr, a2 ? &ov : nullptr);
+            if (r < 0) { ret_errno(); return 0; }
+            if (a2) {
+                try {
+                    mem_.store<uint64_t>(a2,      static_cast<uint64_t>(ov.it_interval.tv_sec));
+                    mem_.store<uint64_t>(a2 + 8,  static_cast<uint64_t>(ov.it_interval.tv_usec));
+                    mem_.store<uint64_t>(a2 + 16, static_cast<uint64_t>(ov.it_value.tv_sec));
+                    mem_.store<uint64_t>(a2 + 24, static_cast<uint64_t>(ov.it_value.tv_usec));
+                } catch (...) { /* ignore */ }
+            }
+            ret_host(0); return 0;
+        }
+        // POSIX per-thread timers — return -ENOSYS so glibc falls back
+        // to setitimer-based SIGEV_SIGNAL timers.
+        case 107: case 108: case 109: case 110: case 111: {
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
+        // clock_settime — we're not authorized to change the host clock;
+        // return -EPERM (matches what an unprivileged process gets).
+        case 112: { ret_host(static_cast<int64_t>(-EPERM)); return 0; }
+
+        // ── sched_setparam/setscheduler/getscheduler/getparam (118-121) ─
+        // The guest is a single-process sandbox; we accept setparam and
+        // return success. getscheduler returns SCHED_OTHER (0).
+        // getparam returns priority 0.
+        case 118: { // sched_setparam(pid, param)
+            ret_host(0); return 0;
+        }
+        case 119: { // sched_setscheduler(pid, policy, param)
+            ret_host(0); return 0;
+        }
+        case 120: { // sched_getscheduler(pid)
+            ret_host(0);  // SCHED_OTHER
+            return 0;
+        }
+        case 121: { // sched_getparam(pid, param)
+            if (a1) {
+                // struct sched_param { int sched_priority; }
+                try { mem_.store<uint32_t>(a1, 0); }
+                catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0); return 0;
+        }
+
+        // ── Identity / process-group syscalls ────────────────────────
+        // We're a single-process guest running as root (uid 0). set*id
+        // calls succeed silently (we're already 0); get*id calls return 0.
+        case 143: { // setregid(rgid, egid) — accept silently
+            ret_host(0); return 0;
+        }
+        case 144: { // setgid(gid)
+            ret_host(0); return 0;
+        }
+        case 145: { // setreuid(ruid, euid)
+            ret_host(0); return 0;
+        }
+        case 146: { // setuid(uid)
+            ret_host(0); return 0;
+        }
+        case 147: { // setresuid(ruid, euid, suid)
+            ret_host(0); return 0;
+        }
+        case 148: { // getresuid(ruid, euid, suid) — all 0
+            if (a0) { try { mem_.store<uint32_t>(a0, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            if (a1) { try { mem_.store<uint32_t>(a1, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            if (a2) { try { mem_.store<uint32_t>(a2, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            ret_host(0); return 0;
+        }
+        case 149: { // setresgid(rgid, egid, sgid)
+            ret_host(0); return 0;
+        }
+        case 150: { // getresgid(rgid, egid, sgid) — all 0
+            if (a0) { try { mem_.store<uint32_t>(a0, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            if (a1) { try { mem_.store<uint32_t>(a1, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            if (a2) { try { mem_.store<uint32_t>(a2, 0); } catch (...) { ret_err(EFAULT); return 0; } }
+            ret_host(0); return 0;
+        }
+        case 151: { // setfsuid(uid)
+            ret_host(0); return 0;
+        }
+        case 152: { // setfsgid(gid)
+            ret_host(0); return 0;
+        }
+        case 154: { // setpgid(pid, pgid)
+            // Single-process sandbox: silently accept. Real pgid is 1.
+            ret_host(0); return 0;
+        }
+        case 156: { // getsid(pid) — return 1 (we're session leader)
+            ret_host(1); return 0;
+        }
+        case 157: { // setsid() — become session leader; return 1
+            ret_host(1); return 0;
+        }
+
+        // ── setrlimit (164) ───────────────────────────────────────────
+        // Accept but don't actually enforce. The guest can't escape the
+        // host's limits anyway. (getrlimit at 163 is in misc_id.cpp.)
+        case 164: { // setrlimit(resource, rlim)
+            ret_host(0); return 0;
+        }
+
+        // ── SysV IPC stubs (186-197) ──────────────────────────────────
+        // We don't implement SysV message queues, semaphores, or shared
+        // memory. Return -ENOSYS so callers (rare on modern Linux — most
+        // apps use POSIX IPC or pthread primitives) get a clean error.
+        case 186: case 187: case 188: case 189:  // msgget/msgctl/msgrcv/msgsnd
+        case 190: case 191: case 192: case 193:  // semget/semctl/semtimedop/semop
+        case 194: case 195: case 196: case 197:  // shmget/shmctl/shmat/shmdt
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+
+        // ── mlock family (228-231, 284) ───────────────────────────────
+        // We're a user-mode emulator; locking guest pages doesn't really
+        // apply. Silently succeed so callers (cryptographic libraries,
+        // realtime audio, etc.) proceed without error.
+        case 228: { // mlock(addr, len)
+            ret_host(0); return 0;
+        }
+        case 229: { // munlock(addr, len)
+            ret_host(0); return 0;
+        }
+        case 230: { // mlockall(flags)
+            ret_host(0); return 0;
+        }
+        case 231: { // munlockall()
+            ret_host(0); return 0;
+        }
+        case 284: { // mlock2(addr, len, flags)
+            ret_host(0); return 0;
+        }
+
+        // ── rt_tgsigqueueinfo (240) ───────────────────────────────────
+        // Like rt_sigqueueinfo but thread-targeted. We don't support
+        // sending signals between threads via this syscall; return
+        // -ENOSYS so callers fall back to tgkill.
+        case 240: { // rt_tgsigqueueinfo(tgid, tid, sig, siginfo)
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
+
+        // ── perf_event_open (241) ─────────────────────────────────────
+        // Already a stub; keep here as a safety net.
+        case 241: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+
+        // ── recvmmsg (243) / sendmmsg (269) ───────────────────────────
+        // Vectorized socket send/recv. Forward to host for real sockets;
+        // for virtual fds the host syscall returns -EBADF naturally.
+        case 243: { // recvmmsg(sockfd, msgvec, vlen, flags, timeout)
+            // Cap vlen to prevent OOM. The host recvmmsg takes a struct
+            // mmsghdr array; we don't translate, just call the host.
+            int vlen = static_cast<int>(a2);
+            if (vlen < 0) { ret_err(EINVAL); return 0; }
+            if (vlen > 64) vlen = 64;
+            // We don't translate the mmsghdr array (variable layout).
+            // Return -ENOSYS so callers fall back to recvmsg in a loop.
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
+        case 269: { // sendmmsg(sockfd, msgvec, vlen, flags)
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
+
+        // ── setns (268) ───────────────────────────────────────────────
+        // Reassociate the calling thread with a namespace. We don't have
+        // real namespaces; -EINVAL is what the kernel returns for an
+        // invalid fd, which is close enough.
+        case 268: { // setns(fd, nstype)
+            ret_host(static_cast<int64_t>(-EINVAL));
+            return 0;
+        }
+
+        // ── sched_setattr / sched_getattr (274, 275) ──────────────────
+        // New Linux scheduling API. Stub: setattr succeeds; getattr
+        // returns a zeroed sched_attr (size 0, SCHED_OTHER).
+        case 274: { // sched_setattr(pid, attr, flags)
+            ret_host(0); return 0;
+        }
+        case 275: { // sched_getattr(pid, attr, size, flags)
+            if (a1 && a2 >= 4) {
+                try {
+                    // struct sched_attr { u32 size; u32 policy; u64 flags;
+                    //                    u32 nice; u32 priority; u64 runtime;
+                    //                    u64 deadline; u64 period; }
+                    for (uint64_t i = 0; i < a2 && i < 56; i += 8) {
+                        mem_.store<uint64_t>(a1 + i, 0);
+                    }
+                    mem_.store<uint32_t>(a1, static_cast<uint32_t>(a2));
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0); return 0;
+        }
+
+        // ── epoll_pwait2 (441) ────────────────────────────────────────
+        // Like epoll_pwait but with a timespec timeout. We forward to
+        // epoll_wait (ignoring sigmask; same as case 22).
+        case 441: { // epoll_pwait2(epfd, events, maxev, ts, sigmask)
+            struct epoll_event evs[256];
+            int maxev = static_cast<int>(a2);
+            if (maxev > 256) maxev = 256;
+            int timeout_ms = -1;
+            if (a3) {
+                try {
+                    time_t sec  = static_cast<time_t>(mem_.load<uint64_t>(a3));
+                    long   nsec = static_cast<long>(mem_.load<uint64_t>(a3 + 8));
+                    if (sec == 0 && nsec == 0) {
+                        // Zero timeout → non-blocking poll.
+                        timeout_ms = 0;
+                    } else {
+                        timeout_ms = static_cast<int>(sec * 1000 + nsec / 1000000);
+                    }
+                } catch (...) { /* use -1 */ }
+            }
+            int n = ::epoll_wait(static_cast<int>(a0), evs, maxev, timeout_ms);
+            if (n > 0) {
+                for (int i = 0; i < n; i++) {
+                    uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
+                    try {
+                        mem_.store<uint32_t>(p, evs[i].events);
+                        mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                    } catch (...) { ret_err(EFAULT); return 0; }
+                }
+            }
+            ret_host(n);
+            return 0;
         }
 
         // ── name_to_handle_at (264) / open_by_handle_at (265) ─────────
@@ -553,20 +824,8 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── getdomainname (168 via old syscall) / setdomainname (162) ─
         case 162: { ret_host(0); return 0; }
 
-        // ── getcpu (168) ──────────────────────────────────────────────
-        // Returns the calling CPU's number and NUMA node. We use the
-        // host's getcpu (the values are valid for the host CPU the
-        // emulator thread is running on, which is good enough for the
-        // guest's scheduling heuristics).
-        case 168: { // getcpu(cpu, node, tcache)
-            unsigned int host_cpu = 0, host_node = 0;
-            // Use syscall directly because getcpu() may not be wrapped in glibc.
-            long r = ::syscall(168, &host_cpu, &host_node, nullptr);
-            if (r < 0) { ret_errno(); return 0; }
-            if (a0) mem_.store<uint32_t>(a0, host_cpu);
-            if (a1) mem_.store<uint32_t>(a1, host_node);
-            ret_host(0); return 0;
-        }
+        // ── getcpu (168) — handled in misc_sched.cpp (runs earlier in
+        //    the dispatch chain). Removed duplicate here.
 
         // ── signalfd (282 via old) / signalfd4 (74) ───────────────────
         // 74 is in misc_io.cpp; nothing to do here.
@@ -576,9 +835,8 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // to inotify, which we support at cases 26-28).
         case 300: case 301: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
 
-        // ── perf_event_open (241) ─────────────────────────────────────
-        // Already in misc_sched.cpp? Let's add a safety stub here.
-        case 241: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        // ── perf_event_open (241) — handled at the top of this switch
+        //    (case 241 returns -ENOSYS). Removed duplicate here.
 
         // ── landlock_create_ruleset (444) / landlock_add_rule (445) /
         //    landlock_restrict_self (446) ──────────────────────────────

@@ -307,6 +307,14 @@ INTEGRATION_TESTS=(
     "strtod_nan_test|ctest_real/strtod_nan_test.elf||5"
     "ubfiz_test|ctest_real/ubfiz_test.elf||5|OK"
     "wc|ctest_real/wc.elf||5"
+    # SHA crypto-extension regression test: verifies SHA1SU0/SU1 and
+    # SHA256SU0/SU1 instructions produce correct schedule updates.
+    # This turn fixed three bugs: wrong SHA1SU1 encoding (was 0x5E280000,
+    # should be 0x5E281800), wrong SHA256SU0 encoding (was 0x5E282000,
+    # should be 0x5E282800), and missing SHA1SU0/SHA256SU1 dispatch.
+    # Also fixed a 128-bit V register load bug (memcpy of 16 bytes from
+    # v_lo[n] read v_lo[n] + v_lo[n+1] instead of v_lo[n] + v_hi[n]).
+    "sha256_crypto|ctest_real/test_sha256_crypto.elf||5|16/16 checks passed"
     # Basic test/ programs (non-interactive)
     "count|test/count.elf||5"
     "extr|test/extr.elf||5|OK"

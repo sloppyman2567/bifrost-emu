@@ -165,7 +165,6 @@ public:
     // the byte AFTER this block (i.e., TP = tls_base + total_size).
     uint64_t static_tls_size() const { return static_tls_size_; }
     uint64_t static_tls_base() const { return static_tls_base_; }
-    void set_static_tls_base(uint64_t b) { static_tls_base_ = b; }
 
     // ── ld-linux shim base address ─────────────────────────────────
     // The shim's data page (_rtld_global_ro etc.) is at shim_base_,
@@ -284,10 +283,6 @@ private:
 
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
-
-    // Apply all relocations from `data`'s SHT_RELA sections to obj.
-    bool apply_relocations(const std::vector<uint8_t>& data,
-                           LoadedObject& obj);
 
     // Find a shared library by soname. Checks standard multiarch paths
     // and returns the file bytes (empty if not found).

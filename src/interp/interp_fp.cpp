@@ -1383,6 +1383,15 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint8_t sf_val = (op >> 31) & 1;
             uint8_t ftype = (op >> 22) & 3;  // 0=S(32-bit), 1=D(64-bit), 3=H(16-bit)
 
+            // ARMv8 Crypto Extensions (SHA1H, SHA1SU0/SU1, SHA256SU0/SU1)
+            // are encoded in the 0x5Exxxxxx range, which the decoder
+            // classifies as FP_SCALAR (because 0x5E has bits[28:24]=11110
+            // matching the FP group). Dispatch them via exec_crypto first
+            // — exec_crypto returns false for non-crypto instructions, so
+            // this is safe. Without this, SHA1/SHA256 schedule-update
+            // instructions would be silently NOP'd, producing wrong hashes.
+            if (exec_crypto(op, cpu)) return;
+
             // FP register access + half-precision helpers are now
             // file-scope functions (read_fp_d, read_fp_s, write_fp_d,
             // write_fp_s, h2f, f2h, d2h) — see top of this file.

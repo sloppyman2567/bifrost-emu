@@ -83,11 +83,6 @@ static const uint8_t aes_inv_sbox[256] = {
     0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d,
 };
 
-// ── xtime: GF(2^8) multiplication by 2 (the AES building block) ────────
-static inline uint8_t aes_xtime(uint8_t x) {
-    return static_cast<uint8_t>((x << 1) ^ (((x >> 7) & 1) * 0x1b));
-}
-
 // ── Multiply two bytes in GF(2^8) with the AES polynomial ─────────────
 static inline uint8_t aes_gmul(uint8_t a, uint8_t b) {
     uint8_t p = 0;
@@ -199,48 +194,44 @@ static inline uint32_t rotr32(uint32_t x, int n) {
     return (x >> n) | (x << (32 - n));
 }
 
+static inline uint32_t rotl32(uint32_t x, int n) {
+    return (x << n) | (x >> (32 - n));
+}
+
 static inline uint32_t sha1h(uint32_t e) {
     return rotr32(e, 2);
 }
 
-static inline uint32_t sha1c(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
+// SHA1SU0 Vd.4S, Vn.4S, Vm.4S: Vd[i] = Vd[i] XOR Vn[i] XOR Vm[i]
+// Three-operand XOR. The old helper had only 2 operands (missing Vm)
+// and was never dispatched — fixed and now dispatched by exec_crypto.
+static inline void sha1su0(uint32_t vd[4], const uint32_t vn[4],
+                            const uint32_t vm[4]) {
+    for (int i = 0; i < 4; i++) vd[i] = vd[i] ^ vn[i] ^ vm[i];
 }
 
-static inline uint32_t sha1p(uint32_t x, uint32_t y, uint32_t z) {
-    return x ^ y ^ z;
-}
-
-static inline uint32_t sha1m(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-// SHA1SU0: Vd.4S = Vd.4S ^ Vn.4S (just XOR of two 128-bit vectors)
-static inline void sha1su0(uint32_t vd[4], const uint32_t vn[4]) {
-    for (int i = 0; i < 4; i++) vd[i] ^= vn[i];
-}
-
-// SHA1SU1: schedule update with rotate-15 + rotate-23 + xor feedback.
+// SHA1SU1 Vd.4S, Vn.4S: full SHA1 schedule update.
+// Per ARM ARM SHA1schedule(operand1=Vd, operand2=Vn):
+//   T[i] = Vd[i] XOR Vn[i]              for i=0..3
+//   T[i] = ROR(T[i] XOR T[(i+2) MOD 4], 31)   for i=0..3  (in-place)
+//   Vd[i] = T[i]
+// Note the in-place update: T[2] uses the new T[0], T[3] uses new T[1].
+// ROR(x, 31) == ROL(x, 1).
 static void sha1su1(uint32_t vd[4], const uint32_t vn[4]) {
-    uint32_t w0 = vd[0], w1 = vd[1], w2 = vd[2], w3 = vd[3];
-    uint32_t t;
-    // Per ARM ARM: Vd = {W[0], W[1], W[2], W[3]}
-    // W[0] = rotr(W[0] ^ W[2] ^ Vn[0] ^ Vn[2], 31)  (i.e., rotl 1)
-    // etc. The ARM ARM has a specific formula.
-    t = rotr32(w0 ^ w2 ^ vn[0] ^ vn[2], 31);
-    w0 = t;
-    t = rotr32(w1 ^ w3 ^ vn[1] ^ vn[3], 31);
-    w1 = t;
-    // The full SHA1SU1 algorithm is more complex; for simplicity we
-    // implement the standard 4-word schedule step.
-    // (For correctness verification, run a known SHA1 test vector.)
-    vd[0] = w0; vd[1] = w1; vd[2] = w2; vd[3] = w3;
+    uint32_t t[4];
+    for (int i = 0; i < 4; i++) t[i] = vd[i] ^ vn[i];
+    // In-place chained update.
+    t[0] = rotr32(t[0] ^ t[2], 31);
+    t[1] = rotr32(t[1] ^ t[3], 31);
+    t[2] = rotr32(t[2] ^ t[0], 31);  // uses new t[0]
+    t[3] = rotr32(t[3] ^ t[1], 31);  // uses new t[1]
+    for (int i = 0; i < 4; i++) vd[i] = t[i];
 }
 
 // ── SHA-256 building blocks ────────────────────────────────────────────
-// SHA256H/H2: the two SHA-256 round functions (work on 128-bit accumulator
-// pairs Qd,Qn).
-// SHA256SU0/SU1: message schedule updates.
+// SHA256SU0/SU1: message schedule updates. (SHA256H/H2 round functions
+// are not yet dispatched — they need careful 4-round hash implementation
+// and a test vector. Tracked as future work.)
 
 static inline uint32_t sha256sig0(uint32_t x) {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
@@ -250,38 +241,36 @@ static inline uint32_t sha256sig1(uint32_t x) {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
 
-static inline uint32_t sha256sum0(uint32_t x) {
-    return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
-}
-
-static inline uint32_t sha256sum1(uint32_t x) {
-    return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
-}
-
-static inline uint32_t sha256ch(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
-}
-
-static inline uint32_t sha256maj(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-// SHA256SU0: schedule step 0 (single 128-bit operation).
+// SHA256SU0 Vd.4S, Vn.4S: schedule update part 0.
+// Per ARM ARM SHA256schedule(operand1=Vd, operand2=Vn):
+//   D[i] = Vn[i] + sig0(Vd[(i+1) MOD 4]) + Vd[(i+2) MOD 4]
+// where sig0(x) = ROR(x,7) XOR ROR(x,18) XOR (x >> 3).
+// Vd holds the older 4 schedule words (W[i..i+3]); Vn holds W[i+4..i+7].
+// The old implementation had an extra "+ Vd[i]" term that doesn't appear
+// in the ARM ARM pseudocode — removed.
 static void sha256su0(uint32_t vd[4], const uint32_t vn[4]) {
-    uint32_t w12 = vd[0], w13 = vd[1], w14 = vd[2], w15 = vd[3];
-    // W[0] = W[0] + sigma0(W[1] + W[9] + W[14])
-    // The ARM ARM formula:
-    //   Vd[0] = W0 + sig0(W1) + W9 + W14
-    //   Vd[1] = W1 + sig0(W2) + W10 + W15
-    //   etc.
-    vd[0] = w12 + sha256sig0(w13) + vn[0] + w14;
-    vd[1] = w13 + sha256sig0(w14) + vn[1] + w15;
-    vd[2] = w14 + sha256sig0(w15) + vn[2] + (vn[0]);  // approximate
-    vd[3] = w15 + sha256sig0(vn[0]) + vn[3] + (vn[1]);
-    // (The above is a simplification — full correctness would require
-    // chaining with the previous schedule values. For asset decryption
-    // that doesn't go through SHA-256, this is fine. Production code
-    // doing SHA-256 should use the host's SHA-256 implementation.)
+    uint32_t old_vd[4] = {vd[0], vd[1], vd[2], vd[3]};
+    for (int i = 0; i < 4; i++) {
+        vd[i] = vn[i] + sha256sig0(old_vd[(i + 1) & 3]) + old_vd[(i + 2) & 3];
+    }
+}
+
+// SHA256SU1 Vd.4S, Vn.4S, Vm.4S: schedule update part 1.
+// Per ARM ARM SHA256schedule2(operand1=Vd, operand2=Vn, operand3=Vm):
+//   T[i] = Vn[i] + sig1(Vm[i]) + Vm[(i+1) MOD 4] + Vm[(i+2) MOD 4]
+//   D[i] = Vd[i] + sig0(T[(i+1) MOD 4]) + T[(i+2) MOD 4] + T[i]
+// where sig0/sig1 are the SHA-256 schedule functions.
+// Vd = W[i+12..i+15] (older), Vn = W[i+8..i+11] (middle), Vm = W[i..i+3] (newest).
+static void sha256su1(uint32_t vd[4], const uint32_t vn[4],
+                       const uint32_t vm[4]) {
+    uint32_t t[4];
+    for (int i = 0; i < 4; i++) {
+        t[i] = vn[i] + sha256sig1(vm[i]) + vm[(i + 1) & 3] + vm[(i + 2) & 3];
+    }
+    uint32_t old_vd[4] = {vd[0], vd[1], vd[2], vd[3]};
+    for (int i = 0; i < 4; i++) {
+        vd[i] = old_vd[i] + sha256sig0(t[(i + 1) & 3]) + t[(i + 2) & 3] + t[i];
+    }
 }
 
 // ── PMULL/PMULL2: polynomial multiplication (low/high halves) ──────────
@@ -336,23 +325,81 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         return true;
     }
 
-    // ── SHA1SU1 (0x5E280000) ───────────────────────────────────────
-    if ((op & 0xFFFFFC00) == 0x5E280000) {
+    // Helper to load a full 128-bit V register into a uint32_t[4].
+    // The CPU stores Vn as v_lo[n] (bits 63:0) + v_hi[n] (bits 127:64),
+    // NOT as a contiguous 16-byte block. The previous SHA code did
+    // `memcpy(vd, &cpu.v_lo[rd], 16)` which read v_lo[rd] + v_lo[rd+1]
+    // instead of v_lo[rd] + v_hi[rd] — corrupting the high 64 bits and
+    // producing wrong hashes for any SHA1/SHA256 code using crypto
+    // extensions.
+    auto load_vreg = [](const CPU& c, uint8_t idx, uint32_t out[4]) {
+        out[0] = static_cast<uint32_t>(c.v_lo[idx]);
+        out[1] = static_cast<uint32_t>(c.v_lo[idx] >> 32);
+        out[2] = static_cast<uint32_t>(c.v_hi[idx]);
+        out[3] = static_cast<uint32_t>(c.v_hi[idx] >> 32);
+    };
+    auto store_vreg = [](CPU& c, uint8_t idx, const uint32_t in[4]) {
+        c.v_lo[idx] = static_cast<uint64_t>(in[0]) |
+                      (static_cast<uint64_t>(in[1]) << 32);
+        c.v_hi[idx] = static_cast<uint64_t>(in[2]) |
+                      (static_cast<uint64_t>(in[3]) << 32);
+    };
+
+    // ── SHA1SU1 (0x5E281800) ───────────────────────────────────────
+    // (Encoding constant corrected: was 0x5E280000 — wrong. Verified
+    // against binutils: `sha1su1 v0.4s, v1.4s` assembles to 0x5E281820,
+    // so the base is 0x5E281800 with bits[15:10] = 000110.)
+    if ((op & 0xFFFFFC00) == 0x5E281800) {
         uint32_t vd[4], vn[4];
-        memcpy(vd, &cpu.v_lo[rd], 16);
-        memcpy(vn, &cpu.v_lo[rn], 16);
+        load_vreg(cpu, rd, vd);
+        load_vreg(cpu, rn, vn);
         sha1su1(vd, vn);
-        memcpy(&cpu.v_lo[rd], vd, 16);
+        store_vreg(cpu, rd, vd);
         return true;
     }
 
-    // ── SHA256SU0 (0x5E282000) ─────────────────────────────────────
-    if ((op & 0xFFFFFC00) == 0x5E282000) {
+    // ── SHA1SU0 (0x5E003000) — 3-operand XOR. ─────────────────────
+    // Vd.4S = Vd.4S XOR Vn.4S XOR Vm.4S
+    // Encoding: 0x5E003000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
+    // (Note: the encoding constant is 0x5E003000, NOT 0x5E000800 —
+    // bits[15:10] = 001100, not 000010. Verified against binutils.)
+    // Without this dispatch, binaries using SHA1SU0 fall through to
+    // "unrecognized SIMD" and silently produce wrong SHA1 hashes.
+    if ((op & 0xFFE0FC00) == 0x5E003000) {
+        uint32_t vd[4], vn[4], vm[4];
+        load_vreg(cpu, rd, vd);
+        load_vreg(cpu, rn, vn);
+        load_vreg(cpu, rm, vm);
+        sha1su0(vd, vn, vm);
+        store_vreg(cpu, rd, vd);
+        return true;
+    }
+
+    // ── SHA256SU0 (0x5E282800) ─────────────────────────────────────
+    // (Encoding constant corrected: was 0x5E282000 — wrong. Verified
+    // against binutils: `sha256su0 v0.4s, v1.4s` assembles to 0x5E282820,
+    // so the base is 0x5E282800 with bits[15:10] = 001010.)
+    if ((op & 0xFFFFFC00) == 0x5E282800) {
         uint32_t vd[4], vn[4];
-        memcpy(vd, &cpu.v_lo[rd], 16);
-        memcpy(vn, &cpu.v_lo[rn], 16);
+        load_vreg(cpu, rd, vd);
+        load_vreg(cpu, rn, vn);
         sha256su0(vd, vn);
-        memcpy(&cpu.v_lo[rd], vd, 16);
+        store_vreg(cpu, rd, vd);
+        return true;
+    }
+
+    // ── SHA256SU1 (0x5E006000) — 3-operand schedule step 1. ───────
+    // Encoding: 0x5E006000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
+    // Vd.4S = SHA256schedule2(Vd, Vn, Vm). The previous implementation
+    // didn't dispatch this at all, so SHA256 code that uses the crypto
+    // extensions silently got wrong schedule values.
+    if ((op & 0xFFE0FC00) == 0x5E006000) {
+        uint32_t vd[4], vn[4], vm[4];
+        load_vreg(cpu, rd, vd);
+        load_vreg(cpu, rn, vn);
+        load_vreg(cpu, rm, vm);
+        sha256su1(vd, vn, vm);
+        store_vreg(cpu, rd, vd);
         return true;
     }
 

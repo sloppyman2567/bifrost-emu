@@ -1514,13 +1514,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     return true;
 }
 
-// ── apply_relocations (deprecated — now inline in link()) ──────────────
-bool DynamicLinker::apply_relocations(const std::vector<uint8_t>& data,
-                                      LoadedObject& obj) {
-    (void)data; (void)obj;
-    return true;  // handled in link()
-}
-
 // ── register_ld_linux_shim_ ────────────────────────────────────────────
 // Allocate a small data + code page in guest memory and populate it
 // with synthetic versions of the symbols glibc's libc.so expects from

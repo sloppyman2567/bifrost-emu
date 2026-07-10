@@ -518,13 +518,9 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 272: { // kcmp(pid1, pid2, type, idx1, idx2) — AArch64 272
-            // BUGFIX: was previously labeled "waitid" but waitid is at 95
-            // (already handled). The real syscall at 272 is kcmp. We don't
-            // support kernel comparison; return 0 (same file) for safety.
-            ret_host(0);
-            return 0;
-        }
+        // kcmp (272) is handled in misc_extended.cpp with a richer
+        // implementation that compares fds for KCMP_FILE. Don't stub
+        // it here — let the dispatch fall through.
 
         case 278: { // getrandom(buf, buflen, flags) — AArch64 278
             // Provide real random bytes from the host kernel's getrandom

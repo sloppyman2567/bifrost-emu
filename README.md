@@ -237,7 +237,7 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (163 tests defined; 119 pass + 30 skip without
+# Run the full test suite (168 tests defined; 124 pass + 30 skip without
 # --test-all because busybox-aarch64 is not downloaded, and 7 dynamic +
 # 7 dynamic-glibc real-world tests skip without a rootfs)
 make check

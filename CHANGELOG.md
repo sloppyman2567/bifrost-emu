@@ -6,6 +6,93 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 80 (2026-07-10)
+
+### Code cleanup + xattr syscall fix + SHA crypto extensions + more syscalls
+
+This turn focuses on dead-code removal, fixing non-fatal divergences,
+correcting wrong syscall-number mappings, and adding support for more
+ARMv8 crypto instructions and Linux syscalls.
+
+**Bug fixes:**
+
+- **CCMP non-fatal divergence fixed.** The JIT's `MRS NZCV` handler read
+  8 bytes from the 4-byte `cpu.pstate` field (via `emit_load` instead of
+  `emit_load32`), leaking the adjacent `running` byte into the high 32
+  bits of the result. It also leaked the JIT-internal `from_sub` flag
+  (bit 27 of pstate) used to un-invert ARM C → x86 CF on flag reload.
+  Fixed by using `emit_load32` and masking the result with 0xF0000000
+  so only the architecturally-visible N/Z/C/V bits are returned. JIT
+  verify mode now reports zero divergences on `jit_ccmp.elf`.
+
+- **xattr syscall handlers at wrong numbers fixed.** The xattr family
+  (getxattr, setxattr, listxattr, removexattr and l*/f* variants) was
+  mapped to syscall numbers 188-197. Per `asm-generic/unistd.h`, those
+  numbers are the SysV IPC family (msgget/msgctl/msgrcv/msgsnd,
+  semget/semctl/semtimedop/semop, shmget/shmctl/shmat/shmdt). The real
+  xattr numbers are 5-16. Fixed by moving the xattr cases to 5-16 and
+  adding -ENOSYS stubs for the SysV IPC range. Added the previously
+  missing `lremovexattr` (15) and `fremovexattr` (16) handlers.
+
+- **SHA1/SHA256 crypto extension bugs fixed.** Three distinct bugs:
+  (a) Wrong encoding constants for SHA1SU1 (was 0x5E280000, should be
+  0x5E281800) and SHA256SU0 (was 0x5E282000, should be 0x5E282800) —
+  verified against binutils. Effect: any binary using these
+  instructions had them silently NOP'd, producing wrong hashes.
+  (b) SHA1SU0 (0x5E003000) and SHA256SU1 (0x5E006000) were not
+  dispatched at all — added.
+  (c) The 128-bit V register load/store in SHA1SU1/SHA256SU0 used
+  `memcpy(vd, &cpu.v_lo[rd], 16)` which read `v_lo[rd]` + `v_lo[rd+1]`
+  instead of `v_lo[rd]` + `v_hi[rd]` (the CPU stores Vn as two
+  separate 64-bit halves in different arrays). Fixed with explicit
+  load_vreg/store_vreg helpers. Also fixed SHA1SU1 to compute all 4
+  output words (was only computing 2), and SHA256SU0 had an extra
+  "+Vd[i]" term not in the ARM ARM pseudocode.
+
+- **exec_crypto now called from FP_SCALAR case.** The decoder
+  classifies 0x5Exxxxxx (SHA crypto) as FP_SCALAR, not SIMD_DP. The
+  FP_SCALAR case in the interpreter didn't call exec_crypto, so SHA
+  instructions routed through FP_SCALAR were silently NOP'd. Fixed.
+
+**Dead code removed:**
+
+- `DynamicLinker::apply_relocations()` — deprecated no-op method,
+  never called.
+- `DynamicLinker::set_static_tls_base()` — public setter for a field
+  that's only set internally.
+- `aes_xtime()` — defined but never called.
+- Six unused SHA round-function helpers (sha1c, sha1p, sha1m,
+  sha256sum0, sha256sum1, sha256ch, sha256maj) — defined for future
+  SHA1C/SHA1P/SHA1M/SHA256H/SHA256H2 support but never dispatched.
+- Duplicate `kcmp` (272) stub in misc_id.cpp (masked the richer
+  implementation in misc_extended.cpp).
+- Duplicate `getcpu` (168) handler in misc_extended.cpp (unreachable;
+  misc_sched.cpp handles it first).
+- Duplicate `perf_event_open` (241) case in misc_extended.cpp.
+
+**New syscalls (25 new AArch64 syscall numbers handled):**
+
+xattr at correct numbers (5-16, was wrongly at 188-197); getitimer (102),
+setitimer (103); timer_create/gettime/getoverrun/settime/delete (107-111,
+stubs); clock_settime (112, -EPERM); sched_setparam/setscheduler/
+getscheduler/getparam (118-121); setregid/setgid/setreuid/setuid/
+setresuid/getresuid/setresgid/getresgid/setfsuid/setfsgid (143-152);
+setpgid (154), getsid (156), setsid (157); setrlimit (164); SysV IPC
+stubs (186-197); mlock/munlock/mlockall/munlockall (228-231); mlock2
+(284); rt_tgsigqueueinfo (240); recvmmsg (243), sendmmsg (269); setns
+(268); sched_setattr/getattr (274-275); epoll_pwait2 (441). Total
+handled: 215 → 240.
+
+**Other:**
+
+- New test `ctest_real/test_sha256_crypto.c` — verifies SHA1SU0/SU1 and
+  SHA256SU0/SU1 against a reference C implementation of the ARM ARM
+  pseudocode. 16/16 checks pass under both JIT and interpreter.
+- Updated stale version references in `api/bifrost.h` (1.4.5-alpha →
+  1.5.0.alpha).
+- Updated test counts in `TESTS.md` and `README.md` (167→168 total,
+  119→124 default pass).
+
 ## [Unreleased] — Turn 79 (2026-07-10)
 
 ### 8-thread multi-wave TLS corruption fixed

@@ -696,12 +696,25 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          0, 0, 5, cur_pc);  // sub_op=5 = PMULL2
                     return true;
                 }
-                // SHA1H, SHA1SU1, SHA256SU0 — emit CALL_INTERP for now
-                // (the interpreter has partial implementations; native
-                // SHA-NI codegen is a future enhancement).
+                // SHA1H, SHA1SU1, SHA256SU0 — 2-operand crypto (mask 0xFFFFFC00).
+                // SHA1SU0, SHA256SU1 — 3-operand crypto (mask 0xFFE0FC00).
+                // All fall back to CALL_INTERP (the interpreter has full
+                // implementations in interp_crypto.hpp; native SHA-NI
+                // codegen is a future enhancement).
+                // Encoding constants verified against binutils:
+                //   SHA1H    = 0x5E280800
+                //   SHA1SU1  = 0x5E281800  (was 0x5E280000 — wrong)
+                //   SHA256SU0= 0x5E282800  (was 0x5E282000 — wrong)
+                //   SHA1SU0  = 0x5E003000  (mask 0xFFE0FC00)
+                //   SHA256SU1= 0x5E006000  (mask 0xFFE0FC00)
                 if (aes_masked == 0x5E280800 ||  // SHA1H
-                    aes_masked == 0x5E280000 ||  // SHA1SU1
-                    aes_masked == 0x5E282000) {  // SHA256SU0
+                    aes_masked == 0x5E281800 ||  // SHA1SU1
+                    aes_masked == 0x5E282800) {  // SHA256SU0
+                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                    return true;
+                }
+                if ((op & 0xFFE0FC00) == 0x5E003000 ||  // SHA1SU0
+                    (op & 0xFFE0FC00) == 0x5E006000) {  // SHA256SU1
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }

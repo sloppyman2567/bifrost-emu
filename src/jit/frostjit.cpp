@@ -647,7 +647,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     // Drop cache mappings for RAX/RCX/RDX (clobbered by materialize).
                     invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
                 }
-                off = PSTATE_OFF;
+                // Read pstate and mask off the internal `from_sub` flag
+                // (bit 27) that emit_materialize_flags stores alongside
+                // NZCV. Without this mask, `mrs x0, nzcv` after a SUBS
+                // returns 0x?a8000000 instead of 0x?a0000000, diverging
+                // from the interpreter. Only bits 31:28 (N/Z/C/V) are
+                // architecturally visible in the NZCV sysreg.
+                int d2 = alloc_reg_for(inst.dest, RAX);
+                emit_load32(d2, CPU_REG, PSTATE_OFF);
+                // and r/m32, 0xF0000000 — 32-bit op (no REX.W), REX.B if
+                // the dest is r8–r15. emit_load32 already zero-extended
+                // the high 32 bits, so the 32-bit AND keeps them zero.
+                if (d2 >= 8) emit_byte(0x41);
+                emit_byte(0x81); emit_byte(modrm(3, 4, d2 & 7));
+                emit_u32(0xF0000000u);
+                set_vreg_reg(inst.dest, d2);
+                return false;
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 0) {
                 off = FPCR_OFF;  // FPCR
             } else if (op1 == 3 && crn == 4 && crm == 4 && op2 == 1) {
@@ -670,9 +685,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 imm_val = 0x00000000; use_imm = true;  // ID_AA64ISAR0_EL1
             }
             if (off >= 0) {
-                // FPCR/FPSR are uint32_t fields — use emit_load32 to avoid
-                // leaking the adjacent CPU member into the high 32 bits.
-                if (op1 == 3 && crn == 4 && crm == 4 && (op2 == 0 || op2 == 1))
+                // FPCR/FPSR/PSTATE are uint32_t fields — use emit_load32
+                // to avoid leaking the adjacent CPU member (e.g. `running`,
+                // `exit_code`) into the high 32 bits of the destination.
+                // The leak previously caused `mrs x0, nzcv` to return
+                // 0x1_a8000000 instead of 0xa0000000 (the high 0x1 was
+                // the `running=true` byte just past pstate).
+                if (op1 == 3 && crn == 4 &&
+                    ((crm == 4 && (op2 == 0 || op2 == 1)) ||  // FPCR/FPSR
+                     (crm == 2 && op2 == 0)))                  // NZCV
                     emit_load32(d, CPU_REG, off);
                 else
                     emit_load(d, CPU_REG, off);
