@@ -741,19 +741,25 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
 // Background: the offsets of these fields CHANGED between glibc versions:
 //   glibc 2.36 (Arm GNU 13.2):  size @ +0x1D0, align @ +0x1D8
 //   glibc 2.40 (Arm GNU 14.2):  size @ +0x1D8, align @ +0x1E0
+//   glibc 2.42 (Arm GNU 15.2):  size @ +0x98,  align @ +0xA0
 //
 // Hardcoding offsets breaks when the toolchain is upgraded. Instead, we
 // disassemble __libc_early_init to find the actual LDP offset it uses to
-// load these two consecutive fields. The function always starts with:
-//   adrp x1, <rtld_global_ro_ptr_page>
-//   ldr  x1, [x1, #<ptr_offset>]     ; x1 = &_rtld_global_ro
-//   ...
-//   ldp  x0, x3, [x1, #<offset>]     ; load (size, align) pair
-//   ldr  x1, [x1, #0x18]             ; load dl_pagesize
+// load these two consecutive fields.
 //
-// We scan the first ~32 instructions of __libc_early_init for an LDP
-// with base register x1 and an unsigned immediate offset, which gives
-// us the offset of dl_tls_static_size (align follows at +8).
+// The function pattern varies by glibc version:
+//   glibc 2.36/2.40: adrp x1,...; ldr x1,[x1,#...]; ldp x?,x?,[x1,#off]
+//     → base register is x1, offset range 0x100-0x300
+//   glibc 2.42:      adrp x0,...; ldr x0,[x0,#...]; ldr x2,[x0,#0x18];
+//                     ldp x1,x0,[x0,#off]
+//     → base register is x0, offset can be as low as 0x98
+//
+// We scan the first ~48 instructions of __libc_early_init for an LDP
+// that:
+//   1. Uses a base register that was recently loaded from an adrp+ldr
+//      pair (we track which register holds the _rtld_global_ro pointer).
+//   2. Has an offset in the range 0x18..0x400 (covers all known glibc
+//      versions, excludes prologue LDP x29,x30 at offset 0).
 //
 // Returns true on success, filling out_size_off and out_align_off.
 // Returns false if detection fails (caller falls back to known offsets).
@@ -765,50 +771,94 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
     uint64_t early_init = resolve_symbol("__libc_early_init");
     if (early_init == 0) return false;
 
-    // Read up to 128 bytes (32 instructions) of __libc_early_init.
-    // The LDP we're looking for is typically within the first 20
-    // instructions (after the prologue and __ctype_init call).
-    uint8_t code[128];
+    // Read up to 192 bytes (48 instructions) of __libc_early_init.
+    // glibc 2.42's version is longer (includes __getrlimit + rlimit
+    // adjustment before the TLS LDP), so we scan more than the old 32.
+    uint8_t code[192];
     try {
         mem_.read(early_init, code, sizeof(code));
     } catch (...) {
         return false;
     }
 
-    // AArch64 LDP (64-bit GPR, unsigned offset):
-    //   LDP Xt1, Xt2, [Xn, #imm]
-    //   Encoding: 1010100101 L imm7 Rt2 Rn Rt
-    //   = 0xA9400000 | (imm7 << 15) | (Rt2 << 10) | (Rn << 5) | Rt
-    //   (bit 22 = L: 1 for LDP, 0 for STP; 0xA9400000 has bit 22 = 1)
-    //   imm7 is UNSIGNED 7 bits, scaled by 8 (offset = imm7 * 8, max 1016)
-    // We look for any LDP with base = x1 (the _rtld_global_ro pointer)
-    // that loads two 64-bit GPRs at an offset in the TLS field range.
-    // __libc_early_init always loads (dl_tls_static_size,
-    // dl_tls_static_align) as a consecutive pair via LDP.
+    // Track which register holds the _rtld_global_ro pointer.
+    // The pattern is: adrp xN, <page>; ldr xN, [xN, #<offset>]
+    // After the ldr, xN holds &_rtld_global_ro.
+    // We accept any register as the base (not just x1) because glibc
+    // 2.42 uses x0 instead of x1.
+    uint32_t rtld_ro_reg = 0xFFFFFFFF;  // invalid sentinel
+    bool rtld_ro_reg_valid = false;
+
     for (size_t i = 0; i + 4 <= sizeof(code); i += 4) {
         uint32_t insn;
         memcpy(&insn, code + i, 4);
-        // Check LDP (64-bit GPR, unsigned offset):
-        // mask 0xFFC00000, value 0xA9400000
+
+        // Detect ADRP: 1 immlo 10000 immhi Rd
+        // mask 0x9F000000, value 0x90000000
+        if ((insn & 0x9F000000) == 0x90000000) {
+            uint32_t rd = insn & 0x1F;
+            // Next instruction might be LDR xRd, [xRd, #imm]
+            // We'll check on the next iteration.
+            // For now, just remember this register had an ADRP.
+            // (We don't track the ADRP target page — we just note
+            //  that xRd is a candidate for the rtld_global_ro pointer.)
+            rtld_ro_reg = rd;
+            rtld_ro_reg_valid = false;  // not yet — need the LDR
+            continue;
+        }
+
+        // Detect LDR (64-bit GPR, unsigned offset): 11 111 0 01 01 imm12 Rn Rt
+        // mask 0xFFC00000, value 0xF9400000
+        if ((insn & 0xFFC00000) == 0xF9400000) {
+            uint32_t rn = (insn >> 5) & 0x1F;
+            uint32_t rt = insn & 0x1F;
+            // Only follow the chain when rt == rn (i.e., ldr xN, [xN, #imm]).
+            // This is the pattern: adrp xN, <page>; ldr xN, [xN, #imm] →
+            // xN now holds the value at that address (the rtld_global_ro
+            // pointer). If rt != rn (e.g., ldr x2, [x0, #24] to load
+            // dl_pagesize), x2 does NOT hold the rtld_global_ro pointer.
+            if (rtld_ro_reg != 0xFFFFFFFF && rn == rtld_ro_reg && rt == rn) {
+                rtld_ro_reg = rt;
+                rtld_ro_reg_valid = true;
+            }
+            continue;
+        }
+
+        // Detect LDP (64-bit GPR, unsigned offset):
+        //   10 1010 0101 0 imm7 Rt2 Rn Rt
+        //   mask 0xFFC00000, value 0xA9400000
         if ((insn & 0xFFC00000) != 0xA9400000) continue;
+
         uint32_t rn = (insn >> 5) & 0x1F;
-        // We want base = x1 (the _rtld_global_ro pointer).
-        if (rn != 1) continue;
+        // The base must be the register holding _rtld_global_ro.
+        if (!rtld_ro_reg_valid || rn != rtld_ro_reg) continue;
+
         // imm7 is at bits 21-15 (7 bits, unsigned for this variant).
         uint32_t imm7 = (insn >> 15) & 0x7F;
         uint32_t offset = imm7 * 8;  // scaled by 8 for 64-bit
-        // Sanity: offset must be in a reasonable range (0x100..0x300)
-        // for rtld_global_ro's TLS fields. This excludes LDP x29,x30
-        // in the prologue (offset 0) and other unrelated loads.
-        if (offset < 0x100 || offset > 0x300) continue;
+        // Sanity: offset must be in a reasonable range (0x18..0x400)
+        // for rtld_global_ro's fields. This excludes LDP x29,x30
+        // in the prologue (offset 0).
+        // 0x18 = dl_pagesize offset (stable across versions).
+        // The TLS fields are at a higher offset, but we accept any
+        // non-zero offset here because the LDP we want is the ONLY
+        // LDP from the rtld_global_ro register (besides the pagesize
+        // LDR which uses a different instruction).
+        if (offset < 0x18 || offset > 0x400) continue;
+
+        // Heuristic: the LDP we want loads (dl_tls_static_size,
+        // dl_tls_static_align). In glibc 2.42, the LDP at offset 0x98
+        // loads (size, align). In glibc 2.40, the LDP at 0x1D8 loads
+        // (size, align). We accept any LDP from the rtld_global_ro
+        // register as the TLS field pair.
         out_size_off = offset;
         out_align_off = offset + 8;
         if (getenv("BIFROST_DYNLINK_TRACE")) {
             fprintf(stderr, "[dynlink] detected TLS field offsets via "
                     "__libc_early_init @0x%llx+%zu: size@+0x%x, align@+0x%x "
-                    "(imm7=%u)\n",
+                    "(imm7=%u, base=x%u)\n",
                     static_cast<unsigned long long>(early_init), i,
-                    out_size_off, out_align_off, imm7);
+                    out_size_off, out_align_off, imm7, rtld_ro_reg);
         }
         return true;
     }
@@ -841,8 +891,9 @@ void DynamicLinker::patch_rtld_global_ro_() {
     // Used as fallback if dynamic detection fails.
     struct KnownOffset { uint32_t size; uint32_t align; const char* ver; };
     constexpr KnownOffset known_offsets[] = {
-        {0x1D8, 0x1E0, "glibc 2.40 (Arm GNU 14.2)"},  // check 2.40 first
-        {0x1D0, 0x1D8, "glibc 2.36 (Arm GNU 13.2)"},  // then 2.36
+        {0x98,  0xA0,  "glibc 2.42 (Arm GNU 15.2)"},  // check newest first
+        {0x1D8, 0x1E0, "glibc 2.40 (Arm GNU 14.2)"},
+        {0x1D0, 0x1D8, "glibc 2.36 (Arm GNU 13.2)"},
     };
 
     // Pagesize is at offset 0x18 in all known glibc versions.
@@ -1664,8 +1715,12 @@ bool DynamicLinker::register_ld_linux_shim_() {
     if (static_tls_size_ > 0) {
         // dl_tls_static_size includes the TLS data + TCB + surplus.
         // glibc adds GLRO(dl_tls_static_surplus) for future dlopen'd
-        // libraries. We use a generous surplus of 4 KiB.
-        constexpr uint64_t TLS_SURPLUS = 4096;
+        // libraries. We use a generous surplus of 16 KiB — glibc 2.42
+        // computes __static_tls_size = ALIGN_UP(size+align, align) +
+        // pagesize + 0x800, and if the input size is too small, TLS
+        // blocks overlap across threads (the "got = expected/4" bug).
+        // The larger surplus ensures enough headroom for 8+ threads.
+        constexpr uint64_t TLS_SURPLUS = 16384;
         uint64_t tls_static_size = static_tls_size_ + 2048 + TLS_SURPLUS;
         // Round up to alignment (64 bytes).
         tls_static_size = (tls_static_size + 63) & ~63ULL;
