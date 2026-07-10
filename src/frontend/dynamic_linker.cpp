@@ -633,6 +633,15 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                 S = obj.base_addr + s.st_value;
                             }
                             mem_.store<uint64_t>(target, S + A);
+                            if (getenv("BIFROST_DYNLINK_TRACE") &&
+                                (name == "_dl_allocate_tls" ||
+                                 name == "_dl_allocate_tls_init")) {
+                                fprintf(stderr, "[dynlink] JUMP_SLOT %s "
+                                        "resolved to 0x%llx (GOT@0x%llx)\n",
+                                        name.c_str(),
+                                        (unsigned long long)(S + A),
+                                        (unsigned long long)target);
+                            }
                         }
                     }
                     // Other relocation types in DT_JMPREL (rare) fall
@@ -1617,21 +1626,16 @@ bool DynamicLinker::register_ld_linux_shim_() {
         //   = 0xD2800000 | 0 | (0x1001<<5) | 8 = 0xD2820028
         // Little-endian bytes: 28 00 82 D2
         //
-        // NOTE (Turn 77 cont.): the correct encoding is 0x28,0x00,0x82,0xD2.
-        // An earlier version had a typo (0x20 instead of 0x00) which made
-        // it `movz x8, #0x1001, lsl #16` = 0x10010000 — the syscall
-        // handler's `case 0x1001` never matched, so _dl_allocate_tls
-        // returned -ENOSYS. glibc treated -38 (non-zero) as a valid TCB
-        // pointer and proceeded with an uninitialized TLS block. This
-        // "worked" for simple tests (no __thread) but broke __thread
-        // isolation. The correct encoding is now used, BUT exposing the
-        // syscall revealed a deeper pre-existing TLS-layout issue: the
-        // per-thread TLS block copy (static_tls_size bytes below the TCB)
-        // doesn't match glibc's expected TLS variant-I layout (main-exe
-        // TLS at POSITIVE TP offsets), causing heap corruption with 4+
-        // threads. The typo encoding is KEPT for now (stable); the correct
-        // encoding and full TLS-layout fix are documented as future work.
-        v.push_back(0x28); v.push_back(0x20); v.push_back(0x82); v.push_back(0xD2);
+        // Turn 78 cont.: CORRECT encoding (0x00, not 0x20). The previous
+        // typo made syscall 0x1001 never fire. Now it fires on every
+        // _dl_allocate_tls AND _dl_allocate_tls_init call (both stubs use
+        // this emitter). The syscall handler copies lib TLS to
+        // [tcb-lib_size, tcb) and ZEROS [tcb, tcb+main_memsz) to clear
+        // stale .tbss data on stack-cache reuse. This is safe because
+        // _dl_allocate_tls/init run BEFORE create_thread sets TCB fields
+        // (tcb, self, stack_guard, etc.) — glibc will overwrite the
+        // zeroed TCB-area bytes with correct values afterwards.
+        v.push_back(0x28); v.push_back(0x00); v.push_back(0x82); v.push_back(0xD2);
         // svc #0           →  0xD4000001
         v.push_back(0x01); v.push_back(0x00); v.push_back(0x00); v.push_back(0xD4);
         // ret              →  0xD65F03C0
@@ -1643,33 +1647,37 @@ bool DynamicLinker::register_ld_linux_shim_() {
     std::vector<uint8_t> code;
     code.reserve(256);
 
-    // Stub layout — _dl_allocate_tls is 16 bytes; all others are 8.
+    // Stub layout — _dl_allocate_tls and _dl_allocate_tls_init are 16 bytes;
+    // all others are 8.
     // Offsets are tracked via named constants so the FPTR table and
     // symbol registrations stay in sync.
     constexpr uint32_t OFF_DSO     = 0;    // _dl_find_dso_for_object
     constexpr uint32_t OFF_TLS     = 8;    // _dl_allocate_tls (16 bytes)
-    constexpr uint32_t OFF_TLSINIT = 24;   // _dl_allocate_tls_init
-    constexpr uint32_t OFF_TLSFREE = 32;   // _dl_deallocate_tls
-    constexpr uint32_t OFF_SIGERR  = 40;   // _dl_signal_error
-    constexpr uint32_t OFF_SIGEXC  = 48;   // _dl_signal_exception
-    constexpr uint32_t OFF_CEXC    = 56;   // _dl_catch_exception
-    constexpr uint32_t OFF_CERR    = 64;   // _dl_catch_error
-    constexpr uint32_t OFF_SBA     = 72;   // _dl_audit_symbind_alt
-    constexpr uint32_t OFF_PREINIT = 80;   // _dl_audit_preinit
-    constexpr uint32_t OFF_SERINFO = 88;   // _dl_rtld_di_serinfo
-    constexpr uint32_t OFF_FINI    = 96;   // _dl_call_fini
-    constexpr uint32_t OFF_TLSADDR = 104;  // __tls_get_addr
-    constexpr uint32_t OFF_TUNABLE = 112;  // __tunable_get_val
-    constexpr uint32_t OFF_STACKPERM = 120; // __nptl_change_stack_perm
+    constexpr uint32_t OFF_TLSINIT = 24;   // _dl_allocate_tls_init (16 bytes)
+    constexpr uint32_t OFF_TLSFREE = 40;   // _dl_deallocate_tls
+    constexpr uint32_t OFF_SIGERR  = 48;   // _dl_signal_error
+    constexpr uint32_t OFF_SIGEXC  = 56;   // _dl_signal_exception
+    constexpr uint32_t OFF_CEXC    = 64;   // _dl_catch_exception
+    constexpr uint32_t OFF_CERR    = 72;   // _dl_catch_error
+    constexpr uint32_t OFF_SBA     = 80;   // _dl_audit_symbind_alt
+    constexpr uint32_t OFF_PREINIT = 88;   // _dl_audit_preinit
+    constexpr uint32_t OFF_SERINFO = 96;   // _dl_rtld_di_serinfo
+    constexpr uint32_t OFF_FINI    = 104;  // _dl_call_fini
+    constexpr uint32_t OFF_TLSADDR = 112;  // __tls_get_addr
+    constexpr uint32_t OFF_TUNABLE = 120;  // __tunable_get_val
+    constexpr uint32_t OFF_STACKPERM = 128; // __nptl_change_stack_perm
 
     // [0] _dl_find_dso_for_object (returns void*)
     emit_stub_return0(code);     // offset 0
     // [1] _dl_allocate_tls (16 bytes — calls syscall 0x1001)
     emit_tls_alloc_stub(code);   // offset 8 (16 bytes)
-    // [2] _dl_allocate_tls_init (returns void* — return arg unchanged;
-    //     the TLS template copy is done by _dl_allocate_tls above)
-    emit_ret(code);              // offset 24: ret (returns x0 unchanged)
-    emit_nop(code);
+    // [2] _dl_allocate_tls_init (16 bytes — also calls syscall 0x1001)
+    //     Turn 78 cont.: glibc calls this on stack-cache REUSE (when
+    //     _dl_allocate_tls is NOT called). Without this, stale .tbss data
+    //     from the previous thread would persist. Both stubs use the same
+    //     emit_tls_alloc_stub, so syscall 0x1001 fires for both new and
+    //     reused stacks.
+    emit_tls_alloc_stub(code);   // offset 24 (16 bytes)
     // [3] _dl_deallocate_tls (void)
     emit_stub_void(code);        // offset 32
     // [4] _dl_signal_error (noreturn)
