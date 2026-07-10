@@ -733,6 +733,88 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
 // We ONLY patch these specific fields — the rest of the struct retains
 // whatever values ld-linux's .data section has (mostly zeros, which
 // glibc handles gracefully via NULL checks).
+// ── detect_tls_field_offsets_ ──────────────────────────────────────────
+// Dynamically detect the offsets of dl_tls_static_size and
+// dl_tls_static_align within struct rtld_global_ro by disassembling
+// __libc_early_init in libc.so.6.
+//
+// Background: the offsets of these fields CHANGED between glibc versions:
+//   glibc 2.36 (Arm GNU 13.2):  size @ +0x1D0, align @ +0x1D8
+//   glibc 2.40 (Arm GNU 14.2):  size @ +0x1D8, align @ +0x1E0
+//
+// Hardcoding offsets breaks when the toolchain is upgraded. Instead, we
+// disassemble __libc_early_init to find the actual LDP offset it uses to
+// load these two consecutive fields. The function always starts with:
+//   adrp x1, <rtld_global_ro_ptr_page>
+//   ldr  x1, [x1, #<ptr_offset>]     ; x1 = &_rtld_global_ro
+//   ...
+//   ldp  x0, x3, [x1, #<offset>]     ; load (size, align) pair
+//   ldr  x1, [x1, #0x18]             ; load dl_pagesize
+//
+// We scan the first ~32 instructions of __libc_early_init for an LDP
+// with base register x1 and an unsigned immediate offset, which gives
+// us the offset of dl_tls_static_size (align follows at +8).
+//
+// Returns true on success, filling out_size_off and out_align_off.
+// Returns false if detection fails (caller falls back to known offsets).
+bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
+                                               uint32_t& out_align_off) {
+    out_size_off = 0;
+    out_align_off = 0;
+
+    uint64_t early_init = resolve_symbol("__libc_early_init");
+    if (early_init == 0) return false;
+
+    // Read up to 128 bytes (32 instructions) of __libc_early_init.
+    // The LDP we're looking for is typically within the first 20
+    // instructions (after the prologue and __ctype_init call).
+    uint8_t code[128];
+    try {
+        mem_.read(early_init, code, sizeof(code));
+    } catch (...) {
+        return false;
+    }
+
+    // AArch64 LDP (64-bit GPR, unsigned offset):
+    //   LDP Xt1, Xt2, [Xn, #imm]
+    //   Encoding: 1010100101 L imm7 Rt2 Rn Rt
+    //   = 0xA9400000 | (imm7 << 15) | (Rt2 << 10) | (Rn << 5) | Rt
+    //   (bit 22 = L: 1 for LDP, 0 for STP; 0xA9400000 has bit 22 = 1)
+    //   imm7 is UNSIGNED 7 bits, scaled by 8 (offset = imm7 * 8, max 1016)
+    // We look for any LDP with base = x1 (the _rtld_global_ro pointer)
+    // that loads two 64-bit GPRs at an offset in the TLS field range.
+    // __libc_early_init always loads (dl_tls_static_size,
+    // dl_tls_static_align) as a consecutive pair via LDP.
+    for (size_t i = 0; i + 4 <= sizeof(code); i += 4) {
+        uint32_t insn;
+        memcpy(&insn, code + i, 4);
+        // Check LDP (64-bit GPR, unsigned offset):
+        // mask 0xFFC00000, value 0xA9400000
+        if ((insn & 0xFFC00000) != 0xA9400000) continue;
+        uint32_t rn = (insn >> 5) & 0x1F;
+        // We want base = x1 (the _rtld_global_ro pointer).
+        if (rn != 1) continue;
+        // imm7 is at bits 21-15 (7 bits, unsigned for this variant).
+        uint32_t imm7 = (insn >> 15) & 0x7F;
+        uint32_t offset = imm7 * 8;  // scaled by 8 for 64-bit
+        // Sanity: offset must be in a reasonable range (0x100..0x300)
+        // for rtld_global_ro's TLS fields. This excludes LDP x29,x30
+        // in the prologue (offset 0) and other unrelated loads.
+        if (offset < 0x100 || offset > 0x300) continue;
+        out_size_off = offset;
+        out_align_off = offset + 8;
+        if (getenv("BIFROST_DYNLINK_TRACE")) {
+            fprintf(stderr, "[dynlink] detected TLS field offsets via "
+                    "__libc_early_init @0x%llx+%zu: size@+0x%x, align@+0x%x "
+                    "(imm7=%u)\n",
+                    static_cast<unsigned long long>(early_init), i,
+                    out_size_off, out_align_off, imm7);
+        }
+        return true;
+    }
+    return false;
+}
+
 void DynamicLinker::patch_rtld_global_ro_() {
     if (pending_tls_static_size_ == 0) return;  // no TLS → nothing to patch
 
@@ -742,50 +824,86 @@ void DynamicLinker::patch_rtld_global_ro_() {
         return;
     }
 
-    // Known offsets in struct rtld_global_ro (glibc 2.36, AArch64):
-    //   offset 0x18:  dl_pagesize (size_t) — read by __getpagesize
-    //   offset 0x1D0: dl_tls_static_size (size_t) — read by _dl_allocate_tls_storage
-    //   offset 0x1D8: dl_tls_static_align (size_t) — read by _dl_allocate_tls_storage
-    //
-    // These offsets were determined by disassembling __getpagesize and
-    // __libc_early_init in libc.so.6. See the comment in
-    // register_ld_linux_shim_() for details.
-    //
-    // We set dl_pagesize = 4096 (standard Linux page size).
-    // We set dl_tls_static_size = pending_tls_static_size_ (includes
-    //   the actual TLS data size + TCB + surplus for future dlopen'd libs).
-    // We set dl_tls_static_align = 64 (TLS_TCB_ALIGN on AArch64).
+    // ── Dynamic offset detection ────────────────────────────────────
+    // The offsets of dl_tls_static_size and dl_tls_static_align within
+    // struct rtld_global_ro vary by glibc version:
+    //   glibc 2.36 (Arm GNU 13.2): size @ +0x1D0, align @ +0x1D8
+    //   glibc 2.40 (Arm GNU 14.2): size @ +0x1D8, align @ +0x1E0
+    // Hardcoding breaks when the toolchain is upgraded. We disassemble
+    // __libc_early_init to find the actual LDP offset it uses to load
+    // these two consecutive fields. If detection fails, we fall back to
+    // spraying ALL known offsets (safe because the fields are consecutive
+    // size_t values and spraying writes the same value to adjacent slots).
+    uint32_t size_off = 0, align_off = 0;
+    bool detected = detect_tls_field_offsets_(size_off, align_off);
+
+    // Known offset pairs (glibc version → (size_off, align_off)).
+    // Used as fallback if dynamic detection fails.
+    struct KnownOffset { uint32_t size; uint32_t align; const char* ver; };
+    constexpr KnownOffset known_offsets[] = {
+        {0x1D8, 0x1E0, "glibc 2.40 (Arm GNU 14.2)"},  // check 2.40 first
+        {0x1D0, 0x1D8, "glibc 2.36 (Arm GNU 13.2)"},  // then 2.36
+    };
+
+    // Pagesize is at offset 0x18 in all known glibc versions.
+    constexpr uint32_t PAGESIZE_OFF = 0x18;
+
     try {
-        uint64_t pagesize = mem_.load<uint64_t>(rtld_ro + 0x18);
+        // ── Patch dl_pagesize (offset 0x18, stable across versions) ──
+        uint64_t pagesize = mem_.load<uint64_t>(rtld_ro + PAGESIZE_OFF);
         if (pagesize == 0) {
-            mem_.store<uint64_t>(rtld_ro + 0x18, 4096);
+            mem_.store<uint64_t>(rtld_ro + PAGESIZE_OFF, 4096);
         }
-        // Set dl_tls_static_size and dl_tls_static_align at the offsets
-        // determined from glibc 2.36 disassembly (__libc_early_init
-        // reads from these offsets). These fix the `assert(size != 0)`
-        // in allocatestack.c.
-        // NOTE: glibc dynamic pthread_create still has a remaining hang
-        // in allocate_stack/__libc_memalign. The exact offset of
-        // dl_tls_static_align may differ from dl_tls_static_size by
-        // a version-dependent amount, causing memalign to receive a
-        // non-power-of-2 alignment. This is tracked as a known
-        // limitation — musl dynamic pthreads and all static pthread
-        // tests work correctly.
-        uint64_t tls_size = mem_.load<uint64_t>(rtld_ro + 0x1D0);
-        if (tls_size == 0) {
-            mem_.store<uint64_t>(rtld_ro + 0x1D0, pending_tls_static_size_);
-        }
-        uint64_t tls_align = mem_.load<uint64_t>(rtld_ro + 0x1D8);
-        if (tls_align == 0) {
-            mem_.store<uint64_t>(rtld_ro + 0x1D8, 64);
+
+        // ── Patch dl_tls_static_size and dl_tls_static_align ─────────
+        // Strategy: if dynamic detection succeeded, patch exactly those
+        // two offsets. Otherwise, "spray" — write the size and align
+        // values to ALL known offset pairs. Spraying is safe because:
+        //   1. The fields are consecutive size_t values in the struct.
+        //   2. Writing a valid size to an adjacent field that happens
+        //      to be dl_tls_static_used or dl_tls_static_surplus is
+        //      harmless (glibc adds them to the size, and a slightly
+        //      larger size just means a bit more TLS surplus).
+        //   3. We only write if the current value is 0, so we never
+        //      clobber a field that ld-linux already initialized.
+        if (detected) {
+            // Precise patching — write only the detected offsets.
+            uint64_t cur_size = mem_.load<uint64_t>(rtld_ro + size_off);
+            if (cur_size == 0) {
+                mem_.store<uint64_t>(rtld_ro + size_off,
+                                     pending_tls_static_size_);
+            }
+            uint64_t cur_align = mem_.load<uint64_t>(rtld_ro + align_off);
+            if (cur_align == 0) {
+                mem_.store<uint64_t>(rtld_ro + align_off, 64);
+            }
+        } else {
+            // Fallback: spray all known offset pairs.
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dynlink] TLS offset detection failed; "
+                        "spraying all known offsets\n");
+            }
+            for (const auto& ko : known_offsets) {
+                uint64_t cur_size = mem_.load<uint64_t>(rtld_ro + ko.size);
+                if (cur_size == 0) {
+                    mem_.store<uint64_t>(rtld_ro + ko.size,
+                                         pending_tls_static_size_);
+                }
+                uint64_t cur_align = mem_.load<uint64_t>(rtld_ro + ko.align);
+                if (cur_align == 0) {
+                    mem_.store<uint64_t>(rtld_ro + ko.align, 64);
+                }
+            }
         }
 
         if (getenv("BIFROST_DYNLINK_TRACE")) {
             fprintf(stderr, "[dynlink] patched _rtld_global_ro @0x%llx: "
                     "dl_pagesize=4096, dl_tls_static_size=%llu, "
-                    "dl_tls_static_align=64\n",
+                    "dl_tls_static_align=64 (%s)\n",
                     static_cast<unsigned long long>(rtld_ro),
-                    static_cast<unsigned long long>(pending_tls_static_size_));
+                    static_cast<unsigned long long>(pending_tls_static_size_),
+                    detected ? "dynamic detection"
+                             : "spray fallback");
         }
     } catch (...) {
         // Reading/writing _rtld_global_ro failed — the struct might

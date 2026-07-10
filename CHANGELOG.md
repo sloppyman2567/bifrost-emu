@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 79 (2026-07-10)
+
+### 8-thread multi-wave TLS corruption fixed
+
+The "8-thread race" bug (Turn 78 Issue #3) is now FIXED. glibc dynamic
+`pthread_create` with 8+ threads across multiple waves (stack-cache
+reuse) now works correctly with full TLS isolation. The producer/consumer
+condvar test (multi-waiter, previously disabled) also works.
+
+**Root cause:** The Turn 78 cont. commit corrected the `_dl_allocate_tls`
+syscall encoding but introduced a regression: `patch_rtld_global_ro_()`
+used hardcoded offsets (0x1D0/0x1D8) for `dl_tls_static_size` /
+`dl_tls_static_align` that are correct for glibc 2.36 but WRONG for
+glibc 2.40 (which uses 0x1D8/0x1E0). With wrong offsets, glibc computed
+`static_tls_size` incorrectly, causing TLS blocks to overlap when threads
+reused cached stacks across waves.
+
+**Fixes:**
+
+- **Dynamic TLS field offset detection** — new
+  `DynamicLinker::detect_tls_field_offsets_()` disassembles
+  `__libc_early_init` at runtime to find the actual LDP offset it uses
+  to load `(dl_tls_static_size, dl_tls_static_align)`. Falls back to
+  "spraying" all known offsets if detection fails. This makes the
+  emulator robust across glibc versions without hardcoded offsets.
+
+- **TCB header zeroing** — the syscall 0x1001 handler now zeros
+  `[tcb, tcb + max(main_memsz, 256))` to clear the entire `tcbhead_t`,
+  including the DTV pointer. The DTV pointer MUST be NULL so glibc's
+  thread-exit cleanup skips the DTV free (our shim uses static TLS only,
+  no dynamic DTV allocation).
+
+- **New regression test** — `test_dyn_pthread_8thread.c` tests 8
+  threads × 4 waves × 500 iters with `__thread long tls_array[8]` per
+  thread, verifying TLS integrity (each element = `id * 100 + index`).
+
+- **Stress test upgraded** — `test_dyn_pthread_stress.c` now uses 8
+  threads (was 4) × 8 waves × 2000 iters = 128,000 increments. The
+  producer/consumer condvar test is re-enabled (was disabled due to the
+  TLS bug).
+
+**Test results:** 125/125 pass with rootfs (glibc 2.40 + musl), under
+JIT. No regressions.
+
 ## [Unreleased] — Turn 78 (2026-07-10)
 
 ### glibc 2.40+ dynamic binaries now work (DT_RELR support)

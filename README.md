@@ -115,7 +115,12 @@ dynamic pthreads work end-to-end**
 `__thread` TLS) — the emulator initializes NPTL's stack-cache list
 heads, routes `_dl_allocate_tls` through a native syscall, reports
 `rseq` success, and propagates `clone3`'s `child_tid` so thread exit
-wakes joiners. musl dynamic pthreads and all static pthread tests also
+wakes joiners. **8+ threads across multiple waves (stack-cache reuse)
+work correctly** with full TLS isolation, including multi-waiter
+condvar (producer/consumer) patterns. The dynamic linker detects TLS
+field offsets at runtime by disassembling `__libc_early_init`, making
+it robust across glibc versions (2.36–2.40+) without hardcoded
+offsets. musl dynamic pthreads and all static pthread tests also
 pass under both JIT and interpreter.
 
 The rootfs includes:

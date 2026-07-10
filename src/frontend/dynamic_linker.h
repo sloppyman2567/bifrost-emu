@@ -430,6 +430,14 @@ private:
     // but before __libc_early_init (which reads dl_pagesize).
     void patch_rtld_global_ro_();
 
+    // Dynamically detect the offsets of dl_tls_static_size and
+    // dl_tls_static_align within struct rtld_global_ro by disassembling
+    // __libc_early_init. Returns true on success, filling out the
+    // offsets; false if detection fails (caller falls back to spray).
+    // Turn 79: replaces hardcoded offsets that broke with glibc 2.40.
+    bool detect_tls_field_offsets_(uint32_t& out_size_off,
+                                    uint32_t& out_align_off);
+
     // BUGFIX (Turn 77): initialize the NPTL stack-cache list heads in
     // _rtld_global (the read-write rtld global, NOT _rtld_global_ro).
     // glibc's pthread_create -> allocate_stack walks the _dl_stack_cache

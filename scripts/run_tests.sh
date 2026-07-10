@@ -26,7 +26,7 @@
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
 #                      (30 busybox + 19 toybox + 7 dynamic glibc)
-#   Dynamic       7  — dynamically-linked musl + glibc tests (need rootfs)
+#   Dynamic       8  — dynamically-linked musl + glibc tests (need rootfs)
 #   Benchmarks    5  — performance (skipped with --quick)
 #
 # Without --test-all and without a rootfs, the runner reports 119 pass +
@@ -356,6 +356,10 @@ DYNAMIC_TESTS=(
     "test_dyn_pthread_min|ctest_real/test_dyn_pthread_min.elf||10|joined, counter=1"
     "test_dyn_threads|ctest_real/test_dyn_threads.elf||20|test_dyn_threads: ALL PASS"
     "test_dyn_pthread_stress|ctest_real/test_dyn_pthread_stress.elf||30|test_dyn_pthread_stress: ALL PASS"
+    # Turn 79: 8-thread multi-wave TLS isolation test. Verifies the fix
+    # for the "8-thread race" bug (context.md Turn 78 Issue #3). Tests
+    # 8 threads x 4 waves with __thread long tls_array[8] per thread.
+    "test_dyn_pthread_8thread|ctest_real/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

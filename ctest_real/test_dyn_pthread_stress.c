@@ -24,14 +24,13 @@
 #include <string.h>
 #include <stdatomic.h>
 
-#define NTHREADS   4       // 4 threads is stable; 8+ hits a
-                            // nondeterministic thread-spawn race (decode
-                            // error at pc=0x0 or heap corruption) in the
-                            // shared-JIT thread_mgr / dynamic-linker TLS
-                            // path — tracked as a known scalability
-                            // limitation. The wave test still exercises
-                            // stack-cache reuse and TLS per-thread.
-#define WAVES      8       // create/join 8 waves of 4 threads = 32 total
+#define NTHREADS   8       // Turn 79: 8 threads now works (was 4, limited
+                            // by a TLS offset bug that caused TLS corruption
+                            // with 8+ threads across waves). The fix
+                            // (dynamic TLS field offset detection + proper
+                            // TCB header zeroing) enables 8-thread multi-wave
+                            // stress with full TLS isolation.
+#define WAVES      8       // create/join 8 waves of 8 threads = 64 total
 #define ITERS      2000    // per-thread mutex-protected increments
 
 static atomic_long shared_counter = 0;
@@ -153,12 +152,10 @@ int main(void) {
     if (!ok) failures++;
 
     // ── Producer/consumer queue test ──────────────────────────────
-    // NOTE: disabled — pthread_cond_wait/signal with multiple waiters
-    // has a wakeup race under the current futex implementation that can
-    // deadlock (4-thread pdc hangs). Tracked as a known limitation;
-    // the static test_pthread_cond (single waiter) passes. Re-enable
-    // once the condvar futex-wake race is fixed.
-#if 0
+    // Turn 79: producer/consumer condvar test re-enabled. The multi-waiter
+    // condvar race was a symptom of the TLS corruption bug (waiters' TLS
+    // state was getting clobbered, causing lost wakeups). With the TLS
+    // offset fix, the producer/consumer test now works reliably.
     printf("=== producer/consumer: %d prod x %d cons x %d items ===\n",
            PDC_PRODUCERS, PDC_CONSUMERS, PDC_ITEMS);
     {
@@ -176,7 +173,6 @@ int main(void) {
                p, c, PDC_PRODUCERS * PDC_ITEMS, ok ? "OK" : "FAIL");
         if (!ok) failures++;
     }
-#endif
 
     printf("test_dyn_pthread_stress: %s\n",
            failures == 0 ? "ALL PASS" : "FAIL");
