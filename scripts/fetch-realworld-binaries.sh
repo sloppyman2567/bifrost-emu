@@ -51,7 +51,6 @@ if [ -x "$BB_DEST" ]; then
 else
     echo "=== Building BusyBox $BB_VERSION (static aarch64 musl) ==="
     WORKDIR1=$(mktemp -d) || { echo "Failed to create temp dir" >&2; exit 1; }
-    trap 'rm -rf "$WORKDIR1"' EXIT
 
     curl "${CURL_OPTS[@]}" -o "$WORKDIR1/busybox.tar.bz2" \
         "https://busybox.net/downloads/busybox-$BB_VERSION.tar.bz2"
@@ -69,6 +68,7 @@ else
     chmod +x "$PROJECT_ROOT/$BB_DEST"
     echo "BusyBox built: $BB_DEST"
     file "$PROJECT_ROOT/$BB_DEST"
+    cd "$PROJECT_ROOT"
 fi
 
 # ── iperf2 ─────────────────────────────────────────────────────────────
@@ -80,7 +80,6 @@ else
     echo ""
     echo "=== Building iperf2 2.2.1 (static aarch64 musl) ==="
     WORKDIR2=$(mktemp -d) || { echo "Failed to create temp dir" >&2; exit 1; }
-    trap 'rm -rf "$WORKDIR1" "$WORKDIR2"' EXIT
 
     if curl "${CURL_OPTS[@]}" -o "$WORKDIR2/iperf2.tar.gz" \
         "https://sourceforge.net/projects/iperf2/files/iperf2-2.2.1.tar.gz/download" 2>/dev/null; then
@@ -92,10 +91,16 @@ else
         cp src/iperf "$PROJECT_ROOT/$IPERF_DEST" 2>/dev/null || echo "  (iperf2 build failed — skipping)"
         chmod +x "$PROJECT_ROOT/$IPERF_DEST" 2>/dev/null
         [ -f "$PROJECT_ROOT/$IPERF_DEST" ] && echo "iperf2 built: $IPERF_DEST"
+        cd "$PROJECT_ROOT"
     else
         echo "  (could not download iperf2 source — skipping)"
     fi
 fi
+
+# Cleanup temp dirs (deferred from per-section traps to avoid unbound
+# variable errors when a section is skipped because the binary already
+# exists).
+rm -rf "${WORKDIR1:-}" "${WORKDIR2:-}" 2>/dev/null || true
 
 # ── toybox (if not present in ctest_real/) ─────────────────────────────
 TOYBOX_DEST="ctest_real/toybox"

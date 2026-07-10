@@ -315,6 +315,10 @@ INTEGRATION_TESTS=(
     # Also fixed a 128-bit V register load bug (memcpy of 16 bytes from
     # v_lo[n] read v_lo[n] + v_lo[n+1] instead of v_lo[n] + v_hi[n]).
     "sha256_crypto|ctest_real/test_sha256_crypto.elf||5|16/16 checks passed"
+    # SHA256H/H2/SHA1C/SHA1P/SHA1M/SHA1H crypto extension regression test.
+    # Verifies JIT/interp parity for the hash-round instructions added
+    # in this turn. 8/8 checks pass under both modes.
+    "sha256_full|ctest_real/test_sha256_full.elf||5|8/8 checks passed"
     # Basic test/ programs (non-interactive)
     "count|test/count.elf||5"
     "extr|test/extr.elf||5|OK"

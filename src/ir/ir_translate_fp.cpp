@@ -697,7 +697,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
                 // SHA1H, SHA1SU1, SHA256SU0 — 2-operand crypto (mask 0xFFFFFC00).
-                // SHA1SU0, SHA256SU1 — 3-operand crypto (mask 0xFFE0FC00).
+                // SHA1C/SHA1P/SHA1M, SHA1SU0, SHA256H/H2, SHA256SU1 — 3-operand
+                // crypto (mask 0xFFE0FC00).
                 // All fall back to CALL_INTERP (the interpreter has full
                 // implementations in interp_crypto.hpp; native SHA-NI
                 // codegen is a future enhancement).
@@ -705,7 +706,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 //   SHA1H    = 0x5E280800
                 //   SHA1SU1  = 0x5E281800  (was 0x5E280000 — wrong)
                 //   SHA256SU0= 0x5E282800  (was 0x5E282000 — wrong)
+                //   SHA1C    = 0x5E000000  (mask 0xFFE0FC00)
+                //   SHA1P    = 0x5E001000  (mask 0xFFE0FC00)
+                //   SHA1M    = 0x5E002000  (mask 0xFFE0FC00)
                 //   SHA1SU0  = 0x5E003000  (mask 0xFFE0FC00)
+                //   SHA256H  = 0x5E004000  (mask 0xFFE0FC00)
+                //   SHA256H2 = 0x5E005000  (mask 0xFFE0FC00)
                 //   SHA256SU1= 0x5E006000  (mask 0xFFE0FC00)
                 if (aes_masked == 0x5E280800 ||  // SHA1H
                     aes_masked == 0x5E281800 ||  // SHA1SU1
@@ -713,7 +719,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }
-                if ((op & 0xFFE0FC00) == 0x5E003000 ||  // SHA1SU0
+                if ((op & 0xFFE0FC00) == 0x5E000000 ||  // SHA1C
+                    (op & 0xFFE0FC00) == 0x5E001000 ||  // SHA1P
+                    (op & 0xFFE0FC00) == 0x5E002000 ||  // SHA1M
+                    (op & 0xFFE0FC00) == 0x5E003000 ||  // SHA1SU0
+                    (op & 0xFFE0FC00) == 0x5E004000 ||  // SHA256H
+                    (op & 0xFFE0FC00) == 0x5E005000 ||  // SHA256H2
                     (op & 0xFFE0FC00) == 0x5E006000) {  // SHA256SU1
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
