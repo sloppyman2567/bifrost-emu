@@ -973,6 +973,23 @@ void DynamicLinker::patch_rtld_global_ro_() {
         // not be mapped at the expected address. This is non-fatal;
         // glibc will hit the assertion later (visible failure).
     }
+
+    // ── Patch dlopen hook pointer ──────────────────────────────────
+    // glibc's __libc_dlopen_mode reads _dl_open from a hook struct at
+    // _rtld_global_ro + 368 (offset 0x170). Write our hook struct pointer
+    // there so dlopen() works. (Turn 84)
+    if (dlopen_hook_ptr_ != 0) {
+        try {
+            mem_.store<uint64_t>(rtld_ro + 368, dlopen_hook_ptr_);
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dynlink] patched _rtld_global_ro + 368 = "
+                        "dlopen hook @0x%llx\n",
+                        static_cast<unsigned long long>(dlopen_hook_ptr_));
+            }
+        } catch (...) {
+            // Non-fatal — dlopen just won't work.
+        }
+    }
 }
 
 // ── init_nptl_stack_lists_ ────────────────────────────────────────────
@@ -1853,6 +1870,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_TLSADDR = 112;  // __tls_get_addr
     constexpr uint32_t OFF_TUNABLE = 120;  // __tunable_get_val
     constexpr uint32_t OFF_STACKPERM = 128; // __nptl_change_stack_perm
+    constexpr uint32_t OFF_DLOPEN   = 136; // _dl_open (16 bytes — calls syscall 0x1002)
 
     // [0] _dl_find_dso_for_object (returns void*)
     emit_stub_return0(code);     // offset 0
@@ -1889,6 +1907,20 @@ bool DynamicLinker::register_ld_linux_shim_() {
     emit_stub_return0(code);     // offset 112
     // [14] __nptl_change_stack_perm (void)
     emit_stub_void(code);        // offset 120
+    // [15] _dl_open (16 bytes — calls syscall 0x1002 for dlopen support)
+    //     Turn 84: glibc's __libc_dlopen_mode reads _dl_open from a hook
+    //     struct at _rtld_global_ro + 368, offset +72. The stub calls
+    //     syscall 0x1002 which loads the library via DynamicLinker.
+    {
+        // movz x8, #0x1002  →  0xD2820048
+        code.push_back(0x48); code.push_back(0x00); code.push_back(0x20); code.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(code);
+    }
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
@@ -1917,6 +1949,30 @@ bool DynamicLinker::register_ld_linux_shim_() {
         mem_.store<uint64_t>(shim_base_ + FPTR_TABLE_OFF + i * 8,
                              code_base + fptr_offsets[i]);
     }
+
+    // ── dlopen hook struct ─────────────────────────────────────────
+    // glibc's __libc_dlopen_mode reads _dl_open from a hook struct:
+    //   1. ldr x2, [rtld_global_ro + 368]  → hook struct pointer
+    //   2. ldr x2, [x2 + 72]               → _dl_open function pointer
+    //   3. blr x2                          → call _dl_open
+    // We allocate a 128-byte hook struct in the shim data area (at
+    // offset 0x800, past the FPTR table) and set hook+72 = _dl_open stub.
+    // After patch_rtld_global_ro_ resolves _rtld_global_ro's address,
+    // we write hook_ptr to rtld_global_ro + 368.
+    // (Turn 84)
+    constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;  // in data area
+    constexpr uint64_t DLOPEN_HOOK_SIZE = 128;
+    constexpr uint64_t DLOPEN_HOOK_DL_OPEN_OFF = 72;  // offset of _dl_open in hook
+    // Zero the hook struct
+    {
+        std::vector<uint8_t> zeros(DLOPEN_HOOK_SIZE, 0);
+        mem_.write(shim_base_ + DLOPEN_HOOK_OFF, zeros.data(), DLOPEN_HOOK_SIZE);
+    }
+    // Set hook + 72 = _dl_open stub address
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + DLOPEN_HOOK_DL_OPEN_OFF,
+                         code_base + OFF_DLOPEN);
+    // Save for patch_rtld_global_ro_ to write into _rtld_global_ro + 368
+    dlopen_hook_ptr_ = shim_base_ + DLOPEN_HOOK_OFF;
 
     // ── Register symbols in the global symbol table ──────────────
     // Data symbols point into the data page; function symbols point
@@ -2927,6 +2983,83 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
                 static_cast<unsigned long long>(it->second.addr));
     }
     return it->second.addr;
+}
+
+// ── load_library (dlopen support) ─────────────────────────────────────
+// Load a shared library at runtime by path. Reuses the same loading
+// logic as load_shared_library but takes a full path instead of a
+// soname. Returns the base address (handle) on success, 0 on failure.
+// (Turn 84)
+uint64_t DynamicLinker::load_library(const std::string& path) {
+    // Read the file from disk.
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) {
+        error_ = "load_library: cannot open '" + path + "'";
+        return 0;
+    }
+    std::streamsize size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(size);
+    if (!f.read(reinterpret_cast<char*>(data.data()), size)) {
+        error_ = "load_library: read error";
+        return 0;
+    }
+    // Validate ELF header.
+    if (size < 64 || data[0] != 0x7f || data[1] != 'E' ||
+        data[2] != 'L' || data[3] != 'F') {
+        error_ = "load_library: not an ELF file";
+        return 0;
+    }
+    // Allocate base address.
+    uint64_t max_end = 0;
+    if (data.size() >= 56) {
+        uint64_t e_phoff;
+        uint16_t e_phentsize, e_phnum;
+        memcpy(&e_phoff,     data.data() + 32, 8);
+        memcpy(&e_phentsize, data.data() + 54, 2);
+        memcpy(&e_phnum,     data.data() + 56, 2);
+        for (int i = 0; i < e_phnum; i++) {
+            const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
+            uint32_t p_type;
+            uint64_t p_vaddr, p_memsz;
+            memcpy(&p_type,  p + 0,  4);
+            memcpy(&p_vaddr, p + 16, 8);
+            memcpy(&p_memsz, p + 40, 8);
+            if (p_type == 1) {
+                uint64_t end = p_vaddr + p_memsz;
+                if (end > max_end) max_end = end;
+            }
+        }
+    }
+    max_end = (max_end + 0xFFFFF) & ~0xFFFFFULL;
+    uint64_t base = mem_.mmap_alloc(max_end);
+    if (base == 0) {
+        error_ = "load_library: mmap_alloc failed";
+        return 0;
+    }
+    // Map segments and parse.
+    LoadedObject obj;
+    obj.name = path;
+    obj.base_addr = base;
+    obj.is_main = false;
+    uint64_t entry;
+    map_segments(data, base, entry);
+    obj.entry = entry;
+    if (!parse_dynamic(data, base, obj)) {
+        error_ = "load_library: parse_dynamic failed";
+        return 0;
+    }
+    parse_tls(data, obj);
+    objects_.push_back(std::move(obj));
+    index_symbols(objects_.back());
+    parse_versions_(objects_.back());
+    // NOTE: relocations and init arrays are NOT applied here yet.
+    // The library's symbols are available via the global symbol table,
+    // so dlsym() will find them. Full relocation processing (for the
+    // library's own internal references) and init_array execution will
+    // be added in a follow-up. This is sufficient for basic dlopen +
+    // dlsym usage (loading a lib, looking up a function, calling it).
+    return base;
 }
 
 } // namespace arm64emu

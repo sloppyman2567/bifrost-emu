@@ -200,6 +200,12 @@ public:
     const std::vector<LoadedObject>& objects() const { return objects_; }
     const std::string& error() const { return error_; }
 
+    // Load a shared library at runtime (dlopen support).
+    // path: absolute or relative path to the .so file.
+    // Returns: base address (>0) on success, 0 on failure.
+    // (Turn 84)
+    uint64_t load_library(const std::string& path);
+
     // ── ifunc resolver callback ────────────────────────────────────
     // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
     // resolver ADDRESS) instead of calling the resolver to get the
@@ -293,6 +299,7 @@ private:
     uint64_t tcb_size_ = 0;         // TCB header size (tcbhead_t, rounded to align)
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
+    uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
 
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.

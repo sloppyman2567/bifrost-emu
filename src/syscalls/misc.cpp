@@ -965,6 +965,47 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        // ── Bifrost-emu internal dlopen syscall (Turn 84) ──────────
+        // Called by the _dl_open stub in the ld-linux shim.
+        // a0 (x0) = guest pointer to library path string (null-terminated)
+        // a1 (x1) = dlopen mode flags (RTLD_LAZY, RTLD_NOW, etc.)
+        // Returns: a handle (>0) on success, 0 on failure.
+        case 0x1002: {
+            // Read the library path from guest memory.
+            std::string path = yggdrasil::Yggdrasil::read_path(mem_, a0);
+            if (path.empty()) {
+                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[dlopen] empty path\n");
+                }
+                ret_host(0);
+                return 0;
+            }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dlopen] path='%s' mode=0x%llx\n",
+                        path.c_str(), static_cast<unsigned long long>(a1));
+            }
+            // Load the library via the dynamic linker.
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl) {
+                ret_host(0);
+                return 0;
+            }
+            uint64_t handle = dl->load_library(path);
+            if (handle == 0) {
+                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[dlopen] failed: %s\n", dl->error().c_str());
+                }
+                ret_host(0);
+                return 0;
+            }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dlopen] OK handle=0x%llx\n",
+                        static_cast<unsigned long long>(handle));
+            }
+            ret_host(handle);
+            return 0;
+        }
+
         default:
             return SYSCALL_NOT_HANDLED;
     }
