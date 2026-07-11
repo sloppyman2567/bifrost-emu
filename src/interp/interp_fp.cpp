@@ -433,6 +433,77 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // ── ADDHN / SUBHN (vector, narrowing) ──────────────────────
+            // ADDHN: 0 Q 0 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x0E204000)
+            // SUBHN: 0 Q 1 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x4E204000)
+            // These add/subtract corresponding 2*size-bit elements from Vn
+            // and Vm, take the HIGH half of the result, and place it in the
+            // corresponding size-bit elements of Vd (narrowing).
+            //
+            // BUGFIX (Turn 83): ADDHN was NOT handled — fell through to
+            // default and was silently NOP'd. This broke glibc's SIMD
+            // strlen, which uses `addhn v2.8b, v1.8h, v1.8h` to narrow
+            // the 16-byte CMEQ result to 8 bytes. Without ADDHN, the
+            // narrowing produced all-zeros, so strlen's `cbnz x2` never
+            // branched, creating an infinite loop scanning for the NUL
+            // terminator. This caused the 8thread-with-printf hang.
+            case 0x0E204000: {  // ADDHN
+                int esize_in = 1 << (size + 1);  // 2, 4, 8, 16 bytes
+                int esize_out = esize_in / 2;
+                // ADDHN always reads the FULL 128-bit source (8H/4S/2D).
+                // Q=0: write result to LOW 64 bits of Vd.
+                // Q=1 (ADDHN2): write result to HIGH 64 bits of Vd.
+                int elems = 16 / esize_in;
+                uint8_t buf_n[16], buf_m[16];
+                memcpy(buf_n, &cpu.v_lo[rn], 8);
+                memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_m, &cpu.v_lo[rm], 8);
+                memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                uint8_t out[8];
+                for (int i = 0; i < elems; i++) {
+                    uint64_t a = 0, b = 0;
+                    memcpy(&a, buf_n + i * esize_in, esize_in);
+                    memcpy(&b, buf_m + i * esize_in, esize_in);
+                    uint64_t sum = a + b;
+                    uint64_t hi = sum >> (esize_out * 8);
+                    memcpy(out + i * esize_out, &hi, esize_out);
+                }
+                if (Q) {
+                    // ADDHN2: write to high 64 bits, preserve low 64
+                    memcpy(&cpu.v_hi[rd], out, 8);
+                } else {
+                    // ADDHN: write to low 64 bits, zero high 64
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
+            case 0x4E204000: {  // SUBHN
+                int esize_in = 1 << (size + 1);
+                int esize_out = esize_in / 2;
+                int elems = 16 / esize_in;
+                uint8_t buf_n[16], buf_m[16];
+                memcpy(buf_n, &cpu.v_lo[rn], 8);
+                memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_m, &cpu.v_lo[rm], 8);
+                memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                uint8_t out[8];
+                for (int i = 0; i < elems; i++) {
+                    uint64_t a = 0, b = 0;
+                    memcpy(&a, buf_n + i * esize_in, esize_in);
+                    memcpy(&b, buf_m + i * esize_in, esize_in);
+                    uint64_t diff = a - b;
+                    uint64_t hi = diff >> (esize_out * 8);
+                    memcpy(out + i * esize_out, &hi, esize_out);
+                }
+                if (Q) {
+                    memcpy(&cpu.v_hi[rd], out, 8);
+                } else {
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
             // ── TBL/TBX (Table Lookup) ──
             // AArch64 TBL/TBX permute bytes from one or two source
             // vectors using indices from a third vector. Each byte
