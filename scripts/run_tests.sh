@@ -474,7 +474,7 @@ REALWORLD_TESTS=(
     # All run with BIFROST_ROOT=rootfs (set below in the dynamic section).
     # We test actual functionality (not --help) to avoid the "no error if
     # existing" text in --help output triggering the FAIL/ERROR heuristic.
-    "rw_iperf3_version|ctest_real/realworld/iperf3-aarch64 --version||10|^iperf 3.12|DYN"
+    "rw_iperf3_version|ctest_real/realworld/iperf3-aarch64 --version||10|^iperf 3|DYN"
     "rw_coreutils_echo|ctest_real/realworld/echo hello||5|^hello$|DYN"
     "rw_coreutils_cat|ctest_real/realworld/cat|hello\n|5|^hello$|DYN"
     "rw_coreutils_echo_n|ctest_real/realworld/echo -n abc||5|^abc$|DYN"

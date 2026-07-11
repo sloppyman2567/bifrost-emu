@@ -25,6 +25,9 @@ DOWNLOAD_TIMEOUT=90
 # libbrotlidec1/libbrotlicommon1 are bundled into libbrotli1 in Bookworm.
 # liblber-2.5-0 is bundled into libldap-2.5-0.
 PACKAGES=(
+    libcurl4
+    zlib1g
+    libssl3
     libnghttp2-14
     libidn2-0
     librtmp1

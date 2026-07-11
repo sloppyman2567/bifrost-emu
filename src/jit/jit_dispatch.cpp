@@ -404,6 +404,16 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // architectural state for verify-mode comparison.
         CPU saved;                  // default-constructed, then populated
         saved.copy_arch_state_from(cpu);
+        // BUGFIX (Turn 84): copy_arch_state_from resets excl_tag_valid to
+        // false (correct for clone, wrong for verify). Save the exclusive
+        // monitor state so the interpreter's verify re-execution sees the
+        // same LDXR reservation as the JIT did. Without this, STXR always
+        // fails in the interpreter path (excl_tag_valid=false), causing
+        // false-positive PC divergences in CAS loops (e.g. glibc's
+        // __aarch64_cas4_acq used by curl, toybox, etc.).
+        saved.excl_tag_valid = cpu.excl_tag_valid;
+        saved.excl_tag_addr  = cpu.excl_tag_addr;
+        saved.excl_tag_size  = cpu.excl_tag_size;
         // The pending-queue state isn't part of architectural state, so
         // saved's pending queue is empty. That's fine for verify mode —
         // verify runs single-threaded and no signals should be pending.
@@ -540,6 +550,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         CPU ref;
         ref.copy_arch_state_from(saved);
         ref.pc = saved.pc;
+        // BUGFIX (Turn 84): restore exclusive monitor state so the
+        // interpreter's STXR sees the same LDXR reservation as the JIT.
+        ref.excl_tag_valid = saved.excl_tag_valid;
+        ref.excl_tag_addr  = saved.excl_tag_addr;
+        ref.excl_tag_size  = saved.excl_tag_size;
         int steps = 0;
         while (steps < entry.instr_count && ref.running) {
             emu.step(ref);
