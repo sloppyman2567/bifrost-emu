@@ -320,6 +320,48 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // ── DUP (element): sf 0 0 11110 1 0 imm5 0000 1 1 Rn Rd ──
+            // Copies one element from Vn to all lanes of Vd.
+            // Encoding base: 0x4E000400 (Q=1) / 0x0E000400 (Q=0).
+            // BUGFIX (Turn 82): this was NOT handled — fell through to
+            // default and got silently NOP'd. This broke the vectorized
+            // TLS init pattern `dup vN.2d, vM.d[0]` used by GCC -O2 to
+            // broadcast a base value before adding an index vector,
+            // causing multi-element __thread TLS arrays to get corrupted
+            // (only lane 0 was correct, lanes 1+ stayed 0 or stale).
+            case 0x0E000400: {
+                uint8_t imm5 = (op >> 16) & 0x1F;
+                int esize, idx;
+                switch (imm5 & 0x1F) {
+                    case 0x01: esize = 1; idx = imm5 >> 1; break;
+                    case 0x02: esize = 2; idx = imm5 >> 2; break;
+                    case 0x04: esize = 4; idx = imm5 >> 3; break;
+                    case 0x08: esize = 8; idx = imm5 >> 4; break;
+                    default: throw DecodeError(cpu.pc, inst);
+                }
+                // Read the source element from Vn.
+                uint64_t src_val;
+                int elems_per_qword = 8 / esize;
+                if (idx < elems_per_qword) {
+                    // Source is in v_lo[rn]
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_lo[rn]);
+                    memcpy(&src_val, p + idx * esize, esize);
+                } else {
+                    // Source is in v_hi[rn] (Q must be 1)
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_hi[rn]);
+                    memcpy(&src_val, p + (idx - elems_per_qword) * esize, esize);
+                }
+                // Broadcast src_val to all lanes of Vd.
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t bytes[16] = {0};
+                for (int i = 0; i < elems; i++) {
+                    memcpy(bytes + i * esize, &src_val, esize);
+                }
+                memcpy(&cpu.v_lo[rd], bytes, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], bytes + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
             // ── INS (general): sf 0 0 11110 10 0 imm5 0000 0 1 Rn Rd ──
             // v0 case label 0x4E000C00 was unreachable (it's DUP with
             // Q=1, which strips to the same sub_noq as DUP Q=0).
@@ -962,7 +1004,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
-            // USHR (vector, immediate) — mask 0xBF00FC00 excludes Q.
             // Shift = (2 * esize_bits) - immh:immb.
             // (rc.1 fixed immh extraction + element-size rule — see SHL above.)
             if ((op & 0xBF00FC00) == 0x2F000400) {
@@ -1391,6 +1432,48 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // this is safe. Without this, SHA1/SHA256 schedule-update
             // instructions would be silently NOP'd, producing wrong hashes.
             if (exec_crypto(op, cpu)) return;
+
+            // ── SHL (scalar, immediate): Dd, Dn, #imm ─────────────────
+            // Encoding: 0x5F005400 (mask 0xFF00FC00).
+            // BUGFIX (Turn 82): the scalar SHL was NOT handled — it was
+            // silently NOP'd, breaking GCC -O2's vectorized TLS init
+            // pattern (shl d31, d31, #2 to multiply by 4).
+            if ((op & 0xFF00FC00) == 0x5F005400) {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int shift = ((immh << 4) | immb) - 64;
+                if (shift < 0) shift = 0;
+                uint64_t v = cpu.v_lo[rn];
+                v <<= shift;
+                cpu.v_lo[rd] = v;
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── USHR (scalar, immediate): Dd, Dn, #imm ────────────────
+            // Encoding: 0x7F000400 (mask 0xFF00FC00).
+            if ((op & 0xFF00FC00) == 0x7F000400) {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int shift = 128 - ((immh << 4) | immb);
+                if (shift < 0) shift = 0;
+                if (shift >= 64) cpu.v_lo[rd] = 0;
+                else cpu.v_lo[rd] = cpu.v_lo[rn] >> shift;
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── SSHR (scalar, immediate, signed): Dd, Dn, #imm ────────
+            // Encoding: 0x7F000000 (mask 0xFF00FC00).
+            if ((op & 0xFF00FC00) == 0x7F000000) {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int shift = 128 - ((immh << 4) | immb);
+                if (shift < 0) shift = 0;
+                int64_t v = static_cast<int64_t>(cpu.v_lo[rn]);
+                if (shift >= 64) cpu.v_lo[rd] = (v < 0) ? ~0ULL : 0;
+                else cpu.v_lo[rd] = static_cast<uint64_t>(v >> shift);
+                cpu.v_hi[rd] = 0;
+                return;
+            }
 
             // FP register access + half-precision helpers are now
             // file-scope functions (read_fp_d, read_fp_s, write_fp_d,

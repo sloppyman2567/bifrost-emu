@@ -958,7 +958,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // "decode error at pc=0x... inst=0x7e61d821". The instruction
         // falls through to CALL_INTERP which uses the interpreter.
         if (op31_24 != 0x1E && op31_24 != 0x9E &&
-            op31_24 != 0x5E && op31_24 != 0x7E) return false;
+            op31_24 != 0x5E && op31_24 != 0x7E &&
+            op31_24 != 0x5F && op31_24 != 0x7F) return false;
         d.is_vec    = true;
         d.cls       = InstClass::FP_SCALAR;
         d.ftype     = (inst >> 22) & 3;

@@ -461,8 +461,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 // TLS variables are at wrong addresses and initialization
                 // fails silently.
                 if (dyn_linker_ && dyn_linker_->static_tls_size() > 0) {
-                    main_cpu_.tpidr_el0 = dyn_linker_->static_tls_base() +
-                                          dyn_linker_->static_tls_size();
+                    // Variant-I: TP = base + lib_size (TCB header start).
+                    main_cpu_.tpidr_el0 = dyn_linker_->thread_pointer();
                     main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
                 }
                 // Scratch stack for the constructor.
@@ -503,23 +503,29 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 }
                 restore();
             });
-            if (!dyn_linker_->link(data, info.base_addr, path)) {
+            if (!dyn_linker_->link(data, info.base_addr, path, info.interp)) {
                 fprintf(stderr, "[%s] native dynamic linking failed: %s; "
                         "falling back to guest ld.so\n",
                         CODENAME, dyn_linker_->error().c_str());
                 dyn_linker_.reset();
             } else if (dyn_linker_->static_tls_size() > 0) {
-                // Set up TPIDR_EL0 to point to the end of the static TLS
-                // block (TP = base + total). This is the AArch64 TLS
-                // convention: the thread pointer points PAST the static
-                // TLS block, and TP-relative offsets are negative.
-                uint64_t tp = dyn_linker_->static_tls_base() +
-                              dyn_linker_->static_tls_size();
+                // Set up TPIDR_EL0 using variant-I TLS layout (glibc AArch64):
+                //   TP = static_tls_base + lib_size
+                // The TCB header (tcbhead_t) is at [TP, TP + tcb_size).
+                // Main exe TLS is at [TP + tcb_size, ...) (positive offset).
+                // Lib TLS is at [TP - lib_size, TP) (negative offset).
+                //
+                // BUGFIX (Turn 82): the old code set TP = base + total (the
+                // END of the block, variant-II). This broke local-exec TLS
+                // access for the main exe — the hardcoded positive TPREL
+                // offset landed in the wrong place. With variant-I, TP points
+                // to the TCB header start (= base + lib_size).
+                uint64_t tp = dyn_linker_->thread_pointer();
                 main_cpu_.tpidr_el0 = tp;
                 main_cpu_.tpidrro_el0 = tp;
                 if (verbose_) {
                     fprintf(stderr, "[%s] native dynlink: static TLS block "
-                            "at 0x%llx (size %llu), TP=0x%llx\n",
+                            "at 0x%llx (size %llu), TP=0x%llx (variant-I)\n",
                             CODENAME,
                             static_cast<unsigned long long>(dyn_linker_->static_tls_base()),
                             static_cast<unsigned long long>(dyn_linker_->static_tls_size()),

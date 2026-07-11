@@ -805,14 +805,23 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
             auto* dl = emu.dyn_linker_.get();
 
-            // Compute lib_size and main exe TLS info from loaded objects.
+            // ── Compute lib_size, main TLS info, and tcb_size ─────────
+            // Uses variant-I TLS layout (glibc AArch64):
+            //   - Main exe TLS: at POSITIVE TP offsets (TP + tcb_size ..)
+            //   - Lib TLS: at NEGATIVE TP offsets (TP - lib_size .. TP)
+            //   - TCB header (tcbhead_t): at [TP, TP + tcb_size)
+            //
+            // See allocate_static_tls() in dynamic_linker.cpp for the
+            // full layout description.
             uint64_t lib_size = 0;
             uint64_t main_memsz = 0;
+            uint64_t main_align = 1;
             if (dl) {
                 for (const auto& obj : dl->objects()) {
                     if (!obj.tls.present || obj.tls.memsz == 0) continue;
                     if (obj.is_main) {
                         main_memsz = obj.tls.memsz;
+                        main_align = obj.tls.align ? obj.tls.align : 16;
                     } else {
                         uint64_t a = obj.tls.align ? obj.tls.align : 16;
                         lib_size = (lib_size + a - 1) & ~(a - 1);
@@ -821,13 +830,24 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 lib_size = (lib_size + 15) & ~15ULL;
             }
+            // TLS_TCB_SIZE: matches allocate_static_tls. The TCB header
+            // (tcbhead_t) occupies [TP, TP + tcb_size). Round up to main
+            // exe's TLS alignment so local-exec TPREL offsets match.
+            constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;
+            uint64_t tcb_size = (main_align > 1)
+                ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
+                : TLS_TCB_SIZE_BASE;
+            uint64_t total_tls_size = lib_size + tcb_size + main_memsz;
 
             uint64_t tcb;
 
             if (a0 != 0) {
                 // Caller-allocated (normal pthread_create path).
+                // glibc computes TCB = stack_block + lib_size, so the lib
+                // TLS area is [tcb - lib_size, tcb) and main TLS is at
+                // [tcb + tcb_size, tcb + tcb_size + main_memsz).
                 tcb = a0;
-            } else if (lib_size == 0 && main_memsz == 0) {
+            } else if (total_tls_size == 0) {
                 // No TLS — return a minimal zeroed block.
                 constexpr uint64_t FALLBACK_SIZE = 4096;
                 uint64_t block = mem_.mmap_alloc(FALLBACK_SIZE);
@@ -839,82 +859,104 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             } else {
                 // mem == NULL: allocate a new block.
+                // Layout: [block .. block+lib_size) = lib TLS,
+                //         [block+lib_size .. block+lib_size+tcb_size) = TCB,
+                //         [block+lib_size+tcb_size .. block+total) = main TLS.
                 constexpr uint64_t PTHREAD_SLACK = 8192;
-                uint64_t alloc_size = lib_size + main_memsz + PTHREAD_SLACK;
+                uint64_t alloc_size = total_tls_size + PTHREAD_SLACK;
                 alloc_size = (alloc_size + 63) & ~63ULL;
                 uint64_t block = mem_.mmap_alloc(alloc_size);
                 if (block == 0) { ret_err(ENOMEM); return 0; }
                 std::vector<uint8_t> zeros(alloc_size, 0);
                 mem_.write(block, zeros.data(), alloc_size);
-                tcb = block + lib_size;
+                tcb = block + lib_size;  // TP points to TCB header start
             }
 
-            // ── Copy lib TLS template to [tcb - lib_size, tcb) ──────
-            // This is the region at negative TP offsets, BELOW the
-            // struct pthread area. The static TLS block has lib TLS
-            // at [base, base+lib_size). We copy the initialized .tdata
-            // template; .bss is already zero from mmap.
+            // ── Copy each module's TLS template to its per-thread slot ──
+            // Variant-I layout per-thread (TP = tcb):
+            //   - lib TLS: [tcb - lib_size, tcb)  (negative TP offset)
+            //   - TCB header: [tcb, tcb + tcb_size)  (glibc fills this)
+            //   - main TLS: [tcb + tcb_size, tcb + tcb_size + main_memsz)
+            //                (positive TP offset)
             //
-            // On stack-cache reuse, glibc's _dl_allocate_tls_init is
-            // supposed to re-initialize the TLS block. Our shim handles
-            // this by copying the template again, which overwrites any
-            // stale .tdata values from the previous thread. The .bss
-            // portion (beyond filesz) retains whatever was there from
-            // the previous thread — but glibc's allocate_stack zeroes
-            // the struct pthread area (below the TLS) for new stacks,
-            // and for reused stacks the .bss values are typically
-            // already 0 (glibc's __nptl_deallocate_tsd clears them).
-            if (lib_size > 0 && dl) {
-                try {
-                    std::vector<uint8_t> tpl(lib_size);
-                    mem_.read(dl->static_tls_base(), tpl.data(), lib_size);
-                    mem_.write(tcb - lib_size, tpl.data(), lib_size);
-                } catch (...) {}
+            // Each object's tls_tp_offset is:
+            //   - main: +tcb_size (positive)
+            //   - libs: (lib_cursor - lib_size) (negative)
+            // So dst = tcb + obj.tls_tp_offset gives the correct per-thread
+            // address for both main and lib TLS.
+            //
+            // BUGFIX (Turn 82): the old code used variant-II (all TLS at
+            // negative TP offsets). This broke local-exec TLS access for
+            // the main exe — the binary's hardcoded positive TPREL offset
+            // (e.g. +0x20) landed in the TCB header instead of the main
+            // exe's TLS block. With variant-I, main TLS is at TP + tcb_size
+            // (positive), matching the linker's TPREL computation.
+            if (dl && total_tls_size > 0) {
+                for (const auto& obj : dl->objects()) {
+                    if (!obj.tls.present || obj.tls.memsz == 0) continue;
+                    int64_t tp_off = obj.tls_tp_offset;
+                    uint64_t dst = static_cast<uint64_t>(
+                        static_cast<int64_t>(tcb) + tp_off);
+                    uint64_t src = dl->static_tls_base() + obj.tls_block_offset;
+                    uint64_t filesz = obj.tls.filesz;
+                    if (filesz > 0 && filesz <= obj.tls.memsz) {
+                        try {
+                            std::vector<uint8_t> tpl(filesz);
+                            mem_.read(src, tpl.data(), filesz);
+                            mem_.write(dst, tpl.data(), filesz);
+                        } catch (...) {}
+                    }
+                    // The .bss portion (memsz - filesz) is left as zero
+                    // (mmap gives zero pages). For stack-cache reuse,
+                    // glibc's allocate_stack zeros the whole struct
+                    // pthread area before calling _dl_allocate_tls_init,
+                    // so stale .bss from a previous thread is cleared.
+                }
             }
 
-            // ── Zero [tcb, tcb + max(main_memsz, TCB_HEADER_SIZE)) ──
-            // This is the TCB header + main exe TLS area at positive TP
-            // offsets. On AArch64 glibc, the TCB (tcbhead_t) starts at TP
-            // and contains: dtv pointer (at +0 in glibc 2.40, or at a
-            // version-dependent offset), pointer_guard, stack_guard, etc.
-            // The main exe's TLS variables share this region (the linker
-            // places them at offsets that avoid TCB fields).
+            // ── Zero ONLY the DTV pointer in tcbhead_t ──────────────
+            // The TCB (tcbhead_t) starts at TP. Its layout (glibc 2.36+):
+            //   +0:  tcb (self pointer)
+            //   +8:  dtv pointer
+            //   +16: self pointer
+            //   +24: multiple_threads, gscope_flag
+            //   +32: sysinfo
+            //   +40: stack_guard
+            //   +48: pointer_guard
+            //   ...
             //
-            // We zero at least TCB_HEADER_SIZE bytes to ensure ALL TCB
-            // fields (including the DTV pointer) are cleared. The DTV
-            // pointer MUST be NULL so that glibc's thread-exit cleanup
-            // (__nptl_deallocate_tsd) skips the DTV free — our shim
-            // doesn't allocate a real DTV (we use static TLS only).
-            // A non-NULL stale DTV pointer causes "munmap_chunk():
+            // Glibc's create_thread sets tcb, self, stack_guard, and
+            // pointer_guard AFTER _dl_allocate_tls returns. The DTV
+            // pointer is set by _dl_allocate_tls (which we shim). Since
+            // our shim doesn't allocate a real DTV (we use static TLS
+            // only), we MUST zero the DTV pointer so glibc's
+            // __nptl_deallocate_tsd sees dtv==NULL and skips the DTV
+            // free. A non-NULL stale DTV pointer causes "munmap_chunk():
             // invalid pointer" when glibc tries to free it.
             //
-            // Glibc's create_thread sets critical TCB fields (self,
-            // stack_guard, pointer_guard) AFTER _dl_allocate_tls
-            // returns, overwriting our zeros. This is safe.
+            // BUGFIX (Turn 82): previously we zeroed [tcb, tcb+256) which
+            // clobbered glibc's struct pthread fields. This caused hangs
+            // when threads exited (cleanup walked garbage pointers). Now
+            // we zero ONLY the 8-byte DTV pointer at tcb+8.
             //
-            // NOTE: we deliberately do NOT zero the struct pthread area
-            // at negative offsets from TCB. That area contains stack
-            // metadata (stackblock, stackblock_size) that glibc's
-            // advise_stack_range reads. Zeroing it causes
-            // "assertion failed: freesize < size" at allocatestack.c:192.
-            constexpr uint64_t TCB_HEADER_SIZE = 0x100;  // 256 bytes
-            uint64_t tcb_zero_size = main_memsz > TCB_HEADER_SIZE
-                                   ? main_memsz : TCB_HEADER_SIZE;
-            {
-                std::vector<uint8_t> zeros(tcb_zero_size, 0);
-                try {
-                    mem_.write(tcb, zeros.data(), tcb_zero_size);
-                } catch (...) {}
-            }
+            // For stack-cache reuse (waves 2+), glibc's allocate_stack
+            // zeros the struct pthread area itself before calling
+            // _dl_allocate_tls_init, so stale TCB fields are already
+            // cleared. For new stacks, glibc zeros the whole struct
+            // pthread in allocate_stack. So we only need to ensure the
+            // DTV is NULL (in case glibc's zeroing was incomplete or
+            // the page came from a previous allocation).
+            constexpr uint64_t TCB_DTV_OFFSET = 8;  // tcbhead_t.dtv
+            try {
+                mem_.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
+            } catch (...) {}
 
             if (getenv("BIFROST_DYNLINK_TRACE")) {
-                fprintf(stderr, "[tls-alloc] TCB @0x%llx (lib TLS "
-                        "@0x%llx size=%llu, main TLS zeroed @0x%llx "
-                        "size=%llu, %s)\n",
+                fprintf(stderr, "[tls-alloc] TCB @0x%llx (total_tls=%llu, "
+                        "lib=%llu, main=%llu, %s)\n",
                         static_cast<unsigned long long>(tcb),
-                        static_cast<unsigned long long>(tcb - lib_size),
+                        static_cast<unsigned long long>(total_tls_size),
                         static_cast<unsigned long long>(lib_size),
-                        static_cast<unsigned long long>(tcb),
                         static_cast<unsigned long long>(main_memsz),
                         (a0 != 0) ? "caller-alloc" : "new-block");
             }

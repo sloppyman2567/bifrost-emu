@@ -959,28 +959,60 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     addr = base + disp;
                 }
                 if (d.is_vec) {
-                    // BUGFIX: previously hardcoded 8 bytes per FP register
-                    // for the lo/hi halves. For S-form (esize=4, single-
-                    // precision), this corrupted the high 32 bits of v_lo
-                    // and read 4 garbage bytes past the proper range. Fix:
-                    // use esize for the per-register transfer, and only
-                    // touch v_hi for 128-bit (Q-form) registers. The GPR
-                    // path below already correctly uses esize.
+                    // Vector STP/LDP. Each register transfer is `esize` bytes:
+                    //   - esize=4 (S-form): 4 bytes (low 32 bits of v_lo)
+                    //   - esize=8 (D-form): 8 bytes (all of v_lo)
+                    //   - esize=16 (Q-form): 16 bytes (v_lo + v_hi)
+                    //
+                    // BUGFIX (Turn 82): the old store path did
+                    //   mem_.write(addr, &v_lo[rt], esize, ...)
+                    // with esize=16, which read 16 bytes from the 8-byte
+                    // v_lo[rt] field — a buffer overread that wrote v_lo[rt]
+                    // (8 bytes) + v_lo[rt+1] (8 garbage bytes from the NEXT
+                    // register). The subsequent hi-half write fixed bytes
+                    // 8-15, but the 16-byte overread was still UB and could
+                    // corrupt data if v_lo[rt+1] was in a different thread's
+                    // context (it isn't, but the pattern is still wrong).
+                    //
+                    // Fix: for Q-form stores, write v_lo (8 bytes) then v_hi
+                    // (8 bytes) separately. For loads, read lo and hi
+                    // separately. For S/D-form, use esize (4 or 8 bytes)
+                    // which is <= sizeof(v_lo) and safe.
                     if (d.is_load) {
-                        uint64_t lo1 = 0, hi1 = 0, lo2 = 0, hi2 = 0;
-                        mem_.read(addr, &lo1, esize, pcache);
-                        if (esize >= 16) mem_.read(addr + 8, &hi1, 8, pcache);
-                        mem_.read(addr + esize, &lo2, esize, pcache);
-                        if (esize >= 16) mem_.read(addr + esize + 8, &hi2, 8, pcache);
-                        cpu.v_lo[d.rt] = lo1;
-                        cpu.v_hi[d.rt] = (esize >= 16) ? hi1 : 0;
-                        cpu.v_lo[d.rt2] = lo2;
-                        cpu.v_hi[d.rt2] = (esize >= 16) ? hi2 : 0;
+                        if (esize <= 8) {
+                            // S/D-form: read esize bytes into v_lo, zero v_hi.
+                            uint64_t lo1 = 0, lo2 = 0;
+                            mem_.read(addr, &lo1, esize, pcache);
+                            mem_.read(addr + esize, &lo2, esize, pcache);
+                            cpu.v_lo[d.rt] = lo1;
+                            cpu.v_hi[d.rt] = 0;
+                            cpu.v_lo[d.rt2] = lo2;
+                            cpu.v_hi[d.rt2] = 0;
+                        } else {
+                            // Q-form (esize=16): read 16 bytes = lo + hi.
+                            uint64_t lo1, hi1, lo2, hi2;
+                            mem_.read(addr, &lo1, 8, pcache);
+                            mem_.read(addr + 8, &hi1, 8, pcache);
+                            mem_.read(addr + 16, &lo2, 8, pcache);
+                            mem_.read(addr + 24, &hi2, 8, pcache);
+                            cpu.v_lo[d.rt] = lo1;
+                            cpu.v_hi[d.rt] = hi1;
+                            cpu.v_lo[d.rt2] = lo2;
+                            cpu.v_hi[d.rt2] = hi2;
+                        }
                     } else {
-                        mem_.write(addr, &cpu.v_lo[d.rt], esize, pcache);
-                        if (esize >= 16) mem_.write(addr + 8, &cpu.v_hi[d.rt], 8, pcache);
-                        mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize, pcache);
-                        if (esize >= 16) mem_.write(addr + esize + 8, &cpu.v_hi[d.rt2], 8, pcache);
+                        if (esize <= 8) {
+                            // S/D-form: write esize bytes from v_lo.
+                            mem_.write(addr, &cpu.v_lo[d.rt], esize, pcache);
+                            mem_.write(addr + esize, &cpu.v_lo[d.rt2], esize, pcache);
+                        } else {
+                            // Q-form (esize=16): write v_lo (8 bytes) then
+                            // v_hi (8 bytes) for each register.
+                            mem_.write(addr, &cpu.v_lo[d.rt], 8, pcache);
+                            mem_.write(addr + 8, &cpu.v_hi[d.rt], 8, pcache);
+                            mem_.write(addr + 16, &cpu.v_lo[d.rt2], 8, pcache);
+                            mem_.write(addr + 24, &cpu.v_hi[d.rt2], 8, pcache);
+                        }
                     }
                 } else {
                     if (d.is_load) {

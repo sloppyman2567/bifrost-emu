@@ -170,11 +170,23 @@ std::string read_guest_cstr(Memory& mem, uint64_t addr) {
 // ── DynamicLinker::link ────────────────────────────────────────────────
 bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                          uint64_t main_base,
-                         const std::string& main_path) {
+                         const std::string& main_path,
+                         const std::string& interp_path) {
     objects_.clear();
     symbols_.clear();
     versioned_symbols_.clear();  // Turn 60, C5
     error_.clear();
+
+    // Detect musl vs glibc from the interpreter path.
+    // musl: /lib/ld-musl-aarch64.so.1
+    // glibc: /lib/ld-linux-aarch64.so.1
+    // This determines the TLS layout: glibc uses variant-I (main TLS at
+    // positive TP offsets), musl uses variant-II (all TLS at negative TP).
+    is_musl_ = (interp_path.find("musl") != std::string::npos);
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dynlink] interp='%s' → %s TLS layout\n",
+                interp_path.c_str(), is_musl_ ? "musl (variant-II)" : "glibc (variant-I)");
+    }
 
     // Index the main binary.
     LoadedObject main_obj;
@@ -1713,15 +1725,24 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // (0x000-0x3FF) are NOT overwritten — they remain zero so glibc
     // falls back to internal defaults.
     if (static_tls_size_ > 0) {
-        // dl_tls_static_size includes the TLS data + TCB + surplus.
-        // glibc adds GLRO(dl_tls_static_surplus) for future dlopen'd
-        // libraries. We use a generous surplus of 16 KiB — glibc 2.42
-        // computes __static_tls_size = ALIGN_UP(size+align, align) +
-        // pagesize + 0x800, and if the input size is too small, TLS
-        // blocks overlap across threads (the "got = expected/4" bug).
-        // The larger surplus ensures enough headroom for 8+ threads.
+        // dl_tls_static_size includes the TLS data + TCB + struct pthread +
+        // surplus. glibc's allocate_stack allocates this many bytes per
+        // thread at the top of the stack. The TCB (tcbhead_t) is at the
+        // END of this region, and struct pthread extends below it.
+        //
+        // On glibc AArch64, sizeof(struct pthread) ≈ 2304 bytes. We must
+        // include this in dl_tls_static_size so glibc allocates enough
+        // space for struct pthread + TLS data + TCB.
+        //
+        // BUGFIX (Turn 82): the old code only included static_tls_size_
+        // (lib + tcb + main) + 2KB + 16KB surplus. This was too small —
+        // glibc's struct pthread (~2.3KB) overflowed into the TLS data
+        // area, causing the "got = expected/4" TLS corruption pattern
+        // with 8+ threads. Now we add sizeof(struct pthread) explicitly.
         constexpr uint64_t TLS_SURPLUS = 16384;
-        uint64_t tls_static_size = static_tls_size_ + 2048 + TLS_SURPLUS;
+        constexpr uint64_t STRUCT_PTHREAD_SIZE = 2304;  // glibc AArch64
+        uint64_t tls_static_size = static_tls_size_ + STRUCT_PTHREAD_SIZE +
+                                   2048 + TLS_SURPLUS;
         // Round up to alignment (64 bytes).
         tls_static_size = (tls_static_size + 63) & ~63ULL;
         // Store for later use (post-relocation patching of _rtld_global_ro).
@@ -2385,67 +2406,169 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
 }
 
 // ── allocate_static_tls ────────────────────────────────────────────────
-// Lay out each PT_TLS block in a contiguous region. The TPIDR_EL0
-// register points to the END of the block (TP = base + total_size);
-// each module's TP-offset is negative (its block is below TP).
+// Lay out each PT_TLS block using AArch64 glibc's variant-I TLS layout:
+//   - Main exe TLS: at POSITIVE TP offsets (TP + tcb_size .. TP + tcb_size + main_memsz)
+//   - Shared lib TLS: at NEGATIVE TP offsets (TP - lib_size .. TP)
 //
-// Layout (mirrors glibc/musl static TLS):
-//   [base .. base+libc_memsz)              — module 1 (libc)
-//   [base+libc_memsz .. base+total)         — module 2 (main binary)
-//   ...
-// TP-offset for module i = (its_start_offset) - total_size
-//   (e.g., libc at offset 0 → tp_off = -total_size)
-//   (main  at offset libc_memsz → tp_off = libc_memsz - total_size)
+// This matches what glibc expects on AArch64:
+//   - Local-exec TLS access (mrs tpidr_el0; add x0, x0, #:tprel_hi:sym;
+//     add x0, x0, #:tprel_lo12:sym) uses a POSITIVE offset baked at link
+//     time = st_value + TLS_TCB_SIZE. So the main exe's TLS block MUST
+//     be at TP + TLS_TCB_SIZE (positive offset from TP).
+//   - The TCB header (tcbhead_t) occupies [TP, TP + TLS_TCB_SIZE). glibc's
+//     create_thread fills in tcb/dtv/self/stack_guard/pointer_guard here.
+//   - Shared lib TLS (accessed via __tls_get_addr / initial-exec for libs)
+//     is at negative TP offsets, below the TCB.
 //
-// We copy initialized TLS data from each object's PT_TLS filesz into
-// the block; the rest (.bss) is zero-filled (mmap gives us zero pages).
+// static_tls_base_ block layout (the "template" we copy per-thread):
+//   [base .. base + lib_size)                          — lib TLS (negative TP)
+//   [base + lib_size .. base + lib_size + tcb_size)    — TCB header (TP+0..TP+tcb_size)
+//   [base + lib_size + tcb_size .. base + total)       — main exe TLS (positive TP)
+// TP = base + lib_size  (points to the TCB header start)
+//
+// Per-thread (TP = tcb):
+//   [tcb - lib_size .. tcb)                — lib TLS
+//   [tcb .. tcb + tcb_size)                — TCB header
+//   [tcb + tcb_size .. tcb + tcb_size + main_memsz) — main exe TLS
+//
+// BUGFIX (Turn 82): the old code used variant-II (ALL TLS at negative TP
+// offsets, TP = base + total). This broke local-exec TLS access for the
+// main exe: the binary's hardcoded positive TPREL offset (e.g. +0x20)
+// landed in the TCB header area instead of the main exe's TLS block.
+// With small main TLS (8 bytes) and lucky alignment, this sometimes
+// worked by accident. With larger main TLS (64+ bytes, e.g. __thread
+// long tls_array[8]), the TLS data overlapped glibc's TCB fields and
+// got clobbered, causing the "got = expected/4" TLS corruption pattern
+// across 8+ threads.
 void DynamicLinker::allocate_static_tls() {
     if (static_tls_base_ != 0) return;  // already allocated
 
-    // Compute total size with alignment.
-    uint64_t total = 0;
-    uint64_t max_align = 16;  // minimum alignment (TP must be 16-aligned)
-    for (auto& obj : objects_) {
+    // First pass: compute lib_size and main TLS info.
+    uint64_t lib_size = 0;
+    uint64_t main_memsz = 0;
+    uint64_t main_align = 1;
+    for (const auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
-        if (obj.tls.align > max_align) max_align = obj.tls.align;
-        // Align current offset up to obj.tls.align.
-        total = (total + obj.tls.align - 1) & ~(obj.tls.align - 1);
-        obj.tls_mod_id = next_tls_mod_id_++;
-        obj.tls_tp_offset = static_cast<int64_t>(total);  // tentative; finalized below
-        total += obj.tls.memsz;
+        if (obj.is_main) {
+            main_memsz = obj.tls.memsz;
+            main_align = obj.tls.align ? obj.tls.align : 16;
+        } else {
+            uint64_t a = obj.tls.align ? obj.tls.align : 16;
+            lib_size = (lib_size + a - 1) & ~(a - 1);
+            lib_size += obj.tls.memsz;
+        }
     }
-    if (total == 0) return;
+    if (lib_size == 0 && main_memsz == 0) return;
 
-    // Round up total to max_align.
+    // Round lib_size up to 16 (minimum TLS alignment).
+    lib_size = (lib_size + 15) & ~15ULL;
+
+    if (is_musl_) {
+        // ── Variant-II (musl): ALL TLS at negative TP offsets ──────
+        // TP = base + total (points PAST the block).
+        // All modules' tp_offset = cursor - total (negative).
+        // This is the original layout that worked for musl.
+        uint64_t total = 0;
+        uint64_t max_align = 16;
+        for (auto& obj : objects_) {
+            if (!obj.tls.present || obj.tls.memsz == 0) continue;
+            if (obj.tls.align > max_align) max_align = obj.tls.align;
+            total = (total + obj.tls.align - 1) & ~(obj.tls.align - 1);
+            obj.tls_mod_id = next_tls_mod_id_++;
+            total += obj.tls.memsz;
+        }
+        total = (total + max_align - 1) & ~(max_align - 1);
+        static_tls_size_ = total;
+        lib_tls_size_ = total;  // variant-II: all TLS is "negative TP"
+        tcb_size_ = 0;          // no TCB header for musl variant-II
+
+        static_tls_base_ = mem_.mmap_alloc(total + 16);
+        if (static_tls_base_ == 0) {
+            error_ = "failed to allocate static TLS block";
+            return;
+        }
+        uint64_t cursor = 0;
+        for (auto& obj : objects_) {
+            if (!obj.tls.present || obj.tls.memsz == 0) continue;
+            cursor = (cursor + obj.tls.align - 1) & ~(obj.tls.align - 1);
+            obj.tls_block_offset = cursor;
+            obj.tls_tp_offset = static_cast<int64_t>(cursor) -
+                                static_cast<int64_t>(total);
+            uint64_t src = obj.base_addr + obj.tls.vaddr;
+            uint64_t dst = static_tls_base_ + cursor;
+            if (obj.tls.filesz > 0) {
+                try {
+                    std::vector<uint8_t> buf(obj.tls.filesz);
+                    mem_.read(src, buf.data(), buf.size());
+                    mem_.write(dst, buf.data(), buf.size());
+                } catch (...) {}
+            }
+            cursor += obj.tls.memsz;
+        }
+        return;
+    }
+
+    // ── Variant-I (glibc AArch64) ──────────────────────────────────
+    // Main exe TLS at POSITIVE TP offsets, lib TLS at NEGATIVE TP offsets.
+    // TCB header (tcbhead_t) at [TP, TP + tcb_size).
+    //
+    // See the long comment above (Turn 82) for the full rationale.
+    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t) = tcb + dtv
+
+    uint64_t tcb_size = (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1);
+    lib_tls_size_ = lib_size;
+    tcb_size_ = tcb_size;
+
+    // Total static TLS block = lib + TCB + main.
+    uint64_t total = lib_size + tcb_size + main_memsz;
+    // Round up to max alignment (16 minimum).
+    uint64_t max_align = 16;
+    if (main_align > max_align) max_align = main_align;
     total = (total + max_align - 1) & ~(max_align - 1);
     static_tls_size_ = total;
 
-    // Allocate guest memory for the block.
-    // Use mmap_alloc to get a fresh region (typically near other allocations).
-    static_tls_base_ = mem_.mmap_alloc(total + 16);  // +16 for TCB
+    // Allocate guest memory for the template block.
+    static_tls_base_ = mem_.mmap_alloc(total + 16);  // +16 slack
     if (static_tls_base_ == 0) {
         error_ = "failed to allocate static TLS block";
         return;
     }
 
-    // TP = base + total (points to the byte AFTER the block).
-    // TP-offsets become negative: tp_off = obj_start_offset - total.
-    uint64_t cursor = 0;
+    // TP = static_tls_base_ + lib_size  (points to the TCB header start).
+    // Main exe TLS is at TP + tcb_size (positive offset).
+    // Lib TLS is at TP - lib_size (negative offset).
+
+    // Second pass: assign module IDs, tp_offsets, block_offsets, and copy
+    // .tdata templates.
+    uint64_t lib_cursor = 0;   // offset within [base, base+lib_size)
     for (auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
-        // Align cursor.
-        cursor = (cursor + obj.tls.align - 1) & ~(obj.tls.align - 1);
-        // Record the offset of this object's TLS data within the block.
-        // Used later to translate .tdata relocations to the TLS block copy.
-        obj.tls_block_offset = cursor;
-        // Finalize TP-offset (negative).
-        obj.tls_tp_offset = static_cast<int64_t>(cursor) - static_cast<int64_t>(total);
+        obj.tls_mod_id = next_tls_mod_id_++;
 
-        // Copy initialized data from obj's PT_TLS filesz.
-        // obj.tls.vaddr is a file vaddr (relative to base); add base_addr
-        // to get the guest VA where the initialized data lives.
+        if (obj.is_main) {
+            // Main exe TLS: at POSITIVE TP offset = tcb_size.
+            // In the template block, it's at [base + lib_size + tcb_size, ...).
+            obj.tls_block_offset = lib_size + tcb_size;
+            obj.tls_tp_offset = static_cast<int64_t>(tcb_size);  // positive
+        } else {
+            // Lib TLS: at NEGATIVE TP offset.
+            // Align lib_cursor.
+            uint64_t a = obj.tls.align ? obj.tls.align : 16;
+            lib_cursor = (lib_cursor + a - 1) & ~(a - 1);
+            // In the template block, lib TLS is at [base + lib_cursor, ...).
+            // But we store libs in REVERSE order so that the first lib loaded
+            // (libc, objects_[1]) is closest to TP (smallest negative offset).
+            // Actually, for simplicity, store libs in load order at increasing
+            // negative offsets. The tp_offset = lib_cursor - lib_size (negative).
+            obj.tls_block_offset = lib_cursor;
+            obj.tls_tp_offset = static_cast<int64_t>(lib_cursor) -
+                                static_cast<int64_t>(lib_size);  // negative
+            lib_cursor += obj.tls.memsz;
+        }
+
+        // Copy initialized data (.tdata) from obj's PT_TLS filesz.
         uint64_t src = obj.base_addr + obj.tls.vaddr;
-        uint64_t dst = static_tls_base_ + cursor;
+        uint64_t dst = static_tls_base_ + obj.tls_block_offset;
         if (obj.tls.filesz > 0) {
             try {
                 std::vector<uint8_t> buf(obj.tls.filesz);
@@ -2456,7 +2579,6 @@ void DynamicLinker::allocate_static_tls() {
             }
         }
         // .bss (memsz - filesz) is already zero from mmap.
-        cursor += obj.tls.memsz;
     }
 }
 

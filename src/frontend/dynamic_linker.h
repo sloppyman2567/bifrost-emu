@@ -146,7 +146,8 @@ public:
     // fail the load).
     bool link(const std::vector<uint8_t>& main_data,
               uint64_t main_base,
-              const std::string& main_path);
+              const std::string& main_path,
+              const std::string& interp_path = "");
 
     // Look up a symbol by name across all loaded objects. Returns the
     // absolute address, or 0 if not found.
@@ -160,11 +161,27 @@ public:
     // a real implementation that tracks the GOT-slot → symbol mapping.
 
     // ── TLS ────────────────────────────────────────────────────────
-    // Total size of the static TLS block across all loaded objects
-    // (sum of aligned memsz). The TPIDR_EL0 register should point to
-    // the byte AFTER this block (i.e., TP = tls_base + total_size).
+    // Total size of the static TLS block across all loaded objects.
+    // With variant-I layout: total = lib_size + tcb_size + main_memsz.
     uint64_t static_tls_size() const { return static_tls_size_; }
     uint64_t static_tls_base() const { return static_tls_base_; }
+
+    // The thread pointer (TPIDR_EL0) for the main thread.
+    // Variant-I (glibc): TP = static_tls_base_ + lib_size (points to TCB header).
+    //   Main exe TLS is at TP + tcb_size (positive offset).
+    //   Lib TLS is at TP - lib_size (negative offset).
+    // Variant-II (musl): TP = static_tls_base_ + static_tls_size_ (end of block).
+    //   All TLS is at negative TP offsets.
+    uint64_t thread_pointer() const {
+        if (is_musl_) return static_tls_base_ + static_tls_size_;
+        return static_tls_base_ + lib_tls_size_;
+    }
+
+    // Size of the lib TLS block (negative TP region).
+    uint64_t lib_tls_size() const { return lib_tls_size_; }
+
+    // Size of the TCB header (tcbhead_t), rounded up to main exe alignment.
+    uint64_t tcb_size() const { return tcb_size_; }
 
     // ── ld-linux shim base address ─────────────────────────────────
     // The shim's data page (_rtld_global_ro etc.) is at shim_base_,
@@ -272,7 +289,10 @@ private:
     // TLS state.
     uint64_t static_tls_size_ = 0;  // total bytes (aligned)
     uint64_t static_tls_base_ = 0;  // guest VA where the block is mapped
+    uint64_t lib_tls_size_ = 0;     // lib TLS size (negative TP region)
+    uint64_t tcb_size_ = 0;         // TCB header size (tcbhead_t, rounded to align)
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
+    bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
 
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
