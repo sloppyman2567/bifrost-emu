@@ -195,6 +195,26 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          0, 0, fp1_opcode, cur_pc);
                     return true;
                 }
+                // FRINT* (opcode 0x08-0x0E): handle natively in JIT (Turn 87)
+                if (fp1_opcode >= 0x08 && fp1_opcode <= 0x0E && ftype <= 1) {
+                    uint8_t frint_mode;
+                    switch (fp1_opcode) {
+                        case 0x08: frint_mode = 0; break;  // FRINTN
+                        case 0x09: frint_mode = 1; break;  // FRINTP
+                        case 0x0A: frint_mode = 2; break;  // FRINTM
+                        case 0x0B: frint_mode = 3; break;  // FRINTZ
+                        case 0x0C: frint_mode = 4; break;  // FRINTA
+                        case 0x0D: frint_mode = 5; break;  // FRINTX
+                        case 0x0E: frint_mode = 4; break;  // FRINTI
+                        default: frint_mode = 0; break;
+                    }
+                    uint16_t src = load_arm_reg(block, rn);
+                    uint16_t r = g_alloc.alloc();
+                    emit(block, IROp::FRINT, r, src, 0, ftype ? 64 : 32,
+                         frint_mode, 0, 0, cur_pc);
+                    store_arm_reg(block, rd, r);
+                    return true;
+                }
             }
             // FMOV (scalar, immediate) — uses shared fp_decode helper.
             //
@@ -394,41 +414,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // The old FCVT check here is removed — it was unreachable because
             // the SCVTF mask caught FCVT first.
 
-            // FRINT (FP round to integer).
-            // The FRINT* instructions have multiple encodings. The common ones:
-            // FRINTN (round to nearest even): 0x1E244000 | (ftype<<22)
-            // FRINTP (round toward +inf):     0x1E24C000 | (ftype<<22)
-            // FRINTM (round toward -inf):     0x1E254000 | (ftype<<22)
-            // FRINTZ (round toward zero):     0x1E25C000 | (ftype<<22)
-            // FRINTA (round per FPCR):        0x1E264000 | (ftype<<22)
-            // FRINTX (round exact):           0x1E274000 | (ftype<<22)
-            // FRINTI (round per FPCR, inexact): 0x1E27C000 | (ftype<<22)
-            // All have bits[21:20] = 0b11, bits[19:15] = 0b11000 | rmode.
-            // rmode: 0=N, 1=P, 2=M, 3=Z (for FRINTN/P/M/Z).
-            // We detect via (op & 0x7F3F0000) == 0x1E240000 (FRINT family base)
-            // with rmode in bits[19:16] (0-3 = N/P/M/Z, 4=A, 5=X, 6=I, 7=I).
-            if ((op & 0xFF3F0000) == 0x1E240000 && ftype <= 1) {
-                uint8_t rmode = (op >> 19) & 0x7;  // bits 21:19
-                // Map ARM rmode to our FRINT imm encoding:
-                //   0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(zero), 4=A(FPCR), 5=X(exact)
-                uint8_t frint_mode;
-                switch (rmode) {
-                    case 0: frint_mode = 0; break;  // FRINTN
-                    case 1: frint_mode = 1; break;  // FRINTP
-                    case 2: frint_mode = 2; break;  // FRINTM
-                    case 3: frint_mode = 3; break;  // FRINTZ
-                    case 4: frint_mode = 4; break;  // FRINTA (FPCR)
-                    case 5: frint_mode = 5; break;  // FRINTX
-                    case 6: frint_mode = 4; break;  // FRINTI → treat as FPCR
-                    default: frint_mode = 0; break;
-                }
-                uint16_t src = load_arm_reg(block, rn);
-                uint16_t r = g_alloc.alloc();
-                emit(block, IROp::FRINT, r, src, 0, ftype ? 64 : 32,
-                     frint_mode, 0, 0, cur_pc);
-                store_arm_reg(block, rd, r);
-                return true;
-            }
+            // FRINT* is now handled earlier (in the is_fp_1source block above).
+            // The old FRINT block here used a mask that only matched FRINTN.
+            // (Turn 87: moved to the is_fp_1source block for correct 6-bit opcode handling)
 
             // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].

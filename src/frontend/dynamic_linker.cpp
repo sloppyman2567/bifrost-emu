@@ -3065,6 +3065,18 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
         error_ = "load_library: parse_dynamic failed"; return 0;
     }
     parse_tls(data, obj);
+    // Assign TLS module ID and tp_offset for dlopened libs (Turn 87).
+    if (obj.tls.present && obj.tls.memsz > 0) {
+        obj.tls_mod_id = next_tls_mod_id_++;
+        if (!is_musl_) {
+            // Variant-I (glibc): lib TLS at negative TP offsets
+            uint64_t a = obj.tls.align ? obj.tls.align : 16;
+            lib_tls_size_ = (lib_tls_size_ + a - 1) & ~(a - 1);
+            obj.tls_tp_offset = -static_cast<int64_t>(lib_tls_size_ + obj.tls.memsz);
+            lib_tls_size_ += obj.tls.memsz;
+            obj.tls_block_offset = static_tls_size_ - lib_tls_size_;
+        }
+    }
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());
@@ -3094,6 +3106,15 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                     int64_t A = r.r_addend;
                     if (type == R_AARCH64_RELATIVE_) {
                         mem_.store<uint64_t>(target, nobj.base_addr + A);
+                    } else if (type == R_AARCH64_IRELATIVE_) {
+                        // ifunc: call the resolver at base + A (Turn 87)
+                        uint64_t resolver_addr = nobj.base_addr + A;
+                        uint64_t resolved = 0;
+                        if (ifunc_resolver_) {
+                            resolved = ifunc_resolver_(resolver_addr);
+                        }
+                        if (resolved == 0) resolved = resolver_addr;
+                        mem_.store<uint64_t>(target, resolved);
                     } else if (type == R_AARCH64_GLOB_DAT_ || type == R_AARCH64_JUMP_SLOT_ || type == R_AARCH64_ABS64_) {
                         uint64_t addr = 0;
                         if (sym != 0) {
@@ -3102,15 +3123,82 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                             if (!name.empty()) addr = resolve_symbol(name);
                         }
                         if (addr) mem_.store<uint64_t>(target, addr + A);
+                    } else if (type == R_AARCH64_TLS_TPREL_) {
+                        // TLS_TPREL: initial-exec access (Turn 87)
+                        int64_t tp_off = A;
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
+                            uint64_t sym_addr = resolve_symbol(name);
+                            int64_t mod_tp_off = nobj.tls_tp_offset;
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
+                                        mod_tp_off = o.tls_tp_offset; break;
+                                    }
+                                }
+                            }
+                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
+                        } else {
+                            tp_off = nobj.tls_tp_offset + A;
+                        }
+                        mem_.store<uint64_t>(target, static_cast<uint64_t>(tp_off));
+                    } else if (type == R_AARCH64_TLS_DTPMOD_) {
+                        // TLS_DTPMOD: module ID (Turn 87)
+                        uint64_t mod_id = nobj.tls_mod_id;
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
+                            uint64_t sym_addr = resolve_symbol(name);
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
+                                        mod_id = o.tls_mod_id; break;
+                                    }
+                                }
+                            }
+                        }
+                        mem_.store<uint64_t>(target, mod_id + A);
+                    } else if (type == R_AARCH64_TLS_DTPREL_) {
+                        // TLS_DTPREL: offset within module (Turn 87)
+                        uint64_t tls_off = static_cast<uint64_t>(A);
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            tls_off = s.st_value + A;
+                        }
+                        mem_.store<uint64_t>(target, tls_off);
+                    } else if (type == R_AARCH64_TLSDESC_) {
+                        // TLSDESC: 16-byte descriptor (Turn 87)
+                        int64_t tp_off = A;
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
+                            uint64_t sym_addr = resolve_symbol(name);
+                            int64_t mod_tp_off = nobj.tls_tp_offset;
+                            if (sym_addr != 0) {
+                                for (const auto& o : objects_) {
+                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
+                                        mod_tp_off = o.tls_tp_offset; break;
+                                    }
+                                }
+                            }
+                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
+                        } else {
+                            tp_off = nobj.tls_tp_offset + A;
+                        }
+                        mem_.store<uint64_t>(target, 0); // resolver = NULL
+                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
                     }
                 }
             }
             if (ja && js) {
                 for (uint64_t off = 0; off+24 <= js; off += 24) {
                     Elf64_Rela r; mem_.read(ja+off, &r, sizeof(r));
+                    uint32_t type = r.r_info & 0xFFFFFFFF;
                     uint32_t sym = r.r_info >> 32;
                     uint64_t target = nobj.base_addr + r.r_offset;
-                    if ((r.r_info & 0xFFFFFFFF) == R_AARCH64_JUMP_SLOT_) {
+                    int64_t A = r.r_addend;
+                    if (type == R_AARCH64_JUMP_SLOT_) {
                         uint64_t addr = 0;
                         if (sym != 0) {
                             Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
@@ -3118,6 +3206,12 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                             if (!name.empty()) addr = resolve_symbol(name);
                         }
                         if (addr) mem_.store<uint64_t>(target, addr);
+                    } else if (type == R_AARCH64_IRELATIVE_) {
+                        // ifunc in PLT (Turn 87)
+                        uint64_t resolver_addr = nobj.base_addr + A;
+                        uint64_t resolved = ifunc_resolver_ ? ifunc_resolver_(resolver_addr) : 0;
+                        if (resolved == 0) resolved = resolver_addr;
+                        mem_.store<uint64_t>(target, resolved);
                     }
                 }
             }

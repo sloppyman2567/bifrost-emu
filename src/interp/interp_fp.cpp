@@ -1741,16 +1741,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         case 0x1: r = std::fabs(a); break;             // FABS
                         case 0x2: r = -a; break;                       // FNEG
                         case 0x3: r = std::sqrt(a); break;             // FSQRT
-                        case 0x4: r = std::rint(a); break;             // FRINTN
-                        case 0x5: r = std::ceil(a); break;             // FRINTP
-                        case 0x6: r = std::floor(a); break;            // FRINTM
-                        case 0x7: r = std::trunc(a); break;            // FRINTZ
-                        case 0x8: r = std::rint(a); break;             // FRINTA
-                        case 0x9: r = std::rint(a); break;             // FRINTX
-                        case 0xA: r = std::rint(a); break;             // FRINTI
-                        case 0xC: r = std::rint(a); break;
-                        case 0xE: r = std::rint(a); break;
-                        case 0xF: r = std::rint(a); break;
+                        case 0x8: r = std::rint(a); break;             // FRINTN
+                        case 0x9: r = std::ceil(a); break;             // FRINTP
+                        case 0xA: r = std::floor(a); break;            // FRINTM
+                        case 0xB: r = std::trunc(a); break;            // FRINTZ
+                        case 0xC: r = std::rint(a); break;             // FRINTA
+                        case 0xD: r = std::rint(a); break;             // FRINTX
+                        case 0xE: r = std::rint(a); break;             // FRINTI
                         default: r = a; break;
                     }
                     write_fp_d(cpu, rd, r);
@@ -1761,14 +1758,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         case 0x1: r = std::fabsf(a); break;
                         case 0x2: r = -a; break;
                         case 0x3: r = std::sqrtf(a); break;
-                        case 0x4: r = std::rintf(a); break;
-                        case 0x5: r = std::ceilf(a); break;
-                        case 0x6: r = std::floorf(a); break;
-                        case 0x7: r = std::truncf(a); break;
-                        case 0x8: r = std::rintf(a); break;
-                        case 0x9: r = std::rintf(a); break;
-                        case 0xA: r = std::rintf(a); break;
-                        case 0xC: r = std::rintf(a); break;
+                        case 0x8: r = std::rintf(a); break;             // FRINTN
+                        case 0x9: r = std::ceilf(a); break;             // FRINTP
+                        case 0xA: r = std::floorf(a); break;            // FRINTM
+                        case 0xB: r = std::truncf(a); break;            // FRINTZ
+                        case 0xC: r = std::rintf(a); break;             // FRINTA
+                        case 0xD: r = std::rintf(a); break;             // FRINTX
+                        case 0xE: r = std::rintf(a); break;             // FRINTI
                         default: r = a; break;
                     }
                     write_fp_s(cpu, rd, r);
