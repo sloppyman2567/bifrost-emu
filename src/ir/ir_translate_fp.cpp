@@ -211,7 +211,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     uint16_t src = load_arm_reg(block, rn);
                     uint16_t r = g_alloc.alloc();
                     emit(block, IROp::FRINT, r, src, 0, ftype ? 64 : 32,
-                         frint_mode, 0, 0, cur_pc);
+                         0, 0, frint_mode, cur_pc);
                     store_arm_reg(block, rd, r);
                     return true;
                 }

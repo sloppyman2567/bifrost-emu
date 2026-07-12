@@ -75,7 +75,7 @@ int main(void) {
     else {
         result = floor_fn(3.7);
         printf("floor(3.7) = %f\n", result);
-        if (result != 3.0) { fprintf(stderr, "WARN: floor(3.7) = %f (JIT FRINT issue)\n", result); }
+        if (result != 3.0) { fprintf(stderr, "FAIL: floor(3.7) = %f\n", result); failures++; }
         else printf("PASS: floor(3.7) = 3.0\n");
     }
 
@@ -84,7 +84,7 @@ int main(void) {
     else {
         result = ceil_fn(3.2);
         printf("ceil(3.2) = %f\n", result);
-        if (result != 4.0) { fprintf(stderr, "WARN: ceil(3.2) = %f (JIT FRINT issue)\n", result); }
+        if (result != 4.0) { fprintf(stderr, "FAIL: ceil(3.2) = %f\n", result); failures++; }
         else printf("PASS: ceil(3.2) = 4.0\n");
     }
 
@@ -98,6 +98,6 @@ int main(void) {
         printf("PASS: dlclose\n");
     }
 
-    printf("test_dlopen: %s\n", failures == 0 ? "ALL PASS" : (failures <= 2 ? "ALL PASS" : "FAIL"));
-    return (failures <= 2) ? 0 : 1;
+    printf("test_dlopen: %s\n", failures == 0 ? "ALL PASS" : "FAIL");
+    return failures ? 1 : 0;
 }

@@ -64,49 +64,17 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
     switch (inst.op) {
         // ── FRINT: FP round to integer ───────────────────────────────
         case IROp::FRINT: {
-            // roundsd/roundss are SSE4.1 instructions. Fall back to
-            // CALL_INTERP on hosts without SSE4.1 to avoid SIGILL.
-            // BUGFIX: previously emitted unconditionally.
-            if (!has_sse41()) {
-                emit_call_interp(inst.arm_pc, false);
-                return false;
-            }
-            // FRINT only clobbers RAX (zero store).
-            clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            // ftype encoding: 0 = single (S), 1 = double (D)
-            // Width is `ftype ? 64 : 32` (set by ir_translate.cpp) — use
-            // `width == 64` to distinguish from 32 (single). The old
-            // `width != 0` check treated both as double, breaking all
-            // single-precision FRINT.
-            bool is_double = (inst.width == 64);
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            // Load FP value into XMM0
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off);
-            // roundsd/roundss xmm0, xmm0, imm8
-            // x86 rounding mode mapping: 0=nearest, 1=down(-inf), 2=up(+inf), 3=truncate(0)
-            uint8_t x86_mode;
-            switch (inst.imm & 0x7) {
-                case 0: x86_mode = 0; break;  // N → nearest
-                case 1: x86_mode = 2; break;  // P → +inf (up)
-                case 2: x86_mode = 1; break;  // M → -inf (down)
-                case 3: x86_mode = 3; break;  // Z → 0 (truncate)
-                default: x86_mode = 4; break; // I/X → current MXCSR rounding
-            }
-            // 66 0F 3A 0B C0 imm8 = roundsd xmm0, xmm0, imm8
-            // 66 0F 3A 0A C0 imm8 = roundss xmm0, xmm0, imm8
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
-            emit_byte(is_double ? 0x0B : 0x0A);
-            emit_byte(0xC0);  // xmm0, xmm0
-            emit_byte(x86_mode);
-            // Store result
-            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, off_d);
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            // BUGFIX (Turn 88): Fall back to CALL_INTERP for FRINT.
+            // The native roundsd codegen was broken because it used
+            // V_LO_OFF + inst.dest * 8 to store the result, but
+            // inst.dest is a scratch vreg (index > 32) whose data
+            // lives on the stack, not in v_lo[]. The write went to
+            // the wrong memory location, and the subsequent STORE_REG
+            // read garbage from the stack slot.
+            // The interpreter handles FRINT correctly (Turn 87 fix:
+            // 6-bit opcodes 0x08-0x0E). Performance impact is minimal
+            // since FRINT is rare (only floor/ceil/trunc/round).
+            emit_call_interp(inst.arm_pc, false);
             return false;
         }
 
