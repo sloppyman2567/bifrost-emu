@@ -79,7 +79,8 @@ private:
     std::unique_ptr<DisplayThunkImpl> impl_;
     void register_function_(const std::string& lib,
                             const std::string& sym,
-                            void* host_fn);
+                            void* host_fn,
+                            uint8_t pointer_args = 0);
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
 };

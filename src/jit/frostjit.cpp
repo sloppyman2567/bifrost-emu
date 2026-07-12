@@ -771,54 +771,56 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // Turn 90: BL_CALL — BL within block.
+        // Turn 90/91: BL_CALL — BL within block.
         // Call the target block via jit_call_helper, then continue the block.
         // This avoids ending the block at BL, which was the #1 perf bottleneck
         // for call-heavy code. Callee-saved ARM regs (x19-x28) cached in
         // callee-saved host regs (R12/R13/R15) survive the call.
         case IROp::BL_CALL: {
-            // Flush all vregs (the C call clobbers caller-saved host regs).
+            // Flush ALL dirty vregs to cpu.regs[]/stack BEFORE the call.
+            // The C call clobbers caller-saved host regs (RAX/RCX/RDX/R8-R11).
             flush_all_vregs();
-            clobber_flags();
+            // Materialize host flags to pstate if valid (callee may read pstate).
+            if (flags_in_host_) {
+                emit_materialize_flags(flags_from_sub_);
+                flags_in_host_ = false;
+                // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
+                // cache mappings (values were already flushed above).
+                invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
+            }
+            // Force-evict SP (vreg 31) if dirty — the callee needs correct SP.
+            if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
+                evict_vreg(31);
+            }
 
-            // Set up args: rdi = cpu, rsi = emu, rdx = target_pc
+            // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
+            emit_mov_imm_to_rax(inst.imm);
+            emit_store(CPU_REG, PC_OFF, RAX);
+
+            // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_reg(RSI, EMU_REG);
-            // target_pc might be > 4GB, so use mov_imm64
-            emit_mov_imm64(RDX, inst.imm);
+            emit_mov_imm_to_rax(inst.imm);
+            // RDX = target_pc (mov rdx, rax)
+            emit_mov_reg(RDX, RAX);
 
-            // Call jit_call_helper via mov rax, addr; call rax.
-            // sub rsp, 8 to keep stack 16-byte aligned for the call.
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x08); // sub rsp, 8
-            emit_byte(0x48); emit_byte(0xB8); // mov rax, imm64
-            emit_u64(reinterpret_cast<uint64_t>(&jit_call_helper));
-            emit_byte(0xFF); emit_byte(0xD0); // call rax
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x08); // add rsp, 8
+            // Save WIN_REG (R10, caller-saved) and RAX before the call.
+            // 2 pushes → even → no alignment fixup needed from emit_call_aligned.
+            emit_push(WIN_REG);
+            emit_push(RAX);
+            // emit_call_aligned: 2 pushes (even) → pushfq → call → popfq.
+            emit_call_aligned(&jit_call_helper, /*num_pushed=*/2);
+            emit_pop(RAX);
+            emit_pop(WIN_REG);
 
-            // RAX = next PC (should be inst.arm_pc + 4). We don't use it —
-            // the block continues with the next IR instruction.
+            // After the call, RAX = next PC (should be inst.arm_pc + 4).
+            // Store it to cpu.pc so the block continues correctly.
+            emit_store(CPU_REG, PC_OFF, RAX);
 
-            // Invalidate caller-saved ARM reg vregs (x0-x18, x30).
-            // The callee may have modified these. Don't flush — the callee
-            // already wrote the correct values to cpu.regs[].
-            for (int r = 0; r <= 18; r++) {
-                if (vreg_home_[r] >= 0) {
-                    int host_reg = vreg_home_[r];
-                    reg_vreg_[host_reg] = -1;
-                    vreg_home_[r] = -1;
-                    vreg_dirty_[r] = false;
-                }
-            }
-            if (vreg_home_[30] >= 0) {
-                int host_reg = vreg_home_[30];
-                reg_vreg_[host_reg] = -1;
-                vreg_home_[30] = -1;
-                vreg_dirty_[30] = false;
-            }
-
-            // Also clear dirty_host_regs_ for caller-saved regs (they were clobbered).
-            dirty_host_regs_ &= ~((1u << RAX) | (1u << RCX) | (1u << RDX) |
-                                  (1u << R8) | (1u << R9) | (1u << R10) | (1u << R11));
+            // Invalidate ALL cache mappings after the call.
+            // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
+            // We must reload everything from cpu.regs[] to be safe.
+            invalidate_all_vregs();
 
             return false;  // does NOT end the block
         }

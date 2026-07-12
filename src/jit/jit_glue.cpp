@@ -103,27 +103,35 @@ void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);
 }
 
-// Turn 90: BL_CALL helper — called from JIT code to invoke a target block
+// Turn 90/91: BL_CALL helper — called from JIT code to invoke a target block
 // without ending the current block. This enables BL-within-block optimization
 // where function calls don't split blocks, keeping callee-saved vregs alive.
 //
-// The helper looks up (or translates) the target block and calls its fn.
-// The target block's fn returns the next PC (which is LR = caller's pc+4
-// after the callee returns via RET). The caller's JIT block continues
-// with the next IR instruction.
+// Turn 91 fix: only look up already-translated blocks (NOT translate).
+// Translating during execution corrupts the JIT's internal state
+// (code_buf_, vreg arrays, etc.) because the caller's block is still
+// being executed. If the block isn't translated yet, fall back to the
+// interpreter (run from target_pc until RET to LR).
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
     auto* jit = emu->jit();
     if (jit) {
-        auto fn = jit->lookup_or_translate(*emu, target_pc);
+        auto fn = jit->lookup_only(target_pc);
         if (fn) {
             // Set cpu.pc so the target block's chain/self-loop logic works.
             cpu->pc = target_pc;
             return fn(cpu, emu);
         }
     }
-    // Fallback: interpreter step at the target PC.
+    // Fallback: run the interpreter from target_pc until it returns
+    // (PC = LR = caller's pc+4). The caller's LR was already set by
+    // the BL_CALL IR's preceding STORE_REG.
     cpu->pc = target_pc;
-    emu->step(*cpu);
+    uint64_t return_pc = cpu->regs[30];
+    int steps = 0;
+    while (cpu->running && cpu->pc != return_pc && steps < 1000000) {
+        emu->step(*cpu);
+        steps++;
+    }
     return cpu->pc;
 }
 

@@ -30,6 +30,14 @@
 
 namespace arm64emu {
 
+// Turn 91: thread-local flag to disable BL_CALL during re-translation.
+// When true, BL instructions use the old behavior (end block at BL)
+// instead of BL_CALL (call within block). Set by translate_block when
+// re-translating a block whose BL_CALL targets aren't translated yet.
+thread_local bool bl_call_disabled_ = false;
+
+// ── translate_to_ir ────────────────────────────────────────────────────
+
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     // FP/SIMD and memory load/store cases are split into separate
@@ -675,15 +683,22 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                // Turn 90: BL_CALL — BL within block.
-                // Save LR, call the target block, then continue the block
-                // at the next instruction (pc+4). This avoids ending the
-                // block at BL, which was the #1 perf bottleneck for
-                // call-heavy code (fib, qsort). With BL_CALL, the block
-                // continues, and callee-saved ARM regs (x19-x28) cached
-                // in callee-saved host regs (R12/R13/R15) survive the call.
-                // DISABLED for now — causes verify divergences. Needs debugging.
-                // Fall back to the old behavior (end block at BL).
+                // Turn 91: BL_CALL — BL within block.
+                // DISABLED: the re-translation logic for untranslated targets
+                // has a vreg allocator state bug that causes fib to crash.
+                // BL_CALL infrastructure (IR op, JIT codegen, jit_call_helper)
+                // is all in place and works for simple cases. Needs debugging
+                // of the re-translation path. Fall back to old behavior.
+                if (false && !bl_call_disabled_) {
+                    // BL_CALL: save LR, call target, continue block.
+                    uint16_t lr = load_imm(block, cur_pc + 4);
+                    store_arm_reg(block, 30, lr);
+                    uint64_t target = cur_pc + d.imm;
+                    emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
+                    // Do NOT end the block — continue with the next instruction.
+                    return false;
+                }
+                // Fallback: end block at BL (old behavior).
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
                 uint64_t target = cur_pc + d.imm;

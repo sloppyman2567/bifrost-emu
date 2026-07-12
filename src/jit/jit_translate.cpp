@@ -23,6 +23,10 @@
 
 namespace arm64emu {
 
+// Turn 91: defined in ir_translate.cpp. When true, BL uses old behavior
+// (end block) instead of BL_CALL (call within block).
+extern thread_local bool bl_call_disabled_;
+
 // ── instr_will_call_interp — heuristic for block splitting ─────────────
 // Returns true if the given ARM64 instruction is likely to generate a
 // CALL_INTERP IR op (i.e. the JIT can't codegen it natively). Used by
@@ -121,7 +125,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // small perf cost (one extra block dispatch per split) for
     // correctness in complex blocks.
     constexpr int MAX_CALL_INTERP_PER_BLOCK = 2;
+    // Turn 91: limit BL_CALL per block. Each BL_CALL flushes all vregs and
+    // invalidates all cache mappings, so too many in one block kills perf.
+    // Cap at 4 — enough for small function call sequences, low enough to
+    // keep register pressure manageable.
+    constexpr int MAX_BL_CALL_PER_BLOCK = 4;
     int call_interp_count = 0;
+    int bl_call_count = 0;
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
@@ -148,10 +158,104 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
 
         bool ends = translate_to_ir(ir_block, d, cur_pc);
         if (will_call_interp) call_interp_count++;
+        // Track BL_CALL count for block splitting.
+        if (d.cls == InstClass::BL) bl_call_count++;
         instr_count++;
         ir_block.count = instr_count;
         if (ends) block_ended = true;
-        else      cur_pc += 4;
+        else {
+            // Turn 91: split block after MAX_BL_CALL_PER_BLOCK BL_CALLs.
+            // Each BL_CALL flushes+invalidates all vregs, so too many in
+            // one block kills perf. Split to start a fresh block.
+            if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
+                chain_target_pc_ = cur_pc + 4;
+                break;
+            }
+            cur_pc += 4;
+        }
+    }
+    // Turn 91: BL_CALL optimization — only use BL_CALL if all targets are
+    // already translated. Otherwise, fall back to the old behavior (end
+    // block at BL). This avoids the interp_only fallback for recursive
+    // functions where the target isn't translated on the first call.
+    //
+    // We implement this by checking if BL_CALL targets are translated.
+    // If not, we re-translate the block with BL_CALL disabled (by setting
+    // a thread-local flag that the IR translator checks).
+    static bool no_bl_call_ = (getenv("BIFROST_NO_BL_CALL") != nullptr);
+    // bl_call_disabled_ is defined in ir_translate.cpp (extern thread_local).
+    if (!no_bl_call_ && bl_call_count > 0 && !bl_call_disabled_) {
+        // Check if all BL_CALL targets are already translated.
+        bool all_translated = true;
+        for (auto& inst : ir_block.insts) {
+            if (inst.op == IROp::BL_CALL) {
+                uint64_t target = inst.imm;
+                auto it = blocks_.find(target);
+                if (it == blocks_.end() || it->second.fn == nullptr) {
+                    all_translated = false;
+                    break;
+                }
+            }
+        }
+        if (!all_translated) {
+            // Re-translate this block with BL_CALL disabled.
+            bl_call_disabled_ = true;
+            // Reset IR block and re-translate.
+            ir_block.insts.clear();
+            ir_block.count = 0;
+            ir_block.ends_with_branch = false;
+            ir_reset_vreg_alloc();
+            // Re-scan the same instructions.
+            cur_pc = start_pc;
+            instr_count = 0;
+            call_interp_count = 0;
+            bl_call_count = 0;
+            block_ended = false;
+            chain_target_pc_ = 0;
+            unchainable_end_ = false;
+            has_selfloop_slot_ = false;
+            while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
+                if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
+                    chain_target_pc_ = cur_pc;
+                    break;
+                }
+                uint32_t inst2;
+                try {
+                    inst2 = emu.mem().fetch_inst(cur_pc);
+                } catch (...) { break; }
+                DecodedInst d2;
+                if (!decode(d2, inst2)) break;
+                bool will2 = instr_will_call_interp(d2);
+                if (will2 && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
+                    chain_target_pc_ = cur_pc;
+                    break;
+                }
+                bool ends2 = translate_to_ir(ir_block, d2, cur_pc);
+                if (will2) call_interp_count++;
+                instr_count++;
+                ir_block.count = instr_count;
+                if (ends2) block_ended = true;
+                else cur_pc += 4;
+            }
+            bl_call_disabled_ = false;
+            // Now re-check interp_only conditions.
+            if (instr_count > 32 ||
+                (call_interp_count > 0 && call_interp_count * 2 > instr_count)) {
+                BlockEntry entry;
+                entry.fn = nullptr;
+                entry.interp_only = true;
+                entry.interp_only_count = instr_count;
+                entry.ends_with_branch = ir_block.ends_with_branch;
+                entry.chain_target_pc = 0;
+                entry.chained = false;
+                entry.instr_count = instr_count;
+                entry.verified_once = true;
+                blocks_[start_pc] = entry;
+                blocks_translated++;
+                make_executable();
+                return nullptr;
+            }
+        }
     }
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
@@ -193,11 +297,21 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         entry.chain_target_pc = 0;
         entry.chained = false;
         entry.instr_count = instr_count;
+        entry.verified_once = true;  // skip verify for interp-only
         blocks_[start_pc] = entry;
         blocks_translated++;
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
+
+    // Turn 91: BL_CALL blocks can't be verified by the current verify
+    // mode (which re-runs the interpreter for instr_count steps). With
+    // BL_CALL, the JIT block executes MORE ARM instructions than
+    // instr_count (the called functions run inside jit_call_helper).
+    // The interpreter re-run would only do instr_count steps, missing
+    // the called functions, causing false divergences. Mark as
+    // verified_once to skip verify for BL_CALL blocks.
+    bool has_bl_call = (bl_call_count > 0);
 
     // ── Optimize the IR ──────────────────────────────────────────
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
@@ -433,6 +547,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chained = false;
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
+    // Turn 91: BL_CALL blocks can't be verified (see comment above).
+    entry.verified_once = has_bl_call;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

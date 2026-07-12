@@ -96,6 +96,21 @@ public:
         return fn;
     }
 
+    // Turn 91: lookup_only — look up an already-translated block.
+    // Does NOT translate. Returns nullptr if not found or interp_only.
+    // Used by jit_call_helper to avoid corrupting JIT state during execution.
+    // Does NOT lock — called from JIT code which may already hold the lock.
+    // The block cache is a concurrent_hash_map (unordered_map with shared_mutex),
+    // and reads are safe as long as no thread is writing. Since we only read,
+    // and writes (translate_block) happen outside of JIT execution, this is safe.
+    uint64_t (*lookup_only(uint64_t pc))(CPU*, Emulator*) {
+        auto it = blocks_.find(pc);
+        if (it != blocks_.end() && it->second.fn) {
+            return it->second.fn;
+        }
+        return nullptr;
+    }
+
     // ── Function Multi-Versioning (FMV) ─────────────────────────────
     // The JIT queries these flags at codegen time to decide which x86
     // instruction sequence to emit for hot operations. For example,

@@ -75,13 +75,14 @@ bool DisplayThunk::init(Memory& mem) {
 
 void DisplayThunk::register_function_(const std::string& lib,
                                         const std::string& sym,
-                                        void* host_fn) {
+                                        void* host_fn,
+                                        uint8_t pointer_args) {
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     thunk_register(*impl_->mem, impl_->libs_, impl_->id_to_idx_,
                    impl_->trampoline_base, TRAMPOLINE_SIZE, MAX_SYMBOLS,
                    static_cast<uint16_t>(SYSCALL_NUMBER),
                    DisplayThunk::ID_BASE, trace,
-                   lib, sym, host_fn);
+                   lib, sym, host_fn, pointer_args);
 }
 
 void DisplayThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) {
@@ -127,7 +128,11 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
-    return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);
+    // Turn 91: use pointer-aware dispatch for display thunks.
+    // Wayland/X11/Vulkan functions often take pointer args that need
+    // guest→host translation.
+    return thunk_dispatch_with_ptrs(cpu, entry.host_fn, entry.name,
+                                     entry.pointer_args, impl_->mem, trace);
 }
 
 size_t DisplayThunk::symbol_count() const {
@@ -258,6 +263,9 @@ void DisplayThunk::register_known_symbols_() {
     #undef REG_VK
 
     // ── libwayland-client.so.0 ────────────────────────────────────
+    // Turn 91: proper Wayland thunking with pointer arg translation.
+    // Wayland functions take pointer args (const char* name, wl_proxy*,
+    // wl_listener*, void* impl, etc.) that need guest→host translation.
     const char* wl_libs[] = {"libwayland-client.so.0", "libwayland-client.so"};
     void* wl_handle = dlopen("libwayland-client.so.0", RTLD_LAZY);
     if (!wl_handle) wl_handle = dlopen("libwayland-client.so", RTLD_LAZY);
@@ -265,31 +273,69 @@ void DisplayThunk::register_known_symbols_() {
         void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
         for (const char* L : wl_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_WL_PTR(name, ptrs) do { \
+        void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
+        for (const char* L : wl_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
 
-    REG_WL(wl_display_connect);
-    REG_WL(wl_display_connect_to_fd);
-    REG_WL(wl_display_disconnect);
+    REG_WL_PTR(wl_display_connect, 0x01);       // arg 0: const char *name
+    REG_WL(wl_display_connect_to_fd);            // arg 0: int fd (not pointer)
+    REG_WL(wl_display_disconnect);               // arg 0: wl_display* (opaque handle, not translated)
     REG_WL(wl_display_get_fd);
     REG_WL(wl_display_dispatch);
     REG_WL(wl_display_dispatch_pending);
     REG_WL(wl_display_dispatch_queue);
-    REG_WL(wl_display_roundtrip);
-    REG_WL(wl_display_flush);
-    REG_WL(wl_display_read_events);
-    REG_WL(wl_display_prepare_read);
-    REG_WL(wl_display_cancel_read);
-    REG_WL(wl_proxy_marshal);
-    REG_WL(wl_proxy_create);
-    REG_WL(wl_proxy_destroy);
-    REG_WL(wl_proxy_get_user_data);
-    REG_WL(wl_proxy_set_user_data);
-    REG_WL(wl_proxy_get_id);
-    REG_WL(wl_proxy_get_class);
-    REG_WL(wl_proxy_add_listener);
-    REG_WL(wl_proxy_get_listener);
+    REG_WL_PTR(wl_display_dispatch_queue, 0x02); // arg 1: wl_event_queue*
+    REG_WL_PTR(wl_display_roundtrip, 0x01);      // arg 0: wl_display*
+    REG_WL_PTR(wl_display_flush, 0x01);          // arg 0: wl_display*
+    REG_WL_PTR(wl_display_read_events, 0x01);    // arg 0: wl_display*
+    REG_WL_PTR(wl_display_prepare_read, 0x01);   // arg 0: wl_display*
+    REG_WL_PTR(wl_display_cancel_read, 0x01);    // arg 0: wl_display*
+    REG_WL(wl_proxy_marshal);                     // variadic — can't thunk safely
+    REG_WL_PTR(wl_proxy_create, 0x01);           // arg 0: wl_proxy* (factory)
+    REG_WL_PTR(wl_proxy_destroy, 0x01);          // arg 0: wl_proxy*
+    REG_WL_PTR(wl_proxy_get_user_data, 0x01);    // arg 0: wl_proxy*
+    REG_WL_PTR(wl_proxy_set_user_data, 0x03);    // arg 0: wl_proxy*, arg 1: void*
+    REG_WL_PTR(wl_proxy_get_id, 0x01);           // arg 0: wl_proxy*
+    REG_WL_PTR(wl_proxy_get_class, 0x01);        // arg 0: wl_proxy*
+    REG_WL_PTR(wl_proxy_add_listener, 0x03);     // arg 0: wl_proxy*, arg 1: void** impl
+    REG_WL_PTR(wl_proxy_get_listener, 0x01);     // arg 0: wl_proxy*
+    REG_WL(wl_proxy_marshal_constructor);         // variadic
+    REG_WL(wl_proxy_marshal_constructor_versioned); // variadic
+    REG_WL_PTR(wl_proxy_set_tag, 0x03);          // arg 0: wl_proxy*, arg 1: const char**
+    REG_WL_PTR(wl_proxy_get_tag, 0x01);          // arg 0: wl_proxy*
+    REG_WL_PTR(wl_proxy_wrapper_destroy, 0x01);  // arg 0: wl_proxy*
+    REG_WL_PTR(wl_event_queue_destroy, 0x01);    // arg 0: wl_event_queue*
     #undef REG_WL
+    #undef REG_WL_PTR
+
+    // ── libwayland-egl.so.1 ──────────────────────────────────────
+    // Turn 91: Wayland EGL for hardware-accelerated OpenGL ES.
+    const char* wl_egl_libs[] = {"libwayland-egl.so.1", "libwayland-egl.so"};
+    void* wl_egl_handle = dlopen("libwayland-egl.so.1", RTLD_LAZY);
+    if (!wl_egl_handle) wl_egl_handle = dlopen("libwayland-egl.so", RTLD_LAZY);
+    #define REG_WL_EGL(name) do { \
+        void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
+        for (const char* L : wl_egl_libs) register_function_(L, #name, p); \
+    } while(0)
+    #define REG_WL_EGL_PTR(name, ptrs) do { \
+        void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
+        for (const char* L : wl_egl_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
+    REG_WL_EGL_PTR(wl_egl_window_create, 0x03);    // args: wl_surface*, int, int
+    REG_WL_EGL_PTR(wl_egl_window_destroy, 0x01);   // arg 0: wl_egl_window*
+    REG_WL_EGL_PTR(wl_egl_window_get_attached_size, 0x03); // arg 0: window, arg 1: int*, arg 2: int*
+    REG_WL_EGL_PTR(wl_egl_window_resize, 0x01);    // arg 0: wl_egl_window*
+    REG_WL_EGL_PTR(wl_egl_window_get_buffer_scale, 0x01);
+    REG_WL_EGL_PTR(wl_egl_window_set_buffer_scale, 0x01);
+    REG_WL_EGL_PTR(wl_egl_window_set_buffer_transform, 0x01);
+    #undef REG_WL_EGL
+    #undef REG_WL_EGL_PTR
 
     // ── libX11.so.6 ───────────────────────────────────────────────
+    // Turn 91: proper X11 thunking with pointer arg translation.
+    // X11 functions take pointer args (Display*, Window, GC, XEvent*,
+    // char*, etc.) that need guest→host translation.
     const char* x11_libs[] = {"libX11.so.6", "libX11.so"};
     void* x11_handle = dlopen("libX11.so.6", RTLD_LAZY);
     if (!x11_handle) x11_handle = dlopen("libX11.so", RTLD_LAZY);
@@ -297,55 +343,143 @@ void DisplayThunk::register_known_symbols_() {
         void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
         for (const char* L : x11_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_X11_PTR(name, ptrs) do { \
+        void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
+        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
 
-    REG_X11(XOpenDisplay);
-    REG_X11(XCloseDisplay);
-    REG_X11(XCreateWindow);
-    REG_X11(XDestroyWindow);
-    REG_X11(XMapWindow);
-    REG_X11(XUnmapWindow);
-    REG_X11(XFlush);
-    REG_X11(XSync);
-    REG_X11(XPending);
-    REG_X11(XNextEvent);
-    REG_X11(XPeekEvent);
-    REG_X11(XEventsQueued);
-    REG_X11(XWindowEvent);
-    REG_X11(XCheckWindowEvent);
-    REG_X11(XMaskEvent);
-    REG_X11(XCheckMaskEvent);
-    REG_X11(XPutBackEvent);
-    REG_X11(XSendEvent);
-    REG_X11(XDisplayWidth);
-    REG_X11(XDisplayHeight);
-    REG_X11(XDisplayWidthMM);
-    REG_X11(XDisplayHeightMM);
-    REG_X11(DefaultRootWindow);
-    REG_X11(BlackPixel);
-    REG_X11(WhitePixel);
-    REG_X11(XSetForeground);
-    REG_X11(XSetBackground);
-    REG_X11(XFillRectangle);
-    REG_X11(XDrawRectangle);
-    REG_X11(XDrawLine);
-    REG_X11(XDrawPoint);
-    REG_X11(XCopyArea);
-    REG_X11(XCreateGC);
-    REG_X11(XFreeGC);
-    REG_X11(XCreatePixmap);
-    REG_X11(XFreePixmap);
-    REG_X11(XSetWindowBackground);
-    REG_X11(XSetWindowBackgroundPixmap);
-    REG_X11(XStoreName);
-    REG_X11(XFetchName);
-    REG_X11(XSetWMProtocols);
-    REG_X11(XInternAtom);
-    REG_X11(XGetAtomName);
-    REG_X11(XCreateColormap);
-    REG_X11(XFreeColormap);
-    REG_X11(XAllocColor);
-    REG_X11(XFreeColors);
+    REG_X11_PTR(XOpenDisplay, 0x01);             // arg 0: const char* name
+    REG_X11_PTR(XCloseDisplay, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XCreateWindow, 0x80);            // arg 6: XSetWindowAttributes*
+    REG_X11_PTR(XCreateSimpleWindow, 0x01);      // arg 0: Display*
+    REG_X11_PTR(XDestroyWindow, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XMapWindow, 0x01);               // arg 0: Display*
+    REG_X11_PTR(XUnmapWindow, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XFlush, 0x01);                   // arg 0: Display*
+    REG_X11_PTR(XSync, 0x01);                    // arg 0: Display*
+    REG_X11_PTR(XPending, 0x01);                 // arg 0: Display*
+    REG_X11_PTR(XNextEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
+    REG_X11_PTR(XPeekEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
+    REG_X11_PTR(XEventsQueued, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XWindowEvent, 0x0B);             // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckWindowEvent, 0x0B);        // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XMaskEvent, 0x03);               // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckMaskEvent, 0x03);          // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckTypedEvent, 0x03);         // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckTypedWindowEvent, 0x0B);   // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XPutBackEvent, 0x03);            // arg 0: Display*, arg 1: XEvent*
+    REG_X11_PTR(XSendEvent, 0x10);               // arg 0: Display*, arg 4: XEvent*
+    REG_X11_PTR(XDisplayWidth, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XDisplayHeight, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XDisplayWidthMM, 0x01);          // arg 0: Display*
+    REG_X11_PTR(XDisplayHeightMM, 0x01);         // arg 0: Display*
+    REG_X11_PTR(DefaultRootWindow, 0x01);        // arg 0: Display*
+    REG_X11_PTR(BlackPixel, 0x01);               // arg 0: Display*
+    REG_X11_PTR(WhitePixel, 0x01);               // arg 0: Display*
+    REG_X11_PTR(XSetForeground, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XSetBackground, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XFillRectangle, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XDrawRectangle, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XDrawLine, 0x01);                // arg 0: Display*
+    REG_X11_PTR(XDrawPoint, 0x01);               // arg 0: Display*
+    REG_X11_PTR(XCopyArea, 0x01);                // arg 0: Display*
+    REG_X11_PTR(XCreateGC, 0x05);                // arg 0: Display*, arg 2: XGCValues*
+    REG_X11_PTR(XFreeGC, 0x01);                  // arg 0: Display*
+    REG_X11_PTR(XCreatePixmap, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XFreePixmap, 0x01);              // arg 0: Display*
+    REG_X11_PTR(XSetWindowBackground, 0x01);     // arg 0: Display*
+    REG_X11_PTR(XSetWindowBackgroundPixmap, 0x01); // arg 0: Display*
+    REG_X11_PTR(XStoreName, 0x03);               // arg 0: Display*, arg 2: const char*
+    REG_X11_PTR(XFetchName, 0x07);               // arg 0: Display*, arg 2: char**
+    REG_X11_PTR(XSetWMProtocols, 0x08);          // arg 0: Display*, arg 3: Atom*
+    REG_X11_PTR(XInternAtom, 0x03);              // arg 0: Display*, arg 1: const char*
+    REG_X11_PTR(XInternAtoms, 0x1F);             // arg 0: Display*, arg 1: char**, arg 4: Atom*
+    REG_X11_PTR(XGetAtomName, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XCreateColormap, 0x01);          // arg 0: Display*
+    REG_X11_PTR(XFreeColormap, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XAllocColor, 0x03);              // arg 0: Display*, arg 2: XColor*
+    REG_X11_PTR(XFreeColors, 0x07);              // arg 0: Display*, arg 2: unsigned long*
+    REG_X11_PTR(XSetClipMask, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XSetClipOrigin, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XCopyGC, 0x01);                  // arg 0: Display*
+    REG_X11_PTR(XChangeGC, 0x05);                // arg 0: Display*, arg 2: XGCValues*
+    REG_X11_PTR(XSetFunction, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XSetLineAttributes, 0x01);       // arg 0: Display*
+    REG_X11_PTR(XSetDashes, 0x07);               // arg 0: Display*, arg 3: const char*
+    REG_X11_PTR(XDrawString, 0x20);              // arg 0: Display*, arg 4: const char*
+    REG_X11_PTR(XDrawImageString, 0x20);         // arg 0: Display*, arg 4: const char*
+    REG_X11_PTR(XTextExtents, 0x90);             // arg 0: XFontStruct*, arg 1: const char*, arg 4: int*, arg 5: int*, arg 6: int*
+    REG_X11_PTR(XLoadFont, 0x03);                // arg 0: Display*, arg 1: const char*
+    REG_X11_PTR(XUnloadFont, 0x01);              // arg 0: Display*
+    REG_X11_PTR(XQueryFont, 0x01);               // arg 0: Display*
+    REG_X11_PTR(XFreeFont, 0x01);                // arg 0: Display*
+    REG_X11_PTR(XListFonts, 0x1B);               // arg 0: Display*, arg 1: const char*, arg 3: char***
+    REG_X11_PTR(XFreeFontNames, 0x01);           // arg 0: char**
+    REG_X11_PTR(XCreateBitmapFromData, 0x08);    // arg 0: Display*, arg 3: const char*
+    REG_X11_PTR(XCreatePixmapFromBitmapData, 0x01); // arg 0: Display*
+    REG_X11_PTR(XQueryPointer, 0x3D);            // args: Display*, Window, and 5 pointer out-args
+    REG_X11_PTR(XWarpPointer, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XGrabPointer, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XUngrabPointer, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XGrabKeyboard, 0x01);            // arg 0: Display*
+    REG_X11_PTR(XUngrabKeyboard, 0x01);          // arg 0: Display*
+    REG_X11_PTR(XBell, 0x01);                    // arg 0: Display*
+    REG_X11_PTR(XScreenCount, 0x01);             // arg 0: Display*
+    REG_X11_PTR(XSetInputFocus, 0x01);           // arg 0: Display*
+    REG_X11_PTR(XGetInputFocus, 0x05);           // arg 0: Display*, arg 2: int*
+    REG_X11_PTR(XChangeProperty, 0x80);          // arg 0: Display*, arg 6: const unsigned char*
+    REG_X11_PTR(XGetWindowProperty, 0xFE);       // multiple pointer args
+    REG_X11_PTR(XDeleteProperty, 0x01);          // arg 0: Display*
+    REG_X11_PTR(XGetWindowAttributes, 0x07);     // arg 0: Display*, arg 2: XWindowAttributes*
     #undef REG_X11
+    #undef REG_X11_PTR
+
+    // ── libX11-xcb.so.1 ─────────────────────────────────────────
+    // Turn 91: X11-XCB bridge for apps that use XCB directly.
+    const char* x11xcb_libs[] = {"libX11-xcb.so.1", "libX11-xcb.so"};
+    void* x11xcb_handle = dlopen("libX11-xcb.so.1", RTLD_LAZY);
+    if (!x11xcb_handle) x11xcb_handle = dlopen("libX11-xcb.so", RTLD_LAZY);
+    #define REG_X11XCB(name) do { \
+        void* p = x11xcb_handle ? dlsym(x11xcb_handle, #name) : nullptr; \
+        for (const char* L : x11xcb_libs) register_function_(L, #name, p); \
+    } while(0)
+    REG_X11XCB(XGetXCBConnection);
+    #undef REG_X11XCB
+
+    // ── libxcb.so.1 ─────────────────────────────────────────────
+    // Turn 91: XCB (X C Binding) for low-level X11 access.
+    const char* xcb_libs[] = {"libxcb.so.1", "libxcb.so"};
+    void* xcb_handle = dlopen("libxcb.so.1", RTLD_LAZY);
+    if (!xcb_handle) xcb_handle = dlopen("libxcb.so", RTLD_LAZY);
+    #define REG_XCB(name) do { \
+        void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
+        for (const char* L : xcb_libs) register_function_(L, #name, p); \
+    } while(0)
+    #define REG_XCB_PTR(name, ptrs) do { \
+        void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
+        for (const char* L : xcb_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
+    REG_XCB_PTR(xcb_connect, 0x02);              // arg 0: const char*, arg 1: int*
+    REG_XCB(xcb_disconnect);
+    REG_XCB(xcb_connection_has_error);
+    REG_XCB_PTR(xcb_get_setup, 0x01);            // arg 0: xcb_connection_t*
+    REG_XCB(xcb_setup_roots_iterator);
+    REG_XCB(xcb_screen_allowed_depths_iterator);
+    REG_XCB(xcb_depth_visuals_iterator);
+    REG_XCB(xcb_generate_id);
+    REG_XCB_PTR(xcb_create_window, 0x01);        // arg 0: xcb_connection_t*
+    REG_XCB_PTR(xcb_create_window_checked, 0x01);
+    REG_XCB_PTR(xcb_destroy_window, 0x01);
+    REG_XCB_PTR(xcb_map_window, 0x01);
+    REG_XCB_PTR(xcb_unmap_window, 0x01);
+    REG_XCB_PTR(xcb_flush, 0x01);
+    REG_XCB_PTR(xcb_get_file_descriptor, 0x01);
+    REG_XCB_PTR(xcb_wait_for_event, 0x01);
+    REG_XCB_PTR(xcb_poll_for_event, 0x01);
+    REG_XCB_PTR(xcb_free, 0x01);
+    REG_XCB(xcb_visualtype_get);
+    #undef REG_XCB
+    #undef REG_XCB_PTR
 
     // ── libgbm.so.1 ───────────────────────────────────────────────
     const char* gbm_libs[] = {"libgbm.so.1", "libgbm.so"};

@@ -110,6 +110,60 @@ inline int64_t thunk_dispatch_generic(CPU& cpu, void* host_fn,
     return 0;
 }
 
+// Turn 91: Pointer-aware dispatch for display thunks (Wayland/X11/Vulkan).
+// Many Wayland/X11 functions take pointer args (const char* name,
+// wl_proxy*, XEvent*, etc.) that need guest→host translation.
+// This helper translates pointer args before calling the host function.
+inline int64_t thunk_dispatch_with_ptrs(CPU& cpu, void* host_fn,
+                                         const std::string& name,
+                                         uint8_t pointer_args,
+                                         Memory* mem, bool trace) {
+    if (!host_fn) {
+        if (trace) {
+            fprintf(stderr, "[display-thunk] dispatch: %s (stub, returns 0)\n",
+                    name.c_str());
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    uint64_t args[8];
+    for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
+
+    // Translate pointer args from guest to host.
+    if (pointer_args && mem) {
+        for (int i = 0; i < 8; i++) {
+            if (pointer_args & (1u << i)) {
+                if (args[i] == 0) continue;  // NULL is NULL
+                uint8_t* host_ptr = mem->guest_to_host_ptr(args[i]);
+                if (host_ptr) {
+                    args[i] = reinterpret_cast<uint64_t>(host_ptr);
+                }
+                // If translation failed, pass original — host fn may handle
+                // gracefully or crash (visible failure, not silent corruption).
+            }
+        }
+    }
+
+    if (trace) {
+        fprintf(stderr, "[display-thunk] dispatch: %s (host_fn=%p) "
+                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx ptrs=0x%x\n",
+                name.c_str(), host_fn,
+                static_cast<unsigned long long>(args[0]),
+                static_cast<unsigned long long>(args[1]),
+                static_cast<unsigned long long>(args[2]),
+                static_cast<unsigned long long>(args[3]),
+                pointer_args);
+    }
+
+    using GenericFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                    uint64_t, uint64_t, uint64_t, uint64_t);
+    auto fn = reinterpret_cast<GenericFn>(host_fn);
+    uint64_t ret = fn(args[0], args[1], args[2], args[3],
+                       args[4], args[5], args[6], args[7]);
+    cpu.regs[0] = ret;
+    return 0;
+}
+
 // Per-library table. Each thunk maintains a vector of these.
 struct ThunkLibTable {
     std::string lib;
@@ -138,6 +192,7 @@ inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
 // trampoline into guest memory, stores the entry. Idempotent.
 // v1.5.0.alpha (Turn 74): added id_base parameter so each thunk type
 // (Graphic/Audio/Display) gets a non-overlapping symbol_id range.
+// Turn 91: added pointer_args parameter for display thunk pointer translation.
 inline void thunk_register(Memory& mem,
                             std::vector<ThunkLibTable>& libs,
                             std::vector<std::pair<uint32_t, uint32_t>>& id_to_idx,
@@ -145,7 +200,8 @@ inline void thunk_register(Memory& mem,
                             uint64_t max_symbols, uint16_t syscall_number,
                             uint32_t id_base, bool trace,
                             const std::string& lib,
-                            const std::string& sym, void* host_fn) {
+                            const std::string& sym, void* host_fn,
+                            uint8_t pointer_args = 0) {
     ThunkLibTable* lt = find_or_create_lib(libs, lib);
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;  // idempotent
@@ -159,15 +215,15 @@ inline void thunk_register(Memory& mem,
     uint32_t sym_id = id_base + local_id;
     uint64_t addr = trampoline_base + local_id * trampoline_size;
     write_thunk_trampoline(mem, addr, sym_id, syscall_number);
-    lt->entries.push_back({sym, host_fn, addr, sym_id});
+    lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args});
     id_to_idx.push_back({
         static_cast<uint32_t>(std::distance(libs.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
     });
     if (trace) {
-        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u)\n",
+        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u ptrs=0x%x)\n",
                 lib.c_str(), sym.c_str(),
-                static_cast<unsigned long long>(addr), sym_id);
+                static_cast<unsigned long long>(addr), sym_id, pointer_args);
     }
 }
 
