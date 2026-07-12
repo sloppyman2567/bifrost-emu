@@ -1927,6 +1927,24 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // nop (pad to 16 bytes)
         emit_nop(code);
     }
+    // [16] _dl_sym (16 bytes — calls syscall 0x1003 for dlsym support)
+    //     dlsym@@GLIBC_2.34 reads *(hook+16) for _dl_sym.
+    //     Turn 86: a0=handle, a1=symbol name ptr → returns symbol address.
+    constexpr uint32_t OFF_DLSYM = 152;
+    {
+        // movz x8, #0x1003  →  0xD2820068
+        code.push_back(0x68); code.push_back(0x00); code.push_back(0x82); code.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(code);
+    }
+    // [17] _dl_close (8 bytes — stub: return 0)
+    //     dlclose reads *(hook+8). Just return 0 (success).
+    constexpr uint32_t OFF_DLCLOSE = 168;
+    emit_stub_return0(code);  // offset 168
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
@@ -1968,8 +1986,12 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // (Turn 84)
     // ── dlopen hook struct ──────────────────────────────────────────
     // glibc reads _dl_open_hook from _rtld_global_ro + 368.
-    // dlopen@@GLIBC_2.34 reads *(hook+0), __libc_dlopen_mode reads *(hook+72).
-    // Single struct with stub at both offsets. (Turn 85)
+    // The hook struct has function pointers at various offsets:
+    //   +0:  _dl_open  (dlopen@@GLIBC_2.34)
+    //   +8:  _dl_close (dlclose@@GLIBC_2.34)
+    //   +16: _dl_sym   (dlsym@@GLIBC_2.34)
+    //   +72: _dl_open  (__libc_dlopen_mode)
+    // (Turn 86)
     constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;
     constexpr uint64_t DLOPEN_HOOK_SIZE = 128;
     {
@@ -1977,6 +1999,8 @@ bool DynamicLinker::register_ld_linux_shim_() {
         mem_.write(shim_base_ + DLOPEN_HOOK_OFF, zeros.data(), DLOPEN_HOOK_SIZE);
     }
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 0,  code_base + OFF_DLOPEN);
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 8,  code_base + OFF_DLCLOSE);
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 16, code_base + OFF_DLSYM);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 72, code_base + OFF_DLOPEN);
     dlopen_hook_ptr_ = shim_base_ + DLOPEN_HOOK_OFF;
 

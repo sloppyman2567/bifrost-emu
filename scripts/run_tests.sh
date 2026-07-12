@@ -372,6 +372,7 @@ DYNAMIC_TESTS=(
     # for the "8-thread race" bug (context.md Turn 78 Issue #3). Tests
     # 8 threads x 4 waves with __thread long tls_array[8] per thread.
     "test_dyn_pthread_8thread|ctest_real/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
+    "test_dlopen|ctest_real/test_dlopen.elf||15|test_dlopen: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

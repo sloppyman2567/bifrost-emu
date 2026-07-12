@@ -1006,6 +1006,52 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
+        // ── Bifrost-emu internal dlsym syscall (Turn 86) ───────────
+        // a0 (x0) = dlopen handle (base address of the library)
+        // a1 (x1) = guest pointer to symbol name string
+        // Returns: symbol address on success, 0 on failure.
+        case 0x1003: {
+            std::string symname = yggdrasil::Yggdrasil::read_path(mem_, a1);
+            if (symname.empty()) {
+                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[dlsym] empty symbol name\n");
+                }
+                ret_host(0);
+                return 0;
+            }
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl) { ret_host(0); return 0; }
+            // If handle is RTLD_DEFAULT (0) or RTLD_NEXT (-1), search all objects.
+            // Otherwise, search only the specified library.
+            uint64_t addr = 0;
+            if (a0 == 0 || static_cast<int64_t>(a0) == -1) {
+                // Search all loaded objects
+                addr = dl->resolve_symbol(symname);
+            } else {
+                // Search only in the library at the given base address
+                for (const auto& obj : dl->objects()) {
+                    if (obj.base_addr == a0) {
+                        // Search this object's symbol table
+                        // Try global symbol table first (faster)
+                        addr = dl->resolve_symbol(symname);
+                        if (addr == 0) {
+                            // Not in global table — search this object's .dynsym
+                            // TODO: search obj's own symtab for local symbols
+                        }
+                        break;
+                    }
+                }
+            }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dlsym] '%s' handle=0x%llx → 0x%llx\n",
+                        symname.c_str(),
+                        static_cast<unsigned long long>(a0),
+                        static_cast<unsigned long long>(addr));
+            }
+            ret_host(addr);
+            return 0;
+        }
+
         default:
             return SYSCALL_NOT_HANDLED;
     }
