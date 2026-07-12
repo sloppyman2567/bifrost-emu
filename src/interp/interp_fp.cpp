@@ -973,7 +973,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // failure (toybox's MD5 uses vshrq_n_u32 for rotates).
             if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
                 && ((op >> 20) & 0xF) == 0  // immh == 0 → MOVI/MVNI, not shift
-                && ((op >> 10) & 0x3F) != 0x21) {  // Turn 73: exclude SHRN (bits[15:10]=100001)
+                && (((op >> 10) & 0x3F) != 0x21  // exclude SHRN (bits[15:10]=100001)
+                    || ((op >> 29) & 1))) {      // Turn 85: but NOT for MVNI (U=1)
                 // BUGFIX (Turn 73): SHRN (0x0F008400) has immh=0 for 16-bit
                 // source, which collides with the MOVI/MVNI pattern. SHRN
                 // has bits[15:10] = 100001 (0x21), while MOVI/MVNI has
@@ -983,18 +984,21 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 uint8_t cmode = (op >> 12) & 0xF;
                 uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                 // U bit (bit 29): 0 = MOVI, 1 = MVNI (invert).
-                // NOTE (Turn 73): MVNI inversion was implemented but caused
-                // regressions in soft-float code (musl's __muldf3 uses MVNI
-                // to create masks). The inversion is correct per the ARM
-                // spec, but exposes pre-existing bugs in the emulator's
-                // handling of soft-float operations. MVNI inversion is
-                // deferred until the soft-float path is fully debugged.
-                // For now, MVNI is treated as MOVI (no inversion), matching
-                // the historical behavior that all tests pass with.
+                // Turn 85: MVNI inversion implemented per ARM spec.
+                // IMPORTANT: for cmode=0xE (byte replication), the U bit
+                // does NOT select MOVI/MVNI — both U=0 and U=1 are MOVI.
+                // This is because binutils uses U=1 for 'movi vD.2d, #0'
+                // to encode the 128-bit zero form. MVNI (invert) only
+                // applies for cmode 0x0-0xD. Without this exception,
+                // 'movi v1.2d, #0' (0x6F00E401, U=1, cmode=0xE) would
+                // produce all-ones instead of all-zeros, breaking every
+                // program that uses MOVI to zero a vector register.
+                bool is_mvni = ((op >> 29) & 1) && (cmode != 0xE);
                 if (cmode == 0xE) {
                     // cmode=0xE: broadcast imm8 to all bytes
                     uint64_t val = 0;
                     for (int i = 0; i < 8; i++) val |= (static_cast<uint64_t>(imm8)) << (i * 8);
+                    if (is_mvni) val = ~val;
                     cpu.v_lo[rd] = val;
                     if (Q) cpu.v_hi[rd] = val;
                     else cpu.v_hi[rd] = 0;
@@ -1024,6 +1028,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         int byte_pos = cmode & 0x7;
                         buf[byte_pos] = imm8;
                         if (Q) buf[8 + byte_pos] = imm8;
+                    }
+                    if (is_mvni) {
+                        for (int i = 0; i < 16; i++) buf[i] = ~buf[i];
                     }
                     memcpy(&cpu.v_lo[rd], buf, 8);
                     if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
