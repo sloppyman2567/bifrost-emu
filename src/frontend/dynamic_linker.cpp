@@ -716,6 +716,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         }
     }
 
+    // Re-patch _rtld_global_ro AFTER __libc_early_init (Turn 85).
+    // __libc_early_init zeroes dl_pagesize. Re-apply.
+    patch_rtld_global_ro_();
+
     // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
@@ -726,6 +730,9 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] all DT_INIT_ARRAY done, link() complete\n");
     }
+
+    // Final re-patch AFTER DT_INIT_ARRAY (Turn 85).
+    patch_rtld_global_ro_();
 
     return true;
 }
@@ -974,21 +981,20 @@ void DynamicLinker::patch_rtld_global_ro_() {
         // glibc will hit the assertion later (visible failure).
     }
 
-    // ── Patch dlopen hook pointer ──────────────────────────────────
-    // glibc's __libc_dlopen_mode reads _dl_open from a hook struct at
-    // _rtld_global_ro + 368 (offset 0x170). Write our hook struct pointer
-    // there so dlopen() works. (Turn 84)
+    // dlopen hook: write to _rtld_global_ro + 368 (Turn 85).
+    // glibc's __libc_dlopen_mode and dlopen@@GLIBC_2.34 both read
+    // _rtld_global_ro from *(libc_base + 0x19FE70), then read +368 and +0/+72.
+    // The _dl_open_hook field IS at _rtld_global_ro + 368 — it's a field
+    // WITHIN the struct, NOT a separate data variable.
+    // Writing to shim + 368 is safe (no overlap with dl_pagesize at +24).
     if (dlopen_hook_ptr_ != 0) {
         try {
             mem_.store<uint64_t>(rtld_ro + 368, dlopen_hook_ptr_);
             if (getenv("BIFROST_DYNLINK_TRACE")) {
-                fprintf(stderr, "[dynlink] patched _rtld_global_ro + 368 = "
-                        "dlopen hook @0x%llx\n",
+                fprintf(stderr, "[dynlink] patched _rtld_global_ro + 368 = 0x%llx\n",
                         static_cast<unsigned long long>(dlopen_hook_ptr_));
             }
-        } catch (...) {
-            // Non-fatal — dlopen just won't work.
-        }
+        } catch (...) {}
     }
 }
 
@@ -1913,7 +1919,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     //     syscall 0x1002 which loads the library via DynamicLinker.
     {
         // movz x8, #0x1002  →  0xD2820048
-        code.push_back(0x48); code.push_back(0x00); code.push_back(0x20); code.push_back(0xD2);
+        code.push_back(0x48); code.push_back(0x00); code.push_back(0x82); code.push_back(0xD2);
         // svc #0           →  0xD4000001
         code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
         // ret              →  0xD65F03C0
@@ -1960,18 +1966,18 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // After patch_rtld_global_ro_ resolves _rtld_global_ro's address,
     // we write hook_ptr to rtld_global_ro + 368.
     // (Turn 84)
-    constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;  // in data area
+    // ── dlopen hook struct ──────────────────────────────────────────
+    // glibc reads _dl_open_hook from _rtld_global_ro + 368.
+    // dlopen@@GLIBC_2.34 reads *(hook+0), __libc_dlopen_mode reads *(hook+72).
+    // Single struct with stub at both offsets. (Turn 85)
+    constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;
     constexpr uint64_t DLOPEN_HOOK_SIZE = 128;
-    constexpr uint64_t DLOPEN_HOOK_DL_OPEN_OFF = 72;  // offset of _dl_open in hook
-    // Zero the hook struct
     {
         std::vector<uint8_t> zeros(DLOPEN_HOOK_SIZE, 0);
         mem_.write(shim_base_ + DLOPEN_HOOK_OFF, zeros.data(), DLOPEN_HOOK_SIZE);
     }
-    // Set hook + 72 = _dl_open stub address
-    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + DLOPEN_HOOK_DL_OPEN_OFF,
-                         code_base + OFF_DLOPEN);
-    // Save for patch_rtld_global_ro_ to write into _rtld_global_ro + 368
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 0,  code_base + OFF_DLOPEN);
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 72, code_base + OFF_DLOPEN);
     dlopen_hook_ptr_ = shim_base_ + DLOPEN_HOOK_OFF;
 
     // ── Register symbols in the global symbol table ──────────────
@@ -2991,74 +2997,130 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
 // soname. Returns the base address (handle) on success, 0 on failure.
 // (Turn 84)
 uint64_t DynamicLinker::load_library(const std::string& path) {
-    // Read the file from disk.
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        error_ = "load_library: cannot open '" + path + "'";
-        return 0;
+    // Resolve path via BIFROST_ROOT sandbox (Turn 85).
+    std::string resolved = path;
+    if (const char* root = getenv("BIFROST_ROOT")) {
+        std::string rp = std::string(root) + path;
+        std::ifstream test(rp, std::ios::binary);
+        if (test) resolved = rp;
     }
+    std::ifstream f(resolved, std::ios::binary | std::ios::ate);
+    if (!f) { error_ = "load_library: cannot open '" + resolved + "'"; return 0; }
     std::streamsize size = f.tellg();
     f.seekg(0, std::ios::beg);
     std::vector<uint8_t> data(size);
     if (!f.read(reinterpret_cast<char*>(data.data()), size)) {
-        error_ = "load_library: read error";
-        return 0;
+        error_ = "load_library: read error"; return 0;
     }
-    // Validate ELF header.
     if (size < 64 || data[0] != 0x7f || data[1] != 'E' ||
         data[2] != 'L' || data[3] != 'F') {
-        error_ = "load_library: not an ELF file";
-        return 0;
+        error_ = "load_library: not an ELF file"; return 0;
     }
-    // Allocate base address.
     uint64_t max_end = 0;
     if (data.size() >= 56) {
-        uint64_t e_phoff;
-        uint16_t e_phentsize, e_phnum;
-        memcpy(&e_phoff,     data.data() + 32, 8);
-        memcpy(&e_phentsize, data.data() + 54, 2);
-        memcpy(&e_phnum,     data.data() + 56, 2);
+        uint64_t e_phoff; uint16_t e_phentsize, e_phnum;
+        memcpy(&e_phoff, data.data()+32, 8);
+        memcpy(&e_phentsize, data.data()+54, 2);
+        memcpy(&e_phnum, data.data()+56, 2);
         for (int i = 0; i < e_phnum; i++) {
-            const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
-            uint32_t p_type;
-            uint64_t p_vaddr, p_memsz;
-            memcpy(&p_type,  p + 0,  4);
-            memcpy(&p_vaddr, p + 16, 8);
-            memcpy(&p_memsz, p + 40, 8);
-            if (p_type == 1) {
-                uint64_t end = p_vaddr + p_memsz;
-                if (end > max_end) max_end = end;
-            }
+            const uint8_t* p = data.data()+e_phoff+i*e_phentsize;
+            uint32_t pt; uint64_t pv, pm;
+            memcpy(&pt, p+0, 4); memcpy(&pv, p+16, 8); memcpy(&pm, p+40, 8);
+            if (pt == 1) { uint64_t e = pv+pm; if (e > max_end) max_end = e; }
         }
     }
     max_end = (max_end + 0xFFFFF) & ~0xFFFFFULL;
     uint64_t base = mem_.mmap_alloc(max_end);
-    if (base == 0) {
-        error_ = "load_library: mmap_alloc failed";
-        return 0;
-    }
-    // Map segments and parse.
+    if (base == 0) { error_ = "load_library: mmap_alloc failed"; return 0; }
     LoadedObject obj;
-    obj.name = path;
-    obj.base_addr = base;
-    obj.is_main = false;
+    obj.name = path; obj.base_addr = base; obj.is_main = false;
     uint64_t entry;
     map_segments(data, base, entry);
     obj.entry = entry;
     if (!parse_dynamic(data, base, obj)) {
-        error_ = "load_library: parse_dynamic failed";
-        return 0;
+        error_ = "load_library: parse_dynamic failed"; return 0;
     }
     parse_tls(data, obj);
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());
-    // NOTE: relocations and init arrays are NOT applied here yet.
-    // The library's symbols are available via the global symbol table,
-    // so dlsym() will find them. Full relocation processing (for the
-    // library's own internal references) and init_array execution will
-    // be added in a follow-up. This is sufficient for basic dlopen +
-    // dlsym usage (loading a lib, looking up a function, calling it).
+
+    // Apply relocations (Turn 85): RELA, JMPREL, RELR
+    auto& nobj = objects_.back();
+    if (nobj.dyn_addr != 0) {
+        try {
+            uint64_t ra=0,rs=0,ja=0,js=0,rra=0,rrs=0;
+            Elf64_Dyn dyn;
+            for (uint64_t p = nobj.dyn_addr; ; p += sizeof(dyn)) {
+                mem_.read(p, &dyn, sizeof(dyn));
+                if (dyn.d_tag == DT_NULL_) break;
+                if (dyn.d_tag == DT_RELA_) ra = nobj.base_addr + dyn.d_val;
+                else if (dyn.d_tag == DT_RELASZ_) rs = dyn.d_val;
+                else if (dyn.d_tag == DT_JMPREL_) ja = nobj.base_addr + dyn.d_val;
+                else if (dyn.d_tag == DT_PLTRELSZ_) js = dyn.d_val;
+                else if (dyn.d_tag == DT_RELR_) rra = nobj.base_addr + dyn.d_val;
+                else if (dyn.d_tag == DT_RELRSZ_) rrs = dyn.d_val;
+            }
+            if (ra && rs) {
+                for (uint64_t off = 0; off+24 <= rs; off += 24) {
+                    Elf64_Rela r; mem_.read(ra+off, &r, sizeof(r));
+                    uint32_t type = r.r_info & 0xFFFFFFFF;
+                    uint32_t sym = r.r_info >> 32;
+                    uint64_t target = nobj.base_addr + r.r_offset;
+                    int64_t A = r.r_addend;
+                    if (type == R_AARCH64_RELATIVE_) {
+                        mem_.store<uint64_t>(target, nobj.base_addr + A);
+                    } else if (type == R_AARCH64_GLOB_DAT_ || type == R_AARCH64_JUMP_SLOT_ || type == R_AARCH64_ABS64_) {
+                        uint64_t addr = 0;
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
+                            if (!name.empty()) addr = resolve_symbol(name);
+                        }
+                        if (addr) mem_.store<uint64_t>(target, addr + A);
+                    }
+                }
+            }
+            if (ja && js) {
+                for (uint64_t off = 0; off+24 <= js; off += 24) {
+                    Elf64_Rela r; mem_.read(ja+off, &r, sizeof(r));
+                    uint32_t sym = r.r_info >> 32;
+                    uint64_t target = nobj.base_addr + r.r_offset;
+                    if ((r.r_info & 0xFFFFFFFF) == R_AARCH64_JUMP_SLOT_) {
+                        uint64_t addr = 0;
+                        if (sym != 0) {
+                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
+                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
+                            if (!name.empty()) addr = resolve_symbol(name);
+                        }
+                        if (addr) mem_.store<uint64_t>(target, addr);
+                    }
+                }
+            }
+            if (rra && rrs) {
+                uint64_t addr = rra, end = rra + rrs;
+                while (addr < end) {
+                    uint64_t entry; mem_.read(addr, &entry, 8); addr += 8;
+                    if ((entry & 1) == 0) {
+                        uint64_t t = nobj.base_addr + entry;
+                        try { uint64_t v = mem_.load<uint64_t>(t); mem_.store<uint64_t>(t, nobj.base_addr + v); } catch (...) {}
+                    } else {
+                        uint64_t cur = addr - 16;
+                        for (int bit = 1; bit < 64; bit++) {
+                            if (entry & (1ULL << bit)) {
+                                try { uint64_t v = mem_.load<uint64_t>(cur); mem_.store<uint64_t>(cur, nobj.base_addr + v); } catch (...) {}
+                            }
+                            cur += 8;
+                        }
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[dlopen] loaded '%s' at 0x%llx\n",
+                path.c_str(), static_cast<unsigned long long>(base));
+    }
     return base;
 }
 
