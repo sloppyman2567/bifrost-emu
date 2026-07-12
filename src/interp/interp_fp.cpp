@@ -1746,8 +1746,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         case 0xA: r = std::floor(a); break;            // FRINTM
                         case 0xB: r = std::trunc(a); break;            // FRINTZ
                         case 0xC: r = std::rint(a); break;             // FRINTA
-                        case 0xD: r = std::rint(a); break;             // FRINTX
-                        case 0xE: r = std::rint(a); break;             // FRINTI
+                        // 0xD unused in A64
+                        case 0xE: r = std::rint(a); break;             // FRINTX
+                        case 0xF: r = std::rint(a); break;             // FRINTI
                         default: r = a; break;
                     }
                     write_fp_d(cpu, rd, r);
@@ -1763,8 +1764,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         case 0xA: r = std::floorf(a); break;            // FRINTM
                         case 0xB: r = std::truncf(a); break;            // FRINTZ
                         case 0xC: r = std::rintf(a); break;             // FRINTA
-                        case 0xD: r = std::rintf(a); break;             // FRINTX
-                        case 0xE: r = std::rintf(a); break;             // FRINTI
+                        // 0xD unused in A64
+                        case 0xE: r = std::rintf(a); break;             // FRINTX
+                        case 0xF: r = std::rintf(a); break;             // FRINTI
                         default: r = a; break;
                     }
                     write_fp_s(cpu, rd, r);

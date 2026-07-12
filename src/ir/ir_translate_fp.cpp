@@ -195,24 +195,45 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          0, 0, fp1_opcode, cur_pc);
                     return true;
                 }
-                // FRINT* (opcode 0x08-0x0E): handle natively in JIT (Turn 87)
-                if (fp1_opcode >= 0x08 && fp1_opcode <= 0x0E && ftype <= 1) {
+                // FRINT* (opcode 0x08-0x0F): handle natively in JIT (Turn 87).
+                //
+                // BUGFIX (Turn 89): Pass FP register indices (rd, rn) DIRECTLY
+                // to the FRINT IR op — do NOT use load_arm_reg/store_arm_reg.
+                // Those helpers allocate vregs (indices >= 33) and emit
+                // LOAD_REG/STORE_REG which access cpu.regs[] (GPR array),
+                // not cpu.v_lo[] (FP array). The JIT codegen and IR executor
+                // both treat inst.dest/inst.src1 as ARM FP reg indices
+                // (0-31) and access V_LO_OFF + idx*8 — same convention as
+                // FP_BINOP/FP_UNOP. Passing vregs caused out-of-bounds
+                // writes to v_lo[33+] and broke floor/ceil/round/trunc
+                // under JIT. The Turn 88 "fix" masked this by falling back
+                // to CALL_INTERP; this is the proper fix.
+                //
+                // BUGFIX (Turn 89, part 2): The opcode→mode mapping was
+                // off by one. The actual A64 FRINT opcodes (verified via
+                // binutils) are:
+                //   0x08=FRINTN, 0x09=FRINTP, 0x0A=FRINTM, 0x0B=FRINTZ,
+                //   0x0C=FRINTA, 0x0E=FRINTX, 0x0F=FRINTI  (0x0D unused)
+                // The old code mapped 0x0D→FRINTX, 0x0E→FRINTI, which was
+                // wrong. Also, `is_fp_1source` used to reject FRINTA/X/I
+                // (bit[17]=1), so they were silently NOP'd — now fixed in
+                // decoder.hpp.
+                if (fp1_opcode >= 0x08 && fp1_opcode <= 0x0F && ftype <= 1) {
                     uint8_t frint_mode;
                     switch (fp1_opcode) {
-                        case 0x08: frint_mode = 0; break;  // FRINTN
-                        case 0x09: frint_mode = 1; break;  // FRINTP
-                        case 0x0A: frint_mode = 2; break;  // FRINTM
-                        case 0x0B: frint_mode = 3; break;  // FRINTZ
-                        case 0x0C: frint_mode = 4; break;  // FRINTA
-                        case 0x0D: frint_mode = 5; break;  // FRINTX
-                        case 0x0E: frint_mode = 4; break;  // FRINTI
-                        default: frint_mode = 0; break;
+                        case 0x08: frint_mode = 0; break;  // FRINTN (nearest)
+                        case 0x09: frint_mode = 1; break;  // FRINTP (+inf/ceil)
+                        case 0x0A: frint_mode = 2; break;  // FRINTM (-inf/floor)
+                        case 0x0B: frint_mode = 3; break;  // FRINTZ (truncate)
+                        case 0x0C: frint_mode = 4; break;  // FRINTA (FPCR)
+                        case 0x0E: frint_mode = 5; break;  // FRINTX (FPCR+inexact)
+                        case 0x0F: frint_mode = 4; break;  // FRINTI (FPCR)
+                        default: frint_mode = 0; break;    // 0x0D unused
                     }
-                    uint16_t src = load_arm_reg(block, rn);
-                    uint16_t r = g_alloc.alloc();
-                    emit(block, IROp::FRINT, r, src, 0, ftype ? 64 : 32,
+                    // Pass rd (dest) and rn (src1) as ARM FP reg indices.
+                    // The JIT reads/writes V_LO_OFF + idx*8 directly.
+                    emit(block, IROp::FRINT, rd, rn, 0, ftype ? 64 : 32,
                          0, 0, frint_mode, cur_pc);
-                    store_arm_reg(block, rd, r);
                     return true;
                 }
             }

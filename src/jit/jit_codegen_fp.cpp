@@ -63,18 +63,78 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
 
     switch (inst.op) {
         // ── FRINT: FP round to integer ───────────────────────────────
+        //
+        // BUGFIX (Turn 89): Native roundsd/roundss codegen restored.
+        //
+        // The Turn 88 "fix" fell back to CALL_INTERP because the IR
+        // translator was passing VREG indices (>= 33) as inst.dest/
+        // inst.src1, causing out-of-bounds writes to v_lo[33+]. The
+        // translator now passes ARM FP reg indices (0-31) directly
+        // (same convention as FP_BINOP/FP_UNOP), so V_LO_OFF + idx*8
+        // is correct. This makes floor/ceil/trunc/round execute
+        // natively under JIT instead of falling back to interpreter.
         case IROp::FRINT: {
-            // BUGFIX (Turn 88): Fall back to CALL_INTERP for FRINT.
-            // The native roundsd codegen was broken because it used
-            // V_LO_OFF + inst.dest * 8 to store the result, but
-            // inst.dest is a scratch vreg (index > 32) whose data
-            // lives on the stack, not in v_lo[]. The write went to
-            // the wrong memory location, and the subsequent STORE_REG
-            // read garbage from the stack slot.
-            // The interpreter handles FRINT correctly (Turn 87 fix:
-            // 6-bit opcodes 0x08-0x0E). Performance impact is minimal
-            // since FRINT is rare (only floor/ceil/trunc/round).
-            emit_call_interp(inst.arm_pc, false);
+            // roundsd/roundss are SSE4.1 instructions. Fall back to
+            // CALL_INTERP on hosts without SSE4.1 to avoid SIGILL.
+            if (!has_sse41()) {
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
+            // Validate FP register indices (Turn 89: with the translator
+            // fix, these are now always 0-31, but guard against future
+            // regressions).
+            check_fp_reg_index(inst.dest, "FRINT dest");
+            check_fp_reg_index(inst.src1, "FRINT src1");
+            // FRINT only clobbers RAX (zero store to v_hi[dest]).
+            clobber_flags();
+            flush_invalidate_host_regs(1u << RAX);
+
+            bool is_double = (inst.width == 64);
+            uint8_t prefix = is_double ? 0xF2 : 0xF3;
+            // Load FP value into XMM0: movsd/movss xmm0, [rbx+off]
+            int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off);
+
+            // x86 rounding mode mapping (SSE4.1 roundsd/roundss imm8):
+            //   0 = round-to-nearest (even)
+            //   1 = round-down (-inf)
+            //   2 = round-up (+inf)
+            //   3 = round-toward-zero (truncate)
+            //   4 = use current MXCSR rounding mode
+            //
+            // ARM FRINT mode → x86 mode:
+            //   0 (FRINTN) → 0 (nearest)
+            //   1 (FRINTP) → 2 (+inf / ceil)
+            //   2 (FRINTM) → 1 (-inf / floor)
+            //   3 (FRINTZ) → 3 (truncate)
+            //   4 (FRINTA) → 4 (MXCSR, default = nearest)
+            //   5 (FRINTX) → 4 (uses FPCR rounding mode)
+            //   4 (FRINTI) → 4 (uses FPCR rounding mode)
+            uint8_t x86_mode;
+            switch (inst.imm & 0x7) {
+                case 0: x86_mode = 0; break;  // N → nearest
+                case 1: x86_mode = 2; break;  // P → +inf (ceil)
+                case 2: x86_mode = 1; break;  // M → -inf (floor)
+                case 3: x86_mode = 3; break;  // Z → truncate
+                default: x86_mode = 4; break; // I/X/A → current MXCSR
+            }
+            // roundsd xmm0, xmm0, imm8:  66 0F 3A 0B C0 imm8
+            // roundss xmm0, xmm0, imm8:  66 0F 3A 0A C0 imm8
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+            emit_byte(is_double ? 0x0B : 0x0A);
+            emit_byte(0xC0);  // xmm0, xmm0
+            emit_byte(x86_mode);
+
+            // Store result: movsd/movss [rbx+off], xmm0
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, off_d);
+
+            // Zero v_hi[dest] (upper 64 bits cleared per AArch64
+            // scalar FP write semantics). Uses RAX (already flushed).
+            emit_mov_imm32_zext(RAX, 0);
+            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
 

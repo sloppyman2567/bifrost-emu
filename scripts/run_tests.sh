@@ -232,6 +232,13 @@ UNIT_TESTS=(
     # accessing cpu.regs[] instead of cpu.v_lo[].
     "jit_fcvt|ctest/jit_fcvt.elf||5|ALL PASS"
 
+    # NEW (Turn 89): FRINT (FP round to integer) native JIT codegen test.
+    # Validates the fix for FRINTA/FRINTX/FRINTI being silently NOP'd
+    # (is_fp_1source decoder bug) and the IR translator passing vregs
+    # instead of FP reg indices. Tests all 7 FRINT variants (N/P/M/Z/A/X/I)
+    # for both single and double precision.
+    "jit_frint|ctest/jit_frint.elf||5|PASS"
+
     # NEW (Turn 63): SCVTF/UCVTF/FCVTZS/FCVTZU with FP source/dest —
     # the "Advanced SIMD scalar two-register miscellaneous" group (0x5E...).
     # GCC emits these for `(double)long_var` when the long is already in

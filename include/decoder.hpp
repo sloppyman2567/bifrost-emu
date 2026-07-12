@@ -323,11 +323,17 @@ inline bool is_fmov_imm(uint32_t op) {
 //   bit[21]=1, bits[14:10]=0b10000 (constant)
 // The 6-bit opcode is in bits[20:15] (= rmode:opcode in the ARM ARM).
 inline bool is_fp_1source(uint32_t op) {
-    // 1-source FP ops (FMOV/FABS/FNEG/FSQRT/FRINT*) have bit[17]=0.
-    // FCVT (between FP precisions) has bit[17]=1 — must be excluded
-    // so it falls through to the FCVT handler.
+    // BUGFIX (Turn 89): The old check `((op >> 17) & 1) == 0` excluded
+    // FCVT (bit[17]=1) but ALSO excluded FRINTA/FRINTX/FRINTI, which
+    // have bit[17]=1 AND bit[18]=1. FCVT has bit[18]=0, bit[17]=1.
+    // The correct exclusion is bits[18:17] == 0b01 (FCVT only).
+    //   bits[18:17]:
+    //     00 = FMOV/FABS/FNEG/FSQRT (opcode 0x00-0x03)
+    //     01 = FCVT                 (opcode 0x04-0x07) — EXCLUDED
+    //     10 = FRINTN/P/M/Z         (opcode 0x08-0x0B)
+    //     11 = FRINTA/X/I           (opcode 0x0C-0x0F, 0x0D unused)
     return ((op >> 21) & 1) == 1 && ((op >> 10) & 0x1F) == 0x10
-           && ((op >> 17) & 1) == 0;
+           && ((op >> 17) & 0x3) != 0x1;
 }
 
 // Extract the FP 1-source opcode (bits[20:15], 6 bits).

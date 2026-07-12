@@ -237,7 +237,7 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (168 tests defined; 124 pass + 30 skip without
+# Run the full test suite (171 tests defined; 125 pass + 30 skip without
 # --test-all because busybox-aarch64 is not downloaded, and 7 dynamic +
 # 7 dynamic-glibc real-world tests skip without a rootfs)
 make check
@@ -274,10 +274,10 @@ make check ARGS="--test-all"
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (BusyBox, iperf3, coreutils) |
 | Dynamic | 7 | Dynamically-linked binaries (musl + glibc) — need rootfs |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **163** | |
+| **Total** | **171** | |
 
 Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
-`--interactive` and not counted in the 163.
+`--interactive` and not counted in the 171.
 
 ## Configuration
 

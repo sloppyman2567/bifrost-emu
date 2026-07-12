@@ -6,7 +6,83 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased] — Turn 80 (2026-07-10)
+## [Unreleased] — Turn 89 (2026-07-12)
+
+### FRINT native JIT codegen — floor/ceil/round/trunc now execute natively
+
+The Turn 88 "fix" for FRINT (FP round to integer) fell back to
+`CALL_INTERP` because the native `roundsd`/`roundss` codegen appeared
+broken. However, that masked the real root cause. This turn fixes the
+underlying bugs so floor/ceil/round/trunc execute natively under the
+JIT instead of falling back to the interpreter.
+
+**Three bugs fixed:**
+
+1. **`is_fp_1source` decoder rejected FRINTA/FRINTX/FRINTI.** The
+   helper in `include/decoder.hpp` checked `((op >> 17) & 1) == 0` to
+   exclude FCVT (which has bit 17 = 1). But FRINTA (opcode 0x0C),
+   FRINTX (opcode 0x0E), and FRINTI (opcode 0x0F) also have bit 17 = 1
+   AND bit 18 = 1. FCVT has bit 18 = 0, bit 17 = 1. The correct
+   exclusion is `bits[18:17] == 0b01` (FCVT only). With the old check,
+   `frinta`/`frintx`/`frinti` were silently NOP'd — `rint()` returned
+   the input unchanged, `round()` returned the input unchanged. This
+   affected both the JIT and the interpreter (both use
+   `is_fp_1source`). Verified via binutils: `frintx d0, d0` = 0x1E674000
+   has bit 17 = 1, which the old check rejected.
+
+2. **FRINT opcode mapping off by one.** The interpreter and IR
+   translator mapped `0x0D → FRINTX, 0x0E → FRINTI`. The actual A64
+   opcodes (verified via binutils) are `0x0E → FRINTX, 0x0F → FRINTI`
+   (0x0D is unused). Fixed the mapping in both `interp_fp.cpp` and
+   `ir_translate_fp.cpp`. Also extended the range check from
+   `<= 0x0E` to `<= 0x0F` to include FRINTI.
+
+3. **IR translator passed VREG indices instead of FP reg indices.**
+   The FRINT translator used `load_arm_reg()` + `g_alloc.alloc()` +
+   `store_arm_reg()`, which produce/consume VREG indices (>= 33) and
+   emit `LOAD_REG`/`STORE_REG` (which access `cpu.regs[]`, the GPR
+   array). But the JIT codegen and IR executor both treat
+   `inst.dest`/`inst.src1` as ARM FP reg indices (0-31) and access
+   `V_LO_OFF + idx*8` — same convention as `FP_BINOP`/`FP_UNOP`.
+   Passing vregs caused out-of-bounds writes to `v_lo[33+]`. Fixed
+   by passing `rd`/`rn` directly (like `FP_BINOP`).
+
+**Result:** Native SSE4.1 `roundsd`/`roundss` codegen restored for
+FRINT. floor/ceil/trunc/round now execute natively under JIT instead
+of falling back to the interpreter. New test `ctest/jit_frint.c`
+(38 checks) validates all 7 FRINT variants (N/P/M/Z/A/X/I) for both
+single and double precision, plus edge cases (zero, negative zero,
+large values) and a loop test. All pass under both JIT and interpreter.
+
+**Note on `round()` vs `frinta`:** GCC -O2 emits `frinta` for C
+`round()`. `frinta` uses the FPCR rounding mode (default =
+round-to-nearest-ties-to-even). The C standard says `round()` is
+ties-away-from-zero, but GCC optimizes it to `frinta` assuming default
+FPCR. This means `round(2.5)` returns 2.0 (ties-to-even) under both
+the emulator and real AArch64 hardware. This is a GCC codegen quirk,
+not an emulator bug.
+
+**Files changed:**
+- `include/decoder.hpp` — `is_fp_1source`: exclude FCVT via
+  `bits[18:17] != 0b01` instead of `bit[17] == 0`.
+- `src/interp/interp_fp.cpp` — FRINT opcode mapping: 0x0E=FRINTX,
+  0x0F=FRINTI (was 0x0D/0x0E). Added 0x0F case, removed 0x0D.
+- `src/ir/ir_translate_fp.cpp` — FRINT: pass `rd`/`rn` directly
+  (not via load_arm_reg); fix opcode mapping; extend range to 0x0F.
+- `src/jit/jit_codegen_fp.cpp` — restored native `roundsd`/`roundss`
+  codegen (replaced Turn 88's `CALL_INTERP` fallback); added
+  `check_fp_reg_index` validation.
+- `ctest/jit_frint.c` — NEW (38 checks).
+- `scripts/run_tests.sh` — added `jit_frint` to UNIT_TESTS.
+- `TESTS.md`, `README.md` — updated test counts (168→171).
+
+**Test results:** 170/171 pass with `--test-all` + rootfs (1 skip:
+iperf3 binary not downloaded). All 125 default tests pass. No
+regressions. Build is warning-clean.
+
+---
+
+## [1.5.0.alpha] — Turn 80–88
 
 ### Code cleanup + xattr syscall fix + SHA crypto extensions + more syscalls
 
