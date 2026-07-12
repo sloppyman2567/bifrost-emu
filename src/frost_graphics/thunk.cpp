@@ -573,31 +573,213 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glActiveTexture);
     REG_GL(glClientActiveTexture);
     REG_GL(glMultiTexCoord2f);
+    // Turn 90: Modern OpenGL 2.0+ / GLES 2.0 symbols for games.
+    // Shaders.
+    REG_GL_PTR(glCreateShader, 0x00);     // returns GLuint
+    REG_GL_PTR(glShaderSource, 0x08);     // arg 3: const GLchar* const*string
+    REG_GL(glCompileShader);
+    REG_GL(glDeleteShader);
+    REG_GL_PTR(glCreateProgram, 0x00);    // returns GLuint
+    REG_GL(glAttachShader);
+    REG_GL(glDetachShader);
+    REG_GL(glLinkProgram);
+    REG_GL(glUseProgram);
+    REG_GL(glDeleteProgram);
+    REG_GL_PTR(glGetShaderiv, 0x04);      // arg 2: GLint *params
+    REG_GL_PTR(glGetProgramiv, 0x04);     // arg 2: GLint *params
+    REG_GL_PTR(glGetShaderInfoLog, 0x08); // arg 3: GLchar *infoLog
+    REG_GL_PTR(glGetProgramInfoLog, 0x08);// arg 3: GLchar *infoLog
+    REG_GL_PTR(glGetAttribLocation, 0x02);// arg 1: const GLchar *name
+    REG_GL_PTR(glGetUniformLocation, 0x02);// arg 1: const GLchar *name
+    REG_GL(glUniform1i);
+    REG_GL(glUniform1f);
+    REG_GL(glUniform2f);
+    REG_GL(glUniform3f);
+    REG_GL(glUniform4f);
+    REG_GL_PTR(glUniform1fv, 0x04);       // arg 2: const GLfloat *value
+    REG_GL_PTR(glUniformMatrix4fv, 0x20); // arg 3: const GLfloat *value
+    REG_GL(glEnableVertexAttribArray);
+    REG_GL(glDisableVertexAttribArray);
+    REG_GL_PTR(glVertexAttribPointer, 0x80); // arg 5: const void *pointer
+    // VBOs.
+    REG_GL_PTR(glGenBuffers, 0x02);       // arg 1: GLuint *buffers
+    REG_GL_PTR(glDeleteBuffers, 0x02);    // arg 1: const GLuint *buffers
+    REG_GL(glBindBuffer);
+    REG_GL_PTR(glBufferData, 0x08);       // arg 3: const void *data
+    REG_GL_PTR(glBufferSubData, 0x08);    // arg 3: const void *data
+    // FBOs.
+    REG_GL_PTR(glGenFramebuffers, 0x02);
+    REG_GL_PTR(glDeleteFramebuffers, 0x02);
+    REG_GL(glBindFramebuffer);
+    REG_GL(glFramebufferTexture2D);
+    REG_GL_PTR(glGenRenderbuffers, 0x02);
+    REG_GL_PTR(glDeleteRenderbuffers, 0x02);
+    REG_GL(glBindRenderbuffer);
+    REG_GL(glRenderbufferStorage);
+    REG_GL(glFramebufferRenderbuffer);
+    REG_GL(glCheckFramebufferStatus);
+    // Textures.
+    REG_GL(glGenerateMipmap);
+    REG_GL(glActiveTexture);
+    REG_GL(glTexImage2D);
+    REG_GL(glTexSubImage2D);
+    REG_GL(glTexParameteri);
+    REG_GL(glTexParameterf);
+    REG_GL_PTR(glCompressedTexImage2D, 0x80); // arg 8: const void *data
+    // Drawing.
+    REG_GL(glDrawArrays);
+    REG_GL_PTR(glDrawElements, 0x10);     // arg 4: const void *indices
+    // Blending.
+    REG_GL(glBlendFunc);
+    REG_GL(glBlendFuncSeparate);
+    REG_GL(glBlendEquation);
+    REG_GL(glBlendEquationSeparate);
+    REG_GL(glColorMask);
+    // Depth/Stencil.
+    REG_GL(glDepthFunc);
+    REG_GL(glDepthMask);
+    REG_GL(glStencilFunc);
+    REG_GL(glStencilOp);
+    REG_GL(glStencilMask);
+    // Misc.
+    REG_GL(glClearDepthf);
+    REG_GL(glPixelStorei);
+    REG_GL(glFinish);
+    REG_GL(glFlush);
+    REG_GL(glEnable);
+    REG_GL(glDisable);
+    REG_GL(glIsEnabled);
+    REG_GL(glViewport);
+    REG_GL(glScissor);
+    REG_GL(glClearColor);
+    REG_GL(glClear);
+    REG_GL(glGetError);
+    REG_GL_PTR(glGetString, 0x00);
+    REG_GL_PTR(glGetIntegerv, 0x02);
+    REG_GL(glHint);
+    REG_GL(glFrontFace);
+    REG_GL(glCullFace);
+    REG_GL(glLineWidth);
+    REG_GL(glPolygonOffset);
+    REG_GL(glSampleCoverage);
 #undef REG_GL
 
     // ── libGLESv2.so / libGLESv2.so.2 ─────────────────────────────
-    // GLESv2 shares many entry points with libGL. We register the
-    // subset that's identical in both APIs (glClear, glClearColor,
-    // glFlush, glGetError, glEnable, glDisable, glViewport).
+    // Turn 90: Expanded from 7 to 60+ GLES2 symbols for game support.
+    // GLESv2 shares most entry points with OpenGL 2.0+ (no fixed-function).
     const char* gles_libs[] = {"libGLESv2.so", "libGLESv2.so.2"};
 #if defined(BIFROST_THUNK_HAVE_GL)
     #define REG_GLES(name) do { \
         void* p = dlsym(RTLD_DEFAULT, #name); \
         for (const char* L : gles_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_GLES_PTR(name, ptrs) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gles_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
 #else
     #define REG_GLES(name) do { \
         for (const char* L : gles_libs) register_function_(L, #name, nullptr); \
     } while(0)
+    #define REG_GLES_PTR(name, ptrs) do { \
+        for (const char* L : gles_libs) register_function_(L, #name, nullptr, ptrs); \
+    } while(0)
 #endif
+    // Core rendering.
     REG_GLES(glClear);
     REG_GLES(glClearColor);
+    REG_GLES(glClearDepthf);
+    REG_GLES(glClearStencil);
     REG_GLES(glFlush);
+    REG_GLES(glFinish);
     REG_GLES(glGetError);
     REG_GLES(glEnable);
     REG_GLES(glDisable);
+    REG_GLES(glIsEnabled);
     REG_GLES(glViewport);
+    REG_GLES(glScissor);
+    REG_GLES(glHint);
+    REG_GLES(glFrontFace);
+    REG_GLES(glCullFace);
+    REG_GLES(glLineWidth);
+    REG_GLES(glPolygonOffset);
+    REG_GLES(glPixelStorei);
+    // Shaders.
+    REG_GLES(glCreateShader);
+    REG_GLES_PTR(glShaderSource, 0x08);
+    REG_GLES(glCompileShader);
+    REG_GLES(glDeleteShader);
+    REG_GLES(glCreateProgram);
+    REG_GLES(glAttachShader);
+    REG_GLES(glDetachShader);
+    REG_GLES(glLinkProgram);
+    REG_GLES(glUseProgram);
+    REG_GLES(glDeleteProgram);
+    REG_GLES_PTR(glGetShaderiv, 0x04);
+    REG_GLES_PTR(glGetProgramiv, 0x04);
+    REG_GLES_PTR(glGetShaderInfoLog, 0x08);
+    REG_GLES_PTR(glGetProgramInfoLog, 0x08);
+    REG_GLES_PTR(glGetAttribLocation, 0x02);
+    REG_GLES_PTR(glGetUniformLocation, 0x02);
+    REG_GLES(glUniform1i);
+    REG_GLES(glUniform1f);
+    REG_GLES(glUniform2f);
+    REG_GLES(glUniform3f);
+    REG_GLES(glUniform4f);
+    REG_GLES_PTR(glUniform1fv, 0x04);
+    REG_GLES_PTR(glUniformMatrix4fv, 0x20);
+    REG_GLES(glEnableVertexAttribArray);
+    REG_GLES(glDisableVertexAttribArray);
+    REG_GLES_PTR(glVertexAttribPointer, 0x80);
+    // VBOs.
+    REG_GLES_PTR(glGenBuffers, 0x02);
+    REG_GLES_PTR(glDeleteBuffers, 0x02);
+    REG_GLES(glBindBuffer);
+    REG_GLES_PTR(glBufferData, 0x08);
+    REG_GLES_PTR(glBufferSubData, 0x08);
+    // FBOs.
+    REG_GLES_PTR(glGenFramebuffers, 0x02);
+    REG_GLES_PTR(glDeleteFramebuffers, 0x02);
+    REG_GLES(glBindFramebuffer);
+    REG_GLES(glFramebufferTexture2D);
+    REG_GLES_PTR(glGenRenderbuffers, 0x02);
+    REG_GLES_PTR(glDeleteRenderbuffers, 0x02);
+    REG_GLES(glBindRenderbuffer);
+    REG_GLES(glRenderbufferStorage);
+    REG_GLES(glFramebufferRenderbuffer);
+    REG_GLES(glCheckFramebufferStatus);
+    // Textures.
+    REG_GLES_PTR(glGenTextures, 0x02);
+    REG_GLES_PTR(glDeleteTextures, 0x02);
+    REG_GLES(glBindTexture);
+    REG_GLES(glActiveTexture);
+    REG_GLES(glGenerateMipmap);
+    REG_GLES(glTexParameteri);
+    REG_GLES(glTexParameterf);
+    REG_GLES(glTexImage2D);
+    REG_GLES(glTexSubImage2D);
+    // Drawing.
+    REG_GLES(glDrawArrays);
+    REG_GLES_PTR(glDrawElements, 0x10);
+    // Blending.
+    REG_GLES(glBlendFunc);
+    REG_GLES(glBlendFuncSeparate);
+    REG_GLES(glBlendEquation);
+    REG_GLES(glBlendEquationSeparate);
+    REG_GLES(glColorMask);
+    // Depth/Stencil.
+    REG_GLES(glDepthFunc);
+    REG_GLES(glDepthMask);
+    REG_GLES(glDepthRangef);
+    REG_GLES(glStencilFunc);
+    REG_GLES(glStencilOp);
+    REG_GLES(glStencilMask);
+    // Queries.
+    REG_GLES_PTR(glGetString, 0x00);
+    REG_GLES_PTR(glGetIntegerv, 0x02);
+    REG_GLES(glSampleCoverage);
 #undef REG_GLES
+#undef REG_GLES_PTR
 
     // ── libEGL.so / libEGL.so.1 ───────────────────────────────────
     const char* egl_libs[] = {"libEGL.so", "libEGL.so.1"};

@@ -89,7 +89,16 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_popfq();
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
-            unchainable_end_ = true;  // conditional branch
+            // Turn 90: fall-through chaining for CBZ/CBNZ.
+            chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
+            // Taken path: store PC, restore regs, ret (no chain).
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);
+            emit_mov_reg(RSI, EMU_REG);
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            emit_ret();
             return 1;
         }
 
@@ -135,7 +144,16 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_popfq();
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
-            unchainable_end_ = true;
+            // Turn 90: fall-through chaining for TBZ/TBNZ.
+            chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
+            // Taken path: store PC, restore regs, ret (no chain).
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);
+            emit_mov_reg(RSI, EMU_REG);
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            emit_ret();
             return 1;
         }
 
@@ -167,7 +185,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             }
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
 
-            // ── Fall-through path: materialize flags, set RAX = fall-through PC ──
+            // ── Fall-through (not-taken) path: materialize flags, set RAX = fall-through PC ──
             // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
             // materialize_flags_to_pstate sees the original carry flag.
             if (need_cmc_for_hi_ls) {
@@ -197,13 +215,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // dispatcher, and prologue. This is the single biggest win for
             // tight loops (e.g. bench_mips: 7.4s → 1.4s).
             //
-            // The placeholder is followed by the normal epilogue path
-            // (set RAX = target PC, store PC, restore regs, ret) as a
-            // fallback. translate_block overwrites the placeholder with
-            // the real jmp, so the fallback only runs if the slot is not
-            // patched (which never happens in practice — the slot is always
-            // patched when has_selfloop_slot_ is true).
-            //
             // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
             static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
             bool is_selfloop = (inst.imm == current_start_pc_);
@@ -216,7 +227,37 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
-            unchainable_end_ = true;  // conditional branch — runtime-dependent next PC
+
+            // Turn 90: Fall-through chaining for conditional branches.
+            //
+            // OLD: unchainable_end_ = true (both paths return to dispatcher)
+            // NEW: The fall-through (not-taken) path chains to the block at
+            //      pc+4 via the shared epilogue's chain slot. The taken path
+            //      emits its own "store PC + restore regs + ret" to return
+            //      to the dispatcher independently.
+            //
+            // This is the biggest perf win for call-heavy code (fib, qsort).
+            // Before: every conditional branch went through the C dispatcher
+            // on BOTH paths. Now: the common (not-taken) path chains directly
+            // to the next block, skipping the dispatcher. Only the taken path
+            // (typically the less-common branch, e.g., loop exit, function
+            // return) goes through the dispatcher.
+            //
+            // The taken path emits a complete epilogue (store PC, restore
+            // callee-saved regs, ret) BEFORE the shared epilogue. This
+            // duplicates ~10 instructions of epilogue code per conditional
+            // branch block, but the code size increase is negligible (<1%
+            // of the 64MB code buffer for typical programs).
+            chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
+            // Emit taken-path epilogue: store RAX to cpu.pc, restore regs, ret.
+            // This ret is NOT a chain slot — it always returns to the dispatcher.
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher)
+            emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            emit_ret();  // return to C dispatcher (no chain)
             return 1;
         }
 

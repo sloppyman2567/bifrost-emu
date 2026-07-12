@@ -90,6 +90,11 @@ enum class IROp : uint8_t {
     BR,             // pc = src1 (unconditional, register)
     BRCOND,         // if cond(imm): pc = target(imm)  (also arm_pc for fallthrough bookkeeping)
     BRCOND_FALLTHRU,// like BRCOND but fall-through branch — used for B (taken always) / BL
+    BL_CALL,        // Turn 90: BL within block — call target block, continue after return.
+                    // imm = target PC, arm_pc = BL's PC (LR = arm_pc + 4).
+                    // Does NOT end the block. Caller-saved ARM regs (x0-x18, x30)
+                    // are invalidated after the call. Callee-saved (x19-x28) survive
+                    // if cached in callee-saved host regs (R12/R13/R15).
     // Interpreter fallback (single instruction)
     CALL_INTERP,    // call interpreter for ARM instruction at arm_pc
     // Syscall (treated as block-ending side effect)

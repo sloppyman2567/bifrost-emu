@@ -103,4 +103,28 @@ void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);
 }
 
+// Turn 90: BL_CALL helper — called from JIT code to invoke a target block
+// without ending the current block. This enables BL-within-block optimization
+// where function calls don't split blocks, keeping callee-saved vregs alive.
+//
+// The helper looks up (or translates) the target block and calls its fn.
+// The target block's fn returns the next PC (which is LR = caller's pc+4
+// after the callee returns via RET). The caller's JIT block continues
+// with the next IR instruction.
+extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
+    auto* jit = emu->jit();
+    if (jit) {
+        auto fn = jit->lookup_or_translate(*emu, target_pc);
+        if (fn) {
+            // Set cpu.pc so the target block's chain/self-loop logic works.
+            cpu->pc = target_pc;
+            return fn(cpu, emu);
+        }
+    }
+    // Fallback: interpreter step at the target PC.
+    cpu->pc = target_pc;
+    emu->step(*cpu);
+    return cpu->pc;
+}
+
 } // namespace arm64emu

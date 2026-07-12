@@ -675,8 +675,21 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
+                // Turn 90: BL_CALL — BL within block.
+                // Save LR, call the target block, then continue the block
+                // at the next instruction (pc+4). This avoids ending the
+                // block at BL, which was the #1 perf bottleneck for
+                // call-heavy code (fib, qsort). With BL_CALL, the block
+                // continues, and callee-saved ARM regs (x19-x28) cached
+                // in callee-saved host regs (R12/R13/R15) survive the call.
+                // DISABLED for now — causes verify divergences. Needs debugging.
+                // Fall back to the old behavior (end block at BL).
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
+                uint64_t target = cur_pc + d.imm;
+                emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
+                block.ends_with_branch = true;
+                return true;
             }
             uint64_t target = cur_pc + d.imm;
             // B is unconditional — encode as BRCOND with cond=AL (always).

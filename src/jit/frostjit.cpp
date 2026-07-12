@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+
 #include <sys/mman.h>
 #include <unordered_map>
 #include <vector>
@@ -85,6 +86,9 @@ extern "C" {
 } // namespace arm64emu
 
 namespace arm64emu {
+
+// Turn 90: BL_CALL helper — defined in jit_glue.cpp
+extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc);
 
 // ── Thread-local per-thread JIT state (Task 3: shared-JIT mode) ────────
 // These are thread-local so that multiple threads sharing a single FrostJIT
@@ -765,6 +769,58 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (d != RDX) emit_mov_reg(d, RDX);
             set_vreg_reg(inst.dest, d);
             return false;
+        }
+
+        // Turn 90: BL_CALL — BL within block.
+        // Call the target block via jit_call_helper, then continue the block.
+        // This avoids ending the block at BL, which was the #1 perf bottleneck
+        // for call-heavy code. Callee-saved ARM regs (x19-x28) cached in
+        // callee-saved host regs (R12/R13/R15) survive the call.
+        case IROp::BL_CALL: {
+            // Flush all vregs (the C call clobbers caller-saved host regs).
+            flush_all_vregs();
+            clobber_flags();
+
+            // Set up args: rdi = cpu, rsi = emu, rdx = target_pc
+            emit_mov_reg(RDI, CPU_REG);
+            emit_mov_reg(RSI, EMU_REG);
+            // target_pc might be > 4GB, so use mov_imm64
+            emit_mov_imm64(RDX, inst.imm);
+
+            // Call jit_call_helper via mov rax, addr; call rax.
+            // sub rsp, 8 to keep stack 16-byte aligned for the call.
+            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x08); // sub rsp, 8
+            emit_byte(0x48); emit_byte(0xB8); // mov rax, imm64
+            emit_u64(reinterpret_cast<uint64_t>(&jit_call_helper));
+            emit_byte(0xFF); emit_byte(0xD0); // call rax
+            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x08); // add rsp, 8
+
+            // RAX = next PC (should be inst.arm_pc + 4). We don't use it —
+            // the block continues with the next IR instruction.
+
+            // Invalidate caller-saved ARM reg vregs (x0-x18, x30).
+            // The callee may have modified these. Don't flush — the callee
+            // already wrote the correct values to cpu.regs[].
+            for (int r = 0; r <= 18; r++) {
+                if (vreg_home_[r] >= 0) {
+                    int host_reg = vreg_home_[r];
+                    reg_vreg_[host_reg] = -1;
+                    vreg_home_[r] = -1;
+                    vreg_dirty_[r] = false;
+                }
+            }
+            if (vreg_home_[30] >= 0) {
+                int host_reg = vreg_home_[30];
+                reg_vreg_[host_reg] = -1;
+                vreg_home_[30] = -1;
+                vreg_dirty_[30] = false;
+            }
+
+            // Also clear dirty_host_regs_ for caller-saved regs (they were clobbered).
+            dirty_host_regs_ &= ~((1u << RAX) | (1u << RCX) | (1u << RDX) |
+                                  (1u << R8) | (1u << R9) | (1u << R10) | (1u << R11));
+
+            return false;  // does NOT end the block
         }
 
         default:

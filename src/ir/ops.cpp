@@ -549,6 +549,28 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             }
 
+            // Turn 90: BL_CALL — call target block, continue after return.
+            case IROp::BL_CALL: {
+                for (int j = 0; j < 31; j++) cpu.regs[j] = vregs[j];
+                cpu.sp = vregs[31];
+                // LR is already set by the preceding STORE_REG.
+                // Call the target by setting PC and stepping until RET.
+                cpu.pc = static_cast<uint64_t>(inst.imm);
+                // Run the interpreter from the target until it returns
+                // (PC = inst.arm_pc + 4, which is LR).
+                uint64_t return_pc = inst.arm_pc + 4;
+                int steps = 0;
+                while (cpu.running && cpu.pc != return_pc && steps < 1000000) {
+                    emu.step(cpu);
+                    steps++;
+                }
+                for (int j = 0; j < 31; j++) vregs[j] = cpu.regs[j];
+                vregs[31] = cpu.sp;
+                // Caller-saved regs (x0-x18) are modified by the callee.
+                // The vregs[] array is already updated from cpu.regs[].
+                break;
+            }
+
             case IROp::UDIV: {
                 uint64_t a = vregs[inst.src1], b = vregs[inst.src2];
                 if (b == 0) { vregs[inst.dest] = 0; break; }
