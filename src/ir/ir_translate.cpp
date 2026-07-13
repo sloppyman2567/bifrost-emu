@@ -683,28 +683,16 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                // Turn 92: BL_CALL — BL within block.
-                // DISABLED: translate_block during execution corrupts JIT
-                // codegen state. The jit_call_helper calls translate_and_lookup
-                // which calls translate_block, but translate_block uses
-                // member variables (code_buf_used_, vreg_home_[], etc.)
-                // that may conflict with the caller's block state.
-                // Needs save/restore of JIT codegen state around the
-                // translate_block call. Fall back to old behavior (end block).
-                if (false) {
-                    uint16_t lr = load_imm(block, cur_pc + 4);
-                    store_arm_reg(block, 30, lr);
-                    uint64_t target = cur_pc + d.imm;
-                    emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
-                    return false;
-                }
-                // Fallback: end block at BL (old behavior).
+                // Turn 93: BL_CALL — BL within block (enabled).
+                // Save LR, call target via jit_call_helper, continue block.
+                // jit_call_helper uses lookup_only (fast path) or
+                // translate_and_lookup (slow path) to call the target.
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
                 uint64_t target = cur_pc + d.imm;
-                emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
-                block.ends_with_branch = true;
-                return true;
+                emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
+                // Do NOT end the block — continue with the next instruction.
+                return false;
             }
             uint64_t target = cur_pc + d.imm;
             // B is unconditional — encode as BRCOND with cond=AL (always).

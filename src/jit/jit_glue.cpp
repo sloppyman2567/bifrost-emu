@@ -103,37 +103,29 @@ void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);
 }
 
-// Turn 92: BL_CALL helper — called from JIT code to invoke a target block
-// without ending the current block. This enables BL-within-block optimization
-// where function calls don't split blocks, keeping callee-saved vregs alive.
-//
-// The helper looks up the target block. If found, calls it directly.
-// If not found, translates it. translate_block uses JIT-internal state
-// (code_buf_used_, vreg_home_[], etc.) so we must save/restore it.
+// Turn 93: BL_CALL helper — called from JIT code to invoke a callee.
+// Runs the callee until it returns (PC = LR). This means dispatching
+// multiple blocks in a loop — the callee's first block only executes
+// part of the function. We must keep dispatching until RET sets PC=LR.
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
-    auto* jit = emu->jit();
-    if (jit) {
-        // Fast path: block already translated.
-        auto fn = jit->lookup_only(target_pc);
-        if (fn) {
-            cpu->pc = target_pc;
-            return fn(cpu, emu);
-        }
-        // Slow path: translate the target block, then call it.
-        // translate_block uses JIT-internal state, but since we're in a
-        // C function call (not JIT code), the JIT's codegen state is not
-        // active. The caller's JIT block saved its state to the CPU struct
-        // before calling us (flush_all_vregs + invalidate_all_vregs in the
-        // BL_CALL codegen). So it's safe to translate here.
-        fn = jit->translate_and_lookup(*emu, target_pc);
-        if (fn) {
-            cpu->pc = target_pc;
-            return fn(cpu, emu);
-        }
-    }
-    // Fallback: single interpreter step.
+    uint64_t return_pc = cpu->regs[30];  // LR set by BL_CALL's STORE_REG
     cpu->pc = target_pc;
-    emu->step(*cpu);
+
+    auto* jit = emu->jit();
+    int steps = 0;
+    while (cpu->running && cpu->pc != return_pc) {
+        if (jit) {
+            auto fn = jit->lookup_only(cpu->pc);
+            if (!fn) fn = jit->translate_and_lookup(*emu, cpu->pc);
+            if (fn) {
+                cpu->pc = fn(cpu, emu);
+                if (++steps > 10000000) break;
+                continue;
+            }
+        }
+        emu->step(*cpu);
+        if (++steps > 10000000) break;
+    }
     return cpu->pc;
 }
 

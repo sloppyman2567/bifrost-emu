@@ -106,6 +106,7 @@ static bool is_pure(IROp op) {
         case IROp::STORE_MEM:
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::CALL_INTERP: case IROp::SVC:
+        case IROp::BL_CALL:  // Turn 93: callee may read/write any ARM reg
         case IROp::FMOV_G2F: case IROp::FMOV_F2G:
         case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
@@ -295,7 +296,8 @@ void optimize_ir(IRBlock& block) {
                 // loads don't cross-invalidate each other's stores.
                 uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
                 last_store_to.erase(key);
-            } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
+            } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC ||
+                       inst.op == IROp::BL_CALL) {
                 last_store_to.clear();
             } else if (inst.op == IROp::ATOMIC) {
                 // ATOMIC reads cpu.regs[imm] directly — preserve preceding
@@ -661,6 +663,7 @@ void optimize_ir(IRBlock& block) {
 
             case IROp::CALL_INTERP:
             case IROp::SVC:
+            case IROp::BL_CALL:  // Turn 93: callee may modify any reg
                 // The interpreter may modify any cpu.regs[] or memory.
                 // Invalidate everything.
                 consts.clear_all();

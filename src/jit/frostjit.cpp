@@ -771,21 +771,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             return false;
         }
 
-        // Turn 90/91: BL_CALL — BL within block.
+        // Turn 93: BL_CALL — BL within block.
         // Call the target block via jit_call_helper, then continue the block.
-        // This avoids ending the block at BL, which was the #1 perf bottleneck
-        // for call-heavy code. Callee-saved ARM regs (x19-x28) cached in
-        // callee-saved host regs (R12/R13/R15) survive the call.
         case IROp::BL_CALL: {
             // Flush ALL dirty vregs to cpu.regs[]/stack BEFORE the call.
-            // The C call clobbers caller-saved host regs (RAX/RCX/RDX/R8-R11).
             flush_all_vregs();
             // Materialize host flags to pstate if valid (callee may read pstate).
             if (flags_in_host_) {
                 emit_materialize_flags(flags_from_sub_);
                 flags_in_host_ = false;
-                // emit_materialize_flags clobbers RAX/RCX/RDX. Drop their
-                // cache mappings (values were already flushed above).
                 invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             }
             // Force-evict SP (vreg 31) if dirty — the callee needs correct SP.
@@ -800,26 +794,25 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_reg(RSI, EMU_REG);
-            emit_mov_imm_to_rax(inst.imm);
-            // RDX = target_pc (mov rdx, rax)
-            emit_mov_reg(RDX, RAX);
+            emit_mov_imm64(RDX, inst.imm);  // RDX = target_pc (use imm64 for >4GB)
 
-            // Save WIN_REG (R10, caller-saved) and RAX before the call.
-            // 2 pushes → even → no alignment fixup needed from emit_call_aligned.
+            // Save WIN_REG (R10, caller-saved) before the call.
+            // emit_call_abs clobbers RAX (to load the function address),
+            // so we can't save RAX across the call. The return value
+            // (next PC) will be in RAX after the call — we must NOT
+            // overwrite it with a pop.
+            // 1 push (WIN_REG) → odd → emit_call_aligned adds alignment.
             emit_push(WIN_REG);
-            emit_push(RAX);
-            // emit_call_aligned: 2 pushes (even) → pushfq → call → popfq.
-            emit_call_aligned(&jit_call_helper, /*num_pushed=*/2);
-            emit_pop(RAX);
+            emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
+            // RAX = return value (next PC). Save it to RCX before popping WIN_REG.
+            // RCX is caller-saved and was already invalidated by the call.
+            emit_mov_reg(RCX, RAX);  // RCX = next PC
             emit_pop(WIN_REG);
-
-            // After the call, RAX = next PC (should be inst.arm_pc + 4).
-            // Store it to cpu.pc so the block continues correctly.
-            emit_store(CPU_REG, PC_OFF, RAX);
+            // Store next PC to cpu.pc.
+            emit_store(CPU_REG, PC_OFF, RCX);
 
             // Invalidate ALL cache mappings after the call.
             // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
-            // We must reload everything from cpu.regs[] to be safe.
             invalidate_all_vregs();
 
             return false;  // does NOT end the block
