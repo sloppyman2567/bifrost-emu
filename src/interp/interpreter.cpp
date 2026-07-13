@@ -621,9 +621,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         set_add_flags(cpu, a, operand, 0, width, true);
                     }
                 } else {
-                    cpu.set_flag_n(d.nzcv_field & 8);
-                    cpu.set_flag_z(d.nzcv_field & 4);
-                    cpu.set_flag_c(d.nzcv_field & 2);
+                    // Turn 94: extract individual flag bits from nzcv_field.
+                    // nzcv_field is a 4-bit value: N=bit3, Z=bit2, C=bit1, V=bit0.
+                    // The old code set_flag_n(d.nzcv_field & 8) which passed
+                    // 8 (non-zero = true) instead of 1. This corrupted the
+                    // flags, causing strlen's CCMP to produce wrong results.
+                    cpu.set_flag_n((d.nzcv_field >> 3) & 1);
+                    cpu.set_flag_z((d.nzcv_field >> 2) & 1);
+                    cpu.set_flag_c((d.nzcv_field >> 1) & 1);
                     cpu.set_flag_v(d.nzcv_field & 1);
                 }
                 return;

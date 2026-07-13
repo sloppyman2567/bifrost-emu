@@ -193,8 +193,11 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
 
-        case 198: { // socket (glibc may probe for IPC)
-            ret_err(ENOSYS);
+        case 198: { // socket(domain, type, protocol) — aarch64 198
+            // Turn 94: forward to host. Needed for curl, wget, and any
+            // network client. The host kernel creates a real socket fd.
+            int fd = ::socket(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2));
+            ret_host(fd);
             return 0;
         }
 
@@ -210,9 +213,20 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
-            // We can't marshal sockaddr from guest memory safely without
-            // knowing the family, so return -ENOSYS for now.
-            ret_err(ENOSYS);
+            // Turn 94: forward to host with guest sockaddr.
+            // Read the sockaddr from guest memory (up to 128 bytes —
+            // sockaddr_storage is 128 bytes, covers IPv4/IPv6/Unix).
+            uint8_t buf[128];
+            size_t len = static_cast<size_t>(a2);
+            if (len > sizeof(buf)) len = sizeof(buf);
+            if (a1 && len > 0) {
+                for (size_t i = 0; i < len; i++) {
+                    buf[i] = mem_.load<uint8_t>(a1 + i);
+                }
+                ret_host(::bind(static_cast<int>(a0), reinterpret_cast<struct sockaddr*>(buf), static_cast<socklen_t>(len)));
+            } else {
+                ret_err(EINVAL);
+            }
             return 0;
         }
 
@@ -227,7 +241,19 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
-            ret_err(ENOSYS);
+            // Turn 94: forward to host with guest sockaddr.
+            uint8_t buf[128];
+            size_t len = static_cast<size_t>(a2);
+            if (len > sizeof(buf)) len = sizeof(buf);
+            if (a1 && len > 0) {
+                for (size_t i = 0; i < len; i++) {
+                    buf[i] = mem_.load<uint8_t>(a1 + i);
+                }
+                int r = ::connect(static_cast<int>(a0), reinterpret_cast<struct sockaddr*>(buf), static_cast<socklen_t>(len));
+                ret_host(r);
+            } else {
+                ret_err(EINVAL);
+            }
             return 0;
         }
 

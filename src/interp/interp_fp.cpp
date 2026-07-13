@@ -433,6 +433,41 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // ── ADDP (vector) ──
+            // Turn 94: ADDP was not implemented — glibc's strlen slow path
+            // (used when the string is near a page boundary) uses ADDP to
+            // reduce CMEQ results. Without it, strlen returned wrong lengths
+            // for strings near page boundaries, breaking curl's URL parser.
+            // ADDP: 0 Q 0 01110 size 1 Rm 0 101111 Rn Rd (base 0x0E20BC00)
+            // Adds pairwise elements from Vn and Vm, placing results in Vd.
+            case 0x0E20BC00: {  // ADDP (vector), 8B/16B
+                int esize = 1;  // byte elements
+                int elems = Q ? 16 : 8;
+                uint8_t buf_n[16], buf_m[16], buf_d[16];
+                memcpy(buf_n, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_m, &cpu.v_lo[rm], 8);
+                if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                // Pairwise add: for 16B, pairs are (n[0]+n[1]), (n[2]+n[3]), ...
+                // For the two-register form, it's pairwise within the
+                // concatenation. Actually, ADDP vD.16b, vN.16b, vM.16b
+                // does: vD[i] = vN[2i] + vN[2i+1] for i=0..7,
+                //        vD[8+i] = vM[2i] + vM[2i+1] for i=0..7.
+                for (int i = 0; i < elems/2; i++) {
+                    buf_d[i] = buf_n[2*i] + buf_n[2*i+1];
+                    if (Q) buf_d[elems/2 + i] = buf_m[2*i] + buf_m[2*i+1];
+                }
+                if (!Q) {
+                    // 8B form: only 4 results from Vn, 4 from Vm
+                    for (int i = 0; i < 4; i++) {
+                        buf_d[4+i] = buf_m[2*i] + buf_m[2*i+1];
+                    }
+                }
+                memcpy(&cpu.v_lo[rd], buf_d, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], buf_d + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
             // ── ADDHN / SUBHN (vector, narrowing) ──────────────────────
             // ADDHN: 0 Q 0 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x0E204000)
             // SUBHN: 0 Q 1 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x4E204000)
