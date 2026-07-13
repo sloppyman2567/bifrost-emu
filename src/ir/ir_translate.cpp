@@ -683,19 +683,19 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                // Turn 91: BL_CALL — BL within block.
-                // DISABLED: the re-translation logic for untranslated targets
-                // has a vreg allocator state bug that causes fib to crash.
-                // BL_CALL infrastructure (IR op, JIT codegen, jit_call_helper)
-                // is all in place and works for simple cases. Needs debugging
-                // of the re-translation path. Fall back to old behavior.
-                if (false && !bl_call_disabled_) {
-                    // BL_CALL: save LR, call target, continue block.
+                // Turn 92: BL_CALL — BL within block.
+                // DISABLED: translate_block during execution corrupts JIT
+                // codegen state. The jit_call_helper calls translate_and_lookup
+                // which calls translate_block, but translate_block uses
+                // member variables (code_buf_used_, vreg_home_[], etc.)
+                // that may conflict with the caller's block state.
+                // Needs save/restore of JIT codegen state around the
+                // translate_block call. Fall back to old behavior (end block).
+                if (false) {
                     uint16_t lr = load_imm(block, cur_pc + 4);
                     store_arm_reg(block, 30, lr);
                     uint64_t target = cur_pc + d.imm;
                     emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
-                    // Do NOT end the block — continue with the next instruction.
                     return false;
                 }
                 // Fallback: end block at BL (old behavior).

@@ -306,6 +306,18 @@ void optimize_ir(IRBlock& block) {
                        inst.op == IROp::STLR_FAST) {
                 last_store_to.clear();
             }
+            // Turn 92: FMOV_G2F/FMOV_G2FHI read GPRs; FMOV_F2G/FMOV_FHI2G read FP regs.
+            // FP_I2F/FP_I2F_FIXED read GPRs (src1 = GPR reg index).
+            // These must invalidate pending GPR STORE_REGs.
+            if (inst.op == IROp::FMOV_G2F || inst.op == IROp::FMOV_G2FHI ||
+                inst.op == IROp::FP_I2F || inst.op == IROp::FP_I2F_FIXED) {
+                // Reads GPR src1. Invalidate GPR store.
+                last_store_to.erase(static_cast<uint32_t>(inst.src1) << 1);
+            }
+            if (inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G) {
+                // Reads FP reg src1, writes GPR dest. Invalidate FP store.
+                last_store_to.erase((static_cast<uint32_t>(inst.src1) << 1) | 1);
+            }
         }
     };
 
@@ -775,6 +787,19 @@ void optimize_ir(IRBlock& block) {
             } else if (inst.op == IROp::STORE_REG) {
                 // dest is the ARM64 reg index, src1 is the vreg being stored.
                 live.insert(inst.src1);
+            } else if (inst.op == IROp::FP_I2F || inst.op == IROp::FP_I2F_FIXED) {
+                // Turn 92: FP_I2F (scvtf/ucvtf) reads a GPR (src1 = GPR reg
+                // index 0-31) and writes an FP reg (dest). The GPR store
+                // must be kept, so mark src1 as live (same as LOAD_REG).
+                if (inst.src1 <= 31) live.insert(inst.src1);
+            } else if (inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED) {
+                // FP_F2I (fcvtzs/fcvtzu) reads an FP reg (src1 = FP reg index)
+                // and writes a GPR (dest). FP stores use inst.sf=1, so they
+                // have a different DSE key. No vreg to mark live here.
+            } else if (inst.op == IROp::FCVT_S2D || inst.op == IROp::FCVT_D2S ||
+                       inst.op == IROp::FP_UNOP || inst.op == IROp::FRINT) {
+                // These read and write FP regs (src1/dest are FP reg indices).
+                // No GPR vregs to mark live.
             } else {
                 // Normal op: src1 and src2 are vregs.
                 if (inst.src1) live.insert(inst.src1);

@@ -103,35 +103,37 @@ void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);
 }
 
-// Turn 90/91: BL_CALL helper — called from JIT code to invoke a target block
+// Turn 92: BL_CALL helper — called from JIT code to invoke a target block
 // without ending the current block. This enables BL-within-block optimization
 // where function calls don't split blocks, keeping callee-saved vregs alive.
 //
-// Turn 91 fix: only look up already-translated blocks (NOT translate).
-// Translating during execution corrupts the JIT's internal state
-// (code_buf_, vreg arrays, etc.) because the caller's block is still
-// being executed. If the block isn't translated yet, fall back to the
-// interpreter (run from target_pc until RET to LR).
+// The helper looks up the target block. If found, calls it directly.
+// If not found, translates it. translate_block uses JIT-internal state
+// (code_buf_used_, vreg_home_[], etc.) so we must save/restore it.
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
     auto* jit = emu->jit();
     if (jit) {
+        // Fast path: block already translated.
         auto fn = jit->lookup_only(target_pc);
         if (fn) {
-            // Set cpu.pc so the target block's chain/self-loop logic works.
+            cpu->pc = target_pc;
+            return fn(cpu, emu);
+        }
+        // Slow path: translate the target block, then call it.
+        // translate_block uses JIT-internal state, but since we're in a
+        // C function call (not JIT code), the JIT's codegen state is not
+        // active. The caller's JIT block saved its state to the CPU struct
+        // before calling us (flush_all_vregs + invalidate_all_vregs in the
+        // BL_CALL codegen). So it's safe to translate here.
+        fn = jit->translate_and_lookup(*emu, target_pc);
+        if (fn) {
             cpu->pc = target_pc;
             return fn(cpu, emu);
         }
     }
-    // Fallback: run the interpreter from target_pc until it returns
-    // (PC = LR = caller's pc+4). The caller's LR was already set by
-    // the BL_CALL IR's preceding STORE_REG.
+    // Fallback: single interpreter step.
     cpu->pc = target_pc;
-    uint64_t return_pc = cpu->regs[30];
-    int steps = 0;
-    while (cpu->running && cpu->pc != return_pc && steps < 1000000) {
-        emu->step(*cpu);
-        steps++;
-    }
+    emu->step(*cpu);
     return cpu->pc;
 }
 

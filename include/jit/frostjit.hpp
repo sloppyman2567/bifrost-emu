@@ -111,6 +111,23 @@ public:
         return nullptr;
     }
 
+    // Turn 92: translate_and_lookup — translate a block then return its fn.
+    // Used by jit_call_helper when the target isn't translated yet.
+    // Takes the exclusive lock, translates, returns fn (or nullptr for interp_only).
+    uint64_t (*translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
+        blocks_mutex_.lock();
+        auto fn = translate_block(emu, pc);
+        if (!fn) {
+            // Might be interp_only — check again.
+            auto it = blocks_.find(pc);
+            if (it != blocks_.end()) {
+                fn = it->second.fn;  // nullptr for interp_only
+            }
+        }
+        blocks_mutex_.unlock();
+        return fn;
+    }
+
     // ── Function Multi-Versioning (FMV) ─────────────────────────────
     // The JIT queries these flags at codegen time to decide which x86
     // instruction sequence to emit for hot operations. For example,
