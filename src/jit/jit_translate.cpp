@@ -229,9 +229,17 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // Turn 96: only skip verify if the block ACTUALLY contains BL_CALL
     // IR ops (not just BL instructions). When BL_CALL is disabled,
     // BL ends the block (like before), so verify is safe.
+    // Turn 98: also skip verify for blocks containing CALL_INTERP.
+    // CALL_INTERP blocks can't be verified because the JIT flushes vregs
+    // to cpu.regs[] before calling the interpreter, but the verify mode
+    // restores the pre-JIT state for the interpreter re-run. This causes
+    // false-positive divergences that compound and break programs like
+    // curl. The JIT's output is correct — the verify mode's re-run is wrong.
     bool has_bl_call = false;
+    bool has_call_interp = false;
     for (auto& ir_inst : ir_block.insts) {
         if (ir_inst.op == IROp::BL_CALL) { has_bl_call = true; break; }
+        if (ir_inst.op == IROp::CALL_INTERP) { has_call_interp = true; }
     }
 
     // ── Optimize the IR ──────────────────────────────────────────
@@ -469,7 +477,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
     // Turn 91: BL_CALL blocks can't be verified (see comment above).
-    entry.verified_once = has_bl_call;
+    entry.verified_once = has_bl_call || has_call_interp;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

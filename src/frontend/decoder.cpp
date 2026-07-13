@@ -623,6 +623,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     d.cls = InstClass::HINT;
                     return true;
                 }
+                // Turn 98: PAC instructions (PACIASP/PACIAZ/AUTIASP/AUTIAZ etc.)
+                // and BTI instructions are in the 0xD5032000-0xD5032FFF range.
+                // Without this check, they fall through to the MSR_SYS case
+                // (which matches 0xD5000000) and become CALL_INTERP in the JIT.
+                // This creates excessive CALL_INTERP blocks that break verify
+                // mode and cause false-positive divergences. PAC and BTI are
+                // NOPs in user-mode emulation (no PAC hardware support).
+                if ((inst & 0xFFFFF000) == 0xD5032000) {
+                    d.cls = InstClass::HINT;
+                    return true;
+                }
                 if ((inst & 0xFF000000) == 0xD5000000) {
                     d.sys_L    = (inst >> 21) & 1;
                     d.sys_op0  = (inst >> 19) & 0x3;
