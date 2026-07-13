@@ -684,14 +684,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
                 // Turn 93: BL_CALL — BL within block (enabled).
-                // Save LR, call target via jit_call_helper, continue block.
-                // jit_call_helper uses lookup_only (fast path) or
-                // translate_and_lookup (slow path) to call the target.
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
                 uint64_t target = cur_pc + d.imm;
                 emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
-                // Do NOT end the block — continue with the next instruction.
                 return false;
             }
             uint64_t target = cur_pc + d.imm;

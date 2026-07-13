@@ -681,8 +681,16 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
             // --- else path: cond FALSE, set pstate = nzcv ---
+            // Turn 95: do NOT set from_sub (bit 27) for the else path.
+            // The else path sets NZCV directly from the instruction's nzcv
+            // immediate — there's no subtraction, so C is NOT in SUB
+            // convention (inverted). Setting from_sub=1 would cause the
+            // flag loader to invert C, producing wrong flags. This was the
+            // root cause of curl's "Port number was not a decimal" error:
+            // CCMP's else path set C=1 (from nzcv) but from_sub=1 caused
+            // the next conditional branch to see C=0, taking the wrong path.
             uint32_t pstate_else = (static_cast<uint32_t>(nzcv) << 28);
-            if (is_sub) pstate_else |= (1U << 27);
+            // from_sub (bit 27) is NOT set — C is raw, not inverted.
             emit_mov_imm32_zext(RDX, pstate_else);
             emit_store32(CPU_REG, PSTATE_OFF, RDX);
             // Jump to end.
