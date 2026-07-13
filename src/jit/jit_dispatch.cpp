@@ -450,8 +450,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (entry.store_infos) {
             for (const auto& si : *entry.store_infos) {
                 if (saved_mem_count >= 64) break;
-                uint64_t base = (si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg];
-                uint64_t addr = base + static_cast<uint64_t>(si.offset);
+                // Turn 97: use absolute address if the base reg was modified
+                // to a known IMM within the block.
+                uint64_t addr = si.use_absolute
+                    ? si.absolute_addr
+                    : ((si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg])
+                        + static_cast<uint64_t>(si.offset);
                 uint64_t val  = 0;
                 try {
                     switch (si.width) {

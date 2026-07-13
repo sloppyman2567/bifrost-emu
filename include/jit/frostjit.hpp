@@ -421,6 +421,10 @@ private:
             uint8_t  arm_reg;   // 0..31 (or 32 for XZR — never stored, so N/A)
             int64_t  offset;    // signed displacement
             uint8_t  width;     // 1, 2, 4, or 8
+            // Turn 97: if true, use absolute_addr instead of saved.regs[arm_reg]+offset.
+            // Set when the base ARM reg was modified to a known IMM within the block.
+            bool     use_absolute = false;
+            uint64_t absolute_addr = 0;
         };
         // shared_ptr so the hot-path `entry = it->second` copy is cheap
         // (atomic refcount increment) instead of deep-copying the vector.
