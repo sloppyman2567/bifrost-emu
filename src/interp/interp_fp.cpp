@@ -412,10 +412,26 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
-            // ── BIC (vector): ... 1 1 Rn 0 0 0 1 1 0 0 0 0 0 Rm Rd ──
-            case 0x0EA01800: {
+            // ── BIC (vector): Vd = Vn & ~Vm ──
+            // Encoding: 0_Q_0_01110_01_1_Rm_000111_Rn_Rd (sub_noq=0x0E601C00)
+            // BUGFIX (Turn 99): the old case 0x0EA01800 was a typo — it
+            // never matched the actual BIC encoding (which has size=01
+            // and bits[15:10]=000111, giving sub_noq=0x0E601C00). With
+            // the wrong case, BIC was silently NOP'd, but no test caught
+            // it because GCC -O2 usually lowers vbicq to AND + NOT rather
+            // than the BIC instruction. glibc's SIMD strlen/strchr DO use
+            // BIC, so the silent NOP broke these functions in subtle ways.
+            case 0x0E601C00: {
                 cpu.v_lo[rd] = cpu.v_lo[rn] & ~cpu.v_lo[rm];
                 if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] & ~cpu.v_hi[rm];
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── ORN (vector): Vd = Vn | ~Vm ──
+            // Encoding: 0_Q_0_01110_11_1_Rm_000111_Rn_Rd (sub_noq=0x0EE01C00)
+            case 0x0EE01C00: {
+                cpu.v_lo[rd] = cpu.v_lo[rn] | ~cpu.v_lo[rm];
+                if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] | ~cpu.v_hi[rm];
                 else cpu.v_hi[rd] = 0;
                 return;
             }
@@ -430,6 +446,50 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             case 0x2E201C00: {
                 cpu.v_lo[rd] = cpu.v_lo[rn] ^ cpu.v_lo[rm];
                 if (Q) cpu.v_hi[rd] = cpu.v_hi[rn] ^ cpu.v_hi[rm];
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── BSL (vector): Vd = (Vn & Vd) | (Vm & ~Vd) ──
+            // Vd is the mask; for each bit, if Vd=1 take Vn bit, else take Vm bit.
+            // Encoding: 0_Q_1_01110_01_1_Rm_000111_Rn_Rd (sub_noq=0x2E601C00)
+            // BUGFIX (Turn 99): BSL was missing — silently NOP'd. glibc's
+            // strchr/strchrnul use BSL to combine NUL-match and char-match
+            // bitmaps. Without BSL, the function returned wrong results,
+            // breaking curl's URL parser ("URL using bad/illegal format").
+            case 0x2E601C00: {
+                uint64_t mask_lo = cpu.v_lo[rd];
+                uint64_t mask_hi = Q ? cpu.v_hi[rd] : 0;
+                cpu.v_lo[rd] = (cpu.v_lo[rn] & mask_lo) | (cpu.v_lo[rm] & ~mask_lo);
+                if (Q) cpu.v_hi[rd] = (cpu.v_hi[rn] & mask_hi) | (cpu.v_hi[rm] & ~mask_hi);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── BIT (vector): Vd = (Vn & Vm) | (Vd & ~Vm) ──
+            // Vm is the mask; for each bit, if Vm=1 take Vn bit, else keep Vd bit.
+            // Encoding: 0_Q_1_01110_10_1_Rm_000111_Rn_Rd (sub_noq=0x2EA01C00)
+            // BUGFIX (Turn 99): BIT was missing — silently NOP'd. glibc's
+            // strchr uses BIT to merge char-match bits into the NUL-match
+            // bitmap (the "Bitwise Insert if True" operation). Without BIT,
+            // strchr could not find ':' or other non-NUL chars, returning
+            // a pointer to the NUL terminator instead.
+            case 0x2EA01C00: {
+                uint64_t mask_lo = cpu.v_lo[rm];
+                uint64_t mask_hi = Q ? cpu.v_hi[rm] : 0;
+                cpu.v_lo[rd] = (cpu.v_lo[rn] & mask_lo) | (cpu.v_lo[rd] & ~mask_lo);
+                if (Q) cpu.v_hi[rd] = (cpu.v_hi[rn] & mask_hi) | (cpu.v_hi[rd] & ~mask_hi);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── BIF (vector): Vd = (Vn & ~Vm) | (Vd & Vm) ──
+            // Vm is the mask; for each bit, if Vm=0 take Vn bit, else keep Vd bit.
+            // Encoding: 0_Q_1_01110_11_1_Rm_000111_Rn_Rd (sub_noq=0x2EE01C00)
+            // BUGFIX (Turn 99): BIF was missing — silently NOP'd. BIF is the
+            // complement of BIT; used by glibc's strrchr and some strlen paths.
+            case 0x2EE01C00: {
+                uint64_t mask_lo = cpu.v_lo[rm];
+                uint64_t mask_hi = Q ? cpu.v_hi[rm] : 0;
+                cpu.v_lo[rd] = (cpu.v_lo[rn] & ~mask_lo) | (cpu.v_lo[rd] & mask_lo);
+                if (Q) cpu.v_hi[rd] = (cpu.v_hi[rn] & ~mask_hi) | (cpu.v_hi[rd] & mask_hi);
                 else cpu.v_hi[rd] = 0;
                 return;
             }
