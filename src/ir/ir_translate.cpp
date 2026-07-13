@@ -683,12 +683,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                // Turn 93: BL_CALL — BL within block (enabled).
+                // Turn 96: BL_CALL temporarily disabled for debugging.
+                if (false) {
+                    uint16_t lr = load_imm(block, cur_pc + 4);
+                    store_arm_reg(block, 30, lr);
+                    uint64_t target = cur_pc + d.imm;
+                    emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
+                    return false;
+                }
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
                 uint64_t target = cur_pc + d.imm;
-                emit(block, IROp::BL_CALL, 0, 0, 0, 0, 0, 0, target, cur_pc);
-                return false;
+                emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
+                block.ends_with_branch = true;
+                return true;
             }
             uint64_t target = cur_pc + d.imm;
             // B is unconditional — encode as BRCOND with cond=AL (always).

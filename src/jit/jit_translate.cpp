@@ -226,7 +226,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // The interpreter re-run would only do instr_count steps, missing
     // the called functions, causing false divergences. Mark as
     // verified_once to skip verify for BL_CALL blocks.
-    bool has_bl_call = (bl_call_count > 0);
+    // Turn 96: only skip verify if the block ACTUALLY contains BL_CALL
+    // IR ops (not just BL instructions). When BL_CALL is disabled,
+    // BL ends the block (like before), so verify is safe.
+    bool has_bl_call = false;
+    for (auto& ir_inst : ir_block.insts) {
+        if (ir_inst.op == IROp::BL_CALL) { has_bl_call = true; break; }
+    }
 
     // ── Optimize the IR ──────────────────────────────────────────
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
