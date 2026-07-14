@@ -159,13 +159,23 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
 
         case IROp::BRCOND: {
             if (!flags_in_host_) {
-                flush_all_vregs();
+                // Turn 102: emit_load_flags_from_pstate and
+                // emit_normalize_cf_to_sub_convention only clobber
+                // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
+                // vregs cached in R8/R9/R11/R12/R13/R15 across the flag
+                // load. This is a big win in branch-heavy code (loops with
+                // many live variables).
+                // No pushfq/popfq: the goal is to LOAD flags, and
+                // popfq would restore the pre-load (garbage) flags.
+                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+                flush_dirty_host_regs(FLAGS3);
+                flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 // Normalize CF to SUB convention so the default
                 // arm_cond_to_x86() mapping works for all conditions.
                 emit_normalize_cf_to_sub_convention();
+                invalidate_host_regs(FLAGS3);
                 flags_from_sub_ = true;  // CF is now in SUB convention
-                invalidate_all_vregs();
                 flags_in_host_ = true;
             }
             // Resolve condition code, handling carry polarity (ADD/TST vs SUB).

@@ -371,6 +371,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // Save flags, flush vregs, restore flags. CRITICAL: preserve
             // flags_in_host_ — invalidate_all_vregs would clear it, but
             // pushfq/popfq preserves the actual flags.
+            //
+            // Note: we keep the full flush_all_vregs+invalidate_all_vregs
+            // here (instead of the Turn 102 targeted variant) because the
+            // CSEL body uses load_vreg_to_reg which does NOT update the
+            // cache. If we left vregs cached in R8/R9/etc., the cache
+            // state would be inconsistent with the actual register contents
+            // after the load_vreg_to_reg calls. The full invalidate is
+            // conservative but correct.
             bool saved_fih = flags_in_host_;
             bool saved_ffs = flags_from_sub_;
             emit_pushfq();
@@ -462,9 +470,18 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // cache is empty and the subsequent memory access can't
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
+            //
+            // Turn 102: only RAX, RCX, RDX are clobbered by the bitfield
+            // codegen below (shifts, ands, mov_imm64). Use targeted
+            // flush+invalidate instead of the full flush_all_vregs+
+            // invalidate_all_vregs — this preserves vregs cached in
+            // R8/R9/R11/R12/R13/R15 across the bitfield op, eliminating
+            // redundant reloads in tight loops containing bitfield ops.
             clobber_flags();  // shifts/ands clobber RFLAGS
-            flush_all_vregs();
-            invalidate_all_vregs();
+            constexpr uint16_t BFM_CLOBBER = (1u << RAX) | (1u << RCX) | (1u << RDX);
+            flush_dirty_host_regs(BFM_CLOBBER);
+            flush_scratch_host_regs(BFM_CLOBBER);
+            invalidate_host_regs(BFM_CLOBBER);
             load_vreg_to_reg(RAX, inst.src1);
 
             // Handle common aliases efficiently:
@@ -626,7 +643,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
 
             // Ensure flags in host.
             if (!flags_in_host_) {
-                flush_all_vregs();
+                // Turn 102: emit_load_flags_from_pstate and
+                // emit_normalize_cf_to_sub_convention only clobber
+                // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
+                // vregs cached in R8/R9/R11/R12/R13/R15.
+                // No pushfq/popfq: see BRCOND comment for rationale.
+                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+                flush_dirty_host_regs(FLAGS3);
+                flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 // emit_load_flags_from_pstate sets x86 CF = ARM C XOR from_sub.
                 // Normalize to SUB convention (x86 CF = NOT ARM C) so the
@@ -638,13 +662,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // pstate divergences like jit=0x8000000 ref=0x88000000
                 // (JIT skipped the compare; interpreter did it).
                 emit_normalize_cf_to_sub_convention();
-                // Drop all cache mappings WITHOUT clearing flags_in_host_.
-                // use invalidate_all_vregs but preserve flags_in_host_.
-                {
-                    bool saved_fih3 = flags_in_host_;
-                    invalidate_all_vregs();
-                    flags_in_host_ = saved_fih3;
-                }
+                invalidate_host_regs(FLAGS3);
                 flags_in_host_ = true;
                 flags_from_sub_ = true;  // CF is now in SUB convention
             }

@@ -58,6 +58,7 @@
 #include <stdio.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/uio.h>
@@ -398,21 +399,168 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 241: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
 
         // ── recvmmsg (243) / sendmmsg (269) ───────────────────────────
-        // Vectorized socket send/recv. Forward to host for real sockets;
-        // for virtual fds the host syscall returns -EBADF naturally.
+        // Vectorized socket send/recv. Forward to host for real sockets
+        // with proper mmsghdr marshaling (Turn 102).
+        //
+        // struct mmsghdr {
+        //     struct msghdr msg_hdr;   // 56 bytes on AArch64
+        //     unsigned int   msg_len;  // 4 bytes
+        // };
+        // Total: 64 bytes per entry (56 + 4 + 4 padding).
         case 243: { // recvmmsg(sockfd, msgvec, vlen, flags, timeout)
-            // Cap vlen to prevent OOM. The host recvmmsg takes a struct
-            // mmsghdr array; we don't translate, just call the host.
             int vlen = static_cast<int>(a2);
             if (vlen < 0) { ret_err(EINVAL); return 0; }
             if (vlen > 64) vlen = 64;
-            // We don't translate the mmsghdr array (variable layout).
-            // Return -ENOSYS so callers fall back to recvmsg in a loop.
-            ret_host(static_cast<int64_t>(-ENOSYS));
+            // Resolve guest fd to host fd via FdTable.
+            auto node = emu.fds().get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            // Allocate host mmsghdr array.
+            std::vector<struct mmsghdr> mmsg(vlen);
+            std::vector<std::vector<iovec>> iovs_per(vlen);
+            std::vector<std::vector<std::vector<uint8_t>>> bufs_per(vlen);
+            std::vector<std::vector<uint8_t>> name_per(vlen);
+            std::vector<std::vector<uint8_t>> ctrl_per(vlen);
+            // Marshal each guest mmsghdr into host mmsghdr.
+            for (int i = 0; i < vlen; i++) {
+                uint64_t entry = a1 + static_cast<uint64_t>(i) * 64;
+                uint64_t msg_name = mem_.load<uint64_t>(entry);
+                uint32_t msg_namelen = mem_.load<uint32_t>(entry + 8);
+                uint64_t msg_iov = mem_.load<uint64_t>(entry + 16);
+                uint64_t msg_iovlen = mem_.load<uint64_t>(entry + 24);
+                uint64_t msg_control = mem_.load<uint64_t>(entry + 32);
+                uint32_t msg_controllen = mem_.load<uint32_t>(entry + 40);
+                if (msg_iovlen > 1024) msg_iovlen = 1024;
+                iovs_per[i].resize(msg_iovlen);
+                bufs_per[i].resize(msg_iovlen);
+                for (uint64_t j = 0; j < msg_iovlen; j++) {
+                    uint64_t len = mem_.load<uint64_t>(msg_iov + j * 16 + 8);
+                    if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+                    bufs_per[i][j].resize(len);
+                    iovs_per[i][j].iov_base = bufs_per[i][j].data();
+                    iovs_per[i][j].iov_len = len;
+                }
+                if (msg_name && msg_namelen) {
+                    name_per[i].resize(msg_namelen);
+                }
+                if (msg_control && msg_controllen) {
+                    if (msg_controllen > 4096) msg_controllen = 4096;
+                    ctrl_per[i].resize(msg_controllen);
+                }
+                memset(&mmsg[i].msg_hdr, 0, sizeof(struct msghdr));
+                mmsg[i].msg_hdr.msg_name = name_per[i].empty() ? nullptr : name_per[i].data();
+                mmsg[i].msg_hdr.msg_namelen = msg_namelen;
+                mmsg[i].msg_hdr.msg_iov = iovs_per[i].data();
+                mmsg[i].msg_hdr.msg_iovlen = msg_iovlen;
+                mmsg[i].msg_hdr.msg_control = ctrl_per[i].empty() ? nullptr : ctrl_per[i].data();
+                mmsg[i].msg_hdr.msg_controllen = msg_controllen;
+                mmsg[i].msg_len = 0;
+            }
+            // Optional timeout (timespec).
+            struct timespec ts;
+            struct timespec* tsp = nullptr;
+            if (a4) {
+                ts.tv_sec = static_cast<time_t>(mem_.load<uint64_t>(a4));
+                ts.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a4 + 8));
+                tsp = &ts;
+            }
+            int r = ::recvmmsg(hfd, mmsg.data(), vlen, static_cast<int>(a3), tsp);
+            if (r < 0) { ret_errno(); return 0; }
+            // Write back received data and metadata to guest mmsghdr array.
+            for (int i = 0; i < r; i++) {
+                uint64_t entry = a1 + static_cast<uint64_t>(i) * 64;
+                uint64_t msg_iov = mem_.load<uint64_t>(entry + 16);
+                uint64_t msg_iovlen = mem_.load<uint64_t>(entry + 24);
+                for (uint64_t j = 0; j < msg_iovlen; j++) {
+                    uint64_t base = mem_.load<uint64_t>(msg_iov + j * 16);
+                    if (bufs_per[i][j].size() > 0) {
+                        mem_.write(base, bufs_per[i][j].data(), bufs_per[i][j].size());
+                    }
+                }
+                // Write msg_name back.
+                uint32_t orig_namelen = mem_.load<uint32_t>(entry + 8);
+                socklen_t actual_name = static_cast<socklen_t>(mmsg[i].msg_hdr.msg_namelen);
+                if (actual_name > orig_namelen) actual_name = orig_namelen;
+                uint64_t msg_name = mem_.load<uint64_t>(entry);
+                if (msg_name && actual_name > 0) {
+                    mem_.write(msg_name, name_per[i].data(), actual_name);
+                }
+                mem_.store<uint32_t>(entry + 8, actual_name);
+                // Write msg_controllen back.
+                uint32_t orig_ctrllen = mem_.load<uint32_t>(entry + 40);
+                socklen_t actual_ctrl = static_cast<socklen_t>(mmsg[i].msg_hdr.msg_controllen);
+                if (actual_ctrl > orig_ctrllen) actual_ctrl = orig_ctrllen;
+                uint64_t msg_control = mem_.load<uint64_t>(entry + 32);
+                if (msg_control && actual_ctrl > 0) {
+                    mem_.write(msg_control, ctrl_per[i].data(), actual_ctrl);
+                }
+                mem_.store<uint32_t>(entry + 40, actual_ctrl);
+                // Write msg_flags.
+                mem_.store<uint32_t>(entry + 44, static_cast<uint32_t>(mmsg[i].msg_hdr.msg_flags));
+                // Write msg_len.
+                mem_.store<uint32_t>(entry + 56, mmsg[i].msg_len);
+            }
+            ret_host(static_cast<uint64_t>(r));
             return 0;
         }
         case 269: { // sendmmsg(sockfd, msgvec, vlen, flags)
-            ret_host(static_cast<int64_t>(-ENOSYS));
+            int vlen = static_cast<int>(a2);
+            if (vlen < 0) { ret_err(EINVAL); return 0; }
+            if (vlen > 64) vlen = 64;
+            auto node = emu.fds().get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            std::vector<struct mmsghdr> mmsg(vlen);
+            std::vector<std::vector<iovec>> iovs_per(vlen);
+            std::vector<std::vector<std::vector<uint8_t>>> bufs_per(vlen);
+            std::vector<std::vector<uint8_t>> name_per(vlen);
+            std::vector<std::vector<uint8_t>> ctrl_per(vlen);
+            for (int i = 0; i < vlen; i++) {
+                uint64_t entry = a1 + static_cast<uint64_t>(i) * 64;
+                uint64_t msg_name = mem_.load<uint64_t>(entry);
+                uint32_t msg_namelen = mem_.load<uint32_t>(entry + 8);
+                uint64_t msg_iov = mem_.load<uint64_t>(entry + 16);
+                uint64_t msg_iovlen = mem_.load<uint64_t>(entry + 24);
+                uint64_t msg_control = mem_.load<uint64_t>(entry + 32);
+                uint32_t msg_controllen = mem_.load<uint32_t>(entry + 40);
+                if (msg_iovlen > 1024) msg_iovlen = 1024;
+                iovs_per[i].resize(msg_iovlen);
+                bufs_per[i].resize(msg_iovlen);
+                for (uint64_t j = 0; j < msg_iovlen; j++) {
+                    uint64_t base = mem_.load<uint64_t>(msg_iov + j * 16);
+                    uint64_t len = mem_.load<uint64_t>(msg_iov + j * 16 + 8);
+                    if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+                    bufs_per[i][j].resize(len);
+                    if (len) mem_.read(base, bufs_per[i][j].data(), len);
+                    iovs_per[i][j].iov_base = bufs_per[i][j].data();
+                    iovs_per[i][j].iov_len = len;
+                }
+                if (msg_name && msg_namelen) {
+                    name_per[i].resize(msg_namelen);
+                    mem_.read(msg_name, name_per[i].data(), msg_namelen);
+                }
+                if (msg_control && msg_controllen) {
+                    if (msg_controllen > 4096) msg_controllen = 4096;
+                    ctrl_per[i].resize(msg_controllen);
+                    mem_.read(msg_control, ctrl_per[i].data(), msg_controllen);
+                }
+                memset(&mmsg[i].msg_hdr, 0, sizeof(struct msghdr));
+                mmsg[i].msg_hdr.msg_name = name_per[i].empty() ? nullptr : name_per[i].data();
+                mmsg[i].msg_hdr.msg_namelen = msg_namelen;
+                mmsg[i].msg_hdr.msg_iov = iovs_per[i].data();
+                mmsg[i].msg_hdr.msg_iovlen = msg_iovlen;
+                mmsg[i].msg_hdr.msg_control = ctrl_per[i].empty() ? nullptr : ctrl_per[i].data();
+                mmsg[i].msg_hdr.msg_controllen = msg_controllen;
+                mmsg[i].msg_len = 0;
+            }
+            int r = ::sendmmsg(hfd, mmsg.data(), vlen, static_cast<int>(a3));
+            if (r < 0) { ret_errno(); return 0; }
+            // Write back msg_len for each sent message.
+            for (int i = 0; i < r; i++) {
+                uint64_t entry = a1 + static_cast<uint64_t>(i) * 64;
+                mem_.store<uint32_t>(entry + 56, mmsg[i].msg_len);
+            }
+            ret_host(static_cast<uint64_t>(r));
             return 0;
         }
 

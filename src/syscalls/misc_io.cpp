@@ -10,6 +10,17 @@
 //
 // NOTE: this file is NOT a friend of Emulator (unlike misc.cpp). It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
+//
+// v1.5.0.alpha (Turn 102): network handling refinement.
+//   - All socket/pipe/eventfd/timerfd/epoll host fds are now wrapped in
+//     HostNode and registered in the FdTable. This fixes a long-standing
+//     bug where close() on a socket fd returned -EBADF (because the fd
+//     wasn't in FdTable), leaking the host fd.
+//   - Network syscalls (bind/connect/listen/accept/...) now resolve the
+//     guest fd via FdTable to get the host fd, so guest fds and host fds
+//     are properly decoupled.
+//   - accept() now properly returns the peer address (was passing NULL).
+//   - epoll_pwait now honors the sigmask (instead of ignoring it).
 #include "core/emulator.h"
 #include "core/memory.h"
 #include "core/cpu.h"
@@ -17,6 +28,7 @@
 #include "yggdrasil/host_node.hpp"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <vector>
 #include <sys/epoll.h>
@@ -25,8 +37,68 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
+#include <unistd.h>
 
 namespace arm64emu {
+
+// ── Guest-fd → host-fd resolution for socket-style fds ──────────────────
+// Returns the host fd backing a guest fd, or -1 if the fd is invalid or
+// not backed by a host fd. This is the network-syscall analogue of
+// fs.cpp's resolve_dirfd — we look up the guest fd in the FdTable and
+// return the underlying host fd. For fds that were never registered in
+// the FdTable (e.g. stdin/stdout/stderr which are HostNode-wrapped but
+// owned by StdioNode, or fds created before this Turn 102 refactor that
+// bypassed the FdTable), we fall back to using the guest fd as the host
+// fd. This preserves backward compatibility for any code path that
+// somehow obtained a raw host fd.
+static inline int resolve_sock_fd(Emulator& emu, uint64_t guest_fd) {
+    int gfd = static_cast<int>(static_cast<int64_t>(guest_fd));
+    if (gfd < 0) return -1;
+    auto node = emu.fds().get(gfd);
+    if (node) {
+        int hfd = node->host_fd();
+        return hfd;  // may be -1 for virtual nodes
+    }
+    // Not in FdTable — fall back to using the guest fd as the host fd.
+    // This preserves backward compatibility for pre-Turn-102 callers that
+    // somehow obtained a raw host fd (e.g. via dup of stdin/stdout).
+    return gfd;
+}
+
+// Helper: register a freshly-created host fd in the FdTable and return
+// the guest fd. Uses O_RDWR as the default flags (sockets don't have a
+// meaningful "flags" field at creation time — they're full-duplex).
+static inline int register_host_fd(Emulator& emu, int hfd, int flags = O_RDWR) {
+    if (hfd < 0) return hfd;
+    return emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, flags));
+}
+
+// Helper: marshal a sockaddr from guest memory into a stack buffer.
+// Returns the actual length to pass to the host syscall (clamped to
+// sizeof(sockaddr_storage)) or 0 if no addr was provided.
+static inline socklen_t marshal_sockaddr_in(Memory& mem, uint64_t guest_addr,
+                                            uint64_t guest_len,
+                                            struct sockaddr_storage* ss) {
+    if (!guest_addr || !guest_len) return 0;
+    socklen_t len = static_cast<socklen_t>(guest_len);
+    if (len > sizeof(*ss)) len = sizeof(*ss);
+    mem.read(guest_addr, ss, len);
+    return len;
+}
+
+// Helper: write a host sockaddr back into guest memory.
+// Reads the guest's addrlen pointer, clamps it to the actual length,
+// writes the sockaddr, and writes back the (possibly clamped) length.
+static inline void marshal_sockaddr_out(Memory& mem, uint64_t guest_addr,
+                                        uint64_t guest_len_ptr,
+                                        const struct sockaddr_storage* ss,
+                                        socklen_t actual_len) {
+    if (!guest_addr || !guest_len_ptr) return;
+    socklen_t guest_len = static_cast<socklen_t>(mem.load<uint32_t>(guest_len_ptr));
+    if (guest_len > actual_len) guest_len = actual_len;
+    mem.write(guest_addr, ss, guest_len);
+    mem.store<uint32_t>(guest_len_ptr, guest_len);
+}
 
 int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
@@ -36,12 +108,18 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
 
     switch (num) {
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
-            ret_host(::eventfd((unsigned int)a0, static_cast<int>(a1)));
+            int hfd = ::eventfd(static_cast<unsigned int>(a0), static_cast<int>(a1));
+            if (hfd < 0) { ret_errno(); return 0; }
+            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            ret_host(gfd);
             return 0;
         }
 
         case 20: { // epoll_create1(flags) — aarch64 syscall 20
-            ret_host(::epoll_create1(static_cast<int>(a0)));
+            int hfd = ::epoll_create1(static_cast<int>(a0));
+            if (hfd < 0) { ret_errno(); return 0; }
+            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            ret_host(gfd);
             return 0;
         }
 
@@ -49,25 +127,53 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             // struct epoll_event: { uint32_t events; epoll_data_t data; }
             // epoll_data_t is a union with uint64_t as the largest member.
             // On aarch64 Linux this is packed to 12 bytes total.
+            int epfd = resolve_sock_fd(emu, a0);
+            int fd   = resolve_sock_fd(emu, a2);
             struct epoll_event ev;
             ev.events = mem_.load<uint32_t>(a3);
             ev.data.u64 = mem_.load<uint64_t>(a3 + 4);
-            ret_host(::epoll_ctl(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2), &ev));
+            int r = ::epoll_ctl(epfd, static_cast<int>(a1), fd, &ev);
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
             return 0;
         }
 
         case 22: { // epoll_pwait(epfd, events, maxevents, timeout, sigmask)
-            // Real AArch64 syscall 22. We forward to epoll_wait and ignore
-            // the sigmask (guest signal delivery isn't supported anyway).
+            // Real AArch64 syscall 22. We forward to epoll_wait and honor
+            // the sigmask by temporarily masking the guest's signals
+            // around the host epoll_wait (so a guest signal arrives only
+            // after epoll_wait returns, matching real kernel semantics).
+            int epfd = resolve_sock_fd(emu, a0);
             struct epoll_event evs[256];
             int maxev = static_cast<int>(a2);
             if (maxev > 256) maxev = 256;
-            int n = ::epoll_wait(static_cast<int>(a0), evs, maxev, static_cast<int>(a3));
+            if (maxev < 0) maxev = 0;
+
+            // Save current sigmask, apply guest sigmask if provided.
+            sigset_t guestmask;
+            bool have_mask = false;
+            if (a4) {
+                memset(&guestmask, 0, sizeof(guestmask));
+                try {
+                    mem_.read(a4, &guestmask, sizeof(uint64_t) * 2);
+                    have_mask = true;
+                } catch (...) { /* ignore — proceed without mask */ }
+            }
+            int n;
+            if (have_mask) {
+                n = ::epoll_pwait(epfd, evs, maxev, static_cast<int>(a3),
+                                  &guestmask);
+            } else {
+                n = ::epoll_wait(epfd, evs, maxev, static_cast<int>(a3));
+            }
+            if (n < 0) { ret_errno(); return 0; }
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
                     uint64_t p = a1 + static_cast<uint64_t>(i) * 12;
-                    mem_.store<uint32_t>(p, evs[i].events);
-                    mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                    try {
+                        mem_.store<uint32_t>(p, evs[i].events);
+                        mem_.store<uint64_t>(p + 4, evs[i].data.u64);
+                    } catch (...) { ret_err(EFAULT); return 0; }
                 }
             }
             ret_host(n);
@@ -157,19 +263,24 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
-            ret_host(::timerfd_create(static_cast<int>(a0), static_cast<int>(a1)));
+            int hfd = ::timerfd_create(static_cast<int>(a0), static_cast<int>(a1));
+            if (hfd < 0) { ret_errno(); return 0; }
+            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            ret_host(gfd);
             return 0;
         }
 
         case 86: { // timerfd_settime(fd, flags, new, old) — aarch64 syscall 86
             if (!a2) { ret_err(EFAULT); return 0; }
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             struct itimerspec newv;
             struct itimerspec oldv;
             newv.it_interval.tv_sec  = static_cast<time_t>(mem_.load<uint64_t>(a2));
             newv.it_interval.tv_nsec = static_cast<long>(mem_.load<uint64_t>(a2 + 8));
             newv.it_value.tv_sec     = static_cast<time_t>(mem_.load<uint64_t>(a2 + 16));
             newv.it_value.tv_nsec    = static_cast<long>(mem_.load<uint64_t>(a2 + 24));
-            int r = ::timerfd_settime(static_cast<int>(a0), static_cast<int>(a1), &newv, a3 ? &oldv : nullptr);
+            int r = ::timerfd_settime(hfd, static_cast<int>(a1), &newv, a3 ? &oldv : nullptr);
             if (r == 0 && a3) {
                 mem_.store<uint64_t>(a3, static_cast<uint64_t>(oldv.it_interval.tv_sec));
                 mem_.store<uint64_t>(a3 + 8, static_cast<uint64_t>(oldv.it_interval.tv_nsec));
@@ -181,8 +292,10 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 87: { // timerfd_gettime(fd, curr) — aarch64 syscall 87
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             struct itimerspec cur;
-            int r = ::timerfd_gettime(static_cast<int>(a0), &cur);
+            int r = ::timerfd_gettime(hfd, &cur);
             if (r == 0 && a1) {
                 mem_.store<uint64_t>(a1, static_cast<uint64_t>(cur.it_interval.tv_sec));
                 mem_.store<uint64_t>(a1 + 8, static_cast<uint64_t>(cur.it_interval.tv_nsec));
@@ -194,66 +307,84 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
         }
 
         case 198: { // socket(domain, type, protocol) — aarch64 198
-            // Turn 94: forward to host. Needed for curl, wget, and any
-            // network client. The host kernel creates a real socket fd.
-            int fd = ::socket(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2));
-            ret_host(fd);
+            // Forward to host. The host kernel creates a real socket fd
+            // which we wrap in HostNode + FdTable.allocate so that:
+            //   - close(guest_fd) actually closes the host fd
+            //   - getsockopt/setsockopt/etc. can resolve the host fd
+            //   - read()/write() on the socket work via fs.cpp's path
+            int hfd = ::socket(static_cast<int>(a0), static_cast<int>(a1),
+                               static_cast<int>(a2));
+            if (hfd < 0) { ret_errno(); return 0; }
+            int gfd = register_host_fd(emu, hfd, O_RDWR);
+            ret_host(gfd);
             return 0;
         }
 
         case 199: { // socketpair(domain, type, protocol, sv) — aarch64 199
             int fds[2];
-            int r = ::socketpair(static_cast<int>(a0), static_cast<int>(a1), static_cast<int>(a2), fds);
-            if (r == 0) {
-                mem_.store<int>(a3, fds[0]);
-                mem_.store<int>(a3 + 4, fds[1]);
-            }
-            ret_host(r);
+            int r = ::socketpair(static_cast<int>(a0), static_cast<int>(a1),
+                                 static_cast<int>(a2), fds);
+            if (r < 0) { ret_errno(); return 0; }
+            // Register both ends in the FdTable.
+            int g0 = register_host_fd(emu, fds[0], O_RDWR);
+            int g1 = register_host_fd(emu, fds[1], O_RDWR);
+            mem_.store<int>(a3, g0);
+            mem_.store<int>(a3 + 4, g1);
+            ret_host(0);
             return 0;
         }
 
         case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
-            // Turn 94: forward to host with guest sockaddr.
-            // Read the sockaddr from guest memory (up to 128 bytes —
-            // sockaddr_storage is 128 bytes, covers IPv4/IPv6/Unix).
-            uint8_t buf[128];
-            size_t len = static_cast<size_t>(a2);
-            if (len > sizeof(buf)) len = sizeof(buf);
-            if (a1 && len > 0) {
-                for (size_t i = 0; i < len; i++) {
-                    buf[i] = mem_.load<uint8_t>(a1 + i);
-                }
-                ret_host(::bind(static_cast<int>(a0), reinterpret_cast<struct sockaddr*>(buf), static_cast<socklen_t>(len)));
-            } else {
-                ret_err(EINVAL);
-            }
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            struct sockaddr_storage ss;
+            socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
+            if (len == 0) { ret_err(EINVAL); return 0; }
+            int r = ::bind(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
             return 0;
         }
 
         case 201: { // listen(sockfd, backlog) — aarch64 201
-            ret_host(::listen(static_cast<int>(a0), static_cast<int>(a1)));
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            int r = ::listen(hfd, static_cast<int>(a1));
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
             return 0;
         }
 
         case 202: { // accept(sockfd, addr, addrlen) — aarch64 202
-            ret_host(::accept(static_cast<int>(a0), nullptr, nullptr));
+            // BUGFIX (Turn 102): was calling ::accept with NULL addr/addrlen,
+            // which discarded the peer address. Real accept(2) fills in the
+            // peer address (when addr != NULL) and writes the actual length
+            // back to *addrlen. Callers that pass NULL get NULL behavior.
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            struct sockaddr_storage ss;
+            socklen_t sslen = sizeof(ss);
+            int new_hfd = ::accept(hfd, reinterpret_cast<struct sockaddr*>(&ss),
+                                   &sslen);
+            if (new_hfd < 0) { ret_errno(); return 0; }
+            // Write peer address back to guest memory if requested.
+            if (a1 && a2) {
+                marshal_sockaddr_out(mem_, a1, a2, &ss, sslen);
+            }
+            int gfd = register_host_fd(emu, new_hfd, O_RDWR);
+            ret_host(gfd);
             return 0;
         }
 
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
-            // Turn 94: forward to host with guest sockaddr.
-            uint8_t buf[128];
-            size_t len = static_cast<size_t>(a2);
-            if (len > sizeof(buf)) len = sizeof(buf);
-            if (a1 && len > 0) {
-                for (size_t i = 0; i < len; i++) {
-                    buf[i] = mem_.load<uint8_t>(a1 + i);
-                }
-                int r = ::connect(static_cast<int>(a0), reinterpret_cast<struct sockaddr*>(buf), static_cast<socklen_t>(len));
-                ret_host(r);
-            } else {
-                ret_err(EINVAL);
-            }
+            int hfd = resolve_sock_fd(emu, a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            struct sockaddr_storage ss;
+            socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
+            if (len == 0) { ret_err(EINVAL); return 0; }
+            int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(0);
             return 0;
         }
 
@@ -271,11 +402,10 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 } catch (...) { ret_err(EFAULT); return 0; }
             }
-            int hfd = ::syscall(SYS_memfd_create, name.c_str(),
-                                static_cast<unsigned int>(a1));
+            int hfd = static_cast<int>(::syscall(SYS_memfd_create, name.c_str(),
+                                static_cast<unsigned int>(a1)));
             if (hfd < 0) { ret_errno(); return 0; }
-            // Register in FdTable.
-            int gfd = emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, O_RDWR));
+            int gfd = register_host_fd(emu, hfd, O_RDWR);
             ret_host(gfd);
             return 0;
         }

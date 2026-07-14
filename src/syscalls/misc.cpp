@@ -45,6 +45,7 @@
 #include "frost/audio_thunk.hpp"    // v1.5.0.alpha
 #include "frost/display_thunk.hpp"  // v1.5.0.alpha
 #include "syscalls/syscalls.h"
+#include "yggdrasil/host_node.hpp"  // HostNode (for socket fd registration)
 
 #include <errno.h>
 #include <fcntl.h>
@@ -175,13 +176,17 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // was dead — fs.cpp's utimensat handler always won the dispatch
         // order, so this case never ran. Moved to the correct number.
         case 242: { // accept4(sockfd, addr, addrlen, flags) — AArch64 242
+            // Resolve guest fd to host fd via FdTable (Turn 102).
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             // Marshal sockaddr from host to guest memory.
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
-            int fd = ::accept4(static_cast<int>(a0),
+            int new_hfd = ::accept4(hfd,
                                reinterpret_cast<struct sockaddr*>(&ss), &sslen,
                                static_cast<int>(a3));
-            if (fd < 0) { ret_errno(); return 0; }
+            if (new_hfd < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
                 // Read guest addrlen, clamp to our result.
                 try {
@@ -191,12 +196,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     mem_.store<uint32_t>(a2, guest_len);
                 } catch (...) {
                     // Bad addr/addrlen pointer — close fd, return EFAULT.
-                    ::close(fd);
+                    ::close(new_hfd);
                     ret_err(EFAULT);
                     return 0;
                 }
             }
-            ret_host(static_cast<uint64_t>(fd));
+            // Register the new socket fd in the FdTable (Turn 102).
+            int gfd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(new_hfd, O_RDWR));
+            ret_host(static_cast<uint64_t>(gfd));
             return 0;
         }
 
@@ -219,9 +226,12 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // its correct number, and the three previously-missing handlers
         // (setsockopt, getsockopt, shutdown) are added.
         case 204: { // getsockname(sockfd, addr, addrlen)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
-            int r = ::getsockname(static_cast<int>(a0),
+            int r = ::getsockname(hfd,
                                   reinterpret_cast<struct sockaddr*>(&ss), &sslen);
             if (r < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
@@ -236,9 +246,12 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── getpeername (syscall 205) ────────────────────────────────
         case 205: { // getpeername(sockfd, addr, addrlen)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             struct sockaddr_storage ss;
             socklen_t sslen = sizeof(ss);
-            int r = ::getpeername(static_cast<int>(a0),
+            int r = ::getpeername(hfd,
                                   reinterpret_cast<struct sockaddr*>(&ss), &sslen);
             if (r < 0) { ret_errno(); return 0; }
             if (a1 && a2) {
@@ -253,6 +266,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── sendto (syscall 206) ─────────────────────────────────────
         case 206: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             // Cap buffer size to prevent bad_alloc on absurd lengths.
             size_t len = a2;
             if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
@@ -267,7 +283,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.read(a4, &dest_ss, addrlen);
                 dest_ptr = reinterpret_cast<struct sockaddr*>(&dest_ss);
             }
-            ssize_t r = ::sendto(static_cast<int>(a0), buf.data(), len,
+            ssize_t r = ::sendto(hfd, buf.data(), len,
                                  static_cast<int>(a3), dest_ptr,
                                  static_cast<socklen_t>(a5));
             if (r < 0) { ret_errno(); return 0; }
@@ -277,12 +293,15 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── recvfrom (syscall 207) ───────────────────────────────────
         case 207: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             size_t len = a2;
             if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
             std::vector<uint8_t> buf(len);
             struct sockaddr_storage src_ss;
             socklen_t srclen = sizeof(src_ss);
-            ssize_t r = ::recvfrom(static_cast<int>(a0), buf.data(), len,
+            ssize_t r = ::recvfrom(hfd, buf.data(), len,
                                    static_cast<int>(a3),
                                    reinterpret_cast<struct sockaddr*>(&src_ss),
                                    &srclen);
@@ -302,12 +321,15 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── setsockopt (syscall 208) ─────────────────────────────────
         case 208: { // setsockopt(sockfd, level, optname, optval, optlen)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             if (a3 == 0 || a4 == 0) { ret_err(EFAULT); return 0; }
             size_t optlen = a4;
             if (optlen > 4096) optlen = 4096;  // sanity cap
             std::vector<uint8_t> optval(optlen);
             mem_.read(a3, optval.data(), optlen);
-            int r = ::setsockopt(static_cast<int>(a0), static_cast<int>(a1),
+            int r = ::setsockopt(hfd, static_cast<int>(a1),
                                  static_cast<int>(a2), optval.data(),
                                  static_cast<socklen_t>(optlen));
             if (r < 0) { ret_errno(); return 0; }
@@ -317,11 +339,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── getsockopt (syscall 209) ─────────────────────────────────
         case 209: { // getsockopt(sockfd, level, optname, optval, optlen*)
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             if (a4 == 0) { ret_err(EFAULT); return 0; }
             socklen_t host_optlen = static_cast<socklen_t>(mem_.load<uint32_t>(a4));
             if (host_optlen > 4096) host_optlen = 4096;
             std::vector<uint8_t> optval(host_optlen);
-            int r = ::getsockopt(static_cast<int>(a0), static_cast<int>(a1),
+            int r = ::getsockopt(hfd, static_cast<int>(a1),
                                  static_cast<int>(a2), optval.data(), &host_optlen);
             if (r < 0) { ret_errno(); return 0; }
             if (a3) mem_.write(a3, optval.data(), host_optlen);
@@ -332,7 +357,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── shutdown (syscall 210) ───────────────────────────────────
         case 210: { // shutdown(sockfd, how)
-            int r = ::shutdown(static_cast<int>(a0), static_cast<int>(a1));
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            int r = ::shutdown(hfd, static_cast<int>(a1));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;
@@ -340,6 +368,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
 
         // ── sendmsg (syscall 211) ────────────────────────────────────
         case 211: { // sendmsg(sockfd, msg, flags)
+            // Resolve guest fd to host fd via FdTable (Turn 102).
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             // Marshal msghdr + iovec from guest memory.
             // Guest msghdr layout (AArch64):
             //   +0:  void*     msg_name      (8 bytes)
@@ -355,6 +387,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
+            uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
+            uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
 
             // Marshal iovec array: each entry is (void* base, size_t len).
             if (msg_iovlen > 1024) msg_iovlen = 1024;  // sanity cap
@@ -363,8 +397,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             for (uint64_t i = 0; i < msg_iovlen; i++) {
                 uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
                 uint64_t len = mem_.load<uint64_t>(msg_iov + i * 16 + 8);
+                if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 iov_bufs[i].resize(len);
-                mem_.read(base, iov_bufs[i].data(), len);
+                if (len) mem_.read(base, iov_bufs[i].data(), len);
                 iovs[i].iov_base = iov_bufs[i].data();
                 iovs[i].iov_len = len;
             }
@@ -374,13 +409,25 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 name_buf.resize(msg_namelen);
                 mem_.read(msg_name, name_buf.data(), msg_namelen);
             }
+            // Marshal msg_control (cmsg buffer) — Turn 102.
+            // The control buffer is opaque to the host kernel; we just
+            // copy it verbatim. The guest and host share the same
+            // cmsghdr layout (both are Linux AArch64).
+            std::vector<uint8_t> ctrl_buf;
+            if (msg_control && msg_controllen) {
+                if (msg_controllen > 4096) msg_controllen = 4096;
+                ctrl_buf.resize(msg_controllen);
+                mem_.read(msg_control, ctrl_buf.data(), msg_controllen);
+            }
             struct msghdr host_msg;
             memset(&host_msg, 0, sizeof(host_msg));
             host_msg.msg_name = name_buf.empty() ? nullptr : name_buf.data();
             host_msg.msg_namelen = msg_namelen;
             host_msg.msg_iov = iovs.data();
             host_msg.msg_iovlen = msg_iovlen;
-            ssize_t r = ::sendmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
+            host_msg.msg_control = ctrl_buf.empty() ? nullptr : ctrl_buf.data();
+            host_msg.msg_controllen = msg_controllen;
+            ssize_t r = ::sendmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             ret_host(static_cast<uint64_t>(r));
             return 0;
@@ -390,43 +437,73 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // BUGFIX: was at case 211 (wrong — 211 is sendmsg). Moved to 212
         // which is the correct AArch64 syscall number per asm-generic/unistd.h.
         case 212: { // recvmsg(sockfd, msg, flags)
+            // Resolve guest fd to host fd via FdTable (Turn 102).
+            auto node = fds_.get(static_cast<int>(a0));
+            int hfd = node ? node->host_fd() : static_cast<int>(a0);
+            if (hfd < 0) { ret_err(EBADF); return 0; }
             if (!a1) { ret_err(EFAULT); return 0; }
             uint64_t msg_name = mem_.load<uint64_t>(a1);
             uint32_t msg_namelen = mem_.load<uint32_t>(a1 + 8);
             uint64_t msg_iov = mem_.load<uint64_t>(a1 + 16);
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
+            uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
+            uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
 
             if (msg_iovlen > 1024) msg_iovlen = 1024;
             std::vector<iovec> iovs(msg_iovlen);
             std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
             for (uint64_t i = 0; i < msg_iovlen; i++) {
                 uint64_t len = mem_.load<uint64_t>(msg_iov + i * 16 + 8);
+                if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
                 iov_bufs[i].resize(len);
                 iovs[i].iov_base = iov_bufs[i].data();
                 iovs[i].iov_len = len;
             }
             std::vector<uint8_t> name_buf;
             if (msg_name && msg_namelen) name_buf.resize(msg_namelen);
+            // Allocate a control buffer for the host to write cmsgs into.
+            std::vector<uint8_t> ctrl_buf;
+            if (msg_control && msg_controllen) {
+                if (msg_controllen > 4096) msg_controllen = 4096;
+                ctrl_buf.resize(msg_controllen);
+            }
             struct msghdr host_msg;
             memset(&host_msg, 0, sizeof(host_msg));
             host_msg.msg_name = name_buf.empty() ? nullptr : name_buf.data();
             host_msg.msg_namelen = msg_namelen;
             host_msg.msg_iov = iovs.data();
             host_msg.msg_iovlen = msg_iovlen;
-            ssize_t r = ::recvmsg(static_cast<int>(a0), &host_msg, static_cast<int>(a2));
+            host_msg.msg_control = ctrl_buf.empty() ? nullptr : ctrl_buf.data();
+            host_msg.msg_controllen = msg_controllen;
+            ssize_t r = ::recvmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
             // Write received data back to guest iovec buffers.
             for (uint64_t i = 0; i < msg_iovlen; i++) {
                 uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);
-                mem_.write(base, iov_bufs[i].data(), iov_bufs[i].size());
+                if (iov_bufs[i].size() > 0) {
+                    mem_.write(base, iov_bufs[i].data(), iov_bufs[i].size());
+                }
             }
             // Write source address back.
             if (msg_name && msg_namelen) {
                 socklen_t actual = static_cast<socklen_t>(host_msg.msg_namelen);
                 if (actual > msg_namelen) actual = msg_namelen;
-                mem_.write(msg_name, name_buf.data(), actual);
+                if (actual > 0) mem_.write(msg_name, name_buf.data(), actual);
                 mem_.store<uint32_t>(a1 + 8, actual);
             }
+            // Write control buffer back (Turn 102).
+            // host_msg.msg_controllen may have been modified by the host
+            // to reflect the actual size of the cmsgs written.
+            if (msg_control && msg_controllen) {
+                socklen_t actual_ctrl = static_cast<socklen_t>(host_msg.msg_controllen);
+                if (actual_ctrl > msg_controllen) actual_ctrl = msg_controllen;
+                if (actual_ctrl > 0) {
+                    mem_.write(msg_control, ctrl_buf.data(), actual_ctrl);
+                }
+                mem_.store<uint32_t>(a1 + 40, actual_ctrl);
+            }
+            // Write msg_flags back (Turn 102).
+            mem_.store<uint32_t>(a1 + 44, static_cast<uint32_t>(host_msg.msg_flags));
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }

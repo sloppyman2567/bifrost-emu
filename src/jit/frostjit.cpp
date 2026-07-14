@@ -577,11 +577,19 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc: SUB → ADD
                 }
             } else {
-                flush_all_vregs();
+                // Turn 102: emit_load_flags_from_pstate and
+                // emit_normalize_cf_to_sub_convention only clobber
+                // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
+                // vregs cached in R8/R9/R11/R12/R13/R15.
+                // No pushfq/popfq: the goal is to LOAD flags, and
+                // popfq would restore the pre-load (garbage) flags.
+                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+                flush_dirty_host_regs(FLAGS3);
+                flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 // Normalize CF to SUB convention (x86 CF = NOT ARM C).
                 emit_normalize_cf_to_sub_convention();
-                invalidate_all_vregs();
+                invalidate_host_regs(FLAGS3);
                 // For SBCS: CF is now NOT ARM C. Correct.
                 // For ADCS: need ARM C. cmc to invert.
                 if (!is_sub) {
