@@ -104,6 +104,26 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 }
             }
         }
+    } catch (DecodeError& e) {
+        // Turn 100: make the emulator robust against NULL function pointer
+        // calls and illegal instructions in worker threads, matching the
+        // main-thread behavior (see emulator.cpp's DecodeError handler).
+        // pc < 4096 = NULL deref / zero page → SIGSEGV.
+        // Otherwise = illegal instruction → SIGILL.
+        uint64_t fault_pc = cpu.pc;
+        int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
+        int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
+        if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+            // No handler installed — default disposition terminates the
+            // thread. deliver_signal already set cpu.running=false and
+            // cpu.exit_code=128+signo.
+            fprintf(stderr,
+                "[%s] thread %d: %s at pc=0x%llx (no handler — terminating)\n",
+                CODENAME, cpu.tid,
+                (signo == BIFROST_SIGSEGV) ? "SIGSEGV (NULL deref)"
+                                            : "SIGILL (illegal instruction)",
+                static_cast<unsigned long long>(fault_pc));
+        }
     } catch (const std::exception& e) {
         fprintf(stderr, "[%s] thread %d: exception: %s\n",
                 CODENAME, cpu.tid, e.what());

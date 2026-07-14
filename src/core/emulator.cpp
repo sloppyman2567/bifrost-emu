@@ -933,6 +933,56 @@ int Emulator::run() {
                 continue;
             }
             break;
+        } catch (DecodeError& e) {
+            // Turn 100: make the emulator robust against NULL function
+            // pointer calls and genuinely illegal instructions.
+            //
+            // On real ARM64 Linux:
+            //   - Jumping to NULL (pc=0) or into the zero page (0x0-0xFFF)
+            //     delivers SIGSEGV with si_code=SEGV_MAPERR (address not
+            //     mapped for execution). The zero page is normally not
+            //     mapped on Linux (vm.mmap_min_addr >= 4096).
+            //   - Encountering an illegal/undefined instruction delivers
+            //     SIGILL with si_code=ILL_ILLOPC.
+            //
+            // The emulator maps the zero page (mem_.map_range(0, 4096))
+            // so NULL dereferences return 0 instead of faulting. This
+            // means instruction fetch at pc=0 reads 0x00000000, which
+            // is UDF #0 — the decoder throws DecodeError.
+            //
+            // Previously, DecodeError propagated to main() and killed
+            // the emulator with "bifrost-emu: decode error at pc=0x0".
+            // This was wrong: the guest should get SIGSEGV (so its own
+            // signal handler can recover) or terminate with the correct
+            // exit code (128+11=139), not an emulator crash.
+            //
+            // pc=0 means a NULL function pointer was called (e.g., an
+            // unresolved weak symbol or ifunc). pc in [1, 4095] means
+            // a jump into the zero page. Both are SIGSEGV.
+            uint64_t fault_pc = main_cpu_.pc;
+            if (fault_pc < 4096) {
+                // NULL pointer execution / jump into zero page → SIGSEGV
+                if (deliver_signal(*this, main_cpu_, signals_,
+                                   BIFROST_SIGSEGV, SEGV_MAPERR_EMU,
+                                   fault_pc)) {
+                    count++;
+                    continue;
+                }
+                // No handler — default disposition terminates with SIGSEGV
+                // (exit code 128+11=139). deliver_signal already set
+                // cpu.running=false and cpu.exit_code=139.
+                break;
+            }
+            // Genuinely illegal instruction at a valid PC → SIGILL.
+            // This lets JITs and dynamic code generators that use SIGILL
+            // for trap-on-overflow patterns to work.
+            if (deliver_signal(*this, main_cpu_, signals_,
+                               BIFROST_SIGILL, ILL_ILLOPC_EMU, fault_pc)) {
+                count++;
+                continue;
+            }
+            // No SIGILL handler — terminate with SIGILL (exit 128+4=132).
+            break;
         }
         count++;
 
