@@ -61,6 +61,18 @@ void Emulator::syscall(CPU& cpu) {
     // interpreter.
     drain_host_signals(cpu);
 
+    // Turn 101: if drain_host_signals delivered a terminating signal
+    // (SIGTERM, SIGKILL, etc.) with no handler, cpu.running is now false
+    // and cpu.exit_code is set. We must NOT execute the syscall — the
+    // guest has been killed. Continuing would execute the syscall (e.g.,
+    // close(fd)) and then return to the JIT, which would run the `ret`
+    // block. The ret block reads x30, but if the signal delivery
+    // corrupted the call chain (e.g., by setting up a signal frame for
+    // a different signal), x30 could be wrong, causing a SIGSEGV at
+    // pc=0. More importantly, executing syscalls after the guest is
+    // dead is wrong — the guest should not observe any side effects.
+    if (!cpu.running) return;
+
     // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
     static bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
     if (trace_syscalls) {

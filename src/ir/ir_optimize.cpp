@@ -299,6 +299,20 @@ void optimize_ir(IRBlock& block) {
             } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC ||
                        inst.op == IROp::BL_CALL) {
                 last_store_to.clear();
+            } else if (inst.op == IROp::BR ||
+                       inst.op == IROp::BRCOND ||
+                       inst.op == IROp::BRCOND_FALLTHRU ||
+                       inst.op == IROp::BRCOND_ZERO ||
+                       inst.op == IROp::BRCOND_BIT) {
+                // Turn 101: branches end the block. The next block (or the
+                // callee for BL) may read ANY ARM register. Without this,
+                // DSE would incorrectly eliminate the BL's STORE_REG x30
+                // (return address) because no instruction in THIS block
+                // reads x30 after the store. But the callee's `ret` reads
+                // x30 in a DIFFERENT block. This caused curl's SIGSEGV at
+                // pc=0x0: __syscall_cancel_arch's `ret` jumped to x30=0
+                // because the BL that set x30 had its store DCE'd.
+                last_store_to.clear();
             } else if (inst.op == IROp::ATOMIC) {
                 // ATOMIC reads cpu.regs[imm] directly — preserve preceding
                 // STORE_REG to that ARM reg. (GPR only — is_fp=0.)
