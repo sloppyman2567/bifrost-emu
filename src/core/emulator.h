@@ -287,7 +287,7 @@ private:
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;
-    bool brk_verbose_ = true; // Turn 40: always true
+    bool brk_verbose_ = true; // controlled by cfg.log_brk_verbose / -q flag
     std::string elf_path_;
     // Guest-side current working directory. Decoupled from the host cwd
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
@@ -330,7 +330,7 @@ private:
     std::atomic<int> alive_threads_{0};
     // ── Futex table ───────────────────────────────────────────────────
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
-    // design was removed in Turn 57 for scalability.)
+    // design was)
     // ── Global exclusive monitor (LL/SC atomics) ──────────────────────
     // AArch64's LDXR/STXR (load-linked / store-conditional) atomics rely
     // on a GLOBAL exclusive monitor that tracks all CPUs' reservations.

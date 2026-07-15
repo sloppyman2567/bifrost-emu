@@ -96,7 +96,6 @@ struct LoadedObject {
     uint64_t    init_array_size = 0;  // DT_INIT_ARRAYSZ (bytes; count = size/8)
     uint64_t    fini_array_addr = 0;  // DT_FINI_ARRAY
     uint64_t    fini_array_size = 0;  // DT_FINI_ARRAYSZ
-    // BUGFIX (Turn 60, C5): symbol versioning info.
     // DT_VERSYM  = address of the .gnu.version section (uint16_t per symbol,
     //              index into the version definition/needed tables).
     // DT_VERDEF  = address of the .gnu.version_d section (this object's
@@ -150,7 +149,7 @@ public:
     uint64_t resolve_symbol(const std::string& name) const;
     // resolve_plt_entry was a stub for a future "lazy PLT binding"
     // feature that was never implemented (the linker uses eager
-    // binding). Removed in Turn 37 as dead code — the dynamic linker
+    // binding). Removed as dead code — the dynamic linker
     // resolves all JUMP_SLOT relocations during link(), not on first
     // call. If you need lazy binding in the future, re-add this with
     // a real implementation that tracks the GOT-slot → symbol mapping.
@@ -308,7 +307,6 @@ private:
     // "first strong wins" instead of "last strong wins" (H6).
     struct SymEntry { uint64_t addr; uint8_t bind; };
     std::unordered_map<std::string, SymEntry> symbols_;
-    // BUGFIX (Turn 60, C5): versioned symbol table. Keyed by
     // "name@version" (e.g. "memcpy@GLIBC_2.17"). When a relocation
     // requests a specific version (via .gnu.version_r), we look up
     // the versioned entry first, then fall back to the unversioned
@@ -363,7 +361,6 @@ private:
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
     // Find a shared library by soname. Checks standard multiarch paths
     // and returns the file bytes (empty if not found).
-    // BUGFIX (Turn 59, C6): parent_runpath/parent_rpath are the parent
     // object's DT_RUNPATH/DT_RPATH (semicolon-separated, $ORIGIN expanded).
     // find_library searches these BEFORE the standard multiarch paths so
     // games bundling their own libs (DT_RUNPATH=$ORIGIN/lib) find them.
@@ -416,7 +413,6 @@ private:
     // Build the global symbol table from obj's .dynsym. Only exported
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
     void index_symbols(const LoadedObject& obj);
-    // BUGFIX (Turn 60, C5): parse symbol versioning sections
     // (.gnu.version, .gnu.version_d, .gnu.version_r) and populate
     // versioned_symbols_ with "name@version" keys.
     void parse_versions_(const LoadedObject& obj);
@@ -435,7 +431,6 @@ private:
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).
-    // BUGFIX (Turn 60, C5): if the object has .gnu.version_r (version
     // requirements), look up the version for this symbol and use
     // resolve_versioned_symbol. This prevents wrong-version symbol
     // selection (e.g. GLIBC_2.17 stat vs GLIBC_2.33 stat with different

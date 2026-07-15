@@ -81,7 +81,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // shifted-register form (bit21=0), rd=31 means XZR (the
             // decoder leaves d.writes_sp=false).
             //
-            // the old code only checked ADD_IMM/SUB_IMM
             // for SP mapping. ADD_REG/SUB_REG (extended register form)
             // was excluded, so `add sp, sp, x12` (very common in
             // function epilogues) was computed as `add xzr, xzr, x12`
@@ -568,7 +567,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         //     For v = 0: CLZ(0) - 1 = W - 1, but ARM spec says CLS(0) = W.
         //     Re-checking the ARM ARM... actually CLS(0) = W-1, not W.
         //     The pseudocode result is W-1 for v=0 (CLZ(0)=W, minus 1).
-        //     My earlier reasoning was wrong. So the formula is exact.
         //   - v == ~0: SAR(~0, W-1) = ~0, XOR = 0, CLZ(0) = W, W - 1 = W-1.
         //     ARM pseudocode: v<w-1>=1 so use NOT(v)=0; CLZ(0)-1 = W-1. ✓
         //

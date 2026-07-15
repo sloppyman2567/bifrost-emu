@@ -220,12 +220,12 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     //   clear_child_tid = ctid (if CLONE_CHILD_CLEARTID)
     //   robust_list_head = 0 (child starts with no robust futexes)
     //   sigmask = parent's sigmask (CLONE_THREAD shares signal handlers,
-    //            but each thread has its own mask per Turn 23's fix)
+    //            but each thread has its own mask to be inherited from the parent.
     //
-    // the per-CPU pending signal queue). Use copy_arch_state_from() which
-    // copies the architectural fields without touching the pending queue
-    // or exclusive monitor. The reset block below then explicitly clears
-    // sigpending, altstack, etc. per Linux clone() semantics.
+    // Copy the parent's architectural state (GPRs, FPRs, PSTATE, etc.)
+    // without touching the pending queue or exclusive monitor. The reset
+    // block below then explicitly clears sigpending, altstack, etc.
+    // per Linux clone() semantics.
     gt->cpu.copy_arch_state_from(parent_cpu);
     gt->cpu.regs[0] = 0;
     gt->cpu.pc = entry_pc;
@@ -295,8 +295,6 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // for compute-bound multi-threaded guests where lock contention on
     // blocks_mutex_ hurts throughput more than the memory cost.
     //
-    // Turn 25 fixed the __tl_lock deadlock that previously prevented
-    // per-thread JIT from working. Turn 28 made shared-JIT deadlock-safe
     // by releasing blocks_mutex_ before block execution.
     static bool no_shared_jit = (getenv("BIFROST_NO_SHARED_JIT") != nullptr);
     if (jit_enabled_ && jit_ && no_shared_jit) {

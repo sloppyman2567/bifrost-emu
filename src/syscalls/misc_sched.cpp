@@ -1,5 +1,5 @@
 // syscalls/misc_sched.cpp — scheduling/priority syscalls extracted from
-// misc_process.cpp (Turn 69 refactor). Handles:
+// misc_process.cpp . Handles:
 //   - ptrace (case 117)
 //   - sched_setaffinity / sched_getaffinity / sched_yield (case 122, 123, 124)
 //   - sched_get_priority_max / sched_get_priority_min (case 125, 126)

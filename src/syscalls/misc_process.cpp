@@ -1,7 +1,7 @@
 // syscalls/misc_process.cpp — dispatcher for process/identity/resource
-// syscalls extracted from misc.cpp (Turn 68 refactor).
+// syscalls extracted from misc.cpp .
 //
-// Turn 69 refactor: the 40 individual cases that used to live here have
+// the 40 individual cases that used to live here have
 // been split into 3 sub-handlers by topic. syscall_misc_process() now
 // only dispatches to the sub-handlers in order:
 //

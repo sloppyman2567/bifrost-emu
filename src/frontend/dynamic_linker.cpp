@@ -29,6 +29,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 namespace arm64emu {
+// ── Trace flag cache ───────────────────────────────────────────────────
+// getenv() is not cheap (it scans environ linearly). On the dynamic
+// linker hot path (resolve_symbol is called for every PLT relocation),
+// calling getenv per-lookup adds measurable overhead. Cache the result
+// in a function-local static — initialized once on first call.
+bool dynlink_trace_enabled() {
+    static bool enabled = (getenv("BIFROST_DYNLINK_TRACE") != nullptr);
+    return enabled;
+}
+bool ifunc_trace_enabled() {
+    static bool enabled = (getenv("BIFROST_IFUNC_TRACE") != nullptr);
+    return enabled;
+}
 // ── ELF dynamic tag constants ──────────────────────────────────────────
 // From elf.h (we hardcode to avoid pulling in the host's elf.h, which
 // may not have all AArch64-specific tags).
@@ -85,7 +98,6 @@ constexpr int DT_FLAGS_     = 30;
 constexpr int DT_RELR_      = 36;
 constexpr int DT_RELRSZ_    = 35;
 constexpr int DT_RELRENT_   = 37;
-// BUGFIX (Turn 60, C5): symbol versioning tags.
 constexpr int DT_VERSYM_    = 0x6FFFFFF0;
 constexpr int DT_VERDEF_    = 0x6FFFFFFC;
 constexpr int DT_VERDEFNUM_ = 0x6FFFFFFD;
@@ -136,6 +148,7 @@ constexpr uint16_t SHN_UNDEF_ = 0;
 std::string read_guest_cstr(Memory& mem, uint64_t addr) {
     std::string out;
     if (addr == 0) return out;
+    out.reserve(64);  // most symbol names are < 64 chars
     try {
         char buf[256];
         uint64_t p = addr;
@@ -159,7 +172,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                          const std::string& interp_path) {
     objects_.clear();
     symbols_.clear();
-    versioned_symbols_.clear();  // Turn 60, C5
+    versioned_symbols_.clear();
     error_.clear();
     // Detect musl vs glibc from the interpreter path.
     // musl: /lib/ld-musl-aarch64.so.1
@@ -167,7 +180,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // This determines the TLS layout: glibc uses variant-I (main TLS at
     // positive TP offsets), musl uses variant-II (all TLS at negative TP).
     is_musl_ = (interp_path.find("musl") != std::string::npos);
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] interp='%s' → %s TLS layout\n",
                 interp_path.c_str(), is_musl_ ? "musl (variant-II)" : "glibc (variant-I)");
     }
@@ -182,7 +195,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     parse_tls(main_data, main_obj);
     objects_.push_back(std::move(main_obj));
     index_symbols(objects_.back());
-    parse_versions_(objects_.back());  // Turn 60, C5
+    parse_versions_(objects_.back());
     // Recursively load DT_NEEDED libraries. We use a worklist to handle
     // transitive dependencies (libc → ld-musl, libm → libc, etc.).
     std::vector<size_t> worklist = {0};
@@ -207,7 +220,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     std::string soname = read_guest_cstr(mem_, str_addr);
                     if (soname.empty()) continue;
                     // Skip if already loaded.
-                    // BUGFIX (Turn 59, L6): dedup by DT_SONAME when present,
                     // falling back to the DT_NEEDED string. Real ld.so uses
                     // DT_SONAME for dedup so a DT_NEEDED "libfoo.so.1" and
                     // a loaded library whose DT_SONAME is "libfoo.so.1.0.0"
@@ -218,7 +230,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         if (!o.soname.empty() && o.soname == soname) { found = true; break; }
                     }
                     if (found) continue;
-                    // BUGFIX (Turn 59, C6): pass the parent object's
                     // DT_RUNPATH so find_library can search it for
                     // transitive deps. (DT_RUNPATH only applies to the
                     // immediate object's DT_NEEDED per the gABI; we
@@ -313,7 +324,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                 else if (dyn.d_tag == DT_RELR_)      relr_addr = obj.base_addr + dyn.d_val;
                 else if (dyn.d_tag == DT_RELRSZ_)    relr_size = dyn.d_val;
             }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] obj '%s' base=0x%llx: "
                         "RELA=0x%llx/%llu JMPREL=0x%llx/%llu RELR=0x%llx/%llu\n",
                         obj.name.c_str(),
@@ -384,12 +395,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            // BUGFIX (Turn 60, C5): use resolve_reloc_symbol
                             // which consults versioned_symbols_ when the
                             // object has .gnu.version_r. This prevents
                             // wrong-version symbol selection.
                             uint64_t S = resolve_reloc_symbol(obj, sym);
-                            // BUGFIX (Turn 59, C3): undefined-weak symbols
                             // must resolve to 0, NOT obj.base_addr. The old
                             // fallback `S = obj.base_addr + s.st_value` ran
                             // for SHN_UNDEF symbols where st_value==0, so
@@ -402,7 +411,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             value = S + A;
                             mem_.store<uint64_t>(target, value);
                             // Debug trace for _rtld_global_ro resolution.
-                            if (getenv("BIFROST_DYNLINK_TRACE") &&
+                            if (dynlink_trace_enabled() &&
                                 (name == "_rtld_global_ro" ||
                                  name == "_rtld_global")) {
                                 fprintf(stderr, "[dynlink] GLOB_DAT '%s' "
@@ -563,9 +572,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            // BUGFIX (Turn 60, C5): versioned resolution.
                             uint64_t S = resolve_reloc_symbol(obj, sym);
-                            // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
                             if (S == 0 && s.st_shndx != SHN_UNDEF_) {
                                 S = obj.base_addr + s.st_value;
                             }
@@ -605,14 +612,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                       &s, sizeof(s));
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
-                            // BUGFIX (Turn 60, C5): versioned resolution.
                             uint64_t S = resolve_reloc_symbol(obj, sym);
-                            // BUGFIX (Turn 59, C3): undefined-weak → 0, not base_addr.
                             if (S == 0 && s.st_shndx != SHN_UNDEF_) {
                                 S = obj.base_addr + s.st_value;
                             }
                             mem_.store<uint64_t>(target, S + A);
-                            if (getenv("BIFROST_DYNLINK_TRACE") &&
+                            if (dynlink_trace_enabled() &&
                                 (name == "_dl_allocate_tls" ||
                                  name == "_dl_allocate_tls_init")) {
                                 fprintf(stderr, "[dynlink] JUMP_SLOT %s "
@@ -664,12 +669,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     if (init_runner_) {
         uint64_t early_init = resolve_symbol("__libc_early_init");
         if (early_init != 0) {
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] calling __libc_early_init @ 0x%llx\n",
                         static_cast<unsigned long long>(early_init));
             }
             init_runner_(early_init);
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] __libc_early_init returned\n");
             }
         }
@@ -677,13 +682,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Re-patch _rtld_global_ro AFTER __libc_early_init.
     // __libc_early_init zeroes dl_pagesize. Re-apply.
     patch_rtld_global_ro_();
-    // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
     // runs with uninitialized globals (vtables, std::mutex, std::string).
     // Requires init_runner_ to be set by the Emulator; no-ops if not.
     run_init_arrays_();
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] all DT_INIT_ARRAY done, link() complete\n");
     }
     // Final re-patch AFTER DT_INIT_ARRAY.
@@ -815,7 +819,7 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
         // register as the TLS field pair.
         out_size_off = offset;
         out_align_off = offset + 8;
-        if (getenv("BIFROST_DYNLINK_TRACE")) {
+        if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dynlink] detected TLS field offsets via "
                     "__libc_early_init @0x%llx+%zu: size@+0x%x, align@+0x%x "
                     "(imm7=%u, base=x%u)\n",
@@ -885,7 +889,7 @@ void DynamicLinker::patch_rtld_global_ro_() {
             }
         } else {
             // Fallback: spray all known offset pairs.
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] TLS offset detection failed; "
                         "spraying all known offsets\n");
             }
@@ -901,7 +905,7 @@ void DynamicLinker::patch_rtld_global_ro_() {
                 }
             }
         }
-        if (getenv("BIFROST_DYNLINK_TRACE")) {
+        if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dynlink] patched _rtld_global_ro @0x%llx: "
                     "dl_pagesize=4096, dl_tls_static_size=%llu, "
                     "dl_tls_static_align=64 (%s)\n",
@@ -924,7 +928,7 @@ void DynamicLinker::patch_rtld_global_ro_() {
     if (dlopen_hook_ptr_ != 0) {
         try {
             mem_.store<uint64_t>(rtld_ro + 368, dlopen_hook_ptr_);
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] patched _rtld_global_ro + 368 = 0x%llx\n",
                         static_cast<unsigned long long>(dlopen_hook_ptr_));
             }
@@ -1063,7 +1067,7 @@ void DynamicLinker::init_nptl_stack_lists_() {
         // _rtld_global not mapped at the expected range — non-fatal.
         // glibc will spin later (visible failure).
     }
-    if (patched && getenv("BIFROST_DYNLINK_TRACE")) {
+    if (patched && dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] initialized NPTL stack list heads in "
                 "_rtld_global @0x%llx (%s offsets: "
                 "stack_used@+0x%llx, stack_user@+0x%llx, "
@@ -1125,7 +1129,7 @@ void DynamicLinker::apply_pending_copies_() {
             mem_.write(cp.target, buf.data(), copy_size);
             // Update symbol table: future resolutions return the copy.
             symbols_[cp.name] = SymEntry{cp.target, STB_GLOBAL_};
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr,
                     "[dynlink] COPY %s: %llu bytes from 0x%llx to 0x%llx\n",
                     cp.name.c_str(),
@@ -1133,7 +1137,7 @@ void DynamicLinker::apply_pending_copies_() {
                     (unsigned long long)src_addr,
                     (unsigned long long)cp.target);
             }
-        } else if (getenv("BIFROST_DYNLINK_TRACE")) {
+        } else if (dynlink_trace_enabled()) {
             fprintf(stderr,
                 "[dynlink] COPY %s: src=0x%llx size=%llu (SKIPPED)\n",
                 cp.name.c_str(),
@@ -1263,7 +1267,7 @@ void DynamicLinker::apply_relr_relocations_(const LoadedObject& obj,
             reloc_addr += 63 * 8;
         }
     }
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] RELR obj '%s': %zu relocations applied\n",
                 obj.name.c_str(), applied);
     }
@@ -1281,7 +1285,7 @@ void DynamicLinker::run_init_arrays_() {
         // DT_INIT (legacy _init() function) — call before .init_array.
         if (obj.init_addr != 0) {
             try {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dynlink_trace_enabled()) {
                     fprintf(stderr, "[dynlink] DT_INIT for '%s' @ 0x%llx\n",
                             obj.name.c_str(),
                             static_cast<unsigned long long>(obj.init_addr));
@@ -1299,7 +1303,7 @@ void DynamicLinker::run_init_arrays_() {
                 } catch (...) { break; }
                 if (fn == 0) continue;  // skip NULL entries
                 try {
-                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    if (dynlink_trace_enabled()) {
                         fprintf(stderr, "[dynlink] DT_INIT_ARRAY[%zu] for '%s' @ 0x%llx\n",
                                 i, obj.name.c_str(),
                                 static_cast<unsigned long long>(fn));
@@ -1331,7 +1335,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     memcpy(&e_phnum,     data.data() + 56, 2);
     memcpy(&e_shentsize, data.data() + 58, 2);
     memcpy(&e_shnum,     data.data() + 60, 2);
-    // BUGFIX (Turn 59, H1/H2): validate e_phoff and e_phentsize before
     // either phdr loop. A malformed ELF with bogus e_phoff could OOB-read
     // `data`. Also require e_phentsize >= 56 (we read up to p+48 for
     // p_align, and the second loop reads p+32 for p_filesz).
@@ -1356,7 +1359,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             //   offset 32: p_filesz (8 bytes)
             //   offset 40: p_memsz  (8 bytes)
             //   offset 48: p_align  (8 bytes)
-            // The old code read p_offset into dyn_vaddr, which happened
             // to work for some musl PIE binaries where p_offset happened
             // to fall inside a LOAD segment's p_vaddr range, but broke
             // for glibc executables where the DYNAMIC segment's p_offset
@@ -1379,7 +1381,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     uint64_t dyn_off = 0;
     bool found = false;
     for (int i = 0; i < e_phnum; i++) {
-        // BUGFIX (Turn 59, H1): bounds-check this loop too (was missing).
         if (e_phoff + (i + 1) * e_phentsize > data.size()) break;
         const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
         uint32_t p_type;
@@ -1432,7 +1433,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             case DT_SONAME_:        soname_off = dyn.d_val; break;
             case DT_RPATH_:         rpath_off = dyn.d_val; break;
             case DT_RUNPATH_:       runpath_off = dyn.d_val; break;
-            // BUGFIX (Turn 60, C5): capture symbol versioning section addrs.
             case DT_VERSYM_:        obj.versym_addr = base + dyn.d_val; break;
             case DT_VERDEF_:        obj.verdef_addr = base + dyn.d_val; break;
             case DT_VERDEFNUM_:     obj.verdef_num = dyn.d_val; break;
@@ -1443,7 +1443,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     }
     obj.symtab_addr = base + symtab_vaddr;
     obj.strtab_addr = base + strtab_vaddr;
-    // BUGFIX (Turn 59, H5): derive symtab_count from DT_HASH when present.
     // DT_HASH's first two uint32_t are nbucket and nchain; nchain is the
     // number of symbols in .dynsym (exact count — no more 8192 cap).
     // Without this, libraries with > 8192 symbols (Qt, webkit) silently
@@ -1464,7 +1463,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         obj.symtab_count = 8192;
     }
     // Read DT_SONAME (for dedup), DT_RPATH, DT_RUNPATH.
-    // BUGFIX (Turn 59, C6): these were declared as constants but never
     // consulted. Now captured for use in find_library and dedup.
     if (soname_off != 0 && strtab_vaddr != 0) {
         // Read the soname string from the file bytes (the strtab may not
@@ -2063,7 +2061,7 @@ bool DynamicLinker::register_ld_linux_shim_() {
     shim_obj.is_main = false;
     shim_obj.dyn_addr = 0;  // no PT_DYNAMIC
     objects_.push_back(std::move(shim_obj));
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] registered ld-linux shim: "
                 "data @0x%llx, code @0x%llx (15 stubs)\n",
                 static_cast<unsigned long long>(shim_base_),
@@ -2072,7 +2070,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     return true;
 }
 // ── find_library ───────────────────────────────────────────────────────
-// BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath (from the
 // parent object's DT_RUNPATH/DT_RPATH) and search them BEFORE the
 // standard multiarch paths. This lets games that bundle their own libs
 // (via DT_RUNPATH=$ORIGIN/lib) actually find them.
@@ -2258,7 +2255,6 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
     return end_addr;
 }
 // ── load_shared_library ────────────────────────────────────────────────
-// BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath so
 // find_library can search the parent object's DT_RUNPATH/DT_RPATH for
 // this library. DT_RUNPATH only applies to the immediate object's
 // DT_NEEDED per the gABI; DT_RPATH is global (deprecated but still used).
@@ -2288,7 +2284,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     // inst=0x00000040" when the guest tried to call a thunked function.
     // The fix: use mem_.mmap_alloc() for library bases, so the
     // allocator tracks ALL high-memory allocations and prevents
-    // collisions. (Turn 72: removed the dead next_lib_base_ member.)
+    // collisions. (removed the dead next_lib_base_ member.)
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff;
@@ -2331,7 +2327,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     parse_tls(data, obj);
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
-    parse_versions_(objects_.back());  // Turn 60, C5
+    parse_versions_(objects_.back());
     return base;
 }
 // ── register_thunk_library_ ──────────────────────────────────
@@ -2372,7 +2368,7 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
             added++;
         }
     }
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] registered thunk library '%s': "
                 "%zu/%zu symbols\n",
                 soname.c_str(), added, syms.size());
@@ -2619,7 +2615,6 @@ int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
     return 0;
 }
 // ── resolve_reloc_symbol ───────────────────────────────────────────────
-// BUGFIX (Turn 60, C5): if the object has .gnu.version, look up the
 // version index for this symbol and try the versioned symbol table first.
 // This lets relocations that request a specific version (e.g. memcpy@GLIBC_2.17)
 // resolve to the correct implementation rather than whichever unversioned
@@ -2709,7 +2704,7 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
     }
     return resolve_symbol(name);
 }
-// ── parse_versions_ (Turn 60, C5) ──────────────────────────────────────
+// ── parse_versions_ ──────────────────────────────────────
 // Parse the GNU symbol versioning sections and populate
 // versioned_symbols_ with "name@version" keys. This lets relocations
 // that request a specific version (via .gnu.version_r) resolve to the
@@ -2781,7 +2776,7 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
     if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
-    for (size_t i = 1; i < count; i++) {  // Turn 72: skip STN_UNDEF (symbol 0)
+    for (size_t i = 1; i < count; i++) {  // skip STN_UNDEF (symbol 0)
         Elf64_Sym s;
         try {
             mem_.read(obj.symtab_addr + i * sizeof(s), &s, sizeof(s));
@@ -2836,14 +2831,11 @@ uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
 // ── index_symbols ──────────────────────────────────────────────────────
 void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
-    // BUGFIX (Turn 59, H5): use obj.symtab_count (from DT_HASH nchain when
     // available, 8192 cap fallback). Previously hardcoded 8192, dropping
     // symbols past the cap in large libs (Qt, webkit).
-    // BUGFIX (Turn 59, H6): "first strong wins" — a strong symbol never
     // overrides an existing strong symbol; a weak symbol is overridden by
     // a strong one. Previously "last strong wins" which let load order
     // silently swap library implementations.
-    // BUGFIX (Turn 59, C4): STT_GNU_IFUNC (type 10) symbols store the
     // RESOLVER address in st_value, not the function address. For ifuncs,
     // we call the resolver (via ifunc_resolver_) and store the resolved
     // address. Without this, glibc's memcpy/memset/strcmp (which are
@@ -2853,7 +2845,6 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;  // sanity
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
-    // The old code `break`ed on this sentinel, terminating the loop at i=0
     // and indexing ZERO symbols. This broke every dynamically-linked binary:
     // libc.so.6's 2973 defined symbols were never indexed, so every
     // relocation against strlen/printf/puts/free/abort/__libc_start_main
@@ -2915,13 +2906,13 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
 uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     auto it = symbols_.find(name);
     if (it == symbols_.end()) {
-        if (getenv("BIFROST_DYNLINK_TRACE")) {
+        if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dynlink] resolve_symbol: '%s' NOT FOUND\n",
                     name.c_str());
         }
         return 0;
     }
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] resolve_symbol: '%s' -> 0x%llx\n",
                 name.c_str(),
                 static_cast<unsigned long long>(it->second.addr));
@@ -2950,7 +2941,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
         if (obj.name == path || obj.soname == basename ||
             obj.name == basename) {
             obj.refcount++;
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dlopen] dedup '%s' → handle=0x%llx refcount=%u\n",
                         path.c_str(),
                         static_cast<unsigned long long>(obj.base_addr),
@@ -2993,7 +2984,6 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
     }
     return load_library_from_data(path, data);
 }
-
 // Internal helper: load a library from an in-memory ELF image.
 // Used by load_library (dlopen by path) and by soname-based lookup.
 // Handles ELF validation, segment mapping, relocation, symbol indexing,
@@ -3224,7 +3214,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
     if (guest_call_args_) {
         if (nobj.init_addr != 0) {
             try {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dynlink_trace_enabled()) {
                     fprintf(stderr, "[dlopen] DT_INIT for '%s' @ 0x%llx\n",
                             path.c_str(),
                             static_cast<unsigned long long>(nobj.init_addr));
@@ -3241,7 +3231,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                 } catch (...) { break; }
                 if (fn == 0) continue;
                 try {
-                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    if (dynlink_trace_enabled()) {
                         fprintf(stderr, "[dlopen] DT_INIT_ARRAY[%zu] for '%s' @ 0x%llx\n",
                                 i, path.c_str(),
                                 static_cast<unsigned long long>(fn));
@@ -3251,13 +3241,12 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
             }
         }
     }
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dlopen] loaded '%s' at 0x%llx (refcount=1)\n",
                 path.c_str(), static_cast<unsigned long long>(base));
     }
     return base;
 }
-
 // ── close_library (dlclose support) ────────────────────────────────────
 // Decrement the refcount. When it reaches 0, run DT_FINI_ARRAY (in
 // reverse order) and DT_FINI. The memory is NOT unmapped (glibc keeps
@@ -3283,7 +3272,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                         } catch (...) { break; }
                         if (fn == 0) continue;
                         try {
-                            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                            if (dynlink_trace_enabled()) {
                                 fprintf(stderr, "[dlclose] DT_FINI_ARRAY[%zu] for '%s' @ 0x%llx\n",
                                         i, obj.name.c_str(),
                                         static_cast<unsigned long long>(fn));
@@ -3295,7 +3284,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                 // DT_FINI (legacy _fini() function) — called after fini_array.
                 if (obj.fini_addr != 0) {
                     try {
-                        if (getenv("BIFROST_DYNLINK_TRACE")) {
+                        if (dynlink_trace_enabled()) {
                             fprintf(stderr, "[dlclose] DT_FINI for '%s' @ 0x%llx\n",
                                     obj.name.c_str(),
                                     static_cast<unsigned long long>(obj.fini_addr));
@@ -3304,7 +3293,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                     } catch (...) {}
                 }
             }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dlclose] '%s' refcount=%u\n",
                         obj.name.c_str(), obj.refcount);
             }
@@ -3314,7 +3303,6 @@ int DynamicLinker::close_library(uint64_t handle) {
     set_last_error("invalid handle");
     return -1;
 }
-
 // ── resolve_symbol_in (dlsym with a handle) ────────────────────────────
 // Search for a symbol within a specific library's scope. First checks
 // the library's own .dynsym, then falls back to the global symbol
@@ -3349,7 +3337,6 @@ uint64_t DynamicLinker::resolve_symbol_in(uint64_t handle,
     }
     return 0;
 }
-
 // ── find_object_by_addr ────────────────────────────────────────────────
 // Find the loaded object whose [base_addr, base_addr + map_size) range
 // contains `addr`. Used by dladdr and _dl_find_dso_for_object.
@@ -3369,7 +3356,6 @@ const LoadedObject* DynamicLinker::find_object_by_addr(uint64_t addr) const {
     }
     return nullptr;
 }
-
 // ── dladdr ─────────────────────────────────────────────────────────────
 // Fill in Dl_info for a given address. Returns 1 if the address falls
 // within a loaded object, 0 otherwise. Finds the nearest symbol by
@@ -3420,7 +3406,6 @@ int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
     }
     return 1;
 }
-
 // ── get_last_error / set_last_error (dlerror support) ──────────────────
 // The error is stored as a host string. get_last_error() copies it to
 // a guest-side buffer (in the shim data area) and returns the guest
@@ -3449,12 +3434,10 @@ uint64_t DynamicLinker::get_last_error() {
     last_error_.clear();
     return dlerror_buf_ptr_;
 }
-
 void DynamicLinker::set_last_error(const std::string& msg) {
     last_error_ = msg;
     error_pending_ = true;
 }
-
 // ── iterate_phdr (dl_iterate_phdr support) ─────────────────────────────
 // Iterate over all loaded objects and call the guest callback for each.
 // The callback receives a guest pointer to a dl_phdr_info struct and
@@ -3515,7 +3498,7 @@ int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
         // Call the guest callback: x0 = info, x1 = sizeof(dl_phdr_info), x2 = data
         // sizeof(struct dl_phdr_info) on AArch64 LP64 = 64 bytes.
         uint64_t rc = guest_call_args_(callback_ptr, info_buf, 64, data_ptr);
-        if (getenv("BIFROST_DYNLINK_TRACE")) {
+        if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dl_iterate_phdr] callback for '%s' returned %lld\n",
                     obj.name.c_str(), static_cast<long long>(rc));
         }

@@ -141,7 +141,6 @@ public:
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
     bool has_sha()       const { return cpu_features_.has_sha(); }
-    // BUGFIX (v1.4.5-alpha): these counters were plain uint64_t, but in
     // shared-JIT mode they're incremented by multiple host threads
     // concurrently → data race / UB. Made them std::atomic with relaxed
     // ordering (we don't need cross-thread synchronization, just atomic
@@ -203,7 +202,7 @@ public:
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
-    // v1.5.0.alpha Turn 2: Per-thread 4-way set-associative inline cache
+    // v1.5.0.alpha: Per-thread 4-way set-associative inline cache
     // for indirect branches (BR/BLR). This is the FEX-Emu pattern: cache
     // the last N (PC→fn) mappings so that virtual dispatch, switch tables,
     // and computed gotos don't pay the shared_mutex + unordered_map cost

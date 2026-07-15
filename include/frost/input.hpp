@@ -1,4 +1,4 @@
-// frost/input.hpp — FrostInput: input event capture + queue (Turn 38-39).
+// frost/input.hpp — FrostInput: input event capture + queue.
 //
 // Captures keyboard, mouse, joystick, and game controller events from the
 // host SDL2 window and exposes them to the guest via:

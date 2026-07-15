@@ -284,7 +284,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     // no-op. The UBFM decode (ROR by 0 + mask all-ones)
                     // would incorrectly produce the source unchanged.
                     //
-                    // This was the root cause of musl's qsort (smoothsort)
                     // producing wrong results: smoothsort's shr() function
                     // does `p[0] >>= n` where n can be 0, and the compiler
                     // emits `LSR Xd, Xn, #0` expecting a zero result.
@@ -601,7 +600,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     }
                 } else {
                     // nzcv_field is a 4-bit value: N=bit3, Z=bit2, C=bit1, V=bit0.
-                    // The old code set_flag_n(d.nzcv_field & 8) which passed
                     // 8 (non-zero = true) instead of 1. This corrupted the
                     // flags, causing strlen's CCMP to produce wrong results.
                     cpu.set_flag_n((d.nzcv_field >> 3) & 1);
@@ -721,12 +719,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         // so `v << (64 - r)` shifts the 32-bit value entirely
                         // out of the low word (e.g. r=7 → <<57, bits land
                         // at positions 57-88, all above bit 32). The result
-                        // was missing the high bits that should have wrapped
                         // around — e.g. ROR(0x12345678, 7) returned 0x02468acf
                         // instead of 0xf2468acf. This broke MD5 (which uses
                         // 32-bit rotates in every round) and any other code
                         // using ROR — the JIT was correct, the interpreter
-                        // was wrong, so verify mode flagged "false-positive"
                         // divergences on every ROR-heavy block.
                         if (width == 64) {
                             res = ror64(a, b & 63);

@@ -32,7 +32,7 @@ namespace arm64emu {
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
 // not (caller falls through to the next dispatcher or residual switch).
-// The case bodies below are verbatim from jit_codegen_fp.cpp (Turn 36 era)
+// The case bodies below are verbatim from jit_codegen_fp.cpp ()
 // — no logic changes, just moved to a separate file/method.
 bool FrostJIT::compile_ir_simd(const IRInst& inst) {
     switch (inst.op) {
@@ -324,7 +324,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 // Load: write vregs to v_lo/v_hi
                 // use separate host regs for lo/hi so we
                 // don't clobber src1's cached value when loading src2.
-                // The old code reused RAX for both, dropping src1's mapping.
                 int slo = ensure_vreg(inst.src1, RAX);
                 int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offlo, slo);

@@ -81,7 +81,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         return next_pc;
     }
-    // v1.5.0.alpha Turn 2: 4-way inline cache for indirect branches.
+    // v1.5.0.alpha: 4-way inline cache for indirect branches.
     // This catches the common case of sequential block-to-block transitions
     // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the shared_mutex.
     // The cache is direct-mapped by (pc >> 2) & 3, so it handles up to 4
@@ -399,7 +399,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // saved's pending queue is empty. That's fine for verify mode —
         // verify runs single-threaded and no signals should be pending.
         // Debug: print entry state for specific blocks
-        if (getenv("BIFROST_VERIFY_TRACE")) {
+        static bool vtrace_ = (getenv("BIFROST_VERIFY_TRACE") != nullptr);
+        if (vtrace_) {
             fprintf(stderr, "[VTRACE] entry block @ 0x%llx x0=0x%llx x1=0x%llx pstate=0x%x\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
                     static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
@@ -501,7 +502,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 // but we won't crash.
             }
         }
-        if (getenv("BIFROST_VERIFY_TRACE")) {
+        if (vtrace_) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
                     cpu.pstate, static_cast<unsigned long long>(jit_next));

@@ -60,7 +60,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
         // ── FRINT: FP round to integer ───────────────────────────────
         //
         //
-        // The Turn 88 "fix" fell back to CALL_INTERP because the IR
+        // The fell back to CALL_INTERP because the IR
         // translator was passing VREG indices (>= 33) as inst.dest/
         // inst.src1, causing out-of-bounds writes to v_lo[33+]. The
         // translator now passes ARM FP reg indices (0-31) directly
@@ -74,7 +74,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return false;
             }
-            // Validate FP register indices (Turn 89: with the translator
+            // Validate FP register indices 
             // fix, these are now always 0-31, but guard against future
             // regressions).
             check_fp_reg_index(inst.dest, "FRINT dest");

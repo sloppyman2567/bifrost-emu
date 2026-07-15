@@ -354,7 +354,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // pushfq/popfq preserves the actual flags.
             //
             // Note: we keep the full flush_all_vregs+invalidate_all_vregs
-            // here (instead of the Turn 102 targeted variant) because the
+            // here (instead ofthe targeted variant) because the
             // CSEL body uses load_vreg_to_reg which does NOT update the
             // cache. If we left vregs cached in R8/R9/etc., the cache
             // state would be inconsistent with the actual register contents
@@ -540,7 +540,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // after ROR by immr, the field that was at
             // [imms:immr] in the original is now at [imms-immr:0]. So the
             // mask must be (imms-immr+1) bits wide, NOT (imms+1) bits.
-            // The old code used (1<<(imms+1))-1 which extracted too many
             // bits, pulling in garbage from above the field. This broke
             // musl's get_stride (ubfx x0, x0, #6, #6) which extracts a
             // 6-bit field — the JIT returned 0x57 instead of 0x17,
@@ -664,7 +663,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // immediate — there's no subtraction, so C is NOT in SUB
             // convention (inverted). Setting from_sub=1 would cause the
             // flag loader to invert C, producing wrong flags. This was the
-            // root cause of curl's "Port number was not a decimal" error:
             // CCMP's else path set C=1 (from nzcv) but from_sub=1 caused
             // the next conditional branch to see C=0, taking the wrong path.
             uint32_t pstate_else = (static_cast<uint32_t>(nzcv) << 28);
@@ -675,7 +673,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             size_t jmp_to_end = emit_jmp_rel32_placeholder();
             // --- cond TRUE path: do the compare ---
             size_t compare_off = code_buf_used_;
-            // The old code always used emit_sub_reg/emit_add_reg (64-bit),
             // which computes the x86 Sign Flag from bit 63 instead of
             // bit 31. For 32-bit operations like `ccmp w3, #2`, if the
             // result is e.g. 0xFFFFFFFD (w3=0xFFFFFFFF, w3-2), the 64-bit

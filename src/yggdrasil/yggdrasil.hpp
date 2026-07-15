@@ -151,7 +151,6 @@ private:
 };
 // ── FdTable: guest fd → Node mapping ──────────────────────────────────
 //
-// BUGFIX (v1.4.5-alpha): added a mutex to protect `table_`. Multiple guest
 // threads (each on its own host thread) call openat/close/read/write/dup
 // concurrently, all touching `table_`. Without a lock, concurrent insert +
 // erase + find on std::unordered_map is undefined behavior — the map can

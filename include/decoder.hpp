@@ -218,7 +218,6 @@ struct DecodedInst {
     uint8_t  fp_opcode = 0;     // FP arithmetic opcode
     uint8_t  rmode = 0;         // FP rounding mode
     uint8_t  simd_count = 1;    // SIMD LD1/ST1 register count (1-4)
-    // BUGFIX (Turn 60, H11): single-structure LD1/ST1 (e.g. LD1 {Vt.S}[idx])
     // uses bits[14:13] for the element index (not register count) and
     // bit[12]=1 to distinguish from multi-structure. The interpreter needs
     // these to dispatch correctly — without them, a single-structure LD1

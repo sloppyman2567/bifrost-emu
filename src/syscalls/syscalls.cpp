@@ -51,7 +51,10 @@ void Emulator::syscall(CPU& cpu) {
     // dead is wrong — the guest should not observe any side effects.
     if (!cpu.running) return;
     // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
-    static bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
+    // Cache both flags in thread-local statics so we only call getenv
+    // once per thread (getenv is not cheap — it scans environ).
+    thread_local bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
+    thread_local bool trace_all = (getenv("BIFROST_SYSCALL_TRACE_ALL") != nullptr);
     if (trace_syscalls) {
         // Read path string for path-based syscalls (56=openat, 79=fstatat, etc.)
         const char* name = nullptr;
@@ -94,7 +97,7 @@ void Emulator::syscall(CPU& cpu) {
                     static_cast<unsigned long long>(cpu.regs[4]),
                     static_cast<unsigned long long>(cpu.regs[5]),
                     static_cast<unsigned long long>(cpu.pc));
-        } else if (getenv("BIFROST_SYSCALL_TRACE_ALL")) {
+        } else if (trace_all) {
             fprintf(stderr, "[syscall t%d] %llu (unknown) a0=0x%llx a1=0x%llx a2=0x%llx pc=0x%llx\n",
                     cpu.tid,
                     static_cast<unsigned long long>(num),

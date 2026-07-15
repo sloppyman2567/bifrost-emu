@@ -43,7 +43,7 @@ inline void emit(IRBlock& b, IROp op, uint16_t dest = 0,
     inst.arm_pc = arm_pc;
     b.insts.push_back(inst);
 }
-// Emit with auxiliary vreg (for SMADDL/SMSUBL accumulator). [Turn 66]
+// Emit with auxiliary vreg (for SMADDL/SMSUBL accumulator).
 inline void emit_aux(IRBlock& b, IROp op, uint16_t dest,
                      uint16_t src1, uint16_t src2, uint16_t aux_vreg,
                      uint64_t arm_pc) {

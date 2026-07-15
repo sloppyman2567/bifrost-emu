@@ -198,15 +198,13 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // (0-31) and access V_LO_OFF + idx*8 — same convention as
                 // FP_BINOP/FP_UNOP. Passing vregs caused out-of-bounds
                 // writes to v_lo[33+] and broke floor/ceil/round/trunc
-                // under JIT. The Turn 88 "fix" masked this by falling back
+                // under JIT. The masked this by falling back
                 // to CALL_INTERP; this is the proper fix.
                 //
-                // BUGFIX (Turn 89, part 2): The opcode→mode mapping was
                 // off by one. The actual A64 FRINT opcodes (verified via
                 // binutils) are:
                 //   0x08=FRINTN, 0x09=FRINTP, 0x0A=FRINTM, 0x0B=FRINTZ,
                 //   0x0C=FRINTA, 0x0E=FRINTX, 0x0F=FRINTI  (0x0D unused)
-                // The old code mapped 0x0D→FRINTX, 0x0E→FRINTI, which was
                 // wrong. Also, `is_fp_1source` used to reject FRINTA/X/I
                 // (bit[17]=1), so they were silently NOP'd — now fixed in
                 // decoder.hpp.
@@ -396,7 +394,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             //                                        NaN/signed-zero inputs)
             //   o2=1, o1=1: FNMSUB → dest = -a*b - c  (= -(a*b + c))
             //
-            // The old code only matched (op & 0xFF200000) == 0x1F000000,
             // which silently dropped FNMADD/FNMSUB (o2=1) — they fell
             // through to the "Unknown FP instruction — NOP" path in the
             // interpreter, returning whatever was already in Vd. This
@@ -421,12 +418,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-            // FCVT check was moved above SCVTF (see BUGFIX Turn 57 above).
+            // FCVT check was moved above SCVTF.
             // The old FCVT check here is removed — it was unreachable because
             // the SCVTF mask caught FCVT first.
             // FRINT* is now handled earlier (in the is_fp_1source block above).
             // The old FRINT block here used a mask that only matched FRINTN.
-            // (Turn 87: moved to the is_fp_1source block for correct 6-bit opcode handling)
             // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
             // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.

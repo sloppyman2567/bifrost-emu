@@ -1,4 +1,4 @@
-// frost_graphics/input.cpp — SDL2 → Linux input event translation (Turn 38-39).
+// frost_graphics/input.cpp — SDL2 → Linux input event translation.
 //
 // v1.4.5-alpha: NEW. Captures keyboard/mouse events from the
 // host's SDL2 window and exposes them as Linux input_event records

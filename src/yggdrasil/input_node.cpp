@@ -1,4 +1,4 @@
-// yggdrasil/input_node.cpp — InputNode implementation (Turn 38-39).
+// yggdrasil/input_node.cpp — InputNode implementation.
 //
 // Reads return event records from the FrostInput ring buffer. The format
 // depends on the InputDevice type passed to the constructor:

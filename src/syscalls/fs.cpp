@@ -884,7 +884,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 53: { // fchmodat(dirfd, path, mode, flags) — AArch64 53
             // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
-            // The old code called ::fchmod(fd, mode) treating the dirfd as
             // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {

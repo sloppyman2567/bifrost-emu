@@ -82,7 +82,6 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
     return val << shift;
 }
 // ── Decode logical immediate bitmask ────────────────────────────────────
-// BUGFIX (Turn 60, H10): return false (and leave *out unchanged) for
 // UNALLOCATED encodings instead of returning 0. The old code returned 0
 // for invalid encodings (width > esize, or combined==0 with N==0), which
 // the caller then happily used as a valid bitmask immediate of 0. Real
@@ -175,14 +174,12 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         if ((inst & 0x3F000000) != 0x08000000) return false;
         // Check for CAS family (bit[21]=1 AND bit[23]=1).
-        // BUGFIX (Turn 59, C7): the old check was only `if ((inst >> 21) & 1)`,
         // which matches BOTH the CAS family (bit[23]=1, e.g. CAS, CASA,
         // CASL, CASAL) AND the pair-exclusive ops (bit[23]=0: STXP, LDXP,
         // STLXP, LDAXP). Bit 21 is set for both families, but bit 23
         // distinguishes them:
         //   - bit[23]=1 → CAS family (single-word CAS)
         //   - bit[23]=0 → pair-exclusive (STXP/LDXP/STLXP/LDAXP, 16-byte)
-        // The old code routed pair-exclusive ops to LSE_ATOMIC with
         // atom_op=0xC (CAS), silently dropping the second source register
         // (Rt2 in bits[14:10]) and corrupting 16-byte atomics
         // (std::atomic<__int128>, lock-free queues, some mutex impls).
@@ -194,7 +191,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         bool is_cas = ((inst >> 21) & 1) && ((inst >> 23) & 1);
         if (is_cas) {
             d.size    = (inst >> 30) & 3;
-            // BUGFIX (M4): bit 23 is the L (release) bit, not the acquire
             // bit. Bit 22 is the A (acquire) bit. The field was named
             // `acquire` but actually held the release bit. Keep the name
             // for now (callers check d.acquire for "ordered" semantics)
@@ -217,7 +213,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt2       = (inst >> 10) & 0x1F;  // Rt2 (pair-exclusive second register)
         d.excl_low6 = (inst >> 10) & 0x3F;
         switch (d.excl_low6) {
-            // BUGFIX (Turn 59, M2): removed bogus case 0x0F (no valid A64
             // exclusive instruction has excl_low6 == 0x0F; STXR/LDXR use
             // 0x1F, STLXR/LDAXR/STLR/LDAR use 0x3F). The old case was
             // unreachable dead code.
@@ -232,10 +227,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return true;
             case 0x3F:
                 // STLXR/LDAXR/STLR/LDAR family.
-                // BUGFIX (Turn 59, M3): distinguish by d.acquire (bit 23).
                 //   bit[23]=1 (d.acquire=1): STLR/LDAR (acquire-release)
                 //   bit[23]=0: STLXR/LDAXR (exclusive with acquire-release)
-                // The old code always classified as STLR/LDAR, which is
                 // wrong for STLXR/LDAXR. The interpreter happened to work
                 // because it reconstructs from the raw bits, but d.cls was
                 // misleading for JIT/trace consumers.
@@ -255,7 +248,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // GPR LDP/STP (signed offset, pre-index).
         // Encoding: opc[31:30] 0 1 0 0 1 0/1 [22]=L ...
         // bit[29] is 0 for GPR STP/LDP (it's part of the fixed pattern).
-        // The old code checked bit[29]=1 which excluded all GPR STP/LDP,
         // causing 32-bit STP W to be silently dropped.
         // Now: check bits[27:23] = 00100 (signed offset) or 00110 (pre-index).
         uint8_t mode_check = (inst >> 23) & 7;
@@ -327,7 +319,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.rt      = inst & 0x1F;
             d.rn      = (inst >> 5) & 0x1F;
             d.rm      = (inst >> 16) & 0x1F;
-            // BUGFIX (Turn 60, H11): distinguish single-structure from
             // multi-structure LD1/ST1.
             //   - Multi-structure (bit[12]=0): bits[14:13] = register count
             //     (00=1, 01=2, 10=3, 11=4 regs). LD1 {Vt.16B}, {Vt.4S, Vt2.4S}, etc.
@@ -335,7 +326,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
             //     and bits[12:10] encode (index, size) per the ARM ARM.
             //     LD1 {Vt.S}[idx], LD1 {Vt.H}[idx], etc. — used for matrix
             //     transpose, RGBA channel interleaving, etc.
-            // The old code unconditionally set simd_count from bits[14:13]
             // for BOTH variants, so a single-structure LD1 {V0.S}[2]
             // (bits[14:13]=10) was misdecoded as a 3-register multi-structure
             // LD1, reading/writing 48 bytes instead of 4. Real games using
@@ -479,7 +469,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rd         = inst & 0x1F;
         d.set_flags  = (opc == 3);
         d.writes_sp  = (d.rd == 31 && opc == 1);
-        // BUGFIX (Turn 60, H10): if decode_bitmask_imm returns false, the
         // encoding is UNALLOCATED — return UNKNOWN instead of treating it
         // as a valid immediate of 0.
         if (!decode_bitmask_imm(d.N, d.immr, d.imms, d.sf, &d.imm_u)) {
@@ -742,7 +731,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         //   Non-SIMD: scale = size (1/2/4/8 bytes per element).
         //   SIMD&FP:  scale = Q ? 4 : 3 (Q-form=16B, D-form=8B).
         //
-        // The old code used `is_q = (opc_ls & 2) && size == 0` which
         // incorrectly matched LDRSB (size=0, opc=11) and LDRSB got
         // scale=4 instead of 0, multiplying the offset by 16. This
         // caused `ldrsb w0, [x0, #176]` to access [x0+2816] and crash

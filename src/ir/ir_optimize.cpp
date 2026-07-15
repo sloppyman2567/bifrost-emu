@@ -99,7 +99,7 @@ static bool is_pure(IROp op) {
         case IROp::STORE_MEM:
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::CALL_INTERP: case IROp::SVC:
-        case IROp::BL_CALL:  // Turn 93: callee may read/write any ARM reg
+        case IROp::BL_CALL:  // callee may read/write any ARM reg
         case IROp::FMOV_G2F: case IROp::FMOV_F2G:
         case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
@@ -203,7 +203,6 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
 // ── The main optimizer ────────────────────────────────────────────────
 void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
-    // BUGFIX (v1.4.0): Detect whether this block contains any ATOMIC,
     // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
     // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
     // ops have complex memory + register side effects that the FWD
@@ -427,7 +426,6 @@ void optimize_ir(IRBlock& block) {
             case IROp::ATOMIC:
                 // Side-effecting (writes memory) — skip constant folding
                 // even if dest is unused.
-                // BUGFIX (v1.4.0): ATOMIC has complex memory + register
                 // side effects (reads cpu.regs[imm] directly, writes old
                 // value to an ARM reg via subsequent STORE_REG, and does
                 // a memory RMW). Clear the entire arm_reg_cache to be
@@ -644,7 +642,7 @@ void optimize_ir(IRBlock& block) {
             }
             case IROp::CALL_INTERP:
             case IROp::SVC:
-            case IROp::BL_CALL:  // Turn 93: callee may modify any reg
+            case IROp::BL_CALL:  // callee may modify any reg
                 // The interpreter may modify any cpu.regs[] or memory.
                 // Invalidate everything.
                 consts.clear_all();

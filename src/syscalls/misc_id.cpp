@@ -1,5 +1,5 @@
 // syscalls/misc_id.cpp — identity/system-info syscalls extracted from
-// misc_process.cpp (Turn 69 refactor). Handles:
+// misc_process.cpp . Handles:
 //   - getgroups / setgroups (case 158, 159)
 //   - uname (case 160)
 //   - getrlimit (case 163)

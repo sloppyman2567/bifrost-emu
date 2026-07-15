@@ -114,7 +114,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             bool Q = d.Q;
             int total_bytes = Q ? 16 : 8;
             uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-            // BUGFIX (Turn 60, H11): single-structure LD1/ST1
             // (e.g. LD1 {Vt.S}[idx]) loads/stores ONE element at a
             // specific lane index, not a whole register. The old code
             // treated it as multi-structure (reading simd_count whole
@@ -361,7 +360,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
                 uint64_t src = cpu.regs[rn];
-                // BUGFIX (rc.1): for Q=1 (128-bit), elements with idx >=
                 // (8/esize) must write to v_hi, not v_lo. The old code
                 // always wrote to v_lo, causing out-of-bounds writes for
                 // lane indices >= 2 (32-bit) or >= 1 (64-bit). This broke
@@ -595,7 +593,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   - TBX (op2=1) matches case 0x0E200000.
             // We read Q (bit 30) and L (bit 20) from the raw op.
             //
-            // The old code was a stub that just copied Vn to Vd — any
             // code doing byte shuffles (hex encode, UTF-8 conversion,
             // base64) would get wrong results silently.
             case 0x0E000000:   // TBL (op2=0; Q and L stripped)
@@ -764,7 +761,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 // TWO half-results:
                 //   first half of Vd = pairwise(max/min) of Vn
                 //   second half of Vd = pairwise(max/min) of Vm
-                // The old code combined Vn and Vm into a single max/min,
                 // which is wrong — it only produced half the output bytes
                 // AND used the wrong semantics. This broke glibc's
                 // strchrnul SIMD path, which uses `umaxp v4.16b, v3.16b,
@@ -825,7 +821,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 int esize = 1 << esize_log2;  // bytes: 1, 2, 4, or 8
                 int index = imm5 >> (esize_log2 + 1);
                 // UMOV: read from vector element, write to GPR.
-                // BUGFIX (rc.1): for Q=1 (128-bit), elements with index >=
                 // (8/esize) must read from v_hi, not v_lo. The old code
                 // always read from v_lo, returning wrong values for lane
                 // indices >= 2 (32-bit) or >= 1 (64-bit).
@@ -883,7 +878,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Sub-discriminator for 1-source vector ops (REV/CNT/CMEQ#0).
             // Mask off Q (30), U (29), size (23:22), Rm (20:16), Rn (9:5), Rd (4:0).
             //
-            // BUGFIX (rc.1): the old mask 0xBFFFFC00 did NOT mask off the
             // size field (bits 23:22) or the U bit (29). This caused:
             //   - REV64 v0.4s (size=2) to not match the REV64 constant (size=0)
             //   - REV32 (U=1) to not match the REV64 case (U=0)
@@ -1042,7 +1036,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
                 && ((op >> 20) & 0xF) == 0  // immh == 0 → MOVI/MVNI, not shift
                 && (((op >> 10) & 0x3F) != 0x21  // exclude SHRN (bits[15:10]=100001)
-                    || ((op >> 29) & 1))) {      // Turn 85: but NOT for MVNI (U=1)
+                    || ((op >> 29) & 1))) {      // but NOT for MVNI (U=1)
                 // source, which collides with the MOVI/MVNI pattern. SHRN
                 // has bits[15:10] = 100001 (0x21), while MOVI/MVNI has
                 // bits[11:10] = 00. Check bits[15:10] to distinguish.
@@ -1116,7 +1110,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Shift = immh:immb - esize_bits
             //   (e.g. shl v0.4s, #4 → immh:immb=0x24=36, esize=32, shift=36-32=4)
             //
-            // BUGFIX (rc.1): the old code had TWO bugs:
             // 1. immh extracted as (op>>19)&0xF — off by one bit (should be >>20).
             // 2. Element size rule was wrong: used 'immh < N' thresholds that
             //    gave 16-bit for immh=3 instead of 32-bit. The correct rule is
@@ -1179,7 +1172,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Shift = (2 * esize_bits) - immh:immb (same as USHR, but
             // the shift is arithmetic — the sign bit is propagated).
             //
-            // BUGFIX (1.4.5-alpha): This handler was missing entirely.
             // The MOVI/shift ambiguity check above (line ~1981) catches
             // this encoding only when immh == 0 (MOVI); for immh != 0
             // (actual SSHR), control fell through past the USHR handler
@@ -1386,7 +1378,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   immh=0 → esize=2 (16-bit source), immh=1 → esize=4 (32-bit),
             //   immh=2,3 → esize=8 (64-bit)
             //   shift = esize*8 - (immh:immb)
-            // The old code used `if (immh == 1) esize=2` which missed immh=0
             // (16-bit source), and used `2*esize*8 - immh:immb` for the shift
             // (off by esize*8). This produced wrong shift amounts, corrupting
             // the narrowed result. With immh=0, esize was set to 8 (64-bit)
@@ -2129,7 +2120,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             // FMADD/FMSUB/FNMADD/FNMSUB
             // Encoding: bits[31:24]=0x1F, bit 15=o1 (sub), bit 21=o2 (neg).
-            // The old code's mask (op & 0xFF200000) == 0x1F000000 only
             // matched FMADD/FMSUB (o2=0); FNMADD/FNMSUB (o2=1) fell
             // through to the "Unknown FP — NOP" path, silently
             // returning whatever was in Vd. This broke any guest

@@ -1,4 +1,4 @@
-// yggdrasil/input_node.hpp — /dev/input/eventX + /dev/input/js0 wrapper (Turn 38-39).
+// yggdrasil/input_node.hpp — /dev/input/eventX + /dev/input/js0 wrapper.
 //
 // InputNode wraps a FrostInput instance. The guest opens /dev/input/eventX
 // (or /dev/input/js0) and reads event records from it. The record format

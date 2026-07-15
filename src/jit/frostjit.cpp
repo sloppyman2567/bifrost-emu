@@ -451,7 +451,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
         }
         case IROp::TST: {
             // Force both operands into distinct host regs via force_two_vregs_to.
-            // The old code used ensure_vreg(src1, RAX) + ensure_vreg(src2, RCX),
             // but ensure_vreg ignores the `preferred` hint when the vreg is
             // already cached elsewhere. Under high register pressure, the
             // second ensure_vreg could evict the first operand's register

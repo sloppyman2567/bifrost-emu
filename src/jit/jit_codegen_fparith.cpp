@@ -39,7 +39,7 @@ namespace arm64emu {
 // Handles all scalar FP arithmetic / conversion / move IR ops. Returns
 // true if the op was handled, false if not (caller falls through to the
 // next dispatcher or residual switch). The case bodies below are verbatim
-// from jit_codegen_fp.cpp (Turn 36 era) — no logic changes, just moved
+// from jit_codegen_fp.cpp () — no logic changes, just moved
 // to a separate file/method. The original `return false;` (meaning
 // "block does not end") becomes `return true;` here (meaning "handled,
 // doesn't end a block").
@@ -104,7 +104,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // Execute SSE2 op: ADDSD/MULSD/etc xmm0, xmm1 → xmm0 = xmm0 OP xmm1
             // BUGFIX: must use modrm(3, 0, 1) → reg=xmm0, rm=xmm1
-            // The old code used modrm(3, 1, 0) with REX.R which encoded
             // ADDSD xmm1, xmm0 (result in xmm1) but stored xmm0 (stale).
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(sse_op);
@@ -717,7 +716,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // v_lo[dest] = imm; v_hi[dest] = 0
             // clobber_host_reg evicts any dirty GPR vreg
             // cached in RAX BEFORE we overwrite it with the immediate.
-            // The old code silently dropped dirty vregs.
             clobber_host_reg(RAX);
             emit_mov_imm64(RAX, inst.imm);
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;

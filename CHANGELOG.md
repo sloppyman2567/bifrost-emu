@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 106 (2026-07-15)
+
+### Code review cleanup + optimization + all 171 tests pass
+
+Comprehensive code review and cleanup pass. All 171 tests now pass
+(was 164+7 skip; downloaded iperf3 deps to reach 171/171). Build is
+warning-clean under `-Wall -Wextra`.
+
+**Comment cleanup (~250 lines removed/modified across 30+ files):**
+
+- Stripped ALL remaining "Turn NN" annotations from source (88
+  occurrences). These were development-history narrative that belongs
+  in `context.md`, not in source code. Used two Python scripts:
+  `strip_stale_comments.py` (standalone comment lines) and
+  `clean_inline_turns.py` (inline references).
+- Removed stale "the old code...", "was previously...", "root cause
+  of..." narrative comments that described removed code.
+- Removed "v1.5.0.alpha:" version annotations in inline comments
+  (the version is in `version.hpp`).
+- Cleaned file header comments that referenced specific turns
+  (e.g., "input_node.cpp — InputNode implementation (Turn 38-39)"
+  → "input_node.cpp — InputNode implementation").
+- Fixed stale `brk_verbose_` comment ("always true" → "controlled by
+  cfg.log_brk_verbose / -q flag").
+
+**Performance optimization (hot-path getenv caching):**
+
+- `src/frontend/dynamic_linker.cpp`: Cached
+  `getenv("BIFROST_DYNLINK_TRACE")` in a function-local static
+  (`dynlink_trace_enabled()`). Was called on every `resolve_symbol`
+  invocation — the hot path during PLT relocation. `getenv` scans
+  `environ` linearly, so this was a measurable overhead. Now called
+  once. Applied to all 28 `getenv("BIFROST_DYNLINK_TRACE")` calls
+  in the file.
+- `src/jit/jit_dispatch.cpp`: Cached
+  `getenv("BIFROST_VERIFY_TRACE")` in static bools (was called
+  per-block in verify mode).
+- `src/syscalls/syscalls.cpp`: Cached
+  `getenv("BIFROST_SYSCALL_TRACE_ALL")` in `thread_local bool`
+  (was called per-syscall when tracing enabled). Also made
+  `trace_syscalls` `thread_local` for correctness under multi-
+  threaded guests.
+- `src/frontend/dynamic_linker.cpp`: Added `out.reserve(64)` in
+  `read_guest_cstr` to avoid repeated `std::string` reallocations
+  for typical-length symbol names.
+
+**Bug fix (spawn_thread code restoration):**
+
+The comment cleanup script accidentally deleted 5 lines of critical
+code from `spawn_thread` in `src/core/thread_mgr.cpp`:
+`copy_arch_state_from(parent_cpu)`, `regs[0]=0`, `pc=entry_pc`,
+`sp=stack_top`, `running=true`. The script's "Turn NN" pattern
+matched a multi-line comment that contained code lines, and the
+removal deleted both the comment AND the adjacent code. This broke
+ALL pthread tests (7 failures). Root-caused and fixed by restoring
+the deleted code. All pthread tests pass again.
+
+**Test results:** 171/171 pass (0 skip, 0 fail). Warning-clean
+under `-Wall -Wextra`.
+
 ## [Unreleased] — Turn 105 (2026-07-15)
 
 ### Argument-passing guest call + dl_iterate_phdr + dladdr + process_vm_writev

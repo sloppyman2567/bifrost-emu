@@ -42,8 +42,8 @@
 #include "frontend/dynamic_linker.h"  // DynamicLinker (for _dl_allocate_tls syscall)
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
-#include "frost/audio_thunk.hpp"    // v1.5.0.alpha
-#include "frost/display_thunk.hpp"  // v1.5.0.alpha
+#include "frost/audio_thunk.hpp"    //
+#include "frost/display_thunk.hpp"  //
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"  // HostNode (for socket fd registration)
 #include <errno.h>
@@ -68,7 +68,7 @@
 #include <sys/sendfile.h>
 namespace arm64emu {
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
-    // Turn 68 refactor: dispatch to sub-handlers first. Each returns
+    // dispatch to sub-handlers first. Each returns
     // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
     if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
@@ -125,7 +125,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         //   26 = inotify_init1
         //   27 = inotify_add_watch
         //   28 = inotify_rm_watch
-        // The old code misrouted any guest vmsplice/splice/tee call into
         // inotify handlers (which would call host inotify with garbage
         // args and fail). Real guest inotify_init1 (syscall 26) returned
         // -ENOSYS. Fixed by renumbering to the correct AArch64 slots.
@@ -560,7 +559,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // line 663 above). Real fchdir is syscall 50, handled in fs.cpp.
         case 36: { // symlinkat(old, newdirfd, new) — AArch64 36
             // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
-            // The old code dispatched 36 to unlinkat, which broke `ln -s`
             // (toybox calls symlinkat() via musl). unlinkat is correctly
             // handled at syscall 35 in fs.cpp.
             std::string oldp = Yggdrasil::read_path(mem_, a0);
@@ -806,7 +804,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(ENOSYS);
             return 0;
         }
-        // ── Bifrost-emu internal TLS-alloc syscall (Turn 76/78) ────────
+        // ── Bifrost-emu internal TLS-alloc syscall  ────────
         // Called by _dl_allocate_tls AND _dl_allocate_tls_init stubs.
         //
         //   1. Copies lib TLS template to [tcb-lib_size, tcb) (negative TP offsets)

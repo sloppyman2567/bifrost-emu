@@ -297,8 +297,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 // (regs, sp, pc, pstate, FP file, TLS, sigmask) so we don't
                 // disturb the (still-default) init. We can't copy the whole
                 // CPU struct because it has mutex + atomic members that are
-                // non-copyable (added Turn 57 for per-CPU pending signal
-                // queue). The pending-queue state is irrelevant here —
+                // non-copyable. The pending-queue state is irrelevant here —
                 // ifunc resolution runs at load time before any threads
                 // exist, so no signals can be pending.
                 struct SavedState {
@@ -395,7 +394,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 restore();
                 return result;
             });
-            // BUGFIX (Turn 59, C1): register an init runner so the
             // dynamic linker can invoke DT_INIT_ARRAY entries (C++ static
             // constructors, glibc hooks, etc.). Uses the same borrow-CPU
             // pattern as the ifunc resolver, but doesn't capture X0 —
@@ -1004,7 +1002,6 @@ int Emulator::run() {
             //
             // Previously, DecodeError propagated to main() and killed
             // the emulator with "bifrost-emu: decode error at pc=0x0".
-            // This was wrong: the guest should get SIGSEGV (so its own
             // signal handler can recover) or terminate with the correct
             // exit code (128+11=139), not an emulator crash.
             //

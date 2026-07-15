@@ -223,7 +223,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                         mem.store<uint64_t>(target, r_addend);
                     } else if (rtype == 1032) {
                         // R_AARCH64_IRELATIVE: *(addr) = call_resolver(Delta + A)
-                        // BUGFIX (Turn 59, C2): for static binaries we can't
                         // call the resolver here (no CPU available in
                         // elf_loader). Store info.base_addr + r_addend so at
                         // least the resolver ADDRESS is correct for PIE

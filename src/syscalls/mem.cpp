@@ -276,7 +276,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             std::lock_guard<std::mutex> g(brk_mu_);
             if (a0 == 0) { ret_host(brk_); return 0; }
             if (a0 < brk_start_) { ret_host(brk_); return 0; }
-            // BUGFIX (production hardening): reject unreasonable brk
             // extensions. The Linux kernel checks the new break against
             // RLIMIT_DATA and the available address space; without this
             // check, a buggy (or malicious) guest could request

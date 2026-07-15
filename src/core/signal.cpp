@@ -82,7 +82,7 @@ bool default_terminates(int signo) {
             // SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG,
             // SIGWINCH — default is ignore (or stop, for SIGSTOP/SIGTSTP).
             // Real-time signals (SIGRTMIN..SIGRTMAX, 32..64) default to
-            // terminate per Linux signal(7). Turn 57.
+            // terminate per Linux signal(7).
             if (signo >= BIFROST_SIGRTMIN && signo <= BIFROST_SIGRTMAX) {
                 return true;
             }
@@ -465,7 +465,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t handler_addr = act->handler;
     const uint64_t act_flags    = act->flags;
     const uint64_t act_mask     = act->mask;
-    // BUGFIX (production hardening): validate handler address alignment.
     // AArch64 instructions must be 4-byte aligned. If a buggy guest
     // installs a handler at an unaligned address (e.g., due to a
     // corrupted function pointer), setting cpu.pc to that address
@@ -677,7 +676,6 @@ void Emulator::install_host_signal_handlers() {
     // queue. SA_RESTART is intentionally NOT set — we want blocking
     // syscalls to be interrupted so the run loop can drain signals.
     //
-    // BUGFIX (production hardening): the old code used sigemptyset(&sa.sa_mask),
     // which means only the SAME signal is blocked during its handler. This
     // created a re-entrancy race in queue_host_signal: if SIGTERM arrived
     // while SIGINT's handler was running, both invocations could read the

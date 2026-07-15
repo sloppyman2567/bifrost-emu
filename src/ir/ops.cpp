@@ -984,7 +984,6 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             // (1/2/4/8). SHL = logical left, USHR = logical right,
             // SSHR = arithmetic right (sign-extends).
             //
-            // BUGFIX (1.4.5-alpha): the previous version did
             // `shift &= (esize*8)-1`, which truncated shift=esize*8 to 0
             // (turning "clear all bits" into a no-op for USHR/SSHR #N where
             // N == esize_bits, e.g. `ushr v.4s, #32`). This caused verify

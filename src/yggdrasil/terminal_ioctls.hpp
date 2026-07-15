@@ -62,7 +62,7 @@ namespace ioctl_num {
 //
 // This helper is used by both HostNode::ioctl() and StdioNode::ioctl().
 // Keeping the dispatch logic in one place ensures the two paths can't
-// drift (which was the original Turn 35 bug — TIOCGWINSZ worked on
+// drift (which was theoriginal bug — TIOCGWINSZ worked on
 // host fds but not on stdin/stdout/stderr).
 inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
                                     uint64_t argp, Memory& mem) {

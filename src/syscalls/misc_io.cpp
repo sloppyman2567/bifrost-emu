@@ -44,7 +44,7 @@ namespace arm64emu {
 // fs.cpp's resolve_dirfd — we look up the guest fd in the FdTable and
 // return the underlying host fd. For fds that were never registered in
 // the FdTable (e.g. stdin/stdout/stderr which are HostNode-wrapped but
-// owned by StdioNode, or fds created before this Turn 102 refactor that
+// owned by StdioNode, or fds created before this refactor that
 // bypassed the FdTable), we fall back to using the guest fd as the host
 // fd. This preserves backward compatibility for any code path that
 // somehow obtained a raw host fd.

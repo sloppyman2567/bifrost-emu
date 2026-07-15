@@ -737,7 +737,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // proceed if *uaddr == val3 (the "cmp" is on uaddr,
                     // not uaddr2).
                     //
-                    // The old code simplified this to just WAKE (waking
                     // `val` waiters and ignoring uaddr2), which caused
                     // spurious wakeups in condvar implementations that
                     // rely on requeue to avoid thundering herds. Now we

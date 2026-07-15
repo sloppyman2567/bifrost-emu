@@ -14,7 +14,7 @@
 // header — they use FrostGraphics::thunk() which returns a
 // GraphicThunk* (forward-declared).
 //
-// ── How it works (Turn 37 redesign) ───────────────────────────────────
+// ── How it works  ───────────────────────────────────
 // The thunk maintains a registry of (library, symbol) → (host_fn_ptr,
 // guest_trampoline_addr). Each registered symbol gets a 16-byte guest
 // trampoline that:
@@ -36,14 +36,14 @@
 // libraries without recompiling them.
 //
 // ── Why not just dlsym(RTLD_DEFAULT)? ─────────────────────────────────
-// The Turn 36 implementation returned host function pointers directly
+// The previous implementation returned host function pointers directly
 // via dlsym(RTLD_DEFAULT, ...). This is fundamentally broken: those are
 // x86-64 function pointers in the host's address space, and the guest
 // would try to execute them as AArch64 code, crashing with SIGILL.
-// The Turn 37 redesign fixes this by returning GUEST-CALLABLE
+// The redesign fixes this by returning GUEST-CALLABLE
 // trampoline addresses instead.
 //
-// ── Limitations (inherited from Turn 36) ──────────────────────────────
+// ── Limitations (inherited from previous design) ──────────────────────────────
 //   - Pointer arguments are translated assuming the guest pointer is
 //     in the emulator's address space (via Memory::host_addr()). This
 //     works for heap/stack pointers but NOT for pointers the guest

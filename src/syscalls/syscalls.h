@@ -44,13 +44,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
-// ── misc.cpp sub-handlers (Turn 68 refactor) ──────────────────────────
+// ── misc.cpp sub-handlers  ──────────────────────────
 // syscall_misc() dispatches to these in order. Each returns
 // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
 int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num);  // sigaction/sigreturn/etc
 int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num);      // epoll/eventfd/timerfd/socket/poll
 int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num); // getpid/wait/rlimit/prctl/etc
-// ── misc_process.cpp sub-handlers (Turn 69 refactor) ──────────────────
+// ── misc_process.cpp sub-handlers  ──────────────────
 // syscall_misc_process() dispatches to these in order. Each returns
 // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
 int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num);  // ptrace/sched_*/priority/getpgid/getcpu

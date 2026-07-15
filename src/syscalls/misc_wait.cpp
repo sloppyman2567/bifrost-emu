@@ -1,5 +1,5 @@
 // syscalls/misc_wait.cpp — wait/times syscalls extracted from
-// misc_process.cpp (Turn 69 refactor). Handles:
+// misc_process.cpp . Handles:
 //   - times (case 153)
 //   - waitpid (case 247)
 //   - wait4 (case 260)

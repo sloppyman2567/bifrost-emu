@@ -83,7 +83,7 @@ int HostNode::fstat(struct stat* st) {
 }
 // HostNode::ioctl — handle terminal and FIONREAD ioctls by forwarding
 // to the host fd. v1.4.5-alpha: moved here from ioctls.cpp's heuristic
-// dispatch. Turn 37: refactored to use the shared
+// dispatch. refactored to use the shared
 // dispatch_terminal_ioctl() helper (was duplicated in StdioNode).
 int HostNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     int r = dispatch_terminal_ioctl(fd_, request, argp, mem);
