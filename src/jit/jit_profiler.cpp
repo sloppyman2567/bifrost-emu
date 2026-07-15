@@ -19,14 +19,11 @@
 // block dispatch path.
 #include "jit/frostjit.hpp"
 #include "bifrost/version.hpp"  // CODENAME
-
 #include <sys/mman.h>
 #include <cerrno>
 #include <cstring>   // memcpy
 #include <cstdlib>   // getenv
-
 namespace arm64emu {
-
 // ── Construction ────────────────────────────────────────────────────────
 FrostJIT::FrostJIT() {
     // W^X (Write XOR Execute) protection: allocate the code buffer as
@@ -51,7 +48,6 @@ FrostJIT::FrostJIT() {
     } else {
         code_buf_ = static_cast<uint8_t*>(p);
     }
-
     // Initialize W^X state. If we started RW (no EXEC), enable W^X and
     // mark the buffer as currently writable (since we just allocated it
     // RW and will write to it during the first translate_block).
@@ -59,7 +55,6 @@ FrostJIT::FrostJIT() {
         wex_enabled_ = true;
         wex_write_depth_ = 0;  // buffer is RX (not writable) by default
     }
-
     // Counters start at zero (declared in the public header).
     blocks_translated = 0;
     blocks_executed   = 0;
@@ -67,13 +62,11 @@ FrostJIT::FrostJIT() {
     cache_misses      = 0;
     interpreter_fallbacks = 0;
     block_chains_patched = 0;
-
     // Watchdog state (thread-local — reset for this thread).
     tls_watchdog_last_pc_ = UINT64_MAX;
     tls_watchdog_count_   = 0;
     total_blocks_executed_.store(0, std::memory_order_relaxed);
     jit_disabled_.store(false, std::memory_order_relaxed);
-
     // Initialize vreg arrays — prev_max_vreg_ must be large enough that
     // the first translate_block() clears all 4096 entries. Without this,
     // uninitialized vreg_home_[] garbage causes load_vreg_to_reg to think
@@ -86,7 +79,6 @@ FrostJIT::FrostJIT() {
     }
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
-
     // ── FMV: detect CPU features once at construction ──────────────
     // The result is cached for the JIT's lifetime — CPU features don't
     // change at runtime. Polled by compile_ir_inst() when emitting code
@@ -100,11 +92,9 @@ FrostJIT::FrostJIT() {
     cpu_features_ = detect_cpu_features();
     no_fma3_ = (getenv("BIFROST_NO_FMA3") != nullptr);
 }
-
 FrostJIT::~FrostJIT() {
     if (code_buf_) munmap(code_buf_, CODE_BUF_SIZE);
 }
-
 // ── W^X protection toggle (reference-counted) ──────────────────────────
 // make_writable: increment the write depth. If this is the first writer
 // (depth was 0), mprotect the buffer to RW. Subsequent calls are no-ops
@@ -140,7 +130,6 @@ void FrostJIT::make_writable() {
     }
     wex_write_depth_++;
 }
-
 // make_executable: decrement the write depth. If this is the last writer
 // (depth reaches 0), mprotect the buffer to RX. No-op if other writers
 // are still active (nested calls).
@@ -154,7 +143,6 @@ void FrostJIT::make_executable() {
         // If mprotect fails, leave the buffer writable (better than crashing).
     }
 }
-
 void FrostJIT::flush_cache() {
     // Clear block metadata. We don't need writable access for this —
     // blocks_/back_refs_/hot_pc_counts_ are STL containers, not the code
@@ -171,5 +159,4 @@ void FrostJIT::flush_cache() {
     tls_hot_pc_counts_.clear();  // clear hotness tracker (thread-local)
     code_buf_used_ = 0;
 }
-
 } // namespace arm64emu

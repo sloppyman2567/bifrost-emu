@@ -5,9 +5,7 @@
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "core/emulator.h"
 #include "jit/frostjit.hpp"
-
 namespace arm64emu {
-
 void Emulator::enable_jit() {
     if (jit_) return;
     // Shared-JIT mode (default): spawned threads share the main's FrostJIT,
@@ -44,7 +42,6 @@ void Emulator::enable_jit() {
         }
     }
 }
-
 void Emulator::print_jit_stats() {
     if (!jit_ || !jit_enabled_) return;
     // Aggregate main JIT + all per-thread JITs for a complete picture.
@@ -59,7 +56,6 @@ void Emulator::print_jit_stats() {
     size_t    code_size        = jit_->code_buf_size();
     size_t    cache_entries    = jit_->cache_entries();
     size_t    num_jits         = 1;  // main JIT
-
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) {
@@ -77,7 +73,6 @@ void Emulator::print_jit_stats() {
             }
         }
     }
-
     fprintf(stderr, "[%s] frostJIT (%zu thread%s): %llu blocks translated, "
             "%llu executed (%llu instructions, %llu cache hits, %llu misses, "
             "%llu fallbacks, %llu chains)\n",
@@ -98,19 +93,15 @@ void Emulator::print_jit_stats() {
                 CODENAME, avg);
     }
 }
-
 void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);
 }
-
-// Turn 93: BL_CALL helper — called from JIT code to invoke a callee.
 // Runs the callee until it returns (PC = LR). This means dispatching
 // multiple blocks in a loop — the callee's first block only executes
 // part of the function. We must keep dispatching until RET sets PC=LR.
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
     uint64_t return_pc = cpu->regs[30];  // LR set by BL_CALL's STORE_REG
     cpu->pc = target_pc;
-
     auto* jit = emu->jit();
     int steps = 0;
     while (cpu->running && cpu->pc != return_pc) {
@@ -128,5 +119,4 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     }
     return cpu->pc;
 }
-
 } // namespace arm64emu

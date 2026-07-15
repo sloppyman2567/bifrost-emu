@@ -12,7 +12,6 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <cstring>
 #include <sys/resource.h>
@@ -20,19 +19,15 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3];
     auto& mem_ = emu.mem();
-
     switch (num) {
         case 153: { // times(struct tms *buf) — AArch64 153
             // times() returns the number of clock ticks since an arbitrary
             // point in the past, and fills struct tms.
-            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
             // even on error. The old code returned ret_errno() without
             // writing, leaving the guest's struct tms uninitialized with
             // deterministic stack garbage. Now we zero-fill first, then
@@ -57,9 +52,7 @@ int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         case 247: { // waitpid (legacy, same as wait4) — aarch64 247
-            // BUGFIX (Turn 62 rev 3): ALWAYS write status to guest.
             int status = 0;
             pid_t r;
             while (true) {
@@ -80,9 +73,7 @@ int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         case 260: { // wait4(pid, wstatus, options, rusage) — aarch64 260
-            // BUGFIX (Turn 62 rev 3): ALWAYS write to guest buffers (a1
             // wstatus, a3 rusage) even on error. The old code returned
             // ret_errno() without writing, leaving the guest's struct
             // rusage uninitialized with deterministic stack garbage.
@@ -120,11 +111,9 @@ int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

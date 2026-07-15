@@ -11,16 +11,13 @@
 #include "syscalls/syscalls.h"
 #include "yggdrasil/yggdrasil.hpp"
 #include "jit/frostjit.hpp"
-
 #include <errno.h>
 #include <signal.h>
 #include <mutex>
 #include <cstring>
 #include <vector>
 #include <thread>
-
 namespace arm64emu {
-
 // ── Clone flag constants ───────────────────────────────────────────────
 // Per Linux kernel include/uapi/linux/sched.h. Named constants replace
 // the raw hex values (0x100, 0x80000, etc.) that were sprinkled across
@@ -52,7 +49,6 @@ namespace clone_flags {
     constexpr uint64_t NEWNET            = 0x40000000;
     constexpr uint64_t IO                = 0x80000000;
 }  // namespace clone_flags
-
 // Helper: walk a thread's robust futex list and mark each held futex as
 // FUTEX_OWNER_DIED, then wake waiters. Called on thread exit. Mirrors
 // the kernel's exit_robust_list() (kernel/futex.c). Best-effort: if a
@@ -62,14 +58,12 @@ namespace clone_flags {
 // to avoid cross-TU coupling. The set_robust_list/get_robust_list syscalls
 // below just store/retrieve the head pointer; the actual list walk happens
 // at thread exit.
-
 int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& signals_ = emu.signals_;
-
     // Lambda wrappers for Emulator member access (spawn_thread, get_futex).
     // (find_cpu_by_tid / decrement_alive_threads are available via emu.*
     // directly at call sites if needed; the lambda wrappers here are
@@ -81,7 +75,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
     auto get_futex = [&](uint64_t addr) -> Emulator::FutexSlot* {
         return emu.get_futex(addr);
     };
-
     switch (num) {
         case 220: { // clone(flags, stack, ptid, ctid, tls)
             // AArch64 clone() syscall signature (matches glibc/musl):
@@ -118,7 +111,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t ptid_ptr = a2;
             uint64_t tls = a3;       // AArch64: x3 = tls
             uint64_t ctid_ptr = a4;  // AArch64: x4 = ctid
-
             if (!(flags & clone_flags::VM)) {
                 // ── Fork path (no CLONE_VM) ──
                 // Use host fork() for copy-on-write memory. The child
@@ -134,7 +126,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 return 0;
             }
-
             // ── Thread path (CLONE_VM) ──
             // The new thread's entry point is the instruction AFTER the
             // SVC (same as the parent). Both parent and child return from
@@ -155,22 +146,18 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // cpu.pc directly, NOT cpu.pc + 4.
             uint64_t entry_pc = cpu.pc;  // already SVC+4 (set by SVC_IMM handler)
             uint64_t arg = 0;  // x0 will be set to 0 for child
-
             int child_tid = spawn_thread(cpu, flags, stack, entry_pc, arg, tls);
             if (child_tid < 0) {
                 ret_err(ENOMEM);
                 return 0;
             }
-
             // CLONE_PARENT_SETTID: write child TID to *ptid
             if ((flags & clone_flags::PARENT_SETTID) && ptid_ptr) {
                 mem_.store<uint32_t>(ptid_ptr, child_tid);
             }
-
             ret_host(child_tid);
             return 0;
         }
-
         case 435: { // clone3(clone_args, size) — AArch64 syscall 435
             // clone3 is the modern (Linux 5.3+) replacement for clone().
             // It takes a struct clone_args and a size. We translate the
@@ -215,7 +202,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // the stack top directly).
             uint64_t stack_top = stack + stack_size;
             if (stack_size == 0) stack_top = stack;  // fork() idiom
-
             if (!(flags & clone_flags::VM)) {
                 // Fork path.
                 int child_pid = emu.fork_guest(cpu, stack_top, flags,
@@ -224,13 +210,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 else                ret_host(static_cast<uint64_t>(child_pid));
                 return 0;
             }
-
             // Thread path. Entry point = instruction after SVC (same as
             // clone case 220 above). The interpreter's SVC_IMM handler
             // advances cpu.pc to SVC+4 before calling syscall(), so
             // cpu.pc is already the correct entry point.
             //
-            // BUGFIX (Turn 77): spawn_thread() reads the ctid pointer
             // from parent_cpu.regs[4] (x4) — correct for legacy clone()
             // (where x4=ctid on AArch64) but WRONG for clone3, where
             // ctid is in the clone_args struct at offset +16, not in a
@@ -257,7 +241,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(tid));
             return 0;
         }
-
         case 221: { // execve — AArch64 syscall 221
             // execve(path, argv, envp) — replace the guest's memory image
             // with a new ELF binary. This is called by the shell after
@@ -275,7 +258,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // has a CoW copy of the parent's memory, so clearing it is
             // safe — the parent is unaffected.
             //
-            // ── Multi-call binary redirect (Turn 40) ───────────────────
+            // ── Multi-call binary redirect ───────────────────
             // When the guest runs `toybox sh -c 'ls /'`, the shell does
             // a PATH lookup for `ls`, finds the host's `/bin/ls` (x86-64),
             // and calls execve("/bin/ls", ...). The host binary is not
@@ -291,7 +274,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_err(EFAULT);
                 return 0;
             }
-
             // Read argv from guest memory (needed for both paths).
             std::vector<std::string> new_argv;
             uint64_t argv_ptr = a1;
@@ -305,7 +287,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 new_argv.push_back(arg);
                 argv_ptr += 8;
             }
-
             // Read the ELF file.
             FILE* f = fopen(path.c_str(), "rb");
             bool is_aarch64 = false;
@@ -329,7 +310,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 fclose(f);
             }
-
             if (!is_aarch64) {
                 // ── Multi-call binary redirect ────────────────────────
                 // The requested binary is not AArch64 (or doesn't exist).
@@ -343,7 +323,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (slash != std::string::npos) {
                     basename = basename.substr(slash + 1);
                 }
-
                 // Don't redirect if the basename IS the current ELF's
                 // basename (infinite loop guard).
                 std::string elf_path = emu.elf_path();
@@ -361,7 +340,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                     return 0;
                 }
-
                 // Try to re-exec the current ELF with argv[0] = basename.
                 FILE* ef = fopen(elf_path.c_str(), "rb");
                 if (!ef) {
@@ -387,7 +365,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 fclose(ef);
-
                 // Replace argv[0] with the basename so the multi-call
                 // binary knows which command to run.
                 if (new_argv.empty()) {
@@ -395,22 +372,17 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 } else {
                     new_argv[0] = basename;
                 }
-
                 if (getenv("BIFROST_EXEC_TRACE")) {
                     fprintf(stderr, "[exec] multi-call redirect: '%s' -> "
                             "'%s %s'\n", path.c_str(), elf_path.c_str(),
                             basename.c_str());
                 }
             }
-
             if (elf_data.empty()) {
                 ret_err(ENOENT);
                 return 0;
             }
-
             if (new_argv.empty()) new_argv.push_back(path);
-
-            // BUGFIX (Turn 40): do NOT call flush_cache() here! After
             // fork(), the child is executing INSIDE the JIT code buffer
             // (the fork/execve syscall was JIT'd, and jit_interp_step()
             // was called from JIT code). flush_cache() resets
@@ -431,8 +403,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (emu.jit()) {
                 emu.jit()->jit_disabled_.store(true, std::memory_order_relaxed);
             }
-
-            // BUGFIX (Turn 40): clear old high-memory allocations to
             // simulate execve's memory image replacement. On real Linux,
             // execve() removes ALL old mappings (heap, mmap, etc.) and
             // only the new binary's PT_LOAD segments + stack remain.
@@ -460,17 +430,14 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 }
             }
-
             // Reload the ELF into the existing Memory. The ElfLoader will
             // map new PT_LOAD segments. Old mappings remain but are
             // overwritten by the new binary's segments.
             auto info = ElfLoader::load(mem_, elf_data);
-
             // Set up a new initial stack.
             const uint64_t STACK_TOP = 0x8000000000ULL;
             // The stack is already mapped from the parent; just reset SP.
             uint64_t sp = STACK_TOP;
-
             // Push argv strings.
             std::vector<uint64_t> argv_addrs;
             for (auto& a : new_argv) {
@@ -478,7 +445,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.write(sp, a.data(), a.size() + 1);
                 argv_addrs.push_back(sp);
             }
-
             // Push envp. Use the Emulator's guest_env_ (which was either
             // set via set_guest_env() or built by build_default_guest_env()
             // at startup). This propagates TZ, LANG, LC_*, etc. from the
@@ -498,13 +464,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.write(sp, e.data(), e.size() + 1);
                 envp_addrs.push_back(sp);
             }
-
             // AT_RANDOM.
             sp -= 16;
             uint8_t rnd[16] = {0};
             mem_.write(sp, rnd, 16);
             uint64_t random_addr = sp;
-
             // Build auxv.
             std::vector<uint64_t> auxv = {
                 6, 4096,           // AT_PAGESZ
@@ -517,13 +481,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 7, 0,              // AT_BASE
                 0, 0,              // AT_NULL
             };
-
             // Compute total table size and align SP to 16.
             uint64_t argc = new_argv.size();
             uint64_t table_size = 8 + 8 * (argc + 1) + 8 * (envp_addrs.size() + 1) + 8 * auxv.size();
             sp -= table_size;
             sp &= ~0xFULL;
-
             uint64_t p = sp;
             auto push = [&](uint64_t v) { mem_.store<uint64_t>(p, v); p += 8; };
             push(argc);
@@ -532,7 +494,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             for (auto e : envp_addrs) push(e);
             push(0);
             for (auto v : auxv) push(v);
-
             // Set CPU state for the new program.
             cpu.pc = info.entry;
             cpu.sp = sp;
@@ -543,8 +504,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             memset(cpu.v_lo, 0, sizeof(cpu.v_lo));
             memset(cpu.v_hi, 0, sizeof(cpu.v_hi));
             cpu.tid = static_cast<int>(getpid());
-
-            // BUGFIX (Turn 40): invalidate the decode cache. After execve,
             // the new binary loads at the same addresses as the old one
             // (e.g., 0x400000). The decode cache matches on PC, so stale
             // entries from the old binary would match new PCs but return
@@ -553,7 +512,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // wrongly-decoded instruction stream). Setting all tags to
             // UINT64_MAX (the "empty" sentinel) forces a fresh decode.
             for (auto& ce : cpu.decode_cache) ce.tag = UINT64_MAX;
-
             if (getenv("BIFROST_EXEC_TRACE")) {
                 fprintf(stderr, "[exec] post-execve: pc=0x%llx sp=0x%llx "
                         "tid=%d regs zeroed, decode cache invalidated\n",
@@ -561,22 +519,18 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(cpu.sp),
                         cpu.tid);
             }
-
             // Set up a fresh TLS scratch area (like load_elf_file does).
             const uint64_t TLS_SCRATCH_SIZE = 65536;
             uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
             cpu.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
             cpu.tpidrro_el0 = cpu.tpidr_el0;
-
             // Map the zero page (NULL deref returns 0).
             mem_.map_range(0, 4096);
-
             // Return 0 to indicate execve succeeded (the syscall doesn't
             // actually return on success — we just set PC to the entry
             // point and continue).
             return 0;
         }
-
         case 98: { // futex(uaddr, op, val, timeout, uaddr2, val3)
             // Real futex implementation: WAIT blocks the calling thread
             // until woken or timeout; WAKE wakes blocked threads. Uses
@@ -596,7 +550,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t timeout_ptr = a3;
             uint64_t uaddr2 = a4;
             uint32_t val3 = static_cast<uint32_t>(a5);
-
             // Mask out private flag — we treat all futexes as private.
             // Also mask out FUTEX_CLOCK_REALTIME (0x100) which selects
             // CLOCK_REALTIME for FUTEX_WAIT_BITSET. Without masking it,
@@ -606,7 +559,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             op &= ~0x80;  // FUTEX_PRIVATE_FLAG
             op &= ~0x100; // FUTEX_CLOCK_REALTIME
             bool clock_realtime = (static_cast<uint32_t>(a1) & 0x100) != 0;
-
             switch (op) {
                 case 0:  // FUTEX_WAIT
                 case 9:  // FUTEX_WAIT_BITSET
@@ -616,7 +568,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // if FUTEX_CLOCK_REALTIME was set). FUTEX_WAIT (op 0)
                     // treats the timeout as RELATIVE.
                     bool absolute = (op == 9);
-
                     // Always check *uaddr == val BEFORE any fast-path
                     // return. The kernel returns -EAGAIN if *uaddr != val,
                     // regardless of whether other threads are alive. The
@@ -629,7 +580,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_err(EAGAIN);
                         return 0;
                     }
-
                     // Backward-compat: if no other threads are alive to
                     // wake us, return 0 immediately (pretend we waited
                     // and were woken). This preserves the previous
@@ -753,7 +703,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
-
                     // Read waiters without the lock — see comment above.
                     // Use an atomic read to avoid torn reads on architectures
                     // where int isn't atomic by default (not an issue on
@@ -764,7 +713,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_host(0);
                         return 0;
                     }
-
                     // There are waiters — take the slot mutex and notify.
                     std::unique_lock<std::mutex> lk(slot->mu);
                     int woken = std::min(to_wake, slot->waiters);
@@ -885,7 +833,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
             }
         }
-
         case 96: { // set_tid_address
             // Stores the tid_address pointer in the calling thread's
             // clear_child_tid field. On real Linux, set_tid_address(2)
@@ -915,7 +862,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(cpu.tid);
             return 0;
         }
-
         case 99: { // set_robust_list(head, len)
             // Record the head of this thread's robust futex list. On
             // thread exit, we walk the list and mark each held futex as
@@ -928,7 +874,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 100: { // get_robust_list(pid, head_ptr, len_ptr)
             // Return the robust list head for `pid` (0 = current thread).
             // We only support querying the current thread (pid 0 or the
@@ -949,7 +894,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 131: { // tgkill(tgid, tid, sig) — send signal to specific thread
             // Deliver the signal to the target thread. If the target is
             // the current thread, deliver directly. If it's another
@@ -976,7 +920,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // pending queue. The target's run loop drains it at the
                 // next 4K-instruction boundary (drain_pending_signals).
                 //
-                // BUGFIX (Turn 57): the old code called deliver_signal()
                 // directly on the target CPU while the target's host
                 // thread was concurrently executing on it — a textbook
                 // data race (regs/pc/sp/sigmask/sigpending mutated under
@@ -1003,7 +946,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 130: { // tkill(tid, sig)
             int tid = static_cast<int>(a0);
             int sig = static_cast<int>(a1);
@@ -1026,7 +968,6 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 129: { // kill(pid, sig)
             // kill() sends a signal to a process. For pid > 0, it goes
             // to the main thread (TID 1) of that process. For pid == 0,
@@ -1072,11 +1013,9 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

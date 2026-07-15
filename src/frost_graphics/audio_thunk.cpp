@@ -5,32 +5,25 @@
 #include "frost/audio_thunk.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER constant
 #include "thunk_common.hpp"
-
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
-
 namespace arm64emu {
-
 struct AudioThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
     bool   initialized = false;
-
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
         AudioThunk::TRAMPOLINE_SIZE * AudioThunk::MAX_SYMBOLS;  // 16 KiB
-
     std::vector<ThunkLibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-
     std::mutex mu;
 };
-
 // ── AudioThunk lifecycle ───────────────────────────────────────────────
 AudioThunk::AudioThunk() {
     impl_ = std::make_unique<AudioThunkImpl>();
-    // v1.5.0.alpha (Turn 74): audio thunking enabled by default.
+    // v1.5.0.alpha: audio thunking enabled by default.
     // Set BIFROST_NO_THUNK_AUDIO=1 to disable.
     const char* disable = getenv("BIFROST_NO_THUNK_AUDIO");
     impl_->enabled = !(disable && disable[0] != '0');
@@ -41,15 +34,11 @@ AudioThunk::AudioThunk() {
         }
     }
 }
-
 AudioThunk::~AudioThunk() = default;
-
 bool AudioThunk::enabled() const { return impl_ && impl_->enabled; }
-
 bool AudioThunk::init(Memory& mem) {
     if (!impl_->enabled) return false;
     if (impl_->initialized) return true;
-
     std::lock_guard<std::mutex> g(impl_->mu);
     impl_->mem = &mem;
     impl_->trampoline_base = mem.mmap_alloc(AudioThunkImpl::TRAMPOLINE_PAGE_SIZE);
@@ -59,7 +48,6 @@ bool AudioThunk::init(Memory& mem) {
     }
     register_known_symbols_();
     impl_->initialized = true;
-
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[audio-thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
@@ -68,7 +56,6 @@ bool AudioThunk::init(Memory& mem) {
     }
     return true;
 }
-
 void AudioThunk::register_function_(const std::string& lib,
                                       const std::string& sym,
                                       void* host_fn) {
@@ -79,12 +66,10 @@ void AudioThunk::register_function_(const std::string& lib,
                    AudioThunk::ID_BASE, trace,
                    lib, sym, host_fn);
 }
-
 void AudioThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) {
     write_thunk_trampoline(mem, addr, sym_id,
                             static_cast<uint16_t>(SYSCALL_NUMBER));
 }
-
 uint64_t AudioThunk::resolve(const std::string& lib, const std::string& sym) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
     std::lock_guard<std::mutex> g(impl_->mu);
@@ -95,7 +80,6 @@ uint64_t AudioThunk::resolve(const std::string& lib, const std::string& sym) {
     }
     return 0;
 }
-
 size_t AudioThunk::enumerate_symbols(const std::string& lib,
     const std::function<void(const std::string&, uint64_t)>& cb) const {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
@@ -107,12 +91,11 @@ size_t AudioThunk::enumerate_symbols(const std::string& lib,
     }
     return lt->entries.size();
 }
-
 int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    // v1.5.0.alpha (Turn 74): check ID range to route correctly.
+    // v1.5.0.alpha: check ID range to route correctly.
     if ((symbol_id & AudioThunk::ID_MASK) != AudioThunk::ID_BASE) {
         return -ENOENT;  // belongs to a different thunk
     }
@@ -125,17 +108,14 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
     return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);
 }
-
 size_t AudioThunk::symbol_count() const {
     if (!impl_) return 0;
     return impl_->id_to_idx_.size();
 }
-
 uint64_t AudioThunk::trampoline_base() const {
     if (!impl_) return 0;
     return impl_->trampoline_base;
 }
-
 // ── register_known_symbols_ ────────────────────────────────────────────
 // Populate the registry with the audio entry points we know how to
 // thunk. Each entry maps a (library, symbol) pair to the host function
@@ -156,7 +136,6 @@ void AudioThunk::register_known_symbols_() {
         void* p = alsa_handle ? dlsym(alsa_handle, #name) : nullptr; \
         for (const char* L : alsa_libs) register_function_(L, #name, p); \
     } while(0)
-
     REG_ALSA(snd_pcm_open);
     REG_ALSA(snd_pcm_close);
     REG_ALSA(snd_pcm_hw_params_malloc);
@@ -178,7 +157,6 @@ void AudioThunk::register_known_symbols_() {
     REG_ALSA(snd_pcm_avail_update);
     REG_ALSA(snd_pcm_delay);
     #undef REG_ALSA
-
     // ── libpulse.so.0 (PulseAudio) ────────────────────────────────
     const char* pulse_libs[] = {"libpulse.so.0", "libpulse.so"};
     void* pulse_handle = dlopen("libpulse.so.0", RTLD_LAZY);
@@ -187,7 +165,6 @@ void AudioThunk::register_known_symbols_() {
         void* p = pulse_handle ? dlsym(pulse_handle, #name) : nullptr; \
         for (const char* L : pulse_libs) register_function_(L, #name, p); \
     } while(0)
-
     REG_PULSE(pa_simple_new);
     REG_PULSE(pa_simple_write);
     REG_PULSE(pa_simple_drain);
@@ -203,7 +180,6 @@ void AudioThunk::register_known_symbols_() {
     REG_PULSE(pa_threaded_mainloop_unlock);
     REG_PULSE(pa_threaded_mainloop_wait);
     #undef REG_PULSE
-
     // ── libSDL2.so (audio subset) ─────────────────────────────────
     // Most SDL2 audio functions take integer/handle args and are
     // well-suited to thunking. Pointer-arg functions (SDL_AudioSpec)
@@ -215,7 +191,6 @@ void AudioThunk::register_known_symbols_() {
         void* p = sdl_handle ? dlsym(sdl_handle, #name) : nullptr; \
         for (const char* L : sdl_libs) register_function_(L, #name, p); \
     } while(0)
-
     REG_SDL(SDL_OpenAudioDevice);
     REG_SDL(SDL_CloseAudioDevice);
     REG_SDL(SDL_PauseAudioDevice);
@@ -232,7 +207,6 @@ void AudioThunk::register_known_symbols_() {
     REG_SDL(SDL_GetAudioDeviceName);
     REG_SDL(SDL_GetAudioDeviceSpec);
     #undef REG_SDL
-
     // ── libopenal.so.1 (OpenAL) ───────────────────────────────────
     const char* openal_libs[] = {"libopenal.so.1", "libopenal.so"};
     void* openal_handle = dlopen("libopenal.so.1", RTLD_LAZY);
@@ -241,7 +215,6 @@ void AudioThunk::register_known_symbols_() {
         void* p = openal_handle ? dlsym(openal_handle, #name) : nullptr; \
         for (const char* L : openal_libs) register_function_(L, #name, p); \
     } while(0)
-
     REG_OPENAL(alcOpenDevice);
     REG_OPENAL(alcCloseDevice);
     REG_OPENAL(alcCreateContext);
@@ -272,5 +245,4 @@ void AudioThunk::register_known_symbols_() {
     REG_OPENAL(alSourcei);
     #undef REG_OPENAL
 }
-
 } // namespace arm64emu

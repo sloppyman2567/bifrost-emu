@@ -1,4 +1,4 @@
-// ir_optimize.cpp — IR optimization passes for bifrost-emu 
+// ir_optimize.cpp — IR optimization passes for bifrost-emu
 //
 // Implements optimize_ir(), which performs the following passes on an
 // IRBlock in place:
@@ -20,17 +20,13 @@
 // operands from cpu.regs[]. On a tight loop like fib(N), the optimized
 // IR is roughly 40% smaller than the naive IR and runs ~3x faster in
 // the x86 codegen.
-
 #include "ir/ir.hpp"
 #include "core/emulator.h"
-
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <cstdio>
-
 namespace arm64emu {
-
 // ── Constant table ─────────────────────────────────────────────────────
 // Maps vreg → known constant value. Populated by IMM, updated by const
 // folding, invalidated by any non-constant op or by CALL_INTERP/SVC.
@@ -42,7 +38,6 @@ struct ConstMap {
     void clear(uint8_t v) { vals.erase(v); }
     void clear_all() { vals.clear(); }
 };
-
 // ── Copy map ───────────────────────────────────────────────────────────
 // Maps vreg → vreg it's a copy of. Transitive lookups handled by find().
 struct CopyMap {
@@ -67,13 +62,11 @@ struct CopyMap {
         }
     }
 };
-
 // ── Bitwise helpers for constant folding ──────────────────────────────
 static uint64_t mask_for_width(uint8_t bits) {
     if (bits >= 64) return ~0ULL;
     return (1ULL << bits) - 1;
 }
-
 // ── Is this op side-effect-free (safe to DCE if dest unused)? ─────────
 // Note: flag-setting ops (ADDS/SUBS/TST/ADCS/SBCS/CCMP) are NOT pure
 // because they set cpu.pstate which later BRCOND/CSEL ops may read.
@@ -133,7 +126,6 @@ static bool is_pure(IROp op) {
             return false;
     }
 }
-
 // ── Fold a binary op with two constant operands ──────────────────────
 static bool fold_binop(IROp op, uint64_t a, uint64_t b, uint64_t& out) {
     switch (op) {
@@ -154,7 +146,6 @@ static bool fold_binop(IROp op, uint64_t a, uint64_t b, uint64_t& out) {
         default: return false;
     }
 }
-
 // ── Fold a unary op with a constant operand ──────────────────────────
 static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
     switch (op) {
@@ -209,11 +200,9 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
         default: return false;
     }
 }
-
 // ── The main optimizer ────────────────────────────────────────────────
 void optimize_ir(IRBlock& block) {
     if (block.insts.empty()) return;
-
     // BUGFIX (v1.4.0): Detect whether this block contains any ATOMIC,
     // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
     // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
@@ -240,7 +229,6 @@ void optimize_ir(IRBlock& block) {
         }
     }
     bool fwd_enabled = enable_fwd_ && !block_has_atomics;
-
     ConstMap consts;
     CopyMap  copies;
     // Last vreg → index in insts that defined it (for store-load fwd).
@@ -248,7 +236,6 @@ void optimize_ir(IRBlock& block) {
     // Per-vreg "currently in ARM64 reg" cache: arm_reg → vreg holding
     // its current value. LOAD_REG can reuse this.
     std::unordered_map<uint16_t, uint16_t> arm_reg_cache;
-
     // Helper: invalidate any arm_reg_cache entries that point to vreg `v`.
     // This must be called whenever vreg `v` is redefined, because a
     // cached LOAD_REG that reused `v` would now read the wrong value.
@@ -261,7 +248,6 @@ void optimize_ir(IRBlock& block) {
             }
         }
     };
-
     // ── Helper: dead-store elimination for STORE_REG ───────────────
     // If a STORE_REG to arch reg R is followed by another STORE_REG to
     // the same R (no intervening LOAD_REG of R, CALL_INTERP/SVC, ATOMIC,
@@ -274,7 +260,6 @@ void optimize_ir(IRBlock& block) {
     //
     // Used by both Pass 0 (pre-FWD) and Pass 1.5 (post-substitution).
     auto dse_pass = [&block]() {
-        // BUGFIX (Turn 57): key includes is_fp flag so GPR and FP stores
         // to the same register index are treated as different destinations.
         // GPR reg 0 writes cpu.regs[0]; FP reg 0 writes cpu.v_lo[0].
         auto store_key = [](const IRInst& inst) -> uint32_t {
@@ -292,7 +277,6 @@ void optimize_ir(IRBlock& block) {
                 }
                 last_store_to[key] = i;
             } else if (inst.op == IROp::LOAD_REG) {
-                // BUGFIX (Turn 57): include is_fp in the key so FP and GPR
                 // loads don't cross-invalidate each other's stores.
                 uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
                 last_store_to.erase(key);
@@ -304,7 +288,6 @@ void optimize_ir(IRBlock& block) {
                        inst.op == IROp::BRCOND_FALLTHRU ||
                        inst.op == IROp::BRCOND_ZERO ||
                        inst.op == IROp::BRCOND_BIT) {
-                // Turn 101: branches end the block. The next block (or the
                 // callee for BL) may read ANY ARM register. Without this,
                 // DSE would incorrectly eliminate the BL's STORE_REG x30
                 // (return address) because no instruction in THIS block
@@ -322,7 +305,6 @@ void optimize_ir(IRBlock& block) {
                        inst.op == IROp::STLR_FAST) {
                 last_store_to.clear();
             }
-            // Turn 92: FMOV_G2F/FMOV_G2FHI read GPRs; FMOV_F2G/FMOV_FHI2G read FP regs.
             // FP_I2F/FP_I2F_FIXED read GPRs (src1 = GPR reg index).
             // These must invalidate pending GPR STORE_REGs.
             if (inst.op == IROp::FMOV_G2F || inst.op == IROp::FMOV_G2FHI ||
@@ -336,10 +318,8 @@ void optimize_ir(IRBlock& block) {
             }
         }
     };
-
     // ── Pass 0: dead-store elimination for STORE_REG ───────────────
     dse_pass();
-
     // Pass 1: walk forward, fold constants, propagate copies, cache
     // ARM64 register loads.
     for (size_t i = 0; i < block.insts.size(); i++) {
@@ -355,21 +335,17 @@ void optimize_ir(IRBlock& block) {
             inst.src1 = copies.find(inst.src1);
         if (inst.src2 && copies.parent.count(inst.src2))
             inst.src2 = copies.find(inst.src2);
-        // BUGFIX (Turn 66): also substitute inst.aux (SMADDL/SMSUBL accumulator).
         if (inst.aux && copies.parent.count(inst.aux))
             inst.aux = copies.find(inst.aux);
-
         switch (inst.op) {
             case IROp::NOP:
                 break;
-
             case IROp::IMM:
                 invalidate_vreg_in_cache(inst.dest);
                 consts.set(inst.dest, inst.imm);
                 copies.clear(inst.dest);
                 last_def[inst.dest] = i;
                 break;
-
             case IROp::MOV: {
                 // dest = src1. Replace subsequent uses of dest with src1.
                 invalidate_vreg_in_cache(inst.dest);
@@ -385,7 +361,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::LOAD_REG: {
                 uint8_t ar = inst.src1;
                 // arm_reg_cache load-forwarding.
@@ -433,7 +408,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::STORE_REG: {
                 // dest is the ARM64 reg index; src1 is the vreg being stored.
                 arm_reg_cache[inst.dest] = inst.src1;
@@ -442,7 +416,6 @@ void optimize_ir(IRBlock& block) {
                     consts.set(inst.dest, consts.get(inst.src1)); // unlikely useful
                 break;
             }
-
             case IROp::LOAD_MEM: {
                 invalidate_vreg_in_cache(inst.dest);
                 consts.clear(inst.dest);
@@ -450,7 +423,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::STORE_MEM:
             case IROp::ATOMIC:
                 // Side-effecting (writes memory) — skip constant folding
@@ -470,7 +442,6 @@ void optimize_ir(IRBlock& block) {
                     copies.clear_all();
                 }
                 break;
-
             case IROp::ADD: case IROp::SUB: case IROp::MUL:
             case IROp::AND: case IROp::OR:  case IROp::XOR:
             case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR: {
@@ -569,7 +540,6 @@ void optimize_ir(IRBlock& block) {
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 break;
             }
-
             case IROp::NOT: case IROp::NEG:
             case IROp::SEXT: case IROp::ZEXT:
             case IROp::CLZ: case IROp::CLS:
@@ -591,7 +561,6 @@ void optimize_ir(IRBlock& block) {
                 if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
                 break;
             }
-
             case IROp::ADDS: case IROp::SUBS: case IROp::TST:
             case IROp::ADCS: case IROp::SBCS:
                 // Flag-setting ops also write to dest (if != 0).
@@ -601,7 +570,6 @@ void optimize_ir(IRBlock& block) {
                 copies.clear(inst.dest);
                 last_def[inst.dest] = i;
                 break;
-
             case IROp::CSEL: case IROp::CSINC:
             case IROp::CSINV: case IROp::CSNEG:
             case IROp::CCMP:
@@ -674,7 +642,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::CALL_INTERP:
             case IROp::SVC:
             case IROp::BL_CALL:  // Turn 93: callee may modify any reg
@@ -684,14 +651,12 @@ void optimize_ir(IRBlock& block) {
                 copies.clear_all();
                 arm_reg_cache.clear();
                 break;
-
             case IROp::BR: case IROp::BRCOND:
             case IROp::BRCOND_FALLTHRU:
                 // Branches don't produce a value. They may invalidate
                 // the arm_reg_cache (since the next block starts fresh),
                 // but we keep it conservative within the block.
                 break;
-
             case IROp::FP_F2I: {
                 // FP_F2I writes directly to ARM reg vreg `dest` (0..31),
                 // bypassing STORE_REG. The JIT's store_reg_to_vreg(dest, RAX)
@@ -708,7 +673,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::FP_F2I_FIXED: {
                 // Same as FP_F2I: writes directly to ARM reg vreg dest.
                 // See comment above for why arm_reg_cache must be updated.
@@ -719,7 +683,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             case IROp::FP_I2F_FIXED: {
                 // Same as FP_I2F: writes to v_lo[dest] (FP reg file),
                 // not to an ARM reg vreg. Just invalidate dest's cache
@@ -730,7 +693,6 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
-
             default:
                 // Unknown op: conservatively invalidate the dest vreg's
                 // cache entry so we don't propagate stale constants or
@@ -747,7 +709,6 @@ void optimize_ir(IRBlock& block) {
                 break;
         }
     }
-
     // ── Pass 1.5: post-substitution dead-store elimination ───────
     // After Pass 1, LOAD_REGs may have been substituted to MOVs (which
     // are then turned into copy relations or DCE'd). This reveals dead
@@ -766,7 +727,6 @@ void optimize_ir(IRBlock& block) {
     if (!no_dse_) {
         dse_pass();
     }
-
     // Pass 2: dead code elimination.
     // A vreg is "live" if it's used as a source by any later op, OR
     // if it's the dest of a non-pure op (side effects), OR if it's
@@ -775,13 +735,11 @@ void optimize_ir(IRBlock& block) {
     // We compute liveness backward, then drop pure ops whose dest is
     // never used.
     std::vector<bool> used(block.insts.size(), false);
-
     // We mark an instruction as "used" if it has a side effect, OR if
     // its dest is read by a later used instruction. Walk backward.
     std::unordered_set<uint16_t> live;
     // ARM64 reg writes are always "used" (they're side-effecting).
     // Branches / mem ops / syscalls are always used.
-
     for (size_t i = block.insts.size(); i > 0; i--) {
         IRInst& inst = block.insts[i - 1];
         bool keep = false;
@@ -805,7 +763,6 @@ void optimize_ir(IRBlock& block) {
                 // dest is the ARM64 reg index, src1 is the vreg being stored.
                 live.insert(inst.src1);
             } else if (inst.op == IROp::FP_I2F || inst.op == IROp::FP_I2F_FIXED) {
-                // Turn 92: FP_I2F (scvtf/ucvtf) reads a GPR (src1 = GPR reg
                 // index 0-31) and writes an FP reg (dest). The GPR store
                 // must be kept, so mark src1 as live (same as LOAD_REG).
                 if (inst.src1 <= 31) live.insert(inst.src1);
@@ -821,7 +778,6 @@ void optimize_ir(IRBlock& block) {
                 // Normal op: src1 and src2 are vregs.
                 if (inst.src1) live.insert(inst.src1);
                 if (inst.src2) live.insert(inst.src2);
-                // BUGFIX (Turn 66): aux is also a vreg source (SMADDL/
                 // SMSUBL accumulator). Mark it live so DCE doesn't remove
                 // the instruction that defines it.
                 if (inst.aux) live.insert(inst.aux);
@@ -831,7 +787,6 @@ void optimize_ir(IRBlock& block) {
             block.dce_removed++;
         }
     }
-
     // Build the new instruction list, dropping unused.
     std::vector<IRInst> new_insts;
     new_insts.reserve(block.insts.size() - block.dce_removed);
@@ -839,7 +794,6 @@ void optimize_ir(IRBlock& block) {
         if (used[i]) new_insts.push_back(block.insts[i]);
     }
     block.insts = std::move(new_insts);
-
     // Pass 3: peephole — (disabled for now).
     // The original idea was to drop redundant ZEXT after ALU ops in
     // 32-bit mode, since x86 32-bit ops zero-extend. But our codegen
@@ -849,7 +803,6 @@ void optimize_ir(IRBlock& block) {
     // TODO: re-enable this peephole once the codegen uses 32-bit ops
     // for sf=0 ARM64 instructions.
 }
-
 // ── Dump IR (debug) ────────────────────────────────────────────────────
 void dump_ir(const IRBlock& block, FILE* out) {
     fprintf(out, "── IR block @ 0x%llx (count=%d, ends_branch=%d) ──\n",
@@ -967,5 +920,4 @@ void dump_ir(const IRBlock& block, FILE* out) {
     fprintf(out, "  (dce_removed=%d fold_subst=%d)\n",
             block.dce_removed, block.fold_subst);
 }
-
 } // namespace arm64emu

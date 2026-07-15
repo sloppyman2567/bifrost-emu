@@ -20,21 +20,17 @@
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/node.hpp"
 #include "frost/graphics.hpp"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     auto& mem_ = emu.mem_;
     auto& fds_ = emu.fds_;
-
     switch (num) {
         case 29: { // ioctl(fd, request, argp) — AArch64 syscall 29
             auto node = fds_.get(static_cast<int>(a0));
@@ -56,11 +52,9 @@ int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

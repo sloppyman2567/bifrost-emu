@@ -15,27 +15,22 @@
 #include "core/signal.h"   // exit_robust_list helper
 #include "jit/frostjit.hpp"  // needed for per-thread JIT + jit_.reset()
 #include "bifrost/version.hpp"
-
 #include <algorithm>
 #include <cstdio>
 #include <exception>
 #include <mutex>
 #include <thread>
-
 namespace arm64emu {
-
 // Forward-declare the robust-list exit helper (defined in
 // src/syscalls/threads.cpp). We can't include threads.cpp directly; the
 // helper is file-static there. Instead, we re-implement a minimal inline
 // version here to avoid cross-TU coupling. The syscall-side version is
 // the authoritative one; this is a duplicate kept in sync.
 // (Defined as a lambda below to keep it local.)
-
 void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // The child's CPU state was set up by spawn_thread() before the
     // host thread was created. We just run it to completion.
     CPU& cpu = gt->cpu;
-
     // ── JIT dispatch ──
     // Default (shared-JIT): spawned threads share the main's FrostJIT
     // (emu->jit_), saving 64 MiB per thread. blocks_mutex_ is held only
@@ -47,7 +42,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         thread_jit = emu->jit_.get();  // shared mode
     }
     bool use_jit = (thread_jit != nullptr);
-
     constexpr uint64_t HANG_LIMIT = 50'000'000;
     uint64_t last_pc = static_cast<uint64_t>(-1);
     uint64_t same_pc_count = 0;
@@ -64,7 +58,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 emu->step(cpu);
             }
             count++;
-
             // Same-PC hang watchdog.
             if (cpu.pc == last_pc) {
                 same_pc_count++;
@@ -81,20 +74,17 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
                 last_pc = cpu.pc;
                 same_pc_count = 0;
             }
-
             // Drain host-forwarded signals every ~4K instructions so
             // spawned threads can receive SIGINT/SIGTERM/etc. Without
             // this, only the main thread sees host signals.
             // Also drain per-CPU pending signals (queued by cross-thread
             // tgkill/tkill/kill) — fix for the cross-thread CPU-mutation
-            // race (Turn 57).
+            // race.
             if ((count & 0xFFF) == 0) {
                 emu->drain_host_signals(cpu);
                 emu->drain_pending_signals(cpu);
-                // BUGFIX (Turn 62): track guest instructions for rusage.
                 emu->add_guest_instructions(4096);
             }
-
             if ((count & 0xFFFFF) == 0) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) {
                     fprintf(stderr,
@@ -105,7 +95,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             }
         }
     } catch (DecodeError& e) {
-        // Turn 100: make the emulator robust against NULL function pointer
         // calls and illegal instructions in worker threads, matching the
         // main-thread behavior (see emulator.cpp's DecodeError handler).
         // pc < 4096 = NULL deref / zero page → SIGSEGV.
@@ -128,7 +117,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         fprintf(stderr, "[%s] thread %d: exception: %s\n",
                 CODENAME, cpu.tid, e.what());
     }
-
     // ── Robust futex cleanup ──
     // Walk this thread's robust futex list and mark each held futex as
     // FUTEX_OWNER_DIED, then wake waiters. This lets pthread_mutex with
@@ -167,7 +155,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             catch (...) { break; }
         }
     }
-
     // CLONE_CHILD_CLEARTID / set_tid_address: zero the word at
     // clear_child_tid and perform a futex wake on it. This is how
     // pthread_join unblocks, AND — critically for musl — how an
@@ -182,7 +169,6 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // directly. So a single clear_child_tid write here covers both
     // the CLONE_CHILD_CLEARTID and set_tid_address contracts.
     //
-    // BUGFIX (Turn 25): the old code had a separate set_tid_address_ptr
     // path that wrote cpu.tid (not 0) to the address. When musl's
     // main thread called set_tid_address(&__thread_list_lock) and
     // then spawned a child with CLONE_CHILD_CLEARTID | ctid=&__thread_list_lock,
@@ -201,14 +187,11 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             slot->cv.notify_all();
         }
     }
-
     // set_tid_address_ptr is now redundant with clear_child_tid (they
     // share the same field per Linux semantics — see set_tid_address
     // syscall handler). The cleanup above already wrote 0 and woke
     // any waiters. We keep the field in CPU state only for debugging
     // / introspection; no second write is needed here.
-
-    // (Turn 77) rseq cleanup: clear this thread's rseq registration
     // state. We do NOT write cpu_id=-1 into the guest rseq area (the
     // area may already be unmapped if the thread's stack was torn down,
     // and the write raced with glibc's own cleanup in multi-threaded
@@ -216,10 +199,8 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     cpu.rseq_registered = false;
     cpu.rseq_addr = 0;
     cpu.rseq_sig = 0;
-
     emu->decrement_alive_threads();
 }
-
 int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                            uint64_t entry_pc, uint64_t arg, uint64_t tls) {
     // arg is the pthread start_routine argument, but Linux clone() semantics
@@ -229,7 +210,6 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // to keep the API forward-compatible with a future clone-with-arg variant.
     (void)arg;
     auto gt = std::make_unique<GuestThread>();
-
     // Initialize the child CPU. The child inherits the parent's register
     // state (like clone() does on Linux) except:
     //   x0 = 0   (child return value)
@@ -242,7 +222,6 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     //   sigmask = parent's sigmask (CLONE_THREAD shares signal handlers,
     //            but each thread has its own mask per Turn 23's fix)
     //
-    // BUGFIX (Turn 57): CPU is non-copyable (mutex + atomic members for
     // the per-CPU pending signal queue). Use copy_arch_state_from() which
     // copies the architectural fields without touching the pending queue
     // or exclusive monitor. The reset block below then explicitly clears
@@ -277,38 +256,31 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     std::fill(gt->cpu.decode_cache.begin(), gt->cpu.decode_cache.end(),
               CPU::CacheEntry{});
     gt->cpu.page_cache = Memory::PageCache{};
-
     // Named clone flag constants (per include/uapi/linux/sched.h).
     // Use a BIFROST_ prefix to avoid collision with system headers
     // that may #define CLONE_SETTLS etc.
     constexpr uint64_t BIFROST_CLONE_SETTLS          = 0x00080000;
     constexpr uint64_t BIFROST_CLONE_CHILD_CLEARTID  = 0x00200000;
     constexpr uint64_t BIFROST_CLONE_CHILD_SETTID    = 0x01000000;
-
     if (flags & BIFROST_CLONE_SETTLS) {
         gt->cpu.tpidr_el0 = tls;
         gt->cpu.tpidrro_el0 = tls;
     }
-
     // For CLONE_CHILD_CLEARTID/CLONE_CHILD_SETTID, the ctid pointer is
     // in x4 (a4) of the parent's clone() call on AArch64.
     // BUGFIX: the old code read ctid from regs[3] (x3), but on AArch64
     // x3=tls and x4=ctid (opposite of x86_64). The syscall handler
     // passes tls correctly (from a3); here we read ctid from regs[4].
     uint64_t ctid_ptr = parent_cpu.regs[4];
-
     if (flags & BIFROST_CLONE_CHILD_CLEARTID) {
         gt->cpu.clear_child_tid = ctid_ptr;
     }
-
     int child_tid = next_tid_.fetch_add(1);
     gt->cpu.tid = child_tid;
     gt->tid = child_tid;
-
     if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
         mem_.store<uint32_t>(ctid_ptr, child_tid);
     }
-
     // ── Shared-JIT mode (default) ──
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache memory per thread (8 threads = 512 MiB saved).
@@ -333,19 +305,15 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
             gt->jit->set_direct_window(mem_.direct_window());
         }
     }
-
     alive_threads_.fetch_add(1);
     GuestThread* gtp = gt.get();
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         threads_.push_back(std::move(gt));
     }
-
     gtp->host_thread = std::thread(thread_entry, this, gtp);
-
     return child_tid;
 }
-
 void Emulator::join_threads() {
     std::lock_guard<std::mutex> g(threads_mu_);
     for (auto& gt : threads_) {
@@ -355,7 +323,6 @@ void Emulator::join_threads() {
     }
     threads_.clear();
 }
-
 CPU* Emulator::find_cpu_by_tid(int tid) {
     if (tid == 1) return &main_cpu_;
     std::lock_guard<std::mutex> g(threads_mu_);
@@ -364,7 +331,6 @@ CPU* Emulator::find_cpu_by_tid(int tid) {
     }
     return nullptr;
 }
-
 // ── Fork support ───────────────────────────────────────────────────────
 // Fork is implemented via host fork(): the child process inherits a
 // copy-on-write duplicate of the entire emulator state (Memory, CPU,
@@ -379,7 +345,6 @@ CPU* Emulator::find_cpu_by_tid(int tid) {
 //
 // The child process exits via _exit() (not return from main) to avoid
 // running atexit handlers that would double-clean the parent's resources.
-
 int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
                          uint64_t flags, uint64_t ptid_ptr,
                          uint64_t ctid_ptr, uint64_t tls) {
@@ -387,12 +352,10 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
     // unflushed buffer data and prints it again on exit.
     fflush(stdout);
     fflush(stderr);
-
     pid_t child_pid = ::fork();
     if (child_pid < 0) {
         return -1;
     }
-
     if (child_pid == 0) {
         // ── Child process ──
         // Set up the child's CPU state: return value 0.
@@ -408,27 +371,22 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         }
         parent_cpu.regs[0] = 0;  // child return value
         parent_cpu.running = true;
-
         constexpr uint64_t BIFROST_CLONE_SETTLS          = 0x00080000;
         constexpr uint64_t BIFROST_CLONE_CHILD_SETTID    = 0x01000000;
         constexpr uint64_t BIFROST_CLONE_CHILD_CLEARTID  = 0x00200000;
-
         if (flags & BIFROST_CLONE_SETTLS) {
             parent_cpu.tpidr_el0 = tls;
             parent_cpu.tpidrro_el0 = tls;
         }
-
         int child_tid = static_cast<int>(getpid());
         parent_cpu.tid = child_tid;
         parent_cpu.is_fork_process = true;  // getpid() returns host PID, not 1
-
         if ((flags & BIFROST_CLONE_CHILD_SETTID) && ctid_ptr) {
             mem_.store<uint32_t>(ctid_ptr, child_tid);
         }
         if (flags & BIFROST_CLONE_CHILD_CLEARTID) {
             parent_cpu.clear_child_tid = ctid_ptr;
         }
-
         // Disable the JIT in the child — the JIT code buffer's mprotect
         // state may be inconsistent after fork, and the JIT cache is
         // not thread/process-safe.
@@ -448,8 +406,6 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // from jit_interp_step works, but is never executed again.
         // The buffer is freed automatically when the child process exits.
         jit_enabled_ = false;
-
-        // BUGFIX (Turn 42): reinstall host signal handlers in the child.
         // After fork(), the child inherits g_active_emu_ from the parent,
         // which points to the PARENT's Emulator — a dangling pointer in
         // the child's address space. When SIGINT (Ctrl-C) arrives in the
@@ -460,27 +416,22 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // Fix: call install_host_signal_handlers() which sets
         // g_active_emu_ = this (the child's own Emulator).
         install_host_signal_handlers();
-
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.
         return 0;
     }
-
     // ── Parent process ──
     // CLONE_PARENT_SETTID: write child PID to *ptid in the parent's memory.
     constexpr uint64_t BIFROST_CLONE_PARENT_SETTID = 0x00100000;
     if ((flags & BIFROST_CLONE_PARENT_SETTID) && ptid_ptr) {
         mem_.store<uint32_t>(ptid_ptr, static_cast<uint32_t>(child_pid));
     }
-
     return child_pid;
 }
-
 Emulator::ForkChild* Emulator::find_fork_child(int pid) {
     (void)pid;
     return nullptr;  // host fork() children are tracked by the kernel
 }
-
 int Emulator::reap_fork_child(int pid, int options, bool& found) {
     // This is only called if the host wait4() path in misc.cpp doesn't
     // handle it. In practice, host fork() children are reaped via the
@@ -489,5 +440,4 @@ int Emulator::reap_fork_child(int pid, int options, bool& found) {
     found = false;
     return 0;
 }
-
 } // namespace arm64emu

@@ -1,7 +1,7 @@
 // jit/frostjit.cpp — FrostJIT: integer/memory/branch IR-op codegen + dispatch.
 //
-// v1.4.5-alpha (Turn 36): split into multiple files for readability.
-// v1.4.5-alpha (Turn 37): further split — ALU/memory/branch cases extracted
+// v1.4.5-alpha: split into multiple files for readability.
+// v1.4.5-alpha: further split — ALU/memory/branch cases extracted
 //   from compile_ir_inst()'s switch into three sub-dispatchers
 //   (compile_ir_{alu,mem,branch}) defined in jit_codegen_{alu,mem,branch}.cpp.
 //   This file holds:
@@ -17,9 +17,9 @@
 //   - jit_interp.cpp        — jit_interp_step() extern "C" trampoline
 //   - jit_helpers.cpp       — emit_fmov_helper, emit_call_interp
 //   - jit_codegen_fp.cpp    — FP/SIMD IR-op codegen
-//   - jit_codegen_alu.cpp   — ALU/arithmetic IR-op codegen (Turn 37)
-//   - jit_codegen_mem.cpp   — memory IR-op codegen (Turn 37)
-//   - jit_codegen_branch.cpp— branch/call IR-op codegen (Turn 37)
+//   - jit_codegen_alu.cpp   — ALU/arithmetic IR-op codegen
+//   - jit_codegen_mem.cpp   — memory IR-op codegen
+//   - jit_codegen_branch.cpp— branch/call IR-op codegen
 //   - jit_flags.cpp         — clobber_flags, materialize_flags_to_pstate
 //   - jit_translate.cpp     — translate_block (ARM64 → x86)
 //   - jit_dispatch.cpp      — run_block (block cache lookup + dispatch)
@@ -33,20 +33,16 @@
 #include "core/emulator.h"
 #include "ir/ir.hpp"
 #include "bifrost/version.hpp"  // CODENAME
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
-
 #include <sys/mman.h>
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
-
 // ── Compile-time layout checks ─────────────────────────────────────────
 // The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)
 // for direct memory access in generated x86 code. If the CPU struct layout
@@ -60,7 +56,6 @@ static_assert(offsetof(CPU, v_lo)   == FrostJIT::V_LO_OFF,   "CPU v_lo offset mi
 static_assert(offsetof(CPU, v_hi)   == FrostJIT::V_HI_OFF,   "CPU v_hi offset mismatch");
 static_assert(offsetof(CPU, fpcr)   == FrostJIT::FPCR_OFF,   "CPU fpcr offset mismatch");
 static_assert(offsetof(CPU, fpsr)   == FrostJIT::FPSR_OFF,   "CPU fpsr offset mismatch");
-
 // Additional layout checks: the JIT hardcodes element counts (regs[31],
 // v_lo[32], v_hi[32]) and element sizes (8 bytes each). If the CPU struct
 // ever changes — e.g. v_lo becomes uint32_t[32] — the JIT's
@@ -71,25 +66,19 @@ static_assert(sizeof(CPU::v_lo) == 32 * 8, "CPU::v_lo must be 32 × 8 bytes (uin
 static_assert(sizeof(CPU::v_hi) == 32 * 8, "CPU::v_hi must be 32 × 8 bytes (uint64_t[32])");
 static_assert(sizeof(((CPU*)0)->regs[0]) == 8, "CPU reg element must be 8 bytes");
 static_assert(sizeof(((CPU*)0)->v_lo[0]) == 8, "CPU v_lo element must be 8 bytes");
-
 // ── Forward decls of slow-path helpers defined in x86_backend.cpp ──────
 // These are extern "C" so JIT-compiled code can call them by address
 // without name-mangling concerns. The CPU* arg is used for SIGSEGV
 // delivery when the memory access faults (UnmappedMemory).
 //
-// v1.4.5-alpha (Turn 36): jit_interp_step() was moved to jit_interp.cpp.
+// v1.4.5-alpha: jit_interp_step() was moved to jit_interp.cpp.
 extern "C" {
     uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width);
     void     jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 }
-
 } // namespace arm64emu
-
 namespace arm64emu {
-
-// Turn 90: BL_CALL helper — defined in jit_glue.cpp
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc);
-
 // ── Thread-local per-thread JIT state (Task 3: shared-JIT mode) ────────
 // These are thread-local so that multiple threads sharing a single FrostJIT
 // instance don't corrupt each other's watchdog/hotness counters. Each
@@ -100,7 +89,6 @@ thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_
 thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
 thread_local FrostJIT::InlineCacheEntry FrostJIT::tls_inline_cache_[INLINE_CACHE_SLOTS];
 thread_local uint32_t FrostJIT::tls_lru_counter_ = 0;
-
 // v1.5.0.alpha: inline cache lookup — try the 4-way set-associative
 // cache before taking the shared_mutex. Returns true on hit.
 bool FrostJIT::inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
@@ -118,13 +106,10 @@ bool FrostJIT::inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*)
     }
     return false;
 }
-
-
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).
-
 bool FrostJIT::compile_ir_inst(const IRInst& inst) {
-    // v1.4.5-alpha (Turn 36): FP/SIMD ops are dispatched to
+    // v1.4.5-alpha: FP/SIMD ops are dispatched to
     // compile_ir_inst_fp_() (defined in jit_codegen_fp.cpp) before the
     // integer/memory/branch switch below. The FP handler sets
     // fp_handled_ to true if it recognized the op (regardless of
@@ -134,8 +119,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     fp_handled_ = false;
     bool ends_block = compile_ir_inst_fp_(inst);
     if (fp_handled_) return ends_block;
-
-    // v1.4.5-alpha (Turn 37): ALU / memory / branch cases are dispatched
+    // v1.4.5-alpha: ALU / memory / branch cases are dispatched
     // to compile_ir_{alu,mem,branch}() (defined in jit_codegen_*.cpp)
     // before the residual switch below. Each sub-dispatcher returns:
     //   -1 = not handled here (fall through to the next dispatcher)
@@ -145,11 +129,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
     if ((ir_r = compile_ir_mem(inst))    >= 0) return ir_r == 1;
     if ((ir_r = compile_ir_alu(inst))    >= 0) return ir_r == 1;
     if ((ir_r = compile_ir_branch(inst)) >= 0) return ir_r == 1;
-
     switch (inst.op) {
         case IROp::NOP:
             return false;
-
         case IROp::ATOMIC: {
             // Native LSE atomics via x86 lock-prefixed instructions.
             // Fast path: address < 4 GiB (direct window) → lock op on
@@ -172,7 +154,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int w = inst.width;
             bool is_64 = (w == 8);
             bool is_16 = (w == 2);
-
             // SMAX/SMIN/UMAX/UMIN and 8-bit/16-bit CAS need special handling
             // that the fast path doesn't support. Fall back to CALL_INTERP.
             // 8-bit CAS needs cmpxchg r/m8 (0x0F 0xB0); the fast path only
@@ -191,28 +172,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 invalidate_host_regs(MEM_CLOBBER);
                 return false;
             }
-
             clobber_flags();
             constexpr uint16_t MEM_CLOBBER =
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-
             // Load base address → RAX.
             load_vreg_to_reg(RAX, inst.src1);
-
             // Check if addr + w <= 4GB (direct window fast path).
             emit_mov_imm64(RDX, Memory::DIRECT_WINDOW_SIZE - w);
             emit_cmp_reg(RAX, RDX);
             size_t jae_patch = emit_jcc_rel32_placeholder(7);  // JA → slow
-
             // ── Fast path: direct window ──
             emit_add_reg(RAX, WIN_REG);  // RAX = window_base + addr
-
             // Load operand → RCX. For CAS, src2 = desired (rt). For others,
             // src2 = operand (rs). CAS loads expected from cpu.regs[imm].
             load_vreg_to_reg(RCX, inst.src2);  // RCX = desired (CAS) or operand
-
             // Helper: emit REX + opcode + modrm for a lock instruction.
             // reg = the register operand, base = RAX (host address).
             auto emit_lock_op = [&](uint8_t opcode, int reg) {
@@ -222,7 +197,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 emit_byte(opcode);
                 emit_byte(modrm(0, reg & 7, RAX & 7));  // [rax], reg
             };
-
             if (atom_op >= 0xC) {
                 // CAS: lock cmpxchg [R9], RCX
                 // x86 cmpxchg: if RAX == [mem], [mem]=RCX; RAX = old always.
@@ -350,7 +324,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             // Jump past slow path.
             size_t jmp_past = emit_jmp_rel32_placeholder();
-
             // ── Slow path: addr ≥ 4 GiB → CALL_INTERP ──
             size_t slow_path = code_buf_used_;
             patch_jcc_rel32(jae_patch, static_cast<int32_t>(slow_path - (jae_patch + 6)));
@@ -363,11 +336,9 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
             patch_jmp_rel32(jmp_past, end_rel);
-
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
-
         case IROp::LDXR_FAST: {
             // Fast LDXR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
@@ -385,7 +356,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
-
         case IROp::STXR_FAST: {
             // Fast STXR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
@@ -404,7 +374,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
-
         case IROp::STLR_FAST: {
             // Fast STLR via C helper — bypasses interpreter decode.
             // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
@@ -422,7 +391,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             invalidate_host_regs(MEM_CLOBBER);
             return false;
         }
-
         case IROp::ADDS: case IROp::SUBS: {
             // Force src1 into RAX, src2 into RCX (same fixed-assignment
             // pattern as SHL/SHR/SAR/ROR — handled by force_two_vregs_to).
@@ -481,7 +449,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             else if (inst.dest != inst.src1) set_vreg_reg(inst.dest, d);
             return false;
         }
-
         case IROp::TST: {
             // Force both operands into distinct host regs via force_two_vregs_to.
             // The old code used ensure_vreg(src1, RAX) + ensure_vreg(src2, RCX),
@@ -498,7 +465,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flags_from_sub_ = false;
             return false;
         }
-
         case IROp::TST_ZERO: {
             // Should not be reached — CBZ/CBNZ now use BRCOND_ZERO.
             // Fallback: treat as TST(val, val).
@@ -508,7 +474,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             flags_from_sub_ = false;
             return false;
         }
-
         // Defensive fallback: CSINC/CSINV/CSNEG are normally decomposed
         // to ADD+NOT+NEG + CSEL in ir_translate.cpp, so the JIT only sees
         // IROp::CSEL. If a future change re-emits these, fall back to the
@@ -524,7 +489,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             return false;
         }
-
         case IROp::BR: {
             int s = ensure_vreg(inst.src1, RAX);
             // Flush all dirty vregs before returning.
@@ -534,7 +498,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             unchainable_end_ = true;  // indirect branch — target is dynamic
             return true;
         }
-
         case IROp::ADCS: case IROp::SBCS: {
             // Native ADCS/SBCS using x86 ADC/SBB.
             //   ADCS: dst = src1 + src2 + C, set flags
@@ -552,7 +515,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // For ADCS, we then cmc to get ADD convention.
             bool is_sub = (inst.op == IROp::SBCS);
             bool is_32bit = (inst.width == 32);
-
             // Load flags from pstate (we need CF in x86 CF).
             // If flags_in_host_, materialize first (to preserve pstate),
             // then we already have flags in host.
@@ -577,7 +539,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc: SUB → ADD
                 }
             } else {
-                // Turn 102: emit_load_flags_from_pstate and
                 // emit_normalize_cf_to_sub_convention only clobber
                 // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
                 // vregs cached in R8/R9/R11/R12/R13/R15.
@@ -596,7 +557,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                     emit_byte(0xF5);  // cmc: SUB → ADD
                 }
             }
-
             // Force src1 into RAX, src2 into RCX (same pattern as SHL/ADDS).
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             int s1 = RAX, s2 = RCX;
@@ -629,7 +589,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest == 0) kill_vreg(inst.src1);
             return false;
         }
-
         // ── MRS — read system register ───────────────────────────────
         case IROp::MRS: {
             // inst.imm encodes the system register (op1/crn/crm/op2/op0).
@@ -723,7 +682,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return false;
         }
-
         // ── MSR — write system register ──────────────────────────────
         case IROp::MSR: {
             uint64_t sys = inst.imm;
@@ -753,7 +711,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             }
             return false;
         }
-
         // ── SMULH / UMULH — 128-bit high-half multiply ──────────────
         case IROp::SMULH:
         case IROp::UMULH: {
@@ -778,8 +735,6 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return false;
         }
-
-        // Turn 93: BL_CALL — BL within block.
         // Call the target block via jit_call_helper, then continue the block.
         case IROp::BL_CALL: {
             // Flush ALL dirty vregs to cpu.regs[]/stack BEFORE the call.
@@ -794,16 +749,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
                 evict_vreg(31);
             }
-
             // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
             emit_mov_imm_to_rax(inst.imm);
             emit_store(CPU_REG, PC_OFF, RAX);
-
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_reg(RSI, EMU_REG);
             emit_mov_imm64(RDX, inst.imm);  // RDX = target_pc (use imm64 for >4GB)
-
             // Save WIN_REG (R10, caller-saved) before the call.
             // emit_call_abs clobbers RAX (to load the function address),
             // so we can't save RAX across the call. The return value
@@ -818,20 +770,14 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_pop(WIN_REG);
             // Store next PC to cpu.pc.
             emit_store(CPU_REG, PC_OFF, RCX);
-
             // Invalidate ALL cache mappings after the call.
             // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
             invalidate_all_vregs();
-
             return false;  // does NOT end the block
         }
-
         default:
             emit_call_interp(inst.arm_pc, false);
             return false;
     }
 }
-
-
-
 } // namespace arm64emu

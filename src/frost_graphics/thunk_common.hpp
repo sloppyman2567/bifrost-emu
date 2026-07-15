@@ -22,19 +22,15 @@
 // it tries GraphicThunk first, then AudioThunk, then DisplayThunk.
 // (Each thunk has its own symbol_id namespace, starting from 0.)
 #pragma once
-
 #include "core/cpu.h"
 #include "core/memory.h"
-
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
-
 namespace arm64emu {
-
 // AArch64 instruction encodings for trampolines.
 namespace trampoline_enc {
     constexpr uint32_t MOVZ_Xd_IMM16(int Xd, uint16_t imm16) {
@@ -44,21 +40,19 @@ namespace trampoline_enc {
     constexpr uint32_t SVC_0 = 0xD4000001u;
     constexpr uint32_t NOP   = 0xD503201Fu;
 }
-
 // Common registry entry. All three thunks use this same shape.
 struct ThunkSymbolEntry {
     std::string name;       // e.g. "glClear" or "snd_pcm_open"
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
-    // v1.5.0.alpha (Turn 74): bitmask indicating which args (0-7) are
+    // v1.5.0.alpha: bitmask indicating which args (0-7) are
     // pointers that need guest→host translation. Bit N set = arg N is
     // a pointer. 0 = no pointer args (all args passed verbatim).
     // This is populated per-symbol by the registration code using
     // the POINTER_ARGS macro in register_known_symbols_().
     uint8_t     pointer_args = 0;
 };
-
 // Write a 16-byte trampoline at the given guest address for the given
 // sym_id. Used by all three thunks.
 inline void write_thunk_trampoline(Memory& mem, uint64_t addr, uint32_t sym_id,
@@ -70,7 +64,6 @@ inline void write_thunk_trampoline(Memory& mem, uint64_t addr, uint32_t sym_id,
     buf[3] = trampoline_enc::NOP;
     mem.write(addr, buf, sizeof(buf));
 }
-
 // Generic dispatch helper. Reads 8 args from cpu.regs[0..7], calls the
 // host function as an 8-arg uint64_t function pointer, writes the
 // return value to cpu.regs[0]. Returns 0 on success.
@@ -90,7 +83,6 @@ inline int64_t thunk_dispatch_generic(CPU& cpu, void* host_fn,
     }
     uint64_t args[8];
     for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
-
     if (trace) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx\n",
@@ -100,7 +92,6 @@ inline int64_t thunk_dispatch_generic(CPU& cpu, void* host_fn,
                 static_cast<unsigned long long>(args[2]),
                 static_cast<unsigned long long>(args[3]));
     }
-
     using GenericFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                     uint64_t, uint64_t, uint64_t, uint64_t);
     auto fn = reinterpret_cast<GenericFn>(host_fn);
@@ -109,8 +100,6 @@ inline int64_t thunk_dispatch_generic(CPU& cpu, void* host_fn,
     cpu.regs[0] = ret;
     return 0;
 }
-
-// Turn 91: Pointer-aware dispatch for display thunks (Wayland/X11/Vulkan).
 // Many Wayland/X11 functions take pointer args (const char* name,
 // wl_proxy*, XEvent*, etc.) that need guest→host translation.
 // This helper translates pointer args before calling the host function.
@@ -128,7 +117,6 @@ inline int64_t thunk_dispatch_with_ptrs(CPU& cpu, void* host_fn,
     }
     uint64_t args[8];
     for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
-
     // Translate pointer args from guest to host.
     if (pointer_args && mem) {
         for (int i = 0; i < 8; i++) {
@@ -143,7 +131,6 @@ inline int64_t thunk_dispatch_with_ptrs(CPU& cpu, void* host_fn,
             }
         }
     }
-
     if (trace) {
         fprintf(stderr, "[display-thunk] dispatch: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx ptrs=0x%x\n",
@@ -154,7 +141,6 @@ inline int64_t thunk_dispatch_with_ptrs(CPU& cpu, void* host_fn,
                 static_cast<unsigned long long>(args[3]),
                 pointer_args);
     }
-
     using GenericFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                     uint64_t, uint64_t, uint64_t, uint64_t);
     auto fn = reinterpret_cast<GenericFn>(host_fn);
@@ -163,13 +149,11 @@ inline int64_t thunk_dispatch_with_ptrs(CPU& cpu, void* host_fn,
     cpu.regs[0] = ret;
     return 0;
 }
-
 // Per-library table. Each thunk maintains a vector of these.
 struct ThunkLibTable {
     std::string lib;
     std::vector<ThunkSymbolEntry> entries;
 };
-
 // Find or create a LibTable for `lib`.
 inline ThunkLibTable* find_or_create_lib(std::vector<ThunkLibTable>& libs,
                                           const std::string& lib) {
@@ -179,7 +163,6 @@ inline ThunkLibTable* find_or_create_lib(std::vector<ThunkLibTable>& libs,
     libs.push_back({lib, {}});
     return &libs.back();
 }
-
 inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
                                 const std::string& lib) {
     for (auto& l : libs) {
@@ -187,12 +170,10 @@ inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
     }
     return nullptr;
 }
-
 // Register a (lib, sym, host_fn) entry. Allocates a sym_id, writes the
 // trampoline into guest memory, stores the entry. Idempotent.
-// v1.5.0.alpha (Turn 74): added id_base parameter so each thunk type
+// v1.5.0.alpha: added id_base parameter so each thunk type
 // (Graphic/Audio/Display) gets a non-overlapping symbol_id range.
-// Turn 91: added pointer_args parameter for display thunk pointer translation.
 inline void thunk_register(Memory& mem,
                             std::vector<ThunkLibTable>& libs,
                             std::vector<std::pair<uint32_t, uint32_t>>& id_to_idx,
@@ -226,5 +207,4 @@ inline void thunk_register(Memory& mem,
                 static_cast<unsigned long long>(addr), sym_id, pointer_args);
     }
 }
-
 } // namespace arm64emu

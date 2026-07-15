@@ -14,9 +14,7 @@
 //   2. A sparse `pages_` map for addresses ≥ 4 GiB (stack, high mmap
 //      region). Backed by std::vector<uint8_t> per page.
 #pragma once
-
 #include "bifrost/types.hpp"
-
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -25,14 +23,11 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
-
 class Memory {
 public:
     static constexpr uint64_t PAGE_SIZE = 4096;
     static constexpr uint64_t PAGE_MASK = PAGE_SIZE - 1;
-
     // v1.5.0.alpha: Address space limits for robustness and security.
     // These prevent a malicious/buggy guest from exhausting host memory
     // or corrupting emulator-internal state.
@@ -52,13 +47,10 @@ public:
     static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
     static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
-
     Memory();
     ~Memory();
-
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;
-
     // ── Page cache (per-thread, lock-free) ────────────────────────────
     // Each CPU keeps its own PageCache so the hot path avoids the page
     // map mutex. The cache stores a raw pointer into the vector's data;
@@ -73,15 +65,12 @@ public:
         uint64_t       write_page = UINT64_MAX;
         uint8_t*       write_ptr  = nullptr;
     };
-
     // ── Mapping ───────────────────────────────────────────────────────
     void map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
-
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
     void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const;
-
     // Convenience templates for fixed-width LE access.
     template<typename T> T load(uint64_t addr) const {
         T v; read(addr, &v, sizeof(T)); return v;
@@ -95,42 +84,34 @@ public:
     template<typename T> void store(uint64_t addr, T v, PageCache* pc) {
         write(addr, &v, sizeof(T), pc);
     }
-
     uint32_t fetch_inst(uint64_t addr) const { return load<uint32_t>(addr); }
     uint32_t fetch_inst(uint64_t addr, PageCache* pc) const { return load<uint32_t>(addr, pc); }
-
     // ── Allocators (bump + grow) ──────────────────────────────────────
     // Allocate a chunk of fresh memory; returns starting address.
     // When `hint` is non-zero, the allocation is placed at exactly `hint`
     // (MAP_FIXED semantic). Existing pages at that address are REPLACED
     // with fresh zeroed pages — matches Linux kernel behavior.
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0);
-
     // Grow (or shrink) an allocation. When growth would collide with
     // another tracked allocation, a fresh region is allocated and the
     // data is copied (mirrors musl's mremap contract).
     uint64_t mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size);
-
     // Remove an allocation from tracking (munmap keeps pages mapped).
     void untrack_allocation(uint64_t addr);
-
     // ── Atomics ───────────────────────────────────────────────────────
     // Used by LSE atomics (CAS) and futex. Returns true if swapped.
     bool atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired);
     bool atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired);
-
     // ── Fixed-width accessors ─────────────────────────────────────────
     uint32_t load_32(uint64_t addr) const { return load<uint32_t>(addr); }
     uint64_t load_64(uint64_t addr) const { return load<uint64_t>(addr); }
     void store_32(uint64_t addr, uint32_t v) { store<uint32_t>(addr, v); }
     void store_64(uint64_t addr, uint64_t v) { store<uint64_t>(addr, v); }
-
     // ── Diagnostics ───────────────────────────────────────────────────
     size_t page_count() const;
     const std::unordered_map<uint64_t, std::vector<uint8_t>>& pages_map_public() const {
         return pages_;
     }
-
     // Snapshot of currently-tracked allocations (start → page-aligned size).
     // Used by /proc/self/maps to produce a real memory layout instead of
     // a hardcoded one. Returns a copy under the lock so callers can iterate
@@ -144,7 +125,6 @@ public:
         }
         return out;
     }
-
     // ── Fork support ──────────────────────────────────────────────────
     // Create a deep copy of this Memory object for fork(). The new
     // Memory has its own direct window and pages_ map, with all
@@ -155,7 +135,6 @@ public:
     // affect the parent, and vice versa. This is "copy-on-write" done
     // eagerly — simpler than true CoW but correct.
     std::unique_ptr<Memory> clone_for_fork() const;
-
     // Snapshot all mapped pages into a flat list of (addr, data) pairs.
     // Used by clone_for_fork() and for debugging. Addresses < 4 GiB
     // come from the direct window; addresses >= 4 GiB come from pages_.
@@ -164,7 +143,6 @@ public:
         std::vector<uint8_t> data;
     };
     std::vector<PageSnapshot> snapshot_pages() const;
-
     // ── Direct-access window for JIT ──────────────────────────────────
     // A large mmap'd region that mirrors guest pages at their native
     // addresses. The JIT can do `mov rax, [window_base + guest_addr]`
@@ -182,8 +160,7 @@ public:
     bool in_direct_window(uint64_t addr) const {
         return direct_window_ && addr < DIRECT_WINDOW_SIZE;
     }
-
-    // v1.5.0.alpha (Turn 74): translate a guest address to a host pointer.
+    // v1.5.0.alpha: translate a guest address to a host pointer.
     // Used by the graphic/audio/display thunks to pass pointer arguments
     // to host GL/EGL/SDL2/ALSA functions. Returns nullptr if the address
     // is not in the direct window (addresses ≥ 4 GiB can't be directly
@@ -198,33 +175,27 @@ public:
         }
         return nullptr;
     }
-
 private:
     // Use shared_mutex for reader-writer locking.
     mutable std::shared_mutex mu_;
     mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
     std::unordered_map<uint64_t, uint64_t> allocations_;
-
     // v1.5.0.alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the
     // high mmap region (0x5000000000 - 0x5FFFFFFFFFF).
     uint64_t mmap_next_ = 0;
-
     // v1.5.0.alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on
     // munmap) to avoid O(pages_.size()) scans on the hot path.
     // Mutable because read() (a const method) auto-allocates pages.
     mutable std::atomic<size_t> total_pages_{0};
-
     // v1.5.0.alpha: Validate that an address range doesn't overlap
     // kernel space or the NULL page region. Returns true if the range
     // is valid for guest allocation.
     bool is_valid_guest_range(uint64_t addr, uint64_t size) const;
-
     // v1.5.0.alpha: Check page count against MAX_TOTAL_PAGES.
     // Returns true if the allocation would exceed the limit.
     bool would_exceed_page_limit(size_t num_pages) const;
 };
-
 } // namespace arm64emu

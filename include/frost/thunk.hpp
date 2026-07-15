@@ -1,6 +1,6 @@
 // frost/thunk.hpp — GraphicThunk: forward guest GL/EGL/SDL2 calls to host.
 //
-// v1.4.5-alpha (Turn 36): NEW. The GraphicThunk class is forward-
+// v1.4.5-alpha: NEW. The GraphicThunk class is forward-
 // declared in frost/graphics.hpp (so the header doesn't pull in dlfcn.h
 // / GL / EGL / SDL2 headers). This header provides the full class
 // definition, needed by:
@@ -57,36 +57,28 @@
 //     passes exactly 8 args, ignoring variadic extras. Most GL/EGL/
 //     SDL2 entry points are non-variadic so this is rarely hit.
 #pragma once
-
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
-
 namespace arm64emu {
-
 // Forward-declarations (full types defined in their own headers).
 class Memory;
 class CPU;
-
 // Forward-declare the pimpl.
 struct GraphicThunkImpl;
-
 class GraphicThunk {
 public:
     GraphicThunk();
     ~GraphicThunk();
-
     // Non-copyable, non-movable (owns guest-side trampoline page +
     // host-side GL/EGL/SDL2 state).
     GraphicThunk(const GraphicThunk&) = delete;
     GraphicThunk& operator=(const GraphicThunk&) = delete;
-
     // Whether thunking is enabled (BIFROST_THUNK_GRAPHICS=1 env var).
     // When false, resolve() always returns 0 and dispatch() is a no-op.
     bool enabled() const;
-
     // ── Lifecycle ────────────────────────────────────────────────────
     // Initialize the thunk: allocate the guest trampoline page and
     // register the known GL/EGL/SDL2 entry points. Idempotent —
@@ -96,7 +88,6 @@ public:
     // The Memory reference is stored internally; the caller must ensure
     // it outlives the thunk (typically both are owned by the Emulator).
     bool init(Memory& mem);
-
     // ── Symbol resolution ────────────────────────────────────────────
     // Resolve a graphic API symbol from the guest's perspective.
     // `lib` is the library basename (e.g. "libGL.so.1").
@@ -107,7 +98,6 @@ public:
     // guest memory. Calling it triggers the __NR_bifrost_thunk syscall
     // which dispatches to the host function.
     uint64_t resolve(const std::string& lib, const std::string& sym);
-
     // ── Per-library symbol enumeration ───────────────────────────────
     // Enumerate all registered symbols for `lib`. Calls `cb(name, addr)`
     // for each. Used by the dynamic linker to populate its symbol table
@@ -118,7 +108,6 @@ public:
     size_t enumerate_symbols(const std::string& lib,
                              const std::function<void(const std::string&,
                                                        uint64_t)>& cb) const;
-
     // ── Dispatch (called from syscall handler) ───────────────────────
     // Dispatch a thunk call. `symbol_id` is the value in x9 when the
     // trampoline trapped. Reads args from cpu.regs[0..7], calls the
@@ -128,16 +117,13 @@ public:
     // dispatch error). The caller (syscall handler) writes the return
     // value to cpu.regs[0]; on success it's already set by dispatch().
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
-
     // ── Diagnostics ──────────────────────────────────────────────────
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
-
     // The syscall number used by trampolines to trap into the host.
     // High enough to never collide with real Linux AArch64 syscalls
     // (which go up to ~451 as of kernel 6.x).
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
-
     // Trampoline layout: 4 instructions × 4 bytes = 16 bytes.
     //   movz x9, #symbol_id       ; load symbol_id
     //   movz x8, #SYSCALL_NUMBER  ; load syscall number
@@ -145,8 +131,7 @@ public:
     //   nop                       ; pad to 16 bytes (alignment)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
-
-    // v1.5.0.alpha (Turn 74): per-thunk ID base to avoid collisions.
+    // v1.5.0.alpha: per-thunk ID base to avoid collisions.
     // Each thunk type gets a non-overlapping range of symbol_ids.
     // The dispatch handler checks the range to route to the correct
     // thunk without trying each one sequentially.
@@ -157,12 +142,10 @@ public:
     static constexpr uint32_t ID_BASE_AUDIO    = 0x1000;
     static constexpr uint32_t ID_BASE_DISPLAY  = 0x2000;
     static constexpr uint32_t ID_MASK          = 0x3000;  // range selector
-
 private:
     std::unique_ptr<GraphicThunkImpl> impl_;
-
     // Per-library registration helpers (defined in thunk.cpp).
-    // v1.5.0.alpha (Turn 74): added pointer_args bitmask (bit N = arg N
+    // v1.5.0.alpha: added pointer_args bitmask (bit N = arg N
     // is a pointer needing guest→host translation).
     void register_function_(const std::string& lib,
                             const std::string& sym,
@@ -171,12 +154,9 @@ private:
     void* resolve_gl_(const std::string& sym);
     void* resolve_egl_(const std::string& sym);
     void* resolve_sdl_(const std::string& sym);
-
     // Write a trampoline at the given guest address for the given sym_id.
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
-
     // Register the known GL/EGL/SDL2 entry points. Called once by init().
     void register_known_symbols_();
 };
-
 } // namespace arm64emu

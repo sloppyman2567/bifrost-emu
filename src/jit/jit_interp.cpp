@@ -1,6 +1,6 @@
 // jit/jit_interp.cpp — interpreter-step trampoline for JIT fallback.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. Holds the
+// v1.4.5-alpha: split out of frostjit.cpp. Holds the
 // jit_interp_step() extern "C" trampoline, which is called from
 // JIT-compiled code (via CALL_INTERP) to fall back to the interpreter
 // for one instruction. This is used for:
@@ -15,22 +15,17 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "bifrost/types.hpp"
-
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
 namespace arm64emu {
-
 // Forward-decls of extern "C" slow-path helpers (defined in x86_backend.cpp).
 extern "C" {
     uint64_t jit_load_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, int width);
     void     jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 }
-
 } // namespace arm64emu
-
 // ── jit_interp_step — called from JIT-compiled code ────────────────────
 // Invalidates the CPU's page cache before stepping, then dispatches to
 // the interpreter. Optional BIFROST_STEP_TRACE env var logs each step.

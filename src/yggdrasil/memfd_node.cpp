@@ -6,16 +6,13 @@
 // This lets /proc/self/maps, /proc/self/status, etc. reflect live
 // state on each open without re-creating the VNode.
 #include "yggdrasil/memfd_node.hpp"
-
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 // ── Static-content factory ────────────────────────────────────────────
 std::unique_ptr<MemfdNode> MemfdNode::create(const std::string& name,
                                              const std::string& content,
@@ -32,7 +29,6 @@ std::unique_ptr<MemfdNode> MemfdNode::create(const std::string& name,
     ::lseek(fd, 0, SEEK_SET);
     return std::unique_ptr<MemfdNode>(new MemfdNode(fd, flags, /*regen=*/nullptr));
 }
-
 // ── Lazy-regenerator factory ──────────────────────────────────────────
 std::unique_ptr<MemfdNode> MemfdNode::create_lazy(
     const std::string& name,
@@ -47,7 +43,6 @@ std::unique_ptr<MemfdNode> MemfdNode::create_lazy(
     }
     return node;
 }
-
 // Rewrite the memfd content from the regenerator. Truncates the memfd
 // to the new content size and resets the file position to 0.
 int MemfdNode::regenerate_() {
@@ -65,19 +60,16 @@ int MemfdNode::regenerate_() {
     ::lseek(fd_, 0, SEEK_SET);
     return 0;
 }
-
 ssize_t MemfdNode::read(uint64_t off, void* buf, size_t n) {
     if (off != UINT64_MAX) ::lseek(fd_, off, SEEK_SET);
     ssize_t r = ::read(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t MemfdNode::write(uint64_t off, const void* buf, size_t n) {
     if (off != UINT64_MAX) ::lseek(fd_, off, SEEK_SET);
     ssize_t r = ::write(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t MemfdNode::lseek(int64_t off, int whence) {
     // v1.4.5-alpha: lazy regeneration on SEEK_SET to 0. This makes
     // re-reads of /proc/self/maps etc. return fresh content without
@@ -91,10 +83,8 @@ ssize_t MemfdNode::lseek(int64_t off, int whence) {
     ssize_t r = ::lseek(fd_, off, whence);
     return r < 0 ? -errno : r;
 }
-
 int MemfdNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
 }
-
 } // namespace arm64emu::yggdrasil

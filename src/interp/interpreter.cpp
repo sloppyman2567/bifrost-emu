@@ -8,7 +8,6 @@
 //   1. Add the decode in decoder.cpp (sets InstClass)
 //   2. Add the execute case here
 //   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
-
 #include "core/emulator.h"
 #include "decoder.hpp"
 #include <cmath>
@@ -16,9 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
-
 namespace arm64emu {
-
 // Set NZCV from a 64-bit add-with-carry result.
 static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_in,
                               int width, bool set_flags) {
@@ -41,7 +38,6 @@ static uint64_t set_add_flags(CPU& cpu, uint64_t a, uint64_t b, uint64_t carry_i
     }
     return res;
 }
-
 // Set NZCV from a subtraction: a - b = a + ~b + 1
 static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
                               bool set_flags) {
@@ -62,7 +58,6 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
     }
     return res;
 }
-
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;
     // ── Decode via the shared decoder ─────────────────────────────
@@ -134,14 +129,12 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = res;
                 return;
             }
-
             // ── FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] ──────────────────
             // (Moved to src/interp/interp_fp.cpp — execute_fp().)
             case InstClass::FMOV_VD1:
             case InstClass::FMOV_RVD1:
                 execute_fp(inst, next_pc, cpu, d);
                 return;
-
             // ── Branches & system (moved to src/interp/interp_branch.cpp) ──
             case InstClass::B:
             case InstClass::BL:
@@ -162,7 +155,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             case InstClass::MSR_SYS:
                 execute_branch(inst, next_pc, cpu, d);
                 return;
-
             // ── ADR / ADRP ────────────────────────────────────────────
             case InstClass::ADR:
             case InstClass::ADRP: {
@@ -180,7 +172,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── MOVN / MOVZ / MOVK ────────────────────────────────────
             case InstClass::MOVN:
             case InstClass::MOVZ:
@@ -210,7 +201,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── ADD/SUB immediate ─────────────────────────────────────
             case InstClass::ADD_IMM:
             case InstClass::ADDS_IMM:
@@ -235,7 +225,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Bitfield (SBFM/BFM/UBFM) ─────────────────────────────
             case InstClass::SBFM:
             case InstClass::BFM:
@@ -249,7 +238,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t src = cpu.regs[d.rn];
                 if (!d.sf) src &= 0xFFFFFFFF;
                 int datasize = width;
-
                 // Per ARM ARM, BFM/SBFM/UBFM all use DecodeBitMasks to compute
                 // wmask (write mask) and tmask (top mask), then:
                 //   bot = (dst & ~wmask) | (ROR(src, immr) & wmask)
@@ -285,12 +273,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // which for BFI(x3, x0, #48, #16) gives field_mask = 0xFFFF | 0xFFFFFFFFFFFF0000 = ~0
                 // → replaces ALL of dst instead of just bits[63:48].
                 // This broke __floatsitf's BFI, corrupting 128-bit long doubles.
-
                 if (imms >= immr) {
                     // BFXIL / extract case
                     int len = imms - immr + 1;
                     uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
-
                     // ── LSR #0 / LSL #0 special case (fix) ──
                     // On AArch64, `LSR Xd, Xn, #0` is encoded as
                     // `UBFM Xd, Xn, #0, #63`. Real hardware treats LSR
@@ -329,7 +315,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
                         return;
                     }
-
                     uint64_t extracted = (src >> immr) & mask;
                     if (opc == 0) {
                         // SBFM: sign-extend
@@ -404,7 +389,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (!d.sf && d.rd != 31) cpu.regs[d.rd] &= 0xFFFFFFFF;
                 return;
             }
-
             // ── EXTR ─────────────────────────────────────────────────
             case InstClass::EXTR: {
                 uint8_t immr = (d.raw >> 10) & 0x3F;
@@ -428,7 +412,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = v;
                 return;
             }
-
             // ── Logical immediate (AND/ORR/EOR/ANDS) ────────────────
             case InstClass::AND_IMM:
             case InstClass::ORR_IMM:
@@ -462,7 +445,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── ADD/SUB shifted/extended register ─────────────────────
             case InstClass::ADD_REG:
             case InstClass::ADDS_REG:
@@ -520,7 +502,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Logical shifted register (AND/ORR/EOR/ANDS) ──────────
             case InstClass::AND_REG:
             case InstClass::ORR_REG:
@@ -575,7 +556,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Conditional select (CSEL/CSINC/CSINV/CSNEG) ──────────
             case InstClass::CSEL:
             case InstClass::CSINC:
@@ -600,7 +580,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = res;
                 return;
             }
-
             // ── Conditional compare (CCMP/CCMN) ──────────────────────
             case InstClass::CCMP:
             case InstClass::CCMN: {
@@ -621,7 +600,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         set_add_flags(cpu, a, operand, 0, width, true);
                     }
                 } else {
-                    // Turn 94: extract individual flag bits from nzcv_field.
                     // nzcv_field is a 4-bit value: N=bit3, Z=bit2, C=bit1, V=bit0.
                     // The old code set_flag_n(d.nzcv_field & 8) which passed
                     // 8 (non-zero = true) instead of 1. This corrupted the
@@ -633,7 +611,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Data processing (1-source): RBIT/REV/REV16/REV32/CLZ/CLS ──
             case InstClass::RBIT:
             case InstClass::REV16:
@@ -701,7 +678,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = v;
                 return;
             }
-
             // ── Data processing (2-source): UDIV/SDIV/LSL/LSR/ASR/ROR ──
             case InstClass::UDIV:
             case InstClass::SDIV:
@@ -771,7 +747,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = res;
                 return;
             }
-
             case InstClass::CRC32: {
                 // CRC32/CRC32C instructions.
                 // d.imm: 0=byte, 1=halfword, 2=word, 3=doubleword
@@ -866,7 +841,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = static_cast<uint64_t>(crc);
                 return;
             }
-
             // ── Data processing (3-source): MADD/MSUB/SMADDL/SMSUBL/UMADDL/UMSUBL/UMULH/SMULH ──
             case InstClass::MADD:
             case InstClass::MSUB:
@@ -913,7 +887,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         break;
                     }
                     case InstClass::SMULH: {
-                        // BUGFIX (Turn 75): the old code cast the int64_t
                         // product to unsigned __int128 AFTER multiplying,
                         // which truncated the result to 64 bits before
                         // widening. This made SMULH always return 0 (or
@@ -933,7 +906,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (d.rd != 31) cpu.regs[d.rd] = res;
                 return;
             }
-
             // ── Load/store pair (STP/LDP, all modes) ──────────────────
             // Encoding: opc 101 V mode L imm7 Rt2 Rn Rt
             //   mode (bits 24:23): 01=post, 10=offset, 11=pre (bit 25 is 0
@@ -969,7 +941,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     //   - esize=8 (D-form): 8 bytes (all of v_lo)
                     //   - esize=16 (Q-form): 16 bytes (v_lo + v_hi)
                     //
-                    // BUGFIX (Turn 82): the old store path did
                     //   mem_.write(addr, &v_lo[rt], esize, ...)
                     // with esize=16, which read 16 bytes from the 8-byte
                     // v_lo[rt] field — a buffer overread that wrote v_lo[rt]
@@ -1035,7 +1006,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN/SWP/CAS) ──
             // The decoder classifies LSE atomics by encoding (mode_b==0b00,
             // V=0). If the decoder says LSE_ATOMIC, it IS an LSE atomic —
@@ -1051,7 +1021,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t mask = (width_bytes == 8) ? ~0ULL
                               : ((1ULL << (width_bytes * 8)) - 1);
                 bool returns_old = (d.rt != 31);
-
                 // BUGFIX: take the exclusive-monitor shard lock around the
                 // entire RMW sequence. The old code did read→compute→write
                 // without any lock, so concurrent LSE atomics from multiple
@@ -1061,7 +1030,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 // The LDXR/STXR handler above uses the same shard mutex.
                 auto& shard = excl_monitor_shards_[excl_shard_idx(base)];
                 std::lock_guard<std::mutex> gatom(shard.mu);
-
                 // CAS family (atom_op >= 0xC): compare-and-swap.
                 // ARM CAS Ws, Wt, [Xn]:
                 //   old = [Xn]; if old == Ws, [Xn] = Wt; Ws = old
@@ -1080,7 +1048,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (d.rs != 31) cpu.regs[d.rs] = old;
                     return;
                 }
-
                 // SWP (atom_op == 0x8): atomic swap.
                 if (d.atom_op == 0x8) {
                     uint64_t old = 0;
@@ -1091,7 +1058,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     if (returns_old) cpu.regs[d.rt] = old;
                     return;
                 }
-
                 // Other LSE atomics (LDADD/LDCLR/LDEOR/LDSET/SMAX/SMIN/UMAX/UMIN).
                 uint64_t a = 0, b = cpu.regs[d.rs];
                 mem_.read(base, &a, width_bytes, pcache);
@@ -1121,7 +1087,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 if (returns_old) cpu.regs[d.rt] = a;
                 return;
             }
-
             // ── Load/store (unsigned immediate offset) ───────────────
             case InstClass::LDR_IMM:
             case InstClass::STR_IMM: {
@@ -1166,7 +1131,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Load/store (unscaled / post-index / pre-index) ───────
             // LDUR/STUR (mode=0), post-index (mode=1), pre-index (mode=2)
             case InstClass::LDR_UNS:
@@ -1223,7 +1187,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Load/store (register offset) ──────────────────────────
             case InstClass::LDR_REG:
             case InstClass::STR_REG: {
@@ -1270,7 +1233,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── Load/store exclusive (LDXR/STXR/LDAXR/STLXR/STLR/LDAR) ──
             // The decoder distinguishes these by excl_low6 + acquire bits:
             //   0x0F = STXR/LDXR family (with Rs)
@@ -1287,7 +1249,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 bool o0 = d.acquire;
                 bool use_monitor = (o0 == 0) || (d.excl_low6 != 0x3F);
-
                 if (!d.is_load) {
                     // Store-exclusive (STXR/STLXR) or store-release (STLR).
                     if (use_monitor) {
@@ -1378,42 +1339,34 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 }
                 return;
             }
-
             // ── SIMD load/store multiple structures (LD1/ST1) ─────────
             // (Moved to src/interp/interp_fp.cpp — execute_fp().)
             case InstClass::SIMD_LD1:
             case InstClass::SIMD_ST1:
                 execute_fp(inst, next_pc, cpu, d);
                 return;
-
             // ── SIMD data-processing (moved to src/interp/interp_fp.cpp) ──
             case InstClass::SIMD_DP:
                 execute_fp(inst, next_pc, cpu, d);
                 return;
-
             // ── FP scalar (moved to src/interp/interp_fp.cpp — execute_fp()) ────
             case InstClass::FP_SCALAR:
                 execute_fp(inst, next_pc, cpu, d);
                 return;
-
             default:
                 // Not recognized by the decoder — fall through
                 // to the unhandled-instruction error below.
                 break;
         }
     }
-
     // If we reach here, the instruction was not recognized by the decoder
     // switch above. Bail with a DecodeError so the caller can report the
     // PC and the offending instruction word.
     throw DecodeError(cpu.pc, inst);
 }
-
 // ---------------------------------------------------------------------------
 // Linux AArch64 syscall layer
 //   syscall number in x8, args in x0..x5, return value in x0
 // ---------------------------------------------------------------------------
-
 } // namespace arm64emu
-
 // End of interpreter.cpp

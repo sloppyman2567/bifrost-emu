@@ -11,7 +11,7 @@
 // NOTE: this file is NOT a friend of Emulator (unlike misc.cpp). It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
 //
-// v1.5.0.alpha (Turn 102): network handling refinement.
+// v1.5.0.alpha: network handling refinement.
 //   - All socket/pipe/eventfd/timerfd/epoll host fds are now wrapped in
 //     HostNode and registered in the FdTable. This fixes a long-standing
 //     bug where close() on a socket fd returned -EBADF (because the fd
@@ -26,7 +26,6 @@
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -38,9 +37,7 @@
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 // ── Guest-fd → host-fd resolution for socket-style fds ──────────────────
 // Returns the host fd backing a guest fd, or -1 if the fd is invalid or
 // not backed by a host fd. This is the network-syscall analogue of
@@ -64,7 +61,6 @@ static inline int resolve_sock_fd(Emulator& emu, uint64_t guest_fd) {
     // somehow obtained a raw host fd (e.g. via dup of stdin/stdout).
     return gfd;
 }
-
 // Helper: register a freshly-created host fd in the FdTable and return
 // the guest fd. Uses O_RDWR as the default flags (sockets don't have a
 // meaningful "flags" field at creation time — they're full-duplex).
@@ -72,7 +68,6 @@ static inline int register_host_fd(Emulator& emu, int hfd, int flags = O_RDWR) {
     if (hfd < 0) return hfd;
     return emu.fds().allocate(std::make_shared<yggdrasil::HostNode>(hfd, flags));
 }
-
 // Helper: marshal a sockaddr from guest memory into a stack buffer.
 // Returns the actual length to pass to the host syscall (clamped to
 // sizeof(sockaddr_storage)) or 0 if no addr was provided.
@@ -85,7 +80,6 @@ static inline socklen_t marshal_sockaddr_in(Memory& mem, uint64_t guest_addr,
     mem.read(guest_addr, ss, len);
     return len;
 }
-
 // Helper: write a host sockaddr back into guest memory.
 // Reads the guest's addrlen pointer, clamps it to the actual length,
 // writes the sockaddr, and writes back the (possibly clamped) length.
@@ -99,13 +93,11 @@ static inline void marshal_sockaddr_out(Memory& mem, uint64_t guest_addr,
     mem.write(guest_addr, ss, guest_len);
     mem.store<uint32_t>(guest_len_ptr, guest_len);
 }
-
 int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem();
-
     switch (num) {
         case 19: { // eventfd2(count, flags) — aarch64 syscall 19
             int hfd = ::eventfd(static_cast<unsigned int>(a0), static_cast<int>(a1));
@@ -114,7 +106,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         case 20: { // epoll_create1(flags) — aarch64 syscall 20
             int hfd = ::epoll_create1(static_cast<int>(a0));
             if (hfd < 0) { ret_errno(); return 0; }
@@ -122,7 +113,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         case 21: { // epoll_ctl(epfd, op, fd, event) — aarch64 syscall 21
             // struct epoll_event: { uint32_t events; epoll_data_t data; }
             // epoll_data_t is a union with uint64_t as the largest member.
@@ -137,7 +127,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 22: { // epoll_pwait(epfd, events, maxevents, timeout, sigmask)
             // Real AArch64 syscall 22. We forward to epoll_wait and honor
             // the sigmask by temporarily masking the guest's signals
@@ -148,7 +137,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int maxev = static_cast<int>(a2);
             if (maxev > 256) maxev = 256;
             if (maxev < 0) maxev = 0;
-
             // Save current sigmask, apply guest sigmask if provided.
             sigset_t guestmask;
             bool have_mask = false;
@@ -179,7 +167,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(n);
             return 0;
         }
-
         case 72: { // pselect6(nfds, rfds, wfds, efds, ts, sig) — aarch64 72
             // Delegate to host select. FD sets are bitmaps (1024 bits = 128 bytes).
             int nfds = static_cast<int>(a0);
@@ -227,7 +214,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 73: { // ppoll(fds, nfds, ts, sigmask) — aarch64 syscall 73
             // previously missing — toybox's `sh` calls
             // ppoll() to wait for input on stdin, and the -ENOSYS fallback
@@ -261,7 +247,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 85: { // timerfd_create(clockid, flags) — aarch64 syscall 85
             int hfd = ::timerfd_create(static_cast<int>(a0), static_cast<int>(a1));
             if (hfd < 0) { ret_errno(); return 0; }
@@ -269,7 +254,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         case 86: { // timerfd_settime(fd, flags, new, old) — aarch64 syscall 86
             if (!a2) { ret_err(EFAULT); return 0; }
             int hfd = resolve_sock_fd(emu, a0);
@@ -290,7 +274,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 87: { // timerfd_gettime(fd, curr) — aarch64 syscall 87
             int hfd = resolve_sock_fd(emu, a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -305,7 +288,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 198: { // socket(domain, type, protocol) — aarch64 198
             // Forward to host. The host kernel creates a real socket fd
             // which we wrap in HostNode + FdTable.allocate so that:
@@ -319,7 +301,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         case 199: { // socketpair(domain, type, protocol, sv) — aarch64 199
             int fds[2];
             int r = ::socketpair(static_cast<int>(a0), static_cast<int>(a1),
@@ -333,7 +314,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 200: { // bind(sockfd, addr, addrlen) — aarch64 200
             int hfd = resolve_sock_fd(emu, a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -345,7 +325,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 201: { // listen(sockfd, backlog) — aarch64 201
             int hfd = resolve_sock_fd(emu, a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -354,9 +333,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 202: { // accept(sockfd, addr, addrlen) — aarch64 202
-            // BUGFIX (Turn 102): was calling ::accept with NULL addr/addrlen,
             // which discarded the peer address. Real accept(2) fills in the
             // peer address (when addr != NULL) and writes the actual length
             // back to *addrlen. Callers that pass NULL get NULL behavior.
@@ -375,7 +352,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         case 203: { // connect(sockfd, addr, addrlen) — aarch64 203
             int hfd = resolve_sock_fd(emu, a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -387,7 +363,6 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 279: { // memfd_create(name, flags) — AArch64 279
             // Forward to host memfd_create. Used by glibc tmpfile(),
             // Rust memmap, Wayland, Chrome IPC.
@@ -409,10 +384,8 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(gfd);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
 }
-
 } // namespace arm64emu

@@ -1,10 +1,10 @@
 // frost_graphics/input.cpp — SDL2 → Linux input event translation (Turn 38-39).
 //
-// v1.4.5-alpha (Turn 38): NEW. Captures keyboard/mouse events from the
+// v1.4.5-alpha: NEW. Captures keyboard/mouse events from the
 // host's SDL2 window and exposes them as Linux input_event records
 // (24 bytes each on AArch64). The guest reads them via /dev/input/eventX.
 //
-// v1.4.5-alpha (Turn 39): Added game controller support. SDL2's game
+// v1.4.5-alpha: Added game controller support. SDL2's game
 // controller API (SDL_GameController*) provides a higher-level
 // abstraction than raw joysticks. We open all connected controllers
 // and translate their events to both EV_ABS/EV_KEY (for eventX) and
@@ -22,11 +22,9 @@
 // both /dev/input/eventX (with EV_ABS/EV_KEY) and /dev/input/js0 (with
 // JS_EVENT), and both represent the same physical events.
 #include "frost/input.hpp"
-
 #if defined(BIFROST_USE_SDL2)
 #  include <SDL2/SDL.h>
 #endif
-
 #include <chrono>
 #include <cerrno>
 #include <cstdint>
@@ -34,28 +32,23 @@
 #include <cstring>
 #include <mutex>
 #include <vector>
-
 namespace arm64emu {
-
 // ── Linux input event constants (from <linux/input-event-codes.h>) ─────
 namespace linux_input {
     constexpr uint16_t EV_SYN = 0x00;
     constexpr uint16_t EV_KEY = 0x01;
     constexpr uint16_t EV_REL = 0x02;
     constexpr uint16_t EV_ABS = 0x03;
-
     // Mouse buttons.
     constexpr uint16_t BTN_LEFT   = 0x110;
     constexpr uint16_t BTN_RIGHT  = 0x111;
     constexpr uint16_t BTN_MIDDLE = 0x112;
     constexpr uint16_t BTN_SIDE   = 0x113;
     constexpr uint16_t BTN_EXTRA  = 0x114;
-
     // Relative axes.
     constexpr uint16_t REL_X      = 0x00;
     constexpr uint16_t REL_Y      = 0x01;
     constexpr uint16_t REL_WHEEL  = 0x08;
-
     // Absolute axes (gamepad sticks).
     constexpr uint16_t ABS_X     = 0x00;  // left stick X
     constexpr uint16_t ABS_Y     = 0x01;  // left stick Y
@@ -67,7 +60,6 @@ namespace linux_input {
     constexpr uint16_t ABS_HAT0Y = 0x11;  // D-pad Y
     constexpr uint16_t ABS_BRAKE = 0x0a;  // alias for ABS_Z (left trigger)
     constexpr uint16_t ABS_GAS   = 0x0b;  // alias for ABS_RZ (right trigger)
-
     // Gamepad buttons (from <linux/input-event-codes.h>).
     constexpr uint16_t BTN_GAMEPAD   = 0x130;  // A / Cross
     constexpr uint16_t BTN_EAST      = 0x131;  // B / Circle
@@ -86,7 +78,6 @@ namespace linux_input {
     constexpr uint16_t BTN_DPAD_DOWN  = 0x222;
     constexpr uint16_t BTN_DPAD_LEFT  = 0x221;
     constexpr uint16_t BTN_DPAD_RIGHT = 0x223;
-
     // Common keyboard keys (subset).
     constexpr uint16_t KEY_RESERVED = 0;
     constexpr uint16_t KEY_ENTER    = 28;
@@ -112,13 +103,11 @@ namespace linux_input {
     constexpr uint16_t KEY_INSERT   = 110;
     constexpr uint16_t KEY_DELETE   = 111;
 }
-
 // ── Linux js_event constants ───────────────────────────────────────────
 namespace linux_js {
     constexpr uint8_t JS_EVENT_BUTTON = 0x01;
     constexpr uint8_t JS_EVENT_AXIS   = 0x02;
     constexpr uint8_t JS_EVENT_INIT   = 0x80;
-
     // Standard axis indices (Linux gamepad convention).
     // 0-1: left stick X/Y, 2-3: right stick X/Y,
     // 4-5: L2/R2 triggers, 6-7: D-pad X/Y (hat).
@@ -131,7 +120,6 @@ namespace linux_js {
     constexpr uint8_t AXIS_HAT_X    = 6;
     constexpr uint8_t AXIS_HAT_Y    = 7;
 }
-
 // ── Linux input_event layout (AArch64, 24 bytes) ───────────────────────
 struct input_event_ {
     int64_t tv_sec;
@@ -141,7 +129,6 @@ struct input_event_ {
     int32_t  value;
 };
 static_assert(sizeof(input_event_) == 24, "input_event_ must be 24 bytes");
-
 // ── Linux js_event layout (8 bytes) ─────────────────────────────────────
 struct js_event_ {
     uint32_t time;    // milliseconds since startup
@@ -150,10 +137,8 @@ struct js_event_ {
     uint8_t  number;
 };
 static_assert(sizeof(js_event_) == 8, "js_event_ must be 8 bytes");
-
 // ── SDL2 → Linux input event translation tables ────────────────────────
 #if defined(BIFROST_USE_SDL2)
-
 static uint16_t sdl_scancode_to_linux(SDL_Scancode sc) {
     if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) {
         return 30 + (sc - SDL_SCANCODE_A);
@@ -188,7 +173,6 @@ static uint16_t sdl_scancode_to_linux(SDL_Scancode sc) {
         default:                        return linux_input::KEY_RESERVED;
     }
 }
-
 static uint16_t sdl_mouse_button_to_linux(uint8_t btn) {
     switch (btn) {
         case SDL_BUTTON_LEFT:   return linux_input::BTN_LEFT;
@@ -199,7 +183,6 @@ static uint16_t sdl_mouse_button_to_linux(uint8_t btn) {
         default:                return 0;
     }
 }
-
 // SDL2 game controller axis → Linux ABS_* code.
 static uint16_t sdl_gc_axis_to_linux_abs(SDL_GameControllerAxis axis) {
     switch (axis) {
@@ -212,7 +195,6 @@ static uint16_t sdl_gc_axis_to_linux_abs(SDL_GameControllerAxis axis) {
         default:                               return 0;
     }
 }
-
 // SDL2 game controller axis → Linux js_event axis number.
 static uint8_t sdl_gc_axis_to_js(SDL_GameControllerAxis axis) {
     switch (axis) {
@@ -225,7 +207,6 @@ static uint8_t sdl_gc_axis_to_js(SDL_GameControllerAxis axis) {
         default:                               return 0xff;  // invalid
     }
 }
-
 // SDL2 game controller button → Linux BTN_* code.
 static uint16_t sdl_gc_button_to_linux_btn(SDL_GameControllerButton btn) {
     switch (btn) {
@@ -247,7 +228,6 @@ static uint16_t sdl_gc_button_to_linux_btn(SDL_GameControllerButton btn) {
         default:                                  return 0;
     }
 }
-
 // SDL2 game controller button → Linux js_event button number.
 // Linux gamepad convention: buttons 0-13 map to A/B/X/Y/TL/TR/Back/Start/
 // Guide/ThumbL/ThumbR/DPad-up/down/left/right.
@@ -277,36 +257,29 @@ static uint8_t sdl_gc_button_to_js(SDL_GameControllerButton btn) {
     }
 }
 #endif  // BIFROST_USE_SDL2
-
 // ── FrostInputImpl — the real implementation (pimpl) ───────────────────
 struct FrostInputImpl {
     static constexpr size_t EVENT_CAP = 256;
     static constexpr size_t JS_CAP = 256;
-
     std::vector<input_event_> event_queue;
     size_t event_head = 0, event_tail = 0;
     std::vector<js_event_> js_queue;
     size_t js_head = 0, js_tail = 0;
     std::mutex mu;
-
     uint64_t event_count = 0;
     bool sdl_active = false;
-
-    // Game controller state (Turn 39). We store the controllers as
+    // Game controller state. We store the controllers as
     // void* (not SDL_GameController*) so the struct compiles without
     // SDL2 headers. The actual SDL_GameController* type is only used
     // inside #if defined(BIFROST_USE_SDL2) blocks.
     std::vector<void*> controllers;
     bool gc_subsystem_init = false;
     int controller_count = 0;  // cached for has_game_controller()
-
     // Baseline timestamp for js_event.time (milliseconds since startup).
     std::chrono::steady_clock::time_point startup_time;
-
     FrostInputImpl()
         : event_queue(EVENT_CAP), js_queue(JS_CAP),
           startup_time(std::chrono::steady_clock::now()) {}
-
     // ── Push an input_event (24 bytes) into the event queue ─────────
     void push_event(uint16_t type, uint16_t code, int32_t value) {
         std::lock_guard<std::mutex> g(mu);
@@ -314,40 +287,34 @@ struct FrostInputImpl {
         auto dur = now.time_since_epoch();
         auto secs = std::chrono::duration_cast<std::chrono::seconds>(dur);
         auto usecs = std::chrono::duration_cast<std::chrono::microseconds>(dur - secs);
-
         input_event_& ev = event_queue[event_tail];
         ev.tv_sec  = static_cast<int64_t>(secs.count());
         ev.tv_usec = static_cast<int64_t>(usecs.count());
         ev.type    = type;
         ev.code    = code;
         ev.value   = value;
-
         event_tail = (event_tail + 1) % EVENT_CAP;
         if (event_tail == event_head) {
             event_head = (event_head + 1) % EVENT_CAP;  // drop oldest
         }
         event_count++;
     }
-
     // ── Push a js_event (8 bytes) into the js queue ─────────────────
     void push_js(uint8_t type, uint8_t number, int16_t value) {
         std::lock_guard<std::mutex> g(mu);
         auto now = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - startup_time).count();
-
         js_event_& ev = js_queue[js_tail];
         ev.time   = static_cast<uint32_t>(ms);
         ev.type   = type;
         ev.number = number;
         ev.value  = value;
-
         js_tail = (js_tail + 1) % JS_CAP;
         if (js_tail == js_head) {
             js_head = (js_head + 1) % JS_CAP;  // drop oldest
         }
     }
-
     // ── Pop one input_event ─────────────────────────────────────────
     bool pop_event(input_event_& out) {
         std::lock_guard<std::mutex> g(mu);
@@ -356,7 +323,6 @@ struct FrostInputImpl {
         event_head = (event_head + 1) % EVENT_CAP;
         return true;
     }
-
     // ── Pop one js_event ────────────────────────────────────────────
     bool pop_js(js_event_& out) {
         std::lock_guard<std::mutex> g(mu);
@@ -365,7 +331,6 @@ struct FrostInputImpl {
         js_head = (js_head + 1) % JS_CAP;
         return true;
     }
-
     // ── Open all connected game controllers ─────────────────────────
     void open_controllers() {
 #if defined(BIFROST_USE_SDL2)
@@ -379,7 +344,6 @@ struct FrostInputImpl {
             }
         }
         if (!gc_subsystem_init) return;
-
         int n = SDL_NumJoysticks();
         for (int i = 0; i < n; i++) {
             if (SDL_IsGameController(i)) {
@@ -397,7 +361,6 @@ struct FrostInputImpl {
         }
 #endif
     }
-
     // ── Close all game controllers ──────────────────────────────────
     void close_controllers() {
 #if defined(BIFROST_USE_SDL2)
@@ -412,7 +375,6 @@ struct FrostInputImpl {
 #endif
     }
 };
-
 // ── FrostInput method implementations ──────────────────────────────────
 FrostInput::FrostInput() {
     impl_ = std::make_unique<FrostInputImpl>();
@@ -426,17 +388,14 @@ FrostInput::FrostInput() {
     impl_->sdl_active = false;
 #endif
 }
-
 FrostInput::~FrostInput() {
     if (impl_) {
         impl_->close_controllers();
     }
 }
-
 bool FrostInput::active() const {
     return impl_ && impl_->sdl_active;
 }
-
 bool FrostInput::poll() {
     if (!impl_ || !impl_->sdl_active) return true;
 #if defined(BIFROST_USE_SDL2)
@@ -484,8 +443,7 @@ bool FrostInput::poll() {
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
                 break;
             }
-
-            // ── Game controller events (Turn 39) ────────────────────
+            // ── Game controller events ────────────────────
             case SDL_CONTROLLERDEVICEADDED: {
                 // Hot-plug: open the newly connected controller.
                 int idx = ev.cdevice.which;
@@ -546,7 +504,6 @@ bool FrostInput::poll() {
                 SDL_GameControllerAxis axis =
                     static_cast<SDL_GameControllerAxis>(ev.caxis.axis);
                 int16_t sdl_value = ev.caxis.value;
-
                 // Push to event_queue as EV_ABS.
                 uint16_t abs_code = sdl_gc_axis_to_linux_abs(axis);
                 if (abs_code != 0) {
@@ -563,7 +520,6 @@ bool FrostInput::poll() {
                 }
                 break;
             }
-
             default:
                 break;
         }
@@ -571,12 +527,10 @@ bool FrostInput::poll() {
 #endif  // BIFROST_USE_SDL2
     return true;
 }
-
 // ── read() — dequeue events into the guest buffer ──────────────────────
 ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking) {
     if (!impl_) return -ENODEV;
     (void)blocking;  // blocking not yet supported
-
     switch (dev) {
         case InputDevice::Event: {
             if (n < sizeof(input_event_)) return 0;
@@ -609,7 +563,6 @@ ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking)
             return -EINVAL;
     }
 }
-
 // ── drain() — discard all pending events ───────────────────────────────
 void FrostInput::drain() {
     if (!impl_) return;
@@ -617,21 +570,17 @@ void FrostInput::drain() {
     impl_->event_head = impl_->event_tail;
     impl_->js_head = impl_->js_tail;
 }
-
 // ── Diagnostics ─────────────────────────────────────────────────────────
 uint64_t FrostInput::event_count() const {
     if (!impl_) return 0;
     return impl_->event_count;
 }
-
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;
     return impl_->controller_count > 0;
 }
-
 int FrostInput::game_controller_count() const {
     if (!impl_) return 0;
     return impl_->controller_count;
 }
-
 } // namespace arm64emu

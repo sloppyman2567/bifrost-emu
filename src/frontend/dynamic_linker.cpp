@@ -20,7 +20,6 @@
 #include "core/memory.h"
 #include "bifrost/types.hpp"
 #include "bifrost/version.hpp"
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -29,9 +28,7 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 // ── ELF dynamic tag constants ──────────────────────────────────────────
 // From elf.h (we hardcode to avoid pulling in the host's elf.h, which
 // may not have all AArch64-specific tags).
@@ -67,7 +64,6 @@ constexpr int DT_INIT_ARRAYSZ_  = 27;
 constexpr int DT_FINI_ARRAYSZ_  = 28;
 constexpr int DT_RUNPATH_   = 29;
 constexpr int DT_FLAGS_     = 30;
-
 // DT_RELR / DT_RELRSZ / DT_RELRENT — compact relative relocations.
 // Added in glibc 2.36+ and produced by default with binutils 2.38+ when
 // linking against glibc 2.36+ (so glibc 2.40 ships .relr.dyn in libc.so.6).
@@ -89,14 +85,12 @@ constexpr int DT_FLAGS_     = 30;
 constexpr int DT_RELR_      = 36;
 constexpr int DT_RELRSZ_    = 35;
 constexpr int DT_RELRENT_   = 37;
-
 // BUGFIX (Turn 60, C5): symbol versioning tags.
 constexpr int DT_VERSYM_    = 0x6FFFFFF0;
 constexpr int DT_VERDEF_    = 0x6FFFFFFC;
 constexpr int DT_VERDEFNUM_ = 0x6FFFFFFD;
 constexpr int DT_VERNEED_   = 0x6FFFFFFE;
 constexpr int DT_VERNEEDNUM_= 0x6FFFFFFF;
-
 // AArch64 relocation types (ELF64 codes), per ARM IHI 0056B.
 constexpr uint32_t R_AARCH64_ABS64_         = 257;
 constexpr uint32_t R_AARCH64_COPY_          = 1024;  // R_AARCH64_COPY
@@ -108,10 +102,8 @@ constexpr uint32_t R_AARCH64_TLS_DTPREL_    = 1029;  // TLS offset within module
 constexpr uint32_t R_AARCH64_TLS_TPREL_     = 1030;  // TLS TP-relative offset
 constexpr uint32_t R_AARCH64_TLSDESC_       = 1031;  // TLS descriptor
 constexpr uint32_t R_AARCH64_IRELATIVE_     = 1032;
-
 // ELF64 section header types.
 constexpr uint32_t SHT_RELA_ = 4;
-
 // ELF64 symbol table entry (24 bytes).
 struct Elf64_Sym {
     uint32_t st_name;   // offset into strtab
@@ -121,29 +113,24 @@ struct Elf64_Sym {
     uint64_t st_value;
     uint64_t st_size;
 };
-
 // ELF64 dynamic section entry (16 bytes).
 struct Elf64_Dyn {
     int64_t  d_tag;
     uint64_t d_val;     // also d_ptr
 };
-
 // ELF64 RELA relocation entry (24 bytes).
 struct Elf64_Rela {
     uint64_t r_offset;
     uint64_t r_info;    // sym << 32 | type
     int64_t  r_addend;
 };
-
 uint32_t ELF64_R_SYM_(uint64_t info)  { return info >> 32; }
 uint32_t ELF64_R_TYPE_(uint64_t info) { return info & 0xFFFFFFFF; }
-
 // Symbol binding/type extractors.
 uint8_t ST_BIND_(uint8_t info)  { return info >> 4; }
 constexpr uint8_t STB_GLOBAL_= 1;
 constexpr uint8_t STB_WEAK_  = 2;
 constexpr uint16_t SHN_UNDEF_ = 0;
-
 // ── Helpers ────────────────────────────────────────────────────────────
 // Read a string from guest memory at `addr` (NUL-terminated).
 std::string read_guest_cstr(Memory& mem, uint64_t addr) {
@@ -164,9 +151,7 @@ std::string read_guest_cstr(Memory& mem, uint64_t addr) {
     } catch (...) {}
     return out;
 }
-
 } // namespace
-
 // ── DynamicLinker::link ────────────────────────────────────────────────
 bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                          uint64_t main_base,
@@ -176,7 +161,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     symbols_.clear();
     versioned_symbols_.clear();  // Turn 60, C5
     error_.clear();
-
     // Detect musl vs glibc from the interpreter path.
     // musl: /lib/ld-musl-aarch64.so.1
     // glibc: /lib/ld-linux-aarch64.so.1
@@ -187,7 +171,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         fprintf(stderr, "[dynlink] interp='%s' → %s TLS layout\n",
                 interp_path.c_str(), is_musl_ ? "musl (variant-II)" : "glibc (variant-I)");
     }
-
     // Index the main binary.
     LoadedObject main_obj;
     main_obj.name = main_path;
@@ -200,7 +183,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     objects_.push_back(std::move(main_obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());  // Turn 60, C5
-
     // Recursively load DT_NEEDED libraries. We use a worklist to handle
     // transitive dependencies (libc → ld-musl, libm → libc, etc.).
     std::vector<size_t> worklist = {0};
@@ -209,7 +191,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         size_t idx = worklist.back();
         worklist.pop_back();
         if (idx >= objects_.size()) continue;
-
         // Re-scan the dynamic section of objects_[idx] for DT_NEEDED.
         // We have to re-read from memory because the dynamic section
         // was relocated in place.
@@ -225,7 +206,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     uint64_t str_addr = objects_[idx].strtab_addr + dyn.d_val;
                     std::string soname = read_guest_cstr(mem_, str_addr);
                     if (soname.empty()) continue;
-
                     // Skip if already loaded.
                     // BUGFIX (Turn 59, L6): dedup by DT_SONAME when present,
                     // falling back to the DT_NEEDED string. Real ld.so uses
@@ -238,7 +218,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         if (!o.soname.empty() && o.soname == soname) { found = true; break; }
                     }
                     if (found) continue;
-
                     // BUGFIX (Turn 59, C6): pass the parent object's
                     // DT_RUNPATH so find_library can search it for
                     // transitive deps. (DT_RUNPATH only applies to the
@@ -277,7 +256,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
             continue;
         }
     }
-
     // Now apply relocations for all loaded objects. We do this after
     // all libraries are loaded so symbol resolution can find symbols
     // in any object.
@@ -285,14 +263,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // First, allocate the static TLS block (must be done before TLS
     // relocations, which reference tls_tp_offset / tls_mod_id).
     allocate_static_tls();
-
     // Register the synthetic ld-linux shim. This provides definitions
     // for symbols that glibc's libc.so references from ld-linux
     // (_rtld_global_ro, _dl_argv, _dl_find_dso_for_object, etc.).
     // Without these, libc crashes during __libc_start_main when it
     // dereferences the (zero) GOT slots.
     //
-    // BUGFIX (Turn 72): ALWAYS register the shim, even when a real
     // ld-linux was loaded. Reason: production glibc builds strip ld-linux's
     // .symtab, leaving only a 40-entry .dynsym that does NOT export
     // _rtld_global, _rtld_global_ro, _dl_argv, __libc_enable_secure,
@@ -304,7 +280,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // real ld-linux .dynsym symbol (rare but possible in debug builds)
     // takes precedence over the shim's stub.
     register_ld_linux_shim_();
-
     // Note: we re-apply using the original file bytes for each object,
     // since the in-memory dynamic section may have been relocated.
     // For the main binary we have `main_data`; for libs we kept their
@@ -315,7 +290,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
         if (obj.dyn_addr == 0) continue;
         try {
             // Find DT_RELA / DT_RELASZ / DT_JMPREL / DT_PLTRELSZ.
-            // BUGFIX (Turn 39): d_val for these tags is a vaddr RELATIVE
             // to the object's load base. For the main binary (non-PIE,
             // base=0) this is already absolute. For shared libraries
             // (PIE, base!=0) we MUST add obj.base_addr to get the
@@ -351,7 +325,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         static_cast<unsigned long long>(relr_addr),
                         static_cast<unsigned long long>(relr_size));
             }
-
             // ── DT_RELR (compact relative relocations) ───────────────
             // Apply BEFORE DT_RELA: DT_RELR only encodes R_AARCH64_RELATIVE
             // (no symbol resolution), so order doesn't strictly matter,
@@ -362,7 +335,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
             if (relr_addr && relr_size) {
                 apply_relr_relocations_(obj, relr_addr, relr_size);
             }
-
             // DT_RELA entries are absolute addresses already (relocated
             // by R_AARCH64_RELATIVE during the main binary's load).
             // For non-PIE main binaries, d_val is a vaddr; for PIE/libs,
@@ -377,11 +349,9 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     uint32_t sym  = ELF64_R_SYM_(r.r_info);
                     uint64_t target = obj.base_addr + r.r_offset;
                     int64_t A = r.r_addend;
-
                     if (type == R_AARCH64_RELATIVE_) {
                         uint64_t value = obj.base_addr + A;
                         mem_.store<uint64_t>(target, value);
-                        // BUGFIX (Turn 74): mirror .tdata relocations to
                         // the TLS block copy. See apply_tls_mirror_().
                         apply_tls_mirror_(obj, target, value);
                     } else if (type == R_AARCH64_COPY_) {
@@ -442,7 +412,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                         static_cast<unsigned long long>(target));
                             }
                         }
-                        // BUGFIX (Turn 74): mirror .tdata relocations.
                         apply_tls_mirror_(obj, target, value);
                     } else if (type == R_AARCH64_IRELATIVE_) {
                         // ifunc: call the resolver at base + A to get the
@@ -606,7 +575,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                 }
             }
             // PLT relocations (DT_JMPREL) — eager binding.
-            // BUGFIX (Turn 39): the old code only processed DT_RELA and
             // ignored DT_JMPREL entirely. JUMP_SLOT relocations (the PLT
             // entries that point to libc functions like printf, malloc,
             // __libc_start_main) live in DT_JMPREL, NOT in DT_RELA. The
@@ -628,7 +596,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     uint32_t sym  = ELF64_R_SYM_(r.r_info);
                     uint64_t target = obj.base_addr + r.r_offset;
                     int64_t A = r.r_addend;
-
                     if (type == R_AARCH64_JUMP_SLOT_) {
                         if (sym == 0) {
                             mem_.store<uint64_t>(target, obj.base_addr + A);
@@ -666,16 +633,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
             // Relocation failed for this object — continue.
         }
     }
-
-    // BUGFIX (Turn 74): apply deferred R_AARCH64_COPY relocations AFTER
     // all objects' RELATIVE/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are
     // done. The COPY reads the original symbol's post-relocation value.
     // If applied during the first pass, it reads pre-relocation values
     // (e.g., libc's stdout variable before RELATIVE sets it to the
     // relocated _IO_2_1_stdout_ address).
     apply_pending_copies_();
-
-    // BUGFIX (Turn 74): call __libc_early_init if libc.so.6 exports it.
     // In glibc 2.34+, the dynamic linker (ld-linux) calls this function
     // during early initialization. It calls __ctype_init() which sets up
     // the thread-local character type tables (ctype_b, ctype_tolower,
@@ -687,7 +650,6 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // ld-linux), __libc_early_init is never called. We call it here,
     // before DT_INIT_ARRAY, matching the order ld-linux uses.
     //
-    // BUGFIX (Turn 76): BEFORE calling __libc_early_init, we must patch
     // the resolved _rtld_global_ro to set dl_tls_static_size,
     // dl_tls_static_align, and dl_pagesize. Without these, glibc's
     // _dl_allocate_tls_storage allocates 0 bytes and pthread_create
@@ -695,13 +657,10 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // (not our shim) because __libc_early_init reads many other fields
     // from the real struct at specific offsets.
     patch_rtld_global_ro_();
-
-    // BUGFIX (Turn 77): initialize the NPTL stack-cache list heads in
     // _rtld_global. Must happen before __libc_early_init and before the
     // program runs pthread_create. See init_nptl_stack_lists_() for the
     // full rationale. (No-op for musl, which has no _rtld_global.)
     init_nptl_stack_lists_();
-
     if (init_runner_) {
         uint64_t early_init = resolve_symbol("__libc_early_init");
         if (early_init != 0) {
@@ -715,28 +674,22 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
             }
         }
     }
-
-    // Re-patch _rtld_global_ro AFTER __libc_early_init (Turn 85).
+    // Re-patch _rtld_global_ro AFTER __libc_early_init.
     // __libc_early_init zeroes dl_pagesize. Re-apply.
     patch_rtld_global_ro_();
-
     // BUGFIX (Turn 59, C1): invoke DT_INIT and DT_INIT_ARRAY for each
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
     // runs with uninitialized globals (vtables, std::mutex, std::string).
     // Requires init_runner_ to be set by the Emulator; no-ops if not.
     run_init_arrays_();
-
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] all DT_INIT_ARRAY done, link() complete\n");
     }
-
-    // Final re-patch AFTER DT_INIT_ARRAY (Turn 85).
+    // Final re-patch AFTER DT_INIT_ARRAY.
     patch_rtld_global_ro_();
-
     return true;
 }
-
 // ── patch_rtld_global_ro_ ──────────────────────────────────────────────
 // Patch the resolved _rtld_global_ro to set dl_pagesize,
 // dl_tls_static_size, and dl_tls_static_align. These fields are
@@ -786,10 +739,8 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
                                                uint32_t& out_align_off) {
     out_size_off = 0;
     out_align_off = 0;
-
     uint64_t early_init = resolve_symbol("__libc_early_init");
     if (early_init == 0) return false;
-
     // Read up to 192 bytes (48 instructions) of __libc_early_init.
     // glibc 2.42's version is longer (includes __getrlimit + rlimit
     // adjustment before the TLS LDP), so we scan more than the old 32.
@@ -799,7 +750,6 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
     } catch (...) {
         return false;
     }
-
     // Track which register holds the _rtld_global_ro pointer.
     // The pattern is: adrp xN, <page>; ldr xN, [xN, #<offset>]
     // After the ldr, xN holds &_rtld_global_ro.
@@ -807,11 +757,9 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
     // 2.42 uses x0 instead of x1.
     uint32_t rtld_ro_reg = 0xFFFFFFFF;  // invalid sentinel
     bool rtld_ro_reg_valid = false;
-
     for (size_t i = 0; i + 4 <= sizeof(code); i += 4) {
         uint32_t insn;
         memcpy(&insn, code + i, 4);
-
         // Detect ADRP: 1 immlo 10000 immhi Rd
         // mask 0x9F000000, value 0x90000000
         if ((insn & 0x9F000000) == 0x90000000) {
@@ -825,7 +773,6 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
             rtld_ro_reg_valid = false;  // not yet — need the LDR
             continue;
         }
-
         // Detect LDR (64-bit GPR, unsigned offset): 11 111 0 01 01 imm12 Rn Rt
         // mask 0xFFC00000, value 0xF9400000
         if ((insn & 0xFFC00000) == 0xF9400000) {
@@ -842,16 +789,13 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
             }
             continue;
         }
-
         // Detect LDP (64-bit GPR, unsigned offset):
         //   10 1010 0101 0 imm7 Rt2 Rn Rt
         //   mask 0xFFC00000, value 0xA9400000
         if ((insn & 0xFFC00000) != 0xA9400000) continue;
-
         uint32_t rn = (insn >> 5) & 0x1F;
         // The base must be the register holding _rtld_global_ro.
         if (!rtld_ro_reg_valid || rn != rtld_ro_reg) continue;
-
         // imm7 is at bits 21-15 (7 bits, unsigned for this variant).
         uint32_t imm7 = (insn >> 15) & 0x7F;
         uint32_t offset = imm7 * 8;  // scaled by 8 for 64-bit
@@ -864,7 +808,6 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
         // LDP from the rtld_global_ro register (besides the pagesize
         // LDR which uses a different instruction).
         if (offset < 0x18 || offset > 0x400) continue;
-
         // Heuristic: the LDP we want loads (dl_tls_static_size,
         // dl_tls_static_align). In glibc 2.42, the LDP at offset 0x98
         // loads (size, align). In glibc 2.40, the LDP at 0x1D8 loads
@@ -883,16 +826,13 @@ bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
     }
     return false;
 }
-
 void DynamicLinker::patch_rtld_global_ro_() {
     if (pending_tls_static_size_ == 0) return;  // no TLS → nothing to patch
-
     uint64_t rtld_ro = resolve_symbol("_rtld_global_ro");
     if (rtld_ro == 0) {
         // _rtld_global_ro not found — might be a musl binary (no _rtld_global_ro).
         return;
     }
-
     // ── Dynamic offset detection ────────────────────────────────────
     // The offsets of dl_tls_static_size and dl_tls_static_align within
     // struct rtld_global_ro vary by glibc version:
@@ -905,7 +845,6 @@ void DynamicLinker::patch_rtld_global_ro_() {
     // size_t values and spraying writes the same value to adjacent slots).
     uint32_t size_off = 0, align_off = 0;
     bool detected = detect_tls_field_offsets_(size_off, align_off);
-
     // Known offset pairs (glibc version → (size_off, align_off)).
     // Used as fallback if dynamic detection fails.
     struct KnownOffset { uint32_t size; uint32_t align; const char* ver; };
@@ -914,17 +853,14 @@ void DynamicLinker::patch_rtld_global_ro_() {
         {0x1D8, 0x1E0, "glibc 2.40 (Arm GNU 14.2)"},
         {0x1D0, 0x1D8, "glibc 2.36 (Arm GNU 13.2)"},
     };
-
     // Pagesize is at offset 0x18 in all known glibc versions.
     constexpr uint32_t PAGESIZE_OFF = 0x18;
-
     try {
         // ── Patch dl_pagesize (offset 0x18, stable across versions) ──
         uint64_t pagesize = mem_.load<uint64_t>(rtld_ro + PAGESIZE_OFF);
         if (pagesize == 0) {
             mem_.store<uint64_t>(rtld_ro + PAGESIZE_OFF, 4096);
         }
-
         // ── Patch dl_tls_static_size and dl_tls_static_align ─────────
         // Strategy: if dynamic detection succeeded, patch exactly those
         // two offsets. Otherwise, "spray" — write the size and align
@@ -965,7 +901,6 @@ void DynamicLinker::patch_rtld_global_ro_() {
                 }
             }
         }
-
         if (getenv("BIFROST_DYNLINK_TRACE")) {
             fprintf(stderr, "[dynlink] patched _rtld_global_ro @0x%llx: "
                     "dl_pagesize=4096, dl_tls_static_size=%llu, "
@@ -980,8 +915,7 @@ void DynamicLinker::patch_rtld_global_ro_() {
         // not be mapped at the expected address. This is non-fatal;
         // glibc will hit the assertion later (visible failure).
     }
-
-    // dlopen hook: write to _rtld_global_ro + 368 (Turn 85).
+    // dlopen hook: write to _rtld_global_ro + 368.
     // glibc's __libc_dlopen_mode and dlopen@@GLIBC_2.34 both read
     // _rtld_global_ro from *(libc_base + 0x19FE70), then read +368 and +0/+72.
     // The _dl_open_hook field IS at _rtld_global_ro + 368 — it's a field
@@ -997,7 +931,6 @@ void DynamicLinker::patch_rtld_global_ro_() {
         } catch (...) {}
     }
 }
-
 // ── init_nptl_stack_lists_ ────────────────────────────────────────────
 // Initialize the NPTL stack-cache list heads in _rtld_global so that
 // glibc's pthread_create -> allocate_stack does not spin forever.
@@ -1032,7 +965,7 @@ void DynamicLinker::patch_rtld_global_ro_() {
 // `_rtld_global_ro`) and write self-referential pointers into the three
 // list heads.
 //
-// ── DYNAMIC OFFSET DETECTION (Turn 77 cont.) ───────────────────────
+// ── DYNAMIC OFFSET DETECTION ───────────────────────
 // The three list heads live at version-dependent offsets within
 // `struct rtld_global`. Rather than hardcode offsets for one glibc
 // version, we discover them at runtime from the libthread_db
@@ -1072,7 +1005,6 @@ void DynamicLinker::init_nptl_stack_lists_() {
         // musl or static binary — no _rtld_global. Nothing to do.
         return;
     }
-
     // ── Discover the stack_used / stack_user offsets dynamically ──
     // Default to the glibc 2.36 / Arm GNU 13.2 offsets (our shipped
     // toolchain). Try to override with the libthread_db descriptor
@@ -1081,7 +1013,6 @@ void DynamicLinker::init_nptl_stack_lists_() {
     uint64_t off_user  = 0x1168;
     uint64_t off_cache = 0x1178;
     bool dynamic = false;
-
     uint64_t desc_used = resolve_symbol(
         "_thread_db_rtld_global__dl_stack_used");
     uint64_t desc_user = resolve_symbol(
@@ -1106,14 +1037,12 @@ void DynamicLinker::init_nptl_stack_lists_() {
             // Descriptor not readable — keep the fallback offsets.
         }
     }
-
     struct ListHeadOff { const char* name; uint64_t off; };
     const ListHeadOff heads[] = {
         { "_dl_stack_used",  off_used  },
         { "_dl_stack_user",  off_user  },
         { "_dl_stack_cache", off_cache },
     };
-
     bool patched = false;
     try {
         for (const auto& h : heads) {
@@ -1134,7 +1063,6 @@ void DynamicLinker::init_nptl_stack_lists_() {
         // _rtld_global not mapped at the expected range — non-fatal.
         // glibc will spin later (visible failure).
     }
-
     if (patched && getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] initialized NPTL stack list heads in "
                 "_rtld_global @0x%llx (%s offsets: "
@@ -1147,7 +1075,6 @@ void DynamicLinker::init_nptl_stack_lists_() {
                 static_cast<unsigned long long>(off_cache));
     }
 }
-
 // ── apply_pending_copies_ ──────────────────────────────────────────────
 // Apply all deferred R_AARCH64_COPY relocations. For each COPY:
 //   1. Find the original symbol definition in a shared library (skip
@@ -1216,7 +1143,6 @@ void DynamicLinker::apply_pending_copies_() {
     }
     pending_copies_.clear();
 }
-
 // ── apply_tls_mirror_ ──────────────────────────────────────────────────
 // If `target` falls within obj's PT_TLS (.tdata) segment, also store
 // `value` at the corresponding offset in the static TLS block. See
@@ -1234,8 +1160,7 @@ void DynamicLinker::apply_tls_mirror_(const LoadedObject& obj,
         mem_.store<uint64_t>(tls_dst, value);
     }
 }
-
-// ── apply_relr_relocations_ (Turn 78) ──────────────────────────────────
+// ── apply_relr_relocations_ ──────────────────────────────────
 // Apply DT_RELR — compact relative relocations. Each bit in the bitmap
 // represents one 8-byte relocation slot. Two encoding forms:
 //
@@ -1343,7 +1268,6 @@ void DynamicLinker::apply_relr_relocations_(const LoadedObject& obj,
                 obj.name.c_str(), applied);
     }
 }
-
 // ── run_init_arrays_ ───────────────────────────────────────────────────
 // Invoke DT_INIT (legacy _init()) and each entry in DT_INIT_ARRAY for
 // every loaded object, in dependency order (libs first, main last).
@@ -1390,7 +1314,6 @@ void DynamicLinker::run_init_arrays_() {
         }
     }
 }
-
 // ── parse_dynamic ──────────────────────────────────────────────────────
 bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
                                   uint64_t base, LoadedObject& obj) {
@@ -1408,7 +1331,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     memcpy(&e_phnum,     data.data() + 56, 2);
     memcpy(&e_shentsize, data.data() + 58, 2);
     memcpy(&e_shnum,     data.data() + 60, 2);
-
     // BUGFIX (Turn 59, H1/H2): validate e_phoff and e_phentsize before
     // either phdr loop. A malformed ELF with bogus e_phoff could OOB-read
     // `data`. Also require e_phentsize >= 56 (we read up to p+48 for
@@ -1417,7 +1339,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         error_ = "parse_dynamic: invalid program header table in " + obj.name;
         return false;
     }
-
     // Find PT_DYNAMIC in program headers.
     uint64_t dyn_vaddr = 0, dyn_filesz = 0;
     for (int i = 0; i < e_phnum; i++) {
@@ -1426,7 +1347,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         uint32_t p_type;
         memcpy(&p_type, p + 0, 4);
         if (p_type == 2) {  // PT_DYNAMIC
-            // BUGFIX (Turn 39): the field at p+8 is p_offset, NOT p_vaddr.
             // The ELF64 program header layout is:
             //   offset 0:  p_type   (4 bytes)
             //   offset 4:  p_flags  (4 bytes)
@@ -1453,7 +1373,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         return true;
     }
     obj.dyn_addr = base + dyn_vaddr;
-
     // Parse the dynamic section from the file bytes (since the in-memory
     // copy may not yet be relocated).
     // Find the file offset corresponding to dyn_vaddr.
@@ -1481,9 +1400,7 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
                  obj.name;
         return false;
     }
-
     // Iterate Elf64_Dyn entries.
-    // BUGFIX (Turn 59): capture DT_INIT/DT_FINI/DT_INIT_ARRAY/DT_FINI_ARRAY
     // /DT_SONAME/DT_RPATH/DT_RUNPATH (previously declared as constants
     // but never read). Also capture DT_HASH for symbol-count derivation (H5).
     uint64_t symtab_vaddr = 0, strtab_vaddr = 0;
@@ -1500,7 +1417,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             case DT_STRTAB_:        strtab_vaddr = dyn.d_val; break;
             case DT_JMPREL_:        obj.jmprel_addr = base + dyn.d_val; break;
             case DT_PLTRELSZ_:      obj.jmprel_size = dyn.d_val; break;
-            // Turn 78: DT_RELR (compact relative relocations). glibc 2.36+
             // produces these by default. Without processing them, libc's
             // internal pointers (init_array, .data.rel.ro, .got) never
             // get fixed up → "decode error at pc=0x0" on first init call.
@@ -1527,7 +1443,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     }
     obj.symtab_addr = base + symtab_vaddr;
     obj.strtab_addr = base + strtab_vaddr;
-
     // BUGFIX (Turn 59, H5): derive symtab_count from DT_HASH when present.
     // DT_HASH's first two uint32_t are nbucket and nchain; nchain is the
     // number of symbols in .dynsym (exact count — no more 8192 cap).
@@ -1548,7 +1463,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
         // 8192 is the old cap; index_symbols also uses it as a safety bound.
         obj.symtab_count = 8192;
     }
-
     // Read DT_SONAME (for dedup), DT_RPATH, DT_RUNPATH.
     // BUGFIX (Turn 59, C6): these were declared as constants but never
     // consulted. Now captured for use in find_library and dedup.
@@ -1596,10 +1510,8 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             obj.runpath = expand_origin(read_guest_cstr(mem_, obj.strtab_addr + runpath_off));
         } catch (...) {}
     }
-
     return true;
 }
-
 // ── register_ld_linux_shim_ ────────────────────────────────────────────
 // Allocate a small data + code page in guest memory and populate it
 // with synthetic versions of the symbols glibc's libc.so expects from
@@ -1652,7 +1564,6 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
 // resolve to the correct addresses.
 bool DynamicLinker::register_ld_linux_shim_() {
     if (shim_base_ != 0) return true;  // already registered
-
     // Allocate 4 pages: 3 data pages + 1 code page.
     // The extra data pages are needed because glibc's _rtld_global_ro
     // struct is large (~4-8 KiB) and fields like dl_tls_static_size
@@ -1666,13 +1577,11 @@ bool DynamicLinker::register_ld_linux_shim_() {
         error_ = "register_ld_linux_shim_: mmap_alloc failed";
         return false;
     }
-
     // ── Data area (shim_base_ .. shim_base_+DATA_SIZE) ────────────
     // Zero the entire data area (mmap_alloc already does this, but be
     // explicit in case the pages were reused from a previous allocation).
     std::vector<uint8_t> zero(DATA_SIZE, 0);
     mem_.write(shim_base_, zero.data(), DATA_SIZE);
-
     // Layout (offsets within the data page):
     //   0x000: _rtld_global_ro (glibc reads many fields at offsets up
     //          to ~0x1000+ from this struct; the function-pointer fields
@@ -1708,7 +1617,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint64_t LIBC_ENABLE_SECURE_OFF = 0x208;
     constexpr uint64_t POINTER_CHK_GUARD_OFF = 0x20C;
     constexpr uint64_t FPTR_TABLE_OFF     = 0x300;
-
     // Generate a random __pointer_chk_guard value. glibc uses this as
     // a stack-protector canary; we use /dev/urandom for entropy.
     uint64_t chk_guard = 0;
@@ -1719,7 +1627,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     }
     if (chk_guard == 0) chk_guard = 0xDEADBEEFCAFEBABEULL;
     mem_.store<uint64_t>(shim_base_ + POINTER_CHK_GUARD_OFF, chk_guard);
-
     // ── Populate _rtld_global_ro TLS fields ──────────────────────────
     // glibc's pthread_create → allocate_stack → _dl_allocate_tls_storage
     // reads GLRO(dl_tls_static_size) and GLRO(dl_tls_static_align) to
@@ -1757,7 +1664,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // include this in dl_tls_static_size so glibc allocates enough
         // space for struct pthread + TLS data + TCB.
         //
-        // BUGFIX (Turn 82): the old code only included static_tls_size_
         // (lib + tcb + main) + 2KB + 16KB surplus. This was too small —
         // glibc's struct pthread (~2.3KB) overflowed into the TLS data
         // area, causing the "got = expected/4" TLS corruption pattern
@@ -1771,7 +1677,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // Store for later use (post-relocation patching of _rtld_global_ro).
         pending_tls_static_size_ = tls_static_size;
     }
-
     // ── Code page (shim_base_+CODE_PAGE_OFF .. shim_base_+SHIM_SIZE) ─
     // Each stub is 2 instructions (8 bytes), EXCEPT _dl_allocate_tls
     // which is 4 instructions (16 bytes) because it calls back into
@@ -1784,7 +1689,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // registered before libc loaded), the abort stubs just BRK #1000
     // (visible crash) instead.
     uint64_t code_base = shim_base_ + CODE_PAGE_OFF;
-
     // ARM64 instruction encodings (little-endian byte order):
     //   mov x0, #0        → 0xD2800000  (MOVZ x0, #0)
     //   ret               → 0xD65F03C0
@@ -1816,7 +1720,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
         emit_brk_1000(v);
         emit_nop(v);
     };
-
     // _dl_allocate_tls syscall stub (16 bytes = 4 instructions):
     //   movz x8, #0x1001   ; bifrost TLS-alloc syscall number
     //   svc  #0            ; call the emulator
@@ -1836,7 +1739,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
         //   = 0xD2800000 | 0 | (0x1001<<5) | 8 = 0xD2820028
         // Little-endian bytes: 28 00 82 D2
         //
-        // Turn 78 cont.: CORRECT encoding (0x00, not 0x20). The previous
         // typo made syscall 0x1001 never fire. Now it fires on every
         // _dl_allocate_tls AND _dl_allocate_tls_init call (both stubs use
         // this emitter). The syscall handler copies lib TLS to
@@ -1853,10 +1755,8 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // nop (pad to 16 bytes)
         emit_nop(v);
     };
-
     std::vector<uint8_t> code;
     code.reserve(256);
-
     // Stub layout — _dl_allocate_tls and _dl_allocate_tls_init are 16 bytes;
     // all others are 8.
     // Offsets are tracked via named constants so the FPTR table and
@@ -1877,13 +1777,11 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_TUNABLE = 120;  // __tunable_get_val
     constexpr uint32_t OFF_STACKPERM = 128; // __nptl_change_stack_perm
     constexpr uint32_t OFF_DLOPEN   = 136; // _dl_open (16 bytes — calls syscall 0x1002)
-
     // [0] _dl_find_dso_for_object (returns void*)
     emit_stub_return0(code);     // offset 0
     // [1] _dl_allocate_tls (16 bytes — calls syscall 0x1001)
     emit_tls_alloc_stub(code);   // offset 8 (16 bytes)
     // [2] _dl_allocate_tls_init (16 bytes — also calls syscall 0x1001)
-    //     Turn 78 cont.: glibc calls this on stack-cache REUSE (when
     //     _dl_allocate_tls is NOT called). Without this, stale .tbss data
     //     from the previous thread would persist. Both stubs use the same
     //     emit_tls_alloc_stub, so syscall 0x1001 fires for both new and
@@ -1914,7 +1812,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // [14] __nptl_change_stack_perm (void)
     emit_stub_void(code);        // offset 120
     // [15] _dl_open (16 bytes — calls syscall 0x1002 for dlopen support)
-    //     Turn 84: glibc's __libc_dlopen_mode reads _dl_open from a hook
     //     struct at _rtld_global_ro + 368, offset +72. The stub calls
     //     syscall 0x1002 which loads the library via DynamicLinker.
     {
@@ -1929,7 +1826,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     }
     // [16] _dl_sym (16 bytes — calls syscall 0x1003 for dlsym support)
     //     dlsym@@GLIBC_2.34 reads *(hook+16) for _dl_sym.
-    //     Turn 86: a0=handle, a1=symbol name ptr → returns symbol address.
     constexpr uint32_t OFF_DLSYM = 152;
     {
         // movz x8, #0x1003  →  0xD2820068
@@ -1949,7 +1845,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
     mem_.write(code_base, code.data(), 4096);
-
     // ── Populate the function pointer table in the data page ──────
     // _rtld_global_ro has fields at specific offsets that glibc reads
     // to find _dl_signal_error, _dl_catch_error, etc. Rather than
@@ -1973,7 +1868,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
         mem_.store<uint64_t>(shim_base_ + FPTR_TABLE_OFF + i * 8,
                              code_base + fptr_offsets[i]);
     }
-
     // ── dlopen hook struct ─────────────────────────────────────────
     // glibc's __libc_dlopen_mode reads _dl_open from a hook struct:
     //   1. ldr x2, [rtld_global_ro + 368]  → hook struct pointer
@@ -1983,7 +1877,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // offset 0x800, past the FPTR table) and set hook+72 = _dl_open stub.
     // After patch_rtld_global_ro_ resolves _rtld_global_ro's address,
     // we write hook_ptr to rtld_global_ro + 368.
-    // (Turn 84)
     // ── dlopen hook struct ──────────────────────────────────────────
     // glibc reads _dl_open_hook from _rtld_global_ro + 368.
     // The hook struct has function pointers at various offsets:
@@ -1991,7 +1884,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     //   +8:  _dl_close (dlclose@@GLIBC_2.34)
     //   +16: _dl_sym   (dlsym@@GLIBC_2.34)
     //   +72: _dl_open  (__libc_dlopen_mode)
-    // (Turn 86)
     constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;
     constexpr uint64_t DLOPEN_HOOK_SIZE = 128;
     {
@@ -2003,11 +1895,9 @@ bool DynamicLinker::register_ld_linux_shim_() {
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 16, code_base + OFF_DLSYM);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 72, code_base + OFF_DLOPEN);
     dlopen_hook_ptr_ = shim_base_ + DLOPEN_HOOK_OFF;
-
     // ── Register symbols in the global symbol table ──────────────
     // Data symbols point into the data page; function symbols point
     // into the code page.
-    // BUGFIX (Turn 72): first-define-wins. The old code unconditionally
     // assigned `symbols_[name] = ...`, which would override a real
     // ld-linux symbol if one was already indexed from .dynsym. Now we
     // only insert if no prior definition exists, matching index_symbols'
@@ -2022,14 +1912,12 @@ bool DynamicLinker::register_ld_linux_shim_() {
             symbols_[name] = SymEntry{code_base + off, STB_GLOBAL_};
         }
     };
-
     // Data symbols (from ld-linux that libc references).
     add_data_sym("_rtld_global_ro", RTLD_GLOBAL_RO_OFF);
     add_data_sym("_rtld_global",    RTLD_GLOBAL_OFF);
     add_data_sym("_dl_argv",        DL_ARGV_OFF);
     add_data_sym("__libc_enable_secure", LIBC_ENABLE_SECURE_OFF);
     add_data_sym("__pointer_chk_guard",  POINTER_CHK_GUARD_OFF);
-
     // Function symbols (from ld-linux that libc references).
     // Offsets match the fptr_offsets[] table above.
     add_func_sym("_dl_find_dso_for_object", OFF_DSO);
@@ -2047,8 +1935,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     add_func_sym("__tls_get_addr",          OFF_TLSADDR);
     add_func_sym("__tunable_get_val",       OFF_TUNABLE);
     add_func_sym("__nptl_change_stack_perm", OFF_STACKPERM);
-
-    // BUGFIX (Turn 77): force-override _dl_allocate_tls and
     // _dl_allocate_tls_init with our shim's stubs, even if the real
     // ld-linux already defined them in .dynsym. The real ld-linux's
     // _dl_allocate_tls -> allocate_dtv calls calloc via a function
@@ -2076,7 +1962,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     symbols_["_dl_allocate_tls_init"] = SymEntry{code_base + OFF_TLSINIT, STB_GLOBAL_};
     versioned_symbols_["_dl_allocate_tls@GLIBC_PRIVATE"]      = SymEntry{code_base + OFF_TLS,     STB_GLOBAL_};
     versioned_symbols_["_dl_allocate_tls_init@GLIBC_PRIVATE"] = SymEntry{code_base + OFF_TLSINIT, STB_GLOBAL_};
-
     // Also register a synthetic LoadedObject so the shim shows up in
     // /proc/self/maps and the allocations_ tracker (for fork safety).
     LoadedObject shim_obj;
@@ -2085,7 +1970,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     shim_obj.is_main = false;
     shim_obj.dyn_addr = 0;  // no PT_DYNAMIC
     objects_.push_back(std::move(shim_obj));
-
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] registered ld-linux shim: "
                 "data @0x%llx, code @0x%llx (15 stubs)\n",
@@ -2094,8 +1978,6 @@ bool DynamicLinker::register_ld_linux_shim_() {
     }
     return true;
 }
-
-
 // ── find_library ───────────────────────────────────────────────────────
 // BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath (from the
 // parent object's DT_RUNPATH/DT_RPATH) and search them BEFORE the
@@ -2128,7 +2010,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     // after fetching the toolchains, without requiring the user to set
     // up a rootfs or install aarch64 multiarch packages on the host.
     std::vector<std::string> dirs;
-
     // 0. Parent's DT_RPATH (semicolon-separated).
     if (!parent_rpath.empty()) {
         std::string s = parent_rpath;
@@ -2143,7 +2024,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             pos = colon + 1;
         }
     }
-
     // 0.5. Parent's DT_RUNPATH (semicolon-separated).
     if (!parent_runpath.empty()) {
         std::string s = parent_runpath;
@@ -2158,7 +2038,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             pos = colon + 1;
         }
     }
-
     // 1. BIFROST_ROOT sandbox.
     if (const char* root = getenv("BIFROST_ROOT")) {
         std::string r(root);
@@ -2171,7 +2050,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             dirs.push_back(r + "/usr/lib64");
         }
     }
-
     // 2. LD_LIBRARY_PATH.
     if (const char* llp = getenv("LD_LIBRARY_PATH")) {
         std::string s = llp;
@@ -2186,15 +2064,13 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             pos = colon + 1;
         }
     }
-
     // 3-7. Standard host multiarch paths.
     dirs.push_back("/usr/aarch64-linux-gnu/lib");
     dirs.push_back("/usr/lib/aarch64-linux-gnu");
     dirs.push_back("/lib/aarch64-linux-gnu");
     dirs.push_back("/usr/lib");
     dirs.push_back("/lib");
-
-    // 3.5. Android-compatible library paths (Turn 72).
+    // 3.5. Android-compatible library paths.
     // Android games and Android-ported apps look for shared libraries
     // in /system/lib64 and /vendor/lib64. When BIFROST_ROOT is set,
     // these resolve to $BIFROST_ROOT/system/lib64 etc. (created by
@@ -2211,7 +2087,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             dirs.push_back(r + "/vendor/lib64");
         }
     }
-
     // 8. Bundled toolchain libs (auto-detected relative to the
     //    executable's directory, so it works regardless of CWD).
     //    We use /proc/self/exe to find the executable's path, then
@@ -2240,7 +2115,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             }
         }
     }
-
     for (const auto& dir : dirs) {
         std::string path = dir + "/" + soname;
         struct stat st;
@@ -2257,7 +2131,6 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
     }
     return {};
 }
-
 // ── map_segments ───────────────────────────────────────────────────────
 uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
                                      uint64_t base, uint64_t& entry) {
@@ -2268,10 +2141,8 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
     memcpy(&e_phoff,     data.data() + 32, 8);
     memcpy(&e_phentsize, data.data() + 54, 2);
     memcpy(&e_phnum,     data.data() + 56, 2);
-
     uint64_t end_addr = base;
     entry = base + e_entry;
-
     for (int i = 0; i < e_phnum; i++) {
         if (e_phoff + (i + 1) * e_phentsize > data.size()) break;
         const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
@@ -2293,7 +2164,6 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
     }
     return end_addr;
 }
-
 // ── load_shared_library ────────────────────────────────────────────────
 // BUGFIX (Turn 59, C6): accept parent_runpath and parent_rpath so
 // find_library can search the parent object's DT_RUNPATH/DT_RPATH for
@@ -2307,7 +2177,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     if (data.empty()) {
         // Library not found on disk. If a thunk resolver is registered
         // and this is a known graphic library, register a synthetic
-        // LoadedObject whose symbols resolve via the thunk (Turn 37).
+        // LoadedObject whose symbols resolve via the thunk.
         // This lets dynamically-linked guest programs that use GL/EGL/
         // SDL2 work without the host having the AArch64 versions of
         // those libraries installed.
@@ -2316,9 +2186,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
         }
         return 0;
     }
-
     // Allocate a fresh base address via the Memory's mmap_alloc().
-    // BUGFIX (Turn 39): the old code used a separate next_lib_base_
     // counter starting at 0x5000000000 — the SAME address as
     // mmap_alloc()'s starting region. This meant the thunk's trampoline
     // page (allocated via mmap_alloc in GraphicThunk::init) could
@@ -2355,7 +2223,6 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     max_end = (max_end + 0xFFFFF) & ~0xFFFFFULL;  // 1 MiB align
     uint64_t base = mem_.mmap_alloc(max_end);
     if (base == 0) return 0;
-
     LoadedObject obj;
     obj.name = soname;
     obj.base_addr = base;
@@ -2364,7 +2231,6 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     uint64_t end = map_segments(data, base, entry);
     obj.entry = entry;
     (void)end;
-
     if (!parse_dynamic(data, base, obj)) {
         return 0;
     }
@@ -2374,8 +2240,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     parse_versions_(objects_.back());  // Turn 60, C5
     return base;
 }
-
-// ── register_thunk_library_ (Turn 37) ──────────────────────────────────
+// ── register_thunk_library_ ──────────────────────────────────
 // Synthesize a LoadedObject for a graphic library that's supported by
 // the thunk resolver but couldn't be loaded from disk. The object has
 // no PT_LOAD segments, no PT_DYNAMIC, no PT_TLS — its only purpose is
@@ -2386,13 +2251,11 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
 // that library. We insert each into the global symbol table.
 uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
     if (!thunk_resolver_) return 0;
-
     // Use a synthetic base address in a high region that won't collide
     // with real libraries. We don't actually map anything at this
     // address — it's just a sentinel for the LoadedObject record.
     // The "real" addresses live in the thunk's trampoline page.
     constexpr uint64_t THUNK_LIB_BASE = 0x6000000000ULL;
-
     LoadedObject obj;
     obj.name = soname;
     obj.base_addr = THUNK_LIB_BASE;  // synthetic; never dereferenced
@@ -2401,12 +2264,10 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
     obj.symtab_addr = 0;  // no .dynsym
     obj.strtab_addr = 0;  // no .dynstr
     objects_.push_back(std::move(obj));
-
     // Ask the thunk for all symbols it supports for this library.
     // The thunk is the single source of truth for its symbol inventory;
     // we don't need a hardcoded list of GL/EGL/SDL2 entry points here.
     ThunkSymbolList syms = thunk_resolver_(soname);
-
     size_t added = 0;
     for (const auto& [sym, addr] : syms) {
         if (addr == 0) continue;
@@ -2417,7 +2278,6 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
             added++;
         }
     }
-
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dynlink] registered thunk library '%s': "
                 "%zu/%zu symbols\n",
@@ -2425,7 +2285,6 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
     }
     return THUNK_LIB_BASE;
 }
-
 // ── is_thunk_supported_lib_ ────────────────────────────────────────────
 // Returns true if `soname` matches the naming pattern of a library that
 // the thunk resolver might handle. We accept:
@@ -2465,7 +2324,6 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
     }
     return false;
 }
-
 // ── parse_tls ──────────────────────────────────────────────────────────
 void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
                               LoadedObject& obj) {
@@ -2490,7 +2348,6 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
         return;
     }
 }
-
 // ── allocate_static_tls ────────────────────────────────────────────────
 // Lay out each PT_TLS block using AArch64 glibc's variant-I TLS layout:
 //   - Main exe TLS: at POSITIVE TP offsets (TP + tcb_size .. TP + tcb_size + main_memsz)
@@ -2517,7 +2374,6 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
 //   [tcb .. tcb + tcb_size)                — TCB header
 //   [tcb + tcb_size .. tcb + tcb_size + main_memsz) — main exe TLS
 //
-// BUGFIX (Turn 82): the old code used variant-II (ALL TLS at negative TP
 // offsets, TP = base + total). This broke local-exec TLS access for the
 // main exe: the binary's hardcoded positive TPREL offset (e.g. +0x20)
 // landed in the TCB header area instead of the main exe's TLS block.
@@ -2528,7 +2384,6 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
 // across 8+ threads.
 void DynamicLinker::allocate_static_tls() {
     if (static_tls_base_ != 0) return;  // already allocated
-
     // First pass: compute lib_size and main TLS info.
     uint64_t lib_size = 0;
     uint64_t main_memsz = 0;
@@ -2545,10 +2400,8 @@ void DynamicLinker::allocate_static_tls() {
         }
     }
     if (lib_size == 0 && main_memsz == 0) return;
-
     // Round lib_size up to 16 (minimum TLS alignment).
     lib_size = (lib_size + 15) & ~15ULL;
-
     if (is_musl_) {
         // ── Variant-II (musl): ALL TLS at negative TP offsets ──────
         // TP = base + total (points PAST the block).
@@ -2567,7 +2420,6 @@ void DynamicLinker::allocate_static_tls() {
         static_tls_size_ = total;
         lib_tls_size_ = total;  // variant-II: all TLS is "negative TP"
         tcb_size_ = 0;          // no TCB header for musl variant-II
-
         static_tls_base_ = mem_.mmap_alloc(total + 16);
         if (static_tls_base_ == 0) {
             error_ = "failed to allocate static TLS block";
@@ -2593,18 +2445,15 @@ void DynamicLinker::allocate_static_tls() {
         }
         return;
     }
-
     // ── Variant-I (glibc AArch64) ──────────────────────────────────
     // Main exe TLS at POSITIVE TP offsets, lib TLS at NEGATIVE TP offsets.
     // TCB header (tcbhead_t) at [TP, TP + tcb_size).
     //
-    // See the long comment above (Turn 82) for the full rationale.
+    // See the long comment above for the full rationale.
     constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t) = tcb + dtv
-
     uint64_t tcb_size = (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1);
     lib_tls_size_ = lib_size;
     tcb_size_ = tcb_size;
-
     // Total static TLS block = lib + TCB + main.
     uint64_t total = lib_size + tcb_size + main_memsz;
     // Round up to max alignment (16 minimum).
@@ -2612,25 +2461,21 @@ void DynamicLinker::allocate_static_tls() {
     if (main_align > max_align) max_align = main_align;
     total = (total + max_align - 1) & ~(max_align - 1);
     static_tls_size_ = total;
-
     // Allocate guest memory for the template block.
     static_tls_base_ = mem_.mmap_alloc(total + 16);  // +16 slack
     if (static_tls_base_ == 0) {
         error_ = "failed to allocate static TLS block";
         return;
     }
-
     // TP = static_tls_base_ + lib_size  (points to the TCB header start).
     // Main exe TLS is at TP + tcb_size (positive offset).
     // Lib TLS is at TP - lib_size (negative offset).
-
     // Second pass: assign module IDs, tp_offsets, block_offsets, and copy
     // .tdata templates.
     uint64_t lib_cursor = 0;   // offset within [base, base+lib_size)
     for (auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
         obj.tls_mod_id = next_tls_mod_id_++;
-
         if (obj.is_main) {
             // Main exe TLS: at POSITIVE TP offset = tcb_size.
             // In the template block, it's at [base + lib_size + tcb_size, ...).
@@ -2651,7 +2496,6 @@ void DynamicLinker::allocate_static_tls() {
                                 static_cast<int64_t>(lib_size);  // negative
             lib_cursor += obj.tls.memsz;
         }
-
         // Copy initialized data (.tdata) from obj's PT_TLS filesz.
         uint64_t src = obj.base_addr + obj.tls.vaddr;
         uint64_t dst = static_tls_base_ + obj.tls_block_offset;
@@ -2667,7 +2511,6 @@ void DynamicLinker::allocate_static_tls() {
         // .bss (memsz - filesz) is already zero from mmap.
     }
 }
-
 // ── TLS accessors ──────────────────────────────────────────────────────
 uint64_t DynamicLinker::tls_mod_id(const std::string& name) const {
     for (const auto& o : objects_) {
@@ -2675,14 +2518,12 @@ uint64_t DynamicLinker::tls_mod_id(const std::string& name) const {
     }
     return 0;
 }
-
 int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
     for (const auto& o : objects_) {
         if (o.tls_mod_id == mod_id) return o.tls_tp_offset;
     }
     return 0;
 }
-
 // ── resolve_reloc_symbol ───────────────────────────────────────────────
 // BUGFIX (Turn 60, C5): if the object has .gnu.version, look up the
 // version index for this symbol and try the versioned symbol table first.
@@ -2700,7 +2541,6 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
     }
     std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
     if (name.empty()) return 0;
-
     // Look up the version requirement for this symbol.
     // .gnu.version (DT_VERSYM) is an array of uint16_t, one per .dynsym
     // entry. The value is an index into the verneed/verdef tables.
@@ -2773,10 +2613,8 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
             // corrupt version info — fall back to unversioned
         }
     }
-
     return resolve_symbol(name);
 }
-
 // ── parse_versions_ (Turn 60, C5) ──────────────────────────────────────
 // Parse the GNU symbol versioning sections and populate
 // versioned_symbols_ with "name@version" keys. This lets relocations
@@ -2804,7 +2642,6 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
 void DynamicLinker::parse_versions_(const LoadedObject& obj) {
     if (obj.versym_addr == 0 || obj.verdef_addr == 0) return;
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
-
     // Build verdef index → version name map.
     // Elf64_Verdef layout (20 bytes):
     //   +0:  uint16_t vd_version (always 1)
@@ -2842,9 +2679,7 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
     } catch (...) {
         return;  // corrupt verdef — skip versioning for this object
     }
-
     if (verdef_names.empty()) return;
-
     // Now iterate .dynsym and for each symbol with a version index > 1,
     // store "name@version" in versioned_symbols_.
     constexpr size_t MAX_SYMS = 8192;
@@ -2852,7 +2687,6 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
     if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
-
     for (size_t i = 1; i < count; i++) {  // Turn 72: skip STN_UNDEF (symbol 0)
         Elf64_Sym s;
         try {
@@ -2862,30 +2696,24 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
         if (s.st_shndx == SHN_UNDEF_) continue;  // only defined symbols
         uint8_t bind = ST_BIND_(s.st_info);
         if (bind != STB_GLOBAL_ && bind != STB_WEAK_) continue;
-
         // Read the version index for this symbol from .gnu.version.
         uint16_t vidx = 0;
         try {
             mem_.read(obj.versym_addr + i * 2, &vidx, 2);
         } catch (...) { continue; }
-
         // Bit 15 = hidden flag. Mask it off to get the real index.
         uint16_t real_idx = vidx & 0x7FFF;
         if (real_idx < 2) continue;  // 0=local, 1=global (unversioned)
-
         auto vit = verdef_names.find(real_idx);
         if (vit == verdef_names.end()) continue;
-
         std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
         if (name.empty()) continue;
-
         uint64_t addr = obj.base_addr + s.st_value;
         // STT_GNU_IFUNC: call resolver (same as index_symbols).
         if (ST_TYPE_(s.st_info) == STT_GNU_IFUNC_ && ifunc_resolver_) {
             uint64_t resolved = ifunc_resolver_(addr);
             if (resolved != 0) addr = resolved;
         }
-
         std::string key = name + "@" + vit->second;
         // First-strong-wins (same as index_symbols).
         auto it = versioned_symbols_.find(key);
@@ -2898,7 +2726,6 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
         }
     }
 }
-
 // ── resolve_versioned_symbol ────────────────────────────────────────────
 uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
                                                    const std::string& version) const {
@@ -2912,7 +2739,6 @@ uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
     // Fall back to unversioned.
     return resolve_symbol(name);
 }
-
 // ── index_symbols ──────────────────────────────────────────────────────
 void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
@@ -2933,7 +2759,6 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
     if (count == 0 || count > MAX_SYMS * 4) count = MAX_SYMS;  // sanity
     constexpr uint8_t STT_GNU_IFUNC_ = 10;
     auto ST_TYPE_ = [](uint8_t info) { return info & 0xF; };
-    // BUGFIX (Turn 72): symbol 0 (STN_UNDEF) is ALWAYS the all-zero sentinel.
     // The old code `break`ed on this sentinel, terminating the loop at i=0
     // and indexing ZERO symbols. This broke every dynamically-linked binary:
     // libc.so.6's 2973 defined symbols were never indexed, so every
@@ -2961,12 +2786,9 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
         // Only index global/weak symbols (skip local).
         uint8_t bind = ST_BIND_(s.st_info);
         if (bind != STB_GLOBAL_ && bind != STB_WEAK_) continue;
-
         std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
         if (name.empty()) continue;
-
         uint64_t addr = obj.base_addr + s.st_value;
-
         // STT_GNU_IFUNC: st_value is the resolver, not the function.
         // Call the resolver to get the real address. If no resolver is
         // registered (DynamicLinker used standalone), fall back to the
@@ -2981,7 +2803,6 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
             // else: no resolver registered; store resolver address.
             // The guest will crash on first call (visible, not silent).
         }
-
         // First-strong-wins symbol resolution (H6).
         auto it = symbols_.find(name);
         if (it == symbols_.end()) {
@@ -2996,7 +2817,6 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
         }
     }
 }
-
 // ── resolve_symbol ─────────────────────────────────────────────────────
 uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     auto it = symbols_.find(name);
@@ -3014,14 +2834,12 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
     }
     return it->second.addr;
 }
-
 // ── load_library (dlopen support) ─────────────────────────────────────
 // Load a shared library at runtime by path. Reuses the same loading
 // logic as load_shared_library but takes a full path instead of a
 // soname. Returns the base address (handle) on success, 0 on failure.
-// (Turn 84)
 uint64_t DynamicLinker::load_library(const std::string& path) {
-    // Resolve path via BIFROST_ROOT sandbox (Turn 85).
+    // Resolve path via BIFROST_ROOT sandbox.
     std::string resolved = path;
     if (const char* root = getenv("BIFROST_ROOT")) {
         std::string rp = std::string(root) + path;
@@ -3065,7 +2883,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
         error_ = "load_library: parse_dynamic failed"; return 0;
     }
     parse_tls(data, obj);
-    // Assign TLS module ID and tp_offset for dlopened libs (Turn 87).
+    // Assign TLS module ID and tp_offset for dlopened libs.
     if (obj.tls.present && obj.tls.memsz > 0) {
         obj.tls_mod_id = next_tls_mod_id_++;
         if (!is_musl_) {
@@ -3080,8 +2898,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());
-
-    // Apply relocations (Turn 85): RELA, JMPREL, RELR
+    // Apply relocations: RELA, JMPREL, RELR
     auto& nobj = objects_.back();
     if (nobj.dyn_addr != 0) {
         try {
@@ -3107,7 +2924,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                     if (type == R_AARCH64_RELATIVE_) {
                         mem_.store<uint64_t>(target, nobj.base_addr + A);
                     } else if (type == R_AARCH64_IRELATIVE_) {
-                        // ifunc: call the resolver at base + A (Turn 87)
+                        // ifunc: call the resolver at base + A
                         uint64_t resolver_addr = nobj.base_addr + A;
                         uint64_t resolved = 0;
                         if (ifunc_resolver_) {
@@ -3124,7 +2941,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                         }
                         if (addr) mem_.store<uint64_t>(target, addr + A);
                     } else if (type == R_AARCH64_TLS_TPREL_) {
-                        // TLS_TPREL: initial-exec access (Turn 87)
+                        // TLS_TPREL: initial-exec access
                         int64_t tp_off = A;
                         if (sym != 0) {
                             Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
@@ -3144,7 +2961,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                         }
                         mem_.store<uint64_t>(target, static_cast<uint64_t>(tp_off));
                     } else if (type == R_AARCH64_TLS_DTPMOD_) {
-                        // TLS_DTPMOD: module ID (Turn 87)
+                        // TLS_DTPMOD: module ID
                         uint64_t mod_id = nobj.tls_mod_id;
                         if (sym != 0) {
                             Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
@@ -3160,7 +2977,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                         }
                         mem_.store<uint64_t>(target, mod_id + A);
                     } else if (type == R_AARCH64_TLS_DTPREL_) {
-                        // TLS_DTPREL: offset within module (Turn 87)
+                        // TLS_DTPREL: offset within module
                         uint64_t tls_off = static_cast<uint64_t>(A);
                         if (sym != 0) {
                             Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
@@ -3168,7 +2985,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                         }
                         mem_.store<uint64_t>(target, tls_off);
                     } else if (type == R_AARCH64_TLSDESC_) {
-                        // TLSDESC: 16-byte descriptor (Turn 87)
+                        // TLSDESC: 16-byte descriptor
                         int64_t tp_off = A;
                         if (sym != 0) {
                             Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
@@ -3207,7 +3024,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
                         }
                         if (addr) mem_.store<uint64_t>(target, addr);
                     } else if (type == R_AARCH64_IRELATIVE_) {
-                        // ifunc in PLT (Turn 87)
+                        // ifunc in PLT
                         uint64_t resolver_addr = nobj.base_addr + A;
                         uint64_t resolved = ifunc_resolver_ ? ifunc_resolver_(resolver_addr) : 0;
                         if (resolved == 0) resolved = resolver_addr;
@@ -3241,5 +3058,4 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
     }
     return base;
 }
-
 } // namespace arm64emu

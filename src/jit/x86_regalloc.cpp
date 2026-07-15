@@ -21,13 +21,10 @@
 //   force_vreg_to_reg    — move/load vreg v into a specific host reg
 //   force_two_vregs_to   — same for two vregs (handles aliasing)
 #include "jit/frostjit.hpp"
-
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>   // getenv, abort
-
 namespace arm64emu {
-
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
 // If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
 // catches it at the earliest point (vreg allocation) instead of silently
@@ -44,7 +41,6 @@ static inline bool regalloc_check_enabled() {
     return enabled;
 #endif
 }
-
 static inline void check_vreg_bounds(int v) {
     if (!regalloc_check_enabled()) return;
     if (v < 0 || v >= 4096) {
@@ -57,7 +53,6 @@ static inline void check_vreg_bounds(int v) {
 #endif
     }
 }
-
 // Verify the dirty_host_regs_ invariant.
 // Bit r is set iff reg_vreg_[r] >= 0 && vreg_dirty_[reg_vreg_[r]].
 // Called at block boundaries to catch maintenance bugs.
@@ -76,7 +71,6 @@ bool FrostJIT::verify_dirty_host_regs_() const {
     }
     return true;
 }
-
 int32_t FrostJIT::vreg_stack_slot(int v) {
     check_vreg_bounds(v);
     if (vreg_slot_[v] != 0) return vreg_slot_[v];
@@ -84,7 +78,6 @@ int32_t FrostJIT::vreg_stack_slot(int v) {
     vreg_slot_[v] = -8 * num_stack_slots_;
     return vreg_slot_[v];
 }
-
 // FP register index validation. FP ops use inst.dest/src1/src2 as FP
 // register indices (0-31). Values > 31 would cause out-of-bounds writes
 // to the CPU struct (v_lo[32+] or v_hi[32+] = past the array).
@@ -99,7 +92,6 @@ void FrostJIT::check_fp_reg_index(int idx, const char* context) const {
 #endif
     }
 }
-
 // Spill a vreg from its x86 reg back to its home (cpu.regs[] or stack).
 void FrostJIT::evict_vreg(int v) {
     int r = vreg_home_[v];
@@ -117,7 +109,6 @@ void FrostJIT::evict_vreg(int v) {
     vreg_dirty_[v] = false;
     dirty_host_regs_ &= ~(1u << r);  // vreg no longer dirty in r
 }
-
 // Drop a vreg's cache mapping WITHOUT spilling.
 //
 // This is the "safe drop" helper: if the vreg is dirty (its cached value
@@ -168,7 +159,6 @@ void FrostJIT::drop_vreg(int v) {
     vreg_dirty_[v] = false;
     dirty_host_regs_ &= ~(1u << r);  // vreg no longer dirty in r
 }
-
 // Evict the occupant of `host_reg` if dirty, then clear the mapping.
 // Use this BEFORE clobbering `host_reg` with a computation that doesn't
 // preserve the old value (e.g. emit_mov_imm64(RAX, ...) in FP_MOVI).
@@ -205,7 +195,6 @@ int FrostJIT::alloc_reg(int preferred) {
     if (v >= 0) evict_vreg(v);
     return r;
 }
-
 // Allocate a host reg excluding `excl1` and `excl2`. Used by ALU codegen
 // to place `dest` in a reg that doesn't collide with src1/src2's host regs,
 // so we can compute dest = src1 op src2 without spilling the operands.
@@ -231,7 +220,6 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
     // and only exclude at most 2). Fall back to alloc_reg.
     return alloc_reg();
 }
-
 // Ensure vreg v is in an x86 reg. Returns the reg.
 // `preferred` is a HINT for newly loaded vregs only — if v is already
 // cached, we return its current reg WITHOUT moving (avoids overhead).
@@ -253,7 +241,6 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     vreg_dirty_[v] = false;
     return r;
 }
-
 // Record that vreg v is now in reg r (e.g., after a computation).
 // The old occupant of reg r is KILLED (not evicted) — its value was
 // already overwritten by the computation, so we must NOT write it back.
@@ -283,7 +270,6 @@ void FrostJIT::set_vreg_reg(int v, int r) {
     vreg_dirty_[v] = true;
     dirty_host_regs_ |= (1u << r);  // v is now dirty in r
 }
-
 // Allocate reg r for vreg v, evicting the current occupant FIRST (before
 // any computation overwrites the register). Use this instead of
 // set_vreg_reg when you need to preserve the old occupant's value.
@@ -305,7 +291,6 @@ int FrostJIT::alloc_reg_for(int v, int preferred) {
     dirty_host_regs_ |= (1u << r);  // v is now dirty in r
     return r;
 }
-
 // Drop a vreg's register mapping (value is dead / will be overwritten).
 void FrostJIT::kill_vreg(int v) {
     int r = vreg_home_[v];
@@ -316,7 +301,6 @@ void FrostJIT::kill_vreg(int v) {
     }
     vreg_dirty_[v] = false;
 }
-
 // Spill all dirty vregs to their home (before CALL_INTERP/SVC/branch).
 // walks the dirty_host_regs_ bitmask — O(popcount) instead
 // of O(max_vreg_). For typical blocks (max_vreg_ ≈ 100) this is ~10x
@@ -332,7 +316,6 @@ void FrostJIT::flush_all_vregs() {
         }
     }
 }
-
 // ── Targeted flush/invalidate (v1.4.0-beta.2) ────────────────────────
 // Walk only the host regs whose bits are set in `mask`, spilling any
 // dirty vreg cached there. This is the heart of the flush-penalty
@@ -349,7 +332,6 @@ void FrostJIT::flush_dirty_host_regs(uint16_t mask) {
         }
     }
 }
-
 // Drop cache mappings for host regs in `mask` (no spill — caller must
 // have already flushed if any were dirty). Companion to above.
 void FrostJIT::invalidate_host_regs(uint16_t mask) {
@@ -366,7 +348,6 @@ void FrostJIT::invalidate_host_regs(uint16_t mask) {
         dirty_host_regs_ &= ~(1u << r);
     }
 }
-
 // Spill ALL scratch vregs (v > 31) in `mask`, even if not dirty.
 // See header comment for why this is necessary.
 void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
@@ -387,14 +368,12 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
         }
     }
 }
-
 // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ────────────
 // These wrap the "load vreg to host reg" / "store host reg to vreg"
 // patterns. load_vreg_to_reg is cache-aware: if v is already cached in
 // a host reg, it emits a mov from that reg (preserving the dirty value)
 // instead of loading stale data from memory. store_reg_to_vreg writes
 // to memory and kills any stale cache mapping for v.
-
 void FrostJIT::load_vreg_to_reg(int dst, int v) {
     // If v is cached in a host reg, mov from there — the cached value
     // may be dirty and not yet written to memory.
@@ -411,7 +390,6 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
         emit_load(dst, RBP, off);
     }
 }
-
 void FrostJIT::store_reg_to_vreg(int v, int src) {
     // Write to memory (cpu.regs[] or stack slot).
     if (v <= 31) {
@@ -430,7 +408,6 @@ void FrostJIT::store_reg_to_vreg(int v, int src) {
         dirty_host_regs_ &= ~(1u << r);
     }
 }
-
 // Drop all cached vreg→reg mappings WITHOUT spilling.
 // Used after operations that clobber all caller-saved regs (C calls).
 // Assumes flush_all_vregs was called BEFORE the clobbering operation,
@@ -448,7 +425,6 @@ void FrostJIT::invalidate_all_vregs() {
     dirty_host_regs_ = 0;
     flags_in_host_ = false;
 }
-
 // ── force_vreg_to_reg ──────────────────────────────────────────────────
 // Force vreg `v` to live in host register `host_reg` (MOVE semantics).
 //
@@ -471,13 +447,11 @@ void FrostJIT::invalidate_all_vregs() {
 // mapping is cleared (the value moves to `host_reg`).
 void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
     if (v > max_vreg_) max_vreg_ = v;
-
     // Step 1: evict whatever is in host_reg (unless it's already v).
     int cur = reg_vreg_[host_reg];
     if (cur >= 0 && cur != v) {
         evict_vreg(cur);
     }
-
     // Step 2: place v in host_reg.
     int home = vreg_home_[v];
     if (home == host_reg) {
@@ -505,7 +479,6 @@ void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
     // (we just moved its value, not written it back).
     if (vreg_dirty_[v]) dirty_host_regs_ |= (1u << host_reg);
 }
-
 // ── force_two_vregs_to ─────────────────────────────────────────────────
 // Force two vregs into two specific host registers in one call.
 //
@@ -524,14 +497,12 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
                                   int src2, int host_reg2) {
     // Force src1 into host_reg1 (MOVE semantics).
     force_vreg_to_reg(src1, host_reg1);
-
     // Force src2 into host_reg2. Evict host_reg2's current occupant
     // if it's not src2. (If src1 == src2 and src1 is now in host_reg1,
     // the eviction of host_reg2 won't touch host_reg1.)
     if (reg_vreg_[host_reg2] >= 0 && reg_vreg_[host_reg2] != src2) {
         evict_vreg(reg_vreg_[host_reg2]);
     }
-
     int home2 = vreg_home_[src2];
     if (home2 == host_reg2) {
         return;  // already there
@@ -562,7 +533,6 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
     if (was_dirty2) dirty_host_regs_ |= (1u << host_reg2);
     else            dirty_host_regs_ &= ~(1u << host_reg2);
 }
-
 // ── emit_fmov_helper ───────────────────────────────────────────────────
 // Unified FMOV codegen for all four GPR↔FP register moves:
 //   dir=0, fp_field=0: FMOV_G2F   — v_lo[idx] = src1; v_hi[idx] = 0
@@ -573,5 +543,4 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
 // G→F path uses RCX as scratch for the zero store
 // (v_hi) so src1 stays cached in RAX. The F→G path loads the FP slot
 // into a fresh vreg via alloc_reg + emit_load + set_vreg_reg.
-
 } // namespace arm64emu

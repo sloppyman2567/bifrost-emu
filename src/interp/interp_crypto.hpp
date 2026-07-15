@@ -43,12 +43,9 @@
 // This file is included by interp_fp.cpp — it's not a separate TU. The
 // helpers below are static to avoid linker conflicts.
 #pragma once
-
 #include "core/cpu.h"
 #include "core/memory.h"
-
 namespace arm64emu {
-
 // ── AES S-box and inverse S-box ────────────────────────────────────────
 // Standard FIPS-197 tables. Generated at compile time from the AES
 // polynomial; here we just hardcode the standard 256-byte tables.
@@ -70,7 +67,6 @@ static const uint8_t aes_sbox[256] = {
     0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
     0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
 };
-
 static const uint8_t aes_inv_sbox[256] = {
     0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
     0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
@@ -89,7 +85,6 @@ static const uint8_t aes_inv_sbox[256] = {
     0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
     0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d,
 };
-
 // ── Multiply two bytes in GF(2^8) with the AES polynomial ─────────────
 static inline uint8_t aes_gmul(uint8_t a, uint8_t b) {
     uint8_t p = 0;
@@ -102,7 +97,6 @@ static inline uint8_t aes_gmul(uint8_t a, uint8_t b) {
     }
     return p;
 }
-
 // ── AES ShiftRows / InvShiftRows ───────────────────────────────────────
 // The state is stored as a 4x4 byte matrix in column-major order (the
 // AES convention). Row r is shifted left by r positions (ShiftRows) or
@@ -117,7 +111,6 @@ static void aes_shift_rows(uint8_t s[16]) {
     // Row 3: shift left by 3 (== right by 1)
     t = s[3]; s[3] = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = t;
 }
-
 static void aes_inv_shift_rows(uint8_t s[16]) {
     uint8_t t;
     // Row 1: shift right by 1
@@ -128,7 +121,6 @@ static void aes_inv_shift_rows(uint8_t s[16]) {
     // Row 3: shift right by 3 (== left by 1)
     t = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t;
 }
-
 // ── AES MixColumns / InvMixColumns ─────────────────────────────────────
 // Each column is multiplied by a fixed matrix in GF(2^8).
 static void aes_mix_columns(uint8_t s[16]) {
@@ -141,7 +133,6 @@ static void aes_mix_columns(uint8_t s[16]) {
         col[3] = aes_gmul(a0, 3) ^ a1 ^ a2 ^ aes_gmul(a3, 2);
     }
 }
-
 static void aes_inv_mix_columns(uint8_t s[16]) {
     for (int c = 0; c < 4; c++) {
         uint8_t* col = s + c * 4;
@@ -152,7 +143,6 @@ static void aes_inv_mix_columns(uint8_t s[16]) {
         col[3] = aes_gmul(a0, 0x0b) ^ aes_gmul(a1, 0x0d) ^ aes_gmul(a2, 0x09) ^ aes_gmul(a3, 0x0e);
     }
 }
-
 // ── AES round functions ────────────────────────────────────────────────
 // AESE: AddRoundKey + SubBytes + ShiftRows
 // AESD: AddRoundKey + InvSubBytes + InvShiftRows
@@ -165,7 +155,6 @@ static void aes_inv_mix_columns(uint8_t s[16]) {
 // be used in a sequence where the round key XOR comes from a separate
 // instruction (EOR Vd.16B, Vd.16B, Vn.16B is typically emitted before
 // AESE), but AESE/AESD also do an implicit XOR with Vn.
-
 static void aes_aese(uint8_t state[16], const uint8_t key[16]) {
     // AddRoundKey
     for (int i = 0; i < 16; i++) state[i] ^= key[i];
@@ -174,7 +163,6 @@ static void aes_aese(uint8_t state[16], const uint8_t key[16]) {
     // ShiftRows
     aes_shift_rows(state);
 }
-
 static void aes_aesd(uint8_t state[16], const uint8_t key[16]) {
     // AddRoundKey
     for (int i = 0; i < 16; i++) state[i] ^= key[i];
@@ -183,37 +171,29 @@ static void aes_aesd(uint8_t state[16], const uint8_t key[16]) {
     // InvShiftRows
     aes_inv_shift_rows(state);
 }
-
 static void aes_aesmc(uint8_t state[16]) {
     aes_mix_columns(state);
 }
-
 static void aes_aesimc(uint8_t state[16]) {
     aes_inv_mix_columns(state);
 }
-
 // ── SHA-1 building blocks ──────────────────────────────────────────────
 // SHA1H: rotate the 32-bit word right by 2 (the SHA-1 finalization step).
 // SHA1C/P/M: the three SHA-1 round functions (Ch, Parity, Maj).
 // SHA1SU0/SU1: message schedule updates.
-
 static inline uint32_t rotr32(uint32_t x, int n) {
     return (x >> n) | (x << (32 - n));
 }
-
 static inline uint32_t rotl32(uint32_t x, int n) {
     return (x << n) | (x >> (32 - n));
 }
-
 static inline uint32_t sha1h(uint32_t e) {
     return rotr32(e, 2);
 }
-
 // ── SHA-1 round functions (Ch, Parity, Maj) ───────────────────────────
 // These take the running state (a,b,c,d,e) and the schedule word W,
 // produce the new (a,b,c,d,e). The ARM crypto SHA1C/SHA1P/SHA1M
 // instructions compute 4 rounds at once, using 4 schedule words from Vm.
-
 // SHA-1 round function f for rounds  0..19: Ch(b,c,d)  = (b & c) ^ (~b & d)
 // SHA-1 round function f for rounds 20..39: Parity(b,c,d) = b ^ c ^ d
 // SHA-1 round function f for rounds 40..59: Maj(b,c,d)  = (b & c) ^ (b & d) ^ (c & d)
@@ -221,7 +201,6 @@ static inline uint32_t sha1h(uint32_t e) {
 static inline uint32_t sha1_ch (uint32_t b, uint32_t c, uint32_t d) { return (b & c) ^ (~b & d); }
 static inline uint32_t sha1_par(uint32_t b, uint32_t c, uint32_t d) { return b ^ c ^ d; }
 static inline uint32_t sha1_maj(uint32_t b, uint32_t c, uint32_t d) { return (b & c) ^ (b & d) ^ (c & d); }
-
 // SHA1C/SHA1P/SHA1M: 4-round SHA-1 hash update.
 //   Qd = accumulator {A,B,C,D} (4 × 32 bits, A in word 0)
 //   Sn = E (the 5th state word, from Vn[0])
@@ -249,7 +228,6 @@ static inline uint32_t sha1_maj(uint32_t b, uint32_t c, uint32_t d) { return (b 
 static const uint32_t SHA1_K_C   = 0x5A827999u;
 static const uint32_t SHA1_K_P   = 0x6ED9EBA1u;
 static const uint32_t SHA1_K_M   = 0x8F1BBCDCu;
-
 template<int RoundKind>  // 0=C, 1=P, 2=M
 static inline uint32_t sha1_round(uint32_t qd[4], uint32_t e, const uint32_t vm[4]) {
     uint32_t a = qd[0], b = qd[1], c = qd[2], d = qd[3];
@@ -266,7 +244,6 @@ static inline uint32_t sha1_round(uint32_t qd[4], uint32_t e, const uint32_t vm[
     qd[0] = a; qd[1] = b; qd[2] = c; qd[3] = d;
     return e;
 }
-
 // SHA1SU0 Vd.4S, Vn.4S, Vm.4S: Vd[i] = Vd[i] XOR Vn[i] XOR Vm[i]
 // Three-operand XOR. The old helper had only 2 operands (missing Vm)
 // and was never dispatched — fixed and now dispatched by exec_crypto.
@@ -274,7 +251,6 @@ static inline void sha1su0(uint32_t vd[4], const uint32_t vn[4],
                             const uint32_t vm[4]) {
     for (int i = 0; i < 4; i++) vd[i] = vd[i] ^ vn[i] ^ vm[i];
 }
-
 // SHA1SU1 Vd.4S, Vn.4S: full SHA1 schedule update.
 // Per ARM ARM SHA1schedule(operand1=Vd, operand2=Vn):
 //   T[i] = Vd[i] XOR Vn[i]              for i=0..3
@@ -292,30 +268,23 @@ static void sha1su1(uint32_t vd[4], const uint32_t vn[4]) {
     t[3] = rotr32(t[3] ^ t[1], 31);  // uses new t[1]
     for (int i = 0; i < 4; i++) vd[i] = t[i];
 }
-
 // ── SHA-256 building blocks ────────────────────────────────────────────
 // SHA256SU0/SU1: message schedule updates.
 // SHA256H/H2: 4-round hash compression (the "round function").
-
 static inline uint32_t sha256sig0(uint32_t x) {
     return rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3);
 }
-
 static inline uint32_t sha256sig1(uint32_t x) {
     return rotr32(x, 17) ^ rotr32(x, 19) ^ (x >> 10);
 }
-
 static inline uint32_t sha256sum0(uint32_t x) {
     return rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22);
 }
-
 static inline uint32_t sha256sum1(uint32_t x) {
     return rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25);
 }
-
 static inline uint32_t sha256ch (uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (~x & z); }
 static inline uint32_t sha256maj(uint32_t x, uint32_t y, uint32_t z) { return (x & y) ^ (x & z) ^ (y & z); }
-
 // SHA256H Qd, Qn, Vm.4S: 4-round SHA-256 hash update (part 1).
 //   Qd = {A,B,C,D} (source AND dest — the "low" 4 words of the 8-word state)
 //   Qn = {E,F,G,H} (read-only — the "high" 4 words)
@@ -345,7 +314,6 @@ static void sha256h(uint32_t qd[4], const uint32_t qn[4],
     }
     qd[0] = a; qd[1] = b; qd[2] = c; qd[3] = d;
 }
-
 // SHA256H2 Qd, Qn, Vm.4S: 4-round SHA-256 hash update (part 2).
 //   Qd = {E,F,G,H} (source AND dest — the "high" 4 words)
 //   Qn = {A,B,C,D} (read-only — typically the result of the prior SHA256H)
@@ -369,7 +337,6 @@ static void sha256h2(uint32_t qd[4], const uint32_t qn[4],
     }
     qd[0] = e; qd[1] = f; qd[2] = g; qd[3] = h;
 }
-
 // SHA256SU0 Vd.4S, Vn.4S: schedule update part 0.
 // Per ARM ARM SHA256schedule(operand1=Vd, operand2=Vn):
 //   D[i] = Vn[i] + sig0(Vd[(i+1) MOD 4]) + Vd[(i+2) MOD 4]
@@ -383,7 +350,6 @@ static void sha256su0(uint32_t vd[4], const uint32_t vn[4]) {
         vd[i] = vn[i] + sha256sig0(old_vd[(i + 1) & 3]) + old_vd[(i + 2) & 3];
     }
 }
-
 // SHA256SU1 Vd.4S, Vn.4S, Vm.4S: schedule update part 1.
 // Per ARM ARM SHA256schedule2(operand1=Vd, operand2=Vn, operand3=Vm):
 //   T[i] = Vn[i] + sig1(Vm[i]) + Vm[(i+1) MOD 4] + Vm[(i+2) MOD 4]
@@ -401,7 +367,6 @@ static void sha256su1(uint32_t vd[4], const uint32_t vn[4],
         vd[i] = old_vd[i] + sha256sig0(t[(i + 1) & 3]) + t[(i + 2) & 3] + t[i];
     }
 }
-
 // ── PMULL/PMULL2: polynomial multiplication (low/high halves) ──────────
 // Carry-less multiplication of two 64-bit values, producing a 128-bit
 // result. Used for CRC computation and GHASH (AES-GCM).
@@ -412,7 +377,6 @@ static inline __uint128_t pmull_64(uint64_t a, uint64_t b) {
     }
     return r;
 }
-
 // ── Crypto instruction dispatcher (called from SIMD_DP) ────────────────
 // Returns true if `op` is a recognized crypto instruction (and was
 // executed). Returns false if it's not a crypto instruction (so the
@@ -423,7 +387,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     uint8_t rd = op & 0x1F;
     uint8_t rn = (op >> 5) & 0x1F;
     uint8_t rm = (op >> 16) & 0x1F;
-
     // ── AES instructions (0x4E284800 - 0x4E287800) ─────────────────
     // Mask: 0xFFFFFC00 (only Rn/Rd are variable)
     if ((op & 0xFFFFFC00) == 0x4E284800) {
@@ -442,7 +405,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         memcpy(&cpu.v_hi[rd], state + 8, 8);
         return true;
     }
-
     // ── SHA1H (0x5E280800) ─────────────────────────────────────────
     // SHA1H Sd, Sn: Sd = ROR(Sn, 2). Operates on 32-bit scalar (lower
     // 32 bits of Vd).
@@ -453,7 +415,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         cpu.v_hi[rd] = 0;
         return true;
     }
-
     // Helper to load a full 128-bit V register into a uint32_t[4].
     // The CPU stores Vn as v_lo[n] (bits 63:0) + v_hi[n] (bits 127:64),
     // NOT as a contiguous 16-byte block. The previous SHA code did
@@ -473,7 +434,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         c.v_hi[idx] = static_cast<uint64_t>(in[2]) |
                       (static_cast<uint64_t>(in[3]) << 32);
     };
-
     // ── SHA1SU1 (0x5E281800) ───────────────────────────────────────
     // (Encoding constant corrected: was 0x5E280000 — wrong. Verified
     // against binutils: `sha1su1 v0.4s, v1.4s` assembles to 0x5E281820,
@@ -486,7 +446,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-
     // ── SHA1SU0 (0x5E003000) — 3-operand XOR. ─────────────────────
     // Vd.4S = Vd.4S XOR Vn.4S XOR Vm.4S
     // Encoding: 0x5E003000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
@@ -503,7 +462,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-
     // ── SHA1C/SHA1P/SHA1M (0x5E000000/0x5E001000/0x5E002000) ──────
     // 4-round SHA-1 hash update. Per ARM ARM SHA1hash pseudocode:
     //   Qd = {A,B,C,D} (128-bit accumulator, source AND dest)
@@ -546,7 +504,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         cpu.v_lo[rn] = (cpu.v_lo[rn] & 0xFFFFFFFF00000000ULL) | e;
         return true;
     }
-
     // ── SHA256H/SHA256H2 (0x5E004000/0x5E005000) ──────────────────
     // 4-round SHA-256 hash update. Qd and Qn are the two halves of the
     // hash state, Vm.4S = 4 (W[i] + K[i]) values.
@@ -571,7 +528,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-
     // ── SHA256SU0 (0x5E282800) ─────────────────────────────────────
     // (Encoding constant corrected: was 0x5E282000 — wrong. Verified
     // against binutils: `sha256su0 v0.4s, v1.4s` assembles to 0x5E282820,
@@ -584,7 +540,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-
     // ── SHA256SU1 (0x5E006000) — 3-operand schedule step 1. ───────
     // Encoding: 0x5E006000 | (Rm<<16) | (Rn<<5) | Rd, mask 0xFFE0FC00.
     // Vd.4S = SHA256schedule2(Vd, Vn, Vm). The previous implementation
@@ -599,7 +554,6 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         store_vreg(cpu, rd, vd);
         return true;
     }
-
     // ── PMULL/PMULL2 (size=11, 64-bit polynomial multiply) ──────────
     // PMULL  Vd.1Q, Vn.1D, Vm.1D: 0x4E60E000 | (Rm<<16) | (Rn<<5) | Rd
     // PMULL2 Vd.1Q, Vn.2D, Vm.2D: 0x4EE0E000 | (Rm<<16) | (Rn<<5) | Rd
@@ -623,9 +577,7 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         cpu.v_hi[rd] = static_cast<uint64_t>(r >> 64);
         return true;
     }
-
     // Not a recognized crypto instruction.
     return false;
 }
-
 } // namespace arm64emu

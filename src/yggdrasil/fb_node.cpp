@@ -7,45 +7,36 @@
 #include "yggdrasil/fb_node.hpp"
 #include "core/memory.h"
 #include "frost/graphics.hpp"
-
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 FbNode::FbNode(int guest_fd, int flags, ::arm64emu::FrostGraphics* gfx)
     : fd_(guest_fd), flags_(flags), gfx_(gfx) {}
-
 FbNode::~FbNode() {
     if (fd_ >= 0) ::close(fd_);
 }
-
 ssize_t FbNode::read(uint64_t off, void* buf, size_t n) {
     if (off != UINT64_MAX) ::lseek(fd_, off, SEEK_SET);
     ssize_t r = ::read(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t FbNode::write(uint64_t off, const void* buf, size_t n) {
     if (off != UINT64_MAX) ::lseek(fd_, off, SEEK_SET);
     ssize_t r = ::write(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t FbNode::lseek(int64_t off, int whence) {
     ssize_t r = ::lseek(fd_, off, whence);
     return r < 0 ? -errno : r;
 }
-
 int FbNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
 }
-
 // FbNode::ioctl — handle FBIOGET_VSCREENINFO / FBIOGET_FSCREENINFO by
 // delegating to GraphicsBackend. Other ioctl requests fall through to
 // IOCTL_NOT_HANDLED so the syscall layer returns -ENOTTY.
@@ -65,5 +56,4 @@ int FbNode::ioctl(uint32_t request, uint64_t argp, ::arm64emu::Memory& mem) {
     }
     return Node::IOCTL_NOT_HANDLED;
 }
-
 } // namespace arm64emu::yggdrasil

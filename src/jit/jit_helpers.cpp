@@ -1,17 +1,15 @@
 // jit/jit_helpers.cpp — FrostJIT codegen helpers.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. Holds:
+// v1.4.5-alpha: split out of frostjit.cpp. Holds:
 //   - emit_fmov_helper  — GPR↔FP register move helper (used by FMOV ops)
 //   - emit_call_interp  — emit a CALL_INTERP call site inside a block
 //     (used when the JIT can't codegen an op and falls back to the
 //     interpreter for one instruction)
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
-
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-
 namespace arm64emu {
 // ── emit_fmov_helper + emit_call_interp ─────────────────────────────────
 void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
@@ -58,7 +56,6 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
         set_vreg_reg(dest, d);
     }
 }
-
 // ── emit_call_interp ───────────────────────────────────────────────────
 void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // flush ALL dirty vregs BEFORE materializing flags.
@@ -119,5 +116,4 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
         call_interp_branch_patches_.push_back(jne_patch);
     }
 }
-
 } // namespace arm64emu

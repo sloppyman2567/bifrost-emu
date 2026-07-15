@@ -65,13 +65,10 @@
 //   no_wex = false          # BIFROST_NO_WEX (security vs perf)
 //   no_fma3 = false         # BIFROST_NO_FMA3
 #pragma once
-
 #include <cstdint>
 #include <string>
 #include <vector>
-
 namespace arm64emu {
-
 // ── Config ─────────────────────────────────────────────────────────────
 // All knobs that affect emulator behavior. Each field has a sensible
 // default; only override what you need.
@@ -86,47 +83,38 @@ struct Config {
     bool     jit_no_selfloop   = false;    // BIFROST_NO_SELFLOOP
     bool     jit_no_wex        = false;    // BIFROST_NO_WEX
     bool     jit_no_fma3       = false;    // BIFROST_NO_FMA3
-
     // ── [fb] ─────────────────────────────────────────────────────────
     uint32_t fb_width          = 1280;
     uint32_t fb_height         = 720;
     uint8_t  fb_bpp            = 32;
     std::string fb_dump_path;             // PPM path on exit (empty = none)
-
     // ── [audio] ──────────────────────────────────────────────────────
     uint32_t audio_sample_rate = 44100;
     uint8_t  audio_channels    = 2;
     uint8_t  audio_sample_size = 2;
     std::string audio_dump_path;          // WAV path on exit
-
     // ── [thunk] ──────────────────────────────────────────────────────
     bool     thunk_graphics    = false;
     bool     thunk_audio       = false;
     bool     thunk_display     = false;
     bool     thunk_trace       = false;
-
     // ── [paths] ──────────────────────────────────────────────────────
     std::string rootfs_path;              // BIFROST_ROOT (empty = no sandbox)
     std::string guest_cwd     = "/";
-
     // ── [signal] ─────────────────────────────────────────────────────
     bool     forward_host_signals = true;
     bool     trace_syscalls    = false;
-
     // ── [perf] ───────────────────────────────────────────────────────
     // Per-CPU instruction counter is always on; this controls the
     // periodic stats printout interval (in instructions). 0 = silent.
     uint64_t perf_stats_interval = 0;
-
     // ── [log] ────────────────────────────────────────────────────────
     bool     log_verbose       = false;
     bool     log_trace         = false;    // instruction trace (-d)
     bool     log_brk_verbose   = true;     // BRK warnings (always on)
-
     // ── Methods ──────────────────────────────────────────────────────
     // Build a Config from the built-in defaults.
     static Config defaults();
-
     // Load a TOML-ish config file. Unknown sections / keys are silently
     // ignored (so old configs work after new keys are added). Returns
     // true on success, false on parse error (with `err` filled in).
@@ -134,26 +122,21 @@ struct Config {
     // `path` is "-" for stdin, or a filesystem path. Missing files are
     // NOT an error — they just leave the Config unchanged.
     bool load_from_file(const std::string& path, std::string& err);
-
     // Load a config from a string (same format as the file). Used by
     // tests and by the C API's bifrost_config_load_string().
     bool load_from_string(const std::string& text, std::string& err);
-
     // Apply env vars on top of the current config. BIFROST_FOO=1 sets
     // the corresponding bool to true (or, for inverted knobs like
     // BIFROST_NO_THREAD_JIT, sets jit_thread_jit to false).
     void apply_env();
-
     // Dump the config to `out` in the same TOML-ish format the parser
     // accepts. Useful for `bifrost-emu --print-config` and for tests.
     void dump(std::string& out) const;
-
     // Validate the config: clamp out-of-range values, fix inconsistent
     // combinations (e.g. fb_width = 0 → default). Returns the number of
     // fixes applied (0 = clean config).
     int validate();
 };
-
 // ── Path helpers ───────────────────────────────────────────────────────
 // Search these locations (in order) for a config file. Returns the first
 // match, or "" if none found.
@@ -163,5 +146,4 @@ struct Config {
 //   4. ~/.bifrost.toml
 //   5. /etc/bifrost.toml
 std::string find_config_file();
-
 } // namespace arm64emu

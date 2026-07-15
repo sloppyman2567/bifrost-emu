@@ -1,6 +1,6 @@
 // audio/audio.cpp — Audio backend implementation.
 //
-// v1.4.5-alpha (Turn 38): added SDL2 audio backend. The class now
+// v1.4.5-alpha: added SDL2 audio backend. The class now
 // supports three backends, tried in order:
 //   1. SDL2 (if USE_SDL2 was set at build time)
 //   2. OSS /dev/dsp (if available)
@@ -17,11 +17,9 @@
 // The headless backend just accumulates bytes in `buffer_` for a
 // later dump_to_wav() call. Used when no audio device is available.
 #include "audio/audio.h"
-
 #if defined(BIFROST_USE_SDL2)
 #  include <SDL2/SDL.h>
 #endif
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -30,29 +28,22 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/soundcard.h>
-
 namespace arm64emu {
-
 // Ring buffer capacity: 64 KiB. At 44100 Hz stereo 16-bit (176400 B/s),
 // this is ~370 ms of audio — plenty to absorb guest write bursts.
 static constexpr size_t RING_CAPACITY = 65536;
-
 // ── Constructor / Destructor ───────────────────────────────────────────
 Audio::Audio() = default;
-
 Audio::~Audio() {
     close();
 }
-
 // ── open() — open the audio device with the given format ───────────────
 bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
     // Close any existing device first (idempotent re-open).
     close();
-
     sample_rate_ = sample_rate;
     channels_ = channels;
     sample_size_ = sample_size;
-
     // Try SDL2 first (preferred backend — cross-platform, low latency).
 #if defined(BIFROST_USE_SDL2)
     if (open_sdl2_()) {
@@ -61,7 +52,6 @@ bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
         return true;
     }
 #endif
-
     // Fall back to OSS /dev/dsp.
     fd_ = ::open("/dev/dsp", O_WRONLY | O_NONBLOCK);
     if (fd_ >= 0) {
@@ -75,12 +65,10 @@ bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
             ::ioctl(fd_, SNDCTL_DSP_SPEED, &sr);
         }
     }
-
     opened_ = true;
     buffer_.clear();
     return true;
 }
-
 // ── close() — release resources ────────────────────────────────────────
 void Audio::close() {
     if (!opened_) return;
@@ -93,15 +81,12 @@ void Audio::close() {
     }
     opened_ = false;
 }
-
 // ── write() — push PCM data into the active backend ────────────────────
 ssize_t Audio::write(const uint8_t* data, size_t len) {
     if (!opened_) return -1;
     std::lock_guard<std::mutex> lock(mu_);
-
     // Always buffer the data for potential WAV dump.
     buffer_.insert(buffer_.end(), data, data + len);
-
 #if defined(BIFROST_USE_SDL2)
     if (sdl_audio_dev_ != 0) {
         // Push into the SPSC ring buffer. The SDL2 callback will pull
@@ -113,19 +98,16 @@ ssize_t Audio::write(const uint8_t* data, size_t len) {
         size_t tail = ring_tail_.load(std::memory_order_relaxed);
         size_t free_bytes = ring_mask_ + 1 - (tail - head);
         size_t to_write = std::min(len, free_bytes);
-
         for (size_t i = 0; i < to_write; i++) {
             ring_[(tail + i) & ring_mask_] = data[i];
         }
         ring_tail_.store(tail + to_write, std::memory_order_release);
-
         // Report full write so the guest doesn't re-send partial data.
         // Dropped samples (when free_bytes < len) are silent — the
         // guest would just retry otherwise, increasing latency.
         return static_cast<ssize_t>(len);
     }
 #endif
-
     // OSS path.
     if (fd_ >= 0) {
         ssize_t written = ::write(fd_, data, len);
@@ -134,17 +116,14 @@ ssize_t Audio::write(const uint8_t* data, size_t len) {
         }
         // Report full write so guest doesn't re-send partial data.
     }
-
     return static_cast<ssize_t>(len);
 }
-
 // ── read() — recording (not yet implemented) ───────────────────────────
 ssize_t Audio::read(uint8_t* buf, size_t len) {
     (void)buf;
     (void)len;
     return 0;
 }
-
 // ── ioctl() — OSS-style audio ioctls ───────────────────────────────────
 int Audio::ioctl(uint32_t cmd, uint64_t arg) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -167,7 +146,6 @@ int Audio::ioctl(uint32_t cmd, uint64_t arg) {
             return -ENOSYS;
     }
 }
-
 // ── backend_name() — diagnostic ────────────────────────────────────────
 const char* Audio::backend_name() const {
 #if defined(BIFROST_USE_SDL2)
@@ -176,23 +154,18 @@ const char* Audio::backend_name() const {
     if (fd_ >= 0) return "oss";
     return "none";
 }
-
 // ── dump_to_wav() — write the accumulated PCM to a WAV file ────────────
 bool Audio::dump_to_wav(const std::string& path) {
     std::lock_guard<std::mutex> lock(mu_);
     if (buffer_.empty()) return false;
-
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
-
     size_t write_size = buffer_.size();
     if (write_size > 0xFFFFFFFFULL) write_size = 0xFFFFFFFFULL;
-
     uint32_t data_size = static_cast<uint32_t>(write_size);
     uint32_t byte_rate = sample_rate_ * channels_ * sample_size_;
     uint16_t block_align = channels_ * sample_size_;
     uint16_t bits_per_sample = sample_size_ * 8;
-
     fwrite("RIFF", 1, 4, f);
     uint32_t riff_size = 36 + data_size;
     fwrite(&riff_size, 4, 1, f);
@@ -211,17 +184,13 @@ bool Audio::dump_to_wav(const std::string& path) {
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
     fwrite(buffer_.data(), 1, write_size, f);
-
     fclose(f);
     return true;
 }
-
-// ── SDL2 backend (Turn 38) ─────────────────────────────────────────────
+// ── SDL2 backend ─────────────────────────────────────────────
 #if defined(BIFROST_USE_SDL2)
-
 bool Audio::open_sdl2_() {
     std::lock_guard<std::mutex> g(sdl_mu_);
-
     // Initialize SDL2 audio subsystem if not already done. We use
     // SDL_InitSubSystem (not SDL_Init) so we don't clobber any video
     // subsystem that FrostGraphics may have already initialized.
@@ -234,7 +203,6 @@ bool Audio::open_sdl2_() {
             return false;
         }
     }
-
     // Configure the audio spec. SDL2 expects signed 16-bit (or float)
     // samples; we map our sample_size to the closest SDL format.
     SDL_AudioSpec want{};
@@ -243,7 +211,6 @@ bool Audio::open_sdl2_() {
     want.samples = 1024;  // ~23 ms at 44100 Hz — low latency
     want.callback = sdl2_audio_callback_;
     want.userdata = this;
-
     if (sample_size_ == 1) {
         want.format = AUDIO_U8;       // 8-bit unsigned
     } else if (sample_size_ == 2) {
@@ -257,7 +224,6 @@ bool Audio::open_sdl2_() {
         }
         return false;
     }
-
     SDL_AudioSpec got{};
     sdl_audio_dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);
     if (sdl_audio_dev_ == 0) {
@@ -267,7 +233,6 @@ bool Audio::open_sdl2_() {
         }
         return false;
     }
-
     // Initialize the SPSC ring buffer. Power-of-2 capacity for fast
     // masking. We use the larger of RING_CAPACITY and 4× the SDL
     // buffer size to ensure we never starve the callback.
@@ -278,7 +243,6 @@ bool Audio::open_sdl2_() {
     ring_mask_ = cap - 1;
     ring_head_.store(0, std::memory_order_relaxed);
     ring_tail_.store(0, std::memory_order_relaxed);
-
     // Update our format to match what SDL2 actually gave us (may differ
     // from what we asked for).
     sample_rate_ = static_cast<uint32_t>(got.freq);
@@ -286,10 +250,8 @@ bool Audio::open_sdl2_() {
     if (got.format == AUDIO_U8) sample_size_ = 1;
     else if (got.format == AUDIO_S16SYS) sample_size_ = 2;
     else if (got.format == AUDIO_F32SYS) sample_size_ = 4;
-
     // Start playback.
     SDL_PauseAudioDevice(sdl_audio_dev_, 0);
-
     if (getenv("BIFROST_AUDIO_VERBOSE")) {
         fprintf(stderr, "[audio] SDL2 audio device opened: %u Hz, %u ch, "
                 "%u bytes/sample (device=%u)\n",
@@ -297,7 +259,6 @@ bool Audio::open_sdl2_() {
     }
     return true;
 }
-
 void Audio::close_sdl2_() {
     std::lock_guard<std::mutex> g(sdl_mu_);
     if (sdl_audio_dev_ != 0) {
@@ -305,17 +266,14 @@ void Audio::close_sdl2_() {
         sdl_audio_dev_ = 0;
     }
 }
-
 // ── sdl2_audio_callback_ — pull samples from the ring buffer ───────────
 // Called from SDL2's audio thread. Must be fast and lock-free.
 void Audio::sdl2_audio_callback_(void* userdata, uint8_t* stream, int len) {
     auto* self = static_cast<Audio*>(userdata);
     if (!self || len <= 0) return;
-
     size_t head = self->ring_head_.load(std::memory_order_relaxed);
     size_t tail = self->ring_tail_.load(std::memory_order_acquire);
     size_t avail = tail - head;
-
     if (avail >= static_cast<size_t>(len)) {
         // Enough data — copy from the ring buffer.
         for (int i = 0; i < len; i++) {
@@ -334,7 +292,5 @@ void Audio::sdl2_audio_callback_(void* userdata, uint8_t* stream, int len) {
         self->ring_head_.store(head + avail, std::memory_order_release);
     }
 }
-
 #endif  // BIFROST_USE_SDL2
-
 } // namespace arm64emu

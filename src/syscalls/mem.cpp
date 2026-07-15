@@ -10,15 +10,12 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <cstdio>
 #include <cstdlib>
 #include <sys/mman.h>
 #include <mutex>
-
 namespace arm64emu {
-
 int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -28,7 +25,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& brk_start_ = emu.brk_start_;
     auto& brk_mu_ = emu.brk_mu_;
     auto& graphics_ = emu.graphics_;
-
     switch (num) {
         case 222: { // mmap
             // a0=addr, a1=length, a2=prot, a3=flags, a4=fd, a5=offset
@@ -37,7 +33,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t prot = a2;
             uint64_t flags = a3;
             if (length == 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-22)); return 0; } // EINVAL
-
             // Sanity-check the length: real Linux rejects absurdly large
             // mmaps based on RLIMIT_AS and available address space. Without
             // this, a buggy/malicious guest passing length = SIZE_MAX could
@@ -51,10 +46,8 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM));
                 return 0;
             }
-
             constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
             constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
-
             // ── MAP_FIXED_NOREPLACE ─────────────────────────────────────
             // BUGFIX: previously MAP_FIXED_NOREPLACE was silently ignored
             // (treated as a non-FIXED mmap), so the kernel could place the
@@ -101,7 +94,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(addr);
                 return 0;
             }
-
             // ── MAP_FIXED overlap with brk region ──────────────────────
             // musl's mallocng uses MAP_FIXED to carve pages out of the brk
             // region for its meta_area slots. The pattern is:
@@ -137,7 +129,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     brk_ = mmap_end;
                 }
             }
-
             // PROT_NONE with MAP_FIXED: these are guard pages. Don't
             // zero existing pages (preserves musl's metadata). Just
             // return success.
@@ -145,9 +136,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(addr);
                 return 0;
             }
-
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
-
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
             if (getenv("BIFROST_TRACE_MMAP")) {
                 fprintf(stderr, "[mmap(addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
@@ -164,7 +153,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // usable. The mmap_alloc above preserves existing pages on
             // MAP_FIXED (see Memory::mmap_alloc), so musl's metadata
             // written via the brk extension is not zeroed out.
-
             // If a file fd is given, read its contents in
             // MAP_ANONYMOUS is 0x20 on Linux AArch64. The old code checked
             // 0x2 (MAP_PRIVATE), so file-backed MAP_PRIVATE mmaps (the
@@ -194,7 +182,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(mapped);
             return 0;
         }
-
         case 215: { // munmap - we just leave pages allocated (no-op OK)
             // We don't actually reclaim the pages (our sparse memory
             // model has no mechanism to give pages back), but we DO
@@ -214,12 +201,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 226: { // mprotect - no-op
             ret_host(0);
             return 0;
         }
-
         case 216: { // mremap(old_addr, old_size, new_size, flags, new_addr) — AArch64 216
             // musl's mallocng uses mremap in two places:
             //
@@ -254,7 +239,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // a3 = flags (we honor MREMAP_MAYMOVE implicitly — we may
             //              return a different address whenever we have to)
             // a4 = new_addr (only used with MREMAP_FIXED; we don't support that)
-
             // musl sometimes calls mremap(0, 0, size, MREMAP_MAYMOVE)
             // as a "malloc via mremap" idiom (especially in the
             // meta_area init path). Treat that as a plain mmap.
@@ -268,7 +252,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(mapped);
                 return 0;
             }
-
             uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size);
             if (getenv("BIFROST_TRACE_MMAP")) {
                 fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
@@ -280,23 +263,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(result);
             return 0;
         }
-
         case 227: { // msync(addr, length, flags) — AArch64 227
             // No-op: our sparse pages are always in sync.
             ret_host(0);
             return 0;
         }
-
         case 233: { // madvise - no-op
             ret_host(0);
             return 0;
         }
-
         case 214: { // brk
             std::lock_guard<std::mutex> g(brk_mu_);
             if (a0 == 0) { ret_host(brk_); return 0; }
             if (a0 < brk_start_) { ret_host(brk_); return 0; }
-
             // BUGFIX (production hardening): reject unreasonable brk
             // extensions. The Linux kernel checks the new break against
             // RLIMIT_DATA and the available address space; without this
@@ -315,7 +294,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(brk_);
                 return 0;
             }
-
             if (a0 > brk_) {
                 mem_.map_range(brk_, a0 - brk_);
             }
@@ -323,11 +301,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(brk_);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

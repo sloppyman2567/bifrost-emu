@@ -4,12 +4,10 @@
 // TIOCGWINSZ / TCGETS / TCSETS / FIONREAD). Previously ioctls.cpp
 // dispatched on the request code with a big if-else chain and guessed
 // the fd type — now the Node owns its ioctls.
-// Turn 37: refactored to use the shared dispatch_terminal_ioctl()
 // helper. Was duplicated verbatim in HostNode.
 #include "yggdrasil/stdio_node.hpp"
 #include "yggdrasil/terminal_ioctls.hpp"  // shared ioctl dispatch
 #include "core/memory.h"
-
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -17,32 +15,25 @@
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 ssize_t StdioNode::read(uint64_t /*off*/, void* buf, size_t n) {
     ssize_t r = ::read(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t StdioNode::write(uint64_t /*off*/, const void* buf, size_t n) {
     ssize_t r = ::write(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
-
 ssize_t StdioNode::lseek(int64_t /*off*/, int /*whence*/) {
     return -ESPIPE;  // not seekable
 }
-
 int StdioNode::fstat(struct stat* st) {
     int r = ::fstat(fd_, st);
     return r < 0 ? -errno : 0;
 }
-
 // StdioNode::ioctl — same set as HostNode (terminal + FIONREAD).
 // Forward to the underlying host fd (0/1/2) via the shared helper.
 //
-// BUGFIX (Turn 53): when the host fd is NOT a TTY (e.g., stdout
 // redirected to a file or pipe), TCGETS ioctl fails on the host,
 // causing glibc's isatty() to return 0. glibc then fully buffers
 // stdout, and on exit the buffer is lost (our exit_group doesn't
@@ -73,7 +64,7 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
         t.c_cflag = B38400 | CS8 | CREAD;
         t.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN;
         t.c_cc[VINTR] = 0x03;    // ^C
-        t.c_cc[VQUIT] = 0x1C;    // ^\
+        t.c_cc[VQUIT] = 0x1C;    // ^Backslash
         t.c_cc[VERASE] = 0x7F;   // DEL
         t.c_cc[VKILL] = 0x15;    // ^U
         t.c_cc[VEOF] = 0x04;     // ^D
@@ -97,5 +88,4 @@ int StdioNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
     // Pass-through for anything else.
     return pass_through_ioctl(fd_, request, argp);
 }
-
 } // namespace arm64emu::yggdrasil

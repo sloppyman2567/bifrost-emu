@@ -19,8 +19,8 @@
 //   --no-jit        disable frostJIT and use the interpreter; this is the
 //                   escape hatch for programs that hit a JIT bug or for
 //                   debugging the interpreter directly. JIT is on by
-//                   default because the 72-test suite, toybox, and musl
-//                   libc all pass under it (6.4x speedup on compute workloads).
+//                   default — the full test suite, toybox, and musl/glibc
+//                   libc all pass under it (5-6x speedup on compute workloads).
 //   --jit           enable frostJIT (now the default; kept for backwards-
 //                   compatibility with existing scripts)
 //   --jit-threshold N  interpret for the first N instructions, then JIT.
@@ -36,7 +36,6 @@
 // By default bifrost-emu is silent: only the emulated program's
 // stdout/stderr appears. No stats, no exit codes, no noise — just the
 // output.
-
 #include "bifrost/emulator.hpp"
 #include "bifrost/config.hpp"
 #include "decoder.hpp"
@@ -47,12 +46,9 @@
 #include <cerrno>
 #include <termios.h>
 #include <unistd.h>
-
 using arm64emu::Emulator;
 using arm64emu::VERSION;
-
 // ── Banner (shown on no-args, --help) ────────────────────────────────────
-
 static void print_banner() {
     fprintf(stderr,
         "\n"
@@ -90,9 +86,7 @@ static void print_banner() {
         "\n",
         VERSION);
 }
-
 // ── Hidden easter egg (--bifrost / --rainbow) ────────────────────────────
-
 static void print_rainbow() {
     fprintf(stderr,
         "\n"
@@ -110,38 +104,23 @@ static void print_rainbow() {
         "  v%s\n\n",
         VERSION);
 }
-
 // ── Terminal raw mode for interactive apps ───────────────────────────────
 //
-// HISTORICAL BUG (v1.3.0-beta.4 and earlier):
-//   The emulator unconditionally enabled raw TTY mode whenever stdin was
-//   a TTY. Raw mode turns off ICANON (line buffering) and ECHO, so the
-//   host kernel delivers each keystroke immediately as a 1-byte read().
-//   That broke every guest program that used line-oriented stdio:
-//   musl's fgets() in sh.elf would receive one byte per read() and never
-//   see the trailing '\n' it needs to return a line, so the shell
-//   appeared to "hang" waiting for input that was actually arriving.
-//
-// FIX (v1.4.0-alpha):
-//   Default to leaving the host TTY alone. The host kernel's line
-//   discipline already does the right thing for 99% of guest programs
-//   (fgets, gets, scanf, getline, …): it buffers a line, delivers the
-//   whole line on Enter, and echoes characters so the user can see
-//   what they typed. Raw mode is now opt-in via --raw-tty for the few
-//   guests that genuinely need per-character input (e.g. a guest
-//   terminal emulator or curses-style UI that does its own line
-//   editing).
-
+// Default: leave the host TTY alone. The host kernel's line discipline
+// already does the right thing for the vast majority of guest programs
+// (fgets, gets, scanf, getline, …): it buffers a line, delivers the
+// whole line on Enter, and echoes characters so the user can see what
+// they typed. Raw mode is opt-in via --raw-tty for guests that
+// genuinely need per-character input (e.g. a guest terminal emulator
+// or curses-style UI that does its own line editing).
 static struct termios orig_termios;
 static bool term_set = false;
-
 static void restore_terminal() {
     if (term_set) {
         tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios);
         term_set = false;
     }
 }
-
 static void set_raw_terminal() {
     if (!isatty(STDIN_FILENO)) return;
     if (tcgetattr(STDIN_FILENO, &orig_termios) != 0) return;
@@ -154,9 +133,7 @@ static void set_raw_terminal() {
     term_set = true;
     atexit(restore_terminal);
 }
-
 // ── Quick ELF sanity check (friendlier than letting the loader throw) ────
-
 static bool looks_like_static_aarch64_elf(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
@@ -170,25 +147,20 @@ static bool looks_like_static_aarch64_elf(const std::string& path) {
         && hdr[5] == 1        // ELFDATA2LSB
         && hdr[18] == 0xB7 && hdr[19] == 0x00;  // e_machine = EM_AARCH64
 }
-
 // ── Main ─────────────────────────────────────────────────────────────────
-
 int main(int argc, char** argv) {
     bool debug   = false;
     bool verbose = false;
     bool quiet   = false;
     bool raw_tty = false;
-    // JIT is now ON by default. Use --no-jit to force the interpreter.
-    // The 72-test suite, toybox integration, and musl libc all pass
-    // under the JIT, and bench_mips shows a 6.4x speedup. The
-    // interpreter is still available as a fallback for programs that
-    // hit a JIT bug or for debugging.
+    // JIT is ON by default. Use --no-jit to force the interpreter.
+    // The interpreter is the fallback for programs that hit a JIT bug
+    // or for debugging.
     bool use_jit = true;
     std::string fb_dump_path;
     std::string audio_dump_path;
     uint64_t jit_threshold = 0;  // 0 = use JIT from start
     int  arg_i   = 1;
-
     // ── Config (v1.5.0.alpha) ─────────────────────────────────────────
     // Resolution order: CLI > env var > config file > defaults.
     // We load the config file first, then env vars, then CLI flags
@@ -196,7 +168,6 @@ int main(int argc, char** argv) {
     arm64emu::Config cfg = arm64emu::Config::defaults();
     std::string config_path = arm64emu::find_config_file();
     bool print_config_only = false;
-
     // First pass: scan for --config PATH so we can load it before parsing
     // the rest of the flags. Other flags are parsed in the main loop
     // below, AFTER the config file is loaded, so they override config.
@@ -218,7 +189,6 @@ int main(int argc, char** argv) {
     }
     // Apply env vars (they override the file).
     cfg.apply_env();
-
     while (arg_i < argc) {
         std::string a = argv[arg_i];
         if (a == "-h" || a == "--help")     { print_banner();   return 0; }
@@ -231,7 +201,6 @@ int main(int argc, char** argv) {
         if (a == "--no-jit")                { use_jit = false; arg_i++; continue; }
         if (a == "--config")                { arg_i += 2; continue; }  // already handled
         if (a == "--print-config")          { arg_i++; continue; }
-        // NEW (Turn 74): --rootfs PATH sets BIFROST_ROOT for the guest.
         // Equivalent to `BIFROST_ROOT=PATH bifrost-emu ...` but more
         // ergonomic and works even when the env var isn't inherited.
         if (a == "--rootfs") {
@@ -297,17 +266,15 @@ int main(int argc, char** argv) {
         }
         break;
     }
-
     // CLI overrides config file values (highest precedence).
     if (debug)               cfg.log_trace = true;
     if (verbose)             cfg.log_verbose = true;
+    if (quiet)               cfg.log_brk_verbose = false;  // -q suppresses BRK warnings
     if (!use_jit)            cfg.jit_enabled = false;
     if (jit_threshold)       cfg.jit_threshold = jit_threshold;
     if (!fb_dump_path.empty())     cfg.fb_dump_path = fb_dump_path;
     if (!audio_dump_path.empty())  cfg.audio_dump_path = audio_dump_path;
-
     cfg.validate();
-
     // --print-config: dump the resolved config and exit. Useful for
     // debugging "why isn't my config taking effect?"
     if (print_config_only) {
@@ -317,15 +284,12 @@ int main(int argc, char** argv) {
         fputs(dump.c_str(), stderr);
         return 0;
     }
-
     // No file given → show the Banner
     if (arg_i >= argc) { print_banner(); return 0; }
-
     std::string elf_path = argv[arg_i];
     std::vector<std::string> guest_argv;
     guest_argv.push_back(elf_path);
     for (int i = arg_i + 1; i < argc; i++) guest_argv.push_back(argv[i]);
-
     // Friendly error if the file is missing or not a static AArch64 ELF
     if (access(elf_path.c_str(), R_OK) != 0) {
         fprintf(stderr, "bifrost-emu: cannot open '%s': %s\n",
@@ -339,29 +303,23 @@ int main(int argc, char** argv) {
             elf_path.c_str());
         return 126;  // 126 = "found but not executable" convention
     }
-
     // Only switch the host TTY into raw mode if the user explicitly asked
     // for it. Default: leave the TTY alone so the host line discipline can
     // buffer input for guest line-oriented stdio (fgets, gets, scanf, …).
     if (raw_tty) set_raw_terminal();
-
     Emulator emu;
     emu.set_verbose(cfg.log_verbose);
     emu.set_trace(cfg.log_trace);
     emu.set_brk_verbose(cfg.log_brk_verbose);
-    (void)quiet; // -q kept for CLI compat; brk_verbose_ now driven by config
-    (void)verbose; (void)debug; // now driven by cfg
     if (cfg.jit_enabled) emu.enable_jit();
     emu.set_jit_threshold(cfg.jit_threshold);
     if (cfg.forward_host_signals) {
         emu.install_host_signal_handlers();  // forward host signals to guest
     }
-
     try {
         emu.load_elf_file(elf_path, guest_argv);
         int code = emu.run();
         restore_terminal();
-
         // Optional framebuffer dump on exit. Useful for headless
         // debugging of programs that draw to /dev/fb0.
         if (!cfg.fb_dump_path.empty() && emu.graphics().ready()) {

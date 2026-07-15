@@ -3,13 +3,9 @@
 //
 // Public IR types live in include/ir/ir.hpp.
 #pragma once
-
 #include "ir/ir.hpp"
-
 #include <cstdint>
-
 namespace arm64emu {
-
 // ── Scratch vreg allocator ──────────────────────────────────────────────
 // Per-block resetable. The translator allocates a fresh vreg for every
 // intermediate value; the optimizer later reuses them.
@@ -23,13 +19,10 @@ struct VregAlloc {
     uint16_t alloc() { return next++; }
     void reset() { next = 33; }
 };
-
 // Per-thread allocator (each JIT thread has its own to avoid locking).
 extern thread_local VregAlloc g_alloc;
-
 // Reset the per-block allocator. Called at the start of each block.
 void ir_reset_vreg_alloc();
-
 // ── IR emit helpers ─────────────────────────────────────────────────────
 // Emit a single IR op.
 inline void emit(IRBlock& b, IROp op, uint16_t dest = 0,
@@ -50,7 +43,6 @@ inline void emit(IRBlock& b, IROp op, uint16_t dest = 0,
     inst.arm_pc = arm_pc;
     b.insts.push_back(inst);
 }
-
 // Emit with auxiliary vreg (for SMADDL/SMSUBL accumulator). [Turn 66]
 inline void emit_aux(IRBlock& b, IROp op, uint16_t dest,
                      uint16_t src1, uint16_t src2, uint16_t aux_vreg,
@@ -64,7 +56,6 @@ inline void emit_aux(IRBlock& b, IROp op, uint16_t dest,
     inst.arm_pc = arm_pc;
     b.insts.push_back(inst);
 }
-
 // Emit an IRInst with the extra bitfield fields (immr/imms/sf).
 inline void emit_bf(IRBlock& b, IROp op, uint16_t dest,
                     uint16_t src1, uint16_t src2,
@@ -81,14 +72,12 @@ inline void emit_bf(IRBlock& b, IROp op, uint16_t dest,
     inst.arm_pc = arm_pc;
     b.insts.push_back(inst);
 }
-
 // Emit an immediate into a fresh vreg.
 inline uint16_t load_imm(IRBlock& b, uint64_t val) {
     uint16_t v = g_alloc.alloc();
     emit(b, IROp::IMM, v, 0, 0, 0, 0, 0, val);
     return v;
 }
-
 // Read an ARM64 reg into a fresh vreg.
 // `is_sp` controls the reg-31 mapping:
 //   - For ADD/SUB immediate: reg 31 = SP (is_sp=true)
@@ -105,16 +94,13 @@ inline uint16_t load_arm_reg(IRBlock& b, uint8_t ar, bool is_sp = false) {
     emit(b, IROp::LOAD_REG, v, ar);
     return v;
 }
-
 // Write a vreg to an ARM64 reg.
 // `is_sp` controls reg-31 mapping (same as load_arm_reg).
 inline void store_arm_reg(IRBlock& b, uint8_t ar, uint8_t v, bool is_sp = false) {
     if (ar == 31 && !is_sp) return;  // XZR — discard
     emit(b, IROp::STORE_REG, ar, v);
 }
-
 // ── FP register load/store ────────────────────────────────────────────
-// BUGFIX (Turn 57): FP registers (V0-V31) live in cpu.v_lo[], NOT
 // cpu.regs[]. The old LOAD_REG/STORE_REG always accessed cpu.regs[],
 // so FP loads/stores via LDR/STR wrote to the wrong array. This caused
 // all 32-bit FP loads from memory (e.g., `ldr s0, [x1]` for a global
@@ -137,7 +123,6 @@ inline uint16_t load_fp_reg(IRBlock& b, uint8_t ar) {
     b.insts.push_back(inst);
     return v;
 }
-
 inline void store_fp_reg(IRBlock& b, uint8_t ar, uint8_t v) {
     if (ar == 31) return;  // XZR — discard
     IRInst inst{};
@@ -147,7 +132,6 @@ inline void store_fp_reg(IRBlock& b, uint8_t ar, uint8_t v) {
     inst.sf = 1;  // is_fp
     b.insts.push_back(inst);
 }
-
 // Zero-extend a value to 32 bits (sf=0) or pass-through (sf=1).
 // We always emit the op; the optimizer peephole removes redundant ZEXTs
 // after ops whose x86 encoding already zero-extends.
@@ -157,7 +141,6 @@ inline uint16_t zext_if_32bit(IRBlock& b, uint16_t v, bool sf) {
     emit(b, IROp::ZEXT, r, v, 0, 32);
     return r;
 }
-
 // Apply an extend operation (UXTB/SXTB/UXTH/SXTH/UXTW/SXTW/UXTX/SXTX) to
 // a vreg, returning a new vreg holding the result. Used by ADD_REG/SUB_REG,
 // ADDS_REG/SUBS_REG, and LDR_REG/STR_REG for the extended-register form.
@@ -215,7 +198,6 @@ inline uint16_t apply_extend(IRBlock& b, uint16_t v, uint8_t extend, uint8_t shi
     }
     return v;
 }
-
 // Apply a shift-type operation (LSL/LSR/ASR/ROR) to a vreg.
 // shift_type: 0=LSL, 1=LSR, 2=ASR, 3=ROR.
 // shift:       shift amount.
@@ -242,7 +224,6 @@ inline uint16_t apply_shift(IRBlock& b, uint16_t v, uint8_t shift_type, uint8_t 
     emit(b, shop, shifted, v, sh, width);
     return shifted;
 }
-
 // ── SWAR lowering helpers (defined in ir_lower.cpp) ─────────────────────
 // Decompose RBIT/REV16/REV32 into primitive IR ops (AND/OR/SHL/SHR) so
 // the JIT can compile them natively instead of falling back to CALL_INTERP.
@@ -251,7 +232,6 @@ uint16_t rbit64_ir(IRBlock& b, uint16_t v);
 uint16_t rbit32_ir(IRBlock& b, uint16_t v);
 uint16_t rev16_64_ir(IRBlock& b, uint16_t v);
 uint16_t rev32_64_ir(IRBlock& b, uint16_t v);
-
 // ── Translator dispatch helpers (defined in ir_translate_*.cpp) ─────────
 // translate_to_ir() delegates FP/SIMD and memory load/store cases to these
 // helpers. Each returns `true` if it handled `d.cls` (in which case
@@ -262,5 +242,4 @@ uint16_t rev32_64_ir(IRBlock& b, uint16_t v);
 // see ir_translate_fp.cpp and ir_translate_mem.cpp for the bodies.
 bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
 bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
-
 } // namespace arm64emu

@@ -2,9 +2,7 @@
 //
 // Public header: safe to include from any consumer (C++ or C-binding).
 #pragma once
-
 namespace arm64emu {
-
 // ── Version ────────────────────────────────────────────────────────────
 // 1.4.5-alpha (2026-07-04): First feature release after 1.4.0 stable.
 //   - Native SIMD vector shift codegen (SHL/USHR/SSHR) via SSE2
@@ -47,7 +45,6 @@ namespace arm64emu {
 //     to the host's equivalent libraries. Enabled via
 //     BIFROST_THUNK_GRAPHICS=1 env var. Proof-of-concept — only a
 //     subset of entry points are thunked.
-//     Turn 37: REDESIGNED. The thunk now allocates a guest trampoline
 //     page; each registered symbol gets a 16-byte AArch64 trampoline
 //     (movz x9,#sym_id; movz x8,#__NR_thunk; svc #0; nop). The thunk
 //     is wired into the dynamic linker via a set_thunk_resolver()
@@ -58,13 +55,13 @@ namespace arm64emu {
 //     pointers as AArch64 code). New syscall __NR_bifrost_thunk=0x1000
 //     dispatches to GraphicThunk::dispatch() which reads x0..x7, calls
 //     the host function, and writes the result to x0.
-//   - SDL2 audio backend (Turn 38). The Audio class now supports three
+//   - SDL2 audio backend. The Audio class now supports three
 //     backends: SDL2 (preferred, cross-platform, low latency via
 //     callback), OSS /dev/dsp (legacy), headless (buffer + WAV dump).
 //     The SDL2 backend uses a lock-free SPSC ring buffer (64 KiB,
 //     power-of-2) — the guest's write() is the producer, SDL2's audio
 //     callback is the consumer. No mutex on the hot path.
-//   - Input event handling (Turn 38). New FrostInput class
+//   - Input event handling. New FrostInput class
 //     (include/frost/input.hpp) captures keyboard/mouse events from
 //     the SDL2 window and translates them to Linux input_event
 //     records (24 bytes on AArch64). SDL2 scancodes → Linux KEY_*
@@ -72,11 +69,11 @@ namespace arm64emu {
 //     motion → EV_REL REL_X/REL_Y; SDL2 mouse wheel → EV_REL REL_WHEEL.
 //     Wired through Yggdrasil DevFS as /dev/input/event0, /dev/input/mice,
 //     /dev/input/mouse0, /dev/input/js0 (all return the same stream).
-//   - FrostGraphics smarter SDL2 init (Turn 38). Window is now
+//   - FrostGraphics smarter SDL2 init. Window is now
 //     SDL_WINDOW_RESIZABLE; the fb texture auto-scales to the window
 //     size via RenderCopy. New set_window_title() and set_window_size()
 //     methods. has_window() diagnostic.
-//   - Game controller support (Turn 39). FrostInput now opens all
+//   - Game controller support. FrostInput now opens all
 //     connected SDL2 game controllers via SDL_GameControllerOpen and
 //     translates their events to both EV_ABS/EV_KEY (for
 //     /dev/input/eventX) and JS_EVENT (for /dev/input/js0). Hot-plug
@@ -84,7 +81,7 @@ namespace arm64emu {
 //     axis mapping: A/B/X/Y, shoulders, triggers, sticks, D-pad,
 //     Start/Back/Guide. New has_game_controller() and
 //     game_controller_count() diagnostics.
-//   - Dynamic linker bug fixes (Turn 39). Three bugs that broke ALL
+//   - Dynamic linker bug fixes. Three bugs that broke ALL
 //     dynamically-linked binaries (glibc AND musl):
 //     1. PT_DYNAMIC parsing read p_offset (file offset) into dyn_vaddr
 //        instead of p_vaddr (virtual address). Fixed.
@@ -162,5 +159,4 @@ namespace arm64emu {
 //     to 95/95 (3 new tests for the new instruction/syscall coverage).
 constexpr const char* VERSION  = "1.5.0.alpha";
 constexpr const char* CODENAME = "bifrost-emu";
-
 } // namespace arm64emu

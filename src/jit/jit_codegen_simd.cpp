@@ -1,6 +1,6 @@
 // jit/jit_codegen_simd.cpp — FrostJIT SIMD/NEON IR-op codegen.
 //
-// v1.4.5-alpha (Turn 69): split out of jit_codegen_fp.cpp. This file holds
+// v1.4.5-alpha: split out of jit_codegen_fp.cpp. This file holds
 // the SIMD_* case bodies of the FP/SIMD IR-op switch, extracted into a
 // separate method (compile_ir_simd) for readability. The compile_ir_inst_fp_()
 // dispatcher in jit_codegen_fp.cpp calls this method before its residual
@@ -26,12 +26,9 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
 // not (caller falls through to the next dispatcher or residual switch).
@@ -55,7 +52,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             //                       pxor xmm0,xmm1  →  ~xmm0
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
             // 2-3 instruction sequence.
@@ -69,7 +65,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-
             auto emit_logical_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 // movsd xmm0, [rbx+off1]
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
@@ -77,7 +72,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 // movsd xmm1, [rbx+off2]
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
-
                 if (simple) {
                     // 66 0F sse_op C1  (xmm0, xmm1)
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(sse_op);
@@ -116,12 +110,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
                     emit_byte(0xC1);
                 }
-
                 // movsd [rbx+offd], xmm0
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -132,7 +124,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_logical_half(off1hi, off2hi, offdhi);
             return true;
         }
-
         // ── SIMD ARITH (integer lane-wise add/sub/mul/min/max) ───────
         // Uses SSE2/SSE4.1 integer SIMD ops. Only the common element
         // sizes (1/2/4/8 bytes) and opcodes (add/sub/mul) are native;
@@ -156,7 +147,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // SSE2 opcodes (with 66 0F prefix):
             //   paddb/h/w/d/q  = FC/FD/FE/D8
             //   psubb/h/w/d/q  = F8/F9/FA/EB
@@ -171,7 +161,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             uint8_t op_byte = 0;
             bool needs_38_prefix = false;  // SSE4.1 3-byte opcodes (66 0F 38 XX)
             bool supported = true;
-
             if (opc == 0) {  // ADD
                 switch (esize) {
                     case 1: op_byte = 0xFC; break;  // paddb
@@ -225,12 +214,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             } else {
                 supported = false;
             }
-
             if (!supported) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-
             auto emit_arith_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 // movsd xmm0, [rbx+off1]
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
@@ -249,7 +236,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -260,7 +246,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_arith_half(off1hi, off2hi, offdhi);
             return true;
         }
-
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────
         // Only eq (opc=0) is fully native via PCMPEQB/W/D/Q. Other
         // comparisons fall back to CALL_INTERP for now.
@@ -273,7 +258,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             uint8_t op_byte = 0;
             switch (esize) {
                 case 1: op_byte = 0x74; break;  // pcmpeqb
@@ -287,7 +271,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     op_byte = 0x29; break;  // pcmpeqq (SSE4.1: 66 0F 38 29)
             }
             bool needs_38_prefix = (esize == 8);
-
             auto emit_cmp_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(0, CPU_REG, off1);
@@ -300,7 +283,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
@@ -311,7 +293,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_cmp_half(off1hi, off2hi, offdhi);
             return true;
         }
-
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
@@ -335,7 +316,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // RAX holds a copy (not a cached vreg) — no mapping to update.
             return true;
         }
-
         // ── SIMD LDST (read/write v_lo/v_hi to/from vregs) ─────────
         case IROp::SIMD_LDST: {
             // width=1 (load): src1=lo vreg, src2=hi vreg → v_lo[dest], v_hi[dest]
@@ -348,7 +328,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 int slo = ensure_vreg(inst.src1, RAX);
                 int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_store(CPU_REG, offlo, slo);
-
                 // For the hi half, use RCX. If src2 is cached in a different
                 // reg, ensure_vreg returns it (no eviction). If src2 is not
                 // cached, ensure_vreg loads it into RCX (evicting RCX's
@@ -362,7 +341,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 emit_load(dlo, CPU_REG, offlo);
                 set_vreg_reg(inst.src1, dlo);
-
                 int dhi = alloc_reg();
                 int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
                 emit_load(dhi, CPU_REG, offhi);
@@ -370,7 +348,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             return true;
         }
-
         // ── SIMD SHL/USHR/SSHR (vector, by immediate) — native SSE2 ──
         // v1.4.5-alpha: native SSE2 codegen via psllw/pslld/psllq (SHL),
         // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). Previously these
@@ -414,7 +391,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             // All SHL/USHR variants for esize ∈ {2,4,8} are supported.
             // (SHL Q-word uses PSLLQ; USHR Q-word uses PSRLQ; both SSE2.)
-
             // Decode the SSE2 subop byte (0x71/0x72/0x73) and the reg
             // field (6=PSLL, 2=PSRL, 4=PSRA).
             uint8_t subop = 0;
@@ -422,17 +398,14 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (esize == 2)      subop = 0x71;
             else if (esize == 4) subop = 0x72;
             else                 subop = 0x73;  // esize == 8
-
             if (inst.op == IROp::SIMD_SHL)       reg_field = 6;
             else if (inst.op == IROp::SIMD_USHR) reg_field = 2;
             else                                 reg_field = 4;  // SIMD_SSHR
-
             clobber_flags();
             // SSE2 shifts only use XMM0 (no GPRs). But emit_call_interp
             // and other paths below might clobber RAX/RCX/RDX, so flush
             // them to keep the register-cache consistent.
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // For each half (v_lo, v_hi):
             //   movsd xmm0, [rbx+off1]    (F2 0F 10 — load 64 bits, zero upper 64)
             //   66 0F <subop> <modrm> imm  (PSLL/PSRL/PSRA xmm0, imm8)
@@ -458,7 +431,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
-
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
@@ -467,7 +439,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_shift_half(off1hi, offdhi);
             return true;
         }
-
         // ── v1.5.0.alpha: AES / PMULL native codegen ──────────────────
         // Uses AES-NI (aesenc/aesdec/aesimc/aesmc) and PCLMULQDQ
         // (pclmulqdq) when the host CPU supports them. Falls back to
@@ -521,19 +492,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // use PCLMULQDQ natively when available.
         case IROp::AES_CRYPTO: {
             uint8_t sub_op = static_cast<uint8_t>(inst.imm);
-
             // PMULL/PMULL2 — use PCLMULQDQ when available.
             if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
                 clobber_flags();
                 flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
                 int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
                 int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
                 int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
                 int32_t off2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
                 int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
                 int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-
                 // Load src1 into XMM0 (low 64 bits in bits[63:0]).
                 // movsd xmm0, [rbx+off1lo]
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
@@ -542,7 +510,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 // movsd xmm1, [rbx+off2lo]
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2lo);
-
                 if (sub_op == 4) {
                     // PMULL: multiply low 64 bits, produce 128-bit result.
                     // pclmulqdq xmm0, xmm1, 0x00  (imm=0x00 selects low×low)
@@ -582,19 +549,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
                     emit_modrm_disp(0, CPU_REG, off1hi);
                     emit_byte(0x01);  // imm8 = 1 (high 64 bits)
-
                     emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
                     emit_modrm_disp(1, CPU_REG, off2lo);
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x22);
                     emit_modrm_disp(1, CPU_REG, off2hi);
                     emit_byte(0x01);
-
                     // pclmulqdq xmm0, xmm1, 0x11  (high × high)
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A); emit_byte(0x44);
                     emit_byte(0xC1);
                     emit_byte(0x11);  // imm8 = 0x11 (high × high)
                 }
-
                 // Store the 128-bit result: bits[63:0] → v_lo, bits[127:64] → v_hi.
                 // movsd [rbx+offdlo], xmm0
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
@@ -606,7 +570,6 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_byte(0x01);  // imm8 = 1 (high 64 bits)
                 return true;
             }
-
             // AESE/AESD/AESMC/AESIMC — fall back to CALL_INTERP.
             // (The ARM-vs-x86 semantic mismatch makes direct AES-NI
             // mapping incorrect. The interpreter's table-driven
@@ -614,10 +577,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_call_interp(inst.arm_pc, false);
             return true;
         }
-
         default:
             return false;  // not handled — caller falls through
     }
 }
-
 } // namespace arm64emu

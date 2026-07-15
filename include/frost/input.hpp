@@ -41,7 +41,7 @@
 //   - EV_SYN after each "batch" of events to delimit frames
 //   - JS_EVENT_BUTTON / JS_EVENT_AXIS for /dev/input/js0
 //
-// ── Game controller support (Turn 39) ─────────────────────────────────
+// ── Game controller support ─────────────────────────────────
 // SDL2's game controller API provides a higher-level abstraction than the
 // raw joystick API: it maps physical controls to standard names (A, B, X,
 // Y, D-pad, left/right stick, triggers). We use SDL_GameControllerOpen
@@ -80,45 +80,36 @@
 //   - JS_EVENT time is milliseconds since startup (we use a steady_clock
 //     baseline). Real Linux uses jiffies.
 #pragma once
-
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <sys/types.h>  // ssize_t
 #include <vector>
-
 namespace arm64emu {
-
 // Forward-declare the pimpl.
 struct FrostInputImpl;
-
 // Device type for read(). Selects which event format to return.
 enum class InputDevice {
     Event,   // /dev/input/eventX — 24-byte input_event records
     Js,      // /dev/input/js0 — 8-byte js_event records
     Mouse,   // /dev/input/mice — 4-byte ImPS/2 packets (not yet implemented)
 };
-
 class FrostInput {
 public:
     FrostInput();
     ~FrostInput();
-
     // Non-copyable, non-movable.
     FrostInput(const FrostInput&) = delete;
     FrostInput& operator=(const FrostInput&) = delete;
-
     // Whether input capture is active (requires SDL2). Always false in
     // headless builds.
     bool active() const;
-
     // Pump the host's event queue (SDL_PollEvent). Translates SDL2
     // events into Linux input events and pushes them to the ring
     // buffers. Should be called periodically by the run loop.
     // Returns false if the user requested window close (SDL_QUIT),
     // true otherwise.
     bool poll();
-
     // Read up to `n` bytes of event records from the queue into `buf`.
     // The format depends on `dev`:
     //   - InputDevice::Event: 24-byte input_event records
@@ -128,22 +119,16 @@ public:
     // is empty, or -1 on error.
     ssize_t read(uint8_t* buf, size_t n, InputDevice dev = InputDevice::Event,
                  bool blocking = false);
-
     // Drain pending events without delivering them. Used when the
     // guest closes /dev/input/eventX.
     void drain();
-
     // Total events captured since construction (diagnostic).
     uint64_t event_count() const;
-
     // Whether any game controllers are connected (diagnostic).
     bool has_game_controller() const;
-
     // Number of game controllers currently open.
     int game_controller_count() const;
-
 private:
     std::unique_ptr<FrostInputImpl> impl_;
 };
-
 } // namespace arm64emu

@@ -27,10 +27,8 @@
 // files under `yggdrasil/`. No behavior change beyond the
 // improvements documented in CHANGELOG.md.
 #pragma once
-
 #include "bifrost/types.hpp"
 #include "yggdrasil/node.hpp"
-
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -39,11 +37,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 // Forward-declare the arm64emu types we reference (the real definitions
 // live in arm64emu:: — graphics.hpp and audio/audio.h). These must be
 // declared at the arm64emu scope so the yggdrasil namespace can refer
@@ -53,14 +49,11 @@ namespace arm64emu {
     class Audio;
     class Memory;
 }
-
 namespace arm64emu::yggdrasil {
-
 // ── Yggdrasil: path → Node resolver ───────────────────────────────────
 class Yggdrasil {
 public:
     Yggdrasil();
-
     // Resolve a guest path to a Node. Returns nullptr on failure (with
     // errno set via the `*err_out` parameter).
     //
@@ -71,32 +64,25 @@ public:
     //   4. Host passthrough (openat on the remapped path)
     std::unique_ptr<Node> open(const std::string& guest_path,
                                int flags, mode_t mode, int* err_out);
-
     // Read a NUL-terminated path string from guest memory. Reads at most
     // 4096 bytes to prevent runaway reads from bad pointers.
     static std::string read_path(::arm64emu::Memory& mem, uint64_t addr);
-
     // Remap a guest path to a host path using BIFROST_ROOT.
     // (Defined in yggdrasil/host.cpp — exposed here so syscall handlers
     // can call it for path-based syscalls like unlinkat/renameat/etc.)
     static std::string remap_path(const std::string& guest_path);
-
     // Set the ELF path (used by /proc/self/exe). Called once from
     // Emulator::load_elf_file().
     void set_elf_path(const std::string& path) { elf_path_ = path; }
     const std::string& elf_path() const { return elf_path_; }
-
     // Set the argv vector (used by /proc/self/cmdline). Called once
     // from Emulator::load_elf_file().
     void set_argv(const std::vector<std::string>& argv) { argv_ = argv; }
-
     // Wire up the graphics backend (for /dev/fb0). May be null if the
     // emulator was built without SDL2 and the guest never opens /dev/fb0.
     void set_graphics(::arm64emu::FrostGraphics* gfx) { gfx_ = gfx; }
-
     // Wire up the audio backend (for /dev/dsp, /dev/snd). May be null.
     void set_audio(::arm64emu::Audio* audio) { audio_ = audio; }
-
     // ── Live memory layout for /proc/self/maps ─────────────────────
     // The Emulator registers a callback that returns the current
     // allocations + brk range so /proc/self/maps can show a real layout
@@ -112,14 +98,12 @@ public:
     void set_maps_provider(std::function<std::vector<MapEntry>()> cb) {
         maps_provider_ = std::move(cb);
     }
-
     // ── Guest process name (comm) for /proc/self/comm ─────────────
     // The Emulator registers a callback that returns the current
     // guest_comm_ (set by prctl PR_SET_NAME, defaults to ELF basename).
     void set_comm_provider(std::function<std::string()> cb) {
         comm_provider_ = std::move(cb);
     }
-
     // ── Guest cwd tracking (chdir/getcwd) ──────────────────────────
     // The Emulator registers the guest's current working directory
     // here so the getcwd syscall can return the real path (the host
@@ -137,7 +121,6 @@ public:
         if (cwd_setter_) return cwd_setter_(path);
         return false;
     }
-
     // Expose the maps provider for /proc/self/maps.
     const std::function<std::vector<MapEntry>()>& maps_provider() const {
         return maps_provider_;
@@ -147,7 +130,6 @@ public:
     std::string get_cwd() const {
         return cwd_getter_ ? cwd_getter_() : guest_cwd_;
     }
-
 private:
     std::string elf_path_;
     std::vector<std::string> argv_;
@@ -158,7 +140,6 @@ private:
     std::function<std::string()> cwd_getter_;
     std::function<bool(const std::string&)> cwd_setter_;
     std::string guest_cwd_ = "/";
-
     // Sub-resolvers (defined in yggdrasil/procfs.cpp / devfs.cpp /
     // host.cpp). Each returns nullptr if it doesn't handle the path.
     std::unique_ptr<Node> open_procfs(const std::string& path,
@@ -168,7 +149,6 @@ private:
     std::unique_ptr<Node> open_host(const std::string& path,
                                     int flags, mode_t mode, int* err_out);
 };
-
 // ── FdTable: guest fd → Node mapping ──────────────────────────────────
 //
 // BUGFIX (v1.4.5-alpha): added a mutex to protect `table_`. Multiple guest
@@ -180,39 +160,29 @@ private:
 class FdTable {
 public:
     FdTable();
-
     // Allocate a new guest fd holding `node`. Returns the fd, or -errno.
     int allocate(std::shared_ptr<Node> node);
-
     // Look up the Node for `fd`. Returns nullptr if fd is not open.
     std::shared_ptr<Node> get(int fd) const;
-
     // Close `fd`. Returns 0 on success, -errno on failure.
     int close(int fd);
-
     // Duplicate `fd` to the lowest available fd. Returns new fd or -errno.
     // If `min_fd` > 0, scan for the lowest free fd >= min_fd (F_DUPFD).
     int dup(int fd, int min_fd = 0);
-
     // Duplicate `fd` to `new_fd` (closing `new_fd` if open). Returns
     // `new_fd` on success or -errno.
     int dup2(int fd, int new_fd);
-
     // Close every open fd in [first, last]. Used by close_range(2).
     // Iterates only over the open fds (not every integer in the range),
     // so a huge range with few open fds is O(open_fds), not O(range).
     void close_range(int first, int last);
-
     // True if `fd` is open.
     bool is_open(int fd) const;
-
     // Number of open fds.
     size_t size() const;
-
 private:
     // guest fd → shared Node. shared_ptr so dup()/dup2() can alias.
     mutable std::mutex mu_;
     std::unordered_map<int, std::shared_ptr<Node>> table_;
 };
-
 } // namespace arm64emu::yggdrasil

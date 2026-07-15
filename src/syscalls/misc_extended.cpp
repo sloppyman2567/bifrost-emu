@@ -1,45 +1,36 @@
-// syscalls/misc_extended.cpp — extended Linux syscalls (v1.5.0.alpha).
+// syscalls/misc_extended.cpp — extended Linux syscalls.
 //
-// This file holds the new syscalls added in 1.5.0.alpha — the things
-// games and complex real-world binaries (glibc dynamic binaries, Vulkan
-// apps, Steam runtime) need but the 1.4.5-alpha suite didn't have.
-//
-// Coverage:
-//   - Extended attributes: getxattr, setxattr, lgetxattr, lsetxattr,
-//     fgetxattr, fsetxattr, listxattr, llistxattr, flistxattr,
-//     removexattr, lremovexattr, fremovexattr (cases 17, 18, 188-197
-//     in the original table — but AArch64 renumbered them. The real
-//     AArch64 numbers are 26, 27, 28 (inotify, repurposed in 1.4.5) and
-//     188-197 for the xattrs; we add the latter).
-//   - fallocate (case 47) — already in fs.cpp, leave alone.
-//   - name_to_handle_at (case 264) / open_by_handle_at (case 265).
-//   - kcmp (case 272) — compare two processes' resources (used by
-//     Steam, Mesa).
-//   - membarrier (case 283) — cross-memory-barrier syscall.
-//   - copy_file_range (case 285).
-//   - preadv2 (case 286) / pwritev2 (case 287).
-//   - pkey_mprotect (case 288) / pkey_alloc (case 289) / pkey_free (290).
-//   - statx (case 291) — already in fs.cpp.
-//   - io_uring_setup (case 425) / io_uring_enter (426) / io_uring_register (427) — stubs.
-//   - open_tree (case 428) / move_mount (429) / fsopen (430) / fsconfig (431)
-//     / fsmount (432) / fspick (433) — stubs (return -ENOSYS).
-//   - pidfd_open (case 434) / pidfd_send_signal (424) / pidfd_getfd (438).
-//   - clone3 (case 435) — already in threads.cpp.
-//   - close_range (case 436) — already in misc.cpp.
-//   - openat2 (case 437) — already in misc.cpp.
-//   - faccessat2 (case 439) — already in misc.cpp.
-//   - process_madvise (case 440) / process_mrelease (448) / futex_waitv (449).
-//   - set_mempolicy_home_node (case 450).
-//   - cachestat (case 451) / fchmodat2 (452) / map_shadow_stack (453).
-//   - futex_wake / futex_wait / futex_requeue (case 454) — new futex2.
-//   - statmount (case 455) / listmount (456).
-//   - lsm_get_self_attr (457) / lsm_set_self_attr (458) / lsm_list_modules (459).
-//   - mseal (case 462).
+// Coverage (numbers per asm-generic/unistd.h, which AArch64 follows):
+//   - Extended attributes (5-16): setxattr/lsetxattr/fsetxattr/getxattr/
+//     lgetxattr/fgetxattr/listxattr/llistxattr/flistxattr/removexattr/
+//     lremovexattr/fremovexattr.
+//   - SysV IPC (188-197): stubbed to -ENOSYS (not implemented).
+//   - name_to_handle_at (264) / open_by_handle_at (265).
+//   - kcmp (272) — compare two processes' resources (used by Steam, Mesa).
+//   - membarrier (283) — cross-memory-barrier syscall.
+//   - copy_file_range (285).
+//   - preadv2 (286) / pwritev2 (287).
+//   - pkey_mprotect (288) / pkey_alloc (289) / pkey_free (290).
+//   - pidfd_send_signal (424) / pidfd_open (434) / pidfd_getfd (438).
+//   - io_uring (425-427) — stubs.
+//   - New mount API (428-433) — stubs.
+//   - process_madvise (440) / process_mrelease (448) / futex_waitv (449).
+//   - set_mempolicy_home_node (450).
+//   - cachestat (451) / fchmodat2 (452) / map_shadow_stack (453).
+//   - futex_wake (454) / futex_wait (455) / futex_requeue (456).
+//   - statmount (457) / listmount (458).
+//   - lsm_get_self_attr (459) / lsm_set_self_attr (460) / lsm_list_modules (461).
+//   - mseal (462) — VMA sealing (kernel 6.10+).
+//   - setxattrat (463) / getxattrat (464) / listxattrat (465) /
+//     removexattrat (466) — kernel 6.13+ *at-style xattrs.
+//   - open_tree_attr (467) — kernel 6.15+.
+//   - file_getattr (468) / file_setattr (469) — kernel 6.17+.
+//   - listns (470) / rseq_slice_yield (471) — kernel 6.19+.
 //
 // Most of these are stubs (returning -ENOSYS or 0) — the goal is for the
 // guest to at least SEE a sensible return code rather than the universal
-// "all unknown syscalls return -ENOSYS" of 1.4.5-alpha. Real semantics
-// for the hot paths (xattr, copy_file_range, pidfd_*) are implemented.
+// "all unknown syscalls return -ENOSYS". Real semantics for the hot paths
+// (xattr, copy_file_range, pidfd_*) are implemented.
 //
 // Dispatch order in syscall_misc() (misc.cpp):
 //   misc_signal → misc_io → misc_process → misc_wait → misc_extended
@@ -50,7 +41,6 @@
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"
-
 #include <algorithm>
 #include <cstring>
 #include <errno.h>
@@ -65,9 +55,7 @@
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 // ── Helper: read a path string from guest memory ───────────────────────
 // Reads up to PATH_MAX bytes from `addr`, stopping at NUL. Returns "" on
 // error. The returned std::string is null-terminated.
@@ -85,7 +73,6 @@ static std::string read_path(Memory& mem, uint64_t addr) {
     }
     return s;
 }
-
 // ── xattr family ───────────────────────────────────────────────────────
 // AArch64 syscall numbers (per asm-generic/unistd.h, which AArch64 follows):
 //   5  = setxattr(path, name, value, size, flags)
@@ -100,16 +87,6 @@ static std::string read_path(Memory& mem, uint64_t addr) {
 //   14 = removexattr(path, name)
 //   15 = lremovexattr(path, name)
 //   16 = fremovexattr(fd, name)
-//
-// BUGFIX (this turn): the previous version of this file mapped the xattr
-// family to syscall numbers 188-197. Those numbers are actually the SysV
-// IPC family (msgrcv, msgsnd, semget, semctl, semtimedop, semop, shmget,
-// shmctl, shmat, shmdt). Real AArch64 binaries calling xattr got -ENOSYS
-// because no handler existed at 5-16, while real binaries calling SysV
-// IPC silently got xattr behavior (wrong return value, no side effect).
-// Fixed by moving the cases to the correct numbers and adding -ENOSYS
-// stubs for the SysV IPC range so those callers see a clean error.
-
 static int64_t do_getxattr(Memory& mem, CPU& cpu, int kind) {
     // kind: 0=getxattr, 1=lgetxattr, 2=fgetxattr
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2], a3 = cpu.regs[3];
@@ -135,7 +112,6 @@ static int64_t do_getxattr(Memory& mem, CPU& cpu, int kind) {
     ret_host(static_cast<uint64_t>(r));
     return 0;
 }
-
 static int64_t do_setxattr(Memory& mem, CPU& cpu, int kind) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2],
              a3 = cpu.regs[3], a4 = cpu.regs[4];
@@ -158,7 +134,6 @@ static int64_t do_setxattr(Memory& mem, CPU& cpu, int kind) {
     ret_host(0);
     return 0;
 }
-
 static int64_t do_listxattr(Memory& mem, CPU& cpu, int kind) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     std::vector<char> list;
@@ -181,14 +156,12 @@ static int64_t do_listxattr(Memory& mem, CPU& cpu, int kind) {
     ret_host(static_cast<uint64_t>(r));
     return 0;
 }
-
 // ── misc_extended dispatcher ───────────────────────────────────────────
 int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& mem_ = emu.mem();
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a5;
-
     switch (num) {
         // ── xattr family (5-16, per asm-generic/unistd.h) ─────────────
         case 5:  return do_setxattr(mem_, cpu, 0);  // setxattr
@@ -223,7 +196,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
-
         // ── POSIX interval timers (102-103, 107-112) ──────────────────
         // getitimer/setitimer (102/103) are widely used by signal-based
         // profilers and SIGALRM-based timers. We forward to the host.
@@ -274,7 +246,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // clock_settime — we're not authorized to change the host clock;
         // return -EPERM (matches what an unprivileged process gets).
         case 112: { ret_host(static_cast<int64_t>(-EPERM)); return 0; }
-
         // ── sched_setparam/setscheduler/getscheduler/getparam (118-121) ─
         // The guest is a single-process sandbox; we accept setparam and
         // return success. getscheduler returns SCHED_OTHER (0).
@@ -297,7 +268,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(0); return 0;
         }
-
         // ── Identity / process-group syscalls ────────────────────────
         // We're a single-process guest running as root (uid 0). set*id
         // calls succeed silently (we're already 0); get*id calls return 0.
@@ -347,14 +317,12 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 157: { // setsid() — become session leader; return 1
             ret_host(1); return 0;
         }
-
         // ── setrlimit (164) ───────────────────────────────────────────
         // Accept but don't actually enforce. The guest can't escape the
         // host's limits anyway. (getrlimit at 163 is in misc_id.cpp.)
         case 164: { // setrlimit(resource, rlim)
             ret_host(0); return 0;
         }
-
         // ── SysV IPC stubs (186-197) ──────────────────────────────────
         // We don't implement SysV message queues, semaphores, or shared
         // memory. Return -ENOSYS so callers (rare on modern Linux — most
@@ -364,7 +332,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 194: case 195: case 196: case 197:  // shmget/shmctl/shmat/shmdt
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
-
         // ── mlock family (228-231, 284) ───────────────────────────────
         // We're a user-mode emulator; locking guest pages doesn't really
         // apply. Silently succeed so callers (cryptographic libraries,
@@ -384,7 +351,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 284: { // mlock2(addr, len, flags)
             ret_host(0); return 0;
         }
-
         // ── rt_tgsigqueueinfo (240) ───────────────────────────────────
         // Like rt_sigqueueinfo but thread-targeted. We don't support
         // sending signals between threads via this syscall; return
@@ -393,14 +359,12 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── perf_event_open (241) ─────────────────────────────────────
         // Already a stub; keep here as a safety net.
         case 241: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
         // ── recvmmsg (243) / sendmmsg (269) ───────────────────────────
         // Vectorized socket send/recv. Forward to host for real sockets
-        // with proper mmsghdr marshaling (Turn 102).
+        // with proper mmsghdr marshaling.
         //
         // struct mmsghdr {
         //     struct msghdr msg_hdr;   // 56 bytes on AArch64
@@ -563,7 +527,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── setns (268) ───────────────────────────────────────────────
         // Reassociate the calling thread with a namespace. We don't have
         // real namespaces; -EINVAL is what the kernel returns for an
@@ -572,7 +535,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-EINVAL));
             return 0;
         }
-
         // ── sched_setattr / sched_getattr (274, 275) ──────────────────
         // New Linux scheduling API. Stub: setattr succeeds; getattr
         // returns a zeroed sched_attr (size 0, SCHED_OTHER).
@@ -593,7 +555,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(0); return 0;
         }
-
         // ── epoll_pwait2 (441) ────────────────────────────────────────
         // Like epoll_pwait but with a timespec timeout. We forward to
         // epoll_wait (ignoring sigmask; same as case 22).
@@ -627,7 +588,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(n);
             return 0;
         }
-
         // ── name_to_handle_at (264) / open_by_handle_at (265) ─────────
         // These are used by NFS-style filesystems and some container
         // runtimes. We forward to the host kernel — the file_handle
@@ -646,7 +606,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── kcmp (272) ────────────────────────────────────────────────
         // Compares two processes' resources to see if they share a
         // kernel object. Used by Steam, Mesa, Mesa's shader cache.
@@ -677,7 +636,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(1);  // different processes
             return 0;
         }
-
         // ── membarrier (283) ──────────────────────────────────────────
         // Issues a memory barrier on all (or a subset of) threads.
         // For our purposes the JIT already emits proper fence
@@ -695,7 +653,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── copy_file_range (285) ─────────────────────────────────────
         // Copies data between two file descriptors without userspace
         // buffer. We forward to the host (Linux 4.x+).
@@ -721,7 +678,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── preadv2 (286) / pwritev2 (287) ────────────────────────────
         // Same as preadv/pwritev but with flags. We forward to the host.
         case 286: { // preadv2(fd, iov, iovcnt, offset_l, offset_h, flags)
@@ -802,7 +758,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── pkey_mprotect (288) / pkey_alloc (289) / pkey_free (290) ──
         // Memory protection keys. We don't have real MPK support, but
         // mprotect-with-pkey is just mprotect-ignore-pkey (the kernel
@@ -823,7 +778,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         case 290: { // pkey_free(pkey)
             ret_host(0); return 0;
         }
-
         // ── pidfd_open (434) ──────────────────────────────────────────
         // Returns a file descriptor referring to a process. We can't
         // safely open a host pidfd for a guest process (the guest PID
@@ -848,21 +802,18 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── io_uring (425, 426, 427) ──────────────────────────────────
         // We don't implement io_uring. Return -ENOSYS so guests fall
         // back to thread-pool + epoll.
         case 425: case 426: case 427:
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
-
         // ── Filesystem mount API (428-433) ────────────────────────────
         // The new (Linux 5.1+) mount API: open_tree, move_mount, fsopen,
         // fsconfig, fsmount, fspick. We don't implement any of these.
         case 428: case 429: case 430: case 431: case 432: case 433:
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
-
         // ── process_madvise (440) ─────────────────────────────────────
         // Like madvise but on another process's memory. We're single-
         // process; return success for the same-pid case.
@@ -870,19 +821,15 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(a2));  // pretend we advised all bytes
             return 0;
         }
-
         // ── process_mrelease (448) ────────────────────────────────────
         // Releases the memory of a dying process. Stub: success.
         case 448: { ret_host(0); return 0; }
-
         // ── futex_waitv (449) ─────────────────────────────────────────
         // Vectorized futex wait (multi-word). We don't implement this
         // yet — return -ENOSYS so guests fall back to FUTEX_WAIT.
         case 449: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
         // ── set_mempolicy_home_node (450) ─────────────────────────────
         case 450: { ret_host(0); return 0; }  // stub: success
-
         // ── cachestat (451) ───────────────────────────────────────────
         // Returns page cache statistics for a file. We return success
         // with zeros (no cache info).
@@ -896,7 +843,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(0); return 0;
         }
-
         // ── fchmodat2 (452) ───────────────────────────────────────────
         // Like fchmodat but with a flags arg. We forward to fchmodat
         // (ignoring flags) for compat.
@@ -908,32 +854,45 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
-
         // ── map_shadow_stack (453) ────────────────────────────────────
         // Allocates a shadow stack (Intel CET). AArch64 doesn't have
         // CET; return -ENOSYS.
         case 453: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
-        // ── futex2 (454) ──────────────────────────────────────────────
-        // futex_wake / futex_wait / futex_requeue. Return -ENOSYS to
-        // force fallback to old futex.
-        case 454: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
-        // ── statmount (455) / listmount (456) ─────────────────────────
-        // New mount-info syscalls. Stub.
-        case 455: case 456: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
-        // ── LSM (457, 458, 459) ───────────────────────────────────────
-        // Linux Security Module introspection. Stub.
-        case 457: case 458: case 459: {
+        // ── futex_wake / futex_wait / futex_requeue (454/455/456) ──────
+        // Split futex API (kernel 6.7+). Return -ENOSYS to force fallback
+        // to the legacy futex syscall (99).
+        case 454: case 455: case 456:
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        // ── statmount (457) / listmount (458) ─────────────────────────
+        // Mount-info query syscalls (kernel 6.8+). Stub.
+        case 457: case 458: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        // ── LSM self-attr introspection (459/460/461) ─────────────────
+        // Linux Security Module introspection (kernel 6.5+). Stub.
+        case 459: case 460: case 461: {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── mseal (462) ───────────────────────────────────────────────
-        // Seals a VMA's protections (Linux 6.10+). Stub: success.
+        // Seals a VMA's protections (kernel 6.10+). Stub: success.
         case 462: { ret_host(0); return 0; }
-
+        // ── *at-style xattr (463-466) — kernel 6.13+ ──────────────────
+        // setxattrat / getxattrat / listxattrat / removexattrat.
+        // Stub: -ENOSYS (callers fall back to classic xattr).
+        case 463: case 464: case 465: case 466: {
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
+        // ── open_tree_attr (467) — kernel 6.15+ ───────────────────────
+        // open_tree() variant that also sets mount attributes atomically.
+        case 467: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        // ── file_getattr (468) / file_setattr (469) — kernel 6.17+ ────
+        // Modern extensible replacements for FS_IOC_FSGETXATTR/FS_IOC_FSSETXATTR.
+        case 468: case 469: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        // ── listns (470) / rseq_slice_yield (471) — kernel 6.19+ ──────
+        // listns: enumerate namespaces. rseq_slice_yield: side-effect-free
+        // CPU-slice yield for restartable-sequence critical sections.
+        case 470: case 471: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
         // ── capget (90) / capset (91) ─────────────────────────────────
         // Linux capabilities. We're a single-user guest with full perms;
         // return a fully-capable set for capget, accept capset silently.
@@ -954,7 +913,6 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             // Accept silently.
             ret_host(0); return 0;
         }
-
         // ── personality (92) ──────────────────────────────────────────
         // Sets the process execution domain. We accept reads (return
         // PER_LINUX = 0) and silently ignore writes.
@@ -964,42 +922,32 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);  // PER_LINUX
             return 0;
         }
-
         // ── sethostname (161) ─────────────────────────────────────────
         // Sets the host name. Stub: success (don't actually change host).
         case 161: { ret_host(0); return 0; }
-
         // ── getdomainname (168 via old syscall) / setdomainname (162) ─
         case 162: { ret_host(0); return 0; }
-
         // ── getcpu (168) — handled in misc_sched.cpp (runs earlier in
         //    the dispatch chain). Removed duplicate here.
-
         // ── signalfd (282 via old) / signalfd4 (74) ───────────────────
         // 74 is in misc_io.cpp; nothing to do here.
-
         // ── fanotify_init (300) / fanotify_mark (301) ─────────────────
         // Filesystem event monitoring. Stub: -ENOSYS (guests fall back
         // to inotify, which we support at cases 26-28).
         case 300: case 301: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
         // ── perf_event_open (241) — handled at the top of this switch
         //    (case 241 returns -ENOSYS). Removed duplicate here.
-
         // ── landlock_create_ruleset (444) / landlock_add_rule (445) /
         //    landlock_restrict_self (446) ──────────────────────────────
         case 444: case 445: case 446: {
             ret_host(static_cast<int64_t>(-ENOSYS));
             return 0;
         }
-
         // ── seccomp (277) ─────────────────────────────────────────────
         // Already a stub elsewhere? Add a safety net here.
         case 277: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
 }
-
 } // namespace arm64emu

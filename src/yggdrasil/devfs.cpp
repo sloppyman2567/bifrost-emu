@@ -29,7 +29,6 @@
 #include "audio/audio.h"
 #include "frost/graphics.hpp"
 #include "frost/input.hpp"
-
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
@@ -38,9 +37,7 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 // /dev directory listing. Only the entries we actually handle.
 static std::vector<DirNode::Entry> dev_entries() {
     return {
@@ -61,7 +58,6 @@ static std::vector<DirNode::Entry> dev_entries() {
         {"pts",     0x4 /*DT_DIR*/},
     };
 }
-
 // /dev/input directory listing. We expose a single event device
 // (event0) that aggregates keyboard + mouse events from the SDL2
 // window. Real Linux has /dev/input/event0..eventN (one per device);
@@ -74,7 +70,6 @@ static std::vector<DirNode::Entry> dev_input_entries() {
         {"js0",    0x2 /*DT_CHR*/},
     };
 }
-
 // Helper: open /dev/random or /dev/urandom via getrandom(). We can't
 // create a HostNode from getrandom (it's a syscall, not an fd), so we
 // use a memfd seeded with random bytes. For /dev/random we use
@@ -106,25 +101,21 @@ static std::unique_ptr<Node> open_random_node(bool blocking_pool, int flags) {
         blocking_pool ? "bifrost-dev-random" : "bifrost-dev-urandom",
         regen, flags);
 }
-
 std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
                                             int flags, mode_t mode, int* err_out) {
     // ── /dev directory listing ─────────────────────────────────────
     if (path == "/dev" || path == "/dev/") {
         return std::make_unique<DirNode>("/dev", dev_entries(), flags);
     }
-
     // /dev/null, /dev/zero → host passthrough
     if (path == "/dev/null" || path == "/dev/zero") {
         int fd = ::openat(AT_FDCWD, path.c_str(), flags, mode);
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-
     // /dev/random vs /dev/urandom — distinct pools (v1.4.5-alpha).
     if (path == "/dev/random")  return open_random_node(/*blocking=*/true,  flags);
     if (path == "/dev/urandom") return open_random_node(/*blocking=*/false, flags);
-
     // /dev/fb0 → virtual framebuffer (memfd-backed via GraphicsBackend)
     if (path == "/dev/fb0") {
         if (!gfx_) { *err_out = -ENODEV; return nullptr; }
@@ -132,14 +123,12 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if (guest_fd < 0) { *err_out = -ENODEV; return nullptr; }
         return std::make_unique<FbNode>(guest_fd, flags, gfx_);
     }
-
     // /dev/tty → open the host's controlling terminal.
     if (path == "/dev/tty") {
         int fd = ::openat(AT_FDCWD, "/dev/tty", flags, mode);
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-
     // /dev/stdin, /dev/stdout, /dev/stderr → dup the host fd.
     if (path == "/dev/stdin") {
         int r = ::dup(0);
@@ -156,7 +145,6 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if (r < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(r, flags);
     }
-
     // /dev/snd, /dev/dsp, /dev/audio → audio backend (PCM buffer + WAV dump)
     if (path == "/dev/snd" || path == "/dev/dsp" || path == "/dev/audio") {
         if (audio_) {
@@ -171,15 +159,12 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-
-    // /dev/input → directory listing (Turn 38)
+    // /dev/input → directory listing
     if (path == "/dev/input" || path == "/dev/input/") {
         return std::make_unique<DirNode>("/dev/input", dev_input_entries(), flags);
     }
-
     // /dev/input/eventX, /dev/input/mice, /dev/input/mouse0, /dev/input/js0
     // → input backend (FrostInput, owned by FrostGraphics).
-    // Turn 39: different paths return different event formats:
     //   - eventX: 24-byte input_event records (EV_KEY/EV_REL/EV_ABS)
     //   - js0:    8-byte js_event records (JS_EVENT_BUTTON/AXIS)
     //   - mice/mouse0: ImPS/2 packets (not yet implemented)
@@ -206,23 +191,19 @@ std::unique_ptr<Node> Yggdrasil::open_devfs(const std::string& path,
         *err_out = -ENODEV;
         return nullptr;
     }
-
     // /dev/ptmx → pseudo-terminal master (passthrough for interactive apps)
     if (path == "/dev/ptmx") {
         int fd = ::openat(AT_FDCWD, "/dev/ptmx", flags, mode);
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-
     // /dev/pts/N → pseudo-terminal slaves (passthrough)
     if (path.rfind("/dev/pts/", 0) == 0) {
         int fd = ::openat(AT_FDCWD, path.c_str(), flags, mode);
         if (fd < 0) { *err_out = -errno; return nullptr; }
         return std::make_unique<HostNode>(fd, flags);
     }
-
     *err_out = 0;
     return nullptr;  // not a /dev path we handle
 }
-
 } // namespace arm64emu::yggdrasil

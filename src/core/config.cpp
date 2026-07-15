@@ -3,7 +3,6 @@
 // Tiny TOML-subset parser (~200 LOC) + env-var bridge + validators.
 // See include/bifrost/config.hpp for the format spec.
 #include "bifrost/config.hpp"
-
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -11,18 +10,14 @@
 #include <iostream>
 #include <sstream>
 #include <unordered_map>
-
 namespace arm64emu {
-
 // ── Helpers ────────────────────────────────────────────────────────────
-
 static std::string trim(const std::string& s) {
     size_t a = 0, b = s.size();
     while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) a++;
     while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) b--;
     return s.substr(a, b - a);
 }
-
 static std::string strip_comment(const std::string& s) {
     // Strip a trailing # comment, honoring that # inside a quoted string
     // is not a comment. (We don't currently allow # in unquoted values
@@ -41,7 +36,6 @@ static std::string strip_comment(const std::string& s) {
     }
     return s;
 }
-
 static bool parse_bool(const std::string& v, bool& out) {
     std::string s = trim(v);
     std::transform(s.begin(), s.end(), s.begin(),
@@ -50,7 +44,6 @@ static bool parse_bool(const std::string& v, bool& out) {
     if (s == "false" || s == "no" || s == "off" || s == "0") { out = false; return true; }
     return false;
 }
-
 static bool parse_int(const std::string& v, int64_t& out) {
     std::string s = trim(v);
     if (s.empty()) return false;
@@ -65,10 +58,8 @@ static bool parse_int(const std::string& v, int64_t& out) {
         return true;
     } catch (...) { return false; }
 }
-
 // (parse_float removed — no float config keys currently exist. If one is
 // added later, reintroduce a std::stod-based parser here.)
-
 // Strip surrounding quotes from a string value. Returns true if quotes
 // were present and stripped; false (and leaves `v` unchanged) otherwise.
 static bool unquote(std::string& v) {
@@ -105,7 +96,6 @@ static bool unquote(std::string& v) {
     }
     return false;
 }
-
 // ── Config::defaults ───────────────────────────────────────────────────
 Config Config::defaults() {
     Config c;
@@ -114,7 +104,6 @@ Config Config::defaults() {
     // single point of truth if defaults change.
     return c;
 }
-
 // ── Config::load_from_string ───────────────────────────────────────────
 // Parses a TOML-subset string and applies it to this Config. Unknown
 // sections / keys are silently ignored (forward-compat). Malformed lines
@@ -124,7 +113,6 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
     std::string line;
     int lineno = 0;
     std::string section;
-
     auto set_field = [&](const std::string& key, const std::string& raw_val) -> bool {
         // [jit]
         if (section == "jit") {
@@ -182,13 +170,11 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
         // Unknown section / key — silently ignored for forward compat.
         return true;
     };
-
     while (std::getline(ss, line)) {
         lineno++;
         std::string l = strip_comment(line);
         l = trim(l);
         if (l.empty()) continue;
-
         // Section header.
         if (l.front() == '[') {
             if (l.back() != ']') {
@@ -198,7 +184,6 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
             section = trim(l.substr(1, l.size() - 2));
             continue;
         }
-
         // key = value
         size_t eq = l.find('=');
         if (eq == std::string::npos) {
@@ -218,7 +203,6 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
     }
     return true;
 }
-
 // ── Config::load_from_file ─────────────────────────────────────────────
 bool Config::load_from_file(const std::string& path, std::string& err) {
     if (path.empty()) return true;
@@ -236,7 +220,6 @@ bool Config::load_from_file(const std::string& path, std::string& err) {
     ss << f.rdbuf();
     return load_from_string(ss.str(), err);
 }
-
 // ── Config::apply_env ──────────────────────────────────────────────────
 // Apply BIFROST_* env vars on top of the config. Env vars always win
 // over the config file (precedence rule). Inverted knobs (e.g.
@@ -251,7 +234,6 @@ void Config::apply_env() {
     auto env_str = [](const char* name, std::string& out) {
         if (const char* v = getenv(name)) out = v;
     };
-
     // [jit]
     // BIFROST_NO_JIT is an INVERTED knob: BIFROST_NO_JIT=1 means
     // jit_enabled=false, BIFROST_NO_JIT=0 means jit_enabled=true. We must
@@ -277,29 +259,23 @@ void Config::apply_env() {
         int64_t n;
         if (parse_int(v, n) && n >= 0) jit_threshold = static_cast<uint64_t>(n);
     }
-
     // [thunk]
     env_bool("BIFROST_THUNK_GRAPHICS", thunk_graphics);
     env_bool("BIFROST_THUNK_AUDIO",    thunk_audio);
     env_bool("BIFROST_THUNK_DISPLAY",  thunk_display);
     env_bool("BIFROST_THUNK_TRACE",    thunk_trace);
-
     // [paths]
     env_str ("BIFROST_ROOT",           rootfs_path);
-
     // [signal]
     env_bool("BIFROST_SYSCALL_TRACE",  trace_syscalls);
-
     // [log]
     env_bool("BIFROST_VERBOSE",        log_verbose);
     env_bool("BIFROST_TRACE",          log_trace);
 }
-
 // ── Config::dump ───────────────────────────────────────────────────────
 void Config::dump(std::string& out) const {
     std::ostringstream ss;
     ss << "# bifrost-emu config (v1.5.0.alpha)\n\n";
-
     ss << "[jit]\n";
     ss << "enabled     = " << (jit_enabled     ? "true" : "false") << "\n";
     ss << "threshold   = " << jit_threshold    << "\n";
@@ -311,57 +287,47 @@ void Config::dump(std::string& out) const {
     ss << "no_wex      = " << (jit_no_wex      ? "true" : "false") << "\n";
     ss << "no_fma3     = " << (jit_no_fma3     ? "true" : "false") << "\n";
     ss << "\n";
-
     ss << "[fb]\n";
     ss << "width  = " << fb_width  << "\n";
     ss << "height = " << fb_height << "\n";
     ss << "bpp    = " << static_cast<int>(fb_bpp) << "\n";
     ss << "dump   = \"" << fb_dump_path << "\"\n";
     ss << "\n";
-
     ss << "[audio]\n";
     ss << "sample_rate = " << audio_sample_rate << "\n";
     ss << "channels    = " << static_cast<int>(audio_channels) << "\n";
     ss << "sample_size = " << static_cast<int>(audio_sample_size) << "\n";
     ss << "dump        = \"" << audio_dump_path << "\"\n";
     ss << "\n";
-
     ss << "[thunk]\n";
     ss << "graphics = " << (thunk_graphics ? "true" : "false") << "\n";
     ss << "audio    = " << (thunk_audio    ? "true" : "false") << "\n";
     ss << "display  = " << (thunk_display  ? "true" : "false") << "\n";
     ss << "trace    = " << (thunk_trace    ? "true" : "false") << "\n";
     ss << "\n";
-
     ss << "[paths]\n";
     ss << "rootfs = \"" << rootfs_path << "\"\n";
     ss << "cwd    = \"" << guest_cwd   << "\"\n";
     ss << "\n";
-
     ss << "[signal]\n";
     ss << "forward_host    = " << (forward_host_signals ? "true" : "false") << "\n";
     ss << "trace_syscalls  = " << (trace_syscalls       ? "true" : "false") << "\n";
     ss << "\n";
-
     ss << "[perf]\n";
     ss << "stats_interval = " << perf_stats_interval << "\n";
     ss << "\n";
-
     ss << "[log]\n";
     ss << "verbose     = " << (log_verbose     ? "true" : "false") << "\n";
     ss << "trace       = " << (log_trace       ? "true" : "false") << "\n";
     ss << "brk_verbose = " << (log_brk_verbose ? "true" : "false") << "\n";
     ss << "\n";
-
     out = ss.str();
 }
-
 // ── Config::validate ───────────────────────────────────────────────────
 // Clamp out-of-range values and fix inconsistent combinations. Returns
 // the number of fixes applied (0 = clean config).
 int Config::validate() {
     int fixes = 0;
-
     // FB sanity: at least 1x1, at most 8K x 8K (avoids OOM on bogus
     // configs). bpp must be 16, 24, or 32.
     if (fb_width == 0)        { fb_width = 1280; fixes++; }
@@ -369,7 +335,6 @@ int Config::validate() {
     if (fb_width  > 8192)     { fb_width  = 8192; fixes++; }
     if (fb_height > 8192)     { fb_height = 8192; fixes++; }
     if (fb_bpp != 16 && fb_bpp != 24 && fb_bpp != 32) { fb_bpp = 32; fixes++; }
-
     // Audio sanity.
     if (audio_sample_rate == 0)              { audio_sample_rate = 44100; fixes++; }
     if (audio_sample_rate > 384000)          { audio_sample_rate = 384000; fixes++; }
@@ -377,20 +342,16 @@ int Config::validate() {
     if (audio_sample_size != 1 && audio_sample_size != 2 && audio_sample_size != 3 && audio_sample_size != 4) {
         audio_sample_size = 2; fixes++;
     }
-
     // JIT threshold is uint64; huge values effectively mean "never JIT"
     // which is fine. Negative thresholds (which can't happen because
     // the field is unsigned) would also be fine.
-
     // guest_cwd must be absolute.
     if (!guest_cwd.empty() && guest_cwd[0] != '/') {
         guest_cwd = "/" + guest_cwd;
         fixes++;
     }
-
     return fixes;
 }
-
 // ── find_config_file ───────────────────────────────────────────────────
 std::string find_config_file() {
     // 1. $BIFROST_CONFIG
@@ -438,5 +399,4 @@ std::string find_config_file() {
     }
     return "";
 }
-
 } // namespace arm64emu

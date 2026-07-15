@@ -10,7 +10,6 @@
 // (no third-party deps). When built with USE_SDL2=1, the refresh()
 // method opens an SDL2 window and pushes the framebuffer to it on
 // every call, allowing graphical guest programs to run interactively.
-
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"          // GraphicThunk full definition (for unique_ptr dtor)
 #include "frost/audio_thunk.hpp"    // v1.5.0.alpha: AudioThunk
@@ -26,13 +25,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string>
-
 #if defined(BIFROST_USE_SDL2)
 #  include <SDL2/SDL.h>
 #endif
-
 namespace arm64emu {
-
 #if defined(BIFROST_USE_SDL2)
 // ── SDL2 backend state ──────────────────────────────────────────────────
 // All SDL2 state is kept in this struct so the header doesn't need to
@@ -43,12 +39,10 @@ struct SDLWindowState {
     SDL_Texture*  texture  = nullptr;
     bool          want_close = false;
 };
-
 static SDLWindowState* sdl_state(void* p) {
     return static_cast<SDLWindowState*>(p);
 }
 #endif
-
 // ── Linux framebuffer structs (sufficient subset) ──────────────────────
 // These match the kernel's struct fb_var_screeninfo and struct
 // fb_fix_screeninfo for the fields that real fb programs query. We
@@ -58,7 +52,6 @@ static SDLWindowState* sdl_state(void* p) {
 // Layout note: we use explicit padding to match the kernel ABI on
 // aarch64/x86_64 (both are 64-bit little-endian, so the struct
 // padding is identical).
-
 struct fb_var_screeninfo {
     uint32_t xres;          // visible resolution
     uint32_t yres;
@@ -68,13 +61,11 @@ struct fb_var_screeninfo {
     uint32_t yoffset;
     uint32_t bits_per_pixel;
     uint32_t grayscale;
-
     struct {
         uint32_t offset;    // bitfield offset
         uint32_t length;    // bitfield length
         uint32_t msb_right; // MSB != 0?
     } red, green, blue, transp;
-
     uint32_t nonstd;        // non-standard pixel format
     uint32_t activate;
     uint32_t height;        // physical mm
@@ -87,7 +78,6 @@ struct fb_var_screeninfo {
     uint32_t vmode;
     uint32_t reserved[6];
 };
-
 struct fb_fix_screeninfo {
     char     id[16];        // "bifrost_fb"
     unsigned long smem_start;  // unused (we're not on real hardware)
@@ -103,14 +93,12 @@ struct fb_fix_screeninfo {
     uint16_t capabilities;
     uint16_t reserved[2];
 };
-
 // ── Constructor / Destructor ───────────────────────────────────────────
 // Out-of-line because the unique_ptr<GraphicThunk> and unique_ptr<FrostInput>
 // members need the full types (defined in thunk.cpp and input.cpp).
 FrostGraphics::FrostGraphics() {
     input_ = std::make_unique<FrostInput>();
 }
-
 FrostGraphics::~FrostGraphics() {
 #if defined(BIFROST_USE_SDL2)
     if (sdl_state_) {
@@ -133,7 +121,6 @@ FrostGraphics::~FrostGraphics() {
         close(fb_fd_);
     }
 }
-
 // ── init() ─────────────────────────────────────────────────────────────
 bool FrostGraphics::init(uint32_t width, uint32_t height) {
     // Reject absurd sizes early. Real fb programs sometimes probe with
@@ -143,7 +130,6 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
                 width, height);
         return false;
     }
-
     // Clean up any prior state (idempotent init).
     if (fb_data_ && fb_data_ != MAP_FAILED) {
         munmap(fb_data_, size());
@@ -153,10 +139,8 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
         close(fb_fd_);
         fb_fd_ = -1;
     }
-
     width_  = width;
     height_ = height;
-
     // Create a memfd to back the framebuffer. The guest will mmap
     // this fd and write pixels directly into it. memfd_create gives
     // us a sealed, anonymous file that's perfect for this.
@@ -166,7 +150,6 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
                 strerror(errno));
         return false;
     }
-
     // Size the memfd to the framebuffer size.
     size_t fb_size = size();
     if (ftruncate(fb_fd_, (off_t)fb_size) < 0) {
@@ -176,7 +159,6 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
         fb_fd_ = -1;
         return false;
     }
-
     // Map it into our address space too — needed for refresh() and
     // dump_to_ppm() to read the pixels the guest wrote.
     fb_data_ = mmap(nullptr, fb_size, PROT_READ | PROT_WRITE,
@@ -188,16 +170,13 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
         fb_fd_ = -1;
         return false;
     }
-
     // Clear to black (BGRA 0,0,0,0).
     memset(fb_data_, 0, fb_size);
-
 #if defined(BIFROST_USE_SDL2)
     // Initialize SDL2 (only video subsystem). If this fails, we silently
     // fall back to headless mode — the framebuffer still works for
     // dump_to_ppm() etc., just without a live window.
     //
-    // Turn 38: SDL2 init is deferred to first refresh()/poll_events()
     // call, NOT done eagerly in init(). This lets headless programs
     // (which never display the fb) avoid opening an SDL2 window. The
     // sdl_init_done_ flag tracks whether SDL_Init has been called.
@@ -255,7 +234,6 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
         }
     }
 #endif
-
     if (getenv("BIFROST_GRAPHICS_VERBOSE")) {
         fprintf(stderr,
             "[graphics] framebuffer initialized: %ux%u, %zu bytes, fd=%d%s\n",
@@ -269,7 +247,6 @@ bool FrostGraphics::init(uint32_t width, uint32_t height) {
     }
     return true;
 }
-
 // ── open_dev_fb0() ─────────────────────────────────────────────────────
 int FrostGraphics::open_dev_fb0() {
     if (!ready()) {
@@ -291,7 +268,6 @@ int FrostGraphics::open_dev_fb0() {
     }
     return guest_fd;
 }
-
 // ── dump_to_ppm() ──────────────────────────────────────────────────────
 bool FrostGraphics::dump_to_ppm(const std::string& path) const {
     if (!fb_data_ || fb_data_ == MAP_FAILED) {
@@ -302,17 +278,14 @@ bool FrostGraphics::dump_to_ppm(const std::string& path) const {
         fprintf(stderr, "[graphics] dump_to_ppm: zero-size framebuffer\n");
         return false;
     }
-
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) {
         fprintf(stderr, "[graphics] dump_to_ppm: cannot open '%s': %s\n",
                 path.c_str(), strerror(errno));
         return false;
     }
-
     // PPM P6 header: "P6\n<width> <height>\n255\n" then raw RGB bytes.
     fprintf(f, "P6\n%u %u\n255\n", width_, height_);
-
     // Framebuffer is 32-bit BGRA. PPM is 24-bit RGB. We drop alpha
     // and swap B/R on the fly. We use a per-row buffer to amortize
     // the fwrite calls.
@@ -338,7 +311,6 @@ bool FrostGraphics::dump_to_ppm(const std::string& path) const {
     fclose(f);
     return true;
 }
-
 // ── owns_fd() ──────────────────────────────────────────────────────────
 bool FrostGraphics::owns_fd(int fd) const {
     if (fd < 0 || fb_fd_ < 0) return false;
@@ -351,19 +323,16 @@ bool FrostGraphics::owns_fd(int fd) const {
     if (::fstat(fb_fd_, &b) != 0) return false;
     return a.st_ino == b.st_ino && a.st_dev == b.st_dev;
 }
-
 // ── sync_from() ────────────────────────────────────────────────────────
 void FrostGraphics::sync_from(const void* src) {
     if (fb_data_ && fb_data_ != MAP_FAILED && src) {
         memcpy(fb_data_, src, size());
     }
 }
-
 // ── poll_events() ──────────────────────────────────────────────────────
 // Pumps the SDL2 event loop. Returns false if the user has requested
 // window close (caller may terminate the guest). No-op in headless mode.
 //
-// Turn 38: also pumps the FrostInput event queue, translating SDL2
 // keyboard/mouse events into Linux input_event records. The guest
 // reads them via /dev/input/eventX.
 bool FrostGraphics::poll_events() {
@@ -398,13 +367,11 @@ bool FrostGraphics::poll_events() {
     return true;
 #endif
 }
-
 // ── refresh() ──────────────────────────────────────────────────────────
 void FrostGraphics::refresh() {
     if (!ready()) {
         return;  // nothing to refresh
     }
-
 #if defined(BIFROST_USE_SDL2)
     // SDL2 path: push the framebuffer to the window.
     if (sdl_state_) {
@@ -425,7 +392,6 @@ void FrostGraphics::refresh() {
     // Fall through to headless path if SDL2 init failed at build time
     // or SDL_CreateWindow failed at runtime.
 #endif
-
     // Headless refresh: dump to PPM if the framebuffer has any
     // non-zero pixel (avoids creating empty PPM files for programs
     // that never wrote to the fb).
@@ -453,7 +419,6 @@ void FrostGraphics::refresh() {
                 width_, height_, dump_path_.c_str());
     }
 }
-
 // ── ioctl() ────────────────────────────────────────────────────────────
 int FrostGraphics::ioctl(uint32_t request, void* guest_buf) {
     if (!ready()) {
@@ -522,20 +487,17 @@ int FrostGraphics::ioctl(uint32_t request, void* guest_buf) {
             return 0;
     }
 }
-
 // ── thunk() — experimental graphic API thunking (v1.4.5-alpha) ─────────
 // The thunk() implementation lives in thunk.cpp (where the full
 // GraphicThunk type is visible). This file just declares the method
 // signature in the header; the body is in thunk.cpp.
 //
 // (See frost/graphics.hpp for the design rationale.)
-
-// ── input() — return the FrostInput instance (Turn 38) ─────────────────
+// ── input() — return the FrostInput instance ─────────────────
 FrostInput* FrostGraphics::input() {
     return input_.get();
 }
-
-// ── set_window_title() — set the SDL2 window title (Turn 38) ───────────
+// ── set_window_title() — set the SDL2 window title ───────────
 void FrostGraphics::set_window_title(const std::string& title) {
     window_title_ = title;
 #if defined(BIFROST_USE_SDL2)
@@ -547,8 +509,7 @@ void FrostGraphics::set_window_title(const std::string& title) {
     }
 #endif
 }
-
-// ── set_window_size() — resize the SDL2 window (Turn 38) ───────────────
+// ── set_window_size() — resize the SDL2 window ───────────────
 void FrostGraphics::set_window_size(uint32_t width, uint32_t height) {
     window_width_ = width;
     window_height_ = height;
@@ -563,8 +524,7 @@ void FrostGraphics::set_window_size(uint32_t width, uint32_t height) {
     }
 #endif
 }
-
-// ── has_window() — whether the SDL2 window is open (Turn 38) ───────────
+// ── has_window() — whether the SDL2 window is open ───────────
 bool FrostGraphics::has_window() const {
 #if defined(BIFROST_USE_SDL2)
     return sdl_window_open_;
@@ -572,5 +532,4 @@ bool FrostGraphics::has_window() const {
     return false;
 #endif
 }
-
 } // namespace arm64emu

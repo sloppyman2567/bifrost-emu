@@ -19,33 +19,26 @@
 //       char d_name[];     // NUL-terminated name, padded to 8 bytes
 //   };
 #pragma once
-
 #include "yggdrasil/node.hpp"
-
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
-
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 class DirNode : public Node {
 public:
     struct Entry {
         std::string name;
         uint8_t     type;   // DT_DIR, DT_REG, DT_LNK, DT_CHR, ...
     };
-
     // Construct with an explicit entry list. The DirNode tracks its
     // own read position (advanced by getdents, reset by lseek to 0).
     DirNode(std::string name, std::vector<Entry> entries, int flags)
         : name_(std::move(name)), entries_(std::move(entries)),
           flags_(flags), pos_(0) {}
-
     // Node interface — read/write/lseek return -EISDIR / -ESPIPE.
     ssize_t read(uint64_t, void*, size_t) override { return -EISDIR; }
     ssize_t write(uint64_t, const void*, size_t) override { return -EISDIR; }
@@ -78,20 +71,16 @@ public:
     }
     bool is_dir() const override { return true; }
     int  flags() const override { return flags_; }
-
     // getdents reads from the current pos_ and advances it. The `off`
     // parameter (from the syscall layer) is ignored — we use the
     // internal pos_ so that lseek + getdents work correctly together.
     ssize_t getdents(uint64_t off, void* buf, size_t n) override;
-
     const std::string& name() const { return name_; }
     const std::vector<Entry>& entries() const { return entries_; }
-
 private:
     std::string name_;
     std::vector<Entry> entries_;
     int flags_;
     size_t pos_;  // current read position (entry index)
 };
-
 } // namespace arm64emu::yggdrasil

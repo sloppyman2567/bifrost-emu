@@ -19,7 +19,6 @@
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/host_node.hpp"
 #include "yggdrasil/node.hpp"
-
 #include <cerrno>
 #include <climits>
 #include <sys/statfs.h>
@@ -37,9 +36,7 @@
 #include <dirent.h>
 #include <sys/sysmacros.h>
 #include <sys/mount.h>
-
 namespace arm64emu {
-
 // ── Helper: resolve a guest dirfd to a host dirfd ─────────────────────
 // The guest passes a dirfd to *at syscalls (openat, fstatat, unlinkat, etc.).
 // This can be:
@@ -47,7 +44,6 @@ namespace arm64emu {
 //   - A guest fd from the FdTable: resolve to the underlying host fd
 //   - An invalid fd: return -1 (caller should return -EBADF)
 //
-// BUGFIX (Turn 64): the old code passed `static_cast<int>(a0)` directly
 // to host ::mkdirat/::unlinkat/etc. The FdTable uses arbitrary indices
 // (allocated starting at 3) that have NO relationship to host fds. When
 // a guest program opened a directory and passed its dirfd to fstatat,
@@ -76,7 +72,6 @@ static int resolve_dirfd(FdTable& fds, uint64_t guest_dirfd) {
     int hfd = node->host_fd();
     return hfd;  // may be -1 for virtual nodes
 }
-
 int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -85,7 +80,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
     auto& vfs_ = emu.vfs_;
     auto& fds_ = emu.fds_;
     auto& elf_path_ = emu.elf_path_;
-
     switch (num) {
         // ── openat — REWRITTEN to use VFS ─────────────────────────────
         // The original 164-line inline /proc//dev/ chain is replaced by
@@ -106,7 +100,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(guest_fd);
             return 0;
         }
-
         // ── read — VFS-aware ──────────────────────────────────────────
         case 63: { // read
             auto node = fds_.get(static_cast<int>(a0));
@@ -155,7 +148,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         // ── write — VFS-aware ─────────────────────────────────────────
         case 64: { // write
             auto node = fds_.get(static_cast<int>(a0));
@@ -173,14 +165,12 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         // ── close — VFS-aware ─────────────────────────────────────────
         case 57: { // close
             int r = fds_.close(static_cast<int>(a0));
             ret_host(r);
             return 0;
         }
-
         // ── dup / dup3 — VFS-aware ─────────────────────────────
         // BUGFIX: AArch64 has NO dup2 syscall (only dup3 at 24). The old
         // case 33 was labeled "dup2" but 33 is actually mknodat — when
@@ -212,7 +202,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // BUGFIX: previously implemented as dup2 (which doesn't exist
             // on AArch64). The real syscall at 33 is mknodat. Forward to
             // host mknodat.
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -224,7 +213,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── lseek — VFS-aware ─────────────────────────────────────────
         case 62: { // lseek
             auto node = fds_.get(static_cast<int>(a0));
@@ -233,10 +221,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         // ── fstat — VFS-aware ─────────────────────────────────────────
         case 80: { // fstat(fd, statbuf) — AArch64 80
-            // BUGFIX (Turn 62 rev 3): ALWAYS write stat buf to guest.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
             struct stat st{};
@@ -269,7 +255,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 59: { // pipe2(pipefd, flags) — AArch64 59
             // BUGFIX: previously wrote raw host fds directly to guest
             // memory without registering them in FdTable. Subsequent
@@ -287,9 +272,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 34: { // mkdirat(dirfd, path, mode)
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable, not
             // static_cast<int>(a0) which passed the guest fd index
             // directly to the host.
             int hfd = resolve_dirfd(fds_, a0);
@@ -303,7 +286,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 35: { // unlinkat(dirfd, path, flags)
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
@@ -315,7 +297,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 38: { // renameat(olddirfd, oldpath, newdirfd, newpath)
             int old_hfd = resolve_dirfd(fds_, a0);
             int new_hfd = resolve_dirfd(fds_, a2);
@@ -330,7 +311,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 66: { // writev(fd, iov, iovcnt) — AArch64 66
             // a0=fd, a1=iovec ptr, a2=count
             // BUGFIX: previously called ::write(guest_fd, ...) directly,
@@ -361,7 +341,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(total);
             return 0;
         }
-
         case 65: { // readv(fd, iov, iovcnt) — AArch64 65
             // BUGFIX: previously called ::read(guest_fd, ...) directly,
             // bypassing FdTable. Resolve via FdTable. Also cap iovcnt
@@ -394,7 +373,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(total);
             return 0;
         }
-
         case 67: { // pread64(fd, buf, count, offset) — AArch64 67
             // BUGFIX: previously implemented as preadv64 (iovec array),
             // but 67 is pread64 (single buffer). The old code interpreted
@@ -424,7 +402,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(n));
             return 0;
         }
-
         case 61: { // getdents64(fd, dirent_buf, count)
             // v1.4.5-alpha: dispatch via the Node. DirNode synthesizes
             // linux_dirent64 records for virtual directories (/proc,
@@ -460,7 +437,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(n);
             return 0;
         }
-
         case 291: { // statx (Linux 4.11+, glibc uses it for fstatat fallback)
             // statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
             // Do a real stat on the (remapped) host path and convert to statx.
@@ -486,7 +462,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             //   +0x9C: stx_dio_offset_align (u32), ... (rest is padding)
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a1);
             std::string host_path = yggdrasil::Yggdrasil::remap_path(path);
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -556,11 +531,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 79: { // fstatat / newfstatat(dirfd, pathname, statbuf, flags)
             // Do a real stat on the (mapped) host path so guest programs
             // see correct file sizes, types, and permissions.
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -624,7 +597,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 78: { // readlinkat(dirfd, pathname, buf, bufsiz) — AArch64 78
             // Handle /proc/self/exe specially (return the ELF path).
             // For all other paths, call the host readlinkat so symlinks
@@ -667,7 +639,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 // Call host readlinkat for real filesystem paths.
-                // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
                 int hfd = resolve_dirfd(fds_, a0);
                 if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                     ret_err(EBADF); return 0;
@@ -689,7 +660,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(EFAULT);
             return 0;
         }
-
         case 25: { // fcntl(fd, cmd, arg) — AArch64 25
             // BUGFIX: previously a no-op stub returning 0. This broke
             // F_GETFL/F_SETFL (O_NONBLOCK never applied), F_GETFD/F_SETFD
@@ -702,7 +672,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = node->host_fd();
             switch (cmd) {
                 case F_DUPFD: {  // 0 — duplicate fd, new fd >= arg
-                    // BUGFIX (Turn 64): F_DUPFD takes a `min_fd` argument
                     // in a2. The old code ignored it and always allocated
                     // the lowest available fd, breaking programs that rely
                     // on F_DUPFD returning a fd >= the requested minimum
@@ -715,7 +684,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case F_DUPFD_CLOEXEC: {  // 1030 — duplicate fd with FD_CLOEXEC
-                    // BUGFIX (Turn 64): the old code fell through to the
                     // default case, returning 0 (success). This made the
                     // guest think it got fd=0 (stdin), corrupting stdin
                     // for Python's os.dup, Java fd management, etc.
@@ -796,11 +764,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
             }
         }
-
         case 44: { // fstatfs(fd, buf) — AArch64 44
             // Forward to host fstatfs for real fds. This gives correct
             // f_blocks/f_bfree/f_bavail so `df` shows real disk usage.
-            // BUGFIX (Turn 65): the old code returned a hardcoded struct
             // with f_blocks=0, making `df` show "0-block filesystem".
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
@@ -827,11 +793,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 43: { // statfs(path, buf) — AArch64 43
             // Forward to host statfs for real paths. This gives correct
             // f_blocks/f_bfree/f_bavail so `df` shows real disk usage.
-            // BUGFIX (Turn 65): the old code returned a hardcoded struct
             // with f_blocks=0, making `df` show "0-block filesystem".
             std::string path = yggdrasil::Yggdrasil::remap_path(
                 yggdrasil::Yggdrasil::read_path(mem_, a0));
@@ -853,9 +817,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 48: { // faccessat(dirfd, path, mode, flags) — AArch64 48
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -866,11 +828,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 50: { // fchdir(fd) — AArch64 50
             // BUGFIX: previously called ::fchdir(guest_fd, ...) directly,
             // bypassing FdTable. Resolve via FdTable so virtual fds work.
-            // BUGFIX (Turn 64): if the node has no host_fd (virtual node),
             // return EBADF instead of passing the guest fd index to the host.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
@@ -885,7 +845,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 49: { // chdir(path) — AArch64 49
             std::string guest_path = yggdrasil::Yggdrasil::read_path(mem_, a0);
             // Update the guest-side cwd first (resolves relative paths
@@ -898,11 +857,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 46: { // ftruncate(fd, length) — AArch64 46
             // BUGFIX: previously called ::ftruncate(guest_fd, ...) directly,
             // bypassing FdTable. Resolve via FdTable so virtual fds work.
-            // BUGFIX (Turn 64): return EBADF for virtual fds without host_fd.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
@@ -912,12 +869,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 52: { // fchmod(fd, mode) — AArch64 52
             // BUGFIX: previously labeled "chmod" but AArch64 has no chmod
             // (only fchmodat at 53). The real syscall at 52 is fchmod.
             // Resolve via FdTable so virtual fds work.
-            // BUGFIX (Turn 64): return EBADF for virtual fds without host_fd.
             auto node = fds_.get(static_cast<int>(a0));
             if (!node) { ret_err(EBADF); return 0; }
             int hfd = node->host_fd();
@@ -927,12 +882,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 53: { // fchmodat(dirfd, path, mode, flags) — AArch64 53
             // BUGFIX: previously labeled "fchmod" but 53 is fchmodat.
             // The old code called ::fchmod(fd, mode) treating the dirfd as
             // a fd. Fix: call ::fchmodat(dirfd, path, mode, flags).
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -944,13 +897,11 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 88: { // utimensat(dirfd, path, times, flags) — AArch64 88
             // SECURITY FIX: do NOT cast the guest pointer `a2` directly to
             // `const struct timespec*` — that dereferences garbage host
             // memory and crashes. Read the guest's times array into a
             // local buffer first, then pass that to ::utimensat.
-            // BUGFIX (Turn 64): resolve guest dirfd via FdTable.
             int hfd = resolve_dirfd(fds_, a0);
             if (hfd == -1 && static_cast<int64_t>(a0) != -100) {
                 ret_err(EBADF); return 0;
@@ -978,7 +929,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 37: { // linkat(olddirfd, oldpath, newdirfd, newpath, flags) — AArch64 37
             // AArch64 syscall 37 is linkat, NOT unlink (there is no legacy
             // unlink on AArch64 — only unlinkat at syscall 35). The old
@@ -986,7 +936,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // calls linkat() via musl's link() wrapper). unlink was being
             // called with olddirfd (AT_FDCWD=-100) as a path pointer,
             // returning ENOENT.
-            // BUGFIX (Turn 64): resolve guest dirfds via FdTable.
             int old_hfd = resolve_dirfd(fds_, a0);
             int new_hfd = resolve_dirfd(fds_, a2);
             if ((old_hfd == -1 && static_cast<int64_t>(a0) != -100) ||
@@ -1002,7 +951,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 39: { // umount2(target, flags) — AArch64 39
             // AArch64 syscall 39 is umount2, NOT symlink (which is
             // symlinkat at syscall 36). The old code dispatched 39 to
@@ -1014,7 +962,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 41: { // pivot_root(new_root, put_old) — AArch64 41
             // AArch64 syscall 41 is pivot_root, NOT link (which is
             // linkat at syscall 37). The old code dispatched 41 to
@@ -1025,7 +972,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
-
         case 45: { // truncate(path, length) — AArch64 45
             std::string path = yggdrasil::Yggdrasil::remap_path(yggdrasil::Yggdrasil::read_path(mem_, a0));
             int r = ::truncate(path.c_str(), (off_t)a1);
@@ -1033,7 +979,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 47: { // fallocate(fd, mode, offset, len) — aarch64 47
             // BUGFIX: previously rejected any mode != 0, but
             // FALLOC_FL_KEEP_SIZE (0x01) is a commonly-supported mode that
@@ -1054,7 +999,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r);
             return 0;
         }
-
         case 40: { // mount(source, target, fstype, flags, data) — AArch64 40
             // BUGFIX: previously implemented as sendfile (which is at 71,
             // already handled in misc.cpp). The old code dereferenced
@@ -1064,7 +1008,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EPERM));
             return 0;
         }
-
         case 17: { // getcwd(buf, size) — AArch64 syscall 17
             // BUGFIX: the old code always returned "/" regardless of
             // chdir() calls. Now we track the guest cwd in the VFS
@@ -1080,7 +1023,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(cwd.size()));
             return 0;
         }
-
         case 276: { // renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
             // Forward to host renameat2. Used for atomic file swap,
             // RENAME_NOREPLACE, RENAME_EXCHANGE.
@@ -1107,7 +1049,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
 #endif
             return 0;
         }
-
         case 267: { // syncfs(fd) — AArch64 267
             // Forward to host syncfs.
             auto node = fds_.get(static_cast<int>(a0));
@@ -1123,11 +1064,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

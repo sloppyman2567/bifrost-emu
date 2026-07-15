@@ -46,7 +46,6 @@
 #include "frost/display_thunk.hpp"  // v1.5.0.alpha
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"  // HostNode (for socket fd registration)
-
 #include <errno.h>
 #include <fcntl.h>
 #include <algorithm>
@@ -67,35 +66,28 @@
 #include <unistd.h>
 #include <sys/file.h>
 #include <sys/sendfile.h>
-
 namespace arm64emu {
-
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
     // Turn 68 refactor: dispatch to sub-handlers first. Each returns
     // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
     if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_process(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
-
     // v1.5.0.alpha: extended syscalls (xattr, kcmp, membarrier,
     // copy_file_range, pkey_*, pidfd_*, io_uring stubs, capget/capset,
     // personality, mseal, etc.).
     if (syscall_misc_extended(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
-
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a3; (void)a4; (void)a5;
     auto& mem_ = emu.mem_;
     auto& fds_ = emu.fds_;
-
-
     switch (num) {
         // ── Process / identity / resource syscalls (117, 122-126, 140, 141,
         //    153, 155, 158-160, 163, 165-168, 172-179, 213, 217-219, 224,
         //    232, 247, 260, 261, 270, 272, 278, 281, 293) have been moved
         //    to misc_process.cpp. syscall_misc() dispatches to
         //    syscall_misc_process() at the top of this function.
-
         case 93: { // exit — exit current thread (not whole process)
             // On AArch64 Linux, exit(2) (syscall 93) exits only the
             // calling thread. The kernel's do_exit() handles:
@@ -127,7 +119,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             cpu.exit_code = static_cast<int>(a0);
             return 0;
         }
-
         // ── inotify_init1 (syscall 26) ───────────────────────────────
         // BUGFIX: AArch64 syscall numbers 75/76/77 are vmsplice/splice/tee,
         // NOT inotify. The real inotify numbers per asm-generic/unistd.h are:
@@ -144,7 +135,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
-
         // ── inotify_add_watch (syscall 27) ───────────────────────────
         case 27: { // inotify_add_watch(fd, pathname, mask)
             std::string path = Yggdrasil::read_path(mem_, a1);
@@ -154,7 +144,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(wd));
             return 0;
         }
-
         // ── inotify_rm_watch (syscall 28) ────────────────────────────
         case 28: { // inotify_rm_watch(fd, wd)
             int r = ::inotify_rm_watch(static_cast<int>(a0), static_cast<int>(a1));
@@ -162,21 +151,19 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── vmsplice / splice / tee (syscalls 75/76/77) ──────────────
         // These are real AArch64 syscalls but we don't implement them.
         // Return -ENOSYS so callers can fall back to read/write loops.
         case 75: { ret_err(ENOSYS); return 0; }  // vmsplice
         case 76: { ret_err(ENOSYS); return 0; }  // splice
         case 77: { ret_err(ENOSYS); return 0; }  // tee
-
         // ── accept4 (syscall 242) ────────────────────────────────────
         // NOTE: AArch64 syscall 88 is utimensat (handled in fs.cpp), NOT
         // accept4. Real accept4 is syscall 242. The old code at case 88
         // was dead — fs.cpp's utimensat handler always won the dispatch
         // order, so this case never ran. Moved to the correct number.
         case 242: { // accept4(sockfd, addr, addrlen, flags) — AArch64 242
-            // Resolve guest fd to host fd via FdTable (Turn 102).
+            // Resolve guest fd to host fd via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -201,19 +188,17 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
             }
-            // Register the new socket fd in the FdTable (Turn 102).
+            // Register the new socket fd in the FdTable.
             int gfd = fds_.allocate(std::make_shared<yggdrasil::HostNode>(new_hfd, O_RDWR));
             ret_host(static_cast<uint64_t>(gfd));
             return 0;
         }
-
         // ── clock_nanosleep (syscall 115) ────────────────────────────
         // NOTE: clock_nanosleep is now handled in time.cpp (which runs
         // before misc.cpp in the dispatcher). The duplicate case here
         // was dead code — removed during the rc.1 syscall cleanup to
         // avoid confusion. AArch64 syscall 115 is clock_nanosleep per
         // asm-generic/unistd.h.
-
         // ── getsockname (syscall 204) ────────────────────────────────
         // BUGFIX: AArch64 syscall numbers per asm-generic/unistd.h:
         //   198=socket 199=socketpair 200=bind 201=listen 202=accept
@@ -243,7 +228,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── getpeername (syscall 205) ────────────────────────────────
         case 205: { // getpeername(sockfd, addr, addrlen)
             auto node = fds_.get(static_cast<int>(a0));
@@ -263,7 +247,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── sendto (syscall 206) ─────────────────────────────────────
         case 206: { // sendto(sockfd, buf, len, flags, dest_addr, addrlen)
             auto node = fds_.get(static_cast<int>(a0));
@@ -290,7 +273,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── recvfrom (syscall 207) ───────────────────────────────────
         case 207: { // recvfrom(sockfd, buf, len, flags, src_addr, addrlen)
             auto node = fds_.get(static_cast<int>(a0));
@@ -318,7 +300,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── setsockopt (syscall 208) ─────────────────────────────────
         case 208: { // setsockopt(sockfd, level, optname, optval, optlen)
             auto node = fds_.get(static_cast<int>(a0));
@@ -336,7 +317,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── getsockopt (syscall 209) ─────────────────────────────────
         case 209: { // getsockopt(sockfd, level, optname, optval, optlen*)
             auto node = fds_.get(static_cast<int>(a0));
@@ -354,7 +334,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── shutdown (syscall 210) ───────────────────────────────────
         case 210: { // shutdown(sockfd, how)
             auto node = fds_.get(static_cast<int>(a0));
@@ -365,10 +344,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── sendmsg (syscall 211) ────────────────────────────────────
         case 211: { // sendmsg(sockfd, msg, flags)
-            // Resolve guest fd to host fd via FdTable (Turn 102).
+            // Resolve guest fd to host fd via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -389,7 +367,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
             uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
             uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
-
             // Marshal iovec array: each entry is (void* base, size_t len).
             if (msg_iovlen > 1024) msg_iovlen = 1024;  // sanity cap
             std::vector<iovec> iovs(msg_iovlen);
@@ -409,7 +386,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 name_buf.resize(msg_namelen);
                 mem_.read(msg_name, name_buf.data(), msg_namelen);
             }
-            // Marshal msg_control (cmsg buffer) — Turn 102.
+            // Marshal msg_control (cmsg buffer).
             // The control buffer is opaque to the host kernel; we just
             // copy it verbatim. The guest and host share the same
             // cmsghdr layout (both are Linux AArch64).
@@ -432,12 +409,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── recvmsg (syscall 212) ────────────────────────────────────
         // BUGFIX: was at case 211 (wrong — 211 is sendmsg). Moved to 212
         // which is the correct AArch64 syscall number per asm-generic/unistd.h.
         case 212: { // recvmsg(sockfd, msg, flags)
-            // Resolve guest fd to host fd via FdTable (Turn 102).
+            // Resolve guest fd to host fd via FdTable.
             auto node = fds_.get(static_cast<int>(a0));
             int hfd = node ? node->host_fd() : static_cast<int>(a0);
             if (hfd < 0) { ret_err(EBADF); return 0; }
@@ -448,7 +424,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t msg_iovlen = mem_.load<uint64_t>(a1 + 24);
             uint64_t msg_control = mem_.load<uint64_t>(a1 + 32);
             uint32_t msg_controllen = mem_.load<uint32_t>(a1 + 40);
-
             if (msg_iovlen > 1024) msg_iovlen = 1024;
             std::vector<iovec> iovs(msg_iovlen);
             std::vector<std::vector<uint8_t>> iov_bufs(msg_iovlen);
@@ -491,7 +466,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (actual > 0) mem_.write(msg_name, name_buf.data(), actual);
                 mem_.store<uint32_t>(a1 + 8, actual);
             }
-            // Write control buffer back (Turn 102).
+            // Write control buffer back.
             // host_msg.msg_controllen may have been modified by the host
             // to reflect the actual size of the cmsgs written.
             if (msg_control && msg_controllen) {
@@ -502,12 +477,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 mem_.store<uint32_t>(a1 + 40, actual_ctrl);
             }
-            // Write msg_flags back (Turn 102).
+            // Write msg_flags back.
             mem_.store<uint32_t>(a1 + 44, static_cast<uint32_t>(host_msg.msg_flags));
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
-
         // ── fadvise64 (syscall 223) ──────────────────────────────────
         case 223: { // fadvise64(fd, offset, len, advice)
             int r = ::posix_fadvise(static_cast<int>(a0),
@@ -517,7 +491,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(-r)));
             return 0;
         }
-
         // ── close_range (syscall 436) ────────────────────────────────
         // BUGFIX: cap iteration to the actually-open fd range. The previous
         // loop iterated from a0 to a1 inclusive; if a1 was INT_MAX, this
@@ -530,7 +503,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         // ── openat2 (syscall 437) ────────────────────────────────────
         case 437: { // openat2(dirfd, pathname, how, size)
             uint64_t flags = a2 ? mem_.load<uint64_t>(a2) : 0;
@@ -546,7 +518,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(emu.fds().allocate(std::move(node))));
             return 0;
         }
-
         // ── faccessat2 (syscall 439) ─────────────────────────────────
         case 439: { // faccessat2(dirfd, pathname, mode, flags)
             std::string path = Yggdrasil::read_path(mem_, a1);
@@ -557,13 +528,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 94: { // exit_group
             cpu.running = false;
             cpu.exit_code = static_cast<int>(a0);
             return 0;
         }
-
         // ── signalfd4 (syscall 74) ────────────────────────────────────
         case 74: { // signalfd4(fd, mask, sizemask, flags)
             // Copy sigset_t from guest memory — a1 is a guest address,
@@ -584,15 +553,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(fd));
             return 0;
         }
-
         // ── getrandom (syscall 278) — already implemented above ──
-
         // ── 15+ new syscalls for broader compatibility ──────────────
-
         // NOTE: case 28 (formerly mislabeled "fchdir") removed — the real
         // AArch64 syscall 28 is inotify_rm_watch (handled correctly at
         // line 663 above). Real fchdir is syscall 50, handled in fs.cpp.
-
         case 36: { // symlinkat(old, newdirfd, new) — AArch64 36
             // AArch64 syscall 36 is symlinkat, NOT unlinkat (which is 35).
             // The old code dispatched 36 to unlinkat, which broke `ln -s`
@@ -715,8 +680,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0); return 0;
         }
         case 95: { // waitid(idtype, id, infop, options) — AArch64 95
-            // BUGFIX (Turn 62 rev 3): ALWAYS write siginfo to guest.
-            // BUGFIX (Turn 64): siginfo_t layout was wrong — si_code was
             // written at offset 4 (where si_errno belongs) and si_pid at
             // offset 8 (where si_code belongs). The correct AArch64
             // siginfo_t layout is:
@@ -789,7 +752,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
         }
-        // ── Bifrost-emu internal thunk syscall (Turn 37) ────────────
+        // ── Bifrost-emu internal thunk syscall ────────────
         // Trampolines generated by GraphicThunk use this syscall number
         // to trap into the host. x9 holds the symbol_id; the thunk looks
         // up the host function, reads args from x0..x7, calls it, and
@@ -810,7 +773,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // it returns -ENOENT (symbol_id out of range), we fall
             // through to AudioThunk, then DisplayThunk.
             uint32_t sym_id = static_cast<uint32_t>(cpu.regs[9]);
-
             auto* gthunk = emu.graphics_.thunk();
             if (gthunk && gthunk->enabled()) {
                 int64_t r = gthunk->dispatch(cpu, sym_id);
@@ -844,11 +806,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(ENOSYS);
             return 0;
         }
-
         // ── Bifrost-emu internal TLS-alloc syscall (Turn 76/78) ────────
         // Called by _dl_allocate_tls AND _dl_allocate_tls_init stubs.
         //
-        // Turn 78 cont.: The handler now:
         //   1. Copies lib TLS template to [tcb-lib_size, tcb) (negative TP offsets)
         //   2. ZEROS [tcb, tcb+main_memsz) to clear stale .tbss data
         //      (this is the main exe TLS area at positive TP offsets)
@@ -879,9 +839,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 fprintf(stderr, "[tls-alloc] syscall 0x1001 called: "
                         "a0=0x%llx\n", static_cast<unsigned long long>(a0));
             }
-
             auto* dl = emu.dyn_linker_.get();
-
             // ── Compute lib_size, main TLS info, and tcb_size ─────────
             // Uses variant-I TLS layout (glibc AArch64):
             //   - Main exe TLS: at POSITIVE TP offsets (TP + tcb_size ..)
@@ -915,9 +873,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
                 : TLS_TCB_SIZE_BASE;
             uint64_t total_tls_size = lib_size + tcb_size + main_memsz;
-
             uint64_t tcb;
-
             if (a0 != 0) {
                 // Caller-allocated (normal pthread_create path).
                 // glibc computes TCB = stack_block + lib_size, so the lib
@@ -948,7 +904,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.write(block, zeros.data(), alloc_size);
                 tcb = block + lib_size;  // TP points to TCB header start
             }
-
             // ── Copy each module's TLS template to its per-thread slot ──
             // Variant-I layout per-thread (TP = tcb):
             //   - lib TLS: [tcb - lib_size, tcb)  (negative TP offset)
@@ -962,7 +917,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // So dst = tcb + obj.tls_tp_offset gives the correct per-thread
             // address for both main and lib TLS.
             //
-            // BUGFIX (Turn 82): the old code used variant-II (all TLS at
             // negative TP offsets). This broke local-exec TLS access for
             // the main exe — the binary's hardcoded positive TPREL offset
             // (e.g. +0x20) landed in the TCB header instead of the main
@@ -990,7 +944,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                     // so stale .bss from a previous thread is cleared.
                 }
             }
-
             // ── Zero ONLY the DTV pointer in tcbhead_t ──────────────
             // The TCB (tcbhead_t) starts at TP. Its layout (glibc 2.36+):
             //   +0:  tcb (self pointer)
@@ -1011,7 +964,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // free. A non-NULL stale DTV pointer causes "munmap_chunk():
             // invalid pointer" when glibc tries to free it.
             //
-            // BUGFIX (Turn 82): previously we zeroed [tcb, tcb+256) which
             // clobbered glibc's struct pthread fields. This caused hangs
             // when threads exited (cleanup walked garbage pointers). Now
             // we zero ONLY the 8-byte DTV pointer at tcb+8.
@@ -1027,7 +979,6 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             try {
                 mem_.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
             } catch (...) {}
-
             if (getenv("BIFROST_DYNLINK_TRACE")) {
                 fprintf(stderr, "[tls-alloc] TCB @0x%llx (total_tls=%llu, "
                         "lib=%llu, main=%llu, %s)\n",
@@ -1037,12 +988,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(main_memsz),
                         (a0 != 0) ? "caller-alloc" : "new-block");
             }
-
             ret_host(tcb);
             return 0;
         }
-
-        // ── Bifrost-emu internal dlopen syscall (Turn 84) ──────────
+        // ── Bifrost-emu internal dlopen syscall ──────────
         // Called by the _dl_open stub in the ld-linux shim.
         // a0 (x0) = guest pointer to library path string (null-terminated)
         // a1 (x1) = dlopen mode flags (RTLD_LAZY, RTLD_NOW, etc.)
@@ -1082,8 +1031,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(handle);
             return 0;
         }
-
-        // ── Bifrost-emu internal dlsym syscall (Turn 86) ───────────
+        // ── Bifrost-emu internal dlsym syscall ───────────
         // a0 (x0) = dlopen handle (base address of the library)
         // a1 (x1) = guest pointer to symbol name string
         // Returns: symbol address on success, 0 on failure.
@@ -1128,11 +1076,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(addr);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

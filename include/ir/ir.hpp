@@ -26,16 +26,13 @@
 // typically emits 1-3 x86 instructions, and the optimizer removes
 // redundant loads/stores between consecutive ARM64 instructions.
 #pragma once
-
 #include "decoder.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
 #include <vector>
 #include <utility>
-
 namespace arm64emu {
-
 // IR opcodes. Keep this list tight — every opcode must be handled in
 // both ops.cpp (executor) and frostjit.cpp (codegen).
 enum class IROp : uint8_t {
@@ -245,7 +242,6 @@ enum class IROp : uint8_t {
     // implementation in interp_crypto.hpp).
     AES_CRYPTO,
 };
-
 // Condition codes (same encoding as ARM64 cond field).
 // 0=EQ, 1=NE, 2=CS, 3=CC, 4=MI, 5=PL, 6=VS, 7=VC,
 // 8=HI, 9=LS, 10=GE, 11=LT, 12=GT, 13=LE, 14=AL, 15=NV
@@ -256,7 +252,6 @@ static inline const char* cond_name(uint8_t c) {
     };
     return names[c & 15];
 }
-
 // A single IR instruction.
 struct IRInst {
     IROp    op;
@@ -269,13 +264,11 @@ struct IRInst {
     uint8_t flags_op;// for ADDS/SUBS/ADCS/SBCS: 0=add, 1=sub (controls C flag inversion)
     uint64_t imm;    // immediate value / mem offset / branch target
     uint64_t arm_pc; // PC of the original ARM instruction (for CALL_INTERP, BRCOND, SVC)
-
     // Optional metadata used by the optimizer. Defaults to zero.
     uint8_t immr = 0;   // for BFM/UBFM/SBFM: rotate amount
     uint8_t imms = 0;   // for BFM/UBFM/SBFM: field width selector
     uint8_t sf   = 0;   // 1 if 64-bit, 0 if 32-bit (for masking)
 };
-
 // An IR block: a list of IR instructions translated from a basic block
 // of ARM64 code.
 struct IRBlock {
@@ -286,18 +279,14 @@ struct IRBlock {
     // Optimization stats (filled by optimize_ir)
     int dce_removed = 0;
     int fold_subst  = 0;
-
     IRBlock() = default;
 };
-
 // Translate a single ARM64 instruction into IR ops.
 // Appends 1+ IRInst to `block->insts`. Returns true if the instruction
 // ends the block (branch/ret/svc).
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc);
-
 // Reset the per-block vreg allocator. Call at the start of each block.
 void ir_reset_vreg_alloc();
-
 // Optimize an IR block in place. Performs:
 //   - Constant folding (IMM + ALU → IMM)
 //   - Copy propagation (MOV chains)
@@ -305,8 +294,6 @@ void ir_reset_vreg_alloc();
 //   - Peephole (load+op fusion, mask elimination when sf=1)
 //   - Local register caching (LOAD_REG → reuse cached vreg if value is live)
 void optimize_ir(IRBlock& block);
-
 // Dump an IR block to stderr for debugging.
 void dump_ir(const IRBlock& block, FILE* out = stderr);
-
 } // namespace arm64emu

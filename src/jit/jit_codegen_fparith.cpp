@@ -1,7 +1,7 @@
 // jit/jit_codegen_fparith.cpp — FrostJIT FP arithmetic / conversion IR-op
 // codegen.
 //
-// v1.4.5-alpha (Turn 69): split out of jit_codegen_fp.cpp. This file holds
+// v1.4.5-alpha: split out of jit_codegen_fp.cpp. This file holds
 // the FP arithmetic / conversion / move case bodies of the FP/SIMD IR-op
 // switch, extracted into a separate method (compile_ir_fparith) for
 // readability. The compile_ir_inst_fp_() dispatcher in jit_codegen_fp.cpp
@@ -30,14 +30,11 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_fparith ──────────────────────────────────────
 // Handles all scalar FP arithmetic / conversion / move IR ops. Returns
 // true if the op was handled, false if not (caller falls through to the
@@ -56,7 +53,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         case IROp::FMOV_F2G:    emit_fmov_helper(/*dir=*/1, /*field=*/0, inst.src1, inst.src1, inst.dest); return true;
         case IROp::FMOV_G2FHI:  emit_fmov_helper(/*dir=*/0, /*field=*/1, inst.dest, inst.src1, inst.dest); return true;
         case IROp::FMOV_FHI2G:  emit_fmov_helper(/*dir=*/1, /*field=*/1, inst.src1, inst.src1, inst.dest); return true;
-
         // ── FP scalar arithmetic — native SSE2 codegen ──────────────
         // These ops use XMM0/XMM1 as scratch, loading from and storing
         // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with
@@ -77,7 +73,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // don't hold vregs. Use targeted flush for O(1) instead of
             // O(max_vreg_) flush_all+invalidate_all.
             flush_invalidate_host_regs(1u << RAX);
-
             // Load src1 into XMM0: movsd/movss xmm0, [rbx+off]
             // BUGFIX: no REX needed — SSE regs are 0-7, RBX is 3.
             // REX.R would extend xmm1 to xmm9, breaking the op.
@@ -85,13 +80,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
-
             // Load src2 into XMM1: movsd/movss xmm1, [rbx+off]
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(1, CPU_REG, off2);
-
             // Execute SSE2 op
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             uint8_t sse_op;
@@ -116,25 +109,21 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(sse_op);
             emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
-
             if (opc == 8) {  // FNMUL: negate the product
                 emit_mov_imm64(RAX, 0x8000000000000000ULL);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
             }
-
             // Store result: movsd/movss [rbx+off], xmm0
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(ld_prefix);
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
-
             // Zero v_hi[dest]
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         case IROp::FP_UNOP: {
             bool is_double = (inst.width == 1);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
@@ -142,12 +131,10 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // FP_UNOP clobbers only RAX (sign mask for FABS/FNEG; zero store).
             // RCX/RDX are not touched — don't flush them.
             flush_invalidate_host_regs(1u << RAX);
-
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(prefix);
             emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
-
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             if (opc == 0) {
                 // FMOV — no-op
@@ -167,17 +154,14 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(0x51);
                 emit_byte(modrm(3, 0, 0));
             }
-
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix);
             emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
-
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
             // regs[dest] = (int/uint)(v_lo[src1])
@@ -203,13 +187,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // FP_F2I clobbers RAX (CVTTSD2SI result) and, in the unsigned
             // path, RCX (2^63 constant). Flush+invalidate both.
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // Load FP value into XMM0
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
-
             if (is_unsigned) {
                 // Unsigned conversion: x86 lacks CVTTSD2USI, so we use:
                 //   if (xmm0 >= 2^63) { xmm0 -= 2^63; CVTTSD2SI rax; rax += 2^63 }
@@ -254,12 +236,10 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
                 emit_byte(0xC0);  // rax, xmm0
             }
-
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);
             return true;
         }
-
         // ── int→FP conversion (SCVTF/UCVTF) ────────────────────────
         case IROp::FP_I2F: {
             // v_lo[dest] = (float/double)(regs[src1]); v_hi=0
@@ -299,10 +279,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // RDX (2^63 constant) in the unsigned path. Flush+invalidate
             // all three.
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // Load GPR into RAX
             load_vreg_to_reg(RAX, inst.src1);
-
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             if (is_unsigned) {
                 // Unsigned: if (rax >= 2^63) { rcx = 1; sub rax, 2^63 } else rcx = 0
@@ -345,18 +323,15 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(0x2A);
                 emit_byte(0xC0);  // xmm0, rax
             }
-
             // Store to v_lo[dest]
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
-
             // Zero v_hi[dest]
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         // ── fixed-point FP→int (FCVTZS/FCVTZU with scale) ───────────
         case IROp::FP_F2I_FIXED: {
             // Semantics: scale FP value by 2^fbits, truncate toward zero,
@@ -378,7 +353,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             check_fp_reg_index(inst.src1, "FP_F2I_FIXED src1");
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // Compute 2^fbits as a double constant in RCX → movq xmm1.
             // std::ldexp(1.0, fbits) gives the exact double; we materialize
             // it as a 64-bit immediate. For fbits=64, ldexp gives +inf
@@ -390,7 +364,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_mov_imm64(RCX, scale_bits);
             // movq xmm1, rcx
             emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
-
             // Load FP value into XMM0 (as double; promote single via cvtss2sd).
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             if (is_double) {
@@ -405,7 +378,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // mulsd xmm0, xmm1 (scale by 2^fbits)
             emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
-
             // NaN check: ucomisd xmm0, xmm0 sets PF=1 iff NaN/unordered.
             // JNP (cc=0xB) jumps when PF=0 (not NaN). Note: cc=0x5 is JNE,
             // NOT JNP — see the cc table in x86_backend.cpp.
@@ -417,7 +389,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Not-NaN path: truncate + saturate (reuse FP_F2I codegen pattern).
             size_t notnan_path = code_buf_used_;
             patch_jcc_rel32(jnp_patch, static_cast<int32_t>(notnan_path - (jnp_patch + 6)));
-
             // The saturating conversion uses CVTTSD2SI rax, xmm0 (signed
             // 64-bit truncation), then clamps. For unsigned dest, we use
             // the subtract-2^63 trick on the (already-scaled) double.
@@ -444,7 +415,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // Signed: cvttsd2si rax, xmm0 (saturates implicitly per x86 semantics).
                 emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0);
             }
-
             // Saturate to dest range.
             if (!is_64bit_dest) {
                 // 32-bit dest: clamp to [INT32_MIN, INT32_MAX] for signed,
@@ -525,15 +495,12 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // subtract-2^63 trick already handles the upper half.
                 // No explicit clamp needed — matches interpreter semantics.
             }
-
             size_t done_path = code_buf_used_;
             patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
-
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);
             return true;
         }
-
         // ── fixed-point int→FP (SCVTF/UCVTF with scale) ─────────────
         case IROp::FP_I2F_FIXED: {
             // Semantics: convert int to FP, divide by 2^fbits.
@@ -550,10 +517,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             uint8_t rex_w = (is_64bit_src || is_unsigned) ? 0x48 : 0x00;
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // Load GPR into RAX
             load_vreg_to_reg(RAX, inst.src1);
-
             // Convert int→double in XMM0. For single-precision dest, we
             // still convert to double first (for precision), multiply by
             // 2^-fbits in double, then demote to single at the end.
@@ -583,7 +548,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 if (rex_w) emit_byte(rex_w);
                 emit_byte(0x0F); emit_byte(0x2A); emit_byte(0xC0);
             }
-
             // Multiply by 2^-fbits (= divide by 2^fbits). Use double precision
             // for the scale to avoid losing bits, even for single dest.
             double inv_scale = std::ldexp(1.0, -fbits);
@@ -593,7 +557,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
             // mulsd xmm0, xmm1
             emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
-
             // Store to v_lo[dest] (single-precision: demote first).
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             if (is_double) {
@@ -605,13 +568,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, off_d);
             }
-
             // Zero v_hi[dest]
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         // ── FP compare (FCMP/FCMPE) ────────────────────────────────
         case IROp::FP_CMP: {
             // Native FCMP/FCMPE using UCOMISD/UCOMISS.
@@ -640,13 +601,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             clobber_flags();
             // FP_CMP clobbers RAX, RCX, RDX (flag manipulation).
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             // Load src1 into XMM0
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off1);
-
             // Load src2 into XMM1 (or zero for FCMP #0.0).
             //
             // The IR translator marks the #0.0 form by setting bit 0 of
@@ -665,7 +624,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // FCMP Dn, #0.0 — XORPS xmm1, xmm1 to get 0.0
                 emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC9); // xorps xmm1, xmm1
             }
-
             // UCOMISD/UCOMISS xmm0, xmm1
             // Encoding: UCOMISD = 66 0F 2E /r ; UCOMISS = NP 0F 2E /r
             // (NOT F2/F3 — those prefixes are for arithmetic ops like ADDSD,
@@ -674,18 +632,14 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             if (is_double) emit_byte(0x66);
             emit_byte(0x0F); emit_byte(0x2E);
             emit_byte(0xC1);  // xmm0, xmm1
-
             // Build pstate in RDX using conditional moves.
             // pushfq to get flags into RAX, then test bits.
             emit_pushfq();
             emit_byte(0x58);  // pop rax (flags in rax)
-
             // RDX = 0 (default)
             emit_xor_reg(RDX, RDX);
-
             // Save rax (flags image) — we need it for multiple tests.
             emit_byte(0x50);  // push rax
-
             // Fixed flag conversion.
             // x86 UCOMISD sets: unordered (PF=1,CF=1,ZF=1), less (CF=1),
             //                    equal (ZF=1), greater (none).
@@ -705,10 +659,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Simpler approach: use conditional jumps (je/jne) to build
             // a proper if-else chain. This is slightly more code but
             // unambiguously correct.
-
             // Default: RDX = 0x20000000 (greater → C=1)
             emit_mov_imm32_zext(RDX, 0x20000000);
-
             // Fixed flag conversion using clean if-else chain.
             // After `test rax, bit`:
             //   ZF=1 iff (rax & bit) == 0 (flag bit is 0)
@@ -716,7 +668,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // JNZ (0x5) jumps when ZF=0, i.e., when the flag bit IS set.
             // We use JNZ to jump OVER the value-set block when the condition
             // is NOT met (flag bit is 0), so the default/previous value stays.
-
             // if PF=1 (unordered): RDX = 0x30000000, then jmp done
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x04); // test rax, 4 (PF bit)
             size_t jz_skip1 = emit_jcc_rel32_placeholder(0x4);  // JZ: PF=0, skip
@@ -724,7 +675,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             size_t jmp_done1 = emit_jmp_rel32_placeholder();
             size_t after_pf = code_buf_used_;
             patch_jcc_rel32(jz_skip1, static_cast<int32_t>(after_pf - (jz_skip1 + 6)));
-
             // if CF=1 (less): RDX = 0x80000000 (N=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x01); // test rax, 1 (CF)
             size_t jz_skip2 = emit_jcc_rel32_placeholder(0x4);  // JZ: CF=0, skip
@@ -732,7 +682,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             size_t jmp_done2 = emit_jmp_rel32_placeholder();
             size_t after_cf = code_buf_used_;
             patch_jcc_rel32(jz_skip2, static_cast<int32_t>(after_cf - (jz_skip2 + 6)));
-
             // if ZF=1 (equal): RDX = 0x60000000 (Z=1, C=1)
             emit_byte(0x48); emit_byte(0xA9); emit_u32(0x40); // test rax, 0x40 (ZF)
             size_t jz_skip3 = emit_jcc_rel32_placeholder(0x4);  // JZ: ZF=0, skip
@@ -741,9 +690,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             patch_jcc_rel32(jz_skip3, static_cast<int32_t>(done_flags - (jz_skip3 + 6)));
             patch_jmp_rel32(jmp_done1, static_cast<int32_t>(done_flags - (jmp_done1 + 5)));
             patch_jmp_rel32(jmp_done2, static_cast<int32_t>(done_flags - (jmp_done2 + 5)));
-
             emit_byte(0x58);  // pop rax (discard)
-
             // Store pstate (mask NZCV bits, OR in new value).
             // BUGFIX: bit 27 of pstate is the JIT-internal `from_sub` flag
             // used by BRCOND/ADCS/SBCS/CCMP to disambiguate CF semantics.
@@ -765,7 +712,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             flags_from_sub_ = false;
             return true;
         }
-
         // ── FMOV immediate (load decoded FP immediate) ──────────────
         case IROp::FP_MOVI: {
             // v_lo[dest] = imm; v_hi[dest] = 0
@@ -780,7 +726,6 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         // ── FCVT: float <-> double conversion ────────────────────────
         // ── FCVT: float <-> double conversion ────────────────────────
         case IROp::FCVT_S2D:
@@ -812,10 +757,8 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
-
         default:
             return false;  // not handled — caller falls through
     }
 }
-
 } // namespace arm64emu

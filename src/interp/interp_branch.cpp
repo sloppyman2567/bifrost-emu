@@ -15,9 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
 namespace arm64emu {
-
 // execute_branch — handle branch and system instruction classes.
 //
 // Called from Emulator::execute() for:
@@ -70,7 +68,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             next_pc = cpu.regs[d.rn];
             if (next_pc == 0) next_pc = cpu.regs[30];  // RET with XZR
             return;
-
         // ── System ────────────────────────────────────────────────
         case InstClass::SVC_IMM:
             // Supervisor call: invoke the Linux AArch64 syscall layer.
@@ -109,7 +106,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                 }
             }
             return;
-
         case InstClass::BRK_IMM: {
             // BRK #imm16 → deliver SIGTRAP. We follow the shell
             // convention for signal-terminated processes: exit code
@@ -202,7 +198,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             cpu.exit_code = 128 + 5;  // SIGTRAP
             return;
         }
-
         case InstClass::HLT_IMM: {
             // HLT #imm16 — used by some baremetal demos as an exit
             // instruction. We treat the immediate as the exit code.
@@ -211,7 +206,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             cpu.exit_code = imm;
             return;
         }
-
         case InstClass::CLREX_INST:
             // Clear the local exclusive monitor. (Per ARM ARM, only
             // STXR and CLREX clear the monitor. Branches used to do
@@ -219,13 +213,11 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             // a bug — see the beta.1 changelog entry.)
             cpu.excl_clear();
             return;
-
         case InstClass::HINT:
             // Hint space: NOP / YIELD / WFE / WFI / SEV / SEVL /
             // DSB / DMB / ISB. All are no-ops for a single-threaded
             // user-mode emulator.
             return;
-
         case InstClass::MRS_SYS: {
             // MRS Xt, <sysreg> — read a system register.
             // We model the small subset that glibc/musl probe during
@@ -282,7 +274,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             if (rt != 31) cpu.regs[rt] = 0;
             return;
         }
-
         case InstClass::MSR_SYS: {
             // MSR <sysreg>, Xt — write a system register.
             uint8_t op0 = d.sys_op0, op1 = d.sys_op1;
@@ -316,7 +307,6 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             // EL1+ sysregs: NOP in user mode.
             return;
         }
-
         default:
             // Not a branch/system class — should never be called here.
             // The dispatcher in interpreter.cpp only routes branch/system
@@ -324,5 +314,4 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             break;
     }
 }
-
 } // namespace arm64emu

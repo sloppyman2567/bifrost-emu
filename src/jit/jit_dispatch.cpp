@@ -1,6 +1,6 @@
 // jit/jit_dispatch.cpp — FrostJIT block dispatcher.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. Holds the
+// v1.4.5-alpha: split out of frostjit.cpp. Holds the
 // run_block() method, which is the main JIT entry point: given a CPU
 // state, look up the block at cpu.pc in the block cache. On a hit,
 // call the cached x86 code directly. On a miss, translate the block
@@ -9,7 +9,6 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -17,7 +16,6 @@
 #include <sys/types.h>  // mode_t
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
@@ -25,7 +23,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         emu.step(cpu);
         return cpu.pc;
     }
-
     // Global progress watchdog — if we've executed > GLOBAL_BLOCK_LIMIT
     // blocks, the JIT is likely stuck in a codegen-bug-induced loop.
     // Disable the JIT permanently and fall back to pure interpreter.
@@ -39,9 +36,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         emu.step(cpu);
         return cpu.pc;
     }
-
     uint64_t pc = cpu.pc;
-
     // ── v1.5.0.alpha: single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the
@@ -86,7 +81,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         return next_pc;
     }
-
     // v1.5.0.alpha Turn 2: 4-way inline cache for indirect branches.
     // This catches the common case of sequential block-to-block transitions
     // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the shared_mutex.
@@ -127,7 +121,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             return next_pc;
         }
     }
-
     // ── Shared-JIT locking strategy ────────────────────────────────
     // The lock is held ONLY for table mutations (translate, chain,
     // hotness promotion, watchdog demotion). It is RELEASED before
@@ -155,7 +148,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
         if (!entry.interp_only && entry.fn && entry.call_interp_count > 0) {
@@ -181,7 +173,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 tls_hot_pc_counts_.clear();
             }
         }
-
         // interp_only shortcut — release lock, run interpreter.
         if (entry.interp_only) {
             blocks_mutex_.unlock_shared();
@@ -198,7 +189,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             } while (cpu.running && cpu.pc == pc);
             return cpu.pc;
         }
-
         // Lazy block chaining — release shared, try exclusive (non-blocking).
         // If we can't get exclusive, skip chaining (optimization, not correctness).
         if (!entry.chained) {
@@ -247,9 +237,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         entry = blocks_[pc];
         blocks_mutex_.unlock();
     }
-
     // ── Lock is released. Execution below does NOT hold any lock. ──
-
     // Loop watchdog — if the same block runs > WATCHDOG_LIMIT times
     // consecutively, it's likely stuck in an infinite loop due to a JIT
     // codegen bug. Fall back to the interpreter for this block AND mark
@@ -279,10 +267,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_watchdog_last_pc_ = pc;
         tls_watchdog_count_ = 0;
     }
-
     blocks_executed++;
     instructions_executed += entry.instr_count;
-
     // v1.5.0.alpha: populate the single-entry last-block cache so the
     // next dispatch of the same PC can take the fast path. Only cache
     // non-interp_only blocks with a valid fn pointer.
@@ -297,7 +283,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_inline_cache_[slot].instr_count = entry.instr_count;
         tls_inline_cache_[slot].lru_stamp = ++tls_lru_counter_;
     }
-
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);
     if (dbg_) {
@@ -312,7 +297,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(cpu.regs[31]));
         }
     }
-
     // ── Release the lock before execution ──────────────────────────
     // From here on, we execute JIT code (entry.fn) or interpreter steps
     // that may block in syscalls. The lock is NOT needed for execution:
@@ -322,7 +306,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Verify-mode does code-buffer patching, but it's debug-only and
     // patches only this block's own slots (no cross-block mutation).
     // (Lock was already released above — no unlock needed here.)
-
     // ── BIFROST_JIT_VERIFY: divergence checker ──────────────────
     // Before running the JIT block, snapshot the CPU state. After the
     // JIT runs, step the interpreter from the snapshot for exactly the
@@ -399,12 +382,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
-        // BUGFIX (Turn 57): CPU is non-copyable (mutex + atomic members
         // for the per-CPU pending signal queue). Snapshot only the
         // architectural state for verify-mode comparison.
         CPU saved;                  // default-constructed, then populated
         saved.copy_arch_state_from(cpu);
-        // BUGFIX (Turn 84): copy_arch_state_from resets excl_tag_valid to
         // false (correct for clone, wrong for verify). Save the exclusive
         // monitor state so the interpreter's verify re-execution sees the
         // same LDXR reservation as the JIT did. Without this, STXR always
@@ -423,7 +404,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
                     static_cast<unsigned long long>(cpu.regs[1]), cpu.pstate);
         }
-
         // ── Verify-mode memory save/restore ─────────────────────────
         // Snapshot the original memory values at every STORE_MEM address
         // (resolved using the pre-JIT CPU state) so we can restore them
@@ -450,7 +430,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (entry.store_infos) {
             for (const auto& si : *entry.store_infos) {
                 if (saved_mem_count >= 64) break;
-                // Turn 97: use absolute address if the base reg was modified
                 // to a known IMM within the block.
                 uint64_t addr = si.use_absolute
                     ? si.absolute_addr
@@ -474,19 +453,15 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 saved_mem_count++;
             }
         }
-
         // Save guest umask BEFORE the JIT runs (for stateful-syscall
         // verify correctness — umask is stateful, so running it twice
         // gives different results without save/restore).
         mode_t saved_umask = emu.guest_umask();
-
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
-
         // Save the JIT's umask value, restore pre-JIT for the interpreter.
         mode_t jit_umask = emu.guest_umask();
         emu.set_guest_umask(saved_umask);
-
         // Capture the JIT's written values at the STORE addresses (so we can
         // restore them after the interpreter runs — the next block expects
         // memory to be in the JIT's state, matching the JIT's cpu state).
@@ -504,7 +479,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             jit_written[i].width = saved_mem[i].width;
             jit_written[i].value = v;
         }
-
         // Restore the original memory values at every STORE_MEM address
         // so the interpreter sees the pre-JIT memory state (eliminating
         // the false-positive divergence from read-then-write patterns).
@@ -527,7 +501,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 // but we won't crash.
             }
         }
-
         if (getenv("BIFROST_VERIFY_TRACE")) {
             fprintf(stderr, "[VTRACE] exit  block @ 0x%llx x0=0x%llx pstate=0x%x jit_next=0x%llx\n",
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(cpu.regs[0]),
@@ -554,7 +527,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         CPU ref;
         ref.copy_arch_state_from(saved);
         ref.pc = saved.pc;
-        // BUGFIX (Turn 84): restore exclusive monitor state so the
         // interpreter's STXR sees the same LDXR reservation as the JIT.
         ref.excl_tag_valid = saved.excl_tag_valid;
         ref.excl_tag_addr  = saved.excl_tag_addr;
@@ -673,7 +645,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         }
         return jit_next;
     }
-
     static bool trace_ = (getenv("BIFROST_JIT_TRACE") != nullptr);
     if (trace_) {
         fprintf(stderr, "[JIT] run block @ 0x%llx sp=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x5=0x%llx\n",
@@ -708,5 +679,4 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     cpu.pc = next_pc;
     return next_pc;
 }
-
 } // namespace arm64emu

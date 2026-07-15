@@ -8,20 +8,16 @@
 #include "core/emulator.h"  // ElfLoader declaration
 #include "core/memory.h"
 #include "bifrost/types.hpp"
-
 #include <cstdint>
 #include <cstring>
 #include <vector>
-
 namespace arm64emu {
-
 ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data) {
     if (data.size() < 64) throw EmuError("file too small to be ELF");
     if (data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F')
         throw EmuError("not an ELF file");
     if (data[4] != 2) throw EmuError("not ELF64");
     if (data[5] != 1) throw EmuError("not little-endian");
-
     uint16_t e_type, e_machine;
     uint32_t e_version, e_flags;
     uint64_t e_entry, e_phoff, e_shoff;
@@ -40,14 +36,12 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     memcpy(&e_shentsize, p + 58, 2);
     memcpy(&e_shnum, p + 60, 2);
     memcpy(&e_shstrndx, p + 62, 2);
-
     if (e_machine != 183) throw EmuError("not AArch64 ELF");
     if (e_phoff == 0 || e_phnum == 0) throw EmuError("no program headers");
     if (e_phoff >= data.size() || e_phentsize < 56)
         throw EmuError("ELF: bad program-header table layout");
     if (e_phnum > (data.size() - e_phoff) / e_phentsize)
         throw EmuError("ELF: program-header table exceeds file size");
-
     struct Phdr {
         uint32_t p_type;
         uint32_t p_flags;
@@ -67,7 +61,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         memcpy(&h.p_align, pp + 48, 8);
         phdrs.push_back(h);
     }
-
     Loaded info{};
     info.entry = e_entry;
     info.phent = e_phentsize;
@@ -76,8 +69,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     info.end_addr  = 0;
     info.has_lse   = false;
     info.base_addr = 0;  // load bias (0 for ET_EXEC, non-zero for ET_DYN/PIE)
-
-    // BUGFIX (Turn 53): for PIE (ET_DYN) executables, p_vaddr fields
     // are relative (start at 0). The Linux kernel loads PIE at a random
     // base address. We load at a fixed base (0x400000) to match the
     // non-PIE convention and avoid colliding with the zero page (which
@@ -91,7 +82,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         info.base_addr = PIE_BASE;
         info.entry += PIE_BASE;
     }
-
     // Detect PT_INTERP (dynamic linker path).
     for (auto& h : phdrs) {
         if (h.p_type == 3) {  // PT_INTERP
@@ -104,13 +94,11 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
             break;
         }
     }
-
     for (auto& h : phdrs) {
         if (h.p_type == 6) {  // PT_PHDR
             info.phdr_addr = h.p_vaddr + info.base_addr;
         }
     }
-
     for (auto& h : phdrs) {
         if (h.p_type != 1) continue;  // PT_LOAD only
         uint64_t vaddr = h.p_vaddr + info.base_addr;
@@ -120,7 +108,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                 throw EmuError("PT_LOAD file range out of bounds");
             mem.write(vaddr, data.data() + h.p_offset, h.p_filesz);
         }
-        // BUGFIX (Turn 40): zero the BSS area (from p_filesz to
         // p_memsz). On real Linux, the kernel gives zero pages for
         // the BSS. Our map_range may leave stale data from a previous
         // binary (e.g., after execve). Without this, musl's global
@@ -135,7 +122,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         uint64_t end = vaddr + h.p_memsz;
         if (end > info.end_addr) info.end_addr = end;
     }
-
     // If phdr_addr still 0 (no PT_PHDR), try to derive from first PT_LOAD
     if (info.phdr_addr == 0 && !phdrs.empty()) {
         for (auto& h : phdrs) {
@@ -145,7 +131,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
             }
         }
     }
-
     // Parse PT_NOTE segments to detect the GNU property AArch64 LSE feature.
     for (auto& h : phdrs) {
         if (h.p_type != 4) continue;  // PT_NOTE
@@ -187,7 +172,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
         }
         if (info.has_lse) break;
     }
-
     // Process RELA relocations (.rela.plt and .rela.dyn if present).
     if (e_shoff > 0 && e_shnum > 0 && e_shentsize >= 40) {
         uint64_t shstr_off = e_shoff + static_cast<uint64_t>(e_shstrndx) * e_shentsize;
@@ -203,7 +187,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                 memcpy(&sh_size,  data.data() + sh_off + 32, 8);
                 if (sh_type != 4) continue;  // SHT_RELA
                 if (sh_offset + sh_size > data.size()) continue;
-
                 uint64_t nrela = sh_size / 24;
                 for (uint64_t j = 0; j < nrela; j++) {
                     uint64_t r_offset, r_info, r_addend;
@@ -222,7 +205,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
                     // (no symbol resolution), so we just write A. The
                     // Delta (= load bias) is info.base_addr (0 for ET_EXEC,
                     // PIE_BASE for ET_DYN/PIE).
-                    // BUGFIX (Turn 53): for PIE binaries, r_offset is
                     // relative to the load base. We MUST add info.base_addr
                     // to get the actual guest VA. Without this, relocations
                     // were written to low memory (near 0) instead of the
@@ -260,8 +242,6 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
             }
         }
     }
-
     return info;
 }
-
 } // namespace arm64emu

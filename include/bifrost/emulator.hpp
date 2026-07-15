@@ -14,10 +14,8 @@
 //     emu.load_elf_file("hello.elf", argv);
 //     int exit_code = emu.run();
 #pragma once
-
 #include "bifrost/types.hpp"
 #include "bifrost/version.hpp"
-
 // Pull in the full class definition. The private members are visible but
 // external code should only use the public API (load_elf_file / run /
 // step / set_* / accessors / enable_jit / jit_step).

@@ -32,24 +32,18 @@
 //   (async-signal-safe), and drained between instructions in the run loop
 //   and at syscall boundaries. This unbreaks guest programs that poll a
 //   signal-pending flag (e.g., toybox sh's `sig_process_pending()`).
-
 #include "core/signal.h"
 #include "arm64_emu.hpp"
-
 #include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <csignal>
-
 namespace arm64emu {
-
 // Static instance pointer for the host signal handler. Only one Emulator
 // can be "active" for host signal forwarding at a time — bifrost-emu runs
 // one guest process per host process.
 Emulator* Emulator::g_active_emu_ = nullptr;
-
 namespace {
-
 // ── Trace helper ───────────────────────────────────────────────────────
 // Signal tracing is opt-in via the BIFROST_SIGNAL_TRACE env var. Stored
 // in a std::atomic<bool> so it's safe to read from a host signal handler
@@ -66,7 +60,6 @@ static void init_signal_trace_flag() {
 inline bool signal_trace_enabled() {
     return g_signal_trace.load(std::memory_order_relaxed);
 }
-
 // ── Default signal dispositions ────────────────────────────────────────
 // Per Linux's signal(7): signals whose default action is "terminate" vs
 // "ignore". SIGKILL/SIGSTOP are always terminate/stop and cannot be
@@ -96,7 +89,6 @@ bool default_terminates(int signo) {
             return false;
     }
 }
-
 // Default "core dump" set: QUIT, ILL, ABRT, BUS, FPE, SEGV, SYS, TRAP,
 // XCPU, XFSZ. We don't actually write a core file; this just controls
 // whether we log the fault address on termination.
@@ -111,12 +103,10 @@ bool default_dumps_core(int signo) {
             return false;
     }
 }
-
 // SIGKILL and SIGSTOP cannot be blocked, caught, or ignored.
 bool is_uncatchable(int signo) {
     return signo == BIFROST_SIGKILL || signo == BIFROST_SIGSTOP;
 }
-
 // Mask of all currently-supported sa_flags bits. Reserved/unsupported
 // bits are masked off when reading a guest k_sigaction so internal state
 // stays sane.
@@ -124,16 +114,13 @@ constexpr uint64_t SA_SUPPORTED_FLAGS =
     SA_SIGINFO_EMU | SA_RESTART_EMU | SA_NODEFER_EMU |
     SA_RESETHAND_EMU | SA_ONSTACK_EMU | SA_NOCLDWAIT_EMU |
     SA_NOCLDSTOP_EMU;
-
 // SIGKILL (signo=9) and SIGSTOP (signo=19) bits in a kernel sigset_t
 // (1-based: bit `signo-1`). Used to mask them out of user-provided
 // sigsets — they cannot be blocked.
 constexpr uint64_t UNBLOCKABLE_MASK = (1ULL << (BIFROST_SIGKILL - 1)) |
                                        (1ULL << (BIFROST_SIGSTOP - 1));
-
 // Build the pending-set bit for a signal number (1-based kernel ABI).
 constexpr uint64_t sig_bit(int signo) { return 1ULL << (signo - 1); }
-
 // Reserved stack space for siginfo + ucontext + handler frame on the
 // guest stack at signal delivery time. siginfo_t is 128 bytes, ucontext_t
 // (with fpsimd_context) is 976 bytes; the slack covers the handler's own
@@ -141,13 +128,10 @@ constexpr uint64_t sig_bit(int signo) { return 1ULL << (signo - 1); }
 constexpr size_t SIGINFO_SIZE     = 128;
 constexpr size_t UCONTEXT_SIZE    = 976;
 constexpr size_t FRAME_RESERVE    = 1280;  // siginfo + ucontext + slack
-
 // fpsimd_context header (arch/arm64/include/uapi/asm/sigcontext.h).
 constexpr uint32_t FPSIMD_MAGIC = 0x46508001;
 constexpr uint32_t FPSIMD_SIZE  = 528;  // 8 (head) + 8 (fpsr+fpcr) + 512 (vregs)
-
 } // namespace
-
 // ── SignalTable::install ───────────────────────────────────────────────
 // rt_sigaction(signo, new_act, old_act, sigsetsize) syscall handler.
 // Reads the new action from `act_addr` (if non-null) and writes the
@@ -161,7 +145,6 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
     if (is_uncatchable(signo)) {
         return -EINVAL;
     }
-
     // Write the previous action to old_act_addr (if requested).
     // Layout of struct k_sigaction on AArch64 (32 bytes total):
     //   +0   sa_handler  (8 bytes)
@@ -183,21 +166,18 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
             return -EFAULT;
         }
     }
-
     // Read the new action (if provided). act_addr == 0 is a query-only
     // call: per POSIX, "If act is NULL, then the signal handler is not
     // changed." Don't touch the installed handler.
     if (act_addr == 0) {
         return 0;
     }
-
     uint8_t buf[KSIGACTION_SIZE] = {0};
     try {
         mem.read(act_addr, buf, KSIGACTION_SIZE);
     } catch (...) {
         return -EFAULT;
     }
-
     SigAction& na = actions_[signo];
     memcpy(&na.handler, buf + 0,  8);
     memcpy(&na.flags,   buf + 8,  8);
@@ -206,26 +186,22 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
     na.installed = true;
     return 0;
 }
-
 const SigAction* SignalTable::lookup(int signo) const {
     if (signo < 1 || signo > MAX_SIGNAL) return nullptr;
     if (!actions_[signo].installed) return nullptr;
     return &actions_[signo];
 }
-
 SignalFrame& SignalTable::push_frame(int signo) {
     frames_.emplace_back();
     frames_.back().signo = signo;
     return frames_.back();
 }
-
 bool SignalTable::pop_frame(SignalFrame& out) {
     if (frames_.empty()) return false;
     out = frames_.back();
     frames_.pop_back();
     return true;
 }
-
 // ── rt_sigprocmask ─────────────────────────────────────────────────────
 // Per-CPU signal mask. SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK. SIGKILL and
 // SIGSTOP cannot be blocked.
@@ -242,7 +218,6 @@ bool SignalTable::pop_frame(SignalFrame& out) {
 int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
                           uint64_t old_set_addr, size_t sigsetsize) {
     if (sigsetsize != 8 && sigsetsize != 4) return -EINVAL;
-
     // Read the new mask FIRST (before writing the old mask), so the
     // aliasing case (old_set_addr == new_set_addr) works as a swap.
     uint64_t new_mask = 0;
@@ -258,7 +233,6 @@ int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
         }
         new_mask &= ~UNBLOCKABLE_MASK;
     }
-
     // Now write the old mask (the previous cpu.sigmask value).
     if (old_set_addr != 0) {
         try {
@@ -271,11 +245,9 @@ int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
             return -EFAULT;
         }
     }
-
     if (new_set_addr == 0) {
         return 0;  // query only
     }
-
     switch (how) {
         case SIG_BLOCK_EMU:   cpu.sigmask |= new_mask;            break;
         case SIG_UNBLOCK_EMU: cpu.sigmask &= ~new_mask;           break;
@@ -284,13 +256,11 @@ int SignalTable::procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
     }
     return 0;
 }
-
 // ── sigaltstack ────────────────────────────────────────────────────────
 // Set/query the per-CPU alternate signal stack. struct sigaltstack
 // (24 bytes): ss_sp (8) + ss_flags (4 + 4 pad) + ss_size (8).
 int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr) {
     constexpr size_t SS_SIZE = 24;
-
     if (old_addr != 0) {
         uint8_t buf[SS_SIZE] = {0};
         memcpy(buf + 0,  &cpu.altstack.sp,    8);
@@ -302,23 +272,19 @@ int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t
             return -EFAULT;
         }
     }
-
     if (new_addr == 0) {
         return 0;
     }
-
     uint8_t buf[SS_SIZE] = {0};
     try {
         mem.read(new_addr, buf, SS_SIZE);
     } catch (...) {
         return -EFAULT;
     }
-
     uint64_t new_sp;     uint32_t new_flags;   uint64_t new_size;
     memcpy(&new_sp,     buf + 0,  8);
     memcpy(&new_flags,  buf + 8,  4);
     memcpy(&new_size,   buf + 16, 8);
-
     // User code can only set SS_DISABLE; SS_ONSTACK is kernel-managed.
     if (new_flags & CPU::AltStack::SS_ONSTACK_EMU) return -EPERM;
     if (new_flags & ~static_cast<uint32_t>(CPU::AltStack::SS_DISABLE_EMU)) {
@@ -333,7 +299,6 @@ int SignalTable::set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t
     cpu.altstack.flags = new_flags;
     return 0;
 }
-
 // ── Sigreturn trampoline ──────────────────────────────────────────────
 // Two AArch64 instructions mapped at TRAMPOLINE_ADDR:
 //   0xD2801168  mov x8, #139   (rt_sigreturn syscall number)
@@ -347,7 +312,6 @@ uint64_t map_sigreturn_trampoline(Memory& mem) {
     mem.write(TRAMPOLINE_ADDR, code, sizeof(code));
     return TRAMPOLINE_ADDR;
 }
-
 // ── siginfo_t construction ─────────────────────────────────────────────
 // AArch64 siginfo_t (128 bytes): si_signo (4) + si_errno (4) + si_code (4)
 // + 4 pad + union (16..) — _kill.{pid,uid}, _sigfault.addr,
@@ -362,7 +326,6 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
     memcpy(buf + 0, &signo32, 4);
     memcpy(buf + 4, &errno32, 4);
     memcpy(buf + 8, &code32,  4);
-
     if (si_code == SI_USER_EMU || si_code == SI_KERNEL_EMU) {
         const int32_t pid = 1;  // main thread tid (single-process model)
         const int32_t uid = 0;
@@ -380,7 +343,6 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
     }
     try { mem.write(info_addr, buf, sizeof(buf)); } catch (...) {}
 }
-
 // ── ucontext_t construction ────────────────────────────────────────────
 // Writes a guest-visible ucontext_t (976 bytes) including the fpsimd_context
 // in the 4 KiB reserved area. Layout (arch/arm64/include/uapi/asm/ucontext.h
@@ -405,7 +367,6 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     uint8_t buf[UCONTEXT_SIZE] = {0};
     memcpy(buf + 40,  &saved_mask, 8);
     memcpy(buf + 168, &fault_addr, 8);
-    // BUGFIX (Turn 55): use sizeof of exactly 31 registers (248 bytes),
     // NOT sizeof(cpu.regs) (256 bytes). The AArch64 ucontext_t has
     // uc_mcontext.regs[31] (X0..X30) at offset 176, followed by sp at
     // offset 424. The old code wrote 256 bytes starting at offset 176,
@@ -420,7 +381,6 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     memcpy(buf + 424, &cpu.sp,     8);
     memcpy(buf + 432, &cpu.pc,     8);
     memcpy(buf + 440, &cpu.pstate, 8);
-
     // fpsimd_context at offset 448.
     memcpy(buf + 448 + 0, &FPSIMD_MAGIC, 4);
     memcpy(buf + 448 + 4, &FPSIMD_SIZE,  4);
@@ -434,7 +394,6 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
     try { mem.write(uc_addr, buf, sizeof(buf)); } catch (...) {}
     return uc_addr + sizeof(buf);
 }
-
 // ── deliver_signal ─────────────────────────────────────────────────────
 // Deliver a signal to the guest. If a real handler is installed, set up
 // the signal frame and switch PC to the handler. Otherwise apply the
@@ -444,7 +403,6 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code, uint64_t fault_addr) {
     const bool trace = signal_trace_enabled();
-
     if (trace) {
         fprintf(stderr, "[signal] deliver_signal: signo=%d si_code=%d "
                 "fault_addr=0x%llx cpu.tid=%d cpu.sigmask=0x%llx\n",
@@ -453,11 +411,9 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                 cpu.tid,
                 static_cast<unsigned long long>(cpu.sigmask));
     }
-
     if (signo < 1 || signo > MAX_SIGNAL) {
         return false;
     }
-
     // Blocked signals are queued as pending (not dropped). They will be
     // delivered when rt_sigprocmask unblocks them. SIGKILL/SIGSTOP are
     // always delivered immediately.
@@ -471,9 +427,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         return false;
     }
-
     const SigAction* act = sigtab.lookup(signo);
-
     if (trace) {
         fprintf(stderr, "[signal] signo=%d: act=%p", signo,
                 static_cast<const void*>(act));
@@ -484,12 +438,10 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         fprintf(stderr, "\n");
     }
-
     // SIG_IGN (handler == 1): drop the signal silently.
     if (act && act->handler == 1) {
         return false;
     }
-
     // SIG_DFL: apply the default disposition.
     if (!act || act->handler == 0) {
         if (default_terminates(signo)) {
@@ -506,7 +458,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         // Non-terminating defaults (ignore) → just drop the signal.
         return false;
     }
-
     // A real handler is installed. Snapshot the fields we need BEFORE
     // any further mutation of `actions_[signo]` — SA_RESETHAND clears
     // the slot, which would invalidate `act` (a pointer into that slot)
@@ -514,7 +465,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t handler_addr = act->handler;
     const uint64_t act_flags    = act->flags;
     const uint64_t act_mask     = act->mask;
-
     // BUGFIX (production hardening): validate handler address alignment.
     // AArch64 instructions must be 4-byte aligned. If a buggy guest
     // installs a handler at an unaligned address (e.g., due to a
@@ -535,7 +485,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         return false;
     }
-
     // Make sure the trampoline is mapped. This is also pre-mapped at
     // install_host_signal_handlers() time, but the call is idempotent
     // and cheap (single is_mapped check) so we keep it as a safety net.
@@ -547,7 +496,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         }
         return false;
     }
-
     // Pick the stack: altstack if SA_ONSTACK is set and the altstack is
     // configured and not already in use.
     uint64_t target_sp = cpu.sp;
@@ -557,19 +505,15 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
         target_sp = (cpu.altstack.top() - FRAME_RESERVE) & ~0xFULL;
         on_altstack = true;
     }
-
     // Lay out siginfo_t and ucontext_t on the guest stack.
     const uint64_t info_addr = (target_sp - FRAME_RESERVE) & ~0xFULL;
     const uint64_t uc_addr   = info_addr + SIGINFO_SIZE;
     const uint64_t new_sp    = info_addr;
-
     // Snapshot the mask so rt_sigreturn can restore it.
     const uint64_t saved_mask = cpu.sigmask;
-
     // Build the guest-visible siginfo_t and ucontext_t.
     build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
     build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
-
     // Save full CPU state in our internal frame for rt_sigreturn.
     SignalFrame& frame = sigtab.push_frame(signo);
     memcpy(frame.regs, cpu.regs, sizeof(frame.regs));
@@ -584,11 +528,9 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     memcpy(frame.v_hi, cpu.v_hi, sizeof(frame.v_hi));
     frame.fpcr = cpu.fpcr;
     frame.fpsr = cpu.fpsr;
-
     if (on_altstack) {
         SignalTable::set_altstack_active(cpu, true);
     }
-
     // Compute the new mask: current mask | sa_mask | signo (unless
     // SA_NODEFER is set, which allows the handler to be re-entered).
     uint64_t new_mask = saved_mask | act_mask;
@@ -597,13 +539,11 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     }
     new_mask &= ~UNBLOCKABLE_MASK;
     cpu.sigmask = new_mask;
-
     // SA_RESETHAND: clear the handler now (one-shot semantics). Safe to
     // do this AFTER we've snapshotted handler_addr/flags/mask above.
     if (act_flags & SA_RESETHAND_EMU) {
         sigtab.clear_handler(signo);
     }
-
     // Set up the handler call: X0=signo, X1=siginfo_t*, X2=ucontext_t*,
     // X30=trampoline, PC=handler, SP=new_sp.
     cpu.regs[0]  = static_cast<uint64_t>(signo);
@@ -612,7 +552,6 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     cpu.regs[30] = tramp;
     cpu.pc       = handler_addr;
     cpu.sp       = new_sp;
-
     if (trace) {
         fprintf(stderr, "[signal] delivered sig %d: handler=0x%llx "
                 "sp=0x%llx x30=0x%llx info=0x%llx uc=0x%llx\n",
@@ -623,10 +562,8 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                 static_cast<unsigned long long>(info_addr),
                 static_cast<unsigned long long>(uc_addr));
     }
-
     return true;
 }
-
 // ── deliver_pending_signals ────────────────────────────────────────────
 // Drain signals that were queued as pending (because they were blocked at
 // delivery time) and are now unblocked. Called after rt_sigprocmask
@@ -641,14 +578,12 @@ int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
         // 0-based ctzll result IS `signo - 1`. Add 1 to recover signo.
         const int signo = __builtin_ctzll(pending) + 1;
         pending &= pending - 1;  // clear lowest set bit
-
         // Skip if still blocked (defensive — only unblocked pending
         // signals should be queued, but the mask can change between
         // queueing and delivery).
         if (SignalTable::is_blocked(cpu, signo) && !is_uncatchable(signo)) {
             continue;
         }
-
         cpu.sigpending &= ~sig_bit(signo);
         if (signal_trace_enabled()) {
             fprintf(stderr, "[signal] delivering pending signal %d "
@@ -659,9 +594,7 @@ int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
     }
     return 0;
 }
-
 // ── Host-to-guest signal forwarding ───────────────────────────────────
-
 void Emulator::host_signal_handler(int signo) {
     // Called from the host kernel in a signal context. We can't call
     // deliver_signal() from here (it would touch guest memory and mutexes
@@ -672,7 +605,6 @@ void Emulator::host_signal_handler(int signo) {
         g_active_emu_->queue_host_signal(signo);
     }
 }
-
 void Emulator::queue_host_signal(int signo) {
     // Lock-free MPSC enqueue.
     //
@@ -711,11 +643,9 @@ void Emulator::queue_host_signal(int signo) {
     }
     host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
 }
-
 void Emulator::install_host_signal_handlers() {
     g_active_emu_ = this;
     init_signal_trace_flag();
-
     // Shells set certain signals to SIG_IGN when launching background
     // processes (e.g. `cmd &`). When a signal is SIG_IGN'd at the host
     // kernel level, our handler is NEVER called — the kernel silently
@@ -743,7 +673,6 @@ void Emulator::install_host_signal_handlers() {
     for (int sig : kResetToDefault) {
         ::signal(sig, SIG_DFL);
     }
-
     // Install one host handler that forwards to the guest via the SPSC
     // queue. SA_RESTART is intentionally NOT set — we want blocking
     // syscalls to be interrupted so the run loop can drain signals.
@@ -761,10 +690,9 @@ void Emulator::install_host_signal_handlers() {
     sa.sa_handler = &Emulator::host_signal_handler;
     sa.sa_flags = 0;
     sigfillset(&sa.sa_mask);  // block ALL signals during handler execution
-
     // Forwardable signals. SIGKILL (9) and SIGSTOP (19) cannot be caught
     // — the host kernel handles them directly, which is correct.
-    // Includes real-time signals SIGRTMIN..SIGRTMAX (Turn 57) so glibc's
+    // Includes real-time signals SIGRTMIN..SIGRTMAX so glibc's
     // pthread_cancel/timer_create/setxid mechanisms work.
     static constexpr int forwarded[] = {
         BIFROST_SIGHUP,    BIFROST_SIGINT,  BIFROST_SIGQUIT, BIFROST_SIGUSR1,
@@ -787,12 +715,10 @@ void Emulator::install_host_signal_handlers() {
     // SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGABRT/SIGSYS are NOT
     // forwarded via host handlers — they're delivered synchronously by
     // the emulator when it detects the corresponding guest fault.
-
     // Pre-map the sigreturn trampoline so the first signal delivery
     // doesn't pay a map_range cost on the hot path. Idempotent.
     map_sigreturn_trampoline(mem_);
 }
-
 bool Emulator::drain_host_signals(CPU& cpu) {
     // Lock-free MPSC dequeue. Atomically advance the head index and
     // process signals in order.
@@ -816,7 +742,6 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         // producer before it sees the advanced head index.
         host_signal_queue_.head.store(h + 1, std::memory_order_release);
         h = h + 1;
-
         // Skip dropped-signal sentinels (queue overflow).
         if (sig == -1) {
             // Re-read tail in case the producer added more signals while
@@ -824,12 +749,10 @@ bool Emulator::drain_host_signals(CPU& cpu) {
             t = host_signal_queue_.tail.load(std::memory_order_acquire);
             continue;
         }
-
         if (trace) {
             // fprintf is safe here — we're in the run loop, not a signal handler.
             fprintf(stderr, "[signal] drain_host_signals: sig=%d\n", sig);
         }
-
         // Drop signals that have no handler and a non-terminating
         // default (SIGCHLD, SIGURG, SIGWINCH, SIGCONT). This matches
         // the kernel behavior of "ignore by default" for these.
@@ -855,7 +778,6 @@ bool Emulator::drain_host_signals(CPU& cpu) {
     }
     return any_delivered;
 }
-
 // ── handle_eintr ───────────────────────────────────────────────────────
 // Called by blocking syscall handlers after a host syscall returns -EINTR.
 // The caller MUST pre-set cpu.regs[0] = -EINTR before calling this, so
@@ -878,7 +800,6 @@ bool Emulator::drain_host_signals(CPU& cpu) {
 bool Emulator::handle_eintr(CPU& cpu) {
     return drain_host_signals(cpu);
 }
-
 // ── drain_pending_signals ─────────────────────────────────────────────
 // Drains per-CPU pending signals queued by cross-thread tgkill/tkill/kill.
 // Called by every CPU's run loop at the 4K-instruction boundary (same
@@ -920,5 +841,4 @@ bool Emulator::drain_pending_signals(CPU& cpu) {
     }
     return any_delivered;
 }
-
 } // namespace arm64emu

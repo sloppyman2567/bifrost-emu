@@ -14,13 +14,10 @@
 //
 // See ir_translate.cpp for the header comment covering translator-wide
 // design rules (vreg mapping, ZEXT-after-32-bit-ops, etc.).
-
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
-
 namespace arm64emu {
-
 // Returns `true` if `d.cls` was one of the FP/SIMD cases handled here
 // (in which case translate_to_ir() returns `false` — none of the
 // extracted cases terminate a block). Returns `false` to let the caller
@@ -33,7 +30,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::FMOV_G2FHI, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
             return true;
         }
-
         case InstClass::FMOV_RVD1: {
             // FMOV Rn, Vm.D[1] → regs[Rn] = v_hi[Vm]
             uint16_t v = g_alloc.alloc();
@@ -41,7 +37,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, v);
             return true;
         }
-
         // ── FP_SCALAR — native FP arithmetic ────────────────────────
         // Decode specific FP op from raw bits and emit native IR ops.
         // Falls back to CALL_INTERP for ops we don't handle natively.
@@ -52,7 +47,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rm = (op >> 16) & 0x1F;
             uint8_t opcode = (op >> 12) & 0xF;
-
             // FMOV (general ↔ FP, 64-bit): may reach here via FP_SCALAR.
             // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
             if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
@@ -122,7 +116,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::FMOV_G2F, rd, masked, 0, 0, 0, 0, 0, cur_pc);
                 return true;
             }
-
             // FCMP/FCMPE — uses shared fp_decode helper.
             //
             // The #0.0 form vs register form is distinguished by bits[4:0]:
@@ -195,9 +188,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          0, 0, fp1_opcode, cur_pc);
                     return true;
                 }
-                // FRINT* (opcode 0x08-0x0F): handle natively in JIT (Turn 87).
+                // FRINT* (opcode 0x08-0x0F): handle natively in JIT.
                 //
-                // BUGFIX (Turn 89): Pass FP register indices (rd, rn) DIRECTLY
                 // to the FRINT IR op — do NOT use load_arm_reg/store_arm_reg.
                 // Those helpers allocate vregs (indices >= 33) and emit
                 // LOAD_REG/STORE_REG which access cpu.regs[] (GPR array),
@@ -331,7 +323,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             // FCVT (float ↔ double conversion).
             // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
-            // BUGFIX (Turn 57): MUST be checked BEFORE SCVTF/UCVTF — the
             // SCVTF mask 0x7F3E0000 also matches FCVT (0x1E22C000 &
             // 0x7F3E0000 == 0x1E220000 == SCVTF mask), causing FCVT to be
             // misidentified as SCVTF (int→FP) and emitted as FP_I2F instead
@@ -430,15 +421,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-
             // FCVT check was moved above SCVTF (see BUGFIX Turn 57 above).
             // The old FCVT check here is removed — it was unreachable because
             // the SCVTF mask caught FCVT first.
-
             // FRINT* is now handled earlier (in the is_fp_1source block above).
             // The old FRINT block here used a mask that only matched FRINTN.
             // (Turn 87: moved to the is_fp_1source block for correct 6-bit opcode handling)
-
             // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
             // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.
@@ -462,12 +450,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // zero-store is needed for single-precision (ftype == 0).
                 return true;
             }
-
             // Everything else (rare FP ops) falls back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
         }
-
         // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native ────────
         case InstClass::SIMD_LOGICAL: {
             uint32_t op = d.raw;
@@ -490,7 +476,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::SIMD_LOGICAL, d.rd, d.rn, d.rm, 0, 0, 0, simd_op, cur_pc);
             return true;
         }
-
         // ── SIMD DUP — native ──────────────────────────────────────
         case InstClass::SIMD_DUP: {
             // dup Vd.2d, Rn → broadcast Rn to both halves
@@ -498,7 +483,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
             return true;
         }
-
         // ── SIMD LD1/ST1 — native (128-bit load/store) ─────────────
         // Handles multi-register forms: LD1/ST1 {Vt..Vt+n-1} stores n×16
         // bytes (n = d.simd_count, 1..4). Each register's v_lo and v_hi
@@ -517,7 +501,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return true;
         }
-
         case InstClass::SIMD_ST1: {
             uint16_t base = load_arm_reg(block, d.rn, true);
             for (uint8_t i = 0; i < d.simd_count; i++) {
@@ -532,7 +515,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return true;
         }
-
         // ── SIMD data-processing (integer add/sub/mul/min/max/cmp) ───
         // Common encodings that we can JIT natively via SIMD_ARITH /
         // SIMD_CMP:
@@ -553,9 +535,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t size = (op >> 22) & 3;
             uint32_t sub3 = op & 0xFF20FC00;
             uint32_t sub3_noq = sub3 & ~(1u << 30);
-
             int esize = 1 << size;   // 1, 2, 4, 8
-
             // ── Arithmetic ops (SIMD_ARITH) ──
             uint8_t arith_op = 0xFF;
             if (sub3_noq == 0x0E208400) {
@@ -569,14 +549,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-
             if (arith_op != 0xFF) {
                 (void)Q;
                 emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm, 0,
                      static_cast<uint64_t>(esize), 0, arith_op, cur_pc);
                 return true;
             }
-
             // ── Compare ops (SIMD_CMP) ──
             // SIMD_CMP imm: 0=eq, 1=ge_u, 2=gt_u, 3=ge_s, 4=gt_s,
             //               5=hi_u, 6=hs_u
@@ -585,14 +563,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // CMEQ (==): U=1, opcode=0x8C
                 cmp_op = 0;  // eq
             }
-
             if (cmp_op != 0xFF) {
                 (void)Q;
                 emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm, 0,
                      static_cast<uint64_t>(esize), 0, cmp_op, cur_pc);
                 return true;
             }
-
             // ── NOT/MVN (vector) — 0x2E205800 ──
             // NOT Vd.<T>, Vn.<T> = bitwise NOT of all lanes.
             // Encoding: 1 Q 0 1 1 1 1 0 size 1 0000 0 1 0 1 1 0 Rn Rd
@@ -608,7 +584,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return true;
             }
-
             // ── NEG (vector) — 0x2E20B800 ──
             // NEG Vd.<T>, Vn.<T> = 0 - Vn (two's complement negate).
             // This is SUB with src1=0. We can emit SIMD_ARITH sub with
@@ -618,7 +593,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return true;
             }
-
             // ── Vector shift-by-immediate: SHL, USHR, SSHR ──
             // v1.4.5-alpha: native IR ops (AVX2 256-bit on capable hosts,
             // SSE2 128-bit fallback otherwise). USRA/SSRA/SLI/SRI/SHRN
@@ -670,7 +644,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-
             // ── v1.5.0.alpha: ARMv8 Crypto Extensions ───────────────
             // AES: 0x4E284800-0x4E287800 (AESE/AESD/AESMC/AESIMC)
             // SHA1H: 0x5E280800
@@ -739,7 +712,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-
             // Unrecognized SIMD_DP — fall back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
@@ -747,11 +719,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // (End of SIMD_DP case — the crypto checks below are BEFORE the
         //  fallthrough, in the sub3_noq checks above. If we reach here,
         //  we already emitted CALL_INTERP.)
-
         default:
             // Not an FP/SIMD case — let the main translator handle it.
             return false;
     }
 }
-
 } // namespace arm64emu

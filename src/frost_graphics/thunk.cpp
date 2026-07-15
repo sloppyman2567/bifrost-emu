@@ -1,4 +1,4 @@
-// frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha, Turn 37).
+// frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha).
 //
 // v1.5.0.alpha: also hosts the FrostGraphics::audio_thunk() and
 // FrostGraphics::display_thunk() lazy-creator methods (the AudioThunk
@@ -80,7 +80,6 @@
 #include "frost/display_thunk.hpp"  // v1.5.0.alpha: DisplayThunk full def
 #include "core/cpu.h"
 #include "core/memory.h"
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,7 +88,6 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
-
 // Host GL/EGL/SDL2 headers — optional. If not available, the thunk
 // compiles but all entry points return stubs. The Makefile sets
 // BIFROST_THUNK_HAVE_GL / BIFROST_THUNK_HAVE_EGL / BIFROST_THUNK_HAVE_SDL2
@@ -103,9 +101,7 @@
 #if defined(BIFROST_THUNK_HAVE_GL)
 #  include <GL/gl.h>
 #endif
-
 namespace arm64emu {
-
 // ── AArch64 instruction encodings for trampolines ─────────────────────
 // We hand-encode the trampoline bytes rather than relying on an
 // assembler. This keeps the thunk self-contained and lets us verify
@@ -122,7 +118,6 @@ namespace trampoline_enc {
     constexpr uint32_t SVC_0   = 0xD4000001u;
     constexpr uint32_t NOP     = 0xD503201Fu;
 }
-
 // ── GraphicThunkImpl — the real implementation (pimpl) ────────────────
 // The GraphicThunk class in frost/thunk.hpp exposes only void* opaque
 // members to keep the header free of GL/EGL/SDL2 includes. The real
@@ -134,17 +129,14 @@ struct SymbolEntry {
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
     uint8_t     pointer_args = 0;  // bitmask: which args (0-7) are pointers
 };
-
 struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
     bool   initialized = false;
-
     // The trampoline page: a single 64 KiB region of guest memory.
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
         GraphicThunk::TRAMPOLINE_SIZE * GraphicThunk::MAX_SYMBOLS;  // 64 KiB
-
     // Registry: (library, symbol_name) → SymbolEntry.
     // We use a flat vector per-library for cache-friendly enumeration
     // (the dynamic linker iterates all symbols when populating its
@@ -154,10 +146,8 @@ struct GraphicThunkImpl {
         std::vector<SymbolEntry> entries;
     };
     std::vector<LibTable> libs_;
-
     // Reverse lookup: symbol_id → (lib index, entry index).
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-
     // SDL2-side state (only when BIFROST_THUNK_HAVE_SDL2 is defined).
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     bool          sdl_init_done = false;
@@ -169,13 +159,11 @@ struct GraphicThunkImpl {
     EGLDisplay    egl_display   = nullptr;
     EGLContext    egl_context   = nullptr;
 #endif
-
     // Mutex protecting the registry (init() registers symbols, resolve()
     // reads them; concurrent calls from multiple guest threads must be
     // safe). The dispatch() path is lock-free after init() — it only
     // reads id_to_idx_, which is set once and never resized.
     std::mutex mu;
-
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -184,7 +172,6 @@ struct GraphicThunkImpl {
         libs_.push_back({lib, {}});
         return &libs_.back();
     }
-
     LibTable* find_lib_(const std::string& lib) {
         for (auto& l : libs_) {
             if (l.lib == lib) return &l;
@@ -192,11 +179,10 @@ struct GraphicThunkImpl {
         return nullptr;
     }
 };
-
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();
-    // v1.5.0.alpha (Turn 74): thunking is now ENABLED BY DEFAULT.
+    // v1.5.0.alpha: thunking is now ENABLED BY DEFAULT.
     // Previously required BIFROST_THUNK_GRAPHICS=1. Now we always try
     // to thunk graphic calls; if the host doesn't have GL/EGL/SDL2
     // libraries, the symbols resolve to stubs that return 0 (safe
@@ -215,7 +201,6 @@ GraphicThunk::GraphicThunk() {
         }
     }
 }
-
 GraphicThunk::~GraphicThunk() {
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     if (impl_ && impl_->sdl_window) {
@@ -226,18 +211,13 @@ GraphicThunk::~GraphicThunk() {
     }
 #endif
 }
-
 bool GraphicThunk::enabled() const { return impl_ && impl_->enabled; }
-
 // ── init() — allocate trampoline page, register known symbols ─────────
 bool GraphicThunk::init(Memory& mem) {
     if (!impl_->enabled) return false;
     if (impl_->initialized) return true;
-
     std::lock_guard<std::mutex> g(impl_->mu);
-
     impl_->mem = &mem;
-
     // Allocate a 64 KiB page for trampolines. mmap_alloc returns a
     // fresh, zeroed region. The page is mapped RWX in guest memory
     // (the JIT will execute the trampolines directly).
@@ -246,12 +226,9 @@ bool GraphicThunk::init(Memory& mem) {
         fprintf(stderr, "[thunk] init: failed to allocate trampoline page\n");
         return false;
     }
-
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
-
     impl_->initialized = true;
-
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
@@ -260,7 +237,6 @@ bool GraphicThunk::init(Memory& mem) {
     }
     return true;
 }
-
 // ── register_function_ — add a (lib, sym) → host_fn mapping ───────────
 // Allocates a symbol_id, writes the trampoline into guest memory, and
 // stores the entry. Thread-safe (called from init() under lock).
@@ -269,13 +245,11 @@ void GraphicThunk::register_function_(const std::string& lib,
                                        void* host_fn,
                                        uint8_t pointer_args) {
     auto* lt = impl_->find_or_create_lib_(lib);
-
     // Check if already registered (idempotent).
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;
     }
-
-    // v1.5.0.alpha (Turn 74): symbol_id includes ID_BASE_GRAPHICS to
+    // v1.5.0.alpha: symbol_id includes ID_BASE_GRAPHICS to
     // avoid collisions with AudioThunk/DisplayThunk IDs.
     uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
     if (local_id >= GraphicThunk::MAX_SYMBOLS) {
@@ -284,23 +258,19 @@ void GraphicThunk::register_function_(const std::string& lib,
         return;
     }
     uint32_t sym_id = GraphicThunk::ID_BASE_GRAPHICS + local_id;
-
     uint64_t addr = impl_->trampoline_base + local_id * GraphicThunk::TRAMPOLINE_SIZE;
     write_trampoline_(*impl_->mem, addr, sym_id);
-
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args});
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
     });
-
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u, ptrs=0x%x)\n",
                 lib.c_str(), sym.c_str(),
                 static_cast<unsigned long long>(addr), sym_id, pointer_args);
     }
 }
-
 // ── write_trampoline_ — emit 16-byte AArch64 trampoline ────────────────
 // Layout (little-endian, each instruction is 4 bytes):
 //   movz x9, #sym_id        ; load symbol_id into x9
@@ -318,11 +288,9 @@ void GraphicThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id
     buf[3] = trampoline_enc::NOP;
     mem.write(addr, buf, sizeof(buf));
 }
-
 // ── resolve() — look up a (lib, sym) and return guest trampoline addr ─
 uint64_t GraphicThunk::resolve(const std::string& lib, const std::string& sym) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
-
     std::lock_guard<std::mutex> g(impl_->mu);
     auto* lt = impl_->find_lib_(lib);
     if (!lt) return 0;
@@ -331,12 +299,10 @@ uint64_t GraphicThunk::resolve(const std::string& lib, const std::string& sym) {
     }
     return 0;
 }
-
 // ── enumerate_symbols() — list all (name, addr) pairs for `lib` ────────
 size_t GraphicThunk::enumerate_symbols(const std::string& lib,
     const std::function<void(const std::string&, uint64_t)>& cb) const {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
-
     std::lock_guard<std::mutex> g(impl_->mu);
     auto* lt = impl_->find_lib_(lib);
     if (!lt) return 0;
@@ -345,7 +311,6 @@ size_t GraphicThunk::enumerate_symbols(const std::string& lib,
     }
     return lt->entries.size();
 }
-
 // ── dispatch() — call the host function for a given symbol_id ──────────
 // Called from the syscall handler when a trampoline traps. Reads args
 // from cpu.regs[0..7], calls the host function, writes the return
@@ -358,7 +323,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    // v1.5.0.alpha (Turn 74): strip the ID_BASE_GRAPHICS prefix to get
+    // v1.5.0.alpha: strip the ID_BASE_GRAPHICS prefix to get
     // the local index. If the symbol_id is outside our range, return
     // -ENOENT so the dispatcher can try other thunks.
     if ((symbol_id & GraphicThunk::ID_MASK) != GraphicThunk::ID_BASE_GRAPHICS) {
@@ -371,11 +336,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         return -ENOENT;
     }
-
     // Look up the entry (lock-free — id_to_idx_ is immutable after init).
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
-
     if (!entry.host_fn) {
         if (getenv("BIFROST_THUNK_TRACE")) {
             fprintf(stderr, "[thunk] dispatch: %s (stub, returns 0)\n",
@@ -384,7 +347,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         cpu.regs[0] = 0;
         return 0;
     }
-
     // Read the first 8 args from the CPU's general-purpose registers.
     // Per AArch64 AAPCS, the first 8 integer/pointer args are in x0..x7.
     // FP args would be in v0..v7, but most GL/EGL/SDL2 entry points take
@@ -395,8 +357,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     for (int i = 0; i < 8; i++) {
         args[i] = cpu.regs[i];
     }
-
-    // v1.5.0.alpha (Turn 74): translate pointer args from guest to host.
+    // v1.5.0.alpha: translate pointer args from guest to host.
     // For each arg marked as a pointer in entry.pointer_args, translate
     // the guest address to a host pointer using Memory::guest_to_host_ptr.
     // This is critical — without it, passing a guest pointer (e.g. a
@@ -421,7 +382,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
     }
-
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx ptrs=0x%x\n",
@@ -432,7 +392,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<unsigned long long>(args[3]),
                 entry.pointer_args);
     }
-
     // Call the host function. We use a union of function pointer types
     // to handle the common calling conventions. The host's calling
     // convention (System V AMD64) is: first 6 integer/pointer args in
@@ -446,22 +405,18 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto fn = reinterpret_cast<GenericFn>(entry.host_fn);
     uint64_t ret = fn(args[0], args[1], args[2], args[3],
                        args[4], args[5], args[6], args[7]);
-
     cpu.regs[0] = ret;
     return 0;
 }
-
 // ── Diagnostics ────────────────────────────────────────────────────────
 size_t GraphicThunk::symbol_count() const {
     if (!impl_) return 0;
     return impl_->id_to_idx_.size();
 }
-
 uint64_t GraphicThunk::trampoline_base() const {
     if (!impl_) return 0;
     return impl_->trampoline_base;
 }
-
 // ── register_known_symbols_ — populate the registry ────────────────────
 // Called once by init(). Each entry maps a (library, symbol) pair to
 // the host function pointer (when the host has the dev headers) or to
@@ -470,8 +425,7 @@ uint64_t GraphicThunk::trampoline_base() const {
 void GraphicThunk::register_known_symbols_() {
     // ── libGL.so / libGL.so.1 ──────────────────────────────────────
     const char* gl_libs[] = {"libGL.so", "libGL.so.1"};
-
-    // v1.5.0.alpha (Turn 74): REG_GL_PTR marks which args are pointers.
+    // v1.5.0.alpha: REG_GL_PTR marks which args are pointers.
     // The pointer_args bitmask is passed to register_function_ so the
     // dispatcher can translate guest pointers to host pointers.
     // Bit N (0-indexed) set = arg N is a pointer.
@@ -497,7 +451,6 @@ void GraphicThunk::register_known_symbols_() {
         for (const char* L : gl_libs) register_function_(L, #name, nullptr, ptrs); \
     } while(0)
 #endif
-
     REG_GL(glClear);
     REG_GL(glClearColor);
     REG_GL(glBegin);
@@ -573,7 +526,6 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glActiveTexture);
     REG_GL(glClientActiveTexture);
     REG_GL(glMultiTexCoord2f);
-    // Turn 90: Modern OpenGL 2.0+ / GLES 2.0 symbols for games.
     // Shaders.
     REG_GL_PTR(glCreateShader, 0x00);     // returns GLuint
     REG_GL_PTR(glShaderSource, 0x08);     // arg 3: const GLchar* const*string
@@ -663,9 +615,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glPolygonOffset);
     REG_GL(glSampleCoverage);
 #undef REG_GL
-
     // ── libGLESv2.so / libGLESv2.so.2 ─────────────────────────────
-    // Turn 90: Expanded from 7 to 60+ GLES2 symbols for game support.
     // GLESv2 shares most entry points with OpenGL 2.0+ (no fixed-function).
     const char* gles_libs[] = {"libGLESv2.so", "libGLESv2.so.2"};
 #if defined(BIFROST_THUNK_HAVE_GL)
@@ -780,7 +730,6 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES(glSampleCoverage);
 #undef REG_GLES
 #undef REG_GLES_PTR
-
     // ── libEGL.so / libEGL.so.1 ───────────────────────────────────
     const char* egl_libs[] = {"libEGL.so", "libEGL.so.1"};
 #if defined(BIFROST_THUNK_HAVE_EGL)
@@ -813,7 +762,6 @@ void GraphicThunk::register_known_symbols_() {
     REG_EGL(eglWaitGL);
     REG_EGL(eglWaitNative);
 #undef REG_EGL
-
     // ── libSDL2.so / libSDL2-2.0.so.0 ─────────────────────────────
     const char* sdl_libs[] = {"libSDL2.so", "libSDL2-2.0.so.0"};
 #if defined(BIFROST_THUNK_HAVE_SDL2)
@@ -909,7 +857,6 @@ void GraphicThunk::register_known_symbols_() {
     REG_SDL(SDL_Vulkan_CreateSurface);
 #undef REG_SDL
 }
-
 // ── FrostGraphics::thunk() — out-of-line definition ───────────────────
 // Lives here (not in graphics.cpp) because it needs the full
 // GraphicThunk type to construct via `new`. Returns the lazily-created
@@ -920,7 +867,6 @@ GraphicThunk* FrostGraphics::thunk() {
     }
     return thunk_.get();
 }
-
 // v1.5.0.alpha: audio_thunk() and display_thunk() — same lazy pattern.
 // They live here for the same reason thunk() does: the FrostGraphics
 // header only forward-declares AudioThunk / DisplayThunk, so the
@@ -932,12 +878,10 @@ AudioThunk* FrostGraphics::audio_thunk() {
     }
     return audio_thunk_.get();
 }
-
 DisplayThunk* FrostGraphics::display_thunk() {
     if (!display_thunk_) {
         display_thunk_ = std::unique_ptr<DisplayThunk>(new DisplayThunk());
     }
     return display_thunk_.get();
 }
-
 } // namespace arm64emu

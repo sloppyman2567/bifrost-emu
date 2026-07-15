@@ -25,34 +25,14 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <syscall.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <sys/sendfile.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/timerfd.h>
-#include <sys/types.h>
-#include <sys/uio.h>
-#include <sys/wait.h>
-#include <poll.h>
-#include <termios.h>
-#include <unistd.h>
-
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 namespace arm64emu {
-
 // ── Main dispatcher ────────────────────────────────────────────────────
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
-
     // Drain pending host-forwarded signals at every syscall boundary.
     // This keeps signal-delivery latency low even when the guest is in
     // a tight syscall loop (e.g., ppoll waiting for SIGCHLD). Without
@@ -60,8 +40,6 @@ void Emulator::syscall(CPU& cpu) {
     // the run loop, which can be hundreds of milliseconds under the
     // interpreter.
     drain_host_signals(cpu);
-
-    // Turn 101: if drain_host_signals delivered a terminating signal
     // (SIGTERM, SIGKILL, etc.) with no handler, cpu.running is now false
     // and cpu.exit_code is set. We must NOT execute the syscall — the
     // guest has been killed. Continuing would execute the syscall (e.g.,
@@ -72,7 +50,6 @@ void Emulator::syscall(CPU& cpu) {
     // pc=0. More importantly, executing syscalls after the guest is
     // dead is wrong — the guest should not observe any side effects.
     if (!cpu.running) return;
-
     // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
     static bool trace_syscalls = (getenv("BIFROST_SYSCALL_TRACE") != nullptr);
     if (trace_syscalls) {
@@ -127,7 +104,6 @@ void Emulator::syscall(CPU& cpu) {
                     static_cast<unsigned long long>(cpu.pc));
         }
     }
-
     // Try each subsystem handler in order. The first one that handles
     // the call returns 0 (with the result already in cpu.regs[0]).
     if (syscall_fs(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;
@@ -136,9 +112,7 @@ void Emulator::syscall(CPU& cpu) {
     if (syscall_time(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
     if (syscall_ioctls(*this, cpu, num)  != SYSCALL_NOT_HANDLED) return;
     if (syscall_misc(*this, cpu, num)    != SYSCALL_NOT_HANDLED) return;
-
     // Completely unknown syscall — return -ENOSYS.
     cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS));
 }
-
 } // namespace arm64emu

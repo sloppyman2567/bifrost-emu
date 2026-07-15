@@ -1,11 +1,11 @@
 // jit/jit_codegen_fp.cpp — FrostJIT FP/SIMD IR-op codegen dispatcher.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. This file held the
+// v1.4.5-alpha: split out of frostjit.cpp. This file held the
 // FP_* and SIMD_* case bodies of the IR-op switch, extracted into a
 // separate method (compile_ir_inst_fp_) for readability. The main switch
 // in frostjit.cpp dispatches to this method for FP/SIMD ops.
 //
-// v1.4.5-alpha (Turn 69): split further into two sub-files:
+// v1.4.5-alpha: split further into two sub-files:
 //   - jit_codegen_fparith.cpp (compile_ir_fparith): FMOV_*, FP_BINOP,
 //     FP_UNOP, FP_CMP, FP_MOVI, FP_F2I, FP_I2F, FP_F2I_FIXED,
 //     FP_I2F_FIXED, FCVT_S2D, FCVT_D2S
@@ -22,16 +22,13 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <vector>
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_inst_fp_ ──────────────────────────────────────
 // Handles all FP_* and SIMD_* IR ops. Returns true if the op was
 // handled (caller returns the bool as the "ends_block" flag), false if
@@ -50,8 +47,7 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
     // it. The caller (compile_ir_inst) checks fp_handled_ after the
     // call to decide whether to fall through to the integer switch.
     fp_handled_ = true;
-
-    // v1.4.5-alpha (Turn 69): FP arithmetic/conversion/move ops and
+    // v1.4.5-alpha: FP arithmetic/conversion/move ops and
     // SIMD/NEON ops are dispatched to compile_ir_fparith() and
     // compile_ir_simd() (defined in jit_codegen_fparith.cpp and
     // jit_codegen_simd.cpp) before the residual switch below. Both
@@ -60,11 +56,9 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
     // The residual switch handles FRINT and the FMADD family.
     if (compile_ir_fparith(inst)) return false;
     if (compile_ir_simd(inst))    return false;
-
     switch (inst.op) {
         // ── FRINT: FP round to integer ───────────────────────────────
         //
-        // BUGFIX (Turn 89): Native roundsd/roundss codegen restored.
         //
         // The Turn 88 "fix" fell back to CALL_INTERP because the IR
         // translator was passing VREG indices (>= 33) as inst.dest/
@@ -88,14 +82,12 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             // FRINT only clobbers RAX (zero store to v_hi[dest]).
             clobber_flags();
             flush_invalidate_host_regs(1u << RAX);
-
             bool is_double = (inst.width == 64);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
             // Load FP value into XMM0: movsd/movss xmm0, [rbx+off]
             int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
             emit_modrm_disp(0, CPU_REG, off);
-
             // x86 rounding mode mapping (SSE4.1 roundsd/roundss imm8):
             //   0 = round-to-nearest (even)
             //   1 = round-down (-inf)
@@ -125,19 +117,16 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             emit_byte(is_double ? 0x0B : 0x0A);
             emit_byte(0xC0);  // xmm0, xmm0
             emit_byte(x86_mode);
-
             // Store result: movsd/movss [rbx+off], xmm0
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
             emit_modrm_disp(0, CPU_REG, off_d);
-
             // Zero v_hi[dest] (upper 64 bits cleared per AArch64
             // scalar FP write semantics). Uses RAX (already flushed).
             emit_mov_imm32_zext(RAX, 0);
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
-
         // ── FMADD / FMSUB / FNMADD / FNMSUB: FP fused multiply-add family
         //
         // ARM FMA semantics (per ARM ARM):
@@ -203,7 +192,6 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;  // Vn
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;  // Vm
             int32_t off_acc = V_LO_OFF + static_cast<int>(inst.imm) * 8; // Va
-
             if (has_fma3()) {
                 // ── FMA3 native codegen ──
                 // Load Va (accumulator) into XMM0 — the FMA3 231 form uses
@@ -214,7 +202,6 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off1);  // movsd xmm1, [rbx+off1]
                 // Vm is read directly from memory via ModRM.rm (no load needed).
-
                 // Pick opcode based on operation:
                 //   FMADD         → vfmadd231  (0xB9)
                 //   FMSUB/FNMADD  → vfnmadd231 (0xBD)  (numerically same)
@@ -237,7 +224,6 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                     case IROp::FNMSUB: opcode = 0xBF; break;  // vfnmsub231
                     default: return false;  // unreachable
                 }
-
                 // VEX 3-byte prefix:
                 //   C4
                 //   byte1: 0xE2  (R~=X~=B~=1 for low registers xmm0-xmm7
@@ -324,7 +310,6 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return false;
         }
-
         default:
             // Not an FP/SIMD op — clear fp_handled_ so the caller falls
             // through to the integer switch.
@@ -332,5 +317,4 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             return false;
     }
 }
-
 } // namespace arm64emu

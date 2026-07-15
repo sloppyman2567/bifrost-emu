@@ -22,26 +22,21 @@
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 // Helper: build a static-content MemfdNode.
 static std::unique_ptr<Node> serve_static(const std::string& content, int flags) {
     return MemfdNode::create("bifrost-procfs", content, flags);
 }
-
 // Helper: build a lazy-regenerating MemfdNode.
 static std::unique_ptr<Node> serve_lazy(std::function<std::string()> regen, int flags) {
     return MemfdNode::create_lazy("bifrost-procfs", std::move(regen), flags);
 }
-
 // Helper: build a DirNode for /proc or /proc/self.
 static std::unique_ptr<Node> serve_dir(std::string name,
                                        std::vector<DirNode::Entry> entries,
                                        int flags) {
     return std::make_unique<DirNode>(std::move(name), std::move(entries), flags);
 }
-
 // ── /proc directory listing ──────────────────────────────────────────
 // We expose a subset of /proc that real Linux guests can handle. The
 // kernel exposes more (loadavg, stat, uptime, etc.) — those are
@@ -59,7 +54,6 @@ static std::vector<DirNode::Entry> proc_entries() {
         {"sys",        0x4 /*DT_DIR*/},
     };
 }
-
 static std::vector<DirNode::Entry> proc_self_entries() {
     return {
         {"exe",     0x2 /*DT_LNK*/},
@@ -74,7 +68,6 @@ static std::vector<DirNode::Entry> proc_self_entries() {
         {"fd",      0x4 /*DT_DIR*/},
     };
 }
-
 // ── Yggdrasil::open_procfs ────────────────────────────────────────────
 std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
                                              int flags, mode_t /*mode*/,
@@ -86,12 +79,10 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
     if (path == "/proc/self" || path == "/proc/self/") {
         return serve_dir("/proc/self", proc_self_entries(), flags);
     }
-
     // ── /proc/self/exe → symlink to the ELF path ────────────────────
     if (path == "/proc/self/exe" || path == "/proc/self/exe/") {
         return serve_static(elf_path_, flags);
     }
-
     // ── /proc/self/cmdline → argv[0]\0argv[1]\0... ──────────────────
     if (path == "/proc/self/cmdline") {
         std::string cmdline;
@@ -99,7 +90,6 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         if (cmdline.empty()) cmdline = elf_path_ + '\0';
         return serve_static(cmdline, flags);
     }
-
     // ── /proc/self/comm → process name (set by prctl PR_SET_NAME) ────
     // The kernel returns the basename of the executable by default,
     // which prctl(PR_SET_NAME) can override. Tools like `ps`, `top`,
@@ -121,7 +111,6 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return comm;
         }, flags);
     }
-
     // ── /proc/self/maps → real memory layout (LAZY) ─────────────────
     // The maps provider may return different results each time (memory
     // is allocated/freed during execution). Use lazy regeneration so
@@ -156,7 +145,6 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return maps;
         }, flags);
     }
-
     // ── /proc/self/status → process info (LAZY) ─────────────────────
     // Status includes VmSize/VmRSS which depend on live memory layout.
     if (path == "/proc/self/status") {
@@ -233,7 +221,6 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return s;
         }, flags);
     }
-
     // ── Static-content files ────────────────────────────────────────
     if (path == "/proc/meminfo") {
         // Field order matters! toybox's `free` reads fields consecutively
@@ -317,8 +304,7 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         s += "Max open files            1024                 4096                 files     \n";
         return serve_static(s, flags);
     }
-
-    // ── /proc/mounts + /proc/self/mounts (Turn 40) ──────────────────
+    // ── /proc/mounts + /proc/self/mounts ──────────────────
     // Many programs (df, mount, findmnt) read /proc/mounts. On real
     // Linux, /proc/mounts is a symlink to /proc/self/mounts. We serve
     // the same content from both paths so programs that open either
@@ -334,7 +320,6 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         s += "tmpfs /tmp tmpfs rw,relatime 0 0\n";
         return serve_static(s, flags);
     }
-
     // ── /proc/filesystems ───────────────────────────────────────────
     if (path == "/proc/filesystems") {
         std::string s;
@@ -346,8 +331,7 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         s += "\text4\n";
         return serve_static(s, flags);
     }
-
-    // ── /proc/self/fd → directory of open fds (Turn 40) ─────────────
+    // ── /proc/self/fd → directory of open fds ─────────────
     // `ls /proc/self/fd` lists the guest's open file descriptors. We
     // return a DirNode with entries for 0, 1, 2 (stdin/stdout/stderr).
     // Real Linux has symlinks here (0 -> /dev/stdin etc.); we just
@@ -360,8 +344,7 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         fd_entries.push_back({"2", 0x2 /*DT_LNK*/});
         return serve_dir("/proc/self/fd", fd_entries, flags);
     }
-
-    // ── /proc/uptime (Turn 62 rev 3) ─────────────────────────────────
+    // ── /proc/uptime ─────────────────────────────────
     // toybox `uptime` reads /proc/uptime for the system uptime (seconds
     // with fractional part) and idle time. Without this, uptime showed
     // garbage (230961:11:19) because it read a non-existent file.
@@ -381,8 +364,7 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return std::string(buf);
         }, flags);
     }
-
-    // ── /proc/loadavg (Turn 62 rev 3) ────────────────────────────────
+    // ── /proc/loadavg ────────────────────────────────
     // toybox `uptime` and `top` read /proc/loadavg for load averages.
     // Format: "1min 5min 15min running/total last_pid\n"
     if (path == "/proc/loadavg") {
@@ -401,9 +383,7 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return std::string(buf);
         }, flags);
     }
-
     *err_out = 0;
     return nullptr;
 }
-
 } // namespace arm64emu::yggdrasil

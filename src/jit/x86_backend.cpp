@@ -21,13 +21,11 @@
 // offsets. The regalloc and IR compiler layer on top.
 #include "jit/frostjit.hpp"
 #include "arm64_emu.hpp"  // Emulator complete type (for slow-path helpers)
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
 namespace arm64emu {
 void FrostJIT::emit_byte(uint8_t b) {
     if (code_buf_used_ + 1 <= CODE_BUF_SIZE)
@@ -47,7 +45,6 @@ void FrostJIT::emit_u64(uint64_t v) {
     else
         code_buf_overflow_ = true;
 }
-
 // ── x86 helpers ────────────────────────────────────────────────────────
 uint8_t FrostJIT::rex(bool w, bool r, bool x, bool b) {
     return 0x40 | (w?8:0) | (r?4:0) | (x?2:0) | (b?1:0);
@@ -58,7 +55,6 @@ uint8_t FrostJIT::modrm(uint8_t mod, uint8_t reg, uint8_t rm) {
 uint8_t FrostJIT::sib(uint8_t scale, uint8_t index, uint8_t base) {
     return (scale<<6) | ((index&7)<<3) | (base&7);
 }
-
 void FrostJIT::emit_mov_imm64(int dst, uint64_t imm) {
     emit_byte(rex(true,false,false,dst>=8));
     emit_byte(0xB8 + (dst&7));
@@ -78,7 +74,6 @@ void FrostJIT::emit_mov_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8));
     emit_byte(0x89); emit_byte(modrm(3,src&7,dst&7));
 }
-
 // Load: mov dst, [base+off] (64-bit)
 void FrostJIT::emit_load(int dst, int base, int32_t off) {
     emit_byte(rex(true,dst>=8,false,base>=8));
@@ -182,7 +177,6 @@ void FrostJIT::emit_store8(int base, int32_t off, int src) {
     emit_byte(0x88);
     emit_modrm_disp(src, base, off);
 }
-
 void FrostJIT::emit_add_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x01); emit_byte(modrm(3,src&7,dst&7));
 }
@@ -260,7 +254,6 @@ size_t FrostJIT::emit_jcc_rel32_placeholder(uint8_t cc) {
 void FrostJIT::patch_jcc_rel32(size_t off, int32_t rel) {
     memcpy(code_buf_+off+2, &rel, 4);
 }
-
 // rel8 jumps: jcc rel8 = 0x70+cc <rel8> (2 bytes)
 size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x70 + cc); emit_byte(0); return off;
@@ -268,7 +261,6 @@ size_t FrostJIT::emit_jcc_rel8_placeholder(uint8_t cc) {
 void FrostJIT::patch_jcc_rel8(size_t off, int8_t rel) {
     code_buf_[off+1] = static_cast<uint8_t>(rel);
 }
-
 // sub rsp, imm8 / add rsp, imm8 (REX.W 83 EC NN / REX.W 83 C4 NN)
 void FrostJIT::emit_sub_rsp_imm8(uint8_t n) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(n);
@@ -276,20 +268,17 @@ void FrostJIT::emit_sub_rsp_imm8(uint8_t n) {
 void FrostJIT::emit_add_rsp_imm8(uint8_t n) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(n);
 }
-
 // and cl, imm8 — used to mask shift counts to 0..63 / 0..31.
 // Encoding: REX.W 83 E1 NN.
 void FrostJIT::emit_and_cl_imm8(uint8_t mask) {
     emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(mask);
 }
-
 // pushfq / popfq — save/restore x86 RFLAGS.
 // Encoding: 0x9C / 0x9D.
 // Used around C calls to preserve pending flag state, and as part of
 // the RSP-16-alignment dance before calls (pushfq adjusts RSP by 8).
 void FrostJIT::emit_pushfq() { emit_byte(0x9C); }
 void FrostJIT::emit_popfq()  { emit_byte(0x9D); }
-
 // emit_call_aligned — see header for the full contract.
 // At JIT body entry RSP%16==8. After the caller's `num_pushed` pushes,
 // RSP%16 == (8 + 8*num_pushed) % 16. We need RSP%16==0 right before
@@ -307,7 +296,6 @@ void FrostJIT::emit_call_aligned(void* target, int num_pushed) {
     emit_popfq();
     if (need_align) emit_add_rsp_imm8(8);
 }
-
 // ── ARM64 reg access (all in [RBX + REGS_OFF + 8*n]) ──────────────────
 void FrostJIT::emit_load_arm(int xr, int ar) {
     if (ar >= 0 && ar <= 30) emit_load(xr, CPU_REG, REGS_OFF + 8*ar);
@@ -319,7 +307,6 @@ void FrostJIT::emit_store_arm(int ar, int xr) {
     else if (ar == 31)       emit_store(CPU_REG, SP_OFF, xr);
     // XZR — discard
 }
-
 // ── NZCV materialization to cpu.pstate ────────────────────────────────
 // Stores ARM NZCV flags to pstate. ARM C is inverted from x86 CF for SUB
 // (ARM C = NOT borrow). We also store a "from_sub" flag in bit 27 so
@@ -332,23 +319,19 @@ void FrostJIT::emit_materialize_flags(bool from_sub) {
     emit_push(RAX);
     emit_pushfq();
     emit_byte(0x58);  // pop rax
-
     emit_xor_reg(RDX, RDX);
-
     // N = SF = (RAX >> 7) & 1, placed at bit 31
     emit_mov_reg(RCX, RAX);
     emit_shift_imm8(RCX, 5, 7);
     emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
     emit_shift_imm8(RCX, 4, 31);
     emit_or_reg(RDX, RCX);
-
     // Z = ZF = (RAX >> 6) & 1, placed at bit 30
     emit_mov_reg(RCX, RAX);
     emit_shift_imm8(RCX, 5, 6);
     emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
     emit_shift_imm8(RCX, 4, 30);
     emit_or_reg(RDX, RCX);
-
     // C = ARM C. For ADD: ARM C = x86 CF. For SUB: ARM C = NOT x86 CF.
     emit_mov_reg(RCX, RAX);
     emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01); // and ecx, 1 (x86 CF)
@@ -357,47 +340,39 @@ void FrostJIT::emit_materialize_flags(bool from_sub) {
     }
     emit_shift_imm8(RCX, 4, 29);
     emit_or_reg(RDX, RCX);
-
     // V = OF = (RAX >> 11) & 1, placed at bit 28
     emit_mov_reg(RCX, RAX);
     emit_shift_imm8(RCX, 5, 11);
     emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);
     emit_shift_imm8(RCX, 4, 28);
     emit_or_reg(RDX, RCX);
-
     // Store from_sub flag in bit 27.
     if (from_sub) {
         emit_byte(0x81); emit_byte(0xCA); emit_u32(0x08000000); // or edx, 1<<27
     }
-
     emit_store32(CPU_REG, PSTATE_OFF, RDX);
     emit_pop(RAX);
 }
-
 // Load NZCV from cpu.pstate into host flags.
 // Converts ARM C back to x86 CF: if from_sub (bit 27), x86 CF = NOT ARM C.
 // Otherwise x86 CF = ARM C.
 void FrostJIT::emit_load_flags_from_pstate() {
     emit_load32(RAX, CPU_REG, PSTATE_OFF);  // eax = pstate
     emit_mov_reg(RCX, RAX);  // rcx = pstate
-
     // Check from_sub flag (bit 27)
     // (always emit the invert check — the from_sub bit may or may not be set)
     // RAX = 0x02 (reserved EFLAGS bit)
     emit_mov_imm32(RAX, 0x02);
-
     // N → SF (bit 7): (pstate >> 24) & 0x80
     emit_mov_reg(RDX, RCX);
     emit_shift_imm8(RDX, 5, 24);
     emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000080);
     emit_or_reg(RAX, RDX);
-
     // Z → ZF (bit 6): (pstate >> 24) & 0x40
     emit_mov_reg(RDX, RCX);
     emit_shift_imm8(RDX, 5, 24);
     emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000040);
     emit_or_reg(RAX, RDX);
-
     // C → CF (bit 0): extract ARM C from pstate bit 29.
     // If from_sub (bit 27 set), invert: x86 CF = NOT ARM C.
     // If not from_sub, x86 CF = ARM C.
@@ -414,17 +389,14 @@ void FrostJIT::emit_load_flags_from_pstate() {
     emit_byte(0x41); emit_byte(0x83); emit_byte(0xE0); emit_byte(0x01); // and r8d, 1
     emit_xor_reg(RDX, R8);  // if from_sub, flip C
     emit_or_reg(RAX, RDX);
-
     // V → OF (bit 11): (pstate >> 17) & 0x800
     emit_mov_reg(RDX, RCX);
     emit_shift_imm8(RDX, 5, 17);
     emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000800);
     emit_or_reg(RAX, RDX);
-
     emit_push(RAX);
     emit_popfq();
 }
-
 // Normalize x86 CF to SUB convention (x86 CF = NOT ARM C) after
 // emit_load_flags_from_pstate. After loading, x86 CF = ARM C XOR from_sub:
 //   from_sub=1: x86 CF = NOT ARM C (already SUB convention — no change)
@@ -436,25 +408,20 @@ void FrostJIT::emit_normalize_cf_to_sub_convention() {
     // Save current flags (including the loaded CF) to RAX.
     emit_pushfq();            // pushfq
     emit_byte(0x58);          // pop rax  (RAX = saved RFLAGS, CF is bit 0)
-
     // Read pstate and extract from_sub bit (bit 27).
     emit_load32(RCX, CPU_REG, PSTATE_OFF);  // mov ecx, [rbx+PSTATE_OFF]
     emit_shift_imm8(RCX, 5, 27);            // shr ecx, 27
     emit_byte(0x83); emit_byte(0xE1); emit_byte(0x01);  // and ecx, 1
-
     // Compute mask = NOT from_sub = 1 XOR from_sub.
     // If from_sub=0: mask=1 (need to flip CF).
     // If from_sub=1: mask=0 (CF already correct).
     emit_byte(0x83); emit_byte(0xF1); emit_byte(0x01);  // xor ecx, 1
-
     // XOR RAX bit 0 (CF) with the mask. This flips CF iff from_sub=0.
     emit_xor_reg(RAX, RCX);  // xor rax, rcx
-
     // Restore flags from RAX (CF is now normalized to SUB convention).
     emit_byte(0x50);          // push rax
     emit_popfq();             // popfq
 }
-
 // ── Condition code mapping ─────────────────────────────────────────────
 // Maps ARM condition codes to x86 Jcc condition codes.
 // Since emit_load_flags_from_pstate correctly restores x86 CF (un-inverting
@@ -484,7 +451,6 @@ uint8_t FrostJIT::arm_cond_to_x86(uint8_t arm_cond) const {
         default:  return 4;
     }
 }
-
 // Resolve an ARM condition code to an x86 Jcc code, accounting for the
 // carry-polarity difference between ADD/TST (direct CF) and SUB (inverted).
 // After ADD/TST, ARM C and x86 CF agree (both = carry-out / both = 0).
@@ -510,7 +476,6 @@ uint8_t FrostJIT::resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc) 
             return arm_cond_to_x86(arm_cond);
     }
 }
-
 // ── Memory access helpers (C-callable from JIT) ────────────────────────
 // These are referenced by name from JIT-compiled code in frostjit.cpp
 // (emit_load_mem / emit_store_mem slow paths). They MUST be non-static
@@ -554,7 +519,6 @@ extern "C" {
             deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
         }
     }
-
     // ── Fast LL/SC helpers (bypass interpreter decode) ──────────────
     // These are called directly from JIT-compiled code (like jit_load_mem_slow)
     // to avoid the full interpreter step overhead (decode cache → switch →
@@ -564,7 +528,6 @@ extern "C" {
     // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=width
     // Returns (LDXR): the loaded value in RAX.
     // Returns (STXR): 0=success, 1=failure in RAX.
-
     uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width) {
         auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
         std::lock_guard<std::mutex> g(shard->mu);
@@ -585,7 +548,6 @@ extern "C" {
         if (!found) vec.push_back(cpu);
         return v;
     }
-
     // STXR: returns 0=success, 1=failure. val is in R8 (passed as 5th arg).
     uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
         auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
@@ -618,7 +580,6 @@ extern "C" {
         cpu->excl_clear();
         return ok ? 0 : 1;
     }
-
     // STLR: store-release (always succeeds, invalidates other CPUs).
     void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
         auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
@@ -641,7 +602,6 @@ extern "C" {
         }
     }
 }
-
 // ── Register allocator ──────────────────────────────────────────────────
 // Maps vregs to x86 registers for the duration of a block. Vregs 0-31
 // are architectural (live in cpu.regs[]/sp); vregs 33+ are scratch
@@ -658,12 +618,10 @@ extern "C" {
 // Reserved: RBX=CPU, R14=EMU, R10=window, RBP=frame, RSP=stack.
 // constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15};
 // (defined in frostjit.hpp; vregs cached in R12/R13/R15 survive CALL_INTERP)
-
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────
 // Memory access through the direct window (R10) when the address is in
 // the low 4 GiB; falls back to the C helper (jit_load_mem_slow /
 // jit_store_mem_slow, defined above) for high addresses.
-
 // Move a 64-bit immediate into RAX. Uses the shorter mov imm32 + zext
 // form when the value fits in 32 bits, otherwise the 10-byte mov imm64.
 void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
@@ -673,7 +631,6 @@ void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
         emit_mov_imm64(RAX, val);
     }
 }
-
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
     // dst = addr_reg + off
@@ -693,7 +650,6 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     emit_mov_imm64(tmp, limit);
     emit_cmp_reg(dst, tmp);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
-
     // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
     // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
     // add rsp,8 dance automatically. We just set up args and call.
@@ -710,7 +666,6 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // RAX now has the return value (the loaded data).
     if (dst != RAX) emit_mov_reg(dst, RAX);
     size_t jmp_past = emit_jmp_rel32_placeholder();
-
     // Fast path.
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
@@ -727,7 +682,6 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }
-
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     // We use R8 as the address scratch (NOT RDX/RCX, since the caller
     // passes addr in RAX and val in RCX, and we must not clobber either
@@ -749,7 +703,6 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_mov_imm64(R9, limit);
     emit_cmp_reg(R8, R9);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
-
     // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
     // 3 pushes (src, RAX, R10) — ODD, so emit_call_aligned handles the
     // sub rsp,8 + pushfq + call + popfq + add rsp,8 automatically.
@@ -768,7 +721,6 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_pop(RAX);                 // restore RAX
     emit_pop(src_reg);             // restore val (RCX)
     size_t jmp_past = emit_jmp_rel32_placeholder();
-
     // Fast path: direct window store.
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
@@ -784,6 +736,4 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }
-
-
 } // namespace arm64emu

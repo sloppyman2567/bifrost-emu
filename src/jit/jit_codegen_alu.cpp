@@ -1,6 +1,6 @@
 // jit/jit_codegen_alu.cpp — FrostJIT ALU/arithmetic IR-op codegen.
 //
-// v1.4.5-alpha (Turn 37): split out of frostjit.cpp. This file holds the
+// v1.4.5-alpha: split out of frostjit.cpp. This file holds the
 // arithmetic / logic / bitfield case bodies of the IR-op switch,
 // extracted into a separate method (compile_ir_alu) for readability.
 // The main switch in frostjit.cpp dispatches to this method before its
@@ -25,12 +25,9 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_alu ───────────────────────────────────────────
 int FrostJIT::compile_ir_alu(const IRInst& inst) {
     switch (inst.op) {
@@ -44,7 +41,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 }
             }
             return 0;
-
         case IROp::MOV:
             if (inst.dest) {
                 int s = ensure_vreg(inst.src1);
@@ -55,7 +51,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 set_vreg_reg(inst.dest, d);
             }
             return 0;
-
         // ── Binary ALU ops ──
         // Use src1 and src2 in whatever host regs they're already cached in.
         // Only allocate a fresh reg for dest when dest != src1 && dest != src2.
@@ -75,7 +70,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             int s1 = ensure_vreg(inst.src1);
             int s2 = ensure_vreg(inst.src2);
             int d;
-
             // emit_alu_op: emit `d = d op src` for the current inst.op.
             auto emit_alu_op = [&](int d, int src) {
                 switch (inst.op) {
@@ -88,7 +82,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     default: break;
                 }
             };
-
             if (inst.dest == inst.src1) {
                 // dest == src1: compute in s1 (in-place modify).
                 d = s1;
@@ -112,7 +105,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             return 0;
         }
-
         case IROp::SHL: case IROp::SHR:
         case IROp::SAR: case IROp::ROR: {
             // x86 variable shifts use CL for the count. We force src2 into
@@ -137,7 +129,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             // Force src2 into RCX (evict current occupant if any).
             force_vreg_to_reg(inst.src2, RCX);
-
             // emit_shift: mask CL to 6 bits (x86 shift counts are mod 64)
             // and emit `d = d shift_cl` for the current inst.op.
             auto emit_shift = [&](int d) {
@@ -159,7 +150,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     emit_shift_cl(d, kind);
                 }
             };
-
             int d;
             if (inst.dest == inst.src1) {
                 d = s1;
@@ -174,7 +164,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             return 0;
         }
-
         case IROp::NOT: {
             clobber_flags();
             int s = ensure_vreg(inst.src1);
@@ -184,7 +173,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return 0;
         }
-
         case IROp::NEG: {
             clobber_flags();
             int s = ensure_vreg(inst.src1);
@@ -194,7 +182,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return 0;
         }
-
         case IROp::SEXT: {
             clobber_flags();  // shifts clobber RFLAGS
             int s = ensure_vreg(inst.src1);
@@ -209,7 +196,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return 0;
         }
-
         case IROp::ZEXT: {
             int bits = inst.width;
             int s = ensure_vreg(inst.src1);
@@ -245,7 +231,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return 0;
         }
-
         case IROp::CLZ: {
             // lzcnt rax, rax overwrites RAX, destroying
             // src1's cached value. If src1 is a scratch vreg holding a snapshot
@@ -276,7 +261,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // dest is already cached in d (via alloc_reg_for) and marked dirty.
             return 0;
         }
-
         case IROp::REV64: {
             // Force src1 into RAX (properly evicts old RAX occupant).
             force_vreg_to_reg(inst.src1, RAX);
@@ -312,7 +296,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // dest is already cached in d (via alloc_reg_for) and marked dirty.
             return 0;
         }
-
         case IROp::CSEL: {
             // Native CSEL/CSINC/CSINV/CSNEG via jcc+mov.
             //
@@ -337,7 +320,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // Carry polarity: arm_cond_to_x86() assumes SUB convention
             // (ARM C = NOT x86 CF). When flags came from ADD/TST
             // (carry_is_direct), CS/CC need swapped mapping, HI/LS need cmc.
-
             // Track whether we loaded flags from pstate. If we did, the
             // flags in pstate are already correct and the epilogue should
             // NOT re-materialize (the loaded x86 flags have inverted CF,
@@ -345,7 +327,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // If we didn't load (flags were already in host), the epilogue
             // must still materialize them.
             bool loaded_from_pstate = !flags_in_host_;
-
             // Ensure flags in host.
             if (!flags_in_host_) {
                 flush_all_vregs();
@@ -388,13 +369,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             flags_in_host_ = saved_fih;
             flags_from_sub_ = saved_ffs;
             if (need_cmc) emit_byte(0xF5);  // cmc
-
             // Load src1 → RAX, src2 → RCX.
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
             else load_vreg_to_reg(RAX, inst.src1);
             if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
             else load_vreg_to_reg(RCX, inst.src2);
-
             // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
             if (inst.op != IROp::CSEL) {
                 emit_pushfq();
@@ -408,7 +387,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 }
                 emit_popfq();
             }
-
             // RDX = RAX (d = src1).
             emit_mov_reg(RDX, RAX);
             // jcc skip (if cond TRUE, keep src1 in RDX).
@@ -418,7 +396,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);
             // Patch jcc to skip over the 3-byte mov.
             patch_jcc_rel8(jcc_off, 3);
-
             // Store RDX to dest, then cache it in RDX.
             store_reg_to_vreg(inst.dest, RDX);
             set_vreg_reg(inst.dest, RDX);
@@ -441,7 +418,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             return 0;
         }
-
         // These are very common (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW/LSL/LSR/
         // ASR/SBFIZ/UBFIZ/BFI/BFXIL) and falling back to CALL_INTERP
         // for each one is both slow and a source of correctness bugs
@@ -471,7 +447,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // interact with stale mappings. We then write the result
             // directly to the dest vreg's memory home and re-cache it.
             //
-            // Turn 102: only RAX, RCX, RDX are clobbered by the bitfield
             // codegen below (shifts, ands, mov_imm64). Use targeted
             // flush+invalidate instead of the full flush_all_vregs+
             // invalidate_all_vregs — this preserves vregs cached in
@@ -483,12 +458,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             flush_scratch_host_regs(BFM_CLOBBER);
             invalidate_host_regs(BFM_CLOBBER);
             load_vreg_to_reg(RAX, inst.src1);
-
             // Handle common aliases efficiently:
             // - LSL (imms < immr): shift left by (width - immr)
             // - LSR (imms == width-1, UBFM): shift right by immr
             // - ASR (imms == width-1, SBFM): arithmetic shift right by immr
-
             // LSL: imms < immr (e.g. lsl w0, w0, #2 = UBFM w0, w0, #30, #31)
             // UBFM semantics for imms < immr:
             //   field = src & ((1 << (imms+1)) - 1)   [take low imms+1 bits]
@@ -520,7 +493,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                     return 0;
                 }
             }
-
             // LSR (UBFM) or ASR (SBFM): imms == width-1
             if (imms == width - 1) {
                 if (immr > 0) {
@@ -550,7 +522,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 set_vreg_reg(inst.dest, RAX);
                 return 0;
             }
-
             // General case: ROR then extract then (for SBFM) sign-extend
             if (immr != 0) {
                 emit_mov_imm32_zext(RCX, immr);
@@ -600,21 +571,18 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, RAX);
             return 0;
         }
-
         // Defensive fallback: BFM is normally decomposed to SHL+SHR+
         // OR+AND+OR in ir_translate.cpp. Falls back to interpreter.
         case IROp::BFM: {
             emit_call_interp(inst.arm_pc, false);
             return 0;
         }
-
         // Defensive fallback: EXTR is normally decomposed to SHL+SHR+OR
         // in ir_translate.cpp. Falls back to interpreter.
         case IROp::EXTR: {
             emit_call_interp(inst.arm_pc, false);
             return 0;
         }
-
         // Defensive fallback: RBIT/REV16/REV32 are decomposed to SWAR
         // shift/mask patterns in ir_translate.cpp, and CLS to SAR+XOR+
         // CLZ+SUB. Falls back to interpreter if re-emitted.
@@ -628,7 +596,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 set_vreg_reg(inst.dest, d);
             }
             return 0;
-
         case IROp::CCMP: {
             // CCMP/CCMN: if cond then set flags from (rn - rm) [CCMP]
             //            or (rn + rm) [CCMN]; else set flags to imm nzcv.
@@ -636,14 +603,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // inst.flags_op = 1 for CCMP (sub), 0 for CCMN (add).
             bool is_sub = (inst.flags_op == 1);
             uint8_t nzcv = inst.width & 0xF;
-
             // Compute x86 cc (true when ARM cond is TRUE).
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
-
             // Ensure flags in host.
             if (!flags_in_host_) {
-                // Turn 102: emit_load_flags_from_pstate and
                 // emit_normalize_cf_to_sub_convention only clobber
                 // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
                 // vregs cached in R8/R9/R11/R12/R13/R15.
@@ -667,7 +631,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 flags_from_sub_ = true;  // CF is now in SUB convention
             }
             if (need_cmc) emit_byte(0xF5);
-
             // Load src1 (rn) → RAX, src2 (rm) → RCX.
             // Use force_two_vregs_to for proper aliasing/eviction handling.
             // The old ensure_vreg + mov pattern could lose src1's value when
@@ -684,7 +647,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             } else {
                 force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
             }
-
             // CCMP clobbers RAX, RCX, RDX (via emit_materialize_flags on the
             // compare path, and via emit_mov_imm32_zext(RDX,...) on the else
             // path). force_two_vregs_to handled RAX/RCX eviction, but RDX
@@ -695,11 +657,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // `toybox ls /` (v37 = new_sp was in RDX, lost to CCMP, then
             // STORE_MEM [v37+0x40] used garbage as the base address).
             flush_invalidate_host_regs((1u << RDX) | (1u << RAX) | (1u << RCX));
-
             // jcc do_compare (if cond TRUE, do the compare)
             size_t jcc_to_compare = emit_jcc_rel32_placeholder(cc);
             // --- else path: cond FALSE, set pstate = nzcv ---
-            // Turn 95: do NOT set from_sub (bit 27) for the else path.
             // The else path sets NZCV directly from the instruction's nzcv
             // immediate — there's no subtraction, so C is NOT in SUB
             // convention (inverted). Setting from_sub=1 would cause the
@@ -715,7 +675,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             size_t jmp_to_end = emit_jmp_rel32_placeholder();
             // --- cond TRUE path: do the compare ---
             size_t compare_off = code_buf_used_;
-            // BUGFIX (Turn 56): use 32-bit sub/add for 32-bit CCMP/CCMN.
             // The old code always used emit_sub_reg/emit_add_reg (64-bit),
             // which computes the x86 Sign Flag from bit 63 instead of
             // bit 31. For 32-bit operations like `ccmp w3, #2`, if the
@@ -746,23 +705,19 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // Materialize flags to pstate.
             emit_materialize_flags(is_sub);
             size_t end_off = code_buf_used_;
-
             // Patch jumps.
             int32_t rel_compare = static_cast<int32_t>(compare_off - (jcc_to_compare + 6));
             patch_jcc_rel32(jcc_to_compare, rel_compare);
             int32_t rel_end = static_cast<int32_t>(end_off - (jmp_to_end + 5));
             patch_jmp_rel32(jmp_to_end, rel_end);
-
             // After both paths, RAX/RCX/RDX hold garbage (materialize_flags
             // or mov_imm32 clobbered them). Drop any stale cache mappings
             // so later instructions reload from memory instead of using
             // the clobbered host regs.
             invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-
             flags_in_host_ = false;
             return 0;
         }
-
         // ── UDIV / SDIV — native x86 div/idiv ────────────────────────
         case IROp::UDIV:
         case IROp::SDIV: {
@@ -779,7 +734,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             flush_invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
             load_vreg_to_reg(RAX, inst.src1);  // dividend
             load_vreg_to_reg(RCX, inst.src2);  // divisor
-
             // For 32-bit division, zero-extend EAX into RAX (clear upper 32).
             // The dividend must be in EAX; if we loaded a 64-bit value,
             // the upper bits would corrupt the 32-bit div.
@@ -789,13 +743,11 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // mov ecx, ecx (zero-extends divisor)
                 emit_byte(0x89); emit_byte(0xC9);
             }
-
             // test rcx, rcx
             emit_test_reg(RCX, RCX);
             // jz zero_div (jump to xor eax,eax if divisor == 0)
             size_t jz_patch = emit_jcc_rel32_placeholder(4);  // JE
             // --- non-zero divisor path ---
-
             // For SDIV, also guard the (INT_MIN, -1) case to avoid x86 #DE.
             // Layout:
             //   cmp rcx, -1           ; is divisor -1?
@@ -848,7 +800,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 // mark RDX as invalidated (we used it as scratch)
                 invalidate_host_regs(1u << RDX);
             }
-
             if (inst.width == 32) {
                 // 32-bit division: use div/idiv on EAX.
                 // xor edx, edx (clear upper for unsigned) or cdq (sign-extend)
@@ -882,14 +833,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 patch_jmp_rel32(overflow_jmp_patch,
                                 static_cast<int32_t>(past_off - (overflow_jmp_patch + 5)));
             }
-
             // For 32-bit results, writing to EAX zero-extends to RAX.
             int d = alloc_reg_for(inst.dest, RAX);
             if (d != RAX) emit_mov_reg(d, RAX);
             set_vreg_reg(inst.dest, d);  // cache the result
             return 0;
         }
-
         // ── SMADDL / UMADDL — widening multiply-accumulate ──────────
         case IROp::SMADDL:
         case IROp::UMADDL: {
@@ -921,7 +870,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             }
             // imul rax, rcx (64-bit multiply — result in RAX, no RDX needed)
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);
-            // BUGFIX (Turn 66): Load accumulator vreg via the vreg cache
             // (inst.aux), not directly from cpu.regs[]. The old code read
             // cpu.regs[inst.cond] which bypassed the vreg cache and could
             // read stale values if the accumulator was modified earlier
@@ -934,7 +882,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);  // cache the result (like UDIV)
             return 0;
         }
-
         // ── SMSUBL / UMSUBL — widening multiply-subtract ────────────
         case IROp::SMSUBL:
         case IROp::UMSUBL: {
@@ -956,7 +903,6 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 emit_byte(0x89); emit_byte(0xC9);  // mov ecx, ecx
             }
             emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1);  // imul rax, rcx
-            // BUGFIX (Turn 66): Load accumulator vreg via the vreg cache.
             load_vreg_to_reg(RDX, inst.aux);
             // sub rdx, rax (dest = acc - product)
             emit_byte(0x48); emit_byte(0x29); emit_byte(0xC2);  // sub rdx, rax
@@ -965,10 +911,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return 0;
         }
-
         default:
             return -1;  // not handled — caller falls through
     }
 }
-
 } // namespace arm64emu

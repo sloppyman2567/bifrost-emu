@@ -13,7 +13,6 @@
 // This umbrella pulls them all in so legacy `#include "arm64_emu.hpp"`
 // keeps working. New code should include only what it needs.
 #pragma once
-
 #include "bifrost/emulator.hpp"   // pulls in types, version, core/* via core/emulator.h
 #include "bifrost/version.hpp"
 #include "decoder.hpp"

@@ -23,21 +23,15 @@
 //     so the high 32 bits are zeroed. The optimizer peephole removes
 //     redundant ZEXTs after ops that already zero-extend (ADD with
 //     32-bit dest on x86, etc.) when generating x86.
-
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
-
 namespace arm64emu {
-
-// Turn 91: thread-local flag to disable BL_CALL during re-translation.
 // When true, BL instructions use the old behavior (end block at BL)
 // instead of BL_CALL (call within block). Set by translate_block when
 // re-translating a block whose BL_CALL targets aren't translated yet.
 thread_local bool bl_call_disabled_ = false;
-
 // ── translate_to_ir ────────────────────────────────────────────────────
-
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     // FP/SIMD and memory load/store cases are split into separate
@@ -47,12 +41,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
     // terminate the block — translate_to_ir returns `false`).
     if (translate_fp(block, d, cur_pc))  return false;
     if (translate_mem(block, d, cur_pc)) return false;
-
     switch (d.cls) {
         case InstClass::HINT:
             emit(block, IROp::NOP);
             return false;
-
         // ── MOVZ / MOVN / MOVK ───────────────────────────────────────
         case InstClass::MOVZ: {
             uint64_t val = static_cast<uint64_t>(d.imm16) << (d.hw * 16);
@@ -81,7 +73,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, result);
             return false;
         }
-
         // ── ADD/SUB (register, immediate) ────────────────────────────
         case InstClass::ADD_REG: case InstClass::ADD_IMM:
         case InstClass::SUB_REG: case InstClass::SUB_IMM: {
@@ -147,7 +138,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r, rd_is_sp);
             return false;
         }
-
         // ── ADDS/SUBS (flag-setting) ─────────────────────────────────
         case InstClass::ADDS_REG: case InstClass::ADDS_IMM:
         case InstClass::SUBS_REG: case InstClass::SUBS_IMM: {
@@ -203,7 +193,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return false;
         }
-
         // ── ADC/ADCS/SBC/SBCS (with carry) ───────────────────────────
         case InstClass::ADC_REG: case InstClass::ADCS_REG:
         case InstClass::SBC_REG: case InstClass::SBCS_REG: {
@@ -261,7 +250,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return false;
         }
-
         // ── AND/ORR/EOR/ANDS (register, immediate) ──────────────────
         // The register form also covers BIC/ORN/EON/BICS via the N bit
         // (bit 21). When N=1 the second operand is inverted before the
@@ -313,7 +301,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return false;
         }
-
         // ── MADD / MSUB ──────────────────────────────────────────────
         case InstClass::MADD: case InstClass::MSUB: {
             uint16_t rn = load_arm_reg(block, (d.rn == 31) ? 32 : d.rn);
@@ -328,7 +315,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, result);
             return false;
         }
-
         // ── LSL/LSR/ASR/ROR (register) ───────────────────────────────
         case InstClass::LSL: case InstClass::LSR:
         case InstClass::ASR: case InstClass::ROR: {
@@ -359,7 +345,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── SBFM/UBFM (bitfield extract) ───────────────────────────
         // These stay native in the JIT — pass through as single IR ops.
         // (The JIT has dedicated, well-tested codegen for them and the
@@ -381,7 +366,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r, d.writes_sp);
             return false;
         }
-
         // ── EXTR (bitfield extract from concat) ────────────────────
         // EXTR Rd, Rn, Rm, #imms:
         //   Rd = (Rn:Rm) >> imms    (imms in [0, width-1])
@@ -403,7 +387,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint16_t rm_v = load_arm_reg(block, d.rm);
             int width = d.sf ? 64 : 32;
             int lsb = d.imms;  // ARM encodes the extraction point in imms
-
             uint16_t result;
             if (lsb == 0) {
                 // Rd = Rm (low 64 bits of the concatenation).
@@ -425,7 +408,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, result);
             return false;
         }
-
         // ── BFM (bitfield insert) ───────────────────────────────────
         // BFM Rd, Rn, #immr, #imms:
         //   mask = ROR(Ones(imms+1), immr, width)
@@ -479,7 +461,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, result);
             return false;
         }
-
         // ── CSEL / CSINC / CSINV / CSNEG ─────────────────────────────
         // CSEL  Rd = cond ? Rn : Rm         → CSEL(Rn, Rm)
         // CSINC Rd = cond ? Rn : (Rm + 1)   → CSEL(Rn, ADD(Rm, 1))
@@ -513,7 +494,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── CCMP / CCMN ──────────────────────────────────────────────
         case InstClass::CCMP: case InstClass::CCMN: {
             uint16_t rn_v = load_arm_reg(block, d.rn);
@@ -527,7 +507,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // CCMP: if cond then set flags from rn - rm else set imm nzcv.
             emit(block, IROp::CCMP, 0, rn_v, rm_v, d.nzcv_field,
                  d.cond, is_sub ? 1 : 0, 0, cur_pc);
-            // BUGFIX (Turn 56): store the 32/64-bit width in the sf field
             // so the JIT can emit the correct sub/add width. Without this,
             // the JIT always uses 64-bit sub, which computes the Sign Flag
             // from bit 63 instead of bit 31 for 32-bit CCMP — causing the
@@ -540,7 +519,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.insts.back().sf = d.sf ? 1 : 0;
             return false;
         }
-
         // ── 1-source data processing: CLZ/CLS/RBIT/REV* ──────────────
         //
         // Strategy:
@@ -564,7 +542,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         case InstClass::REV: {  // REV (64-bit byte-swap) — native BSWAP
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r = g_alloc.alloc();
@@ -573,7 +550,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // CLS: count leading sign bits.
         //
         // ARM semantics:
@@ -634,7 +610,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         case InstClass::RBIT: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r;
@@ -651,7 +626,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         case InstClass::REV16: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r = rev16_64_ir(block, a);
@@ -659,7 +633,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         case InstClass::REV32: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t r = rev32_64_ir(block, a);
@@ -667,7 +640,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── UDIV / SDIV ──────────────────────────────────────────────
         case InstClass::UDIV: case InstClass::SDIV: {
             uint16_t a = load_arm_reg(block, d.rn);
@@ -679,11 +651,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                // Turn 96: BL_CALL temporarily disabled for debugging.
                 if (false) {
                     uint16_t lr = load_imm(block, cur_pc + 4);
                     store_arm_reg(block, 30, lr);
@@ -706,7 +676,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── BR / BLR ────────────────────────────────────────────────
         case InstClass::BR: case InstClass::BLR: {
             if (d.cls == InstClass::BLR) {
@@ -718,7 +687,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── RET ─────────────────────────────────────────────────────
         case InstClass::RET: {
             uint16_t target = load_arm_reg(block, d.rn);
@@ -726,7 +694,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── Bcond ───────────────────────────────────────────────────
         case InstClass::Bcond: {
             uint64_t target = cur_pc + d.imm;
@@ -734,7 +701,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── CBZ / CBNZ ──────────────────────────────────────────────
         // Per ARM ARM, CBZ/CBNZ do NOT modify any flags. They branch
         // based on whether the register is zero. We model this with a
@@ -749,7 +715,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── TBZ / TBNZ ──────────────────────────────────────────────
         // Per ARM ARM, TBZ/TBNZ do NOT modify flags. They branch based
         // on whether bit `bit` of `rt` is zero (TBZ) or one (TBNZ).
@@ -765,7 +730,6 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             block.ends_with_branch = true;
             return true;
         }
-
         // ── ADR / ADRP ──────────────────────────────────────────────
         case InstClass::ADR: {
             uint16_t r = load_imm(block, cur_pc + d.imm);
@@ -777,13 +741,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── SVC ─────────────────────────────────────────────────────
         case InstClass::SVC:
         case InstClass::SVC_IMM:
             emit(block, IROp::SVC, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;  // ends block (syscall may modify PC)
-
         // ── MSR / MRS (system reg access) ───────────────────────────
         case InstClass::MSR: case InstClass::MSR_SYS:
         case InstClass::MRS: case InstClass::MRS_SYS: {
@@ -806,24 +768,20 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return false;
         }
-
         // ── BRK / HLT (terminators) ─────────────────────────────────
         case InstClass::BRK: case InstClass::BRK_IMM:
         case InstClass::HLT: case InstClass::HLT_IMM:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
-
         // ── CLREX / BARRIER ─────────────────────────────────────────
         case InstClass::CLREX: case InstClass::CLREX_INST:
         case InstClass::BARRIER:
             emit(block, IROp::NOP);
             return false;
-
         // ── SMADDL / UMADDL (widening multiply-accumulate) ─────────
         case InstClass::SMADDL: case InstClass::UMADDL: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
-            // BUGFIX (Turn 66): load the accumulator as a vreg and pass
             // it via the `aux` field. The old approach passed the ARM
             // register index in `cond` and read cpu.regs[] directly in
             // the JIT, bypassing the vreg cache. If the accumulator
@@ -837,13 +795,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── SMSUBL / UMSUBL / SMULH / UMULH ─────────────────────────
         case InstClass::SMSUBL:
         case InstClass::UMSUBL: {
             uint16_t a = load_arm_reg(block, d.rn);
             uint16_t b = load_arm_reg(block, d.rm);
-            // BUGFIX (Turn 66): load accumulator as vreg via `aux` field.
             uint16_t acc = load_arm_reg(block, d.ra);
             uint16_t r = g_alloc.alloc();
             emit_aux(block, d.cls == InstClass::SMSUBL ? IROp::SMSUBL : IROp::UMSUBL,
@@ -860,12 +816,10 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             store_arm_reg(block, d.rd, r);
             return false;
         }
-
         // ── Everything else: inline interpreter call (no block split) ──
         default:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
     }
 }
-
 } // namespace arm64emu

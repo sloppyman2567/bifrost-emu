@@ -5,16 +5,13 @@
 // `ls /dev` under the guest returned nothing because no Node existed
 // for the directories themselves — only for specific files under them.
 #include "yggdrasil/dir_node.hpp"
-
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 // linux_dirent64 layout (AArch64):
 //   u64  d_ino;
 //   s64  d_off;
@@ -36,7 +33,6 @@ static uint64_t hash_ino(const std::string& name) {
     }
     return h | 0x8000000000000000ULL;  // set high bit to avoid 0 (reserved)
 }
-
 ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
     // The `off` parameter is ignored — we use the internal pos_ (set by
     // lseek) so that the guest's lseek(fd, d_off, SEEK_SET) + getdents
@@ -52,10 +48,8 @@ ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
     // pos_ to idx+1 — which is where the next getdents call picks up.
     size_t idx = pos_;
     if (idx >= entries_.size()) return 0;  // end-of-directory
-
     uint8_t* out = static_cast<uint8_t*>(buf);
     size_t total = 0;
-
     for (; idx < entries_.size(); idx++) {
         const Entry& e = entries_[idx];
         // Compute record length: name + NUL + padding to 8-byte align,
@@ -63,14 +57,12 @@ ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
         size_t name_len = e.name.size() + 1;  // include NUL
         size_t reclen = 19 + name_len;
         reclen = (reclen + 7) & ~size_t(7);  // align to 8
-
         // If this record doesn't fit, stop here. The guest will call
         // again with a larger buffer (or after consuming what we have).
         if (total + reclen > n) {
             if (total == 0) return -EINVAL;  // buffer too small for one entry
             break;  // return what we have; guest calls again
         }
-
         // Lay out the record.
         // d_ino (8 bytes) — FNV-1a hash of the full path.
         uint64_t ino = hash_ino(name_ + "/" + e.name);
@@ -89,13 +81,10 @@ ssize_t DirNode::getdents(uint64_t /*off*/, void* buf, size_t n) {
         // Zero-fill the padding (name NUL + alignment bytes).
         memset(out + total + 19 + e.name.size(), 0,
                reclen - 19 - e.name.size());
-
         total += reclen;
     }
-
     // Advance the internal position by the number of entries emitted.
     pos_ = idx;
     return static_cast<ssize_t>(total);
 }
-
 } // namespace arm64emu::yggdrasil

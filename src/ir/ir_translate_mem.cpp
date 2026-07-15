@@ -14,13 +14,10 @@
 //
 // See ir_translate.cpp for the header comment covering translator-wide
 // design rules (vreg mapping, ZEXT-after-32-bit-ops, etc.).
-
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
-
 namespace arm64emu {
-
 // Returns `true` if `d.cls` was one of the memory load/store cases
 // handled here (in which case translate_to_ir() returns `false` — none
 // of the extracted cases terminate a block). Returns `false` to let the
@@ -94,7 +91,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // checks `opc_ls & 2` directly.)
                 bool sign_ext = !d.is_vec && (d.opc_ls & 2);
                 if (d.is_vec) {
-                    // BUGFIX (Turn 57): FP registers live in cpu.v_lo[],
                     // NOT cpu.regs[]. Use store_fp_reg to write to the
                     // correct array. For 32-bit FP loads (width=4), the
                     // upper 32 bits of v_lo are already zeroed by the
@@ -121,7 +117,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     store_arm_reg(block, d.rt, val);
                 }
             } else {
-                // BUGFIX (Turn 57): for FP stores, load from v_lo[] not regs[].
                 uint16_t val = d.is_vec ? load_fp_reg(block, d.rt) : load_arm_reg(block, d.rt);
                 emit(block, IROp::STORE_MEM, 0, addr, val, static_cast<uint8_t>(width),
                      0, 0, static_cast<uint64_t>(mem_off));
@@ -146,7 +141,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return true;
         }
-
         // ── LDP/STP ──────────────────────────────────────────────────
         // Native IR translation for GPR pair load/store.
         // v1.5.0.alpha: SIMD LDP/STP (is_vec=true) now gets native IR
@@ -167,7 +161,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool pre_index = (d.mode == 3);
                 int64_t mem_off = post_index ? 0 : d.disp;
                 int stride = Q ? 16 : 8;
-
                 if (is_load) {
                     // LDP Vrt, Vrt2, [base, #disp]
                     // Load rt: v_lo from [base+mem_off], v_hi from [base+mem_off+8]
@@ -290,7 +283,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return true;
         }
-
         // ── Atomics (LDXR/STXR/LDAR/STLR/LSE_ATOMIC) ───────────────
         // LDXR/STXR/STLR use CALL_INTERP for now — the fast C helper path
         // (jit_ldxr/jit_stxr/jit_stlr) is defined but needs more testing
@@ -300,7 +292,6 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDAR: case InstClass::STLR:
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
-
         case InstClass::LSE_ATOMIC: {
             // LSE atomics: native x86 lock-prefixed instructions.
             // Fields:
@@ -347,11 +338,9 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             return true;
         }
-
         default:
             // Not a memory load/store case — let the main translator handle it.
             return false;
     }
 }
-
 } // namespace arm64emu

@@ -15,25 +15,20 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <algorithm>
 #include <sched.h>
 #include <unistd.h>
 #include <vector>
-
 namespace arm64emu {
-
 int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     auto& mem_ = emu.mem();
-
     switch (num) {
         case 117: { // ptrace — return -EPERM
             ret_err(EPERM);
             return 0;
         }
-
         case 124: { // sched_yield — AArch64 124
             // BUGFIX: was previously labeled "sched_setaffinity" but
             // sched_setaffinity is 122, not 124. The actual syscall at
@@ -49,7 +44,6 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
             // AArch64 122. We accept any affinity mask and pretend it
             // succeeded. The guest is a single-process sandbox; we don't
             // enforce CPU affinity.
-            // BUGFIX (Turn 65): validate the mask pointer to avoid EFAULT
             // later. The old code didn't even read a1/a2.
             if (a2 != 0 && a1 > 0) {
                 // Touch the mask to validate the pointer.
@@ -67,7 +61,6 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
             // cpusetsize with the mask pattern so guests requesting larger
             // masks get valid data.
             //
-            // BUGFIX (Turn 65): the old code only wrote 8 bytes and returned
             // 8, ignoring the cpusetsize argument. This broke programs that
             // request larger masks (e.g., Python's os.sched_getaffinity(0)
             // on systems with > 64 CPUs) — they'd see the 8-byte mask but
@@ -114,8 +107,6 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(20);
             return 0;
         }
-
-
         case 155: { // getpgid(pid) — AArch64 155
             // BUGFIX: previously labeled "sched_yield" but sched_yield is
             // at 124 (now correctly handled). The real syscall at 155 is
@@ -123,7 +114,6 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(1);
             return 0;
         }
-
         case 168: { // getcpu(cpu, node, tcache) — AArch64 168
             // BUGFIX: previously implemented as ppoll, but AArch64 168 is
             // getcpu (ppoll is at 73). The old code dereferenced `cache`
@@ -142,11 +132,9 @@ int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu

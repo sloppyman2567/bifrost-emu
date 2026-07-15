@@ -7,28 +7,23 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <signal.h>
 #include <cstdio>
 #include <cstring>
-
 namespace arm64emu {
-
 int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;
     auto& mem_ = emu.mem();
     auto& signals_ = emu.signals();
-
     switch (num) {
         case 132: { // sigaltstack(new, old) — AArch64 132
             int r = SignalTable::set_altstack(mem_, cpu, a0, a1);
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
-
         case 136: { // rt_sigpending(sigset, sigsetsize) — AArch64 136
             if (a0 != 0) {
                 try {
@@ -44,17 +39,14 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 138: { // rt_sigqueueinfo(tgid, signo, siginfo) — AArch64 138
             ret_host(0);
             return 0;
         }
-
         case 137: { // rt_sigtimedwait — AArch64 137
             ret_err(EAGAIN);
             return 0;
         }
-
         case 133: { // rt_sigsuspend(mask, sigsetsize) — AArch64 133
             uint64_t guest_mask = 0;
             if (a0 != 0) {
@@ -81,14 +73,12 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!delivered) cpu.sigmask = saved_sigmask;
             return 0;
         }
-
         case 134: { // rt_sigaction(signo, new_act, old_act, sigsetsize)
             int signo = static_cast<int>(a0);
             int r = signals_.install(mem_, signo, a1, a2);
             ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
-
         case 135: { // rt_sigprocmask(how, new_set, old_set, sigsetsize)
             static const bool trace = (getenv("BIFROST_SIGNAL_TRACE") != nullptr);
             int r = SignalTable::procmask(mem_, cpu, static_cast<int>(a0),
@@ -117,7 +107,6 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(r)));
             return 0;
         }
-
         case 139: { // rt_sigreturn — restore CPU state from signal frame
             SignalFrame frame;
             if (signals_.pop_frame(frame)) {
@@ -140,10 +129,8 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
 }
-
 } // namespace arm64emu

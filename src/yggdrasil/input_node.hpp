@@ -10,12 +10,9 @@
 // The node is not seekable (lseek returns -ESPIPE). Writes are not
 // supported (the device is read-only).
 #pragma once
-
 #include "yggdrasil/node.hpp"
 #include "frost/input.hpp"
-
 namespace arm64emu::yggdrasil {
-
 class InputNode : public Node {
 public:
     // `dev` selects the event format returned by read().
@@ -23,20 +20,16 @@ public:
                        ::arm64emu::InputDevice dev, int flags)
         : input_(input), dev_(dev), flags_(flags) {}
     ~InputNode() override = default;
-
     ssize_t read(uint64_t off, void* buf, size_t n) override;
     ssize_t write(uint64_t off, const void* buf, size_t n) override;
     ssize_t lseek(int64_t off, int whence) override;
     int     fstat(struct stat* st) override;
     bool    seekable() const override { return false; }
     int     flags() const override { return flags_; }
-
     int host_fd() const override { return -1; }
-
 private:
     ::arm64emu::FrostInput* input_;
     ::arm64emu::InputDevice dev_;
     int flags_;
 };
-
 } // namespace arm64emu::yggdrasil

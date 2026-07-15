@@ -34,7 +34,6 @@
 // "inline interpreter fallback" pattern that avoids block-splitting
 // overhead.
 #pragma once
-
 #include "decoder.hpp"
 #include "ir/ir.hpp"
 #include "jit/cpu_features.hpp"
@@ -46,31 +45,23 @@
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
-
 struct CPU;
 class Emulator;
 class Memory;
-
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
-
 class FrostJIT {
 public:
     FrostJIT();
     ~FrostJIT();
-
     FrostJIT(const FrostJIT&) = delete;
     FrostJIT& operator=(const FrostJIT&) = delete;
-
     void set_direct_window(uint8_t* base) { window_base_ = base; }
     uint64_t run_block(CPU& cpu, Emulator& emu);
-
-    // Turn 90: lookup_or_translate — used by BL_CALL helper (jit_call_helper).
     // Returns the block's fn pointer, translating if needed.
     // If the block is interp_only, returns nullptr (caller falls back to interpreter).
     uint64_t (*lookup_or_translate(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
@@ -95,8 +86,6 @@ public:
         blocks_mutex_.unlock();
         return fn;
     }
-
-    // Turn 91: lookup_only — look up an already-translated block.
     // Does NOT translate. Returns nullptr if not found or interp_only.
     // Used by jit_call_helper to avoid corrupting JIT state during execution.
     // Does NOT lock — called from JIT code which may already hold the lock.
@@ -110,8 +99,6 @@ public:
         }
         return nullptr;
     }
-
-    // Turn 92: translate_and_lookup — translate a block then return its fn.
     // Used by jit_call_helper when the target isn't translated yet.
     // Takes the exclusive lock, translates, returns fn (or nullptr for interp_only).
     uint64_t (*translate_and_lookup(Emulator& emu, uint64_t pc))(CPU*, Emulator*) {
@@ -127,7 +114,6 @@ public:
         blocks_mutex_.unlock();
         return fn;
     }
-
     // ── Function Multi-Versioning (FMV) ─────────────────────────────
     // The JIT queries these flags at codegen time to decide which x86
     // instruction sequence to emit for hot operations. For example,
@@ -155,7 +141,6 @@ public:
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
     bool has_sha()       const { return cpu_features_.has_sha(); }
-
     // BUGFIX (v1.4.5-alpha): these counters were plain uint64_t, but in
     // shared-JIT mode they're incremented by multiple host threads
     // concurrently → data race / UB. Made them std::atomic with relaxed
@@ -168,7 +153,6 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
-
     // Loop watchdog state — thread-local so multiple threads sharing a
     // single FrostJIT instance (shared-JIT mode) don't corrupt each
     // other's counters. Resets on any different PC; if the same PC runs
@@ -183,7 +167,6 @@ public:
     // share the main's FrostJIT in shared-JIT mode).
     static thread_local uint64_t tls_watchdog_last_pc_;
     static thread_local uint32_t tls_watchdog_count_;
-
     // v1.5.0.alpha: Per-thread single-entry "last block" fast cache.
     // Bypasses the shared_mutex lookup for tight loops where the same
     // PC is dispatched repeatedly. Stores just the (pc, fn, instr_count)
@@ -220,7 +203,6 @@ public:
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
-
     // v1.5.0.alpha Turn 2: Per-thread 4-way set-associative inline cache
     // for indirect branches (BR/BLR). This is the FEX-Emu pattern: cache
     // the last N (PC→fn) mappings so that virtual dispatch, switch tables,
@@ -228,7 +210,6 @@ public:
     // on every dispatch.
     //
     // The cache is direct-mapped by PC hash (PC >> 2) & (SLOTS-1).
-    // Turn 90: increased from 4 to 16 slots. With 4 slots, 42% of
     // dispatches in call-heavy code (fib) went through the slow path
     // (hash map + mutex). 16 slots reduces collisions to <5% for
     // typical code with 5-15 distinct blocks in a cycle.
@@ -243,12 +224,10 @@ public:
     };
     static thread_local InlineCacheEntry tls_inline_cache_[INLINE_CACHE_SLOTS];
     static thread_local uint32_t tls_lru_counter_;
-
     // Try the inline cache. Returns true on hit (and fills out/fn/count).
     // On miss, inserts into the cache (LRU eviction).
     bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
                               int& instr_count);
-
     // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
     // PC has been dispatched (total, not consecutive). When a PC exceeds
     // HOT_PC_THRESHOLD, it's marked interp_only — the interpreter is
@@ -261,7 +240,6 @@ public:
     static constexpr uint32_t HOT_PC_THRESHOLD = 5000;
     static constexpr size_t   HOT_PC_MAP_MAX   = 65536;
     static thread_local std::unordered_map<uint64_t, uint32_t> tls_hot_pc_counts_;
-
     // Global progress watchdog: if total block executions exceed this
     // limit, the JIT switches to interpreter-only mode permanently.
     // This is a safety valve for JIT codegen bugs that cause infinite
@@ -274,7 +252,6 @@ public:
     static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000;
     std::atomic<uint64_t> total_blocks_executed_{0};
     std::atomic<bool>     jit_disabled_{false};  // set by global watchdog
-
     // ── Shared-JIT mode (default) ───────────────────────────────────
     // Spawned threads share the main thread's FrostJIT instance, saving
     // 64 MiB of code-cache per thread. blocks_mutex_ protects the block
@@ -283,13 +260,11 @@ public:
     // execution (entry.fn) so threads can block in syscalls without
     // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
     std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
-
     void flush_cache();
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return CODE_BUF_SIZE; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
-
     static constexpr int REGS_OFF   = 0;
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;
@@ -298,7 +273,6 @@ public:
     static constexpr int V_HI_OFF   = 544;  // v_hi[0] — 32 × uint64_t
     static constexpr int FPCR_OFF   = 800;
     static constexpr int FPSR_OFF   = 804;
-
     // x86 reg constants.
     static constexpr int RAX=0, RCX=1, RDX=2, RBX=3, RSP=4;
     static constexpr int RBP=5, RSI=6, RDI=7;
@@ -307,7 +281,6 @@ public:
     static constexpr int CPU_REG = RBX;
     static constexpr int EMU_REG = R14;
     static constexpr int WIN_REG = R10;
-
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
@@ -318,21 +291,18 @@ public:
     // Dirty-bitmask width must match NUM_HOST_REGS. uint16_t holds 16 bits.
     static_assert(NUM_HOST_REGS <= 16, "dirty_host_regs_ is uint16_t; "
                   "NUM_HOST_REGS must be <= 16");
-
 private:
     static constexpr size_t CODE_BUF_SIZE = 64 * 1024 * 1024;
     uint8_t* code_buf_ = nullptr;
     size_t   code_buf_used_ = 0;
     bool     code_buf_overflow_ = false;
     uint8_t* window_base_ = nullptr;
-
     // ── CPU features (FMV) ──────────────────────────────────────────
     // Detected once at construction via CPUID + XGETBV. Cached for the
     // JIT's lifetime. Polled by compile_ir_inst() when emitting code
     // for hot operations that have multiple x86 codegen variants.
     CpuFeatures cpu_features_{};
     bool no_fma3_ = false;  // true if BIFROST_NO_FMA3=1 (force decomposed path)
-
     // ── W^X (Write XOR Execute) protection ──────────────────────────
     // The code buffer is mapped PROT_READ|PROT_EXEC by default (no WRITE).
     // Before any codegen or patching operation, call make_writable() to
@@ -359,7 +329,6 @@ private:
     int      wex_write_depth_ = 0;  // >0 means buffer is currently writable
     void make_writable();   // mprotect(code_buf_, RW) — call before writes
     void make_executable(); // mprotect(code_buf_, RX) — call before execution
-
     // ── Block chaining ──────────────────────────────────────────────
     // Each block ends with a 5-byte "chain slot" that is initially
     // `ret` + 4 NOPs. When the block's statically-known next PC (its
@@ -402,7 +371,6 @@ private:
         // any input values. The flag is only consulted when verify mode
         // is active.
         bool    verified_once = false;
-
         // Verify-mode memory save/restore: list of (arm_reg, offset, width)
         // for every STORE_MEM in this block whose address can be statically
         // resolved to (saved_arm_reg + offset). At verify time, we snapshot
@@ -421,7 +389,6 @@ private:
             uint8_t  arm_reg;   // 0..31 (or 32 for XZR — never stored, so N/A)
             int64_t  offset;    // signed displacement
             uint8_t  width;     // 1, 2, 4, or 8
-            // Turn 97: if true, use absolute_addr instead of saved.regs[arm_reg]+offset.
             // Set when the base ARM reg was modified to a known IMM within the block.
             bool     use_absolute = false;
             uint64_t absolute_addr = 0;
@@ -432,7 +399,6 @@ private:
         std::shared_ptr<std::vector<StoreInfo>> store_infos;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
-
     // Back-reference index: maps target_pc → list of source_pcs whose
     // chain_target_pc equals target_pc. Maintained incrementally at
     // translate-time (each block adds itself to its target's back-ref
@@ -441,7 +407,6 @@ private:
     // all blocks. This makes it cheap enough to call on every cache
     // hit, not just at translate-time.
     std::unordered_map<uint64_t, std::vector<uint64_t>> back_refs_;
-
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
     bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
@@ -452,7 +417,6 @@ private:
     // Uses back_refs_ for O(k) lookup; falls back to O(N) scan only if
     // the index is missing (defensive — should never happen).
     void chain_back_references(uint64_t target_pc);
-
     // ── x86 emitters ────────────────────────────────────────────────
     void emit_byte(uint8_t b);
     void emit_u32(uint32_t v);
@@ -460,7 +424,6 @@ private:
     static uint8_t rex(bool w, bool r, bool x, bool b);
     static uint8_t modrm(uint8_t mod, uint8_t reg, uint8_t rm);
     static uint8_t sib(uint8_t scale, uint8_t index, uint8_t base);
-
     void emit_mov_imm64(int dst, uint64_t imm);
     void emit_mov_imm32(int dst, uint32_t imm);
     void emit_mov_imm32_zext(int dst, uint32_t imm);
@@ -477,7 +440,6 @@ private:
     void emit_store16(int base, int32_t off, int src);
     void emit_store8(int base, int32_t off, int src);
     void emit_modrm_disp(int reg, int base, int32_t off);
-
     void emit_add_reg(int dst, int src);
     void emit_sub_reg(int dst, int src);
     void emit_adc_reg(int dst, int src);   // adc r64, r64 (with CF)
@@ -504,7 +466,6 @@ private:
     // that were scattered across ~20 call sites.
     void emit_pushfq();
     void emit_popfq();
-
     // emit_call_aligned: emit a properly RSP-16-aligned call sequence.
     //
     // Background: the SysV AMD64 ABI requires RSP%16==0 at the point of
@@ -538,7 +499,6 @@ private:
     // The caller owns the push/pop of saved regs; the helper owns the
     // alignment fixup + flag save + the call itself.
     void emit_call_aligned(void* target, int num_pushed);
-
     // Function-pointer overload — see emit_call_abs template above.
     template <typename R, typename... Args>
     void emit_call_aligned(R (*fn)(Args...), int num_pushed) {
@@ -554,17 +514,14 @@ private:
     // Stack pointer adjustment (sub/add rsp, imm8).
     void emit_sub_rsp_imm8(uint8_t n);
     void emit_add_rsp_imm8(uint8_t n);
-
     // Mask CL register with an 8-bit immediate (`and cl, imm8`).
     // Used before variable shifts (shl/shr/sar/ror r, cl) to clamp
     // the shift count to the operand width. Replaces the magic-byte
     // sequence `emit_byte(0x48); emit_byte(0x83); emit_byte(0xE1); emit_byte(n);`.
     void emit_and_cl_imm8(uint8_t mask);
-
     // ARM64 reg access.
     void emit_load_arm(int xr, int ar);
     void emit_store_arm(int ar, int xr);
-
     // Flag materialization.
     void emit_materialize_flags(bool from_sub = false);
     void emit_load_flags_from_pstate();
@@ -575,24 +532,19 @@ private:
     // is correct for all conditions.
     // Uses RAX and RCX as scratch (caller must ensure they're free).
     void emit_normalize_cf_to_sub_convention();
-
     // Memory access (direct-window path).
     void emit_load_mem(int dst, int addr_reg, int32_t off, int w, bool sign_ext);
     void emit_store_mem(int addr_reg, int32_t off, int src_reg, int w);
-
     // Move a 64-bit immediate into RAX, using the 32-bit zero-extend form
     // when the value fits in 32 bits (smaller code).
     void emit_mov_imm_to_rax(uint64_t val);
-
     // Resolve an ARM condition code to an x86 Jcc condition code, handling
     // the carry-polarity difference between ADD/TST (direct CF) and SUB
     // (inverted CF). Sets need_cmc=true if the caller must emit a `cmc`
     // before the JCC (needed for HI/LS after ADD/TST).
     uint8_t resolve_arm_cond_with_carry(uint8_t arm_cond, bool& need_cmc);
-
     // Condition code mapping.
     uint8_t arm_cond_to_x86(uint8_t arm_cond) const;
-
     // ── Register allocator ─────────────────────────────────────────
     // Maps vregs to x86 registers. Each vreg has a "home" x86 reg (or -1
     // if spilled to stack). The allocator tracks which vreg owns each x86
@@ -613,7 +565,6 @@ private:
     // frequently.
     static constexpr int NUM_ALLOC_REGS = 9;
     static constexpr int ALLOC_REGS[9] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15};
-
     // Returns true if `r` is caller-saved (clobbered by C calls).
     // R12/R13/R15 are callee-saved → preserved across calls.
     static constexpr bool is_caller_saved(int r) {
@@ -621,12 +572,10 @@ private:
                r == R8  || r == R9  || r == R11 ||
                r == R10;  // WIN_REG is caller-saved too
     }
-
     // Bitmask of all caller-saved host regs (used as a fast `mask` arg).
     static constexpr uint16_t CALLER_SAVED_MASK =
         (1u << RAX) | (1u << RCX) | (1u << RDX) |
         (1u << R8)  | (1u << R9)  | (1u << R11) | (1u << R10);
-
     // vreg → x86 reg (or -1 if spilled to stack).
     int vreg_home_[4096];
     // x86 reg → vreg currently in it (or -1).
@@ -642,7 +591,6 @@ private:
     // Max vreg from the previous block — used to bound the array-clearing
     // in translate_block() so we don't zero all 4096 entries every time.
     int prev_max_vreg_ = 0;
-
     // ── FP register index validation ───────────────────────────────
     // FP ops (FP_BINOP, FP_UNOP, FP_F2I, FP_I2F, FP_CMP, FP_MOVI, FMADD,
     // SIMD_*) use inst.dest/src1/src2 as FP register indices (0-31).
@@ -650,7 +598,6 @@ private:
     // out-of-bounds writes to the CPU struct. This check catches it.
     // Active in debug builds or with BIFROST_REGALLOC_CHECK=1.
     void check_fp_reg_index(int idx, const char* context) const;
-
     // ── Dirty host-reg bitmask (unique flush-reduction scheme) ───────
     // Bit `r` is set iff reg_vreg_[r] holds a dirty vreg (i.e.
     // vreg_dirty_[reg_vreg_[r]] == true). Maintained in lockstep with
@@ -663,7 +610,6 @@ private:
     //   dirty_host_regs_ & (1u << r)  ⇔  reg_vreg_[r] >= 0 &&
     //                                     vreg_dirty_[reg_vreg_[r]]
     uint16_t dirty_host_regs_ = 0;
-
     int  alloc_reg(int preferred = -1);
     // Allocate a host reg, but never return `excl1` or `excl2`.
     // Used by the ALU codegen to ensure dest doesn't collide with src1/src2's
@@ -679,7 +625,6 @@ private:
     void clobber_host_reg(int host_reg);
     void flush_all_vregs();
     void invalidate_all_vregs();
-
     // ── Targeted flush/invalidate (v1.4.0-beta.2) ───────────────────
     // Walk only the host regs whose bits are set in `mask`, spilling any
     // dirty vreg cached there. O(popcount(mask)) instead of O(max_vreg_).
@@ -710,13 +655,11 @@ private:
     }
     // Debug-only: verify the dirty_host_regs_ invariant. Returns true if OK.
     bool verify_dirty_host_regs_() const;
-
     int  ensure_vreg(int v, int preferred = -1);
     void set_vreg_reg(int v, int r);
     void kill_vreg(int v);
     int32_t vreg_stack_slot(int v);
     int  alloc_reg_for(int v, int preferred = -1);  // alloc + evict old occupant BEFORE computation
-
     // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ──────
     // Load vreg `v` into host reg `dst`, handling both arch vregs (0-31,
     // loaded from cpu.regs[]) and scratch vregs (33+, loaded from stack).
@@ -724,7 +667,6 @@ private:
     void load_vreg_to_reg(int dst, int v);
     // Store host reg `src` to arch reg `v` (0-31 = cpu.regs[], 31 = sp).
     void store_reg_to_vreg(int v, int src);
-
     // Force a vreg into a specific host register (MOVE semantics).
     // Evicts the current occupant of `host_reg` if any, then either
     // moves `v` from its current home (clearing the old mapping) or
@@ -733,7 +675,6 @@ private:
     // Use this when the caller needs `v` in a specific reg AND doesn't
     // need `v` to remain in its old location.
     void force_vreg_to_reg(int v, int host_reg);
-
     // Force two vregs into two specific host registers in one call.
     // Handles the aliasing case where src1 == src2 (or src2 was
     // originally cached in host_reg1) by COPYING src2 to host_reg2
@@ -745,7 +686,6 @@ private:
     // fixed reg and src2 in another (e.g. RAX and RCX).
     void force_two_vregs_to(int src1, int host_reg1,
                             int src2, int host_reg2);
-
     // ── FMOV helper ───────────────────────────────────────────────────
     // Moves a 64-bit value between a GPR vreg and an FP register slot
     // (cpu.v_lo[] or cpu.v_hi[]) via RAX (G→F) or a fresh reg (F→G).
@@ -762,7 +702,6 @@ private:
     // G→F or inst.src1 for F→G.
     void emit_fmov_helper(int dir, int fp_field, uint16_t idx,
                           uint16_t src1, uint16_t dest);
-
     // ── Typed emit_call_abs overload ──────────────────────────────────
     // The void* overload (declared above) is the low-level primitive.
     // This function-pointer overload lets call sites write:
@@ -777,12 +716,10 @@ private:
     void emit_call_abs(R (*fn)(Args...)) {
         emit_call_abs(reinterpret_cast<void*>(fn));
     }
-
     // IR compiler helpers.
     struct BranchPatch { size_t patch_off; int target_kind; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
-
-    // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha (Turn 36):
+    // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha:
     // split into two files for readability. The dispatch stays in
     // frostjit.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()
     // in jit_codegen_fp.cpp, and integer/memory/branch cases stay in
@@ -792,7 +729,6 @@ private:
     // Returns true if the block should end after this op (branch/call),
     // false otherwise.
     bool compile_ir_inst(const IRInst& inst);
-
     // FP/SIMD IR-op codegen. Called from compile_ir_inst() for the
     // FP_* and SIMD_* opcodes. Sets fp_handled_ to true if the op was
     // an FP/SIMD op (regardless of whether it ends the block), and
@@ -801,7 +737,6 @@ private:
     // Defined in jit_codegen_fp.cpp.
     bool compile_ir_inst_fp_(const IRInst& inst);
     bool fp_handled_ = false;  // reset before each compile_ir_inst_fp_ call
-
     // ── FP-arithmetic / SIMD sub-dispatchers (split out of
     //    compile_ir_inst_fp_() for readability). Each returns:
     //      true  → op handled here (caller returns false; FP ops never
@@ -819,8 +754,7 @@ private:
     //                             SIMD_USHR, SIMD_SSHR
     bool compile_ir_fparith(const IRInst& inst);
     bool compile_ir_simd(const IRInst& inst);
-
-    // ── ALU / memory / branch codegen (v1.4.5-alpha, Turn 37) ────────
+    // ── ALU / memory / branch codegen (v1.4.5-alpha) ────────
     // Three sub-dispatchers split out of compile_ir_inst() for
     // readability. Each is a member function so it has full access to
     // the JIT's emit_*, alloc_*, flush_*, etc. helpers.
@@ -845,14 +779,12 @@ private:
     int compile_ir_alu(const IRInst& inst);
     int compile_ir_mem(const IRInst& inst);
     int compile_ir_branch(const IRInst& inst);
-
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;
     std::vector<BranchPatch> branch_target_patches_;
     bool rax_holds_next_pc_ = false;
     bool flags_in_host_ = false;
     bool flags_from_sub_ = false;
-
     // ── Liveness-based register freeing ─────────────────────────────
     // kills_per_op_[i] = list of scratch vregs whose last use is IR op i
     // (and that are not the dest of op i). After compiling op i, each
@@ -861,7 +793,6 @@ private:
     // reg vregs (0-31) represent architectural state that must be flushed
     // at the epilogue, so they must not be killed early.
     std::vector<std::vector<uint16_t>> kills_per_op_;
-
     // Block-chaining state (reset at translate_block start).
     // chain_target_pc_ > 0 means the block's statically-known next PC
     // (suitable for chaining). unchainable_end_ = true means the block
@@ -869,7 +800,6 @@ private:
     // so it cannot be chained even at fall-through.
     uint64_t chain_target_pc_ = 0;
     bool unchainable_end_ = false;
-
     // Self-loop chaining state (reset at translate_block start).
     // When a BRCOND's taken target == block start PC, a 5-byte jmp slot is
     // emitted on the taken path. translate_block patches it to jump directly
@@ -879,23 +809,18 @@ private:
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
-
     // Materialize pending host flags to pstate if any flag-clobbering
     // instruction is about to execute. Called by ADD/SUB/AND/OR/XOR/
     // SHL/SHR/SAR/ROR/NOT/NEG/IMUL to preserve flag correctness.
     void clobber_flags();
-
     // Materialize host flags (NZCV) to cpu.pstate, preserving the current
     // RFLAGS around the materialization (which clobbers RAX/RCX/RDX).
     // Used at block exits (BRCOND fall-through and taken paths) where the
     // next block may read pstate. No-op if flags_in_host_ is false.
     // Does NOT clear flags_in_host_ — the caller manages that.
     void materialize_flags_to_pstate();
-
     // Translation entry point.
     uint64_t (*translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*);
-
 private:
 };
-
 } // namespace arm64emu

@@ -21,12 +21,9 @@
 // returns void (it does NOT indicate whether the leaf is supported).
 // We use __get_cpuid_max() to check leaf availability first.
 #include "jit/cpu_features.hpp"
-
 #include <cpuid.h>
 #include <cstddef>  // for size_t
-
 namespace arm64emu {
-
 // XCR0 feature bit positions (Intel SDM Vol 1, Table 13-1).
 //   bit 0:  x87          (always set on x86-64)
 //   bit 1:  XMM          (SSE — required for XMM state)
@@ -39,7 +36,6 @@ static constexpr uint32_t XCR0_YMM       = 1u << 2;
 static constexpr uint32_t XCR0_OPMASK    = 1u << 5;
 static constexpr uint32_t XCR0_ZMM_HI256 = 1u << 6;
 static constexpr uint32_t XCR0_HI16_ZMM  = 1u << 7;
-
 // Read the XCR (extended control register) at index `idx`.
 // XGETBV is the instruction; we wrap it in inline asm because <cpuid.h>
 // doesn't expose it. ECX = idx (typically 0 for XCR0). Returns EDX:EAX.
@@ -50,10 +46,8 @@ static inline uint64_t xgetbv(uint32_t idx) {
                          : "c"(idx));
     return (static_cast<uint64_t>(edx) << 32) | eax;
 }
-
 CpuFeatures detect_cpu_features() {
     CpuFeatures f{};
-
     // CPUID leaf 1: SSE4.1/SSE4.2/POPCNT/AVX/FMA3/OSXSAVE.
     // __get_cpuid returns 1 on success, 0 on unsupported leaf.
     // On ancient CPUs (pre-Pentium 4), leaf 1 may not be present.
@@ -83,7 +77,6 @@ CpuFeatures detect_cpu_features() {
         f.popcnt = (c & ecx_popcnt) != 0;
         f.aesni  = (c & ecx_aesni)  != 0;
         f.pclmulqdq = (c & ecx_pclmulqdq) != 0;
-
         // AVX / FMA3 require OS support (OSXSAVE) and YMM state in XCR0.
         // Cache the XCR0 value — it's also needed for AVX-512 below.
         bool osxsave = (c & ecx_osxsave) != 0;
@@ -97,7 +90,6 @@ CpuFeatures detect_cpu_features() {
             }
         }
     }
-
     // CPUID leaf 7 subleaf 0: AVX2/BMI1/BMI2/AVX-512.
     // __cpuid_count() is a macro that expands to inline asm — it does
     // NOT return a value indicating whether the leaf is supported.
@@ -134,15 +126,12 @@ CpuFeatures detect_cpu_features() {
         const uint32_t ebx_avx512bw = 1u << 30;
         // EBX bit 29: SHA-NI (Intel Goldmont+ / AMD Zen+)
         const uint32_t ebx_sha     = 1u << 29;
-
         f.bmi1 = (b & ebx_bmi1) != 0;
         f.bmi2 = (b & ebx_bmi2) != 0;
         f.sha  = (b & ebx_sha)  != 0;
-
         // AVX2 requires AVX + YMM state (already checked for f.avx).
         bool avx_ok = f.avx;  // AVX implies YMM-enabled XCR0
         f.avx2 = avx_ok && (b & ebx_avx2) != 0;
-
         // LZCNT is part of ABM (CPUID.80000001H:ECX[5]) — separate from
         // BMI1. Check via extended CPUID leaf 0x80000001.
         unsigned int e2a=0, e2b=0, e2c=0, e2d=0;
@@ -150,7 +139,6 @@ CpuFeatures detect_cpu_features() {
             const uint32_t ecx_lzcnt = 1u << 5;
             f.lzcnt = (e2c & ecx_lzcnt) != 0;
         }
-
         // AVX-512 requires OS support for the OPMASK/ZMM state.
         if (f.avx) {
             bool zmm_enabled = (xcr0 & (XCR0_OPMASK | XCR0_ZMM_HI256 |
@@ -165,10 +153,8 @@ CpuFeatures detect_cpu_features() {
             }
         }
     }
-
     return f;
 }
-
 // ── Pretty-printer ────────────────────────────────────────────────────
 // Used by the startup banner and --verbose stats. Returns a pointer to
 // a thread-local buffer so callers don't need to free it.
@@ -209,5 +195,4 @@ const char* cpu_features_string(const CpuFeatures& f) {
     *p = '\0';
     return buf;
 }
-
 } // namespace arm64emu

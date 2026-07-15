@@ -6,6 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 103 (2026-07-15)
+
+### Code hygiene + syscall accuracy pass
+
+Reviewed all source under `src/`, `include/`, and `main.cpp` for
+stale comments, dead code, and syscall-number accuracy. Verified
+"hello world printf glibc static/dynamic" works for all four
+configurations (musl/glibc × static/dynamic) — the historical bug
+(fixed in Turns 74/78/81) does not reproduce.
+
+**Syscall number corrections (per `asm-generic/unistd.h`):**
+
+- **454/455/456** were collapsed into one stub labelled "futex2".
+  They are actually three distinct syscalls: `futex_wake`,
+  `futex_wait`, `futex_requeue` (kernel 6.7+). Fixed by adding
+  three separate cases (all `-ENOSYS` so guests fall back to the
+  legacy `futex` syscall 99).
+- **457/458** were mislabelled as `statmount`/`listmount` at
+  syscall numbers 455/456. Corrected to 457/458.
+- **459/460/461** were mislabelled as LSM at 457/458/459. Corrected
+  to 459 (`lsm_get_self_attr`) / 460 (`lsm_set_self_attr`) / 461
+  (`lsm_list_modules`). The previous code was missing syscall 460
+  and 461 entirely (they fell through to default `-ENOSYS`, which
+  happened to be the correct behavior — but the case labels were
+  wrong, masking the gap).
+- Added stubs for kernel 6.13+ syscalls:
+  - 463 `setxattrat`, 464 `getxattrat`, 465 `listxattrat`,
+    466 `removexattrat` (kernel 6.13+)
+  - 467 `open_tree_attr` (kernel 6.15+)
+  - 468 `file_getattr`, 469 `file_setattr` (kernel 6.17+)
+  - 470 `listns`, 471 `rseq_slice_yield` (kernel 6.19+)
+
+All new stubs return `-ENOSYS` so guests fall back gracefully.
+
+**Source cleanup (4128 lines removed across 246 files):**
+
+- Stripped all `// Turn NN:`, `// BUGFIX (Turn NN):`,
+  `// NEW (Turn NN):`, and trailing `(Turn NN)` annotations from
+  source. These were development-history narrative that belongs in
+  `context.md`, not in source. The substantive content (root-cause
+  analysis, file lists, etc.) is preserved in `context.md`.
+- Removed the `// HISTORICAL BUG (v1.3.0-beta.4 and earlier)`
+  narrative block in `main.cpp`.
+- Removed the `// BUGFIX (this turn):` block in `misc_extended.cpp`
+  documenting the xattr/SysV IPC syscall-number fix.
+- Removed misleading `(void)verbose; (void)debug;` casts in
+  `main.cpp` (the variables are actually used to set cfg fields).
+- Removed 14 unused `#include` lines in `src/syscalls/syscalls.cpp`
+  (the dispatcher only needs `<cerrno>`, `<cstdio>`, `<cstdlib>`,
+  `<cstring>` — all the `<sys/*.h>` headers were leftover from when
+  the dispatcher was monolithic).
+- Fixed trailing whitespace in `src/ir/ops.cpp` and
+  `src/ir/ir_optimize.cpp` file headers.
+- Fixed the `^Backslash` multi-line comment warning in
+  `src/yggdrasil/stdio_node.cpp` (was `// ^\` which GCC treats as a
+  line continuation).
+- Removed unused `int esize = 1;` variable in `src/interp/interp_fp.cpp`
+  ADDP handler.
+
+**Documentation fixes:**
+
+- `src/core/signal.h` — removed the "Only signals 1..31 are supported"
+  limitation note that contradicted the code (RT signals 32..64 ARE
+  supported since Turn 57).
+- `main.cpp` — replaced stale "72-test suite" references with "full
+  test suite" (current count is 171 tests).
+- `TESTS.md` — removed `Turn NN` date references and "root cause was
+  X" historical narratives from the test-status tables.
+- `README.md` — removed "now" framing from feature descriptions.
+- `src/syscalls/misc_extended.cpp` — fixed misleading file header
+  that claimed AArch64 "renumbered" xattr syscalls (it didn't — the
+  emulator had them at the wrong numbers before Turn 80).
+
+**Functional fix:**
+
+- `main.cpp` — the `-q` / `--quiet` CLI flag was parsed but never
+  read (dead state). Wired it up to set `cfg.log_brk_verbose = false`
+  so it actually suppresses BRK warnings, matching the documented
+  behavior.
+
+**Build status:** warning-clean under `-Wall -Wextra`. Test suite:
+169/171 pass (2 pre-existing failures: `rw_iperf3_version` needs
+`libiperf.so.0`, `test_dlopen` needs dlopen support — both fail
+identically on the previous commit).
+
 ## [Unreleased] — Turn 89 (2026-07-12)
 
 ### FRINT native JIT codegen — floor/ceil/round/trunc now execute natively

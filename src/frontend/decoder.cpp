@@ -38,12 +38,9 @@
 //   4. 64-bit CBZ/CBNZ/TBZ/TBNZ (sf=1) now decode correctly.
 //   5. BRK/HLT bit[4:0] = 0 check enforced (matches ARM ARM).
 //   6. Add/sub extended register bits[23:22] = 00 check enforced.
-
 #include "decoder.hpp"
 #include "core/emulator.h"
-
 namespace arm64emu {
-
 // ── Condition codes ─────────────────────────────────────────────────────
 bool cond_true(uint32_t cond, uint32_t pstate) {
     bool N = pstate & (1u << 31);
@@ -70,7 +67,6 @@ bool cond_true(uint32_t cond, uint32_t pstate) {
     }
     return true;
 }
-
 // ── Register extend ─────────────────────────────────────────────────────
 uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
     switch (option & 7) {
@@ -85,7 +81,6 @@ uint64_t extend_reg(uint64_t val, uint8_t option, uint8_t shift, bool /*sf*/) {
     }
     return val << shift;
 }
-
 // ── Decode logical immediate bitmask ────────────────────────────────────
 // BUGFIX (Turn 60, H10): return false (and leave *out unchanged) for
 // UNALLOCATED encodings instead of returning 0. The old code returned 0
@@ -133,12 +128,10 @@ static bool decode_bitmask_imm(bool N, uint8_t immr, uint8_t imms, bool sf,
     *out = result;
     return true;
 }
-
 // ── Main decode function ────────────────────────────────────────────────
 bool decode(DecodedInst& d, uint32_t inst) {
     d.raw = inst;
     d.cls = InstClass::UNKNOWN;
-
     // Pre-extract truly common fields.
     d.rd    = inst & 0x1F;
     d.rn    = (inst >> 5) & 0x1F;
@@ -151,7 +144,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
     d.cond  = inst & 0xF;
     d.Q     = (inst >> 30) & 1;
     d.ftype = (inst >> 22) & 3;
-
     // B / BL — checked BEFORE the outer switch because their encoding
     // uses bits[30:26]=00101, not bits[28:24]. imm26[25:24] leaks into
     // bits[28:24], so a single B/BL can land in cases 0x14–0x17.
@@ -160,15 +152,12 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.imm = arm64emu::sign_extend(inst & 0x03FFFFFF, 26) << 2;
         return true;
     }
-
     uint8_t op28_24 = (inst >> 24) & 0x1F;
     switch (op28_24) {
-
     // Reserved groups.
     case 0x00: case 0x01: case 0x02: case 0x03:
     case 0x04: case 0x05: case 0x06: case 0x07:
         return false;
-
     // Load/Store Pair post-index (V=0) + Load/Store Exclusive.
     case 0x08: {
         if ((inst >> 29) & 1) {
@@ -261,7 +250,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return false;
         }
     }
-
     // Load/Store Pair (offset V=0 / pre-index V=0).
     case 0x09: {
         // GPR LDP/STP (signed offset, pre-index).
@@ -285,7 +273,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
         return true;
     }
-
     // Data processing — register: logical shifted register.
     case 0x0A: {
         uint8_t opc = (inst >> 29) & 3;
@@ -305,20 +292,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         return true;
     }
-
     // Data processing — register: add/subtract (shifted or extended).
     case 0x0B: {
         bool S      = (inst >> 29) & 1;
         bool bit21  = (inst >> 21) & 1;
         // For extended register (bit21=1), bits[23:22] must be 00.
         if (bit21 && (((inst >> 22) & 3) != 0)) return false;
-
         d.is_sub    = (inst >> 30) & 1;
         d.set_flags = S;
         d.rm        = (inst >> 16) & 0x1F;
         d.rn        = (inst >> 5) & 0x1F;
         d.rd        = inst & 0x1F;
-
         if (bit21) {
             d.extend    = (inst >> 13) & 7;
             d.shift     = (inst >> 10) & 7;
@@ -328,12 +312,10 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.shift_type = (inst >> 22) & 3;
             d.shift      = (inst >> 10) & 0x3F;
         }
-
         if (d.is_sub) d.cls = S ? InstClass::SUBS_REG : InstClass::SUB_REG;
         else          d.cls = S ? InstClass::ADDS_REG : InstClass::ADD_REG;
         return true;
     }
-
     // SIMD LD1/ST1 OR Load/Store Pair (V=1, all modes).
     case 0x0C: case 0x0D: {
         if (!((inst >> 29) & 1)) {
@@ -363,7 +345,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
             // We set is_single_struct so the interpreter can dispatch to
             // the single-element path. simd_count stays 1 for single-struct
             // (one register, one element).
-            // BUGFIX (Turn 75): the old code used bit[12] alone to distinguish
             // single-structure from multi-structure. But LD1/ST1 multi (1 reg)
             // has opcode 0b0111 which has bit[12]=1 — same as single-structure.
             // The correct check: if bits[11:10]==00, there's no element index,
@@ -419,11 +400,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.cls = d.is_load ? InstClass::LDP : InstClass::STP;
         return true;
     }
-
     // SIMD data processing (catch-all). v0's mask doesn't cover bit 24
     // but requires bit 31 = 0.
     //
-    // Turn 41: added 0x2E, 0x4E, 0x6E, 0x4F to cover Q=1 and U=1 variants.
     // The AArch64 SIMD encoding uses bits[31:29] to distinguish:
     //   0x0E = Q=0, U=0  (e.g., ADD v.8b)
     //   0x2E = Q=0, U=1  (e.g., SUB v.8b — unsigned sub is 0x2E208400)
@@ -446,7 +425,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.cmode  = (inst >> 12) & 0xF;
         return true;
     }
-
     // PC-relative addressing: ADR / ADRP.
     case 0x10: {
         bool is_adrp = (inst >> 31) & 1;
@@ -459,7 +437,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rd = inst & 0x1F;
         return true;
     }
-
     // Add/subtract (immediate).
     case 0x11: {
         bool S      = (inst >> 29) & 1;
@@ -476,7 +453,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         else          d.cls = S ? InstClass::ADDS_IMM : InstClass::ADD_IMM;
         return true;
     }
-
     // Wide immediate (MOVN/MOVZ/MOVK) OR Logical immediate.
     case 0x12: {
         if ((inst >> 23) & 1) {
@@ -518,7 +494,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         return true;
     }
-
     // Bitfield (SBFM/BFM/UBFM) OR EXTR.
     // IMPROVEMENT: v0 had a bug where the bitfield check (mask 0x1F000000)
     // ignored bit 23 and came BEFORE the EXTR check (mask 0x1F800000),
@@ -530,7 +505,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.imms = (inst >> 10) & 0x3F;
         d.rn   = (inst >> 5) & 0x1F;
         d.rd   = inst & 0x1F;
-
         if ((inst >> 23) & 1) {
             // EXTR. Rm shares bits[20:16] with immr.
             d.rm  = (inst >> 16) & 0x1F;
@@ -546,7 +520,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         return true;
     }
-
     // B.cond / CBZ (32+64) / SVC / BRK / HLT / HVC / SMC.
     case 0x14: {
         uint8_t op31_29 = (inst >> 29) & 7;
@@ -603,7 +576,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return false;
         }
     }
-
     // CBNZ (32+64) / MSR / MRS / HINT / CLREX.
     case 0x15: {
         uint8_t op31_29 = (inst >> 29) & 7;
@@ -623,7 +595,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     d.cls = InstClass::HINT;
                     return true;
                 }
-                // Turn 98: PAC instructions (PACIASP/PACIAZ/AUTIASP/AUTIAZ etc.)
                 // and BTI instructions are in the 0xD5032000-0xD5032FFF range.
                 // Without this check, they fall through to the MSR_SYS case
                 // (which matches 0xD5000000) and become CALL_INTERP in the JIT.
@@ -651,7 +622,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return false;
         }
     }
-
     // TBZ (32+64) / BR / BLR / RET.
     case 0x16: {
         uint8_t op31_29 = (inst >> 29) & 7;
@@ -687,7 +657,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return false;
         }
     }
-
     // TBNZ (32+64).
     case 0x17: {
         uint8_t op31_29 = (inst >> 29) & 7;
@@ -700,7 +669,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt    = inst & 0x1F;
         return true;
     }
-
     // Load/Store (various) — bits[28:24] ∈ {11000, 11100}:
     //   LSE atomics / LDUR/STUR / LDR/STR reg offset.
     // v0's masks don't cover bit 26 (V), so both V=0 (case 0x18) and
@@ -708,11 +676,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
     // bit 29 = 1.
     case 0x18: case 0x1C: {
         if (!((inst >> 29) & 1)) return false;
-
         bool    bit21  = (inst >> 21) & 1;
         bool    bit26  = (inst >> 26) & 1;  // V
         uint8_t mode_b = (inst >> 10) & 3;
-
         if (!bit21) {
             // LDUR/STUR. mode_b ∈ {0,1,3}; mode_b == 2 is reg offset.
             if (mode_b == 2) return false;
@@ -762,7 +728,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 return false;
         }
     }
-
     // Load/Store (unsigned immediate offset) — bits[28:24] ∈ {11001, 11101}.
     // v0's mask doesn't cover bit 26 (V), requires bit 29 = 1.
     case 0x19: case 0x1D: {
@@ -794,7 +759,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.cls = d.is_load ? InstClass::LDR_IMM : InstClass::STR_IMM;
         return true;
     }
-
     // Data processing — register (5 sub-groups share bits[28:24]=11010):
     //   ADC/SBC, Cond compare, Cond select, DP 1-source, DP 2-source.
     // All sub-patterns require bit 21 = 0.
@@ -803,9 +767,7 @@ bool decode(DecodedInst& d, uint32_t inst) {
         bool    bit29     = (inst >> 29) & 1;
         bool    bit21     = (inst >> 21) & 1;
         uint8_t bits23_22 = (inst >> 22) & 3;
-
         if (bit21) return false;
-
         switch (bits23_22) {
             case 0b00: {
                 // ADC/ADCS/SBC/SBCS.
@@ -924,7 +886,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         return false;
     }
-
     // Data processing — register (3-source): MADD/MSUB/SMADDL/etc.
     case 0x1B: {
         d.sub_op = (inst >> 21) & 0x7;
@@ -943,7 +904,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         }
         return true;
     }
-
     // FMOV (Vd.D[1] <-> Rn) + FP scalar (catch-all).
     case 0x1E: {
         if ((inst & 0xFFE0FC00) == 0x9EA00000) {
@@ -962,7 +922,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // fall back to CALL_INTERP for vector-specific encodings it
         // doesn't handle natively.
         //
-        // Turn 40: added 0x7E — 'Advanced SIMD three same, extra'
         // (SQRDMLAH/SQRDMLSH — saturating rounding multiply-add).
         // Used by libc's printf formatting code (NEON for wide-char
         // operations). Without this, `toybox uptime` crashes with
@@ -981,7 +940,6 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rmode     = (inst >> 19) & 3;
         return true;
     }
-
     // FMADD / FMSUB / FNMADD / FNMSUB — FP fused multiply-add/subtract
     // (3-source). bits[28:24]=11111, bit[15]=o1 (0=FMADD/FNMADD, 1=FMSUB/FNMSUB),
     // bit[21]=o2 (0=FMADD/FMSUB, 1=FNMADD/FNMSUB). The IR translator's
@@ -999,11 +957,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rmode     = (inst >> 19) & 3;
         return true;
     }
-
     }  // end outer switch
-
     d.cls = InstClass::UNKNOWN;
     return false;
 }
-
 } // namespace arm64emu

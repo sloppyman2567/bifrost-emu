@@ -3,7 +3,7 @@
 // Both HostNode and StdioNode implement ioctl() by forwarding terminal
 // ioctls (TIOCGWINSZ, TCGETS, TCSETS/TCSETSW/TCSETSF, FIONREAD) to the
 // underlying host fd, marshalling the struct through the guest Memory.
-// The implementations were duplicated verbatim — Turn 37 extracts them
+// The implementations were duplicated verbatimextracts them
 // into a single shared helper.
 //
 // This header also defines the AArch64 Linux ioctl request numbers as
@@ -18,10 +18,8 @@
 // compiler sees it, breaking namespace-qualified access
 // (`ioctl_num::TIOCGWINSZ` → `ioctl_num::0x5413` → syntax error).
 #pragma once
-
 #include "bifrost/types.hpp"
 #include "core/memory.h"  // full Memory definition (for read/write/store)
-
 #include <cstdint>
 #include <cstdio>
 #include <errno.h>
@@ -30,9 +28,7 @@
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
-
 namespace arm64emu::yggdrasil {
-
 // ── AArch64 Linux ioctl request numbers (from <asm-generic/ioctls.h>) ──
 // These match the values the guest AArch64 binary uses when it issues
 // an ioctl syscall. We hardcode them (instead of relying on the host's
@@ -55,7 +51,6 @@ namespace ioctl_num {
     constexpr uint32_t REQ_TIOCNOTTY  = 0x5422;  // detach controlling tty
     constexpr uint32_t REQ_TIOCGSID   = 0x5429;  // get session id
 }  // namespace ioctl_num
-
 // ── dispatch_terminal_ioctl — shared ioctl handler ─────────────────────
 // Forward terminal-related ioctls to the host fd, marshalling the
 // argument struct through the guest Memory. Returns:
@@ -72,7 +67,6 @@ namespace ioctl_num {
 inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
                                     uint64_t argp, Memory& mem) {
     if (argp == 0) return -EFAULT;
-
     switch (request) {
         case ioctl_num::REQ_TIOCGWINSZ: {
             struct winsize ws;
@@ -150,7 +144,6 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
             return Node::IOCTL_NOT_HANDLED;
     }
 }
-
 // ── pass_through_ioctl — last-resort host fd passthrough ───────────────
 // For ioctls we don't recognize, we previously passed them straight to
 // the host fd with the guest's argp reinterpreted as a host pointer.
@@ -159,7 +152,6 @@ inline int dispatch_terminal_ioctl(int host_fd, uint32_t request,
 // (EFAULT) or, worse, corrupt host memory if the guest address happened
 // to map to a valid host region.
 //
-// BUGFIX (Turn 65): we now return -ENOTTY for unrecognized ioctls instead
 // of passing them through. This is safer and matches what the kernel
 // returns for ioctls the fd doesn't support. Programs that rely on
 // exotic ioctls (DRM/KMS, media devices, etc.) will get -ENOTTY and
@@ -173,5 +165,4 @@ inline int pass_through_ioctl(int /*host_fd*/, uint32_t /*request*/, uint64_t /*
     // kernel returns for ioctls the fd doesn't support.
     return -ENOTTY;
 }
-
 }  // namespace arm64emu::yggdrasil

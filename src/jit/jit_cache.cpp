@@ -19,11 +19,9 @@
 //   try_chain_block       — try to chain `entry` to its translated target
 //   chain_back_references — patch all blocks whose target is `target_pc`
 #include "jit/frostjit.hpp"
-
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-
 namespace arm64emu {
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
@@ -50,7 +48,6 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     make_executable();
     return true;
 }
-
 void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     if (entry.chained) return;
     if (entry.chain_target_pc == 0) return;
@@ -62,7 +59,6 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
         block_chains_patched++;
     }
 }
-
 void FrostJIT::chain_back_references(uint64_t target_pc) {
     // Patch any cached block whose chain_target_pc == target_pc.
     //
@@ -74,7 +70,6 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     if (target_it == blocks_.end()) return;
     const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(target_it->second.fn);
     if (target_fn == nullptr) return;
-
     auto try_patch = [&](uint64_t src_pc) {
         auto sit = blocks_.find(src_pc);
         if (sit == blocks_.end()) return;
@@ -86,7 +81,6 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
             block_chains_patched++;
         }
     };
-
     auto it = back_refs_.find(target_pc);
     if (it != back_refs_.end()) {
         for (uint64_t src_pc : it->second) {
@@ -104,5 +98,4 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         }
     }
 }
-
 } // namespace arm64emu

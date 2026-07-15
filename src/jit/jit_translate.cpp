@@ -1,6 +1,6 @@
 // jit/jit_translate.cpp — FrostJIT block translation.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. Holds the
+// v1.4.5-alpha: split out of frostjit.cpp. Holds the
 // translate_block() method, which translates one ARM64 basic block to
 // x86-64 code. The method:
 //   1. Decodes ARM64 instructions via the shared decoder.
@@ -13,27 +13,22 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
-
-// Turn 91: defined in ir_translate.cpp. When true, BL uses old behavior
 // (end block) instead of BL_CALL (call within block).
 extern thread_local bool bl_call_disabled_;
-
 // ── instr_will_call_interp — heuristic for block splitting ─────────────
 // Returns true if the given ARM64 instruction is likely to generate a
 // CALL_INTERP IR op (i.e. the JIT can't codegen it natively). Used by
 // translate_block to decide where to split blocks — too many
 // CALL_INTERP fallbacks in one block causes register pressure issues.
 //
-// v1.4.5-alpha (Turn 36): moved here from jit_flags.cpp (where it was
+// v1.4.5-alpha: moved here from jit_flags.cpp (where it was
 // extracted by accident — it's only used by translate_block).
 static bool instr_will_call_interp(const DecodedInst& d) {
     switch (d.cls) {
@@ -67,7 +62,6 @@ static bool instr_will_call_interp(const DecodedInst& d) {
     }
     return false;
 }
-
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     if (!code_buf_) return nullptr;
@@ -99,14 +93,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
-
     size_t block_start = code_buf_used_;
-
     // ── Translate ARM64 → IR ─────────────────────────────────────
     IRBlock ir_block;
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
-
     // Limit block size based on register pressure. With 9 host regs and
     // >256 vregs, the allocator's spill/reload traffic becomes a
     // correctness hazard. Cap blocks at 32 instructions — enough for
@@ -125,7 +116,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // small perf cost (one extra block dispatch per split) for
     // correctness in complex blocks.
     constexpr int MAX_CALL_INTERP_PER_BLOCK = 2;
-    // Turn 92: limit BL_CALL per block. Each BL_CALL flushes all vregs and
     // invalidates all cache mappings, so too many in one block kills perf.
     // Cap at 2 — enough for small function call sequences, low enough to
     // keep register pressure manageable and avoid excessive vreg flushes.
@@ -147,15 +137,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         } catch (...) { break; }
         DecodedInst d;
         if (!decode(d, inst)) break;
-
         bool will_call_interp = instr_will_call_interp(d);
-
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
             chain_target_pc_ = cur_pc;
             break;
         }
-
         bool ends = translate_to_ir(ir_block, d, cur_pc);
         if (will_call_interp) call_interp_count++;
         // Track BL_CALL count for block splitting.
@@ -164,7 +151,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         ir_block.count = instr_count;
         if (ends) block_ended = true;
         else {
-            // Turn 92: split block after MAX_BL_CALL_PER_BLOCK BL_CALLs.
             if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
                 chain_target_pc_ = cur_pc + 4;
                 break;
@@ -176,7 +162,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
-
     // ── Heuristic: skip JIT for CALL_INTERP-heavy blocks ──────────
     // The JIT's per-CALL_INTERP overhead (flush all vregs + push 2 regs +
     // call interpreter + pop 2 regs + reload) is ~20 instructions. For
@@ -218,18 +203,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }
-
-    // Turn 92: BL_CALL blocks can't be verified by the current verify
     // mode (which re-runs the interpreter for instr_count steps). With
     // BL_CALL, the JIT block executes MORE ARM instructions than
     // instr_count (the called functions run inside jit_call_helper).
     // The interpreter re-run would only do instr_count steps, missing
     // the called functions, causing false divergences. Mark as
     // verified_once to skip verify for BL_CALL blocks.
-    // Turn 96: only skip verify if the block ACTUALLY contains BL_CALL
     // IR ops (not just BL instructions). When BL_CALL is disabled,
     // BL ends the block (like before), so verify is safe.
-    // Turn 98: also skip verify for blocks containing CALL_INTERP.
     // CALL_INTERP blocks can't be verified because the JIT flushes vregs
     // to cpu.regs[] before calling the interpreter, but the verify mode
     // restores the pre-JIT state for the interpreter re-run. This causes
@@ -241,18 +222,15 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (ir_inst.op == IROp::BL_CALL) { has_bl_call = true; break; }
         if (ir_inst.op == IROp::CALL_INTERP) { has_call_interp = true; }
     }
-
     // ── Optimize the IR ──────────────────────────────────────────
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
     if (!no_opt_) optimize_ir(ir_block);
-
     static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
     if (dump_ir_) {
         fprintf(stderr, "══ Block @ 0x%llx (%d ARM instrs) ══\n",
                 static_cast<unsigned long long>(start_pc), instr_count);
         dump_ir(ir_block);
     }
-
     // ── Compute stack size and pre-allocate vreg slots ────────────
     // Pre-scan IR to find all scratch vregs (33+) and assign each a
     // fixed stack slot. This avoids the lazy allocation mismatch between
@@ -292,22 +270,18 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     num_stack_slots_ = max_vreg - 32;
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
     uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
-
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5); // mov rbp, rsp
     emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     emit_u32(stack_bytes);  // sub rsp, stack_bytes
-
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
     if (window_base_) emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
-
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
-
     // ── Compute liveness: for each vreg, find the last op that uses it ──
     // This lets us free host regs of dead vregs immediately after their
     // last use, instead of keeping them cached until eviction. Without
@@ -353,7 +327,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             }
         }
     }
-
     // ── Compile IR ───────────────────────────────────────────────
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
@@ -371,10 +344,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         }
     }
     kills_per_op_.clear();
-
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
-
     // Materialize pending host flags to cpu.pstate before returning.
     // If a flag-setting op (ADDS/SUBS/TST) was the last to touch flags
     // and no subsequent BRCOND consumed them, the flags are still in
@@ -382,10 +353,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // next block (or the interpreter) would see stale pstate.
     // clobber_flags() handles the flush+materialize+invalidate pattern.
     clobber_flags();
-
     // Flush all dirty vregs before returning (so cpu.regs[] is up to date).
     flush_all_vregs();
-
     if (!rax_holds_next_pc_) {
         uint64_t next_pc = start_pc + ir_block.count * 4;
         emit_mov_imm_to_rax(next_pc);
@@ -395,7 +364,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             chain_target_pc_ = next_pc;
         }
     }
-
     // ── PC store point ───────────────────────────────────────────
     // Both the normal epilogue and the CALL_INTERP early-exit converge
     // here. At this point, flags are materialized and vregs are flushed.
@@ -404,9 +372,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // call_interp_branch_patches_ jump here (after the
     // RAX overwrite) to preserve the interpreter's PC in RAX.
     size_t pc_store_off = code_buf_used_;
-
     emit_store(CPU_REG, PC_OFF, RAX);
-
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
     // the next block's prologue. The next prologue reloads RBX/R14 from
@@ -430,7 +396,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     size_t chain_patch_off = code_buf_used_;
     emit_ret();                                  // 0xC3
     emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
-
     // Patch branch targets to epilogue.
     for (auto& p : branch_target_patches_) {
         int32_t rel = static_cast<int32_t>(epilogue_off - (p.patch_off + 5));
@@ -444,7 +409,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         int32_t rel = static_cast<int32_t>(pc_store_off - (off + 6));
         patch_jcc_rel32(off, rel);
     }
-
     if (code_buf_overflow_) {
         code_buf_used_ = block_start;
         // W^X: make the buffer executable again before returning (we may
@@ -452,7 +416,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         make_executable();
         return nullptr;
     }
-
     if (dump_ir_) {
         size_t code_len = code_buf_used_ - block_start;
         fprintf(stderr, "  → %zu bytes of x86 code @ %p:\n    ",
@@ -463,7 +426,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         }
         fprintf(stderr, "\n");
     }
-
     auto fn = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + block_start);
     // If the block ended with an unchainable op (BR/BRCOND/SVC), force
     // chain_target_pc_ to 0 so try_chain_block() skips it.
@@ -476,7 +438,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chained = false;
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
-    // Turn 91: BL_CALL blocks can't be verified (see comment above).
     entry.verified_once = has_bl_call || has_call_interp;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
@@ -493,7 +454,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         code_buf_[selfloop_patch_off_ + 3] = (self_rel >> 16) & 0xFF;
         code_buf_[selfloop_patch_off_ + 4] = (self_rel >> 24) & 0xFF;
     }
-
     // ── Verify-mode memory save/restore: populate store_infos ──────
     // Walk the IR and record every STORE_MEM whose address operand can
     // be statically resolved to (saved_arm_reg + offset). At verify
@@ -527,7 +487,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         std::vector<uint8_t> vreg_base(4096, 0xFF);
         std::vector<int64_t> vreg_off(4096, 0);
         uint32_t modified_so_far = 0;  // bit i set if ARM reg i has been STORE_REG'd SO FAR
-        // Turn 97: track known absolute values of ARM regs set via STORE_REG from IMM.
         // When a STORE_MEM's base reg was modified, we can still record it if we know
         // the new absolute value. This fixes the curl URL parse divergence where
         // x19 was set to a high address (0x571c67a000) via IMM, then used as a
@@ -570,12 +529,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                     si.offset  = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
                     si.width   = inst.width;
                     si.use_absolute = false;
-
                     if (!(modified_so_far & (1u << b))) {
                         // Base reg NOT modified — use saved.regs[b] + offset (original path).
                         // Already set: si.use_absolute = false.
                     } else if (arm_reg_known[b]) {
-                        // Turn 97: Base reg WAS modified, but we know its new value.
                         // Compute the absolute address and use that for snapshot/restore.
                         si.use_absolute = true;
                         si.absolute_addr = arm_reg_val[b] + static_cast<uint64_t>(si.offset);
@@ -584,7 +541,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                         // Skip (accept false positive).
                         continue;
                     }
-
                     if (!entry.store_infos) {
                         entry.store_infos = std::make_shared<std::vector<BlockEntry::StoreInfo>>();
                     }
@@ -594,7 +550,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                 // Mark the dest ARM reg as modified FROM THIS POINT ON.
                 if (inst.dest <= 31) {
                     modified_so_far |= (1u << inst.dest);
-                    // Turn 97: if the stored value is a known IMM, record the
                     // new absolute value of this ARM reg.
                     uint8_t src_base = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
                     if (src_base == 0xFE) {
@@ -612,10 +567,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             }
         }
     }
-
     blocks_[start_pc] = entry;
     blocks_translated++;
-
     // Maintain the back-reference index: this block at start_pc has
     // chain_target_pc=T, so add start_pc to back_refs_[T]. This lets
     // chain_back_references(T) find this block in O(k) instead of
@@ -632,7 +585,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         }
         back_refs_[chain_target_pc_].push_back(start_pc);
     }
-
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.
     // BIFROST_NO_CHAIN disables chaining for debugging.
@@ -641,7 +593,6 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         try_chain_block(start_pc, blocks_[start_pc]);
         chain_back_references(start_pc);
     }
-
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
     // Verify dirty_host_regs_ invariant (active in debug or with
@@ -652,5 +603,4 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     make_executable();
     return fn;
 }
-
 } // namespace arm64emu

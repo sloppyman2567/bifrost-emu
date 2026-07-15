@@ -20,9 +20,7 @@
 #include "core/emulator.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
-
 namespace arm64emu {
-
 int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num) {
     // Dispatch to the 3 sub-handlers in order. Each returns
     // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
@@ -31,5 +29,4 @@ int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num) {
     if (syscall_misc_wait(emu, cpu, num)  != SYSCALL_NOT_HANDLED) return 0;
     return SYSCALL_NOT_HANDLED;
 }
-
 } // namespace arm64emu

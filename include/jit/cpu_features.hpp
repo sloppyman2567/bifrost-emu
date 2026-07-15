@@ -30,11 +30,8 @@
 // ch. 14 (Programming with AVX). We follow the standard algorithm
 // recommended by Intel.
 #pragma once
-
 #include <cstdint>
-
 namespace arm64emu {
-
 // Bit flags for detected x86 features. Picked to be powers of two so
 // callers can test `(features & HAS_FMA3)` cheaply.
 //
@@ -58,28 +55,23 @@ struct CpuFeatures {
     bool aesni        : 1;  // AES-NI — aesenc/aesdec/aesimc/aesmc (Westmere+)
     bool pclmulqdq    : 1;  // PCLMULQDQ — carry-less multiply (Westmere+)
     bool sha          : 1;  // SHA-NI — sha1rnds4/sha256rnds2 (Goldmont+)
-
     // True iff the JIT should emit FMA3 codegen for FMADD/FMSUB/
     // FNMADD/FNMSUB. Requires both FMA3 and AVX support (FMA3 ops use
     // VEX encoding; AVX2 is not strictly required but always present
     // on shipping FMA3 CPUs).
     bool has_fma3() const { return fma3 && avx; }
-
     // True iff the JIT should emit AVX2 (256-bit) codegen. We require
     // AVX + AVX2 + OS support; AVX-512 is even more expensive in power
     // and not used by the JIT today.
     bool has_avx2() const { return avx && avx2; }
-
     // True iff the JIT can use SSE4.1 codegen (roundss/roundsd,
     // pblendw, etc.). This is the most common "modern" baseline.
     bool has_sse41() const { return sse41; }
-
     // v1.5.0.alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
     bool has_aesni()     const { return aesni; }
     bool has_pclmulqdq() const { return pclmulqdq; }
     bool has_sha()       const { return sha; }
 };
-
 // Detect the host CPU's features via CPUID + XGETBV.
 //
 // This is called once per FrostJIT instance and cached — the result
@@ -89,9 +81,7 @@ struct CpuFeatures {
 // returned CpuFeatures is the SSE2-only baseline. This ensures the
 // JIT can still emit baseline SSE2 code on old CPUs.
 CpuFeatures detect_cpu_features();
-
 // Human-readable summary, e.g. "sse4.1 sse4.2 avx avx2 fma3 bmi2".
 // Used by --verbose startup banner and the JIT stats dump.
 const char* cpu_features_string(const CpuFeatures& f);
-
 } // namespace arm64emu

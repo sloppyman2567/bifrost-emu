@@ -19,9 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
-
 namespace arm64emu {
-
 // ── FP register access helpers (file-scope, no per-dispatch allocation) ──
 // These were previously local lambdas inside the FP_SCALAR case, which
 // meant they were reconstructed on every FP instruction dispatch. Moving
@@ -46,7 +44,6 @@ static inline void write_fp_s(CPU& cpu, int r, float f) {
     uint32_t bits; memcpy(&bits, &f, 4);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
-
 // ── Half-precision (FP16) helpers ──────────────────────────────────────
 // IEEE 754 binary16: 1 sign + 5 exp + 10 mantissa.
 static inline float h2f(uint16_t h) {
@@ -88,7 +85,6 @@ static inline uint16_t f2h(float f) {
 static inline uint16_t d2h(double d) {
     return f2h(static_cast<float>(d));
 }
-
 // execute_fp — handle all FP/SIMD instruction classes.
 //
 // Called from Emulator::execute() for:
@@ -103,7 +99,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
     auto* pcache = &cpu.page_cache;
     (void)next_pc;  // FP/SIMD cases never write next_pc
     switch (d.cls) {
-
         // ── FMOV Vd.D[1], Rn / FMOV Rn, Vm.D[1] ──────────────────
         // Move 64-bit GPR to/from HIGH 64 bits of vector register.
         // Used by musl's 128-bit softfloat routines.
@@ -113,14 +108,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
         case InstClass::FMOV_RVD1:
             cpu.regs[d.rd] = cpu.v_hi[d.rn];
             return;
-
         // ── SIMD load/store multiple structures (LD1/ST1) ─────────
         case InstClass::SIMD_LD1:
         case InstClass::SIMD_ST1: {
             bool Q = d.Q;
             int total_bytes = Q ? 16 : 8;
             uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
-
             // BUGFIX (Turn 60, H11): single-structure LD1/ST1
             // (e.g. LD1 {Vt.S}[idx]) loads/stores ONE element at a
             // specific lane index, not a whole register. The old code
@@ -231,7 +224,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 return;
             }
-
             // Multi-structure LD1/ST1 (original path).
             int nregs = d.simd_count;
             for (int i = 0; i < nregs; i++) {
@@ -252,7 +244,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             return;
         }
-
         // ── SIMD data-processing (sub-dispatched by raw opcode bits) ──
         // The decoder classifies the entire 0x0E000000 / 0x4E000000 /
         // 0x2E000000 / 0x6E000000 group as SIMD_DP. We re-extract the
@@ -269,14 +260,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rd = op & 0x1F;
             (void)U;
-
             // v1.5.0.alpha: ARMv8 Crypto Extensions (AES, SHA1, SHA256,
             // PMULL). These are checked first because their encodings
             // overlap with regular SIMD ops in the same major group
             // (bits[28:24]=0b01110) but have specific high-bit patterns
             // that aren't covered by the regular sub-dispatch.
             if (exec_crypto(op, cpu)) return;
-
             // Sub-discriminator: bits[15:10] select the SIMD DP operation.
             // We mask off the Q bit (30) so both Q=0 (8-byte) and Q=1
             // (16-byte) forms route to the same handler. The Q bit is
@@ -290,7 +279,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint32_t sub = op & 0xFFE0FC00;  // bits[31:24] + bits[20:10]
             // Strip Q from sub for matching purposes
             uint32_t sub_noq = sub & ~(1u << 30);
-
             switch (sub_noq) {
             // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
             // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).
@@ -323,7 +311,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // ── DUP (element): sf 0 0 11110 1 0 imm5 0000 1 1 Rn Rd ──
             // Copies one element from Vn to all lanes of Vd.
             // Encoding base: 0x4E000400 (Q=1) / 0x0E000400 (Q=0).
-            // BUGFIX (Turn 82): this was NOT handled — fell through to
             // default and got silently NOP'd. This broke the vectorized
             // TLS init pattern `dup vN.2d, vM.d[0]` used by GCC -O2 to
             // broadcast a base value before adding an index vector,
@@ -414,7 +401,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             // ── BIC (vector): Vd = Vn & ~Vm ──
             // Encoding: 0_Q_0_01110_01_1_Rm_000111_Rn_Rd (sub_noq=0x0E601C00)
-            // BUGFIX (Turn 99): the old case 0x0EA01800 was a typo — it
             // never matched the actual BIC encoding (which has size=01
             // and bits[15:10]=000111, giving sub_noq=0x0E601C00). With
             // the wrong case, BIC was silently NOP'd, but no test caught
@@ -452,7 +438,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // ── BSL (vector): Vd = (Vn & Vd) | (Vm & ~Vd) ──
             // Vd is the mask; for each bit, if Vd=1 take Vn bit, else take Vm bit.
             // Encoding: 0_Q_1_01110_01_1_Rm_000111_Rn_Rd (sub_noq=0x2E601C00)
-            // BUGFIX (Turn 99): BSL was missing — silently NOP'd. glibc's
             // strchr/strchrnul use BSL to combine NUL-match and char-match
             // bitmaps. Without BSL, the function returned wrong results,
             // breaking curl's URL parser ("URL using bad/illegal format").
@@ -467,7 +452,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // ── BIT (vector): Vd = (Vn & Vm) | (Vd & ~Vm) ──
             // Vm is the mask; for each bit, if Vm=1 take Vn bit, else keep Vd bit.
             // Encoding: 0_Q_1_01110_10_1_Rm_000111_Rn_Rd (sub_noq=0x2EA01C00)
-            // BUGFIX (Turn 99): BIT was missing — silently NOP'd. glibc's
             // strchr uses BIT to merge char-match bits into the NUL-match
             // bitmap (the "Bitwise Insert if True" operation). Without BIT,
             // strchr could not find ':' or other non-NUL chars, returning
@@ -483,7 +467,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // ── BIF (vector): Vd = (Vn & ~Vm) | (Vd & Vm) ──
             // Vm is the mask; for each bit, if Vm=0 take Vn bit, else keep Vd bit.
             // Encoding: 0_Q_1_01110_11_1_Rm_000111_Rn_Rd (sub_noq=0x2EE01C00)
-            // BUGFIX (Turn 99): BIF was missing — silently NOP'd. BIF is the
             // complement of BIT; used by glibc's strrchr and some strlen paths.
             case 0x2EE01C00: {
                 uint64_t mask_lo = cpu.v_lo[rm];
@@ -494,14 +477,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── ADDP (vector) ──
-            // Turn 94: ADDP was not implemented — glibc's strlen slow path
             // (used when the string is near a page boundary) uses ADDP to
             // reduce CMEQ results. Without it, strlen returned wrong lengths
             // for strings near page boundaries, breaking curl's URL parser.
             // ADDP: 0 Q 0 01110 size 1 Rm 0 101111 Rn Rd (base 0x0E20BC00)
             // Adds pairwise elements from Vn and Vm, placing results in Vd.
             case 0x0E20BC00: {  // ADDP (vector), 8B/16B
-                int esize = 1;  // byte elements
                 int elems = Q ? 16 : 8;
                 uint8_t buf_n[16], buf_m[16], buf_d[16];
                 memcpy(buf_n, &cpu.v_lo[rn], 8);
@@ -535,7 +516,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // and Vm, take the HIGH half of the result, and place it in the
             // corresponding size-bit elements of Vd (narrowing).
             //
-            // BUGFIX (Turn 83): ADDHN was NOT handled — fell through to
             // default and was silently NOP'd. This broke glibc's SIMD
             // strlen, which uses `addhn v2.8b, v1.8h, v1.8h` to narrow
             // the 16-byte CMEQ result to 8 bytes. Without ADDHN, the
@@ -662,7 +642,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── CMGE / CMHS (vector) ──
-            // BUGFIX (Turn 52): the old case 0x2E203400 was labeled
             // "CMHS" but was actually CMGE (signed >=, opcode 0x0D).
             // The code used unsigned comparison, so it was implementing
             // CMHS behavior under the wrong case label. The actual CMHS
@@ -731,7 +710,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── UMAXP/UMINP/SMAXP/SMINP family ──
-            // BUGFIX (Turn 52): the old code used uint64_t comparison
             // (unsigned) for what was labeled SMAXP/SMINP (U=0, signed).
             // For byte elements with values 0x80-0xFF, signed vs unsigned
             // differ. We now use int64_t with sign-extension for the
@@ -762,7 +740,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // WRONG for SMAXP. We now check the U bit at runtime to
             // select signed vs unsigned comparison.
             case 0x2E20A400: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0)
-                // BUGFIX (Turn 73): C (max/min selector) is bit 11, NOT
                 // bit 15. Verified by comparing UMAXP (0x6e20a400) vs UMINP
                 // (0x6e20ac00) — they differ only at bit 11. The old code
                 // used bit 15, which is part of the opcode that
@@ -783,7 +760,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 memcpy(buf_m, &cpu.v_lo[rm], 8);
                 if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
                 uint8_t out[16] = {0};
-                // BUGFIX (Turn 73): UMAXP/UMINP/SMAXP/SMINP are PAIRWISE
                 // ops that operate on EACH source independently, producing
                 // TWO half-results:
                 //   first half of Vd = pairwise(max/min) of Vn
@@ -904,7 +880,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             default: break;  // fall through to size-based checks below
             }
-
             // Sub-discriminator for 1-source vector ops (REV/CNT/CMEQ#0).
             // Mask off Q (30), U (29), size (23:22), Rm (20:16), Rn (9:5), Rd (4:0).
             //
@@ -974,7 +949,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── CMEQ vs zero ──
-            // BUGFIX (Turn 74): case constant was 0x0E208800 (bits[15:10]=0x22)
             // but actual CMEQ #0 encoding (e.g. 0x4e209801) has bits[15:10]=0x26.
             // The old case NEVER matched — CMEQ #0 was silently NOP'd, breaking
             // glibc's strlen SIMD path. Corrected to 0x0E209800.
@@ -998,7 +972,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             default: break;
             }
-
             // UADDLV — unique mask shape.
             if ((op & 0xBF3FFC00) == 0x0E31B800) {
                 int esize = 1 << size;
@@ -1070,7 +1043,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 && ((op >> 20) & 0xF) == 0  // immh == 0 → MOVI/MVNI, not shift
                 && (((op >> 10) & 0x3F) != 0x21  // exclude SHRN (bits[15:10]=100001)
                     || ((op >> 29) & 1))) {      // Turn 85: but NOT for MVNI (U=1)
-                // BUGFIX (Turn 73): SHRN (0x0F008400) has immh=0 for 16-bit
                 // source, which collides with the MOVI/MVNI pattern. SHRN
                 // has bits[15:10] = 100001 (0x21), while MOVI/MVNI has
                 // bits[11:10] = 00. Check bits[15:10] to distinguish.
@@ -1079,7 +1051,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 uint8_t cmode = (op >> 12) & 0xF;
                 uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
                 // U bit (bit 29): 0 = MOVI, 1 = MVNI (invert).
-                // Turn 85: MVNI inversion implemented per ARM spec.
                 // IMPORTANT: for cmode=0xE (byte replication), the U bit
                 // does NOT select MOVI/MVNI — both U=0 and U=1 are MOVI.
                 // This is because binutils uses U=1 for 'movi vD.2d, #0'
@@ -1409,7 +1380,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Narrowing shift right (SHRN). immh determines SOURCE element size
             // (2× the destination size).
             //
-            // BUGFIX (Turn 73): the immh→esize mapping and shift formula were
             // wrong. Verified empirically by compiling `shrn v0.8b, v0.8h, #4`
 // (0x0f0c8400), `shrn v0.4h, v0.4s, #4` (0x0f1c8400), and
             // `shrn v0.2s, v0.2d, #4` (0x0f3c8400):
@@ -1422,7 +1392,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // the narrowed result. With immh=0, esize was set to 8 (64-bit)
             // instead of 2 (16-bit), and shift = 128-12 = 116 instead of 4.
             //
-            // BUGFIX (Turn 72): the source register is ALWAYS 128 bits (full
             // Q register), even when Q=0. Q=0 means the destination is 64
             // bits (SHRN), Q=1 means 128 bits (SHRN2, writes to upper half).
             if ((op & 0xBF00FC00) == 0x0F008400) {
@@ -1585,7 +1554,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             return;
         }
-
         // ── FP scalar (FMOV/FADD/FSUB/FMUL/FDIV/FCMP/FCVT/...) ────
         // The decoder classifies the entire 0x1E000000/0x9E000000
         // group as FP_SCALAR. We sub-dispatch on raw opcode bits.
@@ -1596,7 +1564,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint8_t rm = (op >> 16) & 0x1F;
             uint8_t sf_val = (op >> 31) & 1;
             uint8_t ftype = (op >> 22) & 3;  // 0=S(32-bit), 1=D(64-bit), 3=H(16-bit)
-
             // ARMv8 Crypto Extensions (SHA1H, SHA1SU0/SU1, SHA256SU0/SU1)
             // are encoded in the 0x5Exxxxxx range, which the decoder
             // classifies as FP_SCALAR (because 0x5E has bits[28:24]=11110
@@ -1605,10 +1572,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // this is safe. Without this, SHA1/SHA256 schedule-update
             // instructions would be silently NOP'd, producing wrong hashes.
             if (exec_crypto(op, cpu)) return;
-
             // ── SHL (scalar, immediate): Dd, Dn, #imm ─────────────────
             // Encoding: 0x5F005400 (mask 0xFF00FC00).
-            // BUGFIX (Turn 82): the scalar SHL was NOT handled — it was
             // silently NOP'd, breaking GCC -O2's vectorized TLS init
             // pattern (shl d31, d31, #2 to multiply by 4).
             if ((op & 0xFF00FC00) == 0x5F005400) {
@@ -1647,11 +1612,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 cpu.v_hi[rd] = 0;
                 return;
             }
-
             // FP register access + half-precision helpers are now
             // file-scope functions (read_fp_d, read_fp_s, write_fp_d,
             // write_fp_s, h2f, f2h, d2h) — see top of this file.
-
             // FMOV (general ↔ FP, 64-bit)
             // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
             // Without this, SCVTF (0x9E62xxxx) matches the FMOV mask.
@@ -2105,7 +2068,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 bool is_unsigned = (op >> 29) & 1;
                 uint8_t opcode = (op >> 12) & 0x1F;
                 bool is_double = (op >> 22) & 1;  // also doubles as "is 64-bit int"
-
                 if (opcode == 0x1D) {  // SCVTF/UCVTF (int → FP, FP source)
                     // Read integer bits from FP source register.
                     uint64_t src_bits = cpu.v_lo[rn];
@@ -2223,7 +2185,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             (void)sf_val; (void)rm;
             return;
         }
-
         default:
             // Not an FP/SIMD class — should never be called here.
             // The dispatcher in interpreter.cpp only routes FP/SIMD cases
@@ -2231,5 +2192,4 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             break;
     }
 }
-
 } // namespace arm64emu

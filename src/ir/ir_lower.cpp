@@ -11,9 +11,7 @@
 // restricted the input to 32 bits (via ZEXT) and will ZEXT the result
 // again to clear the high 32 bits.
 #include "ir/ir.h"
-
 namespace arm64emu {
-
 // v = ((v >> n) & mask) | ((v & mask) << n)
 // Used for swap-with-mask patterns. Each call is 4 IR ops.
 uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
@@ -34,7 +32,6 @@ uint16_t swar_swap(IRBlock& b, uint16_t v, uint64_t mask, int n) {
     emit(b, IROp::OR, out, hi, lo);
     return out;
 }
-
 // 64-bit bit-reversal via 6 SWAR stages:
 //   swap bits 1<>0, 3<>2, ..., 63<>62  (mask=0x5555..., n=1)
 //   swap pairs  3<>1, 2<>0, ..., 63<>61 (mask=0x3333..., n=2)
@@ -55,7 +52,6 @@ uint16_t rbit64_ir(IRBlock& b, uint16_t v) {
     uint16_t out = g_alloc.alloc(); emit(b, IROp::OR,  out, hi, lo);
     return out;
 }
-
 // 32-bit bit-reversal: same idea, 5 stages (no final 32-bit swap).
 uint16_t rbit32_ir(IRBlock& b, uint16_t v) {
     v = swar_swap(b, v, 0x55555555ULL,  1);
@@ -65,13 +61,11 @@ uint16_t rbit32_ir(IRBlock& b, uint16_t v) {
     v = swar_swap(b, v, 0x0000FFFFULL, 16);
     return v;
 }
-
 // REV16 (64-bit): swap bytes within each 16-bit halfword.
 //   mask=0x00FF00FF00FF00FF, n=8
 uint16_t rev16_64_ir(IRBlock& b, uint16_t v) {
     return swar_swap(b, v, 0x00FF00FF00FF00FFULL, 8);
 }
-
 // REV32 (64-bit): swap bytes within each 32-bit word.
 //   = REV16 followed by swap of 16-bit halves within each 32-bit word.
 uint16_t rev32_64_ir(IRBlock& b, uint16_t v) {
@@ -79,5 +73,4 @@ uint16_t rev32_64_ir(IRBlock& b, uint16_t v) {
     v = swar_swap(b, v, 0x0000FFFF0000FFFFULL, 16);
     return v;
 }
-
 } // namespace arm64emu

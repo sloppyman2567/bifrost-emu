@@ -1,6 +1,6 @@
 // jit/jit_flags.cpp — FrostJIT flag materialization helpers.
 //
-// v1.4.5-alpha (Turn 36): split out of frostjit.cpp. Holds the
+// v1.4.5-alpha: split out of frostjit.cpp. Holds the
 // clobber_flags() and materialize_flags_to_pstate() methods, which
 // manage the lazy materialization of guest NZCV flags from host RFLAGS
 // to cpu.pstate. These are called by compile_ir_inst (in frostjit.cpp
@@ -8,9 +8,7 @@
 // RFLAGS or at block exits.
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
-
 #include <cstdint>
-
 namespace arm64emu {
 // ── clobber_flags ───────────────────────────────────────────────────────
 // If the host RFLAGS currently hold valid guest NZCV (flags_in_host_),
@@ -36,7 +34,6 @@ void FrostJIT::clobber_flags() {
         invalidate_host_regs(FLAGS_CLOBBER);
     }
 }
-
 // Materialize host flags to pstate, preserving RFLAGS around the materialize
 // (which clobbers them). Used at block exits (BRCOND fall-through and taken
 // paths) where the next block may read pstate. No-op if flags aren't
@@ -53,13 +50,11 @@ void FrostJIT::materialize_flags_to_pstate() {
     emit_popfq();
     invalidate_host_regs(FLAGS3);
 }
-
 // ── Block chaining helpers ──────────────────────────────────────────────
 // Patch a block's 5-byte chain slot (originally `ret` + 4 NOPs) in place
 // to `jmp rel32` → target_fn. x86 is icache-coherent, so no explicit
 // cache flush is needed, but we emit a memory barrier to ensure the
 // patched bytes are visible to any in-flight execution on the same core.
-
 // single source of truth for "will this instruction route
 // to CALL_INTERP in the IR translator?" Used by the block splitter to
 // pre-scan before translating. If this list gets out of sync with
@@ -73,7 +68,6 @@ void FrostJIT::materialize_flags_to_pstate() {
 // SIMD_LOGICAL falls back to CALL_INTERP only for unrecognized opcodes
 // (its `default:` case), but that's rare enough to accept the risk.
 //
-// v1.4.5-alpha (Turn 36): instr_will_call_interp() was moved to
+// v1.4.5-alpha: instr_will_call_interp() was moved to
 // jit_translate.cpp (it's only used by translate_block).
-
 } // namespace arm64emu

@@ -50,19 +50,14 @@
 //   - MaskRay TLS blog: https://maskray.me/blog/2021-02-14-all-about-thread-local-storage
 //   - Linux kernel: fs/binfmt_elf.c, load_elf_binary()
 #pragma once
-
 #include "bifrost/types.hpp"
-
 #include <cstdint>
 #include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
 namespace arm64emu {
-
 class Memory;
-
 // PT_TLS segment info for a loaded object.
 struct TlsSegment {
     uint64_t vaddr    = 0;  // file vaddr (relative to base)
@@ -71,7 +66,6 @@ struct TlsSegment {
     uint64_t align    = 1;  // alignment in bytes
     bool     present  = false;
 };
-
 // Information about one loaded ELF object (main binary or shared lib).
 struct LoadedObject {
     std::string name;             // soname or path
@@ -94,7 +88,6 @@ struct LoadedObject {
     // "decode error at pc=0x... inst=0x00000000".
     uint64_t    relr_addr  = 0;   // DT_RELR (absolute)
     uint64_t    relr_size  = 0;   // DT_RELRSZ (bytes)
-    // BUGFIX (Turn 59): DT_INIT_ARRAY/DT_FINI_ARRAY/DT_INIT/DT_FINI addresses
     // and sizes. The linker invokes these after relocations are applied
     // (C++ static constructors, glibc hooks, etc.).
     uint64_t    init_addr       = 0;  // DT_INIT (legacy _init() function)
@@ -116,13 +109,11 @@ struct LoadedObject {
     uint64_t    verneed_addr = 0;
     uint64_t    verneed_num  = 0;
     bool        is_main = false;  // main binary vs shared lib
-
     // TLS info.
     TlsSegment tls;
     uint64_t   tls_mod_id   = 0;  // 1-based module ID (0 = no TLS)
     int64_t    tls_tp_offset = 0; // offset from TPIDR_EL0 to this block
                                   // (negative: block is below TP)
-    // BUGFIX (Turn 74): offset of this object's TLS data within the
     // static TLS block. Used to translate .tdata relocations to the
     // TLS block copy. Without this, RELATIVE relocations targeting
     // .tdata (e.g., glibc's _nl_global_locale pointer in .tdata)
@@ -130,11 +121,9 @@ struct LoadedObject {
     // block copy, so the TLS block had pre-relocation (wrong) values.
     uint64_t   tls_block_offset = 0;
 };
-
 class DynamicLinker {
 public:
     DynamicLinker(Memory& mem) : mem_(mem) {}
-
     // Load and relocate a dynamically-linked binary. The main binary's
     // PT_LOAD segments must already be mapped; `main_data` is the raw
     // ELF file bytes (used to parse the dynamic section and relocations
@@ -148,24 +137,20 @@ public:
               uint64_t main_base,
               const std::string& main_path,
               const std::string& interp_path = "");
-
     // Look up a symbol by name across all loaded objects. Returns the
     // absolute address, or 0 if not found.
     uint64_t resolve_symbol(const std::string& name) const;
-
     // resolve_plt_entry was a stub for a future "lazy PLT binding"
     // feature that was never implemented (the linker uses eager
     // binding). Removed in Turn 37 as dead code — the dynamic linker
     // resolves all JUMP_SLOT relocations during link(), not on first
     // call. If you need lazy binding in the future, re-add this with
     // a real implementation that tracks the GOT-slot → symbol mapping.
-
     // ── TLS ────────────────────────────────────────────────────────
     // Total size of the static TLS block across all loaded objects.
     // With variant-I layout: total = lib_size + tcb_size + main_memsz.
     uint64_t static_tls_size() const { return static_tls_size_; }
     uint64_t static_tls_base() const { return static_tls_base_; }
-
     // The thread pointer (TPIDR_EL0) for the main thread.
     // Variant-I (glibc): TP = static_tls_base_ + lib_size (points to TCB header).
     //   Main exe TLS is at TP + tcb_size (positive offset).
@@ -176,13 +161,10 @@ public:
         if (is_musl_) return static_tls_base_ + static_tls_size_;
         return static_tls_base_ + lib_tls_size_;
     }
-
     // Size of the lib TLS block (negative TP region).
     uint64_t lib_tls_size() const { return lib_tls_size_; }
-
     // Size of the TCB header (tcbhead_t), rounded up to main exe alignment.
     uint64_t tcb_size() const { return tcb_size_; }
-
     // ── ld-linux shim base address ─────────────────────────────────
     // The shim's data page (_rtld_global_ro etc.) is at shim_base_,
     // and the code page (function stubs) is at shim_base_ + 4096.
@@ -190,22 +172,16 @@ public:
     // GLRO(dl_tls_static_size) so glibc's _dl_allocate_tls_storage
     // allocates the correct amount.
     uint64_t shim_base() const { return shim_base_; }
-
     // Get the module ID for an object by name (0 if not found).
     uint64_t tls_mod_id(const std::string& name) const;
-
     // Get the TP-offset for a module ID (negative: below TP).
     int64_t tls_tp_offset(uint64_t mod_id) const;
-
     const std::vector<LoadedObject>& objects() const { return objects_; }
     const std::string& error() const { return error_; }
-
     // Load a shared library at runtime (dlopen support).
     // path: absolute or relative path to the .so file.
     // Returns: base address (>0) on success, 0 on failure.
-    // (Turn 84)
     uint64_t load_library(const std::string& path);
-
     // ── ifunc resolver callback ────────────────────────────────────
     // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
     // resolver ADDRESS) instead of calling the resolver to get the
@@ -218,8 +194,7 @@ public:
     void set_ifunc_resolver(std::function<uint64_t(uint64_t)> cb) {
         ifunc_resolver_ = std::move(cb);
     }
-
-    // ── Constructor/init callback (Turn 59) ────────────────────────
+    // ── Constructor/init callback ────────────────────────
     // After relocations are applied, the linker must invoke DT_INIT and
     // DT_INIT_ARRAY for each loaded object (in dependency order: libs
     // first, main binary last). These run C++ static constructors,
@@ -233,8 +208,7 @@ public:
     void set_init_runner(std::function<void(uint64_t)> cb) {
         init_runner_ = std::move(cb);
     }
-
-    // ── Graphic API thunk resolver (Turn 37) ───────────────────────
+    // ── Graphic API thunk resolver ───────────────────────
     // When `find_library()` returns empty for a graphic library soname
     // (libGL.so*, libEGL.so*, libSDL2.so*, libGLESv2.so*), the dynamic
     // linker consults the thunk resolver to populate the global symbol
@@ -256,18 +230,15 @@ public:
     void set_thunk_resolver(ThunkResolver cb) {
         thunk_resolver_ = std::move(cb);
     }
-
     // Enumerate the libraries the thunk resolver supports. Used by
     // `link()` to decide which DT_NEEDED entries to handle as synthetic
     // thunk-backed libraries instead of trying to load them from disk.
     // Returns true if `soname` is a known graphic library.
     static bool is_thunk_supported_lib_(const std::string& soname);
-
 private:
     Memory& mem_;
     std::vector<LoadedObject> objects_;
     // Global symbol table: name → (absolute address, binding).
-    // BUGFIX (Turn 59): was `unordered_map<string, uint64_t>`. Changed to
     // track the binding (STB_GLOBAL vs STB_WEAK) so we can implement
     // "first strong wins" instead of "last strong wins" (H6).
     struct SymEntry { uint64_t addr; uint8_t bind; };
@@ -291,7 +262,6 @@ private:
     // When set, graphic library DT_NEEDED entries that can't be loaded
     // from disk fall back to this resolver instead of failing.
     ThunkResolver thunk_resolver_;
-
     // TLS state.
     uint64_t static_tls_size_ = 0;  // total bytes (aligned)
     uint64_t static_tls_base_ = 0;  // guest VA where the block is mapped
@@ -300,17 +270,14 @@ private:
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
     uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
-
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
     // `base` is the load bias to convert vaddrs to absolute addresses.
     bool parse_dynamic(const std::vector<uint8_t>& data,
                        uint64_t base,
                        LoadedObject& obj);
-
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
-
     // Find a shared library by soname. Checks standard multiarch paths
     // and returns the file bytes (empty if not found).
     // BUGFIX (Turn 59, C6): parent_runpath/parent_rpath are the parent
@@ -321,22 +288,19 @@ private:
                                       std::string& found_path,
                                       const std::string& parent_runpath = "",
                                       const std::string& parent_rpath = "");
-
     // Load a shared library's PT_LOAD segments into guest memory at a
     // fresh base address. Records the object in `objects_` and its
     // symbols in `symbols_`. Returns the base address, or 0 on failure.
     uint64_t load_shared_library(const std::string& soname,
                                  const std::string& parent_runpath = "",
                                  const std::string& parent_rpath = "");
-
     // Register a synthetic LoadedObject for a graphic library that
     // couldn't be loaded from disk but is supported by the thunk
     // resolver. Populates `symbols_` with thunk-resolved addresses.
     // Returns a synthetic (non-zero) base address, or 0 if the thunk
     // resolver declined to handle this library.
     uint64_t register_thunk_library_(const std::string& soname);
-
-    // ── Synthetic ld-linux shim (Turn 52) ──────────────────────────
+    // ── Synthetic ld-linux shim ──────────────────────────
     // glibc's libc.so references many symbols that are normally
     // provided by ld-linux (the dynamic linker): _rtld_global,
     // _rtld_global_ro, _dl_argv, _dl_find_dso_for_object, etc. When
@@ -361,38 +325,30 @@ private:
     // __libc_init instead of depending on ld-linux, except we do it
     // at the dynamic-linker level rather than the libc level.
     bool register_ld_linux_shim_();
-
     // Map PT_LOAD segments from `data` at `base`. Returns the highest
     // mapped address + 1 (i.e., the new end_addr). Sets `entry` to
     // the absolute entry point.
     uint64_t map_segments(const std::vector<uint8_t>& data,
                           uint64_t base, uint64_t& entry);
-
     // Build the global symbol table from obj's .dynsym. Only exported
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
     void index_symbols(const LoadedObject& obj);
-
     // BUGFIX (Turn 60, C5): parse symbol versioning sections
     // (.gnu.version, .gnu.version_d, .gnu.version_r) and populate
     // versioned_symbols_ with "name@version" keys.
     void parse_versions_(const LoadedObject& obj);
-
     // Resolve a symbol by name AND version. Looks up versioned_symbols_
     // first (key "name@version"), then falls back to unversioned
     // symbols_. Returns 0 if not found.
     uint64_t resolve_versioned_symbol(const std::string& name,
                                        const std::string& version) const;
-
     // Allocate the static TLS block and assign TP-offsets to each
     // object with a PT_TLS segment. Must be called after all libraries
     // are loaded but before relocations are applied.
     void allocate_static_tls();
-
-    // BUGFIX (Turn 59): invoke DT_INIT and DT_INIT_ARRAY for each loaded
     // object (libs first, main last). Runs C++ static constructors.
     // Requires init_runner_ to be set; no-ops if not.
     void run_init_arrays_();
-
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).
@@ -402,12 +358,10 @@ private:
     // selection (e.g. GLIBC_2.17 stat vs GLIBC_2.33 stat with different
     // struct layouts).
     uint64_t resolve_reloc_symbol(const LoadedObject& obj, uint32_t sym_idx);
-
     // ── ld-linux shim state ────────────────────────────────────────
     // Guest VA of the synthetic ld-linux data page (allocated by
     // register_ld_linux_shim_()). 0 if the shim hasn't been registered.
     uint64_t shim_base_ = 0;
-
     // ── Pending TLS static size for post-relocation patching ──────
     // After all relocations are applied, we patch the resolved
     // _rtld_global_ro (which points to ld-linux's data section) to
@@ -418,8 +372,7 @@ private:
     // breaks __libc_early_init (which reads other fields from the
     // real struct at specific offsets).
     uint64_t pending_tls_static_size_ = 0;
-
-    // ── Pending R_AARCH64_COPY relocations (Turn 74) ───────────────
+    // ── Pending R_AARCH64_COPY relocations ───────────────
     // COPY relocations must be deferred until AFTER all other relocations
     // are applied. The COPY reads the original symbol's value (which is
     // set by the original object's RELATIVE relocations). If we apply
@@ -431,12 +384,9 @@ private:
         const LoadedObject* copy_obj; // the object containing the COPY reloc
     };
     std::vector<PendingCopy> pending_copies_;
-
     // Apply all pending COPY relocations. Called after all objects'
     // RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/IRELATIVE relocations are done.
     void apply_pending_copies_();
-
-    // Turn 78: apply DT_RELR (compact relative relocations). glibc 2.36+
     // produces these by default; without them, libc's .init_array / .got /
     // .data.rel.ro relative pointers never get fixed up. RELR is a stream
     // of uint64_t words encoding R_AARCH64_RELATIVE relocations in a
@@ -445,22 +395,17 @@ private:
     // https://maskray.me/blog/2021-10-31-relative-relocations-and-relr
     void apply_relr_relocations_(const LoadedObject& obj,
                                  uint64_t relr_addr, uint64_t relr_size);
-
     // Patch the resolved _rtld_global_ro to set dl_pagesize,
     // dl_tls_static_size, and dl_tls_static_align. Called after all
     // relocations (so _rtld_global_ro is resolved to ld-linux's data)
     // but before __libc_early_init (which reads dl_pagesize).
     void patch_rtld_global_ro_();
-
     // Dynamically detect the offsets of dl_tls_static_size and
     // dl_tls_static_align within struct rtld_global_ro by disassembling
     // __libc_early_init. Returns true on success, filling out the
     // offsets; false if detection fails (caller falls back to spray).
-    // Turn 79: replaces hardcoded offsets that broke with glibc 2.40.
     bool detect_tls_field_offsets_(uint32_t& out_size_off,
                                     uint32_t& out_align_off);
-
-    // BUGFIX (Turn 77): initialize the NPTL stack-cache list heads in
     // _rtld_global (the read-write rtld global, NOT _rtld_global_ro).
     // glibc's pthread_create -> allocate_stack walks the _dl_stack_cache
     // list (a circular doubly-linked list_t) looking for a reusable
@@ -477,8 +422,6 @@ private:
     // 2.36 (Arm GNU 13.2) libc.so.6 disassembly of pthread_create and
     // the _thread_db_rtld_global__dl_stack_* descriptors.
     void init_nptl_stack_lists_();
-
-    // BUGFIX (Turn 74): mirror a relocation to the TLS block copy.
     // If `target` falls within obj's PT_TLS (.tdata) segment, also
     // store `value` at the corresponding offset in the static TLS
     // block. This is needed because allocate_static_tls() copies
@@ -490,5 +433,4 @@ private:
     void apply_tls_mirror_(const LoadedObject& obj,
                            uint64_t target, uint64_t value);
 };
-
 } // namespace arm64emu

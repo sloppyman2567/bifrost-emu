@@ -32,7 +32,7 @@
 //      mask.
 //
 // Limitations (clearly documented for the user):
-//   - Only signals 1..31 are supported (no real-time signals 32+).
+//   - Signals 1..31 (classic) and 32..64 (real-time) are supported.
 //   - SA_RESTART is recorded but only honored for a small set of
 //     blocking syscalls (read, write, poll, ppoll, futex). Other
 //     syscalls return -EINTR when interrupted.
@@ -49,17 +49,13 @@
 // This is a private header — only Emulator and the syscalls layer
 // include it. The public surface is the SignalTable class itself.
 #pragma once
-
 #include "bifrost/types.hpp"
 #include "core/cpu.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
-
 namespace arm64emu {
-
 // Linux signal numbers (asm-generic/signal.h).
 constexpr int BIFROST_SIGHUP    = 1;
 constexpr int BIFROST_SIGINT    = 2;
@@ -90,31 +86,21 @@ constexpr int BIFROST_SIGPROF   = 27;
 constexpr int BIFROST_SIGWINCH  = 28;
 constexpr int BIFROST_SIGIO     = 29;
 constexpr int BIFROST_SIGSYS    = 31;
-
 // Real-time signal range (Linux SIGRTMIN..SIGRTMAX).
 // SIGRTMIN is 32 on AArch64 Linux (glibc reserves 32-35 internally, but
 // the kernel's SIGRTMIN is 32). SIGRTMAX is 64. We support all 33 RT
 // signals (32..64) so glibc's pthread_cancel, timer_create, setxid,
-// and musl's timer delivery all work. Turn 57.
+// and musl's timer delivery all work.
 constexpr int BIFROST_SIGRTMIN  = 32;
 constexpr int BIFROST_SIGRTMAX  = 64;
-
-// BUGFIX (Turn 57): was 31, blocking all real-time signals. glibc's
-// libpthread uses SIGRTMIN (32) for pthread_cancel/__pthread_signal_cancel
-// and the setxid mechanism; musl uses SIGRTMIN for timer delivery and
-// SIGCANCEL for cancellation. Without RT signal support, those silently
-// disappear — pthread_cancel hangs, timer_create never fires, getpwuid
-// (setxid) deadlocks. Bumped to 64 to cover the full RT range.
+// Maximum signal number supported (covers classic 1..31 + RT 32..64).
 constexpr int MAX_SIGNAL = 64;
-
 // Signal mask is 64-bit (covers signals 1..64, including RT signals).
 using sigset_t_emu = uint64_t;
-
 // sigprocmask `how` values.
 constexpr int SIG_BLOCK_EMU   = 0;  // SIG_BLOCK
 constexpr int SIG_UNBLOCK_EMU = 1;  // SIG_UNBLOCK
 constexpr int SIG_SETMASK_EMU = 2;  // SIG_SETMASK
-
 // sa_flags bits (Linux).
 constexpr uint64_t SA_SIGINFO_EMU   = 0x00000004;
 constexpr uint64_t SA_RESTART_EMU   = 0x10000000;
@@ -123,7 +109,6 @@ constexpr uint64_t SA_RESETHAND_EMU = 0x80000000;
 constexpr uint64_t SA_ONSTACK_EMU   = 0x08000000;
 constexpr uint64_t SA_NOCLDWAIT_EMU = 0x00000002;
 constexpr uint64_t SA_NOCLDSTOP_EMU = 0x00000001;
-
 // siginfo_t si_code values (subset).
 constexpr int SI_USER_EMU     = 0;
 constexpr int SI_KERNEL_EMU   = 0x80;
@@ -131,12 +116,10 @@ constexpr int SEGV_MAPERR_EMU = 1;
 constexpr int SEGV_ACCERR_EMU = 2;
 constexpr int ILL_ILLOPC_EMU  = 1;
 constexpr int FPE_INTDIV_EMU  = 1;
-
 // Fixed guest address where we map the sigreturn trampoline.
 // Chosen to be far from the stack (0x8000000000) and mmap region
 // (0x5000000000+) so it never collides.
 constexpr uint64_t TRAMPOLINE_ADDR = 0x7000000000ULL;
-
 // Linux struct k_sigaction (AArch64 layout, simplified):
 //   void  (*sa_handler)(int)         — at offset 0
 //   unsigned long sa_flags           — at offset 8
@@ -145,7 +128,6 @@ constexpr uint64_t TRAMPOLINE_ADDR = 0x7000000000ULL;
 //
 // Total size: 32 bytes. Matches the kernel's struct k_sigaction.
 constexpr size_t KSIGACTION_SIZE = 32;
-
 // Saved CPU state for signal delivery.
 struct SignalFrame {
     uint64_t regs[31];   // X0..X30
@@ -167,7 +149,6 @@ struct SignalFrame {
     uint32_t fpcr;
     uint32_t fpsr;
 };
-
 // Per-signal action recorded by rt_sigaction.
 struct SigAction {
     uint64_t handler    = 0;       // 0 = SIG_DFL, 1 = SIG_IGN, else handler addr
@@ -175,7 +156,6 @@ struct SigAction {
     uint64_t mask       = 0;       // additional signals to block during handler
     bool     installed  = false;   // has the guest set a handler?
 };
-
 // Alternate signal stack (sigaltstack).
 // Kept as a free struct for backwards compat with code that constructs
 // one directly. The per-CPU state lives in CPU::altstack.
@@ -189,30 +169,23 @@ struct AltStack {
     bool disabled() const { return (flags & SS_DISABLE_EMU) != 0 || size == 0; }
     uint64_t top() const { return sp + size; }
 };
-
 class SignalTable {
 public:
     SignalTable() = default;
-
     // Install a handler for `signo` from a guest-side struct k_sigaction
     // at address `act_addr`. If `old_act_addr` is non-zero, write the
     // previous action there. Returns 0 on success, -errno on failure.
     int install(Memory& mem, int signo, uint64_t act_addr, uint64_t old_act_addr);
-
     // Look up the installed action for `signo`. Returns nullptr if no
     // handler is installed (caller should apply default behavior).
     const SigAction* lookup(int signo) const;
-
     // Push a signal frame onto the internal stack and return a reference
     // to it. The caller fills in the saved CPU state.
     SignalFrame& push_frame(int signo);
-
     // Pop the most recent signal frame.
     bool pop_frame(SignalFrame& out);
-
     bool has_pending() const { return !frames_.empty(); }
     size_t frame_count() const { return frames_.size(); }
-
     // ── Per-CPU signal mask & altstack ──────────────────────────────
     // The signal mask and altstack are per-CPU state (in CPU::sigmask
     // and CPU::altstack). These helpers take a CPU& and operate on the
@@ -226,16 +199,13 @@ public:
         if (signo < 1 || signo > 63) return false;
         return (cpu.sigmask >> (signo - 1)) & 1;
     }
-
     // Apply a rt_sigprocmask `how` operation to `cpu.sigmask`. Returns 0
     // on success, -EINVAL for an invalid `how`. If `old_set_addr` is
     // non-zero, writes the previous mask there.
     static int procmask(Memory& mem, CPU& cpu, int how, uint64_t new_set_addr,
                         uint64_t old_set_addr, size_t sigsetsize);
-
     // Set/query `cpu.altstack`. Returns 0 on success, -errno on failure.
     static int set_altstack(Memory& mem, CPU& cpu, uint64_t new_addr, uint64_t old_addr);
-
     static void set_altstack_active(CPU& cpu, bool active) {
         if (active) cpu.altstack.flags |= CPU::AltStack::SS_ONSTACK_EMU;
         else        cpu.altstack.flags &= ~CPU::AltStack::SS_ONSTACK_EMU;
@@ -246,12 +216,10 @@ public:
             actions_[signo] = SigAction{};
         }
     }
-
 private:
     SigAction actions_[MAX_SIGNAL + 1];  // indexed by signo (1..31)
     std::vector<SignalFrame> frames_;
 };
-
 // Map the sigreturn trampoline into the guest's address space.
 // Writes the 8-byte AArch64 sequence:
 //   mov x8, #139      // __NR_rt_sigreturn
@@ -259,14 +227,12 @@ private:
 // at TRAMPOLINE_ADDR. Idempotent — safe to call multiple times.
 // Returns TRAMPOLINE_ADDR on success, 0 on failure.
 uint64_t map_sigreturn_trampoline(Memory& mem);
-
 // Build a guest-side siginfo_t at address `info_addr` for `signo` with
 // the supplied si_code and fault address. The layout matches the AArch64
 // struct siginfo_t (128 bytes): si_signo, si_errno, si_code, then a
 // union containing si_addr/si_pid/si_uid/etc.
 void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
                    int si_code, uint64_t fault_addr);
-
 // Build a guest-side ucontext_t at address `uc_addr`. The layout is
 // simplified but covers the fields real handlers (glibc/musl/bionic)
 // actually read:
@@ -285,7 +251,6 @@ void build_siginfo(Memory& mem, uint64_t info_addr, int signo,
 // as the next signal frame's stack pointer if needed).
 uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
                         uint64_t saved_mask, uint64_t fault_addr);
-
 // Deliver a signal to the guest. If a handler is installed, saves
 // the current CPU state, sets up X0=signo / X1=siginfo / X2=ucontext /
 // X30=trampoline / PC=handler, and returns true. If no handler is
@@ -304,9 +269,7 @@ uint64_t build_ucontext(Memory& mem, uint64_t uc_addr, CPU& cpu,
 // if the default disposition was applied.
 bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                     int si_code = SI_USER_EMU, uint64_t fault_addr = 0);
-
 // Deliver any pending signals that are no longer blocked. Called after
 // rt_sigprocmask unblocks signals. Returns the number of signals delivered.
 int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab);
-
 } // namespace arm64emu

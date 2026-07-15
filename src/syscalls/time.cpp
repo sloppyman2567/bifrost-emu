@@ -19,21 +19,17 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
-
 namespace arm64emu {
-
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;  // a3 is used by clock_nanosleep
     auto& mem_ = emu.mem_;
     static const bool trace = (getenv("BIFROST_SIGNAL_TRACE") != nullptr);
-
     switch (num) {
         case 101: { // nanosleep(req, rem) — AArch64 101
             if (!a0) { ret_err(EFAULT); return 0; }
@@ -75,9 +71,7 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 113: { // clock_gettime(clkid, tp) — AArch64 113
-            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
             // even on error. The old code returned ret_errno() without
             // writing, leaving the guest's timespec uninitialized with
             // deterministic stack garbage.
@@ -104,7 +98,6 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 114: { // clock_getres(clkid, res) — AArch64 114
             // musl defaults CLOCK_REALTIME resolution to 1ns.
             if (a1) {
@@ -119,7 +112,6 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 115: { // clock_nanosleep(clkid, flags, req, rem) — AArch64 115
             if (!a2) { ret_err(EFAULT); return 0; }
             struct timespec ts;
@@ -157,9 +149,7 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 169: { // gettimeofday(tv, tz) — AArch64 169
-            // BUGFIX (Turn 62 rev 2): ALWAYS write to guest buffer.
             if (!a0) { ret_err(EFAULT); return 0; }
             struct timeval tv;
             memset(&tv, 0, sizeof(tv));
@@ -182,10 +172,8 @@ int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
 }
-
 } // namespace arm64emu

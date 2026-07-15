@@ -1,6 +1,6 @@
 // jit/jit_codegen_branch.cpp — FrostJIT branch/call IR-op codegen.
 //
-// v1.4.5-alpha (Turn 37): split out of frostjit.cpp. This file holds the
+// v1.4.5-alpha: split out of frostjit.cpp. This file holds the
 // BRCOND_ZERO / BRCOND_BIT / BRCOND / BRCOND_FALLTHRU / CALL_INTERP /
 // SVC case bodies of the IR-op switch, extracted into a separate method
 // (compile_ir_branch) for readability. The main switch in frostjit.cpp
@@ -19,13 +19,10 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_branch ────────────────────────────────────────
 // Handles conditional/unconditional branch ops and supervisor calls.
 // All of these set rax_holds_next_pc_=true and return 1 (ends block)
@@ -89,7 +86,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_popfq();
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
-            // Turn 90: fall-through chaining for CBZ/CBNZ.
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             // Taken path: store PC, restore regs, ret (no chain).
             emit_store(CPU_REG, PC_OFF, RAX);
@@ -101,7 +97,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_ret();
             return 1;
         }
-
         case IROp::BRCOND_BIT: {
             // TBZ/TBNZ: branch on ((val >> bit) & 1) without touching flags.
             // cond=0 (EQ) → branch if bit == 0 (TBZ)
@@ -144,7 +139,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_popfq();
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
-            // Turn 90: fall-through chaining for TBZ/TBNZ.
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             // Taken path: store PC, restore regs, ret (no chain).
             emit_store(CPU_REG, PC_OFF, RAX);
@@ -156,10 +150,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_ret();
             return 1;
         }
-
         case IROp::BRCOND: {
             if (!flags_in_host_) {
-                // Turn 102: emit_load_flags_from_pstate and
                 // emit_normalize_cf_to_sub_convention only clobber
                 // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
                 // vregs cached in R8/R9/R11/R12/R13/R15 across the flag
@@ -183,7 +175,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // from SUB or normalized), the default mapping is used.
             bool need_cmc_for_hi_ls = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
-
             // Emit the JCC first — it consumes host RFLAGS directly, so no
             // flag materialization is needed before it. Flags are materialized
             // to pstate on each path separately (the next block may read pstate).
@@ -194,7 +185,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 emit_byte(0xF5);  // cmc — invert CF for HI/LS after ADD/TST
             }
             size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
-
             // ── Fall-through (not-taken) path: materialize flags, set RAX = fall-through PC ──
             // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
             // materialize_flags_to_pstate sees the original carry flag.
@@ -205,18 +195,15 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
-
             // ── Taken path ──
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
-
             // If CMC was emitted, re-invert CF before materializing flags.
             if (need_cmc_for_hi_ls) {
                 emit_byte(0xF5);  // cmc — restore CF to original
             }
             // Materialize flags to pstate (the taken-target block may read them).
             materialize_flags_to_pstate();
-
             // ── Self-loop chaining ──
             // If the taken target is the block's own start PC, emit a 5-byte
             // `jmp rel32` placeholder. After the block is fully compiled,
@@ -233,12 +220,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 selfloop_patch_off_ = code_buf_used_;
                 emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
             }
-
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             flags_in_host_ = false;
-
-            // Turn 90: Fall-through chaining for conditional branches.
             //
             // OLD: unchainable_end_ = true (both paths return to dispatcher)
             // NEW: The fall-through (not-taken) path chains to the block at
@@ -270,7 +254,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_ret();  // return to C dispatcher (no chain)
             return 1;
         }
-
         case IROp::BRCOND_FALLTHRU: {
             flush_all_vregs();
             emit_mov_imm_to_rax(inst.imm);
@@ -282,20 +265,16 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             chain_target_pc_ = inst.imm;
             return 1;
         }
-
         case IROp::CALL_INTERP:
             emit_call_interp(inst.arm_pc, false);
             return 0;
-
         case IROp::SVC:
             emit_call_interp(inst.arm_pc, true);
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // syscall may modify PC
             return 1;
-
         default:
             return -1;  // not handled — caller falls through
     }
 }
-
 } // namespace arm64emu

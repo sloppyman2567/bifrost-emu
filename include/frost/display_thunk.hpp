@@ -32,49 +32,35 @@
 //
 // Opt-in: BIFROST_THUNK_DISPLAY=1 or [thunk] display = true in config.
 #pragma once
-
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
-
 namespace arm64emu {
-
 class Memory;
 class CPU;
-
 struct DisplayThunkImpl;
-
 class DisplayThunk {
 public:
     DisplayThunk();
     ~DisplayThunk();
-
     DisplayThunk(const DisplayThunk&) = delete;
     DisplayThunk& operator=(const DisplayThunk&) = delete;
-
     bool enabled() const;
-
     bool init(Memory& mem);
-
     uint64_t resolve(const std::string& lib, const std::string& sym);
-
     size_t enumerate_symbols(const std::string& lib,
         const std::function<void(const std::string&, uint64_t)>& cb) const;
-
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
-
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
-
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 2048;  // 32 KiB page
-    // v1.5.0.alpha (Turn 74): ID base for DisplayThunk symbols.
+    // v1.5.0.alpha: ID base for DisplayThunk symbols.
     static constexpr uint32_t ID_BASE = 0x2000;
     static constexpr uint32_t ID_MASK = 0x3000;
-
 private:
     std::unique_ptr<DisplayThunkImpl> impl_;
     void register_function_(const std::string& lib,
@@ -84,5 +70,4 @@ private:
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
 };
-
 } // namespace arm64emu

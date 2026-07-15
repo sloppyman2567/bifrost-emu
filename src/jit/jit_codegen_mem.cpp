@@ -1,6 +1,6 @@
 // jit/jit_codegen_mem.cpp — FrostJIT memory IR-op codegen.
 //
-// v1.4.5-alpha (Turn 37): split out of frostjit.cpp. This file holds the
+// v1.4.5-alpha: split out of frostjit.cpp. This file holds the
 // LOAD_MEM / STORE_MEM / LOAD_REG / STORE_REG case bodies of the IR-op
 // switch, extracted into a separate method (compile_ir_mem) for
 // readability. The main switch in frostjit.cpp dispatches to this method
@@ -18,12 +18,9 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
-
 #include <cstddef>
 #include <cstdint>
-
 namespace arm64emu {
-
 // ── FrostJIT::compile_ir_mem ───────────────────────────────────────────
 // Handles LOAD_MEM, STORE_MEM, LOAD_REG, STORE_REG. These are the only
 // IR ops that touch cpu.regs[]/cpu.v_lo[]/memory directly via the
@@ -44,7 +41,6 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             // conversion result: FP_F2I cached vreg 1, then LOAD_REG v34, x1
             // reloaded the stale cpu.regs[1] instead of the cached vreg 1.
             //
-            // BUGFIX (Turn 57): when inst.sf=1 (is_fp), load from cpu.v_lo[]
             // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
                 kill_vreg(inst.dest);
@@ -64,7 +60,6 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 set_vreg_reg(inst.dest, d);
             }
             return 0;
-
         case IROp::STORE_REG:
             // arm64_reg[dest] = src1. Write to cpu.regs[dest] (or v_lo if is_fp).
             // DON'T cache dest — leave it uncached so it reloads from
@@ -72,7 +67,6 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             // DON'T touch src1 — it stays cached in its reg.
             // This avoids all aliasing problems and eliminates spills.
             //
-            // BUGFIX (Turn 57): when inst.sf=1 (is_fp), write to cpu.v_lo[]
             // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
                 int s = ensure_vreg(inst.src1);
@@ -88,7 +82,6 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 }
             }
             return 0;
-
         case IROp::LOAD_MEM: {
             // Memory access via emit_load_mem. The slow path calls
             // jit_load_mem_slow (clobbers caller-saved regs); the fast
@@ -110,7 +103,6 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             store_reg_to_vreg(inst.dest, RAX);
             return 0;
         }
-
         case IROp::STORE_MEM: {
             // Same as LOAD_MEM: only flush caller-saved dirty vregs.
             clobber_flags();
@@ -123,10 +115,8 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
             return 0;
         }
-
         default:
             return -1;  // not handled — caller falls through
     }
 }
-
 } // namespace arm64emu

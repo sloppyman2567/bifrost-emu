@@ -12,7 +12,6 @@
 // The syscall() body lives in src/syscalls/syscalls.cpp. Thread spawn/join
 // lives in src/core/thread_mgr.cpp. Each is a friend of Emulator.
 #include "core/emulator.h"
-
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
@@ -20,7 +19,6 @@
 #include "frost/audio_thunk.hpp"  // v1.5.0.alpha: AudioThunk
 #include "frost/display_thunk.hpp"// v1.5.0.alpha: DisplayThunk
 #include "jit/frostjit.hpp"
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -37,12 +35,9 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-
 namespace arm64emu {
-
 // ── Static active-emu pointer (defined in src/core/signal.cpp) ────────
 // Emulator* Emulator::g_active_emu_ = nullptr;  // defined in signal.cpp
-
 Emulator::Emulator() = default;
 Emulator::~Emulator() {
     // Clear the active-emu pointer so host signal handlers don't
@@ -50,11 +45,9 @@ Emulator::~Emulator() {
     // the destructor runs would crash with UAF.
     g_active_emu_ = nullptr;
 }
-
 void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
     return &excl_monitor_shards_[excl_shard_idx(addr)];
 }
-
 // ── ELF loading ───────────────────────────────────────────────────────
 void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& argv) {
     elf_path_ = path;
@@ -71,7 +64,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     vfs_.set_argv(argv);
     vfs_.set_graphics(&graphics_);
     vfs_.set_audio(&audio_);
-
     // Wire up /proc/self/maps to query live memory state. The callback
     // captures `this` — the Emulator outlives the VFS, so this is safe.
     // BUGFIX: previously /proc/self/maps returned hardcoded 5-line string
@@ -133,7 +125,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         }
         return out;
     });
-
     // Wire up guest cwd tracking. The host cwd is meaningless because
     // BIFROST_ROOT sandboxing decouples guest paths from host paths.
     // The guest starts at "/" by default; chdir/fchdir update this.
@@ -169,13 +160,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
             return true;
         });
-
     // Wire up /proc/self/comm — returns the guest process name (set by
     // prctl PR_SET_NAME, defaults to ELF basename).
     vfs_.set_comm_provider([this]() -> std::string {
         return guest_comm_;
     });
-
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) throw EmuError("cannot open " + path + ": " + strerror(errno));
     fseek(f, 0, SEEK_END);
@@ -196,7 +185,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     phent_ = info.phent;
     has_lse_ = info.has_lse;
     interp_base_ = 0;
-
     // If the binary has a PT_INTERP (dynamic linker), load it.
     // The dynamic linker's entry point becomes the real entry point;
     // the binary's entry is passed via AT_ENTRY in auxv.
@@ -222,8 +210,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         bool native_dynlink = (getenv("BIFROST_NO_NATIVE_DYNLINK") == nullptr);
         if (native_dynlink) {
             dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
-
-            // ── Wire GraphicThunk into the dynamic linker (Turn 37) ──
+            // ── Wire GraphicThunk into the dynamic linker ──
             // When BIFROST_THUNK_GRAPHICS=1 is set, the thunk forwards
             // guest GL/EGL/SDL2 calls to the host. We init the thunk
             // (allocates the guest trampoline page) and register a
@@ -258,7 +245,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
-
             // v1.5.0.alpha: also init AudioThunk and DisplayThunk if
             // enabled. They share the thunk syscall (0x1000) with
             // GraphicThunk; the dispatcher in misc.cpp tries each in
@@ -297,7 +283,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
-
             // Register the ifunc resolver callback. BUGFIX: the old
             // IRELATIVE handler just stored the resolver ADDRESS instead
             // of CALLING it. Now we run the resolver in a scratch CPU
@@ -454,7 +439,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     main_cpu_.sigmask = saved.sigmask;
                     main_cpu_.running = saved.running;
                 };
-                // BUGFIX (Turn 74): set TPIDR_EL0 to the static TLS block
                 // before running init functions. Constructors and
                 // __libc_early_init access TLS variables (e.g., ctype
                 // tables, locale pointers) via TPIDR_EL0. Without this,
@@ -515,7 +499,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 // Main exe TLS is at [TP + tcb_size, ...) (positive offset).
                 // Lib TLS is at [TP - lib_size, TP) (negative offset).
                 //
-                // BUGFIX (Turn 82): the old code set TP = base + total (the
                 // END of the block, variant-II). This broke local-exec TLS
                 // access for the main exe — the hardcoded positive TPREL
                 // offset landed in the wrong place. With variant-I, TP points
@@ -537,7 +520,6 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // functions directly. The interpreter's symbols are
             // available via the native linker's symbol table.
         }
-
         // Try to open the interpreter. Check common host paths for
         // aarch64 dynamic linkers (musl and glibc multiarch).
         std::vector<std::string> interp_paths = {
@@ -600,24 +582,20 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
         }
     }
-
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
-
     // Set up the initial stack image
     const uint64_t STACK_TOP = 0x8000000000ULL;
     const uint64_t STACK_SIZE = 64 * 1024 * 1024;  // 64 MiB
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
     main_cpu_.sp = build_initial_stack(STACK_TOP, argv, info);
-
     // Pre-allocate a TLS scratch area and set TPIDR_EL0 to point into
     // its center. Many libc startup routines read TPIDR_EL0 before
     // __libc_setup_tls has set the real TCB. Pointing it to valid
     // zeroed memory prevents unmapped-read crashes.
     //
-    // BUGFIX (Turn 72): only do this for STATIC binaries. For dynamic
     // binaries, the dynamic linker already set TPIDR_EL0 to the static
     // TLS block (line ~507 above). Overwriting it here destroys libc's
     // TLS — libc reads errno, stdin/stdout/stderr FILE pointers, locale
@@ -631,19 +609,16 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         main_cpu_.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
         main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
     }
-
     // Map the zero page so NULL dereferences return 0 instead of
     // crashing. libc code often has NULL checks that only work if
     // the load itself doesn't fault.
     mem_.map_range(0, 4096);
-
     main_cpu_.pc = entry_;
     main_cpu_.running = true;
     main_cpu_.tid = 1;  // main thread TID
     next_tid_ = 2;
     main_cpu_.set_tid_address_ptr = 0;
 }
-
 // ── Default guest environment ──────────────────────────────────────────
 // Builds a minimal but realistic environment for the guest, propagating
 // locale/timezone-related host env vars so programs like `toybox uptime`,
@@ -668,7 +643,6 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     envs.push_back("PWD=/");
     envs.push_back("SHLVL=1");
     envs.push_back("_=/bin/sh");
-
     // Propagate locale + timezone vars from the host so locale-aware
     // programs (date, uptime, ls -l's month names, etc.) work correctly.
     // Without TZ, musl defaults to UTC and `toybox uptime` shows UTC time
@@ -706,14 +680,12 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     }
     return envs;
 }
-
 // ── Initial stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ─────
 uint64_t Emulator::build_initial_stack(uint64_t stack_top,
                                        std::vector<std::string>& argv,
                                        ElfLoader::Loaded& info) {
     (void)info;  // reserved for future use (AT_PHDR, etc.)
     uint64_t sp = stack_top;
-
     // Push argv strings
     std::vector<uint64_t> argv_addrs;
     for (auto& a : argv) {
@@ -721,7 +693,6 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         mem_.write(sp, a.data(), a.size() + 1);
         argv_addrs.push_back(sp);
     }
-
     // Push envp. If guest_env_ was set via set_guest_env(), use it.
     // Otherwise, build a default environment that propagates locale/
     // timezone-related host env vars (TZ, LANG, LC_*, etc.) so programs
@@ -736,7 +707,6 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         mem_.write(sp, e.data(), e.size() + 1);
         envp_addrs.push_back(sp);
     }
-
     // AT_RANDOM — 16 random bytes used by glibc for stack canary init and
     // pointer guard. MUST be high-quality random; never fall back to rand()
     // (which is unseeded by default → predictable canary → stack-overflow
@@ -776,7 +746,6 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     }
     mem_.write(sp, rnd, 16);
     uint64_t random_addr = sp;
-
     // AT_HWCAP bits for AArch64:
     //   bit 0: FP, bit 1: ASIMD, bit 7: CRC32, bit 8: LSE atomics.
     // We advertise FP + ASIMD + CRC32 + LSE atomics (glibc needs these).
@@ -786,16 +755,13 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     const uint64_t HWCAP_CRC32   = 1ULL << 7;
     const uint64_t HWCAP_ATOMICS = 1ULL << 8;
     uint64_t hwcap = HWCAP_FP | HWCAP_ASIMD | HWCAP_CRC32 | HWCAP_ATOMICS;
-
     // AT_EXECFN: pointer to the program name string on the stack
     uint64_t execfn_addr = argv_addrs[0];
-
     // AT_PLATFORM: aarch64 string (some libc ifunc resolvers consult it).
     sp -= 8;
     const char platform_str[] = "aarch64";
     mem_.write(sp, platform_str, sizeof(platform_str));
     uint64_t platform_addr = sp;
-
     std::vector<uint64_t> auxv = {
         6,  4096,            // AT_PAGESZ
         3,  phdr_addr_,      // AT_PHDR
@@ -828,7 +794,6 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         17, 100,             // AT_CLKTCK (sysconf(_SC_CLK_TCK))
         0,  0,               // AT_NULL
     };
-
     // Compute total table size and align SP to 16
     uint64_t argc = argv.size();
     uint64_t table_size = 8                            // argc
@@ -837,7 +802,6 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
                         + 8 * auxv.size();             // auxv
     sp -= table_size;
     sp &= ~0xFULL;  // 16-byte align
-
     uint64_t p = sp;
     auto push = [&](uint64_t v) { mem_.store<uint64_t>(p, v); p += 8; };
     push(argc);
@@ -848,14 +812,11 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     for (auto v : auxv) push(v);
     return sp;
 }
-
 // ── Run loop ──────────────────────────────────────────────────────────
 int Emulator::run() {
     uint64_t count = 0;
     auto t0 = std::chrono::steady_clock::now();
-    // BUGFIX (Turn 62): record run start time for guest CPU time tracking.
     run_start_time_ = t0;
-
     // ── Hang watchdog ───────────────────────────────────────────────
     // Detects infinite loops where the same PC is executed over and
     // over without making progress (a common symptom of mallocng init
@@ -883,7 +844,6 @@ int Emulator::run() {
     // false positives while still catching true linked-list-cycle /
     // infinite-spin bugs.
     uint64_t last_progress_hash = 0;
-
     while (main_cpu_.running) {
         try {
             // Optional PC trace for debugging. Gated by env var so
@@ -934,7 +894,6 @@ int Emulator::run() {
             }
             break;
         } catch (DecodeError& e) {
-            // Turn 100: make the emulator robust against NULL function
             // pointer calls and genuinely illegal instructions.
             //
             // On real ARM64 Linux:
@@ -985,7 +944,6 @@ int Emulator::run() {
             break;
         }
         count++;
-
         // Watchdog: if PC hasn't changed, increment same_pc_count.
         if (main_cpu_.pc == last_pc) {
             same_pc_count++;
@@ -1005,7 +963,6 @@ int Emulator::run() {
             last_pc = main_cpu_.pc;
             same_pc_count = 0;
         }
-
         // Tight-loop detection: track recent PCs in a ring buffer.
         // If we've been cycling through a small set of PCs for too long
         // without hitting a syscall AND registers aren't changing, it's
@@ -1060,22 +1017,18 @@ int Emulator::run() {
                 }
             }
         }
-
         // Drain the host-signal queue every ~4K instructions.
         if ((count & 0xFFF) == 0) {
             drain_host_signals(main_cpu_);
             // Also drain per-CPU pending signals (queued by cross-thread
             // tgkill/tkill/kill). This is the fix for the cross-thread
-            // CPU-mutation race (Turn 57).
+            // CPU-mutation race.
             drain_pending_signals(main_cpu_);
-            // BUGFIX (Turn 62): track guest instructions for accurate
             // rusage/times. Add the ~4K instructions since last drain to
             // the total. (Not exact — we add 4096 each time, but close
             // enough for CPU time estimation.)
             guest_instructions_total_.fetch_add(4096, std::memory_order_relaxed);
         }
-
-        // BUGFIX (Turn 62): update MIPS estimate every ~1M instructions
         // so guest_instr_to_seconds() has a real conversion factor.
         if ((count & 0xFFFFF) == 0 && count > 0) {
             auto now = std::chrono::steady_clock::now();
@@ -1085,7 +1038,6 @@ int Emulator::run() {
                 mips_estimate_.store(mips, std::memory_order_relaxed);
             }
         }
-
         if ((count & 0xFFFFF) == 0) {
             if (!mem_.is_mapped(main_cpu_.pc, 4)) {
                 throw EmuError("PC ran into unmapped memory at 0x"
@@ -1110,7 +1062,6 @@ int Emulator::run() {
             }
         }
     }
-
     // Wait for any spawned threads to exit
     join_threads();
     auto t1 = std::chrono::steady_clock::now();
@@ -1143,7 +1094,6 @@ int Emulator::run() {
     }
     return main_cpu_.exit_code;
 }
-
 // ── Per-instruction step (decode cache + trace) ───────────────────────
 void Emulator::step(CPU& cpu) {
     if (trace_) {
@@ -1176,10 +1126,8 @@ void Emulator::step(CPU& cpu) {
     execute(inst, next_pc, cpu);
     cpu.pc = next_pc;
 }
-
 // Host-to-guest signal forwarding (install_host_signal_handlers,
 // queue_host_signal, host_signal_handler, drain_host_signals) is
 // implemented in src/core/signal.cpp — see that file for the full
 // disposition table.
-
 } // namespace arm64emu

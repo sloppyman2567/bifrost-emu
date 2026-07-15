@@ -24,10 +24,9 @@ no rootfs is set up. Running `./scripts/run_tests.sh --test-all` and
 setting up the rootfs (`./scripts/setup-rootfs.sh`) brings the count to
 170/171 (1 skip: iperf3 binary not downloaded).
 
-All 125 default tests pass under frostJIT as of Turn 89 (2026-07-12),
-and all 125 also pass under the interpreter. The C API (`libbifrost.a`
-+ `api/bifrost.h`) is verified by `ctest/test_capi.c` (22 checks, all
-pass).
+All 125 default tests pass under frostJIT, and all 125 also pass
+under the interpreter. The C API (`libbifrost.a` + `api/bifrost.h`) is
+verified by `ctest/test_capi.c` (22 checks, all pass).
 
 ### Test categories
 
@@ -61,30 +60,30 @@ pass/fail via exit code + output keyword scan (PASS/OK/ALL PASS, or a
 custom regex pattern per test). The old `make test` target is kept for
 backward compatibility — it runs a simple loop over all `.elf` files.
 
-**`sin_test.elf` K-table now correct.** The root cause was FCMPE #0.0
-being misdecoded as the register form — the `fcmp_with_zero` helper
-checked `(op & 0x1F) == 0x08` which only matched FCMP #0.0, not FCMPE
-#0.0 (bits[4:0]=0x18). Bit 3 is the #0.0 indicator; bit 4 is the E
+**`sin_test.elf` K-table correct.** FCMPE #0.0 was misdecoded as
+the register form — the `fcmp_with_zero` helper checked
+`(op & 0x1F) == 0x08` which only matched FCMP #0.0, not FCMPE #0.0
+(bits[4:0]=0x18). Bit 3 is the #0.0 indicator; bit 4 is the E
 (exception trap) bit. Fixed by checking bit 3 only.
 
-**`toybox ls /` works under `BIFROST_ENABLE_FWD=1`.** The root cause
-was the CCMP JIT handler clobbering RAX/RCX/RDX without spilling
-scratch vregs cached in those regs. Fixed by adding
-`flush_scratch_host_regs` and calling it before `emit_materialize_flags`
-in `clobber_flags`, `materialize_flags_to_pstate`, and the CCMP handler.
+**`toybox ls /` works under `BIFROST_ENABLE_FWD=1`.** The CCMP JIT
+handler was clobbering RAX/RCX/RDX without spilling scratch vregs
+cached in those regs. Fixed by adding `flush_scratch_host_regs` and
+calling it before `emit_materialize_flags` in `clobber_flags`,
+`materialize_flags_to_pstate`, and the CCMP handler.
 
-**toybox sh now works!** The root cause was a missing MOVI (vector
-immediate) handler for cmode≠0xE — `MOVI V0.4S, #0` was silently
-ignored, leaving V0 non-zero, which corrupted stack data when used
-with `STP Q0, Q0` for zeroing. Fixed by matching all cmode values.
+**toybox sh works.** MOVI (vector immediate) handler for cmode≠0xE
+was missing — `MOVI V0.4S, #0` was silently ignored, leaving V0
+non-zero, which corrupted stack data when used with `STP Q0, Q0`
+for zeroing. Fixed by matching all cmode values.
 
-**MD5 now produces correct hashes.** The root cause was the
-FCVTZS/FCVTZU/SCVTF/UCVTF fixed-point variants being silently NOP'd
-(the integer-variant mask required bit 21 = 1; the fixed-point variant
-has bit 21 = 0 with a 6-bit scale field). Toybox's MD5 K-table init
-uses `fcvtzu w1, d0, #32` to compute `floor(|sin(i+1)| * 2^32)`; with
-the NOP, every K[i] was filled with stack garbage and the hash output
-was unrelated to the input.
+**MD5 produces correct hashes.** The FCVTZS/FCVTZU/SCVTF/UCVTF
+fixed-point variants were silently NOP'd (the integer-variant mask
+required bit 21 = 1; the fixed-point variant has bit 21 = 0 with a
+6-bit scale field). Toybox's MD5 K-table init uses
+`fcvtzu w1, d0, #32` to compute `floor(|sin(i+1)| * 2^32)`; with
+the NOP, every K[i] was filled with stack garbage and the hash
+output was unrelated to the input.
 
 ### toybox sh feature test results
 
@@ -155,15 +154,15 @@ natively. They are the regression suite for frostJIT codegen changes.
 |--------|--------|-----|-------|
 | `ctest/jit_addsub_imm.elf` | ✅ | ✅ | ADD/SUB immediate forms |
 | `ctest/jit_bitfield.elf` | ✅ | ✅ | SBFM/UBFM/BFM bitfield ops |
-| `ctest/jit_block_split.elf` | ✅ | ✅ | Block splitting at CALL_INTERP boundaries (fixed in beta.2) |
+| `ctest/jit_block_split.elf` | ✅ | ✅ | Block splitting at CALL_INTERP boundaries |
 | `ctest/jit_carry.elf` | ✅ | ✅ | ADCS/SBCS carry chain |
 | `ctest/jit_cls.elf` | ✅ | ✅ | CLS (count leading sign bits) |
 | `ctest/jit_csel.elf` | ✅ | ✅ | CSEL/CSINC/CSINV/CSNEG |
 | `ctest/jit_extend.elf` | ✅ | ✅ | SXTB/SXTH/SXTW/UXTB/UXTH/UXTW |
-| `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests pass after FCMP/FABS/FNEG/FSQRT/FMOV-imm decode fixes) |
-| `ctest/jit_fma.elf` | ✅ | ✅ | FMADD/FMSUB/FNMADD/FNMSUB (single+double, 29/29 sub-tests). Native FMA3 codegen on FMA3 hosts (BIFROST_NO_FMA3=1 to force decomposed path). Added in rc.1. |
-| `ctest/jit_neon.elf` | ✅ | ✅ | NEON SIMD ops (10/10 sub-tests): SHL/USHR, SLI/SRI rotate, USRA, REV32/REV64, INS/UMOV, ADD/XOR. Added in rc.1 after the great NEON fix pass. |
-| `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests, added beta.3) |
+| `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests) |
+| `ctest/jit_fma.elf` | ✅ | ✅ | FMADD/FMSUB/FNMADD/FNMSUB (single+double, 29/29 sub-tests). Native FMA3 codegen on FMA3 hosts (BIFROST_NO_FMA3=1 to force decomposed path). |
+| `ctest/jit_neon.elf` | ✅ | ✅ | NEON SIMD ops (10/10 sub-tests): SHL/USHR, SLI/SRI rotate, USRA, REV32/REV64, INS/UMOV, ADD/XOR. |
+| `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests) |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |
 | `ctest/jit_rev.elf` | ✅ | ✅ | REV/REV16/REV32/RBIT |
@@ -229,11 +228,11 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `cal` | ✅ | ✅ | June 2026 calendar |
 | `xxd` | ✅ | ✅ | Hex dump of `/etc/hostname` |
 | `sleep` | ✅ | ✅ | `sleep 0.1` |
-| `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` → `hi`. Builtins, variables, arithmetic, `if`/`for`/`while`/`case`, functions, exit codes, command substitution, fork+execve. (Previously failed with SIGSEGV; the underlying issue was fixed during the rc.1 NEON/SIMD overhaul.) |
+| `sh -c` | ✅ | ✅ | `sh -c 'echo hi'` → `hi`. Builtins, variables, arithmetic, `if`/`for`/`while`/`case`, functions, exit codes, command substitution, fork+execve. |
 | `rev` | ✅ | ✅ | `rev <<< "hello"` → `olleh` |
-| `od` | ✅ | ✅ | `od /etc/hostname` (was SIMD decode error, fixed in beta.3) |
-| `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. (Was broken: SCVTF misdecoded as FMOV + FMADD operand bug.) |
-| `md5sum` | ✅ | ✅ | `echo -n hello \| md5sum` → `5d41402abc4b2a76b9719d911017c592`. Fixed in rc.1 (FCVTZU fixed-point variant was silently NOP'd, breaking MD5 K-table init). |
+| `od` | ✅ | ✅ | `od /etc/hostname` |
+| `seq` | ✅ | ✅ | `seq 1 5` → `1 2 3 4 5`. All variants work: `-w`, `-s`, `-f`, negative steps, float steps. |
+| `md5sum` | ✅ | ✅ | `echo -n hello \| md5sum` → `5d41402abc4b2a76b9719d911017c592`. |
 | `sha1sum` | ✅ | ✅ | `echo -n hello \| sha1sum` → `aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d` |
 | `sha224sum` | ✅ | ✅ | `echo -n hello \| sha224sum` → `ea09ae9cc6768c50fcee903ed054556e5bfc8347907c125748ec5e7f` |
 | `sha256sum` | ✅ | ✅ | `echo -n hello \| sha256sum` → `2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824` |
@@ -245,9 +244,7 @@ compatibility. Run commands via `./bifrost-emu ctest_real/toybox <cmd>`.
 | `tr` | N/A | N/A | Not in this toybox build (use `ctest_real/tr.elf` instead — works) |
 | `expr` | N/A | N/A | Not in this toybox build |
 
-**Toybox summary**: 38 of the 39 tested commands pass; `sh -c` previously
-failed with SIGSEGV but now works correctly (the underlying issue was
-fixed during rc.1's NEON/SIMD overhaul). `tr` and `expr` are not in this
+**Toybox summary**: 38 of the 39 tested commands pass. `tr` and `expr` are not in this
 toybox build. `seq`, `od`, `printf "%g"`, `ls /`, `factor`, `cksum`,
 `cal`, `xxd`, `md5sum`, `sha1sum`, `sha256sum`, `sha384sum`, `sha512sum`,
 `crc32`, `base64` and many more all work.

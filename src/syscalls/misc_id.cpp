@@ -27,7 +27,6 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "syscalls/syscalls.h"
-
 #include <errno.h>
 #include <fcntl.h>
 #include <algorithm>
@@ -40,15 +39,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
-
 namespace arm64emu {
-
 int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
     (void)a4; (void)a5;
     auto& mem_ = emu.mem();
-
     switch (num) {
         case 158: { // getgroups(size, gid_t list[]) — AArch64 syscall 158
             // Return just the effective GID (0 = root) in the supplied list.
@@ -62,14 +58,12 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(1);
             return 0;
         }
-
         case 159: { // setgroups(size, list[]) — AArch64 syscall 159
             // No-op for emulation. The guest is a single-user sandbox; we
             // accept any setgroups() call and pretend it succeeded.
             ret_host(0);
             return 0;
         }
-
         case 160: { // uname
             // struct utsname (Linux): 6 fields of 65 bytes each
             //   sysname, nodename, release, version, machine, domainname
@@ -94,7 +88,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 163: { // getrlimit(resource, rlim) — AArch64 syscall 163
             // Return generous infinite limits so libc doesn't choke.
             // struct rlimit { uint64_t rlim_cur; uint64_t rlim_max; }
@@ -103,16 +96,13 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 165: { // getrusage(who, usage) — AArch64 syscall 165
-            // BUGFIX (Turn 62): forward to host ::getrusage(). The host's
             // rusage includes emulator overhead, but for RUSAGE_CHILDREN
             // (used by `toybox time` after wait4) it's the forked emulator
             // child's CPU time — the closest we can get to guest CPU time.
             // struct rusage is 144 bytes on LP64, identical layout on
             // x86-64 host and AArch64 guest (both use 64-bit time_t).
             //
-            // BUGFIX (Turn 62 rev 2): ALWAYS write to the guest buffer,
             // even on error. The old code returned ret_errno() without
             // writing, leaving the guest's stack buffer uninitialized
             // with deterministic garbage (e.g. "user 549755811552.42").
@@ -143,7 +133,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(r < 0 ? static_cast<uint64_t>(static_cast<int64_t>(-errno)) : 0);
             return 0;
         }
-
         case 166: { // umask(new_mask) — aarch64 166
             // Track guest umask separately from host. The old code called
             // ::umask() which modifies the host process's umask — this
@@ -154,7 +143,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<uint64_t>(old));
             return 0;
         }
-
         case 167: { // prctl — process/thread control
             // Implemented the most common prctl options. Unknown options
             // return -EINVAL (matching kernel behavior). Previously ALL
@@ -322,7 +310,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
             }
         }
-
         case 172: { // getpid
             // CLONE_THREAD semantics: all threads in the same thread
             // group see the same PID (= the main thread's TID, which is
@@ -341,7 +328,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             return 0;
         }
-
         case 173: { // getppid
             // BUGFIX: was returning the emulator's host parent PID for ALL
             // guests. For the main process, the host ppid is the launching
@@ -359,7 +345,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             return 0;
         }
-
         case 174: { // getuid — return 0 (root) so setuid programs work
             // BUGFIX: was returning the host's real UID. If the emulator
             // runs as a normal user (uid 1000), the guest saw uid 1000
@@ -369,28 +354,23 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 175: { // geteuid — return 0 (root)
             ret_host(0);
             return 0;
         }
-
         case 176: { // getgid — return 0 (root)
             ret_host(0);
             return 0;
         }
-
         case 177: { // getegid — return 0 (root)
             ret_host(0);
             return 0;
         }
-
         case 178: { // gettid
             // Return the guest TID of the calling thread.
             ret_host(cpu.tid);
             return 0;
         }
-
         case 179: { // sysinfo(struct sysinfo *info) — AArch64 syscall 179
             // Fills a struct sysinfo (112 bytes on 64-bit) with system
             // memory/load info. Used by `free`, `top`, and other tools.
@@ -418,7 +398,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             //   offset 104: mem_unit (4 bytes)
             //   offset 108: padding (4 bytes)
             if (a0 == 0) { ret_err(EFAULT); return 0; }
-            // BUGFIX (Turn 62 rev 3): forward to host ::sysinfo() for real
             // uptime and load averages. The old code returned fake uptime=100
             // and zero loads, which broke `toybox uptime` (showed "230961:11:19").
             struct sysinfo si;
@@ -451,7 +430,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             return 0;
         }
-
         case 213: { // readahead(fd, offset, count) — AArch64 213
             // BUGFIX: was previously labeled "rt_sigpending" but
             // rt_sigpending is at 136 (already correctly handled). The
@@ -464,7 +442,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 217: { // add_key — AArch64 syscall 217 (kernel keyring)
             // We don't implement the kernel keyring. Return -ENOSYS so
             // callers fall back to non-keyring code paths.
@@ -474,7 +451,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(ENOSYS);
             return 0;
         }
-
         case 232: { // mincore(addr, length, vec) — AArch64 232
             // BUGFIX: previously labeled "epoll_wait" but 232 is mincore.
             // epoll_wait does not exist on AArch64 (epoll_pwait at 22 is
@@ -493,7 +469,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 261: { // prlimit64 (glibc probes resource limits)
             // prlimit64(pid, resource, new_rlim, old_rlim)
             // Return 0 with zeroed rlim if old_rlim is non-NULL.
@@ -508,7 +483,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-
         case 270: { // process_vm_readv(pid, lvec, liovcnt, rvec, riovcnt, flags)
             // BUGFIX: was previously labeled "eventfd2 alt" but eventfd2 is
             // at 19 (already handled). The real syscall at 270 is
@@ -517,11 +491,9 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(ENOSYS);
             return 0;
         }
-
         // kcmp (272) is handled in misc_extended.cpp with a richer
         // implementation that compares fds for KCMP_FILE. Don't stub
         // it here — let the dispatch fall through.
-
         case 278: { // getrandom(buf, buflen, flags) — AArch64 278
             // Provide real random bytes from the host kernel's getrandom
             // syscall. This is the correct source — /dev/urandom requires
@@ -529,7 +501,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             // thread creation), while getrandom(2) never blocks after
             // boot and doesn't need an fd.
             //
-            // BUGFIX (Turn 64): the old code capped buflen at 256 bytes.
             // The kernel's actual limit is 256 bytes ONLY when
             // GRND_RANDOM is used (rare — arc4random, OpenSSL). For the
             // default GRND_NONBLOCK/GRND_DEFAULT urandom pool, the limit
@@ -561,14 +532,11 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(got);
             return 0;
         }
-
         case 281: { // execveat — not supported
             ret_err(ENOSYS);
             return 0;
         }
-
         case 293: { // rseq (restartable sequences)
-            // (Turn 77): PROPER implementation.
             //
             // glibc 2.34+ (NPTL merged) calls rseq() during start_thread
             // to register a per-thread rseq area. The glibc shipped with
@@ -603,7 +571,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             uint64_t rseq_len  = a1;
             uint32_t flags     = static_cast<uint32_t>(a2);
             uint32_t sig       = static_cast<uint32_t>(a3);
-
             if (flags & RSEQ_FLAG_UNREGISTER) {
                 cpu.rseq_registered = false;
                 cpu.rseq_addr = 0;
@@ -611,11 +578,9 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_ok();
                 return 0;
             }
-
             // Register.
             if (rseq_addr == 0 || rseq_len < 32) { ret_err(EINVAL); return 0; }
             if (cpu.rseq_registered) { ret_err(EBUSY); return 0; }
-
             cpu.rseq_registered = true;
             cpu.rseq_addr = rseq_addr;
             cpu.rseq_sig = sig;
@@ -625,7 +590,6 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_ok();
             return 0;
         }
-
         case 218: { // request_key — AArch64 syscall 218 (kernel keyring)
             // We don't implement the kernel keyring. Return -ENOSYS.
             // (The previous comment said "waitid" but waitid is actually
@@ -653,11 +617,9 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_err(ENOSYS);
             return 0;
         }
-
         default:
             return SYSCALL_NOT_HANDLED;
     }
     return 0;
 }
-
 } // namespace arm64emu
