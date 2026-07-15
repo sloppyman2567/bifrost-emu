@@ -1130,6 +1130,26 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(base);
             return 0;
         }
+        // ── Bifrost-emu internal dl_iterate_phdr syscall ──
+        // a0 (x0) = guest callback function pointer
+        // a1 (x1) = user data pointer (passed as x2 to callback)
+        // Returns: sum of callback return values (matches glibc semantics).
+        // The callback is called for each loaded object with:
+        //   x0 = pointer to dl_phdr_info struct (64 bytes)
+        //   x1 = sizeof(dl_phdr_info) = 64
+        //   x2 = data pointer (a1)
+        case 0x1007: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0) { ret_host(0); return 0; }
+            int rc = dl->iterate_phdr(a0, a1);
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dl_iterate_phdr] callback=0x%llx data=0x%llx → %d\n",
+                        static_cast<unsigned long long>(a0),
+                        static_cast<unsigned long long>(a1), rc);
+            }
+            ret_host(static_cast<int64_t>(rc));
+            return 0;
+        }
         default:
             return SYSCALL_NOT_HANDLED;
     }

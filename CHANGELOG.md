@@ -6,6 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 105 (2026-07-15)
+
+### Argument-passing guest call + dl_iterate_phdr + dladdr + process_vm_writev
+
+Implemented all the "next steps" from Turn 104: argument-passing
+init_runner, dl_iterate_phdr, dlopen init arrays, real struct
+link_map (researched but pragmatically skipped), and
+process_vm_writev. Also fixed a critical dlfcn_hook bug that caused
+dladdr to crash.
+
+**guest_call_args_ callback (`src/core/emulator.cpp`):**
+
+New argument-passing guest-call mechanism. Same borrow-CPU pattern as
+`init_runner_`, but sets `x0/x1/x2` before running and returns `x0`.
+Step limit 50M (vs init_runner_'s 10M) because dl_iterate_phdr
+callbacks may do significant work (backtrace walking). Used by:
+- `dl_iterate_phdr` (callback + data)
+- dlopen init arrays (argc/argv/env — passed as 0/0/0 since most
+  init functions ignore arguments)
+- dlclose fini arrays
+
+**dl_iterate_phdr (syscall 0x1007):**
+
+glibc's native `dl_iterate_phdr` walks the link_map list (which we
+don't have). Overrode it with a stub calling syscall 0x1007, which
+calls `iterate_phdr()`. This walks our `objects_` list, writes a
+`dl_phdr_info` struct (64 bytes) to guest memory, and calls the guest
+callback via `guest_call_args_`. Verified: enumerates all loaded
+objects (main binary + libc + ld-linux + dlopen'd libm).
+
+**dladdr (syscall 0x1005) + dlfcn_hook fix:**
+
+glibc's `dladdr@@GLIBC_2.34` goes through the dlfcn_hook (hook+40).
+Previously hook+40 was NULL, causing SIGSEGV at pc=0x0 when dladdr
+was called. Fixed by:
+1. Filling ALL dlfcn_hook slots (dlvsym/dlerror/dladdr/dladdr1/dlinfo/
+   dlmopen) with the return-0 stub to prevent NULL-pointer calls.
+2. Pointing hook+40 (dladdr) to a real dladdr stub calling syscall
+   0x1005, which calls our `dladdr()` implementation.
+
+Verified: `dladdr(dlsym("printf"))` correctly returns `libc.so.6` as
+the containing object and `_IO_printf` as the nearest symbol.
+
+**dlopen init arrays:**
+
+Enabled via `guest_call_args_`. `DT_INIT` and `DT_INIT_ARRAY` are now
+called after relocations for dlopen'd libraries. Verified: libm's
+init array runs without crashing.
+
+**process_vm_writev (syscall 271):**
+
+Implemented same-process write. Same algorithm as `process_vm_readv`
+but direction reversed (lvec is source, rvec is destination). Verified
+manually.
+
+**map_size for all libraries:**
+
+`load_shared_library` now sets `obj.map_size` (previously only
+dlopen'd libraries had it). This fixes `find_object_by_addr` for
+libraries loaded during `link()`.
+
+**struct link_map:**
+
+Researched the full 1216-byte glibc `struct link_map` layout for
+AArch64 LP64 (field offsets, types, what each function accesses). Did
+NOT implement a real link_map — the pragmatic approach (overriding
+`dl_iterate_phdr` and `dladdr` via syscall stubs) achieves the same
+result without the complexity and risk of maintaining a 1216-byte
+struct that must match glibc's exact layout across versions.
+`_dl_find_dso_for_object` and `_dl_close` remain as return-0 stubs
+(safe — glibc handles the 0 return gracefully).
+
+**Build status:** warning-clean under `-Wall -Wextra`. Test suite:
+164/164 pass (7 skip: iperf3 deps). `dladdr`, `dl_iterate_phdr`,
+`process_vm_writev` all verified manually.
+
 ## [Unreleased] — Turn 104 (2026-07-15)
 
 ### dlopen support improvements + process_vm_readv

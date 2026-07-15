@@ -260,6 +260,19 @@ public:
     void set_init_runner(std::function<void(uint64_t)> cb) {
         init_runner_ = std::move(cb);
     }
+    // ── Argument-passing guest-call callback ──────────────────────────
+    // Like init_runner_, but passes up to 3 arguments in x0/x1/x2 and
+    // returns x0. Used by dl_iterate_phdr (callback + data), dlopen init
+    // arrays (argc/argv/env), and other guest calls that need arguments.
+    //
+    // The callback runs a guest function at `addr` with:
+    //   x0 = arg0, x1 = arg1, x2 = arg2
+    // and returns the value of x0 when the function RETs.
+    // If the function doesn't return (infinite loop), the callback
+    // aborts after a step limit and returns 0.
+    void set_guest_call_args(std::function<uint64_t(uint64_t, uint64_t, uint64_t, uint64_t)> cb) {
+        guest_call_args_ = std::move(cb);
+    }
     // ── Graphic API thunk resolver ───────────────────────
     // When `find_library()` returns empty for a graphic library soname
     // (libGL.so*, libEGL.so*, libSDL2.so*, libGLESv2.so*), the dynamic
@@ -310,6 +323,9 @@ private:
     // Optional init runner callback (set by Emulator before link()).
     // Used to invoke DT_INIT_ARRAY entries (C++ static constructors).
     std::function<void(uint64_t)> init_runner_;
+    // Optional argument-passing guest-call callback (set by Emulator
+    // before link()). Used by dl_iterate_phdr and dlopen init arrays.
+    std::function<uint64_t(uint64_t, uint64_t, uint64_t, uint64_t)> guest_call_args_;
     // Optional thunk resolver callback (set by Emulator before link()).
     // When set, graphic library DT_NEEDED entries that can't be loaded
     // from disk fall back to this resolver instead of failing.

@@ -1779,6 +1779,8 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_DLOPEN   = 136; // _dl_open (16 bytes — calls syscall 0x1002)
     constexpr uint32_t OFF_DLSYM    = 152; // _dl_sym (16 bytes — calls syscall 0x1003)
     constexpr uint32_t OFF_DLCLOSE  = 168; // _dl_close (8 bytes — return 0 stub)
+    constexpr uint32_t OFF_DLITER   = 176; // dl_iterate_phdr (16 bytes — calls syscall 0x1007)
+    constexpr uint32_t OFF_DLADDR   = 192; // dladdr (16 bytes — calls syscall 0x1005)
     // [0] _dl_find_dso_for_object (returns void*)
     //     Returns 0 (not found). glibc's dladdr and _dl_open use this
     //     to find the containing DSO for a given address. Returning 0
@@ -1861,6 +1863,37 @@ bool DynamicLinker::register_ld_linux_shim_() {
     //     implement real link_map support and can distinguish internal
     //     vs. user dlclose calls).
     emit_stub_return0(code);  // offset 168 (OFF_DLCLOSE)
+    // [18] dl_iterate_phdr (16 bytes — calls syscall 0x1007)
+    //     glibc's dl_iterate_phdr walks the link_map list, which we don't
+    //     have. We override it with a stub that calls syscall 0x1007,
+    //     which invokes our iterate_phdr() implementation. The stub
+    //     passes x0 (callback) and x1 (data) through to the syscall.
+    {
+        // movz x8, #0x1007  →  0xD28200E8
+        code.push_back(0xE8); code.push_back(0x00); code.push_back(0x82); code.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(code);
+    }
+    // [19] dladdr (16 bytes — calls syscall 0x1005)
+    //     Used by the dlfcn_hook (hook+40). glibc's dladdr@@GLIBC_2.34
+    //     checks the hook and calls hook->dladdr. We point hook+40 to
+    //     this stub, which calls our dladdr implementation via syscall
+    //     0x1005. The syscall fills in the Dl_info struct and returns
+    //     1 (found) or 0 (not found).
+    {
+        // movz x8, #0x1005  →  0xD28200A8
+        code.push_back(0xA8); code.push_back(0x00); code.push_back(0x82); code.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(code);
+    }
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
@@ -1904,6 +1937,12 @@ bool DynamicLinker::register_ld_linux_shim_() {
     //   +8:  _dl_close (dlclose@@GLIBC_2.34)
     //   +16: _dl_sym   (dlsym@@GLIBC_2.34)
     //   +72: _dl_open  (__libc_dlopen_mode)
+    // The dlfcn_hook struct also has slots for dlvsym(+24), dlerror(+32),
+    // dladdr(+40), dladdr1(+48), dlinfo(+56), dlmopen(+64). If these are
+    // left as NULL, glibc's dladdr@@GLIBC_2.34 checks hook->dladdr (non-
+    // NULL because the hook struct itself is non-NULL) and calls 0x0,
+    // crashing. We fill all unused slots with the return-0 stub (OFF_DSO,
+    // which is the _dl_find_dso_for_object stub that just returns 0).
     constexpr uint64_t DLOPEN_HOOK_OFF = 0x800;
     constexpr uint64_t DLOPEN_HOOK_SIZE = 128;
     {
@@ -1913,6 +1952,15 @@ bool DynamicLinker::register_ld_linux_shim_() {
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 0,  code_base + OFF_DLOPEN);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 8,  code_base + OFF_DLCLOSE);
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 16, code_base + OFF_DLSYM);
+    // Fill unused dlfcn_hook slots with the return-0 stub to prevent
+    // crashes when glibc calls dladdr/dlerror/dlinfo/dlmopen/dlvsym
+    // through the hook.
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 24, code_base + OFF_DSO); // dlvsym
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 32, code_base + OFF_DSO); // dlerror
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 40, code_base + OFF_DLADDR); // dladdr (real)
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 48, code_base + OFF_DSO); // dladdr1
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 56, code_base + OFF_DSO); // dlinfo
+    mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 64, code_base + OFF_DSO); // dlmopen
     mem_.store<uint64_t>(shim_base_ + DLOPEN_HOOK_OFF + 72, code_base + OFF_DLOPEN);
     dlopen_hook_ptr_ = shim_base_ + DLOPEN_HOOK_OFF;
     // ── dlerror string buffer ──────────────────────────────────────
@@ -1966,6 +2014,20 @@ bool DynamicLinker::register_ld_linux_shim_() {
     add_func_sym("__tls_get_addr",          OFF_TLSADDR);
     add_func_sym("__tunable_get_val",       OFF_TUNABLE);
     add_func_sym("__nptl_change_stack_perm", OFF_STACKPERM);
+    // Override glibc's dl_iterate_phdr with our stub that calls syscall
+    // 0x1007. glibc's implementation walks the link_map list, which we
+    // don't have. We use FORCE override (not add_func_sym which is
+    // first-define-wins) because libc.so.6 already defines
+    // dl_iterate_phdr@@GLIBC_2.17.
+    symbols_["dl_iterate_phdr"] = SymEntry{code_base + OFF_DLITER, STB_GLOBAL_};
+    versioned_symbols_["dl_iterate_phdr@GLIBC_2.17"] = SymEntry{code_base + OFF_DLITER, STB_GLOBAL_};
+    // NOTE: dladdr override is NOT registered because it causes a crash
+    // during glibc startup (the versioned symbol override conflicts with
+    // glibc's internal _dl_addr call path). The dladdr stub code exists
+    // at OFF_DLADDR but is not wired to any symbol. dladdr remains
+    // glibc's native implementation, which calls _dl_find_dso_for_object
+    // (returning 0) and thus always fails — but it fails gracefully
+    // (returns 0) rather than crashing.
     // _dl_allocate_tls_init with our shim's stubs, even if the real
     // ld-linux already defined them in .dynsym. The real ld-linux's
     // _dl_allocate_tls -> allocate_dtv calls calloc via a function
@@ -2258,6 +2320,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     obj.name = soname;
     obj.base_addr = base;
     obj.is_main = false;
+    obj.map_size = max_end;  // for find_object_by_addr (dladdr)
     uint64_t entry;
     uint64_t end = map_segments(data, base, entry);
     obj.entry = entry;
@@ -3154,21 +3217,11 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
     // uninitialized globals (e.g., libz's crc tables, libpng's error
     // handlers, OpenSSL's algorithm tables).
     //
-    // NOTE: init array execution during dlopen is disabled because
-    // glibc's _dl_open wrapper internally validates the handle as a
-    // struct link_map* and calls _dl_close if validation fails. Our
-    // handle is a base address, not a link_map*, so glibc's internal
-    // cleanup path runs the fini arrays with bogus data, crashing.
-    // The init_runner_ callback borrows the CPU, which can corrupt
-    // state if glibc's dlopen wrapper has pending signal masks or
-    // cleanup handlers. For now, we skip init arrays for dlopen'd
-    // libraries — most libraries (libm, libz, libcrypto) work fine
-    // without explicit init because their static data is zero-initialized
-    // or lazily initialized on first use. Libraries that REQUIRE init
-    // arrays (rare) will need a different approach (e.g., calling init
-    // from the guest's dlopen wrapper instead of the host's).
-#if 0
-    if (init_runner_) {
+    // We use guest_call_args_ (which sets x0/x1/x2 and returns x0)
+    // rather than init_runner_ (which doesn't pass arguments). The
+    // init functions receive (argc, argv, env) per the AArch64 ABI,
+    // but most init functions ignore their arguments. We pass 0/0/0.
+    if (guest_call_args_) {
         if (nobj.init_addr != 0) {
             try {
                 if (getenv("BIFROST_DYNLINK_TRACE")) {
@@ -3176,7 +3229,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                             path.c_str(),
                             static_cast<unsigned long long>(nobj.init_addr));
                 }
-                init_runner_(nobj.init_addr);
+                guest_call_args_(nobj.init_addr, 0, 0, 0);
             } catch (...) {}
         }
         if (nobj.init_array_addr != 0 && nobj.init_array_size >= 8) {
@@ -3193,12 +3246,11 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                                 i, path.c_str(),
                                 static_cast<unsigned long long>(fn));
                     }
-                    init_runner_(fn);
+                    guest_call_args_(fn, 0, 0, 0);
                 } catch (...) {}
             }
         }
     }
-#endif
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[dlopen] loaded '%s' at 0x%llx (refcount=1)\n",
                 path.c_str(), static_cast<unsigned long long>(base));
@@ -3220,7 +3272,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                 return -1;
             }
             obj.refcount--;
-            if (obj.refcount == 0 && init_runner_) {
+            if (obj.refcount == 0 && guest_call_args_) {
                 // Run DT_FINI_ARRAY in reverse order (glibc convention).
                 if (obj.fini_array_addr != 0 && obj.fini_array_size >= 8) {
                     size_t count = obj.fini_array_size / 8;
@@ -3236,7 +3288,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                                         i, obj.name.c_str(),
                                         static_cast<unsigned long long>(fn));
                             }
-                            init_runner_(fn);
+                            guest_call_args_(fn, 0, 0, 0);
                         } catch (...) {}
                     }
                 }
@@ -3248,7 +3300,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                                     obj.name.c_str(),
                                     static_cast<unsigned long long>(obj.fini_addr));
                         }
-                        init_runner_(obj.fini_addr);
+                        guest_call_args_(obj.fini_addr, 0, 0, 0);
                     } catch (...) {}
                 }
             }
@@ -3328,14 +3380,22 @@ int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
     const LoadedObject* obj = find_object_by_addr(addr);
     if (obj == nullptr) return 0;
     info.dli_fbase = obj->base_addr;
-    // dli_fname: point to the object's name. For the main binary, glibc
-    // uses _dl_argv[0]; we use the name we stored.
-    // Note: the name string lives in host memory, not guest memory. We
-    // need to copy it to guest memory. For simplicity, we skip dli_fname
-    // for now (set to 0) — few programs rely on it, and those that do
-    // typically use it for diagnostics. A future improvement could
-    // allocate a guest-side string pool.
-    info.dli_fname = 0;  // TODO: copy name to guest memory
+    // dli_fname: copy the object's name to the guest-side dlerror buffer
+    // (which we reuse since dlerror and dladdr don't run concurrently).
+    // The buffer is at dlerror_buf_ptr_ and is 256 bytes.
+    if (dlerror_buf_ptr_ != 0) {
+        std::string name = obj->name;
+        if (name.empty() && obj->is_main) name = "<main>";
+        size_t n = std::min(name.size(), DLERROR_BUF_SIZE - 1);
+        try {
+            mem_.write(dlerror_buf_ptr_,
+                       reinterpret_cast<const uint8_t*>(name.data()), n);
+            mem_.store<uint8_t>(dlerror_buf_ptr_ + n, 0);
+            info.dli_fname = dlerror_buf_ptr_;
+        } catch (...) {
+            info.dli_fname = 0;
+        }
+    }
     // Find the nearest symbol by scanning .dynsym.
     if (obj->symtab_addr != 0 && obj->strtab_addr != 0) {
         uint64_t best_value = 0;
@@ -3412,7 +3472,7 @@ void DynamicLinker::set_last_error(const std::string& msg) {
 // };
 // On AArch64 (LP64), this struct is 64 bytes.
 int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
-    if (callback_ptr == 0 || init_runner_ == nullptr) return 0;
+    if (callback_ptr == 0 || guest_call_args_ == nullptr) return 0;
     // Allocate a scratch buffer for one dl_phdr_info struct (64 bytes)
     // plus the name string (256 bytes). We reuse the dlerror buffer area
     // since dlerror and dl_iterate_phdr don't run concurrently.
@@ -3421,9 +3481,9 @@ int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
     int total = 0;
     for (const auto& obj : objects_) {
         if (obj.base_addr == 0 && !obj.is_main) continue;
+        // Skip the synthetic ld-linux shim — it's not a real object.
+        if (obj.name == "<ld-linux-shim>") continue;
         // Write the dl_phdr_info struct to guest memory.
-        // We write a simplified version: dlpi_addr, dlpi_name, dlpi_phdr,
-        // dlpi_phnum, and zeros for the rest.
         uint64_t name_ptr = info_buf + 64;  // name goes after the struct
         // Write the name string.
         std::string name = obj.name;
@@ -3433,27 +3493,34 @@ int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
             mem_.write(name_ptr, reinterpret_cast<const uint8_t*>(name.data()), name_len);
             mem_.store<uint8_t>(name_ptr + name_len, 0);
             // Write the struct fields.
+            // struct dl_phdr_info layout (LP64):
+            //   +0:  ElfW(Addr) dlpi_addr      (load bias)
+            //   +8:  const char *dlpi_name      (guest pointer)
+            //   +16: const ElfW(Phdr) *dlpi_phdr (program headers — 0 for now)
+            //   +24: ElfW(Half) dlpi_phnum      (number of phdrs — 0 for now)
+            //   +28: padding to 8-byte align
+            //   +32: u64 dlpi_adds              (total loads)
+            //   +40: u64 dlpi_subs              (total unloads)
+            //   +48: size_t dlpi_tls_modid      (TLS module ID)
+            //   +56: void *dlpi_tls_data        (TLS data pointer)
             mem_.store<uint64_t>(info_buf + 0,  obj.base_addr);       // dlpi_addr
             mem_.store<uint64_t>(info_buf + 8,  name_ptr);             // dlpi_name
-            mem_.store<uint64_t>(info_buf + 16, 0);                    // dlpi_phdr (TODO)
+            mem_.store<uint64_t>(info_buf + 16, 0);                    // dlpi_phdr
             mem_.store<uint16_t>(info_buf + 24, 0);                    // dlpi_phnum
             mem_.store<uint64_t>(info_buf + 32, objects_.size());      // dlpi_adds
             mem_.store<uint64_t>(info_buf + 40, 0);                    // dlpi_subs
             mem_.store<uint64_t>(info_buf + 48, obj.tls_mod_id);       // dlpi_tls_modid
             mem_.store<uint64_t>(info_buf + 56, 0);                    // dlpi_tls_data
         } catch (...) { continue; }
-        // Call the guest callback: x0 = info_buf, x1 = sizeof(info), x2 = data_ptr
-        // The init_runner_ mechanism runs a guest function and returns
-        // when it RETs. We need to pass arguments — but init_runner_
-        // doesn't support arguments. We need a different approach.
-        //
-        // For now, skip dl_iterate_phdr (return 0). The infrastructure
-        // is in place but the callback invocation needs argument support.
-        // Most programs use dl_iterate_phdr for backtrace/debugging and
-        // can tolerate it returning 0 (no objects enumerated).
-        // TODO: add an init_runner variant that passes x0/x1/x2.
-        (void)callback_ptr;
-        (void)data_ptr;
+        // Call the guest callback: x0 = info, x1 = sizeof(dl_phdr_info), x2 = data
+        // sizeof(struct dl_phdr_info) on AArch64 LP64 = 64 bytes.
+        uint64_t rc = guest_call_args_(callback_ptr, info_buf, 64, data_ptr);
+        if (getenv("BIFROST_DYNLINK_TRACE")) {
+            fprintf(stderr, "[dl_iterate_phdr] callback for '%s' returned %lld\n",
+                    obj.name.c_str(), static_cast<long long>(rc));
+        }
+        total += static_cast<int>(rc);
+        if (rc != 0) break;  // callback returns non-zero to stop iteration
     }
     return total;
 }
