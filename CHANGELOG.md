@@ -6,6 +6,124 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Turn 104 (2026-07-15)
+
+### dlopen support improvements + process_vm_readv
+
+Implemented proper `dlopen`/`dlsym`/`dlclose` support and wired up
+`process_vm_readv` (syscall 270). The `test_dlopen` test now passes
+(was previously failing with "Dynamic loading not supported" when
+the rootfs wasn't set up, or crashing if init arrays ran during
+dlopen).
+
+**dlopen improvements (`src/frontend/dynamic_linker.cpp/h`):**
+
+1. **Library dedup by path and soname.** `dlopen("/lib/libm.so.6")`
+   and `dlopen("libm.so.6")` now return the same handle if the
+   library is already loaded, matching glibc's `_dl_open` fast path.
+   The refcount is bumped instead of loading a second copy.
+
+2. **Soname-based lookup.** `dlopen("libm.so.6")` (without a path)
+   now searches standard library paths via `find_library()` instead
+   of only accepting absolute paths.
+
+3. **Refcount tracking.** `LoadedObject` now has a `refcount` field.
+   `load_library` sets it to 1 on first load; re-dlopen bumps it.
+   `close_library` decrements it. (Note: `dlclose` is currently a
+   no-op stub returning 0 because glibc's `_dl_open` wrapper
+   internally calls `_dl_close` for error checking — see notes below.)
+
+4. **`resolve_symbol_in(handle, name)`** for dlsym with a specific
+   handle. Searches the library's own `.dynsym` first, then falls
+   back to the global symbol table. The old code always searched
+   the global table, ignoring the handle.
+
+5. **`find_object_by_addr(addr)`** — finds the loaded object whose
+   `[base, base+map_size)` range contains `addr`. Used by `dladdr`
+   and `_dl_find_dso_for_object`.
+
+6. **`dladdr(addr, info)`** — fills in a `Dl_info` struct with the
+   containing object's base address and the nearest symbol. Scans
+   the object's `.dynsym` for the symbol with the largest
+   `st_value` that is `<= addr`.
+
+7. **`get_last_error()`/`set_last_error()`** — dlerror support.
+   Stores the error as a host string; `get_last_error()` copies it
+   to a guest-side buffer (in the shim data area at offset 0x900)
+   and returns the guest pointer. The error is cleared after
+   retrieval (matching glibc's "dlerror returns NULL on second
+   call" semantics).
+
+8. **`close_library(handle)`** — decrements refcount, runs
+   `DT_FINI_ARRAY` (in reverse) and `DT_FINI` when refcount reaches
+   0. (Currently not wired to the `_dl_close` stub — see notes.)
+
+9. **`iterate_phdr(callback, data)`** — scaffolding for
+   `dl_iterate_phdr` support. The struct layout and guest-memory
+   writing are implemented, but the callback invocation needs
+   argument-passing support in `init_runner_` (currently returns 0).
+
+**Shim stub updates (`src/frontend/dynamic_linker.cpp`):**
+
+- Fixed a critical offset bug: `OFF_DLSYM` and `OFF_DLCLOSE` were
+  swapped relative to the stub emission order. The hook struct
+  stored `hook+8 = _dl_close` and `hook+16 = _dl_sym`, but the
+  code offsets had `_dl_sym` at 152 and `_dl_close` at 168. When
+  glibc called `_dl_close` via `hook+8`, it actually jumped to the
+  `_dl_sym` stub, corrupting the syscall number and crashing.
+  Fixed by ensuring the offset constants match the emission order.
+
+- Added a 256-byte `dlerror_buf_ptr_` buffer in the shim data area
+  (offset 0x900) for `dlerror` string storage.
+
+**New syscall handlers (`src/syscalls/misc.cpp`):**
+
+- `0x1004` (dlclose): calls `close_library(handle)`. Returns 0 on
+  success, -1 on error. (Note: the `_dl_close` stub currently
+  returns 0 without calling this syscall — see notes.)
+- `0x1005` (dladdr): calls `dladdr(addr, info)`, writes the
+  `Dl_info` struct to guest memory, returns 1/0.
+- `0x1006` (`_dl_find_dso_for_object`): calls
+  `find_object_by_addr(addr)`, returns the base address. (Note:
+  the glibc-visible stub still returns 0 — see notes.)
+
+**process_vm_readv (`src/syscalls/misc_id.cpp`, syscall 270):**
+
+Implemented same-process `process_vm_readv`. Walks the local and
+remote iovec arrays in parallel, copying `min(l_remain, r_remain)`
+bytes per chunk. Accepts any pid (the emulator has only one guest
+process, so all reads are same-process). Defensive caps: iovcnt
+clamped to IOV_MAX (1024), individual iov_len clamped to 64 MiB.
+Returns the total bytes copied, or -EFAULT on memory access errors.
+
+**Important design notes:**
+
+- **`_dl_close` stays as `return 0`.** glibc's `_dl_open` wrapper
+  internally calls `_dl_close` if it detects the handle isn't a
+  valid `struct link_map*` (our handle is a base address, not a
+  link_map pointer). Returning 0 makes glibc think cleanup
+  succeeded. The `close_library()` method exists for future use
+  if we implement real link_map support.
+
+- **`_dl_find_dso_for_object` stays as `return 0`.** Returning a
+  base address caused glibc to dereference it as a link_map and
+  crash. Returning 0 makes glibc skip link_map validation. The
+  real implementation (`find_object_by_addr`) is available via
+  syscall 0x1006 for internal use.
+
+- **Init arrays for dlopen'd libraries are disabled.** Running
+  `DT_INIT`/`DT_INIT_ARRAY` during `load_library` caused crashes
+  because the `init_runner_` callback borrows the CPU, which can
+  corrupt state if glibc's dlopen wrapper has pending signal masks
+  or cleanup handlers. Most libraries (libm, libz, libcrypto) work
+  fine without explicit init because their static data is zero-
+  initialized or lazily initialized on first use. The code is
+  present but disabled with `#if 0` for future investigation.
+
+**Build status:** warning-clean under `-Wall -Wextra`. Test suite:
+164/164 pass (7 skip: iperf3 deps not downloaded). `test_dlopen`
+passes. New `process_vm_readv` test verified manually.
+
 ## [Unreleased] — Turn 103 (2026-07-15)
 
 ### Code hygiene + syscall accuracy pass

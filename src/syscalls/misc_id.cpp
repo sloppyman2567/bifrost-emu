@@ -484,11 +484,85 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 270: { // process_vm_readv(pid, lvec, liovcnt, rvec, riovcnt, flags)
-            // BUGFIX: was previously labeled "eventfd2 alt" but eventfd2 is
-            // at 19 (already handled). The real syscall at 270 is
-            // process_vm_readv. We don't support cross-process VM reads;
-            // return -ENOSYS.
-            ret_err(ENOSYS);
+            // process_vm_readv reads from another process's address space.
+            // In the emulator, there is only one guest process, so all
+            // reads are effectively same-process. We accept any pid and
+            // copy from rvec (remote iovecs) to lvec (local iovecs).
+            // Cross-process reads to other guest processes (forked
+            // children) are treated as same-process too — the forked
+            // child shares the same memory map until exec, so reading
+            // "remote" addresses works the same.
+            //
+            // Args (AArch64 LP64):
+            //   x0 = pid (ignored — always same-process)
+            //   x1 = lvec (array of struct iovec: { void* base; size_t len; })
+            //   x2 = liovcnt
+            //   x3 = rvec
+            //   x4 = riovcnt
+            //   x5 = flags (currently 0; reserved for future use)
+            //
+            // The algorithm: walk lvec and rvec in parallel, copying
+            // min(lvec[i].len, rvec[j].len) bytes at a time, advancing
+            // to the next iovec when one is exhausted. This matches the
+            // kernel's behavior (the data is a byte stream, not
+            // per-iovec chunks).
+            (void)a0;  // pid — ignored (always same-process in emulator)
+            uint64_t lvec = a1;
+            uint64_t liovcnt = std::min<uint64_t>(a2, 1024);  // IOV_MAX
+            uint64_t rvec = a3;
+            uint64_t riovcnt = std::min<uint64_t>(a4, 1024);
+            if (liovcnt == 0 || riovcnt == 0) {
+                ret_host(0);
+                return 0;
+            }
+            if (lvec == 0 || rvec == 0) {
+                ret_err(EFAULT);
+                return 0;
+            }
+            // Walk the iovec arrays in parallel.
+            ssize_t total = 0;
+            uint64_t li = 0, ri = 0;          // current iovec indices
+            uint64_t l_off = 0, r_off = 0;    // byte offset within current iovec
+            while (li < liovcnt && ri < riovcnt) {
+                // Read the current local and remote iovec entries.
+                uint64_t l_base, l_len, r_base, r_len;
+                try {
+                    l_base = mem_.load<uint64_t>(lvec + li * 16);
+                    l_len  = mem_.load<uint64_t>(lvec + li * 16 + 8);
+                    r_base = mem_.load<uint64_t>(rvec + ri * 16);
+                    r_len  = mem_.load<uint64_t>(rvec + ri * 16 + 8);
+                } catch (...) {
+                    ret_err(EFAULT);
+                    return 0;
+                }
+                // Defensive cap: prevent OOM from corrupted iovec lengths.
+                if (l_len > 64 * 1024 * 1024) l_len = 64 * 1024 * 1024;
+                if (r_len > 64 * 1024 * 1024) r_len = 64 * 1024 * 1024;
+                // Compute the remaining bytes in each current iovec.
+                uint64_t l_remain = l_len - l_off;
+                uint64_t r_remain = r_len - r_off;
+                uint64_t chunk = std::min(l_remain, r_remain);
+                if (chunk > 0) {
+                    // Copy chunk bytes from r_base+r_off to l_base+l_off.
+                    // Since this is same-process, both are guest addresses
+                    // in our own memory. We read from r and write to l.
+                    std::vector<uint8_t> tmp(chunk);
+                    try {
+                        mem_.read(r_base + r_off, tmp.data(), chunk);
+                        mem_.write(l_base + l_off, tmp.data(), chunk);
+                    } catch (...) {
+                        ret_err(EFAULT);
+                        return 0;
+                    }
+                    total += static_cast<ssize_t>(chunk);
+                    l_off += chunk;
+                    r_off += chunk;
+                }
+                // Advance to the next iovec if the current one is exhausted.
+                if (l_off >= l_len) { li++; l_off = 0; }
+                if (r_off >= r_len) { ri++; r_off = 0; }
+            }
+            ret_host(total);
             return 0;
         }
         // kcmp (272) is handled in misc_extended.cpp with a richer

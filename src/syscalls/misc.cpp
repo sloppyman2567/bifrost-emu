@@ -1036,36 +1036,29 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // a1 (x1) = guest pointer to symbol name string
         // Returns: symbol address on success, 0 on failure.
         case 0x1003: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl) { ret_host(0); return 0; }
             std::string symname = yggdrasil::Yggdrasil::read_path(mem_, a1);
             if (symname.empty()) {
                 if (getenv("BIFROST_DYNLINK_TRACE")) {
                     fprintf(stderr, "[dlsym] empty symbol name\n");
                 }
+                dl->set_last_error("empty symbol name");
                 ret_host(0);
                 return 0;
             }
-            auto* dl = emu.dyn_linker_.get();
-            if (!dl) { ret_host(0); return 0; }
-            // If handle is RTLD_DEFAULT (0) or RTLD_NEXT (-1), search all objects.
-            // Otherwise, search only the specified library.
+            // If handle is RTLD_DEFAULT (0) or RTLD_NEXT (-1), search all
+            // loaded objects via the global symbol table. Otherwise, use
+            // resolve_symbol_in which searches the library's own .dynsym
+            // first, then falls back to the global table.
             uint64_t addr = 0;
             if (a0 == 0 || static_cast<int64_t>(a0) == -1) {
-                // Search all loaded objects
                 addr = dl->resolve_symbol(symname);
             } else {
-                // Search only in the library at the given base address
-                for (const auto& obj : dl->objects()) {
-                    if (obj.base_addr == a0) {
-                        // Search this object's symbol table
-                        // Try global symbol table first (faster)
-                        addr = dl->resolve_symbol(symname);
-                        if (addr == 0) {
-                            // Not in global table — search this object's .dynsym
-                            // TODO: search obj's own symtab for local symbols
-                        }
-                        break;
-                    }
-                }
+                addr = dl->resolve_symbol_in(a0, symname);
+            }
+            if (addr == 0) {
+                dl->set_last_error("symbol '" + symname + "' not found");
             }
             if (getenv("BIFROST_DYNLINK_TRACE")) {
                 fprintf(stderr, "[dlsym] '%s' handle=0x%llx → 0x%llx\n",
@@ -1074,6 +1067,67 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(addr));
             }
             ret_host(addr);
+            return 0;
+        }
+        // ── Bifrost-emu internal dlclose syscall ──────────
+        // a0 (x0) = dlopen handle (base address of the library)
+        // Returns: 0 on success, -1 on error (with dlerror set).
+        case 0x1004: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0) { ret_host(static_cast<int64_t>(-1)); return 0; }
+            int rc = dl->close_library(a0);
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dlclose] handle=0x%llx → %d\n",
+                        static_cast<unsigned long long>(a0), rc);
+            }
+            ret_host(static_cast<int64_t>(rc));
+            return 0;
+        }
+        // ── Bifrost-emu internal dladdr syscall ───────────
+        // a0 (x0) = address to look up
+        // a1 (x1) = guest pointer to Dl_info struct (4 × uint64 = 32 bytes)
+        // Returns: 1 on success (address found), 0 on failure.
+        case 0x1005: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0 || a1 == 0) { ret_host(0); return 0; }
+            DynamicLinker::DlInfo info;
+            int found = dl->dladdr(a0, info);
+            // Write the Dl_info struct to guest memory.
+            // struct Dl_info { const char* dli_fname; void* dli_fbase;
+            //                 const char* dli_sname; void* dli_saddr; }
+            try {
+                mem_.store<uint64_t>(a1 + 0,  info.dli_fname);
+                mem_.store<uint64_t>(a1 + 8,  info.dli_fbase);
+                mem_.store<uint64_t>(a1 + 16, info.dli_sname);
+                mem_.store<uint64_t>(a1 + 24, info.dli_saddr);
+            } catch (...) { ret_host(0); return 0; }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[dladdr] addr=0x%llx → found=%d fbase=0x%llx sname=0x%llx\n",
+                        static_cast<unsigned long long>(a0), found,
+                        static_cast<unsigned long long>(info.dli_fbase),
+                        static_cast<unsigned long long>(info.dli_sname));
+            }
+            ret_host(static_cast<int64_t>(found));
+            return 0;
+        }
+        // ── Bifrost-emu internal _dl_find_dso_for_object syscall ──
+        // a0 (x0) = address to find the containing DSO for
+        // Returns: the DSO's base address (handle), or 0 if not found.
+        // Used by glibc's dladdr and _dl_open to determine the caller's
+        // namespace. The old stub returned 0 (not found), which caused
+        // dladdr to always fail and _dl_open to skip namespace detection.
+        case 0x1006: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0) { ret_host(0); return 0; }
+            const LoadedObject* obj = dl->find_object_by_addr(a0);
+            uint64_t base = obj ? obj->base_addr : 0;
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[_dl_find_dso] addr=0x%llx → base=0x%llx (%s)\n",
+                        static_cast<unsigned long long>(a0),
+                        static_cast<unsigned long long>(base),
+                        obj ? obj->name.c_str() : "not found");
+            }
+            ret_host(base);
             return 0;
         }
         default:

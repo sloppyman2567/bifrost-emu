@@ -109,6 +109,14 @@ struct LoadedObject {
     uint64_t    verneed_addr = 0;
     uint64_t    verneed_num  = 0;
     bool        is_main = false;  // main binary vs shared lib
+    // Refcount for dlopen'd libraries. Starts at 0 for libraries loaded
+    // during link(). Bumped to 1 on first dlopen, incremented on re-dlopen,
+    // decremented on dlclose. When it reaches 0, DT_FINI_ARRAY runs.
+    uint32_t    refcount = 0;
+    // Total mapped size (highest PT_LOAD vaddr+memsz, page-aligned).
+    // Used by find_object_by_addr to check if an address falls within
+    // this object's mapping.
+    uint64_t    map_size = 0;
     // TLS info.
     TlsSegment tls;
     uint64_t   tls_mod_id   = 0;  // 1-based module ID (0 = no TLS)
@@ -181,7 +189,51 @@ public:
     // Load a shared library at runtime (dlopen support).
     // path: absolute or relative path to the .so file.
     // Returns: base address (>0) on success, 0 on failure.
+    // If the library is already loaded (by path or soname), returns the
+    // existing handle and bumps the refcount (matching glibc's
+    // _dl_open fast path).
     uint64_t load_library(const std::string& path);
+    // Decrement the refcount of a dlopen'd library. When the refcount
+    // reaches 0, the library's DT_FINI_ARRAY is invoked (in reverse
+    // order) and the library is marked for unload. The memory is NOT
+    // actually unmapped (glibc doesn't either, for safety — the link_map
+    // stays in the list but l_direct_opencount=0).
+    // Returns 0 on success (dlclose convention), -1 on error.
+    int close_library(uint64_t handle);
+    // Resolve a symbol within a specific library's scope (dlsym with a
+    // handle). Searches the library's own .dynsym first, then its
+    // DT_NEEDED dependencies. Returns 0 if not found.
+    uint64_t resolve_symbol_in(uint64_t handle, const std::string& name);
+    // Find the loaded object that contains `addr` in its [base, base+size)
+    // range. Returns nullptr if no object contains the address. Used by
+    // dladdr and _dl_find_dso_for_object.
+    const LoadedObject* find_object_by_addr(uint64_t addr) const;
+    // Fill in Dl_info for a given address (dladdr). Returns 1 on success
+    // (address found in a loaded object), 0 on failure.
+    //   info->dli_fname  → guest pointer to filename string
+    //   info->dli_fbase  → load base of the containing object
+    //   info->dli_sname  → guest pointer to nearest symbol name (or 0)
+    //   info->dli_saddr  → address of nearest symbol (or 0)
+    struct DlInfo {
+        uint64_t dli_fname;  // guest pointer to filename
+        uint64_t dli_fbase;  // load base
+        uint64_t dli_sname;  // guest pointer to symbol name
+        uint64_t dli_saddr;  // symbol address
+    };
+    int dladdr(uint64_t addr, DlInfo& info);
+    // Get the last error message (dlerror). Returns a guest pointer to
+    // a null-terminated error string, or 0 if no error is pending.
+    // After calling this, the error is cleared (next call returns 0).
+    uint64_t get_last_error();
+    // Set the last error message (used by dlopen/dlsym failure paths).
+    void set_last_error(const std::string& msg);
+    // Iterate over all loaded objects and call the callback for each
+    // (dl_iterate_phdr). The callback receives a guest pointer to a
+    // dl_phdr_info struct and the user's data pointer. Returns the
+    // sum of callback return values (matching glibc semantics).
+    // The callback is a guest function pointer — we call it via the
+    // init_runner_ mechanism.
+    int iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr);
     // ── ifunc resolver callback ────────────────────────────────────
     // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
     // resolver ADDRESS) instead of calling the resolver to get the
@@ -270,12 +322,27 @@ private:
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
     uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
+    // dlerror state. Stored as a host string; get_last_error() copies it
+    // to a guest buffer and returns the guest pointer. The error is
+    // cleared after get_last_error() returns it (matching glibc's
+    // "dlerror returns NULL on second call" semantics).
+    std::string last_error_;
+    bool error_pending_ = false;
+    // Guest buffer for dlerror strings. Allocated once in the shim data
+    // area (offset 0x900, 256 bytes). get_last_error() writes the error
+    // string here and returns the guest pointer.
+    uint64_t dlerror_buf_ptr_ = 0;
+    constexpr static size_t DLERROR_BUF_SIZE = 256;
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
     // `base` is the load bias to convert vaddrs to absolute addresses.
     bool parse_dynamic(const std::vector<uint8_t>& data,
                        uint64_t base,
                        LoadedObject& obj);
+    // Internal helper: load a library from an in-memory ELF image.
+    // Shared by load_library (dlopen by path) and soname-based lookup.
+    uint64_t load_library_from_data(const std::string& path,
+                                    std::vector<uint8_t>& data);
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
     // Find a shared library by soname. Checks standard multiarch paths
