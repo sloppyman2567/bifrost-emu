@@ -988,10 +988,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             if ((op & 0xBFE00000) == 0x2E000000) {
                 uint8_t imm4 = (op >> 11) & 0xF;
                 uint8_t buf[32];
-                memcpy(buf, &cpu.v_lo[rn], 8);
-                memcpy(buf + 8, &cpu.v_hi[rn], 8);
-                memcpy(buf + 16, &cpu.v_lo[rm], 8);
-                memcpy(buf + 24, &cpu.v_hi[rm], 8);
+                // Per ARM ARM: concat = Vn:Vm where Vm is the low 128 bits
+                // and Vn is the high 128 bits. So buf = [rm:rn].
+                memcpy(buf, &cpu.v_lo[rm], 8);
+                memcpy(buf + 8, &cpu.v_hi[rm], 8);
+                memcpy(buf + 16, &cpu.v_lo[rn], 8);
+                memcpy(buf + 24, &cpu.v_hi[rn], 8);
                 uint8_t out[16] = {0};
                 int nbytes = Q ? 16 : 8;
                 memcpy(out, buf + imm4, nbytes);

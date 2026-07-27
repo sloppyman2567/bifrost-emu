@@ -89,6 +89,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         vreg_home_[i] = -1;
         vreg_dirty_[i] = false;
         vreg_slot_[i] = 0;
+        vreg_last_use_[i] = 0;  // reset LRU timestamps
     }
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;

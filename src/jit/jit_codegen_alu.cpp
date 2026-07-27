@@ -88,12 +88,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 emit_alu_op(d, s2);
                 vreg_dirty_[inst.dest] = true;
                 dirty_host_regs_ |= (1u << d);
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else if (inst.dest == inst.src2 && commutative) {
                 // dest == src2, commutative: compute in s2 (swap operands).
                 d = s2;
                 emit_alu_op(d, s1);
                 vreg_dirty_[inst.dest] = true;
                 dirty_host_regs_ |= (1u << d);
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else {
                 // dest != src1 (and not the commutative src2 case):
                 // allocate a fresh reg for dest that doesn't collide with
@@ -121,6 +123,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 reg_vreg_[RCX] = -1;
                 vreg_home_[inst.src1] = tmp;
                 reg_vreg_[tmp] = inst.src1;
+                vreg_last_use_[inst.src1] = ++regalloc_lru_counter_;
                 if (vreg_dirty_[inst.src1]) {
                     dirty_host_regs_ &= ~(1u << RCX);
                     dirty_host_regs_ |= (1u << tmp);
@@ -156,6 +159,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 emit_shift(d);
                 vreg_dirty_[inst.dest] = true;
                 dirty_host_regs_ |= (1u << d);
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else {
                 d = alloc_reg_excluding(s1, RCX);
                 if (d != s1) emit_mov_reg(d, s1);
@@ -331,13 +335,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (!flags_in_host_) {
                 flush_all_vregs();
                 emit_load_flags_from_pstate();
-                // emit_load_flags_from_pstate sets x86 CF = ARM C XOR from_sub.
-                // Normalize to SUB convention (x86 CF = NOT ARM C) so the
-                // default arm_cond_to_x86() mapping works correctly for ALL
-                // conditions (CS/CC/HI/LS included) regardless of whether
-                // the flags originally came from ADD or SUB.
                 emit_normalize_cf_to_sub_convention();
-                // Drop all cache mappings but DON'T clear flags_in_host_.
                 bool saved_fih2 = flags_in_host_;
                 invalidate_all_vregs();
                 flags_in_host_ = saved_fih2;
@@ -349,17 +347,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // resolve_arm_cond_with_carry uses the default mapping.
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
-            // Save flags, flush vregs, restore flags. CRITICAL: preserve
-            // flags_in_host_ — invalidate_all_vregs would clear it, but
-            // pushfq/popfq preserves the actual flags.
-            //
-            // Note: we keep the full flush_all_vregs+invalidate_all_vregs
-            // here (instead ofthe targeted variant) because the
-            // CSEL body uses load_vreg_to_reg which does NOT update the
-            // cache. If we left vregs cached in R8/R9/etc., the cache
-            // state would be inconsistent with the actual register contents
-            // after the load_vreg_to_reg calls. The full invalidate is
-            // conservative but correct.
+            // Full flush before the CSEL body. We keep flush_all_vregs here
+            // (not the targeted variant) because the CSEL body uses
+            // load_vreg_to_reg which does NOT update the cache. If we left
+            // vregs cached in R8/R9/etc., the cache state would be inconsistent
+            // with the actual register contents after the load_vreg_to_reg
+            // calls. The full invalidate is conservative but correct.
             bool saved_fih = flags_in_host_;
             bool saved_ffs = flags_from_sub_;
             emit_pushfq();
@@ -375,6 +368,10 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
             else load_vreg_to_reg(RCX, inst.src2);
             // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
+            // RCX was invalidated by the targeted flush above, and
+            // load_vreg_to_reg doesn't update the cache, so reg_vreg_[RCX]
+            // is -1. The transform modifies RCX, but since no cached vreg
+            // claims RCX, there's no cache inconsistency.
             if (inst.op != IROp::CSEL) {
                 emit_pushfq();
                 if (inst.op == IROp::CSINC) {

@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>   // getenv, abort
+#include <cstdint>   // UINT32_MAX
 namespace arm64emu {
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
 // If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
@@ -107,6 +108,7 @@ void FrostJIT::evict_vreg(int v) {
     vreg_home_[v] = -1;
     reg_vreg_[r] = -1;
     vreg_dirty_[v] = false;
+    vreg_last_use_[v] = 0;  // clear LRU timestamp
     dirty_host_regs_ &= ~(1u << r);  // vreg no longer dirty in r
 }
 // Drop a vreg's cache mapping WITHOUT spilling.
@@ -157,6 +159,7 @@ void FrostJIT::drop_vreg(int v) {
     vreg_home_[v] = -1;
     reg_vreg_[r] = -1;
     vreg_dirty_[v] = false;
+    vreg_last_use_[v] = 0;  // clear LRU timestamp
     dirty_host_regs_ &= ~(1u << r);  // vreg no longer dirty in r
 }
 // Evict the occupant of `host_reg` if dirty, then clear the mapping.
@@ -177,6 +180,7 @@ void FrostJIT::clobber_host_reg(int host_reg) {
     vreg_home_[v] = -1;
     reg_vreg_[host_reg] = -1;
     vreg_dirty_[v] = false;
+    vreg_last_use_[v] = 0;  // clear LRU timestamp
     dirty_host_regs_ &= ~(1u << host_reg);  // host_reg no longer holds dirty vreg
 }
 int FrostJIT::alloc_reg(int preferred) {
@@ -189,8 +193,22 @@ int FrostJIT::alloc_reg(int preferred) {
         int r = ALLOC_REGS[i];
         if (reg_vreg_[r] == -1) return r;
     }
-    // All regs taken — evict the first one (simple LRU-ish).
-    int r = ALLOC_REGS[0];
+    // All regs taken — evict the LRU vreg (true least-recently-used, not FIFO).
+    // Scan all alloc regs and pick the one whose cached vreg has the smallest
+    // vreg_last_use_ timestamp. This avoids evicting a hot vreg just because
+    // it was allocated first (the old FIFO behavior that always evicted
+    // ALLOC_REGS[0] = RAX).
+    int best_r = ALLOC_REGS[0];
+    uint32_t best_ts = vreg_last_use_[reg_vreg_[best_r]];
+    for (int i = 1; i < NUM_ALLOC_REGS; i++) {
+        int r = ALLOC_REGS[i];
+        int v = reg_vreg_[r];
+        if (v >= 0 && vreg_last_use_[v] < best_ts) {
+            best_ts = vreg_last_use_[v];
+            best_r = r;
+        }
+    }
+    int r = best_r;
     int v = reg_vreg_[r];
     if (v >= 0) evict_vreg(v);
     return r;
@@ -205,16 +223,23 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         if (r == excl1 || r == excl2) continue;
         if (reg_vreg_[r] == -1) return r;
     }
-    // No free reg — evict a non-excluded reg. Walk in order and evict
-    // the first non-excluded occupant.
+    // No free reg — evict a non-excluded reg using true LRU.
+    // Scan all non-excluded alloc regs and pick the one with the oldest
+    // vreg_last_use_ timestamp.
+    int best_r = -1;
+    uint32_t best_ts = UINT32_MAX;
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
         if (r == excl1 || r == excl2) continue;
         int v = reg_vreg_[r];
-        if (v >= 0) {
-            evict_vreg(v);
-            return r;
+        if (v >= 0 && vreg_last_use_[v] < best_ts) {
+            best_ts = vreg_last_use_[v];
+            best_r = r;
         }
+    }
+    if (best_r >= 0) {
+        evict_vreg(reg_vreg_[best_r]);
+        return best_r;
     }
     // All alloc regs are excluded — shouldn't happen (we have 9 alloc regs
     // and only exclude at most 2). Fall back to alloc_reg.
@@ -239,6 +264,7 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     vreg_home_[v] = r;
     reg_vreg_[r] = v;
     vreg_dirty_[v] = false;
+    vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
     return r;
 }
 // Record that vreg v is now in reg r (e.g., after a computation).
@@ -268,6 +294,7 @@ void FrostJIT::set_vreg_reg(int v, int r) {
     vreg_home_[v] = r;
     reg_vreg_[r] = v;
     vreg_dirty_[v] = true;
+    vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
     dirty_host_regs_ |= (1u << r);  // v is now dirty in r
 }
 // Allocate reg r for vreg v, evicting the current occupant FIRST (before
@@ -288,6 +315,7 @@ int FrostJIT::alloc_reg_for(int v, int preferred) {
     vreg_home_[v] = r;
     reg_vreg_[r] = v;
     vreg_dirty_[v] = true;
+    vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
     dirty_host_regs_ |= (1u << r);  // v is now dirty in r
     return r;
 }
@@ -297,6 +325,8 @@ void FrostJIT::kill_vreg(int v) {
     if (r >= 0) {
         reg_vreg_[r] = -1;
         vreg_home_[v] = -1;
+        vreg_dirty_[v] = false;
+        vreg_last_use_[v] = 0;  // clear LRU timestamp
         dirty_host_regs_ &= ~(1u << r);  // r no longer holds v (or any dirty vreg)
     }
     vreg_dirty_[v] = false;
@@ -380,6 +410,7 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
     if (v <= max_vreg_ && vreg_home_[v] >= 0) {
         int src = vreg_home_[v];
         if (src != dst) emit_mov_reg(dst, src);
+        vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
         return;
     }
     // Not cached — load from memory (cpu.regs[] or stack slot).
@@ -405,6 +436,7 @@ void FrostJIT::store_reg_to_vreg(int v, int src) {
         reg_vreg_[r] = -1;
         vreg_home_[v] = -1;
         vreg_dirty_[v] = false;
+        vreg_last_use_[v] = 0;  // clear LRU timestamp
         dirty_host_regs_ &= ~(1u << r);
     }
 }
@@ -420,6 +452,7 @@ void FrostJIT::invalidate_all_vregs() {
             reg_vreg_[r] = -1;
             vreg_home_[v] = -1;
             vreg_dirty_[v] = false;
+            vreg_last_use_[v] = 0;  // clear LRU timestamp
         }
     }
     dirty_host_regs_ = 0;
@@ -478,6 +511,7 @@ void FrostJIT::force_vreg_to_reg(int v, int host_reg) {
     // Dirty bit is preserved: if v was dirty before, it's still dirty
     // (we just moved its value, not written it back).
     if (vreg_dirty_[v]) dirty_host_regs_ |= (1u << host_reg);
+    vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
 }
 // ── force_two_vregs_to ─────────────────────────────────────────────────
 // Force two vregs into two specific host registers in one call.
@@ -532,6 +566,7 @@ void FrostJIT::force_two_vregs_to(int src1, int host_reg1,
     // Preserve dirty bit.
     if (was_dirty2) dirty_host_regs_ |= (1u << host_reg2);
     else            dirty_host_regs_ &= ~(1u << host_reg2);
+    vreg_last_use_[src2] = ++regalloc_lru_counter_;  // mark as recently used
 }
 // ── emit_fmov_helper ───────────────────────────────────────────────────
 // Unified FMOV codegen for all four GPR↔FP register moves:

@@ -158,6 +158,8 @@ natively. They are the regression suite for frostJIT codegen changes.
 | `ctest/jit_fp_scalar.elf` | ✅ | ✅ | FP scalar ops (25/25 sub-tests) |
 | `ctest/jit_fma.elf` | ✅ | ✅ | FMADD/FMSUB/FNMADD/FNMSUB (single+double, 29/29 sub-tests). Native FMA3 codegen on FMA3 hosts (BIFROST_NO_FMA3=1 to force decomposed path). |
 | `ctest/jit_neon.elf` | ✅ | ✅ | NEON SIMD ops (10/10 sub-tests): SHL/USHR, SLI/SRI rotate, USRA, REV32/REV64, INS/UMOV, ADD/XOR. |
+| `ctest/jit_neon_advanced.elf` | ✅ | ✅ | Advanced NEON (11/11 sub-tests): EXT, TBL, UZP1/UZP2, ZIP1/ZIP2, TRN1/TRN2, SHRN, SSHLL, USHLL. |
+| `ctest/jit_neon_permute.elf` | ✅ | ✅ | SIMD permute (8/8 checks): ZIP1/ZIP2 (16-bit), UZP1 (8-bit), TRN2 (8-bit), SSHLL, USHLL, SHRN, EXT. |
 | `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests) |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |

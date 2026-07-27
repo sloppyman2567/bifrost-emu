@@ -415,11 +415,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                         vreg_home_[inst.src1] = -1;
                         reg_vreg_[RAX] = -1;
                         dirty_host_regs_ &= ~(1u << RAX);
+                        vreg_last_use_[inst.src1] = 0;  // clear LRU timestamp
                     }
                 }
             } else if (inst.dest == inst.src1 && inst.dest != 0) {
                 vreg_dirty_[inst.dest] = true;
                 dirty_host_regs_ |= (1u << RAX);
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             }
             if (is_32bit) {
                 // 0x29 /r = SUB r/m32, r32 (sub dst, src)
@@ -564,6 +566,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 d = s1;
                 vreg_dirty_[inst.dest] = true;
                 dirty_host_regs_ |= (1u << s1);  // maintain dirty-bitmask invariant
+                vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
             } else if (inst.dest != 0) {
                 d = alloc_reg_for(inst.dest, s1);
                 if (d != s1) emit_mov_reg(d, s1);

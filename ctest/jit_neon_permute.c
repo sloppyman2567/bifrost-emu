@@ -121,9 +121,10 @@ static void test_shrn(void) {
 static void test_ext(void) {
     uint8_t a[16], b[16], out[16], exp[16];
     for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0xA0 + i); }
-    // ext #4: bytes 4..15 of a, then 0..3 of b
-    for (int i = 0; i < 12; i++) exp[i] = a[4+i];
-    for (int i = 0; i < 4; i++) exp[12+i] = b[i];
+    // ext #4: concatenation is [Vm:Vn] = [b:a] = {0xA0..0xAF, 0..15}.
+    // Extracting 16 bytes at offset 4: {0xA4..0xAF, 0,1,2,3}.
+    for (int i = 0; i < 12; i++) exp[i] = b[4+i];
+    for (int i = 0; i < 4; i++) exp[12+i] = a[i];
     __asm__ volatile (
         "ldr q0, [%[a]]\n"
         "ldr q1, [%[b]]\n"

@@ -581,6 +581,15 @@ private:
     int reg_vreg_[16];
     // vreg → dirty (needs writeback to cpu.regs[]/stack on spill/flush).
     bool vreg_dirty_[4096];
+    // vreg → monotonic timestamp of last access (for LRU eviction).
+    // Updated on every ensure_vreg / set_vreg_reg / alloc_reg_for /
+    // force_vreg_to_reg / force_two_vregs_to call. When all alloc regs are
+    // occupied, alloc_reg picks the vreg with the smallest timestamp to
+    // evict — true LRU instead of the old FIFO (always evict ALLOC_REGS[0]).
+    uint32_t vreg_last_use_[4096];
+    // Global LRU counter — incremented on each vreg access. Wraps at 2^32
+    // (takes ~4 billion accesses per block — effectively never wraps).
+    uint32_t regalloc_lru_counter_ = 0;
     // vreg → stack slot offset (or 0 if not yet spilled).
     int32_t vreg_slot_[4096];
     // Number of stack slots used.
