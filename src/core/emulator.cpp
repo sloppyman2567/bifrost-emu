@@ -673,6 +673,40 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
         }
     }
+    // Static binaries have no PT_INTERP, so the block above never runs —
+    // but GraphicThunk / runtime dlopen (syscalls 0x1002/0x1003) still
+    // need a DynamicLinker + thunk trampolines. Create a minimal one.
+    if (!dyn_linker_) {
+        dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+        if (auto* thunk = graphics_.thunk()) {
+            if (thunk->enabled()) thunk->init(mem_);
+        }
+        if (auto* athunk = graphics_.audio_thunk()) {
+            if (athunk->enabled()) athunk->init(mem_);
+        }
+        if (auto* dthunk = graphics_.display_thunk()) {
+            if (dthunk->enabled()) dthunk->init(mem_);
+        }
+        GraphicThunk* gthunk = graphics_.thunk();
+        AudioThunk*   athunk = graphics_.audio_thunk();
+        DisplayThunk* dthunk = graphics_.display_thunk();
+        dyn_linker_->set_thunk_resolver(
+            [gthunk, athunk, dthunk](const std::string& lib)
+                -> DynamicLinker::ThunkSymbolList {
+                DynamicLinker::ThunkSymbolList out;
+                auto add_all = [&](auto* t) {
+                    if (!t || !t->enabled()) return;
+                    t->enumerate_symbols(lib,
+                        [&](const std::string& sym, uint64_t addr) {
+                            out.emplace_back(sym, addr);
+                        });
+                };
+                add_all(gthunk);
+                add_all(athunk);
+                add_all(dthunk);
+                return out;
+            });
+    }
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
@@ -694,11 +728,17 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // area, all those reads return 0, causing stdio functions to crash
     // (NULL vtable pointer → blr x16 with x16=0 → pc=0 → decode error).
     // The dynamic linker's TPIDR_EL0 is correct and must be preserved.
-    if (!dyn_linker_) {
-        const uint64_t TLS_SCRATCH_SIZE = 65536;  // 64 KiB
-        uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
-        main_cpu_.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
-        main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+    //
+    // Static binaries may still have a DynamicLinker for thunk/dlopen
+    // support without a static TLS block — only skip scratch when the
+    // linker actually installed a TLS TP.
+    if (!dyn_linker_ || dyn_linker_->static_tls_size() == 0) {
+        if (main_cpu_.tpidr_el0 == 0) {
+            const uint64_t TLS_SCRATCH_SIZE = 65536;  // 64 KiB
+            uint64_t tls_scratch = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
+            main_cpu_.tpidr_el0 = tls_scratch + TLS_SCRATCH_SIZE / 2;
+            main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+        }
     }
     // Map the zero page so NULL dereferences return 0 instead of
     // crashing. libc code often has NULL checks that only work if

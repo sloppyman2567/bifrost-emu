@@ -237,12 +237,10 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite (171 tests defined; 125 pass + 30 skip without
-# --test-all because busybox-aarch64 is not downloaded, and 7 dynamic +
-# 7 dynamic-glibc real-world tests skip without a rootfs)
+# Run the full test suite
 make check
 
-# Quick mode (skip benchmarks — 114 pass + 30 skip = 144 total attempted)
+# Quick mode (skip benchmarks)
 make check-quick
 
 # Run under the interpreter (catches JIT drift)
@@ -306,17 +304,24 @@ BIFROST_NO_THUNK_DISPLAY=1       # Disable Vulkan/Wayland thunking (on by defaul
 
 bifrost-emu forwards guest GL/EGL/SDL2/ALSA/Vulkan calls to the host's
 native libraries via a **thunk** layer. This is **enabled by default** —
-no env var needed. When the host has the dev libraries installed, guest
-graphic/audio programs use host hardware acceleration. When the host
-doesn't have the libraries, symbols resolve to stubs that return 0
-(safe fallback — the guest falls back to software rendering or no-op).
+no env var needed. Build with `make USE_SDL2=1 USE_THUNK_GL=1` so host
+headers/libs are linked.
 
-The thunk uses per-type symbol ID ranges (Graphics: 0x0000-0x0FFF,
-Audio: 0x1000-0x1FFF, Display: 0x2000-0x2FFF) to avoid collisions.
-Pointer arguments are automatically translated from guest addresses to
-host addresses via the emulator's direct memory window, enabling
-functions like `glVertexPointer`, `glDrawElements`, and `glGetIntegerv`
-to work correctly.
+Marshalling supports AAPCS64 stack args (e.g. `glTexImage2D` data),
+FP args in `v0..` (`glClearColor`, `glVertex3f`), host→guest string
+returns (`glGetString`, `SDL_GetError`), nested `glShaderSource`
+pointers, and bounce buffers for stack pointers outside the 4 GiB
+direct window (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
+dlopen of libGL/libSDL2 uses the thunk when the on-disk `.so` is not
+AArch64 (so host x86_64 libs are never executed as guest code).
+
+Demo:
+
+```bash
+make USE_SDL2=1 USE_THUNK_GL=1
+make cross SRC=ctest_real/test_sdl_gl_triangle.c OUT=ctest_real/test_sdl_gl_triangle.elf
+DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf
+```
 
 See `bifrost.toml.sample` for all options.
 

@@ -38,7 +38,7 @@ namespace trampoline_enc {
                             | (static_cast<uint32_t>(Xd) & 0x1Fu);
     }
     constexpr uint32_t SVC_0 = 0xD4000001u;
-    constexpr uint32_t NOP   = 0xD503201Fu;
+    constexpr uint32_t RET   = 0xD65F03C0u;  // ret (return to x30 / LR)
 }
 // Common registry entry. All three thunks use this same shape.
 struct ThunkSymbolEntry {
@@ -61,7 +61,7 @@ inline void write_thunk_trampoline(Memory& mem, uint64_t addr, uint32_t sym_id,
     buf[0] = trampoline_enc::MOVZ_Xd_IMM16(9, static_cast<uint16_t>(sym_id));
     buf[1] = trampoline_enc::MOVZ_Xd_IMM16(8, syscall_number);
     buf[2] = trampoline_enc::SVC_0;
-    buf[3] = trampoline_enc::NOP;
+    buf[3] = trampoline_enc::RET;
     mem.write(addr, buf, sizeof(buf));
 }
 // Generic dispatch helper. Reads 8 args from cpu.regs[0..7], calls the

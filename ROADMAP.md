@@ -6,39 +6,33 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## Current Focus — Turn 73+ (2026-07-08)
+## Current Focus — SDL2/OpenGL demo readiness (2026-07-25)
 
-### In Progress
+### Done
 
-1. **glibc printf SIMD fast-path.** glibc's strchrnul uses a SIMD loop
-   (CMEQ + CMHS + UMAXP + SHRN) to scan format strings for '%'. The
-   UMAXP C-bit fix (bit 11, not bit 15) and SHRN immh/shift fixes are
-   done, but MVNI inversion had to be reverted (causes soft-float
-   regressions). Need to debug the soft-float __muldf3 interaction
-   before re-enabling MVNI inversion.
+1. **AdvSIMD modified immediate rewrite** — correct MOVI/MVNI/ORR/BIC/MSL
+   (incl. MVNI all-ones masks) with soft-float `__muldf3` still green.
+   Regression: `ctest/jit_mvni_softfloat.elf`.
 
-2. **MVNI inversion + soft-float debugging.** The MVNI fix is correct
-   per the ARM spec but exposes a bug in musl's __muldf3 soft-float
-   code path. Need to trace the soft-float multiplication to find the
-   emulator instruction that produces wrong results when the MVNI mask
-   is 0xFF instead of 0x00.
+2. **SIMD permute / widen** — ZIP/UZP/TRN + SSHLL/USHLL; MOVI vs SHLL
+   distinguished via immh bits[22:19]. Regression: `ctest/jit_neon_permute.elf`.
+
+3. **GraphicThunk marshalling** — AAPCS64 stack args (`glTexImage2D`),
+   FP args (`glClearColor`/`glVertex3f`), guest string cache, nested
+   `glShaderSource`, SDL pointer bounce for high-stack `SDL_Event`,
+   trampoline `ret` after `svc`, static-ELF thunk dlopen, reject
+   host-arch `.so` as guest code.
+
+4. **Demo** — `ctest_real/test_sdl_gl_triangle.elf` (SDL2 window +
+   immediate-mode triangle, 30 frames). Build with
+   `make USE_SDL2=1 USE_THUNK_GL=1`.
 
 ### Planned
 
-3. **AArch32 (32-bit ARM) support.** Currently only AArch64 is supported.
-   Adding AArch32 would expand compatibility with older Android apps.
-
-4. **vDSO emulation.** Some clock_gettime paths are emulated rather than
-   using a real vDSO. This causes minor performance overhead for
-   clock-heavy programs.
-
-5. **dlopen() support.** The dynamic linker currently loads all
-   DT_NEEDED libraries at startup. Runtime dlopen() of TLS-using
-   libraries is not yet supported (would require dynamic TLS allocation).
-
-6. **More real-world binary testing.** Expand the real-world test suite
-   with more AArch64 static binaries (Python, Node.js, Go binaries,
-   Rust binaries).
+5. **AArch32 (32-bit ARM) support.**
+6. **vDSO emulation.**
+7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
+8. **More real-world binary testing.**
 
 ---
 

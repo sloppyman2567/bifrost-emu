@@ -43,19 +43,17 @@
 // The redesign fixes this by returning GUEST-CALLABLE
 // trampoline addresses instead.
 //
-// ── Limitations (inherited from previous design) ──────────────────────────────
-//   - Pointer arguments are translated assuming the guest pointer is
-//     in the emulator's address space (via Memory::host_addr()). This
-//     works for heap/stack pointers but NOT for pointers the guest
-//     got from mmap'd host resources (rare).
-//   - No state tracking: glEnable(GL_DEPTH_TEST) is forwarded but not
-//     recorded. Fine for immediate-mode GL, breaks retained-mode.
-//   - No shader translation: GLSL is text, identical AArch64↔x86-64.
-//   - No EGL surface management: single hidden SDL2 window for EGL.
-//   - No GLESv1 (fixed-function) support: only GLESv2 (programmable).
-//   - Variadic functions (printf-style) are NOT supported — the thunk
-//     passes exactly 8 args, ignoring variadic extras. Most GL/EGL/
-//     SDL2 entry points are non-variadic so this is rarely hit.
+// ── Limitations ──────────────────────────────
+//   - Pointer args outside the 4 GiB direct window bounce through a
+//     host buffer (writeback). Nested structs of pointers may still
+//     need per-symbol handlers (see glShaderSource).
+//   - No full GL state tracking across calls.
+//   - No shader ISA translation (GLSL text is identical AArch64↔x86-64).
+//   - Variadic functions are not supported (fixed ≤9 integer args).
+//   - FP args: mark n_float at registration (glClearColor, glVertex3f).
+//   - Mixed int+float: THUNK_MIXED_FP (glUniform*f).
+//   - GetProcAddress returns guest trampolines for registered symbols.
+//   - Pointer bounce default is 64 KiB (sized from glBufferData when possible).
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -128,7 +126,7 @@ public:
     //   movz x9, #symbol_id       ; load symbol_id
     //   movz x8, #SYSCALL_NUMBER  ; load syscall number
     //   svc #0                    ; trap to host
-    //   nop                       ; pad to 16 bytes (alignment)
+    //   ret                       ; return to guest caller (x30)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
     // v1.5.0.alpha: per-thunk ID base to avoid collisions.
@@ -150,7 +148,10 @@ private:
     void register_function_(const std::string& lib,
                             const std::string& sym,
                             void* host_fn,
-                            uint8_t pointer_args = 0);
+                            uint16_t pointer_args = 0,
+                            uint8_t n_stack = 0,
+                            uint8_t n_float = 0,
+                            uint8_t flags = 0);
     void* resolve_gl_(const std::string& sym);
     void* resolve_egl_(const std::string& sym);
     void* resolve_sdl_(const std::string& sym);

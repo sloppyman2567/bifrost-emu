@@ -484,6 +484,10 @@ private:
     // offsets; false if detection fails (caller falls back to spray).
     bool detect_tls_field_offsets_(uint32_t& out_size_off,
                                     uint32_t& out_align_off);
+    // Detect _dl_open_hook / dlfcn_hook offset within _rtld_global_ro by
+    // disassembling dlopen@@GLIBC_2.34 (or __libc_dlopen_mode). glibc
+    // moved this field from +368 to +376 between 2.40 and 2.43.
+    bool detect_dlopen_hook_offset_(uint32_t& out_hook_off);
     // _rtld_global (the read-write rtld global, NOT _rtld_global_ro).
     // glibc's pthread_create -> allocate_stack walks the _dl_stack_cache
     // list (a circular doubly-linked list_t) looking for a reusable

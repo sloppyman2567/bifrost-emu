@@ -109,14 +109,14 @@ namespace arm64emu {
 //
 //   MOVZ Xd, #imm16, LSL 0  →  0xD2800000 | (imm16 << 5) | Xd
 //   SVC #0                   →  0xD4000001
-//   NOP                      →  0xD503201F
+//   RET                      →  0xD65F03C0  (return to LR / x30)
 namespace trampoline_enc {
     constexpr uint32_t MOVZ_Xd_IMM16(int Xd, uint16_t imm16) {
         return 0xD2800000u | (static_cast<uint32_t>(imm16) << 5)
                             | (static_cast<uint32_t>(Xd) & 0x1Fu);
     }
     constexpr uint32_t SVC_0   = 0xD4000001u;
-    constexpr uint32_t NOP     = 0xD503201Fu;
+    constexpr uint32_t RET     = 0xD65F03C0u;
 }
 // ── GraphicThunkImpl — the real implementation (pimpl) ────────────────
 // The GraphicThunk class in frost/thunk.hpp exposes only void* opaque
@@ -127,8 +127,24 @@ struct SymbolEntry {
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
-    uint8_t     pointer_args = 0;  // bitmask: which args (0-7) are pointers
+    // Bit N set ⇒ arg N is a guest pointer needing translation.
+    // Covers args 0..11 (8 GPRs + up to 4 stack slots).
+    uint16_t    pointer_args = 0;
+    // Extra args beyond x0..x7, read from the guest stack at SP.
+    uint8_t     n_stack = 0;
+    // If >0, the first n_float args are IEEE-754 binary32 values in
+    // v0..v{n-1} (AAPCS64 FP ABI), not in x0..x7.
+    uint8_t     n_float = 0;
+    // flags: bit0 = host returns const char* → copy into guest string cache
+    //        bit1 = glShaderSource nested-pointer marshalling
+    //        bit2 = mixed int+float ABI (n_stack = #ints in x0.., n_float in v0..)
+    //        bit3 = GetProcAddress: resolve guest name → trampoline addr
+    uint8_t     flags = 0;
 };
+static constexpr uint8_t THUNK_RET_STRING    = 1u << 0;
+static constexpr uint8_t THUNK_SHADER_SOURCE = 1u << 1;
+static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
+static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
 struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
@@ -137,6 +153,11 @@ struct GraphicThunkImpl {
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
         GraphicThunk::TRAMPOLINE_SIZE * GraphicThunk::MAX_SYMBOLS;  // 64 KiB
+    // Guest-visible scratch page for host→guest string returns
+    // (glGetString, SDL_GetError, …). Ring-allocated.
+    uint64_t string_cache_base = 0;
+    static constexpr uint64_t STRING_CACHE_SIZE = 4096;
+    uint32_t string_cache_off = 0;
     // Registry: (library, symbol_name) → SymbolEntry.
     // We use a flat vector per-library for cache-friendly enumeration
     // (the dynamic linker iterates all symbols when populating its
@@ -177,6 +198,18 @@ struct GraphicThunkImpl {
             if (l.lib == lib) return &l;
         }
         return nullptr;
+    }
+    uint64_t cache_host_string_(const char* host_str) {
+        if (!mem || !string_cache_base || !host_str) return 0;
+        size_t len = std::strlen(host_str) + 1;
+        if (len > STRING_CACHE_SIZE) len = STRING_CACHE_SIZE;
+        if (string_cache_off + len > STRING_CACHE_SIZE)
+            string_cache_off = 0;
+        uint64_t guest = string_cache_base + string_cache_off;
+        mem->write(guest, host_str, len);
+        string_cache_off = static_cast<uint32_t>(
+            (string_cache_off + len + 7u) & ~7u);
+        return guest;
     }
 };
 // ── GraphicThunk method implementations ───────────────────────────────
@@ -226,6 +259,12 @@ bool GraphicThunk::init(Memory& mem) {
         fprintf(stderr, "[thunk] init: failed to allocate trampoline page\n");
         return false;
     }
+    impl_->string_cache_base = mem.mmap_alloc(GraphicThunkImpl::STRING_CACHE_SIZE);
+    if (impl_->string_cache_base == 0) {
+        fprintf(stderr, "[thunk] init: failed to allocate string cache\n");
+        return false;
+    }
+    impl_->string_cache_off = 0;
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
     impl_->initialized = true;
@@ -243,7 +282,10 @@ bool GraphicThunk::init(Memory& mem) {
 void GraphicThunk::register_function_(const std::string& lib,
                                        const std::string& sym,
                                        void* host_fn,
-                                       uint8_t pointer_args) {
+                                       uint16_t pointer_args,
+                                       uint8_t n_stack,
+                                       uint8_t n_float,
+                                       uint8_t flags) {
     auto* lt = impl_->find_or_create_lib_(lib);
     // Check if already registered (idempotent).
     for (const auto& e : lt->entries) {
@@ -260,15 +302,18 @@ void GraphicThunk::register_function_(const std::string& lib,
     uint32_t sym_id = GraphicThunk::ID_BASE_GRAPHICS + local_id;
     uint64_t addr = impl_->trampoline_base + local_id * GraphicThunk::TRAMPOLINE_SIZE;
     write_trampoline_(*impl_->mem, addr, sym_id);
-    lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args});
+    lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
+                           n_stack, n_float, flags});
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
     });
     if (getenv("BIFROST_THUNK_TRACE")) {
-        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx (id=%u, ptrs=0x%x)\n",
+        fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx "
+                "(id=%u ptrs=0x%x stack=%u fp=%u flags=0x%x)\n",
                 lib.c_str(), sym.c_str(),
-                static_cast<unsigned long long>(addr), sym_id, pointer_args);
+                static_cast<unsigned long long>(addr), sym_id,
+                pointer_args, n_stack, n_float, flags);
     }
 }
 // ── write_trampoline_ — emit 16-byte AArch64 trampoline ────────────────
@@ -285,7 +330,7 @@ void GraphicThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id
     buf[1] = trampoline_enc::MOVZ_Xd_IMM16(8,
                 static_cast<uint16_t>(GraphicThunk::SYSCALL_NUMBER));
     buf[2] = trampoline_enc::SVC_0;
-    buf[3] = trampoline_enc::NOP;
+    buf[3] = trampoline_enc::RET;  // return to guest caller (x30)
     mem.write(addr, buf, sizeof(buf));
 }
 // ── resolve() — look up a (lib, sym) and return guest trampoline addr ─
@@ -323,11 +368,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    // v1.5.0.alpha: strip the ID_BASE_GRAPHICS prefix to get
-    // the local index. If the symbol_id is outside our range, return
-    // -ENOENT so the dispatcher can try other thunks.
     if ((symbol_id & GraphicThunk::ID_MASK) != GraphicThunk::ID_BASE_GRAPHICS) {
-        return -ENOENT;  // belongs to a different thunk
+        return -ENOENT;
     }
     uint32_t local_id = symbol_id - GraphicThunk::ID_BASE_GRAPHICS;
     if (local_id >= impl_->id_to_idx_.size()) {
@@ -336,7 +378,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         return -ENOENT;
     }
-    // Look up the entry (lock-free — id_to_idx_ is immutable after init).
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     if (!entry.host_fn) {
@@ -347,64 +388,260 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         cpu.regs[0] = 0;
         return 0;
     }
-    // Read the first 8 args from the CPU's general-purpose registers.
-    // Per AArch64 AAPCS, the first 8 integer/pointer args are in x0..x7.
-    // FP args would be in v0..v7, but most GL/EGL/SDL2 entry points take
-    // integer/pointer args only (GLbitfield, GLuint, GLsizei, GLclampf,
-    // pointer, etc.). For FP args, the dispatch would need to read from
-    // cpu.v_lo[] — left as a future enhancement.
-    uint64_t args[8];
-    for (int i = 0; i < 8; i++) {
-        args[i] = cpu.regs[i];
+
+    // ── Float-only AAPCS64 path (glClearColor, glVertex3f, …) ────────
+    if (entry.n_float > 0 && !(entry.flags & THUNK_MIXED_FP)
+        && !(entry.flags & THUNK_GET_PROC)) {
+        float fv[8] = {0};
+        for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
+            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+        }
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
+                    entry.name.c_str(), entry.n_float,
+                    fv[0], fv[1], fv[2], fv[3]);
+        }
+        switch (entry.n_float) {
+        case 1: {
+            using Fn = void (*)(float);
+            reinterpret_cast<Fn>(entry.host_fn)(fv[0]);
+            break;
+        }
+        case 2: {
+            using Fn = void (*)(float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1]);
+            break;
+        }
+        case 3: {
+            using Fn = void (*)(float, float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1], fv[2]);
+            break;
+        }
+        default: {
+            using Fn = void (*)(float, float, float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1], fv[2], fv[3]);
+            break;
+        }
+        }
+        cpu.regs[0] = 0;
+        return 0;
     }
-    // v1.5.0.alpha: translate pointer args from guest to host.
-    // For each arg marked as a pointer in entry.pointer_args, translate
-    // the guest address to a host pointer using Memory::guest_to_host_ptr.
-    // This is critical — without it, passing a guest pointer (e.g. a
-    // vertex array address) to the host GL function would crash because
-    // the host can't read guest memory at that address.
-    //
-    // Only args in the direct window (< 4 GiB) can be translated. Args
-    // in the high mmap region (≥ 4 GiB) are passed as-is — the host
-    // function will likely crash, but that's a known limitation (the
-    // thunk would need to copy the data to a low buffer first).
-    if (entry.pointer_args && impl_->mem) {
-        for (int i = 0; i < 8; i++) {
-            if (entry.pointer_args & (1u << i)) {
-                uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(args[i]);
-                if (host_ptr) {
-                    args[i] = reinterpret_cast<uint64_t>(host_ptr);
+
+    // ── Mixed int + float (glUniform*f, glTexParameterf, …) ─────────
+    // n_stack holds the integer arity (x0..); n_float holds float arity
+    // (v0..). Used only when THUNK_MIXED_FP is set.
+    if (entry.flags & THUNK_MIXED_FP) {
+        uint64_t iv[4] = {0};
+        float fv[4] = {0};
+        uint8_t ni = entry.n_stack;
+        if (ni > 4) ni = 4;
+        for (uint8_t i = 0; i < ni; i++) iv[i] = cpu.regs[i];
+        for (uint8_t i = 0; i < entry.n_float && i < 4; i++) {
+            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+        }
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] dispatch: %s (mixed int×%u fp×%u) "
+                    "i0=%lld f0=%g\n",
+                    entry.name.c_str(), ni, entry.n_float,
+                    static_cast<long long>(iv[0]), fv[0]);
+        }
+        if (ni == 1 && entry.n_float == 1) {
+            using Fn = void (*)(int32_t, float);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<int32_t>(iv[0]), fv[0]);
+        } else if (ni == 1 && entry.n_float == 2) {
+            using Fn = void (*)(int32_t, float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<int32_t>(iv[0]), fv[0], fv[1]);
+        } else if (ni == 1 && entry.n_float == 3) {
+            using Fn = void (*)(int32_t, float, float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2]);
+        } else if (ni == 1 && entry.n_float >= 4) {
+            using Fn = void (*)(int32_t, float, float, float, float);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2], fv[3]);
+        } else if (ni == 2 && entry.n_float == 1) {
+            using Fn = void (*)(uint32_t, uint32_t, float);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<uint32_t>(iv[0]),
+                static_cast<uint32_t>(iv[1]), fv[0]);
+        } else {
+            // Unsupported mixed shape — no-op rather than corrupt.
+            if (getenv("BIFROST_THUNK_TRACE")) {
+                fprintf(stderr, "[thunk] mixed FP shape unsupported for %s\n",
+                        entry.name.c_str());
+            }
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
+    // ── Integer/pointer path with optional stack args ────────────────
+    constexpr int kMaxArgs = 12;
+    uint64_t args[kMaxArgs] = {0};
+    for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
+    // AAPCS64: args 8+ live on the guest stack at SP, 8-byte slots.
+    if (entry.n_stack && impl_->mem) {
+        for (uint8_t i = 0; i < entry.n_stack && (8 + i) < kMaxArgs; i++) {
+            uint64_t slot = cpu.sp + static_cast<uint64_t>(i) * 8ull;
+            impl_->mem->read(slot, &args[8 + i], sizeof(uint64_t));
+        }
+    }
+
+    // GetProcAddress(name): return guest trampoline for a registered
+    // GL/EGL/SDL symbol, or 0 if unknown. Games resolve most GL via this.
+    if (entry.flags & THUNK_GET_PROC) {
+        char namebuf[256];
+        const char* name = nullptr;
+        if (args[0] && impl_->mem) {
+            uint8_t* hp = impl_->mem->guest_to_host_ptr(args[0]);
+            if (hp) {
+                name = reinterpret_cast<const char*>(hp);
+            } else {
+                size_t n = 0;
+                for (; n + 1 < sizeof(namebuf); n++) {
+                    uint8_t c = 0;
+                    try { impl_->mem->read(args[0] + n, &c, 1); }
+                    catch (...) { break; }
+                    namebuf[n] = static_cast<char>(c);
+                    if (c == 0) break;
                 }
-                // If translation failed (address ≥ 4 GiB), pass the
-                // original value. The host function may handle it
-                // gracefully (e.g. NULL check) or crash — either way
-                // it's a visible failure, not silent corruption.
+                namebuf[sizeof(namebuf) - 1] = 0;
+                name = namebuf;
+            }
+        }
+        uint64_t found = 0;
+        if (name && name[0]) {
+            for (const auto& lib : impl_->libs_) {
+                for (const auto& e : lib.entries) {
+                    if (e.name == name) {
+                        found = e.guest_addr;
+                        break;
+                    }
+                }
+                if (found) break;
+            }
+        }
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] GetProcAddress('%s') → 0x%llx\n",
+                    name ? name : "(null)",
+                    static_cast<unsigned long long>(found));
+        }
+        cpu.regs[0] = found;
+        return 0;
+    }
+
+    auto translate_ptr = [&](uint64_t& a, int idx,
+                             std::vector<uint8_t>* bounce,
+                             uint64_t* guest_orig,
+                             bool* need_wb) {
+        if (a == 0 || !impl_->mem) return;
+        uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(a);
+        if (host_ptr) {
+            a = reinterpret_cast<uint64_t>(host_ptr);
+            return;
+        }
+        // High-stack / sparse-page pointer: bounce through a host buffer.
+        // Default 64 KiB covers modest textures/VBO uploads; for
+        // glBufferData use the size arg when it fits.
+        size_t kBounce = 65536;
+        if (entry.name == "glBufferData" && idx == 2) {
+            uint64_t sz = args[1];
+            if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+        } else if (entry.name == "glBufferSubData" && idx == 3) {
+            uint64_t sz = args[2];
+            if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+        }
+        bounce->resize(kBounce);
+        try {
+            impl_->mem->read(a, bounce->data(), kBounce);
+        } catch (...) {
+            bounce->assign(kBounce, 0);
+        }
+        *guest_orig = a;
+        *need_wb = true;
+        a = reinterpret_cast<uint64_t>(bounce->data());
+        (void)idx;
+    };
+
+    std::vector<uint8_t> bounce_bufs[kMaxArgs];
+    uint64_t bounce_guest[kMaxArgs] = {0};
+    bool bounce_wb[kMaxArgs] = {false};
+
+    if (entry.pointer_args && impl_->mem) {
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (entry.pointer_args & (1u << i)) {
+                translate_ptr(args[i], i, &bounce_bufs[i],
+                              &bounce_guest[i], &bounce_wb[i]);
             }
         }
     }
+
+    // glShaderSource(shader, count, const char* const* strings, const int* len)
+    if (entry.flags & THUNK_SHADER_SOURCE) {
+        int count = static_cast<int>(args[1]);
+        if (count < 0) count = 0;
+        if (count > 64) count = 64;
+        const char* host_strs[64];
+        // args[2] already translated to host pointer to guest pointer array
+        const uint64_t* guest_arr = reinterpret_cast<const uint64_t*>(args[2]);
+        for (int i = 0; i < count; i++) {
+            uint64_t gp = guest_arr ? guest_arr[i] : 0;
+            uint8_t* hp = (gp && impl_->mem) ? impl_->mem->guest_to_host_ptr(gp)
+                                             : nullptr;
+            host_strs[i] = hp ? reinterpret_cast<const char*>(hp) : "";
+        }
+        using Fn = void (*)(uint64_t, int, const char* const*, const int*);
+        reinterpret_cast<Fn>(entry.host_fn)(
+            args[0], count, host_strs,
+            args[3] ? reinterpret_cast<const int*>(args[3]) : nullptr);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
-                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx ptrs=0x%x\n",
+                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
+                "a8=0x%llx ptrs=0x%x stack=%u\n",
                 entry.name.c_str(), entry.host_fn,
                 static_cast<unsigned long long>(args[0]),
                 static_cast<unsigned long long>(args[1]),
                 static_cast<unsigned long long>(args[2]),
                 static_cast<unsigned long long>(args[3]),
-                entry.pointer_args);
+                static_cast<unsigned long long>(args[8]),
+                entry.pointer_args, entry.n_stack);
     }
-    // Call the host function. We use a union of function pointer types
-    // to handle the common calling conventions. The host's calling
-    // convention (System V AMD64) is: first 6 integer/pointer args in
-    // rdi, rsi, rdx, rcx, r8, r9; first 8 FP args in xmm0..xmm7.
-    //
-    // We cast to a generic 8-arg function pointer. This works for most
-    // GL/EGL/SDL2 entry points because they take 0-8 integer/pointer
-    // args. FP-arg functions would need a separate dispatch path.
-    using GenericFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
-                                    uint64_t, uint64_t, uint64_t, uint64_t);
-    auto fn = reinterpret_cast<GenericFn>(entry.host_fn);
-    uint64_t ret = fn(args[0], args[1], args[2], args[3],
-                       args[4], args[5], args[6], args[7]);
+
+    uint64_t ret = 0;
+    if (entry.n_stack >= 1) {
+        using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t);
+        ret = reinterpret_cast<Fn9>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7], args[8]);
+    } else {
+        using Fn8 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn8>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7]);
+    }
+
+    // Write bounced pointer args back into guest memory.
+    if (impl_->mem) {
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (bounce_wb[i] && bounce_guest[i]) {
+                impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
+                                  bounce_bufs[i].size());
+            }
+        }
+    }
+
+    if (entry.flags & THUNK_RET_STRING) {
+        ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
+    }
     cpu.regs[0] = ret;
     return 0;
 }
@@ -443,6 +680,15 @@ void GraphicThunk::register_known_symbols_() {
         void* p = dlsym(RTLD_DEFAULT, #name); \
         for (const char* L : gl_libs) register_function_(L, #name, p, ptrs); \
     } while(0)
+    #define REG_GL_FP(name, nf) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gl_libs) register_function_(L, #name, p, 0, 0, nf); \
+    } while(0)
+    #define REG_GL_EX(name, ptrs, nstack, nfloat, fl) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gl_libs) \
+            register_function_(L, #name, p, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #else
     #define REG_GL(name) do { \
         for (const char* L : gl_libs) register_function_(L, #name, nullptr); \
@@ -450,16 +696,23 @@ void GraphicThunk::register_known_symbols_() {
     #define REG_GL_PTR(name, ptrs) do { \
         for (const char* L : gl_libs) register_function_(L, #name, nullptr, ptrs); \
     } while(0)
+    #define REG_GL_FP(name, nf) do { \
+        for (const char* L : gl_libs) register_function_(L, #name, nullptr, 0, 0, nf); \
+    } while(0)
+    #define REG_GL_EX(name, ptrs, nstack, nfloat, fl) do { \
+        for (const char* L : gl_libs) \
+            register_function_(L, #name, nullptr, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #endif
     REG_GL(glClear);
-    REG_GL(glClearColor);
+    REG_GL_FP(glClearColor, 4);
     REG_GL(glBegin);
     REG_GL(glEnd);
-    REG_GL(glVertex3f);
-    REG_GL(glVertex2f);
+    REG_GL_FP(glVertex3f, 3);
+    REG_GL_FP(glVertex2f, 2);
     REG_GL_PTR(glVertex3fv, 0x01);      // arg 0: const GLfloat *v
-    REG_GL(glColor3f);
-    REG_GL(glColor4f);
+    REG_GL_FP(glColor3f, 3);
+    REG_GL_FP(glColor4f, 4);
     REG_GL(glColor3ub);
     REG_GL(glFlush);
     REG_GL(glFinish);
@@ -473,16 +726,15 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glOrtho);
     REG_GL(glPushMatrix);
     REG_GL(glPopMatrix);
-    REG_GL(glRotatef);
-    REG_GL(glTranslatef);
-    REG_GL(glScalef);
+    REG_GL_FP(glRotatef, 4);
+    REG_GL_FP(glTranslatef, 3);
+    REG_GL_FP(glScalef, 3);
     REG_GL_PTR(glGenTextures, 0x02);    // arg 1: GLuint *textures
     REG_GL(glBindTexture);
     REG_GL(glTexParameteri);
-    // glTexImage2D: arg 8 (data) is pointer — beyond our 8-arg limit.
-    // Pass 0 for pointer_args; the host fn will get garbage for data.
-    REG_GL(glTexImage2D);
-    REG_GL(glTexSubImage2D);
+    // glTexImage2D: 9th arg (data) on guest stack — translate bit 8.
+    REG_GL_EX(glTexImage2D, (1u << 8), 1, 0, 0);
+    REG_GL_EX(glTexSubImage2D, (1u << 8), 1, 0, 0);
     REG_GL(glEnableClientState);
     REG_GL(glDisableClientState);
     REG_GL_PTR(glVertexPointer, 0x08);  // arg 3: const void *pointer
@@ -490,13 +742,8 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_PTR(glTexCoordPointer, 0x08);// arg 3: const void *pointer
     REG_GL(glDrawArrays);
     REG_GL_PTR(glDrawElements, 0x10);   // arg 4: const void *indices
-    // glGetString returns const GLubyte* — the return value is a host
-    // pointer, not a guest pointer. This is a known issue: the guest
-    // will get a host pointer it can't dereference. For now, pass 0
-    // (no pointer args); the guest should use a wrapper that copies
-    // the string.
-    REG_GL(glGetString);
-    REG_GL_PTR(glGetIntegerv, 0x01);    // arg 1: GLint *params
+    REG_GL_EX(glGetString, 0, 0, 0, THUNK_RET_STRING);
+    REG_GL_PTR(glGetIntegerv, 0x02);    // arg 1: GLint *params
     REG_GL(glGenLists);
     REG_GL(glCallList);
     REG_GL(glNewList);
@@ -528,7 +775,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glMultiTexCoord2f);
     // Shaders.
     REG_GL_PTR(glCreateShader, 0x00);     // returns GLuint
-    REG_GL_PTR(glShaderSource, 0x08);     // arg 3: const GLchar* const*string
+    REG_GL_EX(glShaderSource, 0x0C, 0, 0, THUNK_SHADER_SOURCE);
     REG_GL(glCompileShader);
     REG_GL(glDeleteShader);
     REG_GL_PTR(glCreateProgram, 0x00);    // returns GLuint
@@ -543,16 +790,49 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_PTR(glGetProgramInfoLog, 0x08);// arg 3: GLchar *infoLog
     REG_GL_PTR(glGetAttribLocation, 0x02);// arg 1: const GLchar *name
     REG_GL_PTR(glGetUniformLocation, 0x02);// arg 1: const GLchar *name
+    REG_GL_PTR(glBindAttribLocation, 0x04); // arg 2: const GLchar *name
     REG_GL(glUniform1i);
-    REG_GL(glUniform1f);
-    REG_GL(glUniform2f);
-    REG_GL(glUniform3f);
-    REG_GL(glUniform4f);
+    // Mixed: location in x0, floats in v0.. (AAPCS64)
+    REG_GL_EX(glUniform1f, 0, 1, 1, THUNK_MIXED_FP);
+    REG_GL_EX(glUniform2f, 0, 1, 2, THUNK_MIXED_FP);
+    REG_GL_EX(glUniform3f, 0, 1, 3, THUNK_MIXED_FP);
+    REG_GL_EX(glUniform4f, 0, 1, 4, THUNK_MIXED_FP);
     REG_GL_PTR(glUniform1fv, 0x04);       // arg 2: const GLfloat *value
+    REG_GL_PTR(glUniform2fv, 0x04);
+    REG_GL_PTR(glUniform3fv, 0x04);
+    REG_GL_PTR(glUniform4fv, 0x04);
+    REG_GL_PTR(glUniformMatrix3fv, 0x20);
     REG_GL_PTR(glUniformMatrix4fv, 0x20); // arg 3: const GLfloat *value
     REG_GL(glEnableVertexAttribArray);
     REG_GL(glDisableVertexAttribArray);
     REG_GL_PTR(glVertexAttribPointer, 0x80); // arg 5: const void *pointer
+    REG_GL_PTR(glGetFloatv, 0x02);
+    REG_GL_PTR(glGetBooleanv, 0x02);
+#if defined(BIFROST_THUNK_HAVE_GL)
+    {
+        void* p = dlsym(RTLD_DEFAULT, "glGetProcAddress");
+        if (!p) p = dlsym(RTLD_DEFAULT, "glXGetProcAddress");
+        if (!p) p = dlsym(RTLD_DEFAULT, "glXGetProcAddressARB");
+        if (!p) p = reinterpret_cast<void*>(1);
+        for (const char* L : gl_libs) {
+            register_function_(L, "glGetProcAddress", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+            register_function_(L, "glXGetProcAddress", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+            register_function_(L, "glXGetProcAddressARB", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+        }
+    }
+#else
+    for (const char* L : gl_libs) {
+        register_function_(L, "glGetProcAddress",
+                           reinterpret_cast<void*>(1), 0x01, 0, 0,
+                           THUNK_GET_PROC);
+        register_function_(L, "glXGetProcAddress",
+                           reinterpret_cast<void*>(1), 0x01, 0, 0,
+                           THUNK_GET_PROC);
+    }
+#endif
     // VBOs.
     REG_GL_PTR(glGenBuffers, 0x02);       // arg 1: GLuint *buffers
     REG_GL_PTR(glDeleteBuffers, 0x02);    // arg 1: const GLuint *buffers
@@ -576,8 +856,8 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glTexImage2D);
     REG_GL(glTexSubImage2D);
     REG_GL(glTexParameteri);
-    REG_GL(glTexParameterf);
-    REG_GL_PTR(glCompressedTexImage2D, 0x80); // arg 8: const void *data
+    REG_GL_EX(glTexParameterf, 0, 2, 1, THUNK_MIXED_FP);
+    REG_GL_EX(glCompressedTexImage2D, (1u << 8), 1, 0, 0);
     // Drawing.
     REG_GL(glDrawArrays);
     REG_GL_PTR(glDrawElements, 0x10);     // arg 4: const void *indices
@@ -594,7 +874,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glStencilOp);
     REG_GL(glStencilMask);
     // Misc.
-    REG_GL(glClearDepthf);
+    REG_GL_FP(glClearDepthf, 1);
     REG_GL(glPixelStorei);
     REG_GL(glFinish);
     REG_GL(glFlush);
@@ -603,18 +883,21 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glIsEnabled);
     REG_GL(glViewport);
     REG_GL(glScissor);
-    REG_GL(glClearColor);
+    REG_GL_FP(glClearColor, 4);
     REG_GL(glClear);
     REG_GL(glGetError);
-    REG_GL_PTR(glGetString, 0x00);
+    REG_GL_EX(glGetString, 0, 0, 0, THUNK_RET_STRING);
     REG_GL_PTR(glGetIntegerv, 0x02);
     REG_GL(glHint);
     REG_GL(glFrontFace);
     REG_GL(glCullFace);
-    REG_GL(glLineWidth);
+    REG_GL_FP(glLineWidth, 1);
     REG_GL(glPolygonOffset);
     REG_GL(glSampleCoverage);
 #undef REG_GL
+#undef REG_GL_PTR
+#undef REG_GL_FP
+#undef REG_GL_EX
     // ── libGLESv2.so / libGLESv2.so.2 ─────────────────────────────
     // GLESv2 shares most entry points with OpenGL 2.0+ (no fixed-function).
     const char* gles_libs[] = {"libGLESv2.so", "libGLESv2.so.2"};
@@ -627,6 +910,15 @@ void GraphicThunk::register_known_symbols_() {
         void* p = dlsym(RTLD_DEFAULT, #name); \
         for (const char* L : gles_libs) register_function_(L, #name, p, ptrs); \
     } while(0)
+    #define REG_GLES_FP(name, nf) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gles_libs) register_function_(L, #name, p, 0, 0, nf); \
+    } while(0)
+    #define REG_GLES_EX(name, ptrs, nstack, nfloat, fl) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : gles_libs) \
+            register_function_(L, #name, p, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #else
     #define REG_GLES(name) do { \
         for (const char* L : gles_libs) register_function_(L, #name, nullptr); \
@@ -634,11 +926,18 @@ void GraphicThunk::register_known_symbols_() {
     #define REG_GLES_PTR(name, ptrs) do { \
         for (const char* L : gles_libs) register_function_(L, #name, nullptr, ptrs); \
     } while(0)
+    #define REG_GLES_FP(name, nf) do { \
+        for (const char* L : gles_libs) register_function_(L, #name, nullptr, 0, 0, nf); \
+    } while(0)
+    #define REG_GLES_EX(name, ptrs, nstack, nfloat, fl) do { \
+        for (const char* L : gles_libs) \
+            register_function_(L, #name, nullptr, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #endif
     // Core rendering.
     REG_GLES(glClear);
-    REG_GLES(glClearColor);
-    REG_GLES(glClearDepthf);
+    REG_GLES_FP(glClearColor, 4);
+    REG_GLES_FP(glClearDepthf, 1);
     REG_GLES(glClearStencil);
     REG_GLES(glFlush);
     REG_GLES(glFinish);
@@ -651,12 +950,12 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES(glHint);
     REG_GLES(glFrontFace);
     REG_GLES(glCullFace);
-    REG_GLES(glLineWidth);
+    REG_GLES_FP(glLineWidth, 1);
     REG_GLES(glPolygonOffset);
     REG_GLES(glPixelStorei);
     // Shaders.
     REG_GLES(glCreateShader);
-    REG_GLES_PTR(glShaderSource, 0x08);
+    REG_GLES_EX(glShaderSource, 0x0C, 0, 0, THUNK_SHADER_SOURCE);
     REG_GLES(glCompileShader);
     REG_GLES(glDeleteShader);
     REG_GLES(glCreateProgram);
@@ -671,16 +970,23 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES_PTR(glGetProgramInfoLog, 0x08);
     REG_GLES_PTR(glGetAttribLocation, 0x02);
     REG_GLES_PTR(glGetUniformLocation, 0x02);
+    REG_GLES_PTR(glBindAttribLocation, 0x04);
     REG_GLES(glUniform1i);
-    REG_GLES(glUniform1f);
-    REG_GLES(glUniform2f);
-    REG_GLES(glUniform3f);
-    REG_GLES(glUniform4f);
+    REG_GLES_EX(glUniform1f, 0, 1, 1, THUNK_MIXED_FP);
+    REG_GLES_EX(glUniform2f, 0, 1, 2, THUNK_MIXED_FP);
+    REG_GLES_EX(glUniform3f, 0, 1, 3, THUNK_MIXED_FP);
+    REG_GLES_EX(glUniform4f, 0, 1, 4, THUNK_MIXED_FP);
     REG_GLES_PTR(glUniform1fv, 0x04);
+    REG_GLES_PTR(glUniform2fv, 0x04);
+    REG_GLES_PTR(glUniform3fv, 0x04);
+    REG_GLES_PTR(glUniform4fv, 0x04);
+    REG_GLES_PTR(glUniformMatrix3fv, 0x20);
     REG_GLES_PTR(glUniformMatrix4fv, 0x20);
     REG_GLES(glEnableVertexAttribArray);
     REG_GLES(glDisableVertexAttribArray);
     REG_GLES_PTR(glVertexAttribPointer, 0x80);
+    REG_GLES_PTR(glGetFloatv, 0x02);
+    REG_GLES_PTR(glGetBooleanv, 0x02);
     // VBOs.
     REG_GLES_PTR(glGenBuffers, 0x02);
     REG_GLES_PTR(glDeleteBuffers, 0x02);
@@ -705,9 +1011,9 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES(glActiveTexture);
     REG_GLES(glGenerateMipmap);
     REG_GLES(glTexParameteri);
-    REG_GLES(glTexParameterf);
-    REG_GLES(glTexImage2D);
-    REG_GLES(glTexSubImage2D);
+    REG_GLES_EX(glTexParameterf, 0, 2, 1, THUNK_MIXED_FP);
+    REG_GLES_EX(glTexImage2D, (1u << 8), 1, 0, 0);
+    REG_GLES_EX(glTexSubImage2D, (1u << 8), 1, 0, 0);
     // Drawing.
     REG_GLES(glDrawArrays);
     REG_GLES_PTR(glDrawElements, 0x10);
@@ -720,16 +1026,18 @@ void GraphicThunk::register_known_symbols_() {
     // Depth/Stencil.
     REG_GLES(glDepthFunc);
     REG_GLES(glDepthMask);
-    REG_GLES(glDepthRangef);
+    REG_GLES_FP(glDepthRangef, 2);
     REG_GLES(glStencilFunc);
     REG_GLES(glStencilOp);
     REG_GLES(glStencilMask);
     // Queries.
-    REG_GLES_PTR(glGetString, 0x00);
+    REG_GLES_EX(glGetString, 0, 0, 0, THUNK_RET_STRING);
     REG_GLES_PTR(glGetIntegerv, 0x02);
     REG_GLES(glSampleCoverage);
 #undef REG_GLES
 #undef REG_GLES_PTR
+#undef REG_GLES_FP
+#undef REG_GLES_EX
     // ── libEGL.so / libEGL.so.1 ───────────────────────────────────
     const char* egl_libs[] = {"libEGL.so", "libEGL.so.1"};
 #if defined(BIFROST_THUNK_HAVE_EGL)
@@ -756,11 +1064,27 @@ void GraphicThunk::register_known_symbols_() {
     REG_EGL(eglGetConfigAttrib);
     REG_EGL(eglGetError);
     REG_EGL(eglTerminate);
-    REG_EGL(eglGetDisplay);
     REG_EGL(eglBindAPI);
     REG_EGL(eglReleaseThread);
     REG_EGL(eglWaitGL);
     REG_EGL(eglWaitNative);
+    REG_EGL(eglSwapInterval);
+    REG_EGL(eglQueryString);
+    // Resolve extension/GL entry points to our trampolines.
+#if defined(BIFROST_THUNK_HAVE_EGL)
+    {
+        void* p = dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+        if (!p) p = reinterpret_cast<void*>(1);
+        for (const char* L : egl_libs)
+            register_function_(L, "eglGetProcAddress", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+    }
+#else
+    for (const char* L : egl_libs)
+        register_function_(L, "eglGetProcAddress",
+                           reinterpret_cast<void*>(1), 0x01, 0, 0,
+                           THUNK_GET_PROC);
+#endif
 #undef REG_EGL
     // ── libSDL2.so / libSDL2-2.0.so.0 ─────────────────────────────
     const char* sdl_libs[] = {"libSDL2.so", "libSDL2-2.0.so.0"};
@@ -769,14 +1093,31 @@ void GraphicThunk::register_known_symbols_() {
         void* p = dlsym(RTLD_DEFAULT, #name); \
         for (const char* L : sdl_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_SDL_PTR(name, ptrs) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : sdl_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
+    #define REG_SDL_EX(name, ptrs, nstack, nfloat, fl) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : sdl_libs) \
+            register_function_(L, #name, p, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #else
     #define REG_SDL(name) do { \
         for (const char* L : sdl_libs) register_function_(L, #name, nullptr); \
     } while(0)
+    #define REG_SDL_PTR(name, ptrs) do { \
+        for (const char* L : sdl_libs) register_function_(L, #name, nullptr, ptrs); \
+    } while(0)
+    #define REG_SDL_EX(name, ptrs, nstack, nfloat, fl) do { \
+        for (const char* L : sdl_libs) \
+            register_function_(L, #name, nullptr, ptrs, nstack, nfloat, fl); \
+    } while(0)
 #endif
     REG_SDL(SDL_Init);
     REG_SDL(SDL_Quit);
-    REG_SDL(SDL_CreateWindow);
+    // title string is arg 0
+    REG_SDL_PTR(SDL_CreateWindow, 0x01);
     REG_SDL(SDL_CreateWindowAndRenderer);
     REG_SDL(SDL_DestroyWindow);
     REG_SDL(SDL_GL_CreateContext);
@@ -784,17 +1125,31 @@ void GraphicThunk::register_known_symbols_() {
     REG_SDL(SDL_GL_MakeCurrent);
     REG_SDL(SDL_GL_SwapWindow);
     REG_SDL(SDL_GL_SetAttribute);
-    REG_SDL(SDL_GL_GetAttribute);
-    REG_SDL(SDL_PollEvent);
-    REG_SDL(SDL_WaitEvent);
-    REG_SDL(SDL_PushEvent);
+    REG_SDL_PTR(SDL_GL_GetAttribute, 0x02);
+#if defined(BIFROST_THUNK_HAVE_SDL2)
+    {
+        void* p = dlsym(RTLD_DEFAULT, "SDL_GL_GetProcAddress");
+        if (!p) p = reinterpret_cast<void*>(1);
+        for (const char* L : sdl_libs)
+            register_function_(L, "SDL_GL_GetProcAddress", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+    }
+#else
+    for (const char* L : sdl_libs)
+        register_function_(L, "SDL_GL_GetProcAddress",
+                           reinterpret_cast<void*>(1), 0x01, 0, 0,
+                           THUNK_GET_PROC);
+#endif
+    REG_SDL_PTR(SDL_PollEvent, 0x01);
+    REG_SDL_PTR(SDL_WaitEvent, 0x01);
+    REG_SDL_PTR(SDL_PushEvent, 0x01);
     REG_SDL(SDL_GetWindowSurface);
     REG_SDL(SDL_UpdateWindowSurface);
     REG_SDL(SDL_UpdateWindowSurfaceRects);
-    REG_SDL(SDL_SetWindowTitle);
-    REG_SDL(SDL_GetWindowTitle);
+    REG_SDL_PTR(SDL_SetWindowTitle, 0x02);
+    REG_SDL_EX(SDL_GetWindowTitle, 0, 0, 0, THUNK_RET_STRING);
     REG_SDL(SDL_SetWindowSize);
-    REG_SDL(SDL_GetWindowSize);
+    REG_SDL_PTR(SDL_GetWindowSize, 0x06);
     REG_SDL(SDL_SetWindowPosition);
     REG_SDL(SDL_ShowWindow);
     REG_SDL(SDL_HideWindow);
@@ -802,11 +1157,13 @@ void GraphicThunk::register_known_symbols_() {
     REG_SDL(SDL_SetWindowFullscreen);
     REG_SDL(SDL_GetWindowFlags);
     REG_SDL(SDL_GetTicks);
+    REG_SDL(SDL_GetPerformanceCounter);
+    REG_SDL(SDL_GetPerformanceFrequency);
     REG_SDL(SDL_Delay);
-    REG_SDL(SDL_GetError);
+    REG_SDL_EX(SDL_GetError, 0, 0, 0, THUNK_RET_STRING);
     REG_SDL(SDL_ClearError);
-    REG_SDL(SDL_SetHint);
-    REG_SDL(SDL_GetHint);
+    REG_SDL_PTR(SDL_SetHint, 0x03);
+    REG_SDL_EX(SDL_GetHint, 0x01, 0, 0, THUNK_RET_STRING);
     REG_SDL(SDL_CreateRenderer);
     REG_SDL(SDL_DestroyRenderer);
     REG_SDL(SDL_SetRenderDrawColor);
@@ -856,6 +1213,8 @@ void GraphicThunk::register_known_symbols_() {
     REG_SDL(SDL_Vulkan_GetVkGetInstanceProcAddr);
     REG_SDL(SDL_Vulkan_CreateSurface);
 #undef REG_SDL
+#undef REG_SDL_PTR
+#undef REG_SDL_EX
 }
 // ── FrostGraphics::thunk() — out-of-line definition ───────────────────
 // Lives here (not in graphics.cpp) because it needs the full

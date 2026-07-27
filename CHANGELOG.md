@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Current session (2026-07-26)
+
+### Build/test fixes + SDL2/GL demo verification + docs refresh
+
+Fixed a build break in `include/frost/thunk.hpp`, corrected the test
+runner’s exit-code handling so SDL/GL skip semantics work, verified the
+SDL2/OpenGL guest demo end-to-end, and refreshed documentation to match
+the current state.
+
+**Build fix (`include/frost/thunk.hpp`):**
+
+- Restored missing `//` comment prefixes on three lines in the
+  GraphicThunk header comment block. Without this, the file failed to
+  parse, so downstream TUs only saw the forward declaration from
+  `frost/graphics.hpp` and compilation aborted with “invalid use of
+  incomplete type ‘class arm64emu::GraphicThunk’”.
+
+**Test runner fixes (`scripts/run_tests.sh`):**
+
+- Added proper exit-code 77 skip handling (autoconf convention). The
+  SDL/GL demo returns 77 when no display/GL is available; previously
+  the runner treated any non-zero exit as FAIL.
+- Fixed a pipeline exit-code bug: `rc=$?` after a command-substitution
+  pipeline captured `tr`’s exit code (always 0), not `timeout`’s.
+  Replaced with a temp-file approach so the emulator’s real exit code
+  is checked.
+
+**SDL/GL demo test fix (`ctest_real/test_sdl_gl_triangle.c`):**
+
+- `SDL_CreateWindow` and `SDL_GL_CreateContext` failures now return 77
+  (SKIP) instead of 1 (FAIL). These are display-related failures that
+  should be skipped in headless environments, not reported as bugs.
+
+**SDL2/GL build verification:**
+
+- Built with `make USE_SDL2=1 USE_THUNK_GL=1`.
+- Ran `DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf`:
+  `GL_VENDOR=AMD`, 30 frames, `ALL PASS`.
+- Full suite with SDL2 build: 175 pass, 0 fail, 0 skip.
+
+**Documentation:**
+
+- Updated `README.md` thunk section with current marshalling details
+  and SDL2/GL demo build/run instructions.
+- Updated `ROADMAP.md` current focus to SDL2/OpenGL demo readiness.
+- Updated `TESTS.md` counts to reflect new unit/integration tests.
+- Added `agent.md` to project root.
+
 ## [Unreleased] — Turn 106 (2026-07-15)
 
 ### Code review cleanup + optimization + all 171 tests pass

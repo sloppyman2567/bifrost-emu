@@ -739,6 +739,64 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
 //
 // Returns true on success, filling out_size_off and out_align_off.
 // Returns false if detection fails (caller falls back to known offsets).
+bool DynamicLinker::detect_dlopen_hook_offset_(uint32_t& out_hook_off) {
+    out_hook_off = 0;
+    // Prefer dlopen@@GLIBC_2.34; fall back to __libc_dlopen_mode.
+    const char* fn_name = "dlopen";
+    uint64_t fn = resolve_symbol("dlopen");
+    if (fn == 0) {
+        fn_name = "__libc_dlopen_mode";
+        fn = resolve_symbol("__libc_dlopen_mode");
+    }
+    if (fn == 0) return false;
+    uint8_t code[96];
+    try {
+        mem_.read(fn, code, sizeof(code));
+    } catch (...) {
+        return false;
+    }
+    // Same ADRP+LDR chain used by detect_tls_field_offsets_: once a
+    // register holds &_rtld_global_ro, the next LDR from that base with
+    // an offset in the known hook window is the dlfcn_hook pointer.
+    uint32_t rtld_ro_reg = 0xFFFFFFFF;
+    bool rtld_ro_reg_valid = false;
+    for (size_t i = 0; i + 4 <= sizeof(code); i += 4) {
+        uint32_t insn;
+        memcpy(&insn, code + i, 4);
+        if ((insn & 0x9F000000) == 0x90000000) {
+            rtld_ro_reg = insn & 0x1F;
+            rtld_ro_reg_valid = false;
+            continue;
+        }
+        if ((insn & 0xFFC00000) == 0xF9400000) {
+            uint32_t rn = (insn >> 5) & 0x1F;
+            uint32_t rt = insn & 0x1F;
+            uint32_t imm12 = (insn >> 10) & 0xFFF;
+            uint32_t off = imm12 * 8;  // 64-bit LDR
+            // Hook field first: glibc often reuses the same register
+            // (ldr x4, [x4, #376]), which looks like the ADRP+LDR GOT
+            // chain — so check the hook window whenever the base is
+            // already known to hold &_rtld_global_ro.
+            if (rtld_ro_reg_valid && rn == rtld_ro_reg &&
+                off >= 0x160 && off <= 0x190) {
+                out_hook_off = off;
+                if (dynlink_trace_enabled()) {
+                    fprintf(stderr, "[dynlink] detected dlopen hook offset "
+                            "+0x%x via %s @0x%llx+%zu\n",
+                            off, fn_name,
+                            static_cast<unsigned long long>(fn), i);
+                }
+                return true;
+            }
+            if (rtld_ro_reg != 0xFFFFFFFF && rn == rtld_ro_reg && rt == rn) {
+                rtld_ro_reg = rt;
+                rtld_ro_reg_valid = true;
+                continue;
+            }
+        }
+    }
+    return false;
+}
 bool DynamicLinker::detect_tls_field_offsets_(uint32_t& out_size_off,
                                                uint32_t& out_align_off) {
     out_size_off = 0;
@@ -919,18 +977,45 @@ void DynamicLinker::patch_rtld_global_ro_() {
         // not be mapped at the expected address. This is non-fatal;
         // glibc will hit the assertion later (visible failure).
     }
-    // dlopen hook: write to _rtld_global_ro + 368.
-    // glibc's __libc_dlopen_mode and dlopen@@GLIBC_2.34 both read
-    // _rtld_global_ro from *(libc_base + 0x19FE70), then read +368 and +0/+72.
-    // The _dl_open_hook field IS at _rtld_global_ro + 368 — it's a field
-    // WITHIN the struct, NOT a separate data variable.
-    // Writing to shim + 368 is safe (no overlap with dl_pagesize at +24).
+    // dlopen / dlfcn hook pointer inside _rtld_global_ro.
+    // glibc's dlopen@@GLIBC_2.34 and __libc_dlopen_mode do:
+    //   ldr xN, [rtld_global_ro, #hook_off]  → hook struct*
+    //   ldr xM, [xN] / [xN, #72]             → _dl_open
+    // The hook field offset moved across glibc versions:
+    //   glibc ≤2.40: +368 (0x170)
+    //   glibc 2.43+:  +376 (0x178)
+    // Hardcoding 368 made dlopen fall into the no-hook path on 2.43,
+    // which calls the real ld-linux _dl_open and ends at pc=0.
     if (dlopen_hook_ptr_ != 0) {
         try {
-            mem_.store<uint64_t>(rtld_ro + 368, dlopen_hook_ptr_);
-            if (dynlink_trace_enabled()) {
-                fprintf(stderr, "[dynlink] patched _rtld_global_ro + 368 = 0x%llx\n",
-                        static_cast<unsigned long long>(dlopen_hook_ptr_));
+            uint32_t hook_off = 0;
+            bool hook_detected = detect_dlopen_hook_offset_(hook_off);
+            // Known offsets newest-first; spray only empty slots so we
+            // never clobber a non-NULL field that belongs to another
+            // member of rtld_global_ro.
+            constexpr uint32_t known_hook_offs[] = {376, 368};
+            if (hook_detected) {
+                mem_.store<uint64_t>(rtld_ro + hook_off, dlopen_hook_ptr_);
+                if (dynlink_trace_enabled()) {
+                    fprintf(stderr, "[dynlink] patched _rtld_global_ro + %u "
+                            "= 0x%llx (dlopen hook, detected)\n",
+                            hook_off,
+                            static_cast<unsigned long long>(dlopen_hook_ptr_));
+                }
+            } else {
+                for (uint32_t off : known_hook_offs) {
+                    uint64_t cur = 0;
+                    try { cur = mem_.load<uint64_t>(rtld_ro + off); }
+                    catch (...) { continue; }
+                    if (cur != 0) continue;
+                    mem_.store<uint64_t>(rtld_ro + off, dlopen_hook_ptr_);
+                    if (dynlink_trace_enabled()) {
+                        fprintf(stderr, "[dynlink] patched _rtld_global_ro + %u "
+                                "= 0x%llx (dlopen hook, spray)\n",
+                                off,
+                                static_cast<unsigned long long>(dlopen_hook_ptr_));
+                    }
+                }
             }
         } catch (...) {}
     }
@@ -2263,13 +2348,14 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
                                              const std::string& parent_rpath) {
     std::string path;
     auto data = find_library(soname, path, parent_runpath, parent_rpath);
-    if (data.empty()) {
-        // Library not found on disk. If a thunk resolver is registered
-        // and this is a known graphic library, register a synthetic
-        // LoadedObject whose symbols resolve via the thunk.
-        // This lets dynamically-linked guest programs that use GL/EGL/
-        // SDL2 work without the host having the AArch64 versions of
-        // those libraries installed.
+    // Host search paths often surface x86_64 libGL/libSDL2. Those must
+    // NOT be mapped as guest code — prefer the GraphicThunk synthetic
+    // object whenever the file is missing or not AArch64.
+    constexpr uint16_t EM_AARCH64 = 183;
+    bool aarch64_elf = data.size() >= 20
+        && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
+        && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+    if (!aarch64_elf) {
         if (thunk_resolver_ && is_thunk_supported_lib_(soname)) {
             return register_thunk_library_(soname);
         }
@@ -2961,15 +3047,42 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
     if (path.find('/') == std::string::npos) {
         std::string found_path;
         auto data = find_library(path, found_path);
-        if (!data.empty()) {
+        constexpr uint16_t EM_AARCH64 = 183;
+        bool aarch64_elf = data.size() >= 20
+            && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
+            && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+        if (aarch64_elf) {
             resolved = found_path;
-            // Read the file directly from the data vector.
             std::vector<uint8_t> file_data = std::move(data);
             return load_library_from_data(path, file_data);
         }
+        // Missing or host-arch library: thunk graphic/audio/display APIs.
+        if (thunk_resolver_ && is_thunk_supported_lib_(path)) {
+            return register_thunk_library_(path);
+        }
+        if (data.empty()) {
+            set_last_error("cannot find '" + path + "'");
+            error_ = "load_library: cannot find '" + path + "'";
+            return 0;
+        }
+        set_last_error("'" + path + "' is not an AArch64 ELF");
+        error_ = "load_library: wrong ELF machine for '" + path + "'";
+        return 0;
     }
     std::ifstream f(resolved, std::ios::binary | std::ios::ate);
     if (!f) {
+        // Absolute path missing under BIFROST_ROOT / host: fall back to
+        // soname search (e.g. /lib/libm.so.6 → aarch64 libm on the
+        // toolchain search path).
+        std::string found_path;
+        auto data = find_library(basename, found_path);
+        constexpr uint16_t EM_AARCH64 = 183;
+        bool aarch64_elf = data.size() >= 20
+            && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
+            && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+        if (aarch64_elf) {
+            return load_library_from_data(path, data);
+        }
         set_last_error("cannot open '" + resolved + "'");
         error_ = "load_library: cannot open '" + resolved + "'";
         return 0;
@@ -2981,6 +3094,22 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
         set_last_error("read error");
         error_ = "load_library: read error";
         return 0;
+    }
+    constexpr uint16_t EM_AARCH64 = 183;
+    bool aarch64_elf = data.size() >= 20
+        && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
+        && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
+    if (!aarch64_elf) {
+        // Host absolute path resolved to a non-guest ELF (common when
+        // BIFROST_ROOT lacks the lib and /lib/libm.so.6 is x86_64).
+        std::string found_path;
+        auto alt = find_library(basename, found_path);
+        bool alt_ok = alt.size() >= 20
+            && alt[0] == 0x7f && alt[1] == 'E' && alt[2] == 'L' && alt[3] == 'F'
+            && alt[18] == (EM_AARCH64 & 0xFF) && alt[19] == (EM_AARCH64 >> 8);
+        if (alt_ok) {
+            return load_library_from_data(path, alt);
+        }
     }
     return load_library_from_data(path, data);
 }
@@ -2994,6 +3123,18 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
         data[2] != 'L' || data[3] != 'F') {
         set_last_error("not an ELF file");
         error_ = "load_library: not an ELF file";
+        return 0;
+    }
+    // Absolute-path dlopen used to map host x86_64 libs (e.g. host
+    // /lib/libm.so.6) when the guest rootfs was missing the soname.
+    // Reject non-AArch64 images before mmap so we never execute host
+    // machine code as guest.
+    constexpr uint16_t EM_AARCH64 = 183;
+    uint16_t e_machine = 0;
+    memcpy(&e_machine, data.data() + 18, 2);
+    if (e_machine != EM_AARCH64) {
+        set_last_error("'" + path + "' is not an AArch64 ELF");
+        error_ = "load_library: wrong ELF machine for '" + path + "'";
         return 0;
     }
     uint64_t max_end = 0;

@@ -196,6 +196,9 @@ UNIT_TESTS=(
     "ldp_stp|ctest/jit_ldp_stp.elf||5|PASS"
     "madd|ctest/jit_madd.elf||5|PASS"
     "neon|ctest/jit_neon.elf||5|PASS"
+    "neon_advanced|ctest/jit_neon_advanced.elf||5|checks passed"
+    "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
+    "mvni_softfloat|ctest/jit_mvni_softfloat.elf||5|checks passed"
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "loop|ctest/loop.elf||5|Loop value"
@@ -267,6 +270,9 @@ INTEGRATION_TESTS=(
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
     "sdl_demo|ctest_real/test_sdl_demo.elf||15|drew 60 frames"
+    # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
+    # Exit 77 = skip when SDL/GL unavailable.
+    "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
     # NEW (Turn 74): comprehensive game demo — bouncing ball with
     # framebuffer, input, audio, and game loop.
     "game_demo|ctest_real/test_game_demo.elf||15|game: done"
@@ -559,12 +565,19 @@ run_test() {
     # that forked child processes (guest fork()) are also killed — without
     # this, a hung test would leave orphaned processes that keep the test
     # runner hanging forever.
+    # Use a temp file to capture output so we can get the real
+    # exit code from timeout (PIPESTATUS is lost inside command
+    # substitutions which run in subshells).
+    local tmpout
+    tmpout=$(mktemp)
     if [ -n "$stdin" ]; then
-        output=$(printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file 2>&1 | tr -d '\0')
+        printf "$stdin" | env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file > "$tmpout" 2>&1
     else
-        output=$(env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null 2>&1 | tr -d '\0')
+        env $ENV_PREFIX timeout -s KILL "$tout" $EMU $EMU_FLAGS $file </dev/null > "$tmpout" 2>&1
     fi
     rc=$?
+    output=$(tr -d '\0' < "$tmpout")
+    rm -f "$tmpout"
 
     # Determine pass/fail
     local status="PASS"
@@ -582,6 +595,13 @@ run_test() {
             status="FAIL"
             reason="timeout (rc=$rc)"
         fi
+    fi
+    # Exit code 77 = skip (autoconf convention). Treat as success
+    # for counting purposes — the test is not applicable in this
+    # environment (e.g., SDL/GL unavailable, no display).
+    if [ $rc -eq 77 ]; then
+        status="SKIP"
+        reason="exit 77 (skip)"
     fi
     if [ $rc -ne 0 ] && [ "$status" = "PASS" ]; then
         status="FAIL"
@@ -604,11 +624,15 @@ run_test() {
     # Print result
     local color="$C_GRN"
     [ "$status" = "FAIL" ] && color="$C_RED"
+    [ "$status" = "SKIP" ] && color="$C_YLW"
     printf "  ${color}%-8s${C_RST} ${C_DIM}%-40s${C_RST}" "$status" "$name"
     if [ "$status" = "FAIL" ]; then
         printf " ${C_RED}%s${C_RST}\n" "$reason"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_TESTS+=("$name ($reason)")
+    elif [ "$status" = "SKIP" ]; then
+        printf " ${C_YLW}%s${C_RST}\n" "$reason"
+        SKIP_COUNT=$((SKIP_COUNT + 1))
     else
         printf "\n"
         PASS_COUNT=$((PASS_COUNT + 1))

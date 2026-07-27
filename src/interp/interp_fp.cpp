@@ -1000,102 +1000,180 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
-            // MOVI (vector immediate, MSL form)
-            // Top byte 0x2F/0x6F. Strip Q (bit 30) and U (bit 29).
-            if (((op & ~((1u << 30) | (1u << 29))) & 0xFF001C00) == 0x0F001C00) {
-                uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
-                uint8_t msl = (op >> 13) & 3;
-                uint64_t val = 0;
-                for (int i = 0; i < 8; i++) val |= (static_cast<uint64_t>(imm8)) << (i * 8);
-                val <<= (8 * msl);
-                cpu.v_lo[rd] = val;
-                if (Q) cpu.v_hi[rd] = val;
-                else cpu.v_hi[rd] = 0;
-                return;
-            }
-            // MOVI (vector immediate, all cmode forms) — top byte 0x0F/0x4F/0x6F
-            // Encoding: 0 Q U 01110 abc defgh cmode 01 Rn Rd
-            // After stripping Q (bit 30) and U (bit 29), check:
-            //   bits[31:24] = 0x0F, bits[11:10] = 01
-            // This matches ALL cmode values (0x0 through 0xE), not just 0xE.
-            // Previously only cmode=0xE was matched, causing MOVI Vd.4S, #0
-            // (cmode=0, used to zero V registers) to be silently ignored.
-            // This broke toybox sh's stack zeroing (STP Q0,Q0 after MOVI
-            // V0.4S,#0), corrupting the option parse node list.
-            //
-            // CRITICAL: must check immh (bits[23:20]) == 0 to distinguish
-            // MOVI from SSHR/USHR/SHL. The "Advanced SIMD modified immediate"
-            // and "Advanced SIMD shift by immediate" groups share bits[28:24]
-            // = 01110 and bit 23 = 0 (for 32-bit shifts where immh < 8).
-            // The ARM ARM resolves the ambiguity: if immh != 0, it's a shift;
-            // if immh == 0, it's MOVI. The old code didn't check immh, so
-            // SSHR/USHR/SHL with 32-bit elements were misdecoded as MOVI
-            // (writing an immediate instead of shifting). This silently broke
-            // every NEON shift by immediate — the root cause of the md5sum
-            // failure (toybox's MD5 uses vshrq_n_u32 for rotates).
-            if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
-                && ((op >> 20) & 0xF) == 0  // immh == 0 → MOVI/MVNI, not shift
-                && (((op >> 10) & 0x3F) != 0x21  // exclude SHRN (bits[15:10]=100001)
-                    || ((op >> 29) & 1))) {      // but NOT for MVNI (U=1)
-                // source, which collides with the MOVI/MVNI pattern. SHRN
-                // has bits[15:10] = 100001 (0x21), while MOVI/MVNI has
-                // bits[11:10] = 00. Check bits[15:10] to distinguish.
-                // Without this, `shrn v0.8b, v0.8h, #4` (0x0f0c8400) was
-                // treated as MVNI, producing wrong results.
-                uint8_t cmode = (op >> 12) & 0xF;
-                uint8_t imm8 = ((op >> 16) & 0x7) << 5 | ((op >> 5) & 0x1F);
-                // U bit (bit 29): 0 = MOVI, 1 = MVNI (invert).
-                // IMPORTANT: for cmode=0xE (byte replication), the U bit
-                // does NOT select MOVI/MVNI — both U=0 and U=1 are MOVI.
-                // This is because binutils uses U=1 for 'movi vD.2d, #0'
-                // to encode the 128-bit zero form. MVNI (invert) only
-                // applies for cmode 0x0-0xD. Without this exception,
-                // 'movi v1.2d, #0' (0x6F00E401, U=1, cmode=0xE) would
-                // produce all-ones instead of all-zeros, breaking every
-                // program that uses MOVI to zero a vector register.
-                bool is_mvni = ((op >> 29) & 1) && (cmode != 0xE);
-                if (cmode == 0xE) {
-                    // cmode=0xE: broadcast imm8 to all bytes
-                    uint64_t val = 0;
-                    for (int i = 0; i < 8; i++) val |= (static_cast<uint64_t>(imm8)) << (i * 8);
-                    if (is_mvni) val = ~val;
-                    cpu.v_lo[rd] = val;
-                    if (Q) cpu.v_hi[rd] = val;
-                    else cpu.v_hi[rd] = 0;
-                } else {
-                    uint8_t buf[16] = {0};
-                    if (cmode <= 0x1) {
-                        int byte_pos = cmode & 1;
-                        for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
-                            buf[lane * 4 + byte_pos] = imm8;
+            // ZIP1/ZIP2 / UZP1/UZP2 / TRN1/TRN2 — permute pairs.
+            // Encoding: 0 Q size 01110 00 Rm 0 opc 10 Rn Rd (U=0).
+            // opc6 = bits[15:10] (empirically from gas):
+            //   UZP1=0x06 TRN1=0x0A ZIP1=0x0E
+            //   UZP2=0x16 TRN2=0x1A ZIP2=0x1E
+            if (((op >> 24) & 0x1F) == 0x0E && ((op >> 21) & 1) == 0
+                && ((op >> 29) & 1) == 0) {
+                uint8_t opc6 = (op >> 10) & 0x3F;
+                if (opc6 == 0x06 || opc6 == 0x0A || opc6 == 0x0E
+                    || opc6 == 0x16 || opc6 == 0x1A || opc6 == 0x1E) {
+                    int esize = 1 << size;
+                    int pairs = (Q ? 16 : 8) / (esize * 2);
+                    if (pairs < 1) pairs = 1;
+                    uint8_t a[16], b[16], out[16] = {0};
+                    memcpy(a, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(a + 8, &cpu.v_hi[rn], 8);
+                    memcpy(b, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(b + 8, &cpu.v_hi[rm], 8);
+                    int part = (opc6 == 0x16 || opc6 == 0x1A || opc6 == 0x1E) ? 1 : 0;
+                    bool is_zip = (opc6 == 0x0E || opc6 == 0x1E);
+                    bool is_uzp = (opc6 == 0x06 || opc6 == 0x16);
+                    // TRN otherwise.
+                    if (is_zip) {
+                        // ZIP1: interleave low halves; ZIP2: high halves.
+                        int base = part * pairs * esize;
+                        for (int i = 0; i < pairs; i++) {
+                            memcpy(out + (2 * i) * esize, a + base + i * esize, esize);
+                            memcpy(out + (2 * i + 1) * esize, b + base + i * esize, esize);
                         }
-                    } else if (cmode <= 0x3) {
-                        int byte_pos = cmode & 1;
-                        for (int lane = 0; lane < (Q ? 8 : 4); lane++) {
-                            buf[lane * 2 + byte_pos] = imm8;
-                        }
-                    } else if (cmode <= 0x5) {
-                        int byte_pos = 1 + (cmode & 1);
-                        for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
-                            buf[lane * 4 + byte_pos] = imm8;
-                        }
-                    } else if (cmode <= 0x7) {
-                        int byte_pos = 2 + (cmode & 1);
-                        for (int lane = 0; lane < (Q ? 4 : 2); lane++) {
-                            buf[lane * 4 + byte_pos] = imm8;
+                    } else if (is_uzp) {
+                        // UZP1: even elements from a||b; UZP2: odd.
+                        int total = pairs * 2;
+                        int out_i = 0;
+                        for (int src = 0; src < 2; src++) {
+                            const uint8_t* s = src ? b : a;
+                            for (int i = 0; i < total; i++) {
+                                if ((i & 1) == part) {
+                                    memcpy(out + out_i * esize, s + i * esize, esize);
+                                    out_i++;
+                                }
+                            }
                         }
                     } else {
-                        int byte_pos = cmode & 0x7;
-                        buf[byte_pos] = imm8;
-                        if (Q) buf[8 + byte_pos] = imm8;
+                        // TRN1/TRN2: transpose 2x2 element pairs.
+                        for (int i = 0; i < pairs; i++) {
+                            const uint8_t* s0 = a + (2 * i + part) * esize;
+                            const uint8_t* s1 = b + (2 * i + part) * esize;
+                            memcpy(out + (2 * i) * esize, s0, esize);
+                            memcpy(out + (2 * i + 1) * esize, s1, esize);
+                        }
                     }
-                    if (is_mvni) {
-                        for (int i = 0; i < 16; i++) buf[i] = ~buf[i];
-                    }
-                    memcpy(&cpu.v_lo[rd], buf, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
                     else cpu.v_hi[rd] = 0;
+                    return;
                 }
+            }
+            // Advanced SIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
+            // Encoding: 0 Q op 01111 0 abc cmode o2 1 defgh Rd
+            // Must require immh==0 (bits[23:20]) so shift-by-immediate
+            // encodings (SHL/USHR/SSHR, which share bits[28:24]=01111) are
+            // not stolen. Also exclude SHRN (bits[15:10]=100001).
+            //
+            // cmode/op decode per ARM ARM:
+            //   0xx0 op=0/1 → MOVI/MVNI 32-bit LSL #(cmode[2:1]*8)
+            //   0xx1 op=0/1 → ORR /BIC  32-bit LSL #(cmode[2:1]*8)
+            //   10x0 op=0/1 → MOVI/MVNI 16-bit LSL #(cmode[1]*8)
+            //   10x1 op=0/1 → ORR /BIC  16-bit LSL #(cmode[1]*8)
+            //   110x op=0/1 → MOVI/MVNI 32-bit MSL #((cmode[0]+1)*8)
+            //   1110 op=0   → MOVI 8-bit (replicate imm8 to every byte)
+            //   1110 op=1   → MOVI 64-bit (each imm8 bit → 0x00/0xFF byte)
+            //   1111        → FMOV (handled elsewhere / reserved here)
+            // Use immh = bits[22:19] (not [23:20]): SSHLL/SHRN keep bit23=0
+            // so bits[23:20] can look like "immh==0" while bits[22:19]!=0.
+            // Real MOVI/MVNI/ORR/BIC always have bits[22:19]==0.
+            if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
+                && ((op >> 19) & 0xF) == 0
+                && (((op >> 10) & 0x3F) != 0x21
+                    || ((op >> 29) & 1))) {
+                uint8_t cmode = (op >> 12) & 0xF;
+                uint8_t imm8 = static_cast<uint8_t>(
+                    (((op >> 16) & 0x7) << 5) | ((op >> 5) & 0x1F));
+                bool opbit = (op >> 29) & 1;  // 'op' in ARM encoding
+                uint8_t dst[16];
+                memcpy(dst, &cpu.v_lo[rd], 8);
+                memcpy(dst + 8, &cpu.v_hi[rd], 8);
+
+                auto replicate_u32 = [&](uint32_t lane) {
+                    int n = Q ? 4 : 2;
+                    for (int i = 0; i < n; i++)
+                        memcpy(dst + i * 4, &lane, 4);
+                    if (!Q) memset(dst + 8, 0, 8);
+                };
+                auto replicate_u16 = [&](uint16_t lane) {
+                    int n = Q ? 8 : 4;
+                    for (int i = 0; i < n; i++)
+                        memcpy(dst + i * 2, &lane, 2);
+                    if (!Q) memset(dst + 8, 0, 8);
+                };
+                auto apply_or_bic_u32 = [&](uint32_t imm, bool bic) {
+                    int n = Q ? 4 : 2;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t v;
+                        memcpy(&v, dst + i * 4, 4);
+                        v = bic ? (v & ~imm) : (v | imm);
+                        memcpy(dst + i * 4, &v, 4);
+                    }
+                    if (!Q) memset(dst + 8, 0, 8);
+                };
+                auto apply_or_bic_u16 = [&](uint16_t imm, bool bic) {
+                    int n = Q ? 8 : 4;
+                    for (int i = 0; i < n; i++) {
+                        uint16_t v;
+                        memcpy(&v, dst + i * 2, 2);
+                        v = bic ? static_cast<uint16_t>(v & ~imm)
+                                : static_cast<uint16_t>(v | imm);
+                        memcpy(dst + i * 2, &v, 2);
+                    }
+                    if (!Q) memset(dst + 8, 0, 8);
+                };
+
+                if ((cmode & 0x9) == 0x0) {
+                    // 0xx0: MOVI/MVNI 32-bit LSL
+                    uint32_t imm = static_cast<uint32_t>(imm8)
+                                   << (((cmode >> 1) & 3) * 8);
+                    if (opbit) imm = ~imm;
+                    replicate_u32(imm);
+                } else if ((cmode & 0x9) == 0x1) {
+                    // 0xx1: ORR/BIC 32-bit LSL
+                    uint32_t imm = static_cast<uint32_t>(imm8)
+                                   << (((cmode >> 1) & 3) * 8);
+                    apply_or_bic_u32(imm, opbit);
+                } else if ((cmode & 0xD) == 0x8) {
+                    // 10x0: MOVI/MVNI 16-bit LSL
+                    uint16_t imm = static_cast<uint16_t>(
+                        static_cast<uint16_t>(imm8) << ((cmode & 2) ? 8 : 0));
+                    if (opbit) imm = static_cast<uint16_t>(~imm);
+                    replicate_u16(imm);
+                } else if ((cmode & 0xD) == 0x9) {
+                    // 10x1: ORR/BIC 16-bit LSL
+                    uint16_t imm = static_cast<uint16_t>(
+                        static_cast<uint16_t>(imm8) << ((cmode & 2) ? 8 : 0));
+                    apply_or_bic_u16(imm, opbit);
+                } else if ((cmode & 0xE) == 0xC) {
+                    // 110x: MOVI/MVNI 32-bit MSL #8 or #16
+                    int shift = ((cmode & 1) + 1) * 8;
+                    uint32_t ones = (shift == 16) ? 0xFFFFu : 0xFFu;
+                    uint32_t imm = (static_cast<uint32_t>(imm8) << shift) | ones;
+                    if (opbit) imm = ~imm;
+                    replicate_u32(imm);
+                } else if (cmode == 0xE && !opbit) {
+                    // MOVI 8-bit: replicate imm8 across all bytes
+                    uint64_t val = 0;
+                    for (int i = 0; i < 8; i++)
+                        val |= static_cast<uint64_t>(imm8) << (i * 8);
+                    cpu.v_lo[rd] = val;
+                    cpu.v_hi[rd] = Q ? val : 0;
+                    return;
+                } else if (cmode == 0xE && opbit) {
+                    // MOVI 64-bit: each imm8 bit selects 0x00 or 0xFF byte
+                    uint64_t val = 0;
+                    for (int i = 0; i < 8; i++) {
+                        if (imm8 & (1u << i))
+                            val |= 0xFFULL << (i * 8);
+                    }
+                    cpu.v_lo[rd] = val;
+                    cpu.v_hi[rd] = Q ? val : 0;
+                    return;
+                } else {
+                    // cmode=0xF FMOV — leave to FP scalar paths / NOP
+                    return;
+                }
+                memcpy(&cpu.v_lo[rd], dst, 8);
+                memcpy(&cpu.v_hi[rd], dst + 8, 8);
                 return;
             }
             // SHL (vector, immediate) — mask 0xBF00FC00 excludes Q.
@@ -1415,6 +1493,45 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     cpu.v_hi[rd] = 0;
                 }
                 return;
+            }
+            // SSHLL / USHLL / SSHLL2 / USHLL2 — widen + left shift.
+            // Encoding: 0 Q U 01111 0 immh[3:0] immb[2:0] 101001 Rn Rd
+            // immh is bits[22:19], immb bits[18:16] (bit23 always 0).
+            // Using bits[23:20] wrongly sees immh=0 for 8-bit sources.
+            if (((op & ~((1u << 30) | (1u << 29))) & 0xFF00FC00) == 0x0F00A400) {
+                uint8_t immh = (op >> 19) & 0xF;   // bits[22:19]
+                uint8_t immb = (op >> 16) & 0x7;   // bits[18:16]
+                if (immh != 0) {
+                bool is_unsigned = (op >> 29) & 1;
+                int src_esize, shift;
+                if (immh == 1) { src_esize = 1; }
+                else if (immh <= 3) { src_esize = 2; }
+                else { src_esize = 4; }
+                int dst_esize = src_esize * 2;
+                shift = ((immh << 3) | immb) - (src_esize * 8);
+                if (shift < 0) shift = 0;
+                uint8_t src[16];
+                memcpy(src, &cpu.v_lo[rn], 8);
+                memcpy(src + 8, &cpu.v_hi[rn], 8);
+                int elems = 8 / src_esize;  // always 8/4/2 from a 64-bit half
+                int src_base = Q ? 8 : 0;
+                uint8_t out[16] = {0};
+                for (int i = 0; i < elems; i++) {
+                    uint64_t v = 0;
+                    memcpy(&v, src + src_base + i * src_esize, src_esize);
+                    if (!is_unsigned) {
+                        // Sign-extend from src_esize bytes.
+                        int bits = src_esize * 8;
+                        int64_t sv = static_cast<int64_t>(v << (64 - bits)) >> (64 - bits);
+                        v = static_cast<uint64_t>(sv);
+                    }
+                    v <<= shift;
+                    memcpy(out + i * dst_esize, &v, dst_esize);
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                memcpy(&cpu.v_hi[rd], out + 8, 8);
+                return;
+                }
             }
             // ── Vector ADD/SUB/MUL (integer) ──────────────────────────
             // Encoding: 0x0E208400 (ADD) / 0x2E208400 (SUB) / 0x0E209C00 (MUL)
