@@ -4,16 +4,15 @@
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
 # same sources minus main.cpp.
 #
-# Build options (set on the make command line, e.g. `make USE_SDL2=1`):
+# Build options (set on the make command line, e.g. `make`):
 #
 #   USE_SDL2=1     Enable SDL2 window backend for /dev/fb0.
-#                  Requires SDL2 dev headers. Either install libsdl2-dev
-#                  system-wide, or run ./tools/fetch-sdl2-headers.sh to
-#                  download them via apt-get download (no sudo needed).
-#                  Default: headless (no SDL2).
+#   USE_THUNK_GL=1 Enable host GL/EGL thunking (required for SDL2/GL apps).
+#   Default: auto-detect (enabled when sdl2-config is available).
 #
-#   SDL2_CFLAGS    Override SDL2 compiler flags. Default: $(sdl2-config --cflags)
-#   SDL2_LIBS      Override SDL2 linker flags.    Default: $(sdl2-config --libs)
+# Override examples:
+#   make USE_SDL2=0    # force headless build even if SDL2 is installed
+#   make USE_SDL2=1    # force SDL2 build (errors if not installed)
 #
 #   CXX            C++ compiler (default: g++)
 #   CXXFLAGS       C++ compiler flags
@@ -54,20 +53,26 @@ LIB_OBJECTS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(LIB_SOURCES))
 
 HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
 
-# ── SDL2 backend (opt-in) ────────────────────────────────────────────────
+# Default to SDL2/GL for standard builds; override with USE_SDL2=0 / USE_THUNK_GL=0
+USE_SDL2 ?= 1
+USE_THUNK_GL ?= 1
+
 ifeq ($(USE_SDL2),1)
     SDL2_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null)
     SDL2_LIBS   ?= $(shell sdl2-config --libs   2>/dev/null)
-    CXXFLAGS += $(SDL2_CFLAGS) -DBIFROST_USE_SDL2 -DBIFROST_THUNK_HAVE_SDL2
-    LDFLAGS  += $(SDL2_LIBS)
+    ifneq ($(SDL2_CFLAGS),)
+        CXXFLAGS += $(SDL2_CFLAGS) -DBIFROST_USE_SDL2 -DBIFROST_THUNK_HAVE_SDL2
+        LDFLAGS  += $(SDL2_LIBS)
+    else
+        $(warning "sdl2-config not found — building headless (install libsdl2-dev for SDL2)")
+    endif
 endif
 
-# ── Graphic API thunking (experimental, opt-in) ─────────────────────────
-# When USE_THUNK_GL=1, GraphicThunk forwards guest GL/EGL calls to host.
-# Enable at runtime via BIFROST_THUNK_GRAPHICS=1 env var.
 ifeq ($(USE_THUNK_GL),1)
-    CXXFLAGS += -DBIFROST_THUNK_HAVE_GL -DBIFROST_THUNK_HAVE_EGL
-    LDFLAGS  += -lGL -lEGL
+    ifneq ($(SDL2_CFLAGS),)
+        CXXFLAGS += -DBIFROST_THUNK_HAVE_GL -DBIFROST_THUNK_HAVE_EGL
+        LDFLAGS  += -lGL -lEGL
+    endif
 endif
 
 .PHONY: all test clean install uninstall lib debug setup setup-tests check-all

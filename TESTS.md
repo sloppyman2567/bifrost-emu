@@ -10,15 +10,16 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default) | 175 | 175 | 0 | Full suite with SDL2/GL build |
-| frostJIT (default `make check`) | 170 | 170 | 0 | Quick suite: 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 175 | 175 | 0 | Full suite with SDL2/GL build (standard) |
+| frostJIT (quick `make check-quick`) | 170 | 170 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
 | Interpreter (`./bifrost-emu --no-jit`) | 175 | 175 | 0 | Same conditions as JIT row |
 | `make check-quick` | 170 | 170 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
 
-**175 test programs** are defined in `scripts/run_tests.sh` across six
-categories (see table below). With the default quick suite, **170 pass**
-and **1 skip** (`sdl_gl_triangle` when no DISPLAY/GL is available).
-With SDL2/GL enabled and a display, the full suite is **175/175 pass**.
+**175 test programs** are defined in `scripts/run_tests.sh` across seven
+categories (see table below). The default `make check` suite runs all **175**
+and reports **175 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
+With `make check-quick`, benchmarks are skipped and the suite reports
+**170 pass / 0 fail**.
 
 All 125 default tests pass under frostJIT, and all 125 also pass
 under the interpreter. The C API (`libbifrost.a` + `api/bifrost.h`) is
@@ -29,15 +30,12 @@ verified by `ctest/test_capi.c` (22 checks, all pass).
 | Category | Count | Description |
 |----------|-------|-------------|
 | Unit tests | 39 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute) |
-| Integration tests | 53 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle) |
+| Integration tests | 54 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
 | Dynamic | 12 | Dynamically-linked musl + glibc tests (need rootfs) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **171** | |
-
-Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
-`--interactive` and not counted in the 171.
+| **Total** | **175** | |
 
 ### Running the tests
 

@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 163 tests
+#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 175 tests
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -20,19 +20,18 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (163 total defined):
-#   Unit         35  — ctest/*.elf focused JIT regression tests
-#   Integration  51  — ctest_real/*.elf + test/*.elf real programs
+# Test count breakdown (175 total standard):
+#   Unit         39  — ctest/*.elf focused JIT regression tests
+#   Integration  54  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
 #                      (30 busybox + 19 toybox + 7 dynamic glibc)
-#   Dynamic       8  — dynamically-linked musl + glibc tests (need rootfs)
-#   Benchmarks    5  — performance (skipped with --quick)
+#   Dynamic      12  — dynamically-linked musl + glibc tests (need rootfs)
+#   Benchmarks    5  — performance (included in standard suite)
 #
-# Without --test-all and without a rootfs, the runner reports 119 pass +
-# 30 skip (busybox not downloaded) + 7 silent DYN-mode skips + 7 dynamic
-# tests not attempted = 163 total defined. With --test-all + rootfs set
-# up, all 163 tests run.
+# Standard suite = 175 tests. Quick suite = 170 (skip benchmarks).
+# With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
+# Without rootfs, dynamic tests skip automatically.
 #
 # Exit code: 0 if all tests pass, 1 if any fail.
 
@@ -99,8 +98,8 @@ done
 # ── --test-all: download real-world binaries ──────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
-# After download, runs the full 163-test suite with 0 expected failures
-# (assuming rootfs is set up — otherwise the 7 dynamic tests still skip).
+# After download, runs the full 175-test suite with 0 expected failures
+# (assuming rootfs is set up — otherwise the 12 dynamic tests still skip).
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -166,19 +165,22 @@ fi
 #   Integration — ctest_real/*.elf, real-world test programs that exercise
 #                 multiple subsystems (signals, threads, FS, memory).
 #   Interactive — test/*.elf that need stdin input (echo, repl, sh, cat).
-#                 Not run by default; use --interactive.
+#                 Opt-in via --interactive; not part of standard suite.
 #   Toybox      — ctest_real/toybox with various subcommands.
 #   Real-world  — Downloaded static AArch64 binaries (busybox, toybox, iperf2).
 #                 Skipped if binaries not present. Use --test-all to download.
 #   Dynamic     — Dynamically-linked test binaries (musl + glibc). Requires
 #                 rootfs + toolchain. Skipped if rootfs not present.
-#   Benchmarks  — Performance benchmarks. Skipped with --quick.
+#   Benchmarks  — Performance benchmarks. Included in standard suite;
+#                 skipped with --quick.
 #
 # A test PASSES if:
 #   - exit code is 0, AND
 #   - output contains expected_pattern (or expected_pattern is empty)
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
+
+# Standard suite = 175 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(
