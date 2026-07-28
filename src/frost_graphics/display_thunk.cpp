@@ -2,14 +2,36 @@
 //
 // See include/frost/display_thunk.hpp for the design overview. This file
 // implements the DisplayThunk class for Vulkan / Wayland / X11 / GBM.
+//
+// v1.5.0.alpha: DisplayThunk now uses the same full dispatch logic as
+// GraphicThunk (stack args, float args, string returns, GetProcAddress,
+// mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
+// when host libraries are unavailable.
 #include "frost/display_thunk.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
-#include "thunk_common.hpp"
+#include "frost/display_proxy.hpp"
+#include "core/cpu.h"
+#include "core/memory.h"
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
+#include <cstring>
 #include <unordered_map>
+#include <vector>
 namespace arm64emu {
+
+// ── SymbolEntry: full registry entry (mirrors GraphicThunkImpl::SymbolEntry) ──
+struct SymbolEntry {
+    std::string name;
+    void*       host_fn = nullptr;
+    uint64_t    guest_addr = 0;
+    uint32_t    symbol_id = 0;
+    uint16_t    pointer_args = 0;  // bit N set = arg N is a guest pointer
+    uint8_t     n_stack = 0;       // extra args beyond x0..x7, read from stack
+    uint8_t     n_float = 0;       // FP args in v0..v{n-1}
+    uint8_t     flags = 0;         // THUNK_* flags
+};
+
 struct DisplayThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
@@ -17,12 +39,16 @@ struct DisplayThunkImpl {
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
         DisplayThunk::TRAMPOLINE_SIZE * DisplayThunk::MAX_SYMBOLS;  // 32 KiB
-    std::vector<ThunkLibTable> libs_;
+    struct LibTable {
+        std::string lib;
+        std::vector<SymbolEntry> entries;
+    };
+    std::vector<LibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
     // Vulkan handle table: guest VkInstance/VkDevice → host handle.
-    // Real Vulkan handles are uint64_t on AArch64 (opaque pointers
-    // cast to uint64_t). We maintain a 1:1 mapping.
     std::unordered_map<uint64_t, uint64_t> vk_handle_map_;
+    // DisplayProxy for X11/Wayland fallback (v1.5.0.alpha).
+    std::unique_ptr<DisplayProxy> proxy_;
     std::mutex mu;
 };
 DisplayThunk::DisplayThunk() {
@@ -50,6 +76,11 @@ bool DisplayThunk::init(Memory& mem) {
         fprintf(stderr, "[display-thunk] init: failed to allocate trampoline page\n");
         return false;
     }
+    // v1.5.0.alpha: lazily create the DisplayProxy. It owns an SDL2 window
+    // and provides a software fallback for X11/Wayland calls when the host
+    // libraries are unavailable or have no display.
+    impl_->proxy_ = std::make_unique<DisplayProxy>();
+    impl_->proxy_->set_memory(&mem);
     register_known_symbols_();
     impl_->initialized = true;
     if (getenv("BIFROST_THUNK_TRACE")) {
@@ -60,28 +91,78 @@ bool DisplayThunk::init(Memory& mem) {
     }
     return true;
 }
+DisplayProxy* DisplayThunk::proxy() {
+    if (!impl_ || !impl_->initialized) return nullptr;
+    return impl_->proxy_.get();
+}
 void DisplayThunk::register_function_(const std::string& lib,
                                         const std::string& sym,
                                         void* host_fn,
-                                        uint8_t pointer_args) {
+                                        uint16_t pointer_args,
+                                        uint8_t n_stack,
+                                        uint8_t n_float,
+                                        uint8_t flags) {
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
-    thunk_register(*impl_->mem, impl_->libs_, impl_->id_to_idx_,
-                   impl_->trampoline_base, TRAMPOLINE_SIZE, MAX_SYMBOLS,
-                   static_cast<uint16_t>(SYSCALL_NUMBER),
-                   DisplayThunk::ID_BASE, trace,
-                   lib, sym, host_fn, pointer_args);
+    // Find or create the LibTable for `lib`.
+    DisplayThunkImpl::LibTable* lt = nullptr;
+    for (auto& l : impl_->libs_) {
+        if (l.lib == lib) { lt = &l; break; }
+    }
+    if (!lt) {
+        impl_->libs_.push_back({lib, {}});
+        lt = &impl_->libs_.back();
+    }
+    // Idempotent: skip if already registered.
+    for (const auto& e : lt->entries) {
+        if (e.name == sym) return;
+    }
+    uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
+    if (local_id >= DisplayThunk::MAX_SYMBOLS) {
+        fprintf(stderr, "[display-thunk] register: symbol table full (%zu)\n",
+                impl_->id_to_idx_.size());
+        return;
+    }
+    uint32_t sym_id = DisplayThunk::ID_BASE + local_id;
+    uint64_t addr = impl_->trampoline_base + local_id * DisplayThunk::TRAMPOLINE_SIZE;
+    // Write the trampoline.
+    uint32_t buf[4];
+    buf[0] = 0xD2800000u | (static_cast<uint32_t>(sym_id) << 5);     // movz x9, #sym_id
+    buf[1] = 0xD2800000u | (static_cast<uint32_t>(DisplayThunk::SYSCALL_NUMBER) << 5) | 8; // movz x8, #0x1000
+    buf[2] = 0xD4000001u;  // svc #0
+    buf[3] = 0xD65F03C0u;  // ret
+    impl_->mem->write(addr, buf, sizeof(buf));
+    lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
+                           n_stack, n_float, flags});
+    impl_->id_to_idx_.push_back({
+        static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
+        static_cast<uint32_t>(lt->entries.size() - 1)
+    });
+    if (trace) {
+        fprintf(stderr, "[display-thunk] registered %s:%s -> 0x%llx "
+                "(id=%u ptrs=0x%x stack=%u fp=%u flags=0x%x)\n",
+                lib.c_str(), sym.c_str(),
+                static_cast<unsigned long long>(addr), sym_id,
+                pointer_args, n_stack, n_float, flags);
+    }
 }
 void DisplayThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) {
-    write_thunk_trampoline(mem, addr, sym_id,
-                            static_cast<uint16_t>(SYSCALL_NUMBER));
+    uint32_t buf[4];
+    buf[0] = 0xD2800000u | (static_cast<uint32_t>(sym_id) << 5);
+    buf[1] = 0xD2800000u | (static_cast<uint32_t>(DisplayThunk::SYSCALL_NUMBER) << 5) | 8;
+    buf[2] = 0xD4000001u;
+    buf[3] = 0xD65F03C0u;
+    mem.write(addr, buf, sizeof(buf));
 }
 uint64_t DisplayThunk::resolve(const std::string& lib, const std::string& sym) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
     std::lock_guard<std::mutex> g(impl_->mu);
-    auto* lt = find_lib(impl_->libs_, lib);
-    if (!lt) return 0;
-    for (const auto& e : lt->entries) {
-        if (e.name == sym) return e.guest_addr;
+    for (auto& l : impl_->libs_) {
+        if (l.lib == lib) {
+            for (const auto& e : l.entries) {
+                if (e.name == sym) return e.guest_addr;
+            }
+            return 0;
+        }
     }
     return 0;
 }
@@ -89,20 +170,22 @@ size_t DisplayThunk::enumerate_symbols(const std::string& lib,
     const std::function<void(const std::string&, uint64_t)>& cb) const {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
     std::lock_guard<std::mutex> g(impl_->mu);
-    auto* lt = find_lib(const_cast<std::vector<ThunkLibTable>&>(impl_->libs_), lib);
-    if (!lt) return 0;
-    for (const auto& e : lt->entries) {
-        cb(e.name, e.guest_addr);
+    for (auto& l : impl_->libs_) {
+        if (l.lib == lib) {
+            for (const auto& e : l.entries) {
+                cb(e.name, e.guest_addr);
+            }
+            return l.entries.size();
+        }
     }
-    return lt->entries.size();
+    return 0;
 }
 int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    // v1.5.0.alpha: check ID range to route correctly.
     if ((symbol_id & DisplayThunk::ID_MASK) != DisplayThunk::ID_BASE) {
-        return -ENOENT;  // belongs to a different thunk
+        return -ENOENT;
     }
     uint32_t local_id = symbol_id - DisplayThunk::ID_BASE;
     if (local_id >= impl_->id_to_idx_.size()) {
@@ -111,10 +194,710 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
-    // Wayland/X11/Vulkan functions often take pointer args that need
-    // guest→host translation.
-    return thunk_dispatch_with_ptrs(cpu, entry.host_fn, entry.name,
-                                     entry.pointer_args, impl_->mem, trace);
+
+    // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
+    // When the THUNK_PROXY flag is set, the symbol is handled by the
+    // DisplayProxy (SDL2-based software fallback) when the host library
+    // is unavailable. If the host function IS available, we prefer it
+    // (it provides full functionality). The proxy is only used as a
+    // fallback when the host library is not installed or has no display.
+    if (entry.flags & THUNK_PROXY) {
+        if (!entry.host_fn && impl_->proxy_ && impl_->proxy_->ready()) {
+            return proxy_dispatch_(cpu, entry.name);
+        }
+        if (!entry.host_fn) {
+            // No host function and no proxy — return 0 (NULL).
+            cpu.regs[0] = 0;
+            return 0;
+        }
+        // Host function is available — fall through to standard dispatch.
+    }
+
+    // ── Float-only AAPCS64 path (Vulkan float params, etc.) ──────────
+    if (entry.n_float > 0 && !(entry.flags & THUNK_MIXED_FP)
+        && !(entry.flags & THUNK_GET_PROC)) {
+        float fv[8] = {0};
+        for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
+            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+        }
+        if (trace) {
+            fprintf(stderr, "[display-thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
+                    entry.name.c_str(), entry.n_float,
+                    fv[0], fv[1], fv[2], fv[3]);
+        }
+        switch (entry.n_float) {
+        case 1: { using Fn = void (*)(float); reinterpret_cast<Fn>(entry.host_fn)(fv[0]); break; }
+        case 2: { using Fn = void (*)(float, float); reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1]); break; }
+        case 3: { using Fn = void (*)(float, float, float); reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1], fv[2]); break; }
+        default: { using Fn = void (*)(float, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(fv[0], fv[1], fv[2], fv[3]); break; }
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
+    // ── Mixed int + float (Vulkan mixed params) ──────────────────────
+    if (entry.flags & THUNK_MIXED_FP) {
+        uint64_t iv[4] = {0};
+        float fv[4] = {0};
+        uint8_t ni = entry.n_stack;
+        if (ni > 4) ni = 4;
+        for (uint8_t i = 0; i < ni; i++) iv[i] = cpu.regs[i];
+        for (uint8_t i = 0; i < entry.n_float && i < 4; i++) {
+            std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
+        }
+        if (trace) {
+            fprintf(stderr, "[display-thunk] dispatch: %s (mixed int×%u fp×%u) i0=%lld f0=%g\n",
+                    entry.name.c_str(), ni, entry.n_float,
+                    static_cast<long long>(iv[0]), fv[0]);
+        }
+        if (ni == 1 && entry.n_float == 1) {
+            using Fn = void (*)(int32_t, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0]);
+        } else if (ni == 1 && entry.n_float == 2) {
+            using Fn = void (*)(int32_t, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1]);
+        } else if (ni == 1 && entry.n_float == 3) {
+            using Fn = void (*)(int32_t, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2]);
+        } else if (ni == 1 && entry.n_float >= 4) {
+            using Fn = void (*)(int32_t, float, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2], fv[3]);
+        } else if (ni == 2 && entry.n_float == 1) {
+            using Fn = void (*)(uint32_t, uint32_t, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<uint32_t>(iv[0]), static_cast<uint32_t>(iv[1]), fv[0]);
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
+    // ── Integer/pointer path with optional stack args ─────────────────
+    constexpr int kMaxArgs = 12;
+    uint64_t args[kMaxArgs] = {0};
+    for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
+    // AAPCS64: args 8+ live on the guest stack at SP, 8-byte slots.
+    if (entry.n_stack && impl_->mem) {
+        for (uint8_t i = 0; i < entry.n_stack && (8 + i) < kMaxArgs; i++) {
+            uint64_t slot = cpu.sp + static_cast<uint64_t>(i) * 8ull;
+            impl_->mem->read(slot, &args[8 + i], sizeof(uint64_t));
+        }
+    }
+
+    // ── GetProcAddress: return guest trampoline for a registered symbol ─
+    if (entry.flags & THUNK_GET_PROC) {
+        char namebuf[256];
+        const char* name = nullptr;
+        if (args[0] && impl_->mem) {
+            uint8_t* hp = impl_->mem->guest_to_host_ptr(args[0]);
+            if (hp) {
+                name = reinterpret_cast<const char*>(hp);
+            } else {
+                size_t n = 0;
+                for (; n + 1 < sizeof(namebuf); n++) {
+                    uint8_t c = 0;
+                    try { impl_->mem->read(args[0] + n, &c, 1); }
+                    catch (...) { break; }
+                    namebuf[n] = static_cast<char>(c);
+                    if (c == 0) break;
+                }
+                namebuf[sizeof(namebuf) - 1] = 0;
+                name = namebuf;
+            }
+        }
+        uint64_t found = 0;
+        if (name && name[0]) {
+            for (const auto& lib : impl_->libs_) {
+                for (const auto& e : lib.entries) {
+                    if (e.name == name) { found = e.guest_addr; break; }
+                }
+                if (found) break;
+            }
+        }
+        if (trace) {
+            fprintf(stderr, "[display-thunk] GetProcAddress('%s') → 0x%llx\n",
+                    name ? name : "(null)",
+                    static_cast<unsigned long long>(found));
+        }
+        cpu.regs[0] = found;
+        return 0;
+    }
+
+    // ── Pointer arg translation ────────────────────────────────────────
+    auto translate_ptr = [&](uint64_t& a, int idx,
+                             std::vector<uint8_t>* bounce,
+                             uint64_t* guest_orig, bool* need_wb) {
+        (void)idx;
+        if (a == 0 || !impl_->mem) return;
+        uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(a);
+        if (host_ptr) { a = reinterpret_cast<uint64_t>(host_ptr); return; }
+        // High-stack / sparse-page pointer: bounce through a host buffer.
+        size_t kBounce = 65536;
+        bounce->resize(kBounce);
+        try { impl_->mem->read(a, bounce->data(), kBounce); }
+        catch (...) { bounce->assign(kBounce, 0); }
+        *guest_orig = a;
+        *need_wb = true;
+        a = reinterpret_cast<uint64_t>(bounce->data());
+    };
+
+    std::vector<uint8_t> bounce_bufs[kMaxArgs];
+    uint64_t bounce_guest[kMaxArgs] = {0};
+    bool bounce_wb[kMaxArgs] = {false};
+
+    if (entry.pointer_args && impl_->mem) {
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (entry.pointer_args & (1u << i)) {
+                translate_ptr(args[i], i, &bounce_bufs[i],
+                              &bounce_guest[i], &bounce_wb[i]);
+            }
+        }
+    }
+
+    if (trace) {
+        fprintf(stderr, "[display-thunk] dispatch: %s (host_fn=%p) "
+                "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
+                "a8=0x%llx ptrs=0x%x stack=%u\n",
+                entry.name.c_str(), entry.host_fn,
+                static_cast<unsigned long long>(args[0]),
+                static_cast<unsigned long long>(args[1]),
+                static_cast<unsigned long long>(args[2]),
+                static_cast<unsigned long long>(args[3]),
+                static_cast<unsigned long long>(args[8]),
+                entry.pointer_args, entry.n_stack);
+    }
+
+    uint64_t ret = 0;
+    if (entry.n_stack >= 1) {
+        using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t);
+        ret = reinterpret_cast<Fn9>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7], args[8]);
+    } else {
+        using Fn8 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn8>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7]);
+    }
+
+    // Write bounced pointer args back into guest memory.
+    if (impl_->mem) {
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (bounce_wb[i] && bounce_guest[i]) {
+                impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
+                                  bounce_bufs[i].size());
+            }
+        }
+    }
+
+    if (entry.flags & THUNK_RET_STRING) {
+        // Cache the host string into guest memory and return the guest address.
+        if (ret) {
+            const char* host_str = reinterpret_cast<const char*>(ret);
+            size_t len = std::strlen(host_str) + 1;
+            if (len > 4096) len = 4096;
+            static uint8_t string_cache[8192];
+            static size_t string_cache_off = 0;
+            if (string_cache_off + len > sizeof(string_cache)) string_cache_off = 0;
+            std::memcpy(string_cache + string_cache_off, host_str, len);
+            ret = reinterpret_cast<uint64_t>(string_cache + string_cache_off);
+            string_cache_off = (string_cache_off + len + 7u) & ~7u;
+            // Write the string into guest memory so the guest can read it.
+            if (impl_->mem) {
+                uint64_t guest_str = impl_->mem->mmap_alloc(4096);
+                if (guest_str) {
+                    impl_->mem->write(guest_str, host_str, len);
+                    ret = guest_str;
+                }
+            }
+        }
+    }
+
+    cpu.regs[0] = ret;
+    return 0;
+}
+// ── proxy_dispatch_ — route X11/Wayland calls to DisplayProxy ──────────
+// Called when a symbol has the THUNK_PROXY flag. The DisplayProxy provides
+// a SDL2-based software fallback for X11/Wayland functions when the host
+// libraries are unavailable or have no display.
+uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
+    if (!impl_->proxy_ || !impl_->proxy_->ready()) {
+        // Proxy not ready — return 0 (NULL) for pointer-returning functions,
+        // 0 for integer-returning functions. This matches the behavior of
+        // XOpenDisplay(NULL) returning NULL when no display is available.
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    DisplayProxy* proxy = impl_->proxy_.get();
+    Memory* mem = impl_->mem;
+    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+
+    // Helper: translate a guest pointer arg to a host pointer.
+    auto g2h = [&](uint64_t guest_addr) -> void* {
+        if (!guest_addr || !mem) return nullptr;
+        uint8_t* hp = mem->guest_to_host_ptr(guest_addr);
+        return hp ? reinterpret_cast<void*>(hp) : nullptr;
+    };
+    auto g2h_str = [&](uint64_t guest_addr) -> const char* {
+        return reinterpret_cast<const char*>(g2h(guest_addr));
+    };
+
+    if (sym_name == "XOpenDisplay") {
+        const char* name = g2h_str(cpu.regs[0]);
+        cpu.regs[0] = proxy->XOpenDisplay(name);
+        return 0;
+    }
+    if (sym_name == "XCloseDisplay") {
+        cpu.regs[0] = proxy->XCloseDisplay(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XCreateSimpleWindow") {
+        // 9 args: Display*, Window, int, int, unsigned, unsigned, unsigned,
+        // unsigned long, unsigned long. Arg 8 (background) is on the stack.
+        uint64_t bg = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &bg, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XCreateSimpleWindow(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
+            static_cast<int>(cpu.regs[6]),
+            static_cast<unsigned long>(cpu.regs[7]),
+            static_cast<unsigned long>(bg));
+        return 0;
+    }
+    if (sym_name == "XCreateWindow") {
+        // 12 args: Display*, Window, int, int, unsigned, unsigned, unsigned,
+        // int, unsigned long, int, Visual*, unsigned long.
+        // Args 8-11 are on the stack.
+        uint64_t stack_args[4] = {0};
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, stack_args, sizeof(stack_args));
+        }
+        cpu.regs[0] = proxy->XCreateWindow(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            static_cast<unsigned>(cpu.regs[4]), static_cast<unsigned>(cpu.regs[5]),
+            static_cast<unsigned>(cpu.regs[6]),
+            static_cast<int>(cpu.regs[7]),
+            static_cast<unsigned long>(stack_args[0]),
+            static_cast<uint64_t>(stack_args[1]),
+            static_cast<unsigned long>(stack_args[2]),
+            g2h_str(stack_args[3]));
+        return 0;
+    }
+    if (sym_name == "XDestroyWindow") {
+        cpu.regs[0] = proxy->XDestroyWindow(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XMapWindow") {
+        cpu.regs[0] = proxy->XMapWindow(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XUnmapWindow") {
+        cpu.regs[0] = proxy->XUnmapWindow(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XFlush") {
+        cpu.regs[0] = proxy->XFlush(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XSync") {
+        cpu.regs[0] = proxy->XSync(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XFillRectangle") {
+        proxy->XFillRectangle(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            static_cast<unsigned>(cpu.regs[5]), static_cast<unsigned>(cpu.regs[6]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    if (sym_name == "XDrawRectangle") {
+        proxy->XDrawRectangle(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            static_cast<unsigned>(cpu.regs[5]), static_cast<unsigned>(cpu.regs[6]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    if (sym_name == "XDrawLine") {
+        proxy->XDrawLine(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            static_cast<int>(cpu.regs[5]), static_cast<int>(cpu.regs[6]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    if (sym_name == "XDrawPoint") {
+        proxy->XDrawPoint(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    if (sym_name == "XSetForeground") {
+        cpu.regs[0] = proxy->XSetForeground(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned long>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XSetBackground") {
+        cpu.regs[0] = proxy->XSetBackground(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned long>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XCreateGC") {
+        // 6 args: Display*, Drawable, unsigned long, XGCValues*, int, Visual*
+        // Args 4-5 are on the stack.
+        uint64_t stack_args[2] = {0};
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, stack_args, sizeof(stack_args));
+        }
+        cpu.regs[0] = proxy->XCreateGC(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned long>(cpu.regs[2]),
+            g2h_str(cpu.regs[3]),
+            static_cast<int>(stack_args[0]),
+            static_cast<uint64_t>(stack_args[1]));
+        return 0;
+    }
+    if (sym_name == "XFreeGC") {
+        cpu.regs[0] = proxy->XFreeGC(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XStoreName") {
+        const char* name = g2h_str(cpu.regs[2]);
+        cpu.regs[0] = proxy->XStoreName(cpu.regs[0], cpu.regs[1], name);
+        return 0;
+    }
+    if (sym_name == "XGetWindowAttributes") {
+        cpu.regs[0] = proxy->XGetWindowAttributes(
+            cpu.regs[0], cpu.regs[1], g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XSelectInput") {
+        cpu.regs[0] = proxy->XSelectInput(
+            cpu.regs[0], cpu.regs[1], static_cast<long>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XInternAtom") {
+        const char* name = g2h_str(cpu.regs[1]);
+        cpu.regs[0] = proxy->XInternAtom(
+            cpu.regs[0], name, static_cast<int>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XSetWMProtocols") {
+        // 4 args: Display*, Window, Atom*, int. Arg 3 (count) is on stack.
+        uint64_t count = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &count, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XSetWMProtocols(
+            cpu.regs[0], cpu.regs[1], g2h_str(cpu.regs[2]),
+            static_cast<int>(count));
+        return 0;
+    }
+    if (sym_name == "XGetAtomName") {
+        cpu.regs[0] = proxy->XGetAtomName(cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XPending") {
+        cpu.regs[0] = proxy->XPending(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XNextEvent") {
+        cpu.regs[0] = proxy->XNextEvent(cpu.regs[0], g2h(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XCheckMaskEvent") {
+        cpu.regs[0] = proxy->XCheckMaskEvent(
+            cpu.regs[0], static_cast<long>(cpu.regs[1]), g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XEventsQueued") {
+        cpu.regs[0] = proxy->XEventsQueued(
+            cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XDisplayWidth") {
+        cpu.regs[0] = proxy->XDisplayWidth(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XDisplayHeight") {
+        cpu.regs[0] = proxy->XDisplayHeight(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XDisplayWidthMM") {
+        cpu.regs[0] = proxy->XDisplayWidthMM(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XDisplayHeightMM") {
+        cpu.regs[0] = proxy->XDisplayHeightMM(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "DefaultRootWindow") {
+        cpu.regs[0] = proxy->DefaultRootWindow(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "BlackPixel") {
+        cpu.regs[0] = proxy->BlackPixel(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "WhitePixel") {
+        cpu.regs[0] = proxy->WhitePixel(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XSetWindowBackground") {
+        cpu.regs[0] = proxy->XSetWindowBackground(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XCreateColormap") {
+        cpu.regs[0] = proxy->XCreateColormap(
+            cpu.regs[0], cpu.regs[1], static_cast<uint64_t>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "XFreeColormap") {
+        cpu.regs[0] = proxy->XFreeColormap(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XAllocColor") {
+        cpu.regs[0] = proxy->XAllocColor(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]), g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XSetLineAttributes") {
+        // 6 args: Display*, GC, unsigned, unsigned, int, int. Arg 5 is on stack.
+        uint64_t cap_join = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &cap_join, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XSetLineAttributes(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned>(cpu.regs[2]), static_cast<unsigned>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cap_join));
+        return 0;
+    }
+    if (sym_name == "XDrawString") {
+        const char* str = g2h_str(cpu.regs[5]);
+        proxy->XDrawString(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            str, static_cast<int>(cpu.regs[6]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    if (sym_name == "XQueryPointer") {
+        uint64_t mask_ptr = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &mask_ptr, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XQueryPointer(
+            cpu.regs[0], cpu.regs[1], g2h(cpu.regs[2]), g2h(cpu.regs[3]),
+            g2h(cpu.regs[4]), g2h(cpu.regs[5]), g2h(cpu.regs[6]), g2h(cpu.regs[7]),
+            g2h(mask_ptr));
+        return 0;
+    }
+    if (sym_name == "XWarpPointer") {
+        uint64_t dest_y = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &dest_y, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XWarpPointer(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2],
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            static_cast<int>(cpu.regs[5]), static_cast<int>(cpu.regs[6]),
+            static_cast<int>(cpu.regs[7]), static_cast<int>(dest_y));
+        return 0;
+    }
+    if (sym_name == "XBell") {
+        cpu.regs[0] = proxy->XBell(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XScreenCount") {
+        cpu.regs[0] = proxy->XScreenCount(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XSetInputFocus") {
+        cpu.regs[0] = proxy->XSetInputFocus(
+            cpu.regs[0], static_cast<uint64_t>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]), static_cast<uint64_t>(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "XGetInputFocus") {
+        cpu.regs[0] = proxy->XGetInputFocus(
+            cpu.regs[0], g2h(cpu.regs[1]), g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XChangeProperty") {
+        // 6 args: Display*, Window, Atom, Atom, int, int, const unsigned char*, long.
+        // Args 6-7 are on the stack.
+        uint64_t stack_args[2] = {0};
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, stack_args, sizeof(stack_args));
+        }
+        cpu.regs[0] = proxy->XChangeProperty(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<unsigned long>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
+            g2h_str(stack_args[0]), static_cast<long>(stack_args[1]));
+        return 0;
+    }
+    if (sym_name == "XDeleteProperty") {
+        cpu.regs[0] = proxy->XDeleteProperty(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XCopyArea") {
+        uint64_t stack_args[2] = {0};
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, stack_args, sizeof(stack_args));
+        }
+        cpu.regs[0] = proxy->XCopyArea(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2], static_cast<unsigned long>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
+            static_cast<int>(cpu.regs[6]), static_cast<int>(cpu.regs[7]),
+            static_cast<int>(stack_args[0]), static_cast<int>(stack_args[1]));
+        return 0;
+    }
+    if (sym_name == "XCreatePixmap") {
+        cpu.regs[0] = proxy->XCreatePixmap(
+            cpu.regs[0], cpu.regs[1],
+            static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]));
+        return 0;
+    }
+    if (sym_name == "XFreePixmap") {
+        cpu.regs[0] = proxy->XFreePixmap(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XSetWindowBackgroundPixmap") {
+        cpu.regs[0] = proxy->XSetWindowBackgroundPixmap(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2]);
+        return 0;
+    }
+    if (sym_name == "XSetClipMask") {
+        cpu.regs[0] = proxy->XSetClipMask(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]), cpu.regs[2]);
+        return 0;
+    }
+    if (sym_name == "XSetClipOrigin") {
+        cpu.regs[0] = proxy->XSetClipOrigin(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "XCopyGC") {
+        // 4 args: Display*, GC, unsigned long, GC. Arg 3 is on stack.
+        uint64_t src_gc = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &src_gc, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XCopyGC(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned long>(cpu.regs[2]), src_gc);
+        return 0;
+    }
+    if (sym_name == "XChangeGC") {
+        // 3 args: Display*, GC, unsigned long, XGCValues*. Arg 3 is on stack.
+        uint64_t values_ptr = 0;
+        if (mem && cpu.sp) {
+            mem->read(cpu.sp, &values_ptr, sizeof(uint64_t));
+        }
+        cpu.regs[0] = proxy->XChangeGC(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<unsigned long>(cpu.regs[2]), g2h_str(values_ptr));
+        return 0;
+    }
+    if (sym_name == "XSetFunction") {
+        cpu.regs[0] = proxy->XSetFunction(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XSetDashes") {
+        const char* dashes = g2h_str(cpu.regs[3]);
+        cpu.regs[0] = proxy->XSetDashes(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]), dashes);
+        return 0;
+    }
+    if (sym_name == "XFreeColors") {
+        cpu.regs[0] = proxy->XFreeColors(
+            cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
+            g2h_str(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            static_cast<unsigned long>(cpu.regs[4]));
+        return 0;
+    }
+    if (sym_name == "XDrawImageString") {
+        const char* str = g2h_str(cpu.regs[5]);
+        proxy->XDrawImageString(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            str, static_cast<int>(cpu.regs[6]));
+        cpu.regs[0] = 1;
+        return 0;
+    }
+    // Wayland proxy methods
+    if (sym_name == "wl_display_connect") {
+        const char* name = g2h_str(cpu.regs[0]);
+        cpu.regs[0] = proxy->wl_display_connect(name);
+        return 0;
+    }
+    if (sym_name == "wl_display_disconnect") {
+        proxy->wl_display_disconnect(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "wl_surface_create") {
+        const char* interface = g2h_str(cpu.regs[1]);
+        cpu.regs[0] = proxy->wl_surface_create(
+            cpu.regs[0], interface, static_cast<uint32_t>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "wl_surface_commit") {
+        proxy->wl_surface_commit(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "wl_surface_destroy") {
+        proxy->wl_surface_destroy(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "wl_egl_window_create") {
+        cpu.regs[0] = proxy->wl_egl_window_create(
+            cpu.regs[0], static_cast<int>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "wl_egl_window_destroy") {
+        cpu.regs[0] = proxy->wl_egl_window_destroy(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "wl_egl_window_get_attached_size") {
+        cpu.regs[0] = proxy->wl_egl_window_get_attached_size(
+            cpu.regs[0], g2h(cpu.regs[1]), g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "wl_egl_window_resize") {
+        cpu.regs[0] = proxy->wl_egl_window_resize(
+            cpu.regs[0], static_cast<int>(cpu.regs[1]),
+            static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            static_cast<int>(cpu.regs[4]));
+        return 0;
+    }
+    if (trace) {
+        fprintf(stderr, "[display-thunk] proxy_dispatch: unknown symbol '%s'\n",
+                sym_name.c_str());
+    }
+    cpu.regs[0] = 0;
+    return 0;
 }
 size_t DisplayThunk::symbol_count() const {
     if (!impl_) return 0;
@@ -134,100 +917,110 @@ void DisplayThunk::register_known_symbols_() {
         void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
         for (const char* L : vk_libs) register_function_(L, #name, p); \
     } while(0)
+    #define REG_VK_PTR(name, ptrs) do { \
+        void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
+        for (const char* L : vk_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
+    #define REG_VK_PROC(name) do { \
+        void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
+        if (!p) p = reinterpret_cast<void*>(1); \
+        for (const char* L : vk_libs) \
+            register_function_(L, #name, p, 0x01, 0, 0, THUNK_GET_PROC); \
+    } while(0)
     // Core instance/device functions.
-    REG_VK(vkCreateInstance);
-    REG_VK(vkDestroyInstance);
-    REG_VK(vkEnumeratePhysicalDevices);
-    REG_VK(vkGetPhysicalDeviceProperties);
-    REG_VK(vkGetPhysicalDeviceFeatures);
-    REG_VK(vkGetPhysicalDeviceMemoryProperties);
-    REG_VK(vkGetPhysicalDeviceQueueFamilyProperties);
-    REG_VK(vkCreateDevice);
-    REG_VK(vkDestroyDevice);
-    REG_VK(vkGetDeviceQueue);
+    REG_VK_PTR(vkCreateInstance, 0x03);         // arg 0: pCreateInfo, arg 1: pAllocator
+    REG_VK_PTR(vkDestroyInstance, 0x02);        // arg 1: pAllocator
+    REG_VK_PTR(vkEnumeratePhysicalDevices, 0x06); // arg 1: pCount, arg 2: pPhysicalDevices
+    REG_VK_PTR(vkGetPhysicalDeviceProperties, 0x02); // arg 1: pProperties (large struct)
+    REG_VK_PTR(vkGetPhysicalDeviceFeatures, 0x02); // arg 1: pFeatures
+    REG_VK_PTR(vkGetPhysicalDeviceMemoryProperties, 0x02); // arg 1: pMemoryProperties
+    REG_VK_PTR(vkGetPhysicalDeviceQueueFamilyProperties, 0x06); // arg 1: pCount, arg 2: pQueueFamilyProperties
+    REG_VK_PTR(vkCreateDevice, 0x07);           // arg 0: pCreateInfo, arg 2: ppDevice, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyDevice, 0x02);          // arg 1: pAllocator
+    REG_VK_PTR(vkGetDeviceQueue, 0x06);          // arg 2: ppQueue, arg 3: pAllocator
     REG_VK(vkDeviceWaitIdle);
-    REG_VK(vkQueueWaitIdle);
-    // Swapchain (KHR extension — but the entry point symbols are
-    // available without the KHR suffix in libvulkan.so.1).
-    REG_VK(vkCreateSwapchainKHR);
-    REG_VK(vkDestroySwapchainKHR);
-    REG_VK(vkGetSwapchainImagesKHR);
-    REG_VK(vkAcquireNextImageKHR);
-    REG_VK(vkQueuePresentKHR);
+    REG_VK_PTR(vkQueueWaitIdle, 0x02);          // arg 1: pFence (actually VkQueue, but opaque)
+    // Swapchain (KHR extension).
+    REG_VK_PTR(vkCreateSwapchainKHR, 0x07);     // arg 0: pCreateInfo, arg 2: ppSwapchain, arg 3: pAllocator
+    REG_VK_PTR(vkDestroySwapchainKHR, 0x02);    // arg 1: pAllocator
+    REG_VK_PTR(vkGetSwapchainImagesKHR, 0x06);  // arg 1: pCount, arg 2: pImages
+    REG_VK_PTR(vkAcquireNextImageKHR, 0x1E);    // arg 3: pImageIndex, arg 4: pAcquireFence
+    REG_VK_PTR(vkQueuePresentKHR, 0x02);         // arg 1: pPresentInfo
     // Command buffers.
-    REG_VK(vkCreateCommandPool);
-    REG_VK(vkDestroyCommandPool);
-    REG_VK(vkAllocateCommandBuffers);
-    REG_VK(vkFreeCommandBuffers);
-    REG_VK(vkBeginCommandBuffer);
+    REG_VK_PTR(vkCreateCommandPool, 0x06);       // arg 0: pCreateInfo, arg 2: ppCommandPool, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyCommandPool, 0x02);      // arg 1: pAllocator
+    REG_VK_PTR(vkAllocateCommandBuffers, 0x06);  // arg 0: pAllocateInfo, arg 1: pCommandBuffers
+    REG_VK_PTR(vkFreeCommandBuffers, 0x02);      // arg 1: pCommandBuffers
+    REG_VK_PTR(vkBeginCommandBuffer, 0x02);      // arg 1: pBeginInfo
     REG_VK(vkEndCommandBuffer);
     REG_VK(vkResetCommandBuffer);
-    REG_VK(vkQueueSubmit);
+    REG_VK_PTR(vkQueueSubmit, 0x06);             // arg 1: pSubmitInfo, arg 3: pFence
     // Image / image views.
-    REG_VK(vkCreateImage);
-    REG_VK(vkDestroyImage);
-    REG_VK(vkGetImageMemoryRequirements);
-    REG_VK(vkBindImageMemory);
-    REG_VK(vkCreateImageView);
-    REG_VK(vkDestroyImageView);
+    REG_VK_PTR(vkCreateImage, 0x06);             // arg 0: pCreateInfo, arg 2: ppImage, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyImage, 0x02);            // arg 1: pAllocator
+    REG_VK_PTR(vkGetImageMemoryRequirements, 0x02); // arg 1: pMemoryRequirements
+    REG_VK_PTR(vkBindImageMemory, 0x06);         // arg 2: pMemory, arg 3: pBindInfo
+    REG_VK_PTR(vkCreateImageView, 0x06);         // arg 0: pCreateInfo, arg 2: ppImageView, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyImageView, 0x02);        // arg 1: pAllocator
     // Buffers.
-    REG_VK(vkCreateBuffer);
-    REG_VK(vkDestroyBuffer);
-    REG_VK(vkGetBufferMemoryRequirements);
-    REG_VK(vkBindBufferMemory);
+    REG_VK_PTR(vkCreateBuffer, 0x06);            // arg 0: pCreateInfo, arg 2: ppBuffer, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyBuffer, 0x02);           // arg 1: pAllocator
+    REG_VK_PTR(vkGetBufferMemoryRequirements, 0x02); // arg 1: pMemoryRequirements
+    REG_VK_PTR(vkBindBufferMemory, 0x06);        // arg 2: pMemory, arg 3: pBindInfo
     // Memory.
-    REG_VK(vkAllocateMemory);
-    REG_VK(vkFreeMemory);
-    REG_VK(vkMapMemory);
+    REG_VK_PTR(vkAllocateMemory, 0x06);          // arg 0: pAllocateInfo, arg 2: ppDeviceMemory, arg 3: pAllocator
+    REG_VK_PTR(vkFreeMemory, 0x02);              // arg 1: pAllocator
+    REG_VK_PTR(vkMapMemory, 0x0E);               // arg 2: pOffset, arg 3: pSize, arg 4: ppData
     REG_VK(vkUnmapMemory);
-    REG_VK(vkFlushMappedMemoryRanges);
-    REG_VK(vkInvalidateMappedMemoryRanges);
+    REG_VK_PTR(vkFlushMappedMemoryRanges, 0x02); // arg 0: pMemoryRange
+    REG_VK_PTR(vkInvalidateMappedMemoryRanges, 0x02); // arg 0: pMemoryRange
     // Render pass / framebuffers.
-    REG_VK(vkCreateRenderPass);
-    REG_VK(vkDestroyRenderPass);
-    REG_VK(vkCreateFramebuffer);
-    REG_VK(vkDestroyFramebuffer);
+    REG_VK_PTR(vkCreateRenderPass, 0x06);        // arg 0: pCreateInfo, arg 2: ppRenderPass, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyRenderPass, 0x02);       // arg 1: pAllocator
+    REG_VK_PTR(vkCreateFramebuffer, 0x06);       // arg 0: pCreateInfo, arg 2: ppFramebuffer, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyFramebuffer, 0x02);     // arg 1: pAllocator
     // Shaders / pipelines.
-    REG_VK(vkCreateShaderModule);
-    REG_VK(vkDestroyShaderModule);
-    REG_VK(vkCreatePipelineCache);
-    REG_VK(vkDestroyPipelineCache);
-    REG_VK(vkCreateGraphicsPipelines);
-    REG_VK(vkCreateComputePipelines);
-    REG_VK(vkDestroyPipeline);
-    REG_VK(vkCreatePipelineLayout);
-    REG_VK(vkDestroyPipelineLayout);
-    REG_VK(vkCreateDescriptorSetLayout);
-    REG_VK(vkDestroyDescriptorSetLayout);
-    REG_VK(vkAllocateDescriptorSets);
+    REG_VK_PTR(vkCreateShaderModule, 0x06);      // arg 0: pCreateInfo, arg 2: ppShaderModule, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyShaderModule, 0x02);    // arg 1: pAllocator
+    REG_VK_PTR(vkCreatePipelineCache, 0x06);     // arg 0: pCreateInfo, arg 2: ppPipelineCache, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyPipelineCache, 0x02);   // arg 1: pAllocator
+    REG_VK_PTR(vkCreateGraphicsPipelines, 0x0E); // arg 2: pPipelines, arg 3: pPipelineCache
+    REG_VK_PTR(vkCreateComputePipelines, 0x0E);  // arg 2: pPipelines, arg 3: pPipelineCache
+    REG_VK_PTR(vkDestroyPipeline, 0x02);         // arg 1: pAllocator
+    REG_VK_PTR(vkCreatePipelineLayout, 0x06);    // arg 0: pCreateInfo, arg 2: ppPipelineLayout, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyPipelineLayout, 0x02);   // arg 1: pAllocator
+    REG_VK_PTR(vkCreateDescriptorSetLayout, 0x06); // arg 0: pCreateInfo, arg 2: ppLayout, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyDescriptorSetLayout, 0x02); // arg 1: pAllocator
+    REG_VK_PTR(vkAllocateDescriptorSets, 0x02);  // arg 0: pAllocateInfo, arg 1: pDescriptorSets
     REG_VK(vkFreeDescriptorSets);
-    REG_VK(vkUpdateDescriptorSets);
-    REG_VK(vkCreateDescriptorPool);
-    REG_VK(vkDestroyDescriptorPool);
+    REG_VK_PTR(vkUpdateDescriptorSets, 0x02);    // arg 0: pWriteInfo, arg 1: pCopyInfo
+    REG_VK_PTR(vkCreateDescriptorPool, 0x06);     // arg 0: pCreateInfo, arg 2: ppPool, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyDescriptorPool, 0x02);   // arg 1: pAllocator
     // Fences / semaphores / events.
-    REG_VK(vkCreateFence);
-    REG_VK(vkDestroyFence);
+    REG_VK_PTR(vkCreateFence, 0x06);             // arg 0: pCreateInfo, arg 2: ppFence, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyFence, 0x02);            // arg 1: pAllocator
     REG_VK(vkResetFences);
-    REG_VK(vkGetFenceStatus);
-    REG_VK(vkWaitForFences);
-    REG_VK(vkCreateSemaphore);
-    REG_VK(vkDestroySemaphore);
-    REG_VK(vkCreateEvent);
-    REG_VK(vkDestroyEvent);
+    REG_VK_PTR(vkGetFenceStatus, 0x02);          // arg 1: pFence (actually VkFence, but opaque)
+    REG_VK_PTR(vkWaitForFences, 0x06);            // arg 1: pFences, arg 2: pWaitValues, arg 3: pFlags
+    REG_VK_PTR(vkCreateSemaphore, 0x06);          // arg 0: pCreateInfo, arg 2: ppSemaphore, arg 3: pAllocator
+    REG_VK_PTR(vkDestroySemaphore, 0x02);        // arg 1: pAllocator
+    REG_VK_PTR(vkCreateEvent, 0x06);             // arg 0: pCreateInfo, arg 2: ppEvent, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyEvent, 0x02);            // arg 1: pAllocator
     REG_VK(vkSetEvent);
     REG_VK(vkResetEvent);
     // Query pools.
-    REG_VK(vkCreateQueryPool);
-    REG_VK(vkDestroyQueryPool);
-    REG_VK(vkGetQueryPoolResults);
+    REG_VK_PTR(vkCreateQueryPool, 0x06);         // arg 0: pCreateInfo, arg 2: ppQueryPool, arg 3: pAllocator
+    REG_VK_PTR(vkDestroyQueryPool, 0x02);        // arg 1: pAllocator
+    REG_VK_PTR(vkGetQueryPoolResults, 0x0E);     // arg 1: pCount, arg 2: pData, arg 3: pFlags
     // Sampler.
-    REG_VK(vkCreateSampler);
-    REG_VK(vkDestroySampler);
-    // vkGetInstanceProcAddr / vkGetDeviceProcAddr (essential for
-    // extension loading).
-    REG_VK(vkGetInstanceProcAddr);
-    REG_VK(vkGetDeviceProcAddr);
+    REG_VK_PTR(vkCreateSampler, 0x06);           // arg 0: pCreateInfo, arg 2: ppSampler, arg 3: pAllocator
+    REG_VK_PTR(vkDestroySampler, 0x02);          // arg 1: pAllocator
+    // vkGetInstanceProcAddr / vkGetDeviceProcAddr (essential for extension loading).
+    REG_VK_PROC(vkGetInstanceProcAddr);
+    REG_VK_PROC(vkGetDeviceProcAddr);
     #undef REG_VK
+    #undef REG_VK_PTR
+    #undef REG_VK_PROC
     // ── libwayland-client.so.0 ────────────────────────────────────
     // Wayland functions take pointer args (const char* name, wl_proxy*,
     // wl_listener*, void* impl, etc.) that need guest→host translation.
@@ -236,11 +1029,11 @@ void DisplayThunk::register_known_symbols_() {
     if (!wl_handle) wl_handle = dlopen("libwayland-client.so", RTLD_LAZY);
     #define REG_WL(name) do { \
         void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
-        for (const char* L : wl_libs) register_function_(L, #name, p); \
+        for (const char* L : wl_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     #define REG_WL_PTR(name, ptrs) do { \
         void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
-        for (const char* L : wl_libs) register_function_(L, #name, p, ptrs); \
+        for (const char* L : wl_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_WL_PTR(wl_display_connect, 0x01);       // arg 0: const char *name
     REG_WL(wl_display_connect_to_fd);            // arg 0: int fd (not pointer)
@@ -278,11 +1071,11 @@ void DisplayThunk::register_known_symbols_() {
     if (!wl_egl_handle) wl_egl_handle = dlopen("libwayland-egl.so", RTLD_LAZY);
     #define REG_WL_EGL(name) do { \
         void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
-        for (const char* L : wl_egl_libs) register_function_(L, #name, p); \
+        for (const char* L : wl_egl_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     #define REG_WL_EGL_PTR(name, ptrs) do { \
         void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
-        for (const char* L : wl_egl_libs) register_function_(L, #name, p, ptrs); \
+        for (const char* L : wl_egl_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_WL_EGL_PTR(wl_egl_window_create, 0x03);    // args: wl_surface*, int, int
     REG_WL_EGL_PTR(wl_egl_window_destroy, 0x01);   // arg 0: wl_egl_window*
@@ -301,11 +1094,11 @@ void DisplayThunk::register_known_symbols_() {
     if (!x11_handle) x11_handle = dlopen("libX11.so", RTLD_LAZY);
     #define REG_X11(name) do { \
         void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
-        for (const char* L : x11_libs) register_function_(L, #name, p); \
+        for (const char* L : x11_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     #define REG_X11_PTR(name, ptrs) do { \
         void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
-        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs); \
+        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_X11_PTR(XOpenDisplay, 0x01);             // arg 0: const char* name
     REG_X11_PTR(XCloseDisplay, 0x01);            // arg 0: Display*
@@ -398,7 +1191,7 @@ void DisplayThunk::register_known_symbols_() {
     if (!x11xcb_handle) x11xcb_handle = dlopen("libX11-xcb.so", RTLD_LAZY);
     #define REG_X11XCB(name) do { \
         void* p = x11xcb_handle ? dlsym(x11xcb_handle, #name) : nullptr; \
-        for (const char* L : x11xcb_libs) register_function_(L, #name, p); \
+        for (const char* L : x11xcb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_X11XCB(XGetXCBConnection);
     #undef REG_X11XCB
@@ -408,11 +1201,11 @@ void DisplayThunk::register_known_symbols_() {
     if (!xcb_handle) xcb_handle = dlopen("libxcb.so", RTLD_LAZY);
     #define REG_XCB(name) do { \
         void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
-        for (const char* L : xcb_libs) register_function_(L, #name, p); \
+        for (const char* L : xcb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     #define REG_XCB_PTR(name, ptrs) do { \
         void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
-        for (const char* L : xcb_libs) register_function_(L, #name, p, ptrs); \
+        for (const char* L : xcb_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_XCB_PTR(xcb_connect, 0x02);              // arg 0: const char*, arg 1: int*
     REG_XCB(xcb_disconnect);
@@ -441,7 +1234,7 @@ void DisplayThunk::register_known_symbols_() {
     if (!gbm_handle) gbm_handle = dlopen("libgbm.so", RTLD_LAZY);
     #define REG_GBM(name) do { \
         void* p = gbm_handle ? dlsym(gbm_handle, #name) : nullptr; \
-        for (const char* L : gbm_libs) register_function_(L, #name, p); \
+        for (const char* L : gbm_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
     } while(0)
     REG_GBM(gbm_create_device);
     REG_GBM(gbm_device_destroy);

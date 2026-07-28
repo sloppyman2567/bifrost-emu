@@ -40,6 +40,7 @@
 namespace arm64emu {
 class Memory;
 class CPU;
+class DisplayProxy;
 struct DisplayThunkImpl;
 class DisplayThunk {
 public:
@@ -58,16 +59,27 @@ public:
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 2048;  // 32 KiB page
-    // v1.5.0.alpha: ID base for DisplayThunk symbols.
     static constexpr uint32_t ID_BASE = 0x2000;
     static constexpr uint32_t ID_MASK = 0x3000;
-private:
+    // Dispatch flags (bitmask in the `flags` field of SymbolEntry).
+    // These mirror GraphicThunk's flags so the same dispatch logic works.
+    static constexpr uint8_t THUNK_RET_STRING    = 1u << 0;
+    static constexpr uint8_t THUNK_SHADER_SOURCE = 1u << 1;
+    static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
+    static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
+    static constexpr uint8_t THUNK_PROXY         = 1u << 4;
+ private:
     std::unique_ptr<DisplayThunkImpl> impl_;
     void register_function_(const std::string& lib,
                             const std::string& sym,
                             void* host_fn,
-                            uint8_t pointer_args = 0);
+                            uint16_t pointer_args = 0,
+                            uint8_t n_stack = 0,
+                            uint8_t n_float = 0,
+                            uint8_t flags = 0);
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
+    uint64_t proxy_dispatch_(CPU& cpu, const std::string& sym_name);
+    DisplayProxy* proxy();
 };
 } // namespace arm64emu
