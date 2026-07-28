@@ -360,6 +360,13 @@ INTEGRATION_TESTS=(
     # truncation, PR_GET_DUMPABLE, PR_GET_NO_NEW_PRIVS, unknown option
     # returns -EINVAL.
     "prctl|ctest_real/test_prctl.elf||5|ALL PASS"
+
+    # NEW: preadv/pwritev + additional stubbed syscalls. Verifies:
+    #   - preadv/pwritev roundtrip with vectorized I/O and offset semantics
+    #   - acct/reboot return -EPERM
+    #   - syslog returns -ENOSYS
+    #   - sched_rr_get_interval returns 0 with a valid interval
+    "syscalls|ctest_real/test_syscalls.elf||5|ALL PASS"
 )
 
 # Dynamic linking tests (Turn 53).

@@ -237,6 +237,16 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(0); return 0;
         }
+        case 89: { // acct(filename) — AArch64 89
+            // Process accounting requires CAP_SYS_ADMIN; we return -EPERM.
+            ret_host(static_cast<int64_t>(-EPERM));
+            return 0;
+        }
+        case 116: { // syslog(type, buf, len) — AArch64 116
+            // We don't implement the kernel syslog ring buffer.
+            ret_host(static_cast<int64_t>(-ENOSYS));
+            return 0;
+        }
         // POSIX per-thread timers — return -ENOSYS so glibc falls back
         // to setitimer-based SIGEV_SIGNAL timers.
         case 107: case 108: case 109: case 110: case 111: {
@@ -268,6 +278,17 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ret_host(0); return 0;
         }
+        case 127: { // sched_rr_get_interval(pid, interval) — AArch64 127
+            // Return a 10 ms round-robin time slice for SCHED_OTHER.
+            if (a1) {
+                try {
+                    mem_.store<uint32_t>(a1, 0);       // tv_sec = 0
+                    mem_.store<uint32_t>(a1 + 4, 0);   // tv_nsec = 10000000 (10 ms)
+                    mem_.store<uint32_t>(a1 + 8, 10000000);
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0); return 0;
+        }
         // ── Identity / process-group syscalls ────────────────────────
         // We're a single-process guest running as root (uid 0). set*id
         // calls succeed silently (we're already 0); get*id calls return 0.
@@ -294,6 +315,11 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 149: { // setresgid(rgid, egid, sgid)
             ret_host(0); return 0;
+        }
+        case 142: { // reboot(magic1, magic2, cmd, arg) — AArch64 142
+            // Reboot requires CAP_SYS_ADMIN; return -EPERM.
+            ret_host(static_cast<int64_t>(-EPERM));
+            return 0;
         }
         case 150: { // getresgid(rgid, egid, sgid) — all 0
             if (a0) { try { mem_.store<uint32_t>(a0, 0); } catch (...) { ret_err(EFAULT); return 0; } }
@@ -946,6 +972,12 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         // ── seccomp (277) ─────────────────────────────────────────────
         // Already a stub elsewhere? Add a safety net here.
         case 277: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        case 273: { // finit_module(fd, param, flags) — AArch64 273
+            // Kernel module loading requires CAP_SYS_ADMIN and a real
+            // kernel module fd. We don't implement this.
+            ret_host(static_cast<int64_t>(-EPERM));
+            return 0;
+        }
         default:
             return SYSCALL_NOT_HANDLED;
     }

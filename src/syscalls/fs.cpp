@@ -1,5 +1,5 @@
 // syscalls/fs.cpp — file syscalls: openat/close/read/write/dup/pipe2/
-// mkdirat/unlinkat/renameat/writev/readv/preadv64/fstat/lseek/getdents64/
+// mkdirat/unlinkat/renameat/writev/readv/preadv/pwritev/pread64/fstat/lseek/getdents64/
 // statx/fstatat/readlinkat/fcntl/fstatfs/statfs/faccessat/chdir/fchdir/
 // ftruncate/chmod/fchmod/utimensat/unlink/symlink/link/truncate/fallocate/
 // sendfile/getcwd.
@@ -400,6 +400,97 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             if (n < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(n)); return 0; }
             if (n > 0) mem_.write(a1, tmp.data(), static_cast<size_t>(n));
             ret_host(static_cast<uint64_t>(n));
+            return 0;
+        }
+        case 69: { // preadv(fd, iov, iovcnt, offset) — AArch64 69
+            // Vectorized pread: read from `fd` at `offset` into an array
+            // of iovecs. Marshals the guest iovec array into a single host
+            // bounce buffer, calls ::preadv, then scatters the result back
+            // to each guest iovec base address.
+            int fd = static_cast<int>(a0);
+            auto node = fds_.get(fd);
+            if (!node) {
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0;
+            }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            uint64_t iov_g = a1;
+            int iovcnt = static_cast<int>(a2);
+            off_t offset = static_cast<off_t>(a3);
+            if (iovcnt <= 0 || iovcnt > 1024) { ret_err(EINVAL); return 0; }
+            // Marshal guest iovec array and compute total length.
+            std::vector<struct iovec> giovs(iovcnt);
+            size_t total_len = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                uint64_t base = mem_.load<uint64_t>(iov_g + i * 16);
+                uint64_t len  = mem_.load<uint64_t>(iov_g + i * 16 + 8);
+                if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+                giovs[i].iov_base = reinterpret_cast<void*>(base);
+                giovs[i].iov_len = len;
+                total_len += len;
+            }
+            if (total_len > 64 * 1024 * 1024) total_len = 64 * 1024 * 1024;
+            std::vector<uint8_t> bounce(total_len);
+            struct iovec host_iov = { bounce.data(), total_len };
+            ssize_t r;
+            while (true) {
+                r = ::preadv(hfd, &host_iov, 1, offset);
+                if (r != -EINTR) break;
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
+                if (emu.handle_eintr(cpu)) return 0;
+                break;
+            }
+            if (r < 0) { ret_errno(); return 0; }
+            // Scatter back to guest iovecs in order.
+            size_t copied = 0;
+            for (int i = 0; i < iovcnt && copied < static_cast<size_t>(r); i++) {
+                size_t take = std::min<size_t>(giovs[i].iov_len, static_cast<uint64_t>(r) - copied);
+                if (take > 0) {
+                    mem_.write(reinterpret_cast<uint64_t>(giovs[i].iov_base), bounce.data() + copied, take);
+                }
+                copied += take;
+            }
+            ret_host(static_cast<uint64_t>(r));
+            return 0;
+        }
+        case 70: { // pwritev(fd, iov, iovcnt, offset) — AArch64 70
+            // Vectorized pwrite: writes to `fd` at `offset` from an array
+            // of iovecs. Gathers guest data into a single host bounce
+            // buffer then calls ::pwritev.
+            auto node = fds_.get(static_cast<int>(a0));
+            if (!node) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EBADF)); return 0; }
+            int hfd = node->host_fd();
+            if (hfd < 0) { ret_err(EBADF); return 0; }
+            uint64_t iov_g = a1;
+            int iovcnt = static_cast<int>(a2);
+            off_t offset = static_cast<off_t>(a3);
+            if (iovcnt <= 0 || iovcnt > 1024) { ret_err(EINVAL); return 0; }
+            // Marshal guest iovec array.
+            std::vector<struct iovec> giovs(iovcnt);
+            size_t total_len = 0;
+            for (int i = 0; i < iovcnt; i++) {
+                uint64_t base = mem_.load<uint64_t>(iov_g + i * 16);
+                uint64_t len  = mem_.load<uint64_t>(iov_g + i * 16 + 8);
+                if (len > 64 * 1024 * 1024) len = 64 * 1024 * 1024;
+                giovs[i].iov_base = reinterpret_cast<void*>(base);
+                giovs[i].iov_len = len;
+                total_len += len;
+            }
+            if (total_len > 64 * 1024 * 1024) total_len = 64 * 1024 * 1024;
+            std::vector<uint8_t> bounce(total_len);
+            // Gather from guest iovecs into bounce buffer.
+            size_t copied = 0;
+            for (int i = 0; i < iovcnt && copied < total_len; i++) {
+                size_t take = std::min<size_t>(giovs[i].iov_len, total_len - copied);
+                if (take > 0) {
+                    mem_.read(reinterpret_cast<uint64_t>(giovs[i].iov_base), bounce.data() + copied, take);
+                }
+                copied += take;
+            }
+            struct iovec host_iov = { bounce.data(), copied };
+            ssize_t r = ::pwritev(hfd, &host_iov, 1, offset);
+            if (r < 0) { ret_errno(); return 0; }
+            ret_host(static_cast<uint64_t>(r));
             return 0;
         }
         case 61: { // getdents64(fd, dirent_buf, count)
