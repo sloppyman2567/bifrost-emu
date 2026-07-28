@@ -202,7 +202,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // (it provides full functionality). The proxy is only used as a
     // fallback when the host library is not installed or has no display.
     if (entry.flags & THUNK_PROXY) {
-        if (!entry.host_fn && impl_->proxy_ && impl_->proxy_->ready()) {
+        if (!entry.host_fn && impl_->proxy_) {
             return proxy_dispatch_(cpu, entry.name);
         }
         if (!entry.host_fn) {
@@ -417,10 +417,17 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 // a SDL2-based software fallback for X11/Wayland functions when the host
 // libraries are unavailable or have no display.
 uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
-    if (!impl_->proxy_ || !impl_->proxy_->ready()) {
-        // Proxy not ready — return 0 (NULL) for pointer-returning functions,
-        // 0 for integer-returning functions. This matches the behavior of
-        // XOpenDisplay(NULL) returning NULL when no display is available.
+    if (!impl_->proxy_) {
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    // Lazy-init: only create the SDL2 window when an X11/Wayland call is
+    // actually made. This avoids SDL_Init interfering with the emulator's
+    // signal handlers for tests that don't use display functions.
+    if (!impl_->proxy_->ready()) {
+        impl_->proxy_->init(640, 480, impl_->mem);
+    }
+    if (!impl_->proxy_->ready()) {
         cpu.regs[0] = 0;
         return 0;
     }

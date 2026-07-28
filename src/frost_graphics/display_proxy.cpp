@@ -40,6 +40,9 @@ bool DisplayProxy::init(uint32_t width, uint32_t height, Memory* mem) {
 }
 bool DisplayProxy::init_sdl2_() {
 #if defined(BIFROST_USE_SDL2)
+    // Prevent SDL from installing its own signal handlers, which would
+    // interfere with the emulator's signal delivery (sigint, sigsuspend, etc.).
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "[display-proxy] SDL_Init failed: %s\n", SDL_GetError());
         return false;
