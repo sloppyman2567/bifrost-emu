@@ -543,12 +543,12 @@ static KeycodeResult utf8_char_to_linux_keycode(uint32_t cp) {
     }
     // Lowercase letters: same keycode, no Shift.
     if (cp >= 'a' && cp <= 'z') {
-        return {linux_input::KEY_A + (cp - 'a'), false};
+        return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'a')), false};
     }
     // Uppercase letters: same physical key as lowercase, need Shift.
-        if (cp >= 'A' && cp <= 'Z') {
-            return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'A')), true};
-        }
+    if (cp >= 'A' && cp <= 'Z') {
+        return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'A')), true};
+    }
     // Shifted digit/symbol row.
     struct ShiftMap { uint32_t cp; uint16_t code; };
     static constexpr ShiftMap kShiftMap[] = {
@@ -686,7 +686,6 @@ bool FrostInput::poll() {
                     // Emit a button release for all mouse buttons when the
                     // cursor leaves the window. This prevents the guest from
                     // thinking a button is still held after the cursor exits.
-                    std::lock_guard<std::mutex> g(impl_->mu);
                     for (uint16_t btn : {
                         linux_input::BTN_LEFT,
                         linux_input::BTN_RIGHT,
@@ -742,16 +741,23 @@ bool FrostInput::poll() {
                 break;
             }
             case SDL_MOUSEMOTION: {
-                // Accumulate relative motion into absolute position.
-                impl_->mouse_abs_x += ev.motion.xrel;
-                impl_->mouse_abs_y += ev.motion.yrel;
-                // Clamp to valid range.
-                if (impl_->mouse_abs_x < 0) impl_->mouse_abs_x = 0;
-                if (impl_->mouse_abs_x > FrostInputImpl::MOUSE_ABS_RANGE)
-                    impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE;
-                if (impl_->mouse_abs_y < 0) impl_->mouse_abs_y = 0;
-                if (impl_->mouse_abs_y > FrostInputImpl::MOUSE_ABS_RANGE)
-                    impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE;
+                // Read/write mouse state under mu, then release before
+                // push_event calls (which acquire mu internally).
+                int mx, my;
+                {
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    impl_->mouse_abs_x += ev.motion.xrel;
+                    impl_->mouse_abs_y += ev.motion.yrel;
+                    // Clamp to valid range.
+                    if (impl_->mouse_abs_x < 0) impl_->mouse_abs_x = 0;
+                    if (impl_->mouse_abs_x > FrostInputImpl::MOUSE_ABS_RANGE)
+                        impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE;
+                    if (impl_->mouse_abs_y < 0) impl_->mouse_abs_y = 0;
+                    if (impl_->mouse_abs_y > FrostInputImpl::MOUSE_ABS_RANGE)
+                        impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE;
+                    mx = impl_->mouse_abs_x;
+                    my = impl_->mouse_abs_y;
+                }
                 // Emit relative motion (EV_REL) for guests that use it.
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_X,
                                   static_cast<int32_t>(ev.motion.xrel));
@@ -759,9 +765,9 @@ bool FrostInput::poll() {
                                   static_cast<int32_t>(ev.motion.yrel));
                 // Emit absolute position (EV_ABS) for guests that need it.
                 impl_->push_event(linux_input::EV_ABS, linux_input::ABS_X,
-                                  impl_->mouse_abs_x);
+                                  mx);
                 impl_->push_event(linux_input::EV_ABS, linux_input::ABS_Y,
-                                  impl_->mouse_abs_y);
+                                  my);
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
                 // Warp mouse to window center when it hits the edge. This
                 // prevents the guest cursor from getting stuck at the edge
