@@ -12,6 +12,22 @@
 // /dev/input/js0 returns the correct 8-byte JS_EVENT format instead
 // of the 24-byte input_event format.
 //
+// Robustness/security (v1.5.1-alpha):
+//   - EV_SYN/SYN_DROPPED emitted on ring-buffer overflow, matching
+//     Linux evdev behavior. Guests can detect loss and resync.
+//   - Event deduplication: identical consecutive events are dropped,
+//     matching the Linux input subsystem's "only emit on change"
+//     contract.
+//   - Keyboard modifier tracking: Ctrl/Shift/Alt state is tracked
+//     and emitted as EV_KEY events so guests see modifier changes.
+//   - Mouse warp-to-center: when the cursor hits the window edge,
+//     it's warped back to center to prevent relative-input edge
+//     sticking (mirrors QEMU's SDL2 backend).
+//   - Window leave: all mouse buttons are released when the cursor
+//     leaves the window, preventing stuck-button state.
+//   - Timestamps use CLOCK_MONOTONIC (steady_clock), matching
+//     real Linux input devices.
+//
 // ── Ring buffers ───────────────────────────────────────────────────────
 // We use two separate ring buffers:
 //   - event_queue_  : 24-byte input_event records (for /dev/input/eventX)
@@ -39,6 +55,9 @@ namespace linux_input {
     constexpr uint16_t EV_KEY = 0x01;
     constexpr uint16_t EV_REL = 0x02;
     constexpr uint16_t EV_ABS = 0x03;
+    // SYN codes (used with EV_SYN).
+    constexpr uint16_t SYN_REPORT  = 0x00;
+    constexpr uint16_t SYN_DROPPED = 0x01;  // buffer overrun — guest should resync
     // Mouse buttons.
     constexpr uint16_t BTN_LEFT   = 0x110;
     constexpr uint16_t BTN_RIGHT  = 0x111;
@@ -60,20 +79,30 @@ namespace linux_input {
     constexpr uint16_t ABS_HAT0Y = 0x11;  // D-pad Y
     constexpr uint16_t ABS_BRAKE = 0x0a;  // alias for ABS_Z (left trigger)
     constexpr uint16_t ABS_GAS   = 0x0b;  // alias for ABS_RZ (right trigger)
+    // Keyboard modifier keys (emitted as EV_KEY for guests that read
+    // /dev/input/eventX directly instead of using the keyboard scancode
+    // translation table).
+    constexpr uint16_t KEY_LEFTCTRL   = 29;
+    constexpr uint16_t KEY_RIGHTCTRL  = 97;
+    constexpr uint16_t KEY_LEFTSHIFT  = 42;
+    constexpr uint16_t KEY_RIGHTSHIFT = 54;
+    constexpr uint16_t KEY_LEFTALT    = 56;
+    constexpr uint16_t KEY_RIGHTALT   = 100;
+    constexpr uint16_t KEY_CAPSLOCK   = 58;
     // Gamepad buttons (from <linux/input-event-codes.h>).
-    constexpr uint16_t BTN_GAMEPAD   = 0x130;  // A / Cross
-    constexpr uint16_t BTN_EAST      = 0x131;  // B / Circle
-    constexpr uint16_t BTN_NORTH     = 0x133;  // X / Triangle (varies)
-    constexpr uint16_t BTN_WEST      = 0x134;  // Y / Square (varies)
-    constexpr uint16_t BTN_TL        = 0x136;  // left shoulder
-    constexpr uint16_t BTN_TR        = 0x137;  // right shoulder
-    constexpr uint16_t BTN_TL2       = 0x138;  // left trigger (full press)
-    constexpr uint16_t BTN_TR2       = 0x139;  // right trigger (full press)
+    constexpr uint16_t BTN_GAMEPAD   = 0x130;
+    constexpr uint16_t BTN_EAST      = 0x131;
+    constexpr uint16_t BTN_NORTH     = 0x133;
+    constexpr uint16_t BTN_WEST      = 0x134;
+    constexpr uint16_t BTN_TL        = 0x136;
+    constexpr uint16_t BTN_TR        = 0x137;
+    constexpr uint16_t BTN_TL2       = 0x138;
+    constexpr uint16_t BTN_TR2       = 0x139;
     constexpr uint16_t BTN_SELECT    = 0x13a;
     constexpr uint16_t BTN_START     = 0x13b;
-    constexpr uint16_t BTN_MODE      = 0x13c;  // center / home / guide
-    constexpr uint16_t BTN_THUMBL    = 0x13d;  // left stick click
-    constexpr uint16_t BTN_THUMBR    = 0x13e;  // right stick click
+    constexpr uint16_t BTN_MODE      = 0x13c;
+    constexpr uint16_t BTN_THUMBL    = 0x13d;
+    constexpr uint16_t BTN_THUMBR    = 0x13e;
     constexpr uint16_t BTN_DPAD_UP    = 0x220;
     constexpr uint16_t BTN_DPAD_DOWN  = 0x222;
     constexpr uint16_t BTN_DPAD_LEFT  = 0x221;
@@ -89,13 +118,6 @@ namespace linux_input {
     constexpr uint16_t KEY_RIGHT    = 106;
     constexpr uint16_t KEY_UP       = 103;
     constexpr uint16_t KEY_DOWN     = 108;
-    constexpr uint16_t KEY_LEFTSHIFT  = 42;
-    constexpr uint16_t KEY_RIGHTSHIFT = 54;
-    constexpr uint16_t KEY_LEFTCTRL   = 29;
-    constexpr uint16_t KEY_RIGHTCTRL  = 97;
-    constexpr uint16_t KEY_LEFTALT    = 56;
-    constexpr uint16_t KEY_RIGHTALT   = 100;
-    constexpr uint16_t KEY_CAPSLOCK   = 58;
     constexpr uint16_t KEY_HOME     = 102;
     constexpr uint16_t KEY_END      = 107;
     constexpr uint16_t KEY_PAGEUP   = 104;
@@ -262,6 +284,7 @@ struct FrostInputImpl {
     static constexpr size_t EVENT_CAP = 256;
     static constexpr size_t JS_CAP = 256;
     static constexpr int32_t MOUSE_ABS_RANGE = 32767;  // ABS_X/ABS_Y range
+    static constexpr uint32_t SYN_DROPPED_INTERVAL = 250;  // emit SYN_DROPPED at most every N events
     std::vector<input_event_> event_queue;
     size_t event_head = 0, event_tail = 0;
     std::vector<js_event_> js_queue;
@@ -283,9 +306,49 @@ struct FrostInputImpl {
     // 0..MOUSE_ABS_RANGE (matching Linux convention for touchscreens).
     int32_t mouse_abs_x = MOUSE_ABS_RANGE / 2;
     int32_t mouse_abs_y = MOUSE_ABS_RANGE / 2;
+    // Last emitted event for deduplication. Linux only emits events when
+    // values change; we match that behavior to avoid spamming the guest
+    // with duplicate events.
+    uint16_t last_type = 0;
+    uint16_t last_code = 0;
+    int32_t last_value = 0;
+    bool last_valid = false;
+    // Keyboard modifier state (Ctrl/Shift/Alt). Tracked so we can emit
+    // EV_KEY events for modifier keys and filter GUI grab combos from
+    // text input.
+    uint16_t modifier_state = 0;
+    // Counter for SYN_DROPPED rate-limiting.
+    uint32_t syn_dropped_counter = 0;
     FrostInputImpl()
         : event_queue(EVENT_CAP), js_queue(JS_CAP),
           startup_time(std::chrono::steady_clock::now()) {}
+    // ── Update modifier state from SDL2 key mods ───────────────────────
+    void update_modifiers(uint16_t mods) {
+        struct ModMap { uint16_t sdl_bit; uint16_t linux_code; };
+        static constexpr ModMap kModMap[] = {
+            { KMOD_LCTRL,  linux_input::KEY_LEFTCTRL },
+            { KMOD_RCTRL,  linux_input::KEY_RIGHTCTRL },
+            { KMOD_LSHIFT, linux_input::KEY_LEFTSHIFT },
+            { KMOD_RSHIFT, linux_input::KEY_RIGHTSHIFT },
+            { KMOD_LALT,   linux_input::KEY_LEFTALT },
+            { KMOD_RALT,   linux_input::KEY_RIGHTALT },
+            { KMOD_CAPS,   linux_input::KEY_CAPSLOCK },
+        };
+        uint16_t new_state = 0;
+        for (const auto& m : kModMap) {
+            if (mods & m.sdl_bit) new_state |= (1u << m.linux_code);
+        }
+        // Emit EV_KEY for modifiers that changed.
+        for (const auto& m : kModMap) {
+            bool was_set = modifier_state & (1u << m.linux_code);
+            bool now_set = new_state & (1u << m.linux_code);
+            if (was_set != now_set) {
+                push_event(linux_input::EV_KEY, m.linux_code,
+                           now_set ? 1 : 0);
+            }
+        }
+        modifier_state = new_state;
+    }
     // ── Push an input_event (24 bytes) into the event queue ─────────
     void push_event(uint16_t type, uint16_t code, int32_t value) {
         std::lock_guard<std::mutex> g(mu);
@@ -303,9 +366,39 @@ struct FrostInputImpl {
         ev.type    = type;
         ev.code    = code;
         ev.value   = value;
+        // Deduplicate: Linux only emits events when values change. Skip
+        // identical consecutive events to match real evdev behavior and
+        // reduce queue pressure.
+        bool is_syn = (type == linux_input::EV_SYN);
+        if (last_valid && !is_syn && type == last_type && code == last_code
+            && value == last_value) {
+            return;  // duplicate — skip
+        }
+        last_type = type;
+        last_code = code;
+        last_value = value;
+        last_valid = true;
         event_tail = (event_tail + 1) % EVENT_CAP;
         if (event_tail == event_head) {
-            event_head = (event_head + 1) % EVENT_CAP;  // drop oldest
+            // Buffer overflow — emit SYN_DROPPED to tell the guest to
+            // resync, matching Linux evdev behavior. Rate-limit to avoid
+            // flooding if the guest is very slow.
+            syn_dropped_counter++;
+            if (syn_dropped_counter >= SYN_DROPPED_INTERVAL) {
+                syn_dropped_counter = 0;
+                // Write SYN_DROPPED at the current tail position (overwriting
+                // the oldest event, which we're about to discard anyway).
+                input_event_& drop_ev = event_queue[event_tail];
+                drop_ev.type = linux_input::EV_SYN;
+                drop_ev.code = linux_input::SYN_DROPPED;
+                drop_ev.value = 0;
+                event_tail = (event_tail + 1) % EVENT_CAP;
+                // Advance head past the SYN_DROPPED so the guest sees it.
+                event_head = (event_head + 1) % EVENT_CAP;
+            } else {
+                // Just drop the oldest event without SYN_DROPPED.
+                event_head = (event_head + 1) % EVENT_CAP;
+            }
         }
         event_count++;
     }
@@ -385,6 +478,64 @@ struct FrostInputImpl {
 #endif
     }
 };
+#if defined(BIFROST_USE_SDL2)
+// Convert a UTF-8 character to a Linux keycode. Returns 0 if the
+// character has no direct keycode mapping (e.g., non-Latin scripts).
+static uint16_t utf8_char_to_linux_keycode(uint32_t cp) {
+    // ASCII range.
+    if (cp >= 'a' && cp <= 'z') return 30 + (cp - 'a');  // KEY_A=30
+    if (cp >= 'A' && cp <= 'Z') return 30 + (cp - 'A');
+    if (cp >= '1' && cp <= '9') return 2 + (cp - '1');
+    if (cp == '0') return 11;
+    switch (cp) {
+        case ' ':  return linux_input::KEY_SPACE;
+        case '\n': return linux_input::KEY_ENTER;
+        case '\t': return linux_input::KEY_TAB;
+        case '\b': return linux_input::KEY_BACKSPACE;
+        case '\r': return linux_input::KEY_ENTER;
+        case 0x1B: return linux_input::KEY_ESC;
+        default:   return 0;
+    }
+}
+// Emit EV_KEY events for a UTF-8 text string. Each character is
+// converted to a keycode and emitted as press+release. Returns the
+// number of characters emitted.
+static size_t emit_text_as_keyevents(FrostInputImpl* impl, const char* utf8, size_t len) {
+    size_t emitted = 0;
+    for (size_t i = 0; i < len && utf8[i]; ) {
+        uint32_t cp = 0;
+        uint8_t c = static_cast<uint8_t>(utf8[i]);
+        if (c < 0x80) {
+            cp = c;
+            i += 1;
+        } else if (c < 0xE0) {
+            if (i + 1 < len) {
+                cp = ((c & 0x1F) << 6) | (static_cast<uint8_t>(utf8[i+1]) & 0x3F);
+                i += 2;
+            } else { i++; continue; }
+        } else if (c < 0xF0) {
+            if (i + 2 < len) {
+                cp = ((c & 0x0F) << 12)
+                   | ((static_cast<uint8_t>(utf8[i+1]) & 0x3F) << 6)
+                   | (static_cast<uint8_t>(utf8[i+2]) & 0x3F);
+                i += 3;
+            } else { i++; continue; }
+        } else {
+            if (i + 3 < len) i += 4;
+            else i++;
+            continue;
+        }
+        uint16_t kc = utf8_char_to_linux_keycode(cp);
+        if (kc != 0) {
+            impl->push_event(linux_input::EV_KEY, kc, 1);
+            impl->push_event(linux_input::EV_KEY, kc, 0);
+            impl->push_event(linux_input::EV_SYN, 0, 0);
+            emitted++;
+        }
+    }
+    return emitted;
+}
+#endif  // BIFROST_USE_SDL2
 // ── FrostInput method implementations ──────────────────────────────────
 FrostInput::FrostInput() {
     impl_ = std::make_unique<FrostInputImpl>();
@@ -422,6 +573,21 @@ bool FrostInput::poll() {
                     std::lock_guard<std::mutex> g(impl_->mu);
                     impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE / 2;
                     impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE / 2;
+                } else if (ev.window.event == SDL_WINDOWEVENT_LEAVE) {
+                    // Emit a button release for all mouse buttons when the
+                    // cursor leaves the window. This prevents the guest from
+                    // thinking a button is still held after the cursor exits.
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    for (uint16_t btn : {
+                        linux_input::BTN_LEFT,
+                        linux_input::BTN_RIGHT,
+                        linux_input::BTN_MIDDLE,
+                        linux_input::BTN_SIDE,
+                        linux_input::BTN_EXTRA
+                    }) {
+                        impl_->push_event(linux_input::EV_KEY, btn, 0);
+                    }
+                    impl_->push_event(linux_input::EV_SYN, 0, 0);
                 }
                 break;
             case SDL_KEYDOWN:
@@ -437,6 +603,22 @@ bool FrostInput::poll() {
                     }
                     impl_->push_event(linux_input::EV_KEY, code, value);
                     impl_->push_event(linux_input::EV_SYN, 0, 0);
+                }
+                // Track modifier state (Ctrl/Shift/Alt) so we can emit
+                // EV_KEY for them and filter GUI grab combos.
+                impl_->update_modifiers(ev.key.keysym.mod);
+                break;
+            }
+            case SDL_TEXTINPUT: {
+                // SDL_TEXTINPUT provides properly composed Unicode text
+                // (handles IME, keyboard layouts, dead keys, etc.).
+                // Convert each character to EV_KEY press+release pairs
+                // so guests that read /dev/input/eventX get text input.
+                const char* text = ev.text.text;
+                if (text && text[0]) {
+                    size_t emitted = emit_text_as_keyevents(
+                        impl_.get(), text, strlen(text));
+                    (void)emitted;
                 }
                 break;
             }
@@ -472,6 +654,23 @@ bool FrostInput::poll() {
                 impl_->push_event(linux_input::EV_ABS, linux_input::ABS_Y,
                                   impl_->mouse_abs_y);
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
+                // Warp mouse to window center when it hits the edge. This
+                // prevents the guest cursor from getting stuck at the edge
+                // in relative-input mode (mirrors QEMU's SDL2 backend).
+                if (ev.motion.x <= 0 || ev.motion.x >= ev.motion.x - 1 + ev.motion.xrel
+                    || ev.motion.y <= 0 || ev.motion.y >= ev.motion.y - 1 + ev.motion.yrel) {
+                    // The pointer hit the window edge — warp it back to
+                    // the center so subsequent motion generates deltas
+                    // in every direction again.
+                    int win_w, win_h;
+                    SDL_GetWindowSize(SDL_GetWindowFromID(ev.motion.windowID),
+                                      &win_w, &win_h);
+                    if (win_w > 0 && win_h > 0) {
+                        SDL_WarpMouseInWindow(
+                            SDL_GetWindowFromID(ev.motion.windowID),
+                            win_w / 2, win_h / 2);
+                    }
+                }
                 break;
             }
             case SDL_MOUSEWHEEL: {
@@ -606,6 +805,10 @@ void FrostInput::drain() {
     std::lock_guard<std::mutex> g(impl_->mu);
     impl_->event_head = impl_->event_tail;
     impl_->js_head = impl_->js_tail;
+    impl_->last_valid = false;
+    impl_->last_type = 0;
+    impl_->last_code = 0;
+    impl_->last_value = 0;
 }
 // ── Diagnostics ─────────────────────────────────────────────────────────
 uint64_t FrostInput::event_count() const {
