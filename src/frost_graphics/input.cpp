@@ -124,6 +124,53 @@ namespace linux_input {
     constexpr uint16_t KEY_PAGEDOWN = 109;
     constexpr uint16_t KEY_INSERT   = 110;
     constexpr uint16_t KEY_DELETE   = 111;
+    constexpr uint16_t KEY_0        = 11;
+    constexpr uint16_t KEY_1        = 2;
+    constexpr uint16_t KEY_2        = 3;
+    constexpr uint16_t KEY_3        = 4;
+    constexpr uint16_t KEY_4        = 5;
+    constexpr uint16_t KEY_5        = 6;
+    constexpr uint16_t KEY_6        = 7;
+    constexpr uint16_t KEY_7        = 8;
+    constexpr uint16_t KEY_8        = 9;
+    constexpr uint16_t KEY_9        = 10;
+    constexpr uint16_t KEY_A        = 30;
+    constexpr uint16_t KEY_B        = 31;
+    constexpr uint16_t KEY_C        = 32;
+    constexpr uint16_t KEY_D        = 33;
+    constexpr uint16_t KEY_E        = 34;
+    constexpr uint16_t KEY_F        = 35;
+    constexpr uint16_t KEY_G        = 36;
+    constexpr uint16_t KEY_H        = 37;
+    constexpr uint16_t KEY_I        = 38;
+    constexpr uint16_t KEY_J        = 39;
+    constexpr uint16_t KEY_K        = 40;
+    constexpr uint16_t KEY_L        = 41;
+    constexpr uint16_t KEY_M        = 42;
+    constexpr uint16_t KEY_N        = 43;
+    constexpr uint16_t KEY_O        = 44;
+    constexpr uint16_t KEY_P        = 45;
+    constexpr uint16_t KEY_Q        = 46;
+    constexpr uint16_t KEY_R        = 47;
+    constexpr uint16_t KEY_S        = 48;
+    constexpr uint16_t KEY_T        = 49;
+    constexpr uint16_t KEY_U        = 50;
+    constexpr uint16_t KEY_V        = 51;
+    constexpr uint16_t KEY_W        = 52;
+    constexpr uint16_t KEY_X        = 53;
+    constexpr uint16_t KEY_Y        = 54;
+    constexpr uint16_t KEY_Z        = 55;
+    constexpr uint16_t KEY_MINUS    = 12;
+    constexpr uint16_t KEY_EQUAL    = 13;
+    constexpr uint16_t KEY_LEFTBRACE   = 26;
+    constexpr uint16_t KEY_RIGHTBRACE  = 27;
+    constexpr uint16_t KEY_BACKSLASH   = 43;
+    constexpr uint16_t KEY_SEMICOLON   = 39;
+    constexpr uint16_t KEY_APOSTROPHE  = 40;
+    constexpr uint16_t KEY_COMMA       = 51;
+    constexpr uint16_t KEY_DOT         = 52;
+    constexpr uint16_t KEY_SLASH       = 53;
+    constexpr uint16_t KEY_GRAVE       = 41;
 }
 // ── Linux js_event constants ───────────────────────────────────────────
 namespace linux_js {
@@ -360,15 +407,9 @@ struct FrostInputImpl {
         auto dur = now.time_since_epoch();
         auto secs = std::chrono::duration_cast<std::chrono::seconds>(dur);
         auto usecs = std::chrono::duration_cast<std::chrono::microseconds>(dur - secs);
-        input_event_& ev = event_queue[event_tail];
-        ev.tv_sec  = static_cast<int64_t>(secs.count());
-        ev.tv_usec = static_cast<int64_t>(usecs.count());
-        ev.type    = type;
-        ev.code    = code;
-        ev.value   = value;
         // Deduplicate: Linux only emits events when values change. Skip
         // identical consecutive events to match real evdev behavior and
-        // reduce queue pressure.
+        // reduce queue pressure. Check before writing to the queue.
         bool is_syn = (type == linux_input::EV_SYN);
         if (last_valid && !is_syn && type == last_type && code == last_code
             && value == last_value) {
@@ -378,6 +419,12 @@ struct FrostInputImpl {
         last_code = code;
         last_value = value;
         last_valid = true;
+        input_event_& ev = event_queue[event_tail];
+        ev.tv_sec  = static_cast<int64_t>(secs.count());
+        ev.tv_usec = static_cast<int64_t>(usecs.count());
+        ev.type    = type;
+        ev.code    = code;
+        ev.value   = value;
         event_tail = (event_tail + 1) % EVENT_CAP;
         if (event_tail == event_head) {
             // Buffer overflow — emit SYN_DROPPED to tell the guest to
@@ -467,6 +514,7 @@ struct FrostInputImpl {
     // ── Close all game controllers ──────────────────────────────────
     void close_controllers() {
 #if defined(BIFROST_USE_SDL2)
+        std::lock_guard<std::mutex> g(mu);
         for (void* p : controllers) {
             auto* gc = static_cast<SDL_GameController*>(p);
             if (SDL_GameControllerGetAttached(gc)) {
@@ -479,27 +527,82 @@ struct FrostInputImpl {
     }
 };
 #if defined(BIFROST_USE_SDL2)
-// Convert a UTF-8 character to a Linux keycode. Returns 0 if the
+// Result of mapping a character to a Linux keycode.
+struct KeycodeResult {
+    uint16_t code;
+    bool needs_shift;
+};
+// Convert a UTF-8 character to a Linux keycode. Returns {0, false} if the
 // character has no direct keycode mapping (e.g., non-Latin scripts).
-static uint16_t utf8_char_to_linux_keycode(uint32_t cp) {
-    // ASCII range.
-    if (cp >= 'a' && cp <= 'z') return 30 + (cp - 'a');  // KEY_A=30
-    if (cp >= 'A' && cp <= 'Z') return 30 + (cp - 'A');
-    if (cp >= '1' && cp <= '9') return 2 + (cp - '1');
-    if (cp == '0') return 11;
+static KeycodeResult utf8_char_to_linux_keycode(uint32_t cp) {
+    // Digits: same keycode regardless of Shift.
+    if (cp >= '0' && cp <= '9') {
+        uint16_t code = (cp == '0') ? linux_input::KEY_0
+                                    : linux_input::KEY_1 + (cp - '1');
+        return {code, false};
+    }
+    // Lowercase letters: same keycode, no Shift.
+    if (cp >= 'a' && cp <= 'z') {
+        return {linux_input::KEY_A + (cp - 'a'), false};
+    }
+    // Uppercase letters: same physical key as lowercase, need Shift.
+        if (cp >= 'A' && cp <= 'Z') {
+            return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'A')), true};
+        }
+    // Shifted digit/symbol row.
+    struct ShiftMap { uint32_t cp; uint16_t code; };
+    static constexpr ShiftMap kShiftMap[] = {
+        {'!', linux_input::KEY_1},
+        {'@', linux_input::KEY_2},
+        {'#', linux_input::KEY_3},
+        {'$', linux_input::KEY_4},
+        {'%', linux_input::KEY_5},
+        {'^', linux_input::KEY_6},
+        {'&', linux_input::KEY_7},
+        {'*', linux_input::KEY_8},
+        {'(', linux_input::KEY_9},
+        {')', linux_input::KEY_0},
+        {'_', linux_input::KEY_MINUS},
+        {'+', linux_input::KEY_EQUAL},
+        {'{', linux_input::KEY_LEFTBRACE},
+        {'}', linux_input::KEY_RIGHTBRACE},
+        {'|', linux_input::KEY_BACKSLASH},
+        {':', linux_input::KEY_SEMICOLON},
+        {'"', linux_input::KEY_APOSTROPHE},
+        {'<', linux_input::KEY_COMMA},
+        {'>', linux_input::KEY_DOT},
+        {'?', linux_input::KEY_SLASH},
+        {'~', linux_input::KEY_GRAVE},
+    };
+    for (const auto& m : kShiftMap) {
+        if (cp == m.cp) return {m.code, true};
+    }
+    // Unshifted punctuation.
     switch (cp) {
-        case ' ':  return linux_input::KEY_SPACE;
-        case '\n': return linux_input::KEY_ENTER;
-        case '\t': return linux_input::KEY_TAB;
-        case '\b': return linux_input::KEY_BACKSPACE;
-        case '\r': return linux_input::KEY_ENTER;
-        case 0x1B: return linux_input::KEY_ESC;
-        default:   return 0;
+        case ' ':  return {linux_input::KEY_SPACE, false};
+        case '\n': return {linux_input::KEY_ENTER, false};
+        case '\t': return {linux_input::KEY_TAB, false};
+        case '\b': return {linux_input::KEY_BACKSPACE, false};
+        case '\r': return {linux_input::KEY_ENTER, false};
+        case '-':  return {linux_input::KEY_MINUS, false};
+        case '=':  return {linux_input::KEY_EQUAL, false};
+        case '[':  return {linux_input::KEY_LEFTBRACE, false};
+        case ']':  return {linux_input::KEY_RIGHTBRACE, false};
+        case '\\': return {linux_input::KEY_BACKSLASH, false};
+        case ';':  return {linux_input::KEY_SEMICOLON, false};
+        case '\'': return {linux_input::KEY_APOSTROPHE, false};
+        case ',':  return {linux_input::KEY_COMMA, false};
+        case '.':  return {linux_input::KEY_DOT, false};
+        case '/':  return {linux_input::KEY_SLASH, false};
+        case '`':  return {linux_input::KEY_GRAVE, false};
+        case 0x1B: return {linux_input::KEY_ESC, false};
+        default:   return {0, false};
     }
 }
 // Emit EV_KEY events for a UTF-8 text string. Each character is
-// converted to a keycode and emitted as press+release. Returns the
-// number of characters emitted.
+// converted to a keycode and emitted as press+release. Shift is emitted
+// as a modifier for characters that require it. Returns the number of
+// characters emitted.
 static size_t emit_text_as_keyevents(FrostInputImpl* impl, const char* utf8, size_t len) {
     size_t emitted = 0;
     for (size_t i = 0; i < len && utf8[i]; ) {
@@ -525,10 +628,16 @@ static size_t emit_text_as_keyevents(FrostInputImpl* impl, const char* utf8, siz
             else i++;
             continue;
         }
-        uint16_t kc = utf8_char_to_linux_keycode(cp);
-        if (kc != 0) {
-            impl->push_event(linux_input::EV_KEY, kc, 1);
-            impl->push_event(linux_input::EV_KEY, kc, 0);
+        KeycodeResult kr = utf8_char_to_linux_keycode(cp);
+        if (kr.code != 0) {
+            if (kr.needs_shift) {
+                impl->push_event(linux_input::EV_KEY, linux_input::KEY_LEFTSHIFT, 1);
+            }
+            impl->push_event(linux_input::EV_KEY, kr.code, 1);
+            impl->push_event(linux_input::EV_KEY, kr.code, 0);
+            if (kr.needs_shift) {
+                impl->push_event(linux_input::EV_KEY, linux_input::KEY_LEFTSHIFT, 0);
+            }
             impl->push_event(linux_input::EV_SYN, 0, 0);
             emitted++;
         }
@@ -657,14 +766,14 @@ bool FrostInput::poll() {
                 // Warp mouse to window center when it hits the edge. This
                 // prevents the guest cursor from getting stuck at the edge
                 // in relative-input mode (mirrors QEMU's SDL2 backend).
-                if (ev.motion.x <= 0 || ev.motion.x >= ev.motion.x - 1 + ev.motion.xrel
-                    || ev.motion.y <= 0 || ev.motion.y >= ev.motion.y - 1 + ev.motion.yrel) {
+                int win_w, win_h;
+                SDL_GetWindowSize(SDL_GetWindowFromID(ev.motion.windowID),
+                                  &win_w, &win_h);
+                if (ev.motion.x <= 0 || ev.motion.x >= win_w - 1
+                    || ev.motion.y <= 0 || ev.motion.y >= win_h - 1) {
                     // The pointer hit the window edge — warp it back to
                     // the center so subsequent motion generates deltas
                     // in every direction again.
-                    int win_w, win_h;
-                    SDL_GetWindowSize(SDL_GetWindowFromID(ev.motion.windowID),
-                                      &win_w, &win_h);
                     if (win_w > 0 && win_h > 0) {
                         SDL_WarpMouseInWindow(
                             SDL_GetWindowFromID(ev.motion.windowID),
