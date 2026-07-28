@@ -261,6 +261,7 @@ static uint8_t sdl_gc_button_to_js(SDL_GameControllerButton btn) {
 struct FrostInputImpl {
     static constexpr size_t EVENT_CAP = 256;
     static constexpr size_t JS_CAP = 256;
+    static constexpr int32_t MOUSE_ABS_RANGE = 32767;  // ABS_X/ABS_Y range
     std::vector<input_event_> event_queue;
     size_t event_head = 0, event_tail = 0;
     std::vector<js_event_> js_queue;
@@ -277,13 +278,22 @@ struct FrostInputImpl {
     int controller_count = 0;  // cached for has_game_controller()
     // Baseline timestamp for js_event.time (milliseconds since startup).
     std::chrono::steady_clock::time_point startup_time;
+    // Mouse absolute position tracking. We accumulate relative motion
+    // to produce ABS_X/ABS_Y events alongside EV_REL. The range is
+    // 0..MOUSE_ABS_RANGE (matching Linux convention for touchscreens).
+    int32_t mouse_abs_x = MOUSE_ABS_RANGE / 2;
+    int32_t mouse_abs_y = MOUSE_ABS_RANGE / 2;
     FrostInputImpl()
         : event_queue(EVENT_CAP), js_queue(JS_CAP),
           startup_time(std::chrono::steady_clock::now()) {}
     // ── Push an input_event (24 bytes) into the event queue ─────────
     void push_event(uint16_t type, uint16_t code, int32_t value) {
         std::lock_guard<std::mutex> g(mu);
-        auto now = std::chrono::system_clock::now();
+        // Use steady_clock (CLOCK_MONOTONIC) for timestamps. Real Linux
+        // input events use monotonic time; system_clock (CLOCK_REALTIME)
+        // can jump backwards on NTP adjustment and breaks guests that
+        // compute deltas.
+        auto now = std::chrono::steady_clock::now();
         auto dur = now.time_since_epoch();
         auto secs = std::chrono::duration_cast<std::chrono::seconds>(dur);
         auto usecs = std::chrono::duration_cast<std::chrono::microseconds>(dur - secs);
@@ -407,13 +417,24 @@ bool FrostInput::poll() {
             case SDL_WINDOWEVENT:
                 if (ev.window.event == SDL_WINDOWEVENT_CLOSE) {
                     return false;
+                } else if (ev.window.event == SDL_WINDOWEVENT_ENTER) {
+                    // Reset absolute mouse position to center on focus gain.
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE / 2;
+                    impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE / 2;
                 }
                 break;
             case SDL_KEYDOWN:
             case SDL_KEYUP: {
                 uint16_t code = sdl_scancode_to_linux(ev.key.keysym.scancode);
                 if (code != linux_input::KEY_RESERVED) {
-                    int32_t value = (ev.type == SDL_KEYDOWN) ? 1 : 0;
+                    // SDL_KEYDOWN with repeat=true → Linux KEY_REPEAT (value=2).
+                    int32_t value;
+                    if (ev.type == SDL_KEYDOWN && ev.key.repeat) {
+                        value = 2;  // KEY_REPEAT
+                    } else {
+                        value = (ev.type == SDL_KEYDOWN) ? 1 : 0;
+                    }
                     impl_->push_event(linux_input::EV_KEY, code, value);
                     impl_->push_event(linux_input::EV_SYN, 0, 0);
                 }
@@ -430,10 +451,26 @@ bool FrostInput::poll() {
                 break;
             }
             case SDL_MOUSEMOTION: {
+                // Accumulate relative motion into absolute position.
+                impl_->mouse_abs_x += ev.motion.xrel;
+                impl_->mouse_abs_y += ev.motion.yrel;
+                // Clamp to valid range.
+                if (impl_->mouse_abs_x < 0) impl_->mouse_abs_x = 0;
+                if (impl_->mouse_abs_x > FrostInputImpl::MOUSE_ABS_RANGE)
+                    impl_->mouse_abs_x = FrostInputImpl::MOUSE_ABS_RANGE;
+                if (impl_->mouse_abs_y < 0) impl_->mouse_abs_y = 0;
+                if (impl_->mouse_abs_y > FrostInputImpl::MOUSE_ABS_RANGE)
+                    impl_->mouse_abs_y = FrostInputImpl::MOUSE_ABS_RANGE;
+                // Emit relative motion (EV_REL) for guests that use it.
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_X,
                                   static_cast<int32_t>(ev.motion.xrel));
                 impl_->push_event(linux_input::EV_REL, linux_input::REL_Y,
                                   static_cast<int32_t>(ev.motion.yrel));
+                // Emit absolute position (EV_ABS) for guests that need it.
+                impl_->push_event(linux_input::EV_ABS, linux_input::ABS_X,
+                                  impl_->mouse_abs_x);
+                impl_->push_event(linux_input::EV_ABS, linux_input::ABS_Y,
+                                  impl_->mouse_abs_y);
                 impl_->push_event(linux_input::EV_SYN, 0, 0);
                 break;
             }

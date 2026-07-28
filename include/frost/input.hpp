@@ -75,8 +75,10 @@
 //   - Only one game controller (js0). Multi-controller support is a
 //     future enhancement.
 //   - No multitouch (SDL2 has it; not yet plumbed through).
-//   - Time stamps use CLOCK_REALTIME; real Linux uses CLOCK_MONOTONIC
-//     for input events. Cosmetic difference — guests rarely care.
+//   - Time stamps use CLOCK_MONOTONIC (steady_clock); real Linux uses
+//     CLOCK_MONOTONIC for input events. Previously we used CLOCK_REALTIME
+//     (system_clock), which could jump backwards on NTP adjustment and
+//     broke guests that compute deltas.
 //   - JS_EVENT time is milliseconds since startup (we use a steady_clock
 //     baseline). Real Linux uses jiffies.
 #pragma once
