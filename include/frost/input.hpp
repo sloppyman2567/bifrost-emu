@@ -126,6 +126,8 @@ public:
     void drain();
     // Total events captured since construction (diagnostic).
     uint64_t event_count() const;
+    // Number of events currently in the queue (for FIONREAD).
+    size_t queue_size() const;
     // Whether any game controllers are connected (diagnostic).
     bool has_game_controller() const;
     // Number of game controllers currently open.

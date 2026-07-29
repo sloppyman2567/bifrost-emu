@@ -17,6 +17,22 @@ struct HandleHdr {
     uint32_t type;
     uint32_t index;
 };
+// Handle type tags.
+static constexpr uint32_t H_DISPLAY     = 1;
+static constexpr uint32_t H_WINDOW      = 2;
+static constexpr uint32_t H_GC          = 5;
+static constexpr uint32_t H_COLORMAP    = 6;
+static constexpr uint32_t H_PIXMAP      = 7;
+static constexpr uint32_t H_EGL_WINDOW  = 8;
+static constexpr uint32_t H_SHMSEG      = 9;
+static constexpr uint32_t H_GLX_CONTEXT = 10;
+static constexpr uint32_t H_GLX_WINDOW  = 11;
+static constexpr uint32_t H_GLX_PBUFFER = 12;
+static constexpr uint32_t H_RANDR_CRTC  = 13;
+static constexpr uint32_t H_RANDR_OUTPUT= 14;
+static constexpr uint32_t H_RANDR_MODE  = 15;
+static constexpr uint32_t H_XKB         = 16;
+static constexpr uint32_t H_SHM_IMAGE   = 17;
 DisplayProxy::DisplayProxy() = default;
 DisplayProxy::~DisplayProxy() { shutdown(); }
 void DisplayProxy::shutdown() {
@@ -134,7 +150,7 @@ int DisplayProxy::XCloseDisplay(uint64_t display_guest) {
     free_handle(display_guest);
     return 1;
 }
-uint64_t DisplayProxy::XCreateWindow(uint64_t display_guest, uint64_t parent, int x, int y, unsigned w, unsigned h, unsigned bw, int depth, unsigned long visual, uint64_t visual_ptr, unsigned long valuemask, const char* attributes) {
+uint64_t DisplayProxy::XCreateWindow(uint64_t display_guest, uint64_t parent, int x, int y, unsigned w, unsigned h, unsigned bw, int depth, unsigned long visual, uint64_t visual_ptr, unsigned long valuemask, void* attributes) {
     (void)display_guest; (void)parent; (void)x; (void)y;
     (void)w; (void)h; (void)bw; (void)depth; (void)visual;
     (void)visual_ptr; (void)valuemask; (void)attributes;
@@ -249,7 +265,7 @@ unsigned long DisplayProxy::XSetBackground(uint64_t display_guest, unsigned long
     (void)display_guest; (void)gc; (void)color;
     return 1;
 }
-unsigned long DisplayProxy::XCreateGC(uint64_t display_guest, unsigned long drawable, unsigned long valuemask, const char* values, int screen, uint64_t visual) {
+unsigned long DisplayProxy::XCreateGC(uint64_t display_guest, unsigned long drawable, unsigned long valuemask, void* values, int screen, uint64_t visual) {
     (void)display_guest; (void)drawable; (void)valuemask; (void)values; (void)screen; (void)visual;
     if (!ready()) return 0;
     return alloc_handle(5);
@@ -318,7 +334,7 @@ unsigned long DisplayProxy::XInternAtom(uint64_t display_guest, const char* name
     }
     return hash ? hash : 1;
 }
-int DisplayProxy::XSetWMProtocols(uint64_t display_guest, uint64_t window_guest, const char* protocols, int count) {
+int DisplayProxy::XSetWMProtocols(uint64_t display_guest, uint64_t window_guest, void* protocols, int count) {
     (void)display_guest; (void)window_guest; (void)protocols; (void)count;
     return 1;
 }
@@ -475,7 +491,7 @@ int DisplayProxy::XGetInputFocus(uint64_t display_guest, void* focus, void* reve
     if (revert_to) *(int*)revert_to = 0;
     return 0;
 }
-int DisplayProxy::XChangeProperty(uint64_t display_guest, uint64_t window_guest, unsigned long prop, unsigned long type, int format, int mode, const char* data, long nelements) {
+int DisplayProxy::XChangeProperty(uint64_t display_guest, uint64_t window_guest, unsigned long prop, unsigned long type, int format, int mode, const void* data, long nelements) {
     (void)display_guest; (void)window_guest; (void)prop; (void)type; (void)format; (void)mode; (void)data; (void)nelements;
     return 0;
 }
@@ -515,7 +531,7 @@ int DisplayProxy::XCopyGC(uint64_t display_guest, unsigned long src_gc, unsigned
     (void)display_guest; (void)src_gc; (void)valuemask; (void)dest_gc;
     return 1;
 }
-int DisplayProxy::XChangeGC(uint64_t display_guest, unsigned long gc, unsigned long valuemask, const char* values) {
+int DisplayProxy::XChangeGC(uint64_t display_guest, unsigned long gc, unsigned long valuemask, const void* values) {
     (void)display_guest; (void)gc; (void)valuemask; (void)values;
     return 1;
 }
@@ -527,7 +543,7 @@ int DisplayProxy::XSetDashes(uint64_t display_guest, unsigned long gc, int dash_
     (void)display_guest; (void)gc; (void)dash_offset; (void)dashes;
     return 1;
 }
-int DisplayProxy::XFreeColors(uint64_t display_guest, unsigned long colormap, const char* pixels, int num_pixels, unsigned long planes) {
+int DisplayProxy::XFreeColors(uint64_t display_guest, unsigned long colormap, const unsigned long* pixels, int num_pixels, unsigned long planes) {
     (void)display_guest; (void)colormap; (void)pixels; (void)num_pixels; (void)planes;
     return 0;
 }
@@ -554,5 +570,200 @@ int DisplayProxy::wl_egl_window_resize(uint64_t window_guest, int x, int y, int 
     }
 #endif
     return 0;
+}
+
+// ── XShm (X Shared Memory extension) ─────────────────────────────────────
+// Stubbed for now — the real implementation would use shmget/shmat to create
+// shared memory segments and pass the SHM IDs to the host X server. For now
+// we return 0 (not available) so callers fall back to XPutImage.
+int DisplayProxy::XShmQueryExtension(uint64_t display_guest) {
+    (void)display_guest;
+    return 0;  // not available
+}
+int DisplayProxy::XShmGetEventBase(uint64_t display_guest) {
+    (void)display_guest;
+    return 0;
+}
+uint64_t DisplayProxy::XShmCreateImage(uint64_t display_guest, uint64_t visual, unsigned int depth, int format, void* data, void* shminfo, unsigned int width, unsigned int height) {
+    (void)display_guest; (void)visual; (void)depth; (void)format;
+    (void)data; (void)shminfo; (void)width; (void)height;
+    if (!ready()) return 0;
+    return alloc_handle(H_SHM_IMAGE);
+}
+int DisplayProxy::XShmAttach(uint64_t display_guest, uint64_t shmseg_guest) {
+    (void)display_guest; (void)shmseg_guest;
+    return 0;
+}
+int DisplayProxy::XShmDetach(uint64_t display_guest, uint64_t shmseg_guest) {
+    (void)display_guest; (void)shmseg_guest;
+    free_handle(shmseg_guest);
+    return 1;
+}
+int DisplayProxy::XShmPutImage(uint64_t display_guest, uint64_t drawable, uint64_t gc, uint64_t image, int src_x, int src_y, int dst_x, int dst_y, unsigned int src_width, unsigned int src_height, bool send_event) {
+    (void)display_guest; (void)drawable; (void)gc; (void)image;
+    (void)src_x; (void)src_y; (void)dst_x; (void)dst_y;
+    (void)src_width; (void)src_height; (void)send_event;
+    return 0;
+}
+int DisplayProxy::XShmGetImage(uint64_t display_guest, uint64_t drawable, uint64_t image, int x, int y, unsigned int width, unsigned int height, unsigned long plane_mask) {
+    (void)display_guest; (void)drawable; (void)image;
+    (void)x; (void)y; (void)width; (void)height; (void)plane_mask;
+    return 0;
+}
+
+// ── GLX ────────────────────────────────────────────────────────────────────
+// GLX functions are registered but return stubs when host GLX is unavailable.
+// When host GLX is available, the host function pointer is passed through.
+uint64_t DisplayProxy::glXChooseVisual(uint64_t display_guest, int screen, const int* attrib_list) {
+    (void)display_guest; (void)screen; (void)attrib_list;
+    if (!ready()) return 0;
+    return alloc_handle(H_GLX_WINDOW);
+}
+uint64_t DisplayProxy::glXCreateContext(uint64_t display_guest, uint64_t visual, uint64_t share_list, int direct) {
+    (void)display_guest; (void)visual; (void)share_list; (void)direct;
+    if (!ready()) return 0;
+    return alloc_handle(H_GLX_CONTEXT);
+}
+int DisplayProxy::glXDestroyContext(uint64_t display_guest, uint64_t context) {
+    (void)display_guest;
+    free_handle(context);
+    return 1;
+}
+int DisplayProxy::glXMakeCurrent(uint64_t display_guest, uint64_t drawable, uint64_t context) {
+    (void)display_guest; (void)drawable; (void)context;
+    return 1;
+}
+void DisplayProxy::glXSwapBuffers(uint64_t display_guest, uint64_t drawable) {
+    (void)display_guest; (void)drawable;
+    present();
+}
+const char* DisplayProxy::glXGetClientString(uint64_t display_guest, int name) {
+    (void)display_guest; (void)name;
+    static const char* ver = "1.4";
+    return ver;
+}
+const char* DisplayProxy::glXQueryExtensionsString(uint64_t display_guest, int screen) {
+    (void)display_guest; (void)screen;
+    static const char* exts = "GLX_EXT_import_context GLX_EXT_texture_from_pixmap";
+    return exts;
+}
+const char* DisplayProxy::glXQueryServerString(uint64_t display_guest, int screen, int name) {
+    (void)display_guest; (void)screen; (void)name;
+    return "bifrost-emu";
+}
+uint64_t DisplayProxy::glXGetFBConfigs(uint64_t display_guest, int screen, int* nelements) {
+    (void)display_guest; (void)screen;
+    if (nelements) *nelements = 0;
+    return 0;
+}
+int DisplayProxy::glXGetFBConfigAttrib(uint64_t display_guest, uint64_t fbconfig, int attribute, int* value) {
+    (void)display_guest; (void)fbconfig; (void)attribute;
+    if (value) *value = 0;
+    return 0;
+}
+uint64_t DisplayProxy::glXCreateWindow(uint64_t display_guest, uint64_t config, uint64_t window, const int* attrib_list) {
+    (void)display_guest; (void)config; (void)window; (void)attrib_list;
+    if (!ready()) return 0;
+    return alloc_handle(H_GLX_WINDOW);
+}
+int DisplayProxy::glXDestroyWindow(uint64_t display_guest, uint64_t window) {
+    (void)display_guest;
+    free_handle(window);
+    return 1;
+}
+uint64_t DisplayProxy::glXCreatePbuffer(uint64_t display_guest, uint64_t config, const int* attrib_list) {
+    (void)display_guest; (void)config; (void)attrib_list;
+    if (!ready()) return 0;
+    return alloc_handle(H_GLX_PBUFFER);
+}
+int DisplayProxy::glXDestroyPbuffer(uint64_t display_guest, uint64_t pbuffer) {
+    (void)display_guest;
+    free_handle(pbuffer);
+    return 1;
+}
+
+// ── XRandR ─────────────────────────────────────────────────────────────────
+// Minimal RandR stub: returns a single screen config.
+uint64_t DisplayProxy::XRRGetScreenResources(uint64_t display_guest, uint64_t window) {
+    (void)display_guest; (void)window;
+    if (!ready()) return 0;
+    return alloc_handle(H_RANDR_MODE);
+}
+uint64_t DisplayProxy::XRRGetScreenResourcesCurrent(uint64_t display_guest, uint64_t window) {
+    (void)display_guest; (void)window;
+    if (!ready()) return 0;
+    return alloc_handle(H_RANDR_MODE);
+}
+void DisplayProxy::XRRFreeScreenResources(uint64_t resources_guest) {
+    free_handle(resources_guest);
+}
+uint64_t DisplayProxy::XRRGetCrtcInfo(uint64_t display_guest, uint64_t resources, uint64_t crtc) {
+    (void)display_guest; (void)resources; (void)crtc;
+    if (!ready()) return 0;
+    return alloc_handle(H_RANDR_CRTC);
+}
+void DisplayProxy::XRRFreeCrtcInfo(uint64_t crtc_info_guest) {
+    free_handle(crtc_info_guest);
+}
+uint64_t DisplayProxy::XRRGetOutputInfo(uint64_t display_guest, uint64_t resources, uint64_t output) {
+    (void)display_guest; (void)resources; (void)output;
+    if (!ready()) return 0;
+    return alloc_handle(H_RANDR_OUTPUT);
+}
+void DisplayProxy::XRRFreeOutputInfo(uint64_t output_info_guest) {
+    free_handle(output_info_guest);
+}
+int DisplayProxy::XRRSetCrtcConfig(uint64_t display_guest, uint64_t resources, uint64_t crtc, uint64_t timestamp, int x, int y, uint64_t mode, unsigned int rotation, uint64_t outputs_guest, int noutputs) {
+    (void)display_guest; (void)resources; (void)crtc; (void)timestamp;
+    (void)x; (void)y; (void)mode; (void)rotation; (void)outputs_guest; (void)noutputs;
+    return 1;
+}
+int DisplayProxy::XRRGetScreenSizeRange(uint64_t display_guest, int screen, int* min_width, int* min_height, int* max_width, int* max_height) {
+    (void)display_guest; (void)screen;
+    if (min_width)  *min_width  = 1;
+    if (min_height) *min_height = 1;
+    if (max_width)  *max_width  = (int)width_;
+    if (max_height) *max_height = (int)height_;
+    return 1;
+}
+
+// ── Xkb (X Keyboard extension) ─────────────────────────────────────────────
+// Stubbed: returns success for state queries so games don't abort.
+int DisplayProxy::XkbOpenDevice(uint64_t display_guest, int device_id) {
+    (void)display_guest; (void)device_id;
+    if (!ready()) return 0;
+    return alloc_handle(H_XKB);
+}
+uint64_t DisplayProxy::XkbGetMap(uint64_t display_guest, uint64_t device_spec, unsigned int which) {
+    (void)display_guest; (void)device_spec; (void)which;
+    if (!ready()) return 0;
+    return alloc_handle(H_XKB);
+}
+int DisplayProxy::XkbGetState(uint64_t display_guest, uint64_t device_spec, void* state_return) {
+    (void)display_guest; (void)device_spec;
+    if (!state_return) return 0;
+    // Fill a minimal XkbState: mods=0, group=0.
+    struct XkbState { uint32_t mods; uint32_t group; };
+    auto* s = static_cast<XkbState*>(state_return);
+    s->mods = 0;
+    s->group = 0;
+    return 1;
+}
+int DisplayProxy::XkbSetState(uint64_t display_guest, uint64_t device_spec, unsigned int map_part, void* state) {
+    (void)display_guest; (void)device_spec; (void)map_part; (void)state;
+    return 1;
+}
+int DisplayProxy::XkbSetAutoRepeatRate(uint64_t display_guest, uint64_t device_spec, unsigned int delay, unsigned int interval) {
+    (void)display_guest; (void)device_spec; (void)delay; (void)interval;
+    return 1;
+}
+int DisplayProxy::XkbGetAutoRepeatRate(uint64_t display_guest, uint64_t device_spec, unsigned int* delay_return, unsigned int* interval_return) {
+    (void)display_guest; (void)device_spec;
+    if (delay_return)  *delay_return  = 500;
+    if (interval_return) *interval_return = 33;
+    return 1;
+}
+void DisplayProxy::XkbFreeKeyboard(uint64_t xkb_guest) {
+    free_handle(xkb_guest);
 }
 } // namespace arm64emu

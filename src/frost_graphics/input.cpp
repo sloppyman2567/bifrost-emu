@@ -331,12 +331,12 @@ struct FrostInputImpl {
     static constexpr size_t EVENT_CAP = 256;
     static constexpr size_t JS_CAP = 256;
     static constexpr int32_t MOUSE_ABS_RANGE = 32767;  // ABS_X/ABS_Y range
-    static constexpr uint32_t SYN_DROPPED_INTERVAL = 250;  // emit SYN_DROPPED at most every N events
+    static constexpr uint32_t SYN_DROPPED_INTERVAL = 250;  // (unused, kept for compat)
     std::vector<input_event_> event_queue;
     size_t event_head = 0, event_tail = 0;
     std::vector<js_event_> js_queue;
     size_t js_head = 0, js_tail = 0;
-    std::mutex mu;
+    mutable std::mutex mu;
     uint64_t event_count = 0;
     bool sdl_active = false;
     // Game controller state. We store the controllers as
@@ -410,8 +410,14 @@ struct FrostInputImpl {
         // Deduplicate: Linux only emits events when values change. Skip
         // identical consecutive events to match real evdev behavior and
         // reduce queue pressure. Check before writing to the queue.
+        //
+        // NOTE: EV_REL (relative axes like mouse movement) is NOT
+        // deduplicated — each delta is an independent event and must
+        // always be delivered. EV_SYN is also not deduplicated.
         bool is_syn = (type == linux_input::EV_SYN);
-        if (last_valid && !is_syn && type == last_type && code == last_code
+        bool is_rel = (type == linux_input::EV_REL);
+        if (last_valid && !is_syn && !is_rel
+            && type == last_type && code == last_code
             && value == last_value) {
             return;  // duplicate — skip
         }
@@ -427,25 +433,24 @@ struct FrostInputImpl {
         ev.value   = value;
         event_tail = (event_tail + 1) % EVENT_CAP;
         if (event_tail == event_head) {
-            // Buffer overflow — emit SYN_DROPPED to tell the guest to
-            // resync, matching Linux evdev behavior. Rate-limit to avoid
-            // flooding if the guest is very slow.
-            syn_dropped_counter++;
-            if (syn_dropped_counter >= SYN_DROPPED_INTERVAL) {
-                syn_dropped_counter = 0;
-                // Write SYN_DROPPED at the current tail position (overwriting
-                // the oldest event, which we're about to discard anyway).
-                input_event_& drop_ev = event_queue[event_tail];
-                drop_ev.type = linux_input::EV_SYN;
-                drop_ev.code = linux_input::SYN_DROPPED;
-                drop_ev.value = 0;
-                event_tail = (event_tail + 1) % EVENT_CAP;
-                // Advance head past the SYN_DROPPED so the guest sees it.
-                event_head = (event_head + 1) % EVENT_CAP;
-            } else {
-                // Just drop the oldest event without SYN_DROPPED.
-                event_head = (event_head + 1) % EVENT_CAP;
-            }
+            // Buffer overflow — the new event just overwrote the oldest
+            // event. Match the Linux kernel evdev behavior:
+            //
+            // The kernel sets tail = (head - 2) & mask, then overwrites
+            // the slot at tail with SYN_DROPPED. This leaves the buffer
+            // containing: [dropped events...] | SYN_DROPPED | new_event
+            //
+            // In our ring buffer, head == tail after the push (buffer full).
+            // We set event_head = (event_tail - 2 + EVENT_CAP) % EVENT_CAP
+            // to drop all events before the SYN_DROPPED, then write
+            // SYN_DROPPED at event_head. The new event is at event_tail - 1.
+            event_head = (event_tail + EVENT_CAP - 2) % EVENT_CAP;
+            input_event_& drop_ev = event_queue[event_head];
+            drop_ev.tv_sec  = static_cast<int64_t>(secs.count());
+            drop_ev.tv_usec = static_cast<int64_t>(usecs.count());
+            drop_ev.type    = linux_input::EV_SYN;
+            drop_ev.code    = linux_input::SYN_DROPPED;
+            drop_ev.value   = 0;
         }
         event_count++;
     }
@@ -472,6 +477,14 @@ struct FrostInputImpl {
         out = event_queue[event_head];
         event_head = (event_head + 1) % EVENT_CAP;
         return true;
+    }
+    // ── Number of events currently in the queue ───────────────────────
+    size_t queue_size() const {
+        std::lock_guard<std::mutex> g(mu);
+        if (event_head <= event_tail) {
+            return event_tail - event_head;
+        }
+        return EVENT_CAP - (event_head - event_tail);
     }
     // ── Pop one js_event ────────────────────────────────────────────
     bool pop_js(js_event_& out) {
@@ -775,15 +788,21 @@ bool FrostInput::poll() {
                 int win_w, win_h;
                 SDL_GetWindowSize(SDL_GetWindowFromID(ev.motion.windowID),
                                   &win_w, &win_h);
-                if (ev.motion.x <= 0 || ev.motion.x >= win_w - 1
-                    || ev.motion.y <= 0 || ev.motion.y >= win_h - 1) {
-                    // The pointer hit the window edge — warp it back to
-                    // the center so subsequent motion generates deltas
-                    // in every direction again.
-                    if (win_w > 0 && win_h > 0) {
-                        SDL_WarpMouseInWindow(
-                            SDL_GetWindowFromID(ev.motion.windowID),
-                            win_w / 2, win_h / 2);
+                if (win_w > 0 && win_h > 0) {
+                    int target_x = win_w / 2;
+                    int target_y = win_h / 2;
+                    bool target_at_edge =
+                        (target_x <= 0 || target_x >= win_w - 1
+                         || target_y <= 0 || target_y >= win_h - 1);
+                    if (!target_at_edge) {
+                        bool at_edge =
+                            (ev.motion.x <= 0 || ev.motion.x >= win_w - 1
+                             || ev.motion.y <= 0 || ev.motion.y >= win_h - 1);
+                        if (at_edge) {
+                            SDL_WarpMouseInWindow(
+                                SDL_GetWindowFromID(ev.motion.windowID),
+                                target_x, target_y);
+                        }
                     }
                 }
                 break;
@@ -929,6 +948,10 @@ void FrostInput::drain() {
 uint64_t FrostInput::event_count() const {
     if (!impl_) return 0;
     return impl_->event_count;
+}
+size_t FrostInput::queue_size() const {
+    if (!impl_) return 0;
+    return impl_->queue_size();
 }
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;

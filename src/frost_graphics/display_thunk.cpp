@@ -49,7 +49,24 @@ struct DisplayThunkImpl {
     std::unordered_map<uint64_t, uint64_t> vk_handle_map_;
     // DisplayProxy for X11/Wayland fallback (v1.5.0.alpha).
     std::unique_ptr<DisplayProxy> proxy_;
+    // Guest-visible scratch page for host→guest string returns
+    // (XGetAtomName, glGetString, …). Ring-allocated.
+    uint64_t string_cache_base = 0;
+    static constexpr uint64_t STRING_CACHE_SIZE = 4096;
+    uint32_t string_cache_off = 0;
     std::mutex mu;
+    uint64_t cache_host_string_(const char* host_str) {
+        if (!mem || !string_cache_base || !host_str) return 0;
+        size_t len = std::strlen(host_str) + 1;
+        if (len > STRING_CACHE_SIZE) len = STRING_CACHE_SIZE;
+        if (string_cache_off + len > STRING_CACHE_SIZE)
+            string_cache_off = 0;
+        uint64_t guest = string_cache_base + string_cache_off;
+        mem->write(guest, host_str, len);
+        string_cache_off = static_cast<uint32_t>(
+            (string_cache_off + len + 7u) & ~7u);
+        return guest;
+    }
 };
 DisplayThunk::DisplayThunk() {
     impl_ = std::make_unique<DisplayThunkImpl>();
@@ -76,6 +93,12 @@ bool DisplayThunk::init(Memory& mem) {
         fprintf(stderr, "[display-thunk] init: failed to allocate trampoline page\n");
         return false;
     }
+    impl_->string_cache_base = mem.mmap_alloc(DisplayThunkImpl::STRING_CACHE_SIZE);
+    if (impl_->string_cache_base == 0) {
+        fprintf(stderr, "[display-thunk] init: failed to allocate string cache\n");
+        return false;
+    }
+    impl_->string_cache_off = 0;
     // v1.5.0.alpha: lazily create the DisplayProxy. It owns an SDL2 window
     // and provides a software fallback for X11/Wayland calls when the host
     // libraries are unavailable or have no display.
@@ -389,23 +412,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (entry.flags & THUNK_RET_STRING) {
         // Cache the host string into guest memory and return the guest address.
         if (ret) {
-            const char* host_str = reinterpret_cast<const char*>(ret);
-            size_t len = std::strlen(host_str) + 1;
-            if (len > 4096) len = 4096;
-            static uint8_t string_cache[8192];
-            static size_t string_cache_off = 0;
-            if (string_cache_off + len > sizeof(string_cache)) string_cache_off = 0;
-            std::memcpy(string_cache + string_cache_off, host_str, len);
-            ret = reinterpret_cast<uint64_t>(string_cache + string_cache_off);
-            string_cache_off = (string_cache_off + len + 7u) & ~7u;
-            // Write the string into guest memory so the guest can read it.
-            if (impl_->mem) {
-                uint64_t guest_str = impl_->mem->mmap_alloc(4096);
-                if (guest_str) {
-                    impl_->mem->write(guest_str, host_str, len);
-                    ret = guest_str;
-                }
-            }
+            ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
         }
     }
 
@@ -472,7 +479,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     }
     if (sym_name == "XCreateWindow") {
         // 12 args: Display*, Window, int, int, unsigned, unsigned, unsigned,
-        // int, unsigned long, int, Visual*, unsigned long.
+        // int, unsigned long, Visual*, unsigned long, XSetWindowAttributes*.
         // Args 8-11 are on the stack.
         uint64_t stack_args[4] = {0};
         if (mem && cpu.sp) {
@@ -487,7 +494,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
             static_cast<unsigned long>(stack_args[0]),
             static_cast<uint64_t>(stack_args[1]),
             static_cast<unsigned long>(stack_args[2]),
-            g2h_str(stack_args[3]));
+            g2h(stack_args[3]));
         return 0;
     }
     if (sym_name == "XDestroyWindow") {
@@ -558,8 +565,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XCreateGC") {
-        // 6 args: Display*, Drawable, unsigned long, XGCValues*, int, Visual*
-        // Args 4-5 are on the stack.
+        // 4 args: Display*, Drawable, unsigned long, XGCValues*. Args 4-5 are on stack.
         uint64_t stack_args[2] = {0};
         if (mem && cpu.sp) {
             mem->read(cpu.sp, stack_args, sizeof(stack_args));
@@ -567,7 +573,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         cpu.regs[0] = proxy->XCreateGC(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
             static_cast<unsigned long>(cpu.regs[2]),
-            g2h_str(cpu.regs[3]),
+            g2h(cpu.regs[3]),
             static_cast<int>(stack_args[0]),
             static_cast<uint64_t>(stack_args[1]));
         return 0;
@@ -604,12 +610,14 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
             mem->read(cpu.sp, &count, sizeof(uint64_t));
         }
         cpu.regs[0] = proxy->XSetWMProtocols(
-            cpu.regs[0], cpu.regs[1], g2h_str(cpu.regs[2]),
+            cpu.regs[0], cpu.regs[1], g2h(cpu.regs[2]),
             static_cast<int>(count));
         return 0;
     }
     if (sym_name == "XGetAtomName") {
-        cpu.regs[0] = proxy->XGetAtomName(cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]));
+        unsigned long host_ptr = proxy->XGetAtomName(cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]));
+        const char* host_str = reinterpret_cast<const char*>(host_ptr);
+        cpu.regs[0] = host_str ? impl_->cache_host_string_(host_str) : 0;
         return 0;
     }
     if (sym_name == "XPending") {
@@ -742,7 +750,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XChangeProperty") {
-        // 6 args: Display*, Window, Atom, Atom, int, int, const unsigned char*, long.
+        // 8 args: Display*, Window, Atom, Atom, int, int, const unsigned char*, long.
         // Args 6-7 are on the stack.
         uint64_t stack_args[2] = {0};
         if (mem && cpu.sp) {
@@ -752,7 +760,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
             cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]),
             static_cast<unsigned long>(cpu.regs[3]),
             static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
-            g2h_str(stack_args[0]), static_cast<long>(stack_args[1]));
+            g2h(stack_args[0]), static_cast<long>(stack_args[1]));
         return 0;
     }
     if (sym_name == "XDeleteProperty") {
@@ -837,7 +845,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     if (sym_name == "XFreeColors") {
         cpu.regs[0] = proxy->XFreeColors(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
-            g2h_str(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
+            reinterpret_cast<const unsigned long*>(g2h(cpu.regs[2])), static_cast<int>(cpu.regs[3]),
             static_cast<unsigned long>(cpu.regs[4]));
         return 0;
     }
@@ -897,6 +905,232 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
             cpu.regs[0], static_cast<int>(cpu.regs[1]),
             static_cast<int>(cpu.regs[2]), static_cast<int>(cpu.regs[3]),
             static_cast<int>(cpu.regs[4]));
+        return 0;
+    }
+    // ── XShm proxy ──────────────────────────────────────────────────
+    if (sym_name == "XShmQueryExtension") {
+        cpu.regs[0] = proxy->XShmQueryExtension(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XShmGetEventBase") {
+        cpu.regs[0] = proxy->XShmGetEventBase(cpu.regs[0]);
+        return 0;
+    }
+    if (sym_name == "XShmCreateImage") {
+        cpu.regs[0] = proxy->XShmCreateImage(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned>(cpu.regs[2]),
+            static_cast<int>(cpu.regs[3]), g2h(cpu.regs[4]), g2h(cpu.regs[5]),
+            static_cast<unsigned>(cpu.regs[6]), static_cast<unsigned>(cpu.regs[7]));
+        return 0;
+    }
+    if (sym_name == "XShmAttach") {
+        cpu.regs[0] = proxy->XShmAttach(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XShmDetach") {
+        cpu.regs[0] = proxy->XShmDetach(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XShmPutImage") {
+        // 11 args: args 8-10 (src_width, src_height, send_event) on stack.
+        uint64_t stack_args[3] = {0};
+        if (impl_->mem && cpu.sp) {
+            impl_->mem->read(cpu.sp, stack_args, sizeof(stack_args));
+        }
+        cpu.regs[0] = proxy->XShmPutImage(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2], cpu.regs[3],
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
+            static_cast<int>(cpu.regs[6]), static_cast<int>(cpu.regs[7]),
+            static_cast<unsigned>(stack_args[0]),
+            static_cast<unsigned>(stack_args[1]),
+            static_cast<bool>(stack_args[2]));
+        return 0;
+    }
+    if (sym_name == "XShmGetImage") {
+        cpu.regs[0] = proxy->XShmGetImage(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2],
+            static_cast<int>(cpu.regs[3]), static_cast<int>(cpu.regs[4]),
+            static_cast<unsigned>(cpu.regs[5]), static_cast<unsigned>(cpu.regs[6]),
+            static_cast<unsigned long>(cpu.regs[7]));
+        return 0;
+    }
+    // ── GLX proxy ───────────────────────────────────────────────────
+    if (sym_name == "glXChooseVisual") {
+        cpu.regs[0] = proxy->glXChooseVisual(
+            cpu.regs[0], static_cast<int>(cpu.regs[1]),
+            reinterpret_cast<const int*>(g2h(cpu.regs[2])));
+        return 0;
+    }
+    if (sym_name == "glXCreateContext") {
+        cpu.regs[0] = proxy->glXCreateContext(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2], static_cast<int>(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "glXDestroyContext") {
+        cpu.regs[0] = proxy->glXDestroyContext(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "glXMakeCurrent") {
+        cpu.regs[0] = proxy->glXMakeCurrent(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2]);
+        return 0;
+    }
+    if (sym_name == "glXSwapBuffers") {
+        proxy->glXSwapBuffers(cpu.regs[0], cpu.regs[1]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "glXGetClientString") {
+        const char* s = proxy->glXGetClientString(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        cpu.regs[0] = s ? impl_->cache_host_string_(s) : 0;
+        return 0;
+    }
+    if (sym_name == "glXQueryExtensionsString") {
+        const char* s = proxy->glXQueryExtensionsString(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        cpu.regs[0] = s ? impl_->cache_host_string_(s) : 0;
+        return 0;
+    }
+    if (sym_name == "glXQueryServerString") {
+        const char* s = proxy->glXQueryServerString(cpu.regs[0], static_cast<int>(cpu.regs[1]), static_cast<int>(cpu.regs[2]));
+        cpu.regs[0] = s ? impl_->cache_host_string_(s) : 0;
+        return 0;
+    }
+    if (sym_name == "glXGetFBConfigs") {
+        int nelements = 0;
+        uint64_t fbconfigs = proxy->glXGetFBConfigs(cpu.regs[0], static_cast<int>(cpu.regs[1]), &nelements);
+        if (cpu.regs[2] && impl_->mem) {
+            impl_->mem->write(cpu.regs[2], &nelements, sizeof(nelements));
+        }
+        cpu.regs[0] = fbconfigs;
+        return 0;
+    }
+    if (sym_name == "glXGetFBConfigAttrib") {
+        int value = 0;
+        cpu.regs[0] = proxy->glXGetFBConfigAttrib(
+            cpu.regs[0], cpu.regs[1], static_cast<int>(cpu.regs[2]),
+            cpu.regs[3] ? &value : nullptr);
+        if (cpu.regs[3] && impl_->mem) {
+            impl_->mem->write(cpu.regs[3], &value, sizeof(value));
+        }
+        return 0;
+    }
+    if (sym_name == "glXCreateWindow") {
+        cpu.regs[0] = proxy->glXCreateWindow(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2],
+            reinterpret_cast<const int*>(g2h(cpu.regs[3])));
+        return 0;
+    }
+    if (sym_name == "glXDestroyWindow") {
+        cpu.regs[0] = proxy->glXDestroyWindow(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "glXCreatePbuffer") {
+        cpu.regs[0] = proxy->glXCreatePbuffer(
+            cpu.regs[0], cpu.regs[1],
+            reinterpret_cast<const int*>(g2h(cpu.regs[2])));
+        return 0;
+    }
+    if (sym_name == "glXDestroyPbuffer") {
+        cpu.regs[0] = proxy->glXDestroyPbuffer(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    // ── XRandR proxy ────────────────────────────────────────────────
+    if (sym_name == "XRRGetScreenResources") {
+        cpu.regs[0] = proxy->XRRGetScreenResources(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XRRGetScreenResourcesCurrent") {
+        cpu.regs[0] = proxy->XRRGetScreenResourcesCurrent(cpu.regs[0], cpu.regs[1]);
+        return 0;
+    }
+    if (sym_name == "XRRFreeScreenResources") {
+        proxy->XRRFreeScreenResources(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "XRRGetCrtcInfo") {
+        cpu.regs[0] = proxy->XRRGetCrtcInfo(cpu.regs[0], cpu.regs[1], cpu.regs[2]);
+        return 0;
+    }
+    if (sym_name == "XRRFreeCrtcInfo") {
+        proxy->XRRFreeCrtcInfo(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "XRRGetOutputInfo") {
+        cpu.regs[0] = proxy->XRRGetOutputInfo(cpu.regs[0], cpu.regs[1], cpu.regs[2]);
+        return 0;
+    }
+    if (sym_name == "XRRFreeOutputInfo") {
+        proxy->XRRFreeOutputInfo(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "XRRSetCrtcConfig") {
+        // 10 args: x0..x7 + 2 stack args (outputs, noutputs).
+        uint64_t outputs = 0;
+        int32_t noutputs = 0;
+        if (impl_->mem && cpu.sp) {
+            impl_->mem->read(cpu.sp, &outputs, sizeof(uint64_t));
+            impl_->mem->read(cpu.sp + 8, &noutputs, sizeof(int32_t));
+        }
+        cpu.regs[0] = proxy->XRRSetCrtcConfig(
+            cpu.regs[0], cpu.regs[1], cpu.regs[2], cpu.regs[3],
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
+            cpu.regs[6], static_cast<unsigned>(cpu.regs[7]),
+            outputs, noutputs);
+        return 0;
+    }
+    if (sym_name == "XRRGetScreenSizeRange") {
+        int min_w = 0, min_h = 0, max_w = 0, max_h = 0;
+        cpu.regs[0] = proxy->XRRGetScreenSizeRange(
+            cpu.regs[0], static_cast<int>(cpu.regs[1]),
+            cpu.regs[2] ? &min_w : nullptr,
+            cpu.regs[3] ? &min_h : nullptr,
+            cpu.regs[4] ? &max_w : nullptr,
+            cpu.regs[5] ? &max_h : nullptr);
+        if (cpu.regs[2] && impl_->mem) impl_->mem->write(cpu.regs[2], &min_w, sizeof(min_w));
+        if (cpu.regs[3] && impl_->mem) impl_->mem->write(cpu.regs[3], &min_h, sizeof(min_h));
+        if (cpu.regs[4] && impl_->mem) impl_->mem->write(cpu.regs[4], &max_w, sizeof(max_w));
+        if (cpu.regs[5] && impl_->mem) impl_->mem->write(cpu.regs[5], &max_h, sizeof(max_h));
+        return 0;
+    }
+    // ── Xkb proxy ───────────────────────────────────────────────────
+    if (sym_name == "XkbOpenDevice") {
+        cpu.regs[0] = proxy->XkbOpenDevice(cpu.regs[0], static_cast<int>(cpu.regs[1]));
+        return 0;
+    }
+    if (sym_name == "XkbGetMap") {
+        cpu.regs[0] = proxy->XkbGetMap(cpu.regs[0], cpu.regs[1], static_cast<unsigned>(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XkbGetState") {
+        cpu.regs[0] = proxy->XkbGetState(cpu.regs[0], cpu.regs[1], g2h(cpu.regs[2]));
+        return 0;
+    }
+    if (sym_name == "XkbSetState") {
+        cpu.regs[0] = proxy->XkbSetState(cpu.regs[0], cpu.regs[1], static_cast<unsigned>(cpu.regs[2]), g2h(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "XkbSetAutoRepeatRate") {
+        cpu.regs[0] = proxy->XkbSetAutoRepeatRate(
+            cpu.regs[0], cpu.regs[1], static_cast<unsigned>(cpu.regs[2]),
+            static_cast<unsigned>(cpu.regs[3]));
+        return 0;
+    }
+    if (sym_name == "XkbGetAutoRepeatRate") {
+        unsigned int delay = 0, interval = 0;
+        cpu.regs[0] = proxy->XkbGetAutoRepeatRate(
+            cpu.regs[0], cpu.regs[1],
+            cpu.regs[2] ? &delay : nullptr,
+            cpu.regs[3] ? &interval : nullptr);
+        if (cpu.regs[2] && impl_->mem) impl_->mem->write(cpu.regs[2], &delay, sizeof(delay));
+        if (cpu.regs[3] && impl_->mem) impl_->mem->write(cpu.regs[3], &interval, sizeof(interval));
+        return 0;
+    }
+    if (sym_name == "XkbFreeKeyboard") {
+        proxy->XkbFreeKeyboard(cpu.regs[0]);
+        cpu.regs[0] = 0;
         return 0;
     }
     if (trace) {
@@ -1259,5 +1493,102 @@ void DisplayThunk::register_known_symbols_() {
     REG_GBM(gbm_surface_lock_front_buffer);
     REG_GBM(gbm_surface_release_buffer);
     #undef REG_GBM
+    // ── libXext.so.6 (XShm) ─────────────────────────────────────────
+    const char* xext_libs[] = {"libXext.so.6", "libXext.so"};
+    void* xext_handle = dlopen("libXext.so.6", RTLD_LAZY);
+    if (!xext_handle) xext_handle = dlopen("libXext.so", RTLD_LAZY);
+    #define REG_XEXT(name) do { \
+        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
+        for (const char* L : xext_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
+    } while(0)
+    #define REG_XEXT_PTR(name, ptrs) do { \
+        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
+        for (const char* L : xext_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
+    } while(0)
+    #define REG_XEXT_EX(name, ptrs, nstack) do { \
+        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
+        for (const char* L : xext_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
+    } while(0)
+    REG_XEXT(XShmQueryExtension);
+    REG_XEXT(XShmGetEventBase);
+    REG_XEXT_PTR(XShmCreateImage, 0x33);          // args 0,1,4,5 are pointers
+    REG_XEXT(XShmAttach);
+    REG_XEXT(XShmDetach);
+    REG_XEXT_EX(XShmPutImage, 0x0F, 3);           // args 0-3 are ptrs; 3 stack args
+    REG_XEXT(XShmGetImage);
+    #undef REG_XEXT
+    #undef REG_XEXT_PTR
+    // ── libGLX.so.2 (GLX) ───────────────────────────────────────────
+    const char* glx_libs[] = {"libGLX.so.2", "libGLX.so"};
+    void* glx_handle = dlopen("libGLX.so.2", RTLD_LAZY);
+    if (!glx_handle) glx_handle = dlopen("libGLX.so", RTLD_LAZY);
+    #define REG_GLX(name) do { \
+        void* p = glx_handle ? dlsym(glx_handle, #name) : nullptr; \
+        for (const char* L : glx_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
+    } while(0)
+    #define REG_GLX_PTR(name, ptrs) do { \
+        void* p = glx_handle ? dlsym(glx_handle, #name) : nullptr; \
+        for (const char* L : glx_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
+    } while(0)
+    REG_GLX_PTR(glXChooseVisual, 0x04);           // arg 2: int* (NULL-terminated attrib list)
+    REG_GLX(glXCreateContext);
+    REG_GLX(glXDestroyContext);
+    REG_GLX(glXMakeCurrent);
+    REG_GLX(glXSwapBuffers);
+    REG_GLX(glXGetClientString);
+    REG_GLX(glXQueryExtensionsString);
+    REG_GLX(glXQueryServerString);
+    REG_GLX(glXGetFBConfigs);
+    REG_GLX_PTR(glXGetFBConfigAttrib, 0x08);      // arg 3: int* (value out)
+    REG_GLX_PTR(glXCreateWindow, 0x08);           // arg 3: int* attrib_list
+    REG_GLX(glXDestroyWindow);
+    REG_GLX(glXCreatePbuffer);
+    REG_GLX(glXDestroyPbuffer);
+    #undef REG_GLX
+    #undef REG_GLX_PTR
+    // ── libXrandr.so.2 (RandR) ──────────────────────────────────────
+    const char* randr_libs[] = {"libXrandr.so.2", "libXrandr.so"};
+    void* randr_handle = dlopen("libXrandr.so.2", RTLD_LAZY);
+    if (!randr_handle) randr_handle = dlopen("libXrandr.so", RTLD_LAZY);
+    #define REG_RANDR(name) do { \
+        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
+        for (const char* L : randr_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
+    } while(0)
+    #define REG_RANDR_PTR(name, ptrs) do { \
+        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
+        for (const char* L : randr_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
+    } while(0)
+    REG_RANDR(XRRGetScreenResources);
+    REG_RANDR(XRRGetScreenResourcesCurrent);
+    REG_RANDR(XRRFreeScreenResources);
+    REG_RANDR(XRRGetCrtcInfo);
+    REG_RANDR(XRRFreeCrtcInfo);
+    REG_RANDR(XRRGetOutputInfo);
+    REG_RANDR(XRRFreeOutputInfo);
+    REG_RANDR(XRRSetCrtcConfig);
+    REG_RANDR(XRRGetScreenSizeRange);
+    #undef REG_RANDR
+    #undef REG_RANDR_PTR
+    // ── libXkblib.so (Xkb) ──────────────────────────────────────────
+    const char* xkb_libs[] = {"libXkblib.so", "libX11-xcb.so"};
+    void* xkb_handle = dlopen("libXkblib.so", RTLD_LAZY);
+    if (!xkb_handle) xkb_handle = dlopen("libX11-xcb.so", RTLD_LAZY);
+    #define REG_XKB(name) do { \
+        void* p = xkb_handle ? dlsym(xkb_handle, #name) : nullptr; \
+        for (const char* L : xkb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
+    } while(0)
+    #define REG_XKB_PTR(name, ptrs) do { \
+        void* p = xkb_handle ? dlsym(xkb_handle, #name) : nullptr; \
+        for (const char* L : xkb_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
+    } while(0)
+    REG_XKB(XkbOpenDevice);
+    REG_XKB(XkbGetMap);
+    REG_XKB_PTR(XkbGetState, 0x04);               // arg 2: XkbState* out
+    REG_XKB(XkbSetState);
+    REG_XKB(XkbSetAutoRepeatRate);
+    REG_XKB_PTR(XkbGetAutoRepeatRate, 0x0C);      // arg 2: unsigned int* delay, arg 3: unsigned int* interval
+    REG_XKB(XkbFreeKeyboard);
+    #undef REG_XKB
+    #undef REG_XKB_PTR
 }
 } // namespace arm64emu

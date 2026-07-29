@@ -12,6 +12,7 @@
 #pragma once
 #include "yggdrasil/node.hpp"
 #include "frost/input.hpp"
+#include "core/memory.h"
 namespace arm64emu::yggdrasil {
 class InputNode : public Node {
 public:
@@ -24,6 +25,7 @@ public:
     ssize_t write(uint64_t off, const void* buf, size_t n) override;
     ssize_t lseek(int64_t off, int whence) override;
     int     fstat(struct stat* st) override;
+    int     ioctl(uint32_t request, uint64_t argp, Memory& mem) override;
     bool    seekable() const override { return false; }
     int     flags() const override { return flags_; }
     int host_fd() const override { return -1; }

@@ -9,6 +9,10 @@
 //     wl_display_disconnect, wl_display_dispatch, wl_proxy_marshal.
 //   - X11 (libX11.so.6): XOpenDisplay, XCloseDisplay, XCreateWindow,
 //     XMapWindow, XFlush, XPending, XNextEvent.
+//   - XShm (libXext.so): XShmCreateImage, XShmAttach, XShmPutImage, etc.
+//   - GLX (libGLX.so.2): glXChooseVisual, glXCreateContext, glXMakeCurrent.
+//   - XRandR (libXrandr.so.2): XRRGetScreenResources, XRRGetCrtcInfo.
+//   - Xkb (libXkblib.so): XkbGetMap, XkbGetState.
 //   - GBM (libgbm.so.1): gbm_create_device, gbm_bo_create, gbm_bo_destroy.
 //   - DMA-BUF (no library — ioctls on /dev/dri/card0).
 //
