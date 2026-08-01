@@ -157,6 +157,29 @@ namespace arm64emu {
 //     renders to /dev/fb0 while the host window redraws.
 //   - All 1.4.5-alpha features retained. Test count grows from 92/92
 //     to 95/95 (3 new tests for the new instruction/syscall coverage).
-constexpr const char* VERSION  = "1.5.0.alpha";
+//
+// 1.5.1-alpha (2026-08-01): SIMD/FP + GL state + dladdr + vDSO batch.
+//   New in 1.5.1-alpha (high-level — see CHANGELOG.md for the full list):
+//   - SIMD vector FP 2-source ops (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/
+//     FMAXNM/FMINNM/FABD/FMULX, .2s/.4s/.2d/.1d) implemented; single
+//     precision is native JIT SSE, double runs via the interp handler +
+//     JIT fallback. Fixed the FMULX vector encoding and added the
+//     missing double-precision interpreter case labels.
+//   - LD1/ST1 decoder fix: single-vs-multi structure classification now
+//     uses bit[24] (0x0C multiple / 0x0D single); multi register count
+//     comes from opcode bits[15:12], not bits[14:13].
+//   - GL state tracker (GLStateTracker) mirrors guest GL state so
+//     glIsEnabled / glGetIntegerv / glGetFloatv / glGetBooleanv return
+//     what the guest set. test_gl_state went from SIGSEGV (57 fails) to
+//     ALL PASS.
+//   - FABS/FNEG single-precision JIT sign-mask fix; FABD (|a-b|)
+//     implemented for single and double (musl fabsf lowers to fabd).
+//   - dladdr() enabled through the real glibc dladdr@GLIBC_2.34 symbol.
+//   - Guest vDSO: an embedded AArch64 vDSO ELF is loaded and
+//     AT_SYSINFO_EHDR set (gettimeofday/clock_gettime/clock_getres/
+//     __kernel_rt_sigreturn stubs trap to the syscall handler).
+//   - Test count grows from 175 to 187 (fabs_sign, fabd, simd_vec_fp,
+//     gl_state, test_dladdr, test_dladdr_glibc).
+constexpr const char* VERSION  = "1.5.1-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

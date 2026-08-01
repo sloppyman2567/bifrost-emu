@@ -1,4 +1,4 @@
-// bifrost/config.hpp — bifrost-emu configuration system (v1.5.0.alpha).
+// bifrost/config.hpp — bifrost-emu configuration system (v1.5.1-alpha).
 //
 // bifrost-emu historically configured itself through CLI flags and a
 // growing pile of BIFROST_* env vars (BIFROST_NO_THREAD_JIT,
