@@ -494,43 +494,46 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         // ── SIMD LD1/ST1 — native (128-bit load/store) ─────────────
         // Handles multi-register forms: LD1/ST1 {Vt..Vt+n-1} stores n×16
-        // bytes (n = d.simd_count, 1..4). Each register's v_lo and v_hi
-        // are loaded/stored as two 8-byte memory accesses. Q=0 (.2s/.2d/
-        // .8b/.4h, 64-bit) transfers only v_lo (8 bytes) and zeroes v_hi.
+        // bytes (n = d.simd_count, 1..4). Each 128-bit register is moved
+        // with ONE 16-byte memory access (SIMD_LD16/SIMD_ST16 — single
+        // bounds-check + movupd in the JIT). Q=0 (.2s/.2d/.8b/.4h, 64-bit)
+        // transfers only v_lo (8 bytes) and zeroes v_hi.
         case InstClass::SIMD_LD1: {
             uint16_t base = load_arm_reg(block, d.rn, true);
             bool is_64bit = (d.Q == 0);
-            for (uint8_t i = 0; i < d.simd_count; i++) {
-                uint8_t reg = (d.rt + i) & 0x1F;
-                uint16_t lo = g_alloc.alloc();
-                emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0,
-                     static_cast<uint64_t>(i * (is_64bit ? 8 : 16)));
-                if (is_64bit) {
+            if (is_64bit) {
+                for (uint8_t i = 0; i < d.simd_count; i++) {
+                    uint8_t reg = (d.rt + i) & 0x1F;
+                    uint16_t lo = g_alloc.alloc();
+                    emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0,
+                         static_cast<uint64_t>(i * 8));
                     // 64-bit form: v_hi = 0 (src2=0, the zero vreg).
                     emit(block, IROp::SIMD_LDST, reg, lo, 0, 1, 0, 0, 0, cur_pc);
-                } else {
-                    uint16_t hi = g_alloc.alloc();
-                    emit(block, IROp::LOAD_MEM, hi, base, 0, 8, 0, 0,
-                         static_cast<uint64_t>(i * 16 + 8));
-                    emit(block, IROp::SIMD_LDST, reg, lo, hi, 1, 0, 0, 0, cur_pc);
                 }
+            } else {
+                // 128-bit form: ONE 16-byte load per reg, single
+                // bounds-check across the whole count (flags_op = count).
+                emit(block, IROp::SIMD_LD16, d.rt, base, 0, 0, 0, d.simd_count,
+                     static_cast<uint64_t>(0), cur_pc);
             }
             return true;
         }
         case InstClass::SIMD_ST1: {
             uint16_t base = load_arm_reg(block, d.rn, true);
             bool is_64bit = (d.Q == 0);
-            for (uint8_t i = 0; i < d.simd_count; i++) {
-                uint8_t reg = (d.rt + i) & 0x1F;
-                uint16_t lo = g_alloc.alloc();
-                uint16_t hi = g_alloc.alloc();
-                emit(block, IROp::SIMD_LDST, reg, lo, hi, 0, 0, 0, 0, cur_pc);
-                emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0,
-                     static_cast<uint64_t>(i * (is_64bit ? 8 : 16)));
-                if (!is_64bit) {
-                    emit(block, IROp::STORE_MEM, 0, base, hi, 8, 0, 0,
-                         static_cast<uint64_t>(i * 16 + 8));
+            if (is_64bit) {
+                for (uint8_t i = 0; i < d.simd_count; i++) {
+                    uint8_t reg = (d.rt + i) & 0x1F;
+                    uint16_t lo = g_alloc.alloc();
+                    emit(block, IROp::SIMD_LDST, reg, lo, 0, 0, 0, 0, 0, cur_pc);
+                    emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0,
+                         static_cast<uint64_t>(i * 8));
                 }
+            } else {
+                // 128-bit form: ONE 16-byte store per reg, single
+                // bounds-check across the whole count (flags_op = count).
+                emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 0, d.simd_count,
+                     static_cast<uint64_t>(0), cur_pc);
             }
             return true;
         }

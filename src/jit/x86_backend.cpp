@@ -180,6 +180,16 @@ void FrostJIT::emit_store8(int base, int32_t off, int src) {
 void FrostJIT::emit_add_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x01); emit_byte(modrm(3,src&7,dst&7));
 }
+void FrostJIT::emit_add_reg_imm(int dst, int32_t imm) {
+    // add r64, imm8/imm32: REX.W 83 /0 ib  |  REX.W 81 /0 id
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(rex(true,false,false,dst>=8));
+        emit_byte(0x83); emit_byte(modrm(3,0,dst&7)); emit_byte(static_cast<uint8_t>(imm));
+    } else {
+        emit_byte(rex(true,false,false,dst>=8));
+        emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32(static_cast<uint32_t>(imm));
+    }
+}
 void FrostJIT::emit_sub_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x29); emit_byte(modrm(3,src&7,dst&7));
 }
@@ -505,6 +515,30 @@ extern "C" {
                     static_cast<unsigned long long>(addr), width, static_cast<unsigned long long>(val));
         }
         return val;
+    }
+    // 16-byte SIMD load slow path. Writes v_lo[dst]/v_hi[dst] directly so the
+    // JIT fast path can do a single bounds-check + one movupd instead of two
+    // 8-byte LOAD_MEM/STORE_MEM (each with its own check + window add).
+    void jit_load_mem16_slow(Emulator* emu, CPU* cpu, uint64_t addr, int dst) {
+        uint64_t buf[2] = {0, 0};
+        try {
+            emu->mem().read(addr, buf, 16);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+            return;
+        }
+        cpu->v_lo[dst & 31] = buf[0];
+        cpu->v_hi[dst & 31] = buf[1];
+    }
+    void jit_store_mem16_slow(Emulator* emu, CPU* cpu, uint64_t addr, int src) {
+        uint64_t buf[2] = {cpu->v_lo[src & 31], cpu->v_hi[src & 31]};
+        try {
+            emu->mem().write(addr, buf, 16);
+        } catch (UnmappedMemory& e) {
+            (void)e;
+            deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
+        }
     }
     void jit_store_mem_slow(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width) {
         static const bool mem_trace_ = (getenv("BIFROST_MEM_TRACE") != nullptr);

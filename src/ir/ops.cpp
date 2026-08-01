@@ -824,6 +824,42 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                     vregs[inst.src2] = cpu.v_hi[inst.dest];
                 }
                 break;
+            case IROp::SIMD_LD16: {
+                uint64_t addr = inst.imm + vregs[inst.src1];
+                uint32_t n = inst.flags_op ? inst.flags_op : 1;
+                if (window_base && addr + 16 * n <= Memory::DIRECT_WINDOW_SIZE) {
+                    for (uint32_t i = 0; i < n; i++) {
+                        memcpy(&cpu.v_lo[(inst.dest + i) & 31], window_base + addr + 16 * i, 8);
+                        memcpy(&cpu.v_hi[(inst.dest + i) & 31], window_base + addr + 16 * i + 8, 8);
+                    }
+                } else {
+                    uint8_t buf[16];
+                    for (uint32_t i = 0; i < n; i++) {
+                        emu.mem().read(addr + 16 * i, buf, 16);
+                        std::memcpy(&cpu.v_lo[(inst.dest + i) & 31], buf, 8);
+                        std::memcpy(&cpu.v_hi[(inst.dest + i) & 31], buf + 8, 8);
+                    }
+                }
+                break;
+            }
+            case IROp::SIMD_ST16: {
+                uint64_t addr = inst.imm + vregs[inst.src1];
+                uint32_t n = inst.flags_op ? inst.flags_op : 1;
+                if (window_base && addr + 16 * n <= Memory::DIRECT_WINDOW_SIZE) {
+                    for (uint32_t i = 0; i < n; i++) {
+                        memcpy(window_base + addr + 16 * i, &cpu.v_lo[(inst.src2 + i) & 31], 8);
+                        memcpy(window_base + addr + 16 * i + 8, &cpu.v_hi[(inst.src2 + i) & 31], 8);
+                    }
+                } else {
+                    uint8_t buf[16];
+                    for (uint32_t i = 0; i < n; i++) {
+                        std::memcpy(buf, &cpu.v_lo[(inst.src2 + i) & 31], 8);
+                        std::memcpy(buf + 8, &cpu.v_hi[(inst.src2 + i) & 31], 8);
+                        emu.mem().write(addr + 16 * i, buf, 16);
+                    }
+                }
+                break;
+            }
             case IROp::SIMD_ARITH: {
                 // Lane-wise integer arithmetic on v_lo/v_hi (each 8 bytes).
                 uint8_t opc = static_cast<uint8_t>(inst.imm);

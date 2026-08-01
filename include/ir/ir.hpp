@@ -115,6 +115,11 @@ enum class IROp : uint8_t {
     SIMD_LDST,     // Load/store 128-bit from memory
                    // dest = vreg index, src1 = addr vreg, imm = offset
                    // width = 0 (store), 1 (load)
+    SIMD_LD16,     // 16-byte vector load: v_lo[dest]&v_hi[dest] = mem[src1+imm]
+                   // single bounds-check + one 16-byte load (unlike two
+                   // 8-byte LOAD_MEM). src2 ignored.
+    SIMD_ST16,     // 16-byte vector store: mem[src1+imm] = v_lo[src2]&v_hi[src2]
+                   // single bounds-check + one 16-byte store.
     SIMD_ARITH,    // v_lo[dest],v_hi[dest] = src1 OP src2 (integer lane-wise)
                    // imm = opcode (0=add,1=sub,2=mul,3=umin,4=umax,5=smin,6=smax,
                    //                7=orr_imm_lo,8=orr_imm_hi)  — see JIT

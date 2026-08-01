@@ -458,6 +458,7 @@ private:
     void emit_store8(int base, int32_t off, int src);
     void emit_modrm_disp(int reg, int base, int32_t off);
     void emit_add_reg(int dst, int src);
+    void emit_add_reg_imm(int dst, int32_t imm);
     void emit_sub_reg(int dst, int src);
     void emit_adc_reg(int dst, int src);   // adc r64, r64 (with CF)
     void emit_sbb_reg(int dst, int src);   // sbb r64, r64 (with CF)

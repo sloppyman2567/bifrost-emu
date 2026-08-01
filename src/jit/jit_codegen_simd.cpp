@@ -28,6 +28,12 @@
 #include "ir/ir.hpp"
 #include <cstddef>
 #include <cstdint>
+
+// Slow-path helpers (defined extern "C" in x86_backend.cpp).
+extern "C" {
+void jit_load_mem16_slow(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t addr, int dst);
+void jit_store_mem16_slow(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t addr, int src);
+}
 namespace arm64emu {
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
@@ -343,6 +349,34 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             auto emit_fma_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
+                if (has_fma3()) {
+                    // ── FMA3 native (single-rounded, IEEE 754-correct) ──
+                    // Load the destination accumulator (Vd) into XMM0 and the
+                    // first source (Vn) into XMM1; Vm is a memory operand.
+                    //   FMLA: vfmadd231ps/pd xmm0, xmm1, [off2]
+                    //           xmm0 = xmm0 + xmm1*Vm   (fused, 1 round)
+                    //   FMLS: vfnmadd231ps/pd xmm0, xmm1, [off2]
+                    //           xmm0 = xmm0 - xmm1*Vm   (fused, 1 round)
+                    // VEX.NDS.128.66.0F38: byte1=0xE2 (R~=X~=B~=1, map 0F38),
+                    //   byte2 = W<<7 | (~vvvv)<<3 | L<<2 | pp where vvvv~ =
+                    //   ~1 = 1110 (NDS=xmm1), L=0, pp=01 (66). Opcode 0xB8
+                    //   (vfmadd231ps/pd) / 0xBC (vfnmadd231ps/pd). W picks
+                    //   single (0) vs double (1). The m128 memory operand
+                    //   reads 16 bytes but only the low 8 are used (upper
+                    //   lanes of the packed op are discarded on the 8-byte
+                    //   store back); the read stays inside the CPU struct.
+                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                    emit_modrm_disp(0, CPU_REG, offd);  // movsd xmm0, [rbx+offd]
+                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                    emit_modrm_disp(1, CPU_REG, off1);  // movsd xmm1, [rbx+off1]
+                    emit_byte(0xC4); emit_byte(0xE2);
+                    emit_byte(is_double ? 0xF1 : 0x71);  // W | 0x70 | 0x01
+                    emit_byte(is_sub ? 0xBC : 0xB8);
+                    emit_modrm_disp(0, CPU_REG, off2);   // vf[n]madd231ps/pd xmm0, xmm1, [rbx+off2]
+                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                    emit_modrm_disp(0, CPU_REG, offd);  // movsd [rbx+offd], xmm0
+                    return;
+                }
                 // movsd xmm0, [rbx+offd]  (dest accumulator)
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(0, CPU_REG, offd);
@@ -479,6 +513,131 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_load(dhi, CPU_REG, offhi);
                 set_vreg_reg(inst.src2, dhi);
             }
+            return true;
+        }
+        // ── SIMD LD16/ST16 (16-byte guest memory access, 1..4 vregs) ──
+        // One bounds-check + one movupd per 16 bytes (fast path), or one
+        // call into jit_load_mem16_slow/jit_store_mem16_slow per reg
+        // (slow path). flags_op = register count (1..4, default 1);
+        // dest/src2 = FIRST vreg; vregs dest+0..count-1 are contiguous.
+        // Replaces per-register 8-byte LOAD_MEM/STORE_MEM + SIMD_LDST
+        // chains, which each did their own 10-byte mov imm64 limit + cmp +
+        // jbe + add window.
+        case IROp::SIMD_LD16: {
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+            uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+            // rax = addr + imm
+            load_vreg_to_reg(RAX, inst.src1);
+            if (inst.imm != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm));
+            // Limit check: addr + 16*nregs <= DIRECT_WINDOW_SIZE.
+            int tmp = (RAX != RDX) ? RDX : RCX;
+            emit_mov_imm64(tmp, Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs));
+            emit_cmp_reg(RAX, tmp);
+            size_t jbe_patch = emit_jcc_rel32_placeholder(6);  // JBE
+            // Slow path: N calls to jit_load_mem16_slow(emu, cpu, addr, dst).
+            // NOTE: reload the base address each iteration — the C call
+            // clobbers RAX (caller-saved), so a running "addr += 16" across
+            // calls would add to garbage for i>=1.
+            for (uint32_t i = 0; i < nregs; i++) {
+                load_vreg_to_reg(RAX, inst.src1);
+                if (inst.imm != 0 || i != 0) {
+                    emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
+                }
+                emit_push(WIN_REG);
+                emit_mov_reg(RDI, EMU_REG);
+                emit_mov_reg(RSI, CPU_REG);
+                emit_mov_reg(RDX, RAX);
+                emit_mov_imm32(RCX, (inst.dest + i) & 31);
+                emit_call_aligned(&jit_load_mem16_slow, /*num_pushed=*/1);
+                emit_pop(WIN_REG);
+            }
+            size_t jmp_past = emit_jmp_rel32_placeholder();
+            // Fast path: rax += window; per reg movupd xmm0, [rax+i*16];
+            // store low 8 bytes to v_lo[dst+i], high 8 to v_hi[dst+i].
+            int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
+            patch_jcc_rel32(jbe_patch, fast_rel);
+            emit_add_reg(RAX, WIN_REG);
+            for (uint32_t i = 0; i < nregs; i++) {
+                // movupd xmm0, [rax+i*16]  — 66 0F 10 /r (16-byte unaligned ok).
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x10);
+                if (i == 0) {
+                    emit_modrm_disp(0, 0, 0);
+                } else {
+                    emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                }
+                // movsd [rbx+v_lo[dest+i]], xmm0 — F2 0F 11 /r.
+                int32_t offlo = V_LO_OFF + ((inst.dest + i) & 31) * 8;
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offlo);
+                // movhpd [rbx+v_hi[dest+i]], xmm0 — 66 0F 17 /r.
+                int32_t offhi = V_HI_OFF + ((inst.dest + i) & 31) * 8;
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x17);
+                emit_modrm_disp(0, CPU_REG, offhi);
+            }
+            int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+            patch_jmp_rel32(jmp_past, end_rel);
+            return true;
+        }
+        case IROp::SIMD_ST16: {
+            clobber_flags();
+            constexpr uint16_t MEM_CLOBBER =
+                (1u << RAX) | (1u << RCX) | (1u << RDX) |
+                (1u << R8)  | (1u << R9)  | (1u << R11);
+            flush_invalidate_host_regs(MEM_CLOBBER);
+            uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+            // rax = addr + imm
+            load_vreg_to_reg(RAX, inst.src1);
+            if (inst.imm != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm));
+            // Limit check.
+            int tmp = (RAX != RDX) ? RDX : RCX;
+            emit_mov_imm64(tmp, Memory::DIRECT_WINDOW_SIZE - static_cast<uint64_t>(16 * nregs));
+            emit_cmp_reg(RAX, tmp);
+            size_t jbe_patch = emit_jcc_rel32_placeholder(6);  // JBE
+            // Slow path: N calls to jit_store_mem16_slow(emu, cpu, addr, src).
+            // Reload the base address each iteration (the C call clobbers
+            // RAX), same as the LD16 slow path above.
+            for (uint32_t i = 0; i < nregs; i++) {
+                load_vreg_to_reg(RAX, inst.src1);
+                if (inst.imm != 0 || i != 0) {
+                    emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
+                }
+                emit_push(WIN_REG);
+                emit_mov_reg(RDI, EMU_REG);
+                emit_mov_reg(RSI, CPU_REG);
+                emit_mov_reg(RDX, RAX);
+                emit_mov_imm32(RCX, (inst.src2 + i) & 31);
+                emit_call_aligned(&jit_store_mem16_slow, /*num_pushed=*/1);
+                emit_pop(WIN_REG);
+            }
+            size_t jmp_past = emit_jmp_rel32_placeholder();
+            // Fast path: build xmm0 = {v_lo[src], v_hi[src]} then
+            // rax += window; movupd [rax+i*16], xmm0.
+            int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
+            patch_jcc_rel32(jbe_patch, fast_rel);
+            emit_add_reg(RAX, WIN_REG);
+            for (uint32_t i = 0; i < nregs; i++) {
+                // movsd xmm0, [rbx+v_lo[src+i]] — F2 0F 10 /r.
+                int32_t s_lo = V_LO_OFF + ((inst.src2 + i) & 31) * 8;
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, s_lo);
+                // movhpd xmm0, [rbx+v_hi[src+i]] — 66 0F 16 /r.
+                int32_t s_hi = V_HI_OFF + ((inst.src2 + i) & 31) * 8;
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x16);
+                emit_modrm_disp(0, CPU_REG, s_hi);
+                // movupd [rax+i*16], xmm0 — 66 0F 11 /r.
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x11);
+                if (i == 0) {
+                    emit_modrm_disp(0, 0, 0);
+                } else {
+                    emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                }
+            }
+            int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
+            patch_jmp_rel32(jmp_past, end_rel);
             return true;
         }
         // ── SIMD SHL/USHR/SSHR/USRA/SSRA/SLI/SRI (vector, by immediate) ──
