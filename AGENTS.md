@@ -30,7 +30,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
-  (0x2E20AC00) sub3_noq groups are covered.
+  (0x2E20AC00) sub3_noq groups are covered. The vector shift-by-immediate
+  family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI) is native in the JIT (AVX2
+  VEX 256-bit, `BIFROST_NO_AVX2` disables; SSE2 128-bit fallback; esize=1
+  and 64-bit SSRA via CALL_INTERP). USRA masks to 0x2F001400 — do not
+  confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
+  (0x0F003400), which are still unimplemented.
 
 ## Work Guidance
 

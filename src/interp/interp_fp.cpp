@@ -1356,7 +1356,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 for (int i = 0; i < elems; i++) {
                     uint64_t v = 0;
                     memcpy(&v, buf + i*esize, esize);
-                    v >>= shift;
+                    if (shift >= esize * 8) v = 0;  // shift == esize*8 clears (avoids UB `>> 64`)
+                    else v >>= shift;
                     memcpy(buf + i*esize, &v, esize);
                 }
                 memcpy(&cpu.v_lo[rd], buf, 8);
@@ -1392,22 +1393,23 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 uint8_t buf[16];
                 memcpy(buf, &cpu.v_lo[rn], 8);
                 if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                bool over = (shift >= esize * 8);  // shift == esize*8 sign-fills (avoids UB `>> 64`)
                 for (int i = 0; i < elems; i++) {
                     if (esize == 1) {
                         int8_t v; memcpy(&v, buf + i, 1);
-                        v >>= shift;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
                         memcpy(buf + i, &v, 1);
                     } else if (esize == 2) {
                         int16_t v; memcpy(&v, buf + i*2, 2);
-                        v >>= shift;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
                         memcpy(buf + i*2, &v, 2);
                     } else if (esize == 4) {
                         int32_t v; memcpy(&v, buf + i*4, 4);
-                        v >>= shift;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
                         memcpy(buf + i*4, &v, 4);
                     } else {
                         int64_t v; memcpy(&v, buf + i*8, 8);
-                        v >>= shift;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift;
                         memcpy(buf + i*8, &v, 8);
                     }
                 }
@@ -1420,6 +1422,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift).
             // Used by MD5 to implement vector ROTL via
             //   ROTL(x,n) = USRA(x << n, 32-n).
+            // NOTE: the URSRA/SRSRA (rounding) variants mask to 0x2F003400/
+            // 0x0F003400 and are a separate, unsupported op family.
             if ((op & 0xBF00FC00) == 0x2F001400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
@@ -1440,7 +1444,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     uint64_t v = 0, a = 0;
                     memcpy(&v, buf + i*esize, esize);
                     memcpy(&a, acc + i*esize, esize);
-                    v >>= shift;
+                    if (shift >= esize * 8) v = 0;  // shift == esize*8 clears (avoids UB `>> 64`)
+                    else v >>= shift;
                     a += v;  // accumulate (wraps per element width)
                     a &= (esize == 8) ? ~0ULL : ((1ULL << (esize*8)) - 1);
                     memcpy(acc + i*esize, &a, esize);
@@ -1468,26 +1473,27 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
                 memcpy(acc, &cpu.v_lo[rd], 8);
                 if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
+                bool over = (shift >= esize * 8);  // shift == esize*8 sign-fills (avoids UB `>> 64`)
                 for (int i = 0; i < elems; i++) {
                     if (esize == 1) {
                         int8_t v; memcpy(&v, buf+i, 1);
                         uint8_t a; memcpy(&a, acc+i, 1);
-                        v >>= shift; a += (uint8_t)v;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint8_t)v;
                         memcpy(acc+i, &a, 1);
                     } else if (esize == 2) {
                         int16_t v; memcpy(&v, buf+i*2, 2);
                         uint16_t a; memcpy(&a, acc+i*2, 2);
-                        v >>= shift; a += (uint16_t)v;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint16_t)v;
                         memcpy(acc+i*2, &a, 2);
                     } else if (esize == 4) {
                         int32_t v; memcpy(&v, buf+i*4, 4);
                         uint32_t a; memcpy(&a, acc+i*4, 4);
-                        v >>= shift; a += (uint32_t)v;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint32_t)v;
                         memcpy(acc+i*4, &a, 4);
                     } else {
                         int64_t v; memcpy(&v, buf+i*8, 8);
                         uint64_t a; memcpy(&a, acc+i*8, 8);
-                        v >>= shift; a += (uint64_t)v;
+                        if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint64_t)v;
                         memcpy(acc+i*8, &a, 8);
                     }
                 }
@@ -1556,7 +1562,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     uint64_t n = 0, d = 0;
                     memcpy(&n, vn + i*esize, esize);
                     memcpy(&d, vd + i*esize, esize);
-                    uint64_t lo = (n >> shift);
+                    uint64_t lo = (shift >= esize_bits) ? 0 : (n >> shift);
                     uint64_t hi = (insert_shift < esize_bits) ? ((d << insert_shift) & mask) : 0;
                     uint64_t r = hi | lo;
                     memcpy(vd + i*esize, &r, esize);

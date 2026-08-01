@@ -44,6 +44,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
+// ── vDSO clock fast-path (v1.5.1-alpha) ────────────────────────────
+// Reads the host clock directly for clock_gettime(113)/clock_getres(114)/
+// gettimeofday(169) and writes the result to guest memory. Used by the
+// syscall dispatcher and the JIT native vDSO fast path. Returns true if
+// the call was handled (result set in cpu.regs[0]); false otherwise.
+bool syscall_vdso_clock(Emulator& emu, CPU& cpu, uint64_t num);
 // ── misc.cpp sub-handlers  ──────────────────────────
 // syscall_misc() dispatches to these in order. Each returns
 // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.

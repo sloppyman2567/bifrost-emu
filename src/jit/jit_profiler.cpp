@@ -92,6 +92,7 @@ FrostJIT::FrostJIT() {
     // users a workaround if FMA3 codegen has a bug we haven't found yet.
     cpu_features_ = detect_cpu_features();
     no_fma3_ = (getenv("BIFROST_NO_FMA3") != nullptr);
+    no_avx2_ = (getenv("BIFROST_NO_AVX2") != nullptr);
 }
 FrostJIT::~FrostJIT() {
     if (code_buf_) munmap(code_buf_, CODE_BUF_SIZE);

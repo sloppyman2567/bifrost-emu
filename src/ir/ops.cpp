@@ -1038,10 +1038,11 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
                 break;
             }
-            // ── SIMD vector shifts by immediate (v1.4.5-alpha) ──
-            // Lane-wise shift of src1 by inst.imm. width = esize bytes
-            // (1/2/4/8). SHL = logical left, USHR = logical right,
-            // SSHR = arithmetic right (sign-extends).
+            // ── SIMD vector shifts/inserts by immediate (v1.4.5-alpha) ──
+            // Lane-wise ops on src1 (and dest as accumulator for USRA/SSRA/
+            // SLI/SRI). width = esize bytes (1/2/4/8), imm = shift amount,
+            // flags_op = Q (1 = 128-bit: process v_lo AND v_hi; 0 = 64-bit:
+            // process v_lo only and ZERO v_hi).
             //
             // `shift &= (esize*8)-1`, which truncated shift=esize*8 to 0
             // (turning "clear all bits" into a no-op for USHR/SSHR #N where
@@ -1050,67 +1051,99 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
             // which correctly clear the lane. The fix is to NOT mask and to
             // use a 64-bit intermediate so that shift == esize_bits is
             // well-defined (clears for SHL/USHR, sign-fills for SSHR).
-            // The IR translator guarantees shift ∈ [0, esize*8], so we don't
-            // need to worry about shifts larger than esize*8.
+            // The IR translator guarantees shift ∈ [0, esize*8].
             case IROp::SIMD_SHL:
             case IROp::SIMD_USHR:
-            case IROp::SIMD_SSHR: {
+            case IROp::SIMD_SSHR:
+            case IROp::SIMD_USRA:
+            case IROp::SIMD_SSRA:
+            case IROp::SIMD_SLI:
+            case IROp::SIMD_SRI: {
                 int esize = static_cast<int>(inst.width);
                 if (esize < 1 || esize > 8) esize = 8;
                 int shift = static_cast<int>(inst.imm);
                 if (shift < 0) shift = 0;
                 if (shift > esize * 8) shift = esize * 8;
+                bool q = (inst.flags_op != 0);
                 uint8_t out_lo[16] = {0}, out_hi[16] = {0};
                 uint8_t in_lo[16] = {0}, in_hi[16] = {0};
+                uint8_t acc_lo[16] = {0}, acc_hi[16] = {0};
+                uint8_t zeros8[8] = {0};
                 memcpy(in_lo, &cpu.v_lo[inst.src1], 8);
                 memcpy(in_hi, &cpu.v_hi[inst.src1], 8);
+                memcpy(acc_lo, &cpu.v_lo[inst.dest], 8);
+                memcpy(acc_hi, &cpu.v_hi[inst.dest], 8);
                 int lanes = 8 / esize;
-                auto do_lane = [&](uint8_t* in, uint8_t* out) {
+                uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << (esize * 8)) - 1);
+                int esize_bits = esize * 8;
+                int insert_shift = esize_bits - shift;
+                auto do_lane = [&](uint8_t* in, uint8_t* acc, uint8_t* out) {
                     for (int i = 0; i < lanes; i++) {
                         uint8_t* pi = in + i * esize;
+                        uint8_t* pa = acc + i * esize;
                         uint8_t* po = out + i * esize;
-                        if (inst.op == IROp::SIMD_SHL) {
-                            // Logical left shift (zero-fill).
-                            // Use 64-bit intermediate so shift == esize*8
-                            // is well-defined (clears lane).
-                            uint64_t v = 0; memcpy(&v, pi, esize);
-                            v = (shift >= 64) ? 0 : (v << shift);
-                            v &= (esize == 8) ? ~0ULL
-                                  : ((1ULL << (esize*8)) - 1);
-                            memcpy(po, &v, esize);
-                        } else if (inst.op == IROp::SIMD_USHR) {
-                            // Logical right shift (zero-fill).
-                            // Use 64-bit intermediate so shift == esize*8
-                            // is well-defined (clears lane).
-                            uint64_t v = 0; memcpy(&v, pi, esize);
-                            v = (shift >= 64) ? 0 : (v >> shift);
-                            memcpy(po, &v, esize);
-                        } else {  // SIMD_SSHR
-                            // Arithmetic right shift (sign-extend).
-                            // Promote to int64_t with sign extension so
-                            // shift == esize*8 sign-fills the lane.
-                            int64_t v = 0;
-                            if (esize == 1) v = static_cast<int8_t>(pi[0]);
-                            else if (esize == 2) { int16_t t; memcpy(&t, pi, 2); v = t; }
-                            else if (esize == 4) { int32_t t; memcpy(&t, pi, 4); v = t; }
-                            else { int64_t t; memcpy(&t, pi, 8); v = t; }
-                            // Arithmetic shift by 63 on int64_t is well-defined;
-                            // for shift == 64 we need to handle separately
-                            // (sign-fill). Since esize <= 8, shift <= 64,
-                            // so we only need the special case for shift=64.
-                            if (shift >= 64) {
-                                v = (v < 0) ? -1 : 0;
-                            } else {
-                                v >>= shift;
+                        uint64_t n = 0, d = 0, r = 0;
+                        memcpy(&n, pi, esize);
+                        memcpy(&d, pa, esize);
+                        switch (inst.op) {
+                            case IROp::SIMD_SHL: {
+                                uint64_t v = (shift >= 64) ? 0 : (n << shift);
+                                r = v & mask;
+                                break;
                             }
-                            memcpy(po, &v, esize);
+                            case IROp::SIMD_USHR: {
+                                uint64_t v = (shift >= 64) ? 0 : (n >> shift);
+                                r = v;
+                                break;
+                            }
+                            case IROp::SIMD_SSHR: {
+                                int64_t v = 0;
+                                if (esize == 1) v = static_cast<int8_t>(pi[0]);
+                                else if (esize == 2) { int16_t t; memcpy(&t, pi, 2); v = t; }
+                                else if (esize == 4) { int32_t t; memcpy(&t, pi, 4); v = t; }
+                                else { int64_t t; memcpy(&t, pi, 8); v = t; }
+                                if (shift >= 64) v = (v < 0) ? -1 : 0;
+                                else v >>= shift;
+                                r = static_cast<uint64_t>(v);
+                                break;
+                            }
+                            case IROp::SIMD_USRA: {
+                                uint64_t v = (shift >= 64) ? 0 : (n >> shift);
+                                r = (d + v) & mask;
+                                break;
+                            }
+                            case IROp::SIMD_SSRA: {
+                                int64_t v = 0;
+                                if (esize == 1) v = static_cast<int8_t>(pi[0]);
+                                else if (esize == 2) { int16_t t; memcpy(&t, pi, 2); v = t; }
+                                else if (esize == 4) { int32_t t; memcpy(&t, pi, 4); v = t; }
+                                else { int64_t t; memcpy(&t, pi, 8); v = t; }
+                                if (shift >= 64) v = (v < 0) ? -1 : 0;
+                                else v >>= shift;
+                                r = (d + static_cast<uint64_t>(v)) & mask;
+                                break;
+                            }
+                            case IROp::SIMD_SLI: {
+                                uint64_t hi = (shift >= 64) ? 0 : ((n << shift) & mask);
+                                uint64_t lo = (insert_shift < esize_bits) ? (d >> insert_shift) : 0;
+                                r = hi | lo;
+                                break;
+                            }
+                            case IROp::SIMD_SRI: {
+                                uint64_t lo = (shift >= 64) ? 0 : (n >> shift);
+                                uint64_t hi = (insert_shift < esize_bits) ? ((d << insert_shift) & mask) : 0;
+                                r = hi | lo;
+                                break;
+                            }
+                            default: break;
                         }
+                        memcpy(po, &r, esize);
                     }
                 };
-                do_lane(in_lo, out_lo);
-                do_lane(in_hi, out_hi);
+                do_lane(in_lo, acc_lo, out_lo);
+                if (q) do_lane(in_hi, acc_hi, out_hi);
                 memcpy(&cpu.v_lo[inst.dest], out_lo, 8);
-                memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
+                memcpy(&cpu.v_hi[inst.dest], q ? out_hi : zeros8, 8);
                 break;
             }
             case IROp::FP_F2I: {

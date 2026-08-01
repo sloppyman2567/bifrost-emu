@@ -654,6 +654,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if (esize_bytes != 0) {
                     uint32_t shift_amount = 0;
                     IROp shift_op = IROp::NOP;
+                    uint8_t qbit = (op >> 30) & 1;  // Q: 1=128-bit, 0=64-bit
                     if (sm == 0x0F005400) {  // SHL
                         // SHL: shift = UInt(immh:immb) - esize*8
                         shift_amount = ((immh << 4) | immb) - esize_bytes * 8;
@@ -666,17 +667,27 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         // SSHR: shift = (2 * esize*8) - UInt(immh:immb)
                         shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
                         shift_op = IROp::SIMD_SSHR;
+                    } else if (sm == 0x2F001400) {  // USRA (accumulate)
+                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
+                        shift_op = IROp::SIMD_USRA;
+                    } else if (sm == 0x0F001400) {  // SSRA (signed accumulate)
+                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
+                        shift_op = IROp::SIMD_SSRA;
+                    } else if (sm == 0x2F005400) {  // SLI (shift-left insert)
+                        shift_amount = ((immh << 4) | immb) - esize_bytes * 8;
+                        shift_op = IROp::SIMD_SLI;
+                    } else if (sm == 0x2F004400) {  // SRI (shift-right insert)
+                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
+                        shift_op = IROp::SIMD_SRI;
                     }
                     if (shift_op != IROp::NOP) {
                         emit(block, shift_op, d.rd, d.rn, 0,
-                             esize_bytes, 0, 0, shift_amount, cur_pc);
+                             esize_bytes, 0, qbit, shift_amount, cur_pc);
                         return true;
                     }
                 }
-                // USRA/SSRA/SLI/SRI/SHRN still fall to interpreter.
-                if (sm == 0x2F001400 || sm == 0x0F001400 ||
-                    sm == 0x2F005400 || sm == 0x2F004400 ||
-                    sm == 0x0F008400) {
+                // SHRN still falls to interpreter (narrowing semantics).
+                if (sm == 0x0F008400) {
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }

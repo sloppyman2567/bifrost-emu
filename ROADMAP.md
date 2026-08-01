@@ -30,13 +30,13 @@ status, see [TESTS.md](TESTS.md).
 ### Planned
 
 5. **AArch32 (32-bit ARM) support.**
-6. ~~**vDSO emulation.**~~ ✅ DONE in v1.5.1-alpha (see below) —
-   the vDSO is now loaded and `AT_SYSINFO_EHDR` is set, but the stubs
-   currently trap to the existing syscall handler (no perf gain yet).
-   The next step is a **direct fast-path** that reads the host clock
-   without going through the syscall dispatch (genuine speedup for tight
-   `clock_gettime` / `std::chrono::now()` loops). The vDSO being loaded
-   and addressable is the prerequisite for that.
+6. ~~**vDSO emulation.**~~ ✅ DONE in v1.5.1-alpha — the vDSO is loaded,
+   `AT_SYSINFO_EHDR` is set, and (new) clock calls from inside the vDSO
+   take a **direct fast-path** that reads the host clock without going
+   through the syscall dispatcher (genuine speedup for tight
+   `clock_gettime` / `std::chrono::now()` loops). Verified with
+   `BIFROST_SYSCALL_TRACE_ALL` showing 0 clock syscalls in both JIT and
+   interpreter modes.
 7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
 8. **More real-world binary testing.**
 
@@ -220,8 +220,8 @@ FWD mode. C API (22/22 checks) implemented and verified. See
    debugging. This addresses the FMA correctness (decomposed path is
    double-rounded) and performance (FMA3 single-rounded) items for
    FMA3-capable hosts.
-   Future FMV work: AVX2 256-bit SIMD codegen, BMI2 (pdep/pext for
-   bit-permutation), AVX-512 (masked operations).
+    Future FMV work: BMI2 (pdep/pext for bit-permutation), AVX-512
+    (masked operations).
 
 6. **~~NEON/SIMD shift and REV fixes.~~** ✅ DONE in rc.1 — Fixed 10
    NEON bugs: 32-bit ROR wrap-bit loss, vector SHL/USHR/SHRN immh
@@ -231,6 +231,15 @@ FWD mode. C API (22/22 checks) implemented and verified. See
    Q=1. SHA-1/224/256/384/512 and CRC32 now produce correct hashes.
    MD5 now produces correct hashes (fixed via the FCVTZU fixed-point
    variant fix). Added `ctest/jit_neon.elf` regression test.
+
+7. **~~AVX2 256-bit SIMD codegen.~~** ✅ DONE in v1.5.1-alpha — the FMV
+   framework now gates a native AVX2 path for the vector
+   shift-by-immediate family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI). On AVX2
+   hosts both 64-bit halves are packed into one YMM and processed with a
+   single 256-bit VEX instruction; `BIFROST_NO_AVX2=1` forces the SSE2
+   128-bit per-half fallback (mirroring `BIFROST_NO_FMA3`). Also fixed a
+   Q=0 `v_hi`-zeroing JIT/interpreter divergence and interpreter UB at
+   `shift == esize*8`. Regression: `ctest_real/test_simd_shift.elf`.
 
 ---
 

@@ -51,6 +51,7 @@ class Emulator;
 class Memory;
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
+extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
@@ -129,6 +130,14 @@ public:
     // path even on FMA3-capable CPUs (debugging).
     const CpuFeatures& cpu_features() const { return cpu_features_; }
     bool has_fma3() const { return cpu_features_.has_fma3() && !no_fma3_; }
+    // v1.5.1-alpha: AVX2 (256-bit VEX SIMD) gating, mirroring has_fma3().
+    // Override via BIFROST_NO_AVX2=1 to force the 128-bit SSE2 path.
+    bool has_avx2() const { return cpu_features_.has_avx2() && !no_avx2_; }
+    // v1.5.1-alpha: vDSO clock fast-path range (set by Emulator::enable_jit()).
+    void set_vdso_range(uint64_t base, uint64_t size) { vdso_base_ = base; vdso_size_ = size; }
+    bool in_vdso(uint64_t pc) const {
+        return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
+    }
     // BUGFIX: SSE4.1 opcodes (pmulld, pminud, pmaxud, pminsb, pmaxsb,
     // pminsd, pmaxsd, pcmpeqq, roundsd, roundss) were emitted
     // unconditionally without a runtime guard. They would SIGILL on
@@ -302,6 +311,15 @@ private:
     // for hot operations that have multiple x86 codegen variants.
     CpuFeatures cpu_features_{};
     bool no_fma3_ = false;  // true if BIFROST_NO_FMA3=1 (force decomposed path)
+    bool no_avx2_ = false;  // true if BIFROST_NO_AVX2=1 (force 128-bit SIMD path)
+    // ── vDSO range (v1.5.1-alpha fast path) ──────────────────────────
+    // Cached at enable_jit() time so the SVC codegen can recognize SVC
+    // instructions translated from the vDSO clock stubs and emit a native
+    // fast path (jit_vdso_clock_svc) that skips the interpreter entirely.
+    // Members are private; the setter/query below are public (they are
+    // used by Emulator::enable_jit() and by SVC codegen).
+    uint64_t vdso_base_ = 0;
+    uint64_t vdso_size_ = 0;
     // ── W^X (Write XOR Execute) protection ──────────────────────────
     // The code buffer is mapped PROT_READ|PROT_EXEC by default (no WRITE).
     // Before any codegen or patching operation, call make_writable() to
@@ -727,6 +745,7 @@ private:
     // IR compiler helpers.
     struct BranchPatch { size_t patch_off; int target_kind; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
+    void emit_call_vdso_clock(uint64_t arm_pc);
     // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha:
     // split into two files for readability. The dispatch stays in
     // frostjit.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()

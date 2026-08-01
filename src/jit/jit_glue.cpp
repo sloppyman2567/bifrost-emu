@@ -33,6 +33,7 @@ void Emulator::enable_jit() {
     jit_enabled_ = (jit_ != nullptr);
     if (jit_enabled_) {
         jit_->set_direct_window(mem_.direct_window());
+        jit_->set_vdso_range(vdso_base_, vdso_size_);
         if (verbose_) {
             const auto& cf = jit_->cpu_features();
             fprintf(stderr, "[%s] frostJIT enabled (x86 codegen, %s mode, "

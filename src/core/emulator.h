@@ -85,6 +85,11 @@ public:
     // stubs that trap to the emulator's syscall handler. Called from
     // load_elf_file before build_initial_stack.
     uint64_t load_vdso();
+    // True if pc falls within the mapped vDSO (used by the syscall
+    // dispatcher and JIT vDSO clock fast path).
+    bool in_vdso_range(uint64_t pc) const {
+        return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
+    }
     // Execute one instruction on the given CPU. Used by the interpreter,
     // JIT CALL_INTERP fallback, IR executor, and thread manager.
     void step(CPU& cpu);
@@ -291,6 +296,7 @@ private:
     uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
     uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
     uint64_t vdso_base_ = 0;    // vDSO ELF load address (for AT_SYSINFO_EHDR)
+    uint64_t vdso_size_ = 0;    // vDSO mapped size (page-rounded), for fast-path PC checks
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;
@@ -457,6 +463,9 @@ private:
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
+    // v1.5.1-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    // also called from the syscall dispatcher and the JIT trampoline.
+    friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────
     uint64_t build_initial_stack(uint64_t stack_top,
                                  std::vector<std::string>& argv,

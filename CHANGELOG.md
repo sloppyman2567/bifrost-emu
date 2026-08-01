@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — vDSO clock fast-path + AVX2 SIMD shifts (2026-08-01)
+
+### vDSO clock syscalls now run entirely in the fast path
+
+Guest calls to `clock_gettime` / `clock_getres` / `gettimeofday` from
+within the vDSO page no longer enter the syscall dispatcher at all —
+mirroring real Linux, where the vDSO never traps into the kernel. The
+JIT detects an `svc` inside the vDSO range and routes it through a
+dedicated helper that reads the host clock directly and writes the guest
+result, skipping signal draining and subsystem dispatch.
+
+- `syscall_vdso_clock()` (`src/syscalls/time.cpp`) handles 113
+  (clock_gettime), 114 (clock_getres → {0, 1ns}), 169 (gettimeofday)
+  with full guest-memory writeback and errno semantics.
+- `Emulator::syscall()` fast-path (`src/syscalls/syscalls.cpp`) fires
+  when `in_vdso_range(cpu.pc)` matches; the vDSO range is recorded in
+  `load_vdso()` (`src/core/emulator.cpp`).
+- JIT: the SVC codegen (`src/jit/jit_codegen_branch.cpp`) emits a
+  dedicated `emit_call_vdso_clock()` trampoline
+  (`src/jit/jit_helpers.cpp`) that sets `cpu->pc = svc_pc + 4` and
+  returns through the same fast path (so `rt_sigreturn`-style bookkeeping
+  is preserved). The JIT caches the vDSO range in `enable_jit()`
+  (`src/jit/jit_glue.cpp`).
+- Verified: `BIFROST_SYSCALL_TRACE_ALL=1` shows **0** clock syscalls in
+  both JIT and interpreter mode; 10-check regression
+  `ctest_real/test_vdso_clock.elf` passes under both.
+
+### AVX2 256-bit SIMD codegen for vector shift-by-immediate
+
+The vector shift family `USRA` / `SSRA` / `SLI` / `SRI` previously fell
+back to the interpreter. They are now native codegen:
+
+- On AVX2 hosts both 64-bit halves of the guest V register are packed
+  into one YMM (via `vinserti128`) and shifted/accumulated/merged with a
+  single 256-bit VEX instruction (`vpsll*`/`vpsrl*`/`vpsra*`,
+  `vpadd*`, `vpor`, `vextracti128`), gated by the new `has_avx2()`
+  feature check (`BIFROST_NO_AVX2=1` disables it, mirroring
+  `BIFROST_NO_FMA3`).
+- Non-AVX2 hosts use the existing SSE2 128-bit per-half path.
+- `esize=1` (no byte-shift) and 64-bit `SSRA` (no `psraq`) still fall
+  back to the interpreter.
+- New IR ops `SIMD_USRA/SSRA/SLI/SRI` (`include/ir/ir.hpp`) with the Q
+  bit carried in `flags_op`; implemented in the translator
+  (`src/ir/ir_translate_fp.cpp`), the IR executor (`src/ir/ops.cpp`),
+  and the JIT (`src/jit/jit_codegen_simd.cpp`).
+- Fixed a pre-existing JIT/interpreter divergence: `Q=0` shift ops now
+  zero `v_hi` of the result (the JIT previously shifted `v_hi` too).
+- Fixed pre-existing interpreter UB: `USHR`/`SSHR`/`USRA`/`SSRA`/`SRI`
+  with `shift == esize*8` did `v >>= 64` (undefined); now they clear
+  (logical) or sign-fill (arithmetic) as the ARM spec requires.
+- Regression: `ctest_real/test_simd_shift.elf` (23 checks — all sizes,
+  both halves, Q=1/Q=0, boundary shifts) passes under JIT (AVX2 + SSE2
+  paths) and interpreter.
+
 ## [Unreleased] — Strict SIMD + SADDW/UMINP (2026-08-01)
 
 ### Unhandled SIMD now fails loudly + two more real-world ops

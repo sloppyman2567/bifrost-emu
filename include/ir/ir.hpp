@@ -126,15 +126,24 @@ enum class IROp : uint8_t {
     // Native SIMD vector shifts by immediate (v1.4.5-alpha):
     //   SHL:  dest = src1 << shift   (logical left)
     //   USHR: dest = src1 >> shift   (logical right, unsigned)
-    //   SSHR: dest = src1 >> shift   (arithmetic right, signed)
+    //   SSHR: dest = src1 >>> shift  (arithmetic right, signed)
+    //   USRA: dest = dest + (src1 >> shift)            (logical right + accumulate)
+    //   SSRA: dest = dest + (src1 >>> shift)           (arithmetic right + accumulate)
+    //   SLI:  dest = (src1 << shift) | (dest >> (esize*8 - shift))  (shift-left insert)
+    //   SRI:  dest = (src1 >> shift) | (dest << (esize*8 - shift))  (shift-right insert)
     // All operate lane-wise; width = element size in bytes (1, 2, 4, 8);
-    // imm = shift amount (0..esize*8-1). On AVX2 hosts the JIT emits
-    // 256-bit vpsubw/vpsrld/vpslld etc. for Q=1; on SSE2 hosts it emits
-    // two 128-bit psllw/psrld/psrad ops. Without AVX2 the two halves
-    // are shifted independently (functionally identical, just slower).
+    // imm = shift amount (0..esize*8-1); flags_op = Q (1=128-bit, process
+    // v_lo AND v_hi; 0=64-bit, process v_lo only and ZERO v_hi). On AVX2
+    // hosts the JIT emits 256-bit VEX ops (vinserti128/vextracti128 +
+    // vpsllw/vpsrld/vpslld/vpaddw/vpor...) for Q=1; otherwise each 64-bit
+    // half is processed with 128-bit SSE2 ops (functionally identical).
     SIMD_SHL,      // dest = src1 << imm  (per-lane logical left shift)
     SIMD_USHR,     // dest = src1 >> imm  (per-lane logical right shift)
     SIMD_SSHR,     // dest = src1 >>> imm (per-lane arithmetic right shift)
+    SIMD_USRA,     // dest += src1 >> imm (per-lane logical right + accumulate)
+    SIMD_SSRA,     // dest += src1 >>> imm (per-lane arithmetic right + accumulate)
+    SIMD_SLI,      // dest = (src1 << imm) | (dest >> (esize*8 - imm))
+    SIMD_SRI,      // dest = (src1 >> imm) | (dest << (esize*8 - imm))
     // Native SIMD FP lane-wise arithmetic (v1.5.1-alpha). Same shape as
     // SIMD_ARITH but for FP elements. Operates on v_lo/v_hi (each 8
     // bytes) across all lanes; JIT emits SSE addps/subps/mulps/divps/

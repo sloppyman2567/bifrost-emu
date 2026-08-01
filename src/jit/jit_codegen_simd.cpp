@@ -427,10 +427,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             return true;
         }
-        // ── SIMD SHL/USHR/SSHR (vector, by immediate) — native SSE2 ──
+        // ── SIMD SHL/USHR/SSHR/USRA/SSRA/SLI/SRI (vector, by immediate) ──
         // v1.4.5-alpha: native SSE2 codegen via psllw/pslld/psllq (SHL),
-        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). Previously these
-        // fell back to CALL_INTERP (~20% overhead on SIMD-heavy workloads).
+        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). v1.5.1-alpha:
+        // extended to USRA/SSRA/SLI/SRI (accumulate / insert-merge) and
+        // added an AVX2 256-bit VEX path on capable hosts. Previously
+        // these all fell back to CALL_INTERP (~20% overhead on SIMD-heavy
+        // workloads).
         //
         // SSE2 shift-by-immediate encoding (66 0F <subop> <modrm> <imm8>):
         //   PSLLW xmmN, imm8 : 66 0F 71 F0|N  imm8    (reg field = 6)
@@ -442,80 +445,229 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         //   PSRAW xmmN, imm8 : 66 0F 71 E0|N  imm8    (reg field = 4)
         //   PSRAD xmmN, imm8 : 66 0F 72 E0|N  imm8
         //
+        // Per-op semantic mapping (Vn = src1, Vd = dest accumulator):
+        //   SHL   Vd = Vn << shift                          (PSLL)
+        //   USHR  Vd = Vn >> shift   (logical)              (PSRL)
+        //   SSHR  Vd = Vn >> shift   (arithmetic)           (PSRA)
+        //   USRA  Vd = Vd + (Vn >> shift)                   (PSRL + PADD)
+        //   SSRA  Vd = Vd + (Vn >> shift)  (arithmetic)     (PSRA + PADD)
+        //   SLI   Vd = (Vn << shift) | (Vd >> (esize*8-shift))
+        //                                                    (PSLL+PSRL+POR)
+        //   SRI   Vd = (Vn >> shift) | (Vd << (esize*8-shift))
+        //                                                    (PSRL+PSLL+POR)
+        //
         // The modrm byte is 11_<reg>_<rm> where <rm> selects the xmmN.
         // PSLL/PSRL/PSRA do NOT have a PSLLB/PSRLB/PSRAB form in SSE2
         // (8-bit element shifts); we fall back to CALL_INTERP for esize=1.
-        // 64-bit SSHR (psraq) requires AVX-512 — we fall back for esize=8.
+        // 64-bit SSRA (psraq) requires AVX-512 — we fall back for esize=8.
         //
         // x86 shift semantics match ARM for shift ∈ [0, esize*8]:
         //   - shift=0: no-op (both)
-        //   - shift=esize*8: SHL/USHR clear the lane; SSHR sign-fills it.
+        //   - shift=esize*8: SHL/USHR clear the lane; SSHR sign-fills it
+        //     (immediate shifts with count ≥ element size saturate).
         // The IR translator guarantees shift ∈ [0, esize*8].
+        //
+        // Q bit (flags_op): 1 = 128-bit (process v_lo AND v_hi), 0 = 64-bit
+        // (process v_lo only, ZERO v_hi of the result). On AVX2 hosts we
+        // process both halves in one 256-bit VEX instruction: v_lo in
+        // bits[0:63], v_hi in bits[128:191] (packed via vinserti128), so the
+        // guest lane numbering maps directly onto 256-bit lanes and both
+        // halves shift together. VEX 3-byte prefix format:
+        //   C4 [R~ X~ B~ mmmmm] [W vvvv~ L pp] <opcode> <modrm>
+        // with mmmmm=00001 (0F map) → byte1 0xE1, mmmmm=00011 (0F3A) → 0xE3,
+        // L=1 (256-bit), pp=01 (66 prefix). vvvv~ is the inverted 4-bit
+        // NDS register; 1111b when unused.
         case IROp::SIMD_SHL:
         case IROp::SIMD_USHR:
-        case IROp::SIMD_SSHR: {
+        case IROp::SIMD_SSHR:
+        case IROp::SIMD_USRA:
+        case IROp::SIMD_SSRA:
+        case IROp::SIMD_SLI:
+        case IROp::SIMD_SRI: {
             int esize = static_cast<int>(inst.width);
             uint8_t shift = static_cast<uint8_t>(inst.imm);
+            bool q = (inst.flags_op != 0);
             // Fall back to CALL_INTERP for unsupported element sizes.
             //  - esize=1 (8-bit): no PSLLB/PSRLB/PSRAB in SSE2.
-            //  - esize=8 SSHR: no PSRAQ in SSE2 (needs AVX-512).
+            //  - esize=8 SSRA: no PSRAQ in SSE2 (needs AVX-512).
             //  - Invalid esize: shouldn't happen, but be safe.
             if (esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            if (inst.op == IROp::SIMD_SSHR && esize == 8) {
+            if (inst.op == IROp::SIMD_SSRA && esize == 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            // All SHL/USHR variants for esize ∈ {2,4,8} are supported.
-            // (SHL Q-word uses PSLLQ; USHR Q-word uses PSRLQ; both SSE2.)
-            // Decode the SSE2 subop byte (0x71/0x72/0x73) and the reg
-            // field (6=PSLL, 2=PSRL, 4=PSRA).
+            // Decode the shift group subop (0x71/0x72/0x73) plus the primary
+            // reg field (6=PSLL, 2=PSRL, 4=PSRA) applied to Vn, and the
+            // inverse reg field applied to Vd for the insert ops.
             uint8_t subop = 0;
             uint8_t reg_field = 0;
-            if (esize == 2)      subop = 0x71;
-            else if (esize == 4) subop = 0x72;
-            else                 subop = 0x73;  // esize == 8
-            if (inst.op == IROp::SIMD_SHL)       reg_field = 6;
-            else if (inst.op == IROp::SIMD_USHR) reg_field = 2;
-            else                                 reg_field = 4;  // SIMD_SSHR
+            uint8_t ins_reg = 0;
+            uint8_t padd_op = 0;
+            if (esize == 2)      { subop = 0x71; padd_op = 0xFD; }  // paddw
+            else if (esize == 4) { subop = 0x72; padd_op = 0xFE; }  // paddd
+            else                 { subop = 0x73; padd_op = 0xD4; }  // paddq (esize == 8)
+            if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_SLI) {
+                reg_field = 6;   // PSLL (shift left)
+                ins_reg = 2;     // PSRL (shift right) for the Vd part
+            } else if (inst.op == IROp::SIMD_USHR ||
+                       inst.op == IROp::SIMD_USRA ||
+                       inst.op == IROp::SIMD_SRI) {
+                reg_field = 2;   // PSRL (logical shift right)
+                ins_reg = 6;     // PSLL (shift left) for the Vd part
+            } else {             // SIMD_SSHR / SIMD_SSRA
+                reg_field = 4;   // PSRA (arithmetic shift right)
+            }
+            uint8_t insert_shift = static_cast<uint8_t>(esize * 8) - shift;
             clobber_flags();
-            // SSE2 shifts only use XMM0 (no GPRs). But emit_call_interp
+            // SSE2 shifts only use XMM regs (no GPRs). But emit_call_interp
             // and other paths below might clobber RAX/RCX/RDX, so flush
             // them to keep the register-cache consistent.
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // For each half (v_lo, v_hi):
-            //   movsd xmm0, [rbx+off1]    (F2 0F 10 — load 64 bits, zero upper 64)
-            //   66 0F <subop> <modrm> imm  (PSLL/PSRL/PSRA xmm0, imm8)
-            //   movsd [rbx+offd], xmm0    (F2 0F 11 — store low 64 bits)
-            //
-            // CRITICAL: use 0xF2 (movsd, 64-bit) NOT 0xF3 (movss, 32-bit).
-            // movss would load only the low 32 bits (lane 0) and zero lanes
-            // 1-3, then the SSE2 shift would only shift lane 0, then movss
-            // would store only lane 0 — corrupting lanes 1-3. The existing
-            // SIMD_LOGICAL/SIMD_ARITH handlers also use 0xF3, but their native
-            // paths are not triggered for the current test suite (the IR
-            // translator routes most SIMD ops to CALL_INTERP), so the latent
-            // bug there is not exercised. We use 0xF2 here to be correct.
-            auto emit_shift_half = [&](int32_t off1, int32_t offd) {
-                // movsd xmm0, [rbx+off1]   (F2 0F 10 /r — load 64 bits)
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, off1);
-                // PSLL/PSRL/PSRA xmm0, imm8
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(subop);
-                emit_byte(0xC0 | (reg_field << 3) | 0);  // modrm(3, reg_field, xmm0)
-                emit_byte(shift);
-                // movsd [rbx+offd], xmm0   (F2 0F 11 /r — store low 64 bits)
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
-                emit_modrm_disp(0, CPU_REG, offd);
-            };
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
-            emit_shift_half(off1lo, offdlo);
-            emit_shift_half(off1hi, offdhi);
+            // movsd xmmN, [rbx+off]  (F2 0F 10 — load 64 bits, zero upper 64)
+            auto emit_load64 = [&](int x, int32_t off) {
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(x, CPU_REG, off);
+            };
+            // movsd [rbx+off], xmmN  (F2 0F 11 — store low 64 bits)
+            auto emit_store64 = [&](int x, int32_t off) {
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(x, CPU_REG, off);
+            };
+            // 66 0F <subop> <modrm(3, rf, xmmN)> <imm8>  (PSLL/PSRL/PSRA)
+            auto emit_shift_imm = [&](int x, uint8_t rf, uint8_t sh) {
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(subop);
+                emit_byte(0xC0 | (rf << 3) | x);
+                emit_byte(sh);
+            };
+            auto emit_padd = [&](int d, int s) {
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(padd_op);
+                emit_byte(0xC0 | (d << 3) | s);
+            };
+            auto emit_por = [&](int d, int s) {
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEB);
+                emit_byte(0xC0 | (d << 3) | s);
+            };
+            // VEX 3-byte prefix: C4 <b1> <b2> — mmmmm selects the opcode map
+            // (00001=0F, 00011=0F3A), R~=X~=B~=1 (low regs), L=1 (256-bit).
+            // `vvvv_nds` is the raw NDS register index; pass 0 for "unused"
+            // (encodes 1111b, the required reserved value).
+            auto emit_vex_prefix = [&](uint8_t mmmmm, int vvvv_nds, uint8_t pp) {
+                emit_byte(0xC4);
+                emit_byte(0xE0 | mmmmm);          // 0xE1 (0F) / 0xE3 (0F3A)
+                emit_byte((((~vvvv_nds) & 0x0F) << 3) | 0x04 | pp);  // L=1
+            };
+            // VEX.256 shift-by-immediate: vpsll*/vpsrl*/vpsra* ymm<dest>, ymm<src>, imm8
+            auto emit_vex_shift_imm = [&](int dest, int src, uint8_t rf, uint8_t sh) {
+                emit_vex_prefix(0x01, src, 0x01);
+                emit_byte(subop);
+                emit_byte(0xC0 | (rf << 3) | dest);
+                emit_byte(sh);
+            };
+            // VEX.256 3-operand: vpadd*/vpor ymm<dest>, ymm<nds>, ymm<src>
+            auto emit_vex_3op = [&](uint8_t opcode, int dest, int nds, int src) {
+                emit_vex_prefix(0x01, nds, 0x01);
+                emit_byte(opcode);
+                emit_byte(0xC0 | (dest << 3) | src);
+            };
+            // VEX.256.66.0F3A.W0 38 /r ib — vinserti128 ymm<dest>, ymm<nds>, xmm<src>, 1
+            auto emit_vinserti128 = [&](int dest, int nds, int src) {
+                emit_vex_prefix(0x03, nds, 0x01);
+                emit_byte(0x38);
+                emit_byte(0xC0 | (dest << 3) | src);
+                emit_byte(0x01);
+            };
+            // VEX.256.66.0F3A.W0 39 /r ib — vextracti128 xmm<dest>, ymm<src>, 1
+            // NOTE: for vextracti128 ModRM.reg encodes the SRC (ymm) and
+            // ModRM.rm the DEST (xmm) — the reverse of vinserti128. vvvv
+            // is reserved (1111b).
+            auto emit_vextracti128 = [&](int dest, int src) {
+                emit_vex_prefix(0x03, 0, 0x01);
+                emit_byte(0x39);
+                emit_byte(0xC0 | (src << 3) | dest);
+                emit_byte(0x01);
+            };
+            // Pack two 64-bit halves into ymm<base>: bits[0:63] = lo,
+            // bits[128:191] = hi (uses xmm<base> and xmm<base+1>).
+            auto emit_pack_halves = [&](int base, int32_t offlo, int32_t offhi) {
+                emit_load64(base, offlo);        // xmm<base>   = lo
+                emit_load64(base + 1, offhi);    // xmm<base+1> = hi
+                emit_vinserti128(base, base, base + 1);  // ymm<base> = {hi, lo}
+            };
+            // Store ymm0's low 128 (lo half) and extracted high 128 (hi half).
+            auto emit_store_256 = [&](int32_t offlo, int32_t offhi) {
+                emit_vextracti128(1, 0);   // xmm1 = bits[128:255] (hi half)
+                emit_store64(1, offhi);
+                emit_store64(0, offlo);
+            };
+            // ── SSE2 128-bit path — process one 64-bit half ────────────
+            // CRITICAL: use 0xF2 (movsd, 64-bit) NOT 0xF3 (movss, 32-bit).
+            // movss would load only the low 32 bits (lane 0) and zero lanes
+            // 1-3, then the SSE2 shift would only shift lane 0, then movss
+            // would store only lane 0 — corrupting lanes 1-3. We use 0xF2
+            // here to be correct.
+            auto emit_half_sse = [&](int32_t off1, int32_t offd) {
+                if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_USHR ||
+                    inst.op == IROp::SIMD_SSHR) {
+                    emit_load64(0, off1);
+                    emit_shift_imm(0, reg_field, shift);
+                    emit_store64(0, offd);
+                } else if (inst.op == IROp::SIMD_USRA ||
+                           inst.op == IROp::SIMD_SSRA) {
+                    emit_load64(0, off1);
+                    emit_shift_imm(0, reg_field, shift);
+                    emit_load64(1, offd);
+                    emit_padd(1, 0);            // xmm1 = Vd + shifted Vn
+                    emit_store64(1, offd);
+                } else {  // SIMD_SLI / SIMD_SRI
+                    emit_load64(0, off1);
+                    emit_shift_imm(0, reg_field, shift);
+                    emit_load64(1, offd);
+                    emit_shift_imm(1, ins_reg, insert_shift);
+                    emit_por(1, 0);             // xmm1 = Vn_part | Vd_part
+                    emit_store64(1, offd);
+                }
+            };
+            if (has_avx2() && q) {
+                // ── AVX2 256-bit path (both halves in one instruction) ──
+                if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_USHR ||
+                    inst.op == IROp::SIMD_SSHR) {
+                    emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn
+                    emit_vex_shift_imm(0, 0, reg_field, shift);
+                    emit_store_256(offdlo, offdhi);
+                } else if (inst.op == IROp::SIMD_USRA ||
+                           inst.op == IROp::SIMD_SSRA) {
+                    emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn
+                    emit_vex_shift_imm(0, 0, reg_field, shift);
+                    emit_pack_halves(2, offdlo, offdhi);       // ymm2 = Vd
+                    emit_vex_3op(padd_op, 0, 2, 0);            // ymm0 = Vd + shifted
+                    emit_store_256(offdlo, offdhi);
+                } else {  // SIMD_SLI / SIMD_SRI
+                    emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn
+                    emit_vex_shift_imm(0, 0, reg_field, shift);
+                    emit_pack_halves(2, offdlo, offdhi);       // ymm2 = Vd
+                    emit_vex_shift_imm(2, 2, ins_reg, insert_shift);
+                    emit_vex_3op(0xEB, 0, 2, 0);               // ymm0 = parts|parts
+                    emit_store_256(offdlo, offdhi);
+                }
+            } else {
+                // ── SSE2 128-bit path (Q=1: both halves; Q=0: lo + zero hi) ──
+                emit_half_sse(off1lo, offdlo);
+                if (q) {
+                    emit_half_sse(off1hi, offdhi);
+                } else {
+                    // Q=0: the IR contract zeros v_hi of the result.
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xC0);                 // pxor xmm0, xmm0
+                    emit_store64(0, offdhi);
+                }
+            }
             return true;
         }
         // ── v1.5.0.alpha: AES / PMULL native codegen ──────────────────

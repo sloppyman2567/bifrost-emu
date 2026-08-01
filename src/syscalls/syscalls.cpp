@@ -33,6 +33,20 @@ namespace arm64emu {
 // ── Main dispatcher ────────────────────────────────────────────────────
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
+    // v1.5.1-alpha: vDSO clock fast-path. The vDSO clock stubs
+    // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
+    // return PC inside the vDSO mapping. Read the host clock directly and
+    // skip the full syscall dispatch (drain_host_signals + six subsystem
+    // lookups). This mirrors real Linux, where vDSO clock reads never enter
+    // the kernel and therefore never process pending signals either. The JIT
+    // additionally bypasses the interpreter for these calls via
+    // jit_vdso_clock_svc, but this check covers the interpreter and any
+    // JIT-fallback path too.
+    if (in_vdso_range(cpu.pc) &&
+        (num == 113 || num == 114 || num == 169) &&
+        syscall_vdso_clock(*this, cpu, num)) {
+        return;
+    }
     // Drain pending host-forwarded signals at every syscall boundary.
     // This keeps signal-delivery latency low even when the guest is in
     // a tight syscall loop (e.g., ppoll waiting for SIGCHLD). Without

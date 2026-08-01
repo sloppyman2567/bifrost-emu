@@ -865,6 +865,7 @@ uint64_t Emulator::load_vdso() {
         } catch (...) { return 0; }
     }
     vdso_base_ = base;
+    vdso_size_ = max_vaddr_end;
     if (getenv("BIFROST_DYNLINK_TRACE")) {
         fprintf(stderr, "[vdso] loaded at 0x%llx (size=%llu, %zu segments)\n",
                 static_cast<unsigned long long>(base),

@@ -14,6 +14,7 @@
 #include "core/emulator.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "syscalls/syscalls.h"
 #include "bifrost/types.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -63,5 +64,28 @@ extern "C" void jit_interp_step(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
                 static_cast<unsigned long long>(cpu->regs[0]),
                 static_cast<unsigned long long>(cpu->regs[24]),
                 cpu->pstate);
+    }
+}
+// ── jit_vdso_clock_svc — JIT native vDSO clock fast path ───────────────
+// Emitted by the JIT for SVC instructions that live inside the vDSO
+// mapping (the gettimeofday/clock_gettime/clock_getres stubs). Unlike
+// jit_interp_step, this does NOT decode the SVC in the interpreter — it
+// advances pc to the stub's `ret` (the return address), reads the syscall
+// number, and either:
+//   - runs the clock fast path (host clock read, no syscall dispatch), or
+//   - falls back to the full Emulator::syscall() (e.g. the vDSO
+//     __kernel_rt_sigreturn stub, num 139).
+// Mirrors the interpreter's SVC_IMM pc-advance semantics so signal
+// frames and the execve/rt_sigreturn pc-change check stay consistent.
+extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
+                                   uint64_t svc_pc) {
+    uint64_t return_pc = svc_pc + 4;
+    cpu->pc = return_pc;
+    uint64_t num = cpu->regs[8];
+    if (emu->in_vdso_range(return_pc) &&
+        (num == 113 || num == 114 || num == 169)) {
+        arm64emu::syscall_vdso_clock(*emu, *cpu, num);
+    } else {
+        emu->syscall(*cpu);
     }
 }
