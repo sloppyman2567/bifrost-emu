@@ -63,8 +63,19 @@ status, see [TESTS.md](TESTS.md).
   discriminates the 0x0C/0x0D bases; the old bit[12] heuristic
   misdecoded `LD1 {V0.4S}` as a single-element load, dropping the high
   64 bits) and corrected the multi-structure register count (now from
-  the opcode field bits[15:12], not bits[14:13] which is the size).
-  Regression: `ctest_real/test_simd_vec_fp.elf`.
+   the opcode field bits[15:12], not bits[14:13] which is the size).
+   Regression: `ctest_real/test_simd_vec_fp.elf`.
+- **Unhandled SIMD is now a loud failure instead of a silent NOP.** The
+  interpreter's `SIMD_DP` catch-all used to silently skip any op it
+  didn't model ("incorrect but lets glibc continue", wrong results for
+  anything that depended on the op). It now logs under
+  `BIFROST_SIMD_TRACE=1` and throws a `DecodeError` (→ SIGILL), so a real
+  game/libc run surfaces exactly which NEON ops are still missing. The
+  audit found two ops actually used by shipped code — both implemented:
+  **SADDW/SADDW2** (sign-extended widening add, `v.4s`/`v.2d` forms,
+  low/high half via Q) and **UMINP** (pairwise unsigned min, `8B/16B`,
+  `4H/8H`, `2S/4S`). Regression: `ctest_real/test_simd_saddw_uminp.elf`.
+  `rw_busybox_df` and `rw_iperf3_version` pass under the strict mode.
 - **dladdr() enabled** — was deliberately disabled; now overridden and
   works through the real glibc `dladdr@GLIBC_2.34` symbol.
   Regressions: `ctest_real/test_dladdr.elf`, `test_dladdr_glibc.elf`.

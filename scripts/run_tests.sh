@@ -285,6 +285,10 @@ INTEGRATION_TESTS=(
     # .2s/.4s) were completely unimplemented — NEON-vectorized FP silently
     # produced wrong results. Tests all ops in single precision (.4s, .2s).
     "simd_vec_fp|ctest_real/test_simd_vec_fp.elf||10|ALL PASS"
+    # SADDW/SADDW2 + UMINP vector regression (v1.5.1-alpha): widening add
+    # and pairwise unsigned min, all sizes + low/high half selection. These
+    # were silently NOP'd; now covered (busybox df / iperf3 depend on them).
+    "simd_saddw_uminp|ctest_real/test_simd_saddw_uminp.elf||10|ALL PASS"
     "head|ctest_real/head.elf||5"
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"

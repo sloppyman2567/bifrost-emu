@@ -27,6 +27,10 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - glibc `dlopen` hook offset in `_rtld_global_ro` is detected from
   `dlopen` disassembly (368 vs 376 across glibc versions)
 - Static ELFs still get a DynamicLinker so runtime thunk dlopen works
+- Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
+  not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
+  op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
+  (0x2E20AC00) sub3_noq groups are covered.
 
 ## Work Guidance
 

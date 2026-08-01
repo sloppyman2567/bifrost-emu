@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Strict SIMD + SADDW/UMINP (2026-08-01)
+
+### Unhandled SIMD now fails loudly + two more real-world ops
+
+Real-world binaries (busybox `df`, iperf3 `--version`) were hitting SIMD
+instructions that the interpreter silently NOP'd — wrong results for any
+program that depended on them, with no diagnostic. The silent fallback is
+now a `DecodeError` (→ SIGILL to the guest), logged under
+`BIFROST_SIMD_TRACE=1`, so missing SIMD coverage is a loud, fixable
+failure instead of silent corruption. The audit surfaced two ops actually
+used by shipped code, both now implemented:
+
+**SADDW / SADDW2 (widening add, `src/interp/interp_fp.cpp`):**
+
+- Sign-extends the narrow lanes of Vm and adds them to the wide lanes of
+  Vn. Q selects the low half of Vm (SADDW) or the high half (SADDW2).
+- Supported forms: `v.4s ← v.4s + v.4h/v.8h` and `v.2d ← v.2d + v.2s/v.4s`.
+- Needed by glibc's `df`/filesystem code (`saddw` at busybox `df`).
+
+**UMINP (pairwise unsigned min, `src/interp/interp_fp.cpp`):**
+
+- `Vd[i] = min(Vn[2i], Vn[2i+1])`, `Vd[half+i] = min(Vm[2i], Vm[2i+1])`.
+- Supported forms: `8B/16B`, `4H/8H`, `2S/4S`.
+- Needed by iperf3.
+
+Both run through the interpreter and are reached from the JIT via its
+`CALL_INTERP` fallback. Regression: `ctest_real/test_simd_saddw_uminp.elf`
+(8 checks, ALL PASS under JIT and interpreter). `rw_busybox_df` and
+`rw_iperf3_version` now pass under the strict (throwing) mode.
+
 ## [Unreleased] — v1.5.1-alpha batch (2026-08-01)
 
 ### FP/SIMD correctness + GL state + dladdr + vDSO

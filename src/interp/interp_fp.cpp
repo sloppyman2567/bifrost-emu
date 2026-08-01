@@ -1725,6 +1725,65 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
+                // SADDW / SADDW2 (vector, widening add): sign-extend the
+                // narrow lanes of Vm and add them to the corresponding wide
+                // lanes of Vn. Q selects which half of Vm is used: Q=0 → low
+                // half (SADDW), Q=1 → high half (SADDW2). Vd/Vn are always
+                // full 128-bit (4S or 2D); the narrow source is 8H or 4S.
+                //   SADDW  v.4s ← v.4s + v.4h   (size=1 → src H)
+                //   SADDW  v.2d ← v.2d + v.2s   (size=2 → src S)
+                if (sub3_noq == 0x0E201000) {
+                    int esize_src = 1 << size;            // 2 (H) or 4 (S)
+                    int esize_dst = esize_src * 2;
+                    int lanes = 16 / esize_dst;         // 4 (4S) or 2 (2D)
+                    uint8_t vn[16], vm[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    int src_off = Q ? lanes : 0;        // element index into Vm
+                    for (int i = 0; i < lanes; i++) {
+                        uint64_t wide = 0;
+                        memcpy(&wide, vn + i * esize_dst, esize_dst);
+                        uint64_t narrow = 0;
+                        memcpy(&narrow, vm + (src_off + i) * esize_src, esize_src);
+                        int64_t se = (esize_src == 2) ? (int16_t)narrow : (int32_t)narrow;
+                        uint64_t r = wide + (uint64_t)se;
+                        memcpy(vd + i * esize_dst, &r, esize_dst);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    return;
+                }
+                // UMINP (vector, pairwise unsigned min): Vd[i] =
+                // min(Vn[2i], Vn[2i+1]) for the low half, then
+                // min(Vm[2i], Vm[2i+1]) for the high half.
+                if (sub3_noq == 0x2E20AC00) {  // UMINP 8B/16B, 4H/8H, 2S/4S
+                    int esize = 1 << size;
+                    int elems_per_src = (Q ? 16 : 8) / esize;
+                    int half = elems_per_src / 2;
+                    uint8_t vn[16], vm[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    for (int i = 0; i < half; i++) {
+                        uint64_t a = 0, b = 0;
+                        memcpy(&a, vn + (2 * i) * esize, esize);
+                        memcpy(&b, vn + (2 * i + 1) * esize, esize);
+                        uint64_t r = a < b ? a : b;
+                        memcpy(vd + i * esize, &r, esize);
+                        a = b = 0;
+                        memcpy(&a, vm + (2 * i) * esize, esize);
+                        memcpy(&b, vm + (2 * i + 1) * esize, esize);
+                        r = a < b ? a : b;
+                        memcpy(vd + (half + i) * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
                 // FADD/FSUB/FMUL/FDIV (vector, float) — 0x0E20D400 (FADD 4S)
                 // and 0x0E20DC00 (FMUL 4S).
                 // These use the FP arithmetic encoding with Q form.
@@ -1765,20 +1824,23 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     return;
                 }
             }
-            // Fallback: NOP for SIMD ops we don't model. This is
-            // incorrect but lets glibc continue. Programs that actually
-            // depend on FP results will produce wrong output.
-            // Optional: log unhandled SIMD ops for debugging.
-            static const bool simd_trace_ = (getenv("BIFROST_SIMD_TRACE") != nullptr);
-            if (simd_trace_) {
+            // Fallback: any SIMD_DP op we don't model used to be silently
+            // NOP'd — "incorrect but lets glibc continue", with wrong FP
+            // results for any program that actually depends on the op.
+            // Now we surface it as a DecodeError (→ SIGILL to the guest)
+            // so missing SIMD coverage becomes a loud, fixable failure
+            // instead of silent corruption. Log the opcode first for
+            // debugging (also via BIFROST_SIMD_TRACE=1).
+            if (getenv("BIFROST_SIMD_TRACE")) {
                 static uint64_t simd_unhandled_count_ = 0;
                 if (simd_unhandled_count_ < 50) {
                     fprintf(stderr, "[SIMD] unhandled op=0x%08x pc=0x%llx (Q=%d U=%d size=%d)\n",
                             op, static_cast<unsigned long long>(cpu.pc),
-                            Q, (op>>29)&1, (op>>22)&3);
+                            Q, (op >> 29) & 1, (op >> 22) & 3);
                     simd_unhandled_count_++;
                 }
             }
+            throw DecodeError(cpu.pc, op);
             return;
         }
         // ── FP scalar (FMOV/FADD/FSUB/FMUL/FDIV/FCMP/FCVT/...) ────
