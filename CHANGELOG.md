@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — v1.5.1-alpha batch (2026-08-01)
+
+### FP/SIMD correctness + GL state + dladdr + vDSO
+
+A wide correctness batch: the GL state tracker no longer crashes, single-
+precision FABS/FNEG codegen and FABD are fixed, SIMD vector FP (single and
+double precision) is implemented, the LD1/ST1 multi-vs-single decoder bug is
+fixed, `dladdr()` is enabled, and a guest vDSO is now loaded.
+
+**SIMD vector FP 2-source ops (`src/interp/interp_fp.cpp`,
+`src/ir/ir_translate_fp.cpp`, `src/jit/jit_codegen_simd.cpp`, `src/ir/ops.cpp`):**
+
+- Implemented the vector forms of FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/
+  FMINNM/FABD/FMULX (`.2s`/`.4s`/`.2d`/`.1d`). Previously completely
+  unimplemented — NEON-vectorized FP silently produced wrong results.
+- Single precision is native SSE codegen in the JIT; double precision
+  runs through the interpreter handler via the JIT fallback.
+- Fixed the **FMULX vector encoding** (0x0E20CC00 → 0x0E20DC00) in both
+  the IR match and the interpreter case label.
+- Added the missing **double-precision (`.2d`/`.1d`) case labels** for
+  all ten vector FP ops in the interpreter; double and single share one
+  opcode body (bit22 masked out of the dispatch key).
+
+**LD1/ST1 decoder fix (`src/frontend/decoder.cpp`):**
+
+- The single-vs-multiple-structure classifier used `bit[12] && bits[11:10]!=0`,
+  which misdecoded `LD1 {V0.4S}` (opcode 0b0111) as a single-element load,
+  dropping the high 64 bits of the vector. The correct discriminator is
+  **bit[24]** (multiple = 0x0C base, single = 0x0D base).
+- Fixed the multi-structure **register count** to come from the opcode
+  field bits[15:12] (LD1/ST1: 0x7/0xA/0x6/0x2 → 1/2/3/4 regs; LD2/ST2 0x8,
+  LD3/ST3 0x4, LD4/ST4 0x0) instead of bits[14:13] (which encode the
+  element size).
+
+**GL state tracker (`src/frost_graphics/gl_state.cpp`,
+`include/frost/gl_state.hpp`):**
+
+- Fixed the guest-vs-host pointer crash and the typed-query-dispatch bug
+  that made `ctest_real/test_gl_state.elf` SIGSEGV with 57 failures. Now
+  ALL PASS under JIT and interpreter.
+
+**FABS/FNEG and FABD:**
+
+- FABS/FNEG single-precision JIT codegen used a double-width sign mask
+  (cleared bit 63 instead of bit 31), so `fabsf()` of a negative float
+  stayed negative. Regression: `ctest_real/test_fabs2.elf`.
+- FABD (floating-point absolute difference) was unimplemented; musl's
+  `fabsf(a-b)` lowers to `fabd`, so a broken FABD silently returned the
+  first operand. Implemented for single and double precision in the
+  interpreter, IR, and JIT. Regressions: `ctest_real/test_fabd.elf`.
+
+**dladdr (`src/frontend/dynamic_linker.cpp`):**
+
+- Enabled the `dladdr` override through the real glibc `dladdr@GLIBC_2.34`
+  symbol. Regressions: `ctest_real/test_dladdr.elf`,
+  `test_dladdr_glibc.elf`.
+
+**vDSO emulation (`src/core/emulator.cpp`, `tools/vdso/`):**
+
+- An embedded AArch64 vDSO ELF is loaded into guest memory at startup and
+  `AT_SYSINFO_EHDR` is set. Provides `gettimeofday`, `clock_gettime`,
+  `clock_getres`, and `__kernel_rt_sigreturn` stubs that trap to the
+  emulator's syscall handler. Compatibility/correctness win (glibc takes
+  its normal vDSO code path); the direct clock fast-path is future work.
+
 ## [Unreleased] — Current session (2026-07-26)
 
 ### Build/test fixes + SDL2/GL demo verification + docs refresh

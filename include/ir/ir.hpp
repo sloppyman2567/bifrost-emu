@@ -135,6 +135,16 @@ enum class IROp : uint8_t {
     SIMD_SHL,      // dest = src1 << imm  (per-lane logical left shift)
     SIMD_USHR,     // dest = src1 >> imm  (per-lane logical right shift)
     SIMD_SSHR,     // dest = src1 >>> imm (per-lane arithmetic right shift)
+    // Native SIMD FP lane-wise arithmetic (v1.5.1-alpha). Same shape as
+    // SIMD_ARITH but for FP elements. Operates on v_lo/v_hi (each 8
+    // bytes) across all lanes; JIT emits SSE addps/subps/mulps/divps/
+    // minps/maxps (single) or addpd/... (double). FABD = sub + clear
+    // sign bit.
+    //   imm  = opcode (0=fadd,1=fsub,2=fmul,3=fdiv,4=fmax,5=fmin,
+    //          6=fmaxnm,7=fminnm,0xB=fmulx,0xD=fabd)
+    //   width = element size in bytes (4=float, 8=double)
+    //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
+    SIMD_FP_ARITH,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

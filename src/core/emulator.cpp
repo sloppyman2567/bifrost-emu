@@ -15,6 +15,7 @@
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
+#include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (v1.5.1-alpha)
 #include "frost/thunk.hpp"        // GraphicThunk full definition (for init/resolve)
 #include "frost/audio_thunk.hpp"  // v1.5.0.alpha: AudioThunk
 #include "frost/display_thunk.hpp"// v1.5.0.alpha: DisplayThunk
@@ -715,6 +716,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     const uint64_t STACK_SIZE = 64 * 1024 * 1024;  // 64 MiB
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
+    // v1.5.1-alpha: load the embedded vDSO before building the stack so
+    // AT_SYSINFO_EHDR can point to it. The vDSO provides
+    // gettimeofday/clock_gettime/clock_getres/rt_sigreturn stubs.
+    load_vdso();
     main_cpu_.sp = build_initial_stack(STACK_TOP, argv, info);
     // Pre-allocate a TLS scratch area and set TPIDR_EL0 to point into
     // its center. Many libc startup routines read TPIDR_EL0 before
@@ -811,6 +816,63 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     }
     return envs;
 }
+// ── vDSO loader (v1.5.1-alpha) ───────────────────────────────────────
+// Maps the embedded AArch64 vDSO ELF into guest memory and returns the
+// base address (the ELF header location = AT_SYSINFO_EHDR). The vDSO
+// provides gettimeofday/clock_gettime/clock_getres/__kernel_rt_sigreturn
+// stubs that trap to the emulator's syscall handler via svc #0.
+uint64_t Emulator::load_vdso() {
+    if (vdso_base_ != 0) return vdso_base_;  // already loaded
+    const uint8_t* data = vdso_so_bytes;
+    size_t size = vdso_so_len;
+    if (size < 64) return 0;
+    if (data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F')
+        return 0;
+    uint64_t e_phoff;
+    uint16_t e_phentsize, e_phnum;
+    memcpy(&e_phoff, data + 32, 8);
+    memcpy(&e_phentsize, data + 54, 2);
+    memcpy(&e_phnum, data + 56, 2);
+    if (e_phoff == 0 || e_phnum == 0 || e_phentsize < 56) return 0;
+    uint64_t max_vaddr_end = 0;
+    struct Phdr { uint32_t p_type; uint32_t p_flags; uint64_t p_offset,
+        p_vaddr, p_paddr, p_filesz, p_memsz, p_align; };
+    std::vector<Phdr> loads;
+    for (int i = 0; i < e_phnum; i++) {
+        if (e_phoff + i * e_phentsize + 56 > size) break;
+        Phdr h;
+        memcpy(&h, data + e_phoff + i * e_phentsize, 56);
+        if (h.p_type == 1) {  // PT_LOAD
+            loads.push_back(h);
+            uint64_t end = h.p_vaddr + h.p_memsz;
+            if (end > max_vaddr_end) max_vaddr_end = end;
+        }
+    }
+    if (loads.empty() || max_vaddr_end == 0) return 0;
+    max_vaddr_end = (max_vaddr_end + 0xFFF) & ~0xFFFULL;
+    uint64_t base = mem_.mmap_alloc(max_vaddr_end);
+    if (base == 0) return 0;
+    size_t hdr_size = std::min<size_t>(e_phoff + e_phnum * e_phentsize, size);
+    try {
+        mem_.write(base, data, hdr_size);
+    } catch (...) { return 0; }
+    for (const auto& h : loads) {
+        if (h.p_filesz == 0) continue;
+        if (h.p_offset + h.p_filesz > size) continue;
+        try {
+            mem_.write(base + h.p_vaddr, data + h.p_offset,
+                       static_cast<size_t>(h.p_filesz));
+        } catch (...) { return 0; }
+    }
+    vdso_base_ = base;
+    if (getenv("BIFROST_DYNLINK_TRACE")) {
+        fprintf(stderr, "[vdso] loaded at 0x%llx (size=%llu, %zu segments)\n",
+                static_cast<unsigned long long>(base),
+                static_cast<unsigned long long>(max_vaddr_end),
+                loads.size());
+    }
+    return base;
+}
 // ── Initial stack: argc, argv[], NULL, envp[], NULL, auxv[], NULL ─────
 uint64_t Emulator::build_initial_stack(uint64_t stack_top,
                                        std::vector<std::string>& argv,
@@ -905,7 +967,7 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
         23, 0,               // AT_SECURE (not setuid)
         31, execfn_addr,     // AT_EXECFN (program name)
         7,  interp_base_,    // AT_BASE (interpreter load address, 0 if static)
-        33, 0,               // AT_SYSINFO_EHDR (no vDSO)
+        33, vdso_base_,     // AT_SYSINFO_EHDR (vDSO ELF header address)
         // BUGFIX: AT_MINSIGSTKSZ was 0, which glibc uses to size altstacks.
         // A zero value can cause glibc to allocate an undersized altstack
         // and overflow into unmapped memory in signal handlers. The kernel

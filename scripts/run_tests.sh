@@ -268,6 +268,23 @@ INTEGRATION_TESTS=(
     "fwd_repro3|ctest_real/fwd_repro3.elf||5"
     "fwd_repro4|ctest_real/fwd_repro4.elf||5"
     "fwd_repro5|ctest_real/fwd_repro5.elf||5"
+    # FP correctness regression (v1.5.1-alpha): FABS single-precision
+    # in the JIT was using a double-width sign mask (cleared bit 63 not
+    # bit 31), so fabsf() of a negative float left it negative. This
+    # test forces the FABS instruction via volatile and checks the sign
+    # bit is cleared. Also confirms 0.3f-0.1f matches host IEEE-754.
+    "fabs_sign|ctest_real/test_fabs2.elf||10|ALL PASS"
+    # FP correctness regression (v1.5.1-alpha): FABD (floating-point
+    # absolute difference, |a-b|) was completely unimplemented — musl's
+    # fabsf(got-want) is lowered to `fabd` by the compiler, so a broken
+    # FABD silently returned the first operand, breaking float
+    # comparisons. Tests single + double precision.
+    "fabd|ctest_real/test_fabd.elf||10|ALL PASS"
+    # SIMD vector FP 2-source regression (v1.5.1-alpha): the vector forms
+    # of FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FABD/FMAXNM/FMINNM (0x0E/0x2E group,
+    # .2s/.4s) were completely unimplemented — NEON-vectorized FP silently
+    # produced wrong results. Tests all ops in single precision (.4s, .2s).
+    "simd_vec_fp|ctest_real/test_simd_vec_fp.elf||10|ALL PASS"
     "head|ctest_real/head.elf||5"
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
@@ -275,6 +292,14 @@ INTEGRATION_TESTS=(
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
+    # GL state tracker regression (v1.5.1-alpha): verifies GLStateTracker
+    # mirrors guest GL state and answers queries (glIsEnabled,
+    # glGetIntegerv, glGetFloatv, glGetBooleanv) consistently. Headless —
+    # no DISPLAY needed (state setters are thunked to host libGL, queries
+    # are answered from the tracker). Catches the guest-vs-host pointer
+    # crash and the typed-query-dispatch bug that previously made this
+    # test SIGSEGV with 57 failures.
+    "gl_state|ctest_real/test_gl_state.elf||15|ALL PASS"
     # NEW (Turn 74): comprehensive game demo — bouncing ball with
     # framebuffer, input, audio, and game loop.
     "game_demo|ctest_real/test_game_demo.elf||15|game: done"
@@ -395,6 +420,12 @@ DYNAMIC_TESTS=(
     # 8 threads x 4 waves with __thread long tls_array[8] per thread.
     "test_dyn_pthread_8thread|ctest_real/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
     "test_dlopen|ctest_real/test_dlopen.elf||15|test_dlopen: ALL PASS"
+    # v1.5.1-alpha: dladdr tests. Verifies the dladdr symbol override is
+    # enabled and routes user dladdr() calls through our implementation.
+    # test_dladdr uses the internal syscall (static musl); test_dladdr_glibc
+    # calls the real glibc dladdr@GLIBC_2.34 symbol (dynamic glibc).
+    "test_dladdr|ctest_real/test_dladdr.elf||15|test_dladdr: ALL PASS"
+    "test_dladdr_glibc|ctest_real/test_dladdr_glibc.elf||15|test_dladdr_glibc: ALL PASS"
 )
 
 # Interactive tests (need stdin input)

@@ -79,6 +79,12 @@ public:
     // ── Lifecycle (public) ────────────────────────────────────────────
     void load_elf_file(const std::string& path, std::vector<std::string>& argv);
     int  run();
+    // Load the embedded AArch64 vDSO into guest memory and return its
+    // base address (for AT_SYSINFO_EHDR). Returns 0 on failure. The vDSO
+    // provides gettimeofday/clock_gettime/clock_getres/rt_sigreturn
+    // stubs that trap to the emulator's syscall handler. Called from
+    // load_elf_file before build_initial_stack.
+    uint64_t load_vdso();
     // Execute one instruction on the given CPU. Used by the interpreter,
     // JIT CALL_INTERP fallback, IR executor, and thread manager.
     void step(CPU& cpu);
@@ -284,6 +290,7 @@ private:
     uint64_t phent_ = 0;
     uint64_t interp_base_ = 0;  // dynamic linker load address (0 if static)
     uint64_t prog_entry_ = 0;   // original program entry (for AT_ENTRY)
+    uint64_t vdso_base_ = 0;    // vDSO ELF load address (for AT_SYSINFO_EHDR)
     bool     has_lse_ = false;  // ELF declared LSE feature; affects LDUR/LSE decode
     bool verbose_ = false;
     bool trace_ = false;

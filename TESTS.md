@@ -10,32 +10,28 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 175 | 175 | 0 | Full suite with SDL2/GL build (standard) |
-| frostJIT (quick `make check-quick`) | 170 | 170 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 175 | 175 | 0 | Same conditions as JIT row |
-| `make check-quick` | 170 | 170 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 187 | 187 | 0 | Full suite with SDL2/GL build (standard) |
+| frostJIT (quick `make check-quick`) | 181 | 181 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| Interpreter (`./bifrost-emu --no-jit`) | 187 | 187 | 0 | Same conditions as JIT row |
+| `make check-quick` | 181 | 181 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
 
-**175 test programs** are defined in `scripts/run_tests.sh` across seven
-categories (see table below). The default `make check` suite runs all **175**
-and reports **175 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
+**187 test programs** are defined in `scripts/run_tests.sh` across seven
+categories (see table below). The default `make check` suite runs all **187**
+and reports **187 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
 With `make check-quick`, benchmarks are skipped and the suite reports
-**170 pass / 0 fail**.
-
-All 125 default tests pass under frostJIT, and all 125 also pass
-under the interpreter. The C API (`libbifrost.a` + `api/bifrost.h`) is
-verified by `ctest/test_capi.c` (22 checks, all pass).
+**181 pass / 0 fail**.
 
 ### Test categories
 
 | Category | Count | Description |
 |----------|-------|-------------|
 | Unit tests | 39 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute) |
-| Integration tests | 54 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle) |
+| Integration tests | 59 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
-| Dynamic | 12 | Dynamically-linked musl + glibc tests (need rootfs) |
+| Dynamic | 14 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **175** | |
+| **Total** | **187** | |
 
 ### Running the tests
 

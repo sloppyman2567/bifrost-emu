@@ -98,6 +98,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 case 6: sse_op = 0x5F; break;  // max (maxsd) — FMAXNM
                 case 7: sse_op = 0x5D; break;  // min (minsd) — FMINNM
                 case 8: sse_op = 0x59; break;  // mul (mulsd) — FNMUL (negate after)
+                case 0xD: sse_op = 0x5C; break; // sub (subsd) — FABD (abs after)
                 default:
                     emit_call_interp(inst.arm_pc, false);
                     return true;
@@ -112,6 +113,15 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_mov_imm64(RAX, 0x8000000000000000ULL);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
+            }
+            if (opc == 0xD) {  // FABD: take absolute value of the difference
+                // Width-aware sign mask (same as FABS): double clears
+                // bit 63, single clears bit 31.
+                uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
+                                          : 0x000000007FFFFFFFULL;
+                emit_mov_imm64(RAX, mask);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
             }
             // Store result: movsd/movss [rbx+off], xmm0
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
@@ -138,13 +148,22 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             if (opc == 0) {
                 // FMOV — no-op
             } else if (opc == 1) {
-                // FABS
-                emit_mov_imm64(RAX, 0x7FFFFFFFFFFFFFFFULL);
+                // FABS — clear the sign bit. The sign bit lives at
+                // bit 63 for double, bit 31 for single. Use a width-
+                // aware mask so single-precision FABS actually clears
+                // the float sign bit (the old 0x7FFF...F mask only
+                // cleared bit 63, leaving a negative float negative).
+                uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
+                                          : 0x000000007FFFFFFFULL;
+                emit_mov_imm64(RAX, mask);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
             } else if (opc == 2) {
-                // FNEG
-                emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                // FNEG — flip the sign bit (XOR sign mask). Width-aware
+                // for the same reason as FABS.
+                uint64_t smask = is_double ? 0x8000000000000000ULL
+                                           : 0x0000000080000000ULL;
+                emit_mov_imm64(RAX, smask);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
             } else if (opc == 3) {

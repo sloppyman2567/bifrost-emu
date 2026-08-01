@@ -5,13 +5,21 @@
 // The relocations applied here match the AArch64 ELF ABI (ARM IHI 0056B):
 //   R_AARCH64_ABS64      (257)  : *(addr) = S + A
 //   R_AARCH64_GLOB_DAT   (1025) : *(addr) = S + A
-//   R_AARCH64_JUMP_SLOT  (1026) : *(addr) = S + A   (lazy: leave PLT stub)
+//   R_AARCH64_JUMP_SLOT  (1026) : *(addr) = S + A   (eager; PLT stub left
+//                                  in place but resolved up-front)
 //   R_AARCH64_RELATIVE   (1027) : *(addr) = Delta + A   (Delta = base)
-//   R_AARCH64_TLS_TPREL  (1030) : not applied (TLS unsupported)
-//   R_AARCH64_TLSDESC    (1031) : not applied (TLS unsupported)
+//   R_AARCH64_TLS_DTPMOD (1028) : *(addr) = module id (static TLS)
+//   R_AARCH64_TLS_DTPREL (1029) : *(addr) = TP-offset within module
+//   R_AARCH64_TLS_TPREL  (1030) : *(addr) = TP-offset (Initial-Exec)
+//   R_AARCH64_TLSDESC    (1031) : inline static descriptor: desc[0]=0
+//                                  (no resolver), desc[1]=TP-offset
 //   R_AARCH64_IRELATIVE  (1032) : *(addr) = Indirect(Delta + A)
 //                                  — calls the ifunc resolver at Delta + A
 //                                    and stores its return value.
+//   R_AARCH64_COPY       (1024) : deferred second pass — copies the
+//                                  defining object's symbol bytes into
+//                                  the main binary's GOT slot after all
+//                                  other relocations are applied.
 //
 // References:
 //   - https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst
@@ -2104,13 +2112,27 @@ bool DynamicLinker::register_ld_linux_shim_() {
     // dl_iterate_phdr@@GLIBC_2.17.
     symbols_["dl_iterate_phdr"] = SymEntry{code_base + OFF_DLITER, STB_GLOBAL_};
     versioned_symbols_["dl_iterate_phdr@GLIBC_2.17"] = SymEntry{code_base + OFF_DLITER, STB_GLOBAL_};
-    // NOTE: dladdr override is NOT registered because it causes a crash
-    // during glibc startup (the versioned symbol override conflicts with
-    // glibc's internal _dl_addr call path). The dladdr stub code exists
-    // at OFF_DLADDR but is not wired to any symbol. dladdr remains
-    // glibc's native implementation, which calls _dl_find_dso_for_object
-    // (returning 0) and thus always fails — but it fails gracefully
-    // (returns 0) rather than crashing.
+    // Override glibc's dladdr with our stub that calls syscall 0x1005.
+    // glibc's dladdr@@GLIBC_2.34 checks the dlfcn_hook (hook+40, which
+    // we already point at OFF_DLADDR) AND may be called directly. We
+    // use FORCE override (same pattern as dl_iterate_phdr above) so the
+    // symbol resolves to our stub regardless of which call path is used.
+    // The stub calls our dladdr() implementation via syscall 0x1005,
+    // which fills in the Dl_info struct and returns 1 (found) or 0.
+    //
+    // History: this override was previously disabled because an earlier
+    // attempt crashed glibc startup (the versioned-symbol override
+    // conflicted with glibc's internal _dl_addr path). The dlfcn_hook
+    // wiring (hook+40 → OFF_DLADDR) was added later and made the
+    // user-facing dladdr() work, but the symbol itself stayed
+    // unresolved-to-glibc. Re-enabling the symbol override now routes
+    // ALL dladdr calls (including _dl_addr's internal use) through our
+    // stub, which returns 0 gracefully for unknown addresses — so
+    // glibc's internal callers see "not found" and skip link_map
+    // validation, which is safe.
+    symbols_["dladdr"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};
+    versioned_symbols_["dladdr@GLIBC_2.34"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};
+    versioned_symbols_["dladdr@GLIBC_2.0"] = SymEntry{code_base + OFF_DLADDR, STB_GLOBAL_};
     // _dl_allocate_tls_init with our shim's stubs, even if the real
     // ld-linux already defined them in .dynsym. The real ld-linux's
     // _dl_allocate_tls -> allocate_dtv calls calloc via a function
@@ -3507,26 +3529,39 @@ int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
     const LoadedObject* obj = find_object_by_addr(addr);
     if (obj == nullptr) return 0;
     info.dli_fbase = obj->base_addr;
-    // dli_fname: copy the object's name to the guest-side dlerror buffer
-    // (which we reuse since dlerror and dladdr don't run concurrently).
-    // The buffer is at dlerror_buf_ptr_ and is 256 bytes.
-    if (dlerror_buf_ptr_ != 0) {
+    // dli_fname: copy the object's name to a guest-side buffer. For
+    // dynamic binaries we reuse the dlerror buffer (set in the shim).
+    // For static binaries (no shim, dlerror_buf_ptr_ == 0) we lazily
+    // mmap a small page so dli_fname is non-NULL.
+    uint64_t fname_buf = dlerror_buf_ptr_;
+    if (fname_buf == 0) {
+        if (dladdr_fname_buf_ == 0) {
+            dladdr_fname_buf_ = mem_.mmap_alloc(4096);
+        }
+        fname_buf = dladdr_fname_buf_;
+    }
+    if (fname_buf != 0) {
         std::string name = obj->name;
         if (name.empty() && obj->is_main) name = "<main>";
         size_t n = std::min(name.size(), DLERROR_BUF_SIZE - 1);
         try {
-            mem_.write(dlerror_buf_ptr_,
+            mem_.write(fname_buf,
                        reinterpret_cast<const uint8_t*>(name.data()), n);
-            mem_.store<uint8_t>(dlerror_buf_ptr_ + n, 0);
-            info.dli_fname = dlerror_buf_ptr_;
+            mem_.store<uint8_t>(fname_buf + n, 0);
+            info.dli_fname = fname_buf;
         } catch (...) {
             info.dli_fname = 0;
         }
     }
-    // Find the nearest symbol by scanning .dynsym.
+    // Find the nearest symbol by scanning .dynsym. We want the symbol
+    // with the largest st_value that is <= addr. When multiple symbols
+    // share the same st_value (aliases like sqrt/sqrtf32x), prefer the
+    // one whose address EXACTLY matches addr (canonical name), then the
+    // first one encountered (deterministic).
     if (obj->symtab_addr != 0 && obj->strtab_addr != 0) {
         uint64_t best_value = 0;
         uint64_t best_sym_name_off = 0;
+        bool best_is_exact = false;
         for (uint64_t i = 0; i < obj->symtab_count; i++) {
             Elf64_Sym s;
             try {
@@ -3535,9 +3570,24 @@ int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
             if (s.st_name == 0) continue;
             if (s.st_shndx == 0) continue;  // SHN_UNDEF
             uint64_t sym_addr = obj->base_addr + s.st_value;
-            if (sym_addr <= addr && sym_addr > best_value) {
+            if (sym_addr > addr) continue;
+            bool is_exact = (sym_addr == addr);
+            // Prefer: exact match > larger value > first encountered.
+            if (best_value == 0) {
                 best_value = sym_addr;
                 best_sym_name_off = s.st_name;
+                best_is_exact = is_exact;
+            } else if (is_exact && !best_is_exact) {
+                // Exact match beats a non-exact one regardless of value.
+                best_value = sym_addr;
+                best_sym_name_off = s.st_name;
+                best_is_exact = true;
+            } else if (!is_exact && sym_addr > best_value && !best_is_exact) {
+                best_value = sym_addr;
+                best_sym_name_off = s.st_name;
+            } else if (is_exact && best_is_exact && sym_addr == best_value) {
+                // Both exact at the same address — keep the first
+                // (already set), so the canonical name wins.
             }
         }
         if (best_value != 0) {

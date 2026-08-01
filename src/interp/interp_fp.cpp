@@ -122,9 +122,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // channel interleaving, etc.).
             //
             // Single-structure LD1/ST1 1-element variant encoding
-            // (per ARM ARM C4.1.66):
+            // (per ARM ARM C4.1.66). The decoder sets d.is_single_struct
+            // from bit[24] (base 0x0D = single, 0x0C = multiple):
             //   bits[14:13] = size[1:0] (high bits of size)
-            //   bit[12]     = 1 (single-structure marker)
             //   bits[11:10] = size[1:0] (low bits) — combined size is
             //                 bits[14:13]:[11:10] but for LD1 (1-reg)
             //                 the index comes from Q and size.
@@ -574,6 +574,123 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 } else {
                     memcpy(&cpu.v_lo[rd], out, 8);
                     cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
+            // ── SIMD vector FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/
+            //     FMAXNM/FMINNM/FABD/FMULX, vector form) ──────────────
+            // These are in the 0x0E/0x2E SIMD group (bits[28:24]=0b01110)
+            // with bit[23]=1 (FP), bit[21]=1, bits[15:12]=opcode,
+            // bits[11:10]=0b01. ftype in bits[23:22] (but bit23 is always
+            // 1 here, so effectively bit22: 0=single, 1=double). Q (bit30)
+            // selects .2s/.2d (Q=0, 2 lanes) vs .4s (Q=1, 4 lanes).
+            // Without this, NEON-vectorized FP (libc memcpy/memset with
+            // NEON, image/audio processing) silently produces wrong
+            // results — the instruction falls through to the default.
+            case 0x0e20d400:  // FADD v (single)
+            case 0x0e60d400:  // FADD v (double)
+            case 0x0ea0d400:  // FSUB v (single)
+            case 0x0ee0d400:  // FSUB v (double)
+            case 0x2e20dc00:  // FMUL v (single)
+            case 0x2e60dc00:  // FMUL v (double)
+            case 0x0e20f400:  // FMAX v (single)
+            case 0x0e60f400:  // FMAX v (double)
+            case 0x0ea0f400:  // FMIN v (single)
+            case 0x0ee0f400:  // FMIN v (double)
+            case 0x2ea0d400:  // FABD v (single)
+            case 0x2ee0d400:  // FABD v (double)
+            case 0x0e20c400:  // FMAXNM v (single)
+            case 0x0e60c400:  // FMAXNM v (double)
+            case 0x0ea0c400:  // FMINNM v (single)
+            case 0x0ee0c400:  // FMINNM v (double)
+            case 0x0e20dc00:  // FMULX v (single)
+            case 0x0e60dc00:  // FMULX v (double)
+            case 0x2e20fc00:  // FDIV v (single)
+            case 0x2e60fc00: { // FDIV v (double)
+                // The opcode is encoded across bits[29](U), bits[15:12],
+                // and bits[11:10] — NOT a single field. Dispatch on the
+                // full sub_noq (already matched by the case labels above).
+                // sub_noq keeps bit22, so the double forms (.2d/.1d) have
+                // bit22=1; mask it out so both sizes hit the same opcode.
+                uint32_t key = sub_noq & ~(1u << 22);
+                bool is_double = (op >> 22) & 1;  // bit22: 0=S, 1=D
+                int lanes = is_double ? (Q ? 2 : 1) : (Q ? 4 : 2);
+                auto get_op = [&](uint32_t k) -> int {
+                    if (k == 0x0e20d400) return 0;  // FADD
+                    if (k == 0x0ea0d400) return 1;  // FSUB
+                    if (k == 0x2e20dc00) return 2;  // FMUL
+                    if (k == 0x2e20fc00) return 3;  // FDIV
+                    if (k == 0x0e20f400) return 4;  // FMAX
+                    if (k == 0x0ea0f400) return 5;  // FMIN
+                    if (k == 0x0e20c400) return 6;  // FMAXNM
+                    if (k == 0x0ea0c400) return 7;  // FMINNM
+                    if (k == 0x0e20dc00) return 0xB; // FMULX
+                    if (k == 0x2ea0d400) return 0xD; // FABD
+                    return -1;
+                };
+                int opcode = get_op(key);
+                if (is_double) {
+                    auto gv = [&](int r, int lane) -> double {
+                        uint64_t bits = (lane == 0) ? cpu.v_lo[r] : cpu.v_hi[r];
+                        double d; memcpy(&d, &bits, 8); return d;
+                    };
+                    auto pv = [&](int r, int lane, double v) {
+                        uint64_t bits; memcpy(&bits, &v, 8);
+                        if (lane == 0) cpu.v_lo[r] = bits; else cpu.v_hi[r] = bits;
+                    };
+                    for (int i = 0; i < lanes; i++) {
+                        double a = gv(rn, i), b = gv(rm, i), r = 0;
+                        switch (opcode) {
+                            case 0x0: r = a + b; break;             // FADD
+                            case 0x1: r = a - b; break;             // FSUB
+                            case 0x2: r = a * b; break;             // FMUL
+                            case 0x3: r = a / b; break;             // FDIV
+                            case 0x4: r = std::fmax(a, b); break;   // FMAX
+                            case 0x5: r = std::fmin(a, b); break;   // FMIN
+                            case 0x6: r = std::fmax(a, b); break;   // FMAXNM
+                            case 0x7: r = std::fmin(a, b); break;   // FMINNM
+                            case 0xB: r = a * b; break;             // FMULX (≈FMUL for non-special)
+                            case 0xD: r = std::fabs(a - b); break;  // FABD
+                            default: r = 0; break;
+                        }
+                        pv(rd, i, r);
+                    }
+                    // Zero unused high lanes for Q=0 (.1d → high 64 zeroed,
+                    // matching the JIT/IR which always zero v_hi for Q=0).
+                    if (!Q) cpu.v_hi[rd] = 0;
+                } else {
+                    auto gv = [&](int r, int lane) -> float {
+                        // lanes 0,1 in v_lo (low 64), lanes 2,3 in v_hi.
+                        uint64_t chunk = (lane < 2) ? cpu.v_lo[r] : cpu.v_hi[r];
+                        uint32_t bits = static_cast<uint32_t>(chunk >> ((lane & 1) * 32));
+                        float f; memcpy(&f, &bits, 4); return f;
+                    };
+                    auto pv = [&](int r, int lane, float v) {
+                        uint32_t bits; memcpy(&bits, &v, 4);
+                        uint64_t* chunk = (lane < 2) ? &cpu.v_lo[r] : &cpu.v_hi[r];
+                        int sh = (lane & 1) * 32;
+                        *chunk = (*chunk & ~(0xFFFFFFFFULL << sh))
+                               | (static_cast<uint64_t>(bits) << sh);
+                    };
+                    for (int i = 0; i < lanes; i++) {
+                        float a = gv(rn, i), b = gv(rm, i), r = 0;
+                        switch (opcode) {
+                            case 0x0: r = a + b; break;             // FADD
+                            case 0x1: r = a - b; break;             // FSUB
+                            case 0x2: r = a * b; break;             // FMUL
+                            case 0x3: r = a / b; break;             // FDIV
+                            case 0x4: r = std::fmax(a, b); break;   // FMAX
+                            case 0x5: r = std::fmin(a, b); break;   // FMIN
+                            case 0x6: r = std::fmax(a, b); break;   // FMAXNM
+                            case 0x7: r = std::fmin(a, b); break;   // FMINNM
+                            case 0xB: r = a * b; break;             // FMULX
+                            case 0xD: r = std::fabsf(a - b); break; // FABD
+                            default: r = 0; break;
+                        }
+                        pv(rd, i, r);
+                    }
+                    // Zero unused high lanes for Q=0 (.2s → high 64 zeroed).
+                    if (!Q) cpu.v_hi[rd] = 0;
                 }
                 return;
             }
@@ -1850,6 +1967,24 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         default: r = 0; break;
                     }
                     write_fp_s(cpu, rd, r);
+                }
+                return;
+            }
+            // SIMD scalar/vector 2-source FP (0x7E group): FABD.
+            // Encoding: bits[31:24]=0x7E, bits[15:12]=0xD (FABD opcode),
+            // bits[11:10]=0b01. bit22: 0=single, 1=double (not masked).
+            // FABD computes |a - b|. musl's fabsf(got-want) is lowered to
+            // `fabd s_, s0, s1` by the compiler; without this handler it
+            // returns the first operand unchanged, breaking float
+            // comparisons.
+            if ((op & 0xFF00FC00) == 0x7E00D400) {
+                bool is_double = (op >> 22) & 1;
+                if (is_double) {
+                    double a = read_fp_d(cpu, rn), b = read_fp_d(cpu, rm);
+                    write_fp_d(cpu, rd, std::fabs(a - b));
+                } else {
+                    float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
+                    write_fp_s(cpu, rd, std::fabsf(a - b));
                 }
                 return;
             }

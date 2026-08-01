@@ -78,6 +78,7 @@
 #include "frost/thunk.hpp"
 #include "frost/audio_thunk.hpp"    // v1.5.0.alpha: AudioThunk full def
 #include "frost/display_thunk.hpp"  // v1.5.0.alpha: DisplayThunk full def
+#include "frost/gl_state.hpp"       // v1.5.1.alpha: GLStateTracker
 #include "core/cpu.h"
 #include "core/memory.h"
 #include <cstdio>
@@ -185,6 +186,8 @@ struct GraphicThunkImpl {
     // safe). The dispatch() path is lock-free after init() — it only
     // reads id_to_idx_, which is set once and never resized.
     std::mutex mu;
+    // v1.5.1.alpha: GL state tracker for consistent query results.
+    std::unique_ptr<GLStateTracker> gl_state_tracker_;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -268,6 +271,8 @@ bool GraphicThunk::init(Memory& mem) {
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
     impl_->initialized = true;
+    // v1.5.1.alpha: initialize GL state tracker.
+    impl_->gl_state_tracker_ = std::make_unique<GLStateTracker>();
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
@@ -396,6 +401,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
             std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
         }
+        uint64_t local_args[12] = {0};
+        for (int i = 0; i < 8; i++) local_args[i] = cpu.regs[i];
         if (getenv("BIFROST_THUNK_TRACE")) {
             fprintf(stderr, "[thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
                     entry.name.c_str(), entry.n_float,
@@ -424,6 +431,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         }
         cpu.regs[0] = 0;
+        if (impl_->gl_state_tracker_) {
+            impl_->gl_state_tracker_->track_state_change(entry.name, local_args, fv, entry.n_float);
+        }
         return 0;
     }
 
@@ -474,6 +484,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
         cpu.regs[0] = 0;
+        if (impl_->gl_state_tracker_) {
+            uint64_t mixed_args[12] = {0};
+            mixed_args[0] = iv[0];
+            impl_->gl_state_tracker_->track_state_change(entry.name, mixed_args, fv, entry.n_float);
+        }
         return 0;
     }
 
@@ -613,6 +628,38 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
+    // v1.5.1.alpha: GL state query interception — after pointer translation
+    // so that pointer args in queries (glGetIntegerv, etc.) point to host
+    // memory. Only intercept actual query functions.
+    bool is_gl_query = (entry.name == "glIsEnabled" ||
+                        entry.name == "glGetBooleanv" ||
+                        entry.name == "glGetIntegerv" ||
+                        entry.name == "glGetFloatv");
+    bool handled_by_tracker = false;
+    if (is_gl_query && impl_->gl_state_tracker_) {
+        // Pass the post-translation `args` so the tracker writes query
+        // results into the host buffer (direct-window alias or bounce)
+        // that dispatch() will write back to guest memory.
+        handled_by_tracker = impl_->gl_state_tracker_->try_handle_query(entry.name, args, cpu);
+    }
+    if (handled_by_tracker) {
+        // Skip host call, but still write back any bounced pointer args
+        // so the guest sees the query result.
+        if (impl_->mem) {
+            for (int i = 0; i < kMaxArgs; i++) {
+                if (bounce_wb[i] && bounce_guest[i]) {
+                    impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
+                                      bounce_bufs[i].size());
+                }
+            }
+        }
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] dispatch: %s handled by GL state tracker\n",
+                    entry.name.c_str());
+        }
+        return 0;
+    }
+
     uint64_t ret = 0;
     if (entry.n_stack >= 1) {
         using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
@@ -643,6 +690,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
     cpu.regs[0] = ret;
+    if (impl_->gl_state_tracker_) {
+        impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);
+    }
     return 0;
 }
 // ── Diagnostics ────────────────────────────────────────────────────────
@@ -754,15 +804,22 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glColorMask);
     REG_GL(glStencilFunc);
     REG_GL(glStencilOp);
+    REG_GL(glStencilMask);
+    REG_GL(glStencilFuncSeparate);
+    REG_GL(glStencilOpSeparate);
+    REG_GL(glStencilMaskSeparate);
     REG_GL(glBlendFunc);
+    REG_GL(glBlendFuncSeparate);
+    REG_GL(glBlendEquation);
+    REG_GL(glBlendEquationSeparate);
     REG_GL(glHint);
     REG_GL(glPixelStorei);
     REG_GL_PTR(glReadPixels, 0x80);     // arg 7: void *pixels
     REG_GL(glDrawBuffer);
     REG_GL(glClearDepth);
     REG_GL(glClearStencil);
-    REG_GL(glPointSize);
-    REG_GL(glLineWidth);
+    REG_GL_FP(glPointSize, 1);
+    REG_GL_FP(glLineWidth, 1);
     REG_GL(glFrontFace);
     REG_GL(glCullFace);
     REG_GL(glShadeModel);
@@ -1030,6 +1087,9 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES(glStencilFunc);
     REG_GLES(glStencilOp);
     REG_GLES(glStencilMask);
+    REG_GLES(glStencilFuncSeparate);
+    REG_GLES(glStencilOpSeparate);
+    REG_GLES(glStencilMaskSeparate);
     // Queries.
     REG_GLES_EX(glGetString, 0, 0, 0, THUNK_RET_STRING);
     REG_GLES_PTR(glGetIntegerv, 0x02);

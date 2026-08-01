@@ -1,0 +1,21 @@
+/* vdso.map — version script for the bifrost-emu vDSO.
+ *
+ * glibc looks up vDSO symbols with specific version tags:
+ *   gettimeofday      @ LINUX_2.6
+ *   clock_gettime     @ LINUX_2.6.39
+ *   clock_getres      @ LINUX_2.6.39
+ *   __kernel_rt_sigreturn @ LINUX_2.6.39
+ * musl accepts the LINUX_2.6 tags.
+ */
+LINUX_2.6 {
+	global:
+		gettimeofday;
+	local:
+		*;
+};
+LINUX_2.6.39 {
+	global:
+		clock_gettime;
+		clock_getres;
+		__kernel_rt_sigreturn;
+} LINUX_2.6;

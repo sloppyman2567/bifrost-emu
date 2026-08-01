@@ -30,9 +30,57 @@ status, see [TESTS.md](TESTS.md).
 ### Planned
 
 5. **AArch32 (32-bit ARM) support.**
-6. **vDSO emulation.**
+6. ~~**vDSO emulation.**~~ ✅ DONE in v1.5.1-alpha (see below) —
+   the vDSO is now loaded and `AT_SYSINFO_EHDR` is set, but the stubs
+   currently trap to the existing syscall handler (no perf gain yet).
+   The next step is a **direct fast-path** that reads the host clock
+   without going through the syscall dispatch (genuine speedup for tight
+   `clock_gettime` / `std::chrono::now()` loops). The vDSO being loaded
+   and addressable is the prerequisite for that.
 7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
 8. **More real-world binary testing.**
+
+### v1.5.1-alpha additions (in-progress)
+
+- **GL state tracker fixed** (was crashing with SIGSEGV + 57 failures;
+  now ALL PASS under JIT & interpreter). `ctest_real/test_gl_state.elf`.
+- **FABS/FNEG single-precision JIT codegen** — the sign mask was
+  double-width (cleared bit 63, not bit 31), so `fabsf()` of a negative
+  float left it negative. Regression: `ctest_real/test_fabs2.elf`.
+- **FABD (Floating-point Absolute Difference) implemented** — was
+  completely unimplemented; musl's `fabsf(a-b)` lowers to `fabd`, so a
+  broken FABD silently returned the first operand, breaking float
+  comparisons. Regression: `ctest_real/test_fabd.elf`.
+- **SIMD vector FP 2-source ops implemented** (FADD/FSUB/FMUL/FDIV/
+  FMAX/FMIN/FABD/FMAXNM/FMINNM/FMULX, `.2s`/`.4s`/`.2d`/`.1d`) — were
+  completely unimplemented; NEON-vectorized FP silently produced wrong
+  results. Now native SSE codegen in the JIT (no interpreter fallback)
+  for single precision; double precision runs through the interpreter
+  handler via the JIT fallback. Also fixed the **FMULX vector encoding**
+  (was mis-encoded as a different opcode) and added the missing
+  **double-precision (`.2d`/`.1d`) interpreter case labels**. Fixed the
+  **LD1/ST1 single-vs-multi classification** in the decoder (bit[24]
+  discriminates the 0x0C/0x0D bases; the old bit[12] heuristic
+  misdecoded `LD1 {V0.4S}` as a single-element load, dropping the high
+  64 bits) and corrected the multi-structure register count (now from
+  the opcode field bits[15:12], not bits[14:13] which is the size).
+  Regression: `ctest_real/test_simd_vec_fp.elf`.
+- **dladdr() enabled** — was deliberately disabled; now overridden and
+  works through the real glibc `dladdr@GLIBC_2.34` symbol.
+  Regressions: `ctest_real/test_dladdr.elf`, `test_dladdr_glibc.elf`.
+- **vDSO emulation** — `AT_SYSINFO_EHDR` was 0 (no vDSO); now an
+  embedded AArch64 vDSO ELF (`tools/vdso/`) is loaded into guest
+  memory at startup. The vDSO provides `gettimeofday@LINUX_2.6`,
+  `clock_gettime@LINUX_2.6.39`, `clock_getres@LINUX_2.6.39`,
+  `__kernel_rt_sigreturn@LINUX_2.6.39` stubs that trap to the
+  emulator's syscall handler. **Honest status:** this is a
+  compatibility/correctness win (glibc takes the same vDSO code path
+  it does on a real kernel, and `__kernel_rt_sigreturn` is available
+  for the canonical signal trampoline), NOT a perf win today — the
+  stubs route to the same syscall handler the direct-syscall fallback
+  uses, so there's no measurable speedup yet. The fast-path
+  optimization (read host clock directly, skip syscall dispatch) is
+  future work and is what this vDSO enables.
 
 ---
 

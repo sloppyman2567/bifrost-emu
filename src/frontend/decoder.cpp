@@ -320,28 +320,24 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.rn      = (inst >> 5) & 0x1F;
             d.rm      = (inst >> 16) & 0x1F;
             // multi-structure LD1/ST1.
-            //   - Multi-structure (bit[12]=0): bits[14:13] = register count
-            //     (00=1, 01=2, 10=3, 11=4 regs). LD1 {Vt.16B}, {Vt.4S, Vt2.4S}, etc.
-            //   - Single-structure (bit[12]=1): bits[14:13] = element index,
-            //     and bits[12:10] encode (index, size) per the ARM ARM.
-            //     LD1 {Vt.S}[idx], LD1 {Vt.H}[idx], etc. — used for matrix
-            //     transpose, RGBA channel interleaving, etc.
-            // for BOTH variants, so a single-structure LD1 {V0.S}[2]
-            // (bits[14:13]=10) was misdecoded as a 3-register multi-structure
-            // LD1, reading/writing 48 bytes instead of 4. Real games using
-            // single-structure LD1/ST1 (matrix ops, color conversion) would
-            // silently corrupt memory.
-            //
-            // We set is_single_struct so the interpreter can dispatch to
-            // the single-element path. simd_count stays 1 for single-struct
-            // (one register, one element).
-            // single-structure from multi-structure. But LD1/ST1 multi (1 reg)
-            // has opcode 0b0111 which has bit[12]=1 — same as single-structure.
-            // The correct check: if bits[11:10]==00, there's no element index,
-            // so it's multi-structure. If bits[11:10]!=00, it's single-structure.
-            // This matches the ARM ARM: multi-structure has no index field,
-            // single-structure encodes the element index in bits[11:10].
-            bool is_single_struct = ((inst >> 12) & 1) && (((inst >> 10) & 3) != 0);
+            // The two families are distinguished by the base opcode in
+            // bits[27:24]:
+            //   - Multiple structures (0x0C base, bit[24]=0): LD1/ST1
+            //     {Vt.T}, {Vt.T, Vt2.T}, ... {Vt.T,...,Vt3.T} — reads/writes
+            //     whole vector registers. The element size is bits[11:10]
+            //     (00=B, 01=H, 10=S, 11=D) and the register count comes from
+            //     the opcode field bits[15:12]:
+            //        0x7 -> 1 reg (LD1/ST1), 0xA -> 2 (LD1/ST1),
+            //        0x6 -> 3 (LD1/ST1), 0x2 -> 4 (LD1/ST1),
+            //        0x8 -> 2 (LD2/ST2), 0x4 -> 3 (LD3/ST3), 0x0 -> 4 (LD4/ST4)
+            //   - Single structures (0x0D base, bit[24]=1): LD1 {Vt.T}[idx]
+            //     etc. read/write ONE element at a lane index. The index and
+            //     size are spread across bits[14:10] per the ARM ARM.
+            // bit[12] alone cannot distinguish them: multi-structure LD1
+            // (1 reg) has opcode 0b0111 which sets bit[12]=1, so a naive
+            // bit[12] check misdecodes LD1 {V0.4S} as a single-element load.
+            // bit[24] is the correct discriminator.
+            bool is_single_struct = (inst >> 24) & 1;
             if (is_single_struct) {
                 // Single-structure LD1/ST1.
                 // The element index and size are encoded across bits[14:10].
@@ -359,9 +355,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.Q = (inst >> 30) & 1;
             } else {
                 // Multi-structure LD1/ST1.
-                // Register count: 00=1, 01=2, 10=3, 11=4 regs.
+                // Register count comes from the opcode field bits[15:12]
+                // (not bits[14:13], which encode the element size):
+                //   LD1/ST1: 0x7 -> 1, 0xA -> 2, 0x6 -> 3, 0x2 -> 4
+                //   LD2/ST2: 0x8 -> 2,  LD3/ST3: 0x4 -> 3, LD4/ST4: 0x0 -> 4
                 d.is_single_struct = false;
-                d.simd_count = ((inst >> 13) & 3) + 1;
+                switch ((inst >> 12) & 0xF) {
+                    case 0xA: case 0x8: d.simd_count = 2; break;
+                    case 0x6: case 0x4: d.simd_count = 3; break;
+                    case 0x2: case 0x0: d.simd_count = 4; break;
+                    default:            d.simd_count = 1; break;  // 0x7 (and unknown)
+                }
                 d.Q = (inst >> 30) & 1;  // BUGFIX: Q was missing for multi-struct!
             }
             d.cls = d.is_load ? InstClass::SIMD_LD1 : InstClass::SIMD_ST1;

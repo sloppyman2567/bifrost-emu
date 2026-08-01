@@ -37,11 +37,25 @@
 //   will overwrite it.
 //
 // Limitations:
-//   - R_AARCH64_COPY is not implemented (rare on AArch64).
-//   - Symbol versioning (.gnu.version) is not parsed.
+//   - R_AARCH64_COPY is implemented via a deferred second pass (the
+//     COPY must read the defining symbol's bytes AFTER that object's
+//     RELATIVE relocations are applied). See apply_pending_copies_().
+//   - Symbol versioning (.gnu.version / .gnu.version_r) IS parsed and
+//     used for versioned symbol resolution (versioned_symbols_ map).
 //   - dlopen() of a TLS-using library after the static TLS block is
 //     sized is not supported (would require dynamic TLS allocation).
-//   - TLSDESC uses a simple inline resolver (no PLT call).
+//   - TLSDESC uses an inline static resolver (desc[0]=0, desc[1]=
+//     TP-offset) — no PLT call to a resolver. This is the "static
+//     TLSDESC" trick valid when the TP-offset is known at load time.
+//   - dladdr() is overridden (v1.5.1-alpha): the dladdr@GLIBC_2.34 and
+//     dladdr@GLIBC_2.0 symbols are FORCE-overridden to point at our
+//     OFF_DLADDR stub, which calls DynamicLinker::dladdr() via syscall
+//     0x1005. This fills in Dl_info (dli_fname, dli_fbase, dli_sname,
+//     dli_saddr) and returns 1 (found) or 0. The dlfcn_hook (hook+40)
+//     is also wired to the same stub. (Previously disabled because an
+//     earlier attempt crashed glibc startup via the _dl_addr path; the
+//     later dlfcn_hook wiring made the stub safe to register as a
+//     symbol override too.)
 //
 // References:
 //   - ARM IHI 0056B (AArch64 ELF ABI): https://github.com/ARM-software/abi-aa
@@ -347,6 +361,11 @@ private:
     // string here and returns the guest pointer.
     uint64_t dlerror_buf_ptr_ = 0;
     constexpr static size_t DLERROR_BUF_SIZE = 256;
+    // Lazily-allocated guest buffer for dladdr's dli_fname string. For
+    // dynamic binaries this reuses dlerror_buf_ptr_ (set in the shim).
+    // For static binaries (no shim), we mmap a small page on first
+    // dladdr() call so dli_fname is non-NULL.
+    uint64_t dladdr_fname_buf_ = 0;
     // Parse the dynamic section of `data` starting at `dyn_off` (file
     // offset). Fills in the LoadedObject's symtab/strtab/jmprel/etc.
     // `base` is the load bias to convert vaddrs to absolute addresses.

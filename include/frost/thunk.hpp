@@ -47,7 +47,13 @@
 //   - Pointer args outside the 4 GiB direct window bounce through a
 //     host buffer (writeback). Nested structs of pointers may still
 //     need per-symbol handlers (see glShaderSource).
-//   - No full GL state tracking across calls.
+//   - GL state tracking: v1.5.1-alpha adds GLStateTracker, a
+//     software-side mirror of guest GL state (capabilities, blend,
+//     depth, stencil, viewport, texture bindings, program, pixel
+//     store, hints) so state queries (glIsEnabled, glGetIntegerv,
+//     glGetFloatv, glGetBooleanv) return the values the guest set,
+//     regardless of host context state. Untracked pnames fall through
+//     to the host. See include/frost/gl_state.hpp.
 //   - No shader ISA translation (GLSL text is identical AArch64↔x86-64).
 //   - Variadic functions are not supported (fixed ≤9 integer args).
 //   - FP args: mark n_float at registration (glClearColor, glVertex3f).

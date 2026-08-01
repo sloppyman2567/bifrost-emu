@@ -730,6 +730,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                         case 6: r = std::fmax(a, b); break;   // FMAXNM
                         case 7: r = std::fmin(a, b); break;   // FMINNM
                         case 8: r = -(a * b); break;          // FNMUL
+                        case 0xD: r = std::fabs(a - b); break; // FABD
                     }
                     cpu.v_lo[inst.dest] = 0; memcpy(&cpu.v_lo[inst.dest], &r, 8);
                     cpu.v_hi[inst.dest] = 0;
@@ -748,6 +749,7 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                         case 6: r = std::fmax(a, b); break;   // FMAXNM
                         case 7: r = std::fmin(a, b); break;   // FMINNM
                         case 8: r = -(a * b); break;          // FNMUL
+                        case 0xD: r = std::fabs(a - b); break; // FABD
                     }
                     uint32_t tr; memcpy(&tr, &r, 4);
                     cpu.v_lo[inst.dest] = tr; cpu.v_hi[inst.dest] = 0;
@@ -896,6 +898,63 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 do_lane(in1_hi, in2_hi, out_hi);
                 memcpy(&cpu.v_lo[inst.dest], out_lo, 8);
                 memcpy(&cpu.v_hi[inst.dest], out_hi, 8);
+                break;
+            }
+            case IROp::SIMD_FP_ARITH: {
+                // Lane-wise FP arithmetic on v_lo/v_hi. opc from imm:
+                // 0=fadd,1=fsub,2=fmul,3=fdiv,4=fmax,5=fmin,6=fmaxnm,
+                // 7=fminnm,0xB=fmulx,0xD=fabd. width=element bytes
+                // (4=float, 8=double). flags_op=Q: 1 processes both
+                // v_lo and v_hi (128-bit), 0 only v_lo (64-bit).
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
+                int esize = static_cast<int>(inst.width);
+                bool Q = (inst.flags_op != 0);
+                int lanes = (esize == 8) ? 1 : 2;  // per 64-bit chunk
+                auto do_chunk = [&](uint64_t* d, uint64_t a, uint64_t b) {
+                    if (esize == 4) {
+                        float fa[2], fb[2], fo[2] = {0};
+                        memcpy(fa, &a, 8); memcpy(fb, &b, 8);
+                        for (int i = 0; i < lanes; i++) {
+                            float x = fa[i], y = fb[i];
+                            switch (opc) {
+                                case 0: fo[i] = x + y; break;
+                                case 1: fo[i] = x - y; break;
+                                case 2: fo[i] = x * y; break;
+                                case 3: fo[i] = x / y; break;
+                                case 4: case 6: fo[i] = std::fmax(x, y); break;
+                                case 5: case 7: fo[i] = std::fmin(x, y); break;
+                                case 0xB: fo[i] = x * y; break;  // FMULX
+                                case 0xD: fo[i] = std::fabs(x - y); break;  // FABD
+                                default: fo[i] = 0; break;
+                            }
+                        }
+                        memcpy(d, fo, 8);
+                    } else {  // double, 1 lane
+                        double x, y, r = 0;
+                        memcpy(&x, &a, 8); memcpy(&y, &b, 8);
+                        switch (opc) {
+                            case 0: r = x + y; break;
+                            case 1: r = x - y; break;
+                            case 2: r = x * y; break;
+                            case 3: r = x / y; break;
+                            case 4: case 6: r = std::fmax(x, y); break;
+                            case 5: case 7: r = std::fmin(x, y); break;
+                            case 0xB: r = x * y; break;
+                            case 0xD: r = std::fabs(x - y); break;  // FABD
+                            default: r = 0; break;
+                        }
+                        memcpy(d, &r, 8);
+                    }
+                };
+                uint64_t dlo = 0, dhi = 0;
+                do_chunk(&dlo, cpu.v_lo[inst.src1], cpu.v_lo[inst.src2]);
+                cpu.v_lo[inst.dest] = dlo;
+                if (Q) {
+                    do_chunk(&dhi, cpu.v_hi[inst.src1], cpu.v_hi[inst.src2]);
+                    cpu.v_hi[inst.dest] = dhi;
+                } else {
+                    cpu.v_hi[inst.dest] = 0;
+                }
                 break;
             }
             case IROp::SIMD_CMP: {

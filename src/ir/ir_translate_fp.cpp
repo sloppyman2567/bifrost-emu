@@ -178,6 +178,19 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
+            // SIMD scalar/vector 2-source FP (0x7E group): FABD.
+            // Encoding: bits[31:24]=0x7E, bits[15:12]=0xD (FABD opcode),
+            // bits[11:10]=0b01. bit22: 0=single, 1=double.
+            // We handle FABD (single/double) natively as FP_BINOP with
+            // opcode 0xD. Without this, musl's fabsf(got-want) (which the
+            // compiler lowers to `fabd s_, s0, s1`) returns the first
+            // operand unchanged, breaking float comparisons.
+            if ((op & 0xFF00FC00) == 0x7E00D400) {
+                bool is_double = (op >> 22) & 1;
+                uint8_t ft = is_double ? 1 : 0;  // IR ftype: 0=S, 1=D
+                emit(block, IROp::FP_BINOP, rd, rn, rm, ft, 0, 0, 0xD, cur_pc);
+                return true;
+            }
             // FP 1-source: uses shared fp_decode helper.
             // FABS=1, FNEG=2, FSQRT=3. FRINT* (4+) is handled by the
             // dedicated FRINT block further below.
@@ -550,6 +563,34 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm, 0,
                      static_cast<uint64_t>(esize), 0, arith_op, cur_pc);
                 return true;
+            }
+            // ── Vector FP 2-source (SIMD_FP_ARITH) ──
+            // FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FABD/FMULX,
+            // vector form (.2s/.4s/.2d/.1d). Encoding: bits[31:24]=0x0E
+            // or 0x2E with Q(30), U(29); the opcode is spread across
+            // bits[29] + bits[15:12] + bits[11:10]. We match on the
+            // full sub_noq (mirrors the interpreter's FABD/vector-FP
+            // handling in interp_fp.cpp). bit22: 0=single, 1=double.
+            // Q: 0=64-bit (v_lo only, zero v_hi), 1=128-bit (both).
+            {
+                uint32_t fp_op = 0xFF;
+                if (sub3_noq == 0x0E20D400) fp_op = 0;      // FADD
+                else if (sub3_noq == 0x0EA0D400) fp_op = 1; // FSUB
+                else if (sub3_noq == 0x2E20DC00) fp_op = 2; // FMUL
+                else if (sub3_noq == 0x2E20FC00) fp_op = 3; // FDIV
+                else if (sub3_noq == 0x0E20F400) fp_op = 4; // FMAX
+                else if (sub3_noq == 0x0EA0F400) fp_op = 5; // FMIN
+                else if (sub3_noq == 0x0E20C400) fp_op = 6; // FMAXNM
+                else if (sub3_noq == 0x0EA0C400) fp_op = 7; // FMINNM
+                else if (sub3_noq == 0x0E20DC00) fp_op = 0xB; // FMULX
+                else if (sub3_noq == 0x2EA0D400) fp_op = 0xD; // FABD
+                if (fp_op != 0xFF) {
+                    bool is_double = (op >> 22) & 1;
+                    uint64_t fesize = is_double ? 8 : 4;
+                    emit(block, IROp::SIMD_FP_ARITH, d.rd, d.rn, d.rm, 0,
+                         fesize, Q, fp_op, cur_pc);
+                    return true;
+                }
             }
             // ── Compare ops (SIMD_CMP) ──
             // SIMD_CMP imm: 0=eq, 1=ge_u, 2=gt_u, 3=ge_s, 4=gt_s,

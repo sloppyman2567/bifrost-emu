@@ -44,6 +44,9 @@ tools/sdl2-sdk/
 *~
 .DS_Store
 
+# Agent workspace data (local tool config, node_modules, plans)
+.kilo/
+
 # CMake (if added later)
 build/
 cmake-build-*/

@@ -246,6 +246,86 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_arith_half(off1hi, off2hi, offdhi);
             return true;
         }
+        // ── SIMD FP lane-wise arithmetic (v1.5.1-alpha) ─────────────
+        // Emits packed SSE: addps/subps/mulps/divps/minps/maxps (single,
+        // 0F prefix) or addpd/... (double, 66 0F prefix). FABD = sub then
+        // clear sign bit (andps). width = element bytes (4/8); flags_op
+        // = Q (1 = process both v_lo and v_hi, 0 = v_lo only).
+        case IROp::SIMD_FP_ARITH: {
+            uint8_t opc = static_cast<uint8_t>(inst.imm);
+            int esize = static_cast<int>(inst.width);
+            bool Q = (inst.flags_op != 0);
+            bool is_double = (esize == 8);
+            if (esize != 4 && esize != 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            // Map opcode to SSE op byte.
+            //   single: 0F 58 addps, 5C subps, 59 mulps, 5E divps, 5D minps, 5F maxps
+            //   double: 66 0F 58 addpd, 5C subpd, 59 mulpd, 5E divpd, 5D minpd, 5F maxpd
+            uint8_t op_byte = 0;
+            bool is_sub_for_fabd = false;
+            switch (opc) {
+                case 0: op_byte = 0x58; break;  // add
+                case 1: op_byte = 0x5C; break;  // sub
+                case 2: case 0xB: op_byte = 0x59; break;  // mul / fmulx
+                case 3: op_byte = 0x5E; break;  // div
+                case 4: case 6: op_byte = 0x5F; break;  // max / maxnm
+                case 5: case 7: op_byte = 0x5D; break;  // min / minnm
+                case 0xD: op_byte = 0x5C; is_sub_for_fabd = true; break;  // fabd
+                default:
+                    emit_call_interp(inst.arm_pc, false);
+                    return true;
+            }
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX));
+            auto emit_fp_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
+                // movq xmm0, [rbx+off1] — load the 8-byte chunk (2 floats
+                // or 1 double) into the low 64 bits of xmm0, zero upper.
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(0, CPU_REG, off1);
+                // load src2 chunk into xmm1
+                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E);
+                emit_modrm_disp(1, CPU_REG, off2);
+                // op: xmm0 = xmm0 OP xmm1 (packed; upper 64 are zero and
+                // only the low 64 are stored back, so unused lanes are OK)
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(op_byte);
+                emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
+                if (is_sub_for_fabd) {
+                    // FABD: clear the sign bit of each lane. Single clears
+                    // bit 31 of each 32-bit lane (mask 0x7FFF...7FFF);
+                    // double clears bit 63. Load mask into xmm1 via RAX.
+                    uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
+                                              : 0x7FFFFFFF7FFFFFFFULL;
+                    emit_mov_imm64(RAX, mask);
+                    // movq xmm1, rax
+                    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E);
+                    emit_byte(0xC8);
+                    // andps (0F 54) / andpd (66 0F 54)
+                    if (is_double) emit_byte(0x66);
+                    emit_byte(0x0F); emit_byte(0x54); emit_byte(0xC1);
+                }
+                // movq [rbx+offd], xmm0 — store the low 8 bytes.
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xD6);
+                emit_modrm_disp(0, CPU_REG, offd);
+            };
+            int32_t o1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t o1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t o2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t o2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t odlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t odhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_fp_chunk(o1lo, o2lo, odlo);
+            if (Q) {
+                emit_fp_chunk(o1hi, o2hi, odhi);
+            } else {
+                // Zero v_hi[dest] for Q=0 (64-bit result).
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            }
+            return true;
+        }
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────
         // Only eq (opc=0) is fully native via PCMPEQB/W/D/Q. Other
         // comparisons fall back to CALL_INTERP for now.
