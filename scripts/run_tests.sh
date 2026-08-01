@@ -289,6 +289,11 @@ INTEGRATION_TESTS=(
     # and pairwise unsigned min, all sizes + low/high half selection. These
     # were silently NOP'd; now covered (busybox df / iperf3 depend on them).
     "simd_saddw_uminp|ctest_real/test_simd_saddw_uminp.elf||10|ALL PASS"
+    # UMOV regression (v1.5.1-alpha): vector element → GPR extraction for
+    # B/H/S/D across both halves. Covered the pre-existing bug report
+    # (`umov v.d[1]` returning garbage) which turned out to be a test-asm
+    # constraint artifact — the handler is correct and stays locked in.
+    "simd_umov|ctest_real/test_simd_umov.elf||10|ALL PASS"
     "head|ctest_real/head.elf||5"
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
