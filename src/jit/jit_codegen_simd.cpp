@@ -326,6 +326,59 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             return true;
         }
+        // ── SIMD FP fused 3-source (FMLA/FMLS) ───────────────────────
+        // dest = dest ± src1*src2 per lane. Packed SSE: for each 8-byte
+        // chunk, dest += src1*src2 (mul then add/sub). width = element
+        // size (4=float via *ps, 8=double via *pd); flags_op = Q.
+        // imm: 0=FMLA (+), 1=FMLS (-).
+        case IROp::SIMD_FP_FMA: {
+            int esize = static_cast<int>(inst.width);
+            bool Q = (inst.flags_op != 0);
+            bool is_double = (esize == 8);
+            bool is_sub = (static_cast<uint8_t>(inst.imm) == 1);
+            if (esize != 4 && esize != 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            auto emit_fma_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
+                // movsd xmm0, [rbx+offd]  (dest accumulator)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, offd);
+                // movsd xmm1, [rbx+off1]
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(1, CPU_REG, off1);
+                // movsd xmm2, [rbx+off2]
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(2, CPU_REG, off2);
+                // mulps/mulpd xmm1, xmm2
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F); emit_byte(0x59); emit_byte(0xCA);  // modrm(3, xmm1, xmm2)
+                // addps/addpd (or subps/subpd) xmm0, xmm1
+                if (is_double) emit_byte(0x66);
+                emit_byte(0x0F);
+                emit_byte(is_sub ? 0x5C : 0x58);
+                emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
+                // movsd [rbx+offd], xmm0
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offd);
+            };
+            int32_t o1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t o1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+            int32_t o2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t o2hi = V_HI_OFF + static_cast<int>(inst.src2) * 8;
+            int32_t odlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t odhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_fma_chunk(o1lo, o2lo, odlo);
+            if (Q) {
+                emit_fma_chunk(o1hi, o2hi, odhi);
+            } else {
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            }
+            return true;
+        }
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────
         // Only eq (opc=0) is fully native via PCMPEQB/W/D/Q. Other
         // comparisons fall back to CALL_INTERP for now.

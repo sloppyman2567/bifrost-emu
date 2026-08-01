@@ -968,6 +968,39 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 }
                 break;
             }
+            case IROp::SIMD_FP_FMA: {
+                // Lane-wise FP fused 3-source (FMLA/FMLS): dest accumulates.
+                // opc from imm: 0=FMLA (dest += src1*src2), 1=FMLS
+                // (dest -= src1*src2). width=element bytes (4/8).
+                // flags_op=Q: 1 processes both v_lo and v_hi.
+                uint8_t opc = static_cast<uint8_t>(inst.imm);
+                int esize = static_cast<int>(inst.width);
+                bool Q = (inst.flags_op != 0);
+                bool is_sub = (opc == 1);
+                int lanes = (esize == 8) ? 1 : 2;  // per 64-bit chunk
+                auto do_chunk = [&](uint64_t* d, uint64_t acc, uint64_t a, uint64_t b) {
+                    if (esize == 4) {
+                        float fa[2], fb[2], facc[2], fo[2] = {0};
+                        memcpy(facc, &acc, 8); memcpy(fa, &a, 8); memcpy(fb, &b, 8);
+                        for (int i = 0; i < lanes; i++) {
+                            float x = fa[i], y = fb[i];
+                            fo[i] = is_sub ? (facc[i] - x * y) : (facc[i] + x * y);
+                        }
+                        memcpy(d, fo, 8);
+                    } else {  // double, 1 lane
+                        double accv, x, y, r;
+                        memcpy(&accv, &acc, 8); memcpy(&x, &a, 8); memcpy(&y, &b, 8);
+                        r = is_sub ? (accv - x * y) : (accv + x * y);
+                        memcpy(d, &r, 8);
+                    }
+                };
+                uint64_t dlo = 0, dhi = 0;
+                do_chunk(&dlo, cpu.v_lo[inst.dest], cpu.v_lo[inst.src1], cpu.v_lo[inst.src2]);
+                do_chunk(&dhi, cpu.v_hi[inst.dest], cpu.v_hi[inst.src1], cpu.v_hi[inst.src2]);
+                cpu.v_lo[inst.dest] = dlo;
+                cpu.v_hi[inst.dest] = Q ? dhi : 0;
+                break;
+            }
             case IROp::SIMD_CMP: {
                 // Lane-wise integer comparison; result is all-ones or 0.
                 uint8_t opc = static_cast<uint8_t>(inst.imm);

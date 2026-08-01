@@ -154,6 +154,13 @@ enum class IROp : uint8_t {
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_ARITH,
+    // Native SIMD FP fused 3-source (FMLA/FMLS, v1.5.1-alpha). Accumulates
+    // into dest: dest = dest ± src1*src2 per lane. Same shape as
+    // SIMD_FP_ARITH but reads the OLD dest as the accumulator.
+    //   imm  = opcode (0=fmla, 1=fmls)
+    //   width = element size in bytes (4=float, 8=double)
+    //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
+    SIMD_FP_FMA,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

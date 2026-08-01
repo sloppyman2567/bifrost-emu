@@ -606,7 +606,11 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             case 0x0e20dc00:  // FMULX v (single)
             case 0x0e60dc00:  // FMULX v (double)
             case 0x2e20fc00:  // FDIV v (single)
-            case 0x2e60fc00: { // FDIV v (double)
+            case 0x2e60fc00:  // FDIV v (double)
+            case 0x0e20cc00:  // FMLA v (single)
+            case 0x0e60cc00:  // FMLA v (double)
+            case 0x0ea0cc00:  // FMLS v (single)
+            case 0x0ee0cc00: { // FMLS v (double)
                 // The opcode is encoded across bits[29](U), bits[15:12],
                 // and bits[11:10] — NOT a single field. Dispatch on the
                 // full sub_noq (already matched by the case labels above).
@@ -626,6 +630,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     if (k == 0x0ea0c400) return 7;  // FMINNM
                     if (k == 0x0e20dc00) return 0xB; // FMULX
                     if (k == 0x2ea0d400) return 0xD; // FABD
+                    if (k == 0x0e20cc00) return 0xE; // FMLA
+                    if (k == 0x0ea0cc00) return 0xF; // FMLS
                     return -1;
                 };
                 int opcode = get_op(key);
@@ -651,6 +657,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             case 0x7: r = std::fmin(a, b); break;   // FMINNM
                             case 0xB: r = a * b; break;             // FMULX (≈FMUL for non-special)
                             case 0xD: r = std::fabs(a - b); break;  // FABD
+                            case 0xE: r = gv(rd, i) + a * b; break; // FMLA (accumulate into Vd)
+                            case 0xF: r = gv(rd, i) - a * b; break; // FMLS (accumulate into Vd)
                             default: r = 0; break;
                         }
                         pv(rd, i, r);
@@ -685,6 +693,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             case 0x7: r = std::fmin(a, b); break;   // FMINNM
                             case 0xB: r = a * b; break;             // FMULX
                             case 0xD: r = std::fabsf(a - b); break; // FABD
+                            case 0xE: r = gv(rd, i) + a * b; break; // FMLA (accumulate into Vd)
+                            case 0xF: r = gv(rd, i) - a * b; break; // FMLS (accumulate into Vd)
                             default: r = 0; break;
                         }
                         pv(rd, i, r);

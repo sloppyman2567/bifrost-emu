@@ -289,6 +289,11 @@ INTEGRATION_TESTS=(
     # .2s/.4s) were completely unimplemented — NEON-vectorized FP silently
     # produced wrong results. Tests all ops in single precision (.4s, .2s).
     "simd_vec_fp|ctest_real/test_simd_vec_fp.elf||10|ALL PASS"
+    # SIMD vector FP fused 3-source regression (v1.5.1-alpha): FMLA/FMLS
+    # (Vd = Vd +/- Vn*Vm) were completely unimplemented — NEON-vectorized
+    # matmul/convolution kernels (GCC lowers a*b+c to fmla) hit DecodeError
+    # (SIGILL). Tests both ops in single (.4s/.2s) and double (.2d).
+    "simd_fmla|ctest_real/test_simd_fmla.elf||10|ALL PASS"
     # SADDW/SADDW2 + UMINP vector regression (v1.5.1-alpha): widening add
     # and pairwise unsigned min, all sizes + low/high half selection. These
     # were silently NOP'd; now covered (busybox df / iperf3 depend on them).
