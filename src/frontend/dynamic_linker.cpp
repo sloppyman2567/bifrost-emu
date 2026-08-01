@@ -477,15 +477,15 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             std::string name = read_guest_cstr(
                                 mem_, obj.strtab_addr + s.st_name);
                             // Look up which object defines this symbol.
+                            // Use the object's real [base, base+map_size)
+                            // extent (find_object_by_addr), NOT a fixed
+                            // 256 MiB window — with a contiguous bump
+                            // allocator every symbol in a later library
+                            // would be misattributed to the first object.
                             uint64_t sym_addr = resolve_symbol(name);
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr &&
-                                        sym_addr < o.base_addr + 0x10000000) {
-                                        mod_id = o.tls_mod_id;
-                                        break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_id = o->tls_mod_id;
                             }
                         }
                         mem_.store<uint64_t>(target, mod_id + A);
@@ -518,13 +518,8 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             uint64_t sym_addr = resolve_symbol(name);
                             int64_t mod_tp_off = obj.tls_tp_offset;
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr &&
-                                        sym_addr < o.base_addr + 0x10000000) {
-                                        mod_tp_off = o.tls_tp_offset;
-                                        break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_tp_off = o->tls_tp_offset;
                             }
                             tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
                         } else {
@@ -553,13 +548,8 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                             uint64_t sym_addr = resolve_symbol(name);
                             int64_t mod_tp_off = obj.tls_tp_offset;
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr &&
-                                        sym_addr < o.base_addr + 0x10000000) {
-                                        mod_tp_off = o.tls_tp_offset;
-                                        break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_tp_off = o->tls_tp_offset;
                             }
                             tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
                         } else {
@@ -1374,7 +1364,13 @@ void DynamicLinker::apply_relr_relocations_(const LoadedObject& obj,
 // of-zero, not silent corruption).
 void DynamicLinker::run_init_arrays_() {
     if (!init_runner_) return;
-    for (const auto& obj : objects_) {
+    // Dependencies must initialize before dependents: libc/libm before the
+    // main binary. objects_[0] is the main executable and libraries are
+    // appended after it, so iterate in reverse load order. (The DT_NEEDED
+    // worklist appends a dependency after its dependent, so reversing puts
+    // shared libs first and main last.)
+    for (size_t oi = objects_.size(); oi-- > 0;) {
+        const auto& obj = objects_[oi];
         // DT_INIT (legacy _init() function) — call before .init_array.
         if (obj.init_addr != 0) {
             try {
@@ -3260,11 +3256,8 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                             uint64_t sym_addr = resolve_symbol(name);
                             int64_t mod_tp_off = nobj.tls_tp_offset;
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
-                                        mod_tp_off = o.tls_tp_offset; break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_tp_off = o->tls_tp_offset;
                             }
                             tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
                         } else {
@@ -3279,11 +3272,8 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                             std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
                             uint64_t sym_addr = resolve_symbol(name);
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
-                                        mod_id = o.tls_mod_id; break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_id = o->tls_mod_id;
                             }
                         }
                         mem_.store<uint64_t>(target, mod_id + A);
@@ -3304,11 +3294,8 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                             uint64_t sym_addr = resolve_symbol(name);
                             int64_t mod_tp_off = nobj.tls_tp_offset;
                             if (sym_addr != 0) {
-                                for (const auto& o : objects_) {
-                                    if (sym_addr >= o.base_addr && sym_addr < o.base_addr + 0x10000000) {
-                                        mod_tp_off = o.tls_tp_offset; break;
-                                    }
-                                }
+                                const LoadedObject* o = find_object_by_addr(sym_addr);
+                                if (o) mod_tp_off = o->tls_tp_offset;
                             }
                             tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
                         } else {
@@ -3344,20 +3331,35 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                 }
             }
             if (rra && rrs) {
+                // RELR decode: an address entry (bit0=0) seeds the running
+                // reloc vaddr; bitmap entries (bit0=1) cover 63 slots
+                // starting from the seeded address. Each slot reads its
+                // addend from [base+vaddr] and writes base+addend back.
+                // This mirrors apply_relr_relocations_() (startup path) —
+                // the old code here mixed guest memory addresses with
+                // reloc vaddrs (cur = addr - 16), corrupting the RELR
+                // section and never relocating the real slots.
+                uint64_t reloc_addr = 0;
+                auto relr_apply_one = [&](uint64_t vaddr) {
+                    uint64_t target = nobj.base_addr + vaddr;
+                    uint64_t addend = 0;
+                    try { mem_.read(target, &addend, 8); } catch (...) {}
+                    try { mem_.store<uint64_t>(target, nobj.base_addr + addend); } catch (...) {}
+                };
                 uint64_t addr = rra, end = rra + rrs;
                 while (addr < end) {
                     uint64_t entry; mem_.read(addr, &entry, 8); addr += 8;
                     if ((entry & 1) == 0) {
-                        uint64_t t = nobj.base_addr + entry;
-                        try { uint64_t v = mem_.load<uint64_t>(t); mem_.store<uint64_t>(t, nobj.base_addr + v); } catch (...) {}
+                        reloc_addr = entry;
+                        relr_apply_one(reloc_addr);
+                        reloc_addr += 8;
                     } else {
-                        uint64_t cur = addr - 16;
-                        for (int bit = 1; bit < 64; bit++) {
+                        for (int bit = 1; bit <= 63; bit++) {
                             if (entry & (1ULL << bit)) {
-                                try { uint64_t v = mem_.load<uint64_t>(cur); mem_.store<uint64_t>(cur, nobj.base_addr + v); } catch (...) {}
+                                relr_apply_one(reloc_addr + (bit - 1) * 8);
                             }
-                            cur += 8;
                         }
+                        reloc_addr += 63 * 8;
                     }
                 }
             }

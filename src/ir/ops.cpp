@@ -255,8 +255,13 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 break;
             case IROp::ROR: {
                 uint64_t v = vregs[inst.src1];
-                uint64_t r = vregs[inst.src2] & 63;
-                vregs[inst.dest] = r ? ((v >> r) | (v << (64 - r))) : v;
+                // Rotate within the operand width (matches interpreter/JIT).
+                uint64_t w = (inst.width == 32) ? 32 : 64;
+                uint64_t r = vregs[inst.src2] & (w - 1);
+                if (inst.width == 32) v &= 0xFFFFFFFFULL;
+                if (r == 0) { vregs[inst.dest] = v; break; }
+                vregs[inst.dest] = (v >> r) | (v << (w - r));
+                if (inst.width == 32) vregs[inst.dest] &= 0xFFFFFFFFULL;
                 break;
             }
             case IROp::NOT:
@@ -522,9 +527,15 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 int64_t b = static_cast<int64_t>(vregs[inst.src2]);
                 if (b == 0) { vregs[inst.dest] = 0; break; }
                 if (inst.width == 32) {
-                    vregs[inst.dest] = static_cast<int32_t>(a) / static_cast<int32_t>(b);
+                    int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+                    // ARM: INT_MIN / -1 = INT_MIN (no SIGFPE).
+                    vregs[inst.dest] = (sb == -1 && sa == INT32_MIN)
+                        ? static_cast<uint64_t>(static_cast<int64_t>(INT32_MIN))
+                        : static_cast<uint64_t>(static_cast<int64_t>(sa / sb));
                 } else {
-                    vregs[inst.dest] = static_cast<uint64_t>(a / b);
+                    vregs[inst.dest] = (b == -1 && a == INT64_MIN)
+                        ? static_cast<uint64_t>(INT64_MIN)
+                        : static_cast<uint64_t>(a / b);
                 }
                 break;
             }

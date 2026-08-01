@@ -568,8 +568,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             if (arith_op != 0xFF) {
                 (void)Q;
-                emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm, 0,
-                     static_cast<uint64_t>(esize), 0, arith_op, cur_pc);
+                // esize goes in `width` (arg 6) — codegen reads inst.width.
+                emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, 0, arith_op, cur_pc);
                 return true;
             }
             // ── Vector FP 2-source (SIMD_FP_ARITH) ──
@@ -581,22 +582,30 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // handling in interp_fp.cpp). bit22: 0=single, 1=double.
             // Q: 0=64-bit (v_lo only, zero v_hi), 1=128-bit (both).
             {
+                // The integer SIMD_DP matches above use sub3 (mask
+                // 0xFF20FC00, which strips the size bits [23:22]). FP
+                // 2-source ops keep bit 23 (FADD/FSUB, FMAX/FMIN,
+                // FMAXNM/FMINNM all differ there) so compute a separate
+                // key with the interpreter's mask 0xFFE0FC00 and drop the
+                // ftype bit 22 (0=single, 1=double, handled separately).
+                uint32_t fp_key = (op & 0xFFE0FC00) & ~(1u << 30) & ~(1u << 22);
                 uint32_t fp_op = 0xFF;
-                if (sub3_noq == 0x0E20D400) fp_op = 0;      // FADD
-                else if (sub3_noq == 0x0EA0D400) fp_op = 1; // FSUB
-                else if (sub3_noq == 0x2E20DC00) fp_op = 2; // FMUL
-                else if (sub3_noq == 0x2E20FC00) fp_op = 3; // FDIV
-                else if (sub3_noq == 0x0E20F400) fp_op = 4; // FMAX
-                else if (sub3_noq == 0x0EA0F400) fp_op = 5; // FMIN
-                else if (sub3_noq == 0x0E20C400) fp_op = 6; // FMAXNM
-                else if (sub3_noq == 0x0EA0C400) fp_op = 7; // FMINNM
-                else if (sub3_noq == 0x0E20DC00) fp_op = 0xB; // FMULX
-                else if (sub3_noq == 0x2EA0D400) fp_op = 0xD; // FABD
+                if (fp_key == 0x0E20D400) fp_op = 0;      // FADD
+                else if (fp_key == 0x0EA0D400) fp_op = 1; // FSUB
+                else if (fp_key == 0x2E20DC00) fp_op = 2; // FMUL
+                else if (fp_key == 0x2E20FC00) fp_op = 3; // FDIV
+                else if (fp_key == 0x0E20F400) fp_op = 4; // FMAX
+                else if (fp_key == 0x0EA0F400) fp_op = 5; // FMIN
+                else if (fp_key == 0x0E20C400) fp_op = 6; // FMAXNM
+                else if (fp_key == 0x0EA0C400) fp_op = 7; // FMINNM
+                else if (fp_key == 0x0E20DC00) fp_op = 0xB; // FMULX
+                else if (fp_key == 0x2EA0D400) fp_op = 0xD; // FABD
                 if (fp_op != 0xFF) {
                     bool is_double = (op >> 22) & 1;
                     uint64_t fesize = is_double ? 8 : 4;
-                    emit(block, IROp::SIMD_FP_ARITH, d.rd, d.rn, d.rm, 0,
-                         fesize, Q, fp_op, cur_pc);
+                    // esize in `width`; Q in `flags_op` (matches codegen).
+                    emit(block, IROp::SIMD_FP_ARITH, d.rd, d.rn, d.rm,
+                         static_cast<uint8_t>(fesize), 0, Q, fp_op, cur_pc);
                     return true;
                 }
             }
@@ -610,8 +619,8 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             if (cmp_op != 0xFF) {
                 (void)Q;
-                emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm, 0,
-                     static_cast<uint64_t>(esize), 0, cmp_op, cur_pc);
+                emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, 0, cmp_op, cur_pc);
                 return true;
             }
             // ── NOT/MVN (vector) — 0x2E205800 ──

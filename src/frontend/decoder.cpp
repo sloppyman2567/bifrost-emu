@@ -741,7 +741,11 @@ bool decode(DecodedInst& d, uint32_t inst) {
         // toybox ls / with UnmappedMemory.
         uint64_t scale;
         if (d.is_vec) {
-            scale = (d.size & 2) ? 4 : 3;   // bit 30 = Q
+            // SIMD&FP unsigned-immediate: size bits[31:30] map to the
+            // register width — 00=128-bit Q (scale 4), 01=32-bit S (scale
+            // 2), 10/11=64-bit D (scale 3). The old `(size & 2) ? 4 : 3`
+            // was wrong for every case (S got 3, Q got 3).
+            scale = (d.size == 0) ? 4 : (d.size == 1) ? 2 : 3;
         } else {
             scale = d.size;
         }

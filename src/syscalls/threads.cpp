@@ -794,7 +794,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         } else {
                             for (int i = 0; i < woken; i++) slot1->cv.notify_one();
                         }
-                        slot1->waiters -= woken;
+                        // NOTE: do NOT decrement slot1->waiters here — the
+                        // woken threads each decrement it themselves when
+                        // they return from cv.wait() (see the FUTEX_WAIT
+                        // case). Manually subtracting `woken` double-decrements
+                        // and undercounts waiters, which makes a later
+                        // FUTEX_WAKE think there are no waiters and skip the
+                        // notify → lost wakeup / deadlock.
                     }
                     // Move up to nr_requeue remaining waiters to uaddr2.
                     // We can't selectively move condvar waiters (C++ cv

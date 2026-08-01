@@ -694,9 +694,19 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             res = (width == 64) ? a / b : static_cast<uint32_t>(a) / static_cast<uint32_t>(b);
                         break;
                     case InstClass::SDIV:
-                        if (b != 0)
-                            res = (width == 64) ? static_cast<uint64_t>(static_cast<int64_t>(a) / static_cast<int64_t>(b))
-                                                : static_cast<uint64_t>(static_cast<int32_t>(a) / static_cast<int32_t>(b));
+                        if (b != 0) {
+                            // ARM: SDIV of INT_MIN / -1 = INT_MIN (no #DE).
+                            // Bare signed division is x86 idiv #DE → SIGFPE.
+                            if (width == 64) {
+                                int64_t sa = static_cast<int64_t>(a), sb = static_cast<int64_t>(b);
+                                res = (sb == -1 && sa == INT64_MIN) ? static_cast<uint64_t>(INT64_MIN)
+                                    : static_cast<uint64_t>(sa / sb);
+                            } else {
+                                int32_t sa = static_cast<int32_t>(a), sb = static_cast<int32_t>(b);
+                                res = (sb == -1 && sa == INT32_MIN) ? static_cast<uint64_t>(static_cast<uint32_t>(INT32_MIN))
+                                    : static_cast<uint64_t>(static_cast<uint32_t>(sa / sb));
+                            }
+                        }
                         break;
                     case InstClass::LSL:
                         res = (width == 64) ? (a << (b & 63)) : (static_cast<uint32_t>(a) << (b & 31));
@@ -920,6 +930,15 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint64_t base = (d.rn == 31) ? cpu.sp : cpu.regs[d.rn];
                 int64_t disp = d.disp;  // already scaled by esize in decoder
                 uint64_t addr;
+                // For stores (Rt==Rn legal), capture the operands BEFORE
+                // writeback — otherwise STP X0, X1, [X0, #16]! stores the
+                // new pointer. The IR path reads operands first, so this
+                // keeps interpreter/JIT in agreement.
+                uint64_t s1 = 0, s2 = 0;
+                if (!d.is_load && !d.is_vec) {
+                    s1 = (d.rt  == 31) ? 0 : cpu.regs[d.rt];
+                    s2 = (d.rt2 == 31) ? 0 : cpu.regs[d.rt2];
+                }
                 if (d.mode == 1) {            // post-index
                     addr = base;
                     uint64_t nb = base + disp;
@@ -994,10 +1013,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         if (d.rt  != 31) cpu.regs[d.rt]  = v1;
                         if (d.rt2 != 31) cpu.regs[d.rt2] = v2;
                     } else {
-                        uint64_t v1 = (d.rt  == 31) ? 0 : cpu.regs[d.rt];
-                        uint64_t v2 = (d.rt2 == 31) ? 0 : cpu.regs[d.rt2];
-                        mem_.write(addr, &v1, esize, pcache);
-                        mem_.write(addr + esize, &v2, esize, pcache);
+                        mem_.write(addr, &s1, esize, pcache);
+                        mem_.write(addr + esize, &s2, esize, pcache);
                     }
                 }
                 return;
@@ -1213,6 +1230,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     return;
                 }
                 int width_bytes = 1 << size;
+                // For stores, capture the operand BEFORE writeback so
+                // STR X0, [X0], #8 stores the original value (matches IR).
+                uint64_t sv = 0;
+                if (!d.is_load && d.rt != 31) sv = cpu.regs[d.rt];
                 if (d.is_load) {
                     uint64_t v = 0;
                     mem_.read(addr, &v, width_bytes, pcache);
@@ -1221,7 +1242,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         cpu.regs[d.rt] = v;
                     }
                 } else {
-                    uint64_t v = (d.rt == 31) ? 0 : cpu.regs[d.rt];
+                    uint64_t v = (d.rt == 31) ? 0 : sv;
                     uint64_t mask = (width_bytes == 8) ? ~0ULL
                                   : ((1ULL << (width_bytes * 8)) - 1);
                     v &= mask;

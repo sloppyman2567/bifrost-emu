@@ -155,17 +155,22 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // LDP/STP, so we derive it from opc here.
                 uint8_t opc = (d.raw >> 30) & 3;
                 bool Q = (opc == 2);  // 128-bit
+                // opc=0 → S (32-bit, stride 4), opc=1 → D (64-bit, stride 8),
+                // opc=2 → Q (128-bit, stride 16 via two 8-byte halves).
+                int esize = (opc == 0) ? 4 : 8;
                 bool is_load = d.is_load;
                 uint16_t base = load_arm_reg(block, d.rn, true);
                 bool post_index = (d.mode == 1);
                 bool pre_index = (d.mode == 3);
                 int64_t mem_off = post_index ? 0 : d.disp;
-                int stride = Q ? 16 : 8;
+                int stride = Q ? 16 : esize;
                 if (is_load) {
                     // LDP Vrt, Vrt2, [base, #disp]
-                    // Load rt: v_lo from [base+mem_off], v_hi from [base+mem_off+8]
+                    // Load rt: v_lo from [base+mem_off] (S/D width), v_hi from
+                    // [base+mem_off+8] (Q only). 32-bit loads zero the upper
+                    // half of v_lo (LOAD_MEM zero-extends into the vreg).
                     uint16_t lo1 = g_alloc.alloc();
-                    emit(block, IROp::LOAD_MEM, lo1, base, 0, 8, 0, 0,
+                    emit(block, IROp::LOAD_MEM, lo1, base, 0, esize, 0, 0,
                          static_cast<uint64_t>(mem_off));
                     if (Q) {
                         uint16_t hi1 = g_alloc.alloc();
@@ -173,14 +178,14 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                              static_cast<uint64_t>(mem_off + 8));
                         emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 1, 0, 0, 0, cur_pc);
                     } else {
-                        // 64-bit load: v_hi = 0
+                        // 64-bit (or 32-bit) load: v_hi = 0
                         emit(block, IROp::SIMD_LDST, d.rt, lo1, 0, 1, 0, 0, 0, cur_pc);
                         // SIMD_LDST with src2=0 writes 0 to v_hi (vreg 0 is
                         // always 0 in our IR since it's the zero register).
                     }
                     // Load rt2
                     uint16_t lo2 = g_alloc.alloc();
-                    emit(block, IROp::LOAD_MEM, lo2, base, 0, 8, 0, 0,
+                    emit(block, IROp::LOAD_MEM, lo2, base, 0, esize, 0, 0,
                          static_cast<uint64_t>(mem_off + stride));
                     if (Q) {
                         uint16_t hi2 = g_alloc.alloc();
@@ -192,11 +197,13 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     }
                 } else {
                     // STP Vrt, Vrt2, [base, #disp]
-                    // Store rt: v_lo to [base+mem_off], v_hi to [base+mem_off+8]
+                    // Store rt: v_lo (S/D width) to [base+mem_off], v_hi to
+                    // [base+mem_off+8] (Q only). 32-bit stores write only the
+                    // low 4 bytes of v_lo.
                     uint16_t lo1 = g_alloc.alloc();
                     uint16_t hi1 = g_alloc.alloc();
                     emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 0, 0, 0, 0, cur_pc);
-                    emit(block, IROp::STORE_MEM, 0, base, lo1, 8, 0, 0,
+                    emit(block, IROp::STORE_MEM, 0, base, lo1, esize, 0, 0,
                          static_cast<uint64_t>(mem_off));
                     if (Q) {
                         emit(block, IROp::STORE_MEM, 0, base, hi1, 8, 0, 0,
@@ -205,7 +212,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     uint16_t lo2 = g_alloc.alloc();
                     uint16_t hi2 = g_alloc.alloc();
                     emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 0, 0, 0, 0, cur_pc);
-                    emit(block, IROp::STORE_MEM, 0, base, lo2, 8, 0, 0,
+                    emit(block, IROp::STORE_MEM, 0, base, lo2, esize, 0, 0,
                          static_cast<uint64_t>(mem_off + stride));
                     if (Q) {
                         emit(block, IROp::STORE_MEM, 0, base, hi2, 8, 0, 0,

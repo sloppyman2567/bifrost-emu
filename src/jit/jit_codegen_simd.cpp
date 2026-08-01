@@ -66,11 +66,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             auto emit_logical_half = [&](int32_t off1, int32_t off2, int32_t offd) {
-                // movsd xmm0, [rbx+off1]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                // movsd xmm0, [rbx+off1]  (MOVSD = F2 0F 10, 64-bit)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(0, CPU_REG, off1);
                 // movsd xmm1, [rbx+off2]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
                 if (simple) {
                     // 66 0F sse_op C1  (xmm0, xmm1)
@@ -110,8 +110,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
                     emit_byte(0xC1);
                 }
-                // movsd [rbx+offd], xmm0
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                // movsd [rbx+offd], xmm0  (MOVSD store = F2 0F 11)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -219,11 +219,11 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             auto emit_arith_half = [&](int32_t off1, int32_t off2, int32_t offd) {
-                // movsd xmm0, [rbx+off1]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                // movsd xmm0, [rbx+off1]  (MOVSD = F2 0F 10, 64-bit)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(0, CPU_REG, off1);
                 // movsd xmm1, [rbx+off2]
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
                 // emit the SSE op (xmm0, xmm1)
                 emit_byte(0x66); emit_byte(0x0F);
@@ -232,8 +232,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 }
                 emit_byte(op_byte);
                 emit_byte(0xC1);  // modrm(3, xmm0, xmm1)
-                // movsd [rbx+offd], xmm0
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                // movsd [rbx+offd], xmm0  (MOVSD store = F2 0F 11)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
@@ -352,15 +352,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             bool needs_38_prefix = (esize == 8);
             auto emit_cmp_half = [&](int32_t off1, int32_t off2, int32_t offd) {
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                // MOVSD (64-bit) — F2 0F 10/11, NOT MOVSS (32-bit).
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(0, CPU_REG, off1);
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10);
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(1, CPU_REG, off2);
                 emit_byte(0x66); emit_byte(0x0F);
                 if (needs_38_prefix) emit_byte(0x38);
                 emit_byte(op_byte);
                 emit_byte(0xC1);
-                emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x11);
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;

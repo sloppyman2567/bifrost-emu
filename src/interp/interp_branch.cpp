@@ -65,8 +65,10 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             next_pc = cpu.regs[d.rn];
             return;
         case InstClass::RET:
+            // RET Rn branches to regs[Rn]. Rn==31 (XZR) is encodable and
+            // branches to address 0 (regs[31] is always 0) — do NOT fall
+            // back to LR here; the IR path also emits BR regs[31].
             next_pc = cpu.regs[d.rn];
-            if (next_pc == 0) next_pc = cpu.regs[30];  // RET with XZR
             return;
         // ── System ────────────────────────────────────────────────
         case InstClass::SVC_IMM:
