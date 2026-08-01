@@ -10,16 +10,17 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 191 | 191 | 0 | Full suite with SDL2/GL build (standard) |
-| frostJIT (quick `make check-quick`) | 185 | 185 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 191 | 191 | 0 | Same conditions as JIT row |
-| `make check-quick` | 185 | 185 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 186 | 186 | 0 | Default suite runs 186 of the 191 defined (interactive excluded) |
+| frostJIT (quick `make check-quick`) | 181 | 181 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| Interpreter (`./bifrost-emu --no-jit`) | 186 | 186 | 0 | Same conditions as JIT row |
+| `make check-quick` | 181 | 181 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
 
-**191 test programs** are defined in `scripts/run_tests.sh` across seven
-categories (see table below). The default `make check` suite runs all **191**
-and reports **191 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
+**191 test programs** are defined in `scripts/run_tests.sh` across eight
+categories (see table below). The default `make check` suite runs **186** of
+them (the 5 interactive tests need `--interactive`) and reports
+**186 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
 With `make check-quick`, benchmarks are skipped and the suite reports
-**185 pass / 0 fail**.
+**181 pass / 0 fail**.
 
 ### Test categories
 
@@ -31,7 +32,8 @@ With `make check-quick`, benchmarks are skipped and the suite reports
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
 | Dynamic | 14 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **191** | |
+| Interactive | 5 | `test/` + `ctest_real/` — interactive/REPL tests (echo, repl, cat, sh, fgets), run only with `--interactive` |
+| **Total** | **191** | 186 run by default; interactive (5) and benchmarks (5) excluded with `--quick` → 181 |
 
 ### Running the tests
 
