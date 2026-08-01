@@ -557,6 +557,14 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }
+            } else if (sub3_noq == 0x2E206C00) {
+                arith_op = 3;  // UMIN (unsigned min)
+            } else if (sub3_noq == 0x2E206400) {
+                arith_op = 4;  // UMAX (unsigned max)
+            } else if (sub3_noq == 0x0E206C00) {
+                arith_op = 5;  // SMIN (signed min)
+            } else if (sub3_noq == 0x0E206400) {
+                arith_op = 6;  // SMAX (signed max)
             }
             if (arith_op != 0xFF) {
                 (void)Q;
@@ -621,12 +629,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return true;
             }
-            // ── NEG (vector) — 0x2E20B800 ──
-            // NEG Vd.<T>, Vn.<T> = 0 - Vn (two's complement negate).
-            // This is SUB with src1=0. We can emit SIMD_ARITH sub with
-            // a zero src1, but our SIMD_ARITH reads from vregs, not XZR.
-            // Fall to interp for now.
-            if (sub3_noq == 0x2E20B800) {
+            // ── ABS / NEG (vector) — 0x0E20B800 / 0x2E20B800 ──
+            // ABS Vd.<T>, Vn.<T> = |Vn| per lane; NEG = 0 - Vn per lane.
+            // Both are 2-operand (no src2) so we fall to interp for now.
+            if (sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) {
                 emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                 return true;
             }

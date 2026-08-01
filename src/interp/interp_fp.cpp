@@ -702,31 +702,37 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   TBL: result byte = 0
             //   TBX: result byte unchanged (in-place update)
             //
-            // The SIMD_DP sub-dispatch uses mask 0xFFE0FC00 with Q
-            // (bit 30) and L (bit 20) stripped, but op2 (bit 21)
-            // kept. So:
-            //   - TBL (op2=0) matches case 0x0E000000 (both Q and L
-            //     variants).
-            //   - TBX (op2=1) matches case 0x0E200000.
-            // We read Q (bit 30) and L (bit 20) from the raw op.
-            //
-            // code doing byte shuffles (hex encode, UTF-8 conversion,
-            // base64) would get wrong results silently.
-            case 0x0E000000:   // TBL (op2=0; Q and L stripped)
-            case 0x0E200000: { // TBX (op2=1; Q and L stripped)
-                bool is_tbx     = (op & 0x200000) != 0;  // op2 bit (bit 21)
-                bool is_two_src = (op & 0x1000)   != 0;  // L bit (bit 20)
+            // TBL/TBX encoding: 0 Q 0 0 1 1 1 0 size 0 0 Rm op2 L Rn Rd
+            //   - op2 = bit 12 (0x1000): 0 = TBL, 1 = TBX
+            //   - L   = bit 13 (0x2000): 0 = one source reg, 1 = two
+            // Both bits survive the sub_noq mask (0xFFE0FC00 keeps
+            // bits[15:10]), so each form has its own case:
+            //   - TBL1: 0x0E000000, TBL2: 0x0E002000
+            //   - TBX1: 0x0E001000, TBX2: 0x0E003000
+            // v0 only matched TBL1 (mask 0xFFE00000 val 0x0E000000,
+            // which also masks off bit 13); the 2-source TBL2 form
+            // (e.g. GCC lowering of vextq_u8 with a 2-vector table)
+            // silently fell through as a NOP, producing all zeros.
+            case 0x0E000000:   // TBL (1 source reg)
+            case 0x0E002000:   // TBL (2 source regs)
+            case 0x0E001000:   // TBX (1 source reg)
+            case 0x0E003000:   // TBX (2 source regs)
+            case 0x0E004000:   // TBL (3 source regs)
+            case 0x0E006000:   // TBL (4 source regs)
+            case 0x0E005000:   // TBX (3 source regs)
+            case 0x0E007000: { // TBX (4 source regs)
+                bool is_tbx     = (op & 0x1000) != 0;  // op2 bit (bit 12)
+                int nregs       = ((op >> 13) & 0x3) + 1;  // bits[14:13]
                 // Q bit (bit 30) — already extracted as `Q` above.
-                // Build the source table: 16 (single) or 32 (two) bytes.
-                uint8_t table[32];
-                memcpy(table,    &cpu.v_lo[rn], 8);
-                memcpy(table+8,  &cpu.v_hi[rn], 8);
-                if (is_two_src) {
-                    int rn2 = (rn + 1) & 31;
-                    memcpy(table+16, &cpu.v_lo[rn2], 8);
-                    memcpy(table+24, &cpu.v_hi[rn2], 8);
+                // Build the source table: nregs x (16 or 8) bytes.
+                int bytes_per_reg = Q ? 16 : 8;
+                uint8_t table[4 * 16];
+                for (int r = 0; r < nregs; r++) {
+                    int rn_r = (rn + r) & 31;
+                    memcpy(table + r * bytes_per_reg, &cpu.v_lo[rn_r], 8);
+                    if (Q) memcpy(table + r * bytes_per_reg + 8, &cpu.v_hi[rn_r], 8);
                 }
-                int table_len = is_two_src ? 32 : 16;
+                int table_len = nregs * bytes_per_reg;
                 // Read the index vector Vm.
                 uint8_t idx[16];
                 memcpy(idx,    &cpu.v_lo[rm], 8);
@@ -1047,13 +1053,35 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
-            // ── CNT (vector) ──
+            // ── CNT / NOT / RBIT (vector) ──
+            // The sub2 mask (0x9F3FFC00) masks off size (bit 22) and U
+            // (bit 29), so CNT/NOT/RBIT all collapse to 0x0E205800:
+            //   CNT  = 0x0E205800 (U=0, size=0) — popcount per byte
+            //   NOT  = 0x6E205800 (U=1, size=0) — bitwise invert
+            //   RBIT = 0x6E605800 (U=1, size=1) — bit-reverse per byte
+            // v0 silently ran popcount for RBIT (vrbitq_u8 gave 0 1 1 2
+            // instead of 0 128 64). Distinguish by the raw op bits.
             case 0x0E205800: {
+                bool is_rbit = ((op >> 22) & 1) == 1;   // size=1
+                bool is_not  = !is_rbit && ((op >> 29) & 1) == 1;
                 uint8_t buf[16];
                 memcpy(buf, &cpu.v_lo[rn], 8);
                 if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
                 int nbytes = Q ? 16 : 8;
-                for (int i = 0; i < nbytes; i++) buf[i] = __builtin_popcount(buf[i]);
+                for (int i = 0; i < nbytes; i++) {
+                    if (is_rbit) {
+                        // Reverse the 8 bits of each byte.
+                        uint8_t v = buf[i];
+                        v = ((v & 0xAA) >> 1) | ((v & 0x55) << 1);
+                        v = ((v & 0xCC) >> 2) | ((v & 0x33) << 2);
+                        v = ((v & 0xF0) >> 4) | ((v & 0x0F) << 4);
+                        buf[i] = v;
+                    } else if (is_not) {
+                        buf[i] = ~buf[i];
+                    } else {
+                        buf[i] = __builtin_popcount(buf[i]);
+                    }
+                }
                 memcpy(&cpu.v_lo[rd], buf, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
                 else cpu.v_hi[rd] = 0;
@@ -1098,6 +1126,40 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 cpu.v_lo[rd] = sum;
                 cpu.v_hi[rd] = 0;
+                return;
+            }
+            // INS (element, vector): mov vd.<T>[i], vn.<T>[j]
+            // Encoding: 0 Q 0 0 1 1 1 0 0 0 0 imm5 0 <src_byte_off[3:0]> 1 Rn Rd
+            // Same 0x2E000000 prefix as EXT but bit10=1 (EXT keeps bit10=0
+            // and puts imm4 in bits[14:11]). src byte offset = j*esize.
+            // GCC lowers vextq_u8 to a 2-source TBL whose index vector is
+            // built with these INS moves, so this must not fall into EXT.
+            if ((op & 0xBFE00000) == 0x2E000000 && (op & 0x400) != 0) {
+                uint8_t imm5 = (op >> 16) & 0x1F;
+                int esize, didx;
+                // imm5 = (didx << (size+1)) | (1 << size): the lowest set
+                // bit selects the element size, the upper bits hold the
+                // destination element index.
+                if (imm5 & 0x01) { esize = 1; didx = imm5 >> 1; }
+                else if (imm5 & 0x02) { esize = 2; didx = imm5 >> 2; }
+                else if (imm5 & 0x04) { esize = 4; didx = imm5 >> 3; }
+                else if (imm5 & 0x08) { esize = 8; didx = imm5 >> 4; }
+                else throw DecodeError(cpu.pc, inst);
+                int src_off = (op >> 11) & 0xF;
+                int sidx = src_off / esize;
+                uint64_t src_val;
+                int elems_per_qword = 8 / esize;
+                if (sidx < elems_per_qword) {
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_lo[rn]);
+                    memcpy(&src_val, p + sidx * esize, esize);
+                } else {
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_hi[rn]);
+                    memcpy(&src_val, p + (sidx - elems_per_qword) * esize, esize);
+                }
+                uint8_t* d = (didx < elems_per_qword)
+                    ? reinterpret_cast<uint8_t*>(&cpu.v_lo[rd])
+                    : reinterpret_cast<uint8_t*>(&cpu.v_hi[rd]);
+                memcpy(d + (didx % elems_per_qword) * esize, &src_val, esize);
                 return;
             }
             // EXT (extract) — v0 mask 0xFFE00000 val 0x6E000000
@@ -1761,6 +1823,285 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     memcpy(&cpu.v_hi[rd], vd + 8, 8);
                     return;
                 }
+                // SMLAL/UMLAL/SMLSL/UMLSL/SMULL/UMULL (vector, widening
+                // long multiply). Sign- or zero-extend the narrow lanes of
+                // Vm and multiply into the wide lanes of Vd. Q selects which
+                // half of Vm/Vn is used: Q=0 → low half (no "2" suffix),
+                // Q=1 → high half (the "2" variants). Vd is always full
+                // 128-bit (4S or 2D); the narrow source is 8H or 4S.
+                //   SMLAL  v.4s ← v.4s + sxt(v.4h)*sxt(v.4h)  (size=1 → H)
+                //   UMLAL  v.4s ← v.4s + uxt(v.4h)*uxt(v.4h)  (U=1)
+                //   SMLSL  v.4s ← v.4s - sxt(v.4h)*sxt(v.4h)
+                //   SMULL  v.4s ← sxt(v.4h)*sxt(v.4h)          (no accum)
+                //   SMLAL  v.2d ← v.2d + sxt(v.2s)*sxt(v.2s)  (size=2 → S)
+                // Encoding sub3_noq values:
+                //   SMLAL 0x0E208000, UMLAL 0x2E208000 (bit15=1, +accum)
+                //   SMLSL 0x0E20A000, UMLSL 0x2E20A000 (bit15=1, -accum)
+                //   SMULL 0x0E20C000, UMULL 0x2E20C000 (bit15=1, no accum)
+                if (sub3_noq == 0x0E208000 || sub3_noq == 0x2E208000 ||
+                    sub3_noq == 0x0E20A000 || sub3_noq == 0x2E20A000 ||
+                    sub3_noq == 0x0E20C000 || sub3_noq == 0x2E20C000) {
+                    int esize_src = 1 << size;            // 1 (B), 2 (H), 4 (S)
+                    int esize_dst = esize_src * 2;
+                    int lanes = 16 / esize_dst;           // 8 (8H), 4 (4S), 2 (2D)
+                    bool is_unsigned = (sub3_noq >> 29) & 1;
+                    bool is_subl = sub3_noq == 0x0E20A000 || sub3_noq == 0x2E20A000;
+                    bool no_accum = sub3_noq == 0x0E20C000 || sub3_noq == 0x2E20C000;
+                    uint8_t vn[16], vm[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    memcpy(vd, &cpu.v_lo[rd], 8);
+                    memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    int src_off = Q ? lanes : 0;          // element index into Vn/Vm
+                    for (int i = 0; i < lanes; i++) {
+                        uint64_t an = 0, am = 0;
+                        memcpy(&an, vn + (src_off + i) * esize_src, esize_src);
+                        memcpy(&am, vm + (src_off + i) * esize_src, esize_src);
+                        uint64_t en = is_unsigned ? an :
+                            static_cast<uint64_t>(static_cast<int64_t>(an << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                        uint64_t em = is_unsigned ? am :
+                            static_cast<uint64_t>(static_cast<int64_t>(am << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                        uint64_t prod = en * em;
+                        uint64_t acc = 0;
+                        if (!no_accum) memcpy(&acc, vd + i * esize_dst, esize_dst);
+                        uint64_t r = is_subl ? acc - prod : acc + prod;
+                        memcpy(vd + i * esize_dst, &r, esize_dst);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    return;
+                }
+                // TBL / TBX (vector, table lookup): Vd[i] =
+                // table[index[i]] where `table` is the concatenation of
+                // (len+1) consecutive vector registers starting at Vn.
+                // Index is an unsigned byte; out-of-range → 0 (TBL) or
+                // unchanged Vd[i] (TBX). Q selects 8 (Q=0, v_lo only) vs
+                // 16 (Q=1) byte lanes.
+                //   TBL Vd.8B, {Vn.8B}, Vm.8B        — 0x0E002000 (1 reg)
+                //   TBL Vd.16B, {Vn.16B,..}, Vm.16B  — Q=1 → 0x4E002000
+                //   TBX same but bit[12]=1 → 0x0E003000 / 0x4E003000
+                // Register count = (bits[14:13]) + 1 (1..4).
+                if (sub3_noq == 0x0E002000 || sub3_noq == 0x0E003000) {
+                    bool is_tbx = sub3_noq == 0x0E003000;
+                    int nregs = ((op >> 13) & 0x3) + 1;   // bits[14:13]
+                    int lanes = Q ? 16 : 8;               // 8B or 16B
+                    int tbl_bytes = nregs * lanes;        // concatenated table
+                    uint8_t table[4 * 16];
+                    for (int r = 0; r < nregs; r++) {
+                        int reg = (rn + r) & 31;
+                        memcpy(table + r * lanes, &cpu.v_lo[reg], 8);
+                        if (Q) memcpy(table + r * lanes + 8, &cpu.v_hi[reg], 8);
+                    }
+                    uint8_t idx[16], out[16];
+                    memcpy(idx, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(idx + 8, &cpu.v_hi[rm], 8);
+                    memcpy(out, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(out + 8, &cpu.v_hi[rd], 8);
+                    for (int i = 0; i < lanes; i++) {
+                        uint8_t ix = idx[i];
+                        if (ix < tbl_bytes) out[i] = table[ix];
+                        else if (!is_tbx) out[i] = 0;   // TBL: zero, TBX: keep
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── ABS / NEG (vector) — 0x0E20B800 / 0x2E20B800 ──
+                // ABS Vd.<T>, Vn.<T> = |Vn| per lane; NEG = 0 - Vn per lane.
+                // For ABS of the minimum signed value (e.g. INT8_MIN), ARM
+                // defines the result as the input unchanged (no overflow).
+                // NOTE: FCVTZS/FCVTZU share sub3_noq (0x0E20B800/0x2E20B800)
+                // but set bit16 (0x10000), so exclude them here.
+                if ((sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) &&
+                    !(op & 0x10000)) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    bool is_abs = sub3_noq == 0x0E20B800;
+                    uint8_t vn[16], out[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t v = 0;
+                        memcpy(&v, vn + i * esize, esize);
+                        if (is_abs) {
+                            int64_t sv = static_cast<int64_t>(v << (64 - esize * 8)) >> (64 - esize * 8);
+                            uint64_t r = static_cast<uint64_t>(sv < 0 ? -sv : sv);
+                            memcpy(out + i * esize, &r, esize);
+                        } else {
+                            uint64_t r = static_cast<uint64_t>(0) - v;
+                            memcpy(out + i * esize, &r, esize);
+                        }
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── FCVTZS / FCVTZU (vector, FP→int, toward zero) ──
+                // Same sub3_noq as ABS/NEG but with bit16 (0x10000) set.
+                //   FCVTZS Vd.4S, Vn.4S = 0x4EA1B800  (signed, U=0)
+                //   FCVTZU Vd.4S, Vn.4S = 0x6EA1B800  (unsigned, U=1)
+                //   size=2 → 32-bit (4S/2S), size=3 → 64-bit (2D/1D)
+                // Truncate toward zero (rmode=3). NaN → 0.
+                if ((sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) &&
+                    (op & 0x10000) && size >= 2) {
+                    bool is_unsigned = sub3_noq == 0x2E20B800;
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint8_t vn[16], out[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t r = 0;
+                        if (esize == 4) {
+                            float f;
+                            memcpy(&f, vn + i * esize, 4);
+                            if (std::isfinite(f)) {
+                                if (is_unsigned) {
+                                    r = (f < 0.0f) ? 0 : static_cast<uint32_t>(f);
+                                } else {
+                                    r = static_cast<uint32_t>(static_cast<int32_t>(f));
+                                }
+                            } else {
+                                r = 0;  // NaN/±inf → 0
+                            }
+                        } else {
+                            double d;
+                            memcpy(&d, vn + i * esize, 8);
+                            if (std::isfinite(d)) {
+                                if (is_unsigned) {
+                                    r = (d < 0.0) ? 0 : static_cast<uint64_t>(d);
+                                } else {
+                                    r = static_cast<uint64_t>(static_cast<int64_t>(d));
+                                }
+                            } else {
+                                r = 0;
+                            }
+                        }
+                        memcpy(out + i * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // UMIN/UMAX/SMIN/SMAX (vector): lane-wise min/max.
+                //   UMIN 0x2E206C00 (Q=1 → 0x6E206C00)  UMAX 0x2E206400
+                //   SMIN 0x0E206C00 (Q=1 → 0x4E206C00)  SMAX 0x0E206400
+                if (sub3_noq == 0x2E206C00 || sub3_noq == 0x2E206400 ||
+                    sub3_noq == 0x0E206C00 || sub3_noq == 0x0E206400) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    bool is_unsigned = sub3_noq == 0x2E206C00 || sub3_noq == 0x2E206400;
+                    bool is_min = sub3_noq == 0x2E206C00 || sub3_noq == 0x0E206C00;
+                    uint8_t vn[16], vm[16], out[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0, b = 0;
+                        memcpy(&a, vn + i * esize, esize);
+                        memcpy(&b, vm + i * esize, esize);
+                        uint64_t r;
+                        if (is_unsigned) {
+                            r = is_min ? (a < b ? a : b) : (a > b ? a : b);
+                        } else {
+                            int64_t sa = static_cast<int64_t>(a << (64 - esize * 8)) >> (64 - esize * 8);
+                            int64_t sb = static_cast<int64_t>(b << (64 - esize * 8)) >> (64 - esize * 8);
+                            int64_t sr = is_min ? (sa < sb ? sa : sb) : (sa > sb ? sa : sb);
+                            r = static_cast<uint64_t>(sr);
+                        }
+                        memcpy(out + i * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // MLA / MLS (vector, multiply-accumulate):
+                //   MLA Vd.<T>, Vn.<T>, Vm.<T> = Vd + Vn*Vm  (0x0E209400)
+                //   MLS Vd.<T>, Vn.<T>, Vm.<T> = Vd - Vn*Vm  (0x2E209400)
+                if (sub3_noq == 0x0E209400 || sub3_noq == 0x2E209400) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    bool is_mls = sub3_noq == 0x2E209400;
+                    uint8_t vn[16], vm[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    memcpy(vd, &cpu.v_lo[rd], 8);
+                    if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0, b = 0, acc = 0;
+                        memcpy(&a, vn + i * esize, esize);
+                        memcpy(&b, vm + i * esize, esize);
+                        memcpy(&acc, vd + i * esize, esize);
+                        uint64_t r = is_mls ? acc - a * b : acc + a * b;
+                        memcpy(vd + i * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // UHADD/UHSUB/URHADD/SHADD/SHSUB/SRHADD (vector, halving
+                // add/sub): HADD = (a+b)>>1, HSUB = (a-b)>>1, RHADD =
+                // (a+b+1)>>1, per lane. Signed variants use arithmetic
+                // shift (round toward -inf); RHADD rounds to nearest.
+                //   UHADD 0x2E200400  UHSUB 0x2E202400  URHADD 0x2E201400
+                //   SHADD 0x0E200400  SHSUB 0x0E202400  SRHADD 0x0E201400
+                if (sub3_noq == 0x2E200400 || sub3_noq == 0x2E202400 ||
+                    sub3_noq == 0x2E201400 || sub3_noq == 0x0E200400 ||
+                    sub3_noq == 0x0E202400 || sub3_noq == 0x0E201400) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    bool is_unsigned = sub3_noq == 0x2E200400 || sub3_noq == 0x2E202400 || sub3_noq == 0x2E201400;
+                    bool is_sub = sub3_noq == 0x2E202400 || sub3_noq == 0x0E202400;
+                    bool is_rhadd = sub3_noq == 0x2E201400 || sub3_noq == 0x0E201400;
+                    uint8_t vn[16], vm[16], out[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    if (Q) memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0, b = 0;
+                        memcpy(&a, vn + i * esize, esize);
+                        memcpy(&b, vm + i * esize, esize);
+                        uint64_t r;
+                        if (is_unsigned) {
+                            uint64_t sum = is_sub ? (a - b) : (a + b);
+                            if (is_rhadd) sum += 1;
+                            // UHSUB must wrap the difference to the
+                            // element width BEFORE halving (ARM:
+                            // (a + 2^N - b) >> 1). Without the wrap, a
+                            // 64-bit borrow makes low bytes wrong (e.g.
+                            // (0-3)>>1 = 0x7FFFFFFF...FE → 0xFE, not
+                            // (0+256-3)>>1 = 126). UHADD/URHADD can't
+                            // overflow (a+b ≤ 2^(N+1)-2), and esize=8
+                            // already wraps in 64-bit arithmetic.
+                            if (is_sub && esize < 8)
+                                sum &= (1ULL << (esize * 8)) - 1;
+                            r = sum >> 1;
+                        } else {
+                            // Signed: use 64-bit arithmetic (works for all esizes).
+                            int64_t sa = static_cast<int64_t>(a << (64 - esize * 8)) >> (64 - esize * 8);
+                            int64_t sb = static_cast<int64_t>(b << (64 - esize * 8)) >> (64 - esize * 8);
+                            int64_t sum = is_sub ? (sa - sb) : (sa + sb);
+                            if (is_rhadd) sum += 1;
+                            r = static_cast<uint64_t>(sum >> 1);
+                        }
+                        memcpy(out + i * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
                 // UMINP (vector, pairwise unsigned min): Vd[i] =
                 // min(Vn[2i], Vn[2i+1]) for the low half, then
                 // min(Vm[2i], Vm[2i+1]) for the high half.
@@ -1789,6 +2130,206 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
                     else cpu.v_hi[rd] = 0;
                     return;
+                }
+                // ── FP by-element (FMUL/FMLA/FMLS/FMULX × element) ──
+                // FMUL Vd.4S, Vn.4S, Vm.S[index]: multiply Vn by the scalar
+                // lane of Vm selected by the index field.
+                // Encoding: 0 Q 0 11111 size L M Rm 1 opc[2:0] H Rn Rd
+                // sub3_noq (mask 0xFF00F400, strips L/M/H index bits) =
+                //   FMLA 0x0F001000  FMLS 0x0F005000
+                //   FMUL 0x0F009000  FMULX 0x0F00D000
+                // size: 1=H(16b), 2=S(32b), 3=D(64b). The element index is
+                // formed from H:L:M: D→{H}, S→{H:L}, H→{H:L:M}.
+                {
+                    uint32_t be = (op & 0xFF00F400) & ~(1u << 30);
+                    if ((be == 0x0F001000 || be == 0x0F005000 ||
+                         be == 0x0F009000 || be == 0x0F00D000) && size >= 2) {
+                        int esize = 1 << size;   // 2, 4, or 8
+                        int lanes = (Q ? 16 : 8) / esize;
+                        uint32_t H = (op >> 11) & 1;
+                        uint32_t L = (op >> 21) & 1;
+                        uint32_t M = (op >> 20) & 1;
+                        int idx;
+                        if (size == 3) idx = H;
+                        else if (size == 2) idx = (H << 1) | L;
+                        else idx = (H << 2) | (L << 1) | M;
+                        int opc = (op >> 12) & 0xF;   // 1=FMLA 5=FMLS 9=FMUL 13=FMULX
+                        uint8_t vn[16], vm[16];
+                        memcpy(vn, &cpu.v_lo[rn], 8);
+                        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                        memcpy(vm, &cpu.v_lo[rm], 8);
+                        memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                        if (esize == 8) {
+                            double sc;
+                            memcpy(&sc, vm + idx * 8, 8);
+                            // Snapshot Vd (FMLA/FMLS accumulate into it).
+                            uint64_t dlo0 = cpu.v_lo[rd], dhi0 = cpu.v_hi[rd];
+                            for (int i = 0; i < lanes; i++) {
+                                double a, r;
+                                memcpy(&a, vn + i * 8, 8);
+                                double d;
+                                memcpy(&d, (i == 0) ? &dlo0 : &dhi0, 8);
+                                if (opc == 9 || opc == 13) {
+                                    r = a * sc;                 // FMUL / FMULX
+                                } else {
+                                    r = d + (opc == 1 ? a * sc : -(a * sc));  // FMLA / FMLS
+                                }
+                                if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
+                                else memcpy(&cpu.v_hi[rd], &r, 8);
+                            }
+                        } else if (esize == 4) {
+                            float sc;
+                            memcpy(&sc, vm + idx * 4, 4);
+                            // Snapshot Vd (FMLA/FMLS accumulate into it).
+                            uint64_t dlo0 = cpu.v_lo[rd], dhi0 = cpu.v_hi[rd];
+                            for (int i = 0; i < lanes; i++) {
+                                float a, r;
+                                memcpy(&a, vn + i * 4, 4);
+                                uint64_t chunk = (i < 2) ? dlo0 : dhi0;
+                                int sh = (i & 1) * 32;
+                                float d;
+                                uint32_t db = (chunk >> sh) & 0xFFFFFFFF;
+                                memcpy(&d, &db, 4);
+                                if (opc == 9 || opc == 13) {
+                                    r = a * sc;                 // FMUL / FMULX
+                                } else {
+                                    r = d + (opc == 1 ? a * sc : -(a * sc));  // FMLA / FMLS
+                                }
+                                uint32_t rb;
+                                memcpy(&rb, &r, 4);
+                                uint64_t* chunkp = (i < 2) ? &cpu.v_lo[rd] : &cpu.v_hi[rd];
+                                *chunkp = (*chunkp & ~(0xFFFFFFFFULL << sh))
+                                        | (static_cast<uint64_t>(rb) << sh);
+                            }
+                        }
+                        if (!Q) cpu.v_hi[rd] = 0;
+                        return;
+                    }
+                }
+                // ── FABS / FNEG (FP absolute / negate, vector) ──
+                // FABS Vd.<T>, Vn.<T>: clear sign bit. FNEG: flip sign bit.
+                // Encoding (3-same, 2-operand, bit22=1 FP): 0 Q 0 1110 1
+                // size 1 0 0000 1111 1 0 Rn Rd. sub3_noq: FABS=0x0E20F800,
+                // FNEG=0x2E20F800. S (size=2) or D (size=3).
+                {
+                    uint32_t fs = (op & 0xFF20FC00) & ~(1u << 30);
+                    if (fs == 0x0E20F800 || fs == 0x2E20F800) {
+                        bool is_neg = fs == 0x2E20F800;
+                        int esize = 1 << size;
+                        int lanes = (Q ? 16 : 8) / esize;
+                        uint8_t vn[16];
+                        memcpy(vn, &cpu.v_lo[rn], 8);
+                        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                        for (int i = 0; i < lanes; i++) {
+                            uint64_t v = 0;
+                            memcpy(&v, vn + i * esize, esize);
+                            if (is_neg) v ^= (1ULL << (esize * 8 - 1));
+                            else v &= ~(1ULL << (esize * 8 - 1));
+                            if (esize == 8) {
+                                if (i == 0) memcpy(&cpu.v_lo[rd], &v, 8);
+                                else memcpy(&cpu.v_hi[rd], &v, 8);
+                            } else {
+                                uint64_t* chunkp = (i < 2) ? &cpu.v_lo[rd] : &cpu.v_hi[rd];
+                                int sh = (i & 1) * 32;
+                                uint32_t rb = static_cast<uint32_t>(v);
+                                *chunkp = (*chunkp & ~(0xFFFFFFFFULL << sh))
+                                        | (static_cast<uint64_t>(rb) << sh);
+                            }
+                        }
+                        if (!Q) cpu.v_hi[rd] = 0;
+                        return;
+                    }
+                }
+                // ── SCVTF / UCVTF (vector, integer → float, 2-operand) ──
+                // SCVTF Vd.<T>, Vn.<T>: signed int → FP. UCVTF: unsigned.
+                // Encoding (3-same, 2-operand): 0 Q U 0 1110 size 1 0 0000
+                // 1111 1 0 Rn Rd. sub3_noq: SCVTF=0x0E20D800 (size 0/1),
+                // UCVTF=0x2E20D800 (size 0/1). size=0 → 4S/2S (32-bit ints),
+                // size=1 → 2D/1D (64-bit ints). Note FRECPE/FRSQRTE share
+                // these sub3_noq values but use size=2/3, so `size < 2` here.
+                {
+                    uint32_t cv = (op & 0xFF20FC00) & ~(1u << 30);
+                    if ((cv == 0x0E20D800 || cv == 0x2E20D800) && size < 2) {
+                        bool is_unsigned = cv == 0x2E20D800;
+                        bool is_double = size == 1;   // 2D/1D output
+                        int lanes = is_double ? (Q ? 2 : 1) : (Q ? 4 : 2);
+                        uint8_t vn[16];
+                        memcpy(vn, &cpu.v_lo[rn], 8);
+                        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                        if (is_double) {
+                            for (int i = 0; i < lanes; i++) {
+                                int64_t sv;
+                                memcpy(&sv, vn + i * 8, 8);
+                                double r = is_unsigned ? static_cast<double>(static_cast<uint64_t>(sv))
+                                                       : static_cast<double>(sv);
+                                if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
+                                else memcpy(&cpu.v_hi[rd], &r, 8);
+                            }
+                        } else {
+                            for (int i = 0; i < lanes; i++) {
+                                int32_t sv;
+                                memcpy(&sv, vn + i * 4, 4);
+                                float r = is_unsigned ? static_cast<float>(static_cast<uint32_t>(sv))
+                                                      : static_cast<float>(sv);
+                                uint32_t rb;
+                                memcpy(&rb, &r, 4);
+                                uint64_t* chunkp = (i < 2) ? &cpu.v_lo[rd] : &cpu.v_hi[rd];
+                                int sh = (i & 1) * 32;
+                                *chunkp = (*chunkp & ~(0xFFFFFFFFULL << sh))
+                                        | (static_cast<uint64_t>(rb) << sh);
+                            }
+                        }
+                        if (!Q) cpu.v_hi[rd] = 0;
+                        return;
+                    }
+                }
+                // ── FRECPE / FRSQRTE (FP reciprocal estimate, vector) ──
+                // FRECPE Vd.<T>, Vn.<T>: reciprocal estimate (1/x).
+                // FRSQRTE Vd.<T>, Vn.<T>: reciprocal sqrt estimate.
+                // Encoding (3-same, 2-operand): 0 Q U 0 1110 size 1 0 0000
+                // 1101 1 0 Rn Rd. Sub3_noq: FRECPE=0x0E20D800, FRSQRTE=0x2E20D800
+                // (stripped mask: 0x0E00D000 / 0x2E00D000). S (size=2) or D.
+                {
+                    uint32_t re = (op & 0xFF00F400) & ~(1u << 30);
+                    if ((re == 0x0E00D000 || re == 0x2E00D000) && size >= 2) {
+                        bool is_sqrt = re == 0x2E00D000;
+                        int esize = 1 << size;
+                        int lanes = (Q ? 16 : 8) / esize;
+                        uint8_t vn[16];
+                        memcpy(vn, &cpu.v_lo[rn], 8);
+                        if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                        for (int i = 0; i < lanes; i++) {
+                            if (esize == 8) {
+                                double x;
+                                memcpy(&x, vn + i * 8, 8);
+                                double r;
+                                if (std::isnan(x)) r = x;
+                                else if (x == 0.0) r = std::copysign(INFINITY, x);
+                                else if (std::isinf(x)) r = std::copysign(0.0, x);
+                                else if (is_sqrt && x < 0.0) r = std::nan("");
+                                else r = is_sqrt ? (1.0 / std::sqrt(x)) : (1.0 / x);
+                                if (i == 0) memcpy(&cpu.v_lo[rd], &r, 8);
+                                else memcpy(&cpu.v_hi[rd], &r, 8);
+                            } else {
+                                float x;
+                                memcpy(&x, vn + i * 4, 4);
+                                float r;
+                                if (std::isnan(x)) r = x;
+                                else if (x == 0.0f) r = std::copysign(INFINITY, x);
+                                else if (std::isinf(x)) r = std::copysign(0.0f, x);
+                                else if (is_sqrt && x < 0.0f) r = std::nan("");
+                                else r = is_sqrt ? (1.0f / std::sqrtf(x)) : (1.0f / x);
+                                uint32_t rb;
+                                memcpy(&rb, &r, 4);
+                                uint32_t sh = (i & 1) * 32;
+                                uint64_t* chunkp = (i < 2) ? &cpu.v_lo[rd] : &cpu.v_hi[rd];
+                                *chunkp = (*chunkp & ~(0xFFFFFFFFULL << sh))
+                                        | (static_cast<uint64_t>(rb) << sh);
+                            }
+                        }
+                        if (!Q) cpu.v_hi[rd] = 0;
+                        return;
+                    }
                 }
                 // FADD/FSUB/FMUL/FDIV (vector, float) — 0x0E20D400 (FADD 4S)
                 // and 0x0E20DC00 (FMUL 4S).

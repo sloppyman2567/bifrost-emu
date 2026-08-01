@@ -203,6 +203,7 @@ UNIT_TESTS=(
     "neon|ctest/jit_neon.elf||5|PASS"
     "neon_advanced|ctest/jit_neon_advanced.elf||5|PASS"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
+    "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
     "mvni_softfloat|ctest/jit_mvni_softfloat.elf||5|checks passed"
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"

@@ -30,7 +30,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
-  (0x2E20AC00) sub3_noq groups are covered. The vector shift-by-immediate
+  (0x2E20AC00) sub3_noq groups are covered. TBL/TBX all four forms
+  (TBL1 0x0E000000, TBL2 0x0E002000, TBX1 0x0E001000, TBX2 0x0E003000;
+  op2=bit12, L=bit13) are in interp — GCC lowers `vextq_u8` to TBL2 +
+  `ins v.b[i], v.b[j]` index building. INS (element, vector) shares the
+  EXT prefix `(op & 0xBFE00000) == 0x2E000000`; distinguish by bit10
+  (INS=1, EXT=0). RBIT/NOT/CNT all collapse to sub2 0x0E205800 — RBIT is
+  size=1, NOT is U=1; RBIT bit-reverses per byte. Vector FCVTZS/FCVTZU
+  share sub3 with ABS/NEG (0x0E20B800/0x2E20B800) but set bit16 (0x10000);
+  FCVTZU clamps negatives to 0. The vector shift-by-immediate
   family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI) is native in the JIT (AVX2
   VEX 256-bit, `BIFROST_NO_AVX2` disables; SSE2 128-bit fallback; esize=1
   and 64-bit SSRA via CALL_INTERP). USRA masks to 0x2F001400 — do not
