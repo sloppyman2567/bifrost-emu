@@ -14,6 +14,7 @@ their current status under both the frostJIT (default) and interpreter
 | frostJIT (quick `make check-quick`) | 181 | 181 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
 | Interpreter (`./bifrost-emu --no-jit`) | 186 | 186 | 0 | Same conditions as JIT row |
 | `make check-quick` | 181 | 181 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
+| `./scripts/run_tests.sh --test-all` | **191** | **191** | 0 | Everything incl. interactive (downloads real-world binaries too) |
 
 **191 test programs** are defined in `scripts/run_tests.sh` across eight
 categories (see table below). The default `make check` suite runs **186** of
@@ -21,6 +22,8 @@ them (the 5 interactive tests need `--interactive`) and reports
 **186 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
 With `make check-quick`, benchmarks are skipped and the suite reports
 **181 pass / 0 fail**.
+`./scripts/run_tests.sh --test-all` runs **all 191** (also downloading any
+missing real-world binaries) and reports **191 pass / 0 fail**.
 
 ### Test categories
 
@@ -32,8 +35,8 @@ With `make check-quick`, benchmarks are skipped and the suite reports
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
 | Dynamic | 14 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| Interactive | 5 | `test/` + `ctest_real/` — interactive/REPL tests (echo, repl, cat, sh, fgets), run only with `--interactive` |
-| **Total** | **191** | 186 run by default; interactive (5) and benchmarks (5) excluded with `--quick` → 181 |
+| Interactive | 5 | `test/` + `ctest_real/` — REPL/stdin tests (echo, repl, cat, sh, fgets), run with `--interactive` or `--test-all` |
+| **Total** | **191** | 186 run by default; 181 with `--quick`; 191 with `--test-all` |
 
 ### Running the tests
 
@@ -42,6 +45,7 @@ make check              # run all tests (JIT default, colorized summary)
 make check-quick        # skip slow benchmarks
 make check-nojit        # run under interpreter (--no-jit)
 make check-fwd          # run with BIFROST_ENABLE_FWD=1
+./scripts/run_tests.sh --test-all   # download real-world binaries + run all 191 tests
 make check ARGS='--toybox'      # only toybox tests
 make check ARGS='--filter md5'  # only tests matching "md5"
 ./scripts/run_tests.sh --help   # see all options

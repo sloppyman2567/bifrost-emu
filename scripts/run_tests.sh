@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 175 tests
+#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 191 tests (incl. interactive)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -82,7 +82,7 @@ while [ $# -gt 0 ]; do
         --quick)        QUICK=1 ;;
         --filter)       FILTER="$2"; shift ;;
         --filter=*)     FILTER="${1#--filter=}" ;;
-        --test-all)     DOWNLOAD_REALWORLD=1 ;;
+        --test-all)     DOWNLOAD_REALWORLD=1; RUN_INTERACTIVE=1 ;;
         --help|-h)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -98,8 +98,10 @@ done
 # ── --test-all: download real-world binaries ──────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
-# After download, runs the full 175-test suite with 0 expected failures
-# (assuming rootfs is set up — otherwise the 12 dynamic tests still skip).
+# Also opts into the interactive tests (--interactive), so the full set of
+# 191 test programs runs — every category including REPL/stdin tests.
+# After download, runs the full 191-test suite with 0 expected failures
+# (assuming rootfs is set up — otherwise the 14 dynamic tests still skip).
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -137,7 +139,8 @@ if [ "$DOWNLOAD_REALWORLD" = "1" ]; then
 fi
 
 if [ "$RUN_ALL" = "1" ]; then
-    RUN_UNIT=1; RUN_INTEGRATION=1; RUN_INTERACTIVE=0; RUN_TOYBOX=1
+    RUN_UNIT=1; RUN_INTEGRATION=1; RUN_TOYBOX=1
+    # RUN_INTERACTIVE keeps its default (0) unless --test-all set it.
     RUN_REALWORLD=1
     [ "$QUICK" = "0" ] && RUN_BENCH=1
     # Dynamic tests require rootfs + toolchains; auto-enable if present.
@@ -452,9 +455,9 @@ DYNAMIC_TESTS=(
 INTERACTIVE_TESTS=(
     "echo|test/echo.elf|q\n|5|echo>"
     "repl|test/repl.elf|q\n|5"
-    "cat|test/cat.elf|/etc/hostname|5"
+    "cat|test/cat.elf /etc/hostname||5"
     "sh|ctest_real/sh.elf|exit\n|10"
-    "fgets_test|ctest_real/fgets_test.elf||5"
+    "fgets_test|ctest_real/fgets_test.elf|hello\n|5|got: \[hello"
 )
 
 # Toybox integration tests
