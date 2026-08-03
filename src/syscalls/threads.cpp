@@ -413,12 +413,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // We zero out the pages in the mmap_alloc region. This
             // clears stale heap data, malloc locks, and thread structures.
             // The new binary's musl will see zeroed memory and initialize
-            // fresh. We don't zero the stack (at 0x8000000000) or the
+            // fresh. We don't zero the stack (at Memory::STACK_TOP) or the
             // binary's own PT_LOAD segments (below 0x40000000).
             {
                 auto allocs = mem_.allocations_snapshot();
                 for (auto& [addr, size] : allocs) {
-                    if (addr >= 0x40000000ULL && addr < 0x8000000000ULL) {
+                    if (addr >= Memory::MMAP_BASE_MIN &&
+                        addr < Memory::STACK_TOP) {
                         // Zero out the pages at this allocation.
                         try {
                             std::vector<uint8_t> zeros(size, 0);
@@ -435,7 +436,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // overwritten by the new binary's segments.
             auto info = ElfLoader::load(mem_, elf_data);
             // Set up a new initial stack.
-            const uint64_t STACK_TOP = 0x8000000000ULL;
+            const uint64_t STACK_TOP = Memory::STACK_TOP;
             // The stack is already mapped from the parent; just reset SP.
             uint64_t sp = STACK_TOP;
             // Push argv strings.

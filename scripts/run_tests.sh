@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 191 tests (incl. interactive)
+#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 193 tests (incl. interactive)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -20,16 +20,18 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (175 total standard):
-#   Unit         39  — ctest/*.elf focused JIT regression tests
-#   Integration  54  — ctest_real/*.elf + test/*.elf real programs
+# Test count breakdown (188 total standard):
+#   Unit         40  — ctest/*.elf focused JIT regression tests
+#   Integration  64  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
 #                      (30 busybox + 19 toybox + 7 dynamic glibc)
-#   Dynamic      12  — dynamically-linked musl + glibc tests (need rootfs)
+#   Dynamic      14  — dynamically-linked musl + glibc tests (need rootfs)
 #   Benchmarks    5  — performance (included in standard suite)
+#   Interactive   5  — visual/stdin REPL tests (--test-all only)
 #
-# Standard suite = 175 tests. Quick suite = 170 (skip benchmarks).
+# Standard suite = 188 tests. Quick suite = 183 (skip benchmarks).
+# Full suite (--test-all, with interactive) = 193 tests.
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -99,8 +101,8 @@ done
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
 # Also opts into the interactive tests (--interactive), so the full set of
-# 191 test programs runs — every category including REPL/stdin tests.
-# After download, runs the full 191-test suite with 0 expected failures
+# 193 test programs runs — every category including REPL/stdin tests.
+# After download, runs the full 193-test suite with 0 expected failures
 # (assuming rootfs is set up — otherwise the 14 dynamic tests still skip).
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
@@ -183,7 +185,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 175 tests across 7 categories.
+# Standard suite = 188 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(

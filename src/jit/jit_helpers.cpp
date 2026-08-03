@@ -83,6 +83,18 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
         evict_vreg(31);
     }
+    // ── Vector cache guard ──────────────────────────────────────────────
+    // jit_interp_step is a real host function call; per the SysV ABI all
+    // XMM0-15 are caller-saved and would clobber the guest vectors pinned
+    // in XMM3-15. Write them back to cpu.v_lo/v_hi before the call and
+    // reload them after. In a cache-active block the interp call is always
+    // a GPR-only op (every vector op has a cached fast path), so the
+    // writeback+reload round-trip is lossless — and it also makes any
+    // future escaped-SIMD interp call safe (the reload picks up whatever
+    // the interpreter wrote to cpu.v_lo/v_hi).
+    if (vec_cache_active_) {
+        vec_cache_writeback_all();
+    }
     emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
     emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup needed)
     // Set cpu.pc = arm_pc.
@@ -104,6 +116,9 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // STORE_REG would still hold the OLD value. After the interpreter
     // call, we must reload everything from cpu.regs[] to be safe.
     invalidate_all_vregs();
+    if (vec_cache_active_) {
+        vec_emit_prologue_loads();
+    }
     if (!ends_block) {
         uint64_t next_pc = arm_pc + 4;
         if (next_pc <= 0xFFFFFFFFULL) {

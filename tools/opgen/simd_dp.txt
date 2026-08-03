@@ -1,0 +1,66 @@
+# simd_dp.txt — SIMD data-processing decode/classify spec.
+# GENERATOR INPUT (single source of truth). Format:
+#   NAME  MASK            MATCH           FAMILY    IRSUB   GUARD
+# MASK is ANDed onto the raw op; result must equal MATCH. IRSUB is the
+# per-family semantic sub-opcode consumers emit/execute. GUARD is a C++
+# boolean expr with `op` (uint32_t) and `size`/`Q`/`U`. First match wins.
+#
+# Family -> IRSUB meaning:
+#   INT_ARITH = SIMD_ARITH op (0..6 = ADD/SUB/MUL/UMIN/UMAX/SMIN/SMAX)
+#   INT_CMP   = SIMD_CMP op   (0 = CMEQ)
+#   LOGIC     = SIMD_LOGICAL op (0..4 = AND/ORR/EOR/BIC/ORN); native Q=1
+#   FP        = SIMD_FP op (0..7 FADD..FMINNM, 0xB FMULX, 0xD FABD,
+#                            0xE FMLA, 0xF FMLS)
+#   SHIFT     = shift kind (0..6 = SHL/USHR/SSHR/USRA/SSRA/SLI/SRI)
+#   DUP       = GPR->vector DUP (native .2d only)
+#   CRYPTO    = AES_CRYPTO sub (0..3 AESE..AESIMC, 4 PMULL, 5 PMULL2)
+
+# ── Integer SIMD_ARITH (mask strips Q(30); matches ir_translate_fp.cpp) ──
+ADD     0xBF20FC00   0x0E208400   INT_ARITH   0   -
+SUB     0xBF20FC00   0x2E208400   INT_ARITH   1   -
+MUL     0xBF20FC00   0x0E209C00   INT_ARITH   2   size != 3
+UMIN    0xBF20FC00   0x2E206C00   INT_ARITH   3   -
+UMAX    0xBF20FC00   0x2E206400   INT_ARITH   4   -
+SMIN    0xBF20FC00   0x0E206C00   INT_ARITH   5   -
+SMAX    0xBF20FC00   0x0E206400   INT_ARITH   6   -
+
+# ── Compare (CMEQ ==) ────────────────────────────────────────────────────
+CMEQ    0xBF20FC00   0x2E208C00   INT_CMP     0   -
+
+# ── Bitwise logical 3-register (native Q=1) ──────────────────────────────
+AND     0xBFE0FC00   0x0E201C00   LOGIC     0   Q
+ORR     0xBFE0FC00   0x0EA01C00   LOGIC     1   Q
+EOR     0xBFE0FC00   0x2E201C00   LOGIC     2   Q
+BIC     0xBFE0FC00   0x0E601C00   LOGIC     3   Q
+ORN     0xBFE0FC00   0x0EE01C00   LOGIC     4   Q
+
+# ── Vector FP 2-source / FMA (mask FFFE..FC & ~Q30 & ~bit22) ─────────────
+FADD    0xBFA0FC00   0x0E20D400   FP        0     -
+FSUB    0xBFA0FC00   0x0EA0D400   FP        1     -
+FMUL    0xBFA0FC00   0x2E20DC00   FP        2     -
+FDIV    0xBFA0FC00   0x2E20FC00   FP        3     -
+FMAX    0xBFA0FC00   0x0E20F400   FP        4     -
+FMIN    0xBFA0FC00   0x0EA0F400   FP        5     -
+FMAXNM  0xBFA0FC00   0x0E20C400   FP        6     -
+FMINNM  0xBFA0FC00   0x0EA0C400   FP        7     -
+FMULX   0xBFA0FC00   0x0E20DC00   FP        0xB   -
+FABD    0xBFA0FC00   0x2EA0D400   FP        0xD   -
+FMLA    0xBFA0FC00   0x0E20CC00   FP        0xE   -
+FMLS    0xBFA0FC00   0x0EA0CC00   FP        0xF   -
+
+# ── Vector shift-by-immediate (sm mask 0xBF00FC00) ───────────────────────
+SHL     0xBF00FC00   0x0F005400   SHIFT     0   -
+USHR    0xBF00FC00   0x2F000400   SHIFT     1   -
+SSHR    0xBF00FC00   0x0F000400   SHIFT     2   -
+USRA    0xBF00FC00   0x2F001400   SHIFT     3   -
+SSRA    0xBF00FC00   0x0F001400   SHIFT     4   -
+SLI     0xBF00FC00   0x2F005400   SHIFT     5   -
+SRI     0xBF00FC00   0x2F004400   SHIFT     6   -
+
+# ── GPR->vector DUP (native .2d) ─────────────────────────────────────────
+DUP     0xBFE0FC00   0x0E000C00   DUP       0   ((op >> 16) & 0x1F) == 0x08 && Q
+
+# ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[11:10]) ──────
+AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -
+PMULL   0xFFE0FC00   0x4E60E000   CRYPTO     4   -
+PMULL2  0xFFE0FC00   0x4EE0E000   CRYPTO     5   -

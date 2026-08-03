@@ -88,6 +88,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             // Taken path: store PC, restore regs, ret (no chain).
+            // Write back dirty cached vectors first — the dispatcher (and any
+            // non-cache block it runs next) reads cpu.v_lo/v_hi, not XMM.
+            vec_cache_writeback_all();
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_reg(RSI, EMU_REG);
@@ -141,6 +144,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             // Taken path: store PC, restore regs, ret (no chain).
+            vec_cache_writeback_all();
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);
             emit_mov_reg(RSI, EMU_REG);
@@ -245,6 +249,8 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
             // Emit taken-path epilogue: store RAX to cpu.pc, restore regs, ret.
             // This ret is NOT a chain slot — it always returns to the dispatcher.
+            // Write back dirty cached vectors first (see BRCOND_ZERO above).
+            vec_cache_writeback_all();
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher)
             emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14

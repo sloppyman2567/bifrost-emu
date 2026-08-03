@@ -128,15 +128,15 @@ int main(void) {
     CHECK(test_fmsub_d(1.5, 2.5, 4.0) == 0.25, "fmsub_d_frac");
     CHECK(test_fmsub_d(2.0, 3.0, 5.0) == -1.0, "fmsub_d_neg_result");
 
-    /* FNMADD: -a*b + c = c - a*b (same as FMSUB numerically) */
-    CHECK(test_fnmadd_d(2.0, 3.0, 10.0) == 4.0, "fnmadd_d_basic");
-    CHECK(test_fnmadd_d(1.5, 2.5, 4.0) == 0.25, "fnmadd_d_frac");
-    CHECK(test_fnmadd_d(-2.0, 3.0, 10.0) == 16.0, "fnmadd_d_neg_a");
+    /* FNMADD: -(a*b + c) = -(2.0*3.0 + 10.0) = -16.0 */
+    CHECK(test_fnmadd_d(2.0, 3.0, 10.0) == -16.0, "fnmadd_d_basic");
+    CHECK(test_fnmadd_d(1.5, 2.5, 4.0) == -7.75, "fnmadd_d_frac");
+    CHECK(test_fnmadd_d(-2.0, 3.0, 10.0) == -4.0, "fnmadd_d_neg_a");
 
-    /* FNMSUB: -a*b - c = -(a*b + c) */
-    CHECK(test_fnmsub_d(2.0, 3.0, 1.0) == -7.0, "fnmsub_d_basic");
-    CHECK(test_fnmsub_d(1.5, 2.5, 0.25) == -4.0, "fnmsub_d_frac");
-    CHECK(test_fnmsub_d(-2.0, 3.0, 1.0) == 5.0, "fnmsub_d_neg_a");
+    /* FNMSUB: a*b - c = 2.0*3.0 - 1.0 = 5.0 */
+    CHECK(test_fnmsub_d(2.0, 3.0, 1.0) == 5.0, "fnmsub_d_basic");
+    CHECK(test_fnmsub_d(1.5, 2.5, 0.25) == 3.5, "fnmsub_d_frac");
+    CHECK(test_fnmsub_d(-2.0, 3.0, 1.0) == -7.0, "fnmsub_d_neg_a");
 
     /* ── Single-precision FMA tests ─────────────────────────────── */
     CHECK(test_fmadd_s(2.0f, 3.0f, 1.0f) == 7.0f, "fmadd_s_basic");
@@ -145,11 +145,11 @@ int main(void) {
     CHECK(test_fmsub_s(2.0f, 3.0f, 10.0f) == 4.0f, "fmsub_s_basic");
     CHECK(test_fmsub_s(1.5f, 2.5f, 4.0f) == 0.25f, "fmsub_s_frac");
 
-    CHECK(test_fnmadd_s(2.0f, 3.0f, 10.0f) == 4.0f, "fnmadd_s_basic");
-    CHECK(test_fnmadd_s(1.5f, 2.5f, 4.0f) == 0.25f, "fnmadd_s_frac");
+    CHECK(test_fnmadd_s(2.0f, 3.0f, 10.0f) == -16.0f, "fnmadd_s_basic");
+    CHECK(test_fnmadd_s(1.5f, 2.5f, 4.0f) == -7.75f, "fnmadd_s_frac");
 
-    CHECK(test_fnmsub_s(2.0f, 3.0f, 1.0f) == -7.0f, "fnmsub_s_basic");
-    CHECK(test_fnmsub_s(1.5f, 2.5f, 0.25f) == -4.0f, "fnmsub_s_frac");
+    CHECK(test_fnmsub_s(2.0f, 3.0f, 1.0f) == 5.0f, "fnmsub_s_basic");
+    CHECK(test_fnmsub_s(1.5f, 2.5f, 0.25f) == 3.5f, "fnmsub_s_frac");
 
     /* ── FMA in a loop (accumulation) ──────────────────────────── */
     /* This catches register allocator bugs — the JIT must keep

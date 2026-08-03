@@ -2464,7 +2464,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // FMOV (general ↔ FP, 64-bit)
             // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
             // Without this, SCVTF (0x9E62xxxx) matches the FMOV mask.
-            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
+            // Bit[17]=1 additionally excludes FCVTAS (0x9E640020, bit17=0),
+            // which would otherwise be misdecoded as a raw GPR↔FP bit copy.
+            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))
+                && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn]; cpu.v_hi[rd] = 0; }
                 else       { cpu.regs[rd] = cpu.v_lo[rn]; }
@@ -2480,7 +2483,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // __floatscan inf/nan detection (strtod("-inf") returned
             // -nan) because the sign computation does `scvtf s1, w23`
             // with w23=-1 and expects s1=-1.0f.
-            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))) {
+            // Bit[17]=1 additionally excludes FCVTAS (0x1E240000, bit17=0),
+            // which would otherwise be misdecoded as a raw GPR↔FP bit copy.
+            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))
+                && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) { cpu.v_lo[rd] = cpu.regs[rn] & 0xFFFFFFFF; cpu.v_hi[rd] = 0; }
                 else       { cpu.regs[rd] = cpu.v_lo[rn] & 0xFFFFFFFF; }
@@ -2696,37 +2702,41 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // FCVT{N,P,M,Z,A}{S,U} — FP to int with explicit rounding mode.
-            // Encoding: 0x1E280000 (FCVTNS) .. 0x1E390000 (FCVTZU).
+            // Encoding (integer variant, bit 21 = 1):
+            //   0x1E200000 = FCVTNS, 0x1E280000 = FCVTPS,
+            //   0x1E300000 = FCVTMS, 0x1E240000 = FCVTAS,
+            //   0x1E380000 = FCVTZS/FCVTZU.
             // The rounding mode is in bits[20:19]:
             //   00 = N (nearest even), 01 = P (+inf), 10 = M (-inf),
-            //   11 = Z (zero); bit[16]=1 selects the unsigned variant.
-            // Mask 0x7F3E0000 excludes bit 16 so both signed and
-            // unsigned variants of N/P/M/A match here. (The Z variant
-            // also matches here, but is explicitly dispatched to the
-            // FCVTZS/FCVTZU path below for clarity; the result is the
-            // same either way since rmode=3 → std::trunc.)
-            if ((op & 0x7F3E0000) == 0x1E280000) {
-                // FCVTNS/FCVTNM/FCVTNP/FCVTNU (and FCVTAS via rmode=0b1100)
-                uint8_t rmode = (op >> 19) & 0x7;  // bits 21:19
+            //   11 = Z (zero); bit[18]=1 selects A (nearest, ties away
+            //   from zero). bit[16]=1 selects the unsigned variant.
+            // Mask 0x7F220000 leaves bits[20:19], bit 18 and bit 16 free
+            // so every rounding/unsigned variant matches; the old mask
+            // (0x7F3E0000 == 0x1E280000) only matched FCVTPS, silently
+            // NOPing FCVTNS/FCVTMS/FCVTAS. bits[15:10]==0 excludes FCSEL
+            // (0x1E200C00, bits[13:10]=1100), which otherwise collides.
+            // The fixed-point variant (bit 21 = 0) is dispatched below.
+            if ((op & 0x7F220000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0) {
+                bool is_away = (op >> 18) & 1;       // FCVTAS/FCVTAU
+                uint8_t rmode = (op >> 19) & 0x3;    // bits 20:19: 0=N,1=P,2=M,3=Z
                 bool is_unsigned = ((op >> 16) & 1);  // bit 16 = U
                 bool is_64bit = sf_val;
-                // rmode: 0=N, 1=P, 2=M, 3=Z, 4=A
                 auto round_d = [&](double v) -> int64_t {
+                    if (is_away) return static_cast<int64_t>(std::round(v));  // A: ties away from zero
                     switch (rmode) {
                         case 0: return static_cast<int64_t>(std::llrint(v));   // N
                         case 1: return static_cast<int64_t>(std::ceil(v));     // P
                         case 2: return static_cast<int64_t>(std::floor(v));    // M
-                        case 3: return static_cast<int64_t>(std::trunc(v));    // Z
-                        default: return static_cast<int64_t>(std::llrint(v));  // A
+                        default: return static_cast<int64_t>(std::trunc(v));   // Z
                     }
                 };
                 auto round_s = [&](float v) -> int64_t {
+                    if (is_away) return static_cast<int64_t>(std::roundf(v));
                     switch (rmode) {
                         case 0: return static_cast<int64_t>(std::llrintf(v));
                         case 1: return static_cast<int64_t>(std::ceilf(v));
                         case 2: return static_cast<int64_t>(std::floorf(v));
-                        case 3: return static_cast<int64_t>(std::truncf(v));
-                        default: return static_cast<int64_t>(std::llrintf(v));
+                        default: return static_cast<int64_t>(std::truncf(v));
                     }
                 };
                 if (ftype) {
@@ -2856,8 +2866,13 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // SCVTF/UCVTF (integer variant)
-            // Mask 0x7F3E0000 with constant 0x1E220000 requires bit 21 = 1.
-            if ((op & 0x7F3E0000) == 0x1E220000) {  // SCVTF/UCVTF
+            // Mask 0x7F3EFC00 with constant 0x1E220000 requires bit 21 = 1
+            // and bits[15:10] == 0. The 0xFC00 bits are essential: FCSEL
+            // (0x1E220C01, bits[15:10] = 0b0011) matches the old loose mask
+            // 0x7F3E0000 and was mis-executed as SCVTF (int→FP), converting
+            // the hash GPR into an FP register. This broke grad3's
+            // `fcsel s1, s0, s2, eq` (hash=151 → s1 became 151.0f).
+            if ((op & 0x7F3EFC00) == 0x1E220000) {  // SCVTF/UCVTF
                 bool is_unsigned = ((op >> 16) & 1);
                 bool is_64bit = sf_val;
                 if (ftype) {
@@ -3002,8 +3017,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Per ARM ARM, the four FMA variants are:
             //   FMADD  (o2=0, o1=0): Vd = Va + Vn*Vm       = c + a*b
             //   FMSUB  (o2=0, o1=1): Vd = Va - Vn*Vm       = c - a*b
-            //   FNMADD (o2=1, o1=0): Vd = -Vn*Vm + Va      = -a*b + c
-            //   FNMSUB (o2=1, o1=1): Vd = -Vn*Vm - Va      = -a*b - c
+            //   FNMADD (o2=1, o1=0): Vd = -Va - Vn*Vm      = -c - a*b
+            //   FNMSUB (o2=1, o1=1): Vd = -Va + Vn*Vm      = a*b - c
             //
             // We model FMA3 fusion semantics by computing the product
             // and add/sub in a single C++ expression. C++ does NOT
@@ -3026,20 +3041,20 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                            c = read_fp_d(cpu, ra);
                     double prod = a * b;
                     double r;
-                    if      (!neg && !sub) r = prod + c;        // FMADD
-                    else if (!neg &&  sub) r = c - prod;        // FMSUB
-                    else if ( neg && !sub) r = -prod + c;       // FNMADD
-                    else                   r = -prod - c;       // FNMSUB
+                    if      (!neg && !sub) r = prod + c;        // FMADD  = Sa + Sn*Sm
+                    else if (!neg &&  sub) r = c - prod;        // FMSUB  = Sa - Sn*Sm
+                    else if ( neg && !sub) r = -prod - c;       // FNMADD = -Sa - Sn*Sm
+                    else                   r = prod - c;       // FNMSUB = -Sa + Sn*Sm
                     write_fp_d(cpu, rd, r);
                 } else {
                     float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm),
                           c = read_fp_s(cpu, ra);
                     float prod = a * b;
                     float r;
-                    if      (!neg && !sub) r = prod + c;        // FMADD
-                    else if (!neg &&  sub) r = c - prod;        // FMSUB
-                    else if ( neg && !sub) r = -prod + c;       // FNMADD
-                    else                   r = -prod - c;       // FNMSUB
+                    if      (!neg && !sub) r = prod + c;        // FMADD  = Sa + Sn*Sm
+                    else if (!neg &&  sub) r = c - prod;        // FMSUB  = Sa - Sn*Sm
+                    else if ( neg && !sub) r = -prod - c;       // FNMADD = -Sa - Sn*Sm
+                    else                   r = prod - c;       // FNMSUB = -Sa + Sn*Sm
                     write_fp_s(cpu, rd, r);
                 }
                 return;

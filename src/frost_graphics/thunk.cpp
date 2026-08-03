@@ -84,6 +84,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
@@ -188,6 +189,10 @@ struct GraphicThunkImpl {
     std::mutex mu;
     // v1.5.1.alpha: GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
+    // v1.5.2.alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
+    // pixel buffer can be bounced at its full size (pitch * height)
+    // instead of the 64 KiB default (which truncates larger frames).
+    std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -567,6 +572,34 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         } else if (entry.name == "glBufferSubData" && idx == 3) {
             uint64_t sz = args[2];
             if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+        } else if ((entry.name == "glTexImage2D" ||
+                    entry.name == "glTexSubImage2D") && idx == 8) {
+            // pixels buffer: width * height * bytes-per-pixel from
+            // format/type. Host reads exactly this much.
+            uint64_t w = args[3], h = args[4];
+            uint64_t fmt = args[6], type = args[7];
+            uint64_t channels = 1;
+            switch (fmt) {
+                case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
+                case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
+                case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
+                default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
+            }
+            uint64_t type_sz = 1;
+            switch (type) {
+                case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
+                case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
+                default: break;                                  // UNSIGNED_BYTE etc.
+            }
+            uint64_t sz = w * h * channels * type_sz;
+            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+        } else if (entry.name == "SDL_UpdateTexture" && idx == 2) {
+            // pixels buffer: pitch (args[3]) * texture height.
+            auto it = impl_->sdl_tex_sizes_.find(args[0]);
+            if (it != impl_->sdl_tex_sizes_.end()) {
+                uint64_t sz = args[3] * it->second.second;
+                if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
         }
         bounce->resize(kBounce);
         try {
@@ -593,21 +626,75 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // v1.5.2.alpha: glVertexAttribPointer / glDrawElements take a *byte
+    // offset* into the bound buffer (must NOT be translated) when a
+    // buffer is bound, but a real guest pointer for client-side vertex /
+    // index arrays (must be translated). GLStateTracker knows the binding.
+    if (impl_->gl_state_tracker_) {
+        if (entry.name == "glVertexAttribPointer" ||
+            entry.name == "glVertexAttribIPointer") {
+            if (impl_->gl_state_tracker_->array_buffer_binding() == 0 &&
+                args[5] != 0) {
+                translate_ptr(args[5], 5, &bounce_bufs[5],
+                              &bounce_guest[5], &bounce_wb[5]);
+            }
+        } else if (entry.name == "glDrawElements") {
+            if (impl_->gl_state_tracker_->element_array_buffer_binding() == 0 &&
+                args[3] != 0) {
+                translate_ptr(args[3], 3, &bounce_bufs[3],
+                              &bounce_guest[3], &bounce_wb[3]);
+            }
+        }
+    }
+
     // glShaderSource(shader, count, const char* const* strings, const int* len)
     if (entry.flags & THUNK_SHADER_SOURCE) {
         int count = static_cast<int>(args[1]);
         if (count < 0) count = 0;
         if (count > 64) count = 64;
         const char* host_strs[64];
+        std::vector<std::vector<uint8_t>> bounces;
+        bounces.reserve(static_cast<size_t>(count));
         // args[2] already translated to host pointer to guest pointer array
         const uint64_t* guest_arr = reinterpret_cast<const uint64_t*>(args[2]);
+        // args[3] (guest GLint* lengths, may be NULL) is already translated.
+        const int* lens = args[3] ? reinterpret_cast<const int*>(args[3]) : nullptr;
         for (int i = 0; i < count; i++) {
             uint64_t gp = guest_arr ? guest_arr[i] : 0;
-            uint8_t* hp = (gp && impl_->mem) ? impl_->mem->guest_to_host_ptr(gp)
-                                             : nullptr;
-            host_strs[i] = hp ? reinterpret_cast<const char*>(hp) : "";
+            if (gp == 0) { host_strs[i] = ""; continue; }
+            uint8_t* hp = impl_->mem ? impl_->mem->guest_to_host_ptr(gp) : nullptr;
+            if (hp) { host_strs[i] = reinterpret_cast<const char*>(hp); continue; }
+            // Heap/stack string above the 4 GiB direct window: bounce it.
+            size_t n = (lens && lens[i] > 0)
+                           ? static_cast<size_t>(lens[i])
+                           : (lens ? 0 : 65536);
+            if (n == 0 && lens && lens[i] <= 0) n = 0;
+            if (n == 0) {
+                // Null-terminated string; scan for the terminator.
+                constexpr size_t kMaxStr = 1 << 20;
+                for (; n < kMaxStr; n++) {
+                    uint8_t c = 0;
+                    try { impl_->mem->read(gp + n, &c, 1); } catch (...) { break; }
+                    if (c == 0) break;
+                }
+            }
+            if (n > (16ull << 20)) n = 16ull << 20;
+            bounces.emplace_back(n + 1, 0);
+            try {
+                impl_->mem->read(gp, bounces.back().data(), n);
+            } catch (...) {
+                bounces.back().assign(n + 1, 0);
+            }
+            host_strs[i] = reinterpret_cast<const char*>(bounces.back().data());
         }
         using Fn = void (*)(uint64_t, int, const char* const*, const int*);
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] shaderSource: shader=0x%llx count=%d "
+                    "str0='%.60s' len0=%d\n",
+                    static_cast<unsigned long long>(args[0]), count,
+                    (host_strs[0] ? host_strs[0] : ""),
+                    (lens ? lens[0] : -1));
+        }
         reinterpret_cast<Fn>(entry.host_fn)(
             args[0], count, host_strs,
             args[3] ? reinterpret_cast<const int*>(args[3]) : nullptr);
@@ -686,12 +773,41 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // Track SDL_Texture* dimensions for SDL_UpdateTexture bounce sizing.
+    if (entry.name == "SDL_CreateTexture") {
+        impl_->sdl_tex_sizes_[ret] = {static_cast<uint32_t>(args[3]),
+                                      static_cast<uint32_t>(args[4])};
+    } else if (entry.name == "SDL_DestroyTexture") {
+        impl_->sdl_tex_sizes_.erase(args[0]);
+    }
+
     if (entry.flags & THUNK_RET_STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
     cpu.regs[0] = ret;
     if (impl_->gl_state_tracker_) {
         impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);
+    }
+    // Lightweight frame counter: print every 60 present/swap calls when
+    // BIFROST_FRAME_TRACE=1 (avoids the heavy per-call dispatch trace).
+    if (getenv("BIFROST_FRAME_TRACE") &&
+        (entry.name == "glfwSwapBuffers" || entry.name == "SDL_RenderPresent")) {
+        static uint64_t frame_count = 0;
+        static uint64_t t0 = 0;
+        auto now_us = []() -> uint64_t {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        };
+        if (frame_count == 0) t0 = now_us();
+        if (++frame_count % 5 == 0) {
+            uint64_t dt = now_us() - t0;
+            fprintf(stderr, "[frame] %s: %llu frames in %.2fs (%.2f fps)\n",
+                    entry.name.c_str(),
+                    static_cast<unsigned long long>(frame_count),
+                    dt / 1e6,
+                    frame_count * 1e6 / static_cast<double>(dt));
+        }
     }
     return 0;
 }
@@ -791,7 +907,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_PTR(glColorPointer, 0x08);   // arg 3: const void *pointer
     REG_GL_PTR(glTexCoordPointer, 0x08);// arg 3: const void *pointer
     REG_GL(glDrawArrays);
-    REG_GL_PTR(glDrawElements, 0x10);   // arg 4: const void *indices
+    REG_GL(glDrawElements);             // indices: VBO offset or client ptr
     REG_GL_EX(glGetString, 0, 0, 0, THUNK_RET_STRING);
     REG_GL_PTR(glGetIntegerv, 0x02);    // arg 1: GLint *params
     REG_GL(glGenLists);
@@ -814,7 +930,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL(glBlendEquationSeparate);
     REG_GL(glHint);
     REG_GL(glPixelStorei);
-    REG_GL_PTR(glReadPixels, 0x80);     // arg 7: void *pixels
+    REG_GL_PTR(glReadPixels, 0x40);     // arg 6: void *pixels
     REG_GL(glDrawBuffer);
     REG_GL(glClearDepth);
     REG_GL(glClearStencil);
@@ -858,11 +974,35 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_PTR(glUniform2fv, 0x04);
     REG_GL_PTR(glUniform3fv, 0x04);
     REG_GL_PTR(glUniform4fv, 0x04);
-    REG_GL_PTR(glUniformMatrix3fv, 0x20);
-    REG_GL_PTR(glUniformMatrix4fv, 0x20); // arg 3: const GLfloat *value
+    REG_GL_PTR(glUniformMatrix3fv, 0x08);
+    REG_GL_PTR(glUniformMatrix4fv, 0x08); // arg 3: const GLfloat *value
     REG_GL(glEnableVertexAttribArray);
     REG_GL(glDisableVertexAttribArray);
-    REG_GL_PTR(glVertexAttribPointer, 0x80); // arg 5: const void *pointer
+    // v1.5.2.alpha: last arg is a VBO byte offset when a buffer is bound,
+    // a client vertex-array pointer otherwise — handled in dispatch.
+    REG_GL(glVertexAttribPointer);
+    // v1.5.2.alpha: vertex array objects (core GL 3.0, required by most
+    // modern GL apps before glVertexAttribPointer is legal).
+    REG_GL_PTR(glGenVertexArrays, 0x02);
+    REG_GL(glBindVertexArray);
+    REG_GL_PTR(glDeleteVertexArrays, 0x02);
+    REG_GL(glIsVertexArray);
+    // Integer attribute pointers: offset into bound VBO (or client ptr).
+    REG_GL(glVertexAttribIPointer);
+    // Misc legacy/modern extras used by real games.
+    REG_GL(glPolygonMode);
+    // v1.5.2.alpha: remaining uniform variants (integer + iv + mat2).
+    REG_GL(glUniform2i);
+    REG_GL(glUniform3i);
+    REG_GL(glUniform4i);
+    REG_GL(glUniform1ui);
+    REG_GL_PTR(glUniform1iv, 0x04);
+    REG_GL_PTR(glUniform2iv, 0x04);
+    REG_GL_PTR(glUniform3iv, 0x04);
+    REG_GL_PTR(glUniform4iv, 0x04);
+    REG_GL_PTR(glUniformMatrix2fv, 0x08);  // arg 3: const GLfloat *value
+    REG_GL_PTR(glGetUniformiv, 0x04);     // arg 2: GLint *params
+    REG_GL_EX(glGetStringi, 0, 0, 0, THUNK_RET_STRING);
     REG_GL_PTR(glGetFloatv, 0x02);
     REG_GL_PTR(glGetBooleanv, 0x02);
 #if defined(BIFROST_THUNK_HAVE_GL)
@@ -894,7 +1034,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_PTR(glGenBuffers, 0x02);       // arg 1: GLuint *buffers
     REG_GL_PTR(glDeleteBuffers, 0x02);    // arg 1: const GLuint *buffers
     REG_GL(glBindBuffer);
-    REG_GL_PTR(glBufferData, 0x08);       // arg 3: const void *data
+    REG_GL_PTR(glBufferData, 0x04);       // arg 2: const void *data
     REG_GL_PTR(glBufferSubData, 0x08);    // arg 3: const void *data
     // FBOs.
     REG_GL_PTR(glGenFramebuffers, 0x02);
@@ -917,7 +1057,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GL_EX(glCompressedTexImage2D, (1u << 8), 1, 0, 0);
     // Drawing.
     REG_GL(glDrawArrays);
-    REG_GL_PTR(glDrawElements, 0x10);     // arg 4: const void *indices
+    REG_GL(glDrawElements);             // indices: VBO offset or client ptr
     // Blending.
     REG_GL(glBlendFunc);
     REG_GL(glBlendFuncSeparate);
@@ -1037,18 +1177,35 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES_PTR(glUniform2fv, 0x04);
     REG_GLES_PTR(glUniform3fv, 0x04);
     REG_GLES_PTR(glUniform4fv, 0x04);
-    REG_GLES_PTR(glUniformMatrix3fv, 0x20);
-    REG_GLES_PTR(glUniformMatrix4fv, 0x20);
+    REG_GLES_PTR(glUniformMatrix3fv, 0x08);
+    REG_GLES_PTR(glUniformMatrix4fv, 0x08);
     REG_GLES(glEnableVertexAttribArray);
     REG_GLES(glDisableVertexAttribArray);
-    REG_GLES_PTR(glVertexAttribPointer, 0x80);
+    REG_GLES(glVertexAttribPointer);    // VBO offset or client ptr (dispatch)
     REG_GLES_PTR(glGetFloatv, 0x02);
     REG_GLES_PTR(glGetBooleanv, 0x02);
+    // v1.5.2.alpha: VAOs + remaining uniform variants (GLES3 core).
+    REG_GLES_PTR(glGenVertexArrays, 0x02);
+    REG_GLES(glBindVertexArray);
+    REG_GLES_PTR(glDeleteVertexArrays, 0x02);
+    REG_GLES(glIsVertexArray);
+    REG_GLES(glVertexAttribIPointer);   // VBO offset or client ptr (dispatch)
+    REG_GLES(glUniform2i);
+    REG_GLES(glUniform3i);
+    REG_GLES(glUniform4i);
+    REG_GLES(glUniform1ui);
+    REG_GLES_PTR(glUniform1iv, 0x04);
+    REG_GLES_PTR(glUniform2iv, 0x04);
+    REG_GLES_PTR(glUniform3iv, 0x04);
+    REG_GLES_PTR(glUniform4iv, 0x04);
+    REG_GLES_PTR(glUniformMatrix2fv, 0x08);
+    REG_GLES_PTR(glGetUniformiv, 0x04);
+    REG_GLES_EX(glGetStringi, 0, 0, 0, THUNK_RET_STRING);
     // VBOs.
     REG_GLES_PTR(glGenBuffers, 0x02);
     REG_GLES_PTR(glDeleteBuffers, 0x02);
     REG_GLES(glBindBuffer);
-    REG_GLES_PTR(glBufferData, 0x08);
+    REG_GLES_PTR(glBufferData, 0x04);
     REG_GLES_PTR(glBufferSubData, 0x08);
     // FBOs.
     REG_GLES_PTR(glGenFramebuffers, 0x02);
@@ -1073,7 +1230,7 @@ void GraphicThunk::register_known_symbols_() {
     REG_GLES_EX(glTexSubImage2D, (1u << 8), 1, 0, 0);
     // Drawing.
     REG_GLES(glDrawArrays);
-    REG_GLES_PTR(glDrawElements, 0x10);
+    REG_GLES_PTR(glDrawElements, 0x00);
     // Blending.
     REG_GLES(glBlendFunc);
     REG_GLES(glBlendFuncSeparate);
@@ -1229,11 +1386,14 @@ void GraphicThunk::register_known_symbols_() {
     REG_SDL(SDL_SetRenderDrawColor);
     REG_SDL(SDL_RenderClear);
     REG_SDL(SDL_RenderPresent);
-    REG_SDL(SDL_RenderCopy);
+    // srcrect (arg2) + dstrect (arg3) are guest SDL_Rect* (nullable) —
+    // translate guest → host pointers.
+    REG_SDL_PTR(SDL_RenderCopy, 0x0C);
     REG_SDL(SDL_CreateTexture);
     REG_SDL(SDL_CreateTextureFromSurface);
     REG_SDL(SDL_DestroyTexture);
-    REG_SDL(SDL_UpdateTexture);
+    // rect (arg1, nullable) + pixels (arg2) are guest memory (texture upload).
+    REG_SDL_PTR(SDL_UpdateTexture, 0x06);
     REG_SDL(SDL_RenderSetViewport);
     REG_SDL(SDL_RenderSetLogicalSize);
     REG_SDL(SDL_SetRenderDrawBlendMode);
@@ -1275,6 +1435,104 @@ void GraphicThunk::register_known_symbols_() {
 #undef REG_SDL
 #undef REG_SDL_PTR
 #undef REG_SDL_EX
+
+    // ── libglfw.so.3 / libglfw.so ───────────────────────────────────
+    // v1.5.2.alpha: GLFW windowing backend. GLFW is callback-driven on
+    // the host, but guest callbacks can't be invoked by host code yet;
+    // the callback *setters* are stubbed (args ignored, return 0) so
+    // guest apps must poll (glfwGetKey / glfwGetCursorPos / …) instead.
+    // glfwGetProcAddress is wired into THUNK_GET_PROC so GLAD/glew-style
+    // loaders resolve GL entry points to guest trampolines.
+    const char* glfw_libs[] = {"libglfw.so.3", "libglfw.so"};
+#if defined(BIFROST_THUNK_HAVE_GL)
+    // Not linked into the emulator, so force-load it for dlsym(RTLD_DEFAULT).
+    {
+        void* h = dlopen("libglfw.so.3", RTLD_LAZY | RTLD_GLOBAL);
+        if (!h) h = dlopen("libglfw.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!h && getenv("BIFROST_THUNK_TRACE"))
+            fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
+    }
+    #define REG_GLFW(name) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : glfw_libs) register_function_(L, #name, p); \
+    } while(0)
+    #define REG_GLFW_PTR(name, ptrs) do { \
+        void* p = dlsym(RTLD_DEFAULT, #name); \
+        for (const char* L : glfw_libs) register_function_(L, #name, p, ptrs); \
+    } while(0)
+#else
+    #define REG_GLFW(name) do { \
+        for (const char* L : glfw_libs) register_function_(L, #name, nullptr); \
+    } while(0)
+    #define REG_GLFW_PTR(name, ptrs) do { \
+        for (const char* L : glfw_libs) register_function_(L, #name, nullptr, ptrs); \
+    } while(0)
+#endif
+    REG_GLFW(glfwInit);
+    REG_GLFW(glfwTerminate);
+    REG_GLFW(glfwGetVersion);
+    REG_GLFW(glfwWindowHint);
+    // title is arg 2 (monitor/share are opaque host handles, not ptrs).
+    REG_GLFW_PTR(glfwCreateWindow, 0x04);
+    REG_GLFW(glfwDestroyWindow);
+    REG_GLFW(glfwWindowShouldClose);
+    REG_GLFW(glfwSetWindowShouldClose);
+    REG_GLFW(glfwMakeContextCurrent);
+    REG_GLFW(glfwGetCurrentContext);
+    REG_GLFW(glfwSwapBuffers);
+    REG_GLFW(glfwSwapInterval);
+    REG_GLFW(glfwPollEvents);
+    REG_GLFW(glfwWaitEvents);
+    REG_GLFW(glfwGetTime);
+    REG_GLFW(glfwGetKey);
+    REG_GLFW(glfwGetMouseButton);
+    REG_GLFW_PTR(glfwGetCursorPos, 0x06);       // out double* x, y
+    REG_GLFW(glfwSetCursorPos);
+    REG_GLFW_PTR(glfwGetFramebufferSize, 0x06); // out int* w, h
+    REG_GLFW(glfwSetInputMode);
+    REG_GLFW(glfwGetInputMode);
+    REG_GLFW(glfwGetWindowSize);
+    REG_GLFW(glfwSetWindowTitle);
+    REG_GLFW(glfwGetWindowTitle);
+    REG_GLFW(glfwFocusWindow);
+    REG_GLFW(glfwGetPrimaryMonitor);
+    REG_GLFW(glfwGetVideoMode);
+    REG_GLFW(glfwGetWindowPos);
+    REG_GLFW(glfwSetWindowPos);
+    // Callback setters: stubbed (host GLFW never gets guest pointers).
+    {
+        intptr_t (*cb_stub)(uint64_t, uint64_t, uint64_t, uint64_t) =
+            [](uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) -> intptr_t {
+                (void)a0; (void)a1; (void)a2; (void)a3; return 0;
+            };
+        for (const char* L : glfw_libs) {
+            register_function_(L, "glfwSetErrorCallback", (void*)cb_stub);
+            register_function_(L, "glfwSetKeyCallback", (void*)cb_stub);
+            register_function_(L, "glfwSetMouseButtonCallback", (void*)cb_stub);
+            register_function_(L, "glfwSetCursorPosCallback", (void*)cb_stub);
+            register_function_(L, "glfwSetFramebufferSizeCallback",
+                               (void*)cb_stub);
+            register_function_(L, "glfwSetWindowSizeCallback", (void*)cb_stub);
+            register_function_(L, "glfwSetWindowFocusCallback", (void*)cb_stub);
+        }
+    }
+    // glfwGetProcAddress: GLAD/glew loader → guest trampolines.
+#if defined(BIFROST_THUNK_HAVE_GL)
+    {
+        void* p = dlsym(RTLD_DEFAULT, "glfwGetProcAddress");
+        if (!p) p = reinterpret_cast<void*>(1);
+        for (const char* L : glfw_libs)
+            register_function_(L, "glfwGetProcAddress", p, 0x01, 0, 0,
+                               THUNK_GET_PROC);
+    }
+#else
+    for (const char* L : glfw_libs)
+        register_function_(L, "glfwGetProcAddress",
+                           reinterpret_cast<void*>(1), 0x01, 0, 0,
+                           THUNK_GET_PROC);
+#endif
+#undef REG_GLFW
+#undef REG_GLFW_PTR
 }
 // ── FrostGraphics::thunk() — out-of-line definition ───────────────────
 // Lives here (not in graphics.cpp) because it needs the full

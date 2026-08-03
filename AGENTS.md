@@ -44,6 +44,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   and 64-bit SSRA via CALL_INTERP). USRA masks to 0x2F001400 — do not
   confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
   (0x0F003400), which are still unimplemented.
+- FP-FMA semantics: FMADD = c + a*b, FMSUB = c − a*b, FNMADD = −(a*b + c),
+  FNMSUB = a*b − c. FNMADD/FNMSUB are NOT −a*b±c aliases — encoding those
+  wrong corrupts any value computed via `-(a*b+c)` / `a*b−c` (musl `pow`,
+  `rgba_lerp`'s lab conversions). Keep interp, JIT FMA3 map, and IR in sync.
+- UBFM/LSR pitfall: `lsr Xd, Xn, #0` (UBFM #0, #(datasize−1)) is a NO-OP —
+  a shift by zero returns the source. Do not special-case it to 0; compilers
+  emit `lsr w3, x19, #0` to grab the low 32 bits of a 64-bit constant during
+  vec3/vec4 struct packing (returning 0 zeroed the z component of colors).
+  The general UBFM extract path already yields the correct value.
 
 ## Work Guidance
 
@@ -52,6 +61,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   returns, nested `glShaderSource` pointers)
 - Demo target: `ctest_real/test_sdl_gl_triangle.elf` (exit 0 = pass,
   77 = skip when SDL/GL/display unavailable)
+- SIMD_DP decode on the JIT side is table-generated. `tools/opgen/simd_dp.txt`
+  is the single source of truth for which SIMD_DP op is native and its
+  sub-opcode; the interpreter (`interp_fp.cpp`) stays an independent,
+  hand-written implementation so interp-vs-JIT divergence stays detectable.
+  When adding/modifying a SIMD_DP op: edit the spec, run `make opgen`
+  (regenerates `include/opgen_simd.hpp`), then `make opgen-check`
+  (CI guard — fails if the committed header drifted from the spec). Both
+  `jit_translate.cpp` (instr_will_call_interp) and `ir_translate_fp.cpp`
+  classify via `arm64emu::simd::classify()`. Do NOT hand-edit the generated
+  header or re-add ad-hoc sub3_noq/fp_key sm masks in those two files.
+  FP_SCALAR is NOT table-migrated — it's ftype/opcode logic with FMOV/FCMP
+  special cases; leave it hand-tuned.
 
 ## Verification
 

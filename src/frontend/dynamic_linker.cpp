@@ -2380,15 +2380,14 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
         return 0;
     }
     // Allocate a fresh base address via the Memory's mmap_alloc().
-    // counter starting at 0x5000000000 — the SAME address as
-    // mmap_alloc()'s starting region. This meant the thunk's trampoline
-    // page (allocated via mmap_alloc in GraphicThunk::init) could
-    // collide with the first library loaded here, causing the library
-    // to overwrite the trampolines → "decode error at pc=0x5000000020
-    // inst=0x00000040" when the guest tried to call a thunked function.
-    // The fix: use mem_.mmap_alloc() for library bases, so the
-    // allocator tracks ALL high-memory allocations and prevents
-    // collisions. (removed the dead next_lib_base_ member.)
+    // (v1.5.2: mmap_alloc's base is MMAP_BASE_MIN inside the 4 GiB
+    // direct window — the SAME region where the thunk trampolines and
+    // string caches are allocated. The allocator tracks ALL allocations
+    // so library bases can't collide with the trampolines; that was the
+    // bug this comment documents: the old code used a separate counter
+    // starting at 0x5000000000, which could collide with the thunk's
+    // trampoline page → "decode error at pc=0x5000000020". The fix is
+    // using mem_.mmap_alloc() for library bases.)
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff;
@@ -2500,7 +2499,8 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
     if (starts_with(soname, "libGL.so")
         || starts_with(soname, "libEGL.so")
         || starts_with(soname, "libSDL2")
-        || starts_with(soname, "libGLESv2.so")) {
+        || starts_with(soname, "libGLESv2.so")
+        || starts_with(soname, "libglfw.so")) {
         return true;
     }
     // Audio (v1.5.0.alpha).

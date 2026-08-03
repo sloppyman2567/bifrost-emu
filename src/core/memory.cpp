@@ -23,8 +23,10 @@ Memory::Memory() {
     }
     // v1.5.0.alpha: ASLR for mmap base. Randomize the starting address
     // for future mmap_alloc calls using /dev/urandom. The base is
-    // page-aligned and within the high mmap region (0x5000000000 +
-    // random offset up to 0x10000000000 = ~64 GiB of ASLR entropy).
+    // page-aligned and within the low heap region (MMAP_BASE_MIN +
+    // random offset up to ~768 MiB of ASLR entropy). It's INSIDE the
+    // 4 GiB direct window (v1.5.2) so guest heap accesses hit the JIT
+    // fast path instead of the pages_ + rwlock slow path.
     // This prevents guest-side info leaks that rely on a fixed mmap
     // base (common in sandbox escapes and ROP chain construction).
     //
@@ -36,7 +38,7 @@ Memory::Memory() {
     // BIFROST_NO_ASLR=1 disables randomization (for debugging and
     // reproducible trace comparison between JIT and interpreter).
     if (getenv("BIFROST_NO_ASLR")) {
-        mmap_next_ = 0x5000000000ULL;
+        mmap_next_ = MMAP_BASE_MIN;
     } else {
         int fd = ::open("/dev/urandom", O_RDONLY);
         if (fd >= 0) {
@@ -44,20 +46,22 @@ Memory::Memory() {
             ssize_t n = ::read(fd, &entropy, sizeof(entropy));
             ::close(fd);
             if (n == sizeof(entropy)) {
-                // Mask to 36 bits (64 GiB range), page-align, add base.
-                // Base = 0x5000000000 (above the 4 GiB direct window).
-                entropy &= 0xFFFFFFFFFULL;
-                mmap_next_ = 0x5000000000ULL + (entropy & ~PAGE_MASK);
+                // Mask to the entropy range (MMAP_BASE_MAX - MIN),
+                // page-align, add base.
+                uint64_t range = MMAP_BASE_MAX - MMAP_BASE_MIN;
+                entropy &= (range - PAGE_SIZE);
+                mmap_next_ = MMAP_BASE_MIN + (entropy & ~PAGE_MASK);
             } else {
                 // Fallback: use address of a stack variable as entropy.
                 uint64_t stack_addr = reinterpret_cast<uint64_t>(&p);
-                mmap_next_ = 0x5000000000ULL + ((stack_addr ^ 0x5DEECE66DULL)
-                           & 0xFFFFFFFFFULL & ~PAGE_MASK);
+                uint64_t range = MMAP_BASE_MAX - MMAP_BASE_MIN;
+                mmap_next_ = MMAP_BASE_MIN + ((stack_addr ^ 0x5DEECE66DULL)
+                           & (range - PAGE_SIZE) & ~PAGE_MASK);
             }
         } else {
             // /dev/urandom not available (chroot? container?). Use the
-            // old fixed base — better than crashing.
-            mmap_next_ = 0x5000000000ULL;
+            // low fixed base — better than crashing.
+            mmap_next_ = MMAP_BASE_MIN;
         }
     }
 }

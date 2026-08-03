@@ -196,6 +196,16 @@ void GLStateTracker::set_element_array_buffer_binding(uint32_t buffer) {
     element_array_buffer_binding_ = buffer;
 }
 
+uint32_t GLStateTracker::array_buffer_binding() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return array_buffer_binding_;
+}
+
+uint32_t GLStateTracker::element_array_buffer_binding() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return element_array_buffer_binding_;
+}
+
 void GLStateTracker::set_texture_binding(uint32_t target, uint32_t texture) {
     std::lock_guard<std::mutex> g(mu_);
     uint32_t key = (active_texture_ << 16) | (target & 0xFFFF);
@@ -289,9 +299,6 @@ bool GLStateTracker::get_integerv_locked(uint32_t pname, int32_t& out_val) const
             out_val = 0;
             return true;
         case GL::SAMPLES:
-            out_val = 0;
-            return true;
-        case GL::NUM_EXTENSIONS:
             out_val = 0;
             return true;
         default:

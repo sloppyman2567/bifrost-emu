@@ -194,6 +194,24 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                     fprintf(stderr, "   [sp+0x%02x] 0x%llx\n",
                             i * 8, (unsigned long long)v);
                 }
+                // ── Guest call stack (AArch64 x29 frame chain) ─────
+                // Standard frame record: [fp+0] = caller's fp, [fp+8] = LR.
+                fprintf(stderr, "  call stack:\n");
+                uint64_t fp_v = cpu.regs[29];
+                fprintf(stderr, "   #0  pc=0x%llx lr=0x%llx\n",
+                        (unsigned long long)cpu.pc,
+                        (unsigned long long)cpu.regs[30]);
+                for (int fr = 1; fr < 32; fr++) {
+                    if (fp_v == 0 || fp_v == 0xffffffffffffffffULL) break;
+                    uint64_t next_fp = 0, lr = 0;
+                    try { mem_.read(fp_v, &next_fp, 8); } catch (...) { break; }
+                    try { mem_.read(fp_v + 8, &lr, 8); } catch (...) { break; }
+                    fprintf(stderr, "   #%d  fp=0x%llx lr=0x%llx\n",
+                            fr, (unsigned long long)fp_v,
+                            (unsigned long long)lr);
+                    if (next_fp <= fp_v && next_fp != 0) break;  // stack grows down
+                    fp_v = next_fp;
+                }
                 fflush(stderr);
             }
             cpu.running = false;

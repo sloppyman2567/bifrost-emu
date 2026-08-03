@@ -71,6 +71,40 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
+            // ── Vector cache fast path (v1.5.2-alpha) ──────────────
+            // Full-128-bit bitwise op on pinned XMM regs: one VEX op for
+            // AND/ORR/EOR, VPANDN for BIC, and 2-3 VEX ops for ORN/EON
+            // (using XMM0, which is scratch in cache-active blocks).
+            {
+                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
+                    xs2 = vec_xmm(inst.src2);
+                if (xd >= 0 && xs1 >= 0 && xs2 >= 0 && opc <= 5) {
+                    clobber_flags();
+                    // 0F map, pp=1 (66): vpand DB / vpor EB / vpxor EF /
+                    // vpandn DF / vpcmpeqd 76. VEX.NDS: vvvv=src1, rm=src2.
+                    if (opc == 0) {
+                        emit_vex3(1, false, xs1, 1, xd, xs2, true, 0xDB);  // vpand xd,xs1,xs2
+                    } else if (opc == 1) {
+                        emit_vex3(1, false, xs1, 1, xd, xs2, true, 0xEB);  // vpor xd,xs1,xs2
+                    } else if (opc == 2) {
+                        emit_vex3(1, false, xs1, 1, xd, xs2, true, 0xEF);  // vpxor xd,xs1,xs2
+                    } else if (opc == 3) {
+                        // BIC: xs1 & ~xs2  =  vpandn xd, xs2, xs1
+                        emit_vex3(1, false, xs2, 1, xd, xs1, true, 0xDF);
+                    } else if (opc == 4) {
+                        // ORN: xs1 | ~xs2
+                        emit_vex3(1, false, 0, 1, 0, 0, true, 0x76);    // vpcmpeqd xmm0,xmm0
+                        emit_vex3(1, false, 0, 1, 0, xs2, true, 0xEF);  // vpxor xmm0,xmm0,xs2 → ~xs2
+                        emit_vex3(1, false, xs1, 1, xd, 0, true, 0xEB); // vpor xd,xs1,xmm0
+                    } else { // opc == 5: EON = xs1 ^ ~xs2 = ~(xs1 ^ xs2)
+                        emit_vex3(1, false, xs1, 1, xd, xs2, true, 0xEF);  // vpxor xd,xs1,xs2
+                        emit_vex3(1, false, 0, 1, 0, 0, true, 0x76);       // vpcmpeqd xmm0,xmm0
+                        emit_vex3(1, false, xd, 1, xd, 0, true, 0xEF);     // vpxor xd,xd,xmm0 → ~
+                    }
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
+            }
             auto emit_logical_half = [&](int32_t off1, int32_t off2, int32_t offd) {
                 // movsd xmm0, [rbx+off1]  (MOVSD = F2 0F 10, 64-bit)
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
@@ -283,6 +317,42 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_call_interp(inst.arm_pc, false);
                     return true;
             }
+            // ── Vector cache fast path (v1.5.2-alpha) ──────────────
+            // Same single-VEX-instruction trick as SIMD_FP_FMA: when all
+            // three operands are pinned in host XMM regs, the whole
+            // 128-bit vector op is one vaddps/pd-family instruction.
+            {
+                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
+                    xs2 = vec_xmm(inst.src2);
+                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
+                    clobber_flags();
+                    if (is_sub_for_fabd) {
+                        // vsubps/pd then clear sign bits (vandps with mask).
+                        flush_invalidate_host_regs(1u << RAX);
+                        emit_vex_fp_binop(xd, xs1, xs2, 0x5C, is_double);
+                        uint64_t mask = is_double ? 0x7FFFFFFFFFFFFFFFULL
+                                                  : 0x7FFFFFFF7FFFFFFFULL;
+                        emit_mov_imm64(RAX, mask);
+                        emit_byte(0x66); emit_byte(0x48);
+                        emit_byte(0x0F); emit_byte(0x6E);
+                        emit_byte(0xC0);  // movq xmm0, rax
+                        emit_vex_fp_binop(xd, xd, 0, 0x54, is_double);
+                    } else {
+                        emit_vex_fp_binop(xd, xs1, xs2, op_byte, is_double);
+                    }
+                    if (!Q) {
+                        // Zero upper 64 bits (guest 64-bit result).
+                        bool r = (xd >= 8);
+                        emit_byte(0xF3);
+                        emit_byte(rex(false, r, false, r));
+                        emit_byte(0x0F); emit_byte(0x7E);
+                        emit_byte(static_cast<uint8_t>(0xC0 |
+                                        ((xd & 7) << 3) | (xd & 7)));
+                    }
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
+            }
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX));
             auto emit_fp_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
@@ -345,6 +415,33 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             if (esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
+            }
+            // ── Vector cache fast path (v1.5.2-alpha) ──────────────
+            // When v_lo/v_hi of dest/src1/src2 are all pinned in host XMM
+            // regs (vec_cache_active_ from the block pre-scan), the whole
+            // 128-bit vector is processed in ONE fused VEX instruction —
+            // a single vfmadd231ps/pd replaces the old 8 memory ops
+            // (2 loads + fma + store per 64-bit half). The accumulator
+            // stays in XMM across self-loop iterations (prologue skipped).
+            {
+                int xd = vec_xmm(inst.dest), xs1 = vec_xmm(inst.src1),
+                    xs2 = vec_xmm(inst.src2);
+                if (xd >= 0 && xs1 >= 0 && xs2 >= 0) {
+                    clobber_flags();
+                    emit_vex_fma(xd, xs1, xs2, is_double, is_sub);
+                    if (!Q) {
+                        // Zero upper 64 bits (guest 64-bit result): VMOVQ
+                        // xmm, xmm — F3 0F 7E /r (zero-extending move).
+                        bool r = (xd >= 8);
+                        emit_byte(0xF3);
+                        emit_byte(rex(false, r, false, r));
+                        emit_byte(0x0F); emit_byte(0x7E);
+                        emit_byte(static_cast<uint8_t>(0xC0 |
+                                        ((xd & 7) << 3) | (xd & 7)));
+                    }
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
             }
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
@@ -464,6 +561,28 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
             // v_lo[dest] = v_hi[dest] = src1 (GPR value)
+            // ── Vector cache fast path (v1.5.2-alpha) ──────────────
+            // dest pinned: vmovq xd, gpr (zero upper) then vmovddup
+            // (broadcast low qword to both halves) — no memory bounce.
+            {
+                int xd = vec_xmm(inst.dest);
+                if (xd >= 0) {
+                    int s = ensure_vreg(inst.src1, RAX);
+                    if (s != RAX) {
+                        clobber_host_reg(RAX);
+                        emit_mov_reg(RAX, s);
+                    }
+                    // vmovq xd, rax  (VEX.128.66.0F.W1 6E /r — pp=66, NOT F3:
+                    // the F3.0F.W1 6E form is not a valid AVX encoding; the
+                    // assembler emits 66.0F.W1 6E with the XMM dest in
+                    // ModRM.reg and vvvv=1111 unused).
+                    emit_vex3(1, true, 0, 1, xd, RAX, true, 0x6E);
+                    // vmovddup xd, xd  (VEX.128.F2.0F.WIG 12: broadcast low qword)
+                    emit_vex3(1, false, 0, 3, xd, xd, true, 0x12);
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
+            }
             // DON'T drop src1's cache mapping after the
             // store — src1 may be read again later in the block. The old
             // code did `vreg_home_[reg_vreg_[RAX]] = -1; reg_vreg_[RAX] = -1`

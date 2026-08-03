@@ -132,11 +132,8 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
         // ARM FMA semantics (per ARM ARM):
         //   FMADD:  Vd = Va + Vn*Vm       = c + a*b
         //   FMSUB:  Vd = Va - Vn*Vm       = c - a*b
-        //   FNMADD: Vd = -Vn*Vm + Va      = -a*b + c  (same numerical
-        //                                            result as FMSUB but
-        //                                            different IEEE 754
-        //                                            sign rules)
-        //   FNMSUB: Vd = -Vn*Vm - Va      = -a*b - c  (= -(a*b + c))
+        //   FNMADD: Vd = -Va - Vn*Vm      = -c - a*b  (= -(a*b + c))
+        //   FNMSUB: Vd = -Va + Vn*Vm      = a*b - c
         //
         // ── FMA3 path (when host CPU supports FMA3 + AVX) ───────────
         //
@@ -218,10 +215,10 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 // pp=11/F2, mulss uses pp=10/F3).
                 uint8_t opcode;
                 switch (inst.op) {
-                    case IROp::FMADD:  opcode = 0xB9; break;
-                    case IROp::FMSUB:  opcode = 0xBD; break;  // vfnmadd231
-                    case IROp::FNMADD: opcode = 0xBD; break;  // vfnmadd231
-                    case IROp::FNMSUB: opcode = 0xBF; break;  // vfnmsub231
+                    case IROp::FMADD:  opcode = 0xB9; break;  // vfmadd231   (acc + prod)
+                    case IROp::FMSUB:  opcode = 0xBD; break;  // vfnmadd231  (acc - prod)
+                    case IROp::FNMADD: opcode = 0xBF; break;  // vfnmsub231  (-acc - prod)
+                    case IROp::FNMSUB: opcode = 0xBB; break;  // vfmsub231   (prod - acc)
                     default: return false;  // unreachable
                 }
                 // VEX 3-byte prefix:
@@ -263,19 +260,22 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                 // Load Va (acc) into XMM2
                 emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
                 emit_modrm_disp(2, CPU_REG, off_acc);
-                // Combine per operation:
-                //   FMADD:  r = prod + acc       → addsd xmm0, xmm2
+                // Combine per operation (ARM FMA semantics):
+                //   FMADD:  r = acc + prod       → addsd xmm0, xmm2
                 //   FMSUB:  r = acc - prod       → subsd xmm2, xmm0; movaps xmm0, xmm2
-                //   FNMADD: r = -prod + acc      = acc - prod → same as FMSUB
-                //   FNMSUB: r = -prod - acc      → addsd xmm0, xmm2; negate xmm0
+                //   FNMADD: r = -acc - prod      → addsd xmm0, xmm2; negate xmm0
+                //   FNMSUB: r = prod - acc       → subsd xmm0, xmm2
                 if (inst.op == IROp::FMADD) {
                     emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
                     emit_byte(0xC2);  // addsd xmm0, xmm2
-                } else if (inst.op == IROp::FMSUB || inst.op == IROp::FNMADD) {
+                } else if (inst.op == IROp::FMSUB) {
                     emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
                     emit_byte(0xD0);  // subsd xmm2, xmm0  (xmm2 = acc - prod)
                     emit_byte(0x0F); emit_byte(0x28); emit_byte(0xC2);  // movaps xmm0, xmm2
-                } else {  // FNMSUB
+                } else if (inst.op == IROp::FNMSUB) {
+                    emit_byte(prefix); emit_byte(0x0F); emit_byte(0x5C);
+                    emit_byte(0xC2);  // subsd xmm0, xmm2  (xmm0 = prod - acc)
+                } else {  // FNMADD
                     emit_byte(prefix); emit_byte(0x0F); emit_byte(0x58);
                     emit_byte(0xC2);  // addsd xmm0, xmm2  (xmm0 = prod + acc)
                     // Negate xmm0 by XORing with sign bit.

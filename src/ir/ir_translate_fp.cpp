@@ -17,6 +17,7 @@
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
+#include "opgen_simd.hpp" // generated SIMD_DP decode table (tools/opgen)
 namespace arm64emu {
 // Returns `true` if `d.cls` was one of the FP/SIMD cases handled here
 // (in which case translate_to_ir() returns `false` — none of the
@@ -49,7 +50,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint8_t opcode = (op >> 12) & 0xF;
             // FMOV (general ↔ FP, 64-bit): may reach here via FP_SCALAR.
             // Bit[18]=1 distinguishes FMOV from SCVTF/UCVTF (bit[18]=0).
-            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))) {
+            // Bit[17]=1 additionally excludes FCVTAS (0x9E640020, bit17=0),
+            // which would otherwise be misdecoded as a raw GPR↔FP bit copy.
+            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18))
+                && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
                     uint16_t val = load_arm_reg(block, rn);
@@ -69,7 +73,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // match this mask and get misdecoded as a raw GPR↔FP bit copy.
             // FMOV Sn, Wn → v_lo[rd] = (uint32_t)regs[rn]; v_hi[rd] = 0
             // FMOV Wd, Sn → regs[rd] = (uint32_t)v_lo[rn]
-            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))) {
+            // Bit[17]=1 additionally excludes FCVTAS (0x1E240000, bit17=0),
+            // which would otherwise be misdecoded as a raw GPR↔FP bit copy.
+            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18))
+                && (op & (1u << 17))) {
                 bool to_fp = (op >> 16) & 1;
                 if (to_fp) {
                     // Wn → Sn: mask GPR to 32 bits before storing to v_lo[rd].
@@ -353,9 +360,14 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 return true;
             }
             // SCVTF/UCVTF: int→FP
-            // Encoding: (op & 0x7F3E0000) == 0x1E220000
-            // Mask 0x7F3E0000 excludes bit 16 so both SCVTF (bit 16=0)
-            // and UCVTF (bit 16=1) match. The previous mask 0x7F3F0000
+            // Encoding: (op & 0x7F3EFC00) == 0x1E220000
+            // Mask 0x7F3EFC00 excludes bit 16 so both SCVTF (bit 16=0)
+            // and UCVTF (bit 16=1) match, and requires bits[15:10]==0.
+            // The 0xFC00 bits are essential: FCSEL (0x1E220C01, bits[15:10]
+            // = 0b0011) matched the old loose mask 0x7F3E0000 and was
+            // emitted as FP_I2F (int→FP), converting the hash GPR into an
+            // FP register and breaking grad3's `fcsel s1, s0, s2, eq`.
+            // The previous mask 0x7F3F0000
             // included bit 16, so UCVTF (0x1E230000) did NOT match
             // 0x1E220000 and was silently NOP'd.
             // We pass sf (bit 31) via flags_op so the JIT can choose
@@ -365,7 +377,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // -1, producing 4.29e+09 instead of -1.0f.
             // Checked AFTER FMOV imm (which has a tighter mask and must
             // match first to avoid collision).
-            if ((op & 0x7F3E0000) == 0x1E220000) {
+            if ((op & 0x7F3EFC00) == 0x1E220000) {
                 bool is_unsigned = (op >> 16) & 1;
                 uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
@@ -399,13 +411,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             //   bit 21 (o2): 0 = positive product, 1 = negative product
             // ra = bits[14:10]. Operands: a=Vn, b=Vm, c=Va.
             //
-            //   o2=0, o1=0: FMADD  → dest = a*b + c
-            //   o2=0, o1=1: FMSUB  → dest = c - a*b  (= -a*b + c)
-            //   o2=1, o1=0: FNMADD → dest = -a*b + c  (numerically same as
-            //                                        FMSUB but with different
-            //                                        IEEE 754 sign rules on
-            //                                        NaN/signed-zero inputs)
-            //   o2=1, o1=1: FNMSUB → dest = -a*b - c  (= -(a*b + c))
+            //   o2=0, o1=0: FMADD  → dest = a*b + c      (c + a*b)
+            //   o2=0, o1=1: FMSUB  → dest = c - a*b      (c - a*b)
+            //   o2=1, o1=0: FNMADD → dest = -c - a*b     (= -(a*b + c))
+            //   o2=1, o1=1: FNMSUB → dest = a*b - c
             //
             // which silently dropped FNMADD/FNMSUB (o2=1) — they fell
             // through to the "Unknown FP instruction — NOP" path in the
@@ -555,249 +564,101 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint32_t op = d.raw;
             bool Q = (op >> 30) & 1;
             uint8_t size = (op >> 22) & 3;
-            uint32_t sub3 = op & 0xFF20FC00;
-            uint32_t sub3_noq = sub3 & ~(1u << 30);
-            int esize = 1 << size;   // 1, 2, 4, 8
-            // ── Arithmetic ops (SIMD_ARITH) ──
-            uint8_t arith_op = 0xFF;
-            if (sub3_noq == 0x0E208400) {
-                arith_op = 0;  // ADD
-            } else if (sub3_noq == 0x2E208400) {
-                arith_op = 1;  // SUB
-            } else if (sub3_noq == 0x0E209C00) {
-                arith_op = 2;  // MUL
-                if (size == 3) {
-                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                    return true;
-                }
-            } else if (sub3_noq == 0x2E206C00) {
-                arith_op = 3;  // UMIN (unsigned min)
-            } else if (sub3_noq == 0x2E206400) {
-                arith_op = 4;  // UMAX (unsigned max)
-            } else if (sub3_noq == 0x0E206C00) {
-                arith_op = 5;  // SMIN (signed min)
-            } else if (sub3_noq == 0x0E206400) {
-                arith_op = 6;  // SMAX (signed max)
-            }
-            if (arith_op != 0xFF) {
-                (void)Q;
-                // esize goes in `width` (arg 6) — codegen reads inst.width.
+            int esize = 1 << size;
+            // Native-family dispatch from the generated decode table
+            // (arm64emu::simd::classify, tools/opgen/simd_dp.txt). The family
+            // + per-op sub-code are the single source of truth on the JIT
+            // side. The interpreter's SIMD_DP switch stays an independent
+            // implementation, so interp-vs-JIT divergence is still
+            // detectable. Anything UNKNOWN falls through to the interpreter.
+            auto ct = simd::classify(op);
+            switch (ct.family) {
+            case simd::Family::INT_ARITH:
+                // arith_op = ct.subop (0..6). MUL 64-bit (size==3) is
+                // excluded by the table's guard and lands on CALL_INTERP.
                 emit(block, IROp::SIMD_ARITH, d.rd, d.rn, d.rm,
-                     static_cast<uint8_t>(esize), 0, 0, arith_op, cur_pc);
+                     static_cast<uint8_t>(esize), 0, 0, ct.subop, cur_pc);
                 return true;
-            }
-            // ── Vector FP 2-source (SIMD_FP_ARITH) ──
-            // FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FABD/FMULX,
-            // vector form (.2s/.4s/.2d/.1d). Encoding: bits[31:24]=0x0E
-            // or 0x2E with Q(30), U(29); the opcode is spread across
-            // bits[29] + bits[15:12] + bits[11:10]. We match on the
-            // full sub_noq (mirrors the interpreter's FABD/vector-FP
-            // handling in interp_fp.cpp). bit22: 0=single, 1=double.
-            // Q: 0=64-bit (v_lo only, zero v_hi), 1=128-bit (both).
-            {
-                // The integer SIMD_DP matches above use sub3 (mask
-                // 0xFF20FC00, which strips the size bits [23:22]). FP
-                // 2-source ops keep bit 23 (FADD/FSUB, FMAX/FMIN,
-                // FMAXNM/FMINNM all differ there) so compute a separate
-                // key with the interpreter's mask 0xFFE0FC00 and drop the
-                // ftype bit 22 (0=single, 1=double, handled separately).
-                uint32_t fp_key = (op & 0xFFE0FC00) & ~(1u << 30) & ~(1u << 22);
-                uint32_t fp_op = 0xFF;
-                if (fp_key == 0x0E20D400) fp_op = 0;      // FADD
-                else if (fp_key == 0x0EA0D400) fp_op = 1; // FSUB
-                else if (fp_key == 0x2E20DC00) fp_op = 2; // FMUL
-                else if (fp_key == 0x2E20FC00) fp_op = 3; // FDIV
-                else if (fp_key == 0x0E20F400) fp_op = 4; // FMAX
-                else if (fp_key == 0x0EA0F400) fp_op = 5; // FMIN
-                else if (fp_key == 0x0E20C400) fp_op = 6; // FMAXNM
-                else if (fp_key == 0x0EA0C400) fp_op = 7; // FMINNM
-                else if (fp_key == 0x0E20DC00) fp_op = 0xB; // FMULX
-                else if (fp_key == 0x2EA0D400) fp_op = 0xD; // FABD
-                else if (fp_key == 0x0E20CC00) fp_op = 0xE; // FMLA
-                else if (fp_key == 0x0EA0CC00) fp_op = 0xF; // FMLS
-                if (fp_op != 0xFF) {
-                    bool is_double = (op >> 22) & 1;
-                    uint64_t fesize = is_double ? 8 : 4;
-                    if (fp_op == 0xE || fp_op == 0xF) {
-                        // FMLA/FMLS: accumulate into dest (3-source).
-                        // dest = dest ± src1*src2; imm = 0 (fmla) / 1 (fmls).
-                        emit(block, IROp::SIMD_FP_FMA, d.rd, d.rn, d.rm,
-                             static_cast<uint8_t>(fesize), 0, Q, fp_op - 0xE, cur_pc);
-                        return true;
-                    }
-                    // esize in `width`; Q in `flags_op` (matches codegen).
-                    emit(block, IROp::SIMD_FP_ARITH, d.rd, d.rn, d.rm,
-                         static_cast<uint8_t>(fesize), 0, Q, fp_op, cur_pc);
+            case simd::Family::INT_CMP:
+                emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, 0, ct.subop, cur_pc);
+                return true;
+            case simd::Family::LOGIC:
+                // Native only for Q=1 (table enforces the guard). The IR
+                // SIMD_LOGICAL computes both 64-bit halves, so Q=0 (.8b)
+                // stays on the interpreter, which clears v_hi.
+                emit(block, IROp::SIMD_LOGICAL, d.rd, d.rn, d.rm,
+                     0, 0, 0, ct.subop, cur_pc);
+                return true;
+            case simd::Family::DUP:
+                // GPR->vector broadcast, native only for .2d (table guard).
+                {
+                    uint16_t val = load_arm_reg(block, d.rn);
+                    emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }
-            }
-            // ── Compare ops (SIMD_CMP) ──
-            // SIMD_CMP imm: 0=eq, 1=ge_u, 2=gt_u, 3=ge_s, 4=gt_s,
-            //               5=hi_u, 6=hs_u
-            uint8_t cmp_op = 0xFF;
-            if (sub3_noq == 0x2E208C00) {
-                // CMEQ (==): U=1, opcode=0x8C
-                cmp_op = 0;  // eq
-            }
-            if (cmp_op != 0xFF) {
-                (void)Q;
-                emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm,
-                     static_cast<uint8_t>(esize), 0, 0, cmp_op, cur_pc);
+            case simd::Family::FP: {
+                // Vector FP 2-source / FMA. bit22: 0=single, 1=double.
+                bool is_double = (op >> 22) & 1;
+                uint64_t fesize = is_double ? 8 : 4;
+                if (ct.subop == 0xE || ct.subop == 0xF) {
+                    // FMLA/FMLS: accumulate into dest (3-source).
+                    emit(block, IROp::SIMD_FP_FMA, d.rd, d.rn, d.rm,
+                         static_cast<uint8_t>(fesize), 0, Q, ct.subop - 0xE, cur_pc);
+                } else {
+                    emit(block, IROp::SIMD_FP_ARITH, d.rd, d.rn, d.rm,
+                         static_cast<uint8_t>(fesize), 0, Q, ct.subop, cur_pc);
+                }
                 return true;
             }
-            // ── NOT/MVN (vector) — 0x2E205800 ──
-            // NOT Vd.<T>, Vn.<T> = bitwise NOT of all lanes.
-            // Encoding: 1 Q 0 1 1 1 1 0 size 1 0000 0 1 0 1 1 0 Rn Rd
-            // sub3_noq = 0x2E205800
-            if (sub3_noq == 0x2E205800) {
-                // Use SIMD_LOGICAL with opc=2 (XOR) and src2=src1
-                // to compute NOT: a ^ a = 0, then we need ~a.
-                // Actually NOT = a XOR all-ones. We emit CALL_INTERP
-                // for now since SIMD_LOGICAL doesn't have a NOT mode.
-                // But we can use BIC with src2=src1: a & ~a = 0 (wrong).
-                // Let's emit a logical NOT via XOR with all-ones.
-                // We don't have an all-ones register, so fall to interp.
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return true;
-            }
-            // ── ABS / NEG (vector) — 0x0E20B800 / 0x2E20B800 ──
-            // ABS Vd.<T>, Vn.<T> = |Vn| per lane; NEG = 0 - Vn per lane.
-            // Both are 2-operand (no src2) so we fall to interp for now.
-            if (sub3_noq == 0x0E20B800 || sub3_noq == 0x2E20B800) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return true;
-            }
-            // ── Vector shift-by-immediate: SHL, USHR, SSHR ──
-            // v1.4.5-alpha: native IR ops (AVX2 256-bit on capable hosts,
-            // SSE2 128-bit fallback otherwise). USRA/SSRA/SLI/SRI/SHRN
-            // still fall to the interpreter (they need an accumulator or
-            // narrowing semantics not yet in the IR).
-            // Encoding constants (mask 0xBF00FC00, which strips Q):
-            //   SHL  0x0F005400   USHR 0x2F000400   SSHR 0x0F000400
-            //   USRA 0x2F001400   SSRA 0x0F001400
-            //   SLI  0x2F005400   SRI  0x2F004400   SHRN 0x0F008400
-            {
-                uint32_t sm = op & 0xBF00FC00;
-                // Extract element size from immh (bits[23:20]) per ARM ARM.
-                // NOTE: bits[23:20] = (op >> 20) & 0xF, NOT (op >> 19) —
-                // the interpreter uses (op >> 20) and we must match.
+            case simd::Family::SHIFT: {
+                // Vector shift-by-immediate. immh/immb encode element size
+                // and shift amount (matches the interpreter's decoding).
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
-                uint8_t esize_bytes = 0;  // 1, 2, 4, or 8
+                uint8_t esize_bytes = 0;
                 if      (immh == 0) esize_bytes = 1;
                 else if (immh == 1) esize_bytes = 2;
                 else if (immh == 2 || immh == 3) esize_bytes = 4;
                 else if (immh >= 4) esize_bytes = 8;
-                if (esize_bytes != 0) {
-                    uint32_t shift_amount = 0;
-                    IROp shift_op = IROp::NOP;
-                    uint8_t qbit = (op >> 30) & 1;  // Q: 1=128-bit, 0=64-bit
-                    if (sm == 0x0F005400) {  // SHL
-                        // SHL: shift = UInt(immh:immb) - esize*8
-                        shift_amount = ((immh << 4) | immb) - esize_bytes * 8;
-                        shift_op = IROp::SIMD_SHL;
-                    } else if (sm == 0x2F000400) {  // USHR
-                        // USHR: shift = (2 * esize*8) - UInt(immh:immb)
-                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
-                        shift_op = IROp::SIMD_USHR;
-                    } else if (sm == 0x0F000400) {  // SSHR
-                        // SSHR: shift = (2 * esize*8) - UInt(immh:immb)
-                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
-                        shift_op = IROp::SIMD_SSHR;
-                    } else if (sm == 0x2F001400) {  // USRA (accumulate)
-                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
-                        shift_op = IROp::SIMD_USRA;
-                    } else if (sm == 0x0F001400) {  // SSRA (signed accumulate)
-                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
-                        shift_op = IROp::SIMD_SSRA;
-                    } else if (sm == 0x2F005400) {  // SLI (shift-left insert)
-                        shift_amount = ((immh << 4) | immb) - esize_bytes * 8;
-                        shift_op = IROp::SIMD_SLI;
-                    } else if (sm == 0x2F004400) {  // SRI (shift-right insert)
-                        shift_amount = (2 * esize_bytes * 8) - ((immh << 4) | immb);
-                        shift_op = IROp::SIMD_SRI;
-                    }
-                    if (shift_op != IROp::NOP) {
-                        emit(block, shift_op, d.rd, d.rn, 0,
-                             esize_bytes, 0, qbit, shift_amount, cur_pc);
-                        return true;
-                    }
+                if (esize_bytes == 0) break;  // invalid immh -> interpreter
+                uint8_t qbit = (op >> 30) & 1;
+                // subop 0/5 are left-shift (SHL/SLI); the rest right-shift.
+                bool left = (ct.subop == 0 || ct.subop == 5);
+                uint32_t imm = (uint32_t)((immh << 4) | immb);
+                uint32_t shift_amount = left
+                    ? imm - (uint32_t)esize_bytes * 8
+                    : (uint32_t)esize_bytes * 8 * 2 - imm;
+                IROp shift_op;
+                switch (ct.subop) {
+                    case 0: shift_op = IROp::SIMD_SHL;  break;
+                    case 1: shift_op = IROp::SIMD_USHR; break;
+                    case 2: shift_op = IROp::SIMD_SSHR; break;
+                    case 3: shift_op = IROp::SIMD_USRA; break;
+                    case 4: shift_op = IROp::SIMD_SSRA; break;
+                    case 5: shift_op = IROp::SIMD_SLI;  break;
+                    default: shift_op = IROp::SIMD_SRI; break;
                 }
-                // SHRN still falls to interpreter (narrowing semantics).
-                if (sm == 0x0F008400) {
-                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                    return true;
-                }
+                emit(block, shift_op, d.rd, d.rn, 0,
+                     esize_bytes, 0, qbit, shift_amount, cur_pc);
+                return true;
             }
-            // ── v1.5.0.alpha: ARMv8 Crypto Extensions ───────────────
-            // AES: 0x4E284800-0x4E287800 (AESE/AESD/AESMC/AESIMC)
-            // SHA1H: 0x5E280800
-            // SHA1SU1: 0x5E280000
-            // SHA256SU0: 0x5E282000
-            // PMULL: 0x4E60E000 (size=11, 64-bit poly mul, low half)
-            // PMULL2: 0x4EE0E000 (size=11, 64-bit poly mul, high half)
-            //
-            // We emit AES_CRYPTO IR ops for AESE/AESD/AESMC/AESIMC and
-            // PMULL/PMULL2. The JIT's codegen will use AES-NI /
-            // PCLMULQDQ when available, or fall back to CALL_INTERP
-            // (which calls the interpreter's software table-driven
-            // implementation in interp_crypto.hpp).
-            {
-                uint32_t aes_masked = op & 0xFFFFFC00;
-                if (aes_masked == 0x4E284800) {
-                    // AESE/AESD/AESMC/AESIMC — imm = (op>>10)&3
+            case simd::Family::CRYPTO:
+                // subop 0 = AESE, which covers AESD/AESMC/AESIMC via
+                // bits[11:10]; subop 4 = PMULL, 5 = PMULL2.
+                if (ct.subop == 0) {
                     uint8_t sub_op = static_cast<uint8_t>((op >> 10) & 3);
-                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, 0, 0,
-                         0, 0, sub_op, cur_pc);
-                    return true;
+                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, 0, 0, 0, 0, sub_op, cur_pc);
+                } else {
+                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0, 0, 0, ct.subop, cur_pc);
                 }
-                // PMULL (size=11, 64-bit poly mul, low half)
-                if ((op & 0xFFE0FC00) == 0x4E60E000) {
-                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0,
-                         0, 0, 4, cur_pc);  // sub_op=4 = PMULL
-                    return true;
-                }
-                // PMULL2 (size=11, 64-bit poly mul, high half)
-                if ((op & 0xFFE0FC00) == 0x4EE0E000) {
-                    emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0,
-                         0, 0, 5, cur_pc);  // sub_op=5 = PMULL2
-                    return true;
-                }
-                // SHA1H, SHA1SU1, SHA256SU0 — 2-operand crypto (mask 0xFFFFFC00).
-                // SHA1C/SHA1P/SHA1M, SHA1SU0, SHA256H/H2, SHA256SU1 — 3-operand
-                // crypto (mask 0xFFE0FC00).
-                // All fall back to CALL_INTERP (the interpreter has full
-                // implementations in interp_crypto.hpp; native SHA-NI
-                // codegen is a future enhancement).
-                // Encoding constants verified against binutils:
-                //   SHA1H    = 0x5E280800
-                //   SHA1SU1  = 0x5E281800  (was 0x5E280000 — wrong)
-                //   SHA256SU0= 0x5E282800  (was 0x5E282000 — wrong)
-                //   SHA1C    = 0x5E000000  (mask 0xFFE0FC00)
-                //   SHA1P    = 0x5E001000  (mask 0xFFE0FC00)
-                //   SHA1M    = 0x5E002000  (mask 0xFFE0FC00)
-                //   SHA1SU0  = 0x5E003000  (mask 0xFFE0FC00)
-                //   SHA256H  = 0x5E004000  (mask 0xFFE0FC00)
-                //   SHA256H2 = 0x5E005000  (mask 0xFFE0FC00)
-                //   SHA256SU1= 0x5E006000  (mask 0xFFE0FC00)
-                if (aes_masked == 0x5E280800 ||  // SHA1H
-                    aes_masked == 0x5E281800 ||  // SHA1SU1
-                    aes_masked == 0x5E282800) {  // SHA256SU0
-                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                    return true;
-                }
-                if ((op & 0xFFE0FC00) == 0x5E000000 ||  // SHA1C
-                    (op & 0xFFE0FC00) == 0x5E001000 ||  // SHA1P
-                    (op & 0xFFE0FC00) == 0x5E002000 ||  // SHA1M
-                    (op & 0xFFE0FC00) == 0x5E003000 ||  // SHA1SU0
-                    (op & 0xFFE0FC00) == 0x5E004000 ||  // SHA256H
-                    (op & 0xFFE0FC00) == 0x5E005000 ||  // SHA256H2
-                    (op & 0xFFE0FC00) == 0x5E006000) {  // SHA256SU1
-                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                    return true;
-                }
+                return true;
+            default:
+                break;
             }
-            // Unrecognized SIMD_DP — fall back to interpreter.
+            // Remaining SIMD_DP encodings fall back to the interpreter.
+            // This includes the SHA-1/SHA-256 family (software impl in
+            // interp_crypto.hpp; native SHA-NI codegen is future work).
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;
         }

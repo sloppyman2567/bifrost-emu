@@ -207,6 +207,11 @@ public:
     void set_program(uint32_t program);
     void set_array_buffer_binding(uint32_t buffer);
     void set_element_array_buffer_binding(uint32_t buffer);
+    // v1.5.2.alpha: used to decide whether the final arg of
+    // glVertexAttribPointer / glDrawElements is a VBO byte offset (buffer
+    // bound) or a real guest pointer (client-side vertex/index arrays).
+    uint32_t array_buffer_binding() const;
+    uint32_t element_array_buffer_binding() const;
     void set_texture_binding(uint32_t target, uint32_t texture);
     void set_pixel_store_i(uint32_t pname, int param);
     void set_hint(uint32_t target, uint32_t mode);

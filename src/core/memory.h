@@ -11,8 +11,14 @@
 //      guest address space. The window IS the storage — pages in this
 //      range are not duplicated in pages_. The JIT can address the
 //      window directly: `mov rax, [window_base + guest_addr]`.
-//   2. A sparse `pages_` map for addresses ≥ 4 GiB (stack, high mmap
-//      region). Backed by std::vector<uint8_t> per page.
+//   2. A sparse `pages_` map for addresses ≥ 4 GiB (sigreturn
+//      trampoline, dynamic-linker interpreter, and any explicit high
+//      MAP_FIXED allocations). Backed by std::vector<uint8_t> per page.
+//
+// The guest heap (mmap_alloc base) and the main thread's stack live
+// INSIDE the direct window (see MMAP_BASE_MIN / STACK_TOP below) so the
+// JIT fast path covers them — every heap/stack access is a direct
+// window memcpy instead of the pages_ + rwlock slow path.
 #pragma once
 #include "bifrost/types.hpp"
 #include <atomic>
@@ -47,6 +53,16 @@ public:
     static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
     static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
+    // v1.5.2: Guest heap + stack live INSIDE the 4 GiB direct window so
+    // the JIT fast path (direct window memcpy) covers them. The previous
+    // layout put the heap at 0x5000000000 and the stack at 0x8000000000
+    // — both ABOVE the window — so every heap/stack access went through
+    // the pages_ + rwlock slow path, which dominated the profile.
+    // The ELF image + brk stay in the low region (they always were).
+    static constexpr uint64_t MMAP_BASE_MIN = 0x5000000000ULL;   // OLD: high mmap
+    static constexpr uint64_t MMAP_BASE_MAX = 0x5FFFF00000ULL;   // OLD: high top
+    static constexpr uint64_t STACK_TOP = 0x8000000000ULL;       // OLD: high stack
+    static constexpr uint64_t STACK_SIZE = 64 * 1024 * 1024;   // 64 MiB
     Memory();
     ~Memory();
     Memory(const Memory&) = delete;
@@ -183,7 +199,7 @@ private:
     // v1.5.0.alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the
-    // high mmap region (0x5000000000 - 0x5FFFFFFFFFF).
+    // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
     uint64_t mmap_next_ = 0;
     // v1.5.0.alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on

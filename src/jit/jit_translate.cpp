@@ -13,6 +13,7 @@
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
 #include "ir/ir.hpp"
+#include "opgen_simd.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -33,19 +34,88 @@ extern thread_local bool bl_call_disabled_;
 static bool instr_will_call_interp(const DecodedInst& d) {
     switch (d.cls) {
         case InstClass::SIMD_DP: {
-            uint32_t op = d.raw;
-            uint8_t size = (op >> 22) & 3;
-            uint32_t sub3 = op & 0xFF20FC00;
-            uint32_t sub3_noq = sub3 & ~(1u << 30);
-            if (sub3_noq == 0x0E208400 ||  // ADD
-                sub3_noq == 0x2E208400 ||  // SUB
-                (sub3_noq == 0x0E209C00 && size != 3) ||  // MUL (not 64-bit)
-                sub3_noq == 0x2E208C00) {  // CMEQ
-                return false;  // native SIMD_ARITH / SIMD_CMP
-            }
-            return true;  // other SIMD_DP ops fall back to interp
+            // Native SIMD_DP ops are classified by the generated table
+            // (arm64emu::simd::classify, from tools/opgen/simd_dp.txt).
+            // Anything the table doesn't recognize falls back to the
+            // interpreter. Previously this was a hand-written set of
+            // sub3_noq/fp_key/sm masks mirroring ir_translate_fp.cpp (and
+            // silently drifting — AND/ORR/EOR/DUP native paths were missing,
+            // forcing those blocks down the interpreter).
+            return simd::classify(d.raw).family == simd::Family::UNKNOWN;
         }
-        case InstClass::FP_SCALAR:
+        case InstClass::FP_SCALAR: {
+            uint32_t op = d.raw;
+            uint8_t ftype = (op >> 22) & 3;
+            // Mirror ir_translate_fp.cpp's FP_SCALAR handling: nearly all
+            // scalar FP ops translate to native IR (FP_BINOP/FP_UNOP/FP_CMP/
+            // FCVT/FP_F2I/FP_I2F/FMADD/FCSEL/FRINT/FP_MOVI/FMOV). Only
+            // half-precision (ftype==3) and unmatchable encodings fall back
+            // to CALL_INTERP. Previously this returned true for EVERY
+            // FP_SCALAR, so FP-heavy blocks (e.g. the voxel game's
+            // transform/render math) tripped the interp_only heuristic and
+            // ran the interpreter — ~92% of dispatches never hit JIT code.
+            //
+            // BIFROST_FP_NATIVE_GATE=<bitmask> (debug/bisect): when set,
+            // only FP groups whose bit is set are treated as native; all
+            // others fall back to CALL_INTERP. Bitmap:
+            //   0x01 FMOV GPR<->FP / FMOV FP<->FP / FMOV imm
+            //   0x02 FCMP/FCMPE
+            //   0x04 FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL) + FABD
+            //   0x08 FP 1-source (FABS/FNEG/FSQRT/FRINT*)
+            //   0x10 FCVTZS/FCVTZU (FP->int)
+            //   0x20 FCVT D<->S + SCVTF/UCVTF (int->FP)
+            //   0x40 FMA family
+            //   0x80 FCSEL
+            static int fp_gate = [] {
+                const char* s = getenv("BIFROST_FP_NATIVE_GATE");
+                return s ? static_cast<int>(strtol(s, nullptr, 0)) : -1;  // -1 = all native
+            }();
+            // FMOV GPR↔FP (32/64-bit) — ftype-agnostic in the translator.
+            if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18)) && (op & (1u << 17)))
+                return fp_gate < 0 || (fp_gate & 0x01);
+            if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18)) && (op & (1u << 17)))
+                return fp_gate < 0 || (fp_gate & 0x01);
+            if (ftype > 1)
+                return true;  // half-precision → interpreter
+            // FMOV FP↔FP (double 0x1E604000 / single 0x1E204000).
+            if ((op & 0xFFFFFC00) == 0x1E604000 || (op & 0xFFFFFC00) == 0x1E204000)
+                return fp_gate < 0 || (fp_gate & 0x01);
+            // FMOV (scalar, immediate).
+            if (fp_decode::is_fmov_imm(op))
+                return fp_gate < 0 || (fp_gate & 0x01);
+            // FCMP/FCMPE (register or #0.0 form).
+            if (fp_decode::is_fcmp(op))
+                return fp_gate < 0 || (fp_gate & 0x02);
+            // FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL).
+            if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
+                && (op & 0xFF000000) == 0x1E000000 && ((op >> 12) & 0xF) <= 8)
+                return fp_gate < 0 || (fp_gate & 0x04);
+            // FABD (scalar/vector, S/D via bit22).
+            if ((op & 0xFF00FC00) == 0x7E00D400)
+                return fp_gate < 0 || (fp_gate & 0x04);
+            // FP 1-source: FABS/FNEG/FSQRT (1..3) and FRINT* (0x08..0x0F).
+            if (fp_decode::is_fp_1source(op)) {
+                uint8_t fp1 = fp_decode::fp_1source_opcode(op);
+                if ((fp1 >= 1 && fp1 <= 3) || (fp1 >= 0x08 && fp1 <= 0x0F))
+                    return fp_gate < 0 || (fp_gate & 0x08);
+            }
+            // FCVTZS/FCVTZU (FP→int toward zero).
+            if ((op & 0x7F3E0000) == 0x1E380000)
+                return fp_gate < 0 || (fp_gate & 0x10);
+            // FCVT D↔S (0x1E624000 double→single, 0x1E22C000 single→double).
+            if ((op & 0xFFFFFC00) == 0x1E624000 || (op & 0xFFFFFC00) == 0x1E22C000)
+                return fp_gate < 0 || (fp_gate & 0x20);
+            // SCVTF/UCVTF (int→FP) + fixed-point variant.
+            if ((op & 0x7F3EFC00) == 0x1E220000 || (op & 0x7F3E0000) == 0x1E020000)
+                return fp_gate < 0 || (fp_gate & 0x20);
+            // FMA family (FMADD/FMSUB/FNMADD/FNMSUB).
+            if ((op & 0xFF000000) == 0x1F000000)
+                return fp_gate < 0 || (fp_gate & 0x40);
+            // FCSEL.
+            if ((op & 0xFF200C00) == 0x1E200C00)
+                return fp_gate < 0 || (fp_gate & 0x80);
+            return true;  // rare/unsupported scalar FP → interpreter
+        }
         case InstClass::LDXR: case InstClass::STXR:
         case InstClass::LDAXR: case InstClass::STLXR:
         case InstClass::LDAR: case InstClass::STLR:
@@ -80,6 +150,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
     num_stack_slots_ = 0;
+    vec_cache_reset();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
     // translation when blocks are small (typical: max_vreg_ ≈ 33-100).
@@ -271,6 +342,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     num_stack_slots_ = max_vreg - 32;
     if (num_stack_slots_ < 1) num_stack_slots_ = 1;
     uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
+    // ── Vector register cache pre-scan ─────────────────────────────
+    // Enable the XMM vector cache only if EVERY vector-touching op in the
+    // block is cache-aware (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops.
+    // The cache's correctness relies on never flushing mid-block, which the
+    // all-or-nothing scan guarantees.
+    vec_cache_may_enable(ir_block);
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
@@ -280,6 +357,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
     if (window_base_) emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
+    // Vector cache prologue loads MUST be emitted before block_body_start_off_
+    // is recorded: self-loop re-entry jumps directly to the body start, so
+    // these loads run only on cold entry (dispatcher / chain entry) and the
+    // pinned XMM regs persist as loop-carried state across iterations.
+    vec_emit_prologue_loads();
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
@@ -356,6 +438,11 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     clobber_flags();
     // Flush all dirty vregs before returning (so cpu.regs[] is up to date).
     flush_all_vregs();
+    // Write back dirty cached vectors to cpu.v_lo/v_hi. Self-loop re-entry
+    // skips the epilogue, so loop-carried accumulators stay in XMM; this
+    // runs only when the loop exits (or the block is entered from another
+    // block / the dispatcher).
+    vec_cache_writeback_all();
     if (!rax_holds_next_pc_) {
         uint64_t next_pc = start_pc + ir_block.count * 4;
         emit_mov_imm_to_rax(next_pc);

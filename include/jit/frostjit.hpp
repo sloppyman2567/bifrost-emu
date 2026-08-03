@@ -837,6 +837,48 @@ private:
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
+    // ── XMM vector register cache (v1.5.2-alpha) ───────────────────
+    // Guest vector regs (0-31) pinned into host XMM3-15 across the whole
+    // block. Only blocks whose vector-touching ops are all cache-aware
+    // (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops activate the cache;
+    // translate_block pre-scans the IR and enables it only for such blocks,
+    // so the cache is NEVER flushed mid-block (no body reloads). The
+    // prologue loads (emitted BEFORE block_body_start_off_) run only on cold
+    // entry; self-loop re-entry jumps directly to the body start and skips
+    // them, so the pinned XMM regs act as loop-carried accumulator state.
+    // Dirty vectors are written back to cpu.v_lo/v_hi in the block epilogue.
+    //
+    // XMM0/XMM1/XMM2 stay free as scratch for the (non-cached fallback)
+    // SIMD codegen and for the cached ops' FABD sign-mask.
+    static constexpr int VEC_XMM_START = 3;
+    static constexpr int VEC_XMM_END   = 15;
+    int  vec_cache_[32];      // vector reg → host XMM index, or -1
+    int  vec_xmm_owner_[16];  // host XMM index → vector reg, or -1
+    bool vec_dirty_[32];      // XMM holds newer value than cpu.v_lo/v_hi
+    bool vec_cache_active_ = false;
+    int  vec_pinned_count_ = 0;
+    int  vec_pinned_[32];     // pinned vector regs, in assignment order
+    // Returns the host XMM reg pinning guest vector `vreg`, or -1.
+    int  vec_xmm(int vreg) const {
+        return (vec_cache_active_ && vreg >= 0 && vreg < 32)
+                   ? vec_cache_[vreg] : -1;
+    }
+    // Pre-scan `block`: enables the cache iff every vector-touching op is
+    // cache-aware (or GPR-only) AND the distinct vectors used fit in
+    // XMM3-15 AND the host has FMA3 (AVX). Pins the used vectors.
+    bool vec_cache_may_enable(const IRBlock& block);
+    void vec_cache_reset();
+    void vec_emit_prologue_loads();      // movsd+movhpd loads before body start
+    void vec_cache_writeback_all();      // dirty XMM → cpu.v_lo/v_hi (epilogue)
+    void vec_cache_mark_dirty(int vreg);
+    void vec_emit_load_lo_hi(int xmm, int vreg);
+    // VEX 3-byte emission for the cached SIMD paths (map: 1=0F, 2=0F38,
+    // 3=0F3A; vvvv = NDS source reg; pp: 0=ps, 1=pd/66; W = 64-bit op).
+    void emit_vex3(int map, bool w, int vvvv, int pp, int reg_field,
+                   int rm_field, bool rm_is_reg, uint8_t opcode);
+    void emit_vex_fma(int dest, int src1, int src2, bool is_double, bool is_sub);
+    void emit_vex_fp_binop(int dest, int src1, int src2,
+                           uint8_t op_byte, bool is_double);
     // Materialize pending host flags to pstate if any flag-clobbering
     // instruction is about to execute. Called by ADD/SUB/AND/OR/XOR/
     // SHL/SHR/SAR/ROR/NOT/NEG/IMUL to preserve flag correctness.

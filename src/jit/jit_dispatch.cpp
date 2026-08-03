@@ -606,6 +606,39 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(pc), static_cast<unsigned long long>(jit_next),
                     steps, entry.instr_count);
         }
+        // ── Memory divergence check (BIFROST_JIT_VERIFY_MEM=1) ────────
+        // At this point the interpreter has re-run the block on the restored
+        // pre-JIT memory, so the store addresses now hold the interpreter's
+        // final values. Compare them against the JIT's written values — a
+        // mismatch means the JIT wrote a different value to memory than the
+        // interpreter, i.e. a REAL memory divergence that register verify
+        // masks (it restores JIT memory afterwards). Register verify alone
+        // won't catch a JIT that computes a correct register but stores it
+        // to the wrong address or with a corrupted value.
+        static bool memverify_ = (getenv("BIFROST_JIT_VERIFY_MEM") != nullptr);
+        if (memverify_) {
+            for (int i = 0; i < saved_mem_count; i++) {
+                uint64_t ref_val = 0;
+                bool ok = true;
+                try {
+                    switch (saved_mem[i].width) {
+                        case 1: ref_val = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
+                        case 2: ref_val = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
+                        case 4: ref_val = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
+                        case 8: ref_val = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
+                        default: ok = false;
+                    }
+                } catch (...) { ok = false; }
+                if (ok && ref_val != jit_written[i].value) {
+                    fprintf(stderr, "[VERIFY-MEM] block @ 0x%llx addr=0x%llx width=%d jit=0x%llx ref=0x%llx\n",
+                            static_cast<unsigned long long>(pc),
+                            static_cast<unsigned long long>(saved_mem[i].addr),
+                            saved_mem[i].width,
+                            static_cast<unsigned long long>(jit_written[i].value),
+                            static_cast<unsigned long long>(ref_val));
+                }
+            }
+        }
         // Restore the JIT's written values at every STORE_MEM address so
         // memory is consistent with the JIT's cpu state for the NEXT block.
         // (The interpreter overwrote these with its own values during the

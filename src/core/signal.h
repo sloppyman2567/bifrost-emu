@@ -117,8 +117,10 @@ constexpr int SEGV_ACCERR_EMU = 2;
 constexpr int ILL_ILLOPC_EMU  = 1;
 constexpr int FPE_INTDIV_EMU  = 1;
 // Fixed guest address where we map the sigreturn trampoline.
-// Chosen to be far from the stack (0x8000000000) and mmap region
-// (0x5000000000+) so it never collides.
+// Chosen to be far from the stack (Memory::STACK_TOP) and heap mmap
+// region (MMAP_BASE_MIN+) so it never collides. Stays above the 4 GiB
+// direct window (in pages_) so the map_sigreturn_trampoline is_mapped
+// short-circuit doesn't see it as "mapped" before we write the code.
 constexpr uint64_t TRAMPOLINE_ADDR = 0x7000000000ULL;
 // Linux struct k_sigaction (AArch64 layout, simplified):
 //   void  (*sa_handler)(int)         — at offset 0

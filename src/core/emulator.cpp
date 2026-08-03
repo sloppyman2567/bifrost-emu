@@ -115,11 +115,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
             out.push_back(e);
         }
-        // Stack: fixed 64 MiB at 0x8000000000 - 64 MiB.
+        // Stack: fixed 64 MiB at Memory::STACK_TOP - 64 MiB.
         {
             yggdrasil::Yggdrasil::MapEntry e;
-            e.start = 0x8000000000ULL - 64 * 1024 * 1024;
-            e.end   = 0x8000000000ULL;
+            e.start = Memory::STACK_TOP - Memory::STACK_SIZE;
+            e.end   = Memory::STACK_TOP;
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
             e.label = "[stack]";
             out.push_back(e);
@@ -711,9 +711,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
-    // Set up the initial stack image
-    const uint64_t STACK_TOP = 0x8000000000ULL;
-    const uint64_t STACK_SIZE = 64 * 1024 * 1024;  // 64 MiB
+    // Set up the initial stack image. v1.5.2: STACK_TOP is inside the
+    // 4 GiB direct window so stack accesses hit the JIT fast path.
+    const uint64_t STACK_TOP = Memory::STACK_TOP;
+    const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
     // v1.5.1-alpha: load the embedded vDSO before building the stack so

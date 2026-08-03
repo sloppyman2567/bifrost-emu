@@ -75,9 +75,26 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all test clean install uninstall lib debug setup setup-tests check-all
+.PHONY: all opgen opgen-check test clean install uninstall lib debug setup setup-tests check-all
 
 all: $(TARGET)
+
+# Regenerate the opcode-decode tables (opgen_simd.hpp) from the specs.
+# Requires python3. The generated headers are committed, so a plain `make`
+# does NOT invoke this; run `make opgen` explicitly when a spec changes.
+OPGEN_SPECS := tools/opgen/simd_dp.txt
+OPGEN_GEN   := tools/opgen/opgen.py
+OPGEN_OUTS  := include/opgen_simd.hpp
+
+opgen: $(OPGEN_OUTS)
+
+$(OPGEN_OUTS): $(OPGEN_SPECS) $(OPGEN_GEN)
+	python3 tools/opgen/opgen.py $(OPGEN_SPECS) $@
+
+# CI/navigation guard: fail if the committed generated header has drifted
+# from the spec (i.e. someone edited the spec but forgot `make opgen`).
+opgen-check:
+	python3 tools/opgen/opgen.py --check $(OPGEN_SPECS) $(OPGEN_OUTS)
 
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)

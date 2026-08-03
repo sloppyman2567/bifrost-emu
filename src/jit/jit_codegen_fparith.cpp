@@ -232,9 +232,26 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);
                 // jae .large (CF=0 means src >= 2^63)
                 size_t jae_patch = emit_jcc_rel32_placeholder(0x3);  // JAE rel32
-                // CVTTSD2SI rax, xmm0 (small path)
+                // Small path (src in (-inf, 2^63)). ARM FCVTZU semantics:
+                // negative (or NaN) input → 0. x86 CVTTSD2SI would turn a
+                // negative value into a huge unsigned, so clamp to 0 first
+                 // via ucomisd/iss against 0.0 (CF=1 iff src < 0 or NaN).
+                 // NOTE: must emit SSE pxor (0x66 0F EF) — the MMX form
+                 // (0F EF, no 0x66) does NOT zero xmm1 on all hosts, which
+                 // left 2^63 in xmm1 and sent positives down the zero path.
+                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xC9);  // pxor xmm1, xmm1
+                 if (is_double) emit_byte(0x66);
+                 emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);   // ucomi(s/d) xmm0, xmm1
+                size_t jb_zero = emit_jcc_rel32_placeholder(0x2);   // JB rel32 (src < 0)
+                // CVTTSD2SI rax, xmm0 (non-negative small path)
                 emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
                 emit_byte(0xC0);  // rax, xmm0
+                size_t jmp_small_done = emit_jmp_rel32_placeholder();
+                size_t zero_path = code_buf_used_;
+                patch_jcc_rel32(jb_zero, static_cast<int32_t>(zero_path - (jb_zero + 6)));
+                emit_byte(0x31); emit_byte(0xC0);  // xor eax, eax → result 0
+                size_t small_done = code_buf_used_;
+                patch_jmp_rel32(jmp_small_done, static_cast<int32_t>(small_done - (jmp_small_done + 5)));
                 // jmp .done
                 size_t jmp_done = emit_jmp_rel32_placeholder();
                 size_t large_path = code_buf_used_;
