@@ -145,6 +145,28 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
             return maps;
         }, flags);
     }
+    // ── /proc/mounts + /proc/self/mounts → host mount table (LAZY) ──
+    // QFSFileEngine::drives() (Qt5) opens /etc/mtab then /proc/mounts;
+    // if neither is readable it emits
+    //   "QFSFileEngine::drives() no mounted file systems?!"
+    // and the resulting qWarning re-enters QLoggingCategory static init,
+    // which throws recursive_init_error (crash). Serve the host table.
+    if (path == "/proc/mounts" || path == "/proc/self/mounts") {
+        return serve_lazy([]() -> std::string {
+            std::string out;
+            FILE* f = fopen("/proc/mounts", "r");
+            if (!f) {
+                out = "none / rw,relatime 0 0\n";
+            } else {
+                char buf[1024];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+                    out.append(buf, n);
+                fclose(f);
+            }
+            return out;
+        }, flags);
+    }
     // ── /proc/self/status → process info (LAZY) ─────────────────────
     // Status includes VmSize/VmRSS which depend on live memory layout.
     if (path == "/proc/self/status") {

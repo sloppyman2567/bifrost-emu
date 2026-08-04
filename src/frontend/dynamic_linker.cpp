@@ -11,8 +11,10 @@
 //   R_AARCH64_TLS_DTPMOD (1028) : *(addr) = module id (static TLS)
 //   R_AARCH64_TLS_DTPREL (1029) : *(addr) = TP-offset within module
 //   R_AARCH64_TLS_TPREL  (1030) : *(addr) = TP-offset (Initial-Exec)
-//   R_AARCH64_TLSDESC    (1031) : inline static descriptor: desc[0]=0
-//                                  (no resolver), desc[1]=TP-offset
+//   R_AARCH64_TLSDESC    (1031) : 16-byte descriptor. desc[0] = resolver
+//                                  stub (returns the TP-offset stored at
+//                                  [x0+8], glibc's __tlsdesc_return ABI),
+//                                  desc[1] = TP-offset
 //   R_AARCH64_IRELATIVE  (1032) : *(addr) = Indirect(Delta + A)
 //                                  — calls the ifunc resolver at Delta + A
 //                                    and stores its return value.
@@ -59,6 +61,7 @@ constexpr int DT_NEEDED_    = 1;
 constexpr int DT_PLTRELSZ_  = 2;
 constexpr int DT_PLTGOT_    = 3;
 constexpr int DT_HASH_      = 4;
+constexpr int DT_GNU_HASH_  = 0x6ffffef5;
 constexpr int DT_STRTAB_    = 5;
 constexpr int DT_SYMTAB_    = 6;
 constexpr int DT_RELA_      = 7;
@@ -197,10 +200,27 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     main_obj.name = main_path;
     main_obj.base_addr = main_base;
     main_obj.is_main = true;
+    // Compute the main binary's mapping extent (highest PT_LOAD
+    // p_vaddr+p_memsz) so dlfo_map_start/map_end are meaningful.
+    if (main_data.size() >= 56) {
+        uint64_t e_phoff; uint16_t e_phentsize, e_phnum;
+        memcpy(&e_phoff,     main_data.data() + 32, 8);
+        memcpy(&e_phentsize, main_data.data() + 54, 2);
+        memcpy(&e_phnum,     main_data.data() + 56, 2);
+        uint64_t max_end = 0;
+        for (int i = 0; i < e_phnum; i++) {
+            const uint8_t* p = main_data.data() + e_phoff + i * e_phentsize;
+            uint32_t pt; uint64_t pv, pm;
+            memcpy(&pt, p + 0, 4); memcpy(&pv, p + 16, 8); memcpy(&pm, p + 40, 8);
+            if (pt == 1) { uint64_t e = pv + pm; if (e > max_end) max_end = e; }
+        }
+        main_obj.map_size = max_end;
+    }
     if (!parse_dynamic(main_data, main_base, main_obj)) {
         return false;
     }
     parse_tls(main_data, main_obj);
+    parse_eh_frame(main_data, main_base, main_obj);
     objects_.push_back(std::move(main_obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());
@@ -538,28 +558,27 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         //   desc[1] = TP-offset
                         // This is the "static TLSDESC" trick used by
                         // musl/glibc when the offset is known at load time.
-                        int64_t tp_off = A;
-                        if (sym != 0) {
-                            Elf64_Sym s;
-                            mem_.read(obj.symtab_addr + sym * sizeof(s),
-                                      &s, sizeof(s));
-                            std::string name = read_guest_cstr(
-                                mem_, obj.strtab_addr + s.st_name);
-                            uint64_t sym_addr = resolve_symbol(name);
-                            int64_t mod_tp_off = obj.tls_tp_offset;
-                            if (sym_addr != 0) {
-                                const LoadedObject* o = find_object_by_addr(sym_addr);
-                                if (o) mod_tp_off = o->tls_tp_offset;
-                            }
-                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
-                        } else {
-                            tp_off = obj.tls_tp_offset + A;
-                        }
-                        // desc[0] = 0 (no resolver; inline)
-                        mem_.store<uint64_t>(target, 0);
+                        int64_t tp_off = tlsdesc_tp_offset(obj, sym, A);
+                        // desc[0] = resolver function pointer. The guest
+                        // calls it with x0 = &desc[1]; our stub returns
+                        // the TP-offset stored at [x0+8] (glibc AArch64
+                        // general-dynamic TLS convention). Previously this
+                        // stored 0 (the "static TLSDESC" inline trick),
+                        // which only works with compilers that read desc[1]
+                        // directly — but glibc/Qt codegen does `blr desc[0]`,
+                        // crashing at pc=0x0 on the null resolver.
+                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
+                                            tlsdesc_resolver_off_;
+                        mem_.store<uint64_t>(target, resolver);
                         // desc[1] = TP-offset
                         mem_.store<uint64_t>(target + 8,
                             static_cast<uint64_t>(tp_off));
+                        if (dynlink_trace_enabled()) {
+                            fprintf(stderr, "[dynlink] TLSDESC1 obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
+                                    obj.name.c_str(), (unsigned long long)target,
+                                    (unsigned long long)resolver, (long long)tp_off,
+                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
+                        }
                     } else if (type == R_AARCH64_JUMP_SLOT_) {
                         // Eager binding: resolve now.
                         if (sym == 0) {
@@ -625,6 +644,22 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                                         (unsigned long long)target);
                             }
                         }
+                    } else if (type == R_AARCH64_TLSDESC_) {
+                        // Some toolchains (GCC for Qt5Core) place
+                        // R_AARCH64_TLSDESC relocations at the END of
+                        // .rela.plt (DT_JMPREL), not in .rela.dyn. Apply
+                        // the same 16-byte descriptor as the RELA loop.
+                        int64_t tp_off = tlsdesc_tp_offset(obj, sym, A);
+                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
+                                            tlsdesc_resolver_off_;
+                        mem_.store<uint64_t>(target, resolver);
+                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
+                        if (dynlink_trace_enabled()) {
+                            fprintf(stderr, "[dynlink] TLSDESC-JMP obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
+                                    obj.name.c_str(), (unsigned long long)target,
+                                    (unsigned long long)resolver, (long long)tp_off,
+                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
+                        }
                     }
                     // Other relocation types in DT_JMPREL (rare) fall
                     // through unprocessed — they'd need the same handling
@@ -660,6 +695,12 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // (not our shim) because __libc_early_init reads many other fields
     // from the real struct at specific offsets.
     patch_rtld_global_ro_();
+    // Funnelled glibc 2.42+: libc's _dl_find_object trampoline forwards
+    // through _rtld_global_ro.dl_find_object, which ld-linux's
+    // _dl_start_final normally writes but our native dynlink never runs.
+    // Fill the funnel slots so the trampoline doesn't `br 0`.
+    patch_rtld_funnel_();
+
     // _rtld_global. Must happen before __libc_early_init and before the
     // program runs pthread_create. See init_nptl_stack_lists_() for the
     // full rationale. (No-op for musl, which has no _rtld_global.)
@@ -680,6 +721,15 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Re-patch _rtld_global_ro AFTER __libc_early_init.
     // __libc_early_init zeroes dl_pagesize. Re-apply.
     patch_rtld_global_ro_();
+    // glibc's __libc_start_main_impl sets __libc_single_threaded = 1
+    // BEFORE running DT_INIT_ARRAY (static constructors). This makes
+    // glibc take the single-threaded fast paths: __cxa_guard_acquire
+    // detects recursive static initialization and throws
+    // std::__throw_recursive_init_error instead of taking the
+    // multithreaded CAS+futex path, which deadlocks when only the main
+    // thread exists (FUTEX_WAIT can never be woken). musl has no such
+    // symbol — resolve_symbol returns 0 and the write is skipped.
+    set_libc_single_threaded_();
     // loaded object (libs first, main last). Runs C++ static constructors,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
     // runs with uninitialized globals (vtables, std::mutex, std::string).
@@ -691,6 +741,20 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // Final re-patch AFTER DT_INIT_ARRAY.
     patch_rtld_global_ro_();
     return true;
+}
+// ── set_libc_single_threaded_ ─────────────────────────────────────────
+// Mirror glibc's __libc_start_main_impl: write 1 into libc's
+// __libc_single_threaded BSS word so single-threaded guests use glibc's
+// fast paths (recursive static init → std::__throw_recursive_init_error
+// instead of an unwakeable FUTEX_WAIT deadlock). No-op for musl.
+void DynamicLinker::set_libc_single_threaded_() {
+    libc_single_threaded_addr_ = resolve_symbol("__libc_single_threaded");
+    if (libc_single_threaded_addr_ == 0) return;
+    mem_.store<uint8_t>(libc_single_threaded_addr_, 1);
+    if (dynlink_trace_enabled()) {
+        fprintf(stderr, "[dynlink] __libc_single_threaded = 1 @ 0x%llx\n",
+                static_cast<unsigned long long>(libc_single_threaded_addr_));
+    }
 }
 // ── patch_rtld_global_ro_ ──────────────────────────────────────────────
 // Patch the resolved _rtld_global_ro to set dl_pagesize,
@@ -1017,6 +1081,201 @@ void DynamicLinker::patch_rtld_global_ro_() {
             }
         } catch (...) {}
     }
+}
+// ── patch_rtld_funnel_ ────────────────────────────────────────────────
+// Funnelled glibc (2.42+): glibc was built with function-visibility
+// tuning that puts the real _dl_find_object implementation in ld-linux
+// and exports a 4-instruction trampoline from libc:
+//   adrp x2, <got_page>
+//   ldr  x2, [x2, #<got_off>]        ; x2 = &_rtld_global_ro
+//   ldr  x16, [x2, #<slot_off>]      ; x16 = GLRO(dl_find_object)
+//   br   x16
+// The target slot in _rtld_global_ro is normally written by ld-linux's
+// _dl_start_final:
+//   add x2, x?, #0xc98               ; x2 = &_rtld_global_ro
+//   adrp x1, ...; add x1, x1, #imm   ; &_dl_readonly_area
+//   adrp x0, ...; add x0, x0, #imm   ; &_dl_find_object
+//   stp  x0, x1, [x2, #<slot_off>]
+// Since the native dynlink never runs ld-linux's _dl_start, the slot
+// stays 0 and the trampoline does `br 0` → SIGSEGV at pc=0. We detect
+// the slot offset from the libc trampoline, locate the matching STP in
+// ld-linux's _dl_start, and write the real function addresses so the
+// trampoline forwards correctly. No-op for non-funnelled glibc / musl.
+void DynamicLinker::patch_rtld_funnel_() {
+    // A funnelled libc exports _dl_find_object as a trampoline:
+    //   adrp x2, <got_page>
+    //   ldr  x2, [x2, #<got_off>]        ; x2 = &_rtld_global_ro
+    //   ldr  x16, [x2, #<slot_off>]      ; x16 = GLRO(dl_find_object)
+    //   br   x16
+    // Extract the _rtld_global_ro slot offset. resolve_symbol normally
+    // returns the trampoline, but the _dl_find_object FORCE override in
+    // register_ld_linux_shim_() points it at our stub — in that case
+    // scan libc's mapped text for the `ldr xN, [xM, #slot]; br xN` tail.
+    uint64_t tramp = resolve_symbol("_dl_find_object");
+    uint32_t slot_off = 0;
+    if (tramp != 0 && tramp != dl_find_object_stub_) {
+        uint8_t code[32];
+        try {
+            mem_.read(tramp, code, sizeof(code));
+        } catch (...) {
+            return;
+        }
+        for (size_t i = 0; i + 8 <= sizeof(code); i += 4) {
+            uint32_t insn, nxt;
+            memcpy(&insn, code + i, 4);
+            memcpy(&nxt, code + i + 4, 4);
+            // LDR (64-bit, unsigned offset) then BR (br xN: mask/value
+            // 0xFFFFFC1F/0xD61F0000 — ignores the register bits).
+            if ((insn & 0xFFC00000) == 0xF9400000 &&
+                (nxt & 0xFFFFFC1F) == 0xD61F0000) {
+                slot_off = ((insn >> 10) & 0xFFF) * 8;
+                break;
+            }
+        }
+    } else {
+        // The shim override hides libc's trampoline from resolve_symbol.
+        // Find the slot by scanning libc's own .text for the trampoline
+        // tail; the LDR/BR pair reads x16 out of _rtld_global_ro.
+        const LoadedObject* libc = find_object_by_addr(resolve_symbol("malloc"));
+        if (libc != nullptr) {
+            const uint64_t libc_text_end =
+                libc->base_addr + std::min<uint64_t>(libc->map_size, 0x40000);
+            for (uint64_t p = libc->base_addr + 0x1000; p + 8 <= libc_text_end; p += 4) {
+                uint32_t insn, nxt;
+                try {
+                    insn = mem_.load<uint32_t>(p);
+                    nxt  = mem_.load<uint32_t>(p + 4);
+                } catch (...) {
+                    break;
+                }
+                if ((insn & 0xFFC00000) == 0xF9400000 &&
+                    (nxt & 0xFFFFFC1F) == 0xD61F0000 &&
+                    (insn & 0x1F) == (nxt & 0x1F)) {
+                    uint32_t cand = ((insn >> 10) & 0xFFF) * 8;
+                    if (cand >= 0x100 && cand < 0x400) {
+                        slot_off = cand;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (slot_off == 0 || slot_off >= 0x400) return;
+    uint64_t rtld_ro = resolve_symbol("_rtld_global_ro");
+    if (rtld_ro == 0) return;
+    const LoadedObject* ld = find_object_by_addr(rtld_ro);
+    if (ld == nullptr || ld->base_addr == 0) return;
+    const uint64_t ld_base = ld->base_addr;
+    // Scan ld-linux's mapped image for an STP/STR storing into
+    // _rtld_global_ro at slot_off. Restrict to the .text mapping.
+    const uint64_t text_end = ld_base + std::min<uint64_t>(ld->map_size, 0x28000);
+    uint64_t dl_find_object_va = 0;  // file VA of the real implementation
+    uint64_t dl_readonly_area_va = 0;
+    for (uint64_t p = ld_base + 0x10; p + 8 <= text_end; p += 4) {
+        uint32_t insn;
+        try {
+            insn = mem_.load<uint32_t>(p);
+        } catch (...) {
+            break;
+        }
+        uint32_t off = 0;
+        uint32_t rt = 0xFFFFFFFF, rt2 = 0xFFFFFFFF;
+        if ((insn & 0xFFC00000) == 0xA9000000) {
+            // STP (64-bit, unsigned offset, no writeback): imm7 scaled
+            // by 8. Rt = dst[0], Rt2 = dst[1].
+            off = ((insn >> 15) & 0x7F) * 8;
+            rt = insn & 0x1F;
+            rt2 = (insn >> 10) & 0x1F;
+        } else if ((insn & 0xFFC00000) == 0xF9400000) {
+            // STR (64-bit, unsigned offset).
+            off = ((insn >> 10) & 0xFFF) * 8;
+            rt = insn & 0x1F;
+        }
+        if (off != slot_off) continue;
+        // Resolve the source register(s): the compiler computes the
+        // function address with `adrp xR, <page>; add xR, xR, #imm`
+        // within the instructions just before the store. Walk backwards
+        // up to 16 instructions tracking the last adrp per register.
+        auto resolve_src = [&](uint32_t reg) -> uint64_t {
+            uint64_t add_page = 0, add_imm = 0;
+            bool have_add = false;
+            // Walk BACKWARDS (closest-to-store first) so we see the
+            // `add xR, xR, #imm` before its preceding `adrp xR, <page>`.
+            uint64_t low = (p > 64 ? p - 64 : ld_base);
+            for (uint64_t q = p; q > low; ) {
+                q -= 4;
+                uint32_t w;
+                try { w = mem_.load<uint32_t>(q); }
+                catch (...) { break; }
+                if ((w & 0x7F000000) == 0x11000000) {
+                    uint32_t rd = w & 0x1F, rn = (w >> 5) & 0x1F;
+                    if (rd == reg && rn == reg) {
+                        add_imm = (w >> 10) & 0xFFF;
+                        have_add = true;
+                    }
+                    continue;
+                }
+                if ((w & 0x9F000000) == 0x90000000) {
+                    uint32_t rd = w & 0x1F;
+                    if (rd == reg && have_add) {
+                        // ADRP: pc-relative page of the CURRENT instr.
+                        int64_t imm = ((w >> 5) & 0x7FFFF) << 2;
+                        imm |= (w >> 29) & 0x3;
+                        if (imm & (1LL << 20)) imm -= (1LL << 21);
+                        add_page = (q & ~0xFFFULL) + (imm << 12);
+                        break;
+                    }
+                }
+            }
+            if (add_page == 0 || !have_add) return 0;
+            return add_page + add_imm;
+        };
+        uint64_t v0 = resolve_src(rt);
+        uint64_t v1 = (rt2 != 0xFFFFFFFF) ? resolve_src(rt2) : 0;
+        if (v0 == 0) continue;
+        dl_find_object_va = v0;
+        dl_readonly_area_va = v1;
+        if (dynlink_trace_enabled()) {
+            fprintf(stderr, "[dynlink] funnel STP @0x%llx: slot_off=0x%x "
+                    "-> _dl_find_object=0x%llx, _dl_readonly_area=0x%llx\n",
+                    static_cast<unsigned long long>(p), slot_off,
+                    static_cast<unsigned long long>(v0),
+                    static_cast<unsigned long long>(v1));
+        }
+        break;
+    }
+    if (dl_find_object_va == 0 && dl_find_object_stub_ == 0) return;
+    // Prefer our native shim stub: it answers _dl_find_object from host
+    // LoadedObject state (real eh_frame_hdr etc.) via syscall 0x1008,
+    // which libgcc's _Unwind_Find_FDE needs for C++ exceptions. Fall
+    // back to ld-linux's real implementation only when no shim exists.
+    const uint64_t fn_addr = dl_find_object_stub_ != 0
+                                 ? dl_find_object_stub_
+                                 : dl_find_object_va;
+    if (dl_find_object_stub_ == 0) {
+        // resolve_src yields ABSOLUTE guest addresses. Sanity: the
+        // resolved function must lie inside ld-linux's mapped image
+        // before writing.
+        const uint64_t map_end = ld_base + std::min<uint64_t>(ld->map_size, 0x28000);
+        if (dl_find_object_va < ld_base + 0x1000 || dl_find_object_va >= map_end)
+            return;
+        if (dl_readonly_area_va != 0 &&
+            (dl_readonly_area_va < ld_base + 0x1000 || dl_readonly_area_va >= map_end))
+            dl_readonly_area_va = 0;
+    }
+    try {
+        mem_.store<uint64_t>(rtld_ro + slot_off, fn_addr);
+        if (dl_readonly_area_va != 0)
+            mem_.store<uint64_t>(rtld_ro + slot_off + 8, dl_readonly_area_va);
+        if (dynlink_trace_enabled()) {
+            fprintf(stderr, "[dynlink] patched _rtld_global_ro + 0x%x = 0x%llx "
+                    "(_dl_find_object), +0x%x = 0x%llx (_dl_readonly_area)\n",
+                    slot_off,
+                    static_cast<unsigned long long>(fn_addr),
+                    slot_off + 8,
+                    static_cast<unsigned long long>(dl_readonly_area_va));
+        }
+    } catch (...) {}
 }
 // ── init_nptl_stack_lists_ ────────────────────────────────────────────
 // Initialize the NPTL stack-cache list heads in _rtld_global so that
@@ -1494,7 +1753,7 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
     // /DT_SONAME/DT_RPATH/DT_RUNPATH (previously declared as constants
     // but never read). Also capture DT_HASH for symbol-count derivation (H5).
     uint64_t symtab_vaddr = 0, strtab_vaddr = 0;
-    uint64_t hash_vaddr = 0;
+    uint64_t hash_vaddr = 0, gnu_hash_vaddr = 0;
     uint64_t soname_off = 0, rpath_off = 0, runpath_off = 0;
     for (uint64_t off = dyn_off;
          off + sizeof(Elf64_Dyn) <= data.size() && off < dyn_off + dyn_filesz;
@@ -1513,6 +1772,7 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             case DT_RELR_:          obj.relr_addr = base + dyn.d_val; break;
             case DT_RELRSZ_:        obj.relr_size = dyn.d_val; break;
             case DT_HASH_:          hash_vaddr = dyn.d_val; break;
+            case DT_GNU_HASH_:      gnu_hash_vaddr = dyn.d_val; break;
             case DT_INIT_:          obj.init_addr = base + dyn.d_val; break;
             case DT_FINI_:          obj.fini_addr = base + dyn.d_val; break;
             case DT_INIT_ARRAY_:    obj.init_array_addr = base + dyn.d_val; break;
@@ -1543,6 +1803,54 @@ bool DynamicLinker::parse_dynamic(const std::vector<uint8_t>& data,
             obj.symtab_count = nchain;
         } catch (...) {
             obj.symtab_count = 0;  // fall back to old heuristic
+        }
+    } else if (gnu_hash_vaddr != 0) {
+        // DT_GNU_HASH only (glibc ≥2.35 defaults; Qt libs are GNU_HASH-
+        // only). DT_HASH nchain is the exact .dynsym count, but without
+        // DT_HASH we must derive it from GNU_HASH. Header:
+        //   +0  uint32 nbucket
+        //   +4  uint32 symoffset
+        //   +8  uint32 bloom_size
+        //   +12 uint32 bloom_shift
+        //   then bloom_size uint64 bloom words,
+        //   then nbucket uint32 buckets (each an index into .dynsym),
+        //   then a chain word per symbol from symoffset upward.
+        // The .dynsym table extends past the last bucket's chain run, so
+        // the symbol count = 1 + max chain index reached across all
+        // buckets (GNU_HASH guarantees chains are contiguous from
+        // symoffset). Cap it at MAX_SYMS*4 for safety like DT_HASH.
+        try {
+            uint32_t nbucket = 0, symoffset = 0, bloom_size = 0;
+            mem_.read(base + gnu_hash_vaddr + 0, &nbucket, 4);
+            mem_.read(base + gnu_hash_vaddr + 4, &symoffset, 4);
+            mem_.read(base + gnu_hash_vaddr + 8, &bloom_size, 4);
+            if (nbucket != 0 && nbucket <= 0x100000 && bloom_size <= 0x100000) {
+                // bucket table starts right after the bloom words.
+                uint64_t bucket_off = gnu_hash_vaddr + 16 + (uint64_t)bloom_size * 8;
+                uint64_t max_sym = symoffset;  // symbols before symoffset exist too
+                for (uint32_t b = 0; b < nbucket; b++) {
+                    uint32_t first = 0;
+                    mem_.read(base + bucket_off + b * 4, &first, 4);
+                    if (first == 0 || first < symoffset) continue;
+                    // Walk the chain from `first` until the low bit of the
+                    // hash word is set (last entry in the chain).
+                    uint64_t chain_off = bucket_off + (uint64_t)nbucket * 4 +
+                                         (uint64_t)(first - symoffset) * 4;
+                    for (;;) {
+                        uint32_t h = 0;
+                        mem_.read(base + chain_off, &h, 4);
+                        uint64_t sym_idx = symoffset + (chain_off -
+                            (bucket_off + (uint64_t)nbucket * 4)) / 4;
+                        if (sym_idx > max_sym) max_sym = sym_idx;
+                        if (h & 1) break;  // LSB set → last in chain
+                        chain_off += 4;
+                        if (max_sym > 0x1000000) break;  // safety
+                    }
+                }
+                obj.symtab_count = max_sym + 1;
+            }
+        } catch (...) {
+            obj.symtab_count = 0;
         }
     }
     if (obj.symtab_count == 0) {
@@ -1868,6 +2176,9 @@ bool DynamicLinker::register_ld_linux_shim_() {
     constexpr uint32_t OFF_DLCLOSE  = 168; // _dl_close (8 bytes — return 0 stub)
     constexpr uint32_t OFF_DLITER   = 176; // dl_iterate_phdr (16 bytes — calls syscall 0x1007)
     constexpr uint32_t OFF_DLADDR   = 192; // dladdr (16 bytes — calls syscall 0x1005)
+    // TLSDESC resolver (16 bytes) lives at code.size()==208; OFF_DLFO
+    // is placed AFTER it (224) so the two don't collide.
+    constexpr uint32_t OFF_DLFO     = 224; // _dl_find_object (16 bytes — calls syscall 0x1008)
     // [0] _dl_find_dso_for_object (returns void*)
     //     Returns 0 (not found). glibc's dladdr and _dl_open use this
     //     to find the containing DSO for a given address. Returning 0
@@ -1981,6 +2292,49 @@ bool DynamicLinker::register_ld_linux_shim_() {
         // nop (pad to 16 bytes)
         emit_nop(code);
     }
+    // [20] TLSDESC resolver stub (8 bytes).
+    //     AArch64 general-dynamic TLS uses TLSDESC: the GOT slot holds a
+    //     16-byte descriptor {resolver_fn, arg}. The consumer sequence is:
+    //         adrp x0, page
+    //         ldr  xr, [x0, #off]   ; xr = desc[0] = resolver fn ptr
+    //         add  x0, x0, #off2    ; x0 = &desc[1] (the arg)
+    //         blr  xr               ; call resolver(arg) -> TLS offset in x0
+    //     glibc's real __tlsdesc_* resolvers are hidden in ld-linux, so
+    //     we provide our own: it reads the TP-offset we precomputed into
+    //     desc[1] and returns it.
+    //     ldr x0, [x0, #8]  →  0xF9400400  (bytes 00 04 40 F9)
+    //     ret               →  0xD65F03C0  (bytes C0 03 5F D6)
+    {
+        const uint32_t tlsdesc_off = (uint32_t)code.size();
+        // record the offset in a member for the TLSDESC fixup below.
+        tlsdesc_resolver_off_ = tlsdesc_off;
+        code.push_back(0x00); code.push_back(0x04); code.push_back(0x40); code.push_back(0xF9);
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        emit_nop(code);
+        emit_nop(code);  // pad to 16 bytes for alignment
+    }
+    // [21] _dl_find_object shim (16 bytes — calls syscall 0x1008).
+    //     glibc 2.42's libgcc_s _Unwind_Find_FDE resolves _dl_find_object
+    //     through the PLT; funnelled glibc additionally forwards the
+    //     libc trampoline through _rtld_global_ro.dl_find_object (the
+    //     funnel slot patched by patch_rtld_funnel_()). Both paths land
+    //     here: the stub passes x0 (pc) and x1 (&struct dl_find_object)
+    //     through to syscall 0x1008, which fills the glibc 2.42 result
+    //     struct (flags/map_start/map_end/link_map/eh_frame/sframe) from
+    //     host LoadedObject state. Returning 0 + a real eh_frame lets
+    //     _Unwind_Find_FDE binary-search .eh_frame_hdr so C++ throw/catch
+    //     works; the old -1 stub aborted on every exception.
+    {
+        // movz x8, #0x1008  →  0xD2820108
+        code.push_back(0x08); code.push_back(0x01); code.push_back(0x82); code.push_back(0xD2);
+        // svc #0           →  0xD4000001
+        code.push_back(0x01); code.push_back(0x00); code.push_back(0x00); code.push_back(0xD4);
+        // ret              →  0xD65F03C0
+        code.push_back(0xC0); code.push_back(0x03); code.push_back(0x5F); code.push_back(0xD6);
+        // nop (pad to 16 bytes)
+        emit_nop(code);
+    }
+    dl_find_object_stub_ = code_base + OFF_DLFO;
     // Pad to page size.
     code.resize(4096, 0x1F);  // NOP-fill the rest (0xD503201F LE)
     // Write the code page.
@@ -2319,6 +2673,10 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             std::vector<uint8_t> data(sz);
             if (!f.read(reinterpret_cast<char*>(data.data()), sz)) continue;
             found_path = path;
+            if (dynlink_trace_enabled()) {
+                fprintf(stderr, "[dynlink] found '%s' at '%s'\n",
+                        soname.c_str(), path.c_str());
+            }
             return data;
         }
     }
@@ -2428,6 +2786,7 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
         return 0;
     }
     parse_tls(data, obj);
+    parse_eh_frame(data, base, obj);
     objects_.push_back(std::move(obj));
     index_symbols(objects_.back());
     parse_versions_(objects_.back());
@@ -2539,6 +2898,31 @@ void DynamicLinker::parse_tls(const std::vector<uint8_t>& data,
         memcpy(&obj.tls.memsz,  p + 40, 8);
         memcpy(&obj.tls.align,  p + 48, 8);
         obj.tls.present = true;
+        return;
+    }
+}
+// ── parse_eh_frame ──────────────────────────────────────────────────────
+// Locate PT_GNU_EH_FRAME (p_type 0x6474e550) and record the absolute
+// guest address of the .eh_frame_hdr. libgcc's _Unwind_Find_FDE reads
+// this from the dl_find_object result struct (see syscall 0x1008 in
+// misc.cpp) to binary-search FDEs during C++ exception unwinding.
+void DynamicLinker::parse_eh_frame(const std::vector<uint8_t>& data,
+                                   uint64_t base, LoadedObject& obj) {
+    if (data.size() < 64) return;
+    uint64_t e_phoff;
+    uint16_t e_phentsize, e_phnum;
+    memcpy(&e_phoff,     data.data() + 32, 8);
+    memcpy(&e_phentsize, data.data() + 54, 2);
+    memcpy(&e_phnum,     data.data() + 56, 2);
+    for (int i = 0; i < e_phnum; i++) {
+        if (e_phoff + (i + 1) * e_phentsize > data.size()) break;
+        const uint8_t* p = data.data() + e_phoff + i * e_phentsize;
+        uint32_t p_type;
+        uint64_t p_vaddr;
+        memcpy(&p_type,  p + 0,  4);
+        if (p_type != 0x6474e550u) continue;  // PT_GNU_EH_FRAME
+        memcpy(&p_vaddr, p + 16, 8);
+        obj.eh_frame_hdr_addr = base + p_vaddr;
         return;
     }
 }
@@ -2807,6 +3191,45 @@ uint64_t DynamicLinker::resolve_reloc_symbol(const LoadedObject& obj,
         }
     }
     return resolve_symbol(name);
+}
+// ── tlsdesc_tp_offset ──────────────────────────────────────────────────
+// Compute the TP offset for an R_AARCH64_TLSDESC relocation. The subtle
+// case is an *imported* TLS symbol: the relocation lives in one module
+// (e.g. libicuuc's GOT) but the symbol is defined in another (libstdc++).
+// The importing module's .dynsym st_value is 0 for undefined symbols, so
+// we must resolve to the *defining* module and use ITS TLS block offset +
+// ITS st_value. Using the importing module's st_value silently shifted
+// every cross-module TLS access to the importing module's block, so
+// std::call_once's __once_call store landed on __once_callable's slot
+// (both appeared to resolve to the same negative offset) and __once_proxy
+// read 0 → br x0 → crash at pc=0x0.
+int64_t DynamicLinker::tlsdesc_tp_offset(const LoadedObject& obj,
+                                         uint32_t sym_idx, int64_t A) {
+    if (sym_idx == 0) {
+        // Local TLS: offset within this module's block is the addend.
+        return obj.tls_tp_offset + A;
+    }
+    Elf64_Sym s;
+    try {
+        mem_.read(obj.symtab_addr + sym_idx * sizeof(s), &s, sizeof(s));
+    } catch (...) {
+        return obj.tls_tp_offset + A;
+    }
+    std::string name = read_guest_cstr(mem_, obj.strtab_addr + s.st_name);
+    if (name.empty()) return obj.tls_tp_offset + A;
+    uint64_t sym_addr = resolve_symbol(name);
+    const LoadedObject* def = nullptr;
+    if (sym_addr != 0) {
+        def = find_object_by_addr(sym_addr);
+    }
+    if (def) {
+        // Defining module: TP offset = its block offset + its st_value.
+        // sym_addr = def->base_addr + def_st_value, so recover it.
+        int64_t def_st_value = static_cast<int64_t>(sym_addr - def->base_addr);
+        return def->tls_tp_offset + def_st_value + A;
+    }
+    // Not resolved: fall back to this module's block + its own st_value.
+    return obj.tls_tp_offset + static_cast<int64_t>(s.st_value) + A;
 }
 // ── parse_versions_ ──────────────────────────────────────
 // Parse the GNU symbol versioning sections and populate
@@ -3190,6 +3613,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
         return 0;
     }
     parse_tls(data, obj);
+    parse_eh_frame(data, base, obj);
     // Assign TLS module ID and tp_offset for dlopened libs.
     if (obj.tls.present && obj.tls.memsz > 0) {
         obj.tls_mod_id = next_tls_mod_id_++;
@@ -3287,22 +3711,17 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                         mem_.store<uint64_t>(target, tls_off);
                     } else if (type == R_AARCH64_TLSDESC_) {
                         // TLSDESC: 16-byte descriptor
-                        int64_t tp_off = A;
-                        if (sym != 0) {
-                            Elf64_Sym s; mem_.read(nobj.symtab_addr + sym*sizeof(s), &s, sizeof(s));
-                            std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
-                            uint64_t sym_addr = resolve_symbol(name);
-                            int64_t mod_tp_off = nobj.tls_tp_offset;
-                            if (sym_addr != 0) {
-                                const LoadedObject* o = find_object_by_addr(sym_addr);
-                                if (o) mod_tp_off = o->tls_tp_offset;
-                            }
-                            tp_off = mod_tp_off + static_cast<int64_t>(s.st_value) + A;
-                        } else {
-                            tp_off = nobj.tls_tp_offset + A;
-                        }
-                        mem_.store<uint64_t>(target, 0); // resolver = NULL
+                        int64_t tp_off = tlsdesc_tp_offset(nobj, sym, A);
+                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
+                                            tlsdesc_resolver_off_;
+                        mem_.store<uint64_t>(target, resolver);
                         mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
+                        if (dynlink_trace_enabled()) {
+                            fprintf(stderr, "[dynlink] TLSDESC2 obj=%s @0x%llx resolver=0x%llx tp=%lld shim=0x%llx toff=%u\n",
+                                    nobj.name.c_str(), (unsigned long long)target,
+                                    (unsigned long long)resolver, (long long)tp_off,
+                                    (unsigned long long)shim_base_, tlsdesc_resolver_off_);
+                        }
                     }
                 }
             }

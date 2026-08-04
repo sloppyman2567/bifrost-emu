@@ -1219,6 +1219,60 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(static_cast<int64_t>(rc));
             return 0;
         }
+        // ── Bifrost-emu internal _dl_find_object syscall ──
+        // a0 (x0) = guest address to locate (typically the faulting pc
+        //           inside a C++ throw; libgcc_s's _Unwind_Find_FDE calls
+        //           _dl_find_object with the pc of the frame it's unwinding)
+        // a1 (x1) = guest pointer to a 48-byte struct dl_find_object
+        // Returns: 0 on success, -1 if the address isn't in a loaded object.
+        // glibc 2.42 dl_find_object layout (from elf/dl-find-object.h):
+        //   +0  dlfo_flags   (0 = memory-based .eh_frame_hdr, NOT fd-based;
+        //                      the fd path would read() the host fd)
+        //   +8  dlfo_map_start
+        //   +16 dlfo_map_end
+        //   +24 dlfo_link_map
+        //   +32 dlfo_eh_frame (absolute .eh_frame_hdr guest address)
+        //   +40 dlfo_sframe
+        // libgcc_s's _Unwind_Find_FDE checks flags (must not have the
+        // DLFO_EH_FRAME_FD bit) then binary-searches dlfo_eh_frame; every
+        // C++ throw/catch walks this path. The previous all-zero stub made
+        // it return NULL and _Unwind_RaiseException aborted. We return the
+        // host LoadedObject's real PT_GNU_EH_FRAME address, which is the
+        // actual linker-produced .eh_frame_hdr (version/encodings/table all
+        // valid, pcrel/datarel offsets preserved by mapping at load base).
+        case 0x1008: {
+            auto* dl = emu.dyn_linker_.get();
+            if (!dl || a0 == 0 || a1 == 0) { ret_host(-1); return 0; }
+            const LoadedObject* obj = dl->find_object_by_addr(a0);
+            if (!obj || obj->eh_frame_hdr_addr == 0) {
+                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    fprintf(stderr, "[_dl_find_object] addr=0x%llx → not found"
+                            " (obj=%p)\n",
+                            static_cast<unsigned long long>(a0), (void*)obj);
+                }
+                ret_host(-1);
+                return 0;
+            }
+            uint64_t flags = 0, link_map = 0, sframe = 0;
+            try {
+                mem_.store<uint64_t>(a1 + 0,  flags);
+                mem_.store<uint64_t>(a1 + 8,  obj->base_addr);
+                mem_.store<uint64_t>(a1 + 16, obj->base_addr + obj->map_size);
+                mem_.store<uint64_t>(a1 + 24, link_map);
+                mem_.store<uint64_t>(a1 + 32, obj->eh_frame_hdr_addr);
+                mem_.store<uint64_t>(a1 + 40, sframe);
+            } catch (...) { ret_host(-1); return 0; }
+            if (getenv("BIFROST_DYNLINK_TRACE")) {
+                fprintf(stderr, "[_dl_find_object] addr=0x%llx → %s eh_frame=0x%llx"
+                        " start=0x%llx end=0x%llx\n",
+                        static_cast<unsigned long long>(a0), obj->name.c_str(),
+                        static_cast<unsigned long long>(obj->eh_frame_hdr_addr),
+                        static_cast<unsigned long long>(obj->base_addr),
+                        static_cast<unsigned long long>(obj->base_addr + obj->map_size));
+            }
+            ret_host(0);
+            return 0;
+        }
         default:
             return SYSCALL_NOT_HANDLED;
     }

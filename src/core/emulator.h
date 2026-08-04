@@ -341,6 +341,11 @@ private:
     std::mutex threads_mu_;
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};
+    // Guest VA of libc's __libc_single_threaded BSS word (set by the
+    // dynamic linker during link(); 0 for musl). spawn_thread flips it
+    // to 0 when creating the first guest thread (glibc's pthread_create
+    // does the same) so multi-threaded guests take the correct paths.
+    uint64_t libc_single_threaded_addr_ = 0;
     // ── Futex table ───────────────────────────────────────────────────
     // (sharded — see futex_shards_ above. The old single-mutex + single-map
     // design was)

@@ -584,7 +584,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         "falling back to guest ld.so\n",
                         CODENAME, dyn_linker_->error().c_str());
                 dyn_linker_.reset();
-            } else if (dyn_linker_->static_tls_size() > 0) {
+            } else {
+                libc_single_threaded_addr_ =
+                    dyn_linker_->libc_single_threaded_addr();
+            }
+            if (dyn_linker_ && dyn_linker_->static_tls_size() > 0) {
                 // Set up TPIDR_EL0 using variant-I TLS layout (glibc AArch64):
                 //   TP = static_tls_base + lib_size
                 // The TCB header (tcbhead_t) is at [TP, TP + tcb_size).

@@ -771,29 +771,27 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 return;
             }
-            // ── CMGE / CMHS (vector) ──
-            // "CMHS" but was actually CMGE (signed >=, opcode 0x0D).
-            // The code used unsigned comparison, so it was implementing
-            // CMHS behavior under the wrong case label. The actual CMHS
-            // instruction (opcode 0x0F → case 0x2E203C00 after sub_noq)
-            // was not matched at all and fell through silently.
-            //
-            // This broke glibc's strchrnul SIMD loop, which uses CMHS
-            // (unsigned >=) to detect both the search character AND
-            // the NUL terminator in one comparison. Without CMHS
-            // matching, the loop never detected the NUL terminator
-            // and ran forever through unmapped zero pages.
-            //
-            // Encoding (SIMD two-register misc, bits 15:10 = opcode):
-            //   CMGE (signed >=):   U=0, opcode=0b001101 → sub_noq=0x2E203400
-            //   CMHS (unsigned >=): U=1, opcode=0b001111 → sub_noq=0x2E203C00
-            // Note: sub_noq = (op & 0xFFE0FC00) with Q (bit 30) stripped.
-            // The U bit (29) IS kept in sub_noq, so CMGE and CMHS have
-            // DIFFERENT sub_noq values (0x2E203400 vs 0x2E203C00) because
-            // they have different opcodes (0x0D vs 0x0F), NOT because of U.
-            // (U=0 vs U=1 alone wouldn't change sub_noq since both 0x2E...
-            // and 0x6E... strip to 0x2E... after removing Q.)
-            case 0x2E203400: {  // CMGE (signed >=, opcode 0x0D)
+            // ── CMGT / CMGE / CMHI / CMHS (register compare, vector) ──
+            // SIMD 3-register integer compare. Encoding:
+            //   0 Q U 01110 size 1 Rm opcode Rn Rd
+            // opcode bits[15:10]: 0b001101 → GT/HI (strict >),
+            //                      0b001111 → GE/HS (>=).
+            // U bit (29): 0 = signed (CMGT/CMGE), 1 = unsigned (CMHI/CMHS).
+            // sub_noq keeps U but strips Q (bit 30), so each of the four
+            // ops has a distinct sub_noq base × 4 size variants (size in
+            // bits 23:22, which survives the mask):
+            //   CMGT (signed >):    0x0E203400 0x0E603400 0x0EA03400 0x0EE03400
+            //   CMGE (signed >=):   0x0E203C00 0x0E603C00 0x0EA03C00 0x0EE03C00
+            //   CMHI (unsigned >):  0x2E203400 0x2E603400 0x2EA03400 0x2EE03400
+            //   CMHS (unsigned >=): 0x2E203C00 0x2E603C00 0x2EA03C00 0x2EE03C00
+            // (Verified against cross binutils: cmhi v0.8h,v2.8h,v4.8h =
+            // 0x6E643440 → sub_noq 0x2E603400.)
+            case 0x0E203400: case 0x0E603400: case 0x0EA03400: case 0x0EE03400:
+            case 0x0E203C00: case 0x0E603C00: case 0x0EA03C00: case 0x0EE03C00:
+            case 0x2E203400: case 0x2E603400: case 0x2EA03400: case 0x2EE03400:
+            case 0x2E203C00: case 0x2E603C00: case 0x2EA03C00: case 0x2EE03C00: {
+                bool U = (op >> 29) & 1;       // 0=signed, 1=unsigned
+                bool ge = (op >> 11) & 1;      // opcode 0x0F (>=) vs 0x0D (>)
                 int esize = 1 << size;
                 int elems = (Q ? 16 : 8) / esize;
                 uint8_t buf_n[16], buf_m[16];
@@ -803,36 +801,22 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
                 uint8_t out[16] = {0};
                 for (int i = 0; i < elems; i++) {
-                    // Sign-extend for signed comparison.
-                    int64_t n = 0, m = 0;
-                    memcpy(&n, buf_n + i*esize, esize);
-                    memcpy(&m, buf_m + i*esize, esize);
-                    if (esize == 1) { n = (int8_t)n; m = (int8_t)m; }
-                    else if (esize == 2) { n = (int16_t)n; m = (int16_t)m; }
-                    else if (esize == 4) { n = (int32_t)n; m = (int32_t)m; }
-                    bool ge = (n >= m);
-                    memset(out + i*esize, ge ? 0xFF : 0x00, esize);
-                }
-                memcpy(&cpu.v_lo[rd], out, 8);
-                if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-                else cpu.v_hi[rd] = 0;
-                return;
-            }
-            case 0x2E203C00: {  // CMHS (unsigned >=, opcode 0x0F)
-                int esize = 1 << size;
-                int elems = (Q ? 16 : 8) / esize;
-                uint8_t buf_n[16], buf_m[16];
-                memcpy(buf_n, &cpu.v_lo[rn], 8);
-                if (Q) memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-                memcpy(buf_m, &cpu.v_lo[rm], 8);
-                if (Q) memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
-                uint8_t out[16] = {0};
-                for (int i = 0; i < elems; i++) {
-                    uint64_t n = 0, m = 0;
-                    memcpy(&n, buf_n + i*esize, esize);
-                    memcpy(&m, buf_m + i*esize, esize);
-                    bool ge = (n >= m);  // unsigned
-                    memset(out + i*esize, ge ? 0xFF : 0x00, esize);
+                    bool c;
+                    if (U) {
+                        uint64_t n = 0, m = 0;
+                        memcpy(&n, buf_n + i*esize, esize);
+                        memcpy(&m, buf_m + i*esize, esize);
+                        c = ge ? (n >= m) : (n > m);
+                    } else {
+                        int64_t n = 0, m = 0;
+                        memcpy(&n, buf_n + i*esize, esize);
+                        memcpy(&m, buf_m + i*esize, esize);
+                        if (esize == 1) { n = (int8_t)n; m = (int8_t)m; }
+                        else if (esize == 2) { n = (int16_t)n; m = (int16_t)m; }
+                        else if (esize == 4) { n = (int32_t)n; m = (int32_t)m; }
+                        c = ge ? (n >= m) : (n > m);
+                    }
+                    memset(out + i*esize, c ? 0xFF : 0x00, esize);
                 }
                 memcpy(&cpu.v_lo[rd], out, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
@@ -988,7 +972,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // the U bit (29) is the same for 0x2E... and 0x6E...
             // after Q (bit 30) is removed: 0x6E... & ~(1<<30) = 0x2E...
             // So a single case 0x2E208C00 handles both encodings.
-            case 0x2E208C00: { // CMEQ (U=0 or U=1, after sub_noq)
+            case 0x2E208C00: case 0x2E608C00: case 0x2EA08C00: case 0x2EE08C00: { // CMEQ (U=0 or U=1, after sub_noq); size 0-3
                 int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
                 int elems = (Q ? 16 : 8) / esize;
                 uint8_t buf_rn[16], buf_rm[16];
@@ -1000,6 +984,38 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 for (int i = 0; i < elems; i++) {
                     bool eq = (memcmp(buf_rn + i*esize, buf_rm + i*esize, esize) == 0);
                     memset(out + i*esize, eq ? 0xFF : 0x00, esize);
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── CMTST (test bits, vector) ──
+            // Encoding 0 Q U 01110 size 1 Rm 100011 0 Rn Rd (U=0).
+            // sub_noq = 0x0E208C00 (size 0) / 0x0E608C00 (1) / 0x0EA08C00
+            // (2) / 0x0EE08C00 (3). Unlike CMEQ (U=1 → 0x2E...8C00), the
+            // U=0 form keeps the 0x0E prefix after Q is stripped, so CMTST
+            // gets its OWN case. (Old code assumed both U=0/U=1 map to
+            // 0x2E208C00 — that only holds for the Q=1 0x6E... variant.)
+            // Result per lane: all-ones if (Vn & Vm) != 0, else zero.
+            case 0x0E208C00: case 0x0E608C00: case 0x0EA08C00: case 0x0EE08C00: {
+                int esize = (size == 0) ? 1 : (size == 1 ? 2 : (size == 2 ? 4 : 8));
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf_rn[16], buf_rm[16];
+                memcpy(buf_rn, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf_rn + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_rm, &cpu.v_lo[rm], 8);
+                if (Q) memcpy(buf_rm + 8, &cpu.v_hi[rm], 8);
+                uint8_t out[16] = {0};
+                for (int i = 0; i < elems; i++) {
+                    bool any = false;
+                    for (int k = 0; k < esize; k++) {
+                        if ((buf_rn[i*esize + k] & buf_rm[i*esize + k]) != 0) {
+                            any = true;
+                            break;
+                        }
+                    }
+                    memset(out + i*esize, any ? 0xFF : 0x00, esize);
                 }
                 memcpy(&cpu.v_lo[rd], out, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
@@ -1113,6 +1129,55 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         if (buf[i*esize + b] != 0) { is_zero = false; break; }
                     }
                     memset(buf + i*esize, is_zero ? 0xFF : 0x00, esize);
+                }
+                memcpy(&cpu.v_lo[rd], buf, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── Integer compare against zero (SIMD 2-reg misc) ───────
+            // CMGT/CMGE/CMLT/CMLE <Vd>.<T>, <Vn>.<T>, #0: per-element
+            // signed comparison against 0; each lane becomes all-ones if
+            // the test passes, all-zeros otherwise. Encodings
+            // (0 Q U 01110 size 1 0 Rn opcode Rd, opcode = bits[15:10]):
+            //   CMGT (signed >):  0x0E208800 (U=0, opcode 100010)
+            //   CMGE (signed >=): 0x2E208800 (U=1, opcode 100010)
+            //   CMLE (signed <=): 0x2E209800 (U=1, opcode 100110)
+            //   CMLT (signed <):  0x0E20A800 (U=0, opcode 101010)
+            // The size bits (23:22) land in sub_noq, so each size variant
+            // is its own case label. The source register (Vn) is in the
+            // 2-reg-misc Rn field (bits[9:5]) which the decoder maps to
+            // `rn`. These were previously unhandled → DecodeError (SIGILL)
+            // — Qt5Core's text handling lowers `v<0` to CMLT #0.
+            case 0x0E208800: case 0x0E608800: case 0x0EA08800: case 0x0EE08800:
+            case 0x2E208800: case 0x2E608800: case 0x2EA08800: case 0x2EE08800:
+            case 0x2E209800: case 0x2E609800: case 0x2EA09800: case 0x2EE09800:
+            case 0x0E20A800: case 0x0E60A800: case 0x0EA0A800: case 0x0EE0A800: {
+                int esize = 1 << size;
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                int opc = (op >> 10) & 0x3F;
+                bool is_u = U;
+                // opcode 100010: CMGT(U=0) / CMGE(U=1); 101010: CMLT(U=0);
+                // 100110: CMLE(U=1). cmp: 0=GT 1=GE 2=LT 3=LE.
+                int cmp;
+                if (opc == 0x22)      cmp = is_u ? 1 : 0;
+                else if (opc == 0x2A) cmp = 2;
+                else                  cmp = 3;
+                for (int i = 0; i < elems; i++) {
+                    int64_t v = 0;
+                    memcpy(&v, buf + i * esize, esize);
+                    int64_t sv = (esize == 8) ? v
+                                 : (esize == 4) ? (int32_t)v
+                                 : (esize == 2) ? (int16_t)v
+                                                : (int8_t)v;
+                    bool pass = (cmp == 0) ? (sv > 0)
+                              : (cmp == 1) ? (sv >= 0)
+                              : (cmp == 2) ? (sv < 0)
+                                           : (sv <= 0);
+                    memset(buf + i * esize, pass ? 0xFF : 0x00, esize);
                 }
                 memcpy(&cpu.v_lo[rd], buf, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
@@ -2610,6 +2675,42 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 } else {
                     float a = read_fp_s(cpu, rn), b = read_fp_s(cpu, rm);
                     write_fp_s(cpu, rd, std::fabsf(a - b));
+                }
+                return;
+            }
+            // FP compare-with-zero: FCMGE/FCMGT/FCMLE/FCMLT <Dd>,<Dn>,#0.0
+            // (also the 2D/4S/2S vector forms, size bits free).
+            //   FCMGE 0x7EE08800  FCMGT 0x7EE08C00
+            //   FCMLE 0x7EE0C800  FCMLT 0x7EE0CC00
+            // mask 0xFF3F9000/0x7E208000: bits[31:24]=0x7E, bit21=1,
+            // bits[20:16]=0, bit15=1, bit12=0; bit10 selects strict
+            // (1=GT/LT, 0=GE/LE) and bit14 selects the swapped operand
+            // (1=compare #0 vs Dn: LE/LT). libgcc's aarch64 unwinder
+            // (uw_frame_state_for) lowers `context->ra` + a flag mask via
+            // `cmge d0,d0,#0` (0x7EE08800) — a silent NOP here OR'd
+            // 0x4000000000000000 into the pc, crashing every C++
+            // exception with a bogus _Unwind_Find_FDE address.
+            if ((op & 0xFF3F9000) == 0x7E208000) {
+                // Result is a compare MASK (all-ones/all-zeros), not 1.0/0.0:
+                // libgcc's aarch64 unwinder (uw_frame_state_for) does
+                // `cmge d0,d0,#0` (0x7EE08800), `fmov x0,d0`, `add x0,ra,x0`
+                // to fold a flag mask into the FDE pc (ra-1 when set). A
+                // 1.0/0.0 result would OR 0x3FF0000000000000 into the pc.
+                bool is_double = (op >> 22) & 1;
+                bool strict    = (op >> 10) & 1;   // 0: GE/LE, 1: GT/LT
+                bool swapped   = (op >> 14) & 1;   // 0: Dn op #0, 1: #0 op Dn
+                if (is_double) {
+                    double a = read_fp_d(cpu, rn);
+                    bool t = swapped ? (strict ? (0.0 > a) : (0.0 >= a))
+                                     : (strict ? (a > 0.0) : (a >= 0.0));
+                    cpu.v_lo[rd] = t ? ~0ULL : 0ULL;
+                    cpu.v_hi[rd] = t ? ~0ULL : 0ULL;
+                } else {
+                    float a = read_fp_s(cpu, rn);
+                    bool t = swapped ? (strict ? (0.0f > a) : (0.0f >= a))
+                                     : (strict ? (a > 0.0f) : (a >= 0.0f));
+                    cpu.v_lo[rd] = t ? 0xFFFFFFFFu : 0u;
+                    cpu.v_hi[rd] = 0;
                 }
                 return;
             }

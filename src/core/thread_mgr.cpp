@@ -304,6 +304,9 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         }
     }
     alive_threads_.fetch_add(1);
+    if (libc_single_threaded_addr_) {
+        mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
+    }
     GuestThread* gtp = gt.get();
     {
         std::lock_guard<std::mutex> g(threads_mu_);

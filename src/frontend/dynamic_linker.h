@@ -130,6 +130,12 @@ struct LoadedObject {
     // Used by find_object_by_addr to check if an address falls within
     // this object's mapping.
     uint64_t    map_size = 0;
+    // Absolute guest address of this object's PT_GNU_EH_FRAME
+    // (.eh_frame_hdr), or 0 if none. Populated by parse_eh_frame() and
+    // returned to the guest via the _dl_find_object shim (syscall
+    // 0x1008) so libgcc's _Unwind_Find_FDE can find FDEs for C++
+    // exceptions. Without it every throw/catch aborts.
+    uint64_t    eh_frame_hdr_addr = 0;
     // TLS info.
     TlsSegment tls;
     uint64_t   tls_mod_id   = 0;  // 1-based module ID (0 = no TLS)
@@ -161,6 +167,16 @@ public:
     // Look up a symbol by name across all loaded objects. Returns the
     // absolute address, or 0 if not found.
     uint64_t resolve_symbol(const std::string& name) const;
+    // Guest address of libc's __libc_single_threaded BSS word (0 if libc
+    // doesn't export it, e.g. musl). link() writes 1 into it so glibc's
+    // single-threaded fast paths (e.g. __cxa_guard_acquire, which throws
+    // std::__throw_recursive_init_error on recursive static init) behave
+    // like a real single-threaded process. The Emulator flips it to 0
+    // when the first guest thread is spawned (matching glibc's
+    // pthread_create behavior).
+    uint64_t libc_single_threaded_addr() const {
+        return libc_single_threaded_addr_;
+    }
     // resolve_plt_entry was a stub for a future "lazy PLT binding"
     // feature that was never implemented (the linker uses eager
     // binding). Removed as dead code — the dynamic linker
@@ -350,6 +366,7 @@ private:
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
     uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
+    uint64_t libc_single_threaded_addr_ = 0;  // guest VA of __libc_single_threaded
     // dlerror state. Stored as a host string; get_last_error() copies it
     // to a guest buffer and returns the guest pointer. The error is
     // cleared after get_last_error() returns it (matching glibc's
@@ -378,6 +395,10 @@ private:
                                     std::vector<uint8_t>& data);
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
+    // Parse PT_GNU_EH_FRAME from program headers and record the
+    // absolute .eh_frame_hdr address in obj.eh_frame_hdr_addr.
+    void parse_eh_frame(const std::vector<uint8_t>& data, uint64_t base,
+                        LoadedObject& obj);
     // Find a shared library by soname. Checks standard multiarch paths
     // and returns the file bytes (empty if not found).
     // object's DT_RUNPATH/DT_RPATH (semicolon-separated, $ORIGIN expanded).
@@ -455,10 +476,36 @@ private:
     // selection (e.g. GLIBC_2.17 stat vs GLIBC_2.33 stat with different
     // struct layouts).
     uint64_t resolve_reloc_symbol(const LoadedObject& obj, uint32_t sym_idx);
+    // Compute the TP offset for an R_AARCH64_TLSDESC relocation.
+    // `obj` is the module whose relocation is being applied, `sym_idx`
+    // the referenced .dynsym index (0 = local TLS, offset = A), and
+    // `A` the addend. For imported symbols (defined in another module)
+    // this resolves the symbol to find the *defining* module and uses
+    // that module's TLS block offset + the defining symbol's st_value
+    // (the importing module's st_value is 0 for undefined symbols).
+    // Returns the TP offset relative to TPIDR_EL0.
+    int64_t tlsdesc_tp_offset(const LoadedObject& obj, uint32_t sym_idx,
+                              int64_t A);
     // ── ld-linux shim state ────────────────────────────────────────
     // Guest VA of the synthetic ld-linux data page (allocated by
     // register_ld_linux_shim_()). 0 if the shim hasn't been registered.
     uint64_t shim_base_ = 0;
+    // Offset of the shim's code page within shim_base_ (the ld-linux
+    // synthetic shim is SHIM_SIZE bytes: data pages + one code page).
+    static constexpr uint64_t SHIM_CODE_PAGE_OFF_ = 12288;
+    // Offset into the shim code page of the TLSDESC resolver stub
+    // (a function that returns the TP offset stored at [x0+8]).
+    // Populated by register_ld_linux_shim_() and used by the
+    // R_AARCH64_TLSDESC fixup so desc[0] points at a real function
+    // the guest can `blr` into.
+    uint32_t tlsdesc_resolver_off_ = 0;
+    // Guest address of the _dl_find_object shim stub (calls syscall
+    // 0x1008 which fills the glibc 2.42 dl_find_object result struct
+    // from host LoadedObject state). Populated by register_ld_linux_shim_()
+    // and written into the _rtld_global_ro.dl_find_object funnel slot by
+    // patch_rtld_funnel_() so funnelled-glibc trampolines land in the
+    // native implementation. 0 if the shim wasn't registered.
+    uint64_t dl_find_object_stub_ = 0;
     // ── Pending TLS static size for post-relocation patching ──────
     // After all relocations are applied, we patch the resolved
     // _rtld_global_ro (which points to ld-linux's data section) to
@@ -497,6 +544,13 @@ private:
     // relocations (so _rtld_global_ro is resolved to ld-linux's data)
     // but before __libc_early_init (which reads dl_pagesize).
     void patch_rtld_global_ro_();
+    // Funnelled glibc (2.42+): libc's _dl_find_object is a trampoline that
+    // jumps through GLRO(dl_find_object) in the REAL _rtld_global_ro
+    // (written by ld-linux's _dl_start_final, which the native dynlink
+    // never runs). Detect the slot from the trampoline and fill in the
+    // real function pointers from ld-linux. No-op for non-funnelled glibc.
+    void patch_rtld_funnel_();
+    void set_libc_single_threaded_();
     // Dynamically detect the offsets of dl_tls_static_size and
     // dl_tls_static_align within struct rtld_global_ro by disassembling
     // __libc_early_init. Returns true on success, filling out the
