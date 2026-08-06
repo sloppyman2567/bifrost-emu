@@ -51,7 +51,10 @@ static void test_shifts(void) {
     check("shl_ushr_all", ok);
 }
 
-/* ── SLI for vector rotate-left: ROTL(x,n) = SLI(x,x,n) ── */
+/* ── SLI semantics: Vd = (Vn << shift) | (Vd & ((1<<shift)-1)) ──
+ * The source shifts left; the destination's LOW shift bits are
+ * retained in place (per ARM ARM: the new zero bits created by the
+ * shift retain the destination's existing value). NOT ROTL. */
 static void test_sli_rotl(void) {
     uint32_t x[4] = {0x12345678, 0x9abcdef0, 0x0fedcba9, 0x87654321};
     uint32_t out[4] = {0};
@@ -59,15 +62,17 @@ static void test_sli_rotl(void) {
     __asm__ volatile("sli %0.4s, %0.4s, #7" : "+w"(v) : : );
     vst1q_u32(out, v);
     uint32_t e[4] = {
-        (0x12345678u << 7) | (0x12345678u >> 25),
-        (0x9abcdef0u << 7) | (0x9abcdef0u >> 25),
-        (0x0fedcba9u << 7) | (0x0fedcba9u >> 25),
-        (0x87654321u << 7) | (0x87654321u >> 25),
+        (0x12345678u << 7) | (0x12345678u & 0x7F),
+        (0x9abcdef0u << 7) | (0x9abcdef0u & 0x7F),
+        (0x0fedcba9u << 7) | (0x0fedcba9u & 0x7F),
+        (0x87654321u << 7) | (0x87654321u & 0x7F),
     };
     check("sli_rotl_7", memcmp(out, e, 16) == 0);
 }
 
-/* ── SRI for vector rotate-right: ROTR(x,n) = SRI(x,x,n) ── */
+/* ── SRI semantics: Vd = (Vn >> shift) | (Vd & high shift bits) ──
+ * The source shifts right; the destination's TOP shift bits are
+ * retained in place (per ARM ARM). NOT ROTR. */
 static void test_sri_rotr(void) {
     uint32_t x[4] = {0x12345678, 0x9abcdef0, 0x0fedcba9, 0x87654321};
     uint32_t out[4] = {0};
@@ -75,10 +80,10 @@ static void test_sri_rotr(void) {
     __asm__ volatile("sri %0.4s, %0.4s, #7" : "+w"(v) : : );
     vst1q_u32(out, v);
     uint32_t e[4] = {
-        (0x12345678u >> 7) | (0x12345678u << 25),
-        (0x9abcdef0u >> 7) | (0x9abcdef0u << 25),
-        (0x0fedcba9u >> 7) | (0x0fedcba9u << 25),
-        (0x87654321u >> 7) | (0x87654321u << 25),
+        (0x12345678u >> 7) | (0x12345678u & 0xFE000000u),
+        (0x9abcdef0u >> 7) | (0x9abcdef0u & 0xFE000000u),
+        (0x0fedcba9u >> 7) | (0x0fedcba9u & 0xFE000000u),
+        (0x87654321u >> 7) | (0x87654321u & 0xFE000000u),
     };
     check("sri_rotr_7", memcmp(out, e, 16) == 0);
 }

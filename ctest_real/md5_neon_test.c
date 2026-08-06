@@ -2,7 +2,10 @@
 //
 // MD5's NEON code in toybox uses:
 //   - vshrq_n_u32 / vshlq_n_u32 (vector shift right/left)
-//   - vsliq_n_u32 (shift left insert) for ROTL
+//   - vsliq_n_u32 (shift left insert) for byte-interleave / insert
+//     NOTE: SLI is NOT ROTL — SLI(x,x,n) = (x<<n)|(x&((1<<n)-1)), which
+//     differs from ROTL(x,n) = (x<<n)|(x>>(w-n)). Both are printed below
+//     so the difference is visible.
 //   - vrev64q_u32 (reverse elements in 64-bit container) for byte-swap
 //   - veorq_u32, vorrq_u32, vandq_u32 (logical)
 //   - vaddq_u32 (vector add)
@@ -32,9 +35,9 @@ int main(void) {
     print_u32x4("shl 4", vshlq_n_u32(v, 4));
     // 2. USHR by 4
     print_u32x4("ushr 4", vshrq_n_u32(v, 4));
-    // 3. ROTL via vsliq (rotate left by 7)
-    print_u32x4("rotl 7 (sli)", vsliq_n_u32(v, v, 7));
-    // 4. ROTL via shl|ushr (rotate left by 7)
+    // 3. SLI (shift-left insert) — NOT a rotate
+    print_u32x4("sli 7", vsliq_n_u32(v, v, 7));
+    // 4. True ROTL via shl|ushr (rotate left by 7)
     uint32x4_t rotl_or = vorrq_u32(vshlq_n_u32(v, 7), vshrq_n_u32(v, 25));
     print_u32x4("rotl 7 (or)", rotl_or);
     // 5. vrev64q_u32 (byte swap each 32-bit word)

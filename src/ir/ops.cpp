@@ -1156,7 +1156,6 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                 int lanes = 8 / esize;
                 uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << (esize * 8)) - 1);
                 int esize_bits = esize * 8;
-                int insert_shift = esize_bits - shift;
                 auto do_lane = [&](uint8_t* in, uint8_t* acc, uint8_t* out) {
                     for (int i = 0; i < lanes; i++) {
                         uint8_t* pi = in + i * esize;
@@ -1205,13 +1204,21 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                             }
                             case IROp::SIMD_SLI: {
                                 uint64_t hi = (shift >= 64) ? 0 : ((n << shift) & mask);
-                                uint64_t lo = (insert_shift < esize_bits) ? (d >> insert_shift) : 0;
+                                uint64_t lo = (shift >= 64) ? d : (d & ((1ULL << shift) - 1));
                                 r = hi | lo;
                                 break;
                             }
                             case IROp::SIMD_SRI: {
                                 uint64_t lo = (shift >= 64) ? 0 : (n >> shift);
-                                uint64_t hi = (insert_shift < esize_bits) ? ((d << insert_shift) & mask) : 0;
+                                uint64_t hi;
+                                if (shift <= 0) {
+                                    hi = 0;
+                                } else if (shift >= esize_bits) {
+                                    hi = d & mask;
+                                } else {
+                                    uint64_t lo_keep = (1ULL << (esize_bits - shift)) - 1;
+                                    hi = d & (mask & ~lo_keep);
+                                }
                                 r = hi | lo;
                                 break;
                             }

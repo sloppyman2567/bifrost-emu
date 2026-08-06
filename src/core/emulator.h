@@ -302,6 +302,10 @@ private:
     bool trace_ = false;
     bool brk_verbose_ = true; // controlled by cfg.log_brk_verbose / -q flag
     std::string elf_path_;
+    // Guest address of the envp array on the initial stack. Captured by
+    // build_initial_stack and used to point glibc's __environ at it (the
+    // native dynlink path never runs ld.so to do this itself).
+    uint64_t guest_envp_addr_ = 0;
     // Guest-side current working directory. Decoupled from the host cwd
     // because BIFROST_ROOT sandboxing remaps guest paths. Updated by
     // chdir/fchdir; returned by getcwd. Defaults to "/".

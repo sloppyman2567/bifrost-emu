@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <set>
 namespace arm64emu {
 // ── FP register access helpers (file-scope, no per-dispatch allocation) ──
 // These were previously local lambdas inside the FP_SCALAR case, which
@@ -36,11 +37,17 @@ static inline float read_fp_s(const CPU& cpu, int r) {
 }
 static inline void write_fp_d(CPU& cpu, int r, double d) {
     if (r < 0 || r > 31) return;  // defensive: prevent OOB write
+    static bool nan_dbg_ = (getenv("BIFROST_NAN_TRACE") != nullptr);
+    if (nan_dbg_ && std::isnan(d))
+        fprintf(stderr, "[NAN-D] r%d = %.17g pc=0x%llx\n", r, d, (unsigned long long)cpu.pc);
     uint64_t bits; memcpy(&bits, &d, 8);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
 static inline void write_fp_s(CPU& cpu, int r, float f) {
     if (r < 0 || r > 31) return;  // defensive: prevent OOB write
+    static bool nan_dbg_ = (getenv("BIFROST_NAN_TRACE") != nullptr);
+    if (nan_dbg_ && std::isnan(f))
+        fprintf(stderr, "[NAN-S] r%d = %.9g pc=0x%llx\n", r, f, (unsigned long long)cpu.pc);
     uint32_t bits; memcpy(&bits, &f, 4);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
@@ -137,40 +144,80 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // 1-reg single-structure form), and the index from the
             // remaining bits.
             if (d.is_single_struct) {
-                // Element size: 00=B(1), 01=H(2), 10=S(4), 11=D(8).
-                uint8_t size_field = (d.raw >> 13) & 3;
-                int esize = 1 << size_field;
-                // Index: for LD1 1-reg, Q=0 → index = bit[12]:bit[11]
-                // (but only valid for size=00,01; for size=10 index is
-                // bit[12] only; for size=11 index must be 0).
-                // Q=1 → index = bit[12] (for size=00,01,10); size=11 →
-                // index = 0.
-                // We compute a conservative index that works for the
-                // common cases; the exact decode per ARM ARM is:
-                //   if Q==0: idx = (size_field==0) ? (bits[12:11]) :
-                //              (size_field==1) ? (bit[12]) : 0
-                //   if Q==1: idx = (size_field==0) ? (bits[13:12]) :
-                //              (size_field==1) ? (bits[13:12]>>1) :
-                //              (size_field==2) ? (bit[13]) : 0
-                // Simpler: re-extract from raw bits per ARM ARM table.
+                // LD1R {Vt.T}, [Xn] — single-structure REPLICATE load
+                // (bits[15:14]==11). Reads ONE element of 2^size bytes from
+                // [Xn] and broadcasts it to every lane of Vt (Q=1: 16 bytes
+                // across v_lo/v_hi; Q=0: 8 bytes in v_lo). Post-index: Rm==31
+                // → offset=esize, Rm==30 → 0, else Xm. Load-only; there is no
+                // store-replicate form. Distinguished from the indexed LD1/
+                // ST1 forms below by d.is_ld1r.
+                if (d.is_ld1r) {
+                    int esize = 1 << d.size;
+                    uint8_t buf[8] = {0};
+                    int r = d.rt;
+                    if (d.is_load) {
+                        mem_.read(base, buf, esize, pcache);
+                        for (int off = 0; off < 8; off += esize)
+                            memcpy(reinterpret_cast<uint8_t*>(&cpu.v_lo[r]) + off, buf, esize);
+                        if (Q) {
+                            for (int off = 0; off < 8; off += esize)
+                                memcpy(reinterpret_cast<uint8_t*>(&cpu.v_hi[r]) + off, buf, esize);
+                        } else {
+                            cpu.v_hi[r] = 0;
+                        }
+                    }
+                    if (d.post_indexed) {
+                        uint64_t off = 0;
+                        if (d.rm == 31) off = (uint64_t)esize;
+                        else if (d.rm == 30) off = 0;
+                        else off = cpu.regs[d.rm];
+                        if (d.rn == 31) cpu.sp = base + off;
+                        else cpu.regs[d.rn] = base + off;
+                    }
+                    return;
+                }
+                // ── Single-structure indexed LD1/ST1 decode (ARM ARM) ──
+                // Layout (no-offset / post-index classes, bit[24]=1):
+                //   bit30  = Q        (0→64-bit v_lo, 1→128-bit v_lo+v_hi)
+                //   bits[15:13] = opcode; scale = opcode<2:1>
+                //   bit12  = S
+                //   bits[11:10] = size
+                //   bits[9:5] = Rn, bits[4:0] = Rt
+                // Shared decode (index encoding):
+                //   scale '00' → B:  esize=1; idx = Q:S:size     (bits[30],[12],[11:10])
+                //   scale '01' → H:  esize=2; idx = Q:S:size<1>  (bits[30],[12],[11])
+                //   scale '10': if size<1>=='1' UNDEF
+                //                size<0>=='0' → S: idx = Q:S    (bits[30],[12]), esize=4
+                //                size<0>=='1' → D: idx = Q      (bit[30]),      esize=8
+                //   scale '11' → replicate (LD1R), already handled above.
+                uint32_t opcode = (d.raw >> 13) & 0x7;
+                uint8_t scale   = (opcode >> 1) & 3;
+                uint8_t Sbit    = (d.raw >> 12) & 1;
+                uint8_t sz      = (d.raw >> 10) & 3;   // size, bits[11:10]
                 int idx = 0;
-                uint8_t sz = size_field;
-                if (Q == 0) {
-                    // 64-bit form: 8 bytes per register.
-                    switch (sz) {
-                        case 0: idx = (d.raw >> 11) & 3; break;  // B, 8 elems
-                        case 1: idx = (d.raw >> 12) & 1; break;  // H, 4 elems
-                        case 2: idx = (d.raw >> 13) & 1; break;  // S, 2 elems
-                        case 3: idx = 0; break;                  // D, 1 elem
-                    }
-                } else {
-                    // 128-bit form: 16 bytes per register.
-                    switch (sz) {
-                        case 0: idx = (d.raw >> 12) & 0xF; break;  // B, 16 elems
-                        case 1: idx = (d.raw >> 13) & 7;  break;   // H, 8 elems
-                        case 2: idx = (d.raw >> 14) & 3;  break;   // S, 4 elems
-                        case 3: idx = (d.raw >> 15) & 1;  break;   // D, 2 elems
-                    }
+                int esize = 0;
+                switch (scale) {
+                    case 0: // B
+                        idx   = ((int)(Q & 1) << 2) | ((int)Sbit << 1) | (int)(sz >> 1);
+                        esize = 1;
+                        break;
+                    case 1: // H
+                        idx   = ((int)(Q & 1) << 2) | ((int)Sbit << 1) | (int)((sz >> 1) & 1);
+                        esize = 2;
+                        break;
+                    case 2: // S or D
+                        if ((sz & 1) == 0) {        // size<0>==0 → S
+                            idx   = ((int)(Q & 1) << 1) | (int)Sbit;
+                            esize = 4;
+                        } else {                    // size<0>==1 → D (S must be 0)
+                            idx   = (int)(Q & 1);
+                            esize = 8;
+                        }
+                        break;
+                    default: // scale '11' → LD1R handled earlier; unreachable
+                        idx   = 0;
+                        esize = 1;
+                        break;
                 }
                 int r = d.rt;
                 if (d.is_load) {
@@ -221,25 +268,68 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     }
                     mem_.write(base, buf, esize, pcache);
                 }
+                // Post-index writeback for the single-structure form:
+                // immediate offset = esize (Rm==0b11111), #0 (Rm==0b11110),
+                // or the value in register Xm.
+                if (d.post_indexed) {
+                    uint64_t off = 0;
+                    if (d.rm == 31) off = (uint64_t)esize;
+                    else if (d.rm == 30) off = 0;
+                    else off = cpu.regs[d.rm];
+                    if (d.rn == 31) cpu.sp = base + off;
+                    else cpu.regs[d.rn] = base + off;
+                }
                 return;
             }
-            // Multi-structure LD1/ST1 (original path).
+            // Multi-structure LD1/ST1 (original path) plus LD2/ST2/LD3/ST3/
+            // LD4/ST4 (de-interleaved). d.simd_struct distinguishes them:
+            //   1 = LD1/ST1 (registers stored consecutively, total_bytes each)
+            //   2/3/4 = LD2/LD3/LD4 (registers interleaved element-wise:
+            //           element e of register i sits at (e*nregs + i)*esize).
             int nregs = d.simd_count;
+            int esize = 1 << d.size;
+            int elems = total_bytes / esize;
+            static bool ld_dbg_ = (getenv("BIFROST_LD2_DBG") != nullptr);
+            auto reg_off = [&](int i, int e) -> uint64_t {
+                if (d.simd_struct == 1)
+                    return (uint64_t)i * total_bytes + (uint64_t)e * esize;
+                return (uint64_t)(e * nregs + i) * esize;
+            };
             for (int i = 0; i < nregs; i++) {
                 int r = (d.rt + i) & 0x1F;
-                uint64_t a = base + i * total_bytes;
+                uint8_t regbuf[16] = {0};
                 if (d.is_load) {
-                    uint8_t buf[16];
-                    mem_.read(a, buf, total_bytes, pcache);
-                    memcpy(&cpu.v_lo[r], buf, 8);
-                    if (total_bytes == 16) memcpy(&cpu.v_hi[r], buf + 8, 8);
+                    uint8_t tmp[8];
+                    for (int e = 0; e < elems; e++) {
+                        mem_.read(base + reg_off(i, e), tmp, esize, pcache);
+                        memcpy(regbuf + e * esize, tmp, esize);
+                    }
+                    if (ld_dbg_ && d.simd_count == 2 && d.simd_struct == 2) {
+                        fprintf(stderr, "[LD2-DBG] base=0x%llx nregs=2 reg%d bytes:",
+                                (unsigned long long)base, r);
+                        for (int k = 0; k < 16; k++) fprintf(stderr, " %02x", regbuf[k]);
+                        fprintf(stderr, "\n");
+                    }
+                    memcpy(&cpu.v_lo[r], regbuf, 8);
+                    if (total_bytes == 16) memcpy(&cpu.v_hi[r], regbuf + 8, 8);
                     else cpu.v_hi[r] = 0;
                 } else {
-                    uint8_t buf[16];
-                    memcpy(buf, &cpu.v_lo[r], 8);
-                    if (total_bytes == 16) memcpy(buf + 8, &cpu.v_hi[r], 8);
-                    mem_.write(a, buf, total_bytes, pcache);
+                    memcpy(regbuf, &cpu.v_lo[r], 8);
+                    if (total_bytes == 16) memcpy(regbuf + 8, &cpu.v_hi[r], 8);
+                    for (int e = 0; e < elems; e++)
+                        mem_.write(base + reg_off(i, e), regbuf + e * esize, esize, pcache);
                 }
+            }
+            // Post-index writeback for the multi-structure form: immediate
+            // offset = nregs*total_bytes (Rm==0b11111), #0 (Rm==0b11110), or
+            // the value in register Xm.
+            if (d.post_indexed) {
+                uint64_t off = 0;
+                if (d.rm == 31) off = (uint64_t)nregs * (uint64_t)total_bytes;
+                else if (d.rm == 30) off = 0;
+                else off = cpu.regs[d.rm];
+                if (d.rn == 31) cpu.sp = base + off;
+                else cpu.regs[d.rn] = base + off;
             }
             return;
         }
@@ -571,6 +661,71 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 if (Q) {
                     memcpy(&cpu.v_hi[rd], out, 8);
+                } else {
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
+            // ── SSHL / USHL (vector, shift left by register) ─────────────
+            // Encoding: 0 Q U 01110 size 1 Rm 000100 Rn Rd (sub_noq=0x0E204400
+            // for U=0, 0x2E204400 for U=1; size selects 8b/8h/4s/2d lanes).
+            // SSHL shifts each lane of Vn left by the SIGNED value in the
+            // corresponding Vm lane (negative shift → arithmetic right);
+            // USHL uses the UNSIGNED Vm value (left shift only). Shift
+            // amounts >= the lane width produce 0 (LSL) or sign fill (ASR).
+            // glibc strspn lowers its SWAR "has zero / has non-matching byte"
+            // trick to `sshl v0.16b, v0.16b, v2.16b` + `add`; without this
+            // the interp SIGILL'd (signal 4) inside strspn during fontconfig
+            // config parsing.
+            case 0x0E204400: case 0x0E604400: case 0x0EA04400: case 0x0EE04400:  // SSHL
+            case 0x2E204400: case 0x2E604400: case 0x2EA04400: case 0x2EE04400:  // USHL
+            {
+                int esize = 1 << size;          // 1 / 2 / 4 / 8 bytes
+                int bits = esize * 8;
+                int elems = (Q ? 16 : 8) / esize;
+                uint64_t mask = (bits == 64) ? ~0ULL : ((1ULL << bits) - 1);
+                uint8_t buf_n[16], buf_m[16];
+                memcpy(buf_n, &cpu.v_lo[rn], 8);
+                memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                memcpy(buf_m, &cpu.v_lo[rm], 8);
+                memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                uint8_t out[16] = {0};
+                for (int i = 0; i < elems; i++) {
+                    uint64_t vn_lane = 0, vm_lane = 0;
+                    memcpy(&vn_lane, buf_n + i * esize, esize);
+                    memcpy(&vm_lane, buf_m + i * esize, esize);
+                    uint64_t result;
+                    if (!U) {
+                        // SSHL: signed shift amount; negative → ASR
+                        int64_t s;
+                        if      (esize == 1) s = (int64_t)(int8_t)(uint8_t)vm_lane;
+                        else if (esize == 2) s = (int64_t)(int16_t)(uint16_t)vm_lane;
+                        else if (esize == 4) s = (int64_t)(int32_t)(uint32_t)vm_lane;
+                        else                 s = (int64_t)vm_lane;
+                        if (s >= 0) {
+                            if (s >= bits) result = 0;
+                            else result = (vn_lane << s) & mask;
+                        } else {
+                            int64_t rs = -s;
+                            int64_t sv;
+                            if      (esize == 1) sv = (int64_t)(int8_t)(uint8_t)vn_lane;
+                            else if (esize == 2) sv = (int64_t)(int16_t)(uint16_t)vn_lane;
+                            else if (esize == 4) sv = (int64_t)(int32_t)(uint32_t)vn_lane;
+                            else                 sv = (int64_t)vn_lane;
+                            if (rs >= bits) result = (uint64_t)(sv < 0 ? -1 : 0) & mask;
+                            else result = (uint64_t)(sv >> rs) & mask;
+                        }
+                    } else {
+                        // USHL: unsigned shift amount, left shift only
+                        if (vm_lane >= (uint64_t)bits) result = 0;
+                        else result = (vn_lane << vm_lane) & mask;
+                    }
+                    memcpy(out + i * esize, &result, esize);
+                }
+                if (Q) {
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    memcpy(&cpu.v_hi[rd], out + 8, 8);
                 } else {
                     memcpy(&cpu.v_lo[rd], out, 8);
                     cpu.v_hi[rd] = 0;
@@ -1022,6 +1177,72 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
+            // ── Narrowing (XTN/SQXTN/UQXTN/SQXTUN ±2) ──
+            // bits[15:10] discriminates the op: 001010 → XTN (U=0) /
+            // SQXTUN (U=1); 010010 → SQXTN (U=0) / UQXTN (U=1). size
+            // (bits 23:22) selects the SOURCE element size (2× the dest
+            // size): 00 → 16-bit src/8-bit dst, 01 → 32/16, 10 → 64/32.
+            // Q=0 writes the low 64 bits of Rd and zeroes the upper 64;
+            // Q=1 (*2 variants) writes the high 64 bits, preserving the
+            // low half. SQXTUN saturates signed values into the unsigned
+            // destination range. Verified encodings (cross-as):
+            //   XTN   0x0E212820 (8b,8h) / 0x0E612820 (4h,4s) / 0x0EA12820 (2s,2d)
+            //   XTN2  0x4E…, SQXTN 0x0E…4820, UQXTN 0x2E…4820, SQXTUN 0x2E…2820.
+            case 0x0E202800: case 0x0E602800: case 0x0EA02800:  // XTN (U=0)
+            case 0x2E202800: case 0x2E602800: case 0x2EA02800:  // SQXTUN (U=1)
+            case 0x0E204800: case 0x0E604800: case 0x0EA04800:  // SQXTN (U=0)
+            case 0x2E204800: case 0x2E604800: case 0x2EA04800:  // UQXTN (U=1)
+            {
+                if (size == 3) throw DecodeError(cpu.pc, inst);
+                int src_esize = 2 << size;      // 2 / 4 / 8 bytes
+                int dst_esize = src_esize >> 1; // 1 / 2 / 4 bytes
+                int elems = 16 / src_esize;     // 8 / 4 / 2
+                uint32_t opc = (op >> 10) & 0x3F;
+                // opc 0x0A → XTN/SQXTUN; 0x12 → SQXTN/UQXTN. U picks the
+                // saturating form in both families.
+                bool sat_signed = (opc == 0x12) && !U;   // SQXTN
+                bool sat_unsigned = (opc == 0x12) && U;  // UQXTN
+                bool sat_to_unsigned = (opc == 0x0A) && U; // SQXTUN
+                uint64_t max_u = (dst_esize == 8) ? ~0ULL : ((1ULL << (8 * dst_esize)) - 1);
+                int64_t s_lo = -(1LL << (8 * dst_esize - 1));
+                int64_t s_hi = (1LL << (8 * dst_esize - 1)) - 1;
+                uint8_t buf[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                memcpy(buf + 8, &cpu.v_hi[rn], 8);  // source is always full 128 bits
+                uint8_t out[8] = {0};
+                for (int i = 0; i < elems; i++) {
+                    uint64_t v = 0;
+                    memcpy(&v, buf + i * src_esize, src_esize);
+                    if (sat_signed) {
+                        int64_t sv;
+                        if      (src_esize == 2) sv = (int64_t)(int16_t)(uint16_t)v;
+                        else if (src_esize == 4) sv = (int64_t)(int32_t)(uint32_t)v;
+                        else                     sv = (int64_t)v;
+                        if (sv < s_lo) sv = s_lo;
+                        if (sv > s_hi) sv = s_hi;
+                        v = (uint64_t)sv;
+                    } else if (sat_unsigned) {
+                        if (v > max_u) v = max_u;
+                    } else if (sat_to_unsigned) {
+                        int64_t sv;
+                        if      (src_esize == 2) sv = (int64_t)(int16_t)(uint16_t)v;
+                        else if (src_esize == 4) sv = (int64_t)(int32_t)(uint32_t)v;
+                        else                     sv = (int64_t)v;
+                        if (sv < 0) v = 0;
+                        else if ((uint64_t)sv > max_u) v = max_u;
+                        else v = (uint64_t)sv;
+                    }
+                    // XTN: plain truncation — low dst_esize bytes copied below.
+                    memcpy(out + i * dst_esize, &v, dst_esize);
+                }
+                if (Q) {
+                    memcpy(&cpu.v_hi[rd], out, 8);  // *2: upper half, low preserved
+                } else {
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
             default: break;  // fall through to size-based checks below
             }
             // Sub-discriminator for 1-source vector ops (REV/CNT/CMEQ#0).
@@ -1182,6 +1403,45 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 memcpy(&cpu.v_lo[rd], buf, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], buf + 8, 8);
                 else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── SMAXV/SMINV/UMAXV/UMINV (across-lanes reduction) ─────
+            // Compute the maximum (bit16=0) or minimum (bit16=1) of all
+            // elements of Vn and write the scalar result to element 0 of
+            // Rd (upper bits zeroed). U selects signed (SMAXV/SMINV) vs
+            // unsigned (UMAXV/UMINV). size selects 8/16/32-bit elements;
+            // Q selects 8 vs 16 bytes of source lanes.
+            // Encoding: 0 Q U 01110 0 size 00000 <max/min> 10101 0 Vn Rd
+            //   SMAXV s0,v1.4s = 0x4EB0A820, SMINV = 0x4EB1A820
+            // The sub2 mask (0x9F3FFC00) strips Q/U/size, so both size
+            // variants land on these two labels; read size/U off raw op.
+            case 0x0E30A800:
+            case 0x0E31A800: {
+                int esize = 1 << size;          // 1 (B), 2 (H), 4 (S)
+                int elems = (Q ? 16 : 8) / esize;
+                bool is_unsigned = (op >> 29) & 1;
+                bool is_min = (op >> 16) & 1;
+                uint8_t buf[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                uint64_t best = 0;
+                memcpy(&best, buf, esize);
+                for (int i = 1; i < elems; i++) {
+                    uint64_t v = 0;
+                    memcpy(&v, buf + i * esize, esize);
+                    if (is_unsigned) {
+                        if (is_min ? (v < best) : (v > best)) best = v;
+                    } else {
+                        int64_t sv, sb;
+                        if (esize == 1)      { sv = (int8_t)v;       sb = (int8_t)best; }
+                        else if (esize == 2) { sv = (int16_t)v;      sb = (int16_t)best; }
+                        else                 { sv = (int32_t)v;      sb = (int32_t)best; }
+                        if (is_min ? (sv < sb) : (sv > sb)) best = v;
+                    }
+                }
+                cpu.v_lo[rd] = 0;
+                cpu.v_hi[rd] = 0;
+                memcpy(&cpu.v_lo[rd], &best, esize);
                 return;
             }
             default: break;
@@ -1425,7 +1685,27 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     cpu.v_hi[rd] = Q ? val : 0;
                     return;
                 } else {
-                    // cmode=0xF FMOV — leave to FP scalar paths / NOP
+                    // cmode=0xF FMOV (vector, immediate): floating-point
+                    // constant.  AdvSIMDExpandImm; op bit picks precision:
+                    //   op=1 → 64-bit double, replicated to .2D (Q=1)
+                    //   op=0 → 32-bit single, replicated to .2S/.4S
+                    if (opbit) {
+                        uint64_t val = (static_cast<uint64_t>(imm8 & 0x3F)) << 48;
+                        if (imm8 & 0x80) val |= 0x8000000000000000ULL;   // sign
+                        if (imm8 & 0x40) val |= 0x3FC0000000000000ULL;   // exp
+                        else             val |= 0x4000000000000000ULL;
+                        cpu.v_lo[rd] = val;
+                        cpu.v_hi[rd] = Q ? val : 0;
+                    } else {
+                        uint32_t val = (static_cast<uint32_t>(imm8 & 0x3F)) << 19;
+                        if (imm8 & 0x80) val |= 0x80000000u;             // sign
+                        if (imm8 & 0x40) val |= 0x1F000000u;             // exp
+                        else             val |= 0x40000000u;
+                        replicate_u32(val);
+                        memcpy(&cpu.v_lo[rd], dst, 8);
+                        memcpy(&cpu.v_hi[rd], dst + 8, 8);
+                        return;
+                    }
                     return;
                 }
                 memcpy(&cpu.v_lo[rd], dst, 8);
@@ -1640,8 +1920,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // SLI (vector, immediate, shift left insert) — 0x2F005400.
-            // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd >> (esize-shift)).
-            // Used by MD5 for vector ROTL: ROTL(x, n) = SLI(x, x, n) when Vd==Vn.
+            // SLI Vd.<T>, Vn.<T>, #shift → Vd = (Vn << shift) | (Vd & ((1<<shift)-1)).
+            // The source shifts left; the destination's low `shift` bits are
+            // retained in place (merged below the shifted source). Note: this
+            // is NOT ROTL — ROTL(x,n) = (x<<n)|(x>>(w-n)) differs when Vd!=x.
             if ((op & 0xBF00FC00) == 0x2F005400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
@@ -1652,7 +1934,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else { esize = 8; }
                 shift = ((immh << 4) | immb) - (esize * 8);
                 int esize_bits = esize * 8;
-                int insert_shift = esize_bits - shift;
                 int elems = (Q ? 16 : 8) / esize;
                 uint8_t vn[16], vd[16];
                 memcpy(vn, &cpu.v_lo[rn], 8);
@@ -1660,14 +1941,29 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 memcpy(vd, &cpu.v_lo[rd], 8);
                 if (Q) memcpy(vd + 8, &cpu.v_hi[rd], 8);
                 uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
+                static bool sli_dbg_ = (getenv("BIFROST_LD2_DBG") != nullptr);
+                if (sli_dbg_) {
+                    fprintf(stderr, "[SLI-DBG] op=0x%08x esize=%d shift=%d elems=%d\n", op, esize, shift, elems);
+                    fprintf(stderr, "[SLI-DBG]   vn:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vn[i]); fprintf(stderr, "\n");
+                    fprintf(stderr, "[SLI-DBG]   vd:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vd[i]); fprintf(stderr, "\n");
+                }
                 for (int i = 0; i < elems; i++) {
                     uint64_t n = 0, d = 0;
                     memcpy(&n, vn + i*esize, esize);
                     memcpy(&d, vd + i*esize, esize);
-                    uint64_t hi = (n << shift) & mask;
-                    uint64_t lo = (insert_shift < esize_bits) ? (d >> insert_shift) : 0;
-                    uint64_t r = hi | lo;
+                    uint64_t r;
+                    if (shift <= 0) {
+                        r = n & mask;
+                    } else if (shift >= esize_bits) {
+                        r = d & mask;
+                    } else {
+                        uint64_t lo_mask = (1ULL << shift) - 1;
+                        r = ((n << shift) & mask) | (d & lo_mask);
+                    }
                     memcpy(vd + i*esize, &r, esize);
+                }
+                if (sli_dbg_) {
+                    fprintf(stderr, "[SLI-DBG]   out:"); for (int i = 0; i < elems*esize; i++) fprintf(stderr, " %02x", vd[i]); fprintf(stderr, "\n");
                 }
                 memcpy(&cpu.v_lo[rd], vd, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
@@ -1675,8 +1971,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // SRI (vector, immediate, shift right insert) — 0x2F004400.
-            // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd << (esize-shift)).
-            // Used for vector ROTR: ROTR(x, n) = SRI(x, x, n).
+            // SRI Vd.<T>, Vn.<T>, #shift → Vd = (Vn >> shift) | (Vd & (~((1<<(esize-shift))-1))).
+            // The source shifts right; the destination's top `shift` bits are
+            // retained in place (merged above the shifted source). Note: this
+            // is NOT ROTR — ROTR(x,n) = (x>>n)|(x<<(w-n)) differs when Vd!=x.
             if ((op & 0xBF00FC00) == 0x2F004400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
@@ -1687,7 +1985,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else { esize = 8; }
                 int esize_bits = esize * 8;
                 shift = (2 * esize_bits) - ((immh << 4) | immb);
-                int insert_shift = esize_bits - shift;
                 int elems = (Q ? 16 : 8) / esize;
                 uint8_t vn[16], vd[16];
                 memcpy(vn, &cpu.v_lo[rn], 8);
@@ -1699,9 +1996,16 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     uint64_t n = 0, d = 0;
                     memcpy(&n, vn + i*esize, esize);
                     memcpy(&d, vd + i*esize, esize);
-                    uint64_t lo = (shift >= esize_bits) ? 0 : (n >> shift);
-                    uint64_t hi = (insert_shift < esize_bits) ? ((d << insert_shift) & mask) : 0;
-                    uint64_t r = hi | lo;
+                    uint64_t r;
+                    if (shift <= 0) {
+                        r = n & mask;
+                    } else if (shift >= esize_bits) {
+                        r = d & mask;
+                    } else {
+                        uint64_t lo_keep = (1ULL << (esize_bits - shift)) - 1;
+                        uint64_t hi_mask = mask & ~lo_keep;
+                        r = (n >> shift) | (d & hi_mask);
+                    }
                     memcpy(vd + i*esize, &r, esize);
                 }
                 memcpy(&cpu.v_lo[rd], vd, 8);
@@ -1892,6 +2196,48 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         memcpy(&narrow, vm + (src_off + i) * esize_src, esize_src);
                         int64_t se = (esize_src == 2) ? (int16_t)narrow : (int32_t)narrow;
                         uint64_t r = wide + (uint64_t)se;
+                        memcpy(vd + i * esize_dst, &r, esize_dst);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    return;
+                }
+                // SADDL/UADDL/SSUBL/USUBL (vector, widening long add/sub).
+                // Sign- or zero-extend the narrow lanes of BOTH Vn and Vm
+                // and add (SADDL/UADDL) or subtract (SSUBL/USUBL) them into
+                // the double-width lanes of Vd. Q selects which half of
+                // Vn/Vm is used: Q=0 → low half (no "2" suffix), Q=1 → high
+                // half (SADDL2 etc). Vd is always full 128-bit (8H/4S/2D);
+                // the narrow sources are 8B/8H/4S.
+                //   SADDL  v.4s ← sxt(v.4h) + sxt(v.4h)   (size=1 → src H)
+                //   SADDL  v.2d ← sxt(v.2s) + sxt(v.2s)   (size=2 → src S)
+                //   UADDL  v.4s ← uxt(v.4h) + uxt(v.4h)   (U=1)
+                //   SSUBL  v.4s ← sxt(v.4h) - sxt(v.4h)
+                // Encoding sub3_noq values:
+                //   SADDL 0x0E200000, UADDL 0x2E200000 (bit15=0)
+                //   SSUBL 0x0E202000, USUBL 0x2E202000 (bit13=1)
+                if (sub3_noq == 0x0E200000 || sub3_noq == 0x2E200000 ||
+                    sub3_noq == 0x0E202000 || sub3_noq == 0x2E202000) {
+                    int esize_src = 1 << size;          // 1 (B), 2 (H), 4 (S)
+                    int esize_dst = esize_src * 2;
+                    int lanes = 16 / esize_dst;         // 8 (8H), 4 (4S), 2 (2D)
+                    bool is_unsigned = (sub3_noq >> 29) & 1;
+                    bool is_subl = sub3_noq == 0x0E202000 || sub3_noq == 0x2E202000;
+                    uint8_t vn[16], vm[16], vd[16];
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vm, &cpu.v_lo[rm], 8);
+                    memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                    int src_off = Q ? lanes : 0;        // element index into Vn/Vm
+                    for (int i = 0; i < lanes; i++) {
+                        uint64_t an = 0, am = 0;
+                        memcpy(&an, vn + (src_off + i) * esize_src, esize_src);
+                        memcpy(&am, vm + (src_off + i) * esize_src, esize_src);
+                        uint64_t en = is_unsigned ? an :
+                            static_cast<uint64_t>(static_cast<int64_t>(an << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                        uint64_t em = is_unsigned ? am :
+                            static_cast<uint64_t>(static_cast<int64_t>(am << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                        uint64_t r = is_subl ? en - em : en + em;
                         memcpy(vd + i * esize_dst, &r, esize_dst);
                     }
                     memcpy(&cpu.v_lo[rd], vd, 8);
@@ -2462,6 +2808,19 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     simd_unhandled_count_++;
                 }
             }
+            // BIFROST_SIMD_COLLECT=1: enumerate-all mode. Instead of throwing,
+            // log each distinct unhandled opcode once and NOP the instruction
+            // so the guest keeps running. Produces the full list of missing
+            // SIMD coverage in a single run instead of one SIGILL at a time.
+            // TEMPORARY — removed after coverage sweep.
+            if (getenv("BIFROST_SIMD_COLLECT")) {
+                static std::set<uint32_t> simd_collected_;
+                if (simd_collected_.insert(op).second)
+                    fprintf(stderr, "[SIMD-COL] op=0x%08x pc=0x%llx (Q=%d U=%d size=%d)\n",
+                            op, static_cast<unsigned long long>(cpu.pc),
+                            Q, (op >> 29) & 1, (op >> 22) & 3);
+                return;
+            }
             throw DecodeError(cpu.pc, op);
             return;
         }
@@ -2511,8 +2870,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── SSHR (scalar, immediate, signed): Dd, Dn, #imm ────────
-            // Encoding: 0x7F000000 (mask 0xFF00FC00).
-            if ((op & 0xFF00FC00) == 0x7F000000) {
+            // Encoding: 0x5F000400 (mask 0xFF00FC00). Scalar USHR is the
+            // unsigned twin with mask 0x7F000400 (handled above). The old
+            // mask 0x7F000000 never matched the real SSHR encodings
+            // (e.g. `sshr d9, d8, #32` = 0x5f600509), silently NOP'ing
+            // the shift and breaking raster/geometry code.
+            if ((op & 0xFF00FC00) == 0x5F000400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
                 int shift = 128 - ((immh << 4) | immb);
@@ -2520,6 +2883,34 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 int64_t v = static_cast<int64_t>(cpu.v_lo[rn]);
                 if (shift >= 64) cpu.v_lo[rd] = (v < 0) ? ~0ULL : 0;
                 else cpu.v_lo[rd] = static_cast<uint64_t>(v >> shift);
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── DUP (element → scalar FP register): MOV Sd, Vn.S[i] ──
+            // Also MOV Dd, Vn.D[i]. Encoding base 0x5E000400
+            // (bits[31:24]=0x5E, bit21=0, bits[15:12]=0, bits[11:10]=01).
+            //   mov s11, v9.s[1]  = 0x5e0c052b   (imm5 = 0x0C = 1<<3|4)
+            //   mov d11, v9.d[1]  = 0x5e18052b   (imm5 = 0x18 = 1<<4|8)
+            // Copies a single element of Vn into the scalar FP register Rd
+            // (upper 64 bits zeroed). Qt's raster/bezier code pulls lane
+            // values out of SIMD accumulators with this; without it the
+            // instruction was silently NOP'd.
+            if ((op & 0xFF20FC00) == 0x5E000400) {
+                uint8_t imm5 = (op >> 16) & 0x1F;
+                int esize, idx;
+                if (imm5 & 0x08)      { esize = 8; idx = imm5 >> 4; }  // D (64-bit)
+                else if (imm5 & 0x04) { esize = 4; idx = imm5 >> 3; }  // S (32-bit)
+                else                  { esize = 4; idx = 0; }
+                uint64_t src_val = 0;
+                int elems_per_qword = 8 / esize;
+                if (idx < elems_per_qword) {
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_lo[rn]);
+                    memcpy(&src_val, p + idx * esize, esize);
+                } else {
+                    const uint8_t* p = reinterpret_cast<const uint8_t*>(&cpu.v_hi[rn]);
+                    memcpy(&src_val, p + (idx - elems_per_qword) * esize, esize);
+                }
+                cpu.v_lo[rd] = src_val;
                 cpu.v_hi[rd] = 0;
                 return;
             }
@@ -2756,6 +3147,49 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     nzcv = 0x30000000;  // half-precision: treat as unordered
                 }
                 cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | nzcv;
+                return;
+            }
+            // ── FCCMP/FCCMPE: FP conditional compare ──────────────────
+            // `fccmp d1, d2, #0x0, eq` = 0x1e620420.
+            // Encoding: bits[31:24]=0x1E, bit21=1, bits[11:10]=01,
+            // Rm=bits[20:16], cond=bits[15:12], nzcv=bits[3:0],
+            // E bit=bit[4] (FCCMPE — we don't model FP exceptions, so
+            // FCCMPE behaves identically to FCCMP here).
+            // If cond is true: compare Fn vs Fm and set NZCV like FCMP.
+            // If false: set NZCV = nzcv immediate. Without this the
+            // instruction was silently NOP'd, leaving NZCV stale and
+            // corrupting every subsequent conditional branch (Qt raster
+            // code compares bezier/color values with FCCMP).
+            if ((op & 0xFF200C00) == 0x1E200400) {
+                uint8_t cond = (op >> 12) & 0xF;
+                uint8_t nzcv = op & 0xF;
+                if (cond_true(cond, cpu.pstate)) {
+                    bool unordered = false, less = false, equal = false;
+                    if (ftype == 1) {  // double
+                        double a = read_fp_d(cpu, rn);
+                        double b = read_fp_d(cpu, rm);
+                        if (std::isnan(a) || std::isnan(b))       unordered = true;
+                        else if (a < b)                            less = true;
+                        else if (a > b)                            { /* greater */ }
+                        else                                       equal = true;
+                    } else {  // single (or half — no native FP16)
+                        float a = read_fp_s(cpu, rn);
+                        float b = read_fp_s(cpu, rm);
+                        if (std::isnan(a) || std::isnan(b))       unordered = true;
+                        else if (a < b)                            less = true;
+                        else if (a > b)                            { /* greater */ }
+                        else                                       equal = true;
+                    }
+                    uint32_t n;
+                    if (unordered)      n = 0x30000000;
+                    else if (less)       n = 0x80000000;
+                    else if (equal)      n = 0x60000000;
+                    else                 n = 0x20000000;
+                    cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | n;
+                } else {
+                    uint32_t n = static_cast<uint32_t>(nzcv) << 28;
+                    cpu.pstate = (cpu.pstate & 0x0FFFFFFF) | n;
+                }
                 return;
             }
             // FP 1-source: FMOV/FABS/FNEG/FSQRT/FRINT*
@@ -3161,6 +3595,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // Unknown FP instruction — NOP (don't crash)
+            {
+                static uint64_t fp_nop_count_ = 0;
+                if (fp_nop_count_ < 20) {
+                    fprintf(stderr, "[FP-NOP] op=0x%08x pc=0x%llx\n", op,
+                            (unsigned long long)cpu.pc);
+                }
+                fp_nop_count_++;
+            }
             (void)sf_val; (void)rm;
             return;
         }

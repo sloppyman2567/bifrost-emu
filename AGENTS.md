@@ -44,6 +44,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   and 64-bit SSRA via CALL_INTERP). USRA masks to 0x2F001400 — do not
   confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
   (0x0F003400), which are still unimplemented.
+- Vector FMOV immediate (cmode=0xF in the AdvSIMD modified-immediate block,
+  e.g. `fmov v31.2d, #20.0` = 0x6F01F69F) is NOT a NOP: expand via
+  AdvSIMDExpandImm. 64-bit (op bit29 set): `(imm8&0x3f)<<48`, sign bit →
+  bit63, exponent = `imm8&0x40 ? 0x3FC0000000000000 : 0x4000000000000000`,
+  replicated to both 64-bit lanes. 32-bit (op clear): sign→bit31,
+  exponent = `imm8&0x40 ? 0x1F000000 : 0x40000000`, mantissa `(imm8&0x3f)<<19`,
+  replicated per 32-bit lane. A NOP here corrupts Qt QRectF values built
+  with `fmov v.2d,#imm` + `str q` (NaN rects → broken rounded rect).
+  JIT falls back to CALL_INTERP for this (not in the simd_dp table).
 - FP-FMA semantics: FMADD = c + a*b, FMSUB = c − a*b, FNMADD = −(a*b + c),
   FNMSUB = a*b − c. FNMADD/FNMSUB are NOT −a*b±c aliases — encoding those
   wrong corrupts any value computed via `-(a*b+c)` / `a*b−c` (musl `pow`,

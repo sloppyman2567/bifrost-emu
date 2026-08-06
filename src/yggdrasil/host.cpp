@@ -27,6 +27,13 @@ std::string map_guest_path(const std::string& guest_path) {
     if (guest_path.empty() || guest_path[0] != '/') return guest_path;
     if (guest_path.substr(0, 5) == "/proc") return guest_path;
     if (guest_path.substr(0, 4) == "/dev") return guest_path;
+    // X11 clients need to read the host X auth cookie. If the guest opens
+    // the exact path the host XAUTHORITY points at, pass it through
+    // unchanged — it lives in the host session dir (e.g. /run/user/...),
+    // outside the BIFROST_ROOT sandbox. Without this, xcb connects to the
+    // X socket but the server rejects it with "Authorization required".
+    const char* xauth = getenv("XAUTHORITY");
+    if (xauth && xauth[0] == '/' && guest_path == xauth) return guest_path;
     std::string root(bifrost_root);
     while (root.size() > 1 && root.back() == '/') root.pop_back();
     return root + guest_path;

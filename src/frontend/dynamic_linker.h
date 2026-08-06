@@ -177,6 +177,13 @@ public:
     uint64_t libc_single_threaded_addr() const {
         return libc_single_threaded_addr_;
     }
+    // Point glibc's __environ global at the environment array on the
+    // initial stack. On a real Linux boot, ld.so sets __environ during
+    // _dl_start_user; the native dynlink path never runs ld.so, so
+    // __environ stays NULL and getenv()/environ return nothing. Call
+    // after the initial stack (envp array) is built in guest memory.
+    // No-op for musl (no __environ symbol) and static binaries.
+    void set_guest_environ(uint64_t envp_addr);
     // resolve_plt_entry was a stub for a future "lazy PLT binding"
     // feature that was never implemented (the linker uses eager
     // binding). Removed as dead code — the dynamic linker

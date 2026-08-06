@@ -77,3 +77,6 @@ rootfs/
 test_capi
 busybox-glibc
 busybox-musl
+# Runtime artifacts
+.freebuff/
+.build.lock

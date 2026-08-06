@@ -10,6 +10,7 @@
 //   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
 #include "core/emulator.h"
 #include "decoder.hpp"
+#include "frontend/dynamic_linker.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -60,6 +61,90 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
 }
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;
+    // ── TEMP: NSS trace ─────────────────────────────────────────
+    {
+        static bool nss_trace_ = (getenv("BIFROST_NSS_TRACE") != nullptr);
+        if (nss_trace_) {
+            static bool inited_ = false;
+            static uint64_t base_ = 0;
+            if (!inited_) {
+                // resolved at first call; libc maps at 0x500191e000
+                inited_ = true;
+            }
+            const uint64_t pc = cpu.pc;
+            if ((pc == 0x5001a220a0ULL) || (pc == 0x5001a22180ULL) ||
+                (pc == 0x5001a21d40ULL) || (pc == 0x5001a22620ULL) ||
+                (pc == 0x5001a31608ULL) || (pc == 0x5001a30f80ULL) ||
+                (pc == 0x5001a22ce0ULL) || (pc == 0x5001a32750ULL) ||
+                (pc == 0x5001a368a0ULL) || (pc == 0x5001a369a0ULL)) {
+                fprintf(stderr, "[nsstrace] pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x19=0x%llx x23=0x%llx sp=0x%llx\n",
+                        (unsigned long long)pc,
+                        (unsigned long long)cpu.regs[0], (unsigned long long)cpu.regs[1],
+                        (unsigned long long)cpu.regs[2], (unsigned long long)cpu.regs[19],
+                        (unsigned long long)cpu.regs[23], (unsigned long long)cpu.sp);
+                fflush(stderr);
+            }
+        }
+    }
+    // ── TEMP: xcb_create_window arg trace ────────────────────────
+    {
+        static bool xcb_cw_en = (getenv("BIFROST_XCB_CW") != nullptr);
+        if (xcb_cw_en) {
+            static uint64_t xcb_cw_addr_ = 0;
+            static bool xcb_cw_resolved_ = false;
+            if (!xcb_cw_resolved_ && dyn_linker_) {
+                xcb_cw_addr_ = dyn_linker_->resolve_symbol("xcb_create_window");
+                if (xcb_cw_addr_) { xcb_cw_resolved_ = true; }
+            }
+            if (xcb_cw_addr_ && cpu.pc == xcb_cw_addr_) {
+                fprintf(stderr, "[XCB_CW] pc=0x%llx depth=%u wid=0x%llx par=0x%llx x=%d y=%d w=%u h=%u border=%u class=%u vis=0x%llx mask=0x%llx vlist=0x%llx\n",
+                        (unsigned long long)cpu.pc,
+                        (unsigned)(cpu.regs[1] & 0xff), (unsigned long long)cpu.regs[2],
+                        (unsigned long long)cpu.regs[3], (int)cpu.regs[4], (int)cpu.regs[5],
+                        (unsigned)cpu.regs[6], (unsigned)cpu.regs[7],
+                        (unsigned)cpu.regs[8], (unsigned)cpu.regs[9],
+                        (unsigned long long)cpu.regs[10], (unsigned long long)cpu.regs[11]);
+                fflush(stderr);
+            }
+        }
+    }
+    // ── TEMP: xcb image-blit entry trace ────────────────────────────
+    {
+        static bool xcb_img_en = (getenv("BIFROST_XCB_IMG") != nullptr);
+        if (xcb_img_en) {
+            static const char* kNames[] = {
+                "xcb_put_image", "xcb_wait_for_event", "xcb_poll_for_event",
+                "xcb_poll_for_queued_event", "xcb_flush",
+                "xcb_wait_for_reply", "xcb_poll_for_reply",
+                "xcb_writev", "xcb_connection_has_error", "xcb_connect",
+            };
+            // NO_ASLR: libxcb base = 0x500562c000.
+            static const uint64_t kAddrs[10] = {
+                0x500562c000 + 0x19150ULL,  // xcb_put_image
+                0x500562c000 + 0xe650ULL,   // xcb_wait_for_event
+                0x500562c000 + 0xf5d0ULL,   // xcb_poll_for_event
+                0x500562c000 + 0xf5e4ULL,   // xcb_poll_for_queued_event
+                0x500562c000 + 0xd8b4ULL,   // xcb_flush
+                0x500562c000 + 0xe420ULL,   // xcb_wait_for_reply
+                0x500562c000 + 0xf2e4ULL,   // xcb_poll_for_reply
+                0x500562c000 + 0xc920ULL,   // xcb_writev
+                0x500562c000 + 0xbe40ULL,   // xcb_connection_has_error
+                0x500562c000 + 0x10730ULL,  // xcb_connect
+            };
+            for (int i = 0; i < 10; i++) {
+                if (kAddrs[i] && cpu.pc == kAddrs[i]) {
+                    fprintf(stderr, "[XCBIMG] t%d %s pc=0x%llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx x4=0x%llx x5=0x%llx x6=0x%llx x7=0x%llx\n",
+                            cpu.tid, kNames[i], (unsigned long long)cpu.pc,
+                            (unsigned long long)cpu.regs[0], (unsigned long long)cpu.regs[1],
+                            (unsigned long long)cpu.regs[2], (unsigned long long)cpu.regs[3],
+                            (unsigned long long)cpu.regs[4], (unsigned long long)cpu.regs[5],
+                            (unsigned long long)cpu.regs[6], (unsigned long long)cpu.regs[7]);
+                    fflush(stderr);
+                }
+            }
+        }
+    }
+    // ── Decode via the shared decoder ─────────────────────────────
     // ── Decode via the shared decoder ─────────────────────────────
     // The decoder (decoder.cpp) is the single source of truth for
     // instruction classification. We call decode() once, then dispatch
@@ -1094,6 +1179,17 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
                         uint64_t hi = cpu.v_hi[d.rt];
+                        static bool vdbg_ = (getenv("BIFROST_LD2_DBG") != nullptr);
+                        if (vdbg_ && nbytes == 16) {
+                            fprintf(stderr, "[STRQ-DBG] addr=0x%llx rt=%d bytes:",
+                                    (unsigned long long)addr, d.rt);
+                            for (int k = 0; k < 16; k++) {
+                                fprintf(stderr, " %02x", (k < 8)
+                                    ? (unsigned char)((lo >> (k*8)) & 0xFF)
+                                    : (unsigned char)((hi >> ((k-8)*8)) & 0xFF));
+                            }
+                            fprintf(stderr, "\n");
+                        }
                         mem_.write(addr, &lo, std::min(nbytes, 8), pcache);
                         if (nbytes > 8) mem_.write(addr + 8, &hi, nbytes - 8, pcache);
                     }

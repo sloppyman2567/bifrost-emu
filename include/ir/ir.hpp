@@ -134,8 +134,8 @@ enum class IROp : uint8_t {
     //   SSHR: dest = src1 >>> shift  (arithmetic right, signed)
     //   USRA: dest = dest + (src1 >> shift)            (logical right + accumulate)
     //   SSRA: dest = dest + (src1 >>> shift)           (arithmetic right + accumulate)
-    //   SLI:  dest = (src1 << shift) | (dest >> (esize*8 - shift))  (shift-left insert)
-    //   SRI:  dest = (src1 >> shift) | (dest << (esize*8 - shift))  (shift-right insert)
+    //   SLI:  dest = (src1 << shift) | (dest & ((1<<shift)-1))  (shift-left insert)
+    //   SRI:  dest = (src1 >> shift) | (dest & ~((1<<(esize*8-shift))-1))  (shift-right insert)
     // All operate lane-wise; width = element size in bytes (1, 2, 4, 8);
     // imm = shift amount (0..esize*8-1); flags_op = Q (1=128-bit, process
     // v_lo AND v_hi; 0=64-bit, process v_lo only and ZERO v_hi). On AVX2
@@ -147,8 +147,8 @@ enum class IROp : uint8_t {
     SIMD_SSHR,     // dest = src1 >>> imm (per-lane arithmetic right shift)
     SIMD_USRA,     // dest += src1 >> imm (per-lane logical right + accumulate)
     SIMD_SSRA,     // dest += src1 >>> imm (per-lane arithmetic right + accumulate)
-    SIMD_SLI,      // dest = (src1 << imm) | (dest >> (esize*8 - imm))
-    SIMD_SRI,      // dest = (src1 >> imm) | (dest << (esize*8 - imm))
+    SIMD_SLI,      // dest = (src1 << imm) | (dest & ((1<<imm)-1))
+    SIMD_SRI,      // dest = (src1 >> imm) | (dest & ~((1<<(esize*8-imm))-1))
     // Native SIMD FP lane-wise arithmetic (v1.5.1-alpha). Same shape as
     // SIMD_ARITH but for FP elements. Operates on v_lo/v_hi (each 8
     // bytes) across all lanes; JIT emits SSE addps/subps/mulps/divps/

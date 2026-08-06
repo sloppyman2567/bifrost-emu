@@ -453,6 +453,411 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
                         CODENAME, signo,
                         static_cast<unsigned long long>(fault_addr),
                         static_cast<unsigned long long>(cpu.pc));
+                // TEMP DEBUG: dump guest stack (x29-linked frames).
+                uint64_t fp = cpu.regs[29];
+                fprintf(stderr, "  guest regs: x0=%llx x1=%llx x2=%llx x3=%llx\n",
+                        (unsigned long long)cpu.regs[0], (unsigned long long)cpu.regs[1],
+                        (unsigned long long)cpu.regs[2], (unsigned long long)cpu.regs[3]);
+                fprintf(stderr, "  guest x19=%llx x20=%llx x21=%llx x22=%llx x29=%llx sp=%llx\n",
+                        (unsigned long long)cpu.regs[19], (unsigned long long)cpu.regs[20],
+                        (unsigned long long)cpu.regs[21], (unsigned long long)cpu.regs[22],
+                        (unsigned long long)cpu.regs[29], (unsigned long long)cpu.sp);
+                for (int i = 0; i < 32 && fp && (fp & 1) == 0; i++) {
+                    uint64_t ra = 0, pfp = 0;
+                    try {
+                        emu.mem().read(fp, &pfp, 8);
+                        emu.mem().read(fp + 8, &ra, 8);
+                    } catch (...) { break; }
+                    fprintf(stderr, "  guest[%2d] fp=0x%llx ra=0x%llx\n",
+                            i, static_cast<unsigned long long>(fp),
+                            static_cast<unsigned long long>(ra));
+                    if (pfp <= fp) break;
+                    fp = pfp;
+                }
+                // TEMP DEBUG: full guest allocation map at crash.
+                for (const auto& kv : emu.mem().allocations_snapshot()) {
+                    fprintf(stderr, "  alloc 0x%llx size=0x%llx\n",
+                            (unsigned long long)kv.first, (unsigned long long)kv.second);
+                }
+                // TEMP DEBUG: dump likely memalign chunk region.
+                for (uint64_t addr : {0x500034a000ULL, 0x500034fff0ULL, 0x5000350000ULL, 0x4354954ULL, 0x4354000ULL, 0x4353000ULL}) {
+                    uint8_t raw[48];
+                    try {
+                        emu.mem().read(addr, raw, sizeof(raw));
+                        fprintf(stderr, "  memdump@0x%llx: ", (unsigned long long)addr);
+                        for (size_t i = 0; i < sizeof(raw); i++)
+                            fprintf(stderr, "%02x", raw[i]);
+                        fprintf(stderr, "\n");
+                    } catch (...) {
+                        fprintf(stderr, "  memdump@0x%llx: <unmapped>\n", (unsigned long long)addr);
+                    }
+                }
+                // TEMP DEBUG: dump the object's vtable (x0 → vptr → slots 0..16).
+                {
+                    const uint64_t obj = cpu.regs[0];
+                    uint8_t raw[8];
+                    try {
+                        emu.mem().read(obj, raw, 8);
+                        uint64_t vptr = 0; memcpy(&vptr, raw, 8);
+                        fprintf(stderr, "  obj x0=0x%llx vptr=0x%llx\n",
+                                (unsigned long long)obj, (unsigned long long)vptr);
+                        uint8_t vraw[16 * 8];
+                        emu.mem().read(vptr, vraw, sizeof(vraw));
+                        fprintf(stderr, "  vtable slots: ");
+                        for (size_t i = 0; i < 16; i++) {
+                            uint64_t s = 0; memcpy(&s, vraw + i * 8, 8);
+                            fprintf(stderr, "[%zu]=0x%llx ", i, (unsigned long long)s);
+                        }
+                        fprintf(stderr, "\n");
+                    } catch (...) {
+                        fprintf(stderr, "  vtable dump: <unmapped>\n");
+                    }
+                    try {
+                        uint64_t fontdb = 0x5005961e60ULL;
+                        uint64_t vptr = 0;
+                        emu.mem().read(fontdb, raw, 8);
+                        memcpy(&vptr, raw, 8);
+                        fprintf(stderr, "  fontdb@0x%llx vptr=0x%llx slot[13]=0x%llx\n",
+                                (unsigned long long)fontdb, (unsigned long long)vptr,
+                                (unsigned long long)([&]{ uint64_t s=0; emu.mem().read(vptr+0x68, raw, 8); memcpy(&s, raw, 8); return s; }()));
+                        uint8_t vraw2[8 * 8];
+                        emu.mem().read(vptr, vraw2, sizeof(vraw2));
+                        fprintf(stderr, "  fontdb vtable: ");
+                        for (size_t i = 0; i < 8; i++) {
+                            uint64_t s = 0; memcpy(&s, vraw2 + i * 8, 8);
+                            fprintf(stderr, "[%zu]=0x%llx ", i, (unsigned long long)s);
+                        }
+                        fprintf(stderr, "\n");
+                        uint64_t pi = 0x5005961ca0ULL;
+                        uint64_t piv = 0;
+                        emu.mem().read(pi, raw, 8);
+                        memcpy(&piv, raw, 8);
+                        fprintf(stderr, "  platform_int@0x%llx vptr=0x%llx slot[13]=0x%llx\n",
+                                (unsigned long long)pi, (unsigned long long)piv,
+                                (unsigned long long)([&]{ uint64_t s=0; emu.mem().read(piv+0x68, raw, 8); memcpy(&s, raw, 8); return s; }()));
+                        // inspect dispatch target 0x500dad1520
+                        uint64_t tgt = 0x500dad1520ULL;
+                        uint8_t t[32];
+                        try {
+                            emu.mem().read(tgt, t, sizeof(t));
+                            fprintf(stderr, "  dispatch_tgt@0x%llx: ", (unsigned long long)tgt);
+                            for (size_t i = 0; i < sizeof(t); i++) fprintf(stderr, "%02x", t[i]);
+                            fprintf(stderr, "\n");
+                        } catch (...) { fprintf(stderr, "  dispatch_tgt@0x%llx: <unmapped>\n", (unsigned long long)tgt); }
+                    } catch (...) { fprintf(stderr, "  fontdb dump: <unmapped>\n"); }
+                }
+                // TEMP DEBUG: code at crash return site + GOT slot + low mem.
+                {
+                    // NSS builtin pointer-guard: module_load_builtin /
+                    // __nss_module_get_function read the guard via
+                    // ldr x1,[libc+0x19fe38]; ld1r v31,[x1].
+                    const uint64_t libc_base = 0x500191e000ULL;
+                    try {
+                        uint8_t g[8];
+                        uint64_t guard_ptr = 0, guard = 0;
+                        emu.mem().read(libc_base + 0x19fe38, g, 8);
+                        memcpy(&guard_ptr, g, 8);
+                        if (guard_ptr) {
+                            emu.mem().read(guard_ptr, g, 8);
+                            memcpy(&guard, g, 8);
+                        }
+                        fprintf(stderr, "  guard: slot@0x%llx ptr=0x%llx guard=0x%llx\n",
+                                (unsigned long long)(libc_base + 0x19fe38),
+                                (unsigned long long)guard_ptr,
+                                (unsigned long long)guard);
+                    } catch (...) { fprintf(stderr, "  guard: <unmapped>\n"); }
+                    uint8_t code[0x40];
+                    try {
+                        emu.mem().read(0x5000859d20ULL, code, sizeof(code));
+                        fprintf(stderr, "  code@0x5000859d20: ");
+                        for (size_t i = 0; i < sizeof(code); i++) fprintf(stderr, "%02x", code[i]);
+                        fprintf(stderr, "\n");
+                    } catch (...) { fprintf(stderr, "  code@crash site: <unmapped>\n"); }
+                    // TEMP DEBUG: scan loaded regions for the crash target
+                    // 0x4354954 to locate the stale pointer's home.
+                    {
+                        const uint64_t target = 0x4354954ULL;
+                        int hits = 0;
+                        for (const auto& kv : emu.mem().allocations_snapshot()) {
+                            const uint64_t base = kv.first, size = kv.second;
+                            if (size < 16 || size > (1u << 27)) continue;
+                            std::vector<uint8_t> buf;
+                            try {
+                                buf.resize(size);
+                                emu.mem().read(base, buf.data(), size);
+                            } catch (...) { continue; }
+                            for (size_t i = 0; i + 8 <= buf.size(); i += 8) {
+                                uint64_t v = 0;
+                                memcpy(&v, buf.data() + i, 8);
+                                if (v == target) {
+                                    fprintf(stderr, "  SCAN 0x%llx size=0x%llx @+0x%zx = 0x%llx\n",
+                                            (unsigned long long)base,
+                                            (unsigned long long)size, i,
+                                            (unsigned long long)v);
+                                    if (++hits >= 12) break;
+                                }
+                            }
+                            if (hits >= 12) break;
+                        }
+                        if (hits == 0) fprintf(stderr, "  SCAN: 0x4354954 not found in alloc regions\n");
+                        // Probe the 0x5004350000 region these pointers target.
+                        for (uint64_t addr : {0x5004350000ULL, 0x5004354000ULL, 0x5004354954ULL,
+                                             0x5004356000ULL, 0x5004358000ULL, 0x5004351000ULL}) {
+                            uint8_t raw[16];
+                            try {
+                                emu.mem().read(addr, raw, sizeof(raw));
+                                fprintf(stderr, "  probe@0x%llx: ", (unsigned long long)addr);
+                                for (size_t i = 0; i < 16; i++) fprintf(stderr, "%02x", raw[i]);
+                                fprintf(stderr, "\n");
+                            } catch (...) {
+                                fprintf(stderr, "  probe@0x%llx: <unmapped>\n", (unsigned long long)addr);
+                            }
+                        }
+                        // Find the NSS module: name "files" at module+0x218.
+                        {
+                            const uint64_t want0 = 0x500191e000ULL + 0x117a30ULL;
+                            const uint64_t want1 = 0x500191e000ULL + 0x118620ULL;
+                            bool found = false;
+                            for (const auto& kv : emu.mem().allocations_snapshot()) {
+                                const uint64_t base = kv.first, size = kv.second;
+                                if (size < 64 || size > (1u << 28)) continue;
+                                std::vector<uint8_t> buf;
+                                try { buf.resize(size); emu.mem().read(base, buf.data(), size); }
+                                catch (...) { continue; }
+                                for (size_t i = 0; i + 64 <= buf.size(); i += 8) {
+                                    uint64_t v0 = 0, v1 = 0;
+                                    memcpy(&v0, buf.data() + i, 8);
+                                    memcpy(&v1, buf.data() + i + 8, 8);
+                                    if (v0 == want0 && v1 == want1) {
+                                        fprintf(stderr, "  NSSMOD(fn) @0x%llx +0x%zx (want0/want1)\n",
+                                                (unsigned long long)base, i);
+                                        found = true;
+                                    }
+                                }
+                            }
+                            if (!found) fprintf(stderr, "  NSSMOD(fn): want0/want1 not in allocs\n");
+                        }
+                        // Also scan libc's static data (.bss/.data 0x1a6-0x1b range).
+                        {
+                            const uint64_t want0 = 0x500191e000ULL + 0x117a30ULL;
+                            const uint64_t want1 = 0x500191e000ULL + 0x118620ULL;
+                            for (uint64_t a = 0x5001aa0000ULL; a < 0x5001ac5000ULL; a += 0x1000) {
+                                std::vector<uint8_t> buf;
+                                try { buf.resize(0x1000); emu.mem().read(a, buf.data(), 0x1000); }
+                                catch (...) { continue; }
+                                for (size_t i = 0; i + 64 <= buf.size(); i += 8) {
+                                    uint64_t v0 = 0, v1 = 0;
+                                    memcpy(&v0, buf.data() + i, 8);
+                                    memcpy(&v1, buf.data() + i + 8, 8);
+                                    if (v0 == want0 && v1 == want1) {
+                                        fprintf(stderr, "  NSSMOD(fn) @0x%llx (libc data)\n",
+                                                (unsigned long long)(a + i));
+                                    }
+                                }
+                            }
+                        }
+                        for (const auto& kv : emu.mem().allocations_snapshot()) {
+                            const uint64_t base = kv.first, size = kv.second;
+                            if (size < 0x1000 || size > (1u << 28)) continue;
+                            std::vector<uint8_t> buf;
+                            try { buf.resize(size); emu.mem().read(base, buf.data(), size); }
+                            catch (...) { continue; }
+                            for (size_t i = 0; i + 8 < buf.size(); i++) {
+                                if (memcmp(buf.data() + i, "files", 6) == 0 && buf[i + 6] == 0) {
+                                    uint64_t name = base + i;
+                                    uint64_t mod = name - 0x218;
+                                    uint8_t q[8]; uint64_t v = 0;
+                                    try { emu.mem().read(mod + 8, q, 8); memcpy(&v, q, 8); }
+                                    catch (...) { v = 0xFFFFFFFFFFFFFFFFULL; }
+                                    if (v >= 0x500191e000ULL && v < 0x5001c00000ULL) {
+                                        fprintf(stderr, "  NSSMOD @0x%llx name@0x%llx\n",
+                                                (unsigned long long)mod, (unsigned long long)name);
+                                        for (int e = 0; e < 34; e++) {
+                                            uint64_t w = 0;
+                                            try { emu.mem().read(mod + e * 8, q, 8); memcpy(&w, q, 8); }
+                                            catch (...) { w = 0xFFFFFFFFFFFFFFFFULL; }
+                                            fprintf(stderr, "    [%d]=0x%llx\n", e, (unsigned long long)w);
+                                        }
+                                        goto mod_done;
+                                    }
+                                }
+                            }
+                        }
+                        fprintf(stderr, "  NSSMOD: not found\n");
+                        mod_done:;
+                        // Probe dlopen-hook chain: libc+0x19fe80 → +376 → +72
+                        {
+                            uint8_t q[8]; uint64_t v = 0;
+                            try { emu.mem().read(0x5001abfe80ULL, q, 8); memcpy(&v, q, 8);
+                                  fprintf(stderr, "  dlopen_hook@libc+0x19fe80=0x%llx\n", (unsigned long long)v); } catch (...) { fprintf(stderr, "  dlopen_hook unmapped\n"); }
+                            uint64_t h1 = v;
+                            if (h1) {
+                                try { emu.mem().read(h1 + 376, q, 8); memcpy(&v, q, 8);
+                                      fprintf(stderr, "  dlopen_hook[+376]=0x%llx\n", (unsigned long long)v); } catch (...) { fprintf(stderr, "  +376 unmapped\n"); }
+                                uint64_t h2 = v;
+                                if (h2) {
+                                    try { emu.mem().read(h2 + 72, q, 8); memcpy(&v, q, 8);
+                                          fprintf(stderr, "  dlopen_hook[+376][+72]=0x%llx\n", (unsigned long long)v); } catch (...) { fprintf(stderr, "  +72 unmapped\n"); }
+                                    try { emu.mem().read(h2 + 0, q, 8); memcpy(&v, q, 8);
+                                          fprintf(stderr, "  dlfcn_hook[+0]=0x%llx\n", (unsigned long long)v); } catch (...) {}
+                                }
+                            }
+                            uint8_t b = 0;
+                            try { emu.mem().read(0x5001ab7e04ULL, &b, 1);
+                                  fprintf(stderr, "  files_flag@libc+0x1a7e04=%u\n", (unsigned)b); } catch (...) { fprintf(stderr, "  files_flag unmapped\n"); }
+                            try { emu.mem().read(0x5001ab7e08ULL, q, 8); memcpy(&v, q, 8);
+                                  fprintf(stderr, "  files_flag[+8]=0x%llx\n", (unsigned long long)v); } catch (...) {}
+                        }
+                        // Dump the NSS module struct at guest x19 (0x500592c0b0):
+                        // +0 state/next/name, +8 functions[32] (mangled or raw).
+                        for (uint64_t mbase : {0x500592c0b0ULL}) {
+                            for (int e = -1; e < 40; e++) {
+                                uint8_t q[8]; uint64_t v = 0;
+                                try { emu.mem().read(mbase + e * 8, q, 8); memcpy(&v, q, 8); }
+                                catch (...) { fprintf(stderr, "  MOD[%d]=<unmapped>\n", e); continue; }
+                                fprintf(stderr, "  MOD[x19%+d]=0x%llx\n", e, (unsigned long long)v);
+                            }
+                        }
+                        // getpwuid_r saved the module ptr at [sp+0x80] and the
+                        // function ptr at [sp+0x88]. Dump those plus the module.
+                        {
+                            uint64_t sp = 0x7fffffef10ULL;
+                            for (uint64_t off : {0x80ULL, 0x88ULL, 0x90ULL}) {
+                                uint8_t q[8]; uint64_t v = 0;
+                                try { emu.mem().read(sp + off, q, 8); memcpy(&v, q, 8);
+                                      fprintf(stderr, "  SP[+0x%llx]=0x%llx\n", (unsigned long long)off, (unsigned long long)v); }
+                                catch (...) { fprintf(stderr, "  SP[+0x%llx]=<unmapped>\n", (unsigned long long)off); }
+                            }
+                            uint64_t su = 0;
+                            try { uint8_t q[8]; emu.mem().read(sp + 0x80, q, 8); memcpy(&su, q, 8); } catch (...) {}
+                            uint64_t mod = 0;
+                            try { uint8_t q[8]; emu.mem().read(su, q, 8); memcpy(&mod, q, 8); } catch (...) {}
+                            fprintf(stderr, "  service_user=0x%llx module=0x%llx\n",
+                                    (unsigned long long)su, (unsigned long long)mod);
+                            for (int e = -1; e < 40; e++) {
+                                uint8_t q[8]; uint64_t v = 0;
+                                try { emu.mem().read(mod + e * 8, q, 8); memcpy(&v, q, 8); }
+                                catch (...) { fprintf(stderr, "  MOD[%d]=<unmapped>\n", e); continue; }
+                                fprintf(stderr, "  MOD[%d]=0x%llx\n", e, (unsigned long long)v);
+                            }
+                        }
+                        // Dump the area around the hit (heap context).
+                        for (uint64_t addr : {0x5005962b80ULL, 0x5005962bf0ULL, 0x5005962c00ULL,
+                                             0x5005961ca0ULL, 0x5005961e60ULL, 0x5005961f60ULL}) {
+                            uint8_t raw[0x40];
+                            try {
+                                emu.mem().read(addr, raw, sizeof(raw));
+                                fprintf(stderr, "  heap@0x%llx: ", (unsigned long long)addr);
+                                for (size_t i = 0; i < sizeof(raw); i++) fprintf(stderr, "%02x", raw[i]);
+                                fprintf(stderr, "\n");
+                            } catch (...) {
+                                fprintf(stderr, "  heap@0x%llx: <unmapped>\n", (unsigned long long)addr);
+                            }
+                        }
+                        // Precise 8-byte reads at the exact scan-hit address.
+                        for (uint64_t addr : {0x5005962c08ULL, 0x5005962bd8ULL, 0x5005962b80ULL}) {
+                            uint8_t q[8]; uint64_t v = 0;
+                            try {
+                                emu.mem().read(addr, q, sizeof(q));
+                                memcpy(&v, q, 8);
+                                fprintf(stderr, "  qword@0x%llx = 0x%llx\n",
+                                        (unsigned long long)addr, (unsigned long long)v);
+                            } catch (...) { fprintf(stderr, "  qword@0x%llx: <unmapped>\n", (unsigned long long)addr); }
+                        }
+                        // Scan for the real NSS "files" module: functions[0..1]
+                        // = libc+0x117a30 / libc+0x118620 (first stp pair in __nss_files_functions).
+                        {
+                            const uint64_t want0 = 0x500191e000ULL + 0x117a30ULL;
+                            const uint64_t want1 = 0x500191e000ULL + 0x118620ULL;
+                            for (const auto& kv : emu.mem().allocations_snapshot()) {
+                                const uint64_t base = kv.first, size = kv.second;
+                                if (size < 64 || size > (1u << 28)) continue;
+                                std::vector<uint8_t> buf;
+                                try { buf.resize(size); emu.mem().read(base, buf.data(), size); }
+                                catch (...) { continue; }
+                                for (size_t i = 0; i + 64 <= buf.size(); i += 8) {
+                                    uint64_t v0 = 0, v1 = 0;
+                                    memcpy(&v0, buf.data() + i, 8);
+                                    memcpy(&v1, buf.data() + i + 8, 8);
+                                    if (v0 == want0 && v1 == want1) {
+                                        fprintf(stderr, "  NSSMOD 0x%llx @+0x%zx\n",
+                                                (unsigned long long)base, i);
+                                        uint8_t q[8];
+                                        for (int e = -1; e < 20; e++) {
+                                            uint64_t v = 0;
+                                            try { emu.mem().read(base + i + e * 8, q, 8); memcpy(&v, q, 8); }
+                                            catch (...) { v = 0xFFFFFFFFFFFFFFFFULL; }
+                                            fprintf(stderr, "    [%d]=0x%llx\n", e, (unsigned long long)v);
+                                        }
+                                        goto scan_done;
+                                    }
+                                }
+                            }
+                            fprintf(stderr, "  NSSMOD: functions[0..1] pattern not found\n");
+                            scan_done:;
+                        }
+                    }
+                    uint8_t got[8];
+                    try {
+                        for (uint64_t slot : {0x68f418ULL, 0x68fac8ULL, 0x68fe58ULL, 0x68ff88ULL}) {
+                            emu.mem().read(0x500071e000ULL + slot, got, 8);
+                            uint64_t g = 0; memcpy(&g, got, 8);
+                            fprintf(stderr, "  GOT[Qt5Gui+0x%llx] = 0x%llx\n",
+                                    (unsigned long long)slot, (unsigned long long)g);
+                        }
+                    } catch (...) { fprintf(stderr, "  GOT slots: <unmapped>\n"); }
+                    for (uint64_t slot : {0x68f418ULL, 0x68fac8ULL, 0x68fe58ULL, 0x68ff88ULL, 0x68fc48ULL}) {
+                        uint8_t got2[8]; uint64_t g2 = 0;
+                        try {
+                            emu.mem().read(0x500071e000ULL + slot, got2, 8);
+                            memcpy(&g2, got2, 8);
+                            uint8_t tgt[16];
+                            try {
+                                emu.mem().read(g2, tgt, 16);
+                                fprintf(stderr, "  [GOT+0x%llx]->%#llx: ", (unsigned long long)slot,
+                                        (unsigned long long)g2);
+                                for (size_t i = 0; i < 16; i++) fprintf(stderr, "%02x", tgt[i]);
+                                fprintf(stderr, "\n");
+                            } catch (...) {
+                                fprintf(stderr, "  [GOT+0x%llx]->%#llx: <unmapped>\n",
+                                        (unsigned long long)slot, (unsigned long long)g2);
+                            }
+                        } catch (...) { fprintf(stderr, "  GOT+0x%llx: <unmapped>\n", (unsigned long long)slot); }
+                    }
+                    uint8_t low[16];
+                    try {
+                        emu.mem().read(0x68ULL, low, sizeof(low));
+                        uint64_t v = 0; memcpy(&v, low, 8);
+                        fprintf(stderr, "  [0x68] = 0x%llx\n", (unsigned long long)v);
+                    } catch (...) { fprintf(stderr, "  [0x68]: <unmapped>\n"); }
+                }
+                // TEMP DEBUG: _rtld_global_ro GOT slot used by munmap_chunk's
+                // GLRO(dl_pagesize) read: ldr x1,[libc+0x19fe80]; ldr x2,[x1,#24].
+                {
+                    const uint64_t got_slot = 0x500001e000ULL + 0x19fe80ULL;
+                    uint8_t raw[8];
+                    try {
+                        emu.mem().read(got_slot, raw, 8);
+                        uint64_t ptr = 0; memcpy(&ptr, raw, 8);
+                        fprintf(stderr, "  rtld_global_ro slot@0x%llx = %#llx\n",
+                                (unsigned long long)got_slot, (unsigned long long)ptr);
+                        uint8_t sraw[64];
+                        try {
+                            emu.mem().read(ptr, sraw, sizeof(sraw));
+                            fprintf(stderr, "  rtld_global_ro struct: ");
+                            for (size_t i = 0; i < sizeof(sraw); i++) fprintf(stderr, "%02x", sraw[i]);
+                            fprintf(stderr, "\n");
+                            uint64_t pg = 0; memcpy(&pg, sraw + 24, 8);
+                            fprintf(stderr, "  rtld_global_ro+24 (dl_pagesize) = %#llx\n",
+                                    (unsigned long long)pg);
+                        } catch (...) {
+                            fprintf(stderr, "  rtld_global_ro struct @ %#llx: <unmapped>\n",
+                                    (unsigned long long)ptr);
+                        }
+                    } catch (...) {
+                        fprintf(stderr, "  rtld_global_ro slot: <unmapped>\n");
+                    }
+                }
             }
         }
         // Non-terminating defaults (ignore) → just drop the signal.

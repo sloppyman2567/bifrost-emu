@@ -16,6 +16,16 @@
 #include <sys/mman.h>
 #include <mutex>
 namespace arm64emu {
+// Resolve a guest file descriptor to its host file descriptor, or -1 if
+// the guest fd is invalid or does not wrap a host fd. mmap() with a
+// file-backed mapping needs the real host fd to preload the file
+// contents into the mapping (FdTable allocates guest fds independently
+// of the host fd numbers, so the two are NOT interchangeable).
+static int resolve_host_fd(Emulator& emu, int guest_fd) {
+    auto node = emu.fds().get(guest_fd);
+    if (!node) return -1;
+    return node->host_fd();
+}
 int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
     uint64_t a0 = cpu.regs[0], a1 = cpu.regs[1], a2 = cpu.regs[2];
     uint64_t a3 = cpu.regs[3], a4 = cpu.regs[4], a5 = cpu.regs[5];
@@ -78,14 +88,17 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // the BIFROST_MAP_FIXED bit conceptually (no-op since we
                 // already placed the allocation).
                 if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0) {
-                    struct stat st;
-                    if (::fstat(static_cast<int>(a4), &st) == 0) {
-                        std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
-                        off_t old = ::lseek(static_cast<int>(a4), 0, SEEK_CUR);
-                        ::lseek(static_cast<int>(a4), a5, SEEK_SET);
-                        ssize_t n = ::read(static_cast<int>(a4), buf.data(), buf.size());
-                        ::lseek(static_cast<int>(a4), old, SEEK_SET);
-                        if (n > 0) mem_.write(addr, buf.data(), n);
+                    int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
+                    if (host_fd >= 0) {
+                        struct stat st;
+                        if (::fstat(host_fd, &st) == 0) {
+                            std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
+                            off_t old = ::lseek(host_fd, 0, SEEK_CUR);
+                            ::lseek(host_fd, a5, SEEK_SET);
+                            ssize_t n = ::read(host_fd, buf.data(), buf.size());
+                            ::lseek(host_fd, old, SEEK_SET);
+                            if (n > 0) mem_.write(addr, buf.data(), n);
+                        }
                     }
                     if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
                         graphics_.set_guest_fb_addr(addr);
@@ -138,8 +151,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
-            if (getenv("BIFROST_TRACE_MMAP")) {
-                fprintf(stderr, "[mmap(addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
+             if (getenv("BIFROST_TRACE_MMAP")) {
+                fprintf(stderr, "[mmap(pc=0x%llx addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
+                        (unsigned long long)cpu.pc,
                         (unsigned long long)addr,
                         (unsigned long)length,
                         (unsigned long)prot,
@@ -147,6 +161,21 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (long long)(int64_t)a4,
                         (unsigned long long)a5,
                         (unsigned long long)mapped);
+                if (length > (1u << 20)) {
+                    // TEMP DEBUG: who makes a big mmap?
+                    uint64_t fp = cpu.regs[29];
+                    for (int i = 0; i < 24 && fp && (fp & 1) == 0; i++) {
+                        uint64_t ra = 0, pfp = 0;
+                        try {
+                            emu.mem().read(fp, &pfp, 8);
+                            emu.mem().read(fp + 8, &ra, 8);
+                        } catch (...) { break; }
+                        fprintf(stderr, "  bigmmap[%2d] fp=0x%llx ra=0x%llx\n",
+                                i, (unsigned long long)fp, (unsigned long long)ra);
+                        if (pfp <= fp) break;
+                        fp = pfp;
+                    }
+                }
             }
             // Note: musl's mallocng uses MAP_FIXED with PROT_NONE to carve
             // pages from the brk region, then calls mprotect to make them
@@ -160,14 +189,17 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // libraries) skipped the file-load branch and the guest saw
             // zero pages. Fix: check the correct bit.
             if (static_cast<int64_t>(a4) != -1 && (a3 & 0x20) == 0 /* not MAP_ANONYMOUS */) {
-                struct stat st;
-                if (::fstat(static_cast<int>(a4), &st) == 0) {
-                    std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
-                    off_t old = ::lseek(static_cast<int>(a4), 0, SEEK_CUR);
-                    ::lseek(static_cast<int>(a4), a5, SEEK_SET);
-                    ssize_t n = ::read(static_cast<int>(a4), buf.data(), buf.size());
-                    ::lseek(static_cast<int>(a4), old, SEEK_SET);
-                    if (n > 0) mem_.write(mapped, buf.data(), n);
+                int host_fd = resolve_host_fd(emu, static_cast<int>(a4));
+                if (host_fd >= 0) {
+                    struct stat st;
+                    if (::fstat(host_fd, &st) == 0) {
+                        std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
+                        off_t old = ::lseek(host_fd, 0, SEEK_CUR);
+                        ::lseek(host_fd, a5, SEEK_SET);
+                        ssize_t n = ::read(host_fd, buf.data(), buf.size());
+                        ::lseek(host_fd, old, SEEK_SET);
+                        if (n > 0) mem_.write(mapped, buf.data(), n);
+                    }
                 }
                 // If the guest is mmap'ing the graphics framebuffer fd,
                 // record the guest address so the host can sync the

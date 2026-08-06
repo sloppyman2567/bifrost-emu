@@ -37,6 +37,18 @@ static std::unique_ptr<Node> serve_dir(std::string name,
                                        int flags) {
     return std::make_unique<DirNode>(std::move(name), std::move(entries), flags);
 }
+// Helper: is /proc/self/exe or /proc/<pid>/exe (mirrors the syscall-layer
+// helper in src/syscalls/fs.cpp — keep both in sync).
+static bool is_proc_exe_path(const std::string& p) {
+    if (p == "/proc/self/exe" || p == "/proc/self/exe/") return true;
+    if (p.compare(0, 6, "/proc/") != 0) return false;
+    size_t slash = p.find('/', 6);
+    if (slash == std::string::npos) return false;
+    std::string pid = p.substr(6, slash - 6);
+    if (pid.empty() || pid.find_first_not_of("0123456789") != std::string::npos) return false;
+    std::string tail = p.substr(slash + 1);
+    return tail == "exe" || tail == "exe/";
+}
 // ── /proc directory listing ──────────────────────────────────────────
 // We expose a subset of /proc that real Linux guests can handle. The
 // kernel exposes more (loadavg, stat, uptime, etc.) — those are
@@ -80,7 +92,11 @@ std::unique_ptr<Node> Yggdrasil::open_procfs(const std::string& path,
         return serve_dir("/proc/self", proc_self_entries(), flags);
     }
     // ── /proc/self/exe → symlink to the ELF path ────────────────────
-    if (path == "/proc/self/exe" || path == "/proc/self/exe/") {
+    // Also serves /proc/<pid>/exe (the guest's getpid() returns 1, and
+    // Qt resolves its own binary via /proc/<pid>/exe). stat/lstat/readlink
+    // on these paths are served synthetically in the fstatat/statx/readlinkat
+    // syscall handlers; this open path lets guests read the target string.
+    if (is_proc_exe_path(path)) {
         return serve_static(elf_path_, flags);
     }
     // ── /proc/self/cmdline → argv[0]\0argv[1]\0... ──────────────────

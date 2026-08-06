@@ -166,15 +166,22 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     vfs_.set_comm_provider([this]() -> std::string {
         return guest_comm_;
     });
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) throw EmuError("cannot open " + path + ": " + strerror(errno));
+    // Open the ELF through the BIFROST_ROOT sandbox: `path` is the guest
+    // path (what /proc/self/exe reports), so the host file is the remapped
+    // "$BIFROST_ROOT/<path>". Relative paths pass through unchanged, so
+    // existing `bifrost-emu ctest/foo.elf` invocations are untouched.
+    // This keeps /proc/self/exe consistent with the guest's view of the
+    // filesystem (Qt derives applicationDirPath from it).
+    const std::string host_elf_path = yggdrasil::Yggdrasil::remap_path(path);
+    FILE* f = fopen(host_elf_path.c_str(), "rb");
+    if (!f) throw EmuError("cannot open " + host_elf_path + ": " + strerror(errno));
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); throw EmuError("empty or invalid ELF"); }
     std::vector<uint8_t> data(sz);
     if (fread(data.data(), 1, sz, f) != static_cast<size_t>(sz)) {
-        fclose(f); throw EmuError("short read on " + path);
+        fclose(f); throw EmuError("short read on " + host_elf_path);
     }
     fclose(f);
     auto info = ElfLoader::load(mem_, data);
@@ -726,6 +733,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // gettimeofday/clock_gettime/clock_getres/rt_sigreturn stubs.
     load_vdso();
     main_cpu_.sp = build_initial_stack(STACK_TOP, argv, info);
+    // glibc's ld.so normally sets __environ during _dl_start_user; the
+    // native dynlink path skips ld.so, so point __environ at the envp
+    // array on the initial stack before the program's _start runs.
+    if (dyn_linker_) dyn_linker_->set_guest_environ(guest_envp_addr_);
     // Pre-allocate a TLS scratch area and set TPIDR_EL0 to point into
     // its center. Many libc startup routines read TPIDR_EL0 before
     // __libc_setup_tls has set the real TCB. Pointing it to valid
@@ -811,6 +822,25 @@ std::vector<std::string> Emulator::build_default_guest_env() {
         "PAGER",
         "EDITOR",
         "VISUAL",
+        // GUI/graphics-adjacent vars. Propagating DISPLAY lets guest X11/Qt
+        // (xcb) clients reach a host X server; the QT_* vars select the Qt
+        // platform plugin and its search path (offscreen/xcb/eglfs).
+        "DISPLAY",
+        "XAUTHORITY",
+        // Propagate the host D-Bus session so guest Qt apps can reach the
+        // session bus. Without this, Qt's AT-SPI accessibility bridge
+        // (activated during QWidget::show) cannot find the bus and blocks
+        // forever on its connection-ready semaphore.
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "QT_QPA_PLATFORM",
+        "QT_QPA_PLATFORM_PLUGIN_PATH",
+        "QT_PLUGIN_PATH",
+        "QT_QPA_FONTDIR",
+        "QT_DEBUG_PLUGINS",
+        "QT_X11_NO_MITSHM",
+        "QT_ACCESSIBILITY",
+        "QT_LINUX_ACCESSIBILITY_ALWAYS_ON",
         nullptr,
     };
     for (size_t i = 0; propagate[i]; ++i) {
@@ -1006,6 +1036,9 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     push(argc);
     for (auto a : argv_addrs) push(a);
     push(0);
+    // Record the guest address of the envp array so the native dynlink
+    // path can point glibc's __environ at it (ld.so never runs to do it).
+    guest_envp_addr_ = p;
     for (auto e : envp_addrs) push(e);
     push(0);
     for (auto v : auxv) push(v);

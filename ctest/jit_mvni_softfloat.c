@@ -107,6 +107,47 @@ static void test_orr_bic(void) {
     CHECK(out[0] == 0xF0u && out[1] == 0xF0u, "orr then bic v.4s");
 }
 
+static void test_fmov_2d_imm(void) {
+    // cmode=0xF op=1 FMOV (vector, immediate): 64-bit double constant.
+    // imm8=0x34 → 0x4034000000000000 = 20.0, replicated to both lanes.
+    // Regression: previously silently NOP'd, leaving stale v0 bytes that
+    // produced NaN QRectF inputs in Qt paintEvent code.
+    uint64_t out[2] = {0xdeadbeefULL, 0xdeadbeefULL};
+    __asm__ volatile (
+        "fmov v0.2d, #20.0\n"
+        "str  q0, [%[out]]\n"
+        :: [out]"r"(out) : "v0", "memory"
+    );
+    uint64_t exp = 0x4034000000000000ULL;
+    CHECK(out[0] == exp && out[1] == exp, "fmov v.2d #20.0 → 0x4034000000000000");
+}
+
+static void test_fmov_2d_neg(void) {
+    // imm8 sign bit: #-1.0 → sign set, exp 0x3ff, mantissa 0
+    uint64_t out[2] = {0};
+    __asm__ volatile (
+        "fmov v0.2d, #-1.0\n"
+        "str  q0, [%[out]]\n"
+        :: [out]"r"(out) : "v0", "memory"
+    );
+    CHECK(out[0] == 0xBFF0000000000000ULL && out[1] == 0xBFF0000000000000ULL,
+          "fmov v.2d #-1.0 → 0xBFF0000000000000");
+}
+
+static void test_fmov_4s_imm(void) {
+    // cmode=0xF op=0 FMOV: 32-bit single constant replicated 4x.
+    // imm8=0x34 → 0x41a00000 = 20.0f
+    uint32_t out[4] = {0};
+    __asm__ volatile (
+        "fmov v0.4s, #20.0\n"
+        "str  q0, [%[out]]\n"
+        :: [out]"r"(out) : "v0", "memory"
+    );
+    CHECK(out[0] == 0x41A00000u && out[1] == 0x41A00000u
+          && out[2] == 0x41A00000u && out[3] == 0x41A00000u,
+          "fmov v.4s #20.0 → 0x41a00000");
+}
+
 static void test_softfloat_mul(void) {
     // Force soft-float-style multiplies via volatile doubles so libc
     // printf/math paths exercise __muldf3 under the emulator.
@@ -141,6 +182,9 @@ int main(void) {
     test_movi_msl();
     test_mvni_msl();
     test_orr_bic();
+    test_fmov_2d_imm();
+    test_fmov_2d_neg();
+    test_fmov_4s_imm();
     test_softfloat_mul();
     printf("=== Results: %d/%d checks passed, %d failures ===\n",
            checks - failures, checks, failures);

@@ -147,6 +147,21 @@ static bool looks_like_static_aarch64_elf(const std::string& path) {
         && hdr[5] == 1        // ELFDATA2LSB
         && hdr[18] == 0xB7 && hdr[19] == 0x00;  // e_machine = EM_AARCH64
 }
+// Map a guest path to its host path under the BIFROST_ROOT sandbox.
+// Mirrors yggdrasil/host.cpp's map_guest_path (config rootfs_path ==
+// BIFROST_ROOT). Used for host-side pre-checks (access/ELF sniffing)
+// so guest-style absolute paths like /usr/local/bin/app.elf resolve to
+// "$BIFROST_ROOT/usr/local/bin/app.elf".
+static std::string host_path_for(const std::string& guest_path,
+                                 const std::string& rootfs) {
+    if (rootfs.empty()) return guest_path;
+    if (guest_path.empty() || guest_path[0] != '/') return guest_path;
+    if (guest_path.rfind("/proc", 0) == 0 || guest_path.rfind("/dev", 0) == 0)
+        return guest_path;
+    std::string root(rootfs);
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    return root + guest_path;
+}
 // ── Main ─────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
     bool debug   = false;
@@ -290,17 +305,21 @@ int main(int argc, char** argv) {
     std::vector<std::string> guest_argv;
     guest_argv.push_back(elf_path);
     for (int i = arg_i + 1; i < argc; i++) guest_argv.push_back(argv[i]);
-    // Friendly error if the file is missing or not a static AArch64 ELF
-    if (access(elf_path.c_str(), R_OK) != 0) {
+    // Friendly error if the file is missing or not a static AArch64 ELF.
+    // Pre-checks run against the host-side (BIFROST_ROOT-remapped) path;
+    // load_elf_file still receives the guest path so /proc/self/exe stays
+    // consistent with the guest filesystem view.
+    const std::string host_elf = host_path_for(elf_path, cfg.rootfs_path);
+    if (access(host_elf.c_str(), R_OK) != 0) {
         fprintf(stderr, "bifrost-emu: cannot open '%s': %s\n",
-                elf_path.c_str(), strerror(errno));
+                host_elf.c_str(), strerror(errno));
         return 127;  // 127 = "command not found" convention
     }
-    if (!looks_like_static_aarch64_elf(elf_path)) {
+    if (!looks_like_static_aarch64_elf(host_elf)) {
         fprintf(stderr,
             "bifrost-emu: '%s' is not a 64-bit little-endian AArch64 ELF.\n"
             "bifrost-emu only runs static AArch64 Linux binaries.\n",
-            elf_path.c_str());
+            host_elf.c_str());
         return 126;  // 126 = "found but not executable" convention
     }
     // Only switch the host TTY into raw mode if the user explicitly asked

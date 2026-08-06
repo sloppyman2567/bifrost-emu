@@ -319,6 +319,11 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.rt      = inst & 0x1F;
             d.rn      = (inst >> 5) & 0x1F;
             d.rm      = (inst >> 16) & 0x1F;
+            // LD1/ST1 addressing: bit[23]=1 → post-indexed ([Xn], #imm with
+            // Rm==0b11111, [Xn], #0 with Rm==0b11110, [Xn], Xm otherwise);
+            // bit[23]=0 → plain [Xn] (no writeback). d.rm already holds the
+            // Rm field from bits[21:16].
+            d.post_indexed = (inst >> 23) & 1;
             // multi-structure LD1/ST1.
             // The two families are distinguished by the base opcode in
             // bits[27:24]:
@@ -353,6 +358,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.simd_count = 1;
                 d.simd_index = ((inst >> 13) & 3);  // raw bits[14:13] as index
                 d.Q = (inst >> 30) & 1;
+                // LD1R {Vt.T}, [Xn]: single-structure REPLICATE load. The
+                // shared decode gives scale = opcode<2:1> = bits[15:14];
+                // scale=='11' selects the replicate family and selem =
+                // UInt(opcode<0>:R)+1 selects the register count. LD1R is
+                // the selem==1 form, uniquely identified by bits[15:14]==11,
+                // bit[13]==0, bit[21]==0 (LD2R sets bit21, LD3R sets bit13,
+                // LD4R sets both). size stays bits[11:10]. It reads ONE
+                // 2^size-byte element from [Xn] and broadcasts it across the
+                // register instead of writing a single lane.
+                d.is_ld1r = (((inst >> 14) & 3) == 3) &&
+                            !((inst >> 13) & 1) && !((inst >> 21) & 1);
             } else {
                 // Multi-structure LD1/ST1.
                 // Register count comes from the opcode field bits[15:12]
@@ -360,11 +376,17 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 //   LD1/ST1: 0x7 -> 1, 0xA -> 2, 0x6 -> 3, 0x2 -> 4
                 //   LD2/ST2: 0x8 -> 2,  LD3/ST3: 0x4 -> 3, LD4/ST4: 0x0 -> 4
                 d.is_single_struct = false;
+                // Structure type + register count from the opcode field
+                // bits[15:12]: 0x7=LD1(1), 0xA=LD1(2), 0x6=LD1(3), 0x2=LD1(4),
+                // 0x8=LD2(2), 0x4=LD3(3), 0x0=LD4(4).
                 switch ((inst >> 12) & 0xF) {
-                    case 0xA: case 0x8: d.simd_count = 2; break;
-                    case 0x6: case 0x4: d.simd_count = 3; break;
-                    case 0x2: case 0x0: d.simd_count = 4; break;
-                    default:            d.simd_count = 1; break;  // 0x7 (and unknown)
+                    case 0xA: d.simd_count = 2; d.simd_struct = 1; break;
+                    case 0x8: d.simd_count = 2; d.simd_struct = 2; break;
+                    case 0x6: d.simd_count = 3; d.simd_struct = 1; break;
+                    case 0x4: d.simd_count = 3; d.simd_struct = 3; break;
+                    case 0x2: d.simd_count = 4; d.simd_struct = 1; break;
+                    case 0x0: d.simd_count = 4; d.simd_struct = 4; break;
+                    default:  d.simd_count = 1; d.simd_struct = 1; break;  // 0x7
                 }
                 d.Q = (inst >> 30) & 1;  // BUGFIX: Q was missing for multi-struct!
             }

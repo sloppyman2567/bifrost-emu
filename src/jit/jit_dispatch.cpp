@@ -37,6 +37,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         return cpu.pc;
     }
     uint64_t pc = cpu.pc;
+    // TEMP DEBUG: periodic loop-PC print
+    if ((total_blocks_executed_.load(std::memory_order_relaxed) % 10000000) == 0) {
+        fprintf(stderr, "[LOOP] pc=0x%llx x0=0x%llx x1=0x%llx\n",
+                (unsigned long long)pc, (unsigned long long)cpu.regs[0],
+                (unsigned long long)cpu.regs[1]);
+    }
     // ── v1.5.0.alpha: single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the
@@ -282,6 +288,33 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_inline_cache_[slot].fn = entry.fn;
         tls_inline_cache_[slot].instr_count = entry.instr_count;
         tls_inline_cache_[slot].lru_stamp = ++tls_lru_counter_;
+    }
+    // TEMP DEBUG: trace all blocks in QGuiApplication::font() range
+    if (pc >= 0x500071e000ULL + 0x13bbc4ULL && pc <= 0x500071e000ULL + 0x13bd60ULL) {
+        fprintf(stderr, "[FONT] block @0x%llx x0=%#llx x21=%#llx x22=%#llx\n",
+                (unsigned long long)pc, (unsigned long long)cpu.regs[0],
+                (unsigned long long)cpu.regs[21], (unsigned long long)cpu.regs[22]);
+        if (pc == 0x500071e000ULL + 0x13bd34ULL) {
+            uint8_t raw[8]; uint64_t vptr = 0, slot = 0;
+            try {
+                emu.mem().read(cpu.regs[0], raw, 8); memcpy(&vptr, raw, 8);
+                emu.mem().read(vptr + 0x68, raw, 8); memcpy(&slot, raw, 8);
+                fprintf(stderr, "[FONT]   dispatch: [x0=%#llx] vptr=%#llx [vptr+0x68]=%#llx\n",
+                        (unsigned long long)cpu.regs[0], (unsigned long long)vptr, (unsigned long long)slot);
+            } catch (...) { fprintf(stderr, "[FONT]   dispatch: <unmapped>\n"); }
+        }
+        static bool once = false;
+        if (!once) {
+            once = true;
+            for (uint64_t slot : {0x68f418ULL, 0x68fac8ULL, 0x68fe58ULL, 0x68ff88ULL, 0x68fc48ULL}) {
+                uint8_t raw[8]; uint64_t v = 0;
+                try {
+                    emu.mem().read(0x500071e000ULL + slot, raw, 8);
+                    memcpy(&v, raw, 8);
+                    fprintf(stderr, "[FONT]   GOT+0x%llx = %#llx\n", (unsigned long long)slot, (unsigned long long)v);
+                } catch (...) { fprintf(stderr, "[FONT]   GOT+0x%llx <unmapped>\n", (unsigned long long)slot); }
+            }
+        }
     }
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);

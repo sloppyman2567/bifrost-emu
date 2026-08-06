@@ -85,6 +85,13 @@ void Emulator::syscall(CPU& cpu) {
             case 49: name = "chdir"; break;
             case 50: name = "fchdir"; break;
             case 80: name = "fstat"; break;
+            case 62: name = "lseek"; break;
+            case 222: name = "mmap"; break;
+            case 215: name = "munmap"; break;
+            case 198: name = "socket"; break;
+            case 203: name = "connect"; break;
+            case 40: name = "sendto"; break;
+            case 45: name = "recvfrom"; break;
             case 221: name = "execve"; break;
             case 220: name = "clone"; break;
             case 435: name = "clone3"; break;
@@ -93,6 +100,11 @@ void Emulator::syscall(CPU& cpu) {
             case 96: name = "set_tid_address"; break;
             case 179: name = "sysinfo"; break;
             case 98: name = "futex"; break;
+            case 23: name = "select"; break;
+            case 72: name = "pselect6"; break;
+            case 73: name = "ppoll"; break;
+            case 41: name = "sendmsg"; break;
+            case 43: name = "recvmsg"; break;
             case 99: name = "set_robust_list"; break;
             case 100: name = "get_robust_list"; break;
             case 129: name = "kill"; break;
@@ -101,7 +113,7 @@ void Emulator::syscall(CPU& cpu) {
             default: break;
         }
         if (name) {
-            fprintf(stderr, "[syscall t%d] %llu %s a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx a4=0x%llx a5=0x%llx pc=0x%llx\n",
+            fprintf(stderr, "[syscall t%d] %llu %s a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx a4=0x%llx a5=0x%llx pc=0x%llx",
                     cpu.tid,
                     static_cast<unsigned long long>(num), name,
                     static_cast<unsigned long long>(cpu.regs[0]),
@@ -111,6 +123,22 @@ void Emulator::syscall(CPU& cpu) {
                     static_cast<unsigned long long>(cpu.regs[4]),
                     static_cast<unsigned long long>(cpu.regs[5]),
                     static_cast<unsigned long long>(cpu.pc));
+            if (num == 56 || num == 79 || num == 291 || num == 48 || num == 78 || num == 221) {
+                uint64_t p = cpu.regs[1];
+                char buf[256];
+                size_t n = 0;
+                while (n < sizeof(buf) - 1) {
+                    char c;
+                    if (p + n == 0) break;
+                    mem().read(p + n, &c, 1);
+                    buf[n] = c;
+                    n++;
+                    if (c == 0) break;
+                }
+                buf[n] = 0;
+                fprintf(stderr, " path=\"%s\"", buf);
+            }
+            fprintf(stderr, "\n");
         } else if (trace_all) {
             fprintf(stderr, "[syscall t%d] %llu (unknown) a0=0x%llx a1=0x%llx a2=0x%llx pc=0x%llx\n",
                     cpu.tid,
@@ -123,6 +151,15 @@ void Emulator::syscall(CPU& cpu) {
     }
     // Try each subsystem handler in order. The first one that handles
     // the call returns 0 (with the result already in cpu.regs[0]).
+    if (trace_syscalls) {
+        uint64_t prev = cpu.regs[0];
+        if (syscall_fs(*this, cpu, num) != SYSCALL_NOT_HANDLED) {
+            fprintf(stderr, "  => ret=%lld (0x%llx)\n",
+                    (long long)(int64_t)cpu.regs[0], (unsigned long long)cpu.regs[0]);
+            return;
+        }
+        cpu.regs[0] = prev;
+    }
     if (syscall_fs(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;
     if (syscall_mem(*this, cpu, num)     != SYSCALL_NOT_HANDLED) return;
     if (syscall_threads(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;

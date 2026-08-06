@@ -34,6 +34,7 @@
 #include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
@@ -179,20 +180,28 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             int r;
             fd_set rfds, wfds, efds;
+            int max_hfd = 0;
+            auto fill_set = [&](uint64_t addr, fd_set* set, int* maxfd_out) {
+                if (!addr) return;
+                for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
+                    if (mem_.load<uint8_t>(addr + fd/8) & (1 << (fd%8))) {
+                        int hfd = resolve_sock_fd(emu, fd);
+                        if (hfd >= 0 && hfd < FD_SETSIZE) {
+                            FD_SET(hfd, set);
+                            if (hfd > *maxfd_out) *maxfd_out = hfd;
+                        }
+                    }
+                }
+            };
             while (true) {
                 // Rebuild fd_sets each iteration — select modifies them
                 // in place, so on EINTR retry we need fresh copies.
                 FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
-                if (a1) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                    if (mem_.load<uint8_t>(a1 + fd/8) & (1 << (fd%8))) FD_SET(fd, &rfds);
-                }
-                if (a2) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                    if (mem_.load<uint8_t>(a2 + fd/8) & (1 << (fd%8))) FD_SET(fd, &wfds);
-                }
-                if (a3) for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                    if (mem_.load<uint8_t>(a3 + fd/8) & (1 << (fd%8))) FD_SET(fd, &efds);
-                }
-                r = ::select(nfds, a1 ? &rfds : nullptr, a2 ? &wfds : nullptr,
+                max_hfd = 0;
+                fill_set(a1, &rfds, &max_hfd);
+                fill_set(a2, &wfds, &max_hfd);
+                fill_set(a3, &efds, &max_hfd);
+                r = ::select(max_hfd + 1, a1 ? &rfds : nullptr, a2 ? &wfds : nullptr,
                              a3 ? &efds : nullptr, tvp);
                 if (r >= 0 || errno != EINTR) break;
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
@@ -203,7 +212,9 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 auto write_back = [&](uint64_t addr, fd_set* set) {
                     std::vector<uint8_t> buf(128, 0);
                     for (int fd = 0; fd < nfds && fd < FD_SETSIZE; fd++) {
-                        if (FD_ISSET(fd, set)) buf[fd/8] |= (1 << (fd%8));
+                        int hfd = resolve_sock_fd(emu, fd);
+                        if (hfd >= 0 && hfd < FD_SETSIZE && FD_ISSET(hfd, set))
+                            buf[fd/8] |= (1 << (fd%8));
                     }
                     mem_.write(addr, buf.data(), 128);
                 };
@@ -222,9 +233,26 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int nfds = static_cast<int>(a1);
             std::vector<struct pollfd> pfds(nfds);
             for (int i = 0; i < nfds; i++) {
-                pfds[i].fd      = mem_.load<int>(a0 + static_cast<uint64_t>(i) * 8);
+                pfds[i].fd      = resolve_sock_fd(emu, mem_.load<int>(a0 + static_cast<uint64_t>(i) * 8));
                 pfds[i].events  = mem_.load<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 4);
                 pfds[i].revents = 0;
+            }
+            if (getenv("BIFROST_PPOLL_TRACE")) {
+                fprintf(stderr, "[PPOLL t%d] nfds=%d to=%lds%dms pc=0x%llx x30=0x%llx", cpu.tid, nfds,
+                        a2 ? mem_.load<uint64_t>(a2) : -1,
+                        a2 ? (int)(mem_.load<uint64_t>(a2 + 8)) : -1,
+                        static_cast<unsigned long long>(cpu.pc),
+                        static_cast<unsigned long long>(cpu.regs[30]));
+                for (int i = 0; i < nfds && i < 16; i++)
+                    fprintf(stderr, " f%d:%d/0x%x", i, pfds[i].fd, pfds[i].events);
+                fprintf(stderr, "\n");
+                if (nfds > 0 && getenv("BIFROST_PPOLL_PEEK")) {
+                    int hfd = pfds[0].fd;
+                    uint8_t pb[64] = {0};
+                    ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
+                    fprintf(stderr, "[PPOLLPEEK t%d] host_pending=%zd first=%02x%02x%02x%02x\n",
+                            cpu.tid, pn, pb[0], pb[1], pb[2], pb[3]);
+                }
             }
             int timeout_ms = -1;
             if (a2) {
@@ -243,6 +271,20 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             for (int i = 0; i < nfds; i++) {
                 mem_.store<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 6, pfds[i].revents);
+            }
+            if (getenv("BIFROST_PPOLL_TRACE")) {
+                fprintf(stderr, "[PPOLL t%d] ret=%d", cpu.tid, r);
+                for (int i = 0; i < nfds && i < 16; i++)
+                    if (pfds[i].revents)
+                        fprintf(stderr, " f%d:%d/0x%x", i, pfds[i].fd, pfds[i].revents);
+                fprintf(stderr, "\n");
+                if (nfds > 0 && getenv("BIFROST_PPOLL_PEEK")) {
+                    int hfd = pfds[0].fd;
+                    uint8_t pb[64] = {0};
+                    ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
+                    fprintf(stderr, "[PPOLLPEEK t%d] after_pending=%zd first=%02x%02x%02x%02x\n",
+                            cpu.tid, pn, pb[0], pb[1], pb[2], pb[3]);
+                }
             }
             ret_host(r);
             return 0;
@@ -358,7 +400,30 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             struct sockaddr_storage ss;
             socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
             if (len == 0) { ret_err(EINVAL); return 0; }
+            if (getenv("BIFROST_XTRACE")) {
+                fprintf(stderr, "[XCONN] gfd=%llu hfd=%d fam=%d ", (unsigned long long)a0, hfd, ss.ss_family);
+                if (ss.ss_family == AF_UNIX) {
+                    const char* p = reinterpret_cast<const struct sockaddr_un*>(&ss)->sun_path;
+                    fprintf(stderr, "path='%.120s'", p);
+                }
+                fprintf(stderr, "\n");
+            }
             int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
+            if (getenv("BIFROST_XTRACE")) {
+                fprintf(stderr, "[XCONN] gfd=%llu hfd=%d res=%d ", (unsigned long long)a0, hfd, r);
+                if (r == 0) {
+                    struct sockaddr_storage peer;
+                    socklen_t plen = sizeof(peer);
+                    if (::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&peer), &plen) == 0) {
+                        if (peer.ss_family == AF_UNIX) {
+                            const struct sockaddr_un* un = reinterpret_cast<const struct sockaddr_un*>(&peer);
+                            fprintf(stderr, "peer='" );
+                            for (unsigned k = 0; k < 32; ++k) fprintf(stderr, "%02x", (unsigned char)un->sun_path[k]);
+                            fprintf(stderr, "'\n");
+                        } else fprintf(stderr, "peer_fam=%d\n", peer.ss_family);
+                    } else fprintf(stderr, "getpeername-err\n");
+                } else fprintf(stderr, "\n");
+            }
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0);
             return 0;

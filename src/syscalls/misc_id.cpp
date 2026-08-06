@@ -345,25 +345,26 @@ int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             return 0;
         }
-        case 174: { // getuid — return 0 (root) so setuid programs work
-            // BUGFIX: was returning the host's real UID. If the emulator
-            // runs as a normal user (uid 1000), the guest saw uid 1000
-            // instead of 0 (root), breaking setuid programs, file
-            // ownership checks, and any program expecting to run as root
-            // in the rootfs. The guest is a single-user sandbox → root.
-            ret_host(0);
+        case 174: { // getuid
+            // Return the host's real UID. The guest is a host-bridging
+            // sandbox; reporting the host identity lets guest D-Bus
+            // (Qt AT-SPI a11y bridge) pass AUTH EXTERNAL against the
+            // host session bus, whose SO_PEERCRED is the host uid.
+            // (A previous version returned 0/root, which is rejected by
+            // dbus-daemon: claimed uid 0 != peer uid 1000.)
+            ret_host(::getuid());
             return 0;
         }
-        case 175: { // geteuid — return 0 (root)
-            ret_host(0);
+        case 175: { // geteuid
+            ret_host(::geteuid());
             return 0;
         }
-        case 176: { // getgid — return 0 (root)
-            ret_host(0);
+        case 176: { // getgid
+            ret_host(::getgid());
             return 0;
         }
-        case 177: { // getegid — return 0 (root)
-            ret_host(0);
+        case 177: { // getegid
+            ret_host(::getegid());
             return 0;
         }
         case 178: { // gettid

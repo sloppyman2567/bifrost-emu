@@ -58,13 +58,23 @@ static uint64_t ssra_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t 
     return (d + (uint64_t)v) & mask;
 }
 static uint64_t sli_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t mask) {
+    /* SLI: Vd = (Vn << shift) | (Vd & ((1<<shift)-1)). The source shifts
+     * left; the destination's LOW `shift` bits are retained in place
+     * (ARM ARM: the new zero bits created by the shift retain the
+     * destination's existing value). shift >= esize -> dest unchanged. */
     uint64_t hi = (shift >= 64) ? 0 : ((n << shift) & mask);
-    uint64_t lo = (bits - shift < bits) ? (d >> (bits - shift)) : 0;
+    uint64_t lo = (shift <= 0) ? 0 : (shift >= 64) ? d : (d & ((1ULL << shift) - 1));
     return hi | lo;
 }
 static uint64_t sri_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t mask) {
+    /* SRI: Vd = (Vn >> shift) | (Vd & top shift bits). The source shifts
+     * right; the destination's TOP `shift` bits are retained in place.
+     * shift >= esize -> dest unchanged. */
     uint64_t lo = (shift >= 64) ? 0 : (n >> shift);
-    uint64_t hi = (bits - shift < bits) ? ((d << (bits - shift)) & mask) : 0;
+    uint64_t hi;
+    if (shift <= 0) hi = 0;
+    else if (shift >= bits) hi = d & mask;
+    else hi = d & (mask & ~((1ULL << (bits - shift)) - 1));
     return hi | lo;
 }
 

@@ -218,13 +218,25 @@ struct DecodedInst {
     uint8_t  fp_opcode = 0;     // FP arithmetic opcode
     uint8_t  rmode = 0;         // FP rounding mode
     uint8_t  simd_count = 1;    // SIMD LD1/ST1 register count (1-4)
+    uint8_t  simd_struct = 1;   // multi-structure type: 1=LD1/ST1 (consecutive),
+                                // 2=LD2/ST2 (de-interleave by 2),
+                                // 3=LD3/ST3 (by 3), 4=LD4/ST4 (by 4)
     // uses bits[14:13] for the element index (not register count) and
     // bit[12]=1 to distinguish from multi-structure. The interpreter needs
     // these to dispatch correctly — without them, a single-structure LD1
     // {V0.S}[2] would be misdecoded as a 3-register multi-structure LD1,
     // reading/writing 48 bytes instead of 4.
     bool     is_single_struct = false;  // true for single-structure LD1/ST1
+    bool     is_ld1r = false;           // true for LD1R (single-structure
+    // replicate load, bits[15:14]==0b11). Loads one element and broadcasts it
+    // to every lane of the destination register, instead of addressing a
+    // single lane index like the indexed LD1/ST1 forms.
     uint8_t  simd_index = 0;            // element index for single-structure
+    // LD1/ST1 post-index writeback. bit[23]=1 selects the post-indexed
+    // form ([Xn], #imm / [Xn], Xm); bit[23]=0 is plain [Xn] (no writeback).
+    // The offset is: Rm==0b11111 → nregs*(Q?16:8) (multi-struct) or esize
+    // (single-struct); Rm==0b11110 → 0; else the value in register Xm.
+    bool     post_indexed = false;      // true if the base register is updated
     bool     is_sub = false;    // SUB vs ADD (various groups)
     // ── System registers (MSR/MRS) ──
     uint8_t  sys_op0 = 0;

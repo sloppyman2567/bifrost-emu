@@ -57,6 +57,7 @@
 #include <sys/inotify.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/types.h>
@@ -67,9 +68,17 @@
 #include <sys/file.h>
 #include <sys/sendfile.h>
 namespace arm64emu {
+static void xseq_append(const char* path, char dir, const uint8_t* p, size_t n) {
+    if (!path) return;
+    FILE* f = fopen(path, "ab");
+    if (!f) return;
+    fwrite(&dir, 1, 1, f);
+    uint32_t l = static_cast<uint32_t>(n);
+    fwrite(&l, 1, 4, f);
+    if (n) fwrite(p, 1, n, f);
+    fclose(f);
+}
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
-    // dispatch to sub-handlers first. Each returns
-    // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.
     if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_process(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
@@ -340,6 +349,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                                  static_cast<int>(a3), dest_ptr,
                                  static_cast<socklen_t>(a5));
             if (r < 0) { ret_errno(); return 0; }
+            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7) {
+                fprintf(stderr, "[DBUSSEND] t%d len=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x pr=%c%c%c%c%c%c\n",
+                        cpu.tid, (unsigned long long)r, buf[0],buf[1],buf[2],buf[3], buf[4],buf[5],buf[6],buf[7],
+                        (buf[0]>=32&&buf[0]<127?buf[0]:' '),(buf[1]>=32&&buf[1]<127?buf[1]:' '),
+                        (buf[2]>=32&&buf[2]<127?buf[2]:' '),(buf[3]>=32&&buf[3]<127?buf[3]:' '),
+                        (buf[4]>=32&&buf[4]<127?buf[4]:' '),(buf[5]>=32&&buf[5]<127?buf[5]:' '));
+            }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
@@ -358,6 +374,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                                    reinterpret_cast<struct sockaddr*>(&src_ss),
                                    &srclen);
             if (r < 0) { ret_errno(); return 0; }
+            if (static_cast<int>(a0) == 3) {
+                xseq_append(getenv("BIFROST_XSEQLOG"), 'R', buf.data(), static_cast<size_t>(r));
+                if (getenv("BIFROST_XTRACE")) {
+                    fprintf(stderr, "[XRECVF] fd=%d hfd=%d ret=%zd first=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            static_cast<int>(a0), hfd, r, buf[0], buf[1], buf[2], buf[3],
+                            buf.size()>4?buf[4]:0, buf.size()>5?buf[5]:0, buf.size()>6?buf[6]:0, buf.size()>7?buf[7]:0);
+                }
+            }
             // Write received data back to guest buffer.
             if (r > 0) mem_.write(a1, buf.data(), static_cast<size_t>(r));
             // Write source address back to guest memory if requested.
@@ -476,6 +500,26 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             host_msg.msg_controllen = msg_controllen;
             ssize_t r = ::sendmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
+            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7 && r > 0) {
+                uint8_t h7[16] = {0};
+                if (!iov_bufs.empty() && !iov_bufs[0].empty())
+                    memcpy(h7, iov_bufs[0].data(), std::min<size_t>(16, iov_bufs[0].size()));
+                fprintf(stderr, "[DBUSMSG] t%d len=%zd hex=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x pr=%c%c%c%c\n",
+                        cpu.tid, r, h7[0],h7[1],h7[2],h7[3], h7[4],h7[5],h7[6],h7[7], h7[8],h7[9],h7[10],h7[11],
+                        (h7[0]>=32&&h7[0]<127?h7[0]:' '),(h7[1]>=32&&h7[1]<127?h7[1]:' '),
+                        (h7[2]>=32&&h7[2]<127?h7[2]:' '),(h7[3]>=32&&h7[3]<127?h7[3]:' '));
+            }
+            if (static_cast<int>(a0) == 3 && r > 0) {
+                const char* sp = getenv("BIFROST_XSEQLOG");
+                if (sp) {
+                    ssize_t rem = r;
+                    for (uint64_t i = 0; i < msg_iovlen && rem > 0; i++) {
+                        uint64_t n = std::min<uint64_t>(iov_bufs[i].size(), static_cast<uint64_t>(rem));
+                        if (n > 0) xseq_append(sp, 'W', iov_bufs[i].data(), n);
+                        rem -= n;
+                    }
+                }
+            }
             ret_host(static_cast<uint64_t>(r));
             return 0;
         }
@@ -520,8 +564,85 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             host_msg.msg_iovlen = msg_iovlen;
             host_msg.msg_control = ctrl_buf.empty() ? nullptr : ctrl_buf.data();
             host_msg.msg_controllen = msg_controllen;
+            if (static_cast<int>(a0) == 3 && getenv("BIFROST_XTRACE")) {
+                uint8_t peekbuf[64] = {0};
+                ssize_t pn = ::recv(hfd, peekbuf, sizeof(peekbuf), MSG_PEEK | MSG_DONTWAIT);
+                struct sockaddr_storage peer;
+                socklen_t plen = sizeof(peer);
+                const char* ps = "?";
+                char phex[128] = {0};
+                if (::getpeername(hfd, reinterpret_cast<struct sockaddr*>(&peer), &plen) == 0 && peer.ss_family == AF_UNIX) {
+                    const unsigned char* pp = reinterpret_cast<const unsigned char*>(reinterpret_cast<const struct sockaddr_un*>(&peer)->sun_path);
+                    snprintf(phex, sizeof(phex), "%02x%02x%02x%02x%02x%02x%02x%02x", pp[0],pp[1],pp[2],pp[3],pp[4],pp[5],pp[6],pp[7]);
+                    ps = phex;
+                }
+                fprintf(stderr, "[XPRE] t%d gfd=3 hfd=%d peer=%s pre_peek=%zd pre=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        cpu.tid, hfd, ps, pn, peekbuf[0], peekbuf[1], peekbuf[2], peekbuf[3],
+                        peekbuf[4], peekbuf[5], peekbuf[6], peekbuf[7]);
+            }
+            {
+                if (getenv("BIFROST_XDELAY") && static_cast<int>(a0) == 3) {
+                    for (int k = 0; k < 8; k++) {
+                        uint8_t pb[64] = {0};
+                        ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
+                        fprintf(stderr, "[XDELAY hfd=%d t=%d] peek=%zd %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                hfd, k * 25, pn, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6], pb[7]);
+                        usleep(25000);
+                    }
+                }
+            }
             ssize_t r = ::recvmsg(hfd, &host_msg, static_cast<int>(a2));
             if (r < 0) { ret_errno(); return 0; }
+            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7 && r > 0) {
+                uint8_t h7[16] = {0};
+                if (!iov_bufs.empty() && !iov_bufs[0].empty())
+                    memcpy(h7, iov_bufs[0].data(), std::min<size_t>(16, iov_bufs[0].size()));
+                fprintf(stderr, "[DBUSRECV] t%d len=%zd hex=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        cpu.tid, r, h7[0],h7[1],h7[2],h7[3], h7[4],h7[5],h7[6],h7[7]);
+            }
+            if (static_cast<int>(a0) == 3 && getenv("BIFROST_XTRACE") && r > 0) {
+                // peek what is actually sitting in the kernel socket queue
+                uint8_t peekbuf[128] = {0};
+                ssize_t pn = ::recv(hfd, peekbuf, sizeof(peekbuf), MSG_PEEK | MSG_DONTWAIT);
+                fprintf(stderr, "[XHOST] t%d gfd=3 hfd=%d ret=%zd peek=%zd peek_first=%02x%02x%02x%02x first=%02x%02x%02x%02x\n",
+                        cpu.tid, hfd, r, pn, peekbuf[0], peekbuf[1], peekbuf[2], peekbuf[3],
+                        iov_bufs.empty()?0:iov_bufs[0].data()[0],
+                        iov_bufs.empty()||iov_bufs[0].size()<2?0:iov_bufs[0].data()[1],
+                        iov_bufs.empty()||iov_bufs[0].size()<3?0:iov_bufs[0].data()[2],
+                        iov_bufs.empty()||iov_bufs[0].size()<4?0:iov_bufs[0].data()[3]);
+            }
+            if (static_cast<int>(a0) == 3 && r > 0) {
+                const char* sp = getenv("BIFROST_XSEQLOG");
+                if (sp) {
+                    ssize_t rem = r;
+                    for (uint64_t i = 0; i < msg_iovlen && rem > 0; i++) {
+                        uint64_t n = std::min<uint64_t>(iov_bufs[i].size(), static_cast<uint64_t>(rem));
+                        if (n > 0) xseq_append(sp, 'R', iov_bufs[i].data(), n);
+                        rem -= n;
+                    }
+                }
+            }
+            if (getenv("BIFROST_XRECV_TRACE") && !iov_bufs.empty() && iov_bufs[0].size() >= 1) {
+                uint8_t* p = iov_bufs[0].data();
+                fprintf(stderr, "[XRECV] fd=%d ret=%zd first=%02x %02x %02x %02x | %02x %02x %02x %02x\n",
+                        static_cast<int>(a0), r, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+            }
+            if (getenv("BIFROST_XCAP") && static_cast<int>(a0) == 3 && r > 0) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s.recv", getenv("BIFROST_XCAP"));
+                FILE* f = fopen(path, "ab");
+                if (f) {
+                    uint32_t blen = static_cast<uint32_t>(r);
+                    fwrite(&blen, 1, 4, f);
+                    ssize_t rem = r;
+                    for (uint64_t i = 0; i < msg_iovlen && rem > 0; i++) {
+                        uint64_t n = std::min<uint64_t>(iov_bufs[i].size(), static_cast<uint64_t>(rem));
+                        if (n > 0) fwrite(iov_bufs[i].data(), 1, n, f);
+                        rem -= n;
+                    }
+                    fclose(f);
+                }
+            }
             // Write received data back to guest iovec buffers.
             for (uint64_t i = 0; i < msg_iovlen; i++) {
                 uint64_t base = mem_.load<uint64_t>(msg_iov + i * 16);

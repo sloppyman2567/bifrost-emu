@@ -7,7 +7,7 @@
 #include "player.h"
 #include "../libs/gif/gifload.h"
 
-#define NIGHT_MODE
+//#define NIGHT_MODE
 
 #define MAP_N 1024
 #define Z_FAR 1000.0

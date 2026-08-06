@@ -508,6 +508,13 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // bounds-check + movupd in the JIT). Q=0 (.2s/.2d/.8b/.4h, 64-bit)
         // transfers only v_lo (8 bytes) and zeroes v_hi.
         case InstClass::SIMD_LD1: {
+            // LD2/LD3/LD4 (de-interleaved multi-structure) are not native:
+            // the LD16 fast path assumes registers are stored consecutively.
+            // Fall back to the interpreter, which de-interleaves element-wise.
+            if (d.simd_struct >= 2 || d.is_single_struct) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return true;
+            }
             uint16_t base = load_arm_reg(block, d.rn, true);
             bool is_64bit = (d.Q == 0);
             if (is_64bit) {
@@ -525,9 +532,32 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::SIMD_LD16, d.rt, base, 0, 0, 0, d.simd_count,
                      static_cast<uint64_t>(0), cur_pc);
             }
+            // Post-index writeback: Xn += nregs*vec_bytes (Rm==0b11111),
+            // += 0 (Rm==0b11110), or += Xm.
+            if (d.post_indexed) {
+                uint16_t offv = 0;
+                if (d.rm == 31) {
+                    offv = load_imm(block,
+                        (uint64_t)d.simd_count * (is_64bit ? 8u : 16u));
+                } else if (d.rm == 30) {
+                    offv = load_imm(block, 0);
+                } else {
+                    offv = load_arm_reg(block, d.rm);
+                }
+                uint16_t nb = g_alloc.alloc();
+                emit(block, IROp::ADD, nb, base, offv);
+                store_arm_reg(block, d.rn, nb, true);
+            }
             return true;
         }
         case InstClass::SIMD_ST1: {
+            // LD2/LD3/LD4 (de-interleaved multi-structure) are not native:
+            // the ST16 fast path assumes registers are stored consecutively.
+            // Fall back to the interpreter, which de-interleaves element-wise.
+            if (d.simd_struct >= 2 || d.is_single_struct) {
+                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                return true;
+            }
             uint16_t base = load_arm_reg(block, d.rn, true);
             bool is_64bit = (d.Q == 0);
             if (is_64bit) {
@@ -543,6 +573,22 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // bounds-check across the whole count (flags_op = count).
                 emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 0, d.simd_count,
                      static_cast<uint64_t>(0), cur_pc);
+            }
+            // Post-index writeback: Xn += nregs*vec_bytes (Rm==0b11111),
+            // += 0 (Rm==0b11110), or += Xm.
+            if (d.post_indexed) {
+                uint16_t offv = 0;
+                if (d.rm == 31) {
+                    offv = load_imm(block,
+                        (uint64_t)d.simd_count * (is_64bit ? 8u : 16u));
+                } else if (d.rm == 30) {
+                    offv = load_imm(block, 0);
+                } else {
+                    offv = load_arm_reg(block, d.rm);
+                }
+                uint16_t nb = g_alloc.alloc();
+                emit(block, IROp::ADD, nb, base, offv);
+                store_arm_reg(block, d.rn, nb, true);
             }
             return true;
         }

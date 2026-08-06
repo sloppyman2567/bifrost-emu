@@ -108,6 +108,16 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
         }
     }
 }
+// TEMP DEBUG: trace guest reads/writes in the failing memalign chunk header.
+namespace {
+inline bool chunk_trace_on() {
+    static const bool on = getenv("BIFROST_CHUNK_TRACE") != nullptr;
+    return on;
+}
+inline bool in_chunk_region(uint64_t addr, size_t n) {
+    return addr + n > 0x500034a000ULL && addr < 0x5000350000ULL;
+}
+}
 bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
     if (size == 0) return true;
     // BUGFIX: avoid integer overflow when addr + size wraps around.
@@ -139,6 +149,8 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
     if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
         n <= DIRECT_WINDOW_SIZE - addr) {
         memcpy(direct_window_ + addr, src, n);
+        if (chunk_trace_on() && in_chunk_region(addr, n))
+            fprintf(stderr, "[chunk] DW write 0x%llx n=%zu\n", (unsigned long long)addr, n);
         return;
     }
     const uint8_t* p = reinterpret_cast<const uint8_t*>(src);
@@ -148,6 +160,10 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
         uint64_t pn = cur / PAGE_SIZE;
         uint64_t off = cur & PAGE_MASK;
         size_t take = std::min<size_t>(PAGE_SIZE - off, remaining);
+        if (chunk_trace_on() && in_chunk_region(cur, take))
+            fprintf(stderr, "[chunk] W 0x%llx n=%zu pcache=%d\n",
+                    (unsigned long long)cur, take,
+                    pc && pn == pc->write_page);
         if (pc && __builtin_expect(pn == pc->write_page, 1)) {
             memcpy(pc->write_ptr + off, p, take);
         } else {
@@ -193,6 +209,26 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
         uint64_t pn = cur / PAGE_SIZE;
         uint64_t off = cur & PAGE_MASK;
         size_t take = std::min<size_t>(PAGE_SIZE - off, remaining);
+        if (chunk_trace_on() && in_chunk_region(cur, take)) {
+            uint8_t tmp[8] = {0};
+            size_t td = take > 8 ? 8 : take;
+            if (pc && pn == pc->read_page) {
+                memcpy(tmp, pc->read_ptr + off, td);
+                fprintf(stderr, "[chunk] R(cached) 0x%llx n=%zu -> %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        (unsigned long long)cur, take,
+                        tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7]);
+            } else {
+                auto it = pages_.find(pn);
+                if (it != pages_.end()) {
+                    memcpy(tmp, it->second.data() + off, td);
+                    fprintf(stderr, "[chunk] R(page) 0x%llx n=%zu -> %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            (unsigned long long)cur, take,
+                            tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7]);
+                } else {
+                    fprintf(stderr, "[chunk] R(alloc-zero) 0x%llx n=%zu\n", (unsigned long long)cur, take);
+                }
+            }
+        }
         if (pc && __builtin_expect(pn == pc->read_page, 1)) {
             memcpy(p, pc->read_ptr + off, take);
         } else {

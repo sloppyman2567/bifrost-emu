@@ -783,10 +783,19 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         //   SSHR  Vd = Vn >> shift   (arithmetic)           (PSRA)
         //   USRA  Vd = Vd + (Vn >> shift)                   (PSRL + PADD)
         //   SSRA  Vd = Vd + (Vn >> shift)  (arithmetic)     (PSRA + PADD)
-        //   SLI   Vd = (Vn << shift) | (Vd >> (esize*8-shift))
-        //                                                    (PSLL+PSRL+POR)
-        //   SRI   Vd = (Vn >> shift) | (Vd << (esize*8-shift))
-        //                                                    (PSRL+PSLL+POR)
+        //   SLI   Vd = (Vn << shift) | (Vd & ((1<<shift)-1))
+        //                                                    (PSLL + PSLL/PSRL + POR)
+        //   SRI   Vd = (Vn >> shift) | (Vd & ~((1<<(esize*8-shift))-1))
+        //                                                    (PSRL + PSRL/PSLL + POR)
+        //
+        // SLI/SRI are shift-INSERT ops: the source is shifted and OR'd with
+        // the UNCHANGED destination bits in the vacated positions. Per the
+        // ARM ARM pseudocode (result = (Vd AND NOT(mask)) OR shifted), SLI
+        // retains Vd's low `shift` bits and SRI retains Vd's top `shift`
+        // bits. A single shift of Vd by (esize*8-shift) would read the WRONG
+        // half of Vd, so the retained half is produced by shifting Vd left
+        // and right by (esize*8-shift) in sequence (which isolates the kept
+        // bits in place).
         //
         // The modrm byte is 11_<reg>_<rm> where <rm> selects the xmmN.
         // PSLL/PSRL/PSRA do NOT have a PSLLB/PSRLB/PSRAB form in SSE2
@@ -832,23 +841,19 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             // Decode the shift group subop (0x71/0x72/0x73) plus the primary
-            // reg field (6=PSLL, 2=PSRL, 4=PSRA) applied to Vn, and the
-            // inverse reg field applied to Vd for the insert ops.
+            // reg field (6=PSLL, 2=PSRL, 4=PSRA) applied to Vn.
             uint8_t subop = 0;
             uint8_t reg_field = 0;
-            uint8_t ins_reg = 0;
             uint8_t padd_op = 0;
             if (esize == 2)      { subop = 0x71; padd_op = 0xFD; }  // paddw
             else if (esize == 4) { subop = 0x72; padd_op = 0xFE; }  // paddd
             else                 { subop = 0x73; padd_op = 0xD4; }  // paddq (esize == 8)
             if (inst.op == IROp::SIMD_SHL || inst.op == IROp::SIMD_SLI) {
                 reg_field = 6;   // PSLL (shift left)
-                ins_reg = 2;     // PSRL (shift right) for the Vd part
             } else if (inst.op == IROp::SIMD_USHR ||
                        inst.op == IROp::SIMD_USRA ||
                        inst.op == IROp::SIMD_SRI) {
                 reg_field = 2;   // PSRL (logical shift right)
-                ins_reg = 6;     // PSLL (shift left) for the Vd part
             } else {             // SIMD_SSHR / SIMD_SSRA
                 reg_field = 4;   // PSRA (arithmetic shift right)
             }
@@ -961,8 +966,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_load64(0, off1);
                     emit_shift_imm(0, reg_field, shift);
                     emit_load64(1, offd);
-                    emit_shift_imm(1, ins_reg, insert_shift);
-                    emit_por(1, 0);             // xmm1 = Vn_part | Vd_part
+                    if (inst.op == IROp::SIMD_SLI) {
+                        // Vd_keep = Vd & ((1<<shift)-1): shift left then right.
+                        emit_shift_imm(1, 6, insert_shift);
+                        emit_shift_imm(1, 2, insert_shift);
+                    } else {
+                        // Vd_keep = Vd & (top shift bits): shift right then left.
+                        emit_shift_imm(1, 2, insert_shift);
+                        emit_shift_imm(1, 6, insert_shift);
+                    }
+                    emit_por(1, 0);             // xmm1 = Vn_part | Vd_keep
                     emit_store64(1, offd);
                 }
             };
@@ -984,7 +997,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn
                     emit_vex_shift_imm(0, 0, reg_field, shift);
                     emit_pack_halves(2, offdlo, offdhi);       // ymm2 = Vd
-                    emit_vex_shift_imm(2, 2, ins_reg, insert_shift);
+                    if (inst.op == IROp::SIMD_SLI) {
+                        // Vd_keep = Vd & ((1<<shift)-1): shift left then right.
+                        emit_vex_shift_imm(2, 2, 6, insert_shift);
+                        emit_vex_shift_imm(2, 2, 2, insert_shift);
+                    } else {
+                        // Vd_keep = Vd & (top shift bits): shift right then left.
+                        emit_vex_shift_imm(2, 2, 2, insert_shift);
+                        emit_vex_shift_imm(2, 2, 6, insert_shift);
+                    }
                     emit_vex_3op(0xEB, 0, 2, 0);               // ymm0 = parts|parts
                     emit_store_256(offdlo, offdhi);
                 }

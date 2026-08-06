@@ -756,6 +756,23 @@ void DynamicLinker::set_libc_single_threaded_() {
                 static_cast<unsigned long long>(libc_single_threaded_addr_));
     }
 }
+// ── set_guest_environ ──────────────────────────────────────────────────
+// Mirror what ld.so's _dl_start_user does on a real boot: set libc's
+// __environ global to point at the envp array on the initial stack.
+// Without this, glibc's dynamically-linked startup never initializes
+// __environ (its __libc_start_main_impl SHARED path deliberately does
+// not set it) so getenv() returns NULL for every variable. No-op for
+// musl, which resolves no __environ symbol.
+void DynamicLinker::set_guest_environ(uint64_t envp_addr) {
+    uint64_t addr = resolve_symbol("__environ");
+    if (addr == 0) return;
+    mem_.store<uint64_t>(addr, envp_addr);
+    if (dynlink_trace_enabled()) {
+        fprintf(stderr, "[dynlink] __environ = 0x%llx @ 0x%llx\n",
+                static_cast<unsigned long long>(envp_addr),
+                static_cast<unsigned long long>(addr));
+    }
+}
 // ── patch_rtld_global_ro_ ──────────────────────────────────────────────
 // Patch the resolved _rtld_global_ro to set dl_pagesize,
 // dl_tls_static_size, and dl_tls_static_align. These fields are
@@ -981,10 +998,17 @@ void DynamicLinker::patch_rtld_global_ro_() {
     constexpr uint32_t PAGESIZE_OFF = 0x18;
     try {
         // ── Patch dl_pagesize (offset 0x18, stable across versions) ──
-        uint64_t pagesize = mem_.load<uint64_t>(rtld_ro + PAGESIZE_OFF);
-        if (pagesize == 0) {
-            mem_.store<uint64_t>(rtld_ro + PAGESIZE_OFF, 4096);
-        }
+        // BUGFIX: write unconditionally. ld-linux's .data.rel.ro carries
+        // a hardcoded initializer _dl_pagesize = EXEC_PAGESIZE = 0x10000
+        // (64 KiB) for AArch64 builds. On a real boot, ld.so's
+        // _dl_aux_init unconditionally overrides that from AT_PAGESZ
+        // (=4096, the size the kernel/emulator actually uses). Since the
+        // native dynlink never runs ld.so's startup, the stale 0x10000
+        // would otherwise survive: glibc malloc rounds mmaps to 64 KiB
+        // and munmap_chunk demands 64 KiB-aligned blocks, but the
+        // emulator's mmap_alloc only aligns to 4096 → "munmap_chunk():
+        // invalid pointer". Write 4096 (the value AT_PAGESZ reports).
+        mem_.store<uint64_t>(rtld_ro + PAGESIZE_OFF, 4096);
         // ── Patch dl_tls_static_size and dl_tls_static_align ─────────
         // Strategy: if dynamic detection succeeded, patch exactly those
         // two offsets. Otherwise, "spray" — write the size and align
@@ -3627,10 +3651,44 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
         }
     }
     objects_.push_back(std::move(obj));
-    index_symbols(objects_.back());
-    parse_versions_(objects_.back());
+    size_t parent_idx = objects_.size() - 1;
+    index_symbols(objects_[parent_idx]);
+    parse_versions_(objects_[parent_idx]);
+    // Load DT_NEEDED dependencies of the dlopen'd library BEFORE applying
+    // its relocations. The startup path does this; the dlopen path skipped
+    // it, so JUMP_SLOT/GLOB_DAT slots referencing symbols in deps (e.g.
+    // FcPatternCreate from libfontconfig.so.1) stayed at their raw PLT
+    // vaddr in GOT.plt — a blr to that jumps into unmapped guest memory.
+    // Deps are appended AFTER this library, so keep using parent_idx.
+    if (objects_[parent_idx].dyn_addr != 0) {
+        try {
+            Elf64_Dyn dyn;
+            for (uint64_t p = objects_[parent_idx].dyn_addr; ; p += sizeof(dyn)) {
+                mem_.read(p, &dyn, sizeof(dyn));
+                if (dyn.d_tag == DT_NULL_) break;
+                if (dyn.d_tag == DT_NEEDED_) {
+                    uint64_t str_addr = objects_[parent_idx].strtab_addr + dyn.d_val;
+                    std::string soname = read_guest_cstr(mem_, str_addr);
+                    if (soname.empty()) continue;
+                    bool found = false;
+                    for (const auto& o : objects_) {
+                        if (o.name == soname) { found = true; break; }
+                        if (!o.soname.empty() && o.soname == soname) { found = true; break; }
+                    }
+                    if (found) continue;
+                    uint64_t dep_base = load_library(soname);
+                    if (dep_base == 0) {
+                        fprintf(stderr, "[%s] dlopen: could not load dependency "
+                                "%s (continuing)\n", CODENAME, soname.c_str());
+                    }
+                }
+            }
+        } catch (...) {
+            // Reading the dynamic section failed — skip dep loading.
+        }
+    }
     // Apply relocations: RELA, JMPREL, RELR
-    auto& nobj = objects_.back();
+    auto& nobj = objects_[parent_idx];
     if (nobj.dyn_addr != 0) {
         try {
             uint64_t ra=0,rs=0,ja=0,js=0,rra=0,rrs=0;
