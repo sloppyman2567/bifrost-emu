@@ -823,6 +823,8 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         case IROp::SIMD_SSHR:
         case IROp::SIMD_USRA:
         case IROp::SIMD_SSRA:
+        case IROp::SIMD_URSRA:
+        case IROp::SIMD_SRSRA:
         case IROp::SIMD_SLI:
         case IROp::SIMD_SRI: {
             int esize = static_cast<int>(inst.width);
@@ -837,6 +839,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             if (inst.op == IROp::SIMD_SSRA && esize == 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            // URSRA/SRSRA (rounding shift-accumulate) have no SSE2/AVX2
+            // one-instruction rounding step (no pround-right-and-add), so
+            // route them to the interpreter — correctness first.
+            if (inst.op == IROp::SIMD_URSRA || inst.op == IROp::SIMD_SRSRA) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }

@@ -69,10 +69,12 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF00FC00U) == 0x0F001400U) return Op{Family::SHIFT, 29, 4, "SSRA"};
     if ((op & 0xBF00FC00U) == 0x2F005400U) return Op{Family::SHIFT, 30, 5, "SLI"};
     if ((op & 0xBF00FC00U) == 0x2F004400U) return Op{Family::SHIFT, 31, 6, "SRI"};
-    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0x1F) == 0x08 && Q)) return Op{Family::DUP, 32, 0, "DUP"};
-    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 33, 0, "AESE"};
-    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 34, 4, "PMULL"};
-    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 35, 5, "PMULL2"};
+    if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 32, 7, "URSRA"};
+    if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 33, 8, "SRSRA"};
+    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0x1F) == 0x08 && Q)) return Op{Family::DUP, 34, 0, "DUP"};
+    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 35, 0, "AESE"};
+    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 36, 4, "PMULL"};
+    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 37, 5, "PMULL2"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

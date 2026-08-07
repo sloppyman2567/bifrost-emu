@@ -683,7 +683,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     case 3: shift_op = IROp::SIMD_USRA; break;
                     case 4: shift_op = IROp::SIMD_SSRA; break;
                     case 5: shift_op = IROp::SIMD_SLI;  break;
-                    default: shift_op = IROp::SIMD_SRI; break;
+                    case 6: shift_op = IROp::SIMD_SRI;  break;
+                    case 7: shift_op = IROp::SIMD_URSRA; break;
+                    default: shift_op = IROp::SIMD_SRSRA; break;  // subop 8
                 }
                 emit(block, shift_op, d.rd, d.rn, 0,
                      esize_bytes, 0, qbit, shift_amount, cur_pc);

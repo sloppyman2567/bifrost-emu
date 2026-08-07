@@ -145,8 +145,10 @@ enum class IROp : uint8_t {
     SIMD_SHL,      // dest = src1 << imm  (per-lane logical left shift)
     SIMD_USHR,     // dest = src1 >> imm  (per-lane logical right shift)
     SIMD_SSHR,     // dest = src1 >>> imm (per-lane arithmetic right shift)
-    SIMD_USRA,     // dest += src1 >> imm (per-lane logical right + accumulate)
-    SIMD_SSRA,     // dest += src1 >>> imm (per-lane arithmetic right + accumulate)
+    SIMD_USRA,     // dest += src1 >> imm (unsigned logical right + accumulate)
+    SIMD_SSRA,     // dest += src1 >>> imm (signed arithmetic right + accumulate)
+    SIMD_URSRA,    // dest += round(src1 >> imm) (unsigned, round-half-up)
+    SIMD_SRSRA,    // dest += round(src1 >>> imm) (signed, round-half-up)
     SIMD_SLI,      // dest = (src1 << imm) | (dest & ((1<<imm)-1))
     SIMD_SRI,      // dest = (src1 >> imm) | (dest & ~((1<<(esize*8-imm))-1))
     // Native SIMD FP lane-wise arithmetic (v1.5.1-alpha). Same shape as

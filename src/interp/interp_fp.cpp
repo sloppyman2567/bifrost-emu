@@ -1839,8 +1839,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // USRA Vd.<T>, Vn.<T>, #shift → Vd += (Vn >> #shift).
             // Used by MD5 to implement vector ROTL via
             //   ROTL(x,n) = USRA(x << n, 32-n).
-            // NOTE: the URSRA/SRSRA (rounding) variants mask to 0x2F003400/
-            // 0x0F003400 and are a separate, unsupported op family.
+            // The rounding variants URSRA/SRSRA (0x2F003400/0x0F003400,
+            // bit13 set) are handled just below.
             if ((op & 0xBF00FC00) == 0x2F001400) {
                 uint8_t immh = (op >> 20) & 0xF;
                 uint8_t immb = (op >> 16) & 0xF;
@@ -1913,6 +1913,111 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         if (over) v = (v < 0) ? -1 : 0; else v >>= shift; a += (uint64_t)v;
                         memcpy(acc+i*8, &a, 8);
                     }
+                }
+                memcpy(&cpu.v_lo[rd], acc, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // URSRA (vector, immediate, unsigned rounding accumulate) —
+            // 0x2F003400. URSRA Vd.<T>, Vn.<T>, #shift → Vd += round(Vn >> #shift)
+            // where the ARM RShr rounding is (x + 2^(shift-1)) >> shift
+            // (round-half-up, full-precision add). For shift == esize*8 this
+            // collapses to (x >= 2^(esize*8-1)) ? 1 : 0 (top bit set → the
+            // rounding carries out to 1). Differs from USRA only in the
+            // +2^(shift-1) rounding term.
+            if ((op & 0xBF00FC00) == 0x2F003400) {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int esize, shift;
+                if (immh == 0) { esize = 1; }
+                else if (immh == 1) { esize = 2; }
+                else if (immh <= 3) { esize = 4; }
+                else { esize = 8; }
+                shift = (2 * esize * 8) - ((immh << 4) | immb);
+                int esize_bits = esize * 8;
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf[16];
+                uint8_t acc[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                memcpy(acc, &cpu.v_lo[rd], 8);
+                if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
+                uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
+                for (int i = 0; i < elems; i++) {
+                    uint64_t v = 0, a = 0;
+                    memcpy(&v, buf + i*esize, esize);
+                    memcpy(&a, acc + i*esize, esize);
+                    uint64_t result;
+                    if (shift == 0) {
+                        result = v;  // shift 0 → no rounding, value passes through
+                    } else if (shift >= esize_bits) {
+                        // (x + 2^(esize-1)) >> esize == 1 iff top bit set.
+                        result = (v >= (1ULL << (esize_bits - 1))) ? 1 : 0;
+                    } else {
+                        // (x + 2^(shift-1)) >> shift decomposed without a
+                        // widening add (avoids 64-bit overflow for esize=8):
+                        // result = (x >> shift) + (low_bits >= 2^(shift-1)).
+                        uint64_t low = v & ((1ULL << shift) - 1);
+                        result = (v >> shift) + ((low >= (1ULL << (shift - 1))) ? 1 : 0);
+                    }
+                    a += result;  // accumulate (wraps per element width)
+                    a &= mask;
+                    memcpy(acc + i*esize, &a, esize);
+                }
+                memcpy(&cpu.v_lo[rd], acc, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // SRSRA (vector, immediate, signed rounding accumulate) —
+            // 0x0F003400. Signed variant of URSRA: Vd += round(Vn >>> #shift)
+            // with an arithmetic (sign-extending) shift and the same
+            // +2^(shift-1) rounding increment on the signed value. For
+            // shift == esize*8 the rounded result is always 0 (every signed
+            // element |x| < 2^(esize*8-1) once rounded).
+            if ((op & 0xBF00FC00) == 0x0F003400) {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int esize, shift;
+                if (immh == 0) { esize = 1; }
+                else if (immh == 1) { esize = 2; }
+                else if (immh <= 3) { esize = 4; }
+                else { esize = 8; }
+                shift = (2 * esize * 8) - ((immh << 4) | immb);
+                int esize_bits = esize * 8;
+                int elems = (Q ? 16 : 8) / esize;
+                uint8_t buf[16];
+                uint8_t acc[16];
+                memcpy(buf, &cpu.v_lo[rn], 8);
+                if (Q) memcpy(buf + 8, &cpu.v_hi[rn], 8);
+                memcpy(acc, &cpu.v_lo[rd], 8);
+                if (Q) memcpy(acc + 8, &cpu.v_hi[rd], 8);
+                uint64_t mask = (esize == 8) ? ~0ULL : ((1ULL << esize_bits) - 1);
+                for (int i = 0; i < elems; i++) {
+                    uint64_t vbits = 0, a = 0;
+                    memcpy(&vbits, buf + i*esize, esize);
+                    memcpy(&a, acc + i*esize, esize);
+                    int64_t v;
+                    if (esize == 1) v = (int8_t)(uint8_t)vbits;
+                    else if (esize == 2) v = (int16_t)(uint16_t)vbits;
+                    else if (esize == 4) v = (int32_t)(uint32_t)vbits;
+                    else v = (int64_t)vbits;
+                    int64_t result;
+                    if (shift == 0) {
+                        result = v;  // shift 0 → no rounding, value passes through
+                    } else if (shift >= esize_bits) {
+                        result = 0;  // (x + 2^(esize-1)) >> esize == 0 for all signed x
+                    } else {
+                        // Rounding increment on the signed value, decomposed
+                        // (avoids widening-add overflow): result = (x >> shift)
+                        // + (low_bits >= 2^(shift-1)). x >> shift is arithmetic.
+                        uint64_t low = (uint64_t)v & ((1ULL << shift) - 1);
+                        result = (v >> shift) + ((low >= (1ULL << (shift - 1))) ? 1 : 0);
+                    }
+                    a += (uint64_t)result;  // accumulate (wraps per element width)
+                    a &= mask;
+                    memcpy(acc + i*esize, &a, esize);
                 }
                 memcpy(&cpu.v_lo[rd], acc, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], acc + 8, 8);

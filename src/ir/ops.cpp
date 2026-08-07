@@ -1191,6 +1191,23 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                                 r = (d + v) & mask;
                                 break;
                             }
+                            case IROp::SIMD_URSRA: {
+                                // RShr round-half-up: result = (n + 2^(shift-1))
+                                // >> shift, decomposed to avoid a widening add
+                                // overflow at esize=8. shift==0 -> value passes.
+                                uint64_t v;
+                                if (shift <= 0) {
+                                    v = n;
+                                } else if (shift >= esize_bits) {
+                                    v = (n >= (1ULL << (esize_bits - 1))) ? 1 : 0;
+                                } else {
+                                    uint64_t low = n & ((1ULL << shift) - 1);
+                                    v = (n >> shift) +
+                                        ((low >= (1ULL << (shift - 1))) ? 1 : 0);
+                                }
+                                r = (d + v) & mask;
+                                break;
+                            }
                             case IROp::SIMD_SSRA: {
                                 int64_t v = 0;
                                 if (esize == 1) v = static_cast<int8_t>(pi[0]);
@@ -1200,6 +1217,29 @@ uint64_t execute_ir(const IRBlock& block, CPU& cpu, Emulator& emu,
                                 if (shift >= 64) v = (v < 0) ? -1 : 0;
                                 else v >>= shift;
                                 r = (d + static_cast<uint64_t>(v)) & mask;
+                                break;
+                            }
+                            case IROp::SIMD_SRSRA: {
+                                // Signed RShr round-half-up on the signed value
+                                // (v + 2^(shift-1)) >> shift, decomposed to
+                                // avoid a widening add. shift >= esize_bits ->
+                                // result 0 (|v| < 2^(esize_bits-1) rounded).
+                                int64_t v = 0;
+                                if (esize == 1) v = static_cast<int8_t>(pi[0]);
+                                else if (esize == 2) { int16_t t; memcpy(&t, pi, 2); v = t; }
+                                else if (esize == 4) { int32_t t; memcpy(&t, pi, 4); v = t; }
+                                else { int64_t t; memcpy(&t, pi, 8); v = t; }
+                                int64_t result;
+                                if (shift <= 0) {
+                                    result = v;
+                                } else if (shift >= esize_bits) {
+                                    result = 0;
+                                } else {
+                                    uint64_t low = (uint64_t)v & ((1ULL << shift) - 1);
+                                    result = (v >> shift) +
+                                             ((low >= (1ULL << (shift - 1))) ? 1 : 0);
+                                }
+                                r = (d + static_cast<uint64_t>(result)) & mask;
                                 break;
                             }
                             case IROp::SIMD_SLI: {

@@ -885,6 +885,8 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_SSHR:  return "SIMD_SSHR";
                     case IROp::SIMD_USRA:  return "SIMD_USRA";
                     case IROp::SIMD_SSRA:  return "SIMD_SSRA";
+                    case IROp::SIMD_URSRA: return "SIMD_URSRA";
+                    case IROp::SIMD_SRSRA: return "SIMD_SRSRA";
                     case IROp::SIMD_SLI:   return "SIMD_SLI";
                     case IROp::SIMD_SRI:   return "SIMD_SRI";
                     case IROp::FP_F2I: return "FP_F2I";

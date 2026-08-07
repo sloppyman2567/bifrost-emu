@@ -11,6 +11,17 @@
 
 static int failures = 0;
 
+static void check_b(const char* msg, const uint8_t* res, const uint8_t* exp, int n) {
+    for (int i = 0; i < n; i++) {
+        if (res[i] != exp[i]) {
+            printf("FAIL: %s lane %d (0x%02x != 0x%02x)\n", msg, i, res[i], exp[i]);
+            failures++;
+            return;
+        }
+    }
+    printf("ok:   %s\n", msg);
+}
+
 static void check_h(const char* msg, const uint16_t* res, const uint16_t* exp, int n) {
     for (int i = 0; i < n; i++) {
         if (res[i] != exp[i]) {
@@ -76,6 +87,39 @@ static uint64_t sri_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t m
     else if (shift >= bits) hi = d & mask;
     else hi = d & (mask & ~((1ULL << (bits - shift)) - 1));
     return hi | lo;
+}
+/* URSRA/SRSRA: rounding shift-right-accumulate. Reference for the ARM
+ * RShr rounding (v + 2^(shift-1)) >> shift, decomposed (no widening add
+ * so no overflow at 64-bit): result = (v >> shift) + (low_bits >= 2^(shift-1)).
+ * shift == esize -> URSRA: (v >= 2^(esize-1)) ? 1 : 0; SRSRA: 0. shift == 0
+ * -> value passes through. */
+static uint64_t ursra_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t mask) {
+    uint64_t v;
+    if (shift == 0) {
+        v = n;
+    } else if (shift >= bits) {
+        v = (n >= (1ULL << (bits - 1))) ? 1 : 0;
+    } else {
+        v = (n >> shift) + (((n & ((1ULL << shift) - 1)) >= (1ULL << (shift - 1))) ? 1 : 0);
+    }
+    return (d + v) & mask;
+}
+static uint64_t srsra_lane(uint64_t n, uint64_t d, int bits, int shift, uint64_t mask) {
+    int64_t v;
+    if (bits == 8)       v = (int8_t)(uint8_t)n;
+    else if (bits == 16) v = (int16_t)(uint16_t)n;
+    else if (bits == 32) v = (int32_t)(uint32_t)n;
+    else                 v = (int64_t)n;
+    int64_t result;
+    if (shift == 0) {
+        result = v;
+    } else if (shift >= bits) {
+        result = 0;
+    } else {
+        result = (v >> shift) +
+                 ((((uint64_t)v & ((1ULL << shift) - 1)) >= (1ULL << (shift - 1))) ? 1 : 0);
+    }
+    return (d + (uint64_t)result) & mask;
 }
 
 int main(void) {
@@ -231,6 +275,105 @@ int main(void) {
         if (resx != usra_lane(0xFFFFFFFF, 0x1, 32, 32, m32)) {
             printf("FAIL: usra v.2s #32 (Q=0)\n"); failures++;
         } else printf("ok:   usra v.2s #32 (Q=0)\n");
+    }
+
+    // ── URSRA/SRSRA: rounding shift-right-accumulate ───────────────────
+    // 8-bit lanes, Q=1 (16 lanes), incl. shift==esize (8).
+    uint8_t nb[16] = {0x00,0x80,0xFF,0x7F,0x40,0x3F,0x20,0x01,
+                      0x00,0x80,0x81,0xFF,0x7F,0x3F,0xC0,0x41};
+    uint8_t db[16] = {0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+                      0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01};
+    uint8_t resb[16], expb[16];
+    {
+        uint8x16_t r = vrsraq_n_u8(vld1q_u8(db), vld1q_u8(nb), 3);
+        vst1q_u8(resb, r);
+        for (int i = 0; i < 16; i++) expb[i] = ursra_lane(nb[i], db[i], 8, 3, 0xFF);
+        check_b("ursra v.16b #3", resb, expb, 16);
+    }
+    {
+        int8x16_t r = vrsraq_n_s8((int8x16_t)vld1q_u8(db), (int8x16_t)vld1q_u8(nb), 3);
+        vst1q_s8((int8_t*)resb, r);
+        for (int i = 0; i < 16; i++) expb[i] = srsra_lane(nb[i], db[i], 8, 3, 0xFF);
+        check_b("srsra v.16b #3", resb, expb, 16);
+    }
+    {
+        uint8x16_t r = vrsraq_n_u8(vld1q_u8(db), vld1q_u8(nb), 8);  /* shift == esize */
+        vst1q_u8(resb, r);
+        for (int i = 0; i < 16; i++) expb[i] = ursra_lane(nb[i], db[i], 8, 8, 0xFF);
+        check_b("ursra v.16b #8", resb, expb, 16);
+    }
+    {
+        int8x16_t r = vrsraq_n_s8((int8x16_t)vld1q_u8(db), (int8x16_t)vld1q_u8(nb), 8);
+        vst1q_s8((int8_t*)resb, r);
+        for (int i = 0; i < 16; i++) expb[i] = srsra_lane(nb[i], db[i], 8, 8, 0xFF);
+        check_b("srsra v.16b #8", resb, expb, 16);
+    }
+    // 16-bit lanes, Q=1 — rounding half-up cases (0x4001/0x4000 = round up,
+    // 0x3FFF = round down) and full-element shift.
+    uint16_t nr[8] = {0x4001,0x4000,0x3FFF,0x8001,0xFFFE,0x7FFF,0x0001,0xFFFF};
+    uint16_t dr[8] = {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000};
+    {
+        uint16x8_t r = vrsraq_n_u16(vld1q_u16(dr), vld1q_u16(nr), 15);
+        vst1q_u16(res, r);
+        for (int i = 0; i < 8; i++) exp[i] = ursra_lane(nr[i], dr[i], 16, 15, m16);
+        check_h("ursra v.8h #15", res, exp, 8);
+    }
+    {
+        uint16x8_t r = vrsraq_n_u16(vld1q_u16(dr), vld1q_u16(nr), 16);  /* shift == esize */
+        vst1q_u16(res, r);
+        for (int i = 0; i < 8; i++) exp[i] = ursra_lane(nr[i], dr[i], 16, 16, m16);
+        check_h("ursra v.8h #16", res, exp, 8);
+    }
+    {
+        int16x8_t r = vrsraq_n_s16((int16x8_t)vld1q_u16(dr), (int16x8_t)vld1q_u16(nr), 15);
+        vst1q_s16((int16_t*)res, r);
+        for (int i = 0; i < 8; i++) exp[i] = srsra_lane(nr[i], dr[i], 16, 15, m16);
+        check_h("srsra v.8h #15", res, exp, 8);
+    }
+    // 32-bit lanes, Q=1 — accumulate onto nonzero dest plus rounding.
+    {
+        uint32x4_t r = vrsraq_n_u32(vld1q_u32(ds), vld1q_u32(ns), 7);
+        vst1q_u32(res32, r);
+        for (int i = 0; i < 4; i++) exp32[i] = ursra_lane(ns[i], ds[i], 32, 7, m32);
+        check_s("ursra v.4s #7", res32, exp32, 4);
+    }
+    {
+        int32x4_t r = vrsraq_n_s32((int32x4_t)vld1q_u32(ds), (int32x4_t)vld1q_u32(ns), 7);
+        vst1q_s32((int32_t*)res32, r);
+        for (int i = 0; i < 4; i++) exp32[i] = srsra_lane(ns[i], ds[i], 32, 7, m32);
+        check_s("srsra v.4s #7", res32, exp32, 4);
+    }
+    // 64-bit lanes, Q=1 — includes rounding-half 2^62 and full-element shift.
+    {
+        uint64x2_t r = vrsraq_n_u64(vld1q_u64(dd), vld1q_u64(nd), 9);
+        vst1q_u64(res64, r);
+        for (int i = 0; i < 2; i++) exp64[i] = ursra_lane(nd[i], dd[i], 64, 9, m64);
+        check_d("ursra v.2d #9", res64, exp64, 2);
+    }
+    {
+        int64x2_t r = vrsraq_n_s64((int64x2_t)vld1q_u64(dd), (int64x2_t)vld1q_u64(nd), 9);
+        vst1q_s64((int64_t*)res64, r);
+        for (int i = 0; i < 2; i++) exp64[i] = srsra_lane(nd[i], dd[i], 64, 9, m64);
+        check_d("srsra v.2d #9", res64, exp64, 2);
+    }
+    {
+        int64x2_t r = vrsraq_n_s64((int64x2_t)vld1q_u64(dd), (int64x2_t)vld1q_u64(nd), 64);
+        vst1q_s64((int64_t*)res64, r);
+        for (int i = 0; i < 2; i++) exp64[i] = srsra_lane(nd[i], dd[i], 64, 64, m64);
+        check_d("srsra v.2d #64", res64, exp64, 2);
+    }
+    // 64-bit forms, Q=0: URSRA/SRSRA low half only.
+    {
+        uint8x8_t rb = vrsra_n_u8(vld1_u8(db), vld1_u8(nb), 3);
+        vst1_u8(resb, rb);
+        for (int i = 0; i < 8; i++) expb[i] = ursra_lane(nb[i], db[i], 8, 3, 0xFF);
+        check_b("ursra v.8b #3 (Q=0)", resb, expb, 8);
+    }
+    {
+        int16x4_t r = vrsra_n_s16((int16x4_t)vld1_u16(dq0), (int16x4_t)vld1_u16(nq0), 3);
+        vst1_s16((int16_t*)res, r);
+        for (int i = 0; i < 4; i++) exp[i] = srsra_lane(nq0[i], dq0[i], 16, 3, m16);
+        check_h("srsra v.4h #3 (Q=0)", res, exp, 4);
     }
 
     printf(failures ? "FAILED: %d\n" : "ALL PASS\n", failures);
