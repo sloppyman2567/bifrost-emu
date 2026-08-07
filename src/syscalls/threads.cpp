@@ -8,6 +8,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/yggdrasil.hpp"
 #include "jit/frostjit.hpp"
@@ -50,6 +51,55 @@ namespace clone_flags {
     constexpr uint64_t NEWNET            = 0x40000000;
     constexpr uint64_t IO                = 0x80000000;
 }  // namespace clone_flags
+// Resolve a guest address to "name+0x..." using the dynamic linker's loaded
+// objects and their .dynsym. Used by the BIFROST_FUTEX_BT backtrace dump.
+static std::string bt_sym(Emulator& emu, uint64_t addr) {
+    char buf[160];
+    const DynamicLinker* dl = emu.dyn_linker();
+    if (!dl) {
+        snprintf(buf, sizeof buf, "%#llx", (unsigned long long)addr);
+        return std::string(buf);
+    }
+    const LoadedObject* obj = dl->find_object_by_addr(addr);
+    if (!obj) {
+        snprintf(buf, sizeof buf, "%#llx", (unsigned long long)addr);
+        return std::string(buf);
+    }
+    std::string name;
+    uint64_t best = 0;  // best absolute symbol start address <= addr
+    if (obj->symtab_addr && obj->symtab_count && obj->strtab_addr) {
+        for (uint64_t i = 0; i < obj->symtab_count; i++) {
+            uint64_t s = obj->symtab_addr + i * 24;  // Elf64_Sym
+            uint32_t st_name = 0; uint64_t st_value = 0;
+            try {
+                st_name = emu.mem().load<uint32_t>(s);
+                st_value = emu.mem().load<uint64_t>(s + 8);
+            } catch (...) { break; }
+            if (st_value == 0) continue;
+            uint64_t abs = obj->base_addr + st_value;
+            if (abs <= addr && abs >= best) {
+                best = abs;
+                std::string nm;
+                try {
+                    for (uint64_t k = 0; k < 256; k++) {
+                        char c = (char)emu.mem().load<uint8_t>(obj->strtab_addr + st_name + k);
+                        if (c == 0) break;
+                        nm += c;
+                    }
+                } catch (...) {}
+                if (!nm.empty()) name = nm;
+            }
+        }
+    }
+    if (!name.empty()) {
+        snprintf(buf, sizeof buf, "%s+0x%llx", name.c_str(),
+                 (unsigned long long)(addr - best));
+        return std::string(buf);
+    }
+    snprintf(buf, sizeof buf, "%s+0x%llx", obj->name.c_str(),
+             (unsigned long long)(addr - obj->base_addr));
+    return std::string(buf);
+}
 // Helper: walk a thread's robust futex list and mark each held futex as
 // FUTEX_OWNER_DIED, then wake waiters. Called on thread exit. Mirrors
 // the kernel's exit_robust_list() (kernel/futex.c). Best-effort: if a
@@ -373,7 +423,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 } else {
                     new_argv[0] = basename;
                 }
-                if (getenv("BIFROST_EXEC_TRACE")) {
+                if (dbg().exec_trace) {
                     fprintf(stderr, "[exec] multi-call redirect: '%s' -> "
                             "'%s %s'\n", path.c_str(), elf_path.c_str(),
                             basename.c_str());
@@ -514,7 +564,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // wrongly-decoded instruction stream). Setting all tags to
             // UINT64_MAX (the "empty" sentinel) forces a fresh decode.
             for (auto& ce : cpu.decode_cache) ce.tag = UINT64_MAX;
-            if (getenv("BIFROST_EXEC_TRACE")) {
+            if (dbg().exec_trace) {
                 fprintf(stderr, "[exec] post-execve: pc=0x%llx sp=0x%llx "
                         "tid=%d regs zeroed, decode cache invalidated\n",
                         static_cast<unsigned long long>(cpu.pc),
@@ -578,11 +628,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     // guest expects -EAGAIN when the lock is held by the
                     // current thread).
                     uint32_t cur = mem_.load<uint32_t>(uaddr);
-                    if (getenv("BIFROST_FUTEX_TRACE")) {
-                        fprintf(stderr, "[FUTX t%d] WAIT op=%u addr=%#llx val=%u cur=%u to=%llx pc=0x%llx\n",
+                    if (dbg().futex_trace) {
+                        fprintf(stderr, "[FUTX t%d] WAIT op=%u addr=%#llx val=%u cur=%u to=%llx pc=0x%llx lr=0x%llx\n",
                                 cpu.tid, (unsigned)op, (unsigned long long)uaddr,
                                 val, cur, (unsigned long long)timeout_ptr,
-                                (unsigned long long)cpu.pc);
+                                (unsigned long long)cpu.pc, (unsigned long long)cpu.regs[30]);
                     }
                     if (cur != val) {
                         ret_err(EAGAIN);
@@ -611,12 +661,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         return 0;
                     }
                     slot->waiters++;
-                    if (getenv("BIFROST_FUTEX_BT")) {
-                        fprintf(stderr, "[BT t%d] WAIT op=%u addr=%#llx val=%u cur=%u to=%#llx pc=0x%llx lr=0x%llx\n",
+                    if (dbg().futex_bt) {
+                        fprintf(stderr, "[BT t%d] WAIT op=%u addr=%#llx val=%u cur=%u to=%#llx pc=%s lr=%s\n",
                                 cpu.tid, (unsigned)op, (unsigned long long)uaddr, val, cur,
-                                (unsigned long long)timeout_ptr, (unsigned long long)cpu.pc,
-                                (unsigned long long)cpu.regs[30]);
-                        uint64_t fp = cpu.regs[29], lr = cpu.regs[30];
+                                (unsigned long long)timeout_ptr, bt_sym(emu, cpu.pc).c_str(),
+                                bt_sym(emu, cpu.regs[30]).c_str());
+                        uint64_t fp = cpu.regs[29];
                         uint64_t orig_fp = fp;
                         for (int i = 0; i < 32 && fp && (fp & 1) == 0; i++) {
                             uint64_t ra = 0, pfp = 0;
@@ -624,12 +674,12 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 mem_.read(fp, &pfp, 8);
                                 mem_.read(fp + 8, &ra, 8);
                             } catch (...) { break; }
-                            fprintf(stderr, "  guest[%2d] fp=0x%llx ra=0x%llx\n",
-                                    i, (unsigned long long)fp, (unsigned long long)ra);
+                            fprintf(stderr, "  guest[%2d] fp=0x%llx ra=%s\n",
+                                    i, (unsigned long long)fp, bt_sym(emu, ra).c_str());
                             if (pfp <= fp) break;
                             fp = pfp;
                         }
-                        if (getenv("BIFROST_BTRAW")) {
+                        if (dbg().btraw) {
                             for (int i = 0; i < 6; i++) {
                                 uint64_t a = orig_fp + i * 8;
                                 uint64_t w = 0;
@@ -647,16 +697,17 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 nsc++;
                             }
                         }
-                        if (getenv("BIFROST_ALLBT")) {
+                        if (dbg().allbt) {
                             std::lock_guard<std::mutex> tlk(emu.threads_mu_);
                             for (auto& gt : emu.threads_) {
                                 if (!gt) continue;
                                 const CPU& oc = gt->cpu;
-                                fprintf(stderr, "  [THR t%d] state=%d pc=0x%llx lr=0x%llx x29=0x%llx sp=0x%llx tid=%d\n",
-                                        oc.tid, (int)oc.running, (unsigned long long)oc.pc,
-                                        (unsigned long long)oc.regs[30], (unsigned long long)oc.regs[29],
+                                fprintf(stderr, "  [THR t%d] state=%d pc=%s lr=%s x29=0x%llx sp=0x%llx tid=%d\n",
+                                        oc.tid, (int)oc.running, bt_sym(emu, oc.pc).c_str(),
+                                        bt_sym(emu, oc.regs[30]).c_str(),
+                                        (unsigned long long)oc.regs[29],
                                         (unsigned long long)oc.sp, gt->tid);
-                                if (getenv("BIFROST_ALLBT2") && (oc.regs[29] & 1) == 0) {
+                                if (dbg().allbt2 && (oc.regs[29] & 1) == 0) {
                                     uint64_t fp = oc.regs[29];
                                     for (int i = 0; i < 24 && fp && (fp & 1) == 0; i++) {
                                         uint64_t ra = 0, pfp = 0;
@@ -664,8 +715,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                             mem_.read(fp, &pfp, 8);
                                             mem_.read(fp + 8, &ra, 8);
                                         } catch (...) { break; }
-                                        fprintf(stderr, "    t%d[%2d] fp=0x%llx ra=0x%llx\n",
-                                                oc.tid, i, (unsigned long long)fp, (unsigned long long)ra);
+                                        fprintf(stderr, "    t%d[%2d] fp=0x%llx ra=%s\n",
+                                                oc.tid, i, (unsigned long long)fp, bt_sym(emu, ra).c_str());
                                         if (pfp <= fp) break;
                                         fp = pfp;
                                     }
@@ -774,10 +825,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
                     int fwaiters = slot->waiters;
-                    if (getenv("BIFROST_FUTEX_TRACE")) {
-                        fprintf(stderr, "[FUTX t%d] WAKE op=%u addr=%#llx want=%d waiters=%d pc=0x%llx\n",
+                    if (dbg().futex_trace) {
+                        fprintf(stderr, "[FUTX t%d] WAKE op=%u addr=%#llx want=%d waiters=%d pc=0x%llx lr=0x%llx\n",
                                 cpu.tid, (unsigned)op, (unsigned long long)uaddr,
-                                to_wake, fwaiters, (unsigned long long)cpu.pc);
+                                to_wake, fwaiters, (unsigned long long)cpu.pc,
+                                (unsigned long long)cpu.regs[30]);
                     }
                     // Read waiters without the lock — see comment above.
                     // Use an atomic read to avoid torn reads on architectures

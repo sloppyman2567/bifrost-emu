@@ -24,6 +24,7 @@
 #include "core/emulator.h"
 #include "core/memory.h"
 #include "core/cpu.h"
+#include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/host_node.hpp"
 #include <errno.h>
@@ -104,6 +105,8 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = ::eventfd(static_cast<unsigned int>(a0), static_cast<int>(a1));
             if (hfd < 0) { ret_errno(); return 0; }
             int gfd = register_host_fd(emu, hfd, O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d eventfd2 hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -111,6 +114,8 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = ::epoll_create1(static_cast<int>(a0));
             if (hfd < 0) { ret_errno(); return 0; }
             int gfd = register_host_fd(emu, hfd, O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d epoll_create1 hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -237,7 +242,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 pfds[i].events  = mem_.load<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 4);
                 pfds[i].revents = 0;
             }
-            if (getenv("BIFROST_PPOLL_TRACE")) {
+            if (dbg().ppoll) {
                 fprintf(stderr, "[PPOLL t%d] nfds=%d to=%lds%dms pc=0x%llx x30=0x%llx", cpu.tid, nfds,
                         a2 ? mem_.load<uint64_t>(a2) : -1,
                         a2 ? (int)(mem_.load<uint64_t>(a2 + 8)) : -1,
@@ -246,12 +251,15 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 for (int i = 0; i < nfds && i < 16; i++)
                     fprintf(stderr, " f%d:%d/0x%x", i, pfds[i].fd, pfds[i].events);
                 fprintf(stderr, "\n");
-                if (nfds > 0 && getenv("BIFROST_PPOLL_PEEK")) {
-                    int hfd = pfds[0].fd;
-                    uint8_t pb[64] = {0};
-                    ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
-                    fprintf(stderr, "[PPOLLPEEK t%d] host_pending=%zd first=%02x%02x%02x%02x\n",
-                            cpu.tid, pn, pb[0], pb[1], pb[2], pb[3]);
+                if (nfds > 0 && dbg().ppoll_peek) {
+                    for (int i = 0; i < nfds && i < 4; i++) {
+                        int hfd = pfds[i].fd;
+                        if (hfd < 0) continue;
+                        uint8_t pb[64] = {0};
+                        ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
+                        fprintf(stderr, "[PPOLLPEEK t%d pre %d (hfd=%d) pending=%zd first=%02x%02x%02x%02x\n",
+                                cpu.tid, i, hfd, pn, pb[0], pb[1], pb[2], pb[3]);
+                    }
                 }
             }
             int timeout_ms = -1;
@@ -272,18 +280,21 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             for (int i = 0; i < nfds; i++) {
                 mem_.store<int16_t>(a0 + static_cast<uint64_t>(i) * 8 + 6, pfds[i].revents);
             }
-            if (getenv("BIFROST_PPOLL_TRACE")) {
+            if (dbg().ppoll) {
                 fprintf(stderr, "[PPOLL t%d] ret=%d", cpu.tid, r);
                 for (int i = 0; i < nfds && i < 16; i++)
                     if (pfds[i].revents)
                         fprintf(stderr, " f%d:%d/0x%x", i, pfds[i].fd, pfds[i].revents);
                 fprintf(stderr, "\n");
-                if (nfds > 0 && getenv("BIFROST_PPOLL_PEEK")) {
-                    int hfd = pfds[0].fd;
-                    uint8_t pb[64] = {0};
-                    ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
-                    fprintf(stderr, "[PPOLLPEEK t%d] after_pending=%zd first=%02x%02x%02x%02x\n",
-                            cpu.tid, pn, pb[0], pb[1], pb[2], pb[3]);
+                if (nfds > 0 && dbg().ppoll_peek) {
+                    for (int i = 0; i < nfds && i < 4; i++) {
+                        int hfd = pfds[i].fd;
+                        if (hfd < 0) continue;
+                        uint8_t pb[64] = {0};
+                        ssize_t pn = ::recv(hfd, pb, sizeof(pb), MSG_PEEK | MSG_DONTWAIT);
+                        fprintf(stderr, "[PPOLLPEEK t%d post %d (hfd=%d) pending=%zd first=%02x%02x%02x%02x\n",
+                                cpu.tid, i, hfd, pn, pb[0], pb[1], pb[2], pb[3]);
+                    }
                 }
             }
             ret_host(r);
@@ -293,6 +304,8 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int hfd = ::timerfd_create(static_cast<int>(a0), static_cast<int>(a1));
             if (hfd < 0) { ret_errno(); return 0; }
             int gfd = register_host_fd(emu, hfd, O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d timerfd_create hfd=%d gfd=%d\n", cpu.tid, hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -340,6 +353,9 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                                static_cast<int>(a2));
             if (hfd < 0) { ret_errno(); return 0; }
             int gfd = register_host_fd(emu, hfd, O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d socket dom=%llu type=%llu hfd=%d gfd=%d\n",
+                        cpu.tid, a0, a1, hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -351,6 +367,9 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             // Register both ends in the FdTable.
             int g0 = register_host_fd(emu, fds[0], O_RDWR);
             int g1 = register_host_fd(emu, fds[1], O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d socketpair dom=%llu type=%llu hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
+                        cpu.tid, a0, a1, fds[0], g0, fds[1], g1);
             mem_.store<int>(a3, g0);
             mem_.store<int>(a3 + 4, g1);
             ret_host(0);
@@ -391,6 +410,8 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 marshal_sockaddr_out(mem_, a1, a2, &ss, sslen);
             }
             int gfd = register_host_fd(emu, new_hfd, O_RDWR);
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d accept hfd=%d gfd=%d\n", cpu.tid, new_hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -400,7 +421,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             struct sockaddr_storage ss;
             socklen_t len = marshal_sockaddr_in(mem_, a1, a2, &ss);
             if (len == 0) { ret_err(EINVAL); return 0; }
-            if (getenv("BIFROST_XTRACE")) {
+            if (dbg().xtrace) {
                 fprintf(stderr, "[XCONN] gfd=%llu hfd=%d fam=%d ", (unsigned long long)a0, hfd, ss.ss_family);
                 if (ss.ss_family == AF_UNIX) {
                     const char* p = reinterpret_cast<const struct sockaddr_un*>(&ss)->sun_path;
@@ -409,7 +430,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
                 fprintf(stderr, "\n");
             }
             int r = ::connect(hfd, reinterpret_cast<struct sockaddr*>(&ss), len);
-            if (getenv("BIFROST_XTRACE")) {
+            if (dbg().xtrace) {
                 fprintf(stderr, "[XCONN] gfd=%llu hfd=%d res=%d ", (unsigned long long)a0, hfd, r);
                 if (r == 0) {
                     struct sockaddr_storage peer;

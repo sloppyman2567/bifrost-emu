@@ -5,8 +5,13 @@ Get `qtgui_test.elf` rendering a real visible window on X display `:0` (Xwayland
 via the guest xcb plugin, and produce the app's `QWidget::grab()` screenshot
 (`rootfs/tmp/qtgui_render.png`). **Offscreen mode FULLY PASSES** (exit 0 + valid
 PNG with content) — the entire Qt raster pipeline works. Windowed (xcb) mode is
-blocked by a **racy guest-heap corruption inside the libQt5XcbQpa show() path**
-(see STATUS UPDATE 6).
+blocked by a **guest Qt 5.15 D-Bus/a11y deadlock: `QDBusConnection::sessionBus()`
+called synchronously from `QWidget::show()` (accessibility bridge) parks t1 on a
+`QSemaphore::acquire` that only the never-running main event loop can release**
+(suspended-delivery; see STATUS UPDATE 7). The emulator's D-Bus data path is
+proven correct by a standalone libdbus probe. An earlier racy `malloc(): unaligned
+tcache` heap-corruption suspicion (STATUS UPDATE 6) has NOT reproduced and is
+dropped.
 
 ## Environment run discipline
 - Repo: `/home/gamingpc/Downloads/bifrost-emu-1.5.0-alpha`; builds clean with
@@ -166,18 +171,23 @@ blocked by a **racy guest-heap corruption inside the libQt5XcbQpa show() path**
     content: 2511 unique colors, 95.6% black bg + colored regions. So the
     event loop, `QTimer::singleShot`(400ms), `QWidget::grab`, `QPainter`, and
     `QPixmap::save` all work under emulation. The bug is X-window-specific.
-  - **CURRENT BLOCKER — xcb real-window path:** guest maps the window (XREQ
-    opcode 8), sets input focus (45), then either (a) hangs with t1 in
-    `QSemaphore::acquire` (libQt5Core+0xd0600, stack futex 0x7ffffff600), or
-    (b) **crashes `malloc(): unaligned tcache chunk detected`** (signal 6).
+  - **CURRENT BLOCKER (superseded by UPDATE 7): xcb real-window path.** Guest
+    maps the window (XREQ opcode 8), sets input focus (45), then either (a) hangs
+    with t1 in `QSemaphore::acquire` (libQt5Core+0xd0600, stack futex 0x7ffffff600),
+    or (b) **crashes `malloc(): unaligned tcache chunk detected`** (signal 6).
     The emulator's crash dump backtrace puts the corrupting allocation deep in
     **libQt5XcbQpa** (`+0x155aac`, `+0x159764`, `+0x1750a8`, `+0xd140`,
     `+0xeb04`, `+0x1728`) ← libQt5Gui(+0x13def0/+0x13f328) ←
-    libQt5Widgets(+0x191c88) ← main. It is **racy**: clean 70s run
+    libQt5Widgets(+0x191c88) ← main. It was **racy**: clean 70s run
     (longtest.log) hung w/o crash; a FUTEX_BT run crashed at the same stage.
     recvmsg@212 writeback is bounded (writes guest iov_len per iov — safe);
     writev@66 relay byte-correct. Likely an emulator X-event/reply delivery
     overrun or thread-scheduling race in the xcb path, not a Qt logic bug.
+    **REVISED 2026-08-06 (see UPDATE 7): the heap corruption has NOT reproduced
+    since and is no longer treated as the blocker.** Clean runs (e.g. cur.log)
+    now consistently hang at MapWindow with NO malloc crash. The deterministic
+    gate is (a): the D-Bus/a11y `sessionBus()` QSemaphore deadlock — a guest Qt
+    5.15 bug, emulator exonerated by the standalone libdbus probe.
   - Instrumentation added this session: minimal `BIFROST_FUTEX_BT` (addr+pc+lr
     only — the full find_object walk in the old version was unstable/crashed),
     `[XBT]` opcode-8 MapWindow backtrace (fp walk + stack word scan;
@@ -187,6 +197,64 @@ blocked by a **racy guest-heap corruption inside the libQt5XcbQpa show() path**
     design comment in misc_id.cpp ("so setuid programs work"). Regression
     suite has NOT been run since; may need gating or reverting if it breaks
     setuid-based tests, but it is REQUIRED for D-Bus.
+  - **RESOLVED 2026-08-06 (regression gate): `./scripts/run_tests.sh --test-all`
+    now passes 193/193 in JIT mode.** Two `whoami` tests were updated to expect
+    `^$(whoami)$` (host username) instead of `^root$` — matching the intended
+    consequence of the uid→host-uid change (guest now reports the real user,
+    needed for D-Bus AUTH EXTERNAL). No other test regressions from the uid
+    change, `bt_sym`, or the D-Bus/X traces. Also fixed an **ungated `[XREQ]`
+    writev@66 trace (fs.cpp) that printed on every write and interleaved into
+    guest stdout**, breaking `toybox_ls`/`rw_toybox_uname` pattern matches; it is
+    now `getenv("BIFROST_XTRACE")`-gated like the other X traces.
+
+- **2026-08-06 (7): D-BUS "sessionBus HANG" ROOT-CAUSED — EMULATOR EXONERATED,
+  GUEST QT 5.15 SUSPENDED-DELIVERY DEADLOCK. UPDATE 6 fixed the AUTH/uid gate and
+  the wire now completes through the 262B HELLO reply, but in some runs t1 still
+  hangs in `QSemaphore::acquire` (stack futex 0x7ffffff640). This session proved
+  where and why:
+  - **Guest-symbolized backtrace (new `bt_sym()` tooling, dbg16)**: t1 futex WAIT
+    `0x7ffffff640`, lr=`_ZN10QSemaphore7acquireEi+0xbc`; chain =
+    `QWidget::setVisible → QWidgetPrivate::setVisible → QWidgetPrivate::show_helper
+    → QAccessible::updateAccessibility → QAccessible::isActive →
+    QXcbIntegration::accessibility → QDBusConnection::sessionBus →
+    qDBusBindToApplication → QDBusVirtualObject::qt_metacall →
+    QObject::setProperty → QSemaphore::acquire`. **No `exec()`/event-loop frame**
+    (tops out at `__libc_start_main`) — t1 blocks during `show()` BEFORE the Qt
+    event loop runs.
+  - **Send-side (dbg14)**: only HELLO is ever transmitted (AUTH EXTERNAL →
+    NEGOTIATE_UNIX_FD → BEGIN → HELLO 128B); the a11y sync call was never sent.
+    The 262B hello reply arrives byte-perfect; then t3 (Qt DBus manager thread)
+    wakes its eventfd 5×/drains to 0, one `to=0` ppoll, then an infinite `-1`
+    ppoll on gfd6(gfd18)+gfd7(gfd19). **No futex WAKE ever targets 0x7ffffff640.**
+  - **Mechanism (Qt 5.15 source `qdbusconnection.cpp`/`_p.h`, fetched from
+    code.qt.io h=5.15)**: `QDBusConnection::sessionBus()` from the main thread
+    (since `qApp->thread()==QThread::currentThread()`) sets `suspendedDelivery`
+    + `setDispatchEnabled(false)` and connects via `BlockingQueuedConnection` to
+    the manager thread; re-enabling is deferred to the main-thread event loop via
+    `QTimer::singleShot(0)`/`invokeMethod(QueuedConnection)`. With t1 parked in
+    `show` ahead of `exec`, the enable never fires → the reply is read but never
+    dispatched → the QSemaphore is never released. Guest Qt bug, not emulator.
+  - **Emulator exonerated for the data path**: standalone guest libdbus probe
+    (`dbus_bus_get` → `dbus_bus_register`(HELLO) →
+    `send_with_reply_and_block`(ListNames)) returns **SUCCESS exit 0** under the
+    emulator (reply type=2, sig=`as`). Cross-compiled `/tmp/opencode/dbus_probe.c`
+    with `tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc`, staged at
+    `rootfs/usr/local/bin/dbus_probe.elf`.
+  - **`QT_ACCESSIBILITY=0`/`OFF`, `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=0`,
+    `QT_ACCESSIBILITY_AUTO=0` all still hang (exit 137)** — 5.15.8 ignores them;
+    the a11y bus call happens regardless.
+  - **`DBUS_VERBOSE*` dead end**: rootfs libdbus is a musl build with verbose
+    compiled out.
+  - **Verdict / next action**: keep the uid fix (UPDATE 6, REQUIRED). The residual
+    QSemaphore-acquire hang is Qt 5.15 suspended-delivery (bus opened synchronously
+    from the a11y path before the loop). Options to record: (a) guest-side app/demo
+    change to defer/async the a11y session-bus connect; (b) treat as a known Qt
+    5.15 limitation; (c) only if unavoidable an emulator shim — but the standalone
+    probe proves the emulator data path, so (c) is not justified.
+  - New tooling this session: `bt_sym()` (nearest-symbol scan via
+    `find_object_by_addr` + dynsym walk) wired into `[BT]`/`[THR]`/`[THR2]` in
+    threads.cpp, plus a public `dyn_linker()` accessor on `Emulator`
+    (`src/core/emulator.h`). All uncommitted.
 
 ## Status: CONFIRMED WORKING (was previously misdiagnosed as broken)
 These have been verified and are NOT the bug:
@@ -326,15 +394,23 @@ All four packing instructions now correct. (The `ff ff` in the un-isolated
 full test's h0 is a register-asm test artifact, NOT the emulator.)
 
 ## Next move
-0. (From STATUS UPDATE 6 — CURRENT BLOCKER) Hunt the racy heap corruption in the
-   xcb path (`malloc(): unaligned tcache chunk detected` inside libQt5XcbQpa
-   show). Candidates: X event/reply delivery overrun in the relay (recvmsg@212
-   writeback is bounded; re-check read@63/readv@65 writeback and the t2 event
-   reader's 32-byte reads / phantom-POLLIN), or emulator thread-scheduling race.
-   Reproduce cleanly first: run WITHOUT `BIFROST_FUTEX_BT` (which perturbs it)
-   to confirm the crash occurs; then capture the corrupting allocation site via
-   the crash dump's libQt5XcbQpa offsets. Also re-verify the a11y is truly
-   bypassed by comparing a clean run with the dead-bus env.
+0. (From STATUS UPDATE 7 — the deterministic current gate) The heap-corruption
+   hunt below is DROPPED: it has not reproduced and is no longer the blocker.
+   Clean runs hang at MapWindow with the guest Qt 5.15 `sessionBus()` suspended-
+   delivery deadlock (t1 `QSemaphore::acquire` from the a11y path in `show`,
+   before `exec`). Emulator data path proven correct by the standalone libdbus
+   probe (SUCCESS exit 0). Remaining ways forward, choose one:
+   (a) guest-side: defer/async the a11y bus connect or avoid synchronous
+       `QDBusConnection::sessionBus()` during `show()` (needs demo/Qt tweak);
+   (b) accept as a known Qt 5.15 limitation and treat offscreen mode as the
+       working path (it exits 0 + writes a valid PNG);
+   (c) re-attack the (only) other real blocker if it reappears: the racy xcb
+       heap corruption. Candidates preserved here for reference: X event/reply
+       delivery overrun in the relay (recvmsg@212 writeback is bounded;
+       re-check read@63/readv@65 writeback and the t2 event reader's 32-byte
+       reads / phantom-POLLIN), or emulator thread-scheduling race. Reproduce
+       WITHOUT `BIFROST_FUTEX_BT` (it perturbs); capture the corrupting
+       allocation site via the crash dump's libQt5XcbQpa offsets.
 1. Run the real GUI test and see the window now appear (the serialization is
    now correct, so CreateWindow should carry real w=520/h=320 and be accepted
    by Xwayland). Also verify the framesync/ggbuffer under DISPLAY=:0.
@@ -343,9 +419,14 @@ full test's h0 is a register-asm test artifact, NOT the emulator.)
    `ctest_real/test_sdl_gl_triangle.elf`, and cross-tests to ensure the LD1
    rewrite didn't regress multi-structure LD1/ST1 — and confirm the uid change
    (getuid/geteuid/getgid/getegid → host IDs) does not regress setuid guests.
-3. Strip debug stdin (`[XREQ]/[XFULL]/[XWBYTES]/[XTRDELAY]`,
-   `BIFROST_XSEQLOG`/`xseq_append`, `[XPRE]/[XHOST]/[XDELAY]/[XRECVF]`,
-   `[XCB_CW]`, `[DBUS*]`, `[BT]`/`[XBT]` blocks) before finishing.
+3. Debug hygiene (DONE 2026-08-06): D-Bus investigation traces removed
+   (`[DBUSSEND]/[DBUSMSG]/[DBUSRECV]/[DBUSGMEM]/[DBUSPOST]`,
+   `[DBUSREAD]/[DBUSWRITE]/[DBUSWRV]/[DBUSREADV]`, `[EVENTREAD]/[EVENTWRITE]`).
+   Remaining X/fd/futex/interp diagnostics consolidated behind
+   `include/debug_flags.h` (single `BIFROST_TRACE=1` master switch; individual
+   `BIFROST_XTRACE`/`BIFROST_FUTEX_BT`/`BIFROST_PPOLL_PEEK`/etc. still work).
+   `--test-all` passes 193/193 with the cleanup. `bt_sym`/`[BT]`/`[XBT]` kept as
+   opt-in diagnostics.
 5. Re-verify: `make USE_SDL2=1 USE_THUNK_GL=1`,
    `./scripts/run_tests.sh --unit --quick`, `--dynamic`,
    `DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf`.
@@ -368,7 +449,9 @@ full test's h0 is a register-asm test artifact, NOT the emulator.)
   hangs → a11y not the blocker), `offscreen.log` + `rootfs/tmp/qtgui_render.png`
   (exit 0, valid 520×320 PNG — raster pipeline proven), `rawbt.log` (malloc
   crash dump, libQt5XcbQpa frames), `a11y0.log`/`a11ycheck.log` (QT_ACCESSIBILITY
-  ineffective under XTRACE).
+  ineffective under XTRACE), `dbg14.log` (send side: only HELLO), `dbg16.log`
+  (symbolized BT), `/tmp/opencode/dbus_probe.c` + `rootfs/usr/local/bin/dbus_probe.elf`
+  (standalone libdbus probe — SUCCESS exit 0, emulator data path proven).
 - `/tmp/opencode/*.py`: `xdec2.py`, `xparse.py`, `wdec.py` — sequence decoders.
 - `/tmp/opencode/absx.c`, `splitx.c`, `scr2.c`, `fullprobe.c`: host probes.
 - `rootfs/usr/local/bin/qtgui_test.elf`; offscreen ref `rootfs/tmp/qtgui_render.png`

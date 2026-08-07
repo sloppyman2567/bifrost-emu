@@ -15,6 +15,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include "yggdrasil/yggdrasil.hpp"
 #include "yggdrasil/host_node.hpp"
@@ -58,9 +59,8 @@ namespace arm64emu {
 // there is no host fd — in that case we return -1 and the caller should
 // fall back to a path-based approach or return -EOPNOTSUPP.
 static void xseq_append(char dir, const uint8_t* p, size_t n) {
-    const char* path = getenv("BIFROST_XSEQLOG");
-    if (!path) return;
-    FILE* f = fopen(path, "ab");
+    if (dbg().xseqlog.empty()) return;
+    FILE* f = fopen(dbg().xseqlog.c_str(), "ab");
     if (!f) return;
     fwrite(&dir, 1, 1, f);
     uint32_t l = static_cast<uint32_t>(n);
@@ -148,6 +148,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             // Adopt into the FdTable.
             int guest_fd = fds_.allocate(std::shared_ptr<yggdrasil::Node>(std::move(node)));
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d openat gfd=%d path=%.60s\n",
+                        cpu.tid, guest_fd, path.c_str());
             ret_host(guest_fd);
             return 0;
         }
@@ -198,19 +201,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r > 0) {
                 mem_.write(a1, tmp.data(), r);
                 if (static_cast<int>(a0) == 3) xseq_append('R', tmp.data(), r);
-                if (getenv("BIFROST_XCAP") && static_cast<int>(a0) == 3) {
+                if (!dbg().xcap.empty() && static_cast<int>(a0) == 3) {
                     char path[512];
-                    snprintf(path, sizeof(path), "%s.read", getenv("BIFROST_XCAP"));
+                    snprintf(path, sizeof(path), "%s.read", dbg().xcap.c_str());
                     FILE* f = fopen(path, "ab");
                     if (f) { fwrite(tmp.data(), 1, r, f); fclose(f); }
                 }
-                if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 3) {
+                if (dbg().xtrace && static_cast<int>(a0) == 3) {
                     fprintf(stderr, "[XREAD] fd=%d ret=%d first=%02x%02x%02x%02x\n",
-                            static_cast<int>(a0), (int)r,
-                            tmp[0], tmp[1], tmp[2], tmp[3]);
-                }
-                if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7) {
-                    fprintf(stderr, "[DBUSREAD] fd=%d ret=%d first=%02x%02x%02x%02x\n",
                             static_cast<int>(a0), (int)r,
                             tmp[0], tmp[1], tmp[2], tmp[3]);
                 }
@@ -232,8 +230,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             std::vector<uint8_t> tmp(a2);
             if (a2 > 0) mem_.read(a1, tmp.data(), a2);
             if (static_cast<int>(a0) == 3) xseq_append('W', tmp.data(), a2);
-            if (getenv("BIFROST_XCAP") && static_cast<int>(a0) == 3) {
-                FILE* f = fopen(getenv("BIFROST_XCAP"), "ab");
+            if (!dbg().xcap.empty() && static_cast<int>(a0) == 3) {
+                FILE* f = fopen(dbg().xcap.c_str(), "ab");
                 if (f) {
                     uint32_t blen = static_cast<uint32_t>(a2);
                     fwrite(&blen, 1, 4, f);
@@ -241,13 +239,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     fclose(f);
                 }
             }
-            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 3 && a2 >= 4) {
+            if (dbg().xtrace && static_cast<int>(a0) == 3 && a2 >= 4) {
                 fprintf(stderr, "[XWRITE] fd=%d bytes=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x\n",
-                        static_cast<int>(a0), static_cast<unsigned long long>(a2),
-                        tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7]);
-            }
-            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7 && a2 >= 4) {
-                fprintf(stderr, "[DBUSWRITE] fd=%d bytes=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x\n",
                         static_cast<int>(a0), static_cast<unsigned long long>(a2),
                         tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7]);
             }
@@ -257,7 +250,14 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         // ── close — VFS-aware ─────────────────────────────────────────
         case 57: { // close
+            if (dbg().xtrace) {
+                auto n = fds_.get(static_cast<int>(a0));
+                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu hfd=%d\n", cpu.tid, a0,
+                        n ? n->host_fd() : -1);
+            }
             int r = fds_.close(static_cast<int>(a0));
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu res=%d\n", cpu.tid, a0, r);
             ret_host(r);
             return 0;
         }
@@ -270,6 +270,8 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         // and dup3 is at 24 (both kept).
         case 23: { // dup
             int r = fds_.dup(static_cast<int>(a0));
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d dup old=%d new=%d\n", cpu.tid, (int)a0, r);
             ret_host(r);
             return 0;
         }
@@ -356,6 +358,9 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { ret_errno(); return 0; }
             int g0 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[0], O_RDONLY));
             int g1 = fds_.allocate(std::make_shared<yggdrasil::HostNode>(hfds[1], O_WRONLY));
+            if (dbg().xtrace)
+                fprintf(stderr, "[FDLIFE] t%d pipe2 hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
+                        cpu.tid, hfds[0], g0, hfds[1], g1);
             uint32_t out[2] = { static_cast<uint32_t>(g0), static_cast<uint32_t>(g1) };
             try { mem_.write(a0, out, sizeof(out)); }
             catch (...) { ret_err(EFAULT); return 0; }
@@ -416,19 +421,21 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint8_t hdr[16] = {0};
                 mem_.read(base0, hdr, std::min<uint64_t>(len0, 16));
                 uint16_t xlen = static_cast<uint16_t>(hdr[2]) << 8 | hdr[3];
-                if (getenv("BIFROST_XFULL")) { uint8_t fb[80]={0}; mem_.read(base0, fb, std::min<uint64_t>(len0,80));
+                if (dbg().xfull) { uint8_t fb[80]={0}; mem_.read(base0, fb, std::min<uint64_t>(len0,80));
                     fprintf(stderr,"[XFULL] len=%llu\n", (unsigned long long)len0);
                     for(int q=0;q<std::min<uint64_t>(len0,80);q+=16){ fprintf(stderr,"  %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x | %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x\n",
                         fb[q],fb[q+1],fb[q+2],fb[q+3],fb[q+4],fb[q+5],fb[q+6],fb[q+7],
                         fb[q+8],fb[q+9],fb[q+10],fb[q+11],fb[q+12],fb[q+13],fb[q+14],fb[q+15]); } }
-                fprintf(stderr, "[XREQ] t%d fd=%d opcode=%d len16=%u base0=%#llx iov0=%#llx bytes=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                        cpu.tid, static_cast<int>(a0), hdr[0], xlen,
-                        static_cast<unsigned long long>(base0),
-                        static_cast<unsigned long long>(iov0),
-                        static_cast<unsigned long long>(len0),
-                        hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
-                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15]);
-                if (getenv("BIFROST_XBT") && hdr[0] == 8) {
+                if (dbg().xtrace) {
+                    fprintf(stderr, "[XREQ] t%d fd=%d opcode=%d len16=%u base0=%#llx iov0=%#llx bytes=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            cpu.tid, static_cast<int>(a0), hdr[0], xlen,
+                            static_cast<unsigned long long>(base0),
+                            static_cast<unsigned long long>(iov0),
+                            static_cast<unsigned long long>(len0),
+                            hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+                            hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15]);
+                }
+                if (dbg().xbt && hdr[0] == 8) {
                     uint64_t fp = cpu.regs[29];
                     uint64_t lr = cpu.regs[30];
                     fprintf(stderr, "[XBT t%d] MapWindow pc=0x%llx fp=0x%llx lr=0x%llx\n",
@@ -444,17 +451,6 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 }
             }
-            if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7) {
-                uint8_t h7[24] = {0};
-                uint64_t b7 = mem_.load<uint64_t>(a1 + 0);
-                uint64_t l7 = mem_.load<uint64_t>(a1 + 8);
-                mem_.read(b7, h7, std::min<uint64_t>(l7, 24));
-                fprintf(stderr, "[DBUSWRV] t%d len=%llu hex=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x | pr=%c%c%c%c",
-                        cpu.tid, (unsigned long long)l7, h7[0],h7[1],h7[2],h7[3], h7[4],h7[5],h7[6],h7[7],
-                        h7[8],h7[9],h7[10],h7[11], h7[12],h7[13],h7[14],h7[15],
-                        (h7[0]>=32&&h7[0]<127?h7[0]:' '), (h7[1]>=32&&h7[1]<127?h7[1]:' '),
-                        (h7[2]>=32&&h7[2]<127?h7[2]:' '), (h7[3]>=32&&h7[3]<127?h7[3]:' '));
-            }
             uint64_t iov = a1;
             uint64_t cnt = std::min<uint64_t>(a2, 1024);  // IOV_MAX
             if (static_cast<int>(a0) == 3) {
@@ -466,11 +462,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     xseq_append('W', tmp.data(), tmp.size());
                 }
             }
-            FILE* xcap = getenv("BIFROST_XCAP") ? fopen(getenv("BIFROST_XCAP"), "ab") : nullptr;
+            FILE* xcap = dbg().xcap.empty() ? nullptr : fopen(dbg().xcap.c_str(), "ab");
             if (xcap && static_cast<int>(a0) == 3) {
                 uint32_t blen = 0;
                 for (uint64_t i = 0; i < cnt; i++) {
-                    uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                     uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                     blen += static_cast<uint32_t>(std::min<uint64_t>(len, 1 << 20));
                 }
@@ -487,11 +482,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             ssize_t total = 0;
             uint64_t req_total = 0;
             for (uint64_t i = 0; i < cnt; i++) {
-                uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
                 req_total += len;
             }
-            bool xprobe = (getenv("BIFROST_XPROBE") != nullptr);
+            bool xprobe = dbg().xprobe;
             for (uint64_t i = 0; i < cnt; i++) {
                 uint64_t base = mem_.load<uint64_t>(iov + i * 16);
                 uint64_t len  = mem_.load<uint64_t>(iov + i * 16 + 8);
@@ -523,7 +517,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
             }
             ret_host(total);
-            if (getenv("BIFROST_XWRCHECK") && static_cast<int>(a0) == 3
+            if (dbg().xwrcheck && static_cast<int>(a0) == 3
                 && static_cast<uint64_t>(total) != req_total) {
                 fprintf(stderr, "[XWRSHORT] t=%d req=%llu wrote=%zd\n",
                         cpu.tid, (unsigned long long)req_total, total);
@@ -558,17 +552,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (n > 0) {
                     mem_.write(base, tmp.data(), static_cast<size_t>(n));
                     if (static_cast<int>(a0) == 3) xseq_append('R', tmp.data(), n);
-                    if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 3) {
+                    if (dbg().xtrace && static_cast<int>(a0) == 3) {
                         fprintf(stderr, "[XREADV] fd=%d ret=%d first=%02x%02x%02x%02x\n",
                                 static_cast<int>(a0), (int)n, tmp[0], tmp[1], tmp[2], tmp[3]);
                     }
-                    if (getenv("BIFROST_XTRACE") && static_cast<int>(a0) == 7) {
-                        fprintf(stderr, "[DBUSREADV] t%d ret=%d first=%02x%02x%02x%02x\n",
-                                cpu.tid, (int)n, tmp[0], tmp[1], tmp[2], tmp[3]);
-                    }
-                    if (getenv("BIFROST_XCAP") && static_cast<int>(a0) == 3) {
+                    if (!dbg().xcap.empty() && static_cast<int>(a0) == 3) {
                         char path[512];
-                        snprintf(path, sizeof(path), "%s.readv", getenv("BIFROST_XCAP"));
+                        snprintf(path, sizeof(path), "%s.readv", dbg().xcap.c_str());
                         FILE* f = fopen(path, "ab");
                         if (f) { fwrite(tmp.data(), 1, n, f); fclose(f); }
                     }

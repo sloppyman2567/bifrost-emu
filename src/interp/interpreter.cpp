@@ -10,6 +10,7 @@
 //   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
 #include "core/emulator.h"
 #include "decoder.hpp"
+#include "debug_flags.h"
 #include "frontend/dynamic_linker.h"
 #include <cmath>
 #include <cstdio>
@@ -63,7 +64,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;
     // ── TEMP: NSS trace ─────────────────────────────────────────
     {
-        static bool nss_trace_ = (getenv("BIFROST_NSS_TRACE") != nullptr);
+        static bool nss_trace_ = dbg().nss;
         if (nss_trace_) {
             static bool inited_ = false;
             static uint64_t base_ = 0;
@@ -88,7 +89,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     }
     // ── TEMP: xcb_create_window arg trace ────────────────────────
     {
-        static bool xcb_cw_en = (getenv("BIFROST_XCB_CW") != nullptr);
+        static bool xcb_cw_en = dbg().xcb_cw;
         if (xcb_cw_en) {
             static uint64_t xcb_cw_addr_ = 0;
             static bool xcb_cw_resolved_ = false;
@@ -110,7 +111,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     }
     // ── TEMP: xcb image-blit entry trace ────────────────────────────
     {
-        static bool xcb_img_en = (getenv("BIFROST_XCB_IMG") != nullptr);
+        static bool xcb_img_en = dbg().xcb_img;
         if (xcb_img_en) {
             static const char* kNames[] = {
                 "xcb_put_image", "xcb_wait_for_event", "xcb_poll_for_event",
@@ -1179,7 +1180,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     } else {
                         uint64_t lo = cpu.v_lo[d.rt];
                         uint64_t hi = cpu.v_hi[d.rt];
-                        static bool vdbg_ = (getenv("BIFROST_LD2_DBG") != nullptr);
+                        static bool vdbg_ = dbg().ld2;
                         if (vdbg_ && nbytes == 16) {
                             fprintf(stderr, "[STRQ-DBG] addr=0x%llx rt=%d bytes:",
                                     (unsigned long long)addr, d.rt);

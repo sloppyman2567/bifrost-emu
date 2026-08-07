@@ -152,6 +152,7 @@ public:
     static std::vector<std::string> build_default_guest_env();
     // ── Accessors (public) ────────────────────────────────────────────
     Memory&         mem()      { return mem_; }
+    DynamicLinker* dyn_linker(){ return dyn_linker_.get(); }
     FrostGraphics& graphics() { return graphics_; }
     Audio&          audio()    { return audio_; }
     SignalTable&    signals()  { return signals_; }
