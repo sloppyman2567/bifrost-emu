@@ -25,7 +25,7 @@
 //     32-bit dest on x86, etc.) when generating x86.
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
-#include "core/emulator.h"  // for cond_true() (used by executor only)
+#include "core/emulator.h"  // for cond_true()
 namespace arm64emu {
 // When true, BL instructions use the old behavior (end block at BL)
 // instead of BL_CALL (call within block). Set by translate_block when
@@ -668,7 +668,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             uint64_t target = cur_pc + d.imm;
             // B is unconditional — encode as BRCOND with cond=AL (always).
-            // Using BRCOND_FALLTHRU signals to the executor/codegen that
+            // Using BRCOND_FALLTHRU signals to the codegen that
             // the branch is unconditional and there's no fall-through.
             emit(block, IROp::BRCOND_FALLTHRU, 0, 0, 0, 0, 14 /*AL*/, 0, target, cur_pc);
             block.ends_with_branch = true;

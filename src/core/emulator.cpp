@@ -294,20 +294,22 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // Register the ifunc resolver callback. BUGFIX: the old
             // IRELATIVE handler just stored the resolver ADDRESS instead
             // of CALLING it. Now we run the resolver in a scratch CPU
-            // state (borrowing main_cpu_, which hasn't been initialized
-            // yet at this point in load_elf_file — its real init happens
-            // later). The resolver is a small guest function that
+            // state (borrowing the caller's parked CPU, which hasn't
+            // been initialized yet during startup link() — its real init
+            // happens later). The resolver is a small guest function that
             // returns a function pointer in X0; we run it via step
             // until it RETs to a sentinel address, then capture X0.
-            dyn_linker_->set_ifunc_resolver([this](uint64_t resolver_addr) -> uint64_t {
+            dyn_linker_->set_ifunc_resolver([this](CPU& cpu, uint64_t resolver_addr) -> uint64_t {
                 if (resolver_addr == 0) return 0;
-                // Borrow main_cpu_ as scratch. Save its architectural state
-                // (regs, sp, pc, pstate, FP file, TLS, sigmask) so we don't
-                // disturb the (still-default) init. We can't copy the whole
-                // CPU struct because it has mutex + atomic members that are
-                // non-copyable. The pending-queue state is irrelevant here —
-                // ifunc resolution runs at load time before any threads
-                // exist, so no signals can be pending.
+                // Borrow `cpu` as scratch — this is the CALLING thread's
+                // parked CPU (cpu during startup link(), which is
+                // still-uninitialized and idle). Save its architectural
+                // state (regs, sp, pc, pstate, FP regs, TLS, sigmask) so we
+                // don't disturb the caller's syscall context. We can't copy
+                // the whole CPU struct because it has mutex + atomic members
+                // that are non-copyable. The pending-queue state is
+                // irrelevant — ifunc resolution runs at load time before
+                // any signals can be pending.
                 struct SavedState {
                     uint64_t regs[32];
                     uint64_t sp, pc;
@@ -318,32 +320,32 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t sigmask;
                     bool running;
                 } saved;
-                static_assert(sizeof(saved.regs) == sizeof(main_cpu_.regs), "");
-                std::memcpy(saved.regs, main_cpu_.regs, sizeof(saved.regs));
-                saved.sp = main_cpu_.sp;
-                saved.pc = main_cpu_.pc;
-                saved.pstate = main_cpu_.pstate;
-                std::memcpy(saved.v_lo, main_cpu_.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, main_cpu_.v_hi, sizeof(saved.v_hi));
-                saved.fpcr = main_cpu_.fpcr;
-                saved.fpsr = main_cpu_.fpsr;
-                saved.tpidr_el0 = main_cpu_.tpidr_el0;
-                saved.tpidrro_el0 = main_cpu_.tpidrro_el0;
-                saved.sigmask = main_cpu_.sigmask;
-                saved.running = main_cpu_.running;
+                static_assert(sizeof(saved.regs) == sizeof(cpu.regs), "");
+                std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
+                saved.sp = cpu.sp;
+                saved.pc = cpu.pc;
+                saved.pstate = cpu.pstate;
+                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
+                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                saved.fpcr = cpu.fpcr;
+                saved.fpsr = cpu.fpsr;
+                saved.tpidr_el0 = cpu.tpidr_el0;
+                saved.tpidrro_el0 = cpu.tpidrro_el0;
+                saved.sigmask = cpu.sigmask;
+                saved.running = cpu.running;
                 auto restore = [&]() {
-                    std::memcpy(main_cpu_.regs, saved.regs, sizeof(saved.regs));
-                    main_cpu_.sp = saved.sp;
-                    main_cpu_.pc = saved.pc;
-                    main_cpu_.pstate = saved.pstate;
-                    std::memcpy(main_cpu_.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(main_cpu_.v_hi, saved.v_hi, sizeof(saved.v_hi));
-                    main_cpu_.fpcr = saved.fpcr;
-                    main_cpu_.fpsr = saved.fpsr;
-                    main_cpu_.tpidr_el0 = saved.tpidr_el0;
-                    main_cpu_.tpidrro_el0 = saved.tpidrro_el0;
-                    main_cpu_.sigmask = saved.sigmask;
-                    main_cpu_.running = saved.running;
+                    std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
+                    cpu.sp = saved.sp;
+                    cpu.pc = saved.pc;
+                    cpu.pstate = saved.pstate;
+                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    cpu.fpcr = saved.fpcr;
+                    cpu.fpsr = saved.fpsr;
+                    cpu.tpidr_el0 = saved.tpidr_el0;
+                    cpu.tpidrro_el0 = saved.tpidrro_el0;
+                    cpu.sigmask = saved.sigmask;
+                    cpu.running = saved.running;
                 };
                 // Allocate a small scratch stack for the resolver (4 KiB
                 // is plenty — resolvers are leaf-ish functions that don't
@@ -354,19 +356,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 // has RET'd. Use 0x1000 (in the zero page, unmapped for
                 // execution but a recognizable sentinel).
                 constexpr uint64_t SENTINEL_LR = 0x1000;
-                main_cpu_.pc = resolver_addr;
-                main_cpu_.sp = stack_top;
-                main_cpu_.regs[30] = SENTINEL_LR;  // LR
-                main_cpu_.running = true;
-                main_cpu_.pstate = 0;
+                cpu.pc = resolver_addr;
+                cpu.sp = stack_top;
+                cpu.regs[30] = SENTINEL_LR;  // LR
+                cpu.running = true;
+                cpu.pstate = 0;
                 // Run the resolver. Cap at 1M instructions to avoid
                 // infinite loops in buggy resolvers.
                 constexpr uint64_t IRESOLVER_LIMIT = 1'000'000;
                 uint64_t steps = 0;
                 try {
-                    while (main_cpu_.running && main_cpu_.pc != SENTINEL_LR
+                    while (cpu.running && cpu.pc != SENTINEL_LR
                            && steps < IRESOLVER_LIMIT) {
-                        step(main_cpu_);
+                        step(cpu);
                         steps++;
                     }
                 } catch (const std::exception& e) {
@@ -379,7 +381,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     restore();
                     return 0;
                 }
-                uint64_t result = main_cpu_.regs[0];
+                uint64_t result = cpu.regs[0];
                 if (steps >= IRESOLVER_LIMIT) {
                     if (getenv("BIFROST_IFUNC_TRACE")) {
                         fprintf(stderr, "[%s] ifunc resolver at 0x%llx ran >%llu "
@@ -398,7 +400,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                             static_cast<unsigned long long>(result),
                             static_cast<unsigned long long>(steps));
                 }
-                // Restore main_cpu_ to its pre-resolver state.
+                // Restore cpu to its pre-resolver state.
                 restore();
                 return result;
             });
@@ -406,9 +408,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // constructors, glibc hooks, etc.). Uses the same borrow-CPU
             // pattern as the ifunc resolver, but doesn't capture X0 —
             // just runs the function until it RETs.
-            dyn_linker_->set_init_runner([this](uint64_t fn_addr) {
+            dyn_linker_->set_init_runner([this](CPU& cpu, uint64_t fn_addr) {
                 if (fn_addr == 0) return;
                 // Save architectural state (same pattern as ifunc resolver).
+                // `cpu` is the caller's parked CPU (cpu at startup).
                 struct SavedState {
                     uint64_t regs[32];
                     uint64_t sp, pc;
@@ -419,51 +422,58 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t sigmask;
                     bool running;
                 } saved;
-                std::memcpy(saved.regs, main_cpu_.regs, sizeof(saved.regs));
-                saved.sp = main_cpu_.sp;
-                saved.pc = main_cpu_.pc;
-                saved.pstate = main_cpu_.pstate;
-                std::memcpy(saved.v_lo, main_cpu_.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, main_cpu_.v_hi, sizeof(saved.v_hi));
-                saved.fpcr = main_cpu_.fpcr;
-                saved.fpsr = main_cpu_.fpsr;
-                saved.tpidr_el0 = main_cpu_.tpidr_el0;
-                saved.tpidrro_el0 = main_cpu_.tpidrro_el0;
-                saved.sigmask = main_cpu_.sigmask;
-                saved.running = main_cpu_.running;
+                std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
+                saved.sp = cpu.sp;
+                saved.pc = cpu.pc;
+                saved.pstate = cpu.pstate;
+                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
+                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                saved.fpcr = cpu.fpcr;
+                saved.fpsr = cpu.fpsr;
+                saved.tpidr_el0 = cpu.tpidr_el0;
+                saved.tpidrro_el0 = cpu.tpidrro_el0;
+                saved.sigmask = cpu.sigmask;
+                saved.running = cpu.running;
                 auto restore = [&]() {
-                    std::memcpy(main_cpu_.regs, saved.regs, sizeof(saved.regs));
-                    main_cpu_.sp = saved.sp;
-                    main_cpu_.pc = saved.pc;
-                    main_cpu_.pstate = saved.pstate;
-                    std::memcpy(main_cpu_.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(main_cpu_.v_hi, saved.v_hi, sizeof(saved.v_hi));
-                    main_cpu_.fpcr = saved.fpcr;
-                    main_cpu_.fpsr = saved.fpsr;
-                    main_cpu_.tpidr_el0 = saved.tpidr_el0;
-                    main_cpu_.tpidrro_el0 = saved.tpidrro_el0;
-                    main_cpu_.sigmask = saved.sigmask;
-                    main_cpu_.running = saved.running;
+                    std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
+                    cpu.sp = saved.sp;
+                    cpu.pc = saved.pc;
+                    cpu.pstate = saved.pstate;
+                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    cpu.fpcr = saved.fpcr;
+                    cpu.fpsr = saved.fpsr;
+                    cpu.tpidr_el0 = saved.tpidr_el0;
+                    cpu.tpidrro_el0 = saved.tpidrro_el0;
+                    cpu.sigmask = saved.sigmask;
+                    cpu.running = saved.running;
                 };
                 // before running init functions. Constructors and
                 // __libc_early_init access TLS variables (e.g., ctype
                 // tables, locale pointers) via TPIDR_EL0. Without this,
                 // TLS variables are at wrong addresses and initialization
                 // fails silently.
-                if (dyn_linker_ && dyn_linker_->static_tls_size() > 0) {
-                    // Variant-I: TP = base + lib_size (TCB header start).
-                    main_cpu_.tpidr_el0 = dyn_linker_->thread_pointer();
-                    main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+                if (dyn_linker_ && dyn_linker_->static_tls_size() > 0 &&
+                    cpu.tpidr_el0 == 0) {
+                    // Borrowed CPU has no TLS pointer yet (startup path —
+                    // main_cpu_ is still default-initialized). Set it to the
+                    // static TLS block. A parked guest thread (runtime dl*)
+                    // already has its own per-thread TPIDR_EL0; leave it so
+                    // the guest constructors see ITS TLS, not the main
+                    // thread's.
+                    // Variant-I: TP = base + libc_size (TCB header start).
+                    cpu.tpidr_el0 = dyn_linker_->thread_pointer();
+                    cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
                 // Scratch stack for the constructor.
                 uint64_t scratch_stack = mem_.mmap_alloc(4096);
                 uint64_t stack_top = scratch_stack + 4096;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
-                main_cpu_.pc = fn_addr;
-                main_cpu_.sp = stack_top;
-                main_cpu_.regs[30] = SENTINEL_LR;
-                main_cpu_.running = true;
-                main_cpu_.pstate = 0;
+                cpu.pc = fn_addr;
+                cpu.sp = stack_top;
+                cpu.regs[30] = SENTINEL_LR;
+                cpu.running = true;
+                cpu.pstate = 0;
                 // Constructors may call libc functions (e.g., printf for
                 // debug logging), which may themselves use atomics / TLS.
                 // Cap at 10M instructions to avoid infinite loops in
@@ -471,9 +481,9 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 constexpr uint64_t INIT_LIMIT = 10'000'000;
                 uint64_t steps = 0;
                 try {
-                    while (main_cpu_.running && main_cpu_.pc != SENTINEL_LR
+                    while (cpu.running && cpu.pc != SENTINEL_LR
                            && steps < INIT_LIMIT) {
-                        step(main_cpu_);
+                        step(cpu);
                         steps++;
                     }
                 } catch (const std::exception& e) {
@@ -499,7 +509,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // and dlopen init arrays (argc/argv/env). Step limit is
             // 50M (higher than init_runner_'s 10M) because dl_iterate_phdr
             // callbacks may do significant work (e.g., backtrace walking).
-            dyn_linker_->set_guest_call_args([this](uint64_t fn_addr,
+            dyn_linker_->set_guest_call_args([this](CPU& cpu,
+                                                      uint64_t fn_addr,
                                                       uint64_t arg0,
                                                       uint64_t arg1,
                                                       uint64_t arg2) -> uint64_t {
@@ -514,58 +525,61 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     uint64_t sigmask;
                     bool running;
                 } saved;
-                std::memcpy(saved.regs, main_cpu_.regs, sizeof(saved.regs));
-                saved.sp = main_cpu_.sp;
-                saved.pc = main_cpu_.pc;
-                saved.pstate = main_cpu_.pstate;
-                std::memcpy(saved.v_lo, main_cpu_.v_lo, sizeof(saved.v_lo));
-                std::memcpy(saved.v_hi, main_cpu_.v_hi, sizeof(saved.v_hi));
-                saved.fpcr = main_cpu_.fpcr;
-                saved.fpsr = main_cpu_.fpsr;
-                saved.tpidr_el0 = main_cpu_.tpidr_el0;
-                saved.tpidrro_el0 = main_cpu_.tpidrro_el0;
-                saved.sigmask = main_cpu_.sigmask;
-                saved.running = main_cpu_.running;
+                std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
+                saved.sp = cpu.sp;
+                saved.pc = cpu.pc;
+                saved.pstate = cpu.pstate;
+                std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
+                std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+                saved.fpcr = cpu.fpcr;
+                saved.fpsr = cpu.fpsr;
+                saved.tpidr_el0 = cpu.tpidr_el0;
+                saved.tpidrro_el0 = cpu.tpidrro_el0;
+                saved.sigmask = cpu.sigmask;
+                saved.running = cpu.running;
                 auto restore = [&]() {
-                    std::memcpy(main_cpu_.regs, saved.regs, sizeof(saved.regs));
-                    main_cpu_.sp = saved.sp;
-                    main_cpu_.pc = saved.pc;
-                    main_cpu_.pstate = saved.pstate;
-                    std::memcpy(main_cpu_.v_lo, saved.v_lo, sizeof(saved.v_lo));
-                    std::memcpy(main_cpu_.v_hi, saved.v_hi, sizeof(saved.v_hi));
-                    main_cpu_.fpcr = saved.fpcr;
-                    main_cpu_.fpsr = saved.fpsr;
-                    main_cpu_.tpidr_el0 = saved.tpidr_el0;
-                    main_cpu_.tpidrro_el0 = saved.tpidrro_el0;
-                    main_cpu_.sigmask = saved.sigmask;
-                    main_cpu_.running = saved.running;
+                    std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
+                    cpu.sp = saved.sp;
+                    cpu.pc = saved.pc;
+                    cpu.pstate = saved.pstate;
+                    std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                    std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                    cpu.fpcr = saved.fpcr;
+                    cpu.fpsr = saved.fpsr;
+                    cpu.tpidr_el0 = saved.tpidr_el0;
+                    cpu.tpidrro_el0 = saved.tpidrro_el0;
+                    cpu.sigmask = saved.sigmask;
+                    cpu.running = saved.running;
                 };
-                // Set up TLS pointer (same as init_runner_).
-                if (dyn_linker_ && dyn_linker_->static_tls_size() > 0) {
-                    main_cpu_.tpidr_el0 = dyn_linker_->thread_pointer();
-                    main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+                // Set up TLS pointer (same as init_runner_). Only when the
+                // borrowed CPU has none (startup). A parked guest thread
+                // already has its own per-thread TPIDR_EL0.
+                if (dyn_linker_ && dyn_linker_->static_tls_size() > 0 &&
+                    cpu.tpidr_el0 == 0) {
+                    cpu.tpidr_el0 = dyn_linker_->thread_pointer();
+                    cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
                 uint64_t scratch_stack = mem_.mmap_alloc(4096);
                 uint64_t stack_top = scratch_stack + 4096;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
-                main_cpu_.pc = fn_addr;
-                main_cpu_.sp = stack_top;
-                main_cpu_.regs[0] = arg0;
-                main_cpu_.regs[1] = arg1;
-                main_cpu_.regs[2] = arg2;
-                main_cpu_.regs[30] = SENTINEL_LR;
-                main_cpu_.running = true;
-                main_cpu_.pstate = 0;
+                cpu.pc = fn_addr;
+                cpu.sp = stack_top;
+                cpu.regs[0] = arg0;
+                cpu.regs[1] = arg1;
+                cpu.regs[2] = arg2;
+                cpu.regs[30] = SENTINEL_LR;
+                cpu.running = true;
+                cpu.pstate = 0;
                 constexpr uint64_t CALL_LIMIT = 50'000'000;
                 uint64_t steps = 0;
                 uint64_t result = 0;
                 try {
-                    while (main_cpu_.running && main_cpu_.pc != SENTINEL_LR
+                    while (cpu.running && cpu.pc != SENTINEL_LR
                            && steps < CALL_LIMIT) {
-                        step(main_cpu_);
+                        step(cpu);
                         steps++;
                     }
-                    result = main_cpu_.regs[0];
+                    result = cpu.regs[0];
                 } catch (const std::exception& e) {
                     if (getenv("BIFROST_DYNLINK_TRACE")) {
                         fprintf(stderr, "[%s] guest_call @ 0x%llx threw: %s\n",
@@ -586,7 +600,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 restore();
                 return result;
             });
-            if (!dyn_linker_->link(data, info.base_addr, path, info.interp)) {
+            if (!dyn_linker_->link(main_cpu_, data, info.base_addr, path, info.interp)) {
                 fprintf(stderr, "[%s] native dynamic linking failed: %s; "
                         "falling back to guest ld.so\n",
                         CODENAME, dyn_linker_->error().c_str());

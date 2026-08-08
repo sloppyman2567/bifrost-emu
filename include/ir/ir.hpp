@@ -4,8 +4,7 @@
 // of ARM64 instructions. Each ARM64 instruction translates into 1-N
 // IR ops. The IR is then:
 //   1. Optimized (DCE, constant folding, copy propagation, peephole)
-//   2. Either executed by ops.cpp's tight switch loop (debug path),
-//      or compiled to native x86-64 code by frostjit.cpp (the real JIT).
+//   2. Compiled to native x86-64 code by frostjit.cpp (the real JIT).
 //
 // ── Design ────────────────────────────────────────────────────────────
 //
@@ -34,7 +33,7 @@
 #include <utility>
 namespace arm64emu {
 // IR opcodes. Keep this list tight — every opcode must be handled in
-// both ops.cpp (executor) and frostjit.cpp (codegen).
+// frostjit.cpp (codegen).
 enum class IROp : uint8_t {
     NOP,            // no operation (used by optimizer as a tombstone)
     IMM,            // dest = imm                          (constant)

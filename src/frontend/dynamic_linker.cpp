@@ -177,10 +177,12 @@ std::string read_guest_cstr(Memory& mem, uint64_t addr) {
 }
 } // namespace
 // ── DynamicLinker::link ────────────────────────────────────────────────
-bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
+bool DynamicLinker::link(CPU& cpu,
+                         const std::vector<uint8_t>& main_data,
                          uint64_t main_base,
                          const std::string& main_path,
                          const std::string& interp_path) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     objects_.clear();
     symbols_.clear();
     versioned_symbols_.clear();
@@ -222,8 +224,8 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     parse_tls(main_data, main_obj);
     parse_eh_frame(main_data, main_base, main_obj);
     objects_.push_back(std::move(main_obj));
-    index_symbols(objects_.back());
-    parse_versions_(objects_.back());
+    index_symbols(cpu, objects_.back());
+    parse_versions_(cpu, objects_.back());
     // Recursively load DT_NEEDED libraries. We use a worklist to handle
     // transitive dependencies (libc → ld-musl, libm → libc, etc.).
     std::vector<size_t> worklist = {0};
@@ -262,7 +264,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                     // transitive deps. (DT_RUNPATH only applies to the
                     // immediate object's DT_NEEDED per the gABI; we
                     // approximate by passing the parent's runpath.)
-                    uint64_t lib_base = load_shared_library(soname,
+                    uint64_t lib_base = load_shared_library(cpu, soname,
                         objects_[idx].runpath, objects_[idx].rpath);
                     if (lib_base == 0) {
                         // Library not found — not necessarily fatal
@@ -467,7 +469,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                         uint64_t resolver_addr = obj.base_addr + A;
                         uint64_t resolved = 0;
                         if (ifunc_resolver_) {
-                            resolved = ifunc_resolver_(resolver_addr);
+                            resolved = ifunc_resolver_(cpu, resolver_addr);
                         }
                         if (resolved == 0) {
                             // Fallback: store the resolver address. The
@@ -712,7 +714,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
                 fprintf(stderr, "[dynlink] calling __libc_early_init @ 0x%llx\n",
                         static_cast<unsigned long long>(early_init));
             }
-            init_runner_(early_init);
+            init_runner_(cpu, early_init);
             if (dynlink_trace_enabled()) {
                 fprintf(stderr, "[dynlink] __libc_early_init returned\n");
             }
@@ -734,7 +736,7 @@ bool DynamicLinker::link(const std::vector<uint8_t>& main_data,
     // glibc __libc_start_main hooks, etc. Without this, every C++ game
     // runs with uninitialized globals (vtables, std::mutex, std::string).
     // Requires init_runner_ to be set by the Emulator; no-ops if not.
-    run_init_arrays_();
+    run_init_arrays_(cpu);
     if (dynlink_trace_enabled()) {
         fprintf(stderr, "[dynlink] all DT_INIT_ARRAY done, link() complete\n");
     }
@@ -1645,7 +1647,7 @@ void DynamicLinker::apply_relr_relocations_(const LoadedObject& obj,
 // when it RETs. If no callback is registered, this is a no-op (the guest
 // will run with uninitialized statics — visible as crashes/vtables-full-
 // of-zero, not silent corruption).
-void DynamicLinker::run_init_arrays_() {
+void DynamicLinker::run_init_arrays_(CPU& cpu) {
     if (!init_runner_) return;
     // Dependencies must initialize before dependents: libc/libm before the
     // main binary. objects_[0] is the main executable and libraries are
@@ -1662,7 +1664,7 @@ void DynamicLinker::run_init_arrays_() {
                             obj.name.c_str(),
                             static_cast<unsigned long long>(obj.init_addr));
                 }
-                init_runner_(obj.init_addr);
+                init_runner_(cpu, obj.init_addr);
             } catch (...) {}
         }
         // DT_INIT_ARRAY — array of function pointers, count = size/8.
@@ -1680,7 +1682,7 @@ void DynamicLinker::run_init_arrays_() {
                                 i, obj.name.c_str(),
                                 static_cast<unsigned long long>(fn));
                     }
-                    init_runner_(fn);
+                    init_runner_(cpu, fn);
                 } catch (...) {
                     // If one constructor throws, continue with the rest.
                     // (Real ld.so aborts, but for an emulator it's better
@@ -2743,7 +2745,8 @@ uint64_t DynamicLinker::map_segments(const std::vector<uint8_t>& data,
 // find_library can search the parent object's DT_RUNPATH/DT_RPATH for
 // this library. DT_RUNPATH only applies to the immediate object's
 // DT_NEEDED per the gABI; DT_RPATH is global (deprecated but still used).
-uint64_t DynamicLinker::load_shared_library(const std::string& soname,
+uint64_t DynamicLinker::load_shared_library(CPU& cpu,
+                                             const std::string& soname,
                                              const std::string& parent_runpath,
                                              const std::string& parent_rpath) {
     std::string path;
@@ -2812,8 +2815,8 @@ uint64_t DynamicLinker::load_shared_library(const std::string& soname,
     parse_tls(data, obj);
     parse_eh_frame(data, base, obj);
     objects_.push_back(std::move(obj));
-    index_symbols(objects_.back());
-    parse_versions_(objects_.back());
+    index_symbols(cpu, objects_.back());
+    parse_versions_(cpu, objects_.back());
     return base;
 }
 // ── register_thunk_library_ ──────────────────────────────────
@@ -3279,7 +3282,7 @@ int64_t DynamicLinker::tlsdesc_tp_offset(const LoadedObject& obj,
 // For simplicity, we ONLY parse verdef (exported versions). verneed
 // (needed versions) is consulted at relocation time to look up the
 // correct versioned symbol in dependencies.
-void DynamicLinker::parse_versions_(const LoadedObject& obj) {
+void DynamicLinker::parse_versions_(CPU& cpu, const LoadedObject& obj) {
     if (obj.versym_addr == 0 || obj.verdef_addr == 0) return;
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
     // Build verdef index → version name map.
@@ -3351,7 +3354,7 @@ void DynamicLinker::parse_versions_(const LoadedObject& obj) {
         uint64_t addr = obj.base_addr + s.st_value;
         // STT_GNU_IFUNC: call resolver (same as index_symbols).
         if (ST_TYPE_(s.st_info) == STT_GNU_IFUNC_ && ifunc_resolver_) {
-            uint64_t resolved = ifunc_resolver_(addr);
+            uint64_t resolved = ifunc_resolver_(cpu, addr);
             if (resolved != 0) addr = resolved;
         }
         std::string key = name + "@" + vit->second;
@@ -3380,7 +3383,7 @@ uint64_t DynamicLinker::resolve_versioned_symbol(const std::string& name,
     return resolve_symbol(name);
 }
 // ── index_symbols ──────────────────────────────────────────────────────
-void DynamicLinker::index_symbols(const LoadedObject& obj) {
+void DynamicLinker::index_symbols(CPU& cpu, const LoadedObject& obj) {
     if (obj.symtab_addr == 0 || obj.strtab_addr == 0) return;
     // available, 8192 cap fallback). Previously hardcoded 8192, dropping
     // symbols past the cap in large libs (Qt, webkit).
@@ -3432,7 +3435,7 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
         // the function (visible failure, not silent corruption).
         if (ST_TYPE_(s.st_info) == STT_GNU_IFUNC_) {
             if (ifunc_resolver_) {
-                uint64_t resolved = ifunc_resolver_(addr);
+                uint64_t resolved = ifunc_resolver_(cpu, addr);
                 if (resolved != 0) addr = resolved;
                 // else: fall back to resolver address (visible failure)
             }
@@ -3455,6 +3458,7 @@ void DynamicLinker::index_symbols(const LoadedObject& obj) {
 }
 // ── resolve_symbol ─────────────────────────────────────────────────────
 uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     auto it = symbols_.find(name);
     if (it == symbols_.end()) {
         if (dynlink_trace_enabled()) {
@@ -3479,7 +3483,8 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
 // existing handle and bumps the refcount (matching glibc's _dl_open
 // fast path). This prevents loading the same .so twice and ensures
 // dlopen("libm.so.6") returns the same handle as dlopen("/lib/libm.so.6").
-uint64_t DynamicLinker::load_library(const std::string& path) {
+uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     // ── Dedup: check if already loaded by path ────────────────────
     // Extract the basename (soname) from the path for dedup. glibc's
     // _dl_open does the same: dlopen("/lib/libm.so.6") and
@@ -3519,7 +3524,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
         if (aarch64_elf) {
             resolved = found_path;
             std::vector<uint8_t> file_data = std::move(data);
-            return load_library_from_data(path, file_data);
+            return load_library_from_data(cpu, path, file_data);
         }
         // Missing or host-arch library: thunk graphic/audio/display APIs.
         if (thunk_resolver_ && is_thunk_supported_lib_(path)) {
@@ -3546,7 +3551,7 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
             && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
             && data[18] == (EM_AARCH64 & 0xFF) && data[19] == (EM_AARCH64 >> 8);
         if (aarch64_elf) {
-            return load_library_from_data(path, data);
+            return load_library_from_data(cpu, path, data);
         }
         set_last_error("cannot open '" + resolved + "'");
         error_ = "load_library: cannot open '" + resolved + "'";
@@ -3573,16 +3578,17 @@ uint64_t DynamicLinker::load_library(const std::string& path) {
             && alt[0] == 0x7f && alt[1] == 'E' && alt[2] == 'L' && alt[3] == 'F'
             && alt[18] == (EM_AARCH64 & 0xFF) && alt[19] == (EM_AARCH64 >> 8);
         if (alt_ok) {
-            return load_library_from_data(path, alt);
+            return load_library_from_data(cpu, path, alt);
         }
     }
-    return load_library_from_data(path, data);
+    return load_library_from_data(cpu, path, data);
 }
 // Internal helper: load a library from an in-memory ELF image.
 // Used by load_library (dlopen by path) and by soname-based lookup.
 // Handles ELF validation, segment mapping, relocation, symbol indexing,
 // init array execution, and refcount tracking.
-uint64_t DynamicLinker::load_library_from_data(const std::string& path,
+uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
+                                                const std::string& path,
                                                 std::vector<uint8_t>& data) {
     if (data.size() < 64 || data[0] != 0x7f || data[1] != 'E' ||
         data[2] != 'L' || data[3] != 'F') {
@@ -3652,8 +3658,8 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
     }
     objects_.push_back(std::move(obj));
     size_t parent_idx = objects_.size() - 1;
-    index_symbols(objects_[parent_idx]);
-    parse_versions_(objects_[parent_idx]);
+    index_symbols(cpu, objects_[parent_idx]);
+    parse_versions_(cpu, objects_[parent_idx]);
     // Load DT_NEEDED dependencies of the dlopen'd library BEFORE applying
     // its relocations. The startup path does this; the dlopen path skipped
     // it, so JUMP_SLOT/GLOB_DAT slots referencing symbols in deps (e.g.
@@ -3676,7 +3682,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                         if (!o.soname.empty() && o.soname == soname) { found = true; break; }
                     }
                     if (found) continue;
-                    uint64_t dep_base = load_library(soname);
+                    uint64_t dep_base = load_library(cpu, soname);
                     if (dep_base == 0) {
                         fprintf(stderr, "[%s] dlopen: could not load dependency "
                                 "%s (continuing)\n", CODENAME, soname.c_str());
@@ -3717,7 +3723,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                         uint64_t resolver_addr = nobj.base_addr + A;
                         uint64_t resolved = 0;
                         if (ifunc_resolver_) {
-                            resolved = ifunc_resolver_(resolver_addr);
+                            resolved = ifunc_resolver_(cpu, resolver_addr);
                         }
                         if (resolved == 0) resolved = resolver_addr;
                         mem_.store<uint64_t>(target, resolved);
@@ -3801,7 +3807,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                     } else if (type == R_AARCH64_IRELATIVE_) {
                         // ifunc in PLT
                         uint64_t resolver_addr = nobj.base_addr + A;
-                        uint64_t resolved = ifunc_resolver_ ? ifunc_resolver_(resolver_addr) : 0;
+                        uint64_t resolved = ifunc_resolver_ ? ifunc_resolver_(cpu, resolver_addr) : 0;
                         if (resolved == 0) resolved = resolver_addr;
                         mem_.store<uint64_t>(target, resolved);
                     }
@@ -3861,7 +3867,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                             path.c_str(),
                             static_cast<unsigned long long>(nobj.init_addr));
                 }
-                guest_call_args_(nobj.init_addr, 0, 0, 0);
+                guest_call_args_(cpu, nobj.init_addr, 0, 0, 0);
             } catch (...) {}
         }
         if (nobj.init_array_addr != 0 && nobj.init_array_size >= 8) {
@@ -3878,7 +3884,7 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
                                 i, path.c_str(),
                                 static_cast<unsigned long long>(fn));
                     }
-                    guest_call_args_(fn, 0, 0, 0);
+                    guest_call_args_(cpu, fn, 0, 0, 0);
                 } catch (...) {}
             }
         }
@@ -3893,7 +3899,8 @@ uint64_t DynamicLinker::load_library_from_data(const std::string& path,
 // Decrement the refcount. When it reaches 0, run DT_FINI_ARRAY (in
 // reverse order) and DT_FINI. The memory is NOT unmapped (glibc keeps
 // the link_map for safety). Returns 0 on success, -1 on error.
-int DynamicLinker::close_library(uint64_t handle) {
+int DynamicLinker::close_library(CPU& cpu, uint64_t handle) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     for (auto& obj : objects_) {
         if (obj.base_addr == handle) {
             if (obj.refcount == 0) {
@@ -3919,7 +3926,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                                         i, obj.name.c_str(),
                                         static_cast<unsigned long long>(fn));
                             }
-                            guest_call_args_(fn, 0, 0, 0);
+                            guest_call_args_(cpu, fn, 0, 0, 0);
                         } catch (...) {}
                     }
                 }
@@ -3931,7 +3938,7 @@ int DynamicLinker::close_library(uint64_t handle) {
                                     obj.name.c_str(),
                                     static_cast<unsigned long long>(obj.fini_addr));
                         }
-                        guest_call_args_(obj.fini_addr, 0, 0, 0);
+                        guest_call_args_(cpu, obj.fini_addr, 0, 0, 0);
                     } catch (...) {}
                 }
             }
@@ -3953,6 +3960,7 @@ int DynamicLinker::close_library(uint64_t handle) {
 // the global scope.
 uint64_t DynamicLinker::resolve_symbol_in(uint64_t handle,
                                            const std::string& name) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     // First, try the global symbol table (which includes all loaded
     // objects' exported symbols). This is fast and handles 99% of
     // dlsym calls.
@@ -3983,6 +3991,7 @@ uint64_t DynamicLinker::resolve_symbol_in(uint64_t handle,
 // Find the loaded object whose [base_addr, base_addr + map_size) range
 // contains `addr`. Used by dladdr and _dl_find_dso_for_object.
 const LoadedObject* DynamicLinker::find_object_by_addr(uint64_t addr) const {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     for (const auto& obj : objects_) {
         if (obj.base_addr == 0) continue;  // skip main binary (base 0)
         if (addr >= obj.base_addr && addr < obj.base_addr + obj.map_size) {
@@ -3998,12 +4007,29 @@ const LoadedObject* DynamicLinker::find_object_by_addr(uint64_t addr) const {
     }
     return nullptr;
 }
+// ── object_relative_offset ─────────────────────────────────────────────
+// Returns addr's file offset relative to the containing object's base if
+// that object's name contains `name_fragment`, else ~0.
+uint64_t DynamicLinker::object_relative_offset(uint64_t addr, const std::string& name_fragment) const {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
+    for (const auto& obj : objects_) {
+        if (obj.base_addr == 0) continue;
+        if (addr >= obj.base_addr && addr < obj.base_addr + obj.map_size) {
+            if (obj.name.find(name_fragment) != std::string::npos) {
+                return addr - obj.base_addr;
+            }
+            return ~uint64_t(0);
+        }
+    }
+    return ~uint64_t(0);
+}
 // ── dladdr ─────────────────────────────────────────────────────────────
 // Fill in Dl_info for a given address. Returns 1 if the address falls
 // within a loaded object, 0 otherwise. Finds the nearest symbol by
 // scanning the containing object's .dynsym for the symbol with the
 // largest st_value that is <= addr.
 int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     info = {0, 0, 0, 0};
     const LoadedObject* obj = find_object_by_addr(addr);
     if (obj == nullptr) return 0;
@@ -4083,6 +4109,7 @@ int DynamicLinker::dladdr(uint64_t addr, DlInfo& info) {
 // cleared — the next call returns 0 (matching glibc's "dlerror returns
 // NULL on second call" semantics).
 uint64_t DynamicLinker::get_last_error() {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     if (!error_pending_ || last_error_.empty()) {
         return 0;
     }
@@ -4105,6 +4132,7 @@ uint64_t DynamicLinker::get_last_error() {
     return dlerror_buf_ptr_;
 }
 void DynamicLinker::set_last_error(const std::string& msg) {
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     last_error_ = msg;
     error_pending_ = true;
 }
@@ -4124,8 +4152,9 @@ void DynamicLinker::set_last_error(const std::string& msg) {
 //   void *dlpi_tls_data;           // TLS data pointer
 // };
 // On AArch64 (LP64), this struct is 64 bytes.
-int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
+int DynamicLinker::iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_ptr) {
     if (callback_ptr == 0 || guest_call_args_ == nullptr) return 0;
+    std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     // Allocate a scratch buffer for one dl_phdr_info struct (64 bytes)
     // plus the name string (256 bytes). We reuse the dlerror buffer area
     // since dlerror and dl_iterate_phdr don't run concurrently.
@@ -4167,7 +4196,7 @@ int DynamicLinker::iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr) {
         } catch (...) { continue; }
         // Call the guest callback: x0 = info, x1 = sizeof(dl_phdr_info), x2 = data
         // sizeof(struct dl_phdr_info) on AArch64 LP64 = 64 bytes.
-        uint64_t rc = guest_call_args_(callback_ptr, info_buf, 64, data_ptr);
+        uint64_t rc = guest_call_args_(cpu, callback_ptr, info_buf, 64, data_ptr);
         if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dl_iterate_phdr] callback for '%s' returned %lld\n",
                     obj.name.c_str(), static_cast<long long>(rc));

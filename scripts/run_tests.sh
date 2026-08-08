@@ -451,6 +451,10 @@ DYNAMIC_TESTS=(
     # 8 threads x 4 waves with __thread long tls_array[8] per thread.
     "test_dyn_pthread_8thread|ctest_real/test_dyn_pthread_8thread.elf||30|test_dyn_pthread_8thread: ALL PASS"
     "test_dlopen|ctest_real/test_dlopen.elf||15|test_dlopen: ALL PASS"
+    # Loader thread-safety regression: 4 dlopen/dlsym/dlclose threads x 500
+    # iterations + dladdr/dl_iterate_phdr workers. Verifies the loader mutex
+    # (recursive_lock) and CPU borrow make concurrent dl* calls race-free.
+    "test_dlopen_mt|ctest_real/test_dlopen_mt.elf||60|test_dlopen_mt: ALL PASS"
     # v1.5.1-alpha: dladdr tests. Verifies the dladdr symbol override is
     # enabled and routes user dladdr() calls through our implementation.
     # test_dladdr uses the internal syscall (static musl); test_dladdr_glibc

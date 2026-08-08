@@ -67,11 +67,13 @@
 #include "bifrost/types.hpp"
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
 class Memory;
+class CPU;
 // PT_TLS segment info for a loaded object.
 struct TlsSegment {
     uint64_t vaddr    = 0;  // file vaddr (relative to base)
@@ -160,7 +162,8 @@ public:
     // Returns true on success. On failure, sets `error_` and returns
     // false (caller should fall back to the PT_INTERP-only path or
     // fail the load).
-    bool link(const std::vector<uint8_t>& main_data,
+    bool link(CPU& cpu,
+              const std::vector<uint8_t>& main_data,
               uint64_t main_base,
               const std::string& main_path,
               const std::string& interp_path = "");
@@ -222,20 +225,33 @@ public:
     int64_t tls_tp_offset(uint64_t mod_id) const;
     const std::vector<LoadedObject>& objects() const { return objects_; }
     const std::string& error() const { return error_; }
+    // Loader-wide lock accessor (see loader_mu_ below). External code
+    // that iterates objects() or reads TLS state directly (e.g. the
+    // syscall 0x1001 _dl_allocate_tls handler in misc.cpp) must hold
+    // this lock around the whole iteration to avoid racing with a
+    // concurrent dlopen() from another guest thread.
+    std::recursive_mutex& loader_lock() const { return loader_mu_; }
     // Load a shared library at runtime (dlopen support).
     // path: absolute or relative path to the .so file.
     // Returns: base address (>0) on success, 0 on failure.
     // If the library is already loaded (by path or soname), returns the
     // existing handle and bumps the refcount (matching glibc's
     // _dl_open fast path).
-    uint64_t load_library(const std::string& path);
+    //
+    // `cpu` is the guest thread performing the dlopen. It is passed
+    // down to the ifunc/init guest-call callbacks so they can borrow
+    // the CALLING thread's CPU (parked inside the syscall handler)
+    // instead of racing over main_cpu_. The startup path (link()) passes
+    // main_cpu_, which is idle at load time.
+    uint64_t load_library(CPU& cpu, const std::string& path);
     // Decrement the refcount of a dlopen'd library. When the refcount
     // reaches 0, the library's DT_FINI_ARRAY is invoked (in reverse
     // order) and the library is marked for unload. The memory is NOT
     // actually unmapped (glibc doesn't either, for safety — the link_map
     // stays in the list but l_direct_opencount=0).
     // Returns 0 on success (dlclose convention), -1 on error.
-    int close_library(uint64_t handle);
+    // `cpu` is the calling guest thread (see load_library).
+    int close_library(CPU& cpu, uint64_t handle);
     // Resolve a symbol within a specific library's scope (dlsym with a
     // handle). Searches the library's own .dynsym first, then its
     // DT_NEEDED dependencies. Returns 0 if not found.
@@ -244,6 +260,12 @@ public:
     // range. Returns nullptr if no object contains the address. Used by
     // dladdr and _dl_find_dso_for_object.
     const LoadedObject* find_object_by_addr(uint64_t addr) const;
+    // If `addr` lies within a loaded object whose `name` contains
+    // `name_fragment`, returns the file offset relative to that object's
+    // base (== start_pc - base_addr). Otherwise returns ~0. Used by the
+    // JIT to apply module-relative quirk/quarantine ranges that must
+    // survive ASLR (e.g. glibc's allocator region).
+    uint64_t object_relative_offset(uint64_t addr, const std::string& name_fragment) const;
     // Fill in Dl_info for a given address (dladdr). Returns 1 on success
     // (address found in a loaded object), 0 on failure.
     //   info->dli_fname  → guest pointer to filename string
@@ -267,9 +289,16 @@ public:
     // (dl_iterate_phdr). The callback receives a guest pointer to a
     // dl_phdr_info struct and the user's data pointer. Returns the
     // sum of callback return values (matching glibc semantics).
+    // Iterate over all loaded objects and call the callback for each
+    // (dl_iterate_phdr). The callback receives a guest pointer to a
+    // dl_phdr_info struct and the user's data pointer. Returns the
+    // sum of callback return values (matching glibc semantics).
     // The callback is a guest function pointer — we call it via the
     // init_runner_ mechanism.
-    int iterate_phdr(uint64_t callback_ptr, uint64_t data_ptr);
+    // `cpu` is the calling guest thread (see load_library) — the
+    // callback borrows it so a non-main thread's dl_iterate_phdr runs
+    // its callback on its own CPU instead of racing on main_cpu_.
+    int iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_ptr);
     // ── ifunc resolver callback ────────────────────────────────────
     // BUGFIX: the old IRELATIVE handler just stored `base + A` (the
     // resolver ADDRESS) instead of calling the resolver to get the
@@ -279,7 +308,7 @@ public:
     // that runs the resolver function in a scratch CPU and returns X0.
     // The callback returns 0 on failure (which leaves the GOT slot 0,
     // and the guest will crash on the first call — visible, not silent).
-    void set_ifunc_resolver(std::function<uint64_t(uint64_t)> cb) {
+    void set_ifunc_resolver(std::function<uint64_t(CPU&, uint64_t)> cb) {
         ifunc_resolver_ = std::move(cb);
     }
     // ── Constructor/init callback ────────────────────────
@@ -293,7 +322,7 @@ public:
     // function returns. The Emulator implements this by borrowing the
     // main CPU (saving/restoring architectural state) and stepping until
     // RET to a sentinel LR.
-    void set_init_runner(std::function<void(uint64_t)> cb) {
+    void set_init_runner(std::function<void(CPU&, uint64_t)> cb) {
         init_runner_ = std::move(cb);
     }
     // ── Argument-passing guest-call callback ──────────────────────────
@@ -306,7 +335,7 @@ public:
     // and returns the value of x0 when the function RETs.
     // If the function doesn't return (infinite loop), the callback
     // aborts after a step limit and returns 0.
-    void set_guest_call_args(std::function<uint64_t(uint64_t, uint64_t, uint64_t, uint64_t)> cb) {
+    void set_guest_call_args(std::function<uint64_t(CPU&, uint64_t, uint64_t, uint64_t, uint64_t)> cb) {
         guest_call_args_ = std::move(cb);
     }
     // ── Graphic API thunk resolver ───────────────────────
@@ -338,6 +367,17 @@ public:
     static bool is_thunk_supported_lib_(const std::string& soname);
 private:
     Memory& mem_;
+    // Loader-wide lock. The loader's state (objects_, symbols_,
+    // versioned_symbols_, last_error_, scratch buffers) can be touched
+    // concurrently from multiple guest threads — each guest thread runs
+    // on its own host thread, and dlopen/dlsym/dlclose/dladdr/
+    // dl_iterate_phdr are all re-entrant from any thread. This is the
+    // equivalent of glibc's _dl_load_lock. Recursive because guest
+    // callbacks (dlopen DT_INIT_ARRAY, dl_iterate_phdr hooks) can
+    // re-enter the loader through guest code that calls dl* again on
+    // the same thread. The single-threaded startup path (link()) holds
+    // it uncontended.
+    mutable std::recursive_mutex loader_mu_;
     std::vector<LoadedObject> objects_;
     // Global symbol table: name → (absolute address, binding).
     // track the binding (STB_GLOBAL vs STB_WEAK) so we can implement
@@ -354,13 +394,21 @@ private:
     std::unordered_map<std::string, SymEntry> versioned_symbols_;
     std::string error_;
     // Optional ifunc resolver callback (set by Emulator before link()).
-    std::function<uint64_t(uint64_t)> ifunc_resolver_;
+    // The first parameter is the CPU to borrow while running the
+    // resolver (the calling thread for runtime dl*; main_cpu_ during
+    // startup link()). Borrowing the caller's OWN parked CPU (instead
+    // of always main_cpu_) fixes a race where a non-main guest thread
+    // triggered a resolver/init callback that clobbered main_cpu_ while
+    // the main thread was mid-execution.
+    std::function<uint64_t(CPU&, uint64_t)> ifunc_resolver_;
     // Optional init runner callback (set by Emulator before link()).
     // Used to invoke DT_INIT_ARRAY entries (C++ static constructors).
-    std::function<void(uint64_t)> init_runner_;
+    // First param is the CPU to borrow (see ifunc_resolver_).
+    std::function<void(CPU&, uint64_t)> init_runner_;
     // Optional argument-passing guest-call callback (set by Emulator
     // before link()). Used by dl_iterate_phdr and dlopen init arrays.
-    std::function<uint64_t(uint64_t, uint64_t, uint64_t, uint64_t)> guest_call_args_;
+    // First param is the CPU to borrow (see ifunc_resolver_).
+    std::function<uint64_t(CPU&, uint64_t, uint64_t, uint64_t, uint64_t)> guest_call_args_;
     // Optional thunk resolver callback (set by Emulator before link()).
     // When set, graphic library DT_NEEDED entries that can't be loaded
     // from disk fall back to this resolver instead of failing.
@@ -398,7 +446,8 @@ private:
                        LoadedObject& obj);
     // Internal helper: load a library from an in-memory ELF image.
     // Shared by load_library (dlopen by path) and soname-based lookup.
-    uint64_t load_library_from_data(const std::string& path,
+    uint64_t load_library_from_data(CPU& cpu,
+                                    const std::string& path,
                                     std::vector<uint8_t>& data);
     // Parse PT_TLS from program headers and record it in obj.tls.
     void parse_tls(const std::vector<uint8_t>& data, LoadedObject& obj);
@@ -418,7 +467,8 @@ private:
     // Load a shared library's PT_LOAD segments into guest memory at a
     // fresh base address. Records the object in `objects_` and its
     // symbols in `symbols_`. Returns the base address, or 0 on failure.
-    uint64_t load_shared_library(const std::string& soname,
+    uint64_t load_shared_library(CPU& cpu,
+                                 const std::string& soname,
                                  const std::string& parent_runpath = "",
                                  const std::string& parent_rpath = "");
     // Register a synthetic LoadedObject for a graphic library that
@@ -459,10 +509,10 @@ private:
                           uint64_t base, uint64_t& entry);
     // Build the global symbol table from obj's .dynsym. Only exported
     // (SHN_UNDEF == 0, st_shndx != SHN_UNDEF) symbols are added.
-    void index_symbols(const LoadedObject& obj);
+    void index_symbols(CPU& cpu, const LoadedObject& obj);
     // (.gnu.version, .gnu.version_d, .gnu.version_r) and populate
     // versioned_symbols_ with "name@version" keys.
-    void parse_versions_(const LoadedObject& obj);
+    void parse_versions_(CPU& cpu, const LoadedObject& obj);
     // Resolve a symbol by name AND version. Looks up versioned_symbols_
     // first (key "name@version"), then falls back to unversioned
     // symbols_. Returns 0 if not found.
@@ -474,7 +524,7 @@ private:
     void allocate_static_tls();
     // object (libs first, main last). Runs C++ static constructors.
     // Requires init_runner_ to be set; no-ops if not.
-    void run_init_arrays_();
+    void run_init_arrays_(CPU& cpu);
     // ── Per-relocation helpers ─────────────────────────────────────
     // Resolve a symbol referenced by a relocation. Returns the
     // absolute address (or 0 if undefined).

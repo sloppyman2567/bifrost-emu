@@ -38,6 +38,7 @@
 #include "core/emulator.h"
 #include "core/memory.h"
 #include "core/cpu.h"
+#include <mutex>
 #include "core/signal.h"
 #include "debug_flags.h"
 #include "frontend/dynamic_linker.h"  // DynamicLinker (for _dl_allocate_tls syscall)
@@ -1012,6 +1013,14 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                         "a0=0x%llx\n", static_cast<unsigned long long>(a0));
             }
             auto* dl = emu.dyn_linker_.get();
+            // Hold the loader lock while accounting TLS sizes and copying
+            // per-thread TLS templates — a concurrent dlopen() from another
+            // guest thread could otherwise reorder objects_ mid-iteration.
+            // (When the linker is absent — static binary, no thunk — the
+            // fallback mutex is uncontended and effectively free.)
+            std::recursive_mutex fallback_mu;
+            std::lock_guard<std::recursive_mutex> tls_lk(
+                dl ? dl->loader_lock() : fallback_mu);
             // ── Compute lib_size, main TLS info, and tcb_size ─────────
             // Uses variant-I TLS layout (glibc AArch64):
             //   - Main exe TLS: at POSITIVE TP offsets (TP + tcb_size ..)
@@ -1188,7 +1197,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(0);
                 return 0;
             }
-            uint64_t handle = dl->load_library(path);
+            uint64_t handle = dl->load_library(cpu, path);
             if (handle == 0) {
                 if (getenv("BIFROST_DYNLINK_TRACE")) {
                     fprintf(stderr, "[dlopen] failed: %s\n", dl->error().c_str());
@@ -1247,7 +1256,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 0x1004: {
             auto* dl = emu.dyn_linker_.get();
             if (!dl || a0 == 0) { ret_host(static_cast<int64_t>(-1)); return 0; }
-            int rc = dl->close_library(a0);
+            int rc = dl->close_library(cpu, a0);
             if (getenv("BIFROST_DYNLINK_TRACE")) {
                 fprintf(stderr, "[dlclose] handle=0x%llx → %d\n",
                         static_cast<unsigned long long>(a0), rc);
@@ -1313,7 +1322,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         case 0x1007: {
             auto* dl = emu.dyn_linker_.get();
             if (!dl || a0 == 0) { ret_host(0); return 0; }
-            int rc = dl->iterate_phdr(a0, a1);
+            int rc = dl->iterate_phdr(cpu, a0, a1);
             if (getenv("BIFROST_DYNLINK_TRACE")) {
                 fprintf(stderr, "[dl_iterate_phdr] callback=0x%llx data=0x%llx → %d\n",
                         static_cast<unsigned long long>(a0),

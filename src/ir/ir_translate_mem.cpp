@@ -16,7 +16,7 @@
 // design rules (vreg mapping, ZEXT-after-32-bit-ops, etc.).
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
-#include "core/emulator.h"  // for cond_true() (used by executor only)
+#include "core/emulator.h"  // for cond_true()
 namespace arm64emu {
 // Returns `true` if `d.cls` was one of the memory load/store cases
 // handled here (in which case translate_to_ir() returns `false` — none

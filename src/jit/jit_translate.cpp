@@ -12,6 +12,7 @@
 //   6. Returns a function pointer to the compiled block.
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
+#include "frontend/dynamic_linker.h"
 #include "ir/ir.hpp"
 #include "opgen_simd.hpp"
 #include <atomic>
@@ -233,6 +234,34 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
+    }
+    // ── glibc malloc/free freelist quarantine (Track A) ────────────
+    // The JIT has a known register-state corruption entering glibc's
+    // malloc/free safe-linked freelist code (PROTECT_PTR head reads as 0,
+    // corrupting the heap). Blocks inside glibc's allocator hot region
+    // run via the interpreter, which is the correct baseline. The region
+    // is matched by name + file offset so it survives ASLR.
+    static const bool qt_quarantine_ = (getenv("BIFROST_MALLOC_INTERP") != nullptr);
+    if (qt_quarantine_) {
+        if (emu.dyn_linker()) {
+            uint64_t off = emu.dyn_linker()->object_relative_offset(start_pc, "libc");
+            // malloc/free/calloc/realloc + internal _int_malloc/_int_free.
+            if (off != ~uint64_t(0) && off >= 0x90480 && off <= 0x92800) {
+                BlockEntry entry;
+                entry.fn = nullptr;
+                entry.interp_only = true;
+                entry.interp_only_count = instr_count;
+                entry.ends_with_branch = ir_block.ends_with_branch;
+                entry.chain_target_pc = 0;
+                entry.chained = false;
+                entry.instr_count = instr_count;
+                entry.verified_once = true;  // interp-only: no verify
+                blocks_[start_pc] = entry;
+                blocks_translated++;
+                make_executable();  // W^X: balance the make_writable() at entry
+                return nullptr;
+            }
+        }
     }
     // ── Heuristic: skip JIT for CALL_INTERP-heavy blocks ──────────
     // The JIT's per-CALL_INTERP overhead (flush all vregs + push 2 regs +
