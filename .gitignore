@@ -9,6 +9,9 @@ bifrost-emu-dbg
 # Test binaries (regenerated from .s)
 test/*.elf
 
+# Ad-hoc diagnostic probes
+ctest_real/mangle_probe.c
+
 # C test binaries (regenerated from .c via musl toolchain)
 ctest/*.elf
 ctest_real/*.elf
@@ -46,6 +49,7 @@ tools/sdl2-sdk/
 
 # Agent workspace data (local tool config, node_modules, plans)
 .kilo/
+.opencode/
 
 # CMake (if added later)
 build/
