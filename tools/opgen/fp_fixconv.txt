@@ -1,0 +1,30 @@
+# fp_fixconv.txt — FP fixed-point conversion decode/classify spec.
+# GENERATOR INPUT (single source of truth). Same format as simd_dp.txt:
+#   NAME  MASK            MATCH           FAMILY    IRSUB   GUARD
+# MASK is ANDed onto the raw op; result must equal MATCH. GUARD is a
+# C++ boolean expr with `op` (uint32_t) and `Q`/`U`/`size` in scope.
+# First match wins, so order rows by priority.
+#
+# This table covers ONLY the fixed-point (scaled) integer<->FP
+# conversions: SCVTF/UCVTF/FCVTZS/FCVTZU with a #fbits scale. The
+# non-fixed integer conversions (0x1E220000 / 0x1E380000) and the
+# two-register-misc family (0x5E200800) are separate groups and stay
+# hand-coded in the consumers.
+#
+# IRSUB (semantic sub-opcode) -> meaning:
+#   0 = SCVTF/UCVTF  int->FP, GPR source, FP dest
+#       fbits = 64 - bits[15:10], U = bit 16, sf = bit 31
+#   1 = FCVTZS/FCVTZU FP->int, FP source, GPR dest
+#       (same field decode as 0)
+#   2 = SCVTF/UCVTF  int->FP, FP source, FP dest
+#       fbits = 64 - bits[21:16], U = bit 29, size = bit 22
+#   3 = FCVTZS/FCVTZU FP->int, FP source, FP dest
+#       (same field decode as 2)
+#
+# Subops 2/3 are the AdvSIMD-scalar group 0x5F00E400; bits[12:11]
+# separate SCVTF/UCVTF (00) from FCVTZS/FCVTZU (11), so each gets its
+# own GUARD on the same mask/match.
+SCVTF_GPR  0x7F3E0000   0x1E020000   FIXCONV   0   -
+FCVTZS_GPR 0x7F3E0000   0x1E180000   FIXCONV   1   -
+SCVTF_FP   0xDF80E400   0x5F00E400   FIXCONV   2   ((op >> 11) & 3) == 0
+FCVTZS_FP  0xDF80E400   0x5F00E400   FIXCONV   3   ((op >> 11) & 3) == 3

@@ -14,6 +14,7 @@
 #include "core/emulator.h"
 #include "decoder.hpp"
 #include "interp/interp_crypto.hpp"
+#include "opgen_fpfixed.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -3465,45 +3466,115 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 return;
             }
-            // FCVTZS/FCVTZU (fixed-point variant)
-            // Same encoding as the integer variant but bit 21 = 0 and a
-            // 6-bit scale field at bits[15:10] selects the number of
-            // fractional bits (fbits = 64 - scale). Semantics: scale the
-            // FP value by 2^fbits, convert to integer with truncation
-            // toward zero, and saturate to the destination's range on
-            // overflow. NaN → 0.
-            //
-            // Without this handler, every fixed-point FCVTZU (e.g.
-            // toybox MD5 K-table init: `fcvtzu w1, d0, #32` for
-            // floor(|sin|*2^32)) was silently NOP'd, leaving the
-            // destination register unchanged and producing wrong hashes.
-            if ((op & 0x7F3E0000) == 0x1E180000) {
-                bool is_unsigned = ((op >> 16) & 1);
-                bool is_64bit = sf_val;
-                int fbits = 64 - static_cast<int>((op >> 10) & 0x3F);
-                double a = ftype ? read_fp_d(cpu, rn)
-                                 : static_cast<double>(read_fp_s(cpu, rn));
-                double scaled = std::ldexp(a, fbits);
-                // Saturating conversion. NaN maps to 0 (ARM ARM).
-                if (is_unsigned) {
-                    double hi = is_64bit ? 18446744073709551616.0
-                                         : 4294967296.0;
-                    uint64_t v = (std::isnan(a) || scaled < 0.0) ? 0
-                               : (scaled >= hi) ? (is_64bit ? ~0ULL : 0xFFFFFFFFu)
-                               : static_cast<uint64_t>(scaled);
-                    cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
-                } else {
-                    double hi = is_64bit ? 9223372036854775808.0
-                                         : 2147483648.0;
-                    double lo = -hi;
-                    int64_t v = std::isnan(a) ? 0
-                              : (scaled >= hi) ? (is_64bit ? INT64_MAX : INT32_MAX)
-                              : (scaled < lo)  ? (is_64bit ? INT64_MIN : INT32_MIN)
-                              : static_cast<int64_t>(scaled);
-                    cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v)
-                                            : static_cast<uint32_t>(static_cast<int32_t>(v));
+            // ── Fixed-point int↔FP conversions (SCVTF/UCVTF/FCVTZS/FCVTZU #fbits) ──
+            // Decoded by the generated table (tools/opgen/fp_fixconv.txt →
+            // include/opgen_fpfixed.hpp) so interp, IR translator and JIT
+            // gate share one mask set. Subops:
+            //   0 = SCVTF/UCVTF int→FP, GPR source (U=bit16, sf=bit31,
+            //       fbits = 64-bits[15:10])
+            //   1 = FCVTZS/FCVTZU FP→int, GPR dest (same field decode)
+            //   2 = SCVTF/UCVTF int→FP, FP source/dest (U=bit29, size=bit22,
+            //       fbits = 64-bits[21:16])
+            //   3 = FCVTZS/FCVTZU FP→int, FP source/dest (same field decode)
+            {
+                fpfixed::Op fc = fpfixed::classify(op);
+                if (fc.family == fpfixed::Family::FIXCONV) {
+                    if (fc.subop <= 1) {
+                        // FPDataProc1 forms: GPR source/dest.
+                        bool is_unsigned = ((op >> 16) & 1);
+                        bool is_64bit = sf_val;
+                        int fbits = 64 - static_cast<int>((op >> 10) & 0x3F);
+                        if (fc.subop == 1) {
+                            // FCVTZS/FCVTZU: scale by 2^fbits, truncate toward
+                            // zero, saturate to dest range, NaN → 0. Without
+                            // this handler every fixed-point FCVTZU (e.g. toybox
+                            // MD5 K-table init `fcvtzu w1, d0, #32`) was silently
+                            // NOP'd, leaving wrong hashes.
+                            double a = ftype ? read_fp_d(cpu, rn)
+                                             : static_cast<double>(read_fp_s(cpu, rn));
+                            double scaled = std::ldexp(a, fbits);
+                            if (is_unsigned) {
+                                double hi = is_64bit ? 18446744073709551616.0
+                                                     : 4294967296.0;
+                                uint64_t v = (std::isnan(a) || scaled < 0.0) ? 0
+                                           : (scaled >= hi) ? (is_64bit ? ~0ULL : 0xFFFFFFFFu)
+                                           : static_cast<uint64_t>(scaled);
+                                cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
+                            } else {
+                                double hi = is_64bit ? 9223372036854775808.0
+                                                     : 2147483648.0;
+                                double lo = -hi;
+                                int64_t v = std::isnan(a) ? 0
+                                          : (scaled >= hi) ? (is_64bit ? INT64_MAX : INT32_MAX)
+                                          : (scaled < lo)  ? (is_64bit ? INT64_MIN : INT32_MIN)
+                                          : static_cast<int64_t>(scaled);
+                                cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v)
+                                                        : static_cast<uint32_t>(static_cast<int32_t>(v));
+                            }
+                        } else {
+                            // SCVTF/UCVTF: convert integer to FP, divide by
+                            // 2^fbits (treat the source as fixed-point).
+                            double v = is_unsigned
+                                ? static_cast<double>(is_64bit ? cpu.regs[rn]
+                                                               : static_cast<uint32_t>(cpu.regs[rn]))
+                                : static_cast<double>(is_64bit ? static_cast<int64_t>(cpu.regs[rn])
+                                                               : static_cast<int32_t>(cpu.regs[rn]));
+                            double result = std::ldexp(v, -fbits);
+                            if (ftype) write_fp_d(cpu, rd, result);
+                            else       write_fp_s(cpu, rd, static_cast<float>(result));
+                        }
+                    } else {
+                        // AdvSIMD-scalar forms: FP register source/dest.
+                        // GCC emits `scvtf s0, s0, #1` (0x5F3FE400) when the
+                        // integer already sits in an FP register (e.g. `(float)x`
+                        // with x loaded from memory). The old silent NOP left the
+                        // dest holding the raw integer bit pattern as a denormal
+                        // float, breaking the inRect() hit test in rudolf-cart.
+                        bool is_unsigned = (op >> 29) & 1;
+                        bool is_double = (op >> 22) & 1;
+                        int fbits = 64 - static_cast<int>((op >> 16) & 0x3F);
+                        uint64_t src_bits = cpu.v_lo[rn];
+                        if (fc.subop == 2) {
+                            if (is_double) {
+                                double v = is_unsigned
+                                    ? static_cast<double>(static_cast<uint64_t>(src_bits))
+                                    : static_cast<double>(static_cast<int64_t>(src_bits));
+                                write_fp_d(cpu, rd, std::ldexp(v, -fbits));
+                            } else {
+                                float v = is_unsigned
+                                    ? static_cast<float>(static_cast<uint32_t>(src_bits))
+                                    : static_cast<float>(static_cast<int32_t>(src_bits));
+                                write_fp_s(cpu, rd, std::ldexpf(v, -fbits));
+                            }
+                        } else {
+                            double a = is_double ? read_fp_d(cpu, rn)
+                                                 : static_cast<double>(read_fp_s(cpu, rn));
+                            double scaled = std::ldexp(a, fbits);
+                            if (is_unsigned) {
+                                double hi = is_double ? 18446744073709551616.0
+                                                      : 4294967296.0;
+                                uint64_t out = (std::isnan(a) || scaled < 0.0) ? 0
+                                           : (scaled >= hi) ? (is_double ? ~0ULL : 0xFFFFFFFFu)
+                                           : static_cast<uint64_t>(scaled);
+                                // Write to Sd zeroes the upper 32 bits (matches
+                                // the two-register-misc FCVTZS handler below).
+                                cpu.v_lo[rd] = is_double ? out : (out & 0xFFFFFFFFULL);
+                                cpu.v_hi[rd] = 0;
+                            } else {
+                                double hi = is_double ? 9223372036854775808.0
+                                                      : 2147483648.0;
+                                int64_t out = std::isnan(a) ? 0
+                                            : (scaled >= hi) ? (is_double ? INT64_MAX : INT32_MAX)
+                                            : (scaled < -hi) ? (is_double ? INT64_MIN : INT32_MIN)
+                                            : static_cast<int64_t>(scaled);
+                                cpu.v_lo[rd] = is_double ? static_cast<uint64_t>(out)
+                                                         : (static_cast<uint32_t>(out) & 0xFFFFFFFFULL);
+                                cpu.v_hi[rd] = 0;
+                            }
+                        }
+                    }
+                    return;
                 }
-                return;
             }
             // SCVTF/UCVTF (integer variant)
             // Mask 0x7F3EFC00 with constant 0x1E220000 requires bit 21 = 1
@@ -3530,82 +3601,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     } else {
                         int64_t v = is_64bit ? static_cast<int64_t>(cpu.regs[rn]) : static_cast<int32_t>(cpu.regs[rn]);
                         write_fp_s(cpu, rd, static_cast<float>(v));
-                    }
-                }
-                return;
-            }
-            // SCVTF/UCVTF (fixed-point variant)
-            // Bit 21 = 0 distinguishes from the integer variant; the 6-bit
-            // scale at bits[15:10] selects fractional bits (fbits = 64 - scale).
-            // Semantics: convert integer to FP and divide by 2^fbits — i.e.
-            // treat the source integer as a fixed-point value.
-            if ((op & 0x7F3E0000) == 0x1E020000) {
-                bool is_unsigned = ((op >> 16) & 1);
-                bool is_64bit = sf_val;
-                int fbits = 64 - static_cast<int>((op >> 10) & 0x3F);
-                double v = is_unsigned
-                    ? static_cast<double>(is_64bit ? cpu.regs[rn]
-                                                   : static_cast<uint32_t>(cpu.regs[rn]))
-                    : static_cast<double>(is_64bit ? static_cast<int64_t>(cpu.regs[rn])
-                                                   : static_cast<int32_t>(cpu.regs[rn]));
-                double result = std::ldexp(v, -fbits);
-                if (ftype) write_fp_d(cpu, rd, result);
-                else       write_fp_s(cpu, rd, static_cast<float>(result));
-                return;
-            }
-            // ── AdvSIMD scalar fixed-point int↔FP (FP register sources) ──
-            // SCVTF/UCVTF/FCVTZS/FCVTZU <Sd>/<Dd>, <Sn>/<Dn>, #<fbits>.
-            // Group: (op & 0xDF80E400) == 0x5F00E400. Unlike the FPDataProc1
-            // fixed-point forms (0x1E02xxxx, GPR source/dest) and the
-            // two-register-misc forms (0x5E20D800), these read the integer
-            // from / write it to an FP register. Layout:
-            //   bit 29 = U (1 = UCVTF/FCVTZU)
-            //   bit 22 = size (0 = S/32-bit, 1 = D/64-bit)
-            //   bits[21:16] = scale, fbits = 64 - scale
-            //   bits[12:11] = 00 → SCVTF/UCVTF (int→FP), 11 → FCVTZS/FCVTZU
-            // GCC emits `scvtf s0, s0, #1` (0x5F3FE400) when the integer
-            // already sits in an FP register (e.g. `(float)x` with x from
-            // memory). The previous silent NOP left the destination holding
-            // the raw integer bit pattern as a float (a denormal), so any
-            // comparison against it failed — the inRect() button hit test
-            // in rudolf-cart's click handler never matched.
-            if ((op & 0xDF80E400) == 0x5F00E400) {
-                bool is_unsigned = (op >> 29) & 1;
-                bool is_double = (op >> 22) & 1;
-                int fbits = 64 - static_cast<int>((op >> 16) & 0x3F);
-                bool to_fp = ((op >> 11) & 3) == 0;  // 00 = SCVTF/UCVTF
-                uint64_t src_bits = cpu.v_lo[rn];
-                if (to_fp) {
-                    if (is_double) {
-                        double v = is_unsigned
-                            ? static_cast<double>(static_cast<uint64_t>(src_bits))
-                            : static_cast<double>(static_cast<int64_t>(src_bits));
-                        write_fp_d(cpu, rd, std::ldexp(v, -fbits));
-                    } else {
-                        float v = is_unsigned
-                            ? static_cast<float>(static_cast<uint32_t>(src_bits))
-                            : static_cast<float>(static_cast<int32_t>(src_bits));
-                        write_fp_s(cpu, rd, std::ldexpf(v, -fbits));
-                    }
-                } else {
-                    double a = is_double ? read_fp_d(cpu, rn)
-                                         : static_cast<double>(read_fp_s(cpu, rn));
-                    double scaled = std::ldexp(a, fbits);
-                    if (is_unsigned) {
-                        double hi = is_double ? 18446744073709551616.0
-                                              : 4294967296.0;
-                        uint64_t out = (std::isnan(a) || scaled < 0.0) ? 0
-                                   : (scaled >= hi) ? (is_double ? ~0ULL : 0xFFFFFFFFu)
-                                   : static_cast<uint64_t>(scaled);
-                        cpu.v_lo[rd] = out; cpu.v_hi[rd] = 0;
-                    } else {
-                        double hi = is_double ? 9223372036854775808.0
-                                              : 2147483648.0;
-                        int64_t out = std::isnan(a) ? 0
-                                    : (scaled >= hi) ? (is_double ? INT64_MAX : INT32_MAX)
-                                    : (scaled < -hi) ? (is_double ? INT64_MIN : INT32_MIN)
-                                    : static_cast<int64_t>(scaled);
-                        cpu.v_lo[rd] = static_cast<uint64_t>(out); cpu.v_hi[rd] = 0;
                     }
                 }
                 return;

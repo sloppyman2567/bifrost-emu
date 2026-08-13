@@ -75,7 +75,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check test clean install uninstall lib debug setup setup-tests check-all
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all
 
 all: $(TARGET)
 
@@ -112,6 +112,24 @@ $(THUNK_OUTS): $(THUNK_SPECS) $(THUNK_GEN)
 
 opgen-thunk-check:
 	python3 tools/opgen/thunkgen.py --check $(THUNK_SPECS) $(THUNK_OUTS)
+
+# FP fixed-point conversion decode table (same pattern as SIMD_DP above):
+# tools/opgen/fp_fixconv.txt is the single source of truth for which
+# SCVTF/UCVTF/FCVTZS/FCVTZU #fbits form is which (GPR vs FP register
+# source/dest). Generated into include/opgen_fpfixed.hpp, consumed by
+# the interpreter (interp_fp.cpp), the IR translator (ir_translate_fp.cpp)
+# and the JIT block heuristic (jit_translate.cpp).
+FPFIX_SPECS := tools/opgen/fp_fixconv.txt
+FPFIX_GEN   := tools/opgen/fpgen.py
+FPFIX_OUTS  := include/opgen_fpfixed.hpp
+
+opgen-fpfixed: $(FPFIX_OUTS)
+
+$(FPFIX_OUTS): $(FPFIX_SPECS) $(FPFIX_GEN)
+	python3 tools/opgen/fpgen.py $(FPFIX_SPECS) $@
+
+opgen-fpfixed-check:
+	python3 tools/opgen/fpgen.py --check $(FPFIX_SPECS) $(FPFIX_OUTS)
 
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
@@ -317,6 +335,6 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check $(TARGET)
+check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET)
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh

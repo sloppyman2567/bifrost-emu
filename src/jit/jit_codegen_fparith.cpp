@@ -384,6 +384,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
             bool is_64bit_dest = (inst.flags_op != 0);
+            bool fp_dest = (inst.imms & 1) != 0;  // subop 3: int result into an FP reg
             int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
             check_fp_reg_index(inst.src1, "FP_F2I_FIXED src1");
             clobber_flags();
@@ -532,8 +533,23 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             size_t done_path = code_buf_used_;
             patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
-            // Store result to cpu.regs[dest]
-            store_reg_to_vreg(inst.dest, RAX);
+            // Store result. For the AdvSIMD-scalar form (subop 3, fp_dest) the
+            // integer goes into v_lo[dest] (an FP register) with v_hi cleared;
+            // a 32-bit result is zero-extended (ARM: write to Sd zeroes the
+            // upper 32 bits), matching the interpreter.
+            if (fp_dest) {
+                check_fp_reg_index(inst.dest, "FP_F2I_FIXED FP dest");
+                int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+                if (!is_64bit_dest) {
+                    emit_mov_imm32_zext(RCX, 0xFFFFFFFFu);
+                    emit_byte(0x48); emit_byte(0x21); emit_byte(0xC8);  // and rax, rcx
+                }
+                emit_store(CPU_REG, off_d, RAX);
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            } else {
+                store_reg_to_vreg(inst.dest, RAX);
+            }
             return true;
         }
         // ── fixed-point int→FP (SCVTF/UCVTF with scale) ─────────────
@@ -547,13 +563,22 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
             bool is_64bit_src = (inst.flags_op != 0);
+            bool fp_src = (inst.imms & 1) != 0;  // subop 2: int bits in an FP reg
             int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
             check_fp_reg_index(inst.dest, "FP_I2F_FIXED dest");
             uint8_t rex_w = (is_64bit_src || is_unsigned) ? 0x48 : 0x00;
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // Load GPR into RAX
-            load_vreg_to_reg(RAX, inst.src1);
+            // Load GPR into RAX. For the AdvSIMD-scalar form (subop 2, fp_src)
+            // the integer bits come from v_lo[src1] instead of cpu.regs[].
+            if (fp_src) {
+                check_fp_reg_index(inst.src1, "FP_I2F_FIXED FP src1");
+                int32_t off_s = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+                if (is_64bit_src) emit_load(RAX, CPU_REG, off_s);
+                else              emit_load32(RAX, CPU_REG, off_s);
+            } else {
+                load_vreg_to_reg(RAX, inst.src1);
+            }
             // Convert int→double in XMM0. For single-precision dest, we
             // still convert to double first (for precision), multiply by
             // 2^-fbits in double, then demote to single at the end.

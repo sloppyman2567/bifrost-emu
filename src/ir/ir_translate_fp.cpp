@@ -18,6 +18,7 @@
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true() (used by executor only)
 #include "opgen_simd.hpp" // generated SIMD_DP decode table (tools/opgen)
+#include "opgen_fpfixed.hpp" // generated fixed-point convert table (tools/opgen)
 namespace arm64emu {
 // Returns `true` if `d.cls` was one of the FP/SIMD cases handled here
 // (in which case translate_to_ir() returns `false` — none of the
@@ -302,42 +303,74 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
-            // FCVTZS/FCVTZU (fixed-point variant): scale FP value by 2^fbits
-            // then convert to integer with truncation toward zero, saturating
-            // to the destination's signed/unsigned range on overflow. The 6-bit
-            // scale at bits[15:10] gives fbits = 64 - scale.
+            // ── Fixed-point int↔FP conversions (SCVTF/UCVTF/FCVTZS/FCVTZU #fbits) ──
+            // Classified by the generated table (tools/opgen/fp_fixconv.txt →
+            // include/opgen_fpfixed.hpp) so interp, IR translator and the JIT
+            // gate share one mask set. Subops:
+            //   0 = SCVTF/UCVTF int→FP, GPR source (FP_I2F_FIXED, src1 = GPR vreg)
+            //   1 = FCVTZS/FCVTZU FP→int, GPR dest (FP_F2I_FIXED, src1 = FP reg)
+            //   2 = SCVTF/UCVTF int→FP, FP source+dest (FP_I2F_FIXED, FP-src flag)
+            //   3 = FCVTZS/FCVTZU FP→int, FP source+dest (FP_F2I_FIXED, FP-dest flag)
             //
-            // Native IR op FP_F2I_FIXED is emitted here; the JIT codegen
-            // (src/jit/frostjit.cpp) implements the saturating scaled
-            // truncation directly in x86. The codegen was fixed to properly
-            // flush XMM0/XMM1's prior contents before loading the operands
-            // (the previous "first FCVTZU produces 0" bug was caused by
-            // stale XMM state from a prior FP op not being cleared).
-            if ((op & 0x7F3E0000) == 0x1E180000) {
-                bool is_unsigned = (op >> 16) & 1;
-                uint8_t sf = (op >> 31) & 1;
-                uint8_t scale = (op >> 10) & 0x3F;
-                uint8_t fbits = 64 - scale;
-                if (ftype <= 1) {
-                    // For 32-bit dest (sf=0), emit ZEXT to zero upper bits.
-                    uint16_t tmp = g_alloc.alloc();
-                    emit(block, IROp::FP_F2I_FIXED, tmp, rn, 0, ftype, 0,
-                         sf, is_unsigned, cur_pc);
-                    // Patch immr via the IRInst — the emit() helper doesn't
-                    // expose immr directly; set it on the just-pushed inst.
-                    block.insts.back().immr = fbits;
-                    if (!sf) {
-                        uint16_t z = g_alloc.alloc();
-                        emit(block, IROp::ZEXT, z, tmp, 0, 32);
-                        store_arm_reg(block, rd, z);
-                    } else {
-                        store_arm_reg(block, rd, tmp);
+            // For subops 2/3 the source integer lives in an FP register
+            // (e.g. GCC's `scvtf s0, s0, #1` in (float)x hit tests) so the
+            // JIT codegen must read/write v_lo[] instead of a GPR; that is
+            // signalled via inst.imms bit 0.
+            {
+                fpfixed::Op fc = fpfixed::classify(op);
+                if (fc.family == fpfixed::Family::FIXCONV) {
+                    if (ftype <= 1) {
+                        bool is_unsigned;
+                        uint8_t w, sf, fbits;
+                        if (fc.subop <= 1) {
+                            is_unsigned = (op >> 16) & 1;
+                            sf = (op >> 31) & 1;
+                            fbits = 64 - ((op >> 10) & 0x3F);
+                            w = ftype;
+                        } else {
+                            is_unsigned = (op >> 29) & 1;
+                            sf = (op >> 22) & 1;   // size bit = 64-bit int width
+                            fbits = 64 - ((op >> 16) & 0x3F);
+                            w = (op >> 22) & 1;
+                        }
+                        if (fc.subop == 0) {
+                            emit(block, IROp::FP_I2F_FIXED, rd, rn, 0, w, 0,
+                                 sf, is_unsigned, cur_pc);
+                            block.insts.back().immr = fbits;
+                            return true;
+                        }
+                        if (fc.subop == 1) {
+                            uint16_t tmp = g_alloc.alloc();
+                            emit(block, IROp::FP_F2I_FIXED, tmp, rn, 0, w, 0,
+                                 sf, is_unsigned, cur_pc);
+                            block.insts.back().immr = fbits;
+                            if (!sf) {
+                                uint16_t z = g_alloc.alloc();
+                                emit(block, IROp::ZEXT, z, tmp, 0, 32);
+                                store_arm_reg(block, rd, z);
+                            } else {
+                                store_arm_reg(block, rd, tmp);
+                            }
+                            return true;
+                        }
+                        if (fc.subop == 2) {
+                            emit(block, IROp::FP_I2F_FIXED, rd, rn, 0, w, 0,
+                                 sf, is_unsigned, cur_pc);
+                            block.insts.back().immr = fbits;
+                            block.insts.back().imms = 1;  // FP register source
+                            return true;
+                        }
+                        // subop 3
+                        emit(block, IROp::FP_F2I_FIXED, rd, rn, 0, w, 0,
+                             sf, is_unsigned, cur_pc);
+                        block.insts.back().immr = fbits;
+                        block.insts.back().imms = 1;  // FP register dest
+                        return true;
                     }
+                    // ftype=3 (half) → fall through to CALL_INTERP.
+                    emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }
-                // ftype=3 (half) → fall through to CALL_INTERP.
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return true;
             }
             // FCVT (float ↔ double conversion).
             // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
@@ -385,25 +418,6 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          sf, is_unsigned, cur_pc);
                     return true;
                 }
-            }
-            // SCVTF/UCVTF (fixed-point variant): convert integer to FP and
-            // divide by 2^fbits (fbits = 64 - scale). Native IR op
-            // FP_I2F_FIXED is emitted; the JIT codegen reuses the integer-
-            // variant FP_I2F codegen then multiplies by 2^-fbits.
-            if ((op & 0x7F3E0000) == 0x1E020000) {
-                bool is_unsigned = (op >> 16) & 1;
-                uint8_t sf = (op >> 31) & 1;
-                uint8_t scale = (op >> 10) & 0x3F;
-                uint8_t fbits = 64 - scale;
-                if (ftype <= 1) {
-                    emit(block, IROp::FP_I2F_FIXED, rd, rn, 0, ftype, 0,
-                         sf, is_unsigned, cur_pc);
-                    block.insts.back().immr = fbits;
-                    return true;
-                }
-                // ftype=3 (half) → fall through to CALL_INTERP.
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return true;
             }
             // FMADD/FMSUB/FNMADD/FNMSUB (FP fused multiply-add/subtract).
             // Encoding: (op & 0xFF000000) == 0x1F000000.

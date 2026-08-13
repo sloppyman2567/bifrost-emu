@@ -15,6 +15,7 @@
 #include "frontend/dynamic_linker.h"
 #include "ir/ir.hpp"
 #include "opgen_simd.hpp"
+#include "opgen_fpfixed.hpp"
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -106,8 +107,15 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             // FCVT D↔S (0x1E624000 double→single, 0x1E22C000 single→double).
             if ((op & 0xFFFFFC00) == 0x1E624000 || (op & 0xFFFFFC00) == 0x1E22C000)
                 return fp_gate < 0 || (fp_gate & 0x20);
-            // SCVTF/UCVTF (int→FP) + fixed-point variant.
-            if ((op & 0x7F3EFC00) == 0x1E220000 || (op & 0x7F3E0000) == 0x1E020000)
+            // SCVTF/UCVTF (int→FP).
+            if ((op & 0x7F3EFC00) == 0x1E220000)
+                return fp_gate < 0 || (fp_gate & 0x20);
+            // Fixed-point int↔FP converts (SCVTF/UCVTF/FCVTZS/FCVTZU #fbits).
+            // Classified via the generated table (tools/opgen/fp_fixconv.txt)
+            // so this gate can't drift from interp/IR. Covers the FPDataProc1
+            // forms (GPR source/dest) AND the AdvSIMD-scalar forms with FP
+            // register source/dest (e.g. GCC's `scvtf s0, s0, #1`).
+            if (fpfixed::classify(op).family == fpfixed::Family::FIXCONV)
                 return fp_gate < 0 || (fp_gate & 0x20);
             // FMA family (FMADD/FMSUB/FNMADD/FNMSUB).
             if ((op & 0xFF000000) == 0x1F000000)
