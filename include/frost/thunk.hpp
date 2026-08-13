@@ -70,6 +70,9 @@ namespace arm64emu {
 // Forward-declarations (full types defined in their own headers).
 class Memory;
 class CPU;
+// Generated spec table type (include/opgen_thunk.hpp); only a pointer is
+// stored in SymbolEntry, so a forward declaration is enough here.
+namespace thunk { struct Spec; }
 // Forward-declare the pimpl.
 struct GraphicThunkImpl;
 class GraphicThunk {
@@ -157,7 +160,8 @@ private:
                             uint16_t pointer_args = 0,
                             uint8_t n_stack = 0,
                             uint8_t n_float = 0,
-                            uint8_t flags = 0);
+                            uint8_t flags = 0,
+                            const thunk::Spec* spec = nullptr);
     void* resolve_gl_(const std::string& sym);
     void* resolve_egl_(const std::string& sym);
     void* resolve_sdl_(const std::string& sym);

@@ -3553,6 +3553,63 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else       write_fp_s(cpu, rd, static_cast<float>(result));
                 return;
             }
+            // ── AdvSIMD scalar fixed-point int↔FP (FP register sources) ──
+            // SCVTF/UCVTF/FCVTZS/FCVTZU <Sd>/<Dd>, <Sn>/<Dn>, #<fbits>.
+            // Group: (op & 0xDF80E400) == 0x5F00E400. Unlike the FPDataProc1
+            // fixed-point forms (0x1E02xxxx, GPR source/dest) and the
+            // two-register-misc forms (0x5E20D800), these read the integer
+            // from / write it to an FP register. Layout:
+            //   bit 29 = U (1 = UCVTF/FCVTZU)
+            //   bit 22 = size (0 = S/32-bit, 1 = D/64-bit)
+            //   bits[21:16] = scale, fbits = 64 - scale
+            //   bits[12:11] = 00 → SCVTF/UCVTF (int→FP), 11 → FCVTZS/FCVTZU
+            // GCC emits `scvtf s0, s0, #1` (0x5F3FE400) when the integer
+            // already sits in an FP register (e.g. `(float)x` with x from
+            // memory). The previous silent NOP left the destination holding
+            // the raw integer bit pattern as a float (a denormal), so any
+            // comparison against it failed — the inRect() button hit test
+            // in rudolf-cart's click handler never matched.
+            if ((op & 0xDF80E400) == 0x5F00E400) {
+                bool is_unsigned = (op >> 29) & 1;
+                bool is_double = (op >> 22) & 1;
+                int fbits = 64 - static_cast<int>((op >> 16) & 0x3F);
+                bool to_fp = ((op >> 11) & 3) == 0;  // 00 = SCVTF/UCVTF
+                uint64_t src_bits = cpu.v_lo[rn];
+                if (to_fp) {
+                    if (is_double) {
+                        double v = is_unsigned
+                            ? static_cast<double>(static_cast<uint64_t>(src_bits))
+                            : static_cast<double>(static_cast<int64_t>(src_bits));
+                        write_fp_d(cpu, rd, std::ldexp(v, -fbits));
+                    } else {
+                        float v = is_unsigned
+                            ? static_cast<float>(static_cast<uint32_t>(src_bits))
+                            : static_cast<float>(static_cast<int32_t>(src_bits));
+                        write_fp_s(cpu, rd, std::ldexpf(v, -fbits));
+                    }
+                } else {
+                    double a = is_double ? read_fp_d(cpu, rn)
+                                         : static_cast<double>(read_fp_s(cpu, rn));
+                    double scaled = std::ldexp(a, fbits);
+                    if (is_unsigned) {
+                        double hi = is_double ? 18446744073709551616.0
+                                              : 4294967296.0;
+                        uint64_t out = (std::isnan(a) || scaled < 0.0) ? 0
+                                   : (scaled >= hi) ? (is_double ? ~0ULL : 0xFFFFFFFFu)
+                                   : static_cast<uint64_t>(scaled);
+                        cpu.v_lo[rd] = out; cpu.v_hi[rd] = 0;
+                    } else {
+                        double hi = is_double ? 9223372036854775808.0
+                                              : 2147483648.0;
+                        int64_t out = std::isnan(a) ? 0
+                                    : (scaled >= hi) ? (is_double ? INT64_MAX : INT32_MAX)
+                                    : (scaled < -hi) ? (is_double ? INT64_MIN : INT32_MIN)
+                                    : static_cast<int64_t>(scaled);
+                        cpu.v_lo[rd] = static_cast<uint64_t>(out); cpu.v_hi[rd] = 0;
+                    }
+                }
+                return;
+            }
             // ── SIMD scalar int↔FP conversions (FP source/dest) ───────────────
             // These are in the "Advanced SIMD scalar two-register miscellaneous"
             // group (bits[31:24]=0x5E, bit 30=Q=1 for scalar form). They

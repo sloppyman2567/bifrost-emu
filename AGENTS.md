@@ -44,11 +44,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   size=1, NOT is U=1; RBIT bit-reverses per byte. Vector FCVTZS/FCVTZU
   share sub3 with ABS/NEG (0x0E20B800/0x2E20B800) but set bit16 (0x10000);
   FCVTZU clamps negatives to 0. The vector shift-by-immediate
-  family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI) is native in the JIT (AVX2
-  VEX 256-bit, `BIFROST_NO_AVX2` disables; SSE2 128-bit fallback; esize=1
-  and 64-bit SSRA via CALL_INTERP). USRA masks to 0x2F001400 — do not
-  confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
-  (0x0F003400), which are still unimplemented.
+  family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI/URSRA/SRSRA) is native in the
+  JIT (AVX2 VEX 256-bit, `BIFROST_NO_AVX2` disables; SSE2 128-bit fallback;
+  esize=1 and 64-bit SSRA/SRSRA via CALL_INTERP). USRA masks to 0x2F001400 —
+  do not confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
+  (0x0F003400): those add the round-half-up top discarded bit, computed via
+  (Vn >> sh) + ((Vn >> (sh-1)) & 1) (isolation: PSRL (sh-1) then PSLL/PSRL
+  (esize*8-1) round-trip, no mask constant). URSRA sh==esize*8 → top-bit
+  test; SRSRA sh==esize*8 → 0 (sign-fill cancels the round carry).
 - Vector FMOV immediate (cmode=0xF in the AdvSIMD modified-immediate block,
   e.g. `fmov v31.2d, #20.0` = 0x6F01F69F) is NOT a NOP: expand via
   AdvSIMDExpandImm. 64-bit (op bit29 set): `(imm8&0x3f)<<48`, sign bit →
@@ -87,15 +90,63 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   header or re-add ad-hoc sub3_noq/fp_key sm masks in those two files.
   FP_SCALAR is NOT table-migrated — it's ftype/opcode logic with FMOV/FCMP
   special cases; leave it hand-tuned.
+- GraphicThunk symbols are table-driven the same way: edit
+  `tools/opgen/thunk_dp.txt`, run `make opgen-thunk` (regenerates
+  `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
+  fails if the header drifted from the spec). Do NOT hand-edit the
+  generated header or re-add ad-hoc REG_* entries in thunk.cpp.
+- `make check-all` now runs BOTH generation guards (`opgen-check` +
+  `opgen-thunk-check`) before the test suite, so spec drift fails CI.
 
 ## Verification
 
-- `make USE_SDL2=1 USE_THUNK_GL=1`
-- `./scripts/run_tests.sh --unit --quick`
+- `make` (plain make auto-enables GL/SDL2/EGL thunking)
+- `make check-all` — the "everything" target: build + `setup-tests` +
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **190 pass /
+  0 fail / 0 skip**: unit + integration + toybox + real-world +
+  benchmarks + dynamic). The only historical skip was `test_dladdr_glibc`,
+  which must be a glibc-DYNAMIC binary or its dlopen stub skips with
+  exit 77.
+- `./scripts/run_tests.sh --test-all` — default suite + 5 interactive
+  stdin tests = **195 pass / 0 fail / 0 skip**, incl. downloaded
+  real-world binaries. Subsets: `--quick` (no benches),
+  `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
+  all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
 - `./bifrost-emu ctest/jit_neon_permute.elf`
 - `./scripts/run_tests.sh --dynamic` (includes `test_dlopen`)
 - `DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf`
+  (exit 0 = pass, 77 = skip when SDL/GL/display unavailable)
+
+### Test binary toolchains (how `make setup-tests` builds them)
+
+The suite has **195 tests** across categories (unit/JIT/interp, syscalls,
+integration, interactive, toybox, real-world, benchmarks, dynamic linking).
+Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
+`ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three
+toolchain flavors, per binary:
+
+- **musl-static** (default): `aarch64-linux-musl-gcc -static -O2` — most
+  tests; self-contained, no rootfs needed. Includes the dl* tests that
+  call the internal syscall directly (`test_dlopen`, `test_dladdr`).
+- **glibc-dynamic** (`GLIBC_DYN_SRCS` in the Makefile):
+  `aarch64-none-linux-gnu-gcc -O2` WITHOUT `-static`, so they exercise the
+  ELF loader, glibc interpreter, and real `dl*`/pthread plumbing:
+  `test_dladdr_glibc`, `test_dyn_hello`, `test_dyn_write`, `test_dyn_malloc`,
+  `test_dyn_printf`, `test_dyn_pthread_min`, `test_dyn_threads`,
+  `test_dyn_pthread_stress`, `test_dyn_pthread_8thread`. Must run with
+  `BIFROST_ROOT=rootfs`. DO NOT let setup-tests rebuild these as musl-static
+  (they'd silently pass as static stand-ins or skip).
+- **musl-dynamic**: `aarch64-linux-musl-gcc -O2` (no `-static`) for the
+  `*_musl`/`*_glibc` variants whose `.elf` name differs from the `.c`
+  (`hello_dyn_musl.elf`, `hello_dyn_glibc.elf` ← `hello_dyn.c`;
+  `test_dyn_full_musl.elf` ← `test_dyn_full.c`).
+
+Dynamic tests need the rootfs (`scripts/setup-rootfs.sh`, builds from the
+glibc toolchain's libc) and the glibc cross toolchain
+(`tools/fetch-glibc-toolchain.sh`). `setup-tests` fetches both toolchains if
+missing. When touching a dynamic test: rebuild with the correct toolchain,
+not musl-`-static`.
 
 ## Child DOX Index
 

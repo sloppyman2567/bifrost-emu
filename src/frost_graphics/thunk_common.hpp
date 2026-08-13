@@ -53,6 +53,38 @@ struct ThunkSymbolEntry {
     // the POINTER_ARGS macro in register_known_symbols_().
     uint8_t     pointer_args = 0;
 };
+// Full registry entry shared by GraphicThunk and DisplayThunk. This
+// struct must be defined ONCE (here) so that both TUs instantiate the
+// same std::vector<SymbolEntry> — two TU-local definitions of
+// arm64emu::SymbolEntry with different layouts (e.g. one carrying a
+// spec pointer) is an ODR violation: the linker COMDAT-folds the
+// out-of-line vector methods, and a 64-byte instantiation then corrupts
+// a 72-byte element buffer (mismatched stride → garbage size(), crash
+// in the idempotency scan).
+namespace thunk { struct Spec; }
+struct SymbolEntry {
+    std::string name;       // e.g. "glClear"
+    void*       host_fn;    // host function pointer (or null if stub)
+    uint64_t    guest_addr; // trampoline address in guest memory
+    uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
+    // Bit N set ⇒ arg N is a guest pointer needing translation.
+    // Covers args 0..11 (8 GPRs + up to 4 stack slots).
+    uint16_t    pointer_args = 0;
+    // Extra args beyond x0..x7, read from the guest stack at SP.
+    uint8_t     n_stack = 0;
+    // If >0, the first n_float args are IEEE-754 binary32 values in
+    // v0..v{n-1} (AAPCS64 FP ABI), not in x0..x7.
+    uint8_t     n_float = 0;
+    // flags: bit0 = host returns const char* → copy into guest string cache
+    //        bit1 = glShaderSource nested-pointer marshalling
+    //        bit2 = mixed int+float ABI (n_stack = #ints in x0.., n_float in v0..)
+    //        bit3 = GetProcAddress: resolve guest name → trampoline addr
+    uint8_t     flags = 0;
+    // Row in the generated symbol table (opgen_thunk.hpp). NULL for
+    // legacy/manual registrations; dispatch() switches on its
+    // policy/size/ret columns instead of comparing symbol names.
+    const thunk::Spec* spec = nullptr;
+};
 // Write a 16-byte trampoline at the given guest address for the given
 // sym_id. Used by all three thunks.
 inline void write_thunk_trampoline(Memory& mem, uint64_t addr, uint32_t sym_id,

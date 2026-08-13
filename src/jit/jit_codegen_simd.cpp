@@ -832,20 +832,14 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             bool q = (inst.flags_op != 0);
             // Fall back to CALL_INTERP for unsupported element sizes.
             //  - esize=1 (8-bit): no PSLLB/PSRLB/PSRAB in SSE2.
-            //  - esize=8 SSRA: no PSRAQ in SSE2 (needs AVX-512).
+            //  - esize=8 SSRA/SRSRA: no PSRAQ in SSE2 (needs AVX-512).
             //  - Invalid esize: shouldn't happen, but be safe.
             if (esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            if (inst.op == IROp::SIMD_SSRA && esize == 8) {
-                emit_call_interp(inst.arm_pc, false);
-                return true;
-            }
-            // URSRA/SRSRA (rounding shift-accumulate) have no SSE2/AVX2
-            // one-instruction rounding step (no pround-right-and-add), so
-            // route them to the interpreter — correctness first.
-            if (inst.op == IROp::SIMD_URSRA || inst.op == IROp::SIMD_SRSRA) {
+            if ((inst.op == IROp::SIMD_SSRA || inst.op == IROp::SIMD_SRSRA)
+                && esize == 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
@@ -861,11 +855,20 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 reg_field = 6;   // PSLL (shift left)
             } else if (inst.op == IROp::SIMD_USHR ||
                        inst.op == IROp::SIMD_USRA ||
+                       inst.op == IROp::SIMD_URSRA ||
                        inst.op == IROp::SIMD_SRI) {
                 reg_field = 2;   // PSRL (logical shift right)
-            } else {             // SIMD_SSHR / SIMD_SSRA
+            } else {             // SIMD_SSHR / SIMD_SSRA / SIMD_SRSRA
                 reg_field = 4;   // PSRA (arithmetic shift right)
             }
+            // URSRA/SRSRA are rounding shift-accumulates: the rounded
+            // right-shift RShr(x, s) = (x >> s) + ((x >> (s-1)) & 1),
+            // i.e. add the top bit of the discarded low `s` bits. Native
+            // pipeline: shifted = Vn >> s; round_bit = (Vn >> (s-1)) & mask;
+            // Vd = Vd + shifted + round_bit. (No overflow: the rounding
+            // carry never re-enters the shifted value.)
+            bool is_rounding = (inst.op == IROp::SIMD_URSRA ||
+                                inst.op == IROp::SIMD_SRSRA);
             uint8_t insert_shift = static_cast<uint8_t>(esize * 8) - shift;
             clobber_flags();
             // SSE2 shifts only use XMM regs (no GPRs). But emit_call_interp
@@ -971,6 +974,23 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_load64(1, offd);
                     emit_padd(1, 0);            // xmm1 = Vd + shifted Vn
                     emit_store64(1, offd);
+                } else if (is_rounding) {
+                    // URSRA/SRSRA: Vd += round(Vn >> #shift).
+                    // RShr(Vn, shift) = (Vn >> shift) + roundbit, where
+                    // roundbit is the top discarded bit (bit shift-1 of Vn),
+                    // i.e. 1 if set else 0. Isolate it per element with a
+                    // logical shift + PSLL/PSRL round-trip (bit0 -> top ->
+                    // bit0), which avoids any per-element mask constant.
+                    emit_load64(0, off1);                     // xmm0 = Vn
+                    emit_load64(2, off1);                     // xmm2 = Vn (copy)
+                    emit_shift_imm(2, 2, shift - 1);          // xmm2 >> (shift-1)
+                    emit_shift_imm(2, 6, static_cast<uint8_t>(esize * 8) - 1);  // bit0 -> top
+                    emit_shift_imm(2, 2, static_cast<uint8_t>(esize * 8) - 1);  // top -> bit0
+                    emit_shift_imm(0, reg_field, shift);      // xmm0 = Vn >> shift
+                    emit_padd(0, 2);                          // xmm0 = shifted + roundbit
+                    emit_load64(1, offd);                     // xmm1 = Vd
+                    emit_padd(1, 0);                          // xmm1 = Vd + rounded
+                    emit_store64(1, offd);
                 } else {  // SIMD_SLI / SIMD_SRI
                     emit_load64(0, off1);
                     emit_shift_imm(0, reg_field, shift);
@@ -1001,6 +1021,17 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_vex_shift_imm(0, 0, reg_field, shift);
                     emit_pack_halves(2, offdlo, offdhi);       // ymm2 = Vd
                     emit_vex_3op(padd_op, 0, 2, 0);            // ymm0 = Vd + shifted
+                    emit_store_256(offdlo, offdhi);
+                } else if (is_rounding) {
+                    emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn
+                    emit_pack_halves(1, off1lo, off1hi);       // ymm1 = Vn (copy)
+                    emit_vex_shift_imm(1, 1, 2, shift - 1);    // ymm1 >> (shift-1)
+                    emit_vex_shift_imm(1, 1, 6, static_cast<uint8_t>(esize * 8) - 1);  // bit0 -> top
+                    emit_vex_shift_imm(1, 1, 2, static_cast<uint8_t>(esize * 8) - 1);  // top -> bit0
+                    emit_vex_shift_imm(0, 0, reg_field, shift); // ymm0 = Vn >> shift
+                    emit_vex_3op(padd_op, 0, 0, 1);            // ymm0 = shifted + roundbit
+                    emit_pack_halves(2, offdlo, offdhi);       // ymm2 = Vd
+                    emit_vex_3op(padd_op, 0, 2, 0);            // ymm0 = Vd + rounded
                     emit_store_256(offdlo, offdhi);
                 } else {  // SIMD_SLI / SIMD_SRI
                     emit_pack_halves(0, off1lo, off1hi);       // ymm0 = Vn

@@ -10,6 +10,7 @@
 #include "frost/display_thunk.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
+#include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
 #include "core/cpu.h"
 #include "core/memory.h"
 #include <dlfcn.h>
@@ -19,18 +20,6 @@
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
-
-// ── SymbolEntry: full registry entry (mirrors GraphicThunkImpl::SymbolEntry) ──
-struct SymbolEntry {
-    std::string name;
-    void*       host_fn = nullptr;
-    uint64_t    guest_addr = 0;
-    uint32_t    symbol_id = 0;
-    uint16_t    pointer_args = 0;  // bit N set = arg N is a guest pointer
-    uint8_t     n_stack = 0;       // extra args beyond x0..x7, read from stack
-    uint8_t     n_float = 0;       // FP args in v0..v{n-1}
-    uint8_t     flags = 0;         // THUNK_* flags
-};
 
 struct DisplayThunkImpl {
     bool   enabled = false;
@@ -247,6 +236,10 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             fprintf(stderr, "[display-thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
                     entry.name.c_str(), entry.n_float,
                     fv[0], fv[1], fv[2], fv[3]);
+            if (entry.n_float > 4) {
+                fprintf(stderr, "[display-thunk] dispatch: %s fp×%u — only first 4 floats forwarded\n",
+                        entry.name.c_str(), entry.n_float);
+            }
         }
         switch (entry.n_float) {
         case 1: { using Fn = void (*)(float); reinterpret_cast<Fn>(entry.host_fn)(fv[0]); break; }
@@ -283,6 +276,11 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             using Fn = void (*)(int32_t, float, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2], fv[3]);
         } else if (ni == 2 && entry.n_float == 1) {
             using Fn = void (*)(uint32_t, uint32_t, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<uint32_t>(iv[0]), static_cast<uint32_t>(iv[1]), fv[0]);
+        } else {
+            if (trace) {
+                fprintf(stderr, "[display-thunk] dispatch: %s unsupported mixed ABI (int×%u fp×%u) — call dropped\n",
+                        entry.name.c_str(), ni, entry.n_float);
+            }
         }
         cpu.regs[0] = 0;
         return 0;
@@ -384,7 +382,31 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     uint64_t ret = 0;
-    if (entry.n_stack >= 1) {
+    if (entry.n_stack >= 4) {
+        using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn12>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9], args[10], args[11]);
+    } else if (entry.n_stack == 3) {
+        using Fn11 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn11>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9], args[10]);
+    } else if (entry.n_stack == 2) {
+        using Fn10 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn10>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9]);
+    } else if (entry.n_stack == 1) {
         using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t);
@@ -565,17 +587,12 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XCreateGC") {
-        // 4 args: Display*, Drawable, unsigned long, XGCValues*. Args 4-5 are on stack.
-        uint64_t stack_args[2] = {0};
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, stack_args, sizeof(stack_args));
-        }
+        // 4 args: Display*, Drawable, unsigned long, XGCValues* — all in
+        // x0..x3 (the extra screen/visual proxy params are unused).
         cpu.regs[0] = proxy->XCreateGC(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
             static_cast<unsigned long>(cpu.regs[2]),
-            g2h(cpu.regs[3]),
-            static_cast<int>(stack_args[0]),
-            static_cast<uint64_t>(stack_args[1]));
+            g2h(cpu.regs[3]), 0, 0);
         return 0;
     }
     if (sym_name == "XFreeGC") {
@@ -604,14 +621,10 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XSetWMProtocols") {
-        // 4 args: Display*, Window, Atom*, int. Arg 3 (count) is on stack.
-        uint64_t count = 0;
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, &count, sizeof(uint64_t));
-        }
+        // 4 args: Display*, Window, Atom*, int — all in x0..x3.
         cpu.regs[0] = proxy->XSetWMProtocols(
             cpu.regs[0], cpu.regs[1], g2h(cpu.regs[2]),
-            static_cast<int>(count));
+            static_cast<int>(cpu.regs[3]));
         return 0;
     }
     if (sym_name == "XGetAtomName") {
@@ -687,15 +700,11 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XSetLineAttributes") {
-        // 6 args: Display*, GC, unsigned, unsigned, int, int. Arg 5 is on stack.
-        uint64_t cap_join = 0;
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, &cap_join, sizeof(uint64_t));
-        }
+        // 6 args: Display*, GC, unsigned, unsigned, int, int — x0..x5.
         cpu.regs[0] = proxy->XSetLineAttributes(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
             static_cast<unsigned>(cpu.regs[2]), static_cast<unsigned>(cpu.regs[3]),
-            static_cast<int>(cpu.regs[4]), static_cast<int>(cap_join));
+            static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]));
         return 0;
     }
     if (sym_name == "XDrawString") {
@@ -750,17 +759,13 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XChangeProperty") {
-        // 8 args: Display*, Window, Atom, Atom, int, int, const unsigned char*, long.
-        // Args 6-7 are on the stack.
-        uint64_t stack_args[2] = {0};
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, stack_args, sizeof(stack_args));
-        }
+        // 8 args: Display*, Window, Atom, Atom, int, int, const unsigned char*,
+        // long — all in x0..x7 (data = x6, nelements = x7).
         cpu.regs[0] = proxy->XChangeProperty(
             cpu.regs[0], cpu.regs[1], static_cast<unsigned long>(cpu.regs[2]),
             static_cast<unsigned long>(cpu.regs[3]),
             static_cast<int>(cpu.regs[4]), static_cast<int>(cpu.regs[5]),
-            g2h(stack_args[0]), static_cast<long>(stack_args[1]));
+            g2h(cpu.regs[6]), static_cast<long>(cpu.regs[7]));
         return 0;
     }
     if (sym_name == "XDeleteProperty") {
@@ -808,25 +813,17 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         return 0;
     }
     if (sym_name == "XCopyGC") {
-        // 4 args: Display*, GC, unsigned long, GC. Arg 3 is on stack.
-        uint64_t src_gc = 0;
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, &src_gc, sizeof(uint64_t));
-        }
+        // 4 args: Display*, GC, unsigned long, GC — all in x0..x3.
         cpu.regs[0] = proxy->XCopyGC(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
-            static_cast<unsigned long>(cpu.regs[2]), src_gc);
+            static_cast<unsigned long>(cpu.regs[2]), cpu.regs[3]);
         return 0;
     }
     if (sym_name == "XChangeGC") {
-        // 3 args: Display*, GC, unsigned long, XGCValues*. Arg 3 is on stack.
-        uint64_t values_ptr = 0;
-        if (mem && cpu.sp) {
-            mem->read(cpu.sp, &values_ptr, sizeof(uint64_t));
-        }
+        // 4 args: Display*, GC, unsigned long, XGCValues* — all in x0..x3.
         cpu.regs[0] = proxy->XChangeGC(
             cpu.regs[0], static_cast<unsigned long>(cpu.regs[1]),
-            static_cast<unsigned long>(cpu.regs[2]), g2h_str(values_ptr));
+            static_cast<unsigned long>(cpu.regs[2]), g2h(cpu.regs[3]));
         return 0;
     }
     if (sym_name == "XSetFunction") {
@@ -1282,7 +1279,6 @@ void DisplayThunk::register_known_symbols_() {
     REG_WL(wl_display_get_fd);
     REG_WL(wl_display_dispatch);
     REG_WL(wl_display_dispatch_pending);
-    REG_WL(wl_display_dispatch_queue);
     REG_WL_PTR(wl_display_dispatch_queue, 0x02); // arg 1: wl_event_queue*
     REG_WL_PTR(wl_display_roundtrip, 0x01);      // arg 0: wl_display*
     REG_WL_PTR(wl_display_flush, 0x01);          // arg 0: wl_display*
@@ -1341,9 +1337,13 @@ void DisplayThunk::register_known_symbols_() {
         void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
         for (const char* L : x11_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
+    #define REG_X11_EX(name, ptrs, nstack) do { \
+        void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
+        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
+    } while(0)
     REG_X11_PTR(XOpenDisplay, 0x01);             // arg 0: const char* name
     REG_X11_PTR(XCloseDisplay, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XCreateWindow, 0x80);            // arg 6: XSetWindowAttributes*
+    REG_X11_EX(XCreateWindow, 0x501, 3);         // args 0,8,10 ptrs; 3 stack args
     REG_X11_PTR(XCreateSimpleWindow, 0x01);      // arg 0: Display*
     REG_X11_PTR(XDestroyWindow, 0x01);           // arg 0: Display*
     REG_X11_PTR(XMapWindow, 0x01);               // arg 0: Display*
@@ -1376,7 +1376,7 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XDrawLine, 0x01);                // arg 0: Display*
     REG_X11_PTR(XDrawPoint, 0x01);               // arg 0: Display*
     REG_X11_PTR(XCopyArea, 0x01);                // arg 0: Display*
-    REG_X11_PTR(XCreateGC, 0x05);                // arg 0: Display*, arg 2: XGCValues*
+    REG_X11_PTR(XCreateGC, 0x09);                // arg 0: Display*, arg 3: XGCValues*
     REG_X11_PTR(XFreeGC, 0x01);                  // arg 0: Display*
     REG_X11_PTR(XCreatePixmap, 0x01);            // arg 0: Display*
     REG_X11_PTR(XFreePixmap, 0x01);              // arg 0: Display*
@@ -1390,15 +1390,15 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XGetAtomName, 0x01);             // arg 0: Display*
     REG_X11_PTR(XCreateColormap, 0x01);          // arg 0: Display*
     REG_X11_PTR(XFreeColormap, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XAllocColor, 0x03);              // arg 0: Display*, arg 2: XColor*
-    REG_X11_PTR(XFreeColors, 0x07);              // arg 0: Display*, arg 2: unsigned long*
+    REG_X11_PTR(XAllocColor, 0x05);              // arg 0: Display*, arg 2: XColor*
+    REG_X11_PTR(XFreeColors, 0x05);              // arg 0: Display*, arg 2: unsigned long*
     REG_X11_PTR(XSetClipMask, 0x01);             // arg 0: Display*
     REG_X11_PTR(XSetClipOrigin, 0x01);           // arg 0: Display*
     REG_X11_PTR(XCopyGC, 0x01);                  // arg 0: Display*
-    REG_X11_PTR(XChangeGC, 0x05);                // arg 0: Display*, arg 2: XGCValues*
+    REG_X11_PTR(XChangeGC, 0x09);                // arg 0: Display*, arg 3: XGCValues*
     REG_X11_PTR(XSetFunction, 0x01);             // arg 0: Display*
     REG_X11_PTR(XSetLineAttributes, 0x01);       // arg 0: Display*
-    REG_X11_PTR(XSetDashes, 0x07);               // arg 0: Display*, arg 3: const char*
+    REG_X11_PTR(XSetDashes, 0x09);               // arg 0: Display*, arg 3: const char*
     REG_X11_PTR(XDrawString, 0x20);              // arg 0: Display*, arg 4: const char*
     REG_X11_PTR(XDrawImageString, 0x20);         // arg 0: Display*, arg 4: const char*
     REG_X11_PTR(XTextExtents, 0x90);             // arg 0: XFontStruct*, arg 1: const char*, arg 4: int*, arg 5: int*, arg 6: int*
@@ -1410,8 +1410,8 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XFreeFontNames, 0x01);           // arg 0: char**
     REG_X11_PTR(XCreateBitmapFromData, 0x08);    // arg 0: Display*, arg 3: const char*
     REG_X11_PTR(XCreatePixmapFromBitmapData, 0x01); // arg 0: Display*
-    REG_X11_PTR(XQueryPointer, 0x3D);            // args: Display*, Window, and 5 pointer out-args
-    REG_X11_PTR(XWarpPointer, 0x01);             // arg 0: Display*
+    REG_X11_EX(XQueryPointer, 0x1FD, 1);         // args 0,2..8 ptrs; 1 stack arg
+    REG_X11_EX(XWarpPointer, 0x01, 1);           // arg 0: Display*; 1 stack arg
     REG_X11_PTR(XGrabPointer, 0x01);             // arg 0: Display*
     REG_X11_PTR(XUngrabPointer, 0x01);           // arg 0: Display*
     REG_X11_PTR(XGrabKeyboard, 0x01);            // arg 0: Display*
@@ -1558,6 +1558,10 @@ void DisplayThunk::register_known_symbols_() {
         void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
         for (const char* L : randr_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
     } while(0)
+    #define REG_RANDR_EX(name, ptrs, nstack) do { \
+        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
+        for (const char* L : randr_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
+    } while(0)
     REG_RANDR(XRRGetScreenResources);
     REG_RANDR(XRRGetScreenResourcesCurrent);
     REG_RANDR(XRRFreeScreenResources);
@@ -1565,7 +1569,7 @@ void DisplayThunk::register_known_symbols_() {
     REG_RANDR(XRRFreeCrtcInfo);
     REG_RANDR(XRRGetOutputInfo);
     REG_RANDR(XRRFreeOutputInfo);
-    REG_RANDR(XRRSetCrtcConfig);
+    REG_RANDR_EX(XRRSetCrtcConfig, 0x103, 2);   // args 0,1,8 ptrs; 2 stack args
     REG_RANDR(XRRGetScreenSizeRange);
     #undef REG_RANDR
     #undef REG_RANDR_PTR

@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 193 tests (incl. interactive)
+#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 195 tests (incl. interactive)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -20,18 +20,18 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (188 total standard):
-#   Unit         40  — ctest/*.elf focused JIT regression tests
+# Test count breakdown (190 total standard):
+#   Unit         41  — ctest/*.elf focused JIT regression tests
 #   Integration  64  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
-#                      (30 busybox + 19 toybox + 7 dynamic glibc)
-#   Dynamic      14  — dynamically-linked musl + glibc tests (need rootfs)
+#                      (49 static busybox/toybox + 7 dynamic glibc)
 #   Benchmarks    5  — performance (included in standard suite)
+#   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (--test-all only)
 #
-# Standard suite = 188 tests. Quick suite = 183 (skip benchmarks).
-# Full suite (--test-all, with interactive) = 193 tests.
+# Standard suite = 190 tests. Quick suite = 185 (skip benchmarks).
+# Full suite (--test-all, with interactive) = 195 tests.
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -101,9 +101,9 @@ done
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
 # Also opts into the interactive tests (--interactive), so the full set of
-# 193 test programs runs — every category including REPL/stdin tests.
-# After download, runs the full 193-test suite with 0 expected failures
-# (assuming rootfs is set up — otherwise the 14 dynamic tests still skip).
+# 195 test programs runs — every category including REPL/stdin tests.
+# After download, runs the full 195-test suite with 0 expected failures
+# (assuming rootfs is set up — otherwise the 15 dynamic tests still skip).
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -185,7 +185,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 188 tests across 7 categories.
+# Standard suite = 190 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(
@@ -206,6 +206,7 @@ UNIT_TESTS=(
     "neon_advanced|ctest/jit_neon_advanced.elf||5|PASS"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
+    "neon_roundingshift|ctest/jit_neon_roundingshift.elf||5|checks passed"
     "mvni_softfloat|ctest/jit_mvni_softfloat.elf||5|checks passed"
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"

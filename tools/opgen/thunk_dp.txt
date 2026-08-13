@@ -1,0 +1,492 @@
+# thunk_dp.txt — GraphicThunk symbol signature spec (single source of truth)
+#
+# Generated into include/opgen_thunk.hpp by tools/opgen/thunkgen.py.
+# To add/modify a thunked symbol edit this file and run: make opgen-thunk
+#
+# Column format (whitespace separated, '#' comments, blank lines ignored):
+#     NAME   LIBS   ARGS   RET   POLICY   SIZE
+#
+# LIBS    : lib family the symbol is registered for. One row = the symbol is
+#           registered under every soname of that family:
+#             GL   -> libGL.so, libGL.so.1
+#             GLES -> libGLESv2.so, libGLESv2.so.2
+#             EGL  -> libEGL.so, libEGL.so.1
+#             SDL  -> libSDL2.so, libSDL2-2.0.so.0
+#             GLFW -> libglfw.so.3, libglfw.so
+# ARGS    : AAPCS64 argument kind string, one char per parameter in order:
+#             i  integer/enum register (x-reg), read as raw uint64
+#             f  IEEE-754 binary32 register (v-reg) — only used when the
+#                whole call is float-only (all f) or mixed (i* + f*)
+#             p  pointer argument, translated guest→host with writeback
+#             z  pointer argument like p, but bounced at a computed size
+#                instead of the default 64 KiB (see SIZE column)
+#           '-' means no arguments. Pointer *positions* drive the pointer_args
+#           bitmask; the total count only matters when it exceeds 8 (stack
+#           args at SP).
+# RET     : '-' = plain (void/int, host ret written to x0)
+#           str = host returns const char* -> copy into the guest string cache
+# POLICY  : named dispatch behavior (one switch arm each, no name compares):
+#             -              default generic path
+#             SHADER_SOURCE  glShaderSource nested string-array marshalling
+#             QUERY          GL state queries intercepted by GLStateTracker
+#             GET_PROC       *GetProcAddress: resolve guest name -> trampoline
+#             TRACK_TEX      SDL_CreateTexture: record size for PITCH_H bounce
+#             UNTRACK_TEX    SDL_DestroyTexture: drop recorded size
+#             VA_PTR         vertex-attrib pointer: translate arg5 iff no VBO
+#                            bound (array buffer), else leave as byte offset
+#             EL_PTR         glDrawElements: translate arg3 iff no element
+#                            array buffer bound, else leave as byte offset
+#             PRESENT        frame-present/swap: BIFROST_FRAME_TRACE counter
+#             STUB           register a null-returning callback stub
+#                           (host never receives guest callback pointers)
+# SIZE    : bounce-size policy for the z argument(s):
+#             -       default 64 KiB
+#             arg1    size = guest arg1 (glBufferData: data is arg2)
+#             arg2    size = guest arg2 (glBufferSubData: data is arg3)
+#             TEX2D   size = w*h*bpp from args 3,4,6,7 (glTexImage2D)
+#             TEXSUB  same as TEX2D (glTexSubImage2D)
+#             PITCH_H size = pitch(arg3) * recorded texture height
+#
+# Legacy-fidelity notes: symbols that predate the FP/mixed ABI flags are
+# registered today as plain integer passthrough even when the C prototype
+# uses doubles/floats (glOrtho, glClearDepth, glMultiTexCoord2f, glPolygonOffset,
+# glSampleCoverage, glfwSetCursorPos, …). The spec below reproduces that
+# behavior exactly ('i' tokens), so the table-to-registration parity check
+# holds. Fixing those ABIs is a separate task with its own tests.
+
+# ── libGL.so / libGL.so.1 ──────────────────────────────────────────────
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+glClear                   GL     -             -     -              -
+glClearColor              GL     ffff          -     -              -
+glBegin                   GL     i             -     -              -
+glEnd                     GL     -             -     -              -
+glVertex3f                GL     fff           -     -              -
+glVertex2f                GL     ff            -     -              -
+glVertex3fv               GL     p             -     -              -   # arg0: const GLfloat *v
+glColor3f                 GL     fff           -     -              -
+glColor4f                 GL     ffff          -     -              -
+glColor3ub                GL     iii           -     -              -
+glFlush                   GL     -             -     -              -
+glFinish                  GL     -             -     -              -
+glGetError                GL     -             -     -              -
+glEnable                  GL     i             -     -              -
+glDisable                 GL     i             -     -              -
+glIsEnabled               GL     i             -     QUERY          -
+glViewport                GL     iiii          -     -              -
+glMatrixMode              GL     i             -     -              -
+glLoadIdentity            GL     -             -     -              -
+glOrtho                   GL     iiiiii        -     -              -   # doubles; legacy int passthrough
+glPushMatrix              GL     -             -     -              -
+glPopMatrix               GL     -             -     -              -
+glRotatef                 GL     ffff          -     -              -
+glTranslatef              GL     fff           -     -              -
+glScalef                  GL     fff           -     -              -
+glGenTextures             GL     ip            -     -              -   # arg1: GLuint *textures
+glDeleteTextures          GL     ip            -     -              -   # arg1: const GLuint *textures
+glBindTexture             GL     ii            -     -              -
+glTexParameteri           GL     iii           -     -              -
+glTexImage2D              GL     iiiiiiiiz     -     -              TEX2D  # arg8: pixels
+glTexSubImage2D           GL     iiiiiiiiz     -     -              TEXSUB # arg8: pixels
+glEnableClientState       GL     i             -     -              -
+glDisableClientState      GL     i             -     -              -
+glVertexPointer           GL     iiip          -     -              -   # arg3: const void *pointer
+glColorPointer            GL     iiip          -     -              -   # arg3: const void *pointer
+glTexCoordPointer         GL     iiip          -     -              -   # arg3: const void *pointer
+glDrawArrays              GL     iii           -     -              -
+glDrawElements            GL     iiii          -     EL_PTR         -   # arg3: indices (offset or ptr)
+glGetString               GL     i             str   -              -
+glGetIntegerv             GL     ip            -     QUERY          -   # arg1: GLint *params
+glGenLists                GL     i             -     -              -
+glCallList                GL     i             -     -              -
+glNewList                 GL     ii            -     -              -
+glEndList                 GL     -             -     -              -
+glDeleteLists             GL     ii            -     -              -
+glDepthFunc               GL     i             -     -              -
+glDepthMask               GL     i             -     -              -
+glColorMask               GL     iiii          -     -              -
+glStencilFunc             GL     iii           -     -              -
+glStencilOp               GL     iii           -     -              -
+glStencilMask             GL     i             -     -              -
+glStencilFuncSeparate     GL     iiii          -     -              -
+glStencilOpSeparate       GL     iiii          -     -              -
+glStencilMaskSeparate     GL     ii            -     -              -
+glBlendFunc               GL     ii            -     -              -
+glBlendFuncSeparate       GL     iiii          -     -              -
+glBlendEquation           GL     i             -     -              -
+glBlendEquationSeparate   GL     ii            -     -              -
+glHint                    GL     ii            -     -              -
+glFogf                    GL     if            -     -              -   # GLenum pname, GLfloat param (mixed)
+glFogfv                   GL     ip            -     -              -   # arg1: const GLfloat *params
+glFogi                    GL     ii            -     -              -
+glFogCoordf               GL     f             -     -              -
+glColorMaterial           GL     ii            -     -              -   # face, mode
+glTexEnvi                 GL     iii           -     -              -   # target, pname, GLint param
+glLoadMatrixf             GL     p             -     -              -   # arg0: const GLfloat *m
+glMultMatrixf             GL     p             -     -              -   # arg0: const GLfloat *m
+glPixelStorei             GL     ii            -     -              -
+glReadPixels              GL     iiiiiiz       -     -              READPIXELS # arg6: void *pixels
+glDrawBuffer              GL     i             -     -              -
+glClearDepth              GL     i             -     -              -   # double; legacy int passthrough
+glClearStencil            GL     i             -     -              -
+glPointSize               GL     f             -     -              -
+glLineWidth               GL     f             -     -              -
+glFrontFace               GL     i             -     -              -
+glCullFace                GL     i             -     -              -
+glShadeModel              GL     i             -     -              -
+glLightfv                 GL     iip           -     -              -   # arg2: const GLfloat *params
+glMaterialfv              GL     iip           -     -              -   # arg2: const GLfloat *params
+glNormal3f                GL     fff           -     -              -
+glTexCoord2f              GL     ff            -     -              -
+glActiveTexture           GL     i             -     -              -
+glClientActiveTexture     GL     i             -     -              -
+glMultiTexCoord2f         GL     iii           -     -              -   # target,s,t; legacy int passthrough
+glCreateShader            GL     i             -     -              -
+glShaderSource            GL     iipp          -     SHADER_SOURCE  -   # arg2/3: strings/lens
+glCompileShader           GL     i             -     -              -
+glDeleteShader            GL     i             -     -              -
+glCreateProgram           GL     -             -     -              -
+glAttachShader            GL     ii            -     -              -
+glDetachShader            GL     ii            -     -              -
+glLinkProgram             GL     i             -     -              -
+glUseProgram              GL     i             -     -              -
+glDeleteProgram           GL     i             -     -              -
+glGetShaderiv             GL     iip           -     -              -   # arg2: GLint *params
+glGetProgramiv            GL     iip           -     -              -   # arg2: GLint *params
+glGetShaderInfoLog        GL     iiip          -     -              -   # arg3: GLchar *infoLog
+glGetProgramInfoLog       GL     iiip          -     -              -   # arg3: GLchar *infoLog
+glGetAttribLocation       GL     ip            -     -              -   # arg1: const GLchar *name
+glGetUniformLocation      GL     ip            -     -              -   # arg1: const GLchar *name
+glBindAttribLocation      GL     iip           -     -              -   # arg2: const GLchar *name
+glUniform1i               GL     ii            -     -              -
+glUniform1f               GL     if            -     -              -   # mixed: location x0, float v0
+glUniform2f               GL     iff           -     -              -
+glUniform3f               GL     ifff          -     -              -
+glUniform4f               GL     iffff         -     -              -
+glUniform1fv              GL     iip           -     -              -   # arg2: const GLfloat *value
+glUniform2fv              GL     iip           -     -              -
+glUniform3fv              GL     iip           -     -              -
+glUniform4fv              GL     iip           -     -              -
+glUniformMatrix3fv        GL     iiip          -     -              -   # arg3: const GLfloat *value
+glUniformMatrix4fv        GL     iiip          -     -              -
+glEnableVertexAttribArray GL     i             -     -              -
+glDisableVertexAttribArray GL    i             -     -              -
+glVertexAttribPointer     GL     iiiii         -     VA_PTR         -   # arg5: offset or client ptr
+glGenVertexArrays         GL     ip            -     -              -   # arg1: GLuint *arrays
+glBindVertexArray         GL     i             -     -              -
+glDeleteVertexArrays      GL     ip            -     -              -   # arg1: const GLuint *arrays
+glIsVertexArray           GL     i             -     -              -
+glVertexAttribIPointer    GL     iiiii         -     VA_PTR         -   # arg5: offset or client ptr
+glPolygonMode             GL     ii            -     -              -
+glUniform2i               GL     iii           -     -              -
+glUniform3i               GL     iiii          -     -              -
+glUniform4i               GL     iiiii         -     -              -
+glUniform1ui              GL     ii            -     -              -
+glUniform1iv              GL     iip           -     -              -
+glUniform2iv              GL     iip           -     -              -
+glUniform3iv              GL     iip           -     -              -
+glUniform4iv              GL     iip           -     -              -
+glUniformMatrix2fv        GL     iiip          -     -              -   # arg3: const GLfloat *value
+glGetUniformiv            GL     iip           -     -              -   # arg2: GLint *params
+glGetStringi              GL     ii            str   -              -
+glGetFloatv               GL     ip            -     QUERY          -   # arg1: GLfloat *params
+glGetBooleanv             GL     ip            -     QUERY          -   # arg1: GLboolean *params
+glGetProcAddress          GL     p             -     GET_PROC       -
+glXGetProcAddress         GL     p             -     GET_PROC       -
+glXGetProcAddressARB      GL     p             -     GET_PROC       -
+glGenBuffers              GL     ip            -     -              -   # arg1: GLuint *buffers
+glDeleteBuffers           GL     ip            -     -              -   # arg1: const GLuint *buffers
+glBindBuffer              GL     ii            -     -              -
+glBufferData              GL     iizi          -     -              arg1 # arg2: const void *data (size=arg1)
+glBufferSubData           GL     iiiz          -     -              arg2 # arg3: const void *data (size=arg2)
+glGenFramebuffers         GL     ip            -     -              -   # arg1: GLuint *framebuffers
+glDeleteFramebuffers      GL     ip            -     -              -   # arg1: const GLuint *framebuffers
+glBindFramebuffer         GL     ii            -     -              -
+glFramebufferTexture2D    GL     iiiii         -     -              -
+glGenRenderbuffers        GL     ip            -     -              -   # arg1: GLuint *renderbuffers
+glDeleteRenderbuffers     GL     ip            -     -              -   # arg1: const GLuint *renderbuffers
+glBindRenderbuffer        GL     ii            -     -              -
+glRenderbufferStorage     GL     iiii          -     -              -
+glFramebufferRenderbuffer GL     iiii          -     -              -
+glCheckFramebufferStatus  GL     i             -     -              -
+glGenerateMipmap          GL     i             -     -              -
+glTexParameterf           GL     iif           -     -              -   # mixed: target,pname x0.., param v0
+glCompressedTexImage2D    GL     iiii  iiii p  -     -              -   # arg8: data (64 KiB bounce)
+glScissor                 GL     iiii          -     -              -
+glClearDepthf             GL     f             -     -              -
+glPolygonOffset           GL     ii            -     -              -   # 2 floats; legacy int passthrough
+glSampleCoverage          GL     ii            -     -              -   # float,bool; legacy int passthrough
+
+# ── libGLESv2.so / libGLESv2.so.2 ──────────────────────────────────────
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+glClear                   GLES   -             -     -              -
+glClearColor              GLES   ffff          -     -              -
+glClearDepthf             GLES   f             -     -              -
+glClearStencil            GLES   i             -     -              -
+glFlush                   GLES   -             -     -              -
+glFinish                  GLES   -             -     -              -
+glGetError                GLES   -             -     -              -
+glEnable                  GLES   i             -     -              -
+glDisable                 GLES   i             -     -              -
+glIsEnabled               GLES   i             -     QUERY          -
+glViewport                GLES   iiii          -     -              -
+glScissor                 GLES   iiii          -     -              -
+glHint                    GLES   ii            -     -              -
+glFrontFace               GLES   i             -     -              -
+glCullFace                GLES   i             -     -              -
+glLineWidth               GLES   f             -     -              -
+glPolygonOffset           GLES   ii            -     -              -
+glPixelStorei             GLES   ii            -     -              -
+glCreateShader            GLES   i             -     -              -
+glShaderSource            GLES   iipp          -     SHADER_SOURCE  -
+glCompileShader           GLES   i             -     -              -
+glDeleteShader            GLES   i             -     -              -
+glCreateProgram           GLES   -             -     -              -
+glAttachShader            GLES   ii            -     -              -
+glDetachShader            GLES   ii            -     -              -
+glLinkProgram             GLES   i             -     -              -
+glUseProgram              GLES   i             -     -              -
+glDeleteProgram           GLES   i             -     -              -
+glGetShaderiv             GLES   iip           -     -              -
+glGetProgramiv            GLES   iip           -     -              -
+glGetShaderInfoLog        GLES   iiip          -     -              -
+glGetProgramInfoLog       GLES   iiip          -     -              -
+glGetAttribLocation       GLES   ip            -     -              -
+glGetUniformLocation      GLES   ip            -     -              -
+glBindAttribLocation      GLES   iip           -     -              -
+glUniform1i               GLES   ii            -     -              -
+glUniform1f               GLES   if            -     -              -
+glUniform2f               GLES   iff           -     -              -
+glUniform3f               GLES   ifff          -     -              -
+glUniform4f               GLES   iffff         -     -              -
+glUniform1fv              GLES   iip           -     -              -
+glUniform2fv              GLES   iip           -     -              -
+glUniform3fv              GLES   iip           -     -              -
+glUniform4fv              GLES   iip           -     -              -
+glUniformMatrix3fv        GLES   iiip          -     -              -
+glUniformMatrix4fv        GLES   iiip          -     -              -
+glEnableVertexAttribArray GLES   i             -     -              -
+glDisableVertexAttribArray GLES  i             -     -              -
+glVertexAttribPointer     GLES   iiiii         -     VA_PTR         -
+glGetFloatv               GLES   ip            -     QUERY          -
+glGetBooleanv             GLES   ip            -     QUERY          -
+glGenVertexArrays         GLES   ip            -     -              -
+glBindVertexArray         GLES   i             -     -              -
+glDeleteVertexArrays      GLES   ip            -     -              -
+glIsVertexArray           GLES   i             -     -              -
+glVertexAttribIPointer    GLES   iiiii         -     VA_PTR         -
+glUniform2i               GLES   iii           -     -              -
+glUniform3i               GLES   iiii          -     -              -
+glUniform4i               GLES   iiiii         -     -              -
+glUniform1ui              GLES   ii            -     -              -
+glUniform1iv              GLES   iip           -     -              -
+glUniform2iv              GLES   iip           -     -              -
+glUniform3iv              GLES   iip           -     -              -
+glUniform4iv              GLES   iip           -     -              -
+glUniformMatrix2fv        GLES   iiip          -     -              -
+glGetUniformiv            GLES   iip           -     -              -
+glGetStringi              GLES   ii            str   -              -
+glGenBuffers              GLES   ip            -     -              -
+glDeleteBuffers           GLES   ip            -     -              -
+glBindBuffer              GLES   ii            -     -              -
+glBufferData              GLES   iizi          -     -              arg1
+glBufferSubData           GLES   iiiz          -     -              arg2
+glGenFramebuffers         GLES   ip            -     -              -
+glDeleteFramebuffers      GLES   ip            -     -              -
+glBindFramebuffer         GLES   ii            -     -              -
+glFramebufferTexture2D    GLES   iiiii         -     -              -
+glGenRenderbuffers        GLES   ip            -     -              -
+glDeleteRenderbuffers     GLES   ip            -     -              -
+glBindRenderbuffer        GLES   ii            -     -              -
+glRenderbufferStorage     GLES   iiii          -     -              -
+glFramebufferRenderbuffer GLES   iiii          -     -              -
+glCheckFramebufferStatus  GLES   i             -     -              -
+glGenTextures             GLES   ip            -     -              -
+glDeleteTextures          GLES   ip            -     -              -
+glBindTexture             GLES   ii            -     -              -
+glActiveTexture           GLES   i             -     -              -
+glGenerateMipmap          GLES   i             -     -              -
+glTexParameteri           GLES   iii           -     -              -
+glTexParameterf           GLES   iif           -     -              -
+glTexImage2D              GLES   iiii  iiii z  -     -              TEX2D
+glTexSubImage2D           GLES   iiiiiiiiz     -     -              TEXSUB
+glDrawArrays              GLES   iii           -     -              -
+glDrawElements            GLES   iiii          -     EL_PTR         -
+glBlendFunc               GLES   ii            -     -              -
+glBlendFuncSeparate       GLES   iiii          -     -              -
+glBlendEquation           GLES   i             -     -              -
+glBlendEquationSeparate   GLES   ii            -     -              -
+glColorMask               GLES   iiii          -     -              -
+glDepthFunc               GLES   i             -     -              -
+glDepthMask               GLES   i             -     -              -
+glDepthRangef             GLES   ff            -     -              -
+glStencilFunc             GLES   iii           -     -              -
+glStencilOp               GLES   iii           -     -              -
+glStencilMask             GLES   i             -     -              -
+glStencilFuncSeparate     GLES   iiii          -     -              -
+glStencilOpSeparate       GLES   iiii          -     -              -
+glStencilMaskSeparate     GLES   ii            -     -              -
+glGetString               GLES   i             str   -              -
+glGetIntegerv             GLES   ip            -     QUERY          -
+glSampleCoverage          GLES   ii            -     -              -
+
+# ── libEGL.so / libEGL.so.1 ────────────────────────────────────────────
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+eglGetDisplay             EGL    i             -     -              -
+eglInitialize             EGL    iii           -     -              -
+eglChooseConfig           EGL    iiiii         -     -              -
+eglCreateContext          EGL    iiii          -     -              -
+eglDestroyContext         EGL    ii            -     -              -
+eglMakeCurrent            EGL    iiii          -     -              -
+eglSwapBuffers            EGL    ii            -     -              -
+eglDestroySurface         EGL    ii            -     -              -
+eglCreateWindowSurface    EGL    iiii          -     -              -
+eglCreatePbufferSurface   EGL    iii           -     -              -
+eglQuerySurface           EGL    iiii          -     -              -
+eglGetConfigAttrib        EGL    iiii          -     -              -
+eglGetError               EGL    -             -     -              -
+eglTerminate              EGL    i             -     -              -
+eglBindAPI                EGL    i             -     -              -
+eglReleaseThread          EGL    -             -     -              -
+eglWaitGL                 EGL    -             -     -              -
+eglWaitNative             EGL    i             -     -              -
+eglSwapInterval           EGL    ii            -     -              -
+eglQueryString            EGL    ii            -     -              -
+eglGetProcAddress         EGL    p             -     GET_PROC       -
+
+# ── libSDL2.so / libSDL2-2.0.so.0 ──────────────────────────────────────
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+SDL_Init                  SDL    i             -     -              -
+SDL_Quit                  SDL    -             -     -              -
+SDL_CreateWindow          SDL    piiiii         -     -              -   # arg0: title string
+SDL_CreateWindowAndRenderer SDL  iiiii         -     -              -
+SDL_DestroyWindow         SDL    i             -     -              -
+SDL_GL_CreateContext      SDL    i             -     -              -
+SDL_GL_DeleteContext      SDL    i             -     -              -
+SDL_GL_MakeCurrent        SDL    ii            -     -              -
+SDL_GL_SwapWindow         SDL    i             -     -              -
+SDL_GL_SetAttribute       SDL    ii            -     -              -
+SDL_GL_GetAttribute       SDL    ip            -     -              -   # arg1: int *value
+SDL_GL_GetProcAddress     SDL    p             -     GET_PROC       -
+SDL_GL_SetSwapInterval    SDL    i             -     -              -
+SDL_PollEvent             SDL    p             -     -              -   # arg0: SDL_Event *event
+SDL_WaitEvent             SDL    p             -     -              -
+SDL_PushEvent             SDL    p             -     -              -
+SDL_GetWindowSurface      SDL    i             -     -              -
+SDL_UpdateWindowSurface   SDL    i             -     -              -
+SDL_UpdateWindowSurfaceRects SDL iii           -     -              -
+SDL_SetWindowTitle        SDL    ip            -     -              -   # arg1: title string
+SDL_GetWindowTitle        SDL    i             str   -              -
+SDL_SetWindowSize         SDL    iii           -     -              -
+SDL_GetWindowSize         SDL    ipp           -     -              -   # args1/2: out int *w,*h
+SDL_SetWindowPosition     SDL    iii           -     -              -
+SDL_ShowWindow            SDL    i             -     -              -
+SDL_HideWindow            SDL    i             -     -              -
+SDL_RaiseWindow           SDL    i             -     -              -
+SDL_SetWindowFullscreen   SDL    ii            -     -              -
+SDL_GetWindowFlags        SDL    i             -     -              -
+SDL_GetTicks              SDL    -             -     -              -
+SDL_GetPerformanceCounter SDL    -             -     -              -
+SDL_GetPerformanceFrequency SDL  -             -     -              -
+SDL_Delay                 SDL    i             -     -              -
+SDL_GetError              SDL    -             str   -              -
+SDL_ClearError            SDL    -             -     -              -
+SDL_OpenAudioDevice       SDL    pippi         -     -              -   # device, iscapture, desired, obtained, changes
+SDL_QueueAudio            SDL    izi           -     -              QUEUEAUDIO # dev, data, len
+SDL_GetQueuedAudioSize    SDL    i             -     -              -
+SDL_PauseAudioDevice      SDL    ii            -     -              -
+SDL_ClearQueuedAudio      SDL    i             -     -              -   # dev
+SDL_LockAudioDevice       SDL    i             -     -              -
+SDL_UnlockAudioDevice     SDL    i             -     -              -
+SDL_LoadWAV               SDL    pppp          -     -              -   # file, spec, buf out, len out
+SDL_FreeWAV               SDL    p             -     -              -   # arg0: audio buffer
+SDL_SetHint               SDL    pp            -     -              -   # args0/1: name,value strings
+SDL_GetHint               SDL    p             str   -              -   # arg0: name string
+SDL_CreateRenderer        SDL    iii           -     -              -
+SDL_DestroyRenderer       SDL    i             -     -              -
+SDL_SetRenderDrawColor    SDL    iiii          -     -              -
+SDL_RenderClear           SDL    i             -     -              -
+SDL_RenderPresent         SDL    i             -     PRESENT        -
+SDL_RenderCopy            SDL    iipp          -     -              -   # args2/3: srcrect,dstrect
+SDL_CreateTexture         SDL    iiiii         -     TRACK_TEX      -
+SDL_CreateTextureFromSurface SDL ii            -     -              -
+SDL_DestroyTexture        SDL    i             -     UNTRACK_TEX    -
+SDL_UpdateTexture         SDL    ipzi          -     -              PITCH_H # arg1 rect, arg2 pixels, arg3 pitch
+SDL_RenderSetViewport     SDL    ii            -     -              -
+SDL_RenderSetLogicalSize  SDL    iii           -     -              -
+SDL_SetRenderDrawBlendMode SDL   ii            -     -              -
+SDL_MapRGB                SDL    iiii          -     -              -
+SDL_MapRGBA               SDL    iiiii         -     -              -
+SDL_GetRGB                SDL    iiiii         -     -              -
+SDL_GetRGBA               SDL    iiiiii        -     -              -
+SDL_CreateRGBSurface      SDL    iiiiiiii      -     -              -
+SDL_CreateRGBSurfaceWithFormat SDL iiiii       -     -              -
+SDL_FreeSurface           SDL    i             -     -              -
+SDL_SetColorKey           SDL    ii            -     -              -
+SDL_SetSurfaceAlphaMod    SDL    ii            -     -              -
+SDL_LoadBMP_RW            SDL    ip            -     -              -   # arg0: SDL_RWops*
+SDL_SaveBMP_RW            SDL    iip           -     -              -
+SDL_RWFromFile            SDL    pp            -     -              -   # args0/1: file,mode strings
+SDL_RWFromMem             SDL    pi            -     -              -   # arg0: mem ptr
+SDL_RWclose               SDL    i             -     -              -
+SDL_RWread                SDL    ipii          -     -              -   # arg1: ptr
+SDL_RWwrite               SDL    ipii          -     -              -   # arg1: ptr
+SDL_RWseek                SDL    iii           -     -              -
+SDL_RWtell                SDL    i             -     -              -
+SDL_GetKeyboardState      SDL    i             -     -              -
+SDL_GetModState           SDL    -             -     -              -
+SDL_SetModState           SDL    i             -     -              -
+SDL_GetMouseState         SDL    -             -     -              -
+SDL_GetGlobalMouseState   SDL    -             -     -              -
+SDL_WarpMouseInWindow     SDL    iii           -     -              -
+SDL_ShowCursor            SDL    i             -     -              -
+SDL_CreateCursor          SDL    iiii          -     -              -
+SDL_FreeCursor            SDL    i             -     -              -
+SDL_SetCursor             SDL    i             -     -              -
+SDL_GetNumVideoDisplays   SDL    -             -     -              -
+SDL_GetDisplayBounds      SDL    ii            -     -              -
+SDL_GetCurrentVideoMode   SDL    i             -     -              -
+SDL_GetWindowDisplayIndex SDL    i             -     -              -
+SDL_Vulkan_LoadLibrary    SDL    i             -     -              -
+SDL_Vulkan_GetVkGetInstanceProcAddr SDL i     -     -              -
+SDL_Vulkan_CreateSurface  SDL    ii            -     -              -
+
+# ── libglfw.so.3 / libglfw.so ──────────────────────────────────────────
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+glfwInit                  GLFW   -             -     -              -
+glfwTerminate             GLFW   -             -     -              -
+glfwGetVersion            GLFW   i             -     -              -   # out int*; legacy int passthrough
+glfwWindowHint            GLFW   ii            -     -              -
+glfwCreateWindow          GLFW   iipii         -     -              -   # arg2: title string
+glfwDestroyWindow         GLFW   i             -     -              -
+glfwWindowShouldClose     GLFW   i             -     -              -
+glfwSetWindowShouldClose  GLFW   ii            -     -              -
+glfwMakeContextCurrent    GLFW   i             -     -              -
+glfwGetCurrentContext     GLFW   -             -     -              -
+glfwSwapBuffers           GLFW   i             -     PRESENT        -
+glfwSwapInterval          GLFW   i             -     -              -
+glfwPollEvents            GLFW   -             -     -              -
+glfwWaitEvents            GLFW   -             -     -              -
+glfwGetTime               GLFW   -             -     -              -
+glfwGetKey                GLFW   ii            -     -              -
+glfwGetMouseButton        GLFW   ii            -     -              -
+glfwGetCursorPos          GLFW   ipp           -     -              -   # args1/2: out double *x,*y
+glfwSetCursorPos          GLFW   iii           -     -              -   # 2 doubles; legacy int passthrough
+glfwGetFramebufferSize    GLFW   ipp           -     -              -   # args1/2: out int *w,*h
+glfwSetInputMode          GLFW   iii           -     -              -
+glfwGetInputMode          GLFW   ii            -     -              -
+glfwGetWindowSize         GLFW   ii            -     -              -
+glfwSetWindowTitle        GLFW   ip            -     -              -   # arg1: title string
+glfwGetWindowTitle        GLFW   i             -     -              -
+glfwFocusWindow           GLFW   i             -     -              -
+glfwGetPrimaryMonitor     GLFW   -             -     -              -
+glfwGetVideoMode          GLFW   i             -     -              -
+glfwGetWindowPos          GLFW   ii            -     -              -
+glfwSetWindowPos          GLFW   iii           -     -              -
+glfwSetErrorCallback      GLFW   i             -     STUB           -
+glfwSetKeyCallback        GLFW   i             -     STUB           -
+glfwSetMouseButtonCallback GLFW  i             -     STUB           -
+glfwSetCursorPosCallback  GLFW   i             -     STUB           -
+glfwSetFramebufferSizeCallback GLFW i          -     STUB           -
+glfwSetWindowSizeCallback GLFW   i             -     STUB           -
+glfwSetWindowFocusCallback GLFW  i             -     STUB           -
+glfwGetProcAddress        GLFW   p             -     GET_PROC       -

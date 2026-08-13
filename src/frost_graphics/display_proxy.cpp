@@ -107,6 +107,10 @@ void DisplayProxy::present() {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) {
+            quit_requested_ = true;
+        } else if (ev.type == SDL_WINDOWEVENT &&
+                   ev.window.event == SDL_WINDOWEVENT_CLOSE) {
+            quit_requested_ = true;
         }
     }
 #else

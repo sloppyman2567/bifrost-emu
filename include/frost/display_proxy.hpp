@@ -23,6 +23,8 @@ public:
     void shutdown();
     void present();
     bool ready() const { return window_ != nullptr; }
+    // Set when SDL_QUIT / SDL_WINDOWEVENT_CLOSE is drained in present().
+    bool quit_requested() const { return quit_requested_; }
     void* host_window() const { return window_; }
     Memory* memory() const { return mem_; }
     void set_memory(Memory* mem) { mem_ = mem; }
@@ -155,6 +157,7 @@ private:
     Memory* mem_ = nullptr;
     std::vector<HandleEntry> handles_;
     uint64_t next_guest_addr_ = 0;
+    bool quit_requested_ = false;
     static constexpr uint64_t HANDLE_BASE = 0x7000000000ULL;
     static constexpr uint64_t HANDLE_STEP = 64;
     static constexpr size_t MAX_HANDLES = 512;

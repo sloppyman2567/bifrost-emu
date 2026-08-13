@@ -75,7 +75,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check test clean install uninstall lib debug setup setup-tests check-all
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check test clean install uninstall lib debug setup setup-tests check-all
 
 all: $(TARGET)
 
@@ -95,6 +95,23 @@ $(OPGEN_OUTS): $(OPGEN_SPECS) $(OPGEN_GEN)
 # from the spec (i.e. someone edited the spec but forgot `make opgen`).
 opgen-check:
 	python3 tools/opgen/opgen.py --check $(OPGEN_SPECS) $(OPGEN_OUTS)
+
+# GraphicThunk symbol-signature table (same pattern as the SIMD_DP decode
+# tables above): tools/opgen/thunk_dp.txt is the single source of truth
+# for which GL/GLES/EGL/SDL2/GLFW symbol is thunked and how it is
+# marshalled. Generated into include/opgen_thunk.hpp, consumed by both
+# registration (register_known_symbols_) and dispatch (policy switch).
+THUNK_SPECS := tools/opgen/thunk_dp.txt
+THUNK_GEN   := tools/opgen/thunkgen.py
+THUNK_OUTS  := include/opgen_thunk.hpp
+
+opgen-thunk: $(THUNK_OUTS)
+
+$(THUNK_OUTS): $(THUNK_SPECS) $(THUNK_GEN)
+	python3 tools/opgen/thunkgen.py $(THUNK_SPECS) $@
+
+opgen-thunk-check:
+	python3 tools/opgen/thunkgen.py --check $(THUNK_SPECS) $(THUNK_OUTS)
 
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $(OBJECTS) -o $@ $(LDFLAGS)
@@ -218,29 +235,88 @@ clean:
 setup: $(TARGET)
 	./scripts/setup.sh
 
-# `make setup-tests` only fetches the toolchain and cross-compiles the
-# test .elf files — it does NOT run the test suite or build the rootfs.
-# Useful for CI jobs that want to build tests once and run them later.
+# ── Test toolchains ────────────────────────────────────────────────────
+# Most ctest/ctest_real tests are self-contained and are built STATICALLY
+# with the musl toolchain (no rootfs needed to run). The tests listed
+# below must be DYNAMICALLY linked so they exercise the emulator's ELF
+# loader, interpreter, and dl* plumbing — glibc ones use the glibc cross
+# toolchain, *_musl variants use the musl toolchain without -static.
+# All dynamic tests need the rootfs (BIFROST_ROOT) to run.
+GLIBC_DYN_SRCS := \
+	ctest_real/test_dladdr_glibc.c \
+	ctest_real/test_dyn_hello.c \
+	ctest_real/test_dyn_write.c \
+	ctest_real/test_dyn_malloc.c \
+	ctest_real/test_dyn_printf.c \
+	ctest_real/test_dyn_pthread_min.c \
+	ctest_real/test_dyn_threads.c \
+	ctest_real/test_dyn_pthread_stress.c \
+	ctest_real/test_dyn_pthread_8thread.c
+
+# Dynamically-linked variants whose .elf name differs from the source.
+MUSL_DYN_PAIRS := ctest_real/hello_dyn_musl.elf:ctest_real/hello_dyn.c \
+	ctest_real/test_dyn_full_musl.elf:ctest_real/test_dyn_full.c
+GLIBC_DYN_PAIRS := ctest_real/hello_dyn_glibc.elf:ctest_real/hello_dyn.c
+
+# `make setup-tests` fetches the toolchains (if missing) and cross-
+# compiles the test .elf files — it does NOT run the test suite or build
+# the rootfs. Useful for CI jobs that want to build tests once and run
+# them later. A fresh checkout then yields the complete test set.
 setup-tests:
 	@if [ ! -x tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc ]; then \
 		echo "Fetching musl toolchain ..."; \
 		./tools/fetch-musl-toolchain.sh; \
 	fi
+	@if [ ! -x tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc ]; then \
+		echo "Fetching glibc toolchain ..."; \
+		./tools/fetch-glibc-toolchain.sh; \
+	fi
 	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
 	count=0; \
 	for src in ctest/*.c ctest_real/*.c; do \
 		[ -f "$$src" ] || continue; \
+		case " $(GLIBC_DYN_SRCS) " in *" $$src "*) continue ;; esac; \
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
 		if $$CC -static -O2 -o "$$elf" "$$src" 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \
 	done; \
-	echo "Cross-compiled $$count test binaries."
+	echo "Cross-compiled $$count musl-static test binaries."
+	@CC=tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc; \
+	count=0; \
+	for src in $(GLIBC_DYN_SRCS); do \
+		elf="$${src%.c}.elf"; \
+		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		if $$CC -O2 -o "$$elf" "$$src" 2>/dev/null; then \
+			count=$$((count + 1)); \
+		fi; \
+	done; \
+	echo "Cross-compiled $$count glibc-dynamic test binaries."
+	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	count=0; \
+	for pair in $(MUSL_DYN_PAIRS); do \
+		elf="$${pair%%:*}"; src="$${pair#*:}"; \
+		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		if $$CC -O2 -o "$$elf" "$$src" 2>/dev/null; then \
+			count=$$((count + 1)); \
+		fi; \
+	done; \
+	echo "Cross-compiled $$count musl-dynamic test binaries."
+	@CC=tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc; \
+	count=0; \
+	for pair in $(GLIBC_DYN_PAIRS); do \
+		elf="$${pair%%:*}"; src="$${pair#*:}"; \
+		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
+		if $$CC -O2 -o "$$elf" "$$src" 2>/dev/null; then \
+			count=$$((count + 1)); \
+		fi; \
+	done; \
+	echo "Cross-compiled $$count glibc-dynamic variant binaries."
 
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests $(TARGET)
+check-all: setup-tests opgen-check opgen-thunk-check $(TARGET)
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
