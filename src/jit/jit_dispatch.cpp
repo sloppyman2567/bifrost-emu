@@ -37,12 +37,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         return cpu.pc;
     }
     uint64_t pc = cpu.pc;
-    // TEMP DEBUG: periodic loop-PC print
-    if ((total_blocks_executed_.load(std::memory_order_relaxed) % 10000000) == 0) {
-        fprintf(stderr, "[LOOP] pc=0x%llx x0=0x%llx x1=0x%llx\n",
-                (unsigned long long)pc, (unsigned long long)cpu.regs[0],
-                (unsigned long long)cpu.regs[1]);
-    }
     // ── v1.5.0.alpha: single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the

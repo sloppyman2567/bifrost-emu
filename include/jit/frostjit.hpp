@@ -257,7 +257,7 @@ public:
     // v1.4.0-beta.2: bumped from 50M to 1B. Soft-float-heavy programs
     // (long double multiply, printf %Lf) can legitimately dispatch
     // 100M+ tiny interp_only blocks; 50M was too aggressive.
-    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000;
+    static constexpr uint64_t GLOBAL_BLOCK_LIMIT = 1000000000000;
     std::atomic<uint64_t> total_blocks_executed_{0};
     std::atomic<bool>     jit_disabled_{false};  // set by global watchdog
     // ── Shared-JIT mode (default) ───────────────────────────────────
