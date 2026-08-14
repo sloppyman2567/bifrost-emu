@@ -269,13 +269,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **192 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **193 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic). The only historical skip was `test_dladdr_glibc`,
   which must be a glibc-DYNAMIC binary or its dlopen stub skips with
   exit 77.
 - `./scripts/run_tests.sh --test-all` — default suite + 5 interactive
-  stdin tests = **197 pass / 0 fail / 0 skip**, incl. downloaded
+  stdin tests = **198 pass / 0 fail / 0 skip**, incl. downloaded
   real-world binaries. Subsets: `--quick` (no benches),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -287,7 +287,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **196 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **198 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

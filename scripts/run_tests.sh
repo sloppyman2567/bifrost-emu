@@ -20,9 +20,9 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (190 total standard):
+# Test count breakdown (193 total standard):
 #   Unit         41  — ctest/*.elf focused JIT regression tests
-#   Integration  64  — ctest_real/*.elf + test/*.elf real programs
+#   Integration  67  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
 #                      (49 static busybox/toybox + 7 dynamic glibc)
@@ -30,8 +30,8 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (--test-all only)
 #
-# Standard suite = 190 tests. Quick suite = 185 (skip benchmarks).
-# Full suite (--test-all, with interactive) = 195 tests.
+# Standard suite = 193 tests. Quick suite = 188 (skip benchmarks).
+# Full suite (--test-all, with interactive) = 198 tests.
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
