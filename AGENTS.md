@@ -25,6 +25,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Cross tests: `make cross SRC=… OUT=…` via musl toolchain in `tools/`
 - Thunk trampolines end with `ret` after `svc`; pointer args outside
   the 4 GiB direct window bounce through a host buffer with writeback
+- Thunk trampolines MUST load the symbol id into x9 (the dispatcher reads
+  `cpu.regs[9]` in `src/syscalls/misc.cpp`). Always emit trampolines via the
+  shared `write_thunk_trampoline()` helper in `thunk_common.hpp` (which uses
+  `MOVZ_Xd_IMM16(9, …)`); a hand-rolled `0xD2800000u | (id << 5)` silently
+  encodes `movz x0` and misroutes every call. This bit DisplayThunk for a
+  long time (fixed in the third review pass).
+- DisplayThunk prefers the SDL2 DisplayProxy for `THUNK_PROXY` (X11/Wayland)
+  symbols even when the host libX11/libwayland are present: proxy handles are
+  guest addresses that round-trip, while a HOST `Display*` returned by
+  `XOpenDisplay` cannot be translated back through guest memory (bounce →
+  SIGSEGV). Host libs are only a fallback when no SDL proxy initializes
+  (headless). Do not "restore" host-lib preference for THUNK_PROXY symbols.
 - dlopen of libGL/libSDL2 prefers thunk registration when the on-disk
   `.so` is not AArch64 (do not map host x86_64 libs as guest code)
 - Absolute-path `dlopen` rejects non-AArch64 ELFs and falls back to
@@ -35,7 +47,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Unhandled SIMD_DP ops in `interp_fp.cpp` throw `DecodeError` (→ SIGILL),
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
-  (0x2E20AC00) sub3_noq groups are covered. TBL/TBX all four forms
+  (0x2E20AC00) sub3_noq groups are covered. The pairwise max/min family
+  (SMAXP/SMINP/UMAXP/UMINP) case label covers ALL sizes 0-3
+  (0x2E20A400/0x2E60A400/0x2EA0A400/0x2EE0A400 for max, +bit11 for min);
+  do not narrow it back to size=0 — GCC's vectorized memchr/strchr emit
+  `umaxp v31.4s` (size=2), which a size-0-only case label silently
+  DecodeErrors (SIGILL in interp-only, SIGABRT via JIT CALL_INTERP).
+  TBL/TBX all four forms
   (TBL1 0x0E000000, TBL2 0x0E002000, TBX1 0x0E001000, TBX2 0x0E003000;
   op2=bit12, L=bit13) are in interp — GCC lowers `vextq_u8` to TBL2 +
   `ins v.b[i], v.b[j]` index building. INS (element, vector) shares the
@@ -70,6 +88,34 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   emit `lsr w3, x19, #0` to grab the low 32 bits of a 64-bit constant during
   vec3/vec4 struct packing (returning 0 zeroed the z component of colors).
   The general UBFM extract path already yields the correct value.
+- SIMD_LDST `src2` must be a REAL vreg, never literal 0: vreg 0 is guest X0
+  (vregs 0-30 = X0-X30, 31 = SP, 32 = XZR — XZR only via `load_imm(b, 0)`).
+  On the B/H/S/D vector load path (v_hi zeroing) the codegen reads
+  `ensure_vreg(src2)`, so literal 0 loads X0's value into v_hi; on the store
+  path `set_vreg_reg(src2, dhi)` clobbers guest X0 with v_hi[d.rt] — which
+  corrupted `cmp x1, x0` in `test_simd_arith`'s Test 1 (JIT-only, interp
+  passed). Loads use a `load_imm(block, 0)` zero vreg; stores use a fresh
+  `g_alloc.alloc()` scratch for the unused v_hi half.
+- The guest heap and stack MUST stay inside the 4 GiB direct window or
+  every heap/stack access falls through to the `pages_` + rwlock slow
+  path (~9× JIT regression; the voxel game dropped from ~18 MIPS to
+  ~2 MIPS). `src/core/memory.h` was long described in comments as
+  "v1.5.2: heap/stack inside the window" while the constants still put
+  them ABOVE it (`MMAP_BASE_MIN=0x5000000000`, `STACK_TOP=0x8000000000`).
+  Current layout: ELF+brk low, heap 256..768 MiB (`MMAP_BASE_MIN/MAX`),
+  stack spans 944..1008 MiB (`STACK_TOP=0x3F000000`, 64 MiB). If you ever
+  bump these, keep the comment AND `threads.cpp`'s backtrace heap-range
+  check (which uses `Memory::MMAP_BASE_MIN/MAX`) in sync; `TRAMPOLINE_ADDR`
+  (0x7000000000) deliberately stays above the window.
+- `brk` must round the request up to page granularity (Linux semantics)
+  and refuse growth into the stack region
+  (`new_brk >= Memory::STACK_TOP - Memory::STACK_SIZE`). musl's variadic
+  `syscall()` wrapper passes a STALE `x0` for a no-arg call, so a guest
+  `syscall(214)` (brk(0)) with no explicit arg can hand the emulator a
+  garbage stack-relative address; without alignment that left `brk_`
+  unaligned and failed `test_brk`'s page-alignment check after the
+  layout change (fails in BOTH JIT and interp). Tests calling brk(0)
+  must use `syscall(214, 0)`; the emulator still aligns to be safe.
 
 ## Work Guidance
 
