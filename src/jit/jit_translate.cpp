@@ -192,6 +192,16 @@ static bool instr_will_call_interp(const DecodedInst& d) {
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
     if (!code_buf_) return nullptr;
+    // BL_CALL (native call-within-block) does NOT compose with chain-skip:
+    // a callee block entered at fn() inside jit_call_helper eventually
+    // reaches the chain-skip cold exit (`mov rsp,rbp; pop×6; ret`), which
+    // resets rsp to the chain root's frame and discards the BL_CALL /
+    // jit_call_helper return address on the stack — corrupting the host
+    // call chain (busybox id hung in do_wait after printing its output).
+    // Chain-skip is opt-in (the game doesn't use it), so under chain-skip
+    // fall back to the block-end-at-BL behavior (BL ends the block, the
+    // call edge dispatches via chain slots — the pre-1.5.2 path).
+    bl_call_disabled_ = chain_skip_enabled();
     // W^X: toggle the code buffer to writable before emitting x86 code.
     // (No-op if W^X is disabled or the buffer is already writable.)
     make_writable();

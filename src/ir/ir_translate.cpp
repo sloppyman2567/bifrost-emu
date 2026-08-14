@@ -654,7 +654,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── B / BL ───────────────────────────────────────────────────
         case InstClass::B: case InstClass::BL: {
             if (d.cls == InstClass::BL) {
-                if (false) {
+                if (!bl_call_disabled_) {
                     uint16_t lr = load_imm(block, cur_pc + 4);
                     store_arm_reg(block, 30, lr);
                     uint64_t target = cur_pc + d.imm;
