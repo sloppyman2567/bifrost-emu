@@ -97,6 +97,23 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   the same block reloads the broadcast. Both the vec path and the memory
   path need this; the memory path's trailing Q=0 clobber only masked the
   clean-src1 case.
+- SIMD UMOV (vector element → GPR) is native for all element sizes and both
+  Q values (table row in `simd_dp.txt`: mask `0xBFE0FC00`, match
+  `0x0E003C00`). UMOV shares the ASIMDINS encoding group with INS
+  (bits[15:12]=0001 → 0x0E001C00) and SMOV (0010 → 0x0E002C00); UMOV's
+  bits[15:12]=0011 picks it alone — do NOT use a guard that only checks
+  bit12, and do NOT match 0x0E002C00 (that's SMOV, still interp, no sign
+  extend). The game's memset does `umov x1, v0.d[0]` (0x4E083C01) right
+  after the dup to read the broadcast back. imm5 encodes esize AND index
+  (esize = 1 << ctz(imm5), index = imm5 >> (ctz+1)); the `size` field
+  (bits[23:22]) is 00 and must stay 00 in the match. Q=0 → Wd, Q=1 → Xd.
+  JIT: NOT vec-cache compatible (never pinned), so reading `cpu.v_lo`/
+  `cpu.v_hi` directly is always current; compute qword = (index*esize)/8
+  (0 → v_lo, 1 → v_hi) + byte offset, zero-extending load of esize bytes
+  (emit_load32/16/8 are movzx) into a fresh `alloc_reg()`, then
+  `set_vreg_reg(dest, d)` (mirror the interp's full-element write).
+  Translator skips rd==31 (XZR). `instr_will_call_interp` auto-syncs via
+  classify (Family::UMOV ≠ UNKNOWN).
 - `emit_taken_path_epilogue()` must NOT clear the vec-cache dirty flags:
   `vec_cache_writeback_all()` clears `vec_dirty_` as a codegen-time side
   effect, and the FALL-THROUGH (main) epilogue is emitted LATER — if the

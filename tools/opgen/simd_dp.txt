@@ -76,6 +76,18 @@ SRSRA   0xBF00FC00   0x0F003400   SHIFT     8   -
 # ── GPR->vector DUP (native for all element sizes 1/2/4/8, Q=0 and Q=1) ──
 DUP     0xBFE0FC00   0x0E000C00   DUP       0   (((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8)
 
+# ── UMOV (vector element -> GPR) ─────────────────────────────────────────
+# Encoding: Q 0 0 01110 size 1 imm5 0 0 1 1 Rn Rd. Element size/index come
+# from imm5 (esize = 1 << ctz(imm5), index = imm5 >> (ctz+1)); the `size`
+# field (bits[23:22]) is 00. The ASIMDINS group shares this mask with INS
+# (bits[15:12]=0001 -> 0x0E001C00) and SMOV (bits[15:12]=0010 ->
+# 0x0E002C00); UMOV's bits[15:12]=0011 -> 0x0E003C00 selects it alone.
+# Q=0 -> Wd (32-bit GPR, zero-extended), Q=1 -> Xd (64-bit). The interp
+# (interp_fp.cpp case 0x0E003C00) is the semantic reference. The game's
+# memset does `umov x1, v0.d[0]` (0x4E083C01) right after `dup v0.16b,w1`
+# to read the broadcast back — native here avoids the interp round-trip.
+UMOV    0xBFE0FC00   0x0E003C00   UMOV       0   -
+
 # ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[11:10]) ──────
 AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -
 PMULL   0xFFE0FC00   0x4E60E000   CRYPTO     4   -

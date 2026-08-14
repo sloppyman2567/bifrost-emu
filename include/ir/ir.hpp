@@ -111,6 +111,11 @@ enum class IROp : uint8_t {
     SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)
     SIMD_DUP,      // v_lo[dest] = v_hi[dest] = src1 (broadcast 64-bit)
+    SIMD_UMOV,     // regs[dest] = element[imm] of vector src1 (v_lo/v_hi)
+                   // width = element size in bytes (1, 2, 4, 8);
+                   // imm = lane index (0..15/esize-1); flags_op = Q
+                   // (0=W d zero-extended, 1=X d — codegen reads the full
+                   // element regardless, mirroring the interpreter)
     SIMD_MOVI,     // v_lo[dest],v_hi[dest] = broadcast of imm (MOVI/MVNI)
                    // imm = pre-expanded 64-bit lane pattern; flags_op = Q
                    // (1=128-bit: v_hi = pattern; 0=64-bit: v_hi = 0)

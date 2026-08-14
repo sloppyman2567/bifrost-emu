@@ -749,6 +749,30 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit(block, IROp::SIMD_DUP, d.rd, val, 0, esize, 0, q, 0, cur_pc);
                     return true;
                 }
+            case simd::Family::UMOV: {
+                // UMOV (vector element -> GPR). imm5 = esize | (index <<
+                // log2(esize)); the low set bit gives the element size and
+                // the remaining bits the lane index (interp reference:
+                // interp_fp.cpp case 0x0E003C00). Q=0 writes Wd (zero-
+                // extended 32-bit), Q=1 writes Xd. rd==31 (XZR) discards.
+                uint8_t imm5 = static_cast<uint8_t>((op >> 16) & 0x1F);
+                // Bounded loop mirroring interp_fp.cpp's UMOV decode: imm5
+                // always has a set bit for valid encodings, but an imm5==0
+                // encoding (UNDEFINED per ARM, still admitted by the guard)
+                // must not hang the translator — the interp degrades to
+                // esize=1, index=0, so match it.
+                int esize_log2 = 0;
+                for (int b = 0; b < 5; b++) {
+                    if (imm5 & (1u << b)) { esize_log2 = b; break; }
+                }
+                uint8_t esize = static_cast<uint8_t>(1u << esize_log2);
+                uint8_t index = static_cast<uint8_t>(imm5 >> (esize_log2 + 1));
+                uint8_t qbit = static_cast<uint8_t>((op >> 30) & 1);
+                if (d.rd != 31)
+                    emit(block, IROp::SIMD_UMOV, d.rd, d.rn, 0, esize, 0,
+                         qbit, index, cur_pc);
+                return true;
+            }
             case simd::Family::MODIMM: {
                 // AdvSIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
                 // Mirror of the interpreter's block in interp_fp.cpp

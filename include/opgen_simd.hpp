@@ -22,8 +22,9 @@ enum class Family : uint8_t {
     MODIMM = 4,
     SHIFT = 5,
     DUP = 6,
-    CRYPTO = 7,
-    UNKNOWN = 8,
+    UMOV = 7,
+    CRYPTO = 8,
+    UNKNOWN = 9,
 };
 
 struct Op {
@@ -74,9 +75,10 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 33, 7, "URSRA"};
     if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 34, 8, "SRSRA"};
     if ((op & 0xBFE0FC00U) == 0x0E000C00U && ((((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8))) return Op{Family::DUP, 35, 0, "DUP"};
-    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 36, 0, "AESE"};
-    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 37, 4, "PMULL"};
-    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 38, 5, "PMULL2"};
+    if ((op & 0xBFE0FC00U) == 0x0E003C00U) return Op{Family::UMOV, 36, 0, "UMOV"};
+    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 37, 0, "AESE"};
+    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 38, 4, "PMULL"};
+    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 39, 5, "PMULL2"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

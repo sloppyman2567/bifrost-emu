@@ -225,6 +225,43 @@ static void test_umov(void) {
     check("umov_lane2", lane2 == 0xDEADBEEF);
 }
 
+/* ── UMOV (vector element -> GPR), raw encodings — native in the JIT ──
+ * Encoding: 0x0E003C00 | (Q<<30) | (imm5<<16) | (rn<<5) | rd.
+ * imm5 = esize | (index << log2(esize)+1) — the low set bit is the element
+ * size, the remaining bits the lane index. Q=0 -> Wd, Q=1 -> Xd. Covers
+ * both v_lo (lanes < 8/esize) and v_hi routing. GCC's vectorized memset
+ * does `umov x1, v0.d[0]` (Q=1, imm5=8) after `dup v0.16b,w1`. */
+static void test_umov_raw(void) {
+    /* 16-byte test vector; both qwords non-zero so v_hi routing is tested. */
+    uint64_t vec[2] = {0xDEADBEEFCAFEBABEULL, 0x1122334455667788ULL};
+    uint64_t out = 0;
+    int ok = 1;
+#define UMOV_RAW(rd, enc, expect, label) do {                              \
+        out = 0;                                                           \
+        asm volatile("ldr q0, [%1]\n\t.inst " #enc "\n\tmov %0, x" #rd     \
+                     : "=r"(out) : "r"(vec) : "x" #rd, "memory");          \
+        if (out != (expect)) ok = 0;                                       \
+    } while (0)
+    /* Q=1 (64-bit dest): d[0] (v_lo, imm5=8), d[1] (v_hi, imm5=0x18). */
+    UMOV_RAW(9, 0x4E083C09, 0xDEADBEEFCAFEBABEULL, "d0");
+    UMOV_RAW(10, 0x4E183C0A, 0x1122334455667788ULL, "d1");
+    /* Q=0 (32-bit dest, zero-extended): s lanes across v_lo + v_hi. */
+    UMOV_RAW(11, 0x0E043C0B, 0xCAFEBABEULL, "s0");
+    UMOV_RAW(11, 0x0E0C3C0B, 0xDEADBEEFULL, "s1");
+    UMOV_RAW(11, 0x0E143C0B, 0x55667788ULL, "s2");
+    UMOV_RAW(11, 0x0E1C3C0B, 0x11223344ULL, "s3");
+    /* h lanes, v_hi routing at index >= 4. */
+    UMOV_RAW(11, 0x0E023C0B, 0xBABEULL, "h0");
+    UMOV_RAW(11, 0x0E123C0B, 0x7788ULL, "h4");
+    UMOV_RAW(11, 0x0E1E3C0B, 0x1122ULL, "h7");
+    /* b lanes, v_hi routing at index >= 8. */
+    UMOV_RAW(11, 0x0E013C0B, 0xBEULL, "b0");
+    UMOV_RAW(11, 0x0E113C0B, 0x88ULL, "b8");
+    UMOV_RAW(11, 0x0E1F3C0B, 0x11ULL, "b15");
+#undef UMOV_RAW
+    check("umov_raw_all_sizes", ok);
+}
+
 /* ── Vector ADD/XOR (regression — these already worked) ── */
 static void test_add_xor(void) {
     uint32_t a[4] = {1, 100, 1000, 0xFFFFFFFF};
@@ -254,6 +291,7 @@ int main(void) {
     test_rev64();
     test_ins();
     test_umov();
+    test_umov_raw();
     test_add_xor();
     printf("neon: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;

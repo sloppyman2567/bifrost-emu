@@ -652,6 +652,32 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // RAX holds a copy (not a cached vreg) — no mapping to update.
             return true;
         }
+        // ── SIMD UMOV (vector element -> GPR) ───────────────────────
+        // regs[dest] = element[imm] of vector src1. width = esize
+        // (1/2/4/8), imm = lane index, flags_op = Q (0=W d, 1=X d — the
+        // codegen reads the full element regardless, mirroring the interp).
+        // NOT in vec_cache_compatible_op, so src1 is never pinned: reading
+        // cpu.v_lo/v_hi directly is always current (no stale-XMM hazard).
+        // The zero-extending loads (emit_load32/16/8 are movzx) match the
+        // interp's zero-extended element read for esize < 8; esize == 8
+        // loads the full qword from v_lo or v_hi per the lane index.
+        case IROp::SIMD_UMOV: {
+            const int esize = inst.width ? static_cast<int>(inst.width) : 8;
+            const int index = static_cast<int>(inst.imm);
+            const int byte_off = index * esize;        // offset into the 16-byte vector
+            const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
+            const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
+                              + static_cast<int>(inst.src1) * 8 + (byte_off % 8);
+            int d = alloc_reg();
+            switch (esize) {
+                case 1:  emit_load8(d, CPU_REG, off);  break;
+                case 2:  emit_load16(d, CPU_REG, off); break;
+                case 4:  emit_load32(d, CPU_REG, off); break;
+                default: emit_load(d, CPU_REG, off);   break;  // 8 bytes
+            }
+            set_vreg_reg(inst.dest, d);
+            return true;
+        }
         // ── SIMD MOVI/MVNI (broadcast lane pattern, AdvSIMD modified imm) ──
         // v_lo[dest] = imm; v_hi[dest] = Q ? imm : 0. flags_op = Q.
         // One movabs + one vmovq (vmovq already zeroes the upper half for
