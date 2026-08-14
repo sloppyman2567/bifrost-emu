@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -115,8 +116,9 @@ public:
     // another tracked allocation, a fresh region is allocated and the
     // data is copied (mirrors musl's mremap contract).
     uint64_t mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size);
-    // Remove an allocation from tracking (munmap keeps pages mapped).
-    void untrack_allocation(uint64_t addr);
+    // Remove an allocation from tracking AND reclaim its pages + address
+    // range so a future mmap_alloc can reuse it (Linux munmap semantics).
+    void untrack_allocation(uint64_t addr, uint64_t size);
     // ── Atomics ───────────────────────────────────────────────────────
     // Used by LSE atomics (CAS) and futex. Returns true if swapped.
     bool atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired);
@@ -199,6 +201,14 @@ private:
     mutable std::shared_mutex mu_;
     mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
     std::unordered_map<uint64_t, uint64_t> allocations_;
+    // Reclaimed (munmap'd) address ranges available for reuse, keyed by
+    // start address → size. Kept coalesced/merged so mmap_alloc can do a
+    // first-fit scan and hand back the same guest addresses the guest
+    // freed (critical: a bump-only allocator marches the guest heap past
+    // the 4 GiB direct window and exhausts MAX_TOTAL_PAGES after enough
+    // malloc/free churn, then mmap starts failing and musl mallocng
+    // silently builds its arena at address 0 — BRK #1000 in get_meta).
+    std::map<uint64_t, uint64_t> free_ranges_;
     // 1.5.2-alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the
@@ -216,5 +226,11 @@ private:
     // 1.5.2-alpha: Check page count against MAX_TOTAL_PAGES.
     // Returns true if the allocation would exceed the limit.
     bool would_exceed_page_limit(size_t num_pages) const;
+    // 1.5.2-alpha: Add an address range to the free list, merging it with
+    // any adjacent free ranges (kept sorted by start address).
+    void add_free_range(uint64_t addr, uint64_t size);
+    // 1.5.2-alpha: Remove an address range from the free list (used when
+    // a MAP_FIXED allocation lands on top of reclaimed space).
+    void remove_free_range(uint64_t addr, uint64_t size);
 };
 } // namespace arm64emu

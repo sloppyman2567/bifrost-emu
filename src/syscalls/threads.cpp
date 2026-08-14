@@ -478,7 +478,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         } catch (...) {
                             // Page might not be mapped — skip.
                         }
-                        mem_.untrack_allocation(addr);
+                        mem_.untrack_allocation(addr, size);
                     }
                 }
             }

@@ -81,7 +81,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // from here on, but with no overwrite of existing pages since
                 // we just verified there are none in range).
                 uint64_t mapped = mem_.mmap_alloc(length, addr);
-                (void)mapped;
+                if (mapped == 0) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                    return 0;
+                }
                 // Map succeeded — fall through to the file-load branch below
                 // using `addr` as both the requested and actual address.
                 // We continue into the regular MAP_FIXED path by setting
@@ -151,6 +154,16 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
             uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
+            // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid
+            // range, or OOM page-limit). Returning that 0 to the guest
+            // reads as a *successful* mapping at address 0 (musl only
+            // treats -1/MAP_FAILED as failure), so mallocng built its
+            // arena at address 0 and free() crashed with BRK #1000.
+            // Translate to a proper negative errno → guest MAP_FAILED.
+            if (mapped == 0) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
              if (getenv("BIFROST_TRACE_MMAP")) {
                 fprintf(stderr, "[mmap(pc=0x%llx addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
                         (unsigned long long)cpu.pc,
@@ -214,22 +227,23 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(mapped);
             return 0;
         }
-        case 215: { // munmap - we just leave pages allocated (no-op OK)
-            // We don't actually reclaim the pages (our sparse memory
-            // model has no mechanism to give pages back), but we DO
-            // remove the allocation from our tracking map so that a
-            // future mremap_grow collision check won't see it as an
-            // obstacle. This matches the Linux kernel's contract:
-            // after munmap returns, the address range is free for new
-            // mmap use, even though we happen to keep the page data
-            // around (the guest won't access it again because musl
-            // has dropped its pointer to it).
+        case 215: { // munmap - reclaim the pages and address range
+            // BUGFIX: the old code only removed the allocation from the
+            // tracking map ("no-op OK"). That made mmap_alloc a pure bump
+            // allocator: guest malloc/free churn (the game's 18 MB chunk
+            // meshes every frame) marched the heap pointer up to ~8.5 GB,
+            // exhausted MAX_TOTAL_PAGES (1M pages = 4 GiB), and mmap
+            // started returning 0 — which the guest treated as a valid
+            // mapping at address 0, so musl mallocng built its arena
+            // there and free() crashed with BRK #1000 (get_meta). Now
+            // munmap frees the pages (page-cap reflects live memory) and
+            // returns the address range to the free list for reuse.
             if (getenv("BIFROST_TRACE_MMAP")) {
                 fprintf(stderr, "[munmap(0x%llx, %lu)]\n",
                         (unsigned long long)a0,
                         (unsigned long)a1);
             }
-            mem_.untrack_allocation(a0);
+            mem_.untrack_allocation(a0, a1);
             ret_host(0);
             return 0;
         }
@@ -276,6 +290,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // meta_area init path). Treat that as a plain mmap.
             if (old_addr == 0 && old_size == 0) {
                 uint64_t mapped = mem_.mmap_alloc(new_size, 0);
+                if (mapped == 0) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                    return 0;
+                }
                 if (getenv("BIFROST_TRACE_MMAP")) {
                     fprintf(stderr, "[mremap(0,0,%lu) → 0x%llx]\n",
                             (unsigned long)new_size,

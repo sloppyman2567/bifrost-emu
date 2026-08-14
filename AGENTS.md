@@ -235,6 +235,24 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   bump these, keep the comment AND `threads.cpp`'s backtrace heap-range
   check (which uses `Memory::MMAP_BASE_MIN/MAX`) in sync; `TRAMPOLINE_ADDR`
   (0x7000000000) deliberately stays above the window.
+- `mmap_alloc` is NOT a pure bump allocator anymore: `munmap`
+  (`untrack_allocation(addr, size)`) now frees the `pages_` entries,
+  decrements `total_pages_`, and hands the address range back to
+  `free_ranges_` (`std::map`, coalesced); `mmap_alloc` first-fits a
+  reclaimed range before bumping `mmap_next_`, and zeroes reused pages
+  (MAP_ANONYMOUS semantics). The old bump-only behavior was the
+  minecraft game's crash: each frame's 18 MB DATA + 2.3 MB INDICES mesh
+  buffers were mmap'd then munmap'd, marching the heap to ~8.5 GB
+  (above the 4 GiB window → `pages_` slow path → 1M-page cap hit → mmap
+  returned 0), and musl only treats -1/MAP_FAILED as failure, so mallocng
+  built its arena at guest address 0 and the next `free()` BRK #1000'd in
+  `get_meta` (misdiagnosed for weeks as "normal rc=133"). The mmap syscall
+  also now returns `-ENOMEM` when `mmap_alloc` fails (was returning 0).
+  Keep the OOM check counting ONLY pages that would actually be added
+  (non-window pages absent from `pages_`) — a naive `aligned_size/PAGE`
+  count spuriously trips the cap on reused window ranges. Keep
+  `free_ranges_` under `mu_` (it's mutated by untrack/mmap_alloc/mremap)
+  and copy it in `clone_for_fork`.
 - `brk` must round the request up to page granularity (Linux semantics)
   and refuse growth into the stack region
   (`new_brk >= Memory::STACK_TOP - Memory::STACK_SIZE`). musl's variadic

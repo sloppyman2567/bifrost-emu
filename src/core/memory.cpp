@@ -279,9 +279,26 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t base = hint;
     uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
+    bool reused = false;
     if (base == 0) {
-        base = mmap_next_;
-        mmap_next_ += aligned_size;
+        // BUGFIX: reuse a reclaimed (munmap'd) range first instead of
+        // always bumping. The bump allocator never recycled address
+        // space, so the guest heap marched unboundedly (the minecraft
+        // game's per-frame 18 MB+2.3 MB mesh buffers hit the 1M-page
+        // cap after ~400 meshes and mmap started returning 0 → arena at
+        // address 0 → free() BRK #1000). First-fit keeps the heap
+        // clustered in the direct window (JIT fast path).
+        for (auto it = free_ranges_.begin(); it != free_ranges_.end(); ++it) {
+            if (it->second >= aligned_size) {
+                base = it->first;
+                reused = true;
+                break;
+            }
+        }
+        if (!reused) {
+            base = mmap_next_;
+            mmap_next_ += aligned_size;
+        }
     } else {
         // 1.5.2-alpha: Validate MAP_FIXED address range. Reject
         // addresses in the NULL page region or kernel space.
@@ -289,21 +306,40 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         mmap_next_ = std::max(mmap_next_, base + aligned_size);
     }
     // 1.5.2-alpha: OOM protection. Check page count before allocating.
-    size_t num_new_pages = aligned_size / PAGE_SIZE;
+    // Count only pages that would actually be added (non-window pages not
+    // already present in pages_). Reused window ranges add nothing, and a
+    // reused above-window range re-adds pages that untrack freed — so the
+    // check reflects the LIVE page count, not a naive aligned_size count.
+    size_t num_new_pages = 0;
+    for (uint64_t s = base & ~PAGE_MASK; s < base + aligned_size; s += PAGE_SIZE) {
+        if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+        uint64_t pn = s / PAGE_SIZE;
+        if (pages_.find(pn) == pages_.end()) num_new_pages++;
+    }
     if (would_exceed_page_limit(num_new_pages)) return 0;
+    // Consume the taken free range (leave the tail for later reuse).
+    if (reused) remove_free_range(base, aligned_size);
+    // A MAP_FIXED allocation reclaims any free range it overlaps.
+    if (hint != 0) remove_free_range(base, aligned_size);
     uint64_t start = base & ~PAGE_MASK;
     uint64_t end = base + aligned_size;  // page-aligned end
     size_t pages_added = 0;
     for (; start < end; start += PAGE_SIZE) {
         uint64_t pn = start / PAGE_SIZE;
         if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
+            // Reclaimed window pages may still hold stale data from the
+            // previous owner — zero them for MAP_ANONYMOUS semantics.
+            if (reused) {
+                std::memset(direct_window_ + start, 0, PAGE_SIZE);
+            }
             continue;
         }
         auto it = pages_.find(pn);
         if (it == pages_.end()) {
             pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
             pages_added++;
-        } else if (hint == 0) {
+        } else if (reused) {
+            // Reclaimed pages above the window: zero stale data.
             std::fill(it->second.begin(), it->second.end(), 0);
         }
     }
@@ -386,6 +422,10 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         // a subsequent mmap_alloc(NULL,...) would return an address
         // inside the grown (and possibly already-freed) region.
         mmap_next_ = std::max(mmap_next_, old_addr + new_aligned);
+        // The grown region now belongs to this allocation — remove any
+        // reclaimed free range it overlaps (mremap grows into space that
+        // a prior munmap may have returned to the pool).
+        remove_free_range(extra_start, extra_end - extra_start);
         return old_addr;
     }
     // Collision detected: allocate a fresh region, copy the data, and
@@ -398,19 +438,98 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         read(old_addr, buf.data(), old_size);
         write(new_addr, buf.data(), old_size);
     }
-    {
-        // BUGFIX: unique_lock, not shared_lock — we're mutating allocations_.
-        std::unique_lock<std::shared_mutex> g2(mu_);
-        allocations_.erase(old_addr);
-    }
+    // Reclaim the old range (free its pages + hand the address space
+    // back to the free list) instead of just erasing the tracking entry.
+    untrack_allocation(old_addr, old_aligned);
     return new_addr;
 }
-void Memory::untrack_allocation(uint64_t addr) {
+void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
     // BUGFIX: must hold a *unique* lock to mutate allocations_. The old
     // code used shared_lock, which is a data race (UB) if another thread
     // is concurrently reading allocations_ via mremap_grow().
+    //
+    // BUGFIX: the old code only erased the allocation from the tracking
+    // map. It never reclaimed the pages_ entries, never decremented
+    // total_pages_, and never returned the address range to a pool. That
+    // made mmap_alloc a pure bump allocator: mallocng's huge allocations
+    // (~18 MB DATA + ~2.3 MB INDICES per chunk mesh) were mmap'd and
+    // munmap'd every frame, marching mmap_next_ up to ~8.5 GB and
+    // exhausting MAX_TOTAL_PAGES (1M pages = 4 GiB) after ~400 churn
+    // cycles. mmap_alloc then returned 0, which the mmap syscall handed
+    // to the guest as a *successful* mapping at address 0 (musl only
+    // treats -1/MAP_FAILED as failure), so mallocng built its arena at
+    // address 0 and free() crashed with BRK #1000 in get_meta.
+    //
+    // Now munmap truly frees: page storage is dropped, the page-count
+    // cap reflects live memory, and the address range goes on a free list
+    // for reuse (keeping the guest heap inside the 4 GiB direct window,
+    // which is also the JIT fast path).
     std::unique_lock<std::shared_mutex> g(mu_);
     allocations_.erase(addr);
+    // Free page storage in the range and decrement the live page count.
+    uint64_t start = addr & ~PAGE_MASK;
+    uint64_t end = addr + size;
+    for (uint64_t s = start; s < end; s += PAGE_SIZE) {
+        // Direct-window addresses have no pages_ entry (the window IS
+        // the storage) — nothing to reclaim there, and they don't count
+        // toward total_pages_.
+        if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+        uint64_t pn = s / PAGE_SIZE;
+        auto it = pages_.find(pn);
+        if (it != pages_.end()) {
+            pages_.erase(it);
+            total_pages_.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+    // Hand the address range back to mmap_alloc for reuse.
+    add_free_range(addr, size);
+}
+void Memory::add_free_range(uint64_t addr, uint64_t size) {
+    if (size == 0) return;
+    // Merge with a previous adjacent free range.
+    auto it = free_ranges_.lower_bound(addr);
+    if (it != free_ranges_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->first + prev->second == addr) {
+            // Extend the previous range to cover this one.
+            prev->second += size;
+            addr = prev->first;
+            size = prev->second;
+            free_ranges_.erase(prev);
+            it = free_ranges_.lower_bound(addr);
+        }
+    }
+    // Merge with a following adjacent free range.
+    if (it != free_ranges_.end() && it->first == addr + size) {
+        size += it->second;
+        free_ranges_.erase(it);
+    }
+    free_ranges_[addr] = size;
+}
+void Memory::remove_free_range(uint64_t addr, uint64_t size) {
+    if (size == 0) return;
+    uint64_t lo = addr;
+    uint64_t hi = addr + size;
+    auto it = free_ranges_.lower_bound(addr);
+    // Check if an existing free range starts before addr but overlaps.
+    if (it != free_ranges_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->first + prev->second > addr) it = prev;
+    }
+    while (it != free_ranges_.end() && it->first < hi) {
+        uint64_t r_lo = it->first;
+        uint64_t r_hi = it->first + it->second;
+        // Split the reclaimed range around the overlap.
+        uint64_t left_size = (lo > r_lo) ? lo - r_lo : 0;
+        uint64_t right_lo = (hi < r_hi) ? hi : r_hi;
+        uint64_t right_size = (hi < r_hi) ? r_hi - hi : 0;
+        uint64_t keep_lo = left_size ? r_lo : 0;
+        uint64_t keep_size = left_size;
+        free_ranges_.erase(it);
+        if (keep_size) free_ranges_[keep_lo] = keep_size;
+        if (right_size) free_ranges_[right_lo] = right_size;
+        it = free_ranges_.lower_bound(hi);
+    }
 }
 bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
     // BUGFIX: the old code only consulted the sparse pages_ map and never
@@ -584,6 +703,10 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
         for (const auto& [base, size] : allocations_) {
             child->allocations_[base] = size;
         }
+        // BUGFIX: copy the reclaimed free ranges too, so the child's
+        // mmap_alloc reuses the same address space the parent would
+        // (keeps the child heap inside the direct window after fork).
+        child->free_ranges_ = free_ranges_;
         // 1.5.2-alpha: copy total page count for OOM tracking.
         child->total_pages_.store(total_pages_.load(std::memory_order_relaxed),
                                    std::memory_order_relaxed);
