@@ -378,8 +378,14 @@ void FrostJIT::invalidate_host_regs(uint16_t mask) {
         dirty_host_regs_ &= ~(1u << r);
     }
 }
-// Spill ALL scratch vregs (v > 31) in `mask`, even if not dirty.
-// See header comment for why this is necessary.
+// Spill scratch vregs (v > 31) in `mask` only when DIRTY. Every caller
+// runs flush_dirty_host_regs on the same mask first, which evicts (spills +
+// unmaps) all dirty vregs — so at flush_scratch time any remaining cached
+// scratch is CLEAN, and the dirty-flag invariant (dirty=false ⇒ the stack
+// slot holds the current value) makes the store redundant. The
+// `vreg_dirty_[v]` guard keeps the defensive standalone-call behavior the
+// header comment describes: a scratch whose value lives ONLY in the host reg
+// still gets spilled.
 void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
     uint16_t m = mask;
     while (m) {
@@ -387,12 +393,13 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
         m &= m - 1;
         int v = reg_vreg_[r];
         if (v >= 0 && v > 31) {
-            // Scratch vreg: spill to its stack slot. (If it's dirty,
-            // flush_dirty_host_regs already spilled it — the redundant
-            // store is harmless and cheaper than tracking dirty state.)
-            int32_t off = vreg_stack_slot(v);
-            emit_store(RBP, off, r);
-            // Mark as non-dirty (we just wrote it to its home).
+            if (vreg_dirty_[v]) {
+                // Dirty scratch: spill to its stack slot.
+                int32_t off = vreg_stack_slot(v);
+                emit_store(RBP, off, r);
+            }
+            // Mark as non-dirty (we just wrote it to its home — or it
+            // already was).
             vreg_dirty_[v] = false;
             dirty_host_regs_ &= ~(1u << r);
         }

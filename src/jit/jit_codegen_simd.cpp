@@ -57,7 +57,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             //   EON  (5): a ^ ~b   = pxor xmm0,xmm1; pcmpeqd xmm1,xmm1 (all-ones);
             //                       pxor xmm0,xmm1  →  ~xmm0
             clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // SIMD_LOGICAL touches no GPRs: the SSE2 XMM half-loop and the
+            // VEX vec-cache path both use XMM0-2 only, and the RBX base
+            // register is reserved (never holds a cached vreg). No GPR flush.
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             // For opc 0-2 we use a single SSE2 op; for 3-5 we emit a
             // 2-3 instruction sequence.
@@ -186,7 +188,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 return true;
             }
             clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // SIMD_ARITH touches no GPRs (XMM half-loop / VEX vec-cache
+            // only; unsupported cases above already returned via
+            // emit_call_interp, which self-flushes). No GPR flush.
             // SSE2 opcodes (with 66 0F prefix):
             //   paddb/h/w/d/q  = FC/FD/FE/D8
             //   psubb/h/w/d/q  = F8/F9/FA/EB
@@ -444,7 +448,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 }
             }
             clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // SIMD_FP_FMA uses only RAX (the Q=0 v_hi zero below); the FMA3
+            // and non-FMA3 chunks are XMM-only. Narrow the flush to RAX.
+            flush_invalidate_host_regs(1u << RAX);
             auto emit_fma_chunk = [&](int32_t off1, int32_t off2, int32_t offd) {
                 if (has_fma3()) {
                     // ── FMA3 native (single-rounded, IEEE 754-correct) ──
@@ -547,7 +553,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             const bool ge  = (opc == 2 || opc == 4);  // >= variants: compute b>a, invert
             const bool uns = (opc == 3 || opc == 4);  // unsigned: sign-flip trick
             clobber_flags();
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // Only the unsigned sign-flip path touches a GPR (RAX, for the
+            // movabs sign mask); signed/eq compares are pure XMM. A zero
+            // mask makes flush_invalidate walk nothing.
+            flush_invalidate_host_regs(uns ? (1u << RAX) : 0);
             uint8_t op_byte = 0;
             bool needs_38_prefix = false;
             switch (esize) {
@@ -1167,10 +1176,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                                 inst.op == IROp::SIMD_SRSRA);
             uint8_t insert_shift = static_cast<uint8_t>(esize * 8) - shift;
             clobber_flags();
-            // SSE2 shifts only use XMM regs (no GPRs). But emit_call_interp
-            // and other paths below might clobber RAX/RCX/RDX, so flush
-            // them to keep the register-cache consistent.
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // SIMD shifts use XMM regs only (PSRL/PSLL/PSRA pipeline plus
+            // the rounding round-trip). The translator already routed
+            // non-native cases to CALL_INTERP, which self-flushes. No GPR
+            // flush needed.
             int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
@@ -1415,7 +1424,9 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // PMULL/PMULL2 — use PCLMULQDQ when available.
             if ((sub_op == 4 || sub_op == 5) && has_pclmulqdq()) {
                 clobber_flags();
-                flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+                // PCLMULQDQ path is XMM-only (movsd/pclmulqdq/pinsrq); the
+                // AESE/AESD fallback goes through emit_call_interp, which
+                // self-flushes. No GPR flush needed.
                 int32_t off1lo = V_LO_OFF + static_cast<int>(inst.src1) * 8;
                 int32_t off1hi = V_HI_OFF + static_cast<int>(inst.src1) * 8;
                 int32_t off2lo = V_LO_OFF + static_cast<int>(inst.src2) * 8;

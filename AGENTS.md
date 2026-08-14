@@ -360,6 +360,33 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   block ends first. Block 0x405304: 662 → 590 bytes. Do NOT add a FWD
   env gate to this fast path — the liveness check is sufficient and FWD
   remains disabled by default.
+- SIMD GPR-flush discipline: GPR-free SIMD ops must NOT flush RAX/RCX/RDX.
+  `flush_invalidate_host_regs` on an op that only uses XMM regs (RBX is the
+  reserved base and never holds a cached vreg) unnecessarily evicts live
+  vregs cached in those GPRs. Current truth per op in `jit_codegen_simd.cpp`:
+  SIMD_LOGICAL / SIMD_ARITH / the shift family / AES PMULL need NO GPR flush;
+  SIMD_CMP needs RAX only on the unsigned sign-flip path (`uns` gate);
+  SIMD_FP_FMA needs RAX only (Q=0 v_hi zero); SIMD_FP_ARITH needs RAX
+  (FABD mask + Q=0 v_hi zero); SIMD_ORRIMM needs RAX|RCX (union of the vec
+  path's RAX and the memory path's RAX+RCX); SIMD_DUP uses precise
+  `ensure_vreg`/`clobber_host_reg` instead of a broad flush. CALL_INTERP
+  fallbacks self-flush (`flush_all_vregs` in `emit_call_interp`), so a
+  pre-flush before a fallback is always redundant. When auditing an op for
+  this, check EVERY emitted instruction path (native, vec-cache, fallback)
+  and flush the UNION of actually-clobbered GPRs — don't copy a boilerplate
+  RAX|RCX|RDX from an FP op.
+- `flush_scratch_host_regs` (x86_regalloc.cpp) skips the spill store for
+  CLEAN scratch vregs: every caller runs `flush_dirty_host_regs` on the same
+  mask first (evicting all dirty vregs), so at flush_scratch time the only
+  remaining cached scratch vregs are clean and the dirty-flag invariant
+  (`dirty=false ⇒ stack slot current`) makes the store redundant. The
+  `vreg_dirty_[v]` guard keeps the defensive standalone-call behavior from
+  the header comment. This relies on dirty tracking being exact — the
+  `BIFROST_REGALLOC_CHECK=1` suite (verify_dirty_host_regs_, jit_translate.cpp)
+  is the guard. Do NOT revert to unconditional stores to "be safe": a clean
+  scratch's store is provably dead code. Tier-4 measurement: neutral on
+  bench_matrix/bench_mips/mixed SIMD+scalar microbench; the minecraft game
+  frame-count A/B is unreliable (guest clock stall + ±30% same-binary spread).
 - Every block ends in a 5-byte chain slot (`ret` + 4 NOPs) patched to
   `jmp rel32` once the target is translated. Conditional branches
   (BRCOND/CBZ/CBNZ/TBZ/TBNZ) ALSO emit a second chain slot on their TAKEN
