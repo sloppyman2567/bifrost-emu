@@ -69,6 +69,13 @@ const char* syscall_name(uint64_t num) {
     }
 }
 }  // namespace
+// Increment the syscall histogram (used by Emulator::syscall AND the JIT
+// thunk fast path in jit_interp.cpp so BIFROST_STATS_PERIOD keeps
+// attributing thunk calls even when they bypass the main dispatcher).
+void note_syscall(uint64_t num) {
+    if (num < SYSCALL_HIST_MAX)
+        g_syscall_hist[num].fetch_add(1, std::memory_order_relaxed);
+}
 void dump_syscall_histogram(double dt) {
     // Copy out then sort a top-N by count.
     struct Entry { uint64_t num; uint64_t count; };
@@ -107,8 +114,7 @@ void dump_syscall_histogram(double dt) {
 // ── Main dispatcher ────────────────────────────────────────────────────
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
-    if (num < SYSCALL_HIST_MAX)
-        g_syscall_hist[num].fetch_add(1, std::memory_order_relaxed);
+    note_syscall(num);
     // 1.5.2-alpha: vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and

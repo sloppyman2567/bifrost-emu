@@ -468,6 +468,22 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (SIGPROF interp went 6.3% → 0.0%). No vec-cache interplay needed: SVC
   disqualifies the block in vec_cache_may_enable. `instr_will_call_interp`
   correctly returns false for SVC (not in its switch).
+- Thunk SVC fast path (`jit_thunk_svc` in jit_interp.cpp): `jit_native_svc`
+  branches on `cpu.regs[8] == GraphicThunk::SYSCALL_NUMBER` (0x1000) and
+  calls `jit_thunk_svc` directly — replicating syscalls/misc.cpp's case
+  0x1000 (GraphicThunk → AudioThunk → DisplayThunk → ENOSYS) but skipping
+  `Emulator::syscall()` (drain_host_signals, running check, trace gates,
+  six-handler pre-dispatch). Thunk calls are 99.8% of ALL game syscalls
+  (~115K/s ramping to ~173K/s — the histogram cap-512 artifact hid this
+  until SYSCALL_HIST_MAX was raised to 4097), so this is the hottest
+  syscall path. The check is unambiguous (no real AArch64 syscall number
+  is near 4096; the trampolines load 0x1000 into x8 right before the SVC).
+  Skipping drain_host_signals mirrors the vDSO clock precedent (signals
+  still drain at the run-loop boundary and at every real syscall). The
+  histogram is still counted via `note_syscall(0x1000)` so
+  BIFROST_STATS_PERIOD keeps attributing thunk volume. If the game ever
+  shows stale signals, re-add drain_host_signals to jit_thunk_svc — do
+  NOT route 0x1000 back through Emulator::syscall.
 - Direct-window limit constants are emitted as `mov r32d, imm32`
   (`emit_mov_imm32_zext`, zero-extends) in all five bounds-check sites
   (emit_load_mem, emit_store_mem, ATOMIC in frostjit.cpp, SIMD_LD16, SIMD_ST16)

@@ -18,6 +18,10 @@
 namespace arm64emu {
 // Sentinel return value: this handler didn't recognize `num`.
 constexpr int64_t SYSCALL_NOT_HANDLED = INT64_MIN;
+// Increment the syscall histogram for `num` (relaxed atomic — hot path).
+// Used by Emulator::syscall and the JIT thunk fast path so the
+// BIFROST_STATS_PERIOD printout keeps counting thunk calls.
+void note_syscall(uint64_t num);
 // ── Syscall helper macros ─────────────────────────────────────────────
 // These reduce the 30+ duplicated `ret_host(static_cast<uint64_t>(static_cast<int64_t>(-X)))`
 // patterns across all syscall files. They make the code more readable and

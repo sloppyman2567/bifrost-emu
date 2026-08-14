@@ -127,6 +127,18 @@ drain_host_signals/running check). Medium effort; only if measurement justifies.
   - Game still runs (30s+ profile, ~101 MIPS, interp 0%, 0 fallbacks).
 - NEXT: Phase 3 — JIT direct thunk fast path (mirror jit_vdso_clock_svc): emit a
   direct call to the thunk dispatcher for SVC 0x1000, skipping
-  Emulator::syscall (histogram increment, drain_host_signals, running check,
-  trace checks, pre-dispatch) per call. At ~173K calls/s this is the largest
-  remaining addressable chunk of "other".
+  Emulator::syscall (histogram/drain_host_signals/running check). Medium
+  effort; only if measurement justifies.
+- 2026-08-14 (Phase 3 DONE): `jit_thunk_svc` added — `jit_native_svc` branches
+  on `cpu.regs[8] == GraphicThunk::SYSCALL_NUMBER` (0x1000) and dispatches
+  directly to the GraphicThunk/AudioThunk/DisplayThunk chain, skipping
+  Emulator::syscall (drain_host_signals, running check, trace gates,
+  pre-dispatch). `note_syscall()` exported from syscalls.cpp so the histogram
+  still counts thunk volume. Zero codegen changes (reuses emit_call_native_svc
+  + flush_all_vregs). Verified: test_sdl_gl_triangle ALL PASS; game runs
+  (104.8 MIPS vs ~87-101 pre-phase-3; dispatch% 3.5% vs 5-11%); full suite
+  199/199 default + --chain-skip; regalloc-check quick 194/194; bench_mips
+  byte-identical under JIT_VERIFY/JIT_VERIFY_MEM/FWD.
+- REMAINING "other" (~50%) is the host GL driver work + thunk dispatch
+  marshalling inside jit_thunk_svc (real GPU uploads, bounce sizing) — mostly
+  irreducible. Possible future trim: GLFW_POLL's 316 glfwGetKey calls/frame.

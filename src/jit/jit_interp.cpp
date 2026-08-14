@@ -15,6 +15,9 @@
 #include "core/cpu.h"
 #include "core/signal.h"
 #include "syscalls/syscalls.h"
+#include "frost/thunk.hpp"
+#include "frost/audio_thunk.hpp"
+#include "frost/display_thunk.hpp"
 #include "bifrost/types.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -89,6 +92,52 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
         emu->syscall(*cpu);
     }
 }
+// ── jit_thunk_svc — JIT native thunk fast path ─────────────────────────
+// Replicates syscalls/misc.cpp's case GraphicThunk::SYSCALL_NUMBER (try
+// GraphicThunk → AudioThunk → DisplayThunk → ENOSYS), but is reached
+// DIRECTLY from jit_native_svc when the guest SVCs with num==0x1000, so
+// thunk calls skip Emulator::syscall() entirely (drain_host_signals,
+// running check, trace gates, six-handler pre-dispatch). On the
+// minecraft game thunk calls are 99.8% of ALL syscalls (~115K/s ramping
+// to ~173K/s) — this is the single hottest syscall path.
+//
+// Skipping drain_host_signals mirrors the vDSO clock fast path (vDSO
+// reads never enter the kernel and never process pending signals);
+// signals still drain at the run-loop boundary (every 4096 instructions)
+// and at every real syscall.
+void jit_thunk_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
+    arm64emu::note_syscall(arm64emu::GraphicThunk::SYSCALL_NUMBER);
+    uint32_t sym_id = static_cast<uint32_t>(cpu->regs[9]);
+    auto* gthunk = emu->graphics().thunk();
+    if (gthunk && gthunk->enabled()) {
+        int64_t r = gthunk->dispatch(*cpu, sym_id);
+        if (r == 0) return;                 // handled
+        if (r != -ENOENT) {                  // real error from GraphicThunk
+            cpu->regs[0] = static_cast<uint64_t>(r);
+            return;
+        }
+    }
+    auto* athunk = emu->graphics().audio_thunk();
+    if (athunk && athunk->enabled()) {
+        int64_t r = athunk->dispatch(*cpu, sym_id);
+        if (r == 0) return;
+        if (r != -ENOENT) {
+            cpu->regs[0] = static_cast<uint64_t>(r);
+            return;
+        }
+    }
+    auto* dthunk = emu->graphics().display_thunk();
+    if (dthunk && dthunk->enabled()) {
+        int64_t r = dthunk->dispatch(*cpu, sym_id);
+        if (r == 0) return;
+        if (r != -ENOENT) {
+            cpu->regs[0] = static_cast<uint64_t>(r);
+            return;
+        }
+    }
+    // None of the thunks recognized the symbol_id.
+    cpu->regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOSYS));
+}
 // ── jit_native_svc — JIT native syscall dispatch ───────────────────────
 // Emitted by the JIT for every non-vDSO SVC (see IROp::SVC in
 // jit_codegen_branch.cpp). Replaces the old emit_call_interp round-trip,
@@ -109,5 +158,14 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
 extern "C" void jit_native_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
                                uint64_t svc_pc) {
     cpu->pc = svc_pc + 4;
+    // Thunk SVCs (num==0x1000, the GraphicThunk/AudioThunk/DisplayThunk
+    // trampolines) take the direct jit_thunk_svc path — see above. The
+    // guest trampolines load 0x1000 into x8 right before the SVC, and no
+    // real Linux syscall number is anywhere near 4096, so this test is
+    // unambiguous (it matches the misc.cpp dispatcher's case).
+    if (cpu->regs[8] == arm64emu::GraphicThunk::SYSCALL_NUMBER) {
+        jit_thunk_svc(emu, cpu);
+        return;
+    }
     emu->syscall(*cpu);
 }
