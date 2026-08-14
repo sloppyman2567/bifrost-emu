@@ -165,6 +165,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     unchainable_end_ = false;
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
+    has_taken_chain_slot_ = false;
+    taken_chain_patch_off_ = 0;
+    taken_chain_target_pc_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
@@ -409,7 +412,36 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_u32(stack_bytes);  // sub rsp, stack_bytes
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
-    if (window_base_) emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
+    // v1.5.2-alpha: load the direct-window base into R10 ONLY if the
+    // block actually touches guest memory through the direct window.
+    // Previously every block paid a 10-byte movabs r10, imm64 in its
+    // prologue — pure overhead for the many tiny ALU/FP/vector blocks
+    // that never load or store guest memory (avg 3.5 guest instrs/block,
+    // ~20M block entries/sec). The window-using IR ops are exactly:
+    //   LOAD_MEM / STORE_MEM            (emit_load_mem / emit_store_mem)
+    //   ATOMIC                          (direct-window lock fast path)
+    //   SIMD_LD16 / SIMD_ST16           (16-byte vector memory access)
+    // Everything else either never reads guest memory or calls a C
+    // helper (which uses the pages_ table, not R10).
+    {
+        bool uses_window = false;
+        for (const auto& inst : ir_block.insts) {
+            switch (inst.op) {
+                case IROp::LOAD_MEM:
+                case IROp::STORE_MEM:
+                case IROp::ATOMIC:
+                case IROp::SIMD_LD16:
+                case IROp::SIMD_ST16:
+                    uses_window = true;
+                    break;
+                default:
+                    break;
+            }
+            if (uses_window) break;
+        }
+        if (window_base_ && uses_window)
+            emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
+    }
     // Vector cache prologue loads MUST be emitted before block_body_start_off_
     // is recorded: self-loop re-entry jumps directly to the body start, so
     // these loads run only on cold entry (dispatcher / chain entry) and the
@@ -577,6 +609,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     entry.chain_patch_off = chain_patch_off;
     entry.chain_target_pc = chain_target_pc_;
     entry.chained = false;
+    // Taken-path chain info (BRCOND/CBZ/CBNZ/TBZ/TBNZ emit a second chain
+    // slot on the taken path; see emit_taken_path_epilogue).
+    entry.has_taken_chain_slot = has_taken_chain_slot_;
+    entry.taken_chain_patch_off = taken_chain_patch_off_;
+    entry.taken_chain_target_pc = taken_chain_target_pc_;
+    entry.taken_chained = false;
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
     entry.verified_once = has_bl_call || has_call_interp;
@@ -725,6 +763,16 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
             back_refs_.clear();
         }
         back_refs_[chain_target_pc_].push_back(start_pc);
+    }
+    // The taken-path edge is chained too: add start_pc to its target's
+    // back-ref list so chain_back_references(T) can patch the taken slot
+    // when T gets translated later (e.g. a loop whose back-edge target is
+    // only translated on the second iteration).
+    if (taken_chain_target_pc_ != 0 && taken_chain_target_pc_ != chain_target_pc_) {
+        if (back_refs_.size() > 1000000) {
+            back_refs_.clear();
+        }
+        back_refs_[taken_chain_target_pc_].push_back(start_pc);
     }
     // Try to chain this block to its already-translated target, and
     // also patch any existing blocks whose chain target is this block.

@@ -23,6 +23,35 @@
 #include <cstdint>
 #include <cstdlib>  // getenv (BIFROST_NO_SELFLOOP)
 namespace arm64emu {
+// ── FrostJIT::emit_taken_path_epilogue ─────────────────────────────────
+// Emits the conditional-branch TAKEN-path tail. RAX must hold the taken
+// next-PC. Writes back dirty cached vectors, stores the PC, sets RDI/RSI
+// for the next block's prologue, restores callee-saved regs, then emits
+// `ret` + 4 NOPs as a SECOND chain slot. try_chain_block() patches the
+// ret to `jmp rel32 → target block entry` once the taken target is
+// translated, so the loop-back edge of a hot conditional loop skips the
+// C++ dispatcher entirely (the dispatcher only chained the fall-through
+// edge before this).
+void FrostJIT::emit_taken_path_epilogue() {
+    // Write back dirty cached vectors first (see BRCOND_ZERO above).
+    vec_cache_writeback_all();
+    emit_store(CPU_REG, PC_OFF, RAX);
+    emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
+    emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+    emit_pop(R15); emit_pop(R14); emit_pop(R13);
+    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+    // ── Taken-path chain slot ──
+    // 5 bytes reserved at the end of the taken path: `ret` + 4 NOPs.
+    // Identical layout to the shared epilogue's chain slot so
+    // patch_chain() (which guards on the slot starting with 0xC3) can
+    // patch either one. Until patched, the taken path returns to the
+    // dispatcher as before.
+    taken_chain_patch_off_ = code_buf_used_;
+    has_taken_chain_slot_ = true;
+    emit_ret();                                  // 0xC3
+    emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
+}
 // ── FrostJIT::compile_ir_branch ────────────────────────────────────────
 // Handles conditional/unconditional branch ops and supervisor calls.
 // All of these set rax_holds_next_pc_=true and return 1 (ends block)
@@ -87,17 +116,11 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // Taken path: store PC, restore regs, ret (no chain).
-            // Write back dirty cached vectors first — the dispatcher (and any
-            // non-cache block it runs next) reads cpu.v_lo/v_hi, not XMM.
-            vec_cache_writeback_all();
-            emit_store(CPU_REG, PC_OFF, RAX);
-            emit_mov_reg(RDI, CPU_REG);
-            emit_mov_reg(RSI, EMU_REG);
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
-            emit_pop(R15); emit_pop(R14); emit_pop(R13);
-            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-            emit_ret();
+            // Taken path: store PC, restore regs, ret-with-chain-slot.
+            // The ret is a chain slot patched to `jmp taken_target` once the
+            // taken target is translated (loop-back edges skip the dispatcher).
+            taken_chain_target_pc_ = inst.imm;
+            emit_taken_path_epilogue();
             return 1;
         }
         case IROp::BRCOND_BIT: {
@@ -143,15 +166,9 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // Taken path: store PC, restore regs, ret (no chain).
-            vec_cache_writeback_all();
-            emit_store(CPU_REG, PC_OFF, RAX);
-            emit_mov_reg(RDI, CPU_REG);
-            emit_mov_reg(RSI, EMU_REG);
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);
-            emit_pop(R15); emit_pop(R14); emit_pop(R13);
-            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-            emit_ret();
+            // Taken path: store PC, restore regs, ret-with-chain-slot.
+            taken_chain_target_pc_ = inst.imm;
+            emit_taken_path_epilogue();
             return 1;
         }
         case IROp::BRCOND: {
@@ -247,17 +264,25 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // branch block, but the code size increase is negligible (<1%
             // of the 64MB code buffer for typical programs).
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // Emit taken-path epilogue: store RAX to cpu.pc, restore regs, ret.
-            // This ret is NOT a chain slot — it always returns to the dispatcher.
-            // Write back dirty cached vectors first (see BRCOND_ZERO above).
-            vec_cache_writeback_all();
-            emit_store(CPU_REG, PC_OFF, RAX);
-            emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher)
-            emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-            emit_pop(R15); emit_pop(R14); emit_pop(R13);
-            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-            emit_ret();  // return to C dispatcher (no chain)
+            // v1.5.2-alpha: emit the taken-path epilogue with a SECOND chain
+            // slot so the taken edge (typically the loop-back of a hot
+            // conditional loop) also skips the dispatcher. Skipped when a
+            // self-loop slot was emitted — that jmp already goes straight
+            // to the block body, and the epilogue after it is dead code.
+            if (!has_selfloop_slot_) {
+                taken_chain_target_pc_ = inst.imm;
+                emit_taken_path_epilogue();
+            } else {
+                // Self-loop: keep the original dead epilogue (store PC,
+                // restore regs, ret) — harmless, never executed.
+                emit_store(CPU_REG, PC_OFF, RAX);
+                emit_mov_reg(RDI, CPU_REG);
+                emit_mov_reg(RSI, EMU_REG);
+                emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+                emit_pop(R15); emit_pop(R14); emit_pop(R13);
+                emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+                emit_ret();
+            }
             return 1;
         }
         case IROp::BRCOND_FALLTHRU: {

@@ -45,11 +45,21 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // blocks, the JIT is likely stuck in a codegen-bug-induced loop.
     // Disable the JIT permanently and fall back to pure interpreter.
     // This is a safety valve; normal programs never hit it.
-    // Atomic for thread-safe increment in shared-JIT mode.
-    if (total_blocks_executed_.fetch_add(1, std::memory_order_relaxed) > GLOBAL_BLOCK_LIMIT) {
+    //
+    // v1.5.2-alpha: the counter is THREAD-LOCAL. The old
+    // total_blocks_executed_.fetch_add(1) was a `lock xadd` on EVERY
+    // dispatch (fast path included) — ~15-25 cycles of serializing
+    // atomic traffic per block transition, which was a large fraction of
+    // the ~25% dispatch overhead at 20M dispatches/sec. GLOBAL_BLOCK_LIMIT
+    // is 1e12 (≈14h of pure dispatch at 20M blocks/sec), so the watchdog
+    // is a pure safety valve for codegen-bug infinite loops; a per-thread
+    // count catches any thread spinning on a buggy translation. A thread
+    // tripping it disables the (shared) JIT for everyone.
+    thread_local uint64_t tls_total_blocks_ = 0;
+    if (__builtin_expect(++tls_total_blocks_ > GLOBAL_BLOCK_LIMIT, 0)) {
         jit_disabled_.store(true, std::memory_order_relaxed);
-        fprintf(stderr, "[JIT] global watchdog: %llu blocks executed — disabling JIT (likely codegen bug)\n",
-                static_cast<unsigned long long>(total_blocks_executed_.load()));
+        fprintf(stderr, "[JIT] global watchdog: %llu blocks executed by a thread — disabling JIT (likely codegen bug)\n",
+                static_cast<unsigned long long>(tls_total_blocks_));
         interpreter_fallbacks++;
         emu.step(cpu);
         return cpu.pc;
@@ -61,11 +71,14 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // PC matches the cached one. The cached fn pointer is stable across
     // translate_block() calls (code_buf_ never moves), so a stale cache
     // entry is safe to call — worst case it runs an older (still-correct)
-    // translation. We DO bypass the watchdog update here; the watchdog
-    // is for catching infinite-loop codegen bugs, and a tight loop that
-    // legitimately runs the same block 100M+ times is the normal case
-    // (the watchdog would be checked on the first dispatch, when the
-    // cache misses). The cache is reset on any different PC.
+    // translation.
+    //
+    // v1.5.2-alpha: trimmed to the bare minimum. The per-PC watchdog is
+    // gone from the fast path (the thread-local global watchdog above
+    // still counts every dispatch, and a single-PC hot loop through the
+    // dispatcher is the normal non-self-loopable case). The block's
+    // epilogue already wrote next_pc to cpu.pc, so the redundant
+    // `cpu.pc = next_pc` store is dropped too.
     //
     // Hot-path stats are accumulated in thread-locals and flushed to the
     // atomic counters on the slow path below. Every block dispatch used
@@ -75,74 +88,24 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     thread_local uint64_t tls_exec_ = 0;
     thread_local uint64_t tls_instr_ = 0;
     if (__builtin_expect(pc == tls_last_block_.pc && tls_last_block_.fn != nullptr, 1)) {
-        // Fast path: same PC as last dispatch, fn is cached.
-        // Skip shared_mutex, skip unordered_map, skip BlockEntry copy.
         tls_exec_++;
         tls_instr_ += tls_last_block_.instr_count;
-        uint64_t next_pc = tls_last_block_.fn(&cpu, &emu);
-        cpu.pc = next_pc;
-        // Watchdog update (same logic as below, inlined for the fast path).
-        if (pc == tls_watchdog_last_pc_) {
-            if (++tls_watchdog_count_ > WATCHDOG_LIMIT) {
-                // Demote to interp_only and fall through to slow path.
-                blocks_mutex_.lock();
-                auto wit = blocks_.find(pc);
-                if (wit != blocks_.end() && !wit->second.interp_only) {
-                    wit->second.interp_only = true;
-                    wit->second.interp_only_count = wit->second.instr_count;
-                    wit->second.fn = nullptr;
-                    wit->second.chained = false;
-                }
-                blocks_mutex_.unlock();
-                tls_last_block_.pc = 0;  // invalidate cache
-                tls_last_block_.fn = nullptr;
-                interpreter_fallbacks.fetch_add(1, std::memory_order_relaxed);
-                emu.step(cpu);
-                return cpu.pc;
-            }
-        } else {
-            tls_watchdog_last_pc_ = pc;
-            tls_watchdog_count_ = 0;
-        }
-        return next_pc;
+        return tls_last_block_.fn(&cpu, &emu);
     }
-    // v1.5.0.alpha: 4-way inline cache for indirect branches.
-    // This catches the common case of sequential block-to-block transitions
-    // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the shared_mutex.
-    // The cache is direct-mapped by (pc >> 2) & 3, so it handles up to 4
-    // recent PCs simultaneously without eviction.
+    // v1.5.0.alpha: inline cache for block-to-block transitions.
+    // Catches the common case of sequential block-to-block transitions
+    // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the
+    // shared_mutex. Direct-mapped by a PC hash that mixes high and low
+    // bits; grown to 256 slots (v1.5.2-alpha) so a game's hot working
+    // set stays resident instead of thrashing to the slow path. The
+    // lookup is inlined — a separate call would be most of its cost.
     {
         uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
         int cached_count = 0;
         if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
-            // Cache hit — skip shared_mutex + unordered_map entirely.
             tls_exec_++;
             tls_instr_ += cached_count;
-            uint64_t next_pc = cached_fn(&cpu, &emu);
-            cpu.pc = next_pc;
-            // Watchdog (inlined for the fast path).
-            if (pc == tls_watchdog_last_pc_) {
-                if (++tls_watchdog_count_ > WATCHDOG_LIMIT) {
-                    blocks_mutex_.lock();
-                    auto wit = blocks_.find(pc);
-                    if (wit != blocks_.end() && !wit->second.interp_only) {
-                        wit->second.interp_only = true;
-                        wit->second.interp_only_count = wit->second.instr_count;
-                        wit->second.fn = nullptr;
-                        wit->second.chained = false;
-                    }
-                    blocks_mutex_.unlock();
-                    tls_last_block_.pc = 0;
-                    tls_last_block_.fn = nullptr;
-                    interpreter_fallbacks.fetch_add(1, std::memory_order_relaxed);
-                    emu.step(cpu);
-                    return cpu.pc;
-                }
-            } else {
-                tls_watchdog_last_pc_ = pc;
-                tls_watchdog_count_ = 0;
-            }
-            return next_pc;
+            return cached_fn(&cpu, &emu);
         }
     }
     // ── Shared-JIT locking strategy ────────────────────────────────
@@ -205,6 +168,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     it->second.interp_only_count = it->second.instr_count;
                     it->second.fn = nullptr;
                     it->second.chained = false;
+                    it->second.taken_chained = false;
                     entry = it->second;
                 }
                 blocks_mutex_.unlock();
@@ -300,6 +264,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 wit->second.interp_only_count = wit->second.instr_count;
                 wit->second.fn = nullptr;
                 wit->second.chained = false;
+                wit->second.taken_chained = false;
             }
             blocks_mutex_.unlock();
             interpreter_fallbacks++;
@@ -319,12 +284,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_last_block_.pc = pc;
         tls_last_block_.fn = entry.fn;
         tls_last_block_.instr_count = entry.instr_count;
-        // Also populate the 4-way inline cache for indirect branches.
-        int slot = static_cast<int>((pc >> 2) & (INLINE_CACHE_SLOTS - 1));
+        // Also populate the inline cache for block-to-block transitions.
+        int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
         tls_inline_cache_[slot].pc = pc;
         tls_inline_cache_[slot].fn = entry.fn;
         tls_inline_cache_[slot].instr_count = entry.instr_count;
-        tls_inline_cache_[slot].lru_stamp = ++tls_lru_counter_;
     }
     // TEMP DEBUG: trace all blocks in QGuiApplication::font() range
     if (pc >= 0x500071e000ULL + 0x13bbc4ULL && pc <= 0x500071e000ULL + 0x13bd60ULL) {
@@ -430,6 +394,22 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             code_buf_[entry.chain_patch_off + 4] = 0x90;
             std::atomic_thread_fence(std::memory_order_release);
             // W^X: toggle back to executable before running the block.
+            make_executable();
+        }
+        // Save taken-path chain slot bytes and restore to `ret` + NOPs
+        // (verify runs the block one iteration at a time; a patched taken
+        // slot would jump away to another block mid-verify).
+        uint8_t saved_taken_chain[5];
+        bool was_taken_chained = entry.taken_chained;
+        if (was_taken_chained) {
+            make_writable();
+            memcpy(saved_taken_chain, code_buf_ + entry.taken_chain_patch_off, 5);
+            code_buf_[entry.taken_chain_patch_off] = 0xC3; // ret
+            code_buf_[entry.taken_chain_patch_off + 1] = 0x90;
+            code_buf_[entry.taken_chain_patch_off + 2] = 0x90;
+            code_buf_[entry.taken_chain_patch_off + 3] = 0x90;
+            code_buf_[entry.taken_chain_patch_off + 4] = 0x90;
+            std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }
         // Save self-loop slot bytes and replace with NOPs so the JIT
@@ -744,6 +724,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         if (had_selfloop) {
             make_writable();
             memcpy(code_buf_ + entry.selfloop_patch_off, saved_selfloop, 5);
+            std::atomic_thread_fence(std::memory_order_release);
+            make_executable();
+        }
+        // Restore taken-path chain slot if it was patched.
+        if (was_taken_chained) {
+            make_writable();
+            memcpy(code_buf_ + entry.taken_chain_patch_off, saved_taken_chain, 5);
             std::atomic_thread_fence(std::memory_order_release);
             make_executable();
         }

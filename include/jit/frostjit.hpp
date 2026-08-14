@@ -226,31 +226,44 @@ public:
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
-    // v1.5.0.alpha: Per-thread 4-way set-associative inline cache
-    // for indirect branches (BR/BLR). This is the FEX-Emu pattern: cache
-    // the last N (PC→fn) mappings so that virtual dispatch, switch tables,
+    // v1.5.0.alpha: Per-thread inline cache for block transitions.
+    // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
+    // that multi-block cycles (A→B→A→B), virtual dispatch, switch tables,
     // and computed gotos don't pay the shared_mutex + unordered_map cost
     // on every dispatch.
     //
-    // The cache is direct-mapped by PC hash (PC >> 2) & (SLOTS-1).
-    // dispatches in call-heavy code (fib) went through the slow path
-    // (hash map + mutex). 16 slots reduces collisions to <5% for
-    // typical code with 5-15 distinct blocks in a cycle.
-    // LRU replacement within each set. The fn pointer is stable (same
-    // safety argument as tls_last_block_).
-    static constexpr int INLINE_CACHE_SLOTS = 16;
+    // v1.5.2-alpha: grew from 16 → 256 slots and made the lookup inline
+    // in run_block. With a 16-slot direct-mapped cache, a game with a
+    // hot working set of dozens of blocks thrashed constantly: ~3.2M
+    // dispatches/sec fell through to the shared_mutex + unordered_map
+    // slow path (~80-150ns each), which dominated the dispatch bucket
+    // even though it was only ~17% of dispatches. 256 slots + a hash
+    // that mixes high and low PC bits keeps the whole working set cached.
+    //
+    // Direct-mapped (no replacement policy — the displaced entry is just
+    // overwritten). The fn pointer is stable (code_buf_ never moves),
+    // so a stale entry is safe to call — it runs an older (correct)
+    // translation. Entries are populated on the slow path.
+    static constexpr int INLINE_CACHE_SLOTS = 256;
     struct InlineCacheEntry {
         uint64_t pc = 0;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
-        uint32_t lru_stamp = 0;  // higher = more recently used
     };
     static thread_local InlineCacheEntry tls_inline_cache_[INLINE_CACHE_SLOTS];
-    static thread_local uint32_t tls_lru_counter_;
-    // Try the inline cache. Returns true on hit (and fills out/fn/count).
-    // On miss, inserts into the cache (LRU eviction).
-    bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
-                              int& instr_count);
+    // Inlined into run_block's hot path — a separate out-of-line call
+    // (~5ns) would be most of the lookup's own cost.
+    inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
+                                    int& instr_count) {
+        int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
+        const InlineCacheEntry& e = tls_inline_cache_[slot];
+        if (e.pc == pc && e.fn != nullptr) {
+            *fn = e.fn;
+            instr_count = e.instr_count;
+            return true;
+        }
+        return false;
+    }
     // v1.4.0-beta.2: Per-PC hotness counter. Tracks how many times each
     // PC has been dispatched (total, not consecutive). When a PC exceeds
     // HOT_PC_THRESHOLD, it's marked interp_only — the interpreter is
@@ -397,6 +410,17 @@ private:
         // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
         size_t  selfloop_patch_off = 0;  // offset of the 5-byte jmp slot in code_buf_
+        // Taken-path chaining (v1.5.2-alpha): a second 5-byte chain slot at
+        // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
+        // the taken target is translated, it's patched to `jmp rel32` so the
+        // loop-back edge of a hot conditional loop skips the dispatcher.
+        // has_taken_chain_slot = false when no slot was emitted (block has no
+        // conditional branch, or the taken target is its own start — that case
+        // uses self-loop chaining instead).
+        bool    has_taken_chain_slot = false;
+        size_t  taken_chain_patch_off = 0;   // offset of the taken-path slot
+        uint64_t taken_chain_target_pc = 0;  // taken-path target, or 0
+        bool    taken_chained = false;       // true once patched to a jmp
         // Verify-mode: set true after the first BIFROST_JIT_VERIFY dispatch
         // of this block. Subsequent dispatches skip the per-block divergence
         // check (which is expensive due to mprotect toggling + interpreter
@@ -500,6 +524,12 @@ private:
     void emit_nop();
     void emit_push(int reg);
     void emit_pop(int reg);
+    // Emit the conditional-branch TAKEN-path epilogue: store RAX to cpu.pc,
+    // set RDI/RSI for the next block's prologue, restore callee-saved regs,
+    // then `ret` + 4 NOPs as a SECOND chain slot (taken-path chaining).
+    // Records the slot offset in taken_chain_patch_off_ and sets
+    // has_taken_chain_slot_. The caller sets taken_chain_target_pc_ first.
+    void emit_taken_path_epilogue();
     // pushfq / popfq — save/restore x86 RFLAGS to/from stack.
     // Replaces the magic byte sequences `emit_byte(0x9C)` / `emit_byte(0x9D)`
     // that were scattered across ~20 call sites.
@@ -857,6 +887,18 @@ private:
     bool    has_selfloop_slot_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
+    // Taken-path chain state (reset at translate_block start).
+    // Conditional branches (BRCOND/CBZ/CBNZ/TBZ/TBNZ) emit a SECOND 5-byte
+    // chain slot at the end of their taken-path epilogue (ret + 4 NOPs).
+    // The dispatcher only chains the fall-through edge; the taken edge
+    // (typically the loop-back of a hot conditional loop) returned to the
+    // dispatcher on every iteration. Chaining it skips the C++ round-trip
+    // for the loop-back edge. Skipped when the taken target == block start
+    // (self-loop chaining already handles that case better — it skips the
+    // epilogue entirely).
+    bool    has_taken_chain_slot_ = false;
+    size_t  taken_chain_patch_off_ = 0;  // offset of the 5-byte taken-path slot
+    uint64_t taken_chain_target_pc_ = 0; // taken-path target (inst.imm)
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache (v1.5.2-alpha) ───────────────────
     // Guest vector regs (0-31) pinned into host XMM3-15 across the whole

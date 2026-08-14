@@ -49,14 +49,27 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     return true;
 }
 void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
-    if (entry.chained) return;
-    if (entry.chain_target_pc == 0) return;
-    auto it = blocks_.find(entry.chain_target_pc);
-    if (it == blocks_.end()) return;
-    if (it->second.fn == nullptr) return;
-    if (patch_chain(entry.chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
-        entry.chained = true;
-        block_chains_patched++;
+    // Fall-through chain slot.
+    if (!entry.chained && entry.chain_target_pc != 0) {
+        auto it = blocks_.find(entry.chain_target_pc);
+        if (it != blocks_.end() && it->second.fn != nullptr) {
+            if (patch_chain(entry.chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
+                entry.chained = true;
+                block_chains_patched++;
+            }
+        }
+    }
+    // Taken-path chain slot (BRCOND/CBZ/CBNZ/TBZ/TBNZ): patch the ret at
+    // the end of the taken path to jmp directly to the taken target block
+    // once it's translated. This skips the dispatcher on loop-back edges.
+    if (!entry.taken_chained && entry.has_taken_chain_slot && entry.taken_chain_target_pc != 0) {
+        auto it = blocks_.find(entry.taken_chain_target_pc);
+        if (it != blocks_.end() && it->second.fn != nullptr) {
+            if (patch_chain(entry.taken_chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
+                entry.taken_chained = true;
+                block_chains_patched++;
+            }
+        }
     }
 }
 void FrostJIT::chain_back_references(uint64_t target_pc) {
@@ -74,11 +87,20 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         auto sit = blocks_.find(src_pc);
         if (sit == blocks_.end()) return;
         BlockEntry& entry = sit->second;
-        if (entry.chained) return;
-        if (entry.chain_target_pc != target_pc) return;
-        if (patch_chain(entry.chain_patch_off, target_fn)) {
-            entry.chained = true;
-            block_chains_patched++;
+        // Fall-through slot.
+        if (!entry.chained && entry.chain_target_pc == target_pc) {
+            if (patch_chain(entry.chain_patch_off, target_fn)) {
+                entry.chained = true;
+                block_chains_patched++;
+            }
+        }
+        // Taken-path slot.
+        if (!entry.taken_chained && entry.has_taken_chain_slot
+            && entry.taken_chain_target_pc == target_pc) {
+            if (patch_chain(entry.taken_chain_patch_off, target_fn)) {
+                entry.taken_chained = true;
+                block_chains_patched++;
+            }
         }
     };
     auto it = back_refs_.find(target_pc);
