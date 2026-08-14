@@ -199,6 +199,25 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // bits (0x00000000 = 0.0f), breaking the >= 2^63 detection.
             bool is_double = (inst.width == 1);
             bool is_unsigned = (inst.imm != 0);
+            // ARM FCVT rounding mode, encoded in `cond` (see
+            // ir_translate_fp.cpp): bits[1:0] = rmode (0=N nearest-even,
+            // 1=P +inf, 2=M -inf, 3=Z toward-zero), bit 2 = A (ties-away).
+            // The A variant and unsigned non-Z never reach here — the IR
+            // translator routes them to CALL_INTERP — but keep the JIT
+            // defensive so a future gate drift can't silently mis-round.
+            uint8_t rmode = inst.cond & 3;
+            if (is_unsigned) {
+                if (rmode != 3) {
+                    emit_call_interp(inst.arm_pc, false);
+                    return true;
+                }
+            } else if (rmode == 1 || rmode == 2) {
+                // P/M rounding uses roundsd/roundss (SSE4.1).
+                if (!has_sse41()) {
+                    emit_call_interp(inst.arm_pc, false);
+                    return true;
+                }
+            }
             // Validate FP register index (src1 is an FP reg index 0-31).
             check_fp_reg_index(inst.src1, "FP_F2I src1");
             clobber_flags();
@@ -267,9 +286,29 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 size_t done_path = code_buf_used_;
                 patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
             } else {
-                // CVTTSD2SI rax, xmm0 (truncate toward zero, signed)
-                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
-                emit_byte(0xC0);  // rax, xmm0
+                // Signed FP→int honoring the ARM FCVT rounding mode.
+                if (rmode == 0) {
+                    // N (nearest-even): CVTSD2SI/SS uses the MXCSR rounding
+                    // mode (default round-to-nearest-even), matching
+                    // std::llrint under the default host rounding mode.
+                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2D);
+                    emit_byte(0xC0);  // cvtsd2si rax, xmm0
+                } else if (rmode == 1 || rmode == 2) {
+                    // P (ceil, +inf) / M (floor, -inf): round to an FP
+                    // integer in the target direction (roundsd/roundss),
+                    // then truncate to int. x86 imm8: 1 = -inf, 2 = +inf;
+                    // ARM rmode: 1=P(+inf) → 2, 2=M(-inf) → 1.
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+                    emit_byte(is_double ? 0x0B : 0x0A);   // roundsd / roundss
+                    emit_byte(0xC8);                       // xmm1, xmm0
+                    emit_byte(rmode == 2 ? 1 : 2);         // -inf / +inf
+                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                    emit_byte(0xC1);  // cvttsd2si rax, xmm1
+                } else {
+                    // Z (toward zero): truncate (existing CVTTSD2SI).
+                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                    emit_byte(0xC0);  // rax, xmm0
+                }
             }
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);

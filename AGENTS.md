@@ -83,6 +83,37 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   FNMSUB = a*b − c. FNMADD/FNMSUB are NOT −a*b±c aliases — encoding those
   wrong corrupts any value computed via `-(a*b+c)` / `a*b−c` (musl `pow`,
   `rgba_lerp`'s lab conversions). Keep interp, JIT FMA3 map, and IR in sync.
+- Scalar FP→int conversions (FCVTNS/FCVTPS/FCVTMS/FCVTZS + U variants) are
+  native in the JIT. rmode = bits[20:19] (0=N nearest-even, 1=P +inf,
+  2=M −inf, 3=Z toward-zero), bit[18]=A (ties-away), bit[16]=U. The IR
+  translator matches the WHOLE family via `(op & 0x7F220000) == 0x1E200000
+  && ((op>>10) & 0x3F) == 0` (the bits[15:10]==0 guard excludes FCSEL
+  0x1E200C00 and FCVT D↔S 0x1E6240C0) and passes the rounding mode in the
+  FP_F2I `cond` field `(is_away<<2)|rmode`. The JIT lowers N→`cvtsd2si`
+  (MXCSR nearest, matches llrint under default host rounding), P/M→
+  `roundsd/roundss` (SSE4.1, `has_sse41()` gate with CALL_INTERP fallback)
+  then `cvttsd2si`, Z→`cvttsd2si` (truncate). FCVTAS (ties-away) and
+  unsigned non-Z still fall back — do not "just add" them without also
+  updating `instr_will_call_interp`'s mirror (it returns TRUE for those
+  so the block-split gate agrees with the translator). A mask of only
+  `(op & 0x7F3E0000) == 0x1E380000` (FCVTZS/FCVTZU only) silently routes
+  every `floor()` (fcvtms) and `ceil()` (fcvtps) through the interpreter —
+  Minecraft chunk/mesh math ran half in interp (interp share 13.9% → 7%).
+- `instr_will_call_interp`'s FP gate polarity: "native" must predict NO
+  interp call, so the return is `fp_gate >= 0 && !(fp_gate & bit)`.
+  `fp_gate < 0 || (fp_gate & bit)` is INVERTED — under the default unset
+  gate (-1 = all native) it returned TRUE for every native FP op, splitting
+  FP-heavy blocks every 2 instructions and feeding the interp_only demotion.
+- The interp_only demotion decision in `jit_translate.cpp` must use the
+  ACTUAL `IROp::CALL_INTERP` count in the generated IR, NOT the heuristic
+  `call_interp_count` from `instr_will_call_interp` (which over-predicts).
+  With the heuristic, tiny native FP blocks (`[fcvtms, fcvtms]`,
+  `[fcvtms, str, fcvtms]`) were demoted to the interpreter and ran ~2x
+  slower. The actual-count rule leaves 0 interp_only blocks on the game.
+- `[classprof]` in `interpreter.cpp` must loop `i < FP_SCALAR + 1` — the
+  bound `SYS_NOP + 1` (107) hides SIMD_DP (108) and FP_SCALAR (109), so
+  the histogram showed "no FP traffic" while FP was ~74% of interp time.
+  `BIFROST_CLASS_PROF_PERIOD` overrides the 20M-instruction print period.
 - UBFM/LSR pitfall: `lsr Xd, Xn, #0` (UBFM #0, #(datasize−1)) is a NO-OP —
   a shift by zero returns the source. Do not special-case it to 0; compilers
   emit `lsr w3, x19, #0` to grab the low 32 bits of a 64-bit constant during
@@ -188,13 +219,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **190 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **191 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic). The only historical skip was `test_dladdr_glibc`,
   which must be a glibc-DYNAMIC binary or its dlopen stub skips with
   exit 77.
 - `./scripts/run_tests.sh --test-all` — default suite + 5 interactive
-  stdin tests = **195 pass / 0 fail / 0 skip**, incl. downloaded
+  stdin tests = **196 pass / 0 fail / 0 skip**, incl. downloaded
   real-world binaries. Subsets: `--quick` (no benches),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -206,7 +237,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **195 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **196 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

@@ -263,26 +263,32 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::FP_MOVI, rd, 0, 0, ftype, 0, 0, bits, cur_pc);
                 return true;
             }
-            // FCVTZS/FCVTZU: FP→int (toward zero)
-            // Encoding: (op & 0x7F3E0000) == 0x1E380000, rmode=3 (toward zero)
-            // Mask 0x7F3E0000 excludes bit 16 (U/S selector) so both
-            // FCVTZS and FCVTZU match. The previous mask 0x7F3F0000
-            // included bit 16, so FCVTZU fell through to CALL_INTERP
-            // (interpreter) which has the same mask bug — resulting in
-            // a silent NOP for every unsigned float→int conversion.
-            // We pass sf (bit 31 of the opcode) via flags_op so the JIT
-            // can choose between 32-bit and 64-bit CVTTSD2SI.
-            //
-            // For 32-bit dest (sf=0), the JIT's CVTTSD2SI produces a
-            // 64-bit result. AArch64 32-bit register writes must zero
-            // the upper 32 bits — otherwise a subsequent 64-bit read of
-            // Xd would see sign-extension instead of zero-extension,
-            // breaking code that reuses the register as a 64-bit value.
-            // We emit a ZEXT after FP_F2I when sf=0 to enforce this.
-            if ((op & 0x7F3E0000) == 0x1E380000) {
+            // FCVT{N,P,M,Z,A}{S,U}: FP→int with explicit rounding mode.
+            // Encoding (integer variant, bit 21 = 1):
+            //   0x1E200000 = FCVTNS, 0x1E280000 = FCVTPS,
+            //   0x1E300000 = FCVTMS, 0x1E240000 = FCVTAS,
+            //   0x1E380000 = FCVTZS/FCVTZU.
+            // rmode = bits[20:19]: 00=N(nearest even), 01=P(+inf), 10=M(-inf),
+            // 11=Z(toward zero); bit[18]=A (nearest, ties away); bit[16]=U.
+            // Mask 0x7F220000 leaves rmode, A and U free so every variant
+            // matches (the old mask 0x7F3E0000 == 0x1E380000 only matched
+            // FCVTZS/FCVTZU — fcvtms/fcvtps/fcvtns fell back to CALL_INTERP,
+            // and floor() compiles to FCVTMS, so Minecraft-style chunk/mesh
+            // math ran half in the interpreter). bits[15:10]==0 excludes
+            // FCSEL (0x1E200C00) and FCVT D↔S (0x1E6240C0).
+            if ((op & 0x7F220000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0) {
+                bool is_away = (op >> 18) & 1;
+                uint8_t rmode = (op >> 19) & 3;
                 bool is_unsigned = (op >> 16) & 1;
                 uint8_t sf = (op >> 31) & 1;
                 if (ftype <= 1) {
+                    // A (ties-away) and unsigned non-Z rounding aren't
+                    // native in the JIT codegen yet — keep them correct via
+                    // the interpreter rather than mis-rounding.
+                    if (is_away || (is_unsigned && rmode != 3)) {
+                        emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
+                        return true;
+                    }
                     // For 32-bit dest (sf=0), the JIT's CVTTSD2SI produces a
                     // 64-bit result. AArch64 32-bit register writes must zero
                     // the upper 32 bits — otherwise a subsequent 64-bit read
@@ -291,8 +297,9 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     // stale high bits from a previous computation. We emit a
                     // ZEXT after FP_F2I when sf=0 to enforce this.
                     uint16_t tmp = g_alloc.alloc();
-                    emit(block, IROp::FP_F2I, tmp, rn, 0, ftype, 0,
-                         sf, is_unsigned, cur_pc);
+                    // Rounding mode rides in `cond`: (is_away<<2) | rmode.
+                    emit(block, IROp::FP_F2I, tmp, rn, 0, ftype,
+                         (is_away << 2) | rmode, sf, is_unsigned, cur_pc);
                     if (!sf) {
                         uint16_t z = g_alloc.alloc();
                         emit(block, IROp::ZEXT, z, tmp, 0, 32);

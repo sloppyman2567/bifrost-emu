@@ -269,6 +269,12 @@ INTEGRATION_TESTS=(
     "dynlink_test|ctest_real/test_dynlink.elf||5|test_dynlink: ALL PASS"
     "fcvtzu_test|ctest_real/fcvtzu_test.elf||5|OK"
     "fcvtzu_test2|ctest_real/fcvtzu_test2.elf||5|passed"
+    # FCVT rounding-mode regression (v1.5.2-alpha): FP→int conversions only
+    # handled FCVTZS/FCVTZU (rmode=3, toward zero). floor() compiles to
+    # FCVTMS (rmode=2) and ceil() to FCVTPS (rmode=1), so chunk/mesh math
+    # fell back to CALL_INTERP. Forced encodings check FCVTNS/MS/PS/ZS in
+    # single+double with 32/64-bit dests (no libm — builds under setup-tests).
+    "fcvt_round|ctest_real/test_fcvt_round.elf||10|PASS"
     "fib|ctest_real/fib.elf||5"
     "fwd_repro|ctest_real/fwd_repro.elf||5"
     "fwd_repro2|ctest_real/fwd_repro2.elf||5"

@@ -198,14 +198,18 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         {
             static uint64_t class_counts_[128] = {0};
             static bool class_prof_en_ = (std::getenv("BIFROST_CLASS_PROF") != nullptr);
+            static uint32_t class_prof_period_ = [] {
+                const char* s = std::getenv("BIFROST_CLASS_PROF_PERIOD");
+                return s ? (uint32_t)std::strtoul(s, nullptr, 0) : 20000000u;
+            }();
             if (class_prof_en_) {
                 int ci = (int)d.cls;
                 if (ci >= 0 && ci < 128) class_counts_[ci]++;
                 static uint64_t since_print_ = 0;
-                if (++since_print_ >= 20000000) {
+                if (++since_print_ >= class_prof_period_) {
                     since_print_ = 0;
                     fprintf(stderr, "[classprof]");
-                    for (int i = 0; i < (int)InstClass::SYS_NOP + 1; i++) {
+                    for (int i = 0; i < (int)InstClass::FP_SCALAR + 1; i++) {
                         if (class_counts_[i]) {
                             fprintf(stderr, " %s=%llu",
                                     i == (int)InstClass::SIMD_DP ? "SIMD_DP" :

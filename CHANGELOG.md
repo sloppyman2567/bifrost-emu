@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — native FCVT rounding + de-interp of FP blocks (2026-08-13)
+
+### Interpreter share cut ~2x (13.9% → ~7-8% of wall time); FPS 2 → 6
+
+Chunk loading (the heavy phase) got visibly smoother. Three changes:
+
+- **FCVT{N,P,M,Z}{S,U} rounding modes are native in the JIT.** The IR
+  translator's FP→int block only matched `FCVTZS/FCVTZU` (rmode=3, toward
+  zero) via `(op & 0x7F3E0000) == 0x1E380000`; `floor()` compiles to
+  `fcvtms` (rmode=2) and `ceil()` to `fcvtps` (rmode=1), so chunk/mesh
+  math fell back to CALL_INTERP. Broadened to the full family
+  (`(op & 0x7F220000) == 0x1E200000` + `bits[15:10]==0` to exclude FCSEL
+  and FCVT D↔S), encoding the ARM rmode in the IR FP_F2I `cond` field.
+  The JIT lowers N→`cvtsd2si` (MXCSR nearest), P/M→`roundsd/roundss`
+  (SSE4.1, gated by `has_sse41()` with CALL_INTERP fallback) + truncate,
+  Z→`cvttsd2si` (unchanged). `FCVTAS` (ties-away) and unsigned non-Z stay
+  on the interpreter. Same-mask mirror in `instr_will_call_interp` so the
+  block-split gate agrees with the translator.
+- **`instr_will_call_interp` FP polarity bug fixed.** The `fp_gate`
+  bisect gate returned `fp_gate < 0 || (fp_gate & bit)` — TRUE under the
+  default unset gate (-1 = "all native") for *every* native FP op. That
+  split FP-heavy blocks every 2 instructions and (via the old interp_only
+  heuristic) demoted tiny FP blocks to the interpreter. Now
+  `fp_gate >= 0 && !(fp_gate & bit)`.
+- **interp_only decision uses the actual IR CALL_INTERP count.** The old
+  rule `call_interp_count*2 > instr_count` keyed off the over-predicting
+  heuristic. It now scans the generated IR for real `IROp::CALL_INTERP`
+  ops, so only blocks that genuinely run the interpreter get demoted.
+  Run showed **0 interp_only blocks** (was 486).
+- **classprof printer fixed.** The `[classprof]` loop stopped at
+  `SYS_NOP` (107), hiding `SIMD_DP` (108) and `FP_SCALAR` (109) — the
+  histogram showed "no FP traffic" while FP was ~74% of interp time.
+  Bound extended to `FP_SCALAR`; print period is now overridable via
+  `BIFROST_CLASS_PROF_PERIOD` for sampling JIT-mode interp composition.
+
+Added `ctest_real/test_fcvt_round.c` (forced FCVTMS/PS/NS/ZS encodings,
+single + double, 32/64-bit dests, no libm so `make setup-tests` builds
+it). Verified: full suite **196/196 PASS** (`./scripts/run_tests.sh
+--test-all`).
+
 ## [Unreleased] — JIT dispatch overhead halved + taken-path chaining (2026-08-13)
 
 ### Block dispatch overhead cut ~2x (~21% → ~10% of wall time)

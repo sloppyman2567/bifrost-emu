@@ -80,57 +80,78 @@ static bool instr_will_call_interp(const DecodedInst& d) {
                 const char* s = getenv("BIFROST_FP_NATIVE_GATE");
                 return s ? static_cast<int>(strtol(s, nullptr, 0)) : -1;  // -1 = all native
             }();
+            // NOTE on polarity: `native` means "the IR translator handles
+            // this op natively" so we must predict NO interp call. The
+            // return is therefore `fp_gate >= 0 && !(fp_gate & bit)`:
+            //   gate unset (-1)      → all native → false
+            //   gate set + bit set   → native     → false
+            //   gate set + bit clear → fallback   → true
+            // (Previously this was `fp_gate < 0 || (fp_gate & bit)`, which
+            // under the default unset gate returned TRUE for every native
+            // FP op — splitting FP-heavy blocks every 2 instructions and,
+            // via the old interp_only heuristic, demoting tiny FP blocks
+            // to the interpreter.)
             // FMOV GPR↔FP (32/64-bit) — ftype-agnostic in the translator.
             if ((op & 0xFFE0FC00) == 0x9E600000 && (op & (1u << 18)) && (op & (1u << 17)))
-                return fp_gate < 0 || (fp_gate & 0x01);
+                return fp_gate >= 0 && !(fp_gate & 0x01);
             if ((op & 0xFFE0FC00) == 0x1E200000 && (op & (1u << 18)) && (op & (1u << 17)))
-                return fp_gate < 0 || (fp_gate & 0x01);
+                return fp_gate >= 0 && !(fp_gate & 0x01);
             if (ftype > 1)
                 return true;  // half-precision → interpreter
             // FMOV FP↔FP (double 0x1E604000 / single 0x1E204000).
             if ((op & 0xFFFFFC00) == 0x1E604000 || (op & 0xFFFFFC00) == 0x1E204000)
-                return fp_gate < 0 || (fp_gate & 0x01);
+                return fp_gate >= 0 && !(fp_gate & 0x01);
             // FMOV (scalar, immediate).
             if (fp_decode::is_fmov_imm(op))
-                return fp_gate < 0 || (fp_gate & 0x01);
+                return fp_gate >= 0 && !(fp_gate & 0x01);
             // FCMP/FCMPE (register or #0.0 form).
             if (fp_decode::is_fcmp(op))
-                return fp_gate < 0 || (fp_gate & 0x02);
+                return fp_gate >= 0 && !(fp_gate & 0x02);
             // FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL).
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
                 && (op & 0xFF000000) == 0x1E000000 && ((op >> 12) & 0xF) <= 8)
-                return fp_gate < 0 || (fp_gate & 0x04);
+                return fp_gate >= 0 && !(fp_gate & 0x04);
             // FABD (scalar/vector, S/D via bit22).
             if ((op & 0xFF00FC00) == 0x7E00D400)
-                return fp_gate < 0 || (fp_gate & 0x04);
+                return fp_gate >= 0 && !(fp_gate & 0x04);
             // FP 1-source: FABS/FNEG/FSQRT (1..3) and FRINT* (0x08..0x0F).
             if (fp_decode::is_fp_1source(op)) {
                 uint8_t fp1 = fp_decode::fp_1source_opcode(op);
                 if ((fp1 >= 1 && fp1 <= 3) || (fp1 >= 0x08 && fp1 <= 0x0F))
-                    return fp_gate < 0 || (fp_gate & 0x08);
+                    return fp_gate >= 0 && !(fp_gate & 0x08);
             }
-            // FCVTZS/FCVTZU (FP→int toward zero).
-            if ((op & 0x7F3E0000) == 0x1E380000)
-                return fp_gate < 0 || (fp_gate & 0x10);
+            // FCVT{N,P,M,Z,A}{S,U} — FP→int with explicit rounding mode.
+            // rmode = bits[20:19] (0=N,1=P,2=M,3=Z); bit[18]=A (ties-away);
+            // bit[16]=U. Mirror of ir_translate_fp.cpp's FP_SCALAR block:
+            // A (ties-away) and unsigned non-Z variants still fall back to
+            // CALL_INTERP, so predict interp for those.
+            if ((op & 0x7F220000) == 0x1E200000 && ((op >> 10) & 0x3F) == 0) {
+                bool away = (op >> 18) & 1;
+                uint8_t rmode = (op >> 19) & 3;
+                bool is_unsigned = (op >> 16) & 1;
+                if (away || (is_unsigned && rmode != 3))
+                    return true;
+                return fp_gate >= 0 && !(fp_gate & 0x10);
+            }
             // FCVT D↔S (0x1E624000 double→single, 0x1E22C000 single→double).
             if ((op & 0xFFFFFC00) == 0x1E624000 || (op & 0xFFFFFC00) == 0x1E22C000)
-                return fp_gate < 0 || (fp_gate & 0x20);
+                return fp_gate >= 0 && !(fp_gate & 0x20);
             // SCVTF/UCVTF (int→FP).
             if ((op & 0x7F3EFC00) == 0x1E220000)
-                return fp_gate < 0 || (fp_gate & 0x20);
+                return fp_gate >= 0 && !(fp_gate & 0x20);
             // Fixed-point int↔FP converts (SCVTF/UCVTF/FCVTZS/FCVTZU #fbits).
             // Classified via the generated table (tools/opgen/fp_fixconv.txt)
             // so this gate can't drift from interp/IR. Covers the FPDataProc1
             // forms (GPR source/dest) AND the AdvSIMD-scalar forms with FP
             // register source/dest (e.g. GCC's `scvtf s0, s0, #1`).
             if (fpfixed::classify(op).family == fpfixed::Family::FIXCONV)
-                return fp_gate < 0 || (fp_gate & 0x20);
+                return fp_gate >= 0 && !(fp_gate & 0x20);
             // FMA family (FMADD/FMSUB/FNMADD/FNMSUB).
             if ((op & 0xFF000000) == 0x1F000000)
-                return fp_gate < 0 || (fp_gate & 0x40);
+                return fp_gate >= 0 && !(fp_gate & 0x40);
             // FCSEL.
             if ((op & 0xFF200C00) == 0x1E200C00)
-                return fp_gate < 0 || (fp_gate & 0x80);
+                return fp_gate >= 0 && !(fp_gate & 0x80);
             return true;  // rare/unsupported scalar FP → interpreter
         }
         case InstClass::LDXR: case InstClass::STXR:
@@ -314,8 +335,44 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // register pressure for the 9-host-reg allocator. The __multf3
     // 82-instruction softfloat block generates ~246 vregs, causing
     // spill/reload correctness bugs. Run long blocks via interpreter.
+    // ── interp_only decision ────────────────────────────────────────
+    // Blocks whose instructions are mostly CALL_INTERP fallbacks (or very
+    // long blocks) run entirely via the interpreter — cached, so the
+    // decode cost is skipped on hits. The heuristic call_interp_count
+    // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
+    // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
+    // demoted tiny native FP blocks to the interpreter (~2x slower) and
+    // split FP-heavy blocks every 2 instructions. v1.5.2-alpha: base the
+    // decision on the ACTUAL number of CALL_INTERP ops in the generated
+    // IR instead — only blocks that genuinely run the interpreter get
+    // demoted. Native FP blocks now stay in the JIT.
+    int actual_call_interp = 0;
+    for (auto& ir_inst : ir_block.insts) {
+        if (ir_inst.op == IROp::CALL_INTERP) actual_call_interp++;
+    }
     if (instr_count > 32 ||
-        (call_interp_count > 0 && call_interp_count * 2 > instr_count)) {
+        (actual_call_interp > 0 && actual_call_interp * 2 > instr_count)) {
+        if (getenv("BIFROST_CLASS_PROF")) {
+            static uint64_t dump_ct = 0;
+            if (++dump_ct <= 300) {
+                std::string cls_list;
+                for (int k = 0; k < instr_count; k++) {
+                    try {
+                        uint32_t raw = emu.mem().fetch_inst(start_pc + 4ull * k);
+                        DecodedInst dd;
+                        decode(dd, raw);
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), " %d:%d/%08x", k, (int)dd.cls, raw);
+                        cls_list += buf;
+                    } catch (...) {
+                        cls_list += " X";
+                    }
+                }
+                fprintf(stderr, "[interp_only] pc=0x%llx n=%d aci=%d heur=%d%s\n",
+                        (unsigned long long)start_pc, instr_count, actual_call_interp,
+                        call_interp_count, cls_list.c_str());
+            }
+        }
         BlockEntry entry;
         entry.fn = nullptr;
         entry.interp_only = true;
