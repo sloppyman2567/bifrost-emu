@@ -34,6 +34,8 @@ __attribute__((noinline)) float f_add(float a, float b) { return a + b; }
 __attribute__((noinline)) float f_mul(float a, float b) { return a * b; }
 __attribute__((noinline)) float f_div(float a, float b) { return a / b; }
 __attribute__((noinline)) float f_sqrt(float a) { return sqrtf(a); }
+__attribute__((noinline)) double d_fnmul(double a, double b) { return -(a * b); }
+__attribute__((noinline)) float f_fnmul(float a, float b) { return -(a * b); }
 
 int main(void) {
     /* ── FADD / FSUB / FMUL / FDIV ────────────────────────────────── */
@@ -52,6 +54,17 @@ int main(void) {
     CHECK(f_mul(1.5f, 2.25f) == 3.375f, "fmuls");
     CHECK(f_div(1.5f, 2.25f) == 1.5f / 2.25f, "fdivs");
     CHECK(f_sqrt(144.0f) == 12.0f, "fsqrts_144");
+
+    /* ── FNMUL (negated multiply, opcode 0x8) ───────────────────────
+     * The JIT previously negated with a hardcoded double sign mask
+     * (bit 63).  Single-precision values live in bits 0-31, so the
+     * XOR was a no-op and fnmul s returned +a*b.  cglm's glm_ortho
+     * uses `fnmul s` for its translation row: a +1 instead of -1
+     * pushed every HUD quad off-screen under JIT. */
+    CHECK(d_fnmul(3.0, 2.0) == -6.0, "fnmuld");
+    CHECK(d_fnmul(-4.0, 5.0) == 20.0, "fnmuld_neg");
+    CHECK(f_fnmul(3.0f, 2.0f) == -6.0f, "fnmuls");
+    CHECK(f_fnmul(-4.0f, 5.0f) == 20.0f, "fnmuls_neg");
 
     /* ── FMOV general↔FP (G↔F) — bit-perfect round trip ───────────── */
     uint64_t bits = 0xBEEFCAFEDeadBeefULL;

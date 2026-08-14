@@ -110,7 +110,16 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_byte(0x0F); emit_byte(sse_op);
             emit_byte(modrm(3, 0, 1));  // xmm0, xmm1
             if (opc == 8) {  // FNMUL: negate the product
-                emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                // Width-aware sign mask (same as FABD/FABS): single-
+                // precision flips bit 31, double flips bit 63. A hardcoded
+                // 0x8000000000000000 only negates doubles — movss-loaded
+                // floats live in bits 0-31, so the double sign bit XOR is
+                // a no-op and FNMUL s returned +a*b (e.g. cglm's
+                // glm_ortho translation row became +1 instead of -1,
+                // pushing every HUD quad off-screen under JIT).
+                uint64_t smask = is_double ? 0x8000000000000000ULL
+                                           : 0x80000000ULL;
+                emit_mov_imm64(RAX, smask);
                 emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8);
                 emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1);
             }
