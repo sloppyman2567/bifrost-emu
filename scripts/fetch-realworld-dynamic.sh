@@ -193,4 +193,4 @@ echo "=== Dynamic real-world binaries ready ==="
 ls -lh "$DEST"/iperf3-aarch64 "$DEST"/echo "$DEST"/cat "$DEST"/uname "$DEST"/date "$DEST"/readlink 2>/dev/null || true
 echo ""
 echo "To run real-world dynamic tests:"
-echo "  BIFROST_ROOT=./rootfs ./scripts/run_tests.sh --test-all"
+echo "  BIFROST_ROOT=./rootfs ./scripts/run_tests.sh"

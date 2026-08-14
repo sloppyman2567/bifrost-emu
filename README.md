@@ -249,8 +249,9 @@ make check-nojit
 # JIT divergence checker (slow, catches codegen bugs)
 make verify
 
-# Download real-world binaries (busybox, iperf2) and run all tests
-make check ARGS="--test-all"
+# Run all tests (full 198-test suite — interactive + real-world included
+# by default, real-world binaries auto-download when missing)
+make check
 
 # Run only specific categories
 ./scripts/run_tests.sh --unit         # JIT regression tests

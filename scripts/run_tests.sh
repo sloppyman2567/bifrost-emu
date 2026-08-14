@@ -10,8 +10,7 @@
 #   - Supports running under interpreter (--no-jit) or FWD (--fwd)
 #
 # Usage:
-#   ./scripts/run_tests.sh              # run everything (default = JIT)
-#   ./scripts/run_tests.sh --test-all   # download real-world binaries + run all 195 tests (incl. interactive)
+#   ./scripts/run_tests.sh              # run everything (default = JIT, full 198-test suite)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -20,7 +19,7 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (193 total standard):
+# Test count breakdown (198 total standard):
 #   Unit         41  — ctest/*.elf focused JIT regression tests
 #   Integration  67  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
@@ -28,10 +27,9 @@
 #                      (49 static busybox/toybox + 7 dynamic glibc)
 #   Benchmarks    5  — performance (included in standard suite)
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
-#   Interactive   5  — visual/stdin REPL tests (--test-all only)
+#   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 193 tests. Quick suite = 188 (skip benchmarks).
-# Full suite (--test-all, with interactive) = 198 tests.
+# Standard suite = 198 tests. Quick suite = 193 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -67,7 +65,6 @@ QUICK=0
 FILTER=""
 EMU_FLAGS=""
 ENV_PREFIX=""
-DOWNLOAD_REALWORLD=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -84,7 +81,6 @@ while [ $# -gt 0 ]; do
         --quick)        QUICK=1 ;;
         --filter)       FILTER="$2"; shift ;;
         --filter=*)     FILTER="${1#--filter=}" ;;
-        --test-all)     DOWNLOAD_REALWORLD=1; RUN_INTERACTIVE=1 ;;
         --help|-h)
             sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
             exit 0
@@ -97,19 +93,18 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-# ── --test-all: download real-world binaries ──────────────────────────
+# ── Real-world binary download ────────────────────────────────────────
 # Downloads Alpine musl busybox (static AArch64) to ctest_real/realworld/.
 # The toybox binary is already committed in the repo (ctest_real/toybox).
-# Also opts into the interactive tests (--interactive), so the full set of
-# 195 test programs runs — every category including REPL/stdin tests.
-# After download, runs the full 195-test suite with 0 expected failures
-# (assuming rootfs is set up — otherwise the 15 dynamic tests still skip).
+# The default full run (RUN_ALL=1) downloads these when missing and also
+# runs the interactive tests, so a bare `run_tests.sh` exercises every
+# category — the full 198-test suite.
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
 # test runner indefinitely.
 DOWNLOAD_TIMEOUT=90
-if [ "$DOWNLOAD_REALWORLD" = "1" ]; then
+if [ "$RUN_ALL" = "1" ]; then
     echo -e "${C_BOLD}Downloading real-world binaries...${C_RST}"
     mkdir -p ctest_real/realworld
 
@@ -142,7 +137,7 @@ fi
 
 if [ "$RUN_ALL" = "1" ]; then
     RUN_UNIT=1; RUN_INTEGRATION=1; RUN_TOYBOX=1
-    # RUN_INTERACTIVE keeps its default (0) unless --test-all set it.
+    RUN_INTERACTIVE=1
     RUN_REALWORLD=1
     [ "$QUICK" = "0" ] && RUN_BENCH=1
     # Dynamic tests require rootfs + toolchains; auto-enable if present.
@@ -170,10 +165,11 @@ fi
 #   Integration — ctest_real/*.elf, real-world test programs that exercise
 #                 multiple subsystems (signals, threads, FS, memory).
 #   Interactive — test/*.elf that need stdin input (echo, repl, sh, cat).
-#                 Opt-in via --interactive; not part of standard suite.
+#                 Part of the standard suite (stdin is piped, timeout-guarded).
 #   Toybox      — ctest_real/toybox with various subcommands.
 #   Real-world  — Downloaded static AArch64 binaries (busybox, toybox, iperf2).
-#                 Skipped if binaries not present. Use --test-all to download.
+#                 Auto-downloaded when missing; skipped only if the download
+#                 failed or the binaries are absent.
 #   Dynamic     — Dynamically-linked test binaries (musl + glibc). Requires
 #                 rootfs + toolchain. Skipped if rootfs not present.
 #   Benchmarks  — Performance benchmarks. Included in standard suite;
@@ -185,7 +181,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 190 tests across 7 categories.
+# Standard suite = 198 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(

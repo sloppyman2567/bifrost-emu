@@ -36,8 +36,8 @@ GL/EGL/SDL2/Vulkan thunks.
 - Build: `make` (or `make USE_SDL2=1 USE_THUNK_GL=1` for host GL/SDL)
 - Debug Build: `make debug` (ASan + UBSan)
 - Run Tests: `./scripts/run_tests.sh --quick` (or `--quick --no-jit`, `--fwd`)
-- Full Tests: `./scripts/run_tests.sh` (175 tests: unit + integration + toybox + real-world + dynamic + benchmarks)
-- Full Tests with Real-World Binaries: `./scripts/run_tests.sh --test-all`
+- Full Tests: `./scripts/run_tests.sh` (198 tests: unit + integration + toybox + real-world + dynamic + interactive + benchmarks)
+- Full Tests with Real-World Binaries: `./scripts/run_tests.sh` (auto-downloads when missing)
 - Lint / Format: N/A (no linter configured; -Wall -Wextra enforced)
 - Cross-compile: `make cross SRC=ctest/foo.c OUT=ctest/foo.elf`
 
@@ -49,7 +49,7 @@ GL/EGL/SDL2/Vulkan thunks.
 5. Commit author: `sloppyman2567 <sloppyman2567@users.noreply.github.com>`
 6. Always commit to existing git repo on `main` branch.
 7. Build before committing — `make` must compile cleanly with no new warnings.
-8. Run full test suite before claiming success — `./scripts/run_tests.sh --test-all` (175 tests).
+8. Run full test suite before claiming success — `./scripts/run_tests.sh` (198 tests).
 9. Never reference `context.md` in commit messages or shipped docs.
 10. Always create a fresh tarball after committing (see context.md rules).
 11. Thunk trampolines end with `ret` after `svc`; pointer args outside the 4 GiB direct window bounce through a host buffer with writeback.

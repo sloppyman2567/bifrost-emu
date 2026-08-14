@@ -269,14 +269,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **193 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **198 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
-  benchmarks + dynamic). The only historical skip was `test_dladdr_glibc`,
-  which must be a glibc-DYNAMIC binary or its dlopen stub skips with
-  exit 77.
-- `./scripts/run_tests.sh --test-all` — default suite + 5 interactive
-  stdin tests = **198 pass / 0 fail / 0 skip**, incl. downloaded
-  real-world binaries. Subsets: `--quick` (no benches),
+  benchmarks + dynamic + interactive). The only historical skip was
+  `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
+  stub skips with exit 77.
+- `./scripts/run_tests.sh` — the default is the FULL suite
+  (interactive + real-world are the standard default) = **198 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 193),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`

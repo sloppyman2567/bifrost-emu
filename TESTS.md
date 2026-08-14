@@ -10,42 +10,38 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 186 | 186 | 0 | Default suite runs 186 of the 191 defined (interactive excluded) |
-| frostJIT (quick `make check-quick`) | 181 | 181 | 0 | Skip slow benchmarks + 1 skip (`sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 186 | 186 | 0 | Same conditions as JIT row |
-| `make check-quick` | 181 | 181 | 0 | 1 skip (`sdl_gl_triangle` without DISPLAY) |
-| `./scripts/run_tests.sh --test-all` | **191** | **191** | 0 | Everything incl. interactive (downloads real-world binaries too) |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 198 | 198 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
+| frostJIT (quick `make check-quick`) | 193 | 193 | 0 | Skip slow benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
+| Interpreter (`./bifrost-emu --no-jit`) | 198 | 198 | 0 | Same conditions as JIT row |
 
-**191 test programs** are defined in `scripts/run_tests.sh` across eight
-categories (see table below). The default `make check` suite runs **186** of
-them (the 5 interactive tests need `--interactive`) and reports
-**186 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
+**198 test programs** are defined in `scripts/run_tests.sh` across eight
+categories (see table below). The default `make check` suite runs **all
+198** of them (interactive + real-world are the standard default) and
+reports **198 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
 With `make check-quick`, benchmarks are skipped and the suite reports
-**181 pass / 0 fail**.
-`./scripts/run_tests.sh --test-all` runs **all 191** (also downloading any
-missing real-world binaries) and reports **191 pass / 0 fail**.
+**193 pass / 0 fail**.
 
 ### Test categories
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit tests | 39 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute) |
-| Integration tests | 63 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, SADDW/UMINP, UMOV, shift-by-imm, vDSO clock) |
+| Unit tests | 41 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute, scalar shifts) |
+| Integration tests | 67 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, SADDW/UMINP, UMOV, shift-by-imm, vDSO clock) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
-| Dynamic | 14 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
+| Dynamic | 15 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| Interactive | 5 | `test/` + `ctest_real/` — REPL/stdin tests (echo, repl, cat, sh, fgets), run with `--interactive` or `--test-all` |
-| **Total** | **191** | 186 run by default; 181 with `--quick`; 191 with `--test-all` |
+| Interactive | 5 | `test/` + `ctest_real/` — REPL/stdin tests (echo, repl, cat, sh, fgets) |
+| **Total** | **198** | 198 run by default; 193 with `--quick` |
 
 ### Running the tests
 
 ```bash
-make check              # run all tests (JIT default, colorized summary)
+make check              # run all 198 tests (JIT default, colorized summary)
 make check-quick        # skip slow benchmarks
 make check-nojit        # run under interpreter (--no-jit)
 make check-fwd          # run with BIFROST_ENABLE_FWD=1
-./scripts/run_tests.sh --test-all   # download real-world binaries + run all 191 tests
+./scripts/run_tests.sh  # full suite (real-world binaries auto-download when missing)
 make check ARGS='--toybox'      # only toybox tests
 make check ARGS='--filter md5'  # only tests matching "md5"
 ./scripts/run_tests.sh --help   # see all options
