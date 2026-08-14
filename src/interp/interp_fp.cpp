@@ -1009,7 +1009,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // comparison (uint64_t), which is correct for UMAXP but
             // WRONG for SMAXP. We now check the U bit at runtime to
             // select signed vs unsigned comparison.
-            case 0x2E20A400: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0)
+            case 0x2E20A400: case 0x2E60A400: case 0x2EA0A400: case 0x2EE0A400: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0); size 0-3
                 // bit 15. Verified by comparing UMAXP (0x6e20a400) vs UMINP
                 // (0x6e20ac00) — they differ only at bit 11. The old code
                 // used bit 15, which is part of the opcode that
