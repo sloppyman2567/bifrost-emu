@@ -408,6 +408,9 @@ void world_render(struct World *self) {
 
     // render solid geometry in no particular order
     {
+        // Debug block census (every frame, every chunk, 16^3 scans each)
+        // disabled — pure diagnostic cost with no gameplay effect.
+#if 0
         int loaded=0, empty=0, base_idx=0, trans_idx=0; long long blocks=0;
         int water=0, stone=0, grass=0, dirt=0, other=0;
         for (size_t i = 0; i < NUM_CHUNKS(self); i++) {
@@ -433,6 +436,7 @@ void world_render(struct World *self) {
         }
         fprintf(stderr, "[DBG-WORLD] loaded=%d empty=%d base_idx=%d trans_idx=%d blocks=%lld W=%d S=%d G=%d D=%d O=%d\n",
                 loaded, empty, base_idx, trans_idx, blocks, water, stone, grass, dirt, other);
+#endif
     }
     world_foreach(self, c1) {
         if (c1 != NULL) {
