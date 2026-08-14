@@ -308,6 +308,11 @@ public:
     size_t code_buf_size()  const { return CODE_BUF_SIZE; }
     size_t cache_entries()  const { return blocks_.size(); }
     const uint8_t* code_buf() const { return code_buf_; }
+    // Resolve sampled host RIPs (from the SIGPROF jit-bucket ring) to guest
+    // PCs via the block table and print the hottest guest PCs. For
+    // diagnosing what the JIT spends its time executing. Takes the block
+    // table's shared lock internally.
+    void dump_pc_histogram(const uint64_t* rips, uint32_t n, uint32_t top = 20);
     static constexpr int REGS_OFF   = 0;
     static constexpr int SP_OFF     = 256;
     static constexpr int PC_OFF     = 264;

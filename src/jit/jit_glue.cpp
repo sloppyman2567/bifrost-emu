@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <sys/time.h>
 #include <ucontext.h>
 namespace arm64emu {
@@ -37,6 +38,14 @@ thread_local size_t         tls_prof_codebuf_size = 0;
 thread_local bool prof_in_run_block = false;
 thread_local bool prof_in_translate = false;
 thread_local bool prof_in_interp = false;
+// Per-thread ring of sampled RIPs that landed inside the JIT code buffer.
+// The handler is async-signal-safe (plain TLS array writes only); the
+// buffers are resolved to guest PCs at exit by prof_pc_histogram(). Fixed
+// size, power-of-two, wraps (dropping the oldest) — at 100 Hz a 4096-ring
+// holds 41s of samples.
+constexpr size_t PROF_RIP_MAX = 4096;
+thread_local uint64_t tls_prof_rips[PROF_RIP_MAX];
+thread_local uint32_t tls_prof_rip_head = 0;
 namespace {
 struct ProfGuard {
     bool* f_;
@@ -49,6 +58,8 @@ static void prof_signal_handler(int, siginfo_t*, void* ctx) {
     if (tls_prof_codebuf && rip >= reinterpret_cast<uint64_t>(tls_prof_codebuf) &&
         rip < reinterpret_cast<uint64_t>(tls_prof_codebuf) + tls_prof_codebuf_size) {
         prof_jit.fetch_add(1, std::memory_order_relaxed);
+        tls_prof_rips[tls_prof_rip_head & (PROF_RIP_MAX - 1)] = rip;
+        tls_prof_rip_head++;
     } else if (prof_in_translate) {
         prof_translate.fetch_add(1, std::memory_order_relaxed);
     } else if (prof_in_interp) {
@@ -203,6 +214,14 @@ void Emulator::print_jit_stats() {
                     static_cast<unsigned long long>(trans), 100.0 * trans / total,
                     static_cast<unsigned long long>(interp), 100.0 * interp / total,
                     static_cast<unsigned long long>(other), 100.0 * other / total);
+        }
+        // BIFROST_PC_HIST=1: resolve the sampled jit-bucket RIPs to guest
+        // PCs and print the hottest ones (map to functions with aarch64
+        // objdump). Gated separately so the default run stays quiet.
+        static const bool pc_hist_ = (getenv("BIFROST_PC_HIST") != nullptr);
+        if (pc_hist_ && tls_prof_rip_head > 0) {
+            uint32_t n = std::min<uint32_t>(tls_prof_rip_head, (uint32_t)PROF_RIP_MAX);
+            jit_->dump_pc_histogram(tls_prof_rips, n);
         }
     }
 }
