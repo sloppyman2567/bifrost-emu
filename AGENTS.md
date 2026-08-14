@@ -126,6 +126,22 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (ir_optimize.cpp) or FWD will silently corrupt values (this broke jit_neon's
   umov tests). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
   (the real cost there is regalloc spill/reload bloat, not round-trips).
+  **FIXED (2026-08-14): the deterministic corruption under `BIFROST_ENABLE_FWD=1`
+  (bench_mips printed ~1 GB of spaces + `done: acc=0x0c5a4000` instead of
+  `done: acc=0xf800800a2c4ff835`; suite SIGSEGVs by the second test) was NOT in
+  the forward-walk cache — it was a regalloc bug in `load_vreg_to_reg_fast`
+  Tier 1.5 (x86_regalloc.cpp): it emitted `emit_mov_reg(dst, home)` while `dst`
+  was still mapped to a DIFFERENT dirty vreg, then `flush_dirty_host_regs`
+  wrote the new value into the old vreg's stack slot (e.g. v53 spilled into
+  v48's `[rbp-0x80]`). FWD's shorter IR exposes it because scratch vregs stay
+  live/cached in RAX across LOAD_MEM; without FWD the extra LOAD_REG/STORE_REG
+  ops break the pattern. Fix: `clobber_host_reg(dst)` BEFORE the mov (same
+  class of bug as the SIMD DUP broadcast — drop the mapping, spilling if dirty,
+  before overwriting the register). Re-verified: bench_mips byte-for-byte,
+  `BIFROST_JIT_VERIFY=1` + FWD=1 → zero divergences, `BIFROST_ENABLE_FWD=1`
+  run_tests.sh = 198/198, plain suite = 198/198. FWD is still OFF by default;
+  it measures ~6% on bench_mips (~0.91s vs ~0.97s) but gives ~4% on
+  chunkmesh_mesh — leave the env default alone unless the game shows a win.**
 - `emit_taken_path_epilogue()` must NOT clear the vec-cache dirty flags:
   `vec_cache_writeback_all()` clears `vec_dirty_` as a codegen-time side
   effect, and the FALL-THROUGH (main) epilogue is emitted LATER — if the
@@ -169,6 +185,15 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   FNMSUB = a*b − c. FNMADD/FNMSUB are NOT −a*b±c aliases — encoding those
   wrong corrupts any value computed via `-(a*b+c)` / `a*b−c` (musl `pow`,
   `rgba_lerp`'s lab conversions). Keep interp, JIT FMA3 map, and IR in sync.
+- FP_BINOP FNMUL (opcode 0x8, the negated multiply — NOT the FMA family)
+  must negate with a WIDTH-AWARE sign mask: single flips bit 31, double
+  flips bit 63. A hardcoded 0x8000000000000000 only negates doubles —
+  movss-loaded single-precision values live in bits 0-31, so the bit-63
+  XOR is a no-op and `fnmul s` silently returned +a*b. cglm's `glm_ortho`
+  computes its translation row with `fnmul s` (`-(left+right)*rl`): the +1
+  instead of −1 pushed every HUD quad to NDC > 1 (off-screen) under JIT
+  while the interp (which does `r = -(a*b)` for both widths) drew it fine —
+  the "JIT has no HUD" bug. Match the FABD (0xD) width-aware mask pattern.
 - Scalar FP→int conversions (FCVTNS/FCVTPS/FCVTMS/FCVTZS + U variants) are
   native in the JIT. rmode = bits[20:19] (0=N nearest-even, 1=P +inf,
   2=M −inf, 3=Z toward-zero), bit[18]=A (ties-away), bit[16]=U. The IR
@@ -386,32 +411,52 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
   fails if the header drifted from the spec). Do NOT hand-edit the
   generated header or re-add ad-hoc REG_* entries in thunk.cpp.
-- GLFW cursor callbacks (1.5.2-alpha): `glfwSetCursorPosCallback` has
-  policy `CURSOR_CB` in `tools/opgen/thunk_dp.txt` (args `ii`: window +
-  guest callback). The dispatch in `thunk.cpp` intercepts it BEFORE the
-  generic host-fn path and stores the guest AArch64 callback in
-  `impl_->glfw_cursor_cbs_` keyed by window — NEVER hand the guest address
-  to host `glfwSetCursorPosCallback` (host would call it as x86-64 →
-  SIGSEGV). `glfwPollEvents`/`glfwWaitEvents` have policy `GLFW_POLL`;
-  after the host call returns, dispatch calls
-  `impl_->deliver_glfw_cursor_callbacks_(cpu)` which reads the host
-  cursor position (`impl_->glfw_get_cursor_pos_fn_`, a `dlsym`-resolved
-  `glfwGetCursorPos` resolved in `register_known_symbols_`), fires the
-  callback ONLY when the position changed since the last poll (first poll
-  just seeds `glfw_cursor_last_` so the game sees no spurious startup
-  delta — GLFW semantics: fire on motion only), and invokes the guest via
-  the borrow-CPU runner installed by the Emulator. The runner ABI:
-  `void(GLFWwindow*, double x, double y)` → x0 = window, d0 (v_lo[0]) = x,
-  d1 (v_lo[1]) = y, LR = SENTINEL_LR (0x1000), scratch stack (thread-local,
-  one per guest thread), save/restore ALL CPU state around the `step()`
-  loop — same borrow-CPU pattern as `guest_call_args_` (dynamic_linker),
-  proven reentrant from inside the syscall path (dlopen 0x1002 →
-  `guest_call_args_`). Wire it via `Emulator::wire_thunk_cursor_cb_runner_`
+- GLFW callbacks (1.5.2-alpha): the callback setters — `glfwSetCursorPosCallback`
+  (`CURSOR_CB`), `glfwSetKeyCallback` (`KEY_CB`), `glfwSetMouseButtonCallback`
+  (`MOUSE_CB`), `glfwSetFramebufferSizeCallback` (`FRAMEBUFFER_CB`),
+  `glfwSetWindowSizeCallback` (`WINDOW_SIZE_CB`), `glfwSetWindowFocusCallback`
+  (`FOCUS_CB`), and `glfwSetErrorCallback` (`ERROR_CB`, global — single arg,
+  no window) — all have `*_CB` policies in `tools/opgen/thunk_dp.txt`.
+  The dispatch in `thunk.cpp` intercepts them BEFORE the generic host-fn
+  path and stores the guest AArch64 callback in `impl_->glfw_cbs_`
+  (a per-window `GlfwWindowCbs` struct; `ERROR_CB` in `glfw_error_cb_`) —
+  NEVER hand the guest address to the host setter (host would call it as
+  x86-64 → SIGSEGV). There is NO `STUB` policy anymore: every former STUB
+  setter is a real `*_CB` policy (removing the last STUB rows also removed
+  `Policy::STUB` from the generated enum — don't reference it).
+  `glfwPollEvents`/`glfwWaitEvents` have policy `GLFW_POLL`; after the
+  host call returns, dispatch calls `impl_->deliver_glfw_callbacks_(cpu)`
+  which reads the host state via `dlsym`-resolved fns
+  (`glfwGetCursorPos`/`glfwGetKey`/`glfwGetMouseButton`/`glfwGetWindowSize`/
+  `glfwGetFramebufferSize`/`glfwGetWindowAttrib`) resolved in
+  `register_known_symbols_`, and fires each callback ONLY when its value
+  changed since the last poll (first poll just seeds so the game sees no
+  spurious startup event — GLFW semantics: fire on events only). CRITICAL
+  details: `glfwGetKey` only accepts keys >= `GLFW_KEY_SPACE` (32) —
+  polling 0-31 makes host GLFW fire `GLFW_INVALID_ENUM` "Invalid key N"
+  on EVERY poll; start the key loop at 32. Host GLFW errors are captured
+  by a host-side error trampoline installed in `register_known_symbols_`
+  (`glfw_set_error_callback_fn_` + a static impl pointer) and forwarded to
+  the guest's error callback with change-dedup (a `const char*` desc is
+  bounced via `cache_host_string_`), so the game polling invalid keys
+  doesn't spam the guest every frame. The borrow-CPU runner ABI is generic:
+  `uint64_t(CPU& cpu, uint64_t fn, const int64_t* iargs, size_t n_iargs,
+  const double* fargs, size_t n_fargs)` — x0.. = iargs, d0.. = fargs,
+  LR = SENTINEL_LR (0x1000), scratch stack (thread-local, one per guest
+  thread), save/restore ALL CPU state around the `step()` loop — same
+  borrow-CPU pattern as `guest_call_args_` (dynamic_linker), proven
+  reentrant from inside the syscall path (dlopen 0x1002 →
+  `guest_call_args_`). Wire it via `Emulator::wire_thunk_glfw_cb_runner_`
   right after `thunk->init(mem_)` on BOTH the dynamic-linker (emulator.cpp
-  ~236) and static-ELF (~710) paths. `BIFROST_THUNK_TRACE=1` prints
-  `[thunk] cursor cb` lines for verification. Adding more GLFW callback
-  setters later (key/mouse/scroll): mirror CURSOR_CB (store + deliver),
-  don't leave them `STUB` unless the game can't use them.
+  ~237) and static-ELF (~711) paths. `BIFROST_THUNK_TRACE=1` prints
+  `[thunk] <name>: window=0x.. cb=0x..` and `[thunk] <kind> cb → 0x..`
+  lines for verification. Adding more GLFW callback setters later:
+  mirror `*_CB` (store in `GlfwWindowCbs` + deliver in
+  `deliver_glfw_callbacks_`), don't leave them STUB unless the game can't
+  use them. The `FRAMEBUFFER_CB` delivery is what lets the game's
+  `_size_callback` update `window.size` + `glViewport` on resize/fullscreen
+  (before it was STUB → HUD stayed at the initial size on the user's
+  ultrawide).
 - `make check-all` now runs BOTH generation guards (`opgen-check` +
   `opgen-thunk-check`) before the test suite, so spec drift fails CI.
 
