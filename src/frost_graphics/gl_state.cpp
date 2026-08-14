@@ -547,6 +547,24 @@ bool GLStateTracker::try_handle_query(const std::string& name, const uint64_t ar
     return false;
 }
 
+bool GLStateTracker::tracks_state(const std::string& name) const {
+    // Keep in sync with the name set below (track_state_change). A
+    // function-local static builds the set once on first call.
+    static const std::unordered_set<std::string> kTracked = {
+        "glEnable", "glDisable", "glClearColor", "glColor3f", "glColor4f",
+        "glLineWidth", "glPointSize", "glViewport", "glActiveTexture",
+        "glBlendFunc", "glBlendFuncSeparate", "glBlendEquation",
+        "glBlendEquationSeparate", "glDepthFunc", "glDepthMask",
+        "glCullFace", "glFrontFace", "glPolygonMode", "glScissor",
+        "glStencilFunc", "glStencilOp", "glStencilMask",
+        "glStencilFuncSeparate", "glStencilOpSeparate",
+        "glStencilMaskSeparate", "glUseProgram", "glBindBuffer",
+        "glBindTexture", "glBindFramebuffer", "glBindRenderbuffer",
+        "glPixelStorei", "glHint",
+    };
+    return kTracked.count(name) != 0;
+}
+
 void GLStateTracker::track_state_change(const std::string& name, const uint64_t args[12], const float* fv, uint8_t n_float) {
     // Capabilities.
     if (name == "glEnable") {

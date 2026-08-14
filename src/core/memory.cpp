@@ -311,10 +311,15 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     // reused above-window range re-adds pages that untrack freed — so the
     // check reflects the LIVE page count, not a naive aligned_size count.
     size_t num_new_pages = 0;
-    for (uint64_t s = base & ~PAGE_MASK; s < base + aligned_size; s += PAGE_SIZE) {
-        if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
-        uint64_t pn = s / PAGE_SIZE;
-        if (pages_.find(pn) == pages_.end()) num_new_pages++;
+    // All-window ranges add no pages_ entry (the window IS the storage and
+    // never counts toward total_pages_) — skip the per-page scan entirely
+    // instead of walking ~4608 pages doing nothing.
+    if (!(direct_window_ && base + aligned_size <= DIRECT_WINDOW_SIZE)) {
+        for (uint64_t s = base & ~PAGE_MASK; s < base + aligned_size; s += PAGE_SIZE) {
+            if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+            uint64_t pn = s / PAGE_SIZE;
+            if (pages_.find(pn) == pages_.end()) num_new_pages++;
+        }
     }
     if (would_exceed_page_limit(num_new_pages)) return 0;
     // Consume the taken free range (leave the tail for later reuse).
@@ -327,11 +332,12 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     for (; start < end; start += PAGE_SIZE) {
         uint64_t pn = start / PAGE_SIZE;
         if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
-            // Reclaimed window pages may still hold stale data from the
-            // previous owner — zero them for MAP_ANONYMOUS semantics.
-            if (reused) {
-                std::memset(direct_window_ + start, 0, PAGE_SIZE);
-            }
+            // No explicit zeroing needed: window pages are either
+            // never-touched (fresh host demand-paged zeros) or were
+            // madvise(MADV_DONTNEED)'d at munmap (kernel zero-fills on
+            // the next fault) — kernel-faithful lazy zeroing, so a
+            // reused 18 MB range costs zero bandwidth instead of 4608
+            // memsets. The game overwrites ~100% of each buffer anyway.
             continue;
         }
         auto it = pages_.find(pn);
@@ -464,14 +470,27 @@ void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
     // cap reflects live memory, and the address range goes on a free list
     // for reuse (keeping the guest heap inside the 4 GiB direct window,
     // which is also the JIT fast path).
-    std::unique_lock<std::shared_mutex> g(mu_);
+std::unique_lock<std::shared_mutex> g(mu_);
     allocations_.erase(addr);
-    // Free page storage in the range and decrement the live page count.
+    // Direct-window ranges have no pages_ entry (the window IS the storage).
+    // Drop their physical pages with madvise(MADV_DONTNEED): like a real
+    // munmap the kernel frees them now, and since the window is
+    // MAP_PRIVATE|MAP_ANONYMOUS the next access faults zero-filled. This is
+    // what keeps mmap_alloc's window-reuse path zero-clean without an eager
+    // memset (the old code just walked ~4608 pages doing nothing here).
     uint64_t start = addr & ~PAGE_MASK;
     uint64_t end = addr + size;
+    if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
+        uint64_t window_end = std::min(end, static_cast<uint64_t>(DIRECT_WINDOW_SIZE));
+        window_end &= ~PAGE_MASK;
+        if (window_end > start) {
+            madvise(direct_window_ + start, window_end - start, MADV_DONTNEED);
+        }
+    }
+    // Free page storage in the range and decrement the live page count.
     for (uint64_t s = start; s < end; s += PAGE_SIZE) {
-        // Direct-window addresses have no pages_ entry (the window IS
-        // the storage) — nothing to reclaim there, and they don't count
+        // Direct-window addresses have no pages_ entry (the window IS the
+        // storage) — nothing to reclaim there, and they don't count
         // toward total_pages_.
         if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
         uint64_t pn = s / PAGE_SIZE;

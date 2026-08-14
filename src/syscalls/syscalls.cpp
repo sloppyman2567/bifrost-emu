@@ -36,7 +36,7 @@ namespace arm64emu {
 // so a "where does the time go" run can attribute the SIGPROF "other"
 // bucket to specific syscalls without a clean guest exit.
 namespace {
-constexpr size_t SYSCALL_HIST_MAX = 512;
+constexpr size_t SYSCALL_HIST_MAX = 4096 + 1;  // includes GraphicThunk::SYSCALL_NUMBER (0x1000)
 std::atomic<uint64_t> g_syscall_hist[SYSCALL_HIST_MAX]{};
 const char* syscall_name(uint64_t num) {
     switch (num) {
@@ -235,6 +235,32 @@ void Emulator::syscall(CPU& cpu) {
             return;
         }
         cpu.regs[0] = prev;
+    }
+    // Hot-path pre-dispatch: jump straight to the owning subsystem for the
+    // most frequent calls instead of walking the six-handler chain. The
+    // game's per-frame mesh churn hammers mmap/munmap/brk (mem), and GL/SDL
+    // thunk calls ride misc on GraphicThunk::SYSCALL_NUMBER (0x1000).
+    // Everything else falls through to the generic chain unchanged, so the
+    // ownership is provably identical to before.
+    switch (num) {
+        case 222:   // mmap
+        case 215:   // munmap
+        case 216:   // mremap
+        case 214:   // brk
+        case 226:   // mprotect
+        case 233:   // madvise
+            if (syscall_mem(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
+            break;
+        case 98:    // futex
+        case 220:   // clone
+        case 435:   // clone3
+            if (syscall_threads(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
+            break;
+        case 0x1000:  // GraphicThunk::SYSCALL_NUMBER (GL/SDL/EGL/Vulkan thunks)
+            if (syscall_misc(*this, cpu, num) != SYSCALL_NOT_HANDLED) return;
+            break;
+        default:
+            break;
     }
     if (syscall_fs(*this, cpu, num)      != SYSCALL_NOT_HANDLED) return;
     if (syscall_mem(*this, cpu, num)     != SYSCALL_NOT_HANDLED) return;

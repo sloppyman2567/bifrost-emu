@@ -1147,12 +1147,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
     cpu.regs[0] = ret;
-    if (impl_->gl_state_tracker_) {
+    if (impl_->gl_state_tracker_ &&
+        impl_->gl_state_tracker_->tracks_state(entry.name)) {
         impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);
     }
     // Lightweight frame counter: print every 5 present/swap calls when
     // BIFROST_FRAME_TRACE=1 (avoids the heavy per-call dispatch trace).
-    if (getenv("BIFROST_FRAME_TRACE") && entry.spec &&
+    // Gate is cached in dbg() — getenv() on every dispatch was measurable.
+    if (dbg().frame_trace && entry.spec &&
         entry.spec->policy == thunk::Policy::PRESENT) {
         static uint64_t frame_count = 0;
         static uint64_t t0 = 0;

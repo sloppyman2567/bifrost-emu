@@ -39,6 +39,7 @@ struct DebugFlags {
     bool nss  = false;  // BIFROST_NSS_TRACE
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
+    bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
     // ── capture sinks (paths) ────────────────────────────────────────
     std::string xseqlog;  // BIFROST_XSEQLOG — X wire sequence capture file
     std::string xcap;     // BIFROST_XCAP    — X capture output root
@@ -75,6 +76,7 @@ struct DebugFlags {
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.nss       = all || env("BIFROST_NSS_TRACE");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
+        f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
         return f;

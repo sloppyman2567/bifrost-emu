@@ -305,15 +305,30 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (`call_interp_count*2 > instr_count` in translate_block), and demoting
   hot MIXED blocks (1-2 fallbacks + native ops) measured ~8-10% SLOWER
   on the minecraft game — interp is ~2x slower than JIT, so the native
-  ops get dragged down to interpreter speed. Diagnose with `BIFROST_PROF=1`
-  (SIGPROF sampler: jit/dispatch/translate/interp/other bucket histogram
-  printed at exit; installs lazily on first run_block so
-  install_host_signal_handlers doesn't overwrite it — a naive install
-  crashes the game because SIGPROF is guest-forwarded) and
-  `BIFROST_CLASS_PROF=1` (per-class dynamic histogram in the interpreter;
-  with JIT ON it shows exactly which instruction classes run through the
-  interp fallback). `BIFROST_STATS_PERIOD=N` prints rolling MIPS every N
-  seconds past startup/world-gen phases.
+  ops get dragged down to interpreter speed. Diagnose with the STANDARD
+  profiling recipe (no clean guest exit and no manual gameplay needed):
+  ```
+  cd ctest_real/minecraft_weekend   # run from the game dir (res/ is relative)
+  BIFROST_PROF=1 BIFROST_STATS_PERIOD=10 BIFROST_CLASS_PROF=1 \
+      timeout 42 <repo>/bifrost-emu ./minecraft_weekend.elf 2>&1 | rg 'SIGPROF|guest:|block-end|syscalls|class'
+  ```
+  The game auto-simulates + generates/renders chunks with NO input, so a
+  ~40s timeout-killed run is a valid profile. `BIFROST_PROF=1` is the
+  SIGPROF sampler (jit/dispatch/translate/interp/other buckets; installs
+  lazily on first run_block so install_host_signal_handlers doesn't
+  overwrite it — a naive install crashes the game because SIGPROF is
+  guest-forwarded). `BIFROST_STATS_PERIOD=N` prints the guest MIPS +
+  block-end reasons AND (since b3a2a60) the SIGPROF bucket snapshot every
+  N seconds MID-RUN: the exit-time dump only ran under `--verbose` and a
+  clean guest exit, which games never reach (they exit_group / get killed
+  by timeout), so periodic is the only reliable way to see the split.
+  `BIFROST_STATS_PERIOD` also prints a syscall histogram
+  (dump_syscall_histogram in syscalls.cpp: top-N syscall numbers with
+  names + per-second rates; counted unconditionally with relaxed atomics,
+  printed whenever the periodic reporter runs) that attributes the
+  "other" bucket to specific syscalls. `BIFROST_CLASS_PROF=1` is the
+  per-class dynamic histogram in the interpreter; with JIT ON it shows
+  exactly which instruction classes run through the interp fallback.
 - Block dispatch has THREE layers: a single-entry last-block cache, an
   inlined 256-slot direct-mapped inline cache (hash
   `((pc >> 2) ^ (pc >> 17)) & 255`), then the shared-mutex + unordered_map
