@@ -306,7 +306,19 @@ inline bool is_fp_1source(uint32_t op) {
     //     01 = FCVT                 (opcode 0x04-0x07) — EXCLUDED
     //     10 = FRINTN/P/M/Z         (opcode 0x08-0x0B)
     //     11 = FRINTA/X/I           (opcode 0x0C-0x0F, 0x0D unused)
-    return ((op >> 21) & 1) == 1 && ((op >> 10) & 0x1F) == 0x10
+    // MUST also require bits[31:24]==0x1E (FPDataProc1). Without it,
+    // FMA encodings whose Ra field happens to be 0b10000 collide:
+    // `fnmsub s16, s7, s1, s16` = 0x1F21C0F0 has bit21=1 (o2=neg),
+    // bits[14:10]=Ra=16=0b10000 and bits[18:17]=00, so it matched
+    // is_fp_1source and was misrouted to the FP 1-source handler
+    // (opcode 0x21 → default → r=a), silently corrupting the UP
+    // column of glm_lookat's cross product (u.y became s7 instead of
+    // 0*0-(-1)=1) — degenerate view matrices in minecraft_weekend.
+    // The same collision hit interp (interp_fp.cpp), the IR translator
+    // (ir_translate_fp.cpp) and the JIT gate (jit_translate.cpp)
+    // because all three share this helper.
+    return (op & 0xFF000000) == 0x1E000000 && ((op >> 21) & 1) == 1
+           && ((op >> 10) & 0x1F) == 0x10
            && ((op >> 17) & 0x3) != 0x1;
 }
 // Extract the FP 1-source opcode (bits[20:15], 6 bits).
