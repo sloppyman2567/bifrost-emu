@@ -27,7 +27,7 @@ static int failures = 0;
 
 int main(void) {
     // 1. Get initial brk.
-    void *initial_brk = (void *)syscall(214);  // AArch64 brk syscall number
+    void *initial_brk = (void *)syscall(214, 0);  // AArch64 brk syscall number
     CHECK(initial_brk != NULL, "initial brk(0) is non-null");
     CHECK(((unsigned long)initial_brk & 0xFFF) == 0, "initial brk is page-aligned");
 
@@ -37,7 +37,7 @@ int main(void) {
     CHECK(actual == new_brk, "brk() extends heap to requested address");
 
     // 3. brk(0) should return the new break.
-    void *current_brk = (void *)syscall(214);
+    void *current_brk = (void *)syscall(214, 0);
     CHECK(current_brk == new_brk, "brk(0) returns current break after extend");
 
     // 4. Memory in extended region is accessible.

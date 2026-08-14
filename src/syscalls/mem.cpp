@@ -308,6 +308,14 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             std::lock_guard<std::mutex> g(brk_mu_);
             if (a0 == 0) { ret_host(brk_); return 0; }
             if (a0 < brk_start_) { ret_host(brk_); return 0; }
+            // The Linux kernel rounds the new break up to the page
+            // boundary, so a guest that hands brk() an unaligned address
+            // (e.g. musl's variadic syscall() wrapper passing a stale x0
+            // for a no-arg brk(0) call) still gets a page-aligned break.
+            // Returning the raw value here made brk(0) report an
+            // unaligned break and broke test_brk once the heap/stack
+            // moved into the low window.
+            uint64_t new_brk = (a0 + Memory::PAGE_MASK) & ~Memory::PAGE_MASK;
             // extensions. The Linux kernel checks the new break against
             // RLIMIT_DATA and the available address space; without this
             // check, a buggy (or malicious) guest could request
@@ -320,15 +328,23 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // to prevent runaway allocations. If a program legitimately
             // needs a bigger heap, it should use mmap() directly.
             constexpr uint64_t MAX_BRK_SIZE = 1ULL << 30;  // 1 GiB
-            if (a0 - brk_start_ > MAX_BRK_SIZE) {
+            if (new_brk - brk_start_ > MAX_BRK_SIZE) {
                 // Reject: return the current brk unchanged.
                 ret_host(brk_);
                 return 0;
             }
-            if (a0 > brk_) {
-                mem_.map_range(brk_, a0 - brk_);
+            // Keep the heap out of the stack region: a guest passing a
+            // bogus (e.g. stack-relative) address must not let brk
+            // shadow the stack pages. Linux likewise refuses brk growth
+            // that would collide with the mmap/stack area.
+            if (new_brk >= Memory::STACK_TOP - Memory::STACK_SIZE) {
+                ret_host(brk_);
+                return 0;
             }
-            brk_ = a0;
+            if (new_brk > brk_) {
+                mem_.map_range(brk_, new_brk - brk_);
+            }
+            brk_ = new_brk;
             ret_host(brk_);
             return 0;
         }
