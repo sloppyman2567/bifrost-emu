@@ -91,6 +91,12 @@ enum class IROp : uint8_t {
                     // Does NOT end the block. Caller-saved ARM regs (x0-x18, x30)
                     // are invalidated after the call. Callee-saved (x19-x28) survive
                     // if cached in callee-saved host regs (R12/R13/R15).
+    BLR_CALL,       // BLR within block — call block at src1 (a register target),
+                    // continue after return. Same semantics as BL_CALL (arm_pc =
+                    // BLR's PC, LR = arm_pc + 4, does NOT end the block) but the
+                    // target is dynamic (function pointer in a GPR), so codegen
+                    // loads src1 into the arg reg at the call site instead of an
+                    // immediate. Mirrors BL_CALL's invalidate/cache rules.
     // Interpreter fallback (single instruction)
     CALL_INTERP,    // call interpreter for ARM instruction at arm_pc
     // Syscall (treated as block-ending side effect)

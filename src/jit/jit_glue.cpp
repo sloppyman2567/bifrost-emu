@@ -331,8 +331,15 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     int steps = 0;
     while (cpu->running && cpu->pc != return_pc) {
         if (jit) {
-            auto fn = jit->lookup_only(cpu->pc);
-            if (!fn) fn = jit->translate_and_lookup(*emu, cpu->pc);
+            // Fast path mirrors run_block (last-block + inline caches) but
+            // ALSO populates them — jit_call_helper is the only entry point
+            // for BL_CALL/BLR_CALL targets and previously never wrote the
+            // caches, so every worldgen noise call (grad3 ×8 per noise3,
+            // ~40K compute calls per fresh chunk column) fell to the
+            // mutex-protected unordered_map. The caches are thread-local
+            // and written exactly like run_block's slow path.
+            int ic = 0;
+            auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
                 cpu->pc = fn(cpu, emu);
                 if (++steps > 10000000) break;

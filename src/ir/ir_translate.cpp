@@ -681,6 +681,14 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             if (d.cls == InstClass::BLR) {
                 uint16_t lr = load_imm(block, cur_pc + 4);
                 store_arm_reg(block, 30, lr);
+                if (!bl_call_disabled_) {
+                    // Native call-within-block for indirect calls (function
+                    // pointers): the worldgen noise `.compute` wrappers and
+                    // recursion otherwise re-dispatch on every indirect call.
+                    uint16_t target = load_arm_reg(block, d.rn);
+                    emit(block, IROp::BLR_CALL, 0, target);
+                    return false;  // does NOT end the block
+                }
             }
             uint16_t target = load_arm_reg(block, d.rn);
             emit(block, IROp::BR, 0, target);

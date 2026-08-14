@@ -116,6 +116,44 @@ public:
         blocks_mutex_.unlock();
         return fn;
     }
+    // Fast lookup for jit_call_helper (BL_CALL/BLR_CALL targets). Mirrors
+    // run_block's tiers — last-block cache, inline cache, then the
+    // shared-mutex map — but ALSO populates the caches on the slow path.
+    // jit_call_helper was the only caller that never wrote the caches, so
+    // every helper dispatch fell to the unlocked unordered_map find. The
+    // caches are thread-local and are written exactly like run_block's slow
+    // path (pc+fn+instr_count together), so a later run_block fast-path
+    // match remains valid. NOTE: measured NEUTRAL on the minecraft
+    // worldgen noise (fresh-column heightmap is body-throughput-bound at
+    // ~430 MIPS, not lookup-bound), but it removes a per-call map find from
+    // the hottest call path and is strictly cheaper than the old behavior
+    // for any call-heavy workload (e.g. the mesh BL_CALLs).
+    uint64_t (*lookup_call_target(Emulator& emu, uint64_t pc, int& instr_count))(CPU*, Emulator*) {
+        if (pc == tls_last_block_.pc) {
+            instr_count = tls_last_block_.instr_count;
+            return tls_last_block_.fn;
+        }
+        uint64_t (*fn)(CPU*, Emulator*) = nullptr;
+        if (inline_cache_lookup(pc, &fn, instr_count)) {
+            return fn;
+        }
+        fn = lookup_only(pc);
+        if (!fn) {
+            fn = translate_and_lookup(emu, pc);
+            if (!fn) {
+                instr_count = 0;
+                return nullptr;
+            }
+        }
+        int cnt = 0;
+        auto it = blocks_.find(pc);
+        if (it != blocks_.end()) cnt = it->second.instr_count;
+        tls_last_block_ = LastBlockCache{pc, fn, cnt};
+        tls_inline_cache_[((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1)] =
+            InlineCacheEntry{pc, fn, cnt};
+        instr_count = cnt;
+        return fn;
+    }
     // ── Function Multi-Versioning (FMV) ─────────────────────────────
     // The JIT queries these flags at codegen time to decide which x86
     // instruction sequence to emit for hot operations. For example,

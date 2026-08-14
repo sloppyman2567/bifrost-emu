@@ -449,6 +449,26 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (0.699→0.583s), bench_matrix +1.2%; bench_mips NEUTRAL (single self-loop
   block — the selfloop slot already skips all this overhead). Leave the env
   default OFF (opt-in) until the game confirms a win.
+- BL_CALL's sibling BLR_CALL (`IROp::BLR_CALL`, the indirect/function-pointer
+  form) is native too: `blr rn` emits it (ir_translate.cpp) whenever
+  `!bl_call_disabled_`, codegen mirrors BL_CALL but loads the target from
+  src1 (the rn vreg) into RAX/RDX at the call site instead of an immediate.
+  It has the same chain-skip gate (BLR is counted into `bl_call_count` and
+  `has_bl_call` like BL, so the cap and chain-skip handling agree). The
+  worldgen noise `.compute` wrappers (combined/octave/expscale function
+  pointers, ~40K indirect calls per fresh chunk column) use it. It measured
+  NEUTRAL on the game's worldgen (the fresh-column heightmap is
+  body-throughput-bound at ~430 MIPS — 40K noise3 × (156 instr + 8× the
+  16-instr grad3 leaf) ≈ 11.4M instr in ~26ms — NOT dispatch/lookup-bound),
+  but it's strictly more native than re-dispatching on every blr.
+- `jit_call_helper` (the BL_CALL/BLR_CALL target dispatcher) uses
+  `lookup_call_target` (frostjit.hpp), which mirrors run_block's tiers —
+  thread-local last-block cache, inline cache, then the shared-mutex map —
+  and POPULATES the caches on its slow path (run_block's slow path is the
+  only other writer; jit_call_helper previously fell straight to the
+  unlocked `blocks_.find` on every call). Also measured NEUTRAL on the
+  game's noise (body-bound, see above) but removes a per-call map find from
+  the hottest call path.
 - The prologue's 10-byte `movabs r10, window_base` (WIN_REG) is emitted
   LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
   SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles

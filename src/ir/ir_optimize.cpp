@@ -100,6 +100,7 @@ static bool is_pure(IROp op) {
         case IROp::BR: case IROp::BRCOND: case IROp::BRCOND_FALLTHRU:
         case IROp::CALL_INTERP: case IROp::SVC:
         case IROp::BL_CALL:  // callee may read/write any ARM reg
+        case IROp::BLR_CALL: // callee may read/write any ARM reg
         case IROp::FMOV_G2F: case IROp::FMOV_F2G:
         case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
         case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
@@ -287,7 +288,7 @@ void optimize_ir(IRBlock& block) {
                 uint32_t key = (static_cast<uint32_t>(inst.src1) << 1) | inst.sf;
                 last_store_to.erase(key);
             } else if (inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC ||
-                       inst.op == IROp::BL_CALL) {
+                       inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL) {
                 last_store_to.clear();
             } else if (inst.op == IROp::BR ||
                        inst.op == IROp::BRCOND ||
@@ -650,6 +651,7 @@ void optimize_ir(IRBlock& block) {
             case IROp::CALL_INTERP:
             case IROp::SVC:
             case IROp::BL_CALL:  // callee may modify any reg
+            case IROp::BLR_CALL: // callee may modify any reg
                 // The interpreter may modify any cpu.regs[] or memory.
                 // Invalidate everything.
                 consts.clear_all();

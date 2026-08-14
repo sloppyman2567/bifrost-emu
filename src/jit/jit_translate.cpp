@@ -290,8 +290,9 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         }
         bool ends = translate_to_ir(ir_block, d, cur_pc);
         if (will_call_interp) call_interp_count++;
-        // Track BL_CALL count for block splitting.
-        if (d.cls == InstClass::BL) bl_call_count++;
+        // Track BL_CALL count for block splitting (BLR_CALL too — both
+        // keep the block alive past the call and grow register pressure).
+        if (d.cls == InstClass::BL || d.cls == InstClass::BLR) bl_call_count++;
         instr_count++;
         ir_block.count = instr_count;
         if (ends) {
@@ -435,7 +436,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     bool has_bl_call = false;
     bool has_call_interp = false;
     for (auto& ir_inst : ir_block.insts) {
-        if (ir_inst.op == IROp::BL_CALL) { has_bl_call = true; break; }
+        if (ir_inst.op == IROp::BL_CALL || ir_inst.op == IROp::BLR_CALL) { has_bl_call = true; break; }
         if (ir_inst.op == IROp::CALL_INTERP) { has_call_interp = true; }
     }
     // ── Optimize the IR ──────────────────────────────────────────

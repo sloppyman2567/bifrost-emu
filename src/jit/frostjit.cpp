@@ -729,6 +729,34 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return false;
         }
+        // Call the block at a REGISTER target via jit_call_helper, then
+        // continue the block. Same as BL_CALL but the target comes from
+        // src1 (the BLR's rn register) instead of an immediate.
+        case IROp::BLR_CALL: {
+            flush_all_vregs();
+            if (flags_in_host_) {
+                emit_materialize_flags(flags_from_sub_);
+                flags_in_host_ = false;
+                invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
+            }
+            if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
+                evict_vreg(31);
+            }
+            // RAX = target (from the ARM reg / vreg src1 — after the flush
+            // it's in cpu.regs[src1] or its stack slot).
+            load_vreg_to_reg(RAX, inst.src1);
+            emit_store(CPU_REG, PC_OFF, RAX);
+            emit_mov_reg(RDI, CPU_REG);
+            emit_mov_reg(RSI, EMU_REG);
+            emit_mov_reg(RDX, RAX);  // RDX = target_pc
+            emit_push(WIN_REG);
+            emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
+            emit_mov_reg(RCX, RAX);  // RCX = next PC
+            emit_pop(WIN_REG);
+            emit_store(CPU_REG, PC_OFF, RCX);
+            invalidate_all_vregs();
+            return false;  // does NOT end the block
+        }
         // Call the target block via jit_call_helper, then continue the block.
         case IROp::BL_CALL: {
             // Flush ALL dirty vregs to cpu.regs[]/stack BEFORE the call.
