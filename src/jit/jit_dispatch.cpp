@@ -35,6 +35,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         bifrost_prof_init(this);
         prof_inited = true;
     }
+    // Hoisted once — the runtime hot-block -> interp_only demotion is disabled
+    // by default (measured ~8-10% SLOWER on the minecraft game). getenv() on
+    // every slow-path cache hit was a full environ scan per dispatch.
+    static bool hot_interp_ = (getenv("BIFROST_HOT_INTERP") != nullptr);
     ProfRunGuard prof_g;
     if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
         interpreter_fallbacks++;
@@ -156,7 +160,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // covered at translate time, so this should rarely be needed).
         if (!entry.interp_only && entry.fn &&
             entry.call_interp_count * 2 > entry.instr_count &&
-            getenv("BIFROST_HOT_INTERP") != nullptr) {
+            hot_interp_) {
             auto& cnt = tls_hot_pc_counts_[pc];
             if (++cnt >= HOT_PC_THRESHOLD) {
                 // Promote to interp_only — upgrade to exclusive.
@@ -289,33 +293,6 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_inline_cache_[slot].pc = pc;
         tls_inline_cache_[slot].fn = entry.fn;
         tls_inline_cache_[slot].instr_count = entry.instr_count;
-    }
-    // TEMP DEBUG: trace all blocks in QGuiApplication::font() range
-    if (pc >= 0x500071e000ULL + 0x13bbc4ULL && pc <= 0x500071e000ULL + 0x13bd60ULL) {
-        fprintf(stderr, "[FONT] block @0x%llx x0=%#llx x21=%#llx x22=%#llx\n",
-                (unsigned long long)pc, (unsigned long long)cpu.regs[0],
-                (unsigned long long)cpu.regs[21], (unsigned long long)cpu.regs[22]);
-        if (pc == 0x500071e000ULL + 0x13bd34ULL) {
-            uint8_t raw[8]; uint64_t vptr = 0, slot = 0;
-            try {
-                emu.mem().read(cpu.regs[0], raw, 8); memcpy(&vptr, raw, 8);
-                emu.mem().read(vptr + 0x68, raw, 8); memcpy(&slot, raw, 8);
-                fprintf(stderr, "[FONT]   dispatch: [x0=%#llx] vptr=%#llx [vptr+0x68]=%#llx\n",
-                        (unsigned long long)cpu.regs[0], (unsigned long long)vptr, (unsigned long long)slot);
-            } catch (...) { fprintf(stderr, "[FONT]   dispatch: <unmapped>\n"); }
-        }
-        static bool once = false;
-        if (!once) {
-            once = true;
-            for (uint64_t slot : {0x68f418ULL, 0x68fac8ULL, 0x68fe58ULL, 0x68ff88ULL, 0x68fc48ULL}) {
-                uint8_t raw[8]; uint64_t v = 0;
-                try {
-                    emu.mem().read(0x500071e000ULL + slot, raw, 8);
-                    memcpy(&v, raw, 8);
-                    fprintf(stderr, "[FONT]   GOT+0x%llx = %#llx\n", (unsigned long long)slot, (unsigned long long)v);
-                } catch (...) { fprintf(stderr, "[FONT]   GOT+0x%llx <unmapped>\n", (unsigned long long)slot); }
-            }
-        }
     }
     // Debug: print pstate at entry for specific blocks
     static bool dbg_ = (getenv("BIFROST_DBG_PC") != nullptr);
@@ -767,7 +744,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // or left unchanged (no handler — cpu.running is now false).
         next_pc = cpu.pc;
     }
-    cpu.pc = next_pc;
+    // The block's epilogue already stored next_pc to cpu.pc (jit_translate.cpp),
+    // and the exception path set next_pc = cpu.pc above — the value is already
+    // in place. Drop the redundant store (saves a store + the store->load
+    // dependency for the next dispatch's `pc = cpu.pc` read).
     return next_pc;
 }
 } // namespace arm64emu
