@@ -81,6 +81,7 @@
 #include "frost/gl_state.hpp"       // 1.5.2-alpha: GLStateTracker
 #include "opgen_thunk.hpp"          // 1.5.2.alpha: symbol signature table
 #include "thunk_common.hpp"         // shared SymbolEntry + trampoline encodings
+#include "debug_flags.h"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
 #include <cstdio>
@@ -217,7 +218,7 @@ struct GraphicThunkImpl {
     void deliver_glfw_cursor_callbacks_(CPU& cpu) {
         if (!cursor_cb_runner_ || !glfw_get_cursor_pos_fn_ ||
             glfw_cursor_cbs_.empty()) {
-            if (getenv("BIFROST_THUNK_TRACE"))
+            if (dbg().thunk_trace)
                 fprintf(stderr, "[thunk] deliver: skip (%d %d %d)\n",
                         !!cursor_cb_runner_, !!glfw_get_cursor_pos_fn_,
                         (int)glfw_cursor_cbs_.size());
@@ -233,7 +234,7 @@ struct GraphicThunkImpl {
             if (it == glfw_cursor_last_.end()) {
                 // First poll for this window: seed, don't fire.
                 glfw_cursor_last_[window] = {x, y};
-                if (getenv("BIFROST_THUNK_TRACE"))
+                if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] deliver: seed (%.2f, %.2f)\n", x, y);
                 continue;
             }
@@ -241,7 +242,7 @@ struct GraphicThunkImpl {
                 continue;  // no motion since last poll
             }
             it->second = {x, y};
-            if (getenv("BIFROST_THUNK_TRACE")) {
+            if (dbg().thunk_trace) {
                 fprintf(stderr, "[thunk] cursor cb → 0x%llx (%.2f, %.2f)\n",
                         static_cast<unsigned long long>(cb), x, y);
             }
@@ -265,7 +266,7 @@ GraphicThunk::GraphicThunk() {
     impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
         // Only print if verbose or trace — don't clutter default output
-        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+        if (dbg().thunk_trace || getenv("BIFROST_VERBOSE")) {
             fprintf(stderr, "[thunk] graphic API thunking enabled "
                     "(GL/EGL/SDL2 → host, with emulation fallback)\n");
         }
@@ -307,7 +308,7 @@ bool GraphicThunk::init(Memory& mem) {
     impl_->initialized = true;
     // 1.5.2-alpha: initialize GL state tracker.
     impl_->gl_state_tracker_ = std::make_unique<GLStateTracker>();
-    if (getenv("BIFROST_THUNK_TRACE")) {
+    if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
                 impl_->id_to_idx_.size(),
@@ -348,7 +349,7 @@ void GraphicThunk::register_function_(const std::string& lib,
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
     });
-    if (getenv("BIFROST_THUNK_TRACE")) {
+    if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] registered %s:%s -> 0x%llx "
                 "(id=%u ptrs=0x%x stack=%u fp=%u flags=0x%x)\n",
                 lib.c_str(), sym.c_str(),
@@ -413,7 +414,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     uint32_t local_id = symbol_id - GraphicThunk::ID_BASE_GRAPHICS;
     if (local_id >= impl_->id_to_idx_.size()) {
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: unknown symbol_id=%u\n", symbol_id);
         }
         return -ENOENT;
@@ -421,7 +422,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     if (!entry.host_fn) {
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (stub, returns 0)\n",
                     entry.name.c_str());
         }
@@ -443,7 +444,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         } else {
             impl_->glfw_cursor_cbs_[window] = guest_cb;
         }
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] cursor cb: window=0x%llx cb=0x%llx\n",
                     static_cast<unsigned long long>(window),
                     static_cast<unsigned long long>(guest_cb));
@@ -461,7 +462,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         uint64_t local_args[12] = {0};
         for (int i = 0; i < 8; i++) local_args[i] = cpu.regs[i];
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (fp×%u) f0=%g f1=%g f2=%g f3=%g\n",
                     entry.name.c_str(), entry.n_float,
                     fv[0], fv[1], fv[2], fv[3]);
@@ -507,7 +508,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (uint8_t i = 0; i < entry.n_float && i < 4; i++) {
             std::memcpy(&fv[i], &cpu.v_lo[i], sizeof(float));
         }
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (mixed int×%u fp×%u) "
                     "i0=%lld f0=%g\n",
                     entry.name.c_str(), ni, entry.n_float,
@@ -536,7 +537,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 static_cast<uint32_t>(iv[1]), fv[0]);
         } else {
             // Unsupported mixed shape — no-op rather than corrupt.
-            if (getenv("BIFROST_THUNK_TRACE")) {
+            if (dbg().thunk_trace) {
                 fprintf(stderr, "[thunk] mixed FP shape unsupported for %s\n",
                         entry.name.c_str());
             }
@@ -596,7 +597,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 if (found) break;
             }
         }
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] GetProcAddress('%s') → 0x%llx\n",
                     name ? name : "(null)",
                     static_cast<unsigned long long>(found));
@@ -789,7 +790,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             host_strs[i] = reinterpret_cast<const char*>(bounces.back().data());
         }
         using Fn = void (*)(uint64_t, int, const char* const*, const int*);
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] shaderSource: shader=0x%llx count=%d "
                     "str0='%.60s' len0=%d\n",
                     static_cast<unsigned long long>(args[0]), count,
@@ -803,7 +804,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
-    if (getenv("BIFROST_THUNK_TRACE")) {
+    if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
                 "a8=0x%llx ptrs=0x%x stack=%u\n",
@@ -839,7 +840,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
             }
         }
-        if (getenv("BIFROST_THUNK_TRACE")) {
+        if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s handled by GL state tracker\n",
                     entry.name.c_str());
         }
@@ -999,7 +1000,7 @@ void GraphicThunk::register_known_symbols_() {
     if (kHaveGL) {
         void* h = dlopen("libglfw.so.3", RTLD_LAZY | RTLD_GLOBAL);
         if (!h) h = dlopen("libglfw.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!h && getenv("BIFROST_THUNK_TRACE"))
+        if (!h && dbg().thunk_trace)
             fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
     }
     // Cursor-callback delivery needs the raw host glfwGetCursorPos (the

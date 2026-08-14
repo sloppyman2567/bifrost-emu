@@ -5,6 +5,7 @@
 #include "frost/audio_thunk.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER constant
 #include "thunk_common.hpp"
+#include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include <dlfcn.h>
 #include <mutex>
 #include <string>
@@ -28,7 +29,7 @@ AudioThunk::AudioThunk() {
     const char* disable = getenv("BIFROST_NO_THUNK_AUDIO");
     impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
-        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+        if (dbg().thunk_trace || getenv("BIFROST_VERBOSE")) {
             fprintf(stderr, "[audio-thunk] audio API thunking enabled "
                     "(ALSA/PulseAudio/SDL2/OpenAL → host, with fallback)\n");
         }
@@ -48,7 +49,7 @@ bool AudioThunk::init(Memory& mem) {
     }
     register_known_symbols_();
     impl_->initialized = true;
-    if (getenv("BIFROST_THUNK_TRACE")) {
+    if (dbg().thunk_trace) {
         fprintf(stderr, "[audio-thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
                 impl_->id_to_idx_.size(),
@@ -59,7 +60,7 @@ bool AudioThunk::init(Memory& mem) {
 void AudioThunk::register_function_(const std::string& lib,
                                       const std::string& sym,
                                       void* host_fn) {
-    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+    bool trace = dbg().thunk_trace;
     thunk_register(*impl_->mem, impl_->libs_, impl_->id_to_idx_,
                    impl_->trampoline_base, TRAMPOLINE_SIZE, MAX_SYMBOLS,
                    static_cast<uint16_t>(SYSCALL_NUMBER),
@@ -105,7 +106,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
-    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+    bool trace = dbg().thunk_trace;
     return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);
 }
 size_t AudioThunk::symbol_count() const {

@@ -11,6 +11,7 @@
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
+#include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
 #include <dlfcn.h>
@@ -64,7 +65,7 @@ DisplayThunk::DisplayThunk() {
     const char* disable = getenv("BIFROST_NO_THUNK_DISPLAY");
     impl_->enabled = !(disable && disable[0] != '0');
     if (impl_->enabled) {
-        if (getenv("BIFROST_THUNK_TRACE") || getenv("BIFROST_VERBOSE")) {
+        if (dbg().thunk_trace || getenv("BIFROST_VERBOSE")) {
             fprintf(stderr, "[display-thunk] display API thunking enabled "
                     "(Vulkan/Wayland/X11/GBM → host, with fallback)\n");
         }
@@ -95,7 +96,7 @@ bool DisplayThunk::init(Memory& mem) {
     impl_->proxy_->set_memory(&mem);
     register_known_symbols_();
     impl_->initialized = true;
-    if (getenv("BIFROST_THUNK_TRACE")) {
+    if (dbg().thunk_trace) {
         fprintf(stderr, "[display-thunk] init: %zu symbols registered, "
                 "trampoline_base=0x%llx\n",
                 impl_->id_to_idx_.size(),
@@ -114,7 +115,7 @@ void DisplayThunk::register_function_(const std::string& lib,
                                         uint8_t n_stack,
                                         uint8_t n_float,
                                         uint8_t flags) {
-    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+    bool trace = dbg().thunk_trace;
     // Find or create the LibTable for `lib`.
     DisplayThunkImpl::LibTable* lt = nullptr;
     for (auto& l : impl_->libs_) {
@@ -200,7 +201,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
-    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+    bool trace = dbg().thunk_trace;
 
     // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
     // When the THUNK_PROXY flag is set, the symbol is handled by the
@@ -509,7 +510,7 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     }
     DisplayProxy* proxy = impl_->proxy_.get();
     Memory* mem = impl_->mem;
-    bool trace = (getenv("BIFROST_THUNK_TRACE") != nullptr);
+    bool trace = dbg().thunk_trace;
 
     // Helper: translate a guest pointer arg to a host pointer.
     auto g2h = [&](uint64_t guest_addr) -> void* {

@@ -181,6 +181,13 @@ Root cause + fixes:
   XTest-synthetic motion can't move GLFW under `GLFW_CURSOR_DISABLED` (raw
   XI2 events) — verified delivery with a temporary force-fire override that
   was removed before commit.
+- **Follow-up (same session):** the ad-hoc `getenv("BIFROST_THUNK_TRACE")`
+  calls in the thunk dispatch/delivery hot paths (and pre-existing ones in
+  display_thunk/audio_thunk) were migrated to the cached `dbg().thunk_trace`
+  flag in `include/debug_flags.h` (per AGENTS.md: toggles live there, NOT as
+  getenv in hot paths). `BIFROST_TRACE=1` blanket mode now also enables it.
+  Full suite still 198/198; game cursor-cb trace verified via the cached
+  flag.
 
 ## Current game performance (as of this session)
 - In a loaded chunk under `DISPLAY=:0`: **45-52 FPS** on the game's own frame

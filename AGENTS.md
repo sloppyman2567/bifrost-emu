@@ -15,9 +15,9 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 - Tests: `ctest/`, `ctest_real/`, `scripts/run_tests.sh`
 - Trace/diagnostic toggles live in `include/debug_flags.h` (single cached
   parse): `BIFROST_TRACE=1` enables the whole trace suite; the fine-grained
-  `BIFROST_XTRACE` / `BIFROST_FUTEX_BT` / `BIFROST_PPOLL_PEEK` / etc. still
-  override. Add new diagnostic switches there, NOT as ad-hoc `getenv()`
-  checks in hot syscall/interp paths.
+  `BIFROST_XTRACE` / `BIFROST_FUTEX_BT` / `BIFROST_PPOLL_PEEK` / `BIFROST_THUNK_TRACE`
+  (→ `dbg().thunk_trace`) / etc. still override. Add new diagnostic switches
+  there, NOT as ad-hoc `getenv()` checks in hot syscall/interp paths.
 
 ## Local Contracts
 
