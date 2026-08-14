@@ -165,6 +165,22 @@ struct GraphicThunkImpl {
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).
     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
+    // 1.5.2-alpha: GLFW cursor-position callback delivery. guest window
+    // handle → guest callback address, as registered via
+    // glfwSetCursorPosCallback (CURSOR_CB policy). dispatch() fires the
+    // callback after glfwPollEvents/glfwWaitEvents (GLFW_POLL policy)
+    // when the host cursor position changed.
+    std::unordered_map<uint64_t, uint64_t> glfw_cursor_cbs_;
+    // Last position delivered per window, so the callback only fires on
+    // real motion (GLFW semantics — the game computes per-frame deltas).
+    std::unordered_map<uint64_t, std::pair<double, double>> glfw_cursor_last_;
+    // Host glfwGetCursorPos, resolved at init (GLFW is dlopen'd by
+    // register_known_symbols_). The dispatch's CURSOR_CB/GLFW_POLL path
+    // needs the raw host fn, not the entry's (which is the trampoline).
+    void* glfw_get_cursor_pos_fn_ = nullptr;
+    // Borrow-CPU runner installed by the Emulator to invoke the stored
+    // guest cursor callback (see GraphicThunk::CursorCbRunner).
+    GraphicThunk::CursorCbRunner cursor_cb_runner_;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -190,6 +206,47 @@ struct GraphicThunkImpl {
         string_cache_off = static_cast<uint32_t>(
             (string_cache_off + len + 7u) & ~7u);
         return guest;
+    }
+    // Deliver stored GLFW cursor callbacks after a host poll. For each
+    // registered (window → guest_cb), read the host cursor position; if
+    // it changed since the last delivery, invoke the guest callback via
+    // the borrow-CPU runner. GLFW semantics: the callback fires on
+    // motion only (the game computes per-frame deltas from it). The
+    // first poll only seeds the last-delivered position (no callback) so
+    // the game doesn't see a spurious delta at startup.
+    void deliver_glfw_cursor_callbacks_(CPU& cpu) {
+        if (!cursor_cb_runner_ || !glfw_get_cursor_pos_fn_ ||
+            glfw_cursor_cbs_.empty()) {
+            if (getenv("BIFROST_THUNK_TRACE"))
+                fprintf(stderr, "[thunk] deliver: skip (%d %d %d)\n",
+                        !!cursor_cb_runner_, !!glfw_get_cursor_pos_fn_,
+                        (int)glfw_cursor_cbs_.size());
+            return;
+        }
+        using GetPosFn = void (*)(void*, double*, double*);
+        auto getpos = reinterpret_cast<GetPosFn>(glfw_get_cursor_pos_fn_);
+        for (auto& [window, cb] : glfw_cursor_cbs_) {
+            if (cb == 0) continue;
+            double x = 0.0, y = 0.0;
+            getpos(reinterpret_cast<void*>(window), &x, &y);
+            auto it = glfw_cursor_last_.find(window);
+            if (it == glfw_cursor_last_.end()) {
+                // First poll for this window: seed, don't fire.
+                glfw_cursor_last_[window] = {x, y};
+                if (getenv("BIFROST_THUNK_TRACE"))
+                    fprintf(stderr, "[thunk] deliver: seed (%.2f, %.2f)\n", x, y);
+                continue;
+            }
+            if (it->second.first == x && it->second.second == y) {
+                continue;  // no motion since last poll
+            }
+            it->second = {x, y};
+            if (getenv("BIFROST_THUNK_TRACE")) {
+                fprintf(stderr, "[thunk] cursor cb → 0x%llx (%.2f, %.2f)\n",
+                        static_cast<unsigned long long>(cb), x, y);
+            }
+            cursor_cb_runner_(cpu, cb, window, x, y);
+        }
     }
 };
 // ── GraphicThunk method implementations ───────────────────────────────
@@ -367,6 +424,29 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (getenv("BIFROST_THUNK_TRACE")) {
             fprintf(stderr, "[thunk] dispatch: %s (stub, returns 0)\n",
                     entry.name.c_str());
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
+    // ── GLFW cursor-position callback registration ───────────────────
+    // 1.5.2-alpha: the guest callback is AArch64 code host GLFW cannot
+    // invoke, so we store it keyed by window and deliver it from the
+    // GLFW_POLL path. NEVER hand the guest address to host
+    // glfwSetCursorPosCallback — the host would call it as x86-64
+    // (SIGSEGV). cpu.regs[0]=window handle, cpu.regs[1]=guest callback.
+    if (entry.spec && entry.spec->policy == thunk::Policy::CURSOR_CB) {
+        uint64_t window = cpu.regs[0];
+        uint64_t guest_cb = cpu.regs[1];
+        if (guest_cb == 0) {
+            impl_->glfw_cursor_cbs_.erase(window);
+        } else {
+            impl_->glfw_cursor_cbs_[window] = guest_cb;
+        }
+        if (getenv("BIFROST_THUNK_TRACE")) {
+            fprintf(stderr, "[thunk] cursor cb: window=0x%llx cb=0x%llx\n",
+                    static_cast<unsigned long long>(window),
+                    static_cast<unsigned long long>(guest_cb));
         }
         cpu.regs[0] = 0;
         return 0;
@@ -792,6 +872,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // 1.5.2-alpha: GLFW event pump — after the host poll/ wait returns,
+    // deliver any registered guest cursor-position callbacks (the game
+    // computes per-frame mouse deltas from them, which drives camera
+    // look). The guest callback runs via the borrow-CPU runner.
+    if (entry.spec && entry.spec->policy == thunk::Policy::GLFW_POLL) {
+        impl_->deliver_glfw_cursor_callbacks_(cpu);
+    }
+
     // Track SDL_Texture* dimensions for SDL_UpdateTexture bounce sizing
     // (TRACK_TEX records on create, UNTRACK_TEX drops on destroy).
     if (entry.spec) {
@@ -841,6 +929,14 @@ size_t GraphicThunk::symbol_count() const {
 uint64_t GraphicThunk::trampoline_base() const {
     if (!impl_) return 0;
     return impl_->trampoline_base;
+}
+// ── set_cursor_cb_runner — guest cursor-callback delivery hook ───────
+void GraphicThunk::set_cursor_cb_runner(CursorCbRunner runner) {
+    if (!impl_) return;
+    impl_->cursor_cb_runner_ = std::move(runner);
+    // Fresh registration: drop any stale last-delivered positions so a
+    // newly-wired runner doesn't skip the first motion event.
+    impl_->glfw_cursor_last_.clear();
 }
 // ── register_known_symbols_ — populate the registry ────────────────────
 // Called once by init(). Each entry maps a (library, symbol) pair to
@@ -906,6 +1002,11 @@ void GraphicThunk::register_known_symbols_() {
         if (!h && getenv("BIFROST_THUNK_TRACE"))
             fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
     }
+    // Cursor-callback delivery needs the raw host glfwGetCursorPos (the
+    // GLFW_POLL dispatch path reads the host cursor each poll to decide
+    // whether the guest callback should fire).
+    impl_->glfw_get_cursor_pos_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetCursorPos") : nullptr;
 
     for (const thunk::Spec& spec : thunk::specs) {
         const FamilyDef& fd = kFamilies[static_cast<int>(spec.lib)];

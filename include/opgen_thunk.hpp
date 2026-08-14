@@ -33,7 +33,9 @@ enum class Policy : uint8_t {
     PRESENT = 6,
     TRACK_TEX = 7,
     UNTRACK_TEX = 8,
-    STUB = 9,
+    GLFW_POLL = 9,
+    STUB = 10,
+    CURSOR_CB = 11,
 };
 
 enum class RetKind : uint8_t {
@@ -458,8 +460,8 @@ inline constexpr Spec specs[] = {
     {LibFamily::GLFW, "glfwGetCurrentContext", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSwapBuffers", "i", RetKind::PLAIN, Policy::PRESENT, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSwapInterval", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::GLFW, "glfwPollEvents", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::GLFW, "glfwWaitEvents", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::GLFW, "glfwPollEvents", "", RetKind::PLAIN, Policy::GLFW_POLL, SizeKind::NONE},
+    {LibFamily::GLFW, "glfwWaitEvents", "", RetKind::PLAIN, Policy::GLFW_POLL, SizeKind::NONE},
     {LibFamily::GLFW, "glfwGetTime", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::GLFW, "glfwGetKey", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::GLFW, "glfwGetMouseButton", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
@@ -479,7 +481,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::GLFW, "glfwSetErrorCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSetKeyCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSetMouseButtonCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
-    {LibFamily::GLFW, "glfwSetCursorPosCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
+    {LibFamily::GLFW, "glfwSetCursorPosCallback", "ii", RetKind::PLAIN, Policy::CURSOR_CB, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSetFramebufferSizeCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSetWindowSizeCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},
     {LibFamily::GLFW, "glfwSetWindowFocusCallback", "i", RetKind::PLAIN, Policy::STUB, SizeKind::NONE},

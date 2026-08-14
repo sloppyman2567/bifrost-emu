@@ -148,6 +148,40 @@ Root cause + fixes:
   cost is regalloc spill/reload bloat (12 rbp spill pairs in 0x5304), not
   round-trips — that is the next optimization target.
 
+## This session (Aug 2026): native GLFW cursor callbacks (minecraft mouse-look)
+- **Problem:** the game's `glfwSetCursorPosCallback` was `STUB`'d, so the
+  guest AArch64 `_cursor_callback` never fired → mouse-look dead (no camera
+  rotation; delta stayed 0).
+- **Fix (table-driven):** `tools/opgen/thunk_dp.txt` — `glfwPollEvents`/
+  `glfwWaitEvents` got policy `GLFW_POLL`, `glfwSetCursorPosCallback` got args
+  `ii` + policy `CURSOR_CB` (both added to `VALID_POLICY` in thunkgen.py;
+  regenerated `include/opgen_thunk.hpp`, Policy enum now GLFW_POLL=9 /
+  STUB=10 / CURSOR_CB=11).
+- **Store (thunk.cpp dispatch):** the CURSOR_CB intercept (before the generic
+  host-fn path) stores `cpu.regs[1]` (guest cb) in `impl_->glfw_cursor_cbs_`
+  keyed by `cpu.regs[0]` (window handle — round-trips as the host
+  `GLFWwindow*` opaque value). Never forwards to host.
+- **Deliver:** GLFW_POLL dispatch calls `deliver_glfw_cursor_callbacks_(cpu)`
+  after the host poll; reads host cursor pos via the dlsym-resolved
+  `glfwGetCursorPos`, fires only when position changed since last poll (first
+  poll seeds `glfw_cursor_last_` — GLFW motion semantics, no spurious startup
+  delta), then invokes the guest via the borrow-CPU runner.
+- **Runner (`Emulator::wire_thunk_cursor_cb_runner_`, emulator.cpp):** same
+  borrow-CPU pattern as `guest_call_args_` (dlopen 0x1002 → proven reentrant
+  from the syscall path): save/restore ALL CPU state, x0=window,
+  d0/d1 (v_lo[0]/v_lo[1]) = x/y as double bits, pc=cb, LR=SENTINEL_LR(0x1000),
+  thread-local scratch stack, loop `step(cpu)` until LR, restore. Wired right
+  after `thunk->init(mem_)` on BOTH the dynamic-linker (~236) and static-ELF
+  (~710) paths. New `CursorCbRunner` typedef in `include/frost/thunk.hpp`.
+- **Verified:** full suite **198/198 PASS** (52s); opgen guards green. Game
+  (run from `ctest_real/minecraft_weekend/`, `DISPLAY=:0`) with
+  `BIFROST_THUNK_TRACE=1`: `[thunk] cursor cb: window=… cb=0x41f8a0` on
+  registration, then `[thunk] cursor cb → 0x41f8a0 (x, y)` firing on real
+  cursor motion with live-varying coordinates (mouse-look works, no crash).
+  XTest-synthetic motion can't move GLFW under `GLFW_CURSOR_DISABLED` (raw
+  XI2 events) — verified delivery with a temporary force-fire override that
+  was removed before commit.
+
 ## Current game performance (as of this session)
 - In a loaded chunk under `DISPLAY=:0`: **45-52 FPS** on the game's own frame
   counter with TPS pinned at 60 (one 6 FPS dip during a world-gen/mesh spike).
@@ -190,6 +224,11 @@ Root cause + fixes:
    default; it's only a ~4% win on chunkmesh. Re-evaluate if more ops are
    made FWD-compatible.
 5. `make check-all` before any further commit.
+6. If the game's other GLFW callback setters (`glfwSetKeyCallback`,
+   `glfwSetMouseButtonCallback`, `glfwSetFramebufferSizeCallback`, etc.)
+   are ever needed by a guest, mirror the CURSOR_CB pattern (store the
+   guest cb in a map, deliver after `GLFW_POLL`) rather than leaving them
+   STUB.
 
 ## Critical traps (read AGENTS.md for full list)
 - **`mmap_alloc` is NOT a pure bump allocator anymore:** `munmap`

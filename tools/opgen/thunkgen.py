@@ -35,7 +35,8 @@ VALID_ARGS = set('ifpz')
 VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW')
 VALID_RET = ('-', 'str')
 VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
-                'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'PRESENT', 'STUB')
+                'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'PRESENT', 'STUB',
+                'CURSOR_CB', 'GLFW_POLL')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H', 'READPIXELS', 'QUEUEAUDIO')
 
 HEADER = r"""// opgen_thunk.hpp — GENERATED. DO NOT EDIT.

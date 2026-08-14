@@ -354,6 +354,32 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
   fails if the header drifted from the spec). Do NOT hand-edit the
   generated header or re-add ad-hoc REG_* entries in thunk.cpp.
+- GLFW cursor callbacks (1.5.2-alpha): `glfwSetCursorPosCallback` has
+  policy `CURSOR_CB` in `tools/opgen/thunk_dp.txt` (args `ii`: window +
+  guest callback). The dispatch in `thunk.cpp` intercepts it BEFORE the
+  generic host-fn path and stores the guest AArch64 callback in
+  `impl_->glfw_cursor_cbs_` keyed by window — NEVER hand the guest address
+  to host `glfwSetCursorPosCallback` (host would call it as x86-64 →
+  SIGSEGV). `glfwPollEvents`/`glfwWaitEvents` have policy `GLFW_POLL`;
+  after the host call returns, dispatch calls
+  `impl_->deliver_glfw_cursor_callbacks_(cpu)` which reads the host
+  cursor position (`impl_->glfw_get_cursor_pos_fn_`, a `dlsym`-resolved
+  `glfwGetCursorPos` resolved in `register_known_symbols_`), fires the
+  callback ONLY when the position changed since the last poll (first poll
+  just seeds `glfw_cursor_last_` so the game sees no spurious startup
+  delta — GLFW semantics: fire on motion only), and invokes the guest via
+  the borrow-CPU runner installed by the Emulator. The runner ABI:
+  `void(GLFWwindow*, double x, double y)` → x0 = window, d0 (v_lo[0]) = x,
+  d1 (v_lo[1]) = y, LR = SENTINEL_LR (0x1000), scratch stack (thread-local,
+  one per guest thread), save/restore ALL CPU state around the `step()`
+  loop — same borrow-CPU pattern as `guest_call_args_` (dynamic_linker),
+  proven reentrant from inside the syscall path (dlopen 0x1002 →
+  `guest_call_args_`). Wire it via `Emulator::wire_thunk_cursor_cb_runner_`
+  right after `thunk->init(mem_)` on BOTH the dynamic-linker (emulator.cpp
+  ~236) and static-ELF (~710) paths. `BIFROST_THUNK_TRACE=1` prints
+  `[thunk] cursor cb` lines for verification. Adding more GLFW callback
+  setters later (key/mouse/scroll): mirror CURSOR_CB (store + deliver),
+  don't leave them `STUB` unless the game can't use them.
 - `make check-all` now runs BOTH generation guards (`opgen-check` +
   `opgen-thunk-check`) before the test suite, so spec drift fails CI.
 

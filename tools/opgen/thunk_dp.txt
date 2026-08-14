@@ -464,8 +464,8 @@ glfwMakeContextCurrent    GLFW   i             -     -              -
 glfwGetCurrentContext     GLFW   -             -     -              -
 glfwSwapBuffers           GLFW   i             -     PRESENT        -
 glfwSwapInterval          GLFW   i             -     -              -
-glfwPollEvents            GLFW   -             -     -              -
-glfwWaitEvents            GLFW   -             -     -              -
+glfwPollEvents            GLFW   -             -     GLFW_POLL      -
+glfwWaitEvents            GLFW   -             -     GLFW_POLL      -
 glfwGetTime               GLFW   -             -     -              -
 glfwGetKey                GLFW   ii            -     -              -
 glfwGetMouseButton        GLFW   ii            -     -              -
@@ -485,7 +485,7 @@ glfwSetWindowPos          GLFW   iii           -     -              -
 glfwSetErrorCallback      GLFW   i             -     STUB           -
 glfwSetKeyCallback        GLFW   i             -     STUB           -
 glfwSetMouseButtonCallback GLFW  i             -     STUB           -
-glfwSetCursorPosCallback  GLFW   i             -     STUB           -
+glfwSetCursorPosCallback  GLFW   ii            -     CURSOR_CB      -
 glfwSetFramebufferSizeCallback GLFW i          -     STUB           -
 glfwSetWindowSizeCallback GLFW   i             -     STUB           -
 glfwSetWindowFocusCallback GLFW  i             -     STUB           -

@@ -234,6 +234,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (auto* thunk = graphics_.thunk()) {
                 if (thunk->enabled()) {
                     thunk->init(mem_);
+                    wire_thunk_cursor_cb_runner_();
                 }
                 // Capture the thunk pointer (not `this`) so the
                 // callback doesn't depend on the Emulator's lifetime
@@ -705,7 +706,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     if (!dyn_linker_) {
         dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
         if (auto* thunk = graphics_.thunk()) {
-            if (thunk->enabled()) thunk->init(mem_);
+            if (thunk->enabled()) {
+                thunk->init(mem_);
+                wire_thunk_cursor_cb_runner_();
+            }
         }
         if (auto* athunk = graphics_.audio_thunk()) {
             if (athunk->enabled()) athunk->init(mem_);
@@ -1402,4 +1406,99 @@ void Emulator::step(CPU& cpu) {
 // queue_host_signal, host_signal_handler, drain_host_signals) is
 // implemented in src/core/signal.cpp — see that file for the full
 // disposition table.
+// ── wire_thunk_cursor_cb_runner_ — guest GLFW cursor callback ────────
+// 1.5.2-alpha. glfwSetCursorPosCallback registers a guest AArch64
+// callback; host GLFW can't invoke it, so GraphicThunk stores it and
+// asks us to run it after each glfwPollEvents/glfwWaitEvents with the
+// host cursor position. We borrow the CPU the same way the dynamic
+// linker's guest_call_args_ does (save/restore ALL state, run step()
+// in a loop to a sentinel LR), but set FP args for the cursor callback:
+//   x0 = window handle, d0 (v0 low 64) = x, d1 (v1 low 64) = y
+// The callback signature is `void(GLFWwindow*, double, double)`.
+void Emulator::wire_thunk_cursor_cb_runner_() {
+    auto* thunk = graphics_.thunk();
+    if (!thunk || !thunk->enabled()) return;
+    thunk->set_cursor_cb_runner(
+        [this](CPU& cpu, uint64_t fn, uint64_t window,
+               double x, double y) -> uint64_t {
+            if (fn == 0) return 0;
+            struct SavedState {
+                uint64_t regs[32];
+                uint64_t sp, pc;
+                uint32_t pstate;
+                uint64_t v_lo[32], v_hi[32];
+                uint32_t fpcr, fpsr;
+                uint64_t tpidr_el0, tpidrro_el0;
+                uint64_t sigmask;
+                bool running;
+            } saved;
+            std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
+            saved.sp = cpu.sp;
+            saved.pc = cpu.pc;
+            saved.pstate = cpu.pstate;
+            std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
+            std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+            saved.fpcr = cpu.fpcr;
+            saved.fpsr = cpu.fpsr;
+            saved.tpidr_el0 = cpu.tpidr_el0;
+            saved.tpidrro_el0 = cpu.tpidrro_el0;
+            saved.sigmask = cpu.sigmask;
+            saved.running = cpu.running;
+            auto restore = [&]() {
+                std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
+                cpu.sp = saved.sp;
+                cpu.pc = saved.pc;
+                cpu.pstate = saved.pstate;
+                std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
+                std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+                cpu.fpcr = saved.fpcr;
+                cpu.fpsr = saved.fpsr;
+                cpu.tpidr_el0 = saved.tpidr_el0;
+                cpu.tpidrro_el0 = saved.tpidrro_el0;
+                cpu.sigmask = saved.sigmask;
+                cpu.running = saved.running;
+            };
+            // TLS pointer: the borrowed CPU is a running guest thread,
+            // so TPIDR_EL0 is already set; only initialize when missing
+            // (startup edge, mirrors guest_call_args_).
+            if (dyn_linker_ && dyn_linker_->static_tls_size() > 0 &&
+                cpu.tpidr_el0 == 0) {
+                cpu.tpidr_el0 = dyn_linker_->thread_pointer();
+                cpu.tpidrro_el0 = cpu.tpidr_el0;
+            }
+            // Reusable scratch stack (thread-local: one per guest thread,
+            // so concurrent polls from multiple vCPUs can't clobber).
+            static thread_local uint64_t scratch_stack = 0;
+            if (scratch_stack == 0) {
+                scratch_stack = mem_.mmap_alloc(8192);
+                if (scratch_stack == 0) return 0;
+            }
+            uint64_t stack_top = scratch_stack + 8192;
+            constexpr uint64_t SENTINEL_LR = 0x1000;
+            cpu.pc = fn;
+            cpu.sp = stack_top;
+            cpu.regs[0] = window;
+            cpu.regs[30] = SENTINEL_LR;
+            std::memcpy(&cpu.v_lo[0], &x, sizeof(x));
+            std::memcpy(&cpu.v_lo[1], &y, sizeof(y));
+            cpu.v_hi[0] = 0;
+            cpu.v_hi[1] = 0;
+            cpu.running = true;
+            cpu.pstate = 0;
+            constexpr uint64_t CALL_LIMIT = 50'000'000;
+            uint64_t steps = 0;
+            try {
+                while (cpu.running && cpu.pc != SENTINEL_LR &&
+                       steps < CALL_LIMIT) {
+                    step(cpu);
+                    steps++;
+                }
+            } catch (const std::exception&) {
+                // Callback threw (e.g. unhandled SIMD op → DecodeError).
+                // Swallow: restore and let the game continue polling.
+            }
+            restore();
+            return 0;
+        });
+}
 } // namespace arm64emu
