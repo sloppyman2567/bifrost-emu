@@ -688,6 +688,20 @@ void optimize_ir(IRBlock& block) {
                 last_def[inst.dest] = i;
                 break;
             }
+            case IROp::SIMD_UMOV: {
+                // SIMD_UMOV writes an ARM reg vreg `dest` (0..30) directly
+                // via set_vreg_reg (jit_codegen_simd.cpp), bypassing
+                // STORE_REG — mirroring FP_F2I. The arm_reg_cache MUST be
+                // updated or a subsequent LOAD_REG of `dest` substitutes a
+                // stale cached vreg holding the pre-UMOV value. This broke
+                // `jit_neon`'s umov tests under BIFROST_ENABLE_FWD=1.
+                invalidate_vreg_in_cache(inst.dest);
+                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                consts.clear(inst.dest);
+                copies.clear(inst.dest);
+                last_def[inst.dest] = i;
+                break;
+            }
             case IROp::FP_I2F_FIXED: {
                 // Same as FP_I2F: writes to v_lo[dest] (FP reg file),
                 // not to an ARM reg vreg. Just invalidate dest's cache
