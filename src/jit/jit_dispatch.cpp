@@ -91,7 +91,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // guest instruction. Thread-locals are plain adds on the hot path.
     thread_local uint64_t tls_exec_ = 0;
     thread_local uint64_t tls_instr_ = 0;
-    if (__builtin_expect(pc == tls_last_block_.pc && tls_last_block_.fn != nullptr, 1)) {
+    // Entries are written pc+fn together (slow path), so a pc match alone
+    // implies a valid fn — no redundant fn != nullptr test. The ~0ULL
+    // empty sentinel is never a real guest PC (48-bit VAs).
+    if (__builtin_expect(pc == tls_last_block_.pc, 1)) {
         tls_exec_++;
         tls_instr_ += tls_last_block_.instr_count;
         return tls_last_block_.fn(&cpu, &emu);

@@ -322,7 +322,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `GLOBAL_BLOCK_LIMIT` (1e12), incremented on every dispatch with NO
   atomic (`lock xadd` was ~15-25 cycles per transition at 20M
   dispatches/sec). Do NOT re-add a per-dispatch atomic, a per-PC watchdog,
-  or a `cpu.pc = next_pc` store to the fast paths.
+  or a `cpu.pc = next_pc` store to the fast paths. Both caches (last-block
+  + inline) use the non-canonical `~0ULL` PC as the EMPTY sentinel and are
+  written pc+fn together on the slow path, so a `pc == cached.pc` match
+  alone implies a valid fn — do NOT add back a redundant `fn != nullptr`
+  test (2 loads+cmp per dispatch), and do NOT switch the sentinel back to
+  0 (guest PCs are 48-bit; ~0ULL can never collide).
 - The UBFM/SBFM + LOAD_MEM/STORE_MEM regalloc "sandwich" elimination:
   these ops previously did `flush_dirty_host_regs(mask)` +
   `flush_scratch_host_regs(mask)` + `invalidate_host_regs(mask)` +

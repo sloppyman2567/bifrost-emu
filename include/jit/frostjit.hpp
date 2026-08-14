@@ -221,8 +221,13 @@ public:
     //     first), the cached fn is still correct (same ARM64 code).
     //   - The cache is invalidated (set to pc=0) whenever the dispatcher
     //     observes a different PC, so it never serves a wrong-PC hit.
+    //   - Empty entries use the non-canonical sentinel ~0ULL as the PC
+    //     marker (never a real guest PC — guest VAs are 48-bit). pc and
+    //     fn are always written together, so a pc match alone implies a
+    //     valid fn: the fast path does a single load+cmp with no
+    //     redundant fn != nullptr test.
     struct LastBlockCache {
-        uint64_t pc = 0;
+        uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
     };
@@ -247,18 +252,21 @@ public:
     // translation. Entries are populated on the slow path.
     static constexpr int INLINE_CACHE_SLOTS = 256;
     struct InlineCacheEntry {
-        uint64_t pc = 0;
+        uint64_t pc = ~0ULL;
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
         int instr_count = 0;
     };
     static thread_local InlineCacheEntry tls_inline_cache_[INLINE_CACHE_SLOTS];
     // Inlined into run_block's hot path — a separate out-of-line call
-    // (~5ns) would be most of the lookup's own cost.
+    // (~5ns) would be most of the lookup's own cost. Entries are always
+    // written pc+fn together (slow path), so `e.pc == pc` alone identifies
+    // a valid entry (empty = ~0ULL sentinel, never a real guest PC) —
+    // no redundant fn != nullptr test needed.
     inline bool inline_cache_lookup(uint64_t pc, uint64_t (**fn)(CPU*, Emulator*),
                                     int& instr_count) {
         int slot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1));
         const InlineCacheEntry& e = tls_inline_cache_[slot];
-        if (e.pc == pc && e.fn != nullptr) {
+        if (e.pc == pc) {
             *fn = e.fn;
             instr_count = e.instr_count;
             return true;
