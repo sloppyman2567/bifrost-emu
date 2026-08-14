@@ -116,6 +116,21 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   unaligned and failed `test_brk`'s page-alignment check after the
   layout change (fails in BOTH JIT and interp). Tests calling brk(0)
   must use `syscall(214, 0)`; the emulator still aligns to be safe.
+- JIT runtime hot-block promotion to interp_only is DISABLED by default
+  (`BIFROST_HOT_INTERP=1` opts back in). Do NOT re-enable blindly: the
+  translator already marks CALL_INTERP-heavy blocks interp_only
+  (`call_interp_count*2 > instr_count` in translate_block), and demoting
+  hot MIXED blocks (1-2 fallbacks + native ops) measured ~8-10% SLOWER
+  on the minecraft game — interp is ~2x slower than JIT, so the native
+  ops get dragged down to interpreter speed. Diagnose with `BIFROST_PROF=1`
+  (SIGPROF sampler: jit/dispatch/translate/interp/other bucket histogram
+  printed at exit; installs lazily on first run_block so
+  install_host_signal_handlers doesn't overwrite it — a naive install
+  crashes the game because SIGPROF is guest-forwarded) and
+  `BIFROST_CLASS_PROF=1` (per-class dynamic histogram in the interpreter;
+  with JIT ON it shows exactly which instruction classes run through the
+  interp fallback). `BIFROST_STATS_PERIOD=N` prints rolling MIPS every N
+  seconds past startup/world-gen phases.
 
 ## Work Guidance
 
