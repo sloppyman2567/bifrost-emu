@@ -43,6 +43,8 @@ static bool vec_cache_compatible_op(IROp op) {
         case IROp::SIMD_DUP:
         case IROp::SIMD_MOVI:     // constant broadcast — cached fast path
         case IROp::SIMD_ORRIMM:   // dest read-modify-write — cached fast path
+        case IROp::SIMD_ST16:     // 16-byte guest store — cached fast path
+        case IROp::SIMD_LD16:     // 16-byte guest load — cached fast path
         case IROp::NOP: case IROp::IMM: case IROp::MOV:
         case IROp::LOAD_REG: case IROp::STORE_REG:
         case IROp::LOAD_MEM: case IROp::STORE_MEM:
@@ -102,6 +104,24 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
             // Read-modify-write: dest is both source and dest.
             if (inst.dest < 32 && !vec_used[inst.dest]) {
                 vec_used[inst.dest] = true; used_count++;
+            }
+        } else if (inst.op == IROp::SIMD_ST16) {
+            // Guest 16-byte store: src2 is the FIRST vector written to guest
+            // memory; flags_op = register count (1..4), regs contiguous.
+            // cond=1 (broadcast, `stp q0,q0`) keeps src2 constant across all
+            // halves — only that one register needs pinning.
+            uint32_t n = inst.flags_op ? inst.flags_op : 1;
+            for (uint32_t i = 0; i < n; i++) {
+                int v = (inst.cond && i) ? (inst.src2 & 31) : ((inst.src2 + i) & 31);
+                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
+            }
+        } else if (inst.op == IROp::SIMD_LD16) {
+            // Guest 16-byte load: dest is the FIRST vector destination;
+            // flags_op = register count (1..4), regs contiguous.
+            uint32_t n = inst.flags_op ? inst.flags_op : 1;
+            for (uint32_t i = 0; i < n; i++) {
+                int v = (inst.dest + i) & 31;
+                if (!vec_used[v]) { vec_used[v] = true; used_count++; }
             }
         }
     }

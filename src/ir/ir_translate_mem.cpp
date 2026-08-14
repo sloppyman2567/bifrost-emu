@@ -196,63 +196,66 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 bool pre_index = (d.mode == 3);
                 int64_t mem_off = post_index ? 0 : d.disp;
                 int stride = Q ? 16 : esize;
-                if (is_load) {
-                    // LDP Vrt, Vrt2, [base, #disp]
-                    // Load rt: v_lo from [base+mem_off] (S/D width), v_hi from
-                    // [base+mem_off+8] (Q only). 32-bit loads zero the upper
-                    // half of v_lo (LOAD_MEM zero-extends into the vreg).
+                if (Q) {
+                    // Q (128-bit): reuse SIMD_LD16/SIMD_ST16 directly — one
+                    // bounds-check + movupd per 16-byte half, NO GPR
+                    // round-trip. The old path emitted SIMD_LDST +
+                    // 2× STORE_MEM per 8-byte half (4 SIMD_LDST + 8
+                    // STORE_MEM for a `stp q0,q0` pair), which made the
+                    // hot guest memset loop (~21% of chunk-load) generate
+                    // ~1169 bytes of x86 per 4-instr iteration. Both the
+                    // load (v_lo+v_hi filled, matching interp) and store
+                    // (16-byte movupd) semantics are handled by these ops.
+                    // When both halves of a STP come from the SAME register
+                    // (`stp q0,q0`, the memset zero-fill pattern), merge the
+                    // pair into ONE SIMD_ST16 with nregs=2 (flags_op) and
+                    // cond=1 (broadcast): a single bounds check for the whole
+                    // 32-byte span and the vec-cache pinned source is emitted
+                    // once, not twice. The JIT codegen reads `cond` to keep
+                    // src2 constant across both halves instead of src2+i.
+                    if (is_load) {
+                        emit(block, IROp::SIMD_LD16, d.rt, base, 0, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off), cur_pc);
+                        emit(block, IROp::SIMD_LD16, d.rt2, base, 0, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off + stride), cur_pc);
+                    } else if (d.rt == d.rt2) {
+                        emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 1, 2,
+                             static_cast<uint64_t>(mem_off), cur_pc);
+                    } else {
+                        emit(block, IROp::SIMD_ST16, 0, base, d.rt, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off), cur_pc);
+                        emit(block, IROp::SIMD_ST16, 0, base, d.rt2, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off + stride), cur_pc);
+                    }
+                } else if (is_load) {
+                    // S/D LDP: load rt (S/D width), zero the upper half.
+                    // src2 must be a real zero vreg (load_imm) — literal 0
+                    // is guest X0 (vreg 0), and reading it here writes X0's
+                    // value into v_hi instead of zeroing it.
                     uint16_t lo1 = g_alloc.alloc();
                     emit(block, IROp::LOAD_MEM, lo1, base, 0, esize, 0, 0,
                          static_cast<uint64_t>(mem_off));
-                    if (Q) {
-                        uint16_t hi1 = g_alloc.alloc();
-                        emit(block, IROp::LOAD_MEM, hi1, base, 0, 8, 0, 0,
-                             static_cast<uint64_t>(mem_off + 8));
-                        emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 1, 0, 0, 0, cur_pc);
-                    } else {
-                        // 64-bit (or 32-bit) load: v_hi = 0. src2 must be a
-                        // real zero vreg (load_imm) — literal 0 is guest X0
-                        // (vreg 0), and reading it here writes X0's value into
-                        // v_hi instead of zeroing it.
-                        uint16_t zero = load_imm(block, 0);
-                        emit(block, IROp::SIMD_LDST, d.rt, lo1, zero, 1, 0, 0, 0, cur_pc);
-                    }
-                    // Load rt2
+                    uint16_t zero = load_imm(block, 0);
+                    emit(block, IROp::SIMD_LDST, d.rt, lo1, zero, 1, 0, 0, 0, cur_pc);
                     uint16_t lo2 = g_alloc.alloc();
                     emit(block, IROp::LOAD_MEM, lo2, base, 0, esize, 0, 0,
                          static_cast<uint64_t>(mem_off + stride));
-                    if (Q) {
-                        uint16_t hi2 = g_alloc.alloc();
-                        emit(block, IROp::LOAD_MEM, hi2, base, 0, 8, 0, 0,
-                             static_cast<uint64_t>(mem_off + stride + 8));
-                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 1, 0, 0, 0, cur_pc);
-                    } else {
-                        uint16_t zero2 = load_imm(block, 0);
-                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, zero2, 1, 0, 0, 0, cur_pc);
-                    }
+                    uint16_t zero2 = load_imm(block, 0);
+                    emit(block, IROp::SIMD_LDST, d.rt2, lo2, zero2, 1, 0, 0, 0, cur_pc);
                 } else {
-                    // STP Vrt, Vrt2, [base, #disp]
-                    // Store rt: v_lo (S/D width) to [base+mem_off], v_hi to
-                    // [base+mem_off+8] (Q only). 32-bit stores write only the
-                    // low 4 bytes of v_lo.
+                    // S/D STP: store rt's low bytes to [base+mem_off] and
+                    // rt2's to [base+mem_off+stride]. hi_scratch receives
+                    // the unused v_hi half (literal 0 = guest X0).
                     uint16_t lo1 = g_alloc.alloc();
                     uint16_t hi1 = g_alloc.alloc();
                     emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 0, 0, 0, 0, cur_pc);
                     emit(block, IROp::STORE_MEM, 0, base, lo1, esize, 0, 0,
                          static_cast<uint64_t>(mem_off));
-                    if (Q) {
-                        emit(block, IROp::STORE_MEM, 0, base, hi1, 8, 0, 0,
-                             static_cast<uint64_t>(mem_off + 8));
-                    }
                     uint16_t lo2 = g_alloc.alloc();
                     uint16_t hi2 = g_alloc.alloc();
                     emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 0, 0, 0, 0, cur_pc);
                     emit(block, IROp::STORE_MEM, 0, base, lo2, esize, 0, 0,
                          static_cast<uint64_t>(mem_off + stride));
-                    if (Q) {
-                        emit(block, IROp::STORE_MEM, 0, base, hi2, 8, 0, 0,
-                             static_cast<uint64_t>(mem_off + stride + 8));
-                    }
                 }
                 // Writeback
                 if (d.writeback || post_index || pre_index) {

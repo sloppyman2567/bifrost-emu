@@ -730,7 +730,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                         emit_vex3(1, false, xd, 1, xd, 0, true, 0xEB);
                     }
                     if (!inst.flags_op)
-                        emit_vex3(1, false, 0, 3, xd, xd, true, 0x7E);  // vmovq xd,xd → zero upper
+                        emit_vex3(1, false, 0, 2, xd, xd, true, 0x7E);  // vmovq xd,xd → zero upper (F3)
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
                 }
@@ -812,6 +812,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // NOTE: reload the base address each iteration — the C call
             // clobbers RAX (caller-saved), so a running "addr += 16" across
             // calls would add to garbage for i>=1.
+            // Vec-cache guard: the C helper writes cpu.v_lo/v_hi[dest] and the
+            // host call clobbers all XMM0-15 (caller-saved), so write back any
+            // dirty pinned vectors first and reload them after — same round-trip
+            // as emit_call_interp. CRITICAL: use writeback_all(FALSE) and emit
+            // the reloads WITHOUT clearing vec_dirty_ — the slow-path code is
+            // SKIPPED at runtime on the fast path, so clearing the flags here at
+            // codegen time would suppress the epilogue writeback for vectors
+            // dirtied earlier in the block (lost values → wrong branch → hang).
+            if (vec_cache_active_) vec_cache_writeback_all(false);
             for (uint32_t i = 0; i < nregs; i++) {
                 load_vreg_to_reg(RAX, inst.src1);
                 if (inst.imm != 0 || i != 0) {
@@ -825,28 +834,51 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_aligned(&jit_load_mem16_slow, /*num_pushed=*/1);
                 emit_pop(WIN_REG);
             }
+            if (vec_cache_active_) {
+                for (int pi = 0; pi < vec_pinned_count_; pi++) {
+                    int v = vec_pinned_[pi];
+                    vec_emit_load_lo_hi(vec_cache_[v], v);
+                }
+            }
             size_t jmp_past = emit_jmp_rel32_placeholder();
-            // Fast path: rax += window; per reg movupd xmm0, [rax+i*16];
-            // store low 8 bytes to v_lo[dst+i], high 8 to v_hi[dst+i].
+            // Fast path: rax += window; per reg load the 16 bytes.
+            // If dest+i is pinned in the vec cache, load straight into the
+            // pinned XMM (one movupd) and mark it dirty for the epilogue
+            // writeback. Otherwise movupd into scratch xmm0 then spill both
+            // halves to v_lo/v_hi[dest+i].
             int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
             patch_jcc_rel32(jbe_patch, fast_rel);
             emit_add_reg(RAX, WIN_REG);
             for (uint32_t i = 0; i < nregs; i++) {
-                // movupd xmm0, [rax+i*16]  — 66 0F 10 /r (16-byte unaligned ok).
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x10);
-                if (i == 0) {
-                    emit_modrm_disp(0, 0, 0);
+                int xdst = vec_xmm((inst.dest + i) & 31);
+                if (xdst >= 0) {
+                    // movupd xmmN, [rax+i*16] — 66 [REX.R] 0F 10 /r.
+                    emit_byte(0x66);
+                    if (xdst >= 8) emit_byte(rex(false, true, false, false));
+                    emit_byte(0x0F); emit_byte(0x10);
+                    if (i == 0) {
+                        emit_modrm_disp(xdst, 0, 0);
+                    } else {
+                        emit_modrm_disp(xdst, 0, static_cast<int32_t>(16 * i));
+                    }
+                    vec_cache_mark_dirty((inst.dest + i) & 31);
                 } else {
-                    emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                    // movupd xmm0, [rax+i*16]  — 66 0F 10 /r.
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x10);
+                    if (i == 0) {
+                        emit_modrm_disp(0, 0, 0);
+                    } else {
+                        emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                    }
+                    // movsd [rbx+v_lo[dest+i]], xmm0 — F2 0F 11 /r.
+                    int32_t offlo = V_LO_OFF + ((inst.dest + i) & 31) * 8;
+                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                    emit_modrm_disp(0, CPU_REG, offlo);
+                    // movhpd [rbx+v_hi[dest+i]], xmm0 — 66 0F 17 /r.
+                    int32_t offhi = V_HI_OFF + ((inst.dest + i) & 31) * 8;
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x17);
+                    emit_modrm_disp(0, CPU_REG, offhi);
                 }
-                // movsd [rbx+v_lo[dest+i]], xmm0 — F2 0F 11 /r.
-                int32_t offlo = V_LO_OFF + ((inst.dest + i) & 31) * 8;
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
-                emit_modrm_disp(0, CPU_REG, offlo);
-                // movhpd [rbx+v_hi[dest+i]], xmm0 — 66 0F 17 /r.
-                int32_t offhi = V_HI_OFF + ((inst.dest + i) & 31) * 8;
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x17);
-                emit_modrm_disp(0, CPU_REG, offhi);
             }
             int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
             patch_jmp_rel32(jmp_past, end_rel);
@@ -859,6 +891,10 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
             uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+            // cond=1 → broadcast: every 16-byte half stores the SAME source
+            // vector (`stp q0,q0` memset pattern), so src2 stays constant
+            // across the loop instead of src2+i.
+            bool broadcast = (inst.cond != 0);
             // rax = addr + imm
             load_vreg_to_reg(RAX, inst.src1);
             if (inst.imm != 0) emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm));
@@ -870,6 +906,15 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // Slow path: N calls to jit_store_mem16_slow(emu, cpu, addr, src).
             // Reload the base address each iteration (the C call clobbers
             // RAX), same as the LD16 slow path above.
+            // Vec-cache guard: the C helper reads cpu.v_lo/v_hi[src] and the
+            // host call clobbers all XMM0-15 (caller-saved), so write back any
+            // dirty pinned vectors first and reload them after — same round-trip
+            // as emit_call_interp. CRITICAL: use writeback_all(FALSE) and emit
+            // the reloads WITHOUT clearing vec_dirty_ — the slow-path code is
+            // SKIPPED at runtime on the fast path, so clearing the flags here at
+            // codegen time would suppress the epilogue writeback for vectors
+            // dirtied earlier in the block (lost values → wrong branch → hang).
+            if (vec_cache_active_) vec_cache_writeback_all(false);
             for (uint32_t i = 0; i < nregs; i++) {
                 load_vreg_to_reg(RAX, inst.src1);
                 if (inst.imm != 0 || i != 0) {
@@ -879,31 +924,53 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_mov_reg(RDI, EMU_REG);
                 emit_mov_reg(RSI, CPU_REG);
                 emit_mov_reg(RDX, RAX);
-                emit_mov_imm32(RCX, (inst.src2 + i) & 31);
+                emit_mov_imm32(RCX, broadcast ? (inst.src2 & 31) : ((inst.src2 + i) & 31));
                 emit_call_aligned(&jit_store_mem16_slow, /*num_pushed=*/1);
                 emit_pop(WIN_REG);
             }
+            if (vec_cache_active_) {
+                for (int pi = 0; pi < vec_pinned_count_; pi++) {
+                    int v = vec_pinned_[pi];
+                    vec_emit_load_lo_hi(vec_cache_[v], v);
+                }
+            }
             size_t jmp_past = emit_jmp_rel32_placeholder();
-            // Fast path: build xmm0 = {v_lo[src], v_hi[src]} then
-            // rax += window; movupd [rax+i*16], xmm0.
+            // Fast path: rax += window; per reg store the source vector.
+            // If src2+i is pinned in the vec cache, store straight from the
+            // pinned XMM (one movupd, no cpu.v_lo/v_hi reload) — the memset
+            // loop's loop-invariant q0 stays resident across iterations.
+            // Otherwise build xmm0 = {v_lo[src], v_hi[src]} then store.
             int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
             patch_jcc_rel32(jbe_patch, fast_rel);
             emit_add_reg(RAX, WIN_REG);
             for (uint32_t i = 0; i < nregs; i++) {
-                // movsd xmm0, [rbx+v_lo[src+i]] — F2 0F 10 /r.
-                int32_t s_lo = V_LO_OFF + ((inst.src2 + i) & 31) * 8;
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, s_lo);
-                // movhpd xmm0, [rbx+v_hi[src+i]] — 66 0F 16 /r.
-                int32_t s_hi = V_HI_OFF + ((inst.src2 + i) & 31) * 8;
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x16);
-                emit_modrm_disp(0, CPU_REG, s_hi);
-                // movupd [rax+i*16], xmm0 — 66 0F 11 /r.
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x11);
-                if (i == 0) {
-                    emit_modrm_disp(0, 0, 0);
+                int xsrc = vec_xmm(broadcast ? (inst.src2 & 31) : ((inst.src2 + i) & 31));
+                if (xsrc >= 0) {
+                    // movupd [rax+i*16], xmmN — 66 [REX.R] 0F 11 /r.
+                    emit_byte(0x66);
+                    if (xsrc >= 8) emit_byte(rex(false, true, false, false));
+                    emit_byte(0x0F); emit_byte(0x11);
+                    if (i == 0) {
+                        emit_modrm_disp(xsrc, 0, 0);
+                    } else {
+                        emit_modrm_disp(xsrc, 0, static_cast<int32_t>(16 * i));
+                    }
                 } else {
-                    emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                    // movsd xmm0, [rbx+v_lo[src]] — F2 0F 10 /r.
+                    int32_t s_lo = V_LO_OFF + (broadcast ? (inst.src2 & 31) : ((inst.src2 + i) & 31)) * 8;
+                    emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
+                    emit_modrm_disp(0, CPU_REG, s_lo);
+                    // movhpd xmm0, [rbx+v_hi[src]] — 66 0F 16 /r.
+                    int32_t s_hi = V_HI_OFF + (broadcast ? (inst.src2 & 31) : ((inst.src2 + i) & 31)) * 8;
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x16);
+                    emit_modrm_disp(0, CPU_REG, s_hi);
+                    // movupd [rax+i*16], xmm0 — 66 0F 11 /r.
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x11);
+                    if (i == 0) {
+                        emit_modrm_disp(0, 0, 0);
+                    } else {
+                        emit_modrm_disp(0, 0, static_cast<int32_t>(16 * i));
+                    }
                 }
             }
             int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
