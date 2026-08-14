@@ -105,6 +105,17 @@ void window_create(FWindow init, FWindow destroy, FWindow tick,  FWindow update,
     }
 
     glfwSwapInterval(0);  // no vsync: headless/host display may never vblank
+
+    // Use the actual (HiDPI-aware) framebuffer size: glfwCreateWindow takes
+    // logical size but on 2x scale displays the drawable is twice as large.
+    // The game hardcodes 1280x720 otherwise, leaving content in the bottom-left
+    // quadrant of the host window. Querying the real framebuffer size fills it.
+    int fbw = 0, fbh = 0;
+    glfwGetFramebufferSize(window.handle, &fbw, &fbh);
+    if (fbw > 0 && fbh > 0) {
+        window.size = (ivec2s) {{fbw, fbh}};
+    }
+    glViewport(0, 0, window.size.x, window.size.y);
 }
 
 // Host GLFW cannot invoke guest callbacks, so poll the window state and
