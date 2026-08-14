@@ -425,7 +425,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   garbage (the second bug: RIP=0x555500000008). (3) RBX/R14 need no setup on
   the chain edge (reserved regs, never reassigned in a body). (4) vec blocks
   re-run their vec prologue loads at `chain_entry` (the predecessor's
-  epilogue wrote back dirty vectors to cpu.v_lo/v_hi first). Measured on
+  epilogue wrote back dirty vectors to cpu.v_lo/v_hi first). The stack-frame
+  pre-scan in jit_translate.cpp must cover EVERY vreg the block may touch,
+  including `inst.aux` (SMADDL/SMSUBL accumulator) — any missed vreg gets a
+  lazy `vreg_stack_slot` (-8 * num_stack_slots_++) past the pre-allocated
+  frame. Measured on
   multi-block workloads: bench_fib +18.8% (0.653→0.530s), bench_sort +16.6%
   (0.699→0.583s), bench_matrix +1.2%; bench_mips NEUTRAL (single self-loop
   block — the selfloop slot already skips all this overhead). Leave the env

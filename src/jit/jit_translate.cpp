@@ -452,6 +452,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (inst.dest > max_vreg) max_vreg = inst.dest;
         if (inst.src1 > max_vreg) max_vreg = inst.src1;
         if (inst.src2 > max_vreg) max_vreg = inst.src2;
+        // aux is the SMADDL/SMSUBL accumulator vreg. Today it is always
+        // allocated BEFORE inst.dest (load_arm_reg(ra) then g_alloc.alloc()),
+        // so aux < dest for the same op — but copy-substitution in
+        // optimize_ir can rewrite aux, and any vreg the pre-scan misses gets
+        // a LAZY slot (-8 * num_stack_slots_++) past the pre-allocated frame
+        // (vreg_stack_slot in x86_regalloc.cpp). Under chain-skip's fixed
+        // 32 KB frame that writes past the frame. Defensive: cover it.
+        if (inst.aux > max_vreg) max_vreg = inst.aux;
     }
     // Bounds-check: vreg arrays are fixed-size (4096). A pathological block
     // could exceed this, silently overflowing vreg_slot_[] / vreg_home_[] /
