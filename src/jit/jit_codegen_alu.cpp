@@ -451,10 +451,12 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // redundant reloads in tight loops containing bitfield ops.
             clobber_flags();  // shifts/ands clobber RFLAGS
             constexpr uint16_t BFM_CLOBBER = (1u << RAX) | (1u << RCX) | (1u << RDX);
-            flush_dirty_host_regs(BFM_CLOBBER);
-            flush_scratch_host_regs(BFM_CLOBBER);
-            invalidate_host_regs(BFM_CLOBBER);
-            load_vreg_to_reg(RAX, inst.src1);
+            // Fast path: if src1 is a dead scratch vreg already cached in
+            // RAX (e.g. a preceding LOAD_REG left it there), skip the
+            // flush→reload sandwich entirely. Otherwise flush+invalidate
+            // and load as before (also skipping the redundant reload when
+            // src1 was still cached in RAX — the flush only writes memory).
+            load_vreg_to_reg_fast(RAX, inst.src1, inst.dest, BFM_CLOBBER);
             // Handle common aliases efficiently:
             // - LSL (imms < immr): shift left by (width - immr)
             // - LSR (imms == width-1, UBFM): shift right by immr

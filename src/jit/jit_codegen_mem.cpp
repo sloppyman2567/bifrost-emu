@@ -97,10 +97,21 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             constexpr uint16_t MEM_CLOBBER =
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
-            flush_invalidate_host_regs(MEM_CLOBBER);
-            load_vreg_to_reg(RAX, inst.src1);
+            // Fast path: if src1 is a dead scratch vreg already cached in
+            // RAX, keep it there (skip the flush→reload sandwich). The
+            // address is consumed by emit_load_mem, which then OVERWRITES
+            // RAX with the loaded data — so drop src1's mapping afterwards
+            // (safe: src1 is dead, and its value was consumed as the base).
+            uint16_t kept = load_vreg_to_reg_fast(RAX, inst.src1, inst.dest, MEM_CLOBBER);
             emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm), inst.width, false);
-            store_reg_to_vreg(inst.dest, RAX);
+            if (kept & (1u << RAX)) kill_vreg(inst.src1);
+            // Keep dest cached in RAX (set_vreg_reg) instead of storing to
+            // memory: the loaded value is usually consumed immediately
+            // (STORE_REG / next op), and store_reg_to_vreg would kill the
+            // mapping so the consumer reloads from the stack slot — a
+            // redundant sandwich. The epilogue flushes dest if the block ends
+            // before it's read.
+            set_vreg_reg(inst.dest, RAX);
             return 0;
         }
         case IROp::STORE_MEM: {
@@ -109,9 +120,22 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             constexpr uint16_t MEM_CLOBBER =
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
-            flush_invalidate_host_regs(MEM_CLOBBER);
-            load_vreg_to_reg(RAX, inst.src1);
-            load_vreg_to_reg(RCX, inst.src2);
+            // Fast path for both operands: if src1/src2 are dead scratch
+            // vregs already cached in RAX/RCX, keep them there. emit_store_mem
+            // PRESERVES RAX and RCX (pushes/pops them around the slow call),
+            // so kept mappings stay valid after the store. Decide BOTH
+            // operands BEFORE flushing so src2's cache isn't wiped by src1's
+            // flush, then flush+invalidate only the non-kept regs.
+            bool keep1 = vreg_fast_keep_candidate(inst.src1, RAX, inst.dest);
+            bool keep2 = vreg_fast_keep_candidate(inst.src2, RCX, inst.dest);
+            uint16_t kept_mask = 0;
+            if (keep1) kept_mask |= (1u << RAX);
+            if (keep2) kept_mask |= (1u << RCX);
+            flush_dirty_host_regs(MEM_CLOBBER & ~kept_mask);
+            flush_scratch_host_regs(MEM_CLOBBER & ~kept_mask);
+            invalidate_host_regs(MEM_CLOBBER & ~kept_mask);
+            if (!keep1) load_vreg_to_reg(RAX, inst.src1);
+            if (!keep2) load_vreg_to_reg(RCX, inst.src2);
             emit_store_mem(RAX, static_cast<int32_t>(inst.imm), RCX, inst.width);
             return 0;
         }

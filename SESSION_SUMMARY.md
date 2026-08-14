@@ -19,6 +19,37 @@ window. Committed as three commits: `9d7bcd8` (allocator fix),
 `ba795da` (periodic prof reporter), `34d6f09` (vec-cache ST16/LD16 + broadcast).
 Root cause + fixes:
 
+## What was just done THIS session (committed as `perf(jit)` — sandwich elimination)
+The hot `chunkmesh_mesh` spill/reload bloat (Next-step #1 from the prior
+session) was attacked directly. The 662-byte hot block 0x405304 was full of
+`mov reg,slot; mov slot,reg` "sandwiches" — UBFM/SBFM/LOAD_MEM/STORE_MEM
+unconditionally did `flush_dirty_host_regs(mask)` + `flush_scratch_host_regs(mask)`
++ `invalidate_host_regs(mask)` + `load_vreg_to_reg(dst, src)` whenever a
+preceding LOAD_REG/ADD/SHL had left the source vreg dirty in RAX/RCX.
+
+- New `load_vreg_to_reg_fast()` (x86_regalloc.cpp) + `vreg_fast_keep_candidate()`
+  predicate + `cur_op_index_` member (set in translate_block's compile loop),
+  gated on the EXACT per-op liveness in `kills_per_op_[cur_op_index_]`:
+  - Tier 1 (always safe): src cached in dst → flush+invalidate still happen
+    (value preserved for later readers) but skip the redundant reload.
+  - Tier 1.5: src cached in ANOTHER clobbered reg → copy to dst first, then
+    flush (kills the ADD/SHL→LOAD_MEM sandwich).
+  - Tier 2 (dead scratch, v>32, last use = current op, v != inst.dest):
+    skip the flush of dst entirely, keep it mapped dirty for the op.
+- LOAD_MEM now keeps dest cached (`set_vreg_reg(dest, RAX)`) instead of
+  `store_reg_to_vreg` — the loaded value is consumed immediately, and the old
+  mapping-kill forced a reload sandwich.
+- STORE_MEM decides BOTH operands via `vreg_fast_keep_candidate` BEFORE
+  flushing (so src2's cache isn't wiped by src1's flush) and relies on
+  `emit_store_mem` preserving RAX/RCX.
+- Dead-check MUST use `kills_per_op_` liveness, NOT a FWD env gate: the
+  CopyMap copy-substitution in optimize_ir can make scratch vregs multi-read
+  even with FWD off. FWD stays disabled by default.
+- Result: block 0x405304 = 662 → 590 bytes. Game ~49.5 → ~51.5 MIPS avg (noisy,
+  NOW() seeds). **198/198 PASS (52s)**, opgen-check/opgen-thunk-check green,
+  BIFROST_JIT_VERIFY divergence count unchanged (7 pre-existing false-positives),
+  BIFROST_REGALLOC_CHECK + VERIFY_MEM clean on the game.
+
 - **Root cause (end-to-end confirmed):** `Memory::mmap_alloc` was a pure bump
   allocator (`mmap_next_`, starts at `MMAP_BASE_MIN=0x10000000`, only grows).
   `munmap`/`untrack_allocation` only erased from `allocations_` — no `pages_`
@@ -213,12 +244,13 @@ Root cause + fixes:
   those remaining classprof fallbacks from the prior session are obsolete.
 
 ## Next steps (suggested)
-1. **chunkmesh_mesh regalloc spill/reload bloat** (the real hotspot cost, ~53%):
-   the hot 0x405304/0x405028 blocks spend most of their bytes on
-   `mov reg,-0xN(%rbp)` / `mov -0xN(%rbp),reg` spill pairs + `cpu.regs[]`
-   round-trips. FWD fixes only the round-trips (~4%); attacking the spill
-   pairs (better host-reg allocation across the block, or folding address
-   math into single LEA ops) is the bigger win.
+1. **chunkmesh_mesh regalloc spill/reload bloat** — DONE this session: the
+   flush→reload sandwich elimination (`load_vreg_to_reg_fast`, gated on
+   `kills_per_op_` liveness) shrank the hot 0x405304 block 662 → 590 bytes.
+   Remaining cost is legitimate stack traffic (genuine spilling of live
+   vregs), NOT redundant flush/reload pairs — a fuller host-reg allocation
+   pass would need cross-block allocation, which the block-at-a-time JIT
+   doesn't do.
 2. If game perf in-chunk is still desired: profile with `BIFROST_PROF=1`
    (`BIFROST_CLASS_PROF=1` shows which classes run through the interp
    fallback). GL thunk marshalling (SDL2/GL swap, mesh upload) is the likely
@@ -284,6 +316,9 @@ Root cause + fixes:
   (`nregs=2`, 32-byte span); `vec_cache_may_enable` must pin src2, not src2+i.
 - `vmovq xd,xd` zero-upper is VEX pp=2 (F3), never pp=3 (F2 = `(bad)` SIGILL).
 - Runtime hot-interp promotion: DO NOT re-enable blindly.
+- Sandwich elimination (`load_vreg_to_reg_fast`): gate the dead-src skip on
+  `kills_per_op_` liveness, NOT the FWD env var (CopyMap can multi-read a
+  scratch vreg even with FWD off). Never skip the flush when src is live.
 - Taken-path chain slot: do NOT remove or restrict to BRCOND.
 - SIMD_LDST `src2` must be a REAL vreg (vreg 0 = guest X0), never literal 0.
 - Thunk trampolines must load symbol id into x9 via `write_thunk_trampoline()`.

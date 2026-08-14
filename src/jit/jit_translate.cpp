@@ -575,6 +575,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // ── Compile IR ───────────────────────────────────────────────
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
+        cur_op_index_ = i;
         if (compile_ir_inst(inst)) break;
         // Free host regs of vregs whose last use was this op. Dead vregs
         // are freed immediately, making room for new vregs without eviction.

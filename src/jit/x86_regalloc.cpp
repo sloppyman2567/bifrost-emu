@@ -398,6 +398,88 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
         }
     }
 }
+// ── vreg_last_use_this_op ──────────────────────────────────────────────
+// True if scratch vreg `v` has its LAST use at the current op (i.e. it is
+// dead once the current op has been emitted) and is NOT the dest of the
+// current op. The current op index is cur_op_index_, set in
+// translate_block's compile loop. Used by the flush-skip fast paths in
+// UBFM/SBFM/LOAD_MEM/STORE_MEM: a dead scratch vreg already cached in
+// the destination host reg needs neither a spill (no later reader) nor a
+// reload (the value is already there).
+bool FrostJIT::vreg_last_use_this_op(int v) const {
+    if (cur_op_index_ >= kills_per_op_.size()) return false;
+    const auto& kills = kills_per_op_[cur_op_index_];
+    for (uint16_t k : kills) {
+        if (k == v) return true;
+    }
+    return false;
+}
+bool FrostJIT::vreg_fast_keep_candidate(int v, int reg, int dest_vreg) const {
+    if (v <= 32 || v >= 4096 || v == dest_vreg) return false;
+    if (vreg_home_[v] != reg) return false;
+    return vreg_last_use_this_op(v);
+}
+// ── load_vreg_to_reg_fast ──────────────────────────────────────────────
+// Load vreg `v` into host reg `dst` before an op that clobbers the regs
+// in `clobber_mask` (dst must be a member of the mask). Avoids the
+// flush→reload sandwich (`mov dst,slot; mov slot,dst`) when the previous
+// op left `v` cached in `dst`:
+//
+//   Tier 1 (always safe): v is already cached in `dst`. The flush never
+//   modifies the register (it only writes to memory), so `dst` still
+//   physically holds v's value after the flush+invalidate. Skip the
+//   redundant reload. The mapping is dropped (v reloads from memory if
+//   a later op needs it).
+//   Tier 2 (dead scratch only): additionally, if v is a scratch vreg
+//   (v > 32) that dies at this op, skip the flush of `dst` entirely and
+//   keep v mapped dirty in `dst` — the op consumes it and the caller's
+//   trailing set_vreg_reg(dest, dst) (UBFM/SBFM) or explicit
+//   kill_vreg(v) (LOAD_MEM) drops the mapping.
+//
+// Returns the set of host regs in `clobber_mask` that were kept live
+// (bit set = that reg's scratch vreg stayed cached there, Tier 2). Pass
+// `clobber_mask & ~kept` to a subsequent call (STORE_MEM loads both
+// operands) so an earlier kept reg isn't flushed by the second call.
+uint16_t FrostJIT::load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
+                                         uint16_t clobber_mask) {
+    // Capture cache state BEFORE any flush (flush+invalidate drops mappings).
+    bool in_dst = (v <= max_vreg_ && vreg_home_[v] == dst);
+    int home = (v <= max_vreg_) ? vreg_home_[v] : -1;
+    // Tier 2: dead scratch vreg already cached in dst. No spill, no
+    // invalidate of dst, no reload — keep it mapped for the op to consume.
+    if (v > 32 && v < 4096 && v != dest_vreg && in_dst &&
+        vreg_last_use_this_op(v)) {
+        uint16_t flush_mask = clobber_mask & ~(1u << dst);
+        flush_dirty_host_regs(flush_mask);
+        flush_scratch_host_regs(flush_mask);
+        invalidate_host_regs(flush_mask);
+        vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
+        return (1u << dst);
+    }
+    // Tier 1.5: v is cached in ANOTHER reg that the op will clobber. Copy
+    // it to dst first, then flush+invalidate (the flush preserves the value
+    // for later readers via its stack slot), skip the reload. Common case:
+    // ADD/SHL leaves a scratch vreg in RCX, then LOAD_MEM consumes it.
+    if (home >= 0 && home != dst && (clobber_mask & (1u << home))) {
+        emit_mov_reg(dst, home);
+        flush_dirty_host_regs(clobber_mask);
+        flush_scratch_host_regs(clobber_mask);
+        invalidate_host_regs(clobber_mask);
+        vreg_last_use_[v] = ++regalloc_lru_counter_;
+        return 0;
+    }
+    // Flush+invalidate everything in the clobber mask.
+    flush_dirty_host_regs(clobber_mask);
+    flush_scratch_host_regs(clobber_mask);
+    invalidate_host_regs(clobber_mask);
+    // Tier 1: v was already in dst — the flush preserved the value in
+    // memory and dst still physically holds it, so skip the redundant reload.
+    if (in_dst) {
+        return 0;  // no live mapping; dst holds the value for the op to use
+    }
+    load_vreg_to_reg(dst, v);
+    return 0;
+}
 // ── Codegen helpers (reduce boilerplate in compile_ir_inst) ────────────
 // These wrap the "load vreg to host reg" / "store host reg to vreg"
 // patterns. load_vreg_to_reg is cache-aware: if v is already cached in

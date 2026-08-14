@@ -298,6 +298,38 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   atomic (`lock xadd` was ~15-25 cycles per transition at 20M
   dispatches/sec). Do NOT re-add a per-dispatch atomic, a per-PC watchdog,
   or a `cpu.pc = next_pc` store to the fast paths.
+- The UBFM/SBFM + LOAD_MEM/STORE_MEM regalloc "sandwich" elimination:
+  these ops previously did `flush_dirty_host_regs(mask)` +
+  `flush_scratch_host_regs(mask)` + `invalidate_host_regs(mask)` +
+  `load_vreg_to_reg(dst, src)` whenever src was cached in dst — if a
+  preceding LOAD_REG/ADD/SHL left the source vreg dirty in RAX (or RCX),
+  that emitted `mov %rax,slot; mov slot,%rax` on the hot chunkmesh path
+  (the 662-byte block 0x405304 had ~5-9 such pairs). They now go through
+  `load_vreg_to_reg_fast()` (x86_regalloc.cpp), which is gated on the
+  EXACT per-op liveness already computed in translate_block
+  (`kills_per_op_[cur_op_index_]`, `cur_op_index_` set in the compile loop
+  right before `compile_ir_inst`). Tier 1 (always safe): src cached in dst
+  — still flush+invalidate (value preserved for later readers) but skip
+  the redundant reload, since the flush never modifies the register. Tier
+  1.5: src cached in ANOTHER reg the op clobbers — copy to dst first, then
+  flush (avoids ADD/SHL→LOAD_MEM sandwich). Tier 2 (needs liveness): src
+  is a DEAD scratch vreg (v>32, last use = current op, and v != inst.dest)
+  — skip the flush of dst entirely and keep it mapped dirty for the op to
+  consume; the trailing `set_vreg_reg(dest, dst)` (UBFM) or explicit
+  `kill_vreg` (LOAD_MEM) drops the mapping. The dead-check MUST use
+  `kills_per_op_` liveness, NOT the FWD env gate: `optimize_ir`'s CopyMap
+  copy-substitution can make a scratch vreg multi-read even with FWD off,
+  and `kills_per_op_` is the precise "no later reader" predicate. STORE_MEM
+  decides BOTH operands via `vreg_fast_keep_candidate` BEFORE flushing
+  (it also must not flush the other operand's kept reg), and relies on
+  `emit_store_mem` PRESERVING RAX and RCX (it pushes/pops them around the
+  slow call). LOAD_MEM now keeps its dest cached via `set_vreg_reg(dest,
+  RAX)` instead of `store_reg_to_vreg` — the loaded value is usually
+  consumed immediately (STORE_REG/next op) and store_reg_to_vreg killed
+  the mapping forcing a reload sandwich; the epilogue flushes dest if the
+  block ends first. Block 0x405304: 662 → 590 bytes. Do NOT add a FWD
+  env gate to this fast path — the liveness check is sufficient and FWD
+  remains disabled by default.
 - Every block ends in a 5-byte chain slot (`ret` + 4 NOPs) patched to
   `jmp rel32` once the target is translated. Conditional branches
   (BRCOND/CBZ/CBNZ/TBZ/TBNZ) ALSO emit a second chain slot on their TAKEN

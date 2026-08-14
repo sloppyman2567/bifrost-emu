@@ -879,6 +879,40 @@ private:
     // reg vregs (0-31) represent architectural state that must be flushed
     // at the epilogue, so they must not be killed early.
     std::vector<std::vector<uint16_t>> kills_per_op_;
+    // Index of the IR op currently being compiled (set in translate_block's
+    // compile loop). Lets codegen query kills_per_op_[cur_op_index_] to
+    // decide whether a source vreg is dead AFTER this op (no later reader),
+    // which permits skipping the flush→reload sandwich for scratch vregs
+    // already cached in the target host reg.
+    size_t cur_op_index_ = 0;
+    // Returns true if scratch vreg `v` has its LAST use at the current op
+    // (i.e. it is dead once the current op is emitted) and is NOT the dest
+    // of the current op. Used by the flush-skip fast paths in UBFM/SBFM/
+    // LOAD_MEM/STORE_MEM: a dead scratch vreg already in the destination
+    // host reg needs neither a spill (no later reader) nor a reload.
+    bool vreg_last_use_this_op(int v) const;
+    // Optimized variant of load_vreg_to_reg for ops that clobber a set of
+    // host regs. Avoids the flush→reload sandwich (`mov dst,slot; mov
+    // slot,dst`) when the previous op left `v` cached in `dst`:
+    //   Tier 1: v cached in dst — flush+invalidate still happen (the value
+    //     is preserved in memory for later readers), but the reload is
+    //     skipped because the flush never modifies the register.
+    //   Tier 2: additionally when v is a DEAD scratch vreg (v > 32, last
+    //     use is the current op), the flush of dst is skipped entirely and
+    //     v stays mapped dirty in dst for the op to consume; the caller's
+    //     trailing set_vreg_reg(dest, dst) or kill_vreg drops the mapping.
+    // `dest_vreg` is the current op's dest (pass -1 if the op has none);
+    // a vreg equal to dest must NOT take Tier 2 (it is redefined live).
+    // Returns the subset of `clobber_mask` whose regs were kept live by
+    // Tier 2 (bit set); pass `clobber_mask & ~kept` to a second call for
+    // two-operand ops (STORE_MEM) so the first kept reg isn't flushed.
+    uint16_t load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
+                                   uint16_t clobber_mask);
+    // Predicate form of the Tier-2 fast path: true if scratch vreg `v` is
+    // already cached in host reg `reg`, its last use is the current op, and
+    // it is not the op's dest. Used by two-operand ops (STORE_MEM) that must
+    // decide BOTH operands' fast paths before flushing anything.
+    bool vreg_fast_keep_candidate(int v, int reg, int dest_vreg) const;
     // Block-chaining state (reset at translate_block start).
     // chain_target_pc_ > 0 means the block's statically-known next PC
     // (suitable for chaining). unchainable_end_ = true means the block
