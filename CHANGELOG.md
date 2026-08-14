@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — JIT dispatch overhead halved + taken-path chaining (2026-08-13)
+
+### Block dispatch overhead cut ~2x (~21% → ~10% of wall time)
+
+SIGPROF on `ctest_real/minecraft_weekend` showed the C dispatcher eating
+~21% of wall time at ~20M block dispatches/sec. The minecraft game went
+from ~3 FPS to ~10 FPS with chunks loaded. Four changes:
+
+- **Thread-local global watchdog.** The per-dispatch
+  `total_blocks_executed_.fetch_add(1)` was a serializing `lock xadd`
+  on every block transition. Replaced with a thread-local counter checked
+  against `GLOBAL_BLOCK_LIMIT` (1e12) — the watchdog stays a pure safety
+  valve for codegen-bug infinite loops.
+- **Inline cache 16 → 256 slots.** Direct-mapped with a mixed PC hash
+  (`((pc >> 2) ^ (pc >> 17)) & 255`), lookup inlined into the header.
+  Fast paths (single-entry last-block cache + inline cache) trimmed to a
+  bare call/ret — the per-PC watchdog and the redundant `cpu.pc = next_pc`
+  store were removed from them.
+- **Lazy WIN_REG prologue.** The 10-byte `movabs r10, window_base` is only
+  emitted for blocks that actually use `LOAD_MEM`/`STORE_MEM`/`ATOMIC`/
+  `SIMD_LD16`/`SIMD_ST16`.
+- **Taken-path chaining.** Conditional branches (`BRCOND`/`CBZ`/`CBNZ`/
+  `TBZ`/`TBNZ`) now emit a second 5-byte chain slot (`ret` + 4 NOPs) at the
+  end of their taken-path epilogue, patched to `jmp rel32` once the taken
+  target is translated. Loop-back edges that previously returned to the C
+  dispatcher every iteration now jump straight to the next block. Skipped
+  when a self-loop slot is present (that already skips the epilogue).
+  Wired through `BlockEntry`, `try_chain_block`, `back_refs_`,
+  `chain_back_references`, and verify-mode save/restore.
+
+Verified: full suite **195/195 PASS** (`./scripts/run_tests.sh --test-all`).
+
 ## [Unreleased] — vDSO clock fast-path + AVX2 SIMD shifts (2026-08-01)
 
 ### vDSO clock syscalls now run entirely in the fast path

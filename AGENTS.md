@@ -131,6 +131,31 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   with JIT ON it shows exactly which instruction classes run through the
   interp fallback). `BIFROST_STATS_PERIOD=N` prints rolling MIPS every N
   seconds past startup/world-gen phases.
+- Block dispatch has THREE layers: a single-entry last-block cache, an
+  inlined 256-slot direct-mapped inline cache (hash
+  `((pc >> 2) ^ (pc >> 17)) & 255`), then the shared-mutex + unordered_map
+  slow path. The fast paths are trimmed to a bare call/ret — the global
+  safety-valve watchdog is a THREAD-LOCAL counter checked against
+  `GLOBAL_BLOCK_LIMIT` (1e12), incremented on every dispatch with NO
+  atomic (`lock xadd` was ~15-25 cycles per transition at 20M
+  dispatches/sec). Do NOT re-add a per-dispatch atomic, a per-PC watchdog,
+  or a `cpu.pc = next_pc` store to the fast paths.
+- Every block ends in a 5-byte chain slot (`ret` + 4 NOPs) patched to
+  `jmp rel32` once the target is translated. Conditional branches
+  (BRCOND/CBZ/CBNZ/TBZ/TBNZ) ALSO emit a second chain slot on their TAKEN
+  path (`emit_taken_path_epilogue()` in `jit_codegen_branch.cpp`); this
+  halves dispatch overhead (~21% → ~10% wall time on the minecraft game)
+  because loop-back edges no longer return to the C dispatcher. Skipped
+  when a self-loop slot exists. Both slots live in `BlockEntry`
+  (`chain_patch_off`/`taken_chain_patch_off`, `chained`/`taken_chained`),
+  both register in `back_refs_`, and both are un-patched during
+  `BIFROST_JIT_VERIFY`. Do NOT remove the taken-path slot or restrict it
+  to BRCOND — CBZ/CBNZ/TBZ/TBNZ while-loop edges (GCC vectorized
+  memchr/strchr, pointer loops) rely on it.
+- The prologue's 10-byte `movabs r10, window_base` (WIN_REG) is emitted
+  LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
+  SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles
+  of setup on every entry for blocks that never touch the direct window.
 
 ## Work Guidance
 
