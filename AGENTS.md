@@ -114,6 +114,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `set_vreg_reg(dest, d)` (mirror the interp's full-element write).
   Translator skips rd==31 (XZR). `instr_will_call_interp` auto-syncs via
   classify (Family::UMOV ≠ UNKNOWN).
+- FWD (`BIFROST_ENABLE_FWD=1`, the `arm_reg_cache` load-forwarding in
+  `ir_optimize.cpp`) is disabled by default: it had a "subtle correctness bug"
+  since the original author (commit 1257f7b). The original regalloc clobber bug
+  is fixed (jit_helpers.cpp `emit_fmov_helper` spills RAX before reuse), but
+  ANY op that writes an ARM reg vreg DIRECTLY (bypassing STORE_REG) — currently
+  `FP_F2I`, `FP_F2I_FIXED`, and `SIMD_UMOV` (jit_codegen_simd.cpp
+  `set_vreg_reg(inst.dest, d)`) — MUST also update `arm_reg_cache[dest]=dest`
+  in `optimize_ir`, or a later LOAD_REG of `dest` substitutes a stale cached
+  vreg. If you add another such op, mirror the SIMD_UMOV case
+  (ir_optimize.cpp) or FWD will silently corrupt values (this broke jit_neon's
+  umov tests). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
+  (the real cost there is regalloc spill/reload bloat, not round-trips).
 - `emit_taken_path_epilogue()` must NOT clear the vec-cache dirty flags:
   `vec_cache_writeback_all()` clears `vec_dirty_` as a codegen-time side
   effect, and the FALL-THROUGH (main) epilogue is emitted LATER — if the

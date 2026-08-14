@@ -126,6 +126,28 @@ Root cause + fixes:
   **198 pass / 0 fail / 0 skip** (51 s) — allocator changes cause no
   regressions.
 
+## This session (Aug 2026): chunkmesh_mesh profiling + FWD bugfix (`a5e85c4`)
+- Started profiling **chunkmesh_mesh** (53% of game samples, biggest hotspot):
+  dumped JIT blocks (`BIFROST_JIT_DUMP=1`) for the hot 0x405304 neighbor-lookup
+  (11 ARM instrs → 50 IR ops → 662 bytes x86, ~15 host instrs/guest instr) and
+  0x405028 loop head (178 bytes for 1 instr `ldp w0,w2,[x26]`). Waste = every
+  ALU op round-trips `cpu.regs[] → host stack → back` (LOAD_REG/STORE_REG
+  pairs), plus per-LOAD_MEM bounds-check fast/slow stubs.
+- Root cause of the round-trips: `arm_reg_cache` load-forwarding
+  (`BIFROST_ENABLE_FWD=1`) is **disabled by default** (original "subtle
+  correctness bug", commit 1257f7b). The original regalloc clobber was already
+  fixed (jit_helpers.cpp), but testing FWD exposed a **second latent bug**:
+  `SIMD_UMOV` writes an ARM reg vreg directly (jit_codegen_simd.cpp
+  `set_vreg_reg(inst.dest, d)`), bypassing STORE_REG — mirroring `FP_F2I` — yet
+  `optimize_ir` only taught `arm_reg_cache` about FP_F2I/FP_F2I_FIXED. Under
+  FWD a later LOAD_REG substituted a stale cached vreg → `jit_neon` umov tests
+  failed. Fixed by adding the SIMD_UMOV case (ir_optimize.cpp, mirror FP_F2I).
+- Verified **198/198 pass with FWD=1**; FWD shrinks the 0x5304 block 662→633
+  bytes (IR 50→34 ops, dce_removed=22) but game MIPS gain is ~44→46 (noise).
+- **FWD stays OFF by default** (env var only). The remaining chunkmesh_mesh
+  cost is regalloc spill/reload bloat (12 rbp spill pairs in 0x5304), not
+  round-trips — that is the next optimization target.
+
 ## Current game performance (as of this session)
 - In a loaded chunk under `DISPLAY=:0`: **45-52 FPS** on the game's own frame
   counter with TPS pinned at 60 (one 6 FPS dip during a world-gen/mesh spike).
@@ -150,16 +172,24 @@ Root cause + fixes:
   those remaining classprof fallbacks from the prior session are obsolete.
 
 ## Next steps (suggested)
-1. If game perf in-chunk is still desired: profile with `BIFROST_PROF=1`
+1. **chunkmesh_mesh regalloc spill/reload bloat** (the real hotspot cost, ~53%):
+   the hot 0x405304/0x405028 blocks spend most of their bytes on
+   `mov reg,-0xN(%rbp)` / `mov -0xN(%rbp),reg` spill pairs + `cpu.regs[]`
+   round-trips. FWD fixes only the round-trips (~4%); attacking the spill
+   pairs (better host-reg allocation across the block, or folding address
+   math into single LEA ops) is the bigger win.
+2. If game perf in-chunk is still desired: profile with `BIFROST_PROF=1`
    (`BIFROST_CLASS_PROF=1` shows which classes run through the interp
    fallback). GL thunk marshalling (SDL2/GL swap, mesh upload) is the likely
-   remaining cost at 45-52 FPS, not CPU. chunkmesh_mesh (53%) + memset (15%)
-   remain the CPU hotspots; memset's `stp q0,q0` loop is already broadcast +
+   remaining cost at 45-52 FPS, not CPU. memset (15%) is already broadcast +
    pinned, further gains need bigger vector stores (e.g. 4-reg LD1/ST1) or
    host AVX-512.
-2. Do not regress fast dispatch paths (bare call/ret, no atomics, no per-PC
+3. Do not regress fast dispatch paths (bare call/ret, no atomics, no per-PC
    watchdog). Hot-interp promotion stays opt-in (BIFROST_HOT_INTERP).
-3. `make check-all` before any further commit.
+4. FWD (`BIFROST_ENABLE_FWD=1`) is now correct (198/198) but stays OFF by
+   default; it's only a ~4% win on chunkmesh. Re-evaluate if more ops are
+   made FWD-compatible.
+5. `make check-all` before any further commit.
 
 ## Critical traps (read AGENTS.md for full list)
 - **`mmap_alloc` is NOT a pure bump allocator anymore:** `munmap`
@@ -193,6 +223,12 @@ Root cause + fixes:
 - SIMD DUP (GPR→vector) native for all esizes/Q: drop the RAX mapping FIRST
   (`clobber_host_reg(RAX)`) or the shift-replicate chain corrupts src1.
 - UMOV lane-extract: matches bits[15:12]=0011 ONLY (NOT 0010 = SMOV).
+- **FWD (`BIFROST_ENABLE_FWD=1`, arm_reg_cache in ir_optimize.cpp): off by
+  default. ANY op that writes an ARM reg vreg DIRECTLY (bypassing STORE_REG)
+  — FP_F2I, FP_F2I_FIXED, SIMD_UMOV — MUST update `arm_reg_cache[dest]=dest`
+  in optimize_ir or a later LOAD_REG substitutes a stale cached vreg (this
+  broke jit_neon's umov tests). Mirror the SIMD_UMOV case when adding new
+  direct-ARM-reg-write ops.
 - `emit_taken_path_epilogue()` must NOT clear vec-cache dirty flags
   (`vec_cache_writeback_all(false)`).
 - SIMD_ST16/LD16 slow path: same invariant — `vec_cache_writeback_all(false)`
