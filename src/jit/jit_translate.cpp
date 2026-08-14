@@ -132,13 +132,11 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         default:
             break;
     }
-    if (d.is_vec &&
-        (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
-         d.cls == InstClass::LDR_REG || d.cls == InstClass::STR_IMM ||
-         d.cls == InstClass::STR_UNS || d.cls == InstClass::STR_REG ||
-         d.cls == InstClass::LDP || d.cls == InstClass::STP)) {
-        return true;
-    }
+    // v1.5.0.alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
+    // natively translated (ir_translate_mem.cpp) — the old is_vec gate
+    // here forced every one of them to CALL_INTERP, splitting FP-heavy
+    // blocks every 1-2 instructions and killing the pinned-XMM vec cache
+    // (each FP load/store cost ~18 interpreter steps in the voxel game).
     return false;
 }
 // ── translate_block ───────────────────────────────────────────────

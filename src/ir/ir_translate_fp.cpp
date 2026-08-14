@@ -537,8 +537,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     uint16_t lo = g_alloc.alloc();
                     emit(block, IROp::LOAD_MEM, lo, base, 0, 8, 0, 0,
                          static_cast<uint64_t>(i * 8));
-                    // 64-bit form: v_hi = 0 (src2=0, the zero vreg).
-                    emit(block, IROp::SIMD_LDST, reg, lo, 0, 1, 0, 0, 0, cur_pc);
+                    // 64-bit form: v_hi = 0 (src2 = a real zero vreg via
+                    // load_imm — literal 0 is guest X0 (vreg 0), not zero).
+                    uint16_t zero = load_imm(block, 0);
+                    emit(block, IROp::SIMD_LDST, reg, lo, zero, 1, 0, 0, 0, cur_pc);
                 }
             } else {
                 // 128-bit form: ONE 16-byte load per reg, single
@@ -578,7 +580,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 for (uint8_t i = 0; i < d.simd_count; i++) {
                     uint8_t reg = (d.rt + i) & 0x1F;
                     uint16_t lo = g_alloc.alloc();
-                    emit(block, IROp::SIMD_LDST, reg, lo, 0, 0, 0, 0, 0, cur_pc);
+                    // src2 = fresh scratch for the unused v_hi half — literal
+                    // 0 is guest X0 (vreg 0) and set_vreg_reg would clobber it.
+                    uint16_t hi_scratch = g_alloc.alloc();
+                    emit(block, IROp::SIMD_LDST, reg, lo, hi_scratch, 0, 0, 0, 0, cur_pc);
                     emit(block, IROp::STORE_MEM, 0, base, lo, 8, 0, 0,
                          static_cast<uint64_t>(i * 8));
                 }

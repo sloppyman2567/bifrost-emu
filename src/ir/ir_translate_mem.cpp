@@ -28,24 +28,25 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDR_IMM: case InstClass::LDR_UNS: case InstClass::LDR_REG:
         case InstClass::LDRSW: case InstClass::LDRSB: case InstClass::LDRSH:
         case InstClass::STR_IMM: case InstClass::STR_UNS: case InstClass::STR_REG: {
-            // vector loads/stores (LDR/STR Q/D/S/H/B with
-            // is_vec=true) must fall back to the interpreter. The IR
-            // translator's load/store code uses d.rt as a general-purpose
-            // register index (cpu.regs[d.rt]), but for vector instructions
-            // d.rt refers to a vector register (V0-V31). Treating a vector
-            // load/store as an integer one corrupts the wrong register —
-            // e.g. `str q0, [sp, #32]` would store X0's value instead of
-            // Q0's, and `ldr q0, [sp, #32]` would load into X0 instead of
-            // Q0. This broke musl's __fixunstfsi/__extenddftf2 which spill
-            // 128-bit long doubles to the stack via `str q0` / `ldp x0,x1`.
-            if (d.is_vec) {
-                emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
-                return true;
-            }
+            // SIMD&FP LDR/STR (B/H/S/D/Q) are translated natively below.
+            // v1.5.0.alpha: previously these fell back to CALL_INTERP
+            // because the GPR path below reads/writes cpu.regs[d.rt] while
+            // vector instructions address cpu.v_lo/v_hi[d.rt]. The vector
+            // branch handles the vreg storage (SIMD_LD16/ST16 for 16-byte
+            // Q forms, SIMD_LDST + LOAD_MEM/STORE_MEM for B/H/S/D).
             bool is_load = (d.cls == InstClass::LDR_IMM || d.cls == InstClass::LDR_UNS ||
                             d.cls == InstClass::LDR_REG || d.cls == InstClass::LDRSW ||
                             d.cls == InstClass::LDRSB || d.cls == InstClass::LDRSH);
             int width = 1 << d.size;
+            // SIMD&FP load/store width — mirror the interpreter exactly:
+            //   is_q = (opc_ls & 2) && size == 0 → 16 bytes (Q form)
+            //   else nbytes = 1 << size  (B=1, H=2, S=4, D=8).
+            bool vec_q = false;
+            int vec_nbytes = 0;
+            if (d.is_vec) {
+                vec_q = (d.opc_ls & 2) && d.size == 0;
+                vec_nbytes = vec_q ? 16 : (1 << d.size);
+            }
             uint16_t base = load_arm_reg(block, d.rn, true);  // base reg 31 = SP
             // ── Compute the load/store address ──
             // For post-index (mode=1): load/store from `base`, writeback `base + disp`.
@@ -78,7 +79,53 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // For post-index: 0 (load from base, writeback handles disp).
             // For offset/pre-index: disp (load from base+disp).
             int64_t mem_off = post_index ? 0 : d.disp;
-            if (is_load) {
+            if (d.is_vec) {
+                // ── SIMD&FP LDR/STR (B/H/S/D/Q) — native ───────────────
+                // Q (16 bytes): SIMD_LD16/SIMD_ST16 — one bounds-check +
+                // movupd, same machinery as LD1/ST1 128-bit.
+                // B/H/S/D (<16 bytes): LOAD_MEM/STORE_MEM for the bytes,
+                // plus SIMD_LDST to (a) zero v_hi on load — the interp sets
+                // v_hi = (nbytes >= 16) ? hi : 0 — and (b) read v_lo on
+                // store. These ops are not vec-cache-compatible, so the
+                // block never enables the XMM cache: cpu.v_lo/v_hi stays
+                // the canonical vector storage (no stale-pinned-XMM risk).
+                if (is_load) {
+                    if (vec_q) {
+                        emit(block, IROp::SIMD_LD16, d.rt, addr, 0, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off), cur_pc);
+                    } else {
+                        uint16_t lo = g_alloc.alloc();
+                        emit(block, IROp::LOAD_MEM, lo, addr, 0,
+                             static_cast<uint8_t>(vec_nbytes), 0, 0,
+                             static_cast<uint64_t>(mem_off));
+                        // LOAD_MEM zero-extends into the vreg; src2 is a
+                        // real zero vreg (load_imm) so v_hi gets 0, matching
+                        // the interpreter (v_hi = 0 for nbytes < 16). Passing
+                        // literal 0 as src2 would read guest X0 (vreg 0) and
+                        // write ITS value into v_hi — and on the store path
+                        // it clobbers X0 itself.
+                        uint16_t zero = load_imm(block, 0);
+                        emit(block, IROp::SIMD_LDST, d.rt, lo, zero, 1, 0, 0, 0, cur_pc);
+                    }
+                } else {
+                    if (vec_q) {
+                        emit(block, IROp::SIMD_ST16, 0, addr, d.rt, 0, 0, 1,
+                             static_cast<uint64_t>(mem_off), cur_pc);
+                    } else {
+                        uint16_t lo = g_alloc.alloc();
+                        // Store: read v_lo[d.rt] into the lo vreg. src2 is a
+                        // fresh scratch that receives the (unused) v_hi half
+                        // — literal 0 would be guest X0 (vreg 0) and the
+                        // codegen's set_vreg_reg would clobber X0 with
+                        // v_hi[d.rt]'s value.
+                        uint16_t hi_scratch = g_alloc.alloc();
+                        emit(block, IROp::SIMD_LDST, d.rt, lo, hi_scratch, 0, 0, 0, 0, cur_pc);
+                        emit(block, IROp::STORE_MEM, 0, addr, lo,
+                             static_cast<uint8_t>(vec_nbytes), 0, 0,
+                             static_cast<uint64_t>(mem_off));
+                    }
+                }
+            } else if (is_load) {
                 uint16_t val = g_alloc.alloc();
                 emit(block, IROp::LOAD_MEM, val, addr, 0, static_cast<uint8_t>(width),
                      0, 0, static_cast<uint64_t>(mem_off));
@@ -89,23 +136,8 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // LDR_UNS/LDR_REG and uses d.opc_ls to distinguish
                 // sign-extended loads. (Matching the interpreter, which
                 // checks `opc_ls & 2` directly.)
-                bool sign_ext = !d.is_vec && (d.opc_ls & 2);
-                if (d.is_vec) {
-                    // NOT cpu.regs[]. Use store_fp_reg to write to the
-                    // correct array. For 32-bit FP loads (width=4), the
-                    // upper 32 bits of v_lo are already zeroed by the
-                    // ZEXT below — but we skip ZEXT for FP and rely on
-                    // LOAD_MEM loading the right number of bytes + the
-                    // store_fp_reg writing the full 64-bit vreg to v_lo.
-                    if (width < 8) {
-                        // Zero-extend to 64 bits (upper bytes of v_lo = 0).
-                        uint16_t ext = g_alloc.alloc();
-                        emit(block, IROp::ZEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
-                        store_fp_reg(block, d.rt, ext);
-                    } else {
-                        store_fp_reg(block, d.rt, val);
-                    }
-                } else if (sign_ext) {
+                bool sign_ext = d.opc_ls & 2;
+                if (sign_ext) {
                     uint16_t ext = g_alloc.alloc();
                     emit(block, IROp::SEXT, ext, val, 0, static_cast<uint8_t>(width * 8));
                     store_arm_reg(block, d.rt, ext);
@@ -117,7 +149,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     store_arm_reg(block, d.rt, val);
                 }
             } else {
-                uint16_t val = d.is_vec ? load_fp_reg(block, d.rt) : load_arm_reg(block, d.rt);
+                uint16_t val = load_arm_reg(block, d.rt);
                 emit(block, IROp::STORE_MEM, 0, addr, val, static_cast<uint8_t>(width),
                      0, 0, static_cast<uint64_t>(mem_off));
             }
@@ -178,10 +210,12 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                              static_cast<uint64_t>(mem_off + 8));
                         emit(block, IROp::SIMD_LDST, d.rt, lo1, hi1, 1, 0, 0, 0, cur_pc);
                     } else {
-                        // 64-bit (or 32-bit) load: v_hi = 0
-                        emit(block, IROp::SIMD_LDST, d.rt, lo1, 0, 1, 0, 0, 0, cur_pc);
-                        // SIMD_LDST with src2=0 writes 0 to v_hi (vreg 0 is
-                        // always 0 in our IR since it's the zero register).
+                        // 64-bit (or 32-bit) load: v_hi = 0. src2 must be a
+                        // real zero vreg (load_imm) — literal 0 is guest X0
+                        // (vreg 0), and reading it here writes X0's value into
+                        // v_hi instead of zeroing it.
+                        uint16_t zero = load_imm(block, 0);
+                        emit(block, IROp::SIMD_LDST, d.rt, lo1, zero, 1, 0, 0, 0, cur_pc);
                     }
                     // Load rt2
                     uint16_t lo2 = g_alloc.alloc();
@@ -193,7 +227,8 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                              static_cast<uint64_t>(mem_off + stride + 8));
                         emit(block, IROp::SIMD_LDST, d.rt2, lo2, hi2, 1, 0, 0, 0, cur_pc);
                     } else {
-                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, 0, 1, 0, 0, 0, cur_pc);
+                        uint16_t zero2 = load_imm(block, 0);
+                        emit(block, IROp::SIMD_LDST, d.rt2, lo2, zero2, 1, 0, 0, 0, cur_pc);
                     }
                 } else {
                     // STP Vrt, Vrt2, [base, #disp]
