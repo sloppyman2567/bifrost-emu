@@ -5,7 +5,87 @@
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "core/emulator.h"
 #include "jit/frostjit.hpp"
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <sys/time.h>
+#include <ucontext.h>
 namespace arm64emu {
+// ── BIFROST_PROF=1 sampling profiler ─────────────────────────────────
+// SIGPROF/ITIMER_PROF sampler that buckets the interrupted host RIP:
+//   jit        — inside a translated block's x86 code (executing guest code)
+//   dispatch   — inside run_block (lookup, chaining, watchdog)
+//   translate  — inside translate_block (decoding + IR + x86 codegen)
+//   interp     — inside Emulator::step (interpreter)
+//   other      — syscall handlers, memcpy, host libs, anything else
+// Thread-local flags are toggled by RAII guards in run_block /
+// translate_block / step; the handler only does atomic increments.
+namespace {
+std::atomic<uint64_t> prof_jit{0};
+std::atomic<uint64_t> prof_dispatch{0};
+std::atomic<uint64_t> prof_translate{0};
+std::atomic<uint64_t> prof_interp{0};
+std::atomic<uint64_t> prof_other{0};
+std::atomic<bool>     prof_enabled{false};
+thread_local const uint8_t* tls_prof_codebuf = nullptr;
+thread_local size_t         tls_prof_codebuf_size = 0;
+}
+// Thread-local "currently inside" flags, toggled by RAII guards in
+// run_block / translate_block / Emulator::step (declared extern in
+// those TUs). The handler reads them; the guards set them.
+thread_local bool prof_in_run_block = false;
+thread_local bool prof_in_translate = false;
+thread_local bool prof_in_interp = false;
+namespace {
+struct ProfGuard {
+    bool* f_;
+    explicit ProfGuard(bool* f) : f_(f) { if (prof_enabled.load(std::memory_order_relaxed)) *f_ = true; }
+    ~ProfGuard() { if (prof_enabled.load(std::memory_order_relaxed)) *f_ = false; }
+};
+static void prof_signal_handler(int, siginfo_t*, void* ctx) {
+    auto* uc = static_cast<ucontext_t*>(ctx);
+    uint64_t rip = static_cast<uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
+    if (tls_prof_codebuf && rip >= reinterpret_cast<uint64_t>(tls_prof_codebuf) &&
+        rip < reinterpret_cast<uint64_t>(tls_prof_codebuf) + tls_prof_codebuf_size) {
+        prof_jit.fetch_add(1, std::memory_order_relaxed);
+    } else if (prof_in_translate) {
+        prof_translate.fetch_add(1, std::memory_order_relaxed);
+    } else if (prof_in_interp) {
+        prof_interp.fetch_add(1, std::memory_order_relaxed);
+    } else if (prof_in_run_block) {
+        prof_dispatch.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        prof_other.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+static void prof_install(FrostJIT* jit) {
+    if (prof_enabled.exchange(true)) return;
+    tls_prof_codebuf = jit->code_buf();
+    tls_prof_codebuf_size = jit->code_buf_size();
+    struct sigaction sa = {};
+    sa.sa_sigaction = prof_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGPROF, &sa, nullptr);
+    struct itimerval it = {};
+    it.it_interval.tv_usec = 10000;  // 100 Hz
+    it.it_value.tv_usec = 10000;
+    setitimer(ITIMER_PROF, &it, nullptr);
+}
+}
+// Called lazily from run_block's first dispatch (after any host-signal
+// forwarding handlers are installed) so our SIGPROF handler isn't
+// overwritten by install_host_signal_handlers.
+void bifrost_prof_init(FrostJIT* jit) {
+    static bool inited = false;
+    if (inited || !getenv("BIFROST_PROF")) return;
+    inited = true;
+    prof_install(jit);
+}
+bool bifrost_prof_active() {
+    return prof_enabled.load(std::memory_order_relaxed);
+}
 void Emulator::enable_jit() {
     if (jit_) return;
     // Shared-JIT mode (default): spawned threads share the main's FrostJIT,
@@ -92,6 +172,38 @@ void Emulator::print_jit_stats() {
                      static_cast<double>(blocks_executed);
         fprintf(stderr, "[%s] frostJIT: avg %.1f instructions/block\n",
                 CODENAME, avg);
+    }
+    if (getenv("BIFROST_BLOCK_PROF")) {
+        auto& bp = jit_->block_profile;
+        fprintf(stderr, "[%s] frostJIT block-end reasons: "
+                "natural_branch=%llu entry_point=%llu call_interp_cap=%llu "
+                "bl_call_cap=%llu max_size=%llu decode_fail=%llu interp_only=%llu\n",
+                CODENAME,
+                static_cast<unsigned long long>(bp.natural_branch.load()),
+                static_cast<unsigned long long>(bp.entry_point.load()),
+                static_cast<unsigned long long>(bp.call_interp_cap.load()),
+                static_cast<unsigned long long>(bp.bl_call_cap.load()),
+                static_cast<unsigned long long>(bp.max_size.load()),
+                static_cast<unsigned long long>(bp.decode_fail.load()),
+                static_cast<unsigned long long>(bp.interp_only.load()));
+    }
+    if (prof_enabled.load(std::memory_order_relaxed)) {
+        uint64_t jit = prof_jit.load(std::memory_order_relaxed);
+        uint64_t disp = prof_dispatch.load(std::memory_order_relaxed);
+        uint64_t trans = prof_translate.load(std::memory_order_relaxed);
+        uint64_t interp = prof_interp.load(std::memory_order_relaxed);
+        uint64_t other = prof_other.load(std::memory_order_relaxed);
+        uint64_t total = jit + disp + trans + interp + other;
+        if (total > 0) {
+            fprintf(stderr, "[%s] SIGPROF samples: jit=%llu (%.1f%%) dispatch=%llu "
+                    "(%.1f%%) translate=%llu (%.1f%%) interp=%llu (%.1f%%) other=%llu (%.1f%%)\n",
+                    CODENAME,
+                    static_cast<unsigned long long>(jit), 100.0 * jit / total,
+                    static_cast<unsigned long long>(disp), 100.0 * disp / total,
+                    static_cast<unsigned long long>(trans), 100.0 * trans / total,
+                    static_cast<unsigned long long>(interp), 100.0 * interp / total,
+                    static_cast<unsigned long long>(other), 100.0 * other / total);
+        }
     }
 }
 void Emulator::jit_step(CPU& cpu) {

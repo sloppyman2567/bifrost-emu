@@ -17,7 +17,25 @@
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
+// BIFROST_PROF sampling-flag toggle (see jit_glue.cpp). RAII so the
+// flag is cleared on every early-return path.
+extern thread_local bool prof_in_run_block;
+extern thread_local bool prof_in_translate;
+extern thread_local bool prof_in_interp;
+void bifrost_prof_init(FrostJIT* jit);
+bool bifrost_prof_active();
+struct ProfRunGuard {
+    bool saved_;
+    ProfRunGuard() : saved_(bifrost_prof_active()) { if (saved_) prof_in_run_block = true; }
+    ~ProfRunGuard() { if (saved_) prof_in_run_block = false; }
+};
 uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
+    static bool prof_inited = false;
+    if (!prof_inited) {
+        bifrost_prof_init(this);
+        prof_inited = true;
+    }
+    ProfRunGuard prof_g;
     if (!code_buf_ || jit_disabled_.load(std::memory_order_relaxed)) {
         interpreter_fallbacks++;
         emu.step(cpu);
@@ -48,12 +66,19 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // legitimately runs the same block 100M+ times is the normal case
     // (the watchdog would be checked on the first dispatch, when the
     // cache misses). The cache is reset on any different PC.
+    //
+    // Hot-path stats are accumulated in thread-locals and flushed to the
+    // atomic counters on the slow path below. Every block dispatch used
+    // to do two `lock xadd` atomics (~15-20 cycles each); with avg 4
+    // instructions/block that was ~10 cycles of pure counter overhead per
+    // guest instruction. Thread-locals are plain adds on the hot path.
+    thread_local uint64_t tls_exec_ = 0;
+    thread_local uint64_t tls_instr_ = 0;
     if (__builtin_expect(pc == tls_last_block_.pc && tls_last_block_.fn != nullptr, 1)) {
         // Fast path: same PC as last dispatch, fn is cached.
         // Skip shared_mutex, skip unordered_map, skip BlockEntry copy.
-        blocks_executed.fetch_add(1, std::memory_order_relaxed);
-        instructions_executed.fetch_add(tls_last_block_.instr_count,
-                                         std::memory_order_relaxed);
+        tls_exec_++;
+        tls_instr_ += tls_last_block_.instr_count;
         uint64_t next_pc = tls_last_block_.fn(&cpu, &emu);
         cpu.pc = next_pc;
         // Watchdog update (same logic as below, inlined for the fast path).
@@ -91,9 +116,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         int cached_count = 0;
         if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
             // Cache hit — skip shared_mutex + unordered_map entirely.
-            blocks_executed.fetch_add(1, std::memory_order_relaxed);
-            instructions_executed.fetch_add(cached_count,
-                                             std::memory_order_relaxed);
+            tls_exec_++;
+            tls_instr_ += cached_count;
             uint64_t next_pc = cached_fn(&cpu, &emu);
             cpu.pc = next_pc;
             // Watchdog (inlined for the fast path).
@@ -138,6 +162,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //   - x86 JIT code is reentrant — multiple threads can execute the
     //     same block concurrently (each has its own CPU/stack).
     //
+    // Flush the thread-local hot-path counters into the shared atomic
+    // stats (slow path runs far less often than block dispatches).
+    blocks_executed.fetch_add(tls_exec_, std::memory_order_relaxed);
+    instructions_executed.fetch_add(tls_instr_, std::memory_order_relaxed);
+    tls_exec_ = 0;
+    tls_instr_ = 0;
+    //
     // Per-thread state (watchdog, hotness) is thread-local — no lock
     // needed.
     // Use a SHARED lock for block lookup (concurrent reads OK). Release
@@ -150,7 +181,19 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         cache_hits++;
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
-        if (!entry.interp_only && entry.fn && entry.call_interp_count > 0) {
+        // Runtime promotion to interp_only is DISABLED by default: the
+        // translator already marks CALL_INTERP-heavy blocks interp_only
+        // (call_interp_count*2 > instr_count in translate_block), and
+        // mixed blocks (a few fallbacks + several native ops) measure
+        // FASTER in JIT — demoting them drags native ops down to
+        // interpreter speed (interp is ~2x slower; game steady-state
+        // dropped ~8-10% with promotion on). Opt in only if a future
+        // workload shows JIT-with-CALL_INTERP slower than pure interp
+        // for a hot cycle (the original __multf3 case is already
+        // covered at translate time, so this should rarely be needed).
+        if (!entry.interp_only && entry.fn &&
+            entry.call_interp_count * 2 > entry.instr_count &&
+            getenv("BIFROST_HOT_INTERP") != nullptr) {
             auto& cnt = tls_hot_pc_counts_[pc];
             if (++cnt >= HOT_PC_THRESHOLD) {
                 // Promote to interp_only — upgrade to exclusive.

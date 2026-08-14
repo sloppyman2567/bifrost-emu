@@ -1189,6 +1189,28 @@ int Emulator::run() {
             break;
         }
         count++;
+        // Periodic MIPS reporter (BIFROST_STATS_PERIOD=seconds). Prints
+        // rolling guest MIPS every period so steady-state performance can
+        // be measured past startup/world-gen phases. Inert unless set.
+        {
+            static const double period_ = []() {
+                const char* s = getenv("BIFROST_STATS_PERIOD");
+                return s ? atof(s) : 0.0;
+            }();
+            if (period_ > 0.0) {
+                static auto last_t_ = std::chrono::steady_clock::now();
+                static uint64_t last_count_ = count;
+                auto now_t = std::chrono::steady_clock::now();
+                double dt = std::chrono::duration<double>(now_t - last_t_).count();
+                if (dt >= period_) {
+                    double mips = (count - last_count_) / 1e6 / dt;
+                    fprintf(stderr, "[%s] rolling MIPS: %.2f (total %llu)\n",
+                            CODENAME, mips, static_cast<unsigned long long>(count));
+                    last_t_ = now_t;
+                    last_count_ = count;
+                }
+            }
+        }
         // Watchdog: if PC hasn't changed, increment same_pc_count.
         if (main_cpu_.pc == last_pc) {
             same_pc_count++;
@@ -1341,6 +1363,12 @@ int Emulator::run() {
 }
 // ── Per-instruction step (decode cache + trace) ───────────────────────
 void Emulator::step(CPU& cpu) {
+    // BIFROST_PROF sampling-flag toggle (see jit_glue.cpp): the
+    // SIGPROF handler buckets time spent in the interpreter vs JIT.
+    extern thread_local bool prof_in_interp;
+    extern bool bifrost_prof_active();
+    const bool prof_active = bifrost_prof_active();
+    if (prof_active) prof_in_interp = true;
     if (trace_) {
         fprintf(stderr,
             "[trace tid=%d] pc=0x%08llx x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx "
@@ -1370,6 +1398,7 @@ void Emulator::step(CPU& cpu) {
     uint64_t next_pc = cpu.pc + 4;
     execute(inst, next_pc, cpu);
     cpu.pc = next_pc;
+    if (prof_active) prof_in_interp = false;
 }
 // Host-to-guest signal forwarding (install_host_signal_handlers,
 // queue_host_signal, host_signal_handler, drain_host_signals) is

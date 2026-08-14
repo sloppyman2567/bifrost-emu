@@ -26,6 +26,8 @@
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true()
+#include <cstdio>
+#include <cstdlib>
 namespace arm64emu {
 // When true, BL instructions use the old behavior (end block at BL)
 // instead of BL_CALL (call within block). Set by translate_block when
@@ -815,9 +817,27 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             return false;
         }
         // ── Everything else: inline interpreter call (no block split) ──
-        default:
+        default: {
+            // BIFROST_CLASS_PROF companion: which classes hit the
+            // translate-time CALL_INTERP fallback (translation counts,
+            // not dynamic). Printed at exit via ir_dump_callinterp.
+            if (std::getenv("BIFROST_CLASS_PROF")) {
+                static uint64_t ci_cls[128] = {0};
+                int ci = (int)d.cls;
+                if (ci >= 0 && ci < 128) ci_cls[ci]++;
+                static uint64_t since_print = 0;
+                if (++since_print >= 20000) {
+                    since_print = 0;
+                    fprintf(stderr, "[citrans]");
+                    for (int i = 0; i < 128; i++)
+                        if (ci_cls[i]) fprintf(stderr, " %d=%llu", i,
+                                               (unsigned long long)ci_cls[i]);
+                    fprintf(stderr, "\n");
+                }
+            }
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return false;
+        }
     }
 }
 } // namespace arm64emu

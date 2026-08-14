@@ -23,6 +23,14 @@
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
+// BIFROST_PROF sampling-flag toggle (see jit_glue.cpp).
+extern thread_local bool prof_in_translate;
+bool bifrost_prof_active();
+struct ProfTranslateGuard {
+    bool saved_;
+    ProfTranslateGuard() : saved_(bifrost_prof_active()) { if (saved_) prof_in_translate = true; }
+    ~ProfTranslateGuard() { if (saved_) prof_in_translate = false; }
+};
 // (end block) instead of BL_CALL (call within block).
 extern thread_local bool bl_call_disabled_;
 // ── instr_will_call_interp — heuristic for block splitting ─────────────
@@ -141,6 +149,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
 }
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
+    ProfTranslateGuard prof_g;
     if (!code_buf_) return nullptr;
     // W^X: toggle the code buffer to writable before emitting x86 code.
     // (No-op if W^X is disabled or the buffer is already writable.)
@@ -207,18 +216,20 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
+            block_profile.entry_point++;
             chain_target_pc_ = cur_pc;
             break;
         }
         uint32_t inst;
         try {
             inst = emu.mem().fetch_inst(cur_pc);
-        } catch (...) { break; }
+        } catch (...) { block_profile.decode_fail++; break; }
         DecodedInst d;
-        if (!decode(d, inst)) break;
+        if (!decode(d, inst)) { block_profile.decode_fail++; break; }
         bool will_call_interp = instr_will_call_interp(d);
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
+            block_profile.call_interp_cap++;
             chain_target_pc_ = cur_pc;
             break;
         }
@@ -228,15 +239,20 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (d.cls == InstClass::BL) bl_call_count++;
         instr_count++;
         ir_block.count = instr_count;
-        if (ends) block_ended = true;
+        if (ends) {
+            block_profile.natural_branch++;
+            block_ended = true;
+        }
         else {
             if (bl_call_count >= MAX_BL_CALL_PER_BLOCK) {
+                block_profile.bl_call_cap++;
                 chain_target_pc_ = cur_pc + 4;
                 break;
             }
             cur_pc += 4;
         }
     }
+    if (instr_count >= MAX_BLOCK_REG_PRESSURE) block_profile.max_size++;
     if (instr_count == 0) {
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
@@ -264,6 +280,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                 entry.verified_once = true;  // interp-only: no verify
                 blocks_[start_pc] = entry;
                 blocks_translated++;
+                block_profile.interp_only++;
                 make_executable();  // W^X: balance the make_writable() at entry
                 return nullptr;
             }
@@ -307,6 +324,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         entry.verified_once = true;  // skip verify for interp-only
         blocks_[start_pc] = entry;
         blocks_translated++;
+        block_profile.interp_only++;
         make_executable();  // W^X: balance the make_writable() at entry
         return nullptr;
     }

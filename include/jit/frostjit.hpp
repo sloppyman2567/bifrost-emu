@@ -161,6 +161,21 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
+    // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
+    // blocks stop early. avg instructions/block is the JIT's #1 dispatch
+    // overhead lever, and these counters reveal whether blocks split at
+    // natural branches (guest code structure) or because of JIT caps
+    // (entry-point hits, CALL_INTERP/BL_CALL limits, the 32-instr
+    // register-pressure cap).
+    struct BlockProfile {
+        std::atomic<uint64_t> natural_branch{0};
+        std::atomic<uint64_t> entry_point{0};
+        std::atomic<uint64_t> call_interp_cap{0};
+        std::atomic<uint64_t> bl_call_cap{0};
+        std::atomic<uint64_t> max_size{0};
+        std::atomic<uint64_t> decode_fail{0};
+        std::atomic<uint64_t> interp_only{0};
+    } block_profile;
     // Loop watchdog state — thread-local so multiple threads sharing a
     // single FrostJIT instance (shared-JIT mode) don't corrupt each
     // other's counters. Resets on any different PC; if the same PC runs
@@ -245,6 +260,12 @@ public:
     // detect. The counter map is bounded by HOT_PC_MAP_MAX to prevent
     // unbounded memory growth; eviction is LRU-ish (clear on overflow).
     // Thread-local for the same reason as the watchdog.
+    //
+    // v1.5.1: runtime promotion is DISABLED by default (BIFROST_HOT_INTERP
+    // opts back in). The translator already marks CALL_INTERP-heavy blocks
+    // interp_only, and demoting hot mixed blocks (1-2 fallbacks + natives)
+    // measured slower on the real game (~8-10%) because it drags native
+    // ops down to interpreter speed.
     static constexpr uint32_t HOT_PC_THRESHOLD = 5000;
     static constexpr size_t   HOT_PC_MAP_MAX   = 65536;
     static thread_local std::unordered_map<uint64_t, uint32_t> tls_hot_pc_counts_;

@@ -191,6 +191,62 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
         }
         const DecodedInst& d = *dp;
+        // ── BIFROST_CLASS_PROF: dynamic per-class instruction histogram ─
+        // Run the guest in interpreter mode (BIFROST_NO_JIT=1) with this
+        // set to see which instruction classes dominate. Prints every
+        // 20M instructions. Array sized past SYS_NOP (last enum value).
+        {
+            static uint64_t class_counts_[128] = {0};
+            static bool class_prof_en_ = (std::getenv("BIFROST_CLASS_PROF") != nullptr);
+            if (class_prof_en_) {
+                int ci = (int)d.cls;
+                if (ci >= 0 && ci < 128) class_counts_[ci]++;
+                static uint64_t since_print_ = 0;
+                if (++since_print_ >= 20000000) {
+                    since_print_ = 0;
+                    fprintf(stderr, "[classprof]");
+                    for (int i = 0; i < (int)InstClass::SYS_NOP + 1; i++) {
+                        if (class_counts_[i]) {
+                            fprintf(stderr, " %s=%llu",
+                                    i == (int)InstClass::SIMD_DP ? "SIMD_DP" :
+                                    i == (int)InstClass::FP_SCALAR ? "FP_SCALAR" :
+                                    i == (int)InstClass::LDR_IMM ? "LDR_IMM" :
+                                    i == (int)InstClass::LDR_UNS ? "LDR_UNS" :
+                                    i == (int)InstClass::LDR_REG ? "LDR_REG" :
+                                    i == (int)InstClass::STR_IMM ? "STR_IMM" :
+                                    i == (int)InstClass::STR_UNS ? "STR_UNS" :
+                                    i == (int)InstClass::STR_REG ? "STR_REG" :
+                                    i == (int)InstClass::ADD_REG ? "ADD_REG" :
+                                    i == (int)InstClass::SUB_REG ? "SUB_REG" :
+                                    i == (int)InstClass::ADD_IMM ? "ADD_IMM" :
+                                    i == (int)InstClass::SUB_IMM ? "SUB_IMM" :
+                                    i == (int)InstClass::ADDS_REG ? "ADDS_REG" :
+                                    i == (int)InstClass::SUBS_REG ? "SUBS_REG" :
+                                    i == (int)InstClass::ADDS_IMM ? "ADDS_IMM" :
+                                    i == (int)InstClass::SUBS_IMM ? "SUBS_IMM" :
+                                    i == (int)InstClass::AND_REG ? "AND_REG" :
+                                    i == (int)InstClass::B ? "B" :
+                                    i == (int)InstClass::BL ? "BL" :
+                                    i == (int)InstClass::Bcond ? "Bcond" :
+                                    i == (int)InstClass::CBZ ? "CBZ" :
+                                    i == (int)InstClass::CBNZ ? "CBNZ" :
+                                    i == (int)InstClass::MOVZ ? "MOVZ" :
+                                    i == (int)InstClass::MOVK ? "MOVK" :
+                                    i == (int)InstClass::LDP ? "LDP" :
+                                    i == (int)InstClass::STP ? "STP" :
+                                    i == (int)InstClass::LDR_UNS ? "LDR_UNS" :
+                                    i == (int)InstClass::RET ? "RET" :
+                                    i == (int)InstClass::SVC ? "SVC" :
+                                    i == (int)InstClass::LSR ? "LSR" :
+                                    i == (int)InstClass::LSL ? "LSL" :
+                                    "?",
+                                    (unsigned long long)class_counts_[i]);
+                        }
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
+        }
         switch (d.cls) {
             // ── ADC/ADCS/SBC/SBCS (add/subtract with carry) ──────────
             // These were previously unimplemented and
