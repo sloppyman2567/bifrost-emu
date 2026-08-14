@@ -53,15 +53,18 @@ public:
     static constexpr size_t MAX_TOTAL_PAGES = 1ULL * 1024 * 1024; // 4 GiB
     static constexpr uint64_t MAX_MMAP_LENGTH = 4ULL * 1024 * 1024 * 1024;
     static constexpr uint64_t NULL_PAGE_LIMIT = PAGE_SIZE;
-    // v1.5.2: Guest heap + stack live INSIDE the 4 GiB direct window so
-    // the JIT fast path (direct window memcpy) covers them. The previous
-    // layout put the heap at 0x5000000000 and the stack at 0x8000000000
-    // — both ABOVE the window — so every heap/stack access went through
-    // the pages_ + rwlock slow path, which dominated the profile.
-    // The ELF image + brk stay in the low region (they always were).
-    static constexpr uint64_t MMAP_BASE_MIN = 0x5000000000ULL;   // OLD: high mmap
-    static constexpr uint64_t MMAP_BASE_MAX = 0x5FFFF00000ULL;   // OLD: high top
-    static constexpr uint64_t STACK_TOP = 0x8000000000ULL;       // OLD: high stack
+    // Guest heap + stack live INSIDE the 4 GiB direct window so the JIT
+    // fast path (direct window memcpy) covers them. The layout formerly
+    // put the heap at 0x5000000000 and the stack at 0x8000000000 — both
+    // ABOVE the window — so every heap/stack access went through the
+    // pages_ + rwlock slow path, which dominated the profile (the voxel
+    // game ran ~2 MIPS with the JIT). The ELF image + brk stay in the
+    // low region (they always were). Heap range 256..768 MiB, stack ends
+    // at 1008 MiB (spans 944..1008 MiB) — no overlap, ~176 MiB headroom
+    // below the stack if the heap outgrows MMAP_BASE_MAX.
+    static constexpr uint64_t MMAP_BASE_MIN = 0x10000000ULL;     // 256 MiB
+    static constexpr uint64_t MMAP_BASE_MAX = 0x30000000ULL;     // 768 MiB
+    static constexpr uint64_t STACK_TOP = 0x3F000000ULL;         // 1008 MiB
     static constexpr uint64_t STACK_SIZE = 64 * 1024 * 1024;   // 64 MiB
     Memory();
     ~Memory();

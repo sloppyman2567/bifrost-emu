@@ -692,7 +692,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         for (uint64_t a = sp & ~0x7ULL; a < sp + 8192 && nsc < 24; a += 8) {
                             uint64_t w = 0;
                             try { w = mem_.load_64(a); } catch (...) { break; }
-                            if (w >= 0x5000000000ULL && w <= 0x5100000000ULL) {
+                            if (w >= Memory::MMAP_BASE_MIN && w <= Memory::MMAP_BASE_MAX) {
                                 fprintf(stderr, "  [%#llx] w=%#llx\n", (unsigned long long)a, (unsigned long long)w);
                                 nsc++;
                             }
