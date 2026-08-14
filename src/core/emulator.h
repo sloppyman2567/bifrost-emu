@@ -503,12 +503,12 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
-    // 1.5.2-alpha: wire the GraphicThunk's cursor-callback runner to a
-    // borrow-CPU guest invocation (save/restore CPU, set x0/window +
-    // d0/d1 = cursor x/y, pc = callback, run step() to the sentinel LR).
+    // 1.5.2-alpha: wire the GraphicThunk's GLFW-callback runner to a
+    // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
+    // d0..=fargs, pc = callback, run step() to the sentinel LR).
     // Called after the thunk is initialized on both the dynamic-linker
     // and static-ELF paths.
-    void wire_thunk_cursor_cb_runner_();
+    void wire_thunk_glfw_cb_runner_();
     static std::string to_hex(uint64_t v) {
         char b[32]; snprintf(b, sizeof(b), "%llx", static_cast<unsigned long long>(v));
         return b;

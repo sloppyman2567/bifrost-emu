@@ -166,22 +166,55 @@ struct GraphicThunkImpl {
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).
     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
-    // 1.5.2-alpha: GLFW cursor-position callback delivery. guest window
-    // handle → guest callback address, as registered via
-    // glfwSetCursorPosCallback (CURSOR_CB policy). dispatch() fires the
-    // callback after glfwPollEvents/glfwWaitEvents (GLFW_POLL policy)
-    // when the host cursor position changed.
-    std::unordered_map<uint64_t, uint64_t> glfw_cursor_cbs_;
-    // Last position delivered per window, so the callback only fires on
-    // real motion (GLFW semantics — the game computes per-frame deltas).
+    // 1.5.2-alpha: generic GLFW callback delivery. Each glfwSetXxxCallback
+    // is a *_CB-policy symbol: dispatch() stores the guest callback here
+    // instead of handing it to host GLFW (host can't invoke guest AArch64
+    // callbacks). After glfwPollEvents/glfwWaitEvents (GLFW_POLL policy),
+    // deliver_glfw_callbacks_() reads the host state, detects changes, and
+    // fires the stored guest callbacks via the borrow-CPU runner.
+    struct GlfwWindowCbs {
+        uint64_t cursor = 0;       // (window, x, y)
+        uint64_t key = 0;          // (window, key, scancode, action, mods)
+        uint64_t mouse = 0;        // (window, button, action, mods)
+        uint64_t framebuffer = 0;  // (window, w, h)
+        uint64_t window_size = 0;  // (window, w, h)
+        uint64_t focus = 0;        // (window, focused)
+    };
+    std::unordered_map<uint64_t, GlfwWindowCbs> glfw_cbs_;
+    // Error callback is global (no window): void(int code, const char* desc).
+    uint64_t glfw_error_cb_ = 0;
+    // Last delivered host state per window for change detection. The
+    // first poll only seeds (no spurious callback at startup), matching
+    // GLFW semantics: callbacks fire on real events only.
     std::unordered_map<uint64_t, std::pair<double, double>> glfw_cursor_last_;
-    // Host glfwGetCursorPos, resolved at init (GLFW is dlopen'd by
-    // register_known_symbols_). The dispatch's CURSOR_CB/GLFW_POLL path
-    // needs the raw host fn, not the entry's (which is the trampoline).
+    std::unordered_map<uint64_t, std::vector<uint8_t>> glfw_key_last_;
+    std::unordered_map<uint64_t, uint32_t> glfw_mouse_last_;
+    std::unordered_map<uint64_t, std::pair<int, int>> glfw_fb_last_;
+    std::unordered_map<uint64_t, std::pair<int, int>> glfw_winsz_last_;
+    std::unordered_map<uint64_t, bool> glfw_focus_last_;
+    // Raw host GLFW fns, resolved at init (GLFW is dlopen'd by
+    // register_known_symbols_). The GLFW_POLL delivery path needs the raw
+    // host fns, not the entries' (which are trampolines).
     void* glfw_get_cursor_pos_fn_ = nullptr;
-    // Borrow-CPU runner installed by the Emulator to invoke the stored
-    // guest cursor callback (see GraphicThunk::CursorCbRunner).
-    GraphicThunk::CursorCbRunner cursor_cb_runner_;
+    void* glfw_get_key_fn_ = nullptr;
+    void* glfw_get_mouse_button_fn_ = nullptr;
+    void* glfw_get_window_size_fn_ = nullptr;
+    void* glfw_get_framebuffer_size_fn_ = nullptr;
+    void* glfw_get_window_attrib_fn_ = nullptr;
+    void* glfw_set_error_callback_fn_ = nullptr;
+    // 1.5.3-alpha: glfwCreateWindow HiDPI compensation. Resolved at init.
+    void* glfw_get_window_content_scale_fn_ = nullptr;
+    void* glfw_set_window_size_fn_ = nullptr;
+    // Last error captured from host GLFW's error callback (ERROR_CB
+    // delivery). Cleared after each delivery.
+    int glfw_last_error_code_ = 0;
+    std::string glfw_last_error_desc_;
+    // Last error actually forwarded to the guest, for change-dedup.
+    int glfw_last_delivered_err_code_ = 0;
+    std::string glfw_last_delivered_err_desc_;
+    // Borrow-CPU runner installed by the Emulator to invoke stored guest
+    // GLFW callbacks (see GraphicThunk::GlfwCbRunner).
+    GraphicThunk::GlfwCbRunner glfw_cb_runner_;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -208,45 +241,181 @@ struct GraphicThunkImpl {
             (string_cache_off + len + 7u) & ~7u);
         return guest;
     }
-    // Deliver stored GLFW cursor callbacks after a host poll. For each
-    // registered (window → guest_cb), read the host cursor position; if
-    // it changed since the last delivery, invoke the guest callback via
-    // the borrow-CPU runner. GLFW semantics: the callback fires on
-    // motion only (the game computes per-frame deltas from it). The
-    // first poll only seeds the last-delivered position (no callback) so
-    // the game doesn't see a spurious delta at startup.
-    void deliver_glfw_cursor_callbacks_(CPU& cpu) {
-        if (!cursor_cb_runner_ || !glfw_get_cursor_pos_fn_ ||
-            glfw_cursor_cbs_.empty()) {
+    // Deliver stored GLFW callbacks after a host poll. For each
+    // registered window, read the host state (cursor position, key/button
+    // state, framebuffer/window size, focus) and fire any callback whose
+    // value changed since the last delivery. The first poll only seeds
+    // (no spurious callback at startup), matching GLFW semantics — the
+    // game computes per-frame mouse deltas from the cursor callback.
+    void deliver_glfw_callbacks_(CPU& cpu) {
+        if (!glfw_cb_runner_) return;
+        // ── Error callback (global, no window) ────────────────────────
+        // Dedup: only forward when the code or description CHANGED since
+        // the last delivery. The game polls glfwGetKey for keys < 32
+        // (invalid in GLFW), which host GLFW flags as an error on every
+        // poll — forwarding each would spam the guest error callback.
+        if (glfw_error_cb_ && glfw_last_error_code_ != 0 &&
+            (glfw_last_error_code_ != glfw_last_delivered_err_code_ ||
+             glfw_last_error_desc_ != glfw_last_delivered_err_desc_)) {
+            int64_t iargs[2];
+            iargs[0] = glfw_last_error_code_;
+            iargs[1] = cache_host_string_(glfw_last_error_desc_.c_str());
             if (dbg().thunk_trace)
-                fprintf(stderr, "[thunk] deliver: skip (%d %d %d)\n",
-                        !!cursor_cb_runner_, !!glfw_get_cursor_pos_fn_,
-                        (int)glfw_cursor_cbs_.size());
-            return;
+                fprintf(stderr, "[thunk] error cb → 0x%llx (%d, \"%s\")\n",
+                        static_cast<unsigned long long>(glfw_error_cb_),
+                        glfw_last_error_code_, glfw_last_error_desc_.c_str());
+            glfw_cb_runner_(cpu, glfw_error_cb_, iargs, 2, nullptr, 0);
+            glfw_last_delivered_err_code_ = glfw_last_error_code_;
+            glfw_last_delivered_err_desc_ = glfw_last_error_desc_;
         }
+        glfw_last_error_code_ = 0;
+        glfw_last_error_desc_.clear();
+        if (glfw_cbs_.empty()) return;
         using GetPosFn = void (*)(void*, double*, double*);
+        using GetKeyFn = int (*)(void*, int);
+        using GetSizeFn = void (*)(void*, int*, int*);
+        using GetAttribFn = int (*)(void*, int);
         auto getpos = reinterpret_cast<GetPosFn>(glfw_get_cursor_pos_fn_);
-        for (auto& [window, cb] : glfw_cursor_cbs_) {
-            if (cb == 0) continue;
-            double x = 0.0, y = 0.0;
-            getpos(reinterpret_cast<void*>(window), &x, &y);
-            auto it = glfw_cursor_last_.find(window);
-            if (it == glfw_cursor_last_.end()) {
-                // First poll for this window: seed, don't fire.
-                glfw_cursor_last_[window] = {x, y};
-                if (dbg().thunk_trace)
-                    fprintf(stderr, "[thunk] deliver: seed (%.2f, %.2f)\n", x, y);
-                continue;
+        auto getkey = reinterpret_cast<GetKeyFn>(glfw_get_key_fn_);
+        auto getbtn = reinterpret_cast<GetKeyFn>(glfw_get_mouse_button_fn_);
+        auto getsz  = reinterpret_cast<GetSizeFn>(glfw_get_window_size_fn_);
+        auto getfbs = reinterpret_cast<GetSizeFn>(glfw_get_framebuffer_size_fn_);
+        auto getat  = reinterpret_cast<GetAttribFn>(glfw_get_window_attrib_fn_);
+        constexpr int GLFW_FOCUSED = 0x00020001;
+        constexpr int GLFW_KEY_SPACE = 32;
+        constexpr int GLFW_KEY_LAST = 348;
+        constexpr int GLFW_MOUSE_BUTTON_LAST = 7;
+        constexpr int GLFW_RELEASE = 0, GLFW_PRESS = 1;
+        for (auto& [window, cbs] : glfw_cbs_) {
+            void* w = reinterpret_cast<void*>(window);
+            int64_t iargs[8];
+            double fargs[2];
+            // ── Cursor position ────────────────────────────────────────
+            if (cbs.cursor && getpos) {
+                double x = 0.0, y = 0.0;
+                getpos(w, &x, &y);
+                auto it = glfw_cursor_last_.find(window);
+                if (it == glfw_cursor_last_.end()) {
+                    glfw_cursor_last_[window] = {x, y};  // seed
+                } else if (it->second.first != x || it->second.second != y) {
+                    it->second = {x, y};
+                    int64_t warg = static_cast<int64_t>(window);
+                    fargs[0] = x; fargs[1] = y;
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] cursor cb → 0x%llx (%.2f, %.2f)\n",
+                                static_cast<unsigned long long>(cbs.cursor), x, y);
+                    glfw_cb_runner_(cpu, cbs.cursor, &warg, 1, fargs, 2);
+                }
             }
-            if (it->second.first == x && it->second.second == y) {
-                continue;  // no motion since last poll
+            // ── Keyboard state ─────────────────────────────────────────
+            if (cbs.key && getkey) {
+                auto it = glfw_key_last_.find(window);
+                if (it == glfw_key_last_.end()) {
+                    // First poll: seed current state, don't fire (GLFW
+                    // semantics — no spurious PRESS for keys already held).
+                    std::vector<uint8_t> seed(GLFW_KEY_LAST, 0);
+                    for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++)
+                        seed[k] = (getkey(w, k) == GLFW_PRESS) ? 1 : 0;
+                    glfw_key_last_[window] = std::move(seed);
+                    continue;
+                }
+                auto& last = it->second;
+                // glfwGetKey only accepts keys >= GLFW_KEY_SPACE (32);
+                // polling 0-31 makes host GLFW fire "Invalid key" errors.
+                for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++) {
+                    int cur = getkey(w, k);
+                    uint8_t pressed = (cur == GLFW_PRESS) ? 1 : 0;
+                    if (last[k] != pressed) {
+                        last[k] = pressed;
+                        iargs[0] = window; iargs[1] = k; iargs[2] = 0;  // scancode
+                        iargs[3] = pressed ? GLFW_PRESS : GLFW_RELEASE; // action
+                        iargs[4] = 0;                                   // mods
+                        if (dbg().thunk_trace)
+                            fprintf(stderr, "[thunk] key cb → 0x%llx (%d, %s)\n",
+                                    static_cast<unsigned long long>(cbs.key), k,
+                                    pressed ? "PRESS" : "RELEASE");
+                        glfw_cb_runner_(cpu, cbs.key, iargs, 5, nullptr, 0);
+                    }
+                }
             }
-            it->second = {x, y};
-            if (dbg().thunk_trace) {
-                fprintf(stderr, "[thunk] cursor cb → 0x%llx (%.2f, %.2f)\n",
-                        static_cast<unsigned long long>(cb), x, y);
+            // ── Mouse button state ─────────────────────────────────────
+            if (cbs.mouse && getbtn) {
+                auto it = glfw_mouse_last_.find(window);
+                if (it == glfw_mouse_last_.end()) {
+                    // First poll: seed current state, don't fire.
+                    uint32_t seed = 0;
+                    for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST; b++)
+                        if (getbtn(w, b) == GLFW_PRESS) seed |= (1u << b);
+                    glfw_mouse_last_[window] = seed;
+                    continue;
+                }
+                uint32_t last = it->second;
+                for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST; b++) {
+                    int cur = getbtn(w, b);
+                    uint8_t pressed = (cur == GLFW_PRESS) ? 1 : 0;
+                    uint32_t bit = 1u << b;
+                    if (!!(last & bit) != pressed) {
+                        if (pressed) last |= bit; else last &= ~bit;
+                        iargs[0] = window; iargs[1] = b;
+                        iargs[2] = pressed ? GLFW_PRESS : GLFW_RELEASE;
+                        iargs[3] = 0;  // mods
+                        if (dbg().thunk_trace)
+                            fprintf(stderr, "[thunk] mouse cb → 0x%llx (btn %d, %s)\n",
+                                    static_cast<unsigned long long>(cbs.mouse), b,
+                                    pressed ? "PRESS" : "RELEASE");
+                        glfw_cb_runner_(cpu, cbs.mouse, iargs, 4, nullptr, 0);
+                    }
+                }
+                it->second = last;
             }
-            cursor_cb_runner_(cpu, cb, window, x, y);
+            // ── Framebuffer size ───────────────────────────────────────
+            if (cbs.framebuffer && getfbs) {
+                int fbw = 0, fbh = 0;
+                getfbs(w, &fbw, &fbh);
+                auto it = glfw_fb_last_.find(window);
+                if (it == glfw_fb_last_.end()) {
+                    glfw_fb_last_[window] = {fbw, fbh};  // seed
+                } else if (it->second.first != fbw || it->second.second != fbh) {
+                    it->second = {fbw, fbh};
+                    iargs[0] = window; iargs[1] = fbw; iargs[2] = fbh;
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] fb cb → 0x%llx (%d, %d)\n",
+                                static_cast<unsigned long long>(cbs.framebuffer), fbw, fbh);
+                    glfw_cb_runner_(cpu, cbs.framebuffer, iargs, 3, nullptr, 0);
+                }
+            }
+            // ── Window size ────────────────────────────────────────────
+            if (cbs.window_size && getsz) {
+                int ww = 0, wh = 0;
+                getsz(w, &ww, &wh);
+                auto it = glfw_winsz_last_.find(window);
+                if (it == glfw_winsz_last_.end()) {
+                    glfw_winsz_last_[window] = {ww, wh};  // seed
+                } else if (it->second.first != ww || it->second.second != wh) {
+                    it->second = {ww, wh};
+                    iargs[0] = window; iargs[1] = ww; iargs[2] = wh;
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] winsz cb → 0x%llx (%d, %d)\n",
+                                static_cast<unsigned long long>(cbs.window_size), ww, wh);
+                    glfw_cb_runner_(cpu, cbs.window_size, iargs, 3, nullptr, 0);
+                }
+            }
+            // ── Window focus ───────────────────────────────────────────
+            if (cbs.focus && getat) {
+                bool focused = getat(w, GLFW_FOCUSED) != 0;
+                auto it = glfw_focus_last_.find(window);
+                if (it == glfw_focus_last_.end()) {
+                    glfw_focus_last_[window] = focused;  // seed
+                } else if (it->second != focused) {
+                    it->second = focused;
+                    iargs[0] = window; iargs[1] = focused ? 1 : 0;
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] focus cb → 0x%llx (%d)\n",
+                                static_cast<unsigned long long>(cbs.focus),
+                                focused ? 1 : 0);
+                    glfw_cb_runner_(cpu, cbs.focus, iargs, 2, nullptr, 0);
+                }
+            }
         }
     }
 };
@@ -430,27 +599,62 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
-    // ── GLFW cursor-position callback registration ───────────────────
+    // ── GLFW callback registration (CURSOR_CB/KEY_CB/MOUSE_CB/…) ─────
     // 1.5.2-alpha: the guest callback is AArch64 code host GLFW cannot
     // invoke, so we store it keyed by window and deliver it from the
     // GLFW_POLL path. NEVER hand the guest address to host
-    // glfwSetCursorPosCallback — the host would call it as x86-64
-    // (SIGSEGV). cpu.regs[0]=window handle, cpu.regs[1]=guest callback.
-    if (entry.spec && entry.spec->policy == thunk::Policy::CURSOR_CB) {
-        uint64_t window = cpu.regs[0];
-        uint64_t guest_cb = cpu.regs[1];
-        if (guest_cb == 0) {
-            impl_->glfw_cursor_cbs_.erase(window);
-        } else {
-            impl_->glfw_cursor_cbs_[window] = guest_cb;
+    // glfwSetCursorPosCallback etc — the host would call it as x86-64
+    // (SIGSEGV). cpu.regs[0]=window handle (except ERROR_CB, global),
+    // cpu.regs[1]=guest callback.
+    if (entry.spec) {
+        thunk::Policy pol = entry.spec->policy;
+        if (pol == thunk::Policy::CURSOR_CB || pol == thunk::Policy::KEY_CB ||
+            pol == thunk::Policy::MOUSE_CB || pol == thunk::Policy::FRAMEBUFFER_CB ||
+            pol == thunk::Policy::WINDOW_SIZE_CB || pol == thunk::Policy::FOCUS_CB ||
+            pol == thunk::Policy::ERROR_CB) {
+            if (pol == thunk::Policy::ERROR_CB) {
+                // Global callback, single arg: glfwSetErrorCallback(cb).
+                impl_->glfw_error_cb_ = cpu.regs[0];
+                if (dbg().thunk_trace) {
+                    fprintf(stderr, "[thunk] glfwSetErrorCallback cb=0x%llx\n",
+                            static_cast<unsigned long long>(cpu.regs[0]));
+                }
+                cpu.regs[0] = 0;
+                return 0;
+            }
+            uint64_t window = cpu.regs[0];
+            uint64_t guest_cb = cpu.regs[1];
+            auto& cbs = impl_->glfw_cbs_[window];
+            uint64_t* slot = nullptr;
+            switch (pol) {
+                case thunk::Policy::CURSOR_CB:       slot = &cbs.cursor; break;
+                case thunk::Policy::KEY_CB:          slot = &cbs.key; break;
+                case thunk::Policy::MOUSE_CB:        slot = &cbs.mouse; break;
+                case thunk::Policy::FRAMEBUFFER_CB:  slot = &cbs.framebuffer; break;
+                case thunk::Policy::WINDOW_SIZE_CB:  slot = &cbs.window_size; break;
+                case thunk::Policy::FOCUS_CB:        slot = &cbs.focus; break;
+                default: break;
+            }
+            if (slot) {
+                *slot = guest_cb;
+                if (guest_cb == 0) {
+                    // Unregister: drop the window entry if all slots empty.
+                    if (cbs.cursor == 0 && cbs.key == 0 && cbs.mouse == 0 &&
+                        cbs.framebuffer == 0 && cbs.window_size == 0 &&
+                        cbs.focus == 0) {
+                        impl_->glfw_cbs_.erase(window);
+                    }
+                }
+            }
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] %s: window=0x%llx cb=0x%llx\n",
+                        entry.name.c_str(),
+                        static_cast<unsigned long long>(window),
+                        static_cast<unsigned long long>(guest_cb));
+            }
+            cpu.regs[0] = 0;
+            return 0;
         }
-        if (dbg().thunk_trace) {
-            fprintf(stderr, "[thunk] cursor cb: window=0x%llx cb=0x%llx\n",
-                    static_cast<unsigned long long>(window),
-                    static_cast<unsigned long long>(guest_cb));
-        }
-        cpu.regs[0] = 0;
-        return 0;
     }
 
     // ── Float-only AAPCS64 path (glClearColor, glVertex3f, …) ────────
@@ -729,6 +933,53 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // ── glfwCreateWindow HiDPI compensation ───────────────────────────
+    // 1.5.3-alpha: the game requests a LOGICAL window size (1280x720),
+    // but on HiDPI sessions (KDE Scale=2, Wayland/X11) host GLFW makes
+    // the PHYSICAL framebuffer scale * the request (2560x1440), and
+    // window.c then adopts the framebuffer size as window.size — the
+    // game runs at double resolution and the HUD/matrices are laid out
+    // for a fullscreen-scale window. Resize the host window by
+    // 1/content_scale so glfwGetFramebufferSize returns exactly the
+    // requested size. args[2] (title) was translated to a host pointer
+    // by the pointer-args loop above.
+    if (entry.spec && entry.spec->policy == thunk::Policy::GLFW_CREATE) {
+        if (!impl_->glfw_get_window_content_scale_fn_ ||
+            !impl_->glfw_set_window_size_fn_ || !entry.host_fn) {
+            if (dbg().thunk_trace)
+                fprintf(stderr, "[thunk] glfwCreateWindow: host fns unavailable\n");
+            cpu.regs[0] = 0;
+            return 0;
+        }
+        using CreateFn = uint64_t (*)(int, int, const char*, uint64_t, uint64_t);
+        uint64_t win = reinterpret_cast<CreateFn>(entry.host_fn)(
+            static_cast<int>(args[0]), static_cast<int>(args[1]),
+            reinterpret_cast<const char*>(args[2]), args[3], args[4]);
+        cpu.regs[0] = win;
+        if (win) {
+            float xs = 1.0f, ys = 1.0f;
+            using ScaleFn = void (*)(uint64_t, float*, float*);
+            reinterpret_cast<ScaleFn>(impl_->glfw_get_window_content_scale_fn_)(
+                win, &xs, &ys);
+            if (xs > 1.01f || ys > 1.01f) {
+                int nw = static_cast<int>(static_cast<int64_t>(args[0]) / xs + 0.5f);
+                int nh = static_cast<int>(static_cast<int64_t>(args[1]) / ys + 0.5f);
+                using SizeFn = void (*)(uint64_t, int, int);
+                reinterpret_cast<SizeFn>(impl_->glfw_set_window_size_fn_)(win, nw, nh);
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] glfwCreateWindow %llux%llu -> resize "
+                            "%dx%d (scale %.2f)\n",
+                            static_cast<unsigned long long>(args[0]),
+                            static_cast<unsigned long long>(args[1]), nw, nh, xs);
+            } else if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] glfwCreateWindow %llux%llu (scale %.2f)\n",
+                        static_cast<unsigned long long>(args[0]),
+                        static_cast<unsigned long long>(args[1]), xs);
+            }
+        }
+        return 0;
+    }
+
     // VA_PTR/EL_PTR: these take a *byte offset* into the bound buffer (must
     // NOT be translated) when a buffer is bound, but a real guest pointer
     // for client-side vertex / index arrays (must be translated).
@@ -878,7 +1129,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // computes per-frame mouse deltas from them, which drives camera
     // look). The guest callback runs via the borrow-CPU runner.
     if (entry.spec && entry.spec->policy == thunk::Policy::GLFW_POLL) {
-        impl_->deliver_glfw_cursor_callbacks_(cpu);
+        impl_->deliver_glfw_callbacks_(cpu);
     }
 
     // Track SDL_Texture* dimensions for SDL_UpdateTexture bounce sizing
@@ -931,13 +1182,20 @@ uint64_t GraphicThunk::trampoline_base() const {
     if (!impl_) return 0;
     return impl_->trampoline_base;
 }
-// ── set_cursor_cb_runner — guest cursor-callback delivery hook ───────
-void GraphicThunk::set_cursor_cb_runner(CursorCbRunner runner) {
+// ── set_glfw_cb_runner — guest GLFW-callback delivery hook ───────────
+void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {
     if (!impl_) return;
-    impl_->cursor_cb_runner_ = std::move(runner);
-    // Fresh registration: drop any stale last-delivered positions so a
-    // newly-wired runner doesn't skip the first motion event.
+    impl_->glfw_cb_runner_ = std::move(runner);
+    // Fresh registration: drop stale last-delivered state so a newly-
+    // wired runner doesn't skip the first motion/size event.
     impl_->glfw_cursor_last_.clear();
+    impl_->glfw_key_last_.clear();
+    impl_->glfw_mouse_last_.clear();
+    impl_->glfw_fb_last_.clear();
+    impl_->glfw_winsz_last_.clear();
+    impl_->glfw_focus_last_.clear();
+    impl_->glfw_last_delivered_err_code_ = 0;
+    impl_->glfw_last_delivered_err_desc_.clear();
 }
 // ── register_known_symbols_ — populate the registry ────────────────────
 // Called once by init(). Each entry maps a (library, symbol) pair to
@@ -952,12 +1210,6 @@ void GraphicThunk::set_cursor_cb_runner(CursorCbRunner runner) {
 // n_float / flags) from the ARGS column and registers each symbol under
 // every soname of its family. Adding a symbol is now a one-line spec row,
 // not a REG_* macro + a dispatch() special case.
-namespace {
-intptr_t thunk_cb_stub(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
-    (void)a0; (void)a1; (void)a2; (void)a3;
-    return 0;
-}
-} // namespace
 
 void GraphicThunk::register_known_symbols_() {
 #if defined(BIFROST_THUNK_HAVE_GL)
@@ -1003,24 +1255,60 @@ void GraphicThunk::register_known_symbols_() {
         if (!h && dbg().thunk_trace)
             fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
     }
-    // Cursor-callback delivery needs the raw host glfwGetCursorPos (the
-    // GLFW_POLL dispatch path reads the host cursor each poll to decide
-    // whether the guest callback should fire).
+    // GLFW callback delivery needs the raw host state-query fns (the
+    // GLFW_POLL dispatch path reads them to decide whether guest
+    // callbacks should fire). These are resolved once at init.
     impl_->glfw_get_cursor_pos_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetCursorPos") : nullptr;
+    impl_->glfw_get_key_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetKey") : nullptr;
+    impl_->glfw_get_mouse_button_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetMouseButton") : nullptr;
+    impl_->glfw_get_window_size_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetWindowSize") : nullptr;
+    impl_->glfw_get_framebuffer_size_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetFramebufferSize") : nullptr;
+    impl_->glfw_get_window_attrib_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetWindowAttrib") : nullptr;
+    impl_->glfw_set_error_callback_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwSetErrorCallback") : nullptr;
+    impl_->glfw_get_window_content_scale_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetWindowContentScale") : nullptr;
+    impl_->glfw_set_window_size_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwSetWindowSize") : nullptr;
+
+    // Install a HOST-side error-capture trampoline so real GLFW errors
+    // (from host libglfw itself) are recorded and later forwarded to the
+    // guest's glfwSetErrorCallback. We MUST NOT hand the guest callback
+    // to host GLFW (it's AArch64), so dispatch() stores it and this
+    // host trampoline feeds the shared error slot. Requires a global
+    // pointer to the impl (single emulator per process).
+    static GraphicThunkImpl* host_err_sink = nullptr;
+    host_err_sink = impl_.get();
+    impl_->glfw_last_error_code_ = 0;
+    impl_->glfw_last_error_desc_.clear();
+    if (impl_->glfw_set_error_callback_fn_) {
+        using SetErrCbFn = void (*)(void (*)(int, const char*));
+        auto setcb = reinterpret_cast<SetErrCbFn>(impl_->glfw_set_error_callback_fn_);
+        setcb([](int code, const char* desc) {
+            if (!host_err_sink) return;
+            host_err_sink->glfw_last_error_code_ = code;
+            host_err_sink->glfw_last_error_desc_ =
+                desc ? desc : std::string();
+        });
+    }
 
     for (const thunk::Spec& spec : thunk::specs) {
         const FamilyDef& fd = kFamilies[static_cast<int>(spec.lib)];
         // Host fn resolution: real dlsym when the host has the library,
-        // null stub otherwise. STUB policy overrides with the callback
-        // stub (guest callbacks can't be invoked by host code yet). GET_PROC
-        // must stay non-null: dispatch returns the trampoline before calling
-        // it, but a null host_fn short-circuits to 0 first.
+        // null stub otherwise. GET_PROC must stay non-null: dispatch
+        // returns the trampoline before calling it, but a null host_fn
+        // short-circuits to 0 first. GLFW *_CB setters are intercepted in
+        // dispatch() before the host-fn path (the guest callback is
+        // AArch64), so their host_fn is never used for the callback.
         void* host_fn = nullptr;
         if (fd.have) host_fn = dlsym(RTLD_DEFAULT, spec.name);
-        if (spec.policy == thunk::Policy::STUB) {
-            host_fn = reinterpret_cast<void*>(&thunk_cb_stub);
-        } else if (spec.policy == thunk::Policy::GET_PROC && !host_fn) {
+        if (spec.policy == thunk::Policy::GET_PROC && !host_fn) {
             host_fn = reinterpret_cast<void*>(1);
         }
 

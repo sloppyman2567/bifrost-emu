@@ -37,8 +37,22 @@
 #             EL_PTR         glDrawElements: translate arg3 iff no element
 #                            array buffer bound, else leave as byte offset
 #             PRESENT        frame-present/swap: BIFROST_FRAME_TRACE counter
-#             STUB           register a null-returning callback stub
-#                           (host never receives guest callback pointers)
+#             ERROR_CB       glfwSetErrorCallback (global, single arg): store
+#                            the guest cb; deliver after GLFW_POLL with dedup
+#             KEY_CB         glfwSetKeyCallback (window, cb): store + deliver
+#             MOUSE_CB       glfwSetMouseButtonCallback (window, cb)
+#             CURSOR_CB      glfwSetCursorPosCallback (window, cb)
+#             FRAMEBUFFER_CB glfwSetFramebufferSizeCallback (window, cb)
+#             WINDOW_SIZE_CB glfwSetWindowSizeCallback (window, cb)
+#             FOCUS_CB       glfwSetWindowFocusCallback (window, cb)
+#             GLFW_POLL      glfwPollEvents/glfwWaitEvents: after the host
+#                            call, deliver all stored *_CB callbacks whose
+#                            value changed since the last poll
+#             GLFW_CREATE    glfwCreateWindow: create the host window, then
+#                            compensate for the host content scale (HiDPI)
+#                            so the PHYSICAL framebuffer is exactly the
+#                            size the guest requested (1280x720 stays
+#                            1280x720 instead of 2560x1440 on 2x displays)
 # SIZE    : bounce-size policy for the z argument(s):
 #             -       default 64 KiB
 #             arg1    size = guest arg1 (glBufferData: data is arg2)
@@ -456,7 +470,7 @@ glfwInit                  GLFW   -             -     -              -
 glfwTerminate             GLFW   -             -     -              -
 glfwGetVersion            GLFW   i             -     -              -   # out int*; legacy int passthrough
 glfwWindowHint            GLFW   ii            -     -              -
-glfwCreateWindow          GLFW   iipii         -     -              -   # arg2: title string
+glfwCreateWindow          GLFW   iipii         -     GLFW_CREATE    -   # arg2: title string
 glfwDestroyWindow         GLFW   i             -     -              -
 glfwWindowShouldClose     GLFW   i             -     -              -
 glfwSetWindowShouldClose  GLFW   ii            -     -              -
@@ -482,11 +496,11 @@ glfwGetPrimaryMonitor     GLFW   -             -     -              -
 glfwGetVideoMode          GLFW   i             -     -              -
 glfwGetWindowPos          GLFW   ii            -     -              -
 glfwSetWindowPos          GLFW   iii           -     -              -
-glfwSetErrorCallback      GLFW   i             -     STUB           -
-glfwSetKeyCallback        GLFW   i             -     STUB           -
-glfwSetMouseButtonCallback GLFW  i             -     STUB           -
+glfwSetErrorCallback      GLFW   i             -     ERROR_CB       -
+glfwSetKeyCallback        GLFW   ii            -     KEY_CB         -
+glfwSetMouseButtonCallback GLFW  ii            -     MOUSE_CB       -
 glfwSetCursorPosCallback  GLFW   ii            -     CURSOR_CB      -
-glfwSetFramebufferSizeCallback GLFW i          -     STUB           -
-glfwSetWindowSizeCallback GLFW   i             -     STUB           -
-glfwSetWindowFocusCallback GLFW  i             -     STUB           -
+glfwSetFramebufferSizeCallback GLFW ii         -     FRAMEBUFFER_CB -
+glfwSetWindowSizeCallback GLFW   ii            -     WINDOW_SIZE_CB -
+glfwSetWindowFocusCallback GLFW  ii            -     FOCUS_CB       -
 glfwGetProcAddress        GLFW   p             -     GET_PROC       -

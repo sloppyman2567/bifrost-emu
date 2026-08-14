@@ -234,7 +234,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (auto* thunk = graphics_.thunk()) {
                 if (thunk->enabled()) {
                     thunk->init(mem_);
-                    wire_thunk_cursor_cb_runner_();
+                    wire_thunk_glfw_cb_runner_();
                 }
                 // Capture the thunk pointer (not `this`) so the
                 // callback doesn't depend on the Emulator's lifetime
@@ -708,7 +708,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         if (auto* thunk = graphics_.thunk()) {
             if (thunk->enabled()) {
                 thunk->init(mem_);
-                wire_thunk_cursor_cb_runner_();
+                wire_thunk_glfw_cb_runner_();
             }
         }
         if (auto* athunk = graphics_.audio_thunk()) {
@@ -1406,21 +1406,23 @@ void Emulator::step(CPU& cpu) {
 // queue_host_signal, host_signal_handler, drain_host_signals) is
 // implemented in src/core/signal.cpp — see that file for the full
 // disposition table.
-// ── wire_thunk_cursor_cb_runner_ — guest GLFW cursor callback ────────
-// 1.5.2-alpha. glfwSetCursorPosCallback registers a guest AArch64
-// callback; host GLFW can't invoke it, so GraphicThunk stores it and
-// asks us to run it after each glfwPollEvents/glfwWaitEvents with the
-// host cursor position. We borrow the CPU the same way the dynamic
-// linker's guest_call_args_ does (save/restore ALL state, run step()
-// in a loop to a sentinel LR), but set FP args for the cursor callback:
-//   x0 = window handle, d0 (v0 low 64) = x, d1 (v1 low 64) = y
-// The callback signature is `void(GLFWwindow*, double, double)`.
-void Emulator::wire_thunk_cursor_cb_runner_() {
+// ── wire_thunk_glfw_cb_runner_ — guest GLFW callback delivery ─────────
+// 1.5.2-alpha. glfwSetCursorPosCallback/glfwSetKeyCallback/… register
+// guest AArch64 callbacks; host GLFW can't invoke them, so GraphicThunk
+// stores them and asks us to run them after each
+// glfwPollEvents/glfwWaitEvents. We borrow the CPU the same way the
+// dynamic linker's guest_call_args_ does (save/restore ALL state, run
+// step() in a loop to a sentinel LR), passing the callback args in
+// integer (x0..) and FP (d0..) registers:
+//   void cb(GLFWwindow* w, ...)     → x0 = iargs[0] = window, …
+//   void errcb(int code, char* d)   → x0 = iargs[0], …
+void Emulator::wire_thunk_glfw_cb_runner_() {
     auto* thunk = graphics_.thunk();
     if (!thunk || !thunk->enabled()) return;
-    thunk->set_cursor_cb_runner(
-        [this](CPU& cpu, uint64_t fn, uint64_t window,
-               double x, double y) -> uint64_t {
+    thunk->set_glfw_cb_runner(
+        [this](CPU& cpu, uint64_t fn, const int64_t* iargs,
+               size_t n_iargs, const double* fargs,
+               size_t n_fargs) -> uint64_t {
             if (fn == 0) return 0;
             struct SavedState {
                 uint64_t regs[32];
@@ -1477,12 +1479,13 @@ void Emulator::wire_thunk_cursor_cb_runner_() {
             constexpr uint64_t SENTINEL_LR = 0x1000;
             cpu.pc = fn;
             cpu.sp = stack_top;
-            cpu.regs[0] = window;
+            for (size_t i = 0; i < n_iargs && i < 8; i++)
+                cpu.regs[i] = static_cast<uint64_t>(iargs[i]);
+            for (size_t i = 0; i < n_fargs && i < 8; i++) {
+                std::memcpy(&cpu.v_lo[i], &fargs[i], sizeof(fargs[i]));
+                cpu.v_hi[i] = 0;
+            }
             cpu.regs[30] = SENTINEL_LR;
-            std::memcpy(&cpu.v_lo[0], &x, sizeof(x));
-            std::memcpy(&cpu.v_lo[1], &y, sizeof(y));
-            cpu.v_hi[0] = 0;
-            cpu.v_hi[1] = 0;
             cpu.running = true;
             cpu.pstate = 0;
             constexpr uint64_t CALL_LIMIT = 50'000'000;

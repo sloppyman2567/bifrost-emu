@@ -124,21 +124,27 @@ public:
     // dispatch error). The caller (syscall handler) writes the return
     // value to cpu.regs[0]; on success it's already set by dispatch().
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
-    // ── Guest callback delivery hook (GLFW cursor position) ──────────
-    // 1.5.2-alpha: glfwSetCursorPosCallback is a CURSOR_CB-policy symbol.
-    // dispatch() stores the guest callback (keyed by window) instead of
-    // handing it to host GLFW (host code can't invoke guest AArch64
-    // callbacks). After a GLFW_POLL-policy call (glfwPollEvents/
-    // glfwWaitEvents), dispatch() reads the host cursor position and
-    // invokes the stored guest callback through this runner.
+    // ── Guest callback delivery hook (GLFW callbacks) ──────────────────
+    // 1.5.2-alpha: GLFW callback setters (glfwSetCursorPosCallback /
+    // glfwSetKeyCallback / glfwSetMouseButtonCallback /
+    // glfwSetFramebufferSizeCallback / glfwSetWindowSizeCallback /
+    // glfwSetWindowFocusCallback / glfwSetErrorCallback) are *_CB-policy
+    // symbols. dispatch() stores the guest callback instead of handing it
+    // to host GLFW (host code can't invoke guest AArch64 callbacks).
+    // After a GLFW_POLL-policy call (glfwPollEvents/glfwWaitEvents),
+    // dispatch() reads the host state, detects changes, and invokes the
+    // stored guest callbacks through this runner.
     //
     // The runner borrows the guest CPU (save/restore all state, set
-    // x0=window, d0=x, d1=y, pc=cb, run step() to a sentinel LR), the
+    // x0..=iargs, d0..=fargs, pc=cb, run step() to a sentinel LR), the
     // same pattern as DynamicLinker::guest_call_args_. The Emulator
-    // wires it. Signature: fn(window, x, y) → x0 (void callback).
-    using CursorCbRunner = std::function<uint64_t(
-        CPU& cpu, uint64_t fn, uint64_t window, double x, double y)>;
-    void set_cursor_cb_runner(CursorCbRunner runner);
+    // wires it. iargs[0] is the window handle for window-scoped
+    // callbacks (error callback: iargs={code, desc_guest}).
+    using GlfwCbRunner = std::function<uint64_t(
+        CPU& cpu, uint64_t fn,
+        const int64_t* iargs, size_t n_iargs,
+        const double* fargs, size_t n_fargs)>;
+    void set_glfw_cb_runner(GlfwCbRunner runner);
     // ── Diagnostics ──────────────────────────────────────────────────
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
