@@ -728,8 +728,12 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                      static_cast<uint8_t>(esize), 0, 0, ct.subop, cur_pc);
                 return true;
             case simd::Family::INT_CMP:
+                // subop = ct.subop (0=CMEQ, 1=CMGT, 2=CMGE, 3=CMHI, 4=CMHS).
+                // flags_op threads Q so the JIT zeroes v_hi for Q=0 (.8b etc.)
+                // exactly like the interpreter's SIMD_DP compare block.
                 emit(block, IROp::SIMD_CMP, d.rd, d.rn, d.rm,
-                     static_cast<uint8_t>(esize), 0, 0, ct.subop, cur_pc);
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
                 return true;
             case simd::Family::LOGIC:
                 // Native only for Q=1 (table enforces the guard). The IR

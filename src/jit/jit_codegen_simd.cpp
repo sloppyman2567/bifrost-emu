@@ -19,7 +19,7 @@
 // Cases handled:
 //   SIMD_LOGICAL — AND/ORR/EOR/BIC/ORN/EON (SSE2)
 //   SIMD_ARITH   — integer lane-wise add/sub/mul/min/max
-//   SIMD_CMP     — integer lane-wise compare (eq)
+//   SIMD_CMP     — integer lane-wise compare (eq/gt/ge, signed & unsigned)
 //   SIMD_DUP     — broadcast GPR to both halves
 //   SIMD_LDST    — load/store v_lo/v_hi to/from vregs
 //   SIMD_SHL/USHR/SSHR — vector, by immediate (SSE2 psll/psrl/psra)
@@ -511,40 +511,107 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             return true;
         }
         // ── SIMD CMP (integer lane-wise compare) ─────────────────────
-        // Only eq (opc=0) is fully native via PCMPEQB/W/D/Q. Other
-        // comparisons fall back to CALL_INTERP for now.
+        // imm (opc) = 0=CMEQ, 1=CMGT, 2=CMGE, 3=CMHI, 4=CMHS; width =
+        // esize (1/2/4/8); flags_op = Q (threaded by the translator so the
+        // Q=0 64-bit forms zero v_hi, matching the interpreter). XMM
+        // scratch: XMM0 = a, XMM1 = b, XMM2 = sign-flip mask / all-ones.
+        // SIMD_CMP is NOT vec-cache-compatible (see vec_cache_compatible_op
+        // in jit_codegen_vec_cache.cpp), so blocks containing it never get
+        // XMM3-15 pinned — XMM2 scratch is always safe here.
+        //
+        // x86 lowering per opc (dest = a op b, per lane):
+        //   CMEQ (0): PCMPEQ(a,b)                   66 0F 74/75/76 (8/16/32),
+        //                                              66 0F 38 29 (64, SSE4.1)
+        //   CMGT (1): PCMPGT(a,b)                   66 0F 64/65/66 (8/16/32),
+        //                                              66 0F 38 37 (64, SSE4.2)
+        //   CMGE (2): NOT(PCMPGT(b,a))              — swap operands, then
+        //              invert with pxor all-ones. (a>=b <=> !(b>a))
+        //   CMHI (3): XOR(a,msk); XOR(b,msk); PCMPGT(a,b) — flipping the
+        //              sign bit maps the unsigned order onto signed order.
+        //              mask = 0x80.. per lane (0x8080.. / 0x8000.. /
+        //              0x80000000.. / 0x80000000'00000000..).
+        //   CMHS (4): XOR both with msk, PCMPGT(b,a), invert. (a>=b <=> !(b>a))
+        // Each 64-bit half is processed in isolation: MOVSD loads zero the
+        // upper 64 bits, so the masked compare only ever touches the half
+        // being computed (the sign-flip mask's upper 64 bits are 0 and the
+        // compare of zeros in the unused lane is discarded by the MOVSD
+        // store). Same pattern as the existing CMEQ half-loop.
         case IROp::SIMD_CMP: {
             uint8_t opc = static_cast<uint8_t>(inst.imm);
             int esize = static_cast<int>(inst.width);
-            if (opc != 0 || (esize != 1 && esize != 2 && esize != 4 && esize != 8)) {
+            bool Q = (inst.flags_op != 0);
+            if (opc > 4 || (esize != 1 && esize != 2 && esize != 4 && esize != 8)) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
+            const bool ge  = (opc == 2 || opc == 4);  // >= variants: compute b>a, invert
+            const bool uns = (opc == 3 || opc == 4);  // unsigned: sign-flip trick
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             uint8_t op_byte = 0;
+            bool needs_38_prefix = false;
             switch (esize) {
-                case 1: op_byte = 0x74; break;  // pcmpeqb
-                case 2: op_byte = 0x75; break;  // pcmpeqw
-                case 4: op_byte = 0x76; break;  // pcmpeqd
-                case 8:  // pcmpeqq requires SSE4.1
-                    if (!has_sse41()) {
-                        emit_call_interp(inst.arm_pc, false);
-                        return true;
+                case 1: op_byte = (opc == 0) ? 0x74 : 0x64; break;  // pcmpeqb / pcmpgtb
+                case 2: op_byte = (opc == 0) ? 0x75 : 0x65; break;  // pcmpeqw / pcmpgtw
+                case 4: op_byte = (opc == 0) ? 0x76 : 0x66; break;  // pcmpeqd / pcmpgtd
+                case 8:  // 64-bit: pcmpeqq (SSE4.1) / pcmpgtq (SSE4.2)
+                    if (opc == 0) {
+                        if (!has_sse41()) {
+                            emit_call_interp(inst.arm_pc, false);
+                            return true;
+                        }
+                        op_byte = 0x29;
+                    } else {
+                        if (!has_sse42()) {
+                            emit_call_interp(inst.arm_pc, false);
+                            return true;
+                        }
+                        op_byte = 0x37;
                     }
-                    op_byte = 0x29; break;  // pcmpeqq (SSE4.1: 66 0F 38 29)
+                    needs_38_prefix = true;
+                    break;
             }
-            bool needs_38_prefix = (esize == 8);
+            uint64_t sign_mask = 0;
+            if (uns) {
+                switch (esize) {
+                    case 1: sign_mask = 0x8080808080808080ULL; break;
+                    case 2: sign_mask = 0x8000800080008000ULL; break;
+                    case 4: sign_mask = 0x8000000080000000ULL; break;
+                    default: sign_mask = 0x8000000000000000ULL; break;  // esize 8
+                }
+            }
             auto emit_cmp_half = [&](int32_t off1, int32_t off2, int32_t offd) {
+                // GE variants compute PCMPGT(b, a): load the operands swapped.
+                int32_t offa = ge ? off2 : off1;
+                int32_t offb = ge ? off1 : off2;
                 // MOVSD (64-bit) — F2 0F 10/11, NOT MOVSS (32-bit).
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, off1);
+                emit_modrm_disp(0, CPU_REG, offa);
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off2);
+                emit_modrm_disp(1, CPU_REG, offb);
+                if (uns) {
+                    // movabs rax, mask; movq xmm2, rax (66 REX.W 0F 6E);
+                    // pxor xmm0,xmm2; pxor xmm1,xmm2
+                    emit_mov_imm64(RAX, sign_mask);
+                    emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E);
+                    emit_byte(0xD0);  // modrm(3, xmm2, rax)
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xC2);  // pxor xmm0, xmm2
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xCA);  // pxor xmm1, xmm2
+                }
+                // 66 0F [38] op modrm(3, xmm0, xmm1)
                 emit_byte(0x66); emit_byte(0x0F);
                 if (needs_38_prefix) emit_byte(0x38);
                 emit_byte(op_byte);
                 emit_byte(0xC1);
+                if (ge) {
+                    // pcmpeqb xmm2, xmm2 (all-ones) then pxor xmm0, xmm2.
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x74);
+                    emit_byte(0xD2);
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                    emit_byte(0xC2);  // pxor xmm0, xmm2
+                }
                 emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
                 emit_modrm_disp(0, CPU_REG, offd);
             };
@@ -555,7 +622,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             int32_t offdlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offdhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_cmp_half(off1lo, off2lo, offdlo);
-            emit_cmp_half(off1hi, off2hi, offdhi);
+            if (Q) {
+                emit_cmp_half(off1hi, off2hi, offdhi);
+            } else {
+                // Q=0 (.8b/.4h/.2s/.1d): 64-bit result — zero v_hi like the
+                // interpreter's SIMD_DP compare block (interp_fp.cpp).
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+                emit_byte(0xC0);  // pxor xmm0, xmm0
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, offdhi);
+            }
             return true;
         }
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────

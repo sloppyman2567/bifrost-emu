@@ -140,8 +140,11 @@ enum class IROp : uint8_t {
                    // width = element size in bytes (1, 2, 4, 8)
                    //   size=8 only valid for add/sub (no pmul etc.)
     SIMD_CMP,      // v_lo[dest],v_hi[dest] = compare(src1, src2) ? all-ones : 0
-                   // imm = opcode (0=eq,1=ge_u,2=gt_u,3=ge_s,4=gt_s,5=hi_u,6=hs_u)
+                   // imm = opcode (0=eq CMEQ, 1=gt_s CMGT, 2=ge_s CMGE,
+                   //              3=gt_u CMHI, 4=ge_u CMHS)
                    // width = element size in bytes (1, 2, 4, 8)
+                   // flags_op = Q (1=128-bit: process v_lo AND v_hi; 0=64-bit:
+                   // process v_lo only and ZERO v_hi — matches the interp)
     // Native SIMD vector shifts by immediate (v1.4.5-alpha):
     //   SHL:  dest = src1 << shift   (logical left)
     //   USHR: dest = src1 >> shift   (logical right, unsigned)

@@ -7,7 +7,7 @@
 #
 # Family -> IRSUB meaning:
 #   INT_ARITH = SIMD_ARITH op (0..6 = ADD/SUB/MUL/UMIN/UMAX/SMIN/SMAX)
-#   INT_CMP   = SIMD_CMP op   (0 = CMEQ)
+#   INT_CMP   = SIMD_CMP op   (0 = CMEQ, 1 = CMGT, 2 = CMGE, 3 = CMHI, 4 = CMHS)
 #   LOGIC     = SIMD_LOGICAL op (0..4 = AND/ORR/EOR/BIC/ORN); native Q=1
 #   FP        = SIMD_FP op (0..7 FADD..FMINNM, 0xB FMULX, 0xD FABD,
 #                            0xE FMLA, 0xF FMLS)
@@ -24,8 +24,18 @@ UMAX    0xBF20FC00   0x2E206400   INT_ARITH   4   -
 SMIN    0xBF20FC00   0x0E206C00   INT_ARITH   5   -
 SMAX    0xBF20FC00   0x0E206400   INT_ARITH   6   -
 
-# ── Compare (CMEQ ==) ────────────────────────────────────────────────────
+# ── Compare (3-register same, mask strips Q(30) keeps U(29)) ────────────
+# Encodings (size = bits[23:22]):
+#   CMGT (signed >):    0x0E203400  (U=0, opcode 0x34)
+#   CMGE (signed >=):   0x0E203C00  (U=0, opcode 0x3C)
+#   CMEQ (==):          0x2E208C00  (U=1, opcode 0x8C)
+#   CMHI (unsigned >):  0x2E203400  (U=1, opcode 0x34)
+#   CMHS (unsigned >=): 0x2E203C00  (U=1, opcode 0x3C)
+CMGT    0xBF20FC00   0x0E203400   INT_CMP     1   -
+CMGE    0xBF20FC00   0x0E203C00   INT_CMP     2   -
 CMEQ    0xBF20FC00   0x2E208C00   INT_CMP     0   -
+CMHI    0xBF20FC00   0x2E203400   INT_CMP     3   -
+CMHS    0xBF20FC00   0x2E203C00   INT_CMP     4   -
 
 # ── Bitwise logical 3-register (native Q=1) ──────────────────────────────
 AND     0xBFE0FC00   0x0E201C00   LOGIC     0   Q

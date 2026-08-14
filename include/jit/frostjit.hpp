@@ -147,6 +147,10 @@ public:
     // codegen sites. Now we do, falling back to CALL_INTERP on hosts
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
+    // 1.5.2-alpha: SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
+    // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
+    // pre-Westmere hosts without the check.
+    bool has_sse42() const { return cpu_features_.sse42; }
     // 1.5.2-alpha: crypto instruction set detection.
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }

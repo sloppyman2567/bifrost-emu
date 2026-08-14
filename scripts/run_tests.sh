@@ -10,7 +10,7 @@
 #   - Supports running under interpreter (--no-jit) or FWD (--fwd)
 #
 # Usage:
-#   ./scripts/run_tests.sh              # run everything (default = JIT, full 198-test suite)
+#   ./scripts/run_tests.sh              # run everything (default = JIT, full 199-test suite)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -19,8 +19,8 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (198 total standard):
-#   Unit         41  — ctest/*.elf focused JIT regression tests
+# Test count breakdown (199 total standard):
+#   Unit         42  — ctest/*.elf focused JIT regression tests
 #   Integration  67  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
@@ -29,7 +29,7 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 198 tests. Quick suite = 193 (skip benchmarks).
+# Standard suite = 199 tests. Quick suite = 194 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -98,7 +98,7 @@ done
 # The toybox binary is already committed in the repo (ctest_real/toybox).
 # The default full run (RUN_ALL=1) downloads these when missing and also
 # runs the interactive tests, so a bare `run_tests.sh` exercises every
-# category — the full 198-test suite.
+# category — the full 199-test suite.
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -181,7 +181,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 198 tests across 7 categories.
+# Standard suite = 199 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(
@@ -200,6 +200,7 @@ UNIT_TESTS=(
     "madd|ctest/jit_madd.elf||5|PASS"
     "neon|ctest/jit_neon.elf||5|PASS"
     "neon_advanced|ctest/jit_neon_advanced.elf||5|PASS"
+    "neon_cmp|ctest/jit_neon_cmp.elf||5|checks passed"
     "neon_permute|ctest/jit_neon_permute.elf||5|checks passed"
     "neon_fixups|ctest/jit_neon_fixups.elf||5|checks passed"
     "neon_roundingshift|ctest/jit_neon_roundingshift.elf||5|checks passed"
