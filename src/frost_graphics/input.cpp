@@ -12,7 +12,7 @@
 // /dev/input/js0 returns the correct 8-byte JS_EVENT format instead
 // of the 24-byte input_event format.
 //
-// Robustness/security (v1.5.1-alpha):
+// Robustness/security (1.5.2-alpha):
 //   - EV_SYN/SYN_DROPPED emitted on ring-buffer overflow, matching
 //     Linux evdev behavior. Guests can detect loss and resync.
 //   - Event deduplication: identical consecutive events are dropped,

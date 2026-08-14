@@ -1,4 +1,4 @@
-// FCVT rounding-mode regression test (v1.5.2-alpha).
+// FCVT rounding-mode regression test (1.5.2-alpha).
 //
 // The JIT's FP→int conversion (FP_F2I) only handled FCVTZS/FCVTZU
 // (rmode=3, toward zero). floor() compiles to FCVTMS (rmode=2) and

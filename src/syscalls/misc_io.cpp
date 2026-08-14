@@ -11,7 +11,7 @@
 // NOTE: this file is NOT a friend of Emulator (unlike misc.cpp). It accesses
 // private state via the public accessors emu.mem(), emu.fds(), etc.
 //
-// v1.5.0.alpha: network handling refinement.
+// 1.5.2-alpha: network handling refinement.
 //   - All socket/pipe/eventfd/timerfd/epoll host fds are now wrapped in
 //     HostNode and registered in the FdTable. This fixes a long-standing
 //     bug where close() on a socket fd returned -EBADF (because the fd

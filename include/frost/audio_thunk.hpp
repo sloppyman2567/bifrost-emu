@@ -1,6 +1,6 @@
 // frost/audio_thunk.hpp — AudioThunk: forward guest audio calls to host.
 //
-// v1.5.0.alpha: NEW. AudioThunk is the audio counterpart to GraphicThunk.
+// 1.5.2-alpha: NEW. AudioThunk is the audio counterpart to GraphicThunk.
 // It intercepts guest dlsym calls for libasound (ALSA), libpulse (PulseAudio),
 // libSDL2 (audio subsystem), and libopenal, and forwards them to the host's
 // equivalent libraries.
@@ -75,7 +75,7 @@ public:
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 1024;  // 16 KiB page
-    // v1.5.0.alpha: ID base for AudioThunk symbols.
+    // 1.5.2-alpha: ID base for AudioThunk symbols.
     static constexpr uint32_t ID_BASE = 0x1000;
     static constexpr uint32_t ID_MASK = 0x3000;
 private:

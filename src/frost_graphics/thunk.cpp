@@ -1,6 +1,6 @@
 // frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha).
 //
-// v1.5.0.alpha: also hosts the FrostGraphics::audio_thunk() and
+// 1.5.2-alpha: also hosts the FrostGraphics::audio_thunk() and
 // FrostGraphics::display_thunk() lazy-creator methods (the AudioThunk
 // and DisplayThunk implementations live in their own .cpp files).
 //
@@ -76,10 +76,10 @@
 // for the FrostGraphics::thunk() accessor.
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
-#include "frost/audio_thunk.hpp"    // v1.5.0.alpha: AudioThunk full def
-#include "frost/display_thunk.hpp"  // v1.5.0.alpha: DisplayThunk full def
-#include "frost/gl_state.hpp"       // v1.5.1.alpha: GLStateTracker
-#include "opgen_thunk.hpp"          // v1.5.2.alpha: symbol signature table
+#include "frost/audio_thunk.hpp"    // 1.5.2-alpha: AudioThunk full def
+#include "frost/display_thunk.hpp"  // 1.5.2-alpha: DisplayThunk full def
+#include "frost/gl_state.hpp"       // 1.5.2-alpha: GLStateTracker
+#include "opgen_thunk.hpp"          // 1.5.2.alpha: symbol signature table
 #include "thunk_common.hpp"         // shared SymbolEntry + trampoline encodings
 #include "core/cpu.h"
 #include "core/memory.h"
@@ -159,9 +159,9 @@ struct GraphicThunkImpl {
     // safe). The dispatch() path is lock-free after init() — it only
     // reads id_to_idx_, which is set once and never resized.
     std::mutex mu;
-    // v1.5.1.alpha: GL state tracker for consistent query results.
+    // 1.5.2-alpha: GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
-    // v1.5.2.alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
+    // 1.5.2.alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).
     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
@@ -195,7 +195,7 @@ struct GraphicThunkImpl {
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();
-    // v1.5.0.alpha: thunking is now ENABLED BY DEFAULT.
+    // 1.5.2-alpha: thunking is now ENABLED BY DEFAULT.
     // Previously required BIFROST_THUNK_GRAPHICS=1. Now we always try
     // to thunk graphic calls; if the host doesn't have GL/EGL/SDL2
     // libraries, the symbols resolve to stubs that return 0 (safe
@@ -248,7 +248,7 @@ bool GraphicThunk::init(Memory& mem) {
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
     impl_->initialized = true;
-    // v1.5.1.alpha: initialize GL state tracker.
+    // 1.5.2-alpha: initialize GL state tracker.
     impl_->gl_state_tracker_ = std::make_unique<GLStateTracker>();
     if (getenv("BIFROST_THUNK_TRACE")) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
@@ -274,7 +274,7 @@ void GraphicThunk::register_function_(const std::string& lib,
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;
     }
-    // v1.5.0.alpha: symbol_id includes ID_BASE_GRAPHICS to
+    // 1.5.2-alpha: symbol_id includes ID_BASE_GRAPHICS to
     // avoid collisions with AudioThunk/DisplayThunk IDs.
     uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
     if (local_id >= GraphicThunk::MAX_SYMBOLS) {
@@ -736,7 +736,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
-    // v1.5.1.alpha: GL state query interception — after pointer translation
+    // 1.5.2-alpha: GL state query interception — after pointer translation
     // so that pointer args in queries (glGetIntegerv, etc.) point to host
     // memory. Only intercept functions tagged QUERY in the spec.
     bool is_gl_query = (entry.spec &&
@@ -848,7 +848,7 @@ uint64_t GraphicThunk::trampoline_base() const {
 // a null stub (when the host doesn't have the headers, but we still
 // want the symbol to resolve so the guest doesn't fail at dlsym time).
 //
-// v1.5.2.alpha: the symbol inventory is TABLE-DRIVEN. tools/opgen/thunk_dp.txt
+// 1.5.2.alpha: the symbol inventory is TABLE-DRIVEN. tools/opgen/thunk_dp.txt
 // (generated into include/opgen_thunk.hpp) lists every (lib family, symbol)
 // with its AAPCS64 arg kinds, return kind, dispatch policy and bounce size.
 // This loop derives the legacy ABI-shape fields (pointer_args / n_stack /
@@ -967,7 +967,7 @@ GraphicThunk* FrostGraphics::thunk() {
     }
     return thunk_.get();
 }
-// v1.5.0.alpha: audio_thunk() and display_thunk() — same lazy pattern.
+// 1.5.2-alpha: audio_thunk() and display_thunk() — same lazy pattern.
 // They live here for the same reason thunk() does: the FrostGraphics
 // header only forward-declares AudioThunk / DisplayThunk, so the
 // unique_ptr ctor needs the full type, which is only visible in this

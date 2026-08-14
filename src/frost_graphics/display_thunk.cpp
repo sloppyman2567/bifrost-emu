@@ -1,9 +1,9 @@
-// frost_graphics/display_thunk.cpp — DisplayThunk implementation (v1.5.0.alpha).
+// frost_graphics/display_thunk.cpp — DisplayThunk implementation (1.5.2-alpha).
 //
 // See include/frost/display_thunk.hpp for the design overview. This file
 // implements the DisplayThunk class for Vulkan / Wayland / X11 / GBM.
 //
-// v1.5.0.alpha: DisplayThunk now uses the same full dispatch logic as
+// 1.5.2-alpha: DisplayThunk now uses the same full dispatch logic as
 // GraphicThunk (stack args, float args, string returns, GetProcAddress,
 // mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
 // when host libraries are unavailable.
@@ -36,7 +36,7 @@ struct DisplayThunkImpl {
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
     // Vulkan handle table: guest VkInstance/VkDevice → host handle.
     std::unordered_map<uint64_t, uint64_t> vk_handle_map_;
-    // DisplayProxy for X11/Wayland fallback (v1.5.0.alpha).
+    // DisplayProxy for X11/Wayland fallback (1.5.2-alpha).
     std::unique_ptr<DisplayProxy> proxy_;
     // Guest-visible scratch page for host→guest string returns
     // (XGetAtomName, glGetString, …). Ring-allocated.
@@ -59,7 +59,7 @@ struct DisplayThunkImpl {
 };
 DisplayThunk::DisplayThunk() {
     impl_ = std::make_unique<DisplayThunkImpl>();
-    // v1.5.0.alpha: display thunking enabled by default.
+    // 1.5.2-alpha: display thunking enabled by default.
     // Set BIFROST_NO_THUNK_DISPLAY=1 to disable.
     const char* disable = getenv("BIFROST_NO_THUNK_DISPLAY");
     impl_->enabled = !(disable && disable[0] != '0');
@@ -88,7 +88,7 @@ bool DisplayThunk::init(Memory& mem) {
         return false;
     }
     impl_->string_cache_off = 0;
-    // v1.5.0.alpha: lazily create the DisplayProxy. It owns an SDL2 window
+    // 1.5.2-alpha: lazily create the DisplayProxy. It owns an SDL2 window
     // and provides a software fallback for X11/Wayland calls when the host
     // libraries are unavailable or have no display.
     impl_->proxy_ = std::make_unique<DisplayProxy>();

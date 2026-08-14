@@ -142,7 +142,7 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         // ── ADDS/SUBS (flag-setting) ─────────────────────────────────
         case InstClass::ADDS_REG: case InstClass::ADDS_IMM:
         case InstClass::SUBS_REG: case InstClass::SUBS_IMM: {
-            // v1.5.0.alpha BUGFIX: for the EXTENDED REGISTER form of
+            // 1.5.2-alpha BUGFIX: for the EXTENDED REGISTER form of
             // ADDS/SUBS (bit21=1), Rn=31 = SP (per ARM ARM). For the
             // shifted register form (bit21=0), Rn=31 = XZR.
             // We check the raw instruction bits directly (like the

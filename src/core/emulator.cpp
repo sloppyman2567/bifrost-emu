@@ -15,10 +15,10 @@
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
-#include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (v1.5.1-alpha)
+#include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (1.5.2-alpha)
 #include "frost/thunk.hpp"        // GraphicThunk full definition (for init/resolve)
-#include "frost/audio_thunk.hpp"  // v1.5.0.alpha: AudioThunk
-#include "frost/display_thunk.hpp"// v1.5.0.alpha: DisplayThunk
+#include "frost/audio_thunk.hpp"  // 1.5.2-alpha: AudioThunk
+#include "frost/display_thunk.hpp"// 1.5.2-alpha: DisplayThunk
 #include "jit/frostjit.hpp"
 #include <algorithm>
 #include <atomic>
@@ -253,7 +253,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
-            // v1.5.0.alpha: also init AudioThunk and DisplayThunk if
+            // 1.5.2-alpha: also init AudioThunk and DisplayThunk if
             // enabled. They share the thunk syscall (0x1000) with
             // GraphicThunk; the dispatcher in misc.cpp tries each in
             // order. The dynamic linker's thunk_resolver_ is set to
@@ -736,13 +736,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
-    // Set up the initial stack image. v1.5.2: STACK_TOP is inside the
+    // Set up the initial stack image. 1.5.2: STACK_TOP is inside the
     // 4 GiB direct window so stack accesses hit the JIT fast path.
     const uint64_t STACK_TOP = Memory::STACK_TOP;
     const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
-    // v1.5.1-alpha: load the embedded vDSO before building the stack so
+    // 1.5.2-alpha: load the embedded vDSO before building the stack so
     // AT_SYSINFO_EHDR can point to it. The vDSO provides
     // gettimeofday/clock_gettime/clock_getres/rt_sigreturn stubs.
     load_vdso();
@@ -865,7 +865,7 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     }
     return envs;
 }
-// ── vDSO loader (v1.5.1-alpha) ───────────────────────────────────────
+// ── vDSO loader (1.5.2-alpha) ───────────────────────────────────────
 // Maps the embedded AArch64 vDSO ELF into guest memory and returns the
 // base address (the ELF header location = AT_SYSINFO_EHDR). The vDSO
 // provides gettimeofday/clock_gettime/clock_getres/__kernel_rt_sigreturn

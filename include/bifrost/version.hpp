@@ -180,6 +180,17 @@ namespace arm64emu {
 //     __kernel_rt_sigreturn stubs trap to the syscall handler).
 //   - Test count grows from 175 to 187 (fabs_sign, fabd, simd_vec_fp,
 //     gl_state, test_dladdr, test_dladdr_glibc).
-constexpr const char* VERSION  = "1.5.1-alpha";
+//
+// 1.5.2-alpha (2026-08-13): interp-fallback elimination for FP/SIMD.
+//   New in 1.5.2-alpha (high-level — see CHANGELOG.md for the full list):
+//   - AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC native (new MODIMM
+//     simd_dp table row + SIMD_MOVI/SIMD_ORRIMM IR ops; ~500K interp
+//     executions removed; fixed latent cmode=8 MOVI returning 0).
+//   - Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd,Dn,#imm) native
+//     in the FP_SCALAR translator (the game's `ushr dN,dM,#32` was the
+//     top remaining fallback); fixed latent esize=8 SSHR SIGILL (PSRAQ
+//     is AVX-512F only, now CALL_INTERP).
+//   - Version bump: all version refs normalized to 1.5.2-alpha.
+constexpr const char* VERSION  = "1.5.2-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

@@ -1,7 +1,7 @@
 // frost_graphics/thunk_common.hpp — shared trampoline encoding + registry
 // helpers for the GraphicThunk / AudioThunk / DisplayThunk family.
 //
-// v1.5.0.alpha: extracted from GraphicThunk to avoid duplication now
+// 1.5.2-alpha: extracted from GraphicThunk to avoid duplication now
 // that we have three thunk classes.
 //
 // All three thunks:
@@ -46,7 +46,7 @@ struct ThunkSymbolEntry {
     void*       host_fn;    // host function pointer (or null if stub)
     uint64_t    guest_addr; // trampoline address in guest memory
     uint32_t    symbol_id;  // small int (0..MAX_SYMBOLS-1)
-    // v1.5.0.alpha: bitmask indicating which args (0-7) are
+    // 1.5.2-alpha: bitmask indicating which args (0-7) are
     // pointers that need guest→host translation. Bit N set = arg N is
     // a pointer. 0 = no pointer args (all args passed verbatim).
     // This is populated per-symbol by the registration code using
@@ -204,7 +204,7 @@ inline ThunkLibTable* find_lib(std::vector<ThunkLibTable>& libs,
 }
 // Register a (lib, sym, host_fn) entry. Allocates a sym_id, writes the
 // trampoline into guest memory, stores the entry. Idempotent.
-// v1.5.0.alpha: added id_base parameter so each thunk type
+// 1.5.2-alpha: added id_base parameter so each thunk type
 // (Graphic/Audio/Display) gets a non-overlapping symbol_id range.
 inline void thunk_register(Memory& mem,
                             std::vector<ThunkLibTable>& libs,

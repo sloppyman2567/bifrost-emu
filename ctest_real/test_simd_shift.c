@@ -1,5 +1,5 @@
 /*
- * Vector shift-by-immediate regression (v1.5.1-alpha): USRA/SSRA/SLI/SRI
+ * Vector shift-by-immediate regression (1.5.2-alpha): USRA/SSRA/SLI/SRI
  * must match the reference implementation across every element size
  * (H/S/D), across both 64-bit halves (Q=1) and the 64-bit forms (Q=0),
  * including boundary shift amounts. Covered via NEON intrinsics so the

@@ -1,6 +1,6 @@
 # Display Thunk & Windowing System — Review Notes
 
-Review of the display thunk and windowing subsystem as of v1.5.0.alpha.
+Review of the display thunk and windowing subsystem as of v1.5.2-alpha.
 Files: `src/frost_graphics/display_thunk.cpp` (~1580 lines),
 `src/frost_graphics/display_proxy.cpp` / `include/frost/display_proxy.hpp`,
 `src/frost_graphics/thunk_common.hpp`, `include/frost/display_thunk.hpp`.

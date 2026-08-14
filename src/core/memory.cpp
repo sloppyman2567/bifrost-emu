@@ -21,11 +21,11 @@ Memory::Memory() {
     if (p != MAP_FAILED) {
         direct_window_ = static_cast<uint8_t*>(p);
     }
-    // v1.5.0.alpha: ASLR for mmap base. Randomize the starting address
+    // 1.5.2-alpha: ASLR for mmap base. Randomize the starting address
     // for future mmap_alloc calls using /dev/urandom. The base is
     // page-aligned and within the low heap region (MMAP_BASE_MIN +
     // random offset up to ~768 MiB of ASLR entropy). It's INSIDE the
-    // 4 GiB direct window (v1.5.2) so guest heap accesses hit the JIT
+    // 4 GiB direct window (1.5.2) so guest heap accesses hit the JIT
     // fast path instead of the pages_ + rwlock slow path.
     // This prevents guest-side info leaks that rely on a fixed mmap
     // base (common in sandbox escapes and ROP chain construction).
@@ -70,7 +70,7 @@ Memory::~Memory() {
         munmap(direct_window_, DIRECT_WINDOW_SIZE);
     }
 }
-// v1.5.0.alpha: Validate that an address range is within the guest's
+// 1.5.2-alpha: Validate that an address range is within the guest's
 // usable address space. Rejects:
 //   - Addresses below NULL_PAGE_LIMIT (NULL dereference protection)
 //   - Addresses above 0x7FFFFFFFFFFF (kernel space on AArch64 Linux)
@@ -172,7 +172,7 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
                 std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) {
-                    // v1.5.0.alpha: OOM protection for write path.
+                    // 1.5.2-alpha: OOM protection for write path.
                     if (would_exceed_page_limit(1)) {
                         throw UnmappedMemory(cur, true);
                     }
@@ -232,7 +232,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
         if (pc && __builtin_expect(pn == pc->read_page, 1)) {
             memcpy(p, pc->read_ptr + off, take);
         } else {
-            // v1.5.0.alpha: FEX-style demand paging. On real Linux, reads
+            // 1.5.2-alpha: FEX-style demand paging. On real Linux, reads
             // to unmapped pages in the user address space trigger a page
             // fault, and the kernel zero-fills the page (for anonymous
             // mappings). This is critical for programs that read past the
@@ -248,7 +248,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
                 std::unique_lock<std::shared_mutex> g(mu_);
                 auto it = pages_.find(pn);
                 if (it == pages_.end()) {
-                    // v1.5.0.alpha: OOM protection for demand paging.
+                    // 1.5.2-alpha: OOM protection for demand paging.
                     // If auto-allocation would exceed the page limit,
                     // throw UnmappedMemory (causing SIGSEGV delivery)
                     // instead of letting the host OOM.
@@ -273,7 +273,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
 }
 uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     if (size == 0) size = PAGE_SIZE;
-    // v1.5.0.alpha: Per-allocation size cap. Prevents a malicious guest
+    // 1.5.2-alpha: Per-allocation size cap. Prevents a malicious guest
     // from requesting SIZE_MAX and OOMing the host.
     if (size > MAX_MMAP_LENGTH) return 0;  // caller maps 0 to -ENOMEM
     std::unique_lock<std::shared_mutex> g(mu_);
@@ -283,12 +283,12 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         base = mmap_next_;
         mmap_next_ += aligned_size;
     } else {
-        // v1.5.0.alpha: Validate MAP_FIXED address range. Reject
+        // 1.5.2-alpha: Validate MAP_FIXED address range. Reject
         // addresses in the NULL page region or kernel space.
         if (!is_valid_guest_range(base, aligned_size)) return 0;
         mmap_next_ = std::max(mmap_next_, base + aligned_size);
     }
-    // v1.5.0.alpha: OOM protection. Check page count before allocating.
+    // 1.5.2-alpha: OOM protection. Check page count before allocating.
     size_t num_new_pages = aligned_size / PAGE_SIZE;
     if (would_exceed_page_limit(num_new_pages)) return 0;
     uint64_t start = base & ~PAGE_MASK;
@@ -584,7 +584,7 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
         for (const auto& [base, size] : allocations_) {
             child->allocations_[base] = size;
         }
-        // v1.5.0.alpha: copy total page count for OOM tracking.
+        // 1.5.2-alpha: copy total page count for OOM tracking.
         child->total_pages_.store(total_pages_.load(std::memory_order_relaxed),
                                    std::memory_order_relaxed);
     }

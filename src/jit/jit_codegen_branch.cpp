@@ -264,7 +264,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // branch block, but the code size increase is negligible (<1%
             // of the 64MB code buffer for typical programs).
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // v1.5.2-alpha: emit the taken-path epilogue with a SECOND chain
+            // 1.5.2-alpha: emit the taken-path epilogue with a SECOND chain
             // slot so the taken edge (typically the loop-back of a hot
             // conditional loop) also skips the dispatcher. Skipped when a
             // self-loop slot was emitted — that jmp already goes straight
@@ -300,7 +300,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_call_interp(inst.arm_pc, false);
             return 0;
         case IROp::SVC:
-            // v1.5.1-alpha: vDSO clock fast path — SVCs translated from the
+            // 1.5.2-alpha: vDSO clock fast path — SVCs translated from the
             // vDSO clock stubs emit a native call (jit_vdso_clock_svc) that
             // reads the host clock directly, skipping the interpreter +
             // syscall dispatch. Other SVCs go through the normal interp step.

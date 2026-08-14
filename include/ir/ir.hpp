@@ -157,7 +157,7 @@ enum class IROp : uint8_t {
     SIMD_SRSRA,    // dest += round(src1 >>> imm) (signed, round-half-up)
     SIMD_SLI,      // dest = (src1 << imm) | (dest & ((1<<imm)-1))
     SIMD_SRI,      // dest = (src1 >> imm) | (dest & ~((1<<(esize*8-imm))-1))
-    // Native SIMD FP lane-wise arithmetic (v1.5.1-alpha). Same shape as
+    // Native SIMD FP lane-wise arithmetic (1.5.2-alpha). Same shape as
     // SIMD_ARITH but for FP elements. Operates on v_lo/v_hi (each 8
     // bytes) across all lanes; JIT emits SSE addps/subps/mulps/divps/
     // minps/maxps (single) or addpd/... (double). FABD = sub + clear
@@ -167,7 +167,7 @@ enum class IROp : uint8_t {
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_ARITH,
-    // Native SIMD FP fused 3-source (FMLA/FMLS, v1.5.1-alpha). Accumulates
+    // Native SIMD FP fused 3-source (FMLA/FMLS, 1.5.2-alpha). Accumulates
     // into dest: dest = dest ± src1*src2 per lane. Same shape as
     // SIMD_FP_ARITH but reads the OLD dest as the accumulator.
     //   imm  = opcode (0=fmla, 1=fmls)
@@ -264,7 +264,7 @@ enum class IROp : uint8_t {
                    // src1=addr, src2=value, dest=ARM reg for status (rs)
     STLR_FAST,     // jit_stlr(emu, cpu, src1, src2, width); store-release
                    // src1=addr, src2=value
-    // v1.5.0.alpha: Native ARMv8 Crypto Extensions (AES-NI / PCLMULQDQ).
+    // 1.5.2-alpha: Native ARMv8 Crypto Extensions (AES-NI / PCLMULQDQ).
     // These operate on the full 128-bit V register (v_lo + v_hi).
     // dest = result vreg; src1 = state vreg; src2 = key vreg (AES) or
     // second operand (PMULL).

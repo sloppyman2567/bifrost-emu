@@ -181,7 +181,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         default:
             break;
     }
-    // v1.5.0.alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
+    // 1.5.2-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
     // natively translated (ir_translate_mem.cpp) — the old is_vec gate
     // here forced every one of them to CALL_INTERP, splitting FP-heavy
     // blocks every 1-2 instructions and killing the pinned-XMM vec cache
@@ -362,7 +362,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
     // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
     // demoted tiny native FP blocks to the interpreter (~2x slower) and
-    // split FP-heavy blocks every 2 instructions. v1.5.2-alpha: base the
+    // split FP-heavy blocks every 2 instructions. 1.5.2-alpha: base the
     // decision on the ACTUAL number of CALL_INTERP ops in the generated
     // IR instead — only blocks that genuinely run the interpreter get
     // demoted. Native FP blocks now stay in the JIT.
@@ -489,7 +489,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_u32(stack_bytes);  // sub rsp, stack_bytes
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
-    // v1.5.2-alpha: load the direct-window base into R10 ONLY if the
+    // 1.5.2-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
     // prologue — pure overhead for the many tiny ALU/FP/vector blocks

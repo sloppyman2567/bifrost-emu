@@ -1,4 +1,4 @@
-// jit_neon_fixups.c — regression coverage for v1.5.0 SIMD fixes:
+// jit_neon_fixups.c — regression coverage for 1.5.2-alpha SIMD fixes:
 //   TBL1/TBL2/TBX1/TBX2, INS (element, vector), UHSUB unsigned wrap,
 //   RBIT/NOT/CNT disambiguation, vector FCVTZS/FCVTZU, real EXT.
 #include <stdio.h>

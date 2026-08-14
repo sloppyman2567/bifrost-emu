@@ -1,4 +1,4 @@
-// frost_graphics/audio_thunk.cpp — AudioThunk implementation (v1.5.0.alpha).
+// frost_graphics/audio_thunk.cpp — AudioThunk implementation (1.5.2-alpha).
 //
 // See include/frost/audio_thunk.hpp for the design overview. This file
 // implements the AudioThunk class using the shared thunk_common helpers.
@@ -23,7 +23,7 @@ struct AudioThunkImpl {
 // ── AudioThunk lifecycle ───────────────────────────────────────────────
 AudioThunk::AudioThunk() {
     impl_ = std::make_unique<AudioThunkImpl>();
-    // v1.5.0.alpha: audio thunking enabled by default.
+    // 1.5.2-alpha: audio thunking enabled by default.
     // Set BIFROST_NO_THUNK_AUDIO=1 to disable.
     const char* disable = getenv("BIFROST_NO_THUNK_AUDIO");
     impl_->enabled = !(disable && disable[0] != '0');
@@ -95,7 +95,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
     }
-    // v1.5.0.alpha: check ID range to route correctly.
+    // 1.5.2-alpha: check ID range to route correctly.
     if ((symbol_id & AudioThunk::ID_MASK) != AudioThunk::ID_BASE) {
         return -ENOENT;  // belongs to a different thunk
     }

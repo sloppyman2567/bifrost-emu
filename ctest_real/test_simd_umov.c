@@ -1,5 +1,5 @@
 /*
- * UMOV regression (v1.5.1-alpha): UMOV must extract a vector element into a
+ * UMOV regression (1.5.2-alpha): UMOV must extract a vector element into a
  * GPR across every element size (B/H/S/D) and across both 64-bit halves
  * (Q=1). Covered via vgetq_lane_* intrinsics so the compiler emits real
  * `umov` instructions into W/X registers correctly. Expected values computed

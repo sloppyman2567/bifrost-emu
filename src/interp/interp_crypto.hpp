@@ -1,4 +1,4 @@
-// interp/interp_crypto.cpp — ARMv8 Crypto Extensions (v1.5.0.alpha).
+// interp/interp_crypto.cpp — ARMv8 Crypto Extensions (1.5.2-alpha).
 //
 // Implements the AES, SHA1, SHA256, and PMULL/PMULL2 instructions from
 // the ARMv8 Crypto Extensions. These are essential for:

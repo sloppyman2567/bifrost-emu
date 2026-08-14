@@ -40,7 +40,7 @@ status, see [TESTS.md](TESTS.md).
 7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
 8. **More real-world binary testing.**
 
-### v1.5.1-alpha additions (in-progress)
+### v1.5.2-alpha additions (in-progress)
 
 - **GL state tracker fixed** (was crashing with SIGSEGV + 57 failures;
   now ALL PASS under JIT & interpreter). `ctest_real/test_gl_state.elf`.

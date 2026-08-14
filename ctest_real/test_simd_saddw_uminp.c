@@ -5,7 +5,7 @@
  * (SADDW) or high half (SADDW2) of Vm. UMINP (0x2E20AC00 group) does a
  * pairwise unsigned min over adjacent lanes of Vn (low half of Vd) and Vm
  * (high half of Vd). These are used by glibc/busybox/iperf3; they were
- * silently NOP'd before v1.5.1-alpha surfaced missing SIMD ops as SIGILL.
+ * silently NOP'd before 1.5.2-alpha surfaced missing SIMD ops as SIGILL.
  *
  * Build: make cross SRC=ctest_real/test_simd_saddw_uminp.c OUT=ctest_real/test_simd_saddw_uminp.elf
  * Run:   ./bifrost-emu ctest_real/test_simd_saddw_uminp.elf

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — version bump to 1.5.2-alpha (2026-08-13)
+
+- All version references across the tree are normalized to **1.5.2-alpha**:
+  `include/bifrost/version.hpp` (`VERSION` + new 1.5.2-alpha history block),
+  `main.cpp`, `api/bifrost.h`, `Makefile`, `scripts/setup-rootfs.sh`,
+  `bifrost.toml.sample`, `README.md`, `ROADMAP.md`, and ~54 code/header
+  files (inline `v1.5.0.alpha` / `v1.5.1-alpha` / `v1.5.1.alpha` comments).
+  `ctest/test_capi.c` now asserts `bifrost_version() == "1.5.2-alpha"`.
+  Historical release sections in `CHANGELOG.md` / `version.hpp` / `ROADMAP.md`
+  (`1.4.5-alpha`, `1.5.0.alpha`, `1.5.1-alpha`) are kept as release history.
+
 ## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
 
 ### Vector `movi vN.2s, #imm` (~500K interp executions) is now native JIT
@@ -255,7 +266,7 @@ Both run through the interpreter and are reached from the JIT via its
 (8 checks, ALL PASS under JIT and interpreter). `rw_busybox_df` and
 `rw_iperf3_version` now pass under the strict (throwing) mode.
 
-## [Unreleased] — v1.5.1-alpha batch (2026-08-01)
+## [Unreleased] — v1.5.2-alpha batch (2026-08-13)
 
 ### FP/SIMD correctness + GL state + dladdr + vDSO
 

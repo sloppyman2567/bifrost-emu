@@ -473,7 +473,7 @@ private:
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
-    // v1.5.1-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    // 1.5.2-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
     // also called from the syscall dispatcher and the JIT trampoline.
     friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────

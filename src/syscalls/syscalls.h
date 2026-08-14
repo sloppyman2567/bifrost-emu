@@ -44,7 +44,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_time(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_ioctls(Emulator& emu, CPU& cpu, uint64_t num);
 int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
-// ── vDSO clock fast-path (v1.5.1-alpha) ────────────────────────────
+// ── vDSO clock fast-path (1.5.2-alpha) ────────────────────────────
 // Reads the host clock directly for clock_gettime(113)/clock_getres(114)/
 // gettimeofday(169) and writes the result to guest memory. Used by the
 // syscall dispatcher and the JIT native vDSO fast path. Returns true if
@@ -62,7 +62,7 @@ int64_t syscall_misc_process(Emulator& emu, CPU& cpu, uint64_t num); // getpid/w
 int64_t syscall_misc_sched(Emulator& emu, CPU& cpu, uint64_t num);  // ptrace/sched_*/priority/getpgid/getcpu
 int64_t syscall_misc_id(Emulator& emu, CPU& cpu, uint64_t num);     // getuid/getpid/uname/sysinfo/getrandom/etc
 int64_t syscall_misc_wait(Emulator& emu, CPU& cpu, uint64_t num);   // times/waitpid/wait4
-// ── misc_extended.cpp (v1.5.0.alpha) ────────────────────────────────
+// ── misc_extended.cpp (1.5.2-alpha) ────────────────────────────────
 // Extended syscalls: xattr, kcmp, membarrier, copy_file_range, pkey_*,
 // pidfd_*, io_uring stubs, mount-API stubs, capget/capset, personality,
 // fanotify stubs, landlock stubs, seccomp stub, mseal, etc.

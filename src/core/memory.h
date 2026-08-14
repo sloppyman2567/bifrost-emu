@@ -34,7 +34,7 @@ class Memory {
 public:
     static constexpr uint64_t PAGE_SIZE = 4096;
     static constexpr uint64_t PAGE_MASK = PAGE_SIZE - 1;
-    // v1.5.0.alpha: Address space limits for robustness and security.
+    // 1.5.2-alpha: Address space limits for robustness and security.
     // These prevent a malicious/buggy guest from exhausting host memory
     // or corrupting emulator-internal state.
     //
@@ -179,7 +179,7 @@ public:
     bool in_direct_window(uint64_t addr) const {
         return direct_window_ && addr < DIRECT_WINDOW_SIZE;
     }
-    // v1.5.0.alpha: translate a guest address to a host pointer.
+    // 1.5.2-alpha: translate a guest address to a host pointer.
     // Used by the graphic/audio/display thunks to pass pointer arguments
     // to host GL/EGL/SDL2/ALSA functions. Returns nullptr if the address
     // is not in the direct window (addresses ≥ 4 GiB can't be directly
@@ -199,21 +199,21 @@ private:
     mutable std::shared_mutex mu_;
     mutable std::unordered_map<uint64_t, std::vector<uint8_t>> pages_;
     std::unordered_map<uint64_t, uint64_t> allocations_;
-    // v1.5.0.alpha: ASLR for mmap base. Randomized at construction time
+    // 1.5.2-alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the
     // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
     uint64_t mmap_next_ = 0;
-    // v1.5.0.alpha: Total page count for OOM protection. Tracked
+    // 1.5.2-alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on
     // munmap) to avoid O(pages_.size()) scans on the hot path.
     // Mutable because read() (a const method) auto-allocates pages.
     mutable std::atomic<size_t> total_pages_{0};
-    // v1.5.0.alpha: Validate that an address range doesn't overlap
+    // 1.5.2-alpha: Validate that an address range doesn't overlap
     // kernel space or the NULL page region. Returns true if the range
     // is valid for guest allocation.
     bool is_valid_guest_range(uint64_t addr, uint64_t size) const;
-    // v1.5.0.alpha: Check page count against MAX_TOTAL_PAGES.
+    // 1.5.2-alpha: Check page count against MAX_TOTAL_PAGES.
     // Returns true if the allocation would exceed the limit.
     bool would_exceed_page_limit(size_t num_pages) const;
 };

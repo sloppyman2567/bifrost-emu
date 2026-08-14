@@ -24,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 namespace arm64emu {
-// ── vDSO clock fast-path (v1.5.1-alpha) ─────────────────────────────────
+// ── vDSO clock fast-path (1.5.2-alpha) ─────────────────────────────────
 // Shared by three paths so the clock logic lives in one place:
 //   1. Emulator::syscall() — when a SVC's return PC is inside the vDSO
 //      range (interpreter + JIT-fallback call it through the dispatcher).

@@ -47,7 +47,7 @@
 //   - TLSDESC uses an inline static resolver (desc[0]=0, desc[1]=
 //     TP-offset) — no PLT call to a resolver. This is the "static
 //     TLSDESC" trick valid when the TP-offset is known at load time.
-//   - dladdr() is overridden (v1.5.1-alpha): the dladdr@GLIBC_2.34 and
+//   - dladdr() is overridden (1.5.2-alpha): the dladdr@GLIBC_2.34 and
 //     dladdr@GLIBC_2.0 symbols are FORCE-overridden to point at our
 //     OFF_DLADDR stub, which calls DynamicLinker::dladdr() via syscall
 //     0x1005. This fills in Dl_info (dli_fname, dli_fbase, dli_sname,
