@@ -284,6 +284,21 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
   SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles
   of setup on every entry for blocks that never touch the direct window.
+- Native syscall dispatch: the `IROp::SVC` codegen in jit_codegen_branch.cpp
+  does NOT call the interpreter for non-vDSO syscalls. It emits
+  `emit_call_native_svc` → `jit_native_svc(emu, cpu, svc_pc)`, which sets
+  `cpu.pc = svc_pc + 4` (return address — signal frames must save the
+  return address, else rt_sigreturn re-executes the SVC and re-enters a
+  blocking syscall forever) and calls `Emulator::syscall()` directly,
+  skipping step()/decode/dispatch. The vDSO clock stubs keep their own
+  `jit_vdso_clock_svc` fast path. `unchainable_end_` stays true (syscall
+  may modify pc, e.g. execve/rt_sigreturn) and `rax_holds_next_pc_` is set;
+  the emit helper reloads pc from cpu.pc into RAX and invalidates ALL
+  vregs after the call. Do NOT revert SVC to emit_call_interp: the game
+  makes ~2M syscalls/run and the interp round-trip was ~6.3% of wall time
+  (SIGPROF interp went 6.3% → 0.0%). No vec-cache interplay needed: SVC
+  disqualifies the block in vec_cache_may_enable. `instr_will_call_interp`
+  correctly returns false for SVC (not in its switch).
 
 ## Work Guidance
 

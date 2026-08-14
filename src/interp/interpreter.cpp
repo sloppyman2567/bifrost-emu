@@ -205,13 +205,14 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             if (class_prof_en_) {
                 int ci = (int)d.cls;
                 if (ci >= 0 && ci < 128) class_counts_[ci]++;
-                // Sample raw words of the FP/SIMD classes that fall back to
-                // the interpreter, to spot the next native-codegen target.
+                // Sample raw words of the classes that fall back to the
+                // interpreter, to spot the next native-codegen target
+                // (UNKNOWN is skipped — it's the not-yet-decoded default
+                // and would drown the sampler). objdump the top words.
                 static uint64_t raw_counts_[4096] = {0};
                 static uint32_t raw_words_[4096] = {0};
                 static int raw_slots_ = 0;
-                if ((ci == (int)InstClass::FP_SCALAR || ci == (int)InstClass::SIMD_DP)
-                    && raw_slots_ < 4096) {
+                if (ci != (int)InstClass::UNKNOWN && raw_slots_ < 4096) {
                     uint32_t w = d.raw;
                     bool found = false;
                     for (int k = 0; k < raw_slots_; k++) {
@@ -262,7 +263,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         }
                     }
                     fprintf(stderr, "\n");
-                    // Top fallback FP/SIMD raw words (translate via
+                    // Top fallback raw words (translate via
                     // aarch64-linux-gnu-objdump for the exact mnemonic).
                     if (raw_slots_) {
                         for (int rank = 0; rank < 12; rank++) {
@@ -270,7 +271,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                             for (int k = 0; k < raw_slots_; k++)
                                 if (best < 0 || raw_counts_[k] > raw_counts_[best]) best = k;
                             if (best < 0 || raw_counts_[best] == 0) break;
-                            fprintf(stderr, "  [fp/simd] %08x x%llu\n",
+                            fprintf(stderr, "  [raw] %08x x%llu\n",
                                     raw_words_[best], (unsigned long long)raw_counts_[best]);
                             raw_counts_[best] = 0;
                         }

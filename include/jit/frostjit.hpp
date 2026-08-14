@@ -52,6 +52,7 @@ class Memory;
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
+extern "C" void jit_native_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
@@ -798,6 +799,7 @@ private:
     struct BranchPatch { size_t patch_off; int target_kind; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
     void emit_call_vdso_clock(uint64_t arm_pc);
+    void emit_call_native_svc(uint64_t arm_pc);
     // compile_ir_inst — the main IR-op→x86 switch. v1.4.5-alpha:
     // split into two files for readability. The dispatch stays in
     // frostjit.cpp; FP/SIMD cases are delegated to compile_ir_inst_fp_()

@@ -89,3 +89,25 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
         emu->syscall(*cpu);
     }
 }
+// ── jit_native_svc — JIT native syscall dispatch ───────────────────────
+// Emitted by the JIT for every non-vDSO SVC (see IROp::SVC in
+// jit_codegen_branch.cpp). Replaces the old emit_call_interp round-trip,
+// which stepped the whole interpreter (decode-cache lookup, dispatch
+// switch, execute_branch SVC_IMM case) just to reach Emulator::syscall().
+// The game's syscall-heavy loops (~2M svc #0 per run) measured ~6.3% of
+// wall time in the interpreter; this cuts the decode/dispatch overhead
+// entirely.
+//
+// Semantics mirror the interpreter's SVC_IMM case (interp_branch.cpp):
+// advance cpu.pc to the return address (svc_pc+4) BEFORE the call so a
+// signal delivered inside a blocking syscall saves the right PC (the
+// frame's saved PC must be the return address, else rt_sigreturn
+// re-executes the SVC and re-enters the blocking syscall forever). The
+// syscall may change cpu.pc (execve, rt_sigreturn, signal delivery) —
+// the caller reloads PC from cpu.pc after the call, which the vDSO
+// clock / emit_call_interp paths already do.
+extern "C" void jit_native_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
+                               uint64_t svc_pc) {
+    cpu->pc = svc_pc + 4;
+    emu->syscall(*cpu);
+}

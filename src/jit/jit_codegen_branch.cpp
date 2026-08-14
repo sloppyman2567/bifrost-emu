@@ -306,14 +306,18 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_call_interp(inst.arm_pc, false);
             return 0;
         case IROp::SVC:
-            // 1.5.2-alpha: vDSO clock fast path — SVCs translated from the
-            // vDSO clock stubs emit a native call (jit_vdso_clock_svc) that
-            // reads the host clock directly, skipping the interpreter +
-            // syscall dispatch. Other SVCs go through the normal interp step.
+            // Native syscall dispatch. vDSO clock stubs keep their fast
+            // path (jit_vdso_clock_svc reads the host clock directly,
+            // skipping syscall dispatch). ALL other SVCs go through
+            // jit_native_svc, which advances pc to svc_pc+4 and calls
+            // Emulator::syscall() directly — no interpreter round-trip.
+            // The interpreter's SVC_IMM pc-advance semantics are mirrored
+            // so signal frames and the execve/rt_sigreturn pc-change check
+            // stay consistent.
             if (in_vdso(inst.arm_pc)) {
                 emit_call_vdso_clock(inst.arm_pc);
             } else {
-                emit_call_interp(inst.arm_pc, true);
+                emit_call_native_svc(inst.arm_pc);
             }
             rax_holds_next_pc_ = true;
             unchainable_end_ = true;  // syscall may modify PC

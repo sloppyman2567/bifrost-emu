@@ -165,4 +165,38 @@ void FrostJIT::emit_call_vdso_clock(uint64_t arm_pc) {
     // The helper may have touched cpu.regs[]/vregs — reload everything.
     invalidate_all_vregs();
 }
+// ── emit_call_native_svc — native syscall dispatch ─────────────────────
+// Like emit_call_vdso_clock, but calls jit_native_svc(emu, cpu, svc_pc)
+// instead of stepping the interpreter. Used for non-vDSO SVCs: the helper
+// advances cpu.pc to svc_pc+4 and runs Emulator::syscall() directly,
+// skipping step()/decode/syscall-dispatch. SVC never coexists with the
+// vec cache (SVC disqualifies the block in vec_cache_may_enable), so no
+// writeback/reload round-trip is needed here.
+void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
+    flush_all_vregs();
+    if (flags_in_host_) {
+        emit_materialize_flags(flags_from_sub_);
+        flags_in_host_ = false;
+        invalidate_host_regs((1u<<RAX)|(1u<<RCX)|(1u<<RDX));
+    }
+    if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
+        evict_vreg(31);
+    }
+    emit_push(WIN_REG);  // save R10 (caller-saved)  — 1 push
+    emit_push(RAX);      // save RAX                 — 2 pushes (EVEN → no align fixup)
+    // Set cpu.pc = svc_pc (the helper advances it to svc_pc+4).
+    emit_mov_imm_to_rax(arm_pc);
+    emit_store(CPU_REG, PC_OFF, RAX);
+    // Set args: RDI = emu, RSI = cpu, RDX = svc_pc.
+    emit_mov_reg(RDI, EMU_REG);
+    emit_mov_reg(RSI, CPU_REG);
+    emit_mov_reg(RDX, RAX);
+    emit_call_aligned(&jit_native_svc, /*num_pushed=*/2);
+    emit_pop(RAX);       // restore RAX
+    emit_pop(WIN_REG);   // restore WIN_REG
+    // Reload PC into RAX (the syscall may have changed cpu.pc).
+    emit_load(RAX, CPU_REG, PC_OFF);
+    // The syscall may have touched cpu.regs[]/vregs — reload everything.
+    invalidate_all_vregs();
+}
 } // namespace arm64emu
