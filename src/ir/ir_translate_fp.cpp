@@ -525,6 +525,46 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // zero-store is needed for single-precision (ftype == 0).
                 return true;
             }
+            // Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd, Dn, #imm).
+            // The 64-bit-element shift encodings live in the FP space
+            // (bits[28:24] = 11111), so the decoder routes them to FP_SCALAR
+            // and they used to CALL_INTERP on every execution (the game's
+            // `ushr dN, dM, #32` was the top remaining SIMD/FP fallback).
+            // Reuse the SIMD shift IR ops with a single 64-bit lane
+            // (esize=8, q=0): v_lo[rd] = shift(v_lo[rn]); v_hi[rd] = 0.
+            //   SHL  (op & 0xFF00FC00) == 0x5F005400: shift = immh:immb - 64
+            //   USHR (op & 0xFF00FC00) == 0x7F000400: shift = 128 - immh:immb
+            //   SSHR (op & 0xFF00FC00) == 0x5F000400: shift = 128 - immh:immb
+            // shift == 64 (all bits shifted out) falls back to the
+            // interpreter, which clears (SHL/USHR) / sign-fills (SSHR) the
+            // lane exactly — the SSE2 imm-shift opcode masks the count to 6
+            // bits and would silently no-op.
+            {
+                uint8_t immh = (op >> 20) & 0xF;
+                uint8_t immb = (op >> 16) & 0xF;
+                int imm = (immh << 4) | immb;
+                IROp sshift_op = IROp::SIMD_SHL;
+                int sshift = 0;
+                if ((op & 0xFF00FC00) == 0x5F005400) {
+                    sshift_op = IROp::SIMD_SHL;
+                    sshift = imm - 64;
+                    if (sshift < 0) sshift = 0;
+                } else if ((op & 0xFF00FC00) == 0x7F000400) {
+                    sshift_op = IROp::SIMD_USHR;
+                    sshift = 128 - imm;
+                    if (sshift < 0) sshift = 0;
+                } else if ((op & 0xFF00FC00) == 0x5F000400) {
+                    sshift_op = IROp::SIMD_SSHR;
+                    sshift = 128 - imm;
+                    if (sshift < 0) sshift = 0;
+                } else {
+                    sshift = 64;  // not a scalar shift -> fall through
+                }
+                if (sshift < 64) {
+                    emit(block, sshift_op, rd, rn, 0, 8, 0, 0, sshift, cur_pc);
+                    return true;
+                }
+            }
             // Everything else (rare FP ops) falls back to interpreter.
             emit(block, IROp::CALL_INTERP, 0, 0, 0, 0, 0, 0, 0, cur_pc);
             return true;

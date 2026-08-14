@@ -23,6 +23,9 @@
 #include <string.h>
 #include <arm_neon.h>
 
+#define STR2(x) #x
+#define STR(x)  STR2(x)
+
 static int fails = 0;
 
 static void check(const char* name, int ok) {
@@ -49,6 +52,43 @@ static void test_shifts(void) {
         if (out[0] != (x >> n)) ok = 0;
     }
     check("shl_ushr_all", ok);
+}
+
+/* ── Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd, Dn, #imm) ──
+ * The 64-bit-element shift encodings live in the FP space
+ * (bits[28:24] = 11111), so the decoder routes them to FP_SCALAR and
+ * they used to CALL_INTERP every time — the voxel game's `ushr dN, dM,
+ * #32` was the top remaining FP/SIMD fallback. Encodings:
+ *   SHL  Dd, Dn, #s  = 0x5F005400 | ((64+s)  << 16) | (rn<<5) | rd
+ *   USHR Dd, Dn, #s  = 0x7F000400 | ((128-s) << 16) | (rn<<5) | rd
+ *   SSHR Dd, Dn, #s  = 0x5F000400 | ((128-s) << 16) | (rn<<5) | rd
+ * shift == 64 (all bits shifted out) exercises the interpreter fallback
+ * (clear for SHL/USHR, sign-fill for SSHR). */
+#define SHL_D_WORD(rd, rn, s)  (0x5F005400u | ((((64u) + (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
+#define USHR_D_WORD(rd, rn, s) (0x7F000400u | ((((128u) - (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
+#define SSHR_D_WORD(rd, rn, s) (0x5F000400u | ((((128u) - (s)) & 0xFF) << 16) | ((rn) << 5) | (rd))
+
+static void test_scalar_shift(void) {
+    uint64_t in  = 0xFEDCBA9876543210ULL;   /* sign bit set -> SSHR sign-fills */
+    uint64_t out = 0;
+    int ok = 1;
+
+#define DO_SSHIFT(word) \
+    asm volatile("ldr d0, [%0]\n\t.inst " STR(word) "\n\tstr d0, [%1]" \
+                 :: "r"(&in), "r"(&out) : "memory")
+
+    DO_SSHIFT(SHL_D_WORD(0, 0, 1));   if (out != (in << 1))  ok = 0;
+    DO_SSHIFT(SHL_D_WORD(0, 0, 32));  if (out != (in << 32)) ok = 0;
+    DO_SSHIFT(SHL_D_WORD(0, 0, 64));  if (out != 0)          ok = 0;  /* interp fallback */
+    DO_SSHIFT(USHR_D_WORD(0, 0, 1));  if (out != (in >> 1))  ok = 0;
+    DO_SSHIFT(USHR_D_WORD(0, 0, 32)); if (out != 0x00000000FEDCBA98ULL) ok = 0;
+    DO_SSHIFT(USHR_D_WORD(0, 0, 64)); if (out != 0)          ok = 0;  /* interp fallback */
+    DO_SSHIFT(SSHR_D_WORD(0, 0, 1));  if (out != (uint64_t)((int64_t)in >> 1))  ok = 0;
+    DO_SSHIFT(SSHR_D_WORD(0, 0, 32)); if (out != 0xFFFFFFFFFEDCBA98ULL) ok = 0;
+    DO_SSHIFT(SSHR_D_WORD(0, 0, 64)); if (out != 0xFFFFFFFFFFFFFFFFULL) ok = 0;  /* interp fallback */
+
+#undef DO_SSHIFT
+    check("scalar_shl_ushr_sshr", ok);
 }
 
 /* ── SLI semantics: Vd = (Vn << shift) | (Vd & ((1<<shift)-1)) ──
@@ -167,6 +207,7 @@ static void test_add_xor(void) {
 
 int main(void) {
     test_shifts();
+    test_scalar_shift();
     test_sli_rotl();
     test_sri_rotr();
     test_usra();

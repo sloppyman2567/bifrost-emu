@@ -908,14 +908,16 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             bool q = (inst.flags_op != 0);
             // Fall back to CALL_INTERP for unsupported element sizes.
             //  - esize=1 (8-bit): no PSLLB/PSRLB/PSRAB in SSE2.
-            //  - esize=8 SSRA/SRSRA: no PSRAQ in SSE2 (needs AVX-512).
+            //  - esize=8 SSHR/SSRA/SRSRA: 64-bit arithmetic shifts need
+            //    PSRAQ, which is AVX-512F only (NOT SSE2/AVX2 — a plain
+            //    `66 0F 73 /4 ib` = PSRAQ SIGILLs the host).
             //  - Invalid esize: shouldn't happen, but be safe.
             if (esize != 2 && esize != 4 && esize != 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            if ((inst.op == IROp::SIMD_SSRA || inst.op == IROp::SIMD_SRSRA)
-                && esize == 8) {
+            if ((inst.op == IROp::SIMD_SSHR || inst.op == IROp::SIMD_SSRA ||
+                 inst.op == IROp::SIMD_SRSRA) && esize == 8) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }

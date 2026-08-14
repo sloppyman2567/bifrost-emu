@@ -38,6 +38,36 @@ Added `ctest_real/test_movi_imm.c` (`.inst`-pinned MOVI/MVNI across LSL
 0/8/16/24, 8-bit, 64-bit, MSL#8/#16, and ORR/BIC 32/16-bit with
 read-modify-write pre-sets; no libm). Full suite: **193/193 PASS**.
 
+## [Unreleased] — native scalar 64-bit shift-by-immediate (2026-08-13)
+
+### `ushr dN, dM, #imm` (the game's #1 remaining FP/SIMD fallback) is native
+
+- **The scalar 64-bit shifts live in the FP space.** `ushr dN, dM, #32`
+  (0x7F600401), `sshr dN, dM, #32` (0x5F600509), and `shl dN, dM, #imm`
+  (0x5F0054xx) all have bits[28:24] = 11111, so the decoder routes them to
+  FP_SCALAR — the simd_dp SHIFT table (mask `0xBF00FC00`, pins bit28=0)
+  never sees them, and they CALL_INTERP'd on every execution. The voxel
+  game's `ushr dN, dM, #32` was ~20K executions per 500K-instruction
+  sample window — the top remaining `[fp/simd]` fallback.
+- **Native in the FP_SCALAR IR translator.** SHL `0x5F005400` /
+  USHR `0x7F000400` / SSHR `0x5F000400` (mask `0xFF00FC00`) now reuse the
+  SIMD shift ops with a single 64-bit lane (esize=8, q=0): `v_lo[rd]`
+  shifted, `v_hi[rd]` zeroed. shift == 64 (all bits shifted out) still
+  falls back to the interpreter's exact clear (SHL/USHR) / sign-fill
+  (SSHR), because the SSE2 imm-shift opcode masks the count to 6 bits.
+- **Fixed a latent JIT SIGILL: esize=8 SSHR emitted PSRAQ.** `66 0F 73 /4 ib`
+  (PSRAQ) and VPSRAQ are AVX-512F only — not SSE2/AVX2 — so `sshr dN,#imm`
+  (and any `sshr vN.2d`) crashed the host with SIGILL. The shift codegen
+  now CALL_INTERPs esize=8 SSHR alongside SSRA/SRSRA.
+- **Interp SHL scalar UB guard.** `shl dN, dM, #64` previously did
+  `v << 64` (UB); now clears the lane like USHR.
+- `instr_will_call_interp` mirrors the three masks under `fp_gate` bit
+  0x100 so the block-split gate agrees with the translator.
+
+Added `scalar_shl_ushr_sshr` to `ctest/jit_neon.c` (`.inst`-pinned D-form
+shifts at #1/#32/#64 for SHL/USHR/SSHR incl. the interp fallback edges).
+Game wall time ~30.5s → ~22.3s. Full suite: **193/193 PASS**.
+
 ## [Unreleased] — native FCVT rounding + de-interp of FP blocks (2026-08-13)
 
 ### Interpreter share cut ~2x (13.9% → ~7-8% of wall time); FPS 2 → 6

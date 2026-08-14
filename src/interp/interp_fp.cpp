@@ -2965,7 +2965,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 int shift = ((immh << 4) | immb) - 64;
                 if (shift < 0) shift = 0;
                 uint64_t v = cpu.v_lo[rn];
-                v <<= shift;
+                if (shift >= 64) v = 0;  // shift == 64 clears (avoids UB `<< 64`)
+                else v <<= shift;
                 cpu.v_lo[rd] = v;
                 cpu.v_hi[rd] = 0;
                 return;

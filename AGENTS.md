@@ -64,7 +64,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   FCVTZU clamps negatives to 0. The vector shift-by-immediate
   family (SHL/USHR/SSHR/USRA/SSRA/SLI/SRI/URSRA/SRSRA) is native in the
   JIT (AVX2 VEX 256-bit, `BIFROST_NO_AVX2` disables; SSE2 128-bit fallback;
-  esize=1 and 64-bit SSRA/SRSRA via CALL_INTERP). USRA masks to 0x2F001400 —
+  esize=1 and 64-bit SSHR/SSRA/SRSRA via CALL_INTERP — there is NO PSRAQ in
+  SSE2/AVX2, `66 0F 73 /4 ib` SIGILLs the host; VPSRAQ is AVX-512F only, so
+  a "native esize=8 SSHR" is a trap). The scalar 64-bit Dd,Dn,#imm forms
+  (SHL 0x5F005400 / USHR 0x7F000400 / SSHR 0x5F000400, mask 0xFF00FC00) live
+  in the FP space (bits[28:24]=11111), so the DECODER routes them to
+  FP_SCALAR, not SIMD_DP — the simd_dp table never sees them and they
+  used to CALL_INTERP (the voxel game's `ushr dN,dM,#32` was the top
+  remaining fallback). They're handled in the FP_SCALAR case of
+  ir_translate_fp.cpp by reusing SIMD_USHR/SHL/SSHR with esize=8, q=0
+  (v_lo shifted, v_hi zeroed; shift==64 falls back to the interp's
+  clear/sign-fill). `instr_will_call_interp` mirrors them under gate bit
+  0x100. USRA masks to 0x2F001400 —
   do not confuse it with the rounding variants URSRA (0x2F003400) / SRSRA
   (0x0F003400): those add the round-half-up top discarded bit, computed via
   (Vn >> sh) + ((Vn >> (sh-1)) & 1) (isolation: PSRL (sh-1) then PSLL/PSRL

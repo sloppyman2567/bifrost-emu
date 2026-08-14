@@ -76,6 +76,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             //   0x20 FCVT D<->S + SCVTF/UCVTF (int->FP)
             //   0x40 FMA family
             //   0x80 FCSEL
+            //   0x100 Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd,Dn,#imm)
             static int fp_gate = [] {
                 const char* s = getenv("BIFROST_FP_NATIVE_GATE");
                 return s ? static_cast<int>(strtol(s, nullptr, 0)) : -1;  // -1 = all native
@@ -163,6 +164,14 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             // FCSEL.
             if ((op & 0xFF200C00) == 0x1E200C00)
                 return fp_gate >= 0 && !(fp_gate & 0x80);
+            // Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd, Dn, #imm).
+            // Mirror of ir_translate_fp.cpp's FP_SCALAR block — native
+            // except shift==64 (all bits shifted out), which still
+            // CALL_INTERPs to the interpreter's exact clear/sign-fill.
+            if ((op & 0xFF00FC00) == 0x5F005400 ||
+                (op & 0xFF00FC00) == 0x7F000400 ||
+                (op & 0xFF00FC00) == 0x5F000400)
+                return fp_gate >= 0 && !(fp_gate & 0x100);
             return true;  // rare/unsupported scalar FP → interpreter
         }
         case InstClass::LDXR: case InstClass::STXR:
