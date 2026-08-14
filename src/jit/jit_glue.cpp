@@ -198,32 +198,116 @@ void Emulator::print_jit_stats() {
                 static_cast<unsigned long long>(bp.decode_fail.load()),
                 static_cast<unsigned long long>(bp.interp_only.load()));
     }
-    if (prof_enabled.load(std::memory_order_relaxed)) {
-        uint64_t jit = prof_jit.load(std::memory_order_relaxed);
-        uint64_t disp = prof_dispatch.load(std::memory_order_relaxed);
-        uint64_t trans = prof_translate.load(std::memory_order_relaxed);
-        uint64_t interp = prof_interp.load(std::memory_order_relaxed);
-        uint64_t other = prof_other.load(std::memory_order_relaxed);
-        uint64_t total = jit + disp + trans + interp + other;
-        if (total > 0) {
-            fprintf(stderr, "[%s] SIGPROF samples: jit=%llu (%.1f%%) dispatch=%llu "
-                    "(%.1f%%) translate=%llu (%.1f%%) interp=%llu (%.1f%%) other=%llu (%.1f%%)\n",
-                    CODENAME,
-                    static_cast<unsigned long long>(jit), 100.0 * jit / total,
-                    static_cast<unsigned long long>(disp), 100.0 * disp / total,
-                    static_cast<unsigned long long>(trans), 100.0 * trans / total,
-                    static_cast<unsigned long long>(interp), 100.0 * interp / total,
-                    static_cast<unsigned long long>(other), 100.0 * other / total);
-        }
-        // BIFROST_PC_HIST=1: resolve the sampled jit-bucket RIPs to guest
-        // PCs and print the hottest ones (map to functions with aarch64
-        // objdump). Gated separately so the default run stays quiet.
-        static const bool pc_hist_ = (getenv("BIFROST_PC_HIST") != nullptr);
-        if (pc_hist_ && tls_prof_rip_head > 0) {
-            uint32_t n = std::min<uint32_t>(tls_prof_rip_head, (uint32_t)PROF_RIP_MAX);
-            jit_->dump_pc_histogram(tls_prof_rips, n);
+    dump_prof_snapshot();
+}
+// Periodic (or exit-time) SIGPROF bucket snapshot. Shared by print_jit_stats
+// and the BIFROST_STATS_PERIOD reporter so the jit/dispatch/translate/interp
+// split can be observed DURING a run phase (e.g. worldgen) without requiring a
+// clean guest exit. Inert unless BIFROST_PROF=1.
+void Emulator::dump_prof_snapshot() {
+    if (!prof_enabled.load(std::memory_order_relaxed)) return;
+    uint64_t jit = prof_jit.load(std::memory_order_relaxed);
+    uint64_t disp = prof_dispatch.load(std::memory_order_relaxed);
+    uint64_t trans = prof_translate.load(std::memory_order_relaxed);
+    uint64_t interp = prof_interp.load(std::memory_order_relaxed);
+    uint64_t other = prof_other.load(std::memory_order_relaxed);
+    uint64_t total = jit + disp + trans + interp + other;
+    if (total > 0) {
+        fprintf(stderr, "[%s] SIGPROF samples: jit=%llu (%.1f%%) dispatch=%llu "
+                "(%.1f%%) translate=%llu (%.1f%%) interp=%llu (%.1f%%) other=%llu (%.1f%%)\n",
+                CODENAME,
+                static_cast<unsigned long long>(jit), 100.0 * jit / total,
+                static_cast<unsigned long long>(disp), 100.0 * disp / total,
+                static_cast<unsigned long long>(trans), 100.0 * trans / total,
+                static_cast<unsigned long long>(interp), 100.0 * interp / total,
+                static_cast<unsigned long long>(other), 100.0 * other / total);
+    }
+    // BIFROST_PC_HIST=1: resolve the sampled jit-bucket RIPs to guest
+    // PCs and print the hottest ones (map to functions with aarch64
+    // objdump). Gated separately so the default run stays quiet.
+    static const bool pc_hist_ = (getenv("BIFROST_PC_HIST") != nullptr);
+    if (pc_hist_ && tls_prof_rip_head > 0) {
+        uint32_t n = std::min<uint32_t>(tls_prof_rip_head, (uint32_t)PROF_RIP_MAX);
+        jit_->dump_pc_histogram(tls_prof_rips, n);
+    }
+}
+// Periodic real-guest-throughput + block-structure reporter. The old
+// BIFROST_STATS_PERIOD "rolling MIPS" used the run-loop dispatch counter
+// (block dispatches, NOT guest instructions) so it under-reported real
+// throughput ~10x. This aggregates jit_->instructions_executed across all
+// JITs (the actual guest-instruction count, incremented per block body)
+// and prints the block-end-reason histogram deltas so the codegen-quality
+// levers (avg instr/block, CALL_INTERP/BL_CALL caps, max_size) stay visible
+// DURING a run phase. Inert unless BIFROST_STATS_PERIOD is set.
+void Emulator::dump_periodic_stats(double dt) {
+    if (!jit_ || !jit_enabled_) return;
+    uint64_t instr  = jit_->instructions_executed.load(std::memory_order_relaxed);
+    uint64_t blocks = jit_->blocks_executed.load(std::memory_order_relaxed);
+    uint64_t blocks_tr  = jit_->blocks_translated.load(std::memory_order_relaxed);
+    uint64_t chains = jit_->block_chains_patched.load(std::memory_order_relaxed);
+    // BlockProfile is only tracked on the main JIT in practice, but sum the
+    // per-thread JITs if present so the numbers are comparable to print_jit_stats.
+    uint64_t natural = jit_->block_profile.natural_branch.load(std::memory_order_relaxed);
+    uint64_t entry   = jit_->block_profile.entry_point.load(std::memory_order_relaxed);
+    uint64_t ci_cap  = jit_->block_profile.call_interp_cap.load(std::memory_order_relaxed);
+    uint64_t bl_cap  = jit_->block_profile.bl_call_cap.load(std::memory_order_relaxed);
+    uint64_t max_sz  = jit_->block_profile.max_size.load(std::memory_order_relaxed);
+    uint64_t decfail = jit_->block_profile.decode_fail.load(std::memory_order_relaxed);
+    uint64_t ionly   = jit_->block_profile.interp_only.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        for (auto& gt : threads_) {
+            if (gt->jit) {
+                instr     += gt->jit->instructions_executed.load(std::memory_order_relaxed);
+                blocks    += gt->jit->blocks_executed.load(std::memory_order_relaxed);
+                blocks_tr += gt->jit->blocks_translated.load(std::memory_order_relaxed);
+                chains    += gt->jit->block_chains_patched.load(std::memory_order_relaxed);
+                natural   += gt->jit->block_profile.natural_branch.load(std::memory_order_relaxed);
+                entry     += gt->jit->block_profile.entry_point.load(std::memory_order_relaxed);
+                ci_cap    += gt->jit->block_profile.call_interp_cap.load(std::memory_order_relaxed);
+                bl_cap    += gt->jit->block_profile.bl_call_cap.load(std::memory_order_relaxed);
+                max_sz    += gt->jit->block_profile.max_size.load(std::memory_order_relaxed);
+                decfail   += gt->jit->block_profile.decode_fail.load(std::memory_order_relaxed);
+                ionly     += gt->jit->block_profile.interp_only.load(std::memory_order_relaxed);
+            }
         }
     }
+    // deltas since the last dump
+    static uint64_t last_instr_, last_blocks_, last_blocks_tr_, last_chains_;
+    static uint64_t last_natural_, last_entry_, last_ci_cap_, last_bl_cap_,
+                    last_max_sz_, last_decfail_, last_ionly_;
+    uint64_t d_instr     = instr - last_instr_;
+    uint64_t d_blocks    = blocks - last_blocks_;
+    uint64_t d_blocks_tr = blocks_tr - last_blocks_tr_;
+    uint64_t d_chains    = chains - last_chains_;
+    double mips = dt > 0 ? d_instr / 1e6 / dt : 0.0;
+    fprintf(stderr,
+            "[%s] guest: %.1f MIPS real (%.1f M blocks/s, avg %.1f instr/block, "
+            "%llu new blocks translated, %llu chains patched)\n",
+            CODENAME, mips,
+            dt > 0 ? d_blocks / 1e6 / dt : 0.0,
+            d_blocks > 0 ? static_cast<double>(d_instr) / d_blocks : 0.0,
+            static_cast<unsigned long long>(d_blocks_tr),
+            static_cast<unsigned long long>(d_chains));
+    // Block-end reasons: why translated blocks stop early (structural
+    // branch vs JIT caps). Deltas so a phase-local spike is visible.
+    fprintf(stderr,
+            "[%s] block-end: natural=%llu entry=%llu call_interp=%llu "
+            "bl_call=%llu max_size=%llu decode_fail=%llu interp_only=%llu\n",
+            CODENAME,
+            static_cast<unsigned long long>(natural - last_natural_),
+            static_cast<unsigned long long>(entry - last_entry_),
+            static_cast<unsigned long long>(ci_cap - last_ci_cap_),
+            static_cast<unsigned long long>(bl_cap - last_bl_cap_),
+            static_cast<unsigned long long>(max_sz - last_max_sz_),
+            static_cast<unsigned long long>(decfail - last_decfail_),
+            static_cast<unsigned long long>(ionly - last_ionly_));
+    last_instr_     = instr;     last_blocks_     = blocks;
+    last_blocks_tr_ = blocks_tr; last_chains_     = chains;
+    last_natural_   = natural;   last_entry_      = entry;
+    last_ci_cap_    = ci_cap;    last_bl_cap_     = bl_cap;
+    last_max_sz_    = max_sz;    last_decfail_    = decfail;
+    last_ionly_     = ionly;
 }
 void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);

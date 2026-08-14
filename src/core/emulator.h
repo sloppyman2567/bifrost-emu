@@ -165,6 +165,11 @@ public:
     // Defined in src/jit/jit_glue.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);
     void print_jit_stats();
+    void dump_prof_snapshot();
+    // Periodic real-guest-throughput + block-structure reporter. Uses real
+    // instructions_executed (not the run-loop dispatch counter) and prints
+    // block-end reasons so the codegen-quality levers stay visible mid-run.
+    void dump_periodic_stats(double dt);
     // ── vCPU management ───────────────────────────────────────────────
     // Futex table: maps a guest address → (mutex, condvar, waiter count).
     // Used by clone-spawned threads for synchronization.

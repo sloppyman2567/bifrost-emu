@@ -1189,9 +1189,10 @@ int Emulator::run() {
             break;
         }
         count++;
-        // Periodic MIPS reporter (BIFROST_STATS_PERIOD=seconds). Prints
-        // rolling guest MIPS every period so steady-state performance can
-        // be measured past startup/world-gen phases. Inert unless set.
+        // Periodic reporter (BIFROST_STATS_PERIOD=seconds). Prints real
+        // guest throughput + block-structure + SIGPROF buckets every period
+        // so steady-state AND phase-local behavior (startup/worldgen/load)
+        // can be measured without a clean guest exit. Inert unless set.
         {
             static const double period_ = []() {
                 const char* s = getenv("BIFROST_STATS_PERIOD");
@@ -1199,15 +1200,12 @@ int Emulator::run() {
             }();
             if (period_ > 0.0) {
                 static auto last_t_ = std::chrono::steady_clock::now();
-                static uint64_t last_count_ = count;
                 auto now_t = std::chrono::steady_clock::now();
                 double dt = std::chrono::duration<double>(now_t - last_t_).count();
                 if (dt >= period_) {
-                    double mips = (count - last_count_) / 1e6 / dt;
-                    fprintf(stderr, "[%s] rolling MIPS: %.2f (total %llu)\n",
-                            CODENAME, mips, static_cast<unsigned long long>(count));
+                    dump_periodic_stats(dt);
+                    dump_prof_snapshot();
                     last_t_ = now_t;
-                    last_count_ = count;
                 }
             }
         }
