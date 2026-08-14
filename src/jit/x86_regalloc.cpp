@@ -460,7 +460,15 @@ uint16_t FrostJIT::load_vreg_to_reg_fast(int dst, int v, int dest_vreg,
     // it to dst first, then flush+invalidate (the flush preserves the value
     // for later readers via its stack slot), skip the reload. Common case:
     // ADD/SHL leaves a scratch vreg in RCX, then LOAD_MEM consumes it.
+    //
+    // CRITICAL: clobber_host_reg(dst) BEFORE the mov. If dst was still
+    // mapped to a DIFFERENT dirty vreg, the mov destroys that cached value
+    // and the subsequent flush_dirty_host_regs writes the NEW value into the
+    // old vreg's stack slot (value corruption). This is the same class of
+    // bug as the SIMD DUP broadcast: drop the mapping (spilling if dirty)
+    // before overwriting the register.
     if (home >= 0 && home != dst && (clobber_mask & (1u << home))) {
+        clobber_host_reg(dst);
         emit_mov_reg(dst, home);
         flush_dirty_host_regs(clobber_mask);
         flush_scratch_host_regs(clobber_mask);
