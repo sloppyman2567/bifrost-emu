@@ -522,6 +522,7 @@ private:
     void emit_modrm_disp(int reg, int base, int32_t off);
     void emit_add_reg(int dst, int src);
     void emit_add_reg_imm(int dst, int32_t imm);
+    void emit_alu_imm(int dst, int kind, int32_t imm);
     void emit_sub_reg(int dst, int src);
     void emit_adc_reg(int dst, int src);   // adc r64, r64 (with CF)
     void emit_sbb_reg(int dst, int src);   // sbb r64, r64 (with CF)
@@ -897,6 +898,15 @@ private:
     // which permits skipping the flush→reload sandwich for scratch vregs
     // already cached in the target host reg.
     size_t cur_op_index_ = 0;
+    // ── Block-local constant tracking ────────────────────────────────
+    // jit_consts_[v] = constant value of scratch vreg `v`, populated when
+    // the IMM op that defines it is compiled. Used to fold a constant src2
+    // into an x86 immediate form (ADD/SUB/AND/OR/XOR, shifts) when the vreg
+    // is dead after the consuming op. Safe because IR scratch vregs are
+    // allocated monotonically (VregAlloc::next++) and defined exactly once
+    // per block, so a vreg keyed here is always an IMM result. Defensively
+    // erased when any non-IMM op writes the same dest vreg.
+    std::unordered_map<uint16_t, uint64_t> jit_consts_;
     // Returns true if scratch vreg `v` has its LAST use at the current op
     // (i.e. it is dead once the current op is emitted) and is NOT the dest
     // of the current op. Used by the flush-skip fast paths in UBFM/SBFM/

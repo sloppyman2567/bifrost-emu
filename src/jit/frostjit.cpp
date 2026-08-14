@@ -162,7 +162,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Load base address → RAX.
             load_vreg_to_reg(RAX, inst.src1);
             // Check if addr + w <= 4GB (direct window fast path).
-            emit_mov_imm64(RDX, Memory::DIRECT_WINDOW_SIZE - w);
+            emit_mov_imm32_zext(RDX, static_cast<uint32_t>(Memory::DIRECT_WINDOW_SIZE - w));
             emit_cmp_reg(RAX, RDX);
             size_t jae_patch = emit_jcc_rel32_placeholder(7);  // JA → slow
             // ── Fast path: direct window ──

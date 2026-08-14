@@ -418,6 +418,41 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (SIGPROF interp went 6.3% → 0.0%). No vec-cache interplay needed: SVC
   disqualifies the block in vec_cache_may_enable. `instr_will_call_interp`
   correctly returns false for SVC (not in its switch).
+- Direct-window limit constants are emitted as `mov r32d, imm32`
+  (`emit_mov_imm32_zext`, zero-extends) in all five bounds-check sites
+  (emit_load_mem, emit_store_mem, ATOMIC in frostjit.cpp, SIMD_LD16, SIMD_ST16)
+  — the limit `DIRECT_WINDOW_SIZE − w` is always < 2^32, so a 10-byte movabs
+  is dead weight (5-6 bytes saved per memory access). Do NOT "shorten" the
+  compare itself to `cmp r64, imm32`: imm32 SIGN-EXTENDS, so 0xFFFFFFF8
+  compares against 0xFFFFFFFFFFFFFFF8 and every window hit falls to the slow
+  path. 32-bit mov + 64-bit cmp is exact (both operands < 2^32).
+- Constant-src2 folding in the JIT: `jit_consts_` (per-block
+  `unordered_map<uint16_t,uint64_t>`) records the value of each scratch vreg
+  whose defining op is `IROp::IMM` (populated in compile_ir_alu's IMM case,
+  erased in translate_block's compile loop when any non-IMM op writes the
+  same dest — defensive; the monotonic `VregAlloc::next++` makes vreg
+  numbers unique per definition). The ADD/SUB/AND/OR/XOR case and the
+  SHL/SHR/SAR/ROR case fold a constant src2 into an x86 immediate form when
+  `vreg_last_use_this_op(src2)` (dead after this op) and `dest/src1 != src2`
+  (must not be the write target or collide with the src1 value — `kill_vreg`
+  before `ensure_vreg(src1)` frees the dead const's reg). CRITICAL rules:
+  (a) the JIT ALU ops are ALWAYS 64-bit (guest W-reg results get a separate
+  ZEXT from the translator), so a fold is only valid when
+  `(int64)c == (int64)(int32)c` — ADD/SUB/AND/OR/XOR imm32 sign-extends;
+  this covers 12-bit add/sub immediates, stack offsets, small masks
+  (0xFF/0x3F/…), and −1, but NEVER masks ≥ 0x80000000 (e.g. `and x0,x1,#0xFFFFFFF0`
+  must stay register-form) or 64-bit values whose low 32 bits don't
+  sign-extend back. (b) shift counts fold via `emit_shift_imm8(d, kind,
+  cnt & 0x3F)` (mod-64, x86 imm shifts self-mask), with the 32-bit-ROR
+  special case emitting a REX.W-free `C1 /1 ib` with `cnt & 0x1F`. A register
+  shift with a loop-invariant count does NOT fold (src2 is an ARM reg or a
+  live vreg, not a dead IMM) — that's fine, the CL path reuses RCX across
+  iterations. (c) the emitted immediate ops clobber RFLAGS exactly like the
+  reg form, and clobber_flags() precedes the fold, so flag tracking is
+  unaffected. Measured: bench_mips +3.7% (MIPS is addi/ori/andi/lui-heavy),
+  bench_matrix/sort/memcpy/fib ±1% (noise). Suite 199/199, quick 194/194,
+  regalloc-check 194/194, FWD 194/194, bench_mips byte-identical under
+  JIT_VERIFY/JIT_VERIFY_MEM/FWD.
 
 ## Work Guidance
 

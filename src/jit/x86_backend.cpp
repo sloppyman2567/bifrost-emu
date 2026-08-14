@@ -190,6 +190,18 @@ void FrostJIT::emit_add_reg_imm(int dst, int32_t imm) {
         emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32(static_cast<uint32_t>(imm));
     }
 }
+void FrostJIT::emit_alu_imm(int dst, int kind, int32_t imm) {
+    // r64, imm8/imm32 with the /digit from `kind` (0=ADD 1=OR 4=AND
+    // 5=SUB 6=XOR), for constant-src2 folding. Same encoding family as
+    // emit_add_reg_imm; imm32 sign-extends to 64 bits.
+    if (imm >= -128 && imm <= 127) {
+        emit_byte(rex(true,false,false,dst>=8));
+        emit_byte(0x83); emit_byte(modrm(3,kind,dst&7)); emit_byte(static_cast<uint8_t>(imm));
+    } else {
+        emit_byte(rex(true,false,false,dst>=8));
+        emit_byte(0x81); emit_byte(modrm(3,kind,dst&7)); emit_u32(static_cast<uint32_t>(imm));
+    }
+}
 void FrostJIT::emit_sub_reg(int dst, int src) {
     emit_byte(rex(true,src>=8,false,dst>=8)); emit_byte(0x29); emit_byte(modrm(3,src&7,dst&7));
 }
@@ -678,10 +690,11 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
             emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32(static_cast<uint32_t>(off));
         }
     }
-    // Check if addr + w <= 4GB.
+    // Check if addr + w <= 4GB. The limit is always < 2^32, so a 32-bit
+    // zero-extending mov is 5-6 bytes instead of the 10-byte movabs.
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
     int tmp = (dst != RDX) ? RDX : RCX;
-    emit_mov_imm64(tmp, limit);
+    emit_mov_imm32_zext(tmp, static_cast<uint32_t>(limit));
     emit_cmp_reg(dst, tmp);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
     // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
@@ -732,9 +745,9 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
             emit_byte(0x81); emit_byte(modrm(3,0,R8&7)); emit_u32(static_cast<uint32_t>(off));
         }
     }
-    // Limit check: R9 = limit. cmp R8, R9.
+    // Limit check: R9 = limit. cmp R8, R9. Limit is < 2^32 → 32-bit mov.
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    emit_mov_imm64(R9, limit);
+    emit_mov_imm32_zext(R9, static_cast<uint32_t>(limit));
     emit_cmp_reg(R8, R9);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
     // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).

@@ -33,6 +33,8 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
     switch (inst.op) {
         case IROp::IMM:
             if (inst.dest) {
+                if (inst.dest > 32 && inst.dest < 4096)
+                    jit_consts_[inst.dest] = inst.imm;
                 int d = alloc_reg_for(inst.dest, -1);
                 if (inst.imm <= 0xFFFFFFFFULL) {
                     emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm));
@@ -66,6 +68,46 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         case IROp::ADD: case IROp::SUB: case IROp::AND:
         case IROp::OR:  case IROp::XOR: case IROp::MUL: {
             clobber_flags();
+            // ── Constant-src2 immediate folding ──
+            // If src2 is a block-local IMM constant (dead after this op and
+            // not the dest), fold it into an x86 immediate form. The JIT ALU
+            // ops are always 64-bit (guest W-reg results get a separate ZEXT
+            // from the translator), so only constants that survive imm32
+            // sign-extension fold: (int64)c == (int64)(int32)c. This covers
+            // 12-bit add/sub immediates, stack-frame offsets, small masks
+            // (0xFF/0x3F/...), and −1 (SUB #−1 → add r,−1).
+            if (inst.op != IROp::MUL && inst.dest != inst.src2 &&
+                inst.src1 != inst.src2) {
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end() && vreg_last_use_this_op(inst.src2)) {
+                    int64_t c = static_cast<int64_t>(cit->second);
+                    if (static_cast<int64_t>(static_cast<int32_t>(c)) == c) {
+                        int32_t imm = static_cast<int32_t>(c);
+                        int kind = (inst.op == IROp::ADD) ? 0
+                                : (inst.op == IROp::OR)  ? 1
+                                : (inst.op == IROp::AND) ? 4
+                                : (inst.op == IROp::SUB) ? 5 : 6;
+                        kill_vreg(inst.src2);  // free the dead const vreg's reg
+                        int s1 = ensure_vreg(inst.src1);
+                        int d;
+                        if (inst.dest == inst.src1) {
+                            d = s1;
+                        } else {
+                            d = alloc_reg_excluding(s1, -1);
+                            if (d != s1) emit_mov_reg(d, s1);
+                        }
+                        emit_alu_imm(d, kind, imm);
+                        if (inst.dest == inst.src1) {
+                            vreg_dirty_[inst.dest] = true;
+                            dirty_host_regs_ |= (1u << d);
+                            vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+                        } else {
+                            set_vreg_reg(inst.dest, d);
+                        }
+                        return 0;
+                    }
+                }
+            }
             bool commutative = (inst.op != IROp::SUB);
             int s1 = ensure_vreg(inst.src1);
             int s2 = ensure_vreg(inst.src2);
@@ -109,11 +151,52 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
         }
         case IROp::SHL: case IROp::SHR:
         case IROp::SAR: case IROp::ROR: {
+            clobber_flags();
+            // ── Constant-count immediate shift ──
+            // If src2 is a block-local IMM constant (dead after this op and
+            // not the dest), emit `shl/shr/sar/ror r, imm8` and skip the
+            // RCX/CL dance entirely. Counts are masked mod 64 (mod 32 for
+            // 32-bit ROR) exactly as the CL-variable path does.
+            if (inst.dest != inst.src2 && inst.src1 != inst.src2) {
+                auto cit = jit_consts_.find(inst.src2);
+                if (cit != jit_consts_.end() && vreg_last_use_this_op(inst.src2)) {
+                    uint64_t cnt = cit->second;
+                    kill_vreg(inst.src2);
+                    int s1 = ensure_vreg(inst.src1);
+                    int d;
+                    if (inst.dest == inst.src1) {
+                        d = s1;
+                    } else {
+                        d = alloc_reg_excluding(s1, -1);
+                        if (d != s1) emit_mov_reg(d, s1);
+                    }
+                    bool is_32bit_ror = (inst.op == IROp::ROR && inst.width == 32);
+                    if (is_32bit_ror) {
+                        uint8_t c = static_cast<uint8_t>(cnt & 0x1F);
+                        if (c) {  // ror r32d, imm8 (no REX.W), count mod 32
+                            if (d >= 8) emit_byte(0x41);
+                            emit_byte(0xC1); emit_byte(modrm(3, 1, d & 7)); emit_byte(c);
+                        }
+                    } else {
+                        int kind = (inst.op == IROp::SHL) ? 4
+                                 : (inst.op == IROp::SHR) ? 5
+                                 : (inst.op == IROp::SAR) ? 7 : 1;
+                        emit_shift_imm8(d, kind, static_cast<uint8_t>(cnt & 0x3F));
+                    }
+                    if (inst.dest == inst.src1) {
+                        vreg_dirty_[inst.dest] = true;
+                        dirty_host_regs_ |= (1u << d);
+                        vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+                    } else {
+                        set_vreg_reg(inst.dest, d);
+                    }
+                    return 0;
+                }
+            }
             // x86 variable shifts use CL for the count. We force src2 into
             // RCX (clobbering its previous occupant), but leave src1 in
             // whatever reg it's cached in. dest is computed in src1's reg
             // when dest == src1, else in a fresh reg excluding src1 and RCX.
-            clobber_flags();
             int s1 = ensure_vreg(inst.src1);
             // If s1 is in RCX, move it elsewhere first so forcing src2 into
             // RCX doesn't lose src1.
