@@ -113,6 +113,12 @@ enum class IROp : uint8_t {
     FP_UNOP,       // v_lo[dest] = op(v_lo[src1]); v_hi[dest]=0
                    // imm = opcode (0=mov,1=abs,2=neg,3=sqrt)
                    // width = ftype (0=S, 1=D)
+    FP_MOV,        // FP↔FP register move: v_lo[dest] = v_lo[src1]
+                    // width = ftype (0=S single: v_lo[dest] = (float)v_lo[src1],
+                    // v_hi[dest] = 0; 1=D double: v_lo/v_hi both copied).
+                    // One IR op instead of the old 4-op
+                    // FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/G2FHI) round-trip —
+                    // noise3/grad3 alone emit 67 fmovs per body.
     // Native SIMD/NEON ops (operate on v_lo/v_hi directly via SSE2/AVX)
     SIMD_LOGICAL,  // v_lo[dest],v_hi[dest] = src1 OP src2
                    // imm = opcode (0=and,1=orr,2=xor,3=bic,4=orn,5=eon)

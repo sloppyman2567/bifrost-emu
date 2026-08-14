@@ -103,7 +103,7 @@ static bool is_pure(IROp op) {
         case IROp::BLR_CALL: // callee may read/write any ARM reg
         case IROp::FMOV_G2F: case IROp::FMOV_F2G:
         case IROp::FMOV_G2FHI: case IROp::FMOV_FHI2G:  // write to v_lo/v_hi or read from them
-        case IROp::FP_BINOP: case IROp::FP_UNOP:      // write to v_lo/v_hi
+        case IROp::FP_BINOP: case IROp::FP_UNOP: case IROp::FP_MOV:  // write to v_lo/v_hi
         case IROp::SIMD_LOGICAL: case IROp::SIMD_DUP: // write to v_lo/v_hi
         case IROp::SIMD_MOVI: case IROp::SIMD_ORRIMM: // write to v_lo/v_hi
         case IROp::SIMD_LDST:                          // write to v_lo/v_hi
@@ -792,7 +792,8 @@ void optimize_ir(IRBlock& block) {
                 // and writes a GPR (dest). FP stores use inst.sf=1, so they
                 // have a different DSE key. No vreg to mark live here.
             } else if (inst.op == IROp::FCVT_S2D || inst.op == IROp::FCVT_D2S ||
-                       inst.op == IROp::FP_UNOP || inst.op == IROp::FRINT) {
+                       inst.op == IROp::FP_UNOP || inst.op == IROp::FP_MOV ||
+                       inst.op == IROp::FRINT) {
                 // These read and write FP regs (src1/dest are FP reg indices).
                 // No GPR vregs to mark live.
             } else {
@@ -892,6 +893,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::FMOV_FHI2G: return "FMOV_FHI2G";
                     case IROp::FP_BINOP: return "FP_BINOP";
                     case IROp::FP_UNOP: return "FP_UNOP";
+                    case IROp::FP_MOV: return "FP_MOV";
                     case IROp::SIMD_LOGICAL: return "SIMD_LOGICAL";
                     case IROp::SIMD_DUP: return "SIMD_DUP";
                     case IROp::SIMD_MOVI: return "SIMD_MOVI";

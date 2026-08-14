@@ -1,144 +1,156 @@
-# Plan: minecraft_weekend — cut the SIGPROF "other" bucket (mmap/munmap + GL thunk)
+# Plan: Scalar-FP register cache + leaf inlining → ~1 GIPS worldgen
 
-## Objective
-The game (ctest_real/minecraft_weekend, GLFW+OpenGL voxel) is CPU-bound but only
-~46% of wall time is guest JIT execution. ~49% is SIGPROF "other" (host-side:
-mmap/munmap zeroing, GL/SDL thunks, driver work). Goal: shrink "other" by
-attacking the two addressable sources — the per-frame mmap/munmap mesh-buffer
-churn and the thunk dispatch overhead. Host GL driver/upload work inside "other"
-is irreducible.
+Goal: cut the minecraft_weekend worldgen lag spike by chasing ~1 GIPS on the
+terrain-generation hot path (currently ~430 MIPS). The remaining spike is
+genuine Perlin-noise work (2 fresh chunk loads/frame ≈ 87ms of the ~92ms
+spike frames), and the JIT itself is the limiter for the FP-heavy phases.
 
-## Environment run discipline
-- Repo: `/home/gamingpc/Downloads/bifrost-emu-1.5.0-alpha`; build with `make`.
-- Profile from the game dir (res/ is relative), NO input and NO clean exit
-  needed — the game auto-simulates/generates; periodic stats print mid-run:
-  ```
-  cd ctest_real/minecraft_weekend
-  BIFROST_PROF=1 BIFROST_STATS_PERIOD=10 BIFROST_CLASS_PROF=1 \
-      timeout 42 <repo>/bifrost-emu ./minecraft_weekend.elf 2>&1 | \
-      rg 'SIGPROF|guest:|block-end|syscalls|class'
-  ```
-- One ~40s timeout-killed run is a valid profile (SIGPROF buckets print every
-  10s via dump_periodic_stats since b3a2a60).
-- Do NOT run long suites repeatedly for A/B (user constraint); use single
-  targeted runs. Game frame-count A/B is unreliable (±30% same-binary spread).
+Status: Phase 1 (baseline) DONE, diagnosis confirmed. Committed baseline is
+`87a33ed`. Next: Phase 2 (FMOV compaction).
 
-## Baseline profile (2026-08-14, default JIT)
-- SIGPROF: jit ~46%, dispatch ~5%, translate ~0.4%, interp 0.0% (0 fallbacks,
-  0 interp_only), **other ~49%**.
-- ~100 MIPS real, avg 6.2 instr/block, 16.4 M blocks/s.
-- Syscalls ~900/s (growing): mmap 222 ~31% (~280/s), munmap 215 ~30% (~265/s),
-  madvise 233 ~2.5%, clock_gettime 113 ~2%, brk 214. mmap+munmap = ~61%.
-  (Thunk calls = syscall 0x1000 are NOT yet counted — SYSCALL_HIST_MAX=512
-  underflows them; Phase 0 fixes this.)
-- Game: FPS ~150, TPS ~60. Mesh remesh allocates 4 buffers (~25 MB: 18 MB DATA
-  + 2.25 MB INDICES + FACES + t_indices) via malloc→mmap, uploads, frees→munmap.
-  Buffers live in the 4 GiB direct window (heap 256..768 MiB) — JIT fast path.
+## Phase 1 results (measurement — 2026-08-14)
 
-## Design principle: replicate Linux kernel mmap semantics
-Real Linux does NOT zero fresh anonymous mappings eagerly — it drops physical
-pages at munmap and zero-fills on demand via page faults. The emulator should
-mirror that. The direct window is ONE contiguous `MAP_PRIVATE|MAP_ANONYMOUS|
-MAP_NORESERVE` host mapping (memory.cpp:18-20) that the JIT addresses as
-`direct_window_ + guest_addr`, so sub-ranges can't be literally unmapped (real
-munmap → SIGSEGV on stale access is impossible without tearing the window).
-The closest kernel mechanism that fits is `madvise(MADV_DONTNEED)`: physical
-pages freed at munmap (kernel behavior), later access faults zero-filled
-instead of SIGSEGV. That divergence (zeros vs SIGSEGV on use-after-free) is
-deliberate, documented, and strictly safer. JIT direct-window loads/stores
-(`mov (%r10,%rax),%rdx`) fault transparently — no host signal, the kernel
-zero-fills and continues. DECISION LOCKED: use madvise, NOT bulk memset.
+JIT MIPS ceiling on cross-compiled benches (interp-counted instr ÷ JIT
+run-loop time):
 
-## Work items
+| bench | guest MIPS | result |
+|---|---|---|
+| bench_mips (pure int addi/ori/andi) | **1084** | `acc=0xf800800a2c4ff835` |
+| bench_matrix (float matmul) | **765** | 254.6 MFLOPS, 256×256 |
+| bench_fib | 726 | fib(35)=9227465 |
+| bench_sort | 499 | qsort 100K |
+| bench_memcpy | 420 | 256 MiB @ 3264 MiB/s |
 
-### Phase 0 — Count thunk calls (measurement, no behavior change)
-- src/syscalls/syscalls.cpp: SYSCALL_HIST_MAX=512 < 0x1000; raise the cap (or
-  special-case 0x1000) so thunk calls appear in the histogram. Re-profile ~40s.
-  Output gates Phase 3 (skip it if thunk volume is low).
+Int/float ceiling ratio = **1.42x**. The game's 430 MIPS sits well below
+BOTH ceilings → the FP path is the limiter, and the noise should be able to
+approach ~765 MIPS (1.8x) with FP caching; integer ILP proves ~1.1 GIPS is
+reachable in principle.
 
-### Phase 1 — mmap/munmap fast path (biggest measured win, kernel-faithful)
-1. `untrack_allocation` (memory.cpp:446-486): for all-window ranges
-   (`direct_window_ && addr+size <= DIRECT_WINDOW_SIZE`) replace the no-op
-   per-page loop (4608 iterations of nothing) with one
-   `madvise(direct_window_+addr, size, MADV_DONTNEED)`. Keep the non-window
-   `pages_` loop.
-2. `mmap_alloc` (memory.cpp:327-345): remove the window memset entirely (both
-   reused + fresh). New invariant: window pages are never-touched OR
-   madvise'd ⇒ zero-on-fault. Keep non-window zeroing.
-3. OOM count loop (memory.cpp:313-318) + the untrack page loop: short-circuit
-   when the whole range is in-window (provably 0 new pages).
-4. Guards: `direct_window_` null-check; verify MAP_FIXED path (hint!=0,
-   memory.cpp:302-307) doesn't rely on old zeroing (madvise only strengthens
-   it); confirm no host code caches window pointers across munmap (JIT computes
-   from direct_window_ at runtime — safe).
-- Correctness: madvise makes guest use-after-free read zeros (vs stale data) —
-  strictly safer; test_mmap zero-fill expectations hold (fault → zero).
+Hypothesis confirmed via `BIFROST_JIT_DUMP=1` IR dump of noise3/grad3
+(game is PIE, load base 0x400000 — plan's original 0x32b50/0x324d0 were
+stale; real syms: `grad3`=0x431f60, `noise3`=0x4325e0):
+- noise3 = 12 blocks, 507 IR ops: **67 FMOV-family** (each `fmov sN,sM`
+  expands to 4 IR ops: `FMOV_F2G → IMM 0xffffffff → AND → FMOV_G2F`, the
+  single-precision masking variant), **54 FP arith** (FP_BINOP=23,
+  FMADD=13, FP_CMP=5, FP_I2F=8, FP_F2I=5), 16 LOAD_MEM (perm[] ldrb),
+  and LOAD_REG=77/STORE_REG=64 GPR-cache traffic.
+- grad3 = 3 blocks, 63 IR ops: FMOV=18, FP=6.
+- Every FP operand crosses `cpu.v_lo[]` memory (`[rbx+off]`) — no XMM
+  cache for scalar FP, while GPRs use the LOAD_REG/STORE_REG cache.
 
-### Phase 2 — Syscall dispatch + thunk hygiene (cheap)
-1. `Emulator::syscall` (syscalls.cpp:239-244): pre-check hot numbers →
-   direct subsystem call, skipping the 5-handler + 4-subhandler chain:
-   222/215→mem, 0x1000→misc (thunk), 98/220→threads. Everything else falls
-   through unchanged (zero mis-dispatch risk).
-2. `thunk.cpp:1155`: `getenv("BIFROST_FRAME_TRACE")` runs on EVERY dispatch —
-   cache to a static bool (per debug_flags.h rule). Grep for other per-call
-   getenv in thunk/syscall hot paths.
-3. `track_state_change` (thunk.cpp:1150 → gl_state.cpp:550-733): 32 string
-   compares per call, all miss for hot calls. Precompute an `is_state` flag on
-   each SymbolEntry at registration; per-call check = one bool test.
+## Diagnosis (measured + code-verified)
 
-### Phase 3 — (conditional on Phase 0 thunk volume)
-JIT direct thunk fast path: mirror `jit_vdso_clock_svc` — emit a direct call to
-the thunk dispatcher for `0x1000` SVC, skipping Emulator::syscall (histogram/
-drain_host_signals/running check). Medium effort; only if measurement justifies.
+Fresh-column heightmap = 40K `noise3` × (156 instr + 8× the 16-instr
+`grad3` leaf) ≈ 11.4M guest instructions in ~26.5ms ≈ **430 MIPS**.
+`grad3` = 16 instr at guest `0x431f60`; `noise3` = 156 instr at `0x4325e0`
+(PIE base 0x400000; static offsets 0x31f60 / 0x325e0).
 
-## Verification (Phase 4)
-- Mem tests: test_mmap, test_mremap, test_brk, test_dlopen, test_dyn_malloc,
-  malloc-heavy tests.
-- Full suites default + chain-skip (199 each), regalloc-check quick,
-  bench_mips byte-identical under JIT_VERIFY/JIT_VERIFY_MEM/FWD.
-- Game profile re-run: compare "other" % and MIPS vs baseline (single run per
-  phase, not repeated A/B).
+Three dispatch/lookup experiments measured FLAT (BL cap 2→8, read-only fast
+caches in jit_call_helper, cache-populating lookup) → the phase is not
+dispatch/lookup-bound. Root cause is in scalar-FP codegen:
 
-## STATUS UPDATES
-- 2026-08-14: Plan written. Phase 0 next (raise SYSCALL_HIST_MAX to see thunk
-  calls), then Phase 1 madvise.
-- 2026-08-14 (Phase 0/1/2 DONE): Raising SYSCALL_HIST_MAX to cover 0x1000 was
-  decisive: **thunk syscalls (4096) are 99.8% of ALL syscalls — ~115K/s
-  ramping to ~173K/s** after warmup. mmap/munmap churn is ~0.1% (~1500/s
-  combined) — NOT the syscall bottleneck (the earlier ~900/s baseline was a
-  cap-512 measurement artifact that hid 0x1000). The SIGPROF "other" ~46% is
-  dominated by the thunk dispatch path (JIT SVC round-trip + dispatch marshalling
-  + host GL driver), so Phase 2's thunk hygiene is on the right target and
-  **Phase 3 (JIT direct thunk fast path) is now strongly justified**.
-- Implemented + verified:
-  - Phase 1: `madvise(MADV_DONTNEED)` at munmap for window ranges
-    (untrack_allocation), window memset removed from mmap_alloc (kernel-faithful
-    lazy zeroing), OOM + untrack page loops short-circuited for all-window
-    ranges.
-  - Phase 2a: hot-number pre-dispatch in Emulator::syscall (222/215/216/214/226/
-    233→mem, 98/220/435→threads, 0x1000→misc) skipping the 6-handler chain.
-  - Phase 2b: BIFROST_FRAME_TRACE moved to cached dbg().frame_trace (debug_flags.h);
-    GLStateTracker::tracks_state() gate so non-GL thunk calls skip the 32-name
-    scan in track_state_change.
-  - Histogram cap: SYSCALL_HIST_MAX 512 → 4097 (counts 0x1000).
-  - Verification: build clean; test_malloc pass; **full suite 199/199 default
-    AND --chain-skip**; regalloc-check quick 194/194; bench_mips byte-identical
-    acc=0xf800800a2c4ff835 under JIT_VERIFY / JIT_VERIFY_MEM / FWD.
-  - Game still runs (30s+ profile, ~101 MIPS, interp 0%, 0 fallbacks).
-- NEXT: Phase 3 — JIT direct thunk fast path (mirror jit_vdso_clock_svc): emit a
-  direct call to the thunk dispatcher for SVC 0x1000, skipping
-  Emulator::syscall (histogram/drain_host_signals/running check). Medium
-  effort; only if measurement justifies.
-- 2026-08-14 (Phase 3 DONE): `jit_thunk_svc` added — `jit_native_svc` branches
-  on `cpu.regs[8] == GraphicThunk::SYSCALL_NUMBER` (0x1000) and dispatches
-  directly to the GraphicThunk/AudioThunk/DisplayThunk chain, skipping
-  Emulator::syscall (drain_host_signals, running check, trace gates,
-  pre-dispatch). `note_syscall()` exported from syscalls.cpp so the histogram
-  still counts thunk volume. Zero codegen changes (reuses emit_call_native_svc
-  + flush_all_vregs). Verified: test_sdl_gl_triangle ALL PASS; game runs
-  (104.8 MIPS vs ~87-101 pre-phase-3; dispatch% 3.5% vs 5-11%); full suite
-  199/199 default + --chain-skip; regalloc-check quick 194/194; bench_mips
-  byte-identical under JIT_VERIFY/JIT_VERIFY_MEM/FWD.
-- REMAINING "other" (~50%) is the host GL driver work + thunk dispatch
-  marshalling inside jit_thunk_svc (real GPU uploads, bounce sizing) — mostly
-  irreducible. Possible future trim: GLFW_POLL's 316 glfwGetKey calls/frame.
+- **FP_BINOP/FP_UNOP/FP_CMP** (`jit_codegen_fparith.cpp`) round-trip every
+  operand through memory: `movsd xmm0,[rbx+off]`; `movsd xmm1,[rbx+off]`;
+  op; `movsd [rbx+off],xmm0`; v_hi zero-store; RAX flush → ~7 host instr
+  and 2-3 memory accesses **per op**.
+- **FMOV Dd,Dn** (`ir_translate_fp.cpp:100`) is lowered to FOUR IR ops
+  (F2G → G2F → FHI2G → G2FHI), each a load+store through a GPR scratch,
+  +2 scratch vregs allocated — because the translator "avoided adding a new
+  IR op". noise3 has 38 fmovs → ~152 memory round-trips per body.
+- GPRs have a vreg cache (`x86_regalloc.cpp`) and SIMD blocks have the vec
+  cache (`jit_codegen_vec_cache.cpp`, XMM3-15 pinning). **Scalar FP has no
+  cache at all.**
+
+→ ~2 memory ops per guest instruction explains the measured ~10 cyc/instr.
+
+Why 1 GIPS is reachable here: Perlin noise has real ILP (the 8 grad3
+contributions are independent until the final lerp), so with register
+caching the noise can run at ~1-2 cyc/instr. A native serial float chain
+would not be faster — the ILP is the unlock.
+
+## Phases
+
+### Phase 1 — Baseline ✅ DONE
+- Built bench ELFs (musl-static `-O2`), measured the int (1084 MIPS) and
+  float (765 MIPS) JIT ceilings.
+- `BIFROST_JIT_DUMP=1` IR dump confirmed the FMOV 4-op expansion and the
+  FP memory round-trips (see Phase 1 results above).
+
+### Phase 2 — FMOV compaction ✅ DONE (not shipped — ~1.5% only)
+- New `IROp::FP_MOV` (FP↔FP move): 1 IR op, codegen = 1 `vmovsd`/`vmovss`
+  load + store (+ v_hi zero for single, + v_hi copy for double), replacing
+  the old 4-op `FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/G2FHI)` GPR round-trip.
+  Files: `include/ir/ir.hpp` (op), `src/ir/ir_translate_fp.cpp` (both FMOV
+  FP↔FP branches emit it; `ftype` = width), `src/jit/jit_codegen_fparith.cpp`
+  (codegen; clobber_flags + flush RAX only on single), `src/ir/ir_optimize.cpp`
+  (is_pure, DCE-liveness FP branch, dump name).
+- Verified: full 199/199, quick chain-skip 194/194, quick FWD 194/194,
+  triangle rc=0, bench_mips byte-identical, bench_matrix correct.
+- Measured: heightmap 26.5 → **26.1ms** (~1.5%). Confirms the plan caveat:
+  FMOV is NOT the bottleneck — the FP_BINOP/FMADD memory round-trips and
+  the serial powf chains are. FP_MOV stays anyway: it is the correct IR
+  shape for Phase 3's FP register cache (pinned XMM can turn it into a
+  reg-reg movsd). Do not ship Phase 2 standalone.
+
+### Phase 2 — FMOV compaction (small, low-risk)
+- Add a real `IROp::FP_MOV` so `fmov Dd,Dn` / `Sd,Sn` = 1 `vmovsd`/`vmovss`
+  (+ v_hi zero for single) instead of 4 IR ops + 4 memory round-trips.
+- Mirror in `src/ir/ir_optimize.cpp` (purity/consts/`last_store_to`) and
+  `instr_will_call_interp`'s FP gate in `jit_translate.cpp`.
+- Est. ~10-20% on the heightmap alone.
+
+### Phase 3 — Scalar FP vreg cache (the main event)
+Reuse the vec-cache machinery (`jit_codegen_vec_cache.cpp`) for scalar FP:
+- New `fp_cache_may_enable` gate for scalar-FP-heavy blocks (noise3
+  qualifies: ~65% FP ops), exclusive with the SIMD vec cache (same XMM pool).
+- Pin hot scalar FP vregs (v_lo of v0-31, 32/64-bit aware) into XMM3-15;
+  track dirty + v_hi consistency (FMOV_FHI2G/G2FHI must flush through).
+- Prologue loads on cold entry; epilogue writeback before block return;
+  self-loop blocks keep pinned regs as loop-carried state; `emit_call_interp`
+  guard writes back + reloads.
+- Rewrite FP_BINOP/FP_UNOP/FP_CMP/FP_MOV/FMOV_* codegen to read/write the
+  cached XMM regs (1-2 host instr per op).
+- Careful with BL_CALL/BLR_CALL: flush pinned FP vregs (cheap, only dirty
+  ones) before the helper call, invalidate after.
+
+### Phase 4 — Leaf-call inlining (pushes past 2x)
+- Runtime-detect BL_CALL/BLR_CALL targets that are single-block leaves
+  (translate the target; verify 1 block ending in RET, no internal
+  branches). `grad3` qualifies (16 instr).
+- Splice the leaf's IR into the caller on re-translation, eliminating the
+  call round-trip (flush/invalidate/prologue/epilogue/helper).
+- The 8×grad3 round-trips become the dominant cost after Phase 3, so this
+  is the step that gets the heightmap from ~1.5x to ~2.5-3x.
+
+### Phase 5 — Verify (full matrix)
+- `make check-all` / quick suite 194/194; full 199/199.
+- `--chain-skip` quick 194/194; FWD quick 194/194.
+- `bench_mips` byte-identical (`done: acc=0xf800800a2c4ff835`) under
+  `BIFROST_JIT_VERIFY` / `BIFROST_JIT_VERIFY_MEM`.
+- `test_sdl_gl_triangle` ALL PASS.
+- Game: fresh-column heightmap 26.5 → ~9-11ms; fresh chunk 43.6 → ~20ms;
+  spike frames roughly halve.
+
+## Expected outcome
+- Heightmap ~2.5-3x (26.5ms → ~9-11ms) → ~1.1-1.2 GIPS on that phase.
+- Same win flows into mesh (cglm float math) and lighting.
+- Fresh chunk 43.6ms → ~20ms; exploration spikes halve.
+
+## Honest caveats
+- Phase 3 touches the hottest codegen paths; regalloc bugs hide here — the
+  verification matrix (JIT_VERIFY, FWD, regalloc-check, bench_mips
+  byte-identical) is the safety net.
+- Serial float chains (e.g. musl `powf` in the expscale wrappers) stay
+  latency-bound — that slice of worldgen won't hit 1 GIPS.
+- Phase 2 alone (~15%) is not worth shipping without Phase 3.
+- Game instrumentation must be reverted before any commit; never commit
+  `ctest_real/minecraft_weekend/t`, `subaru_stairs*.mp4`.
+
+## Key files
+- `src/ir/ir_translate_fp.cpp` — FMOV lowering (`:100`), FP op IR emission
+- `src/jit/jit_codegen_fparith.cpp` — FP_BINOP/FP_UNOP/FP_CMP codegen
+- `src/jit/jit_codegen_vec_cache.cpp` — the XMM pinning machinery to reuse
+- `src/jit/jit_codegen_fp.cpp` — FMOV_G2F/F2G/FHI2G/G2FHI codegen
+- `src/ir/ir_optimize.cpp`, `src/jit/jit_translate.cpp` — mirrors
+- `ctest_real/minecraft_weekend/lib_noise/noise1234.c` — noise3/grad3
+- `ctest_real/minecraft_weekend/src/world/gen/worldgen.c` — heightmap/fill

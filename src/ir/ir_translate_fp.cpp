@@ -101,27 +101,17 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // Encoding: 0x1E604000 (double) or 0x1E204000 (single).
             // FMOV Dd, Dn → v_lo[rd] = v_lo[rn]; v_hi[rd] = v_hi[rn]
             // FMOV Sd, Sn → v_lo[rd] = v_lo[rn] (low 32 bits); v_hi[rd] = 0
-            // We use FMOV_G2F/F2G via a GPR scratch to avoid adding a new IR op.
-            // For double: load v_lo[rn] into GPR, store to v_lo[rd]; same for v_hi.
-            // For single: load v_lo[rn] into GPR, mask to 32 bits, store to v_lo[rd]; v_hi[rd] = 0.
+            // Single FP_MOV IR op (codegen = vmovsd/vmovss between the v_lo/
+            // v_hi slots). The old 4-op FMOV_F2G→(IMM/AND)→FMOV_G2F(→FHI2G/
+            // G2FHI) round-trip through a GPR scratch cost ~4 memory accesses
+            // per fmov — noise3/grad3 emit 67 fmovs per body, so this was a
+            // large chunk of the worldgen cost.
             if ((op & 0xFFFFFC00) == 0x1E604000) {
-                // Double-precision FP register move.
-                uint16_t lo = g_alloc.alloc();
-                emit(block, IROp::FMOV_F2G, lo, rn, 0, 0, 0, 0, 0, cur_pc);
-                emit(block, IROp::FMOV_G2F, rd, lo, 0, 0, 0, 0, 0, cur_pc);
-                uint16_t hi = g_alloc.alloc();
-                emit(block, IROp::FMOV_FHI2G, hi, rn, 0, 0, 0, 0, 0, cur_pc);
-                emit(block, IROp::FMOV_G2FHI, rd, hi, 0, 0, 0, 0, 0, cur_pc);
+                emit(block, IROp::FP_MOV, rd, rn, 0, ftype, 0, 0, 0, cur_pc);
                 return true;
             }
             if ((op & 0xFFFFFC00) == 0x1E204000) {
-                // Single-precision FP register move (zeroes upper bits).
-                uint16_t lo = g_alloc.alloc();
-                emit(block, IROp::FMOV_F2G, lo, rn, 0, 0, 0, 0, 0, cur_pc);
-                uint16_t mask = load_imm(block, 0xFFFFFFFFULL);
-                uint16_t masked = g_alloc.alloc();
-                emit(block, IROp::AND, masked, lo, mask);
-                emit(block, IROp::FMOV_G2F, rd, masked, 0, 0, 0, 0, 0, cur_pc);
+                emit(block, IROp::FP_MOV, rd, rn, 0, ftype, 0, 0, 0, cur_pc);
                 return true;
             }
             // FCMP/FCMPE — uses shared fp_decode helper.

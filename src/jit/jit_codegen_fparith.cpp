@@ -189,6 +189,42 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
             return true;
         }
+        // ── FP↔FP register move (FMOV Dd,Dn / Sd,Sn) ────────────────
+        case IROp::FP_MOV: {
+            // v_lo[dest] = v_lo[src1]; double also copies v_hi[src1]→v_hi[dest],
+            // single zeroes v_hi[dest] (ARM: fmov Sd,Sn clears the upper 32
+            // bits). Pure XMM0 memory-to-memory move — no arithmetic. Replaces
+            // the old 4-op GPR round-trip (2-4 memory accesses per side).
+            bool is_double = (inst.width == 1);
+            uint8_t prefix = is_double ? 0xF2 : 0xF3;
+            clobber_flags();
+            // movsd/movss preserve flags; clobber_flags() is a conservative
+            // marker matching FP_UNOP/FP_BINOP. Only RAX is touched (single:
+            // v_hi zero store); double touches no GPR.
+            flush_invalidate_host_regs(is_double ? 0 : (1u << RAX));
+            int32_t off_s = V_LO_OFF + static_cast<int>(inst.src1) * 8;
+            emit_byte(prefix);
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_modrm_disp(0, CPU_REG, off_s);
+            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            emit_byte(prefix);
+            emit_byte(0x0F); emit_byte(0x11);
+            emit_modrm_disp(0, CPU_REG, off_d);
+            if (is_double) {
+                int32_t off_sh = V_HI_OFF + static_cast<int>(inst.src1) * 8;
+                emit_byte(prefix);
+                emit_byte(0x0F); emit_byte(0x10);
+                emit_modrm_disp(0, CPU_REG, off_sh);
+                int32_t off_dh = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+                emit_byte(prefix);
+                emit_byte(0x0F); emit_byte(0x11);
+                emit_modrm_disp(0, CPU_REG, off_dh);
+            } else {
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            }
+            return true;
+        }
         // ── FP→int conversion (FCVTZS/FCVTZU) ──────────────────────
         case IROp::FP_F2I: {
             // regs[dest] = (int/uint)(v_lo[src1])
