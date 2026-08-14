@@ -399,6 +399,37 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `BIFROST_JIT_VERIFY`. Do NOT remove the taken-path slot or restrict it
   to BRCOND — CBZ/CBNZ/TBZ/TBNZ while-loop edges (GCC vectorized
   memchr/strchr, pointer loops) rely on it.
+- Chain-skip (`BIFROST_CHAIN_SKIP=1`, DEFAULT OFF — `--chain-skip` in
+  run_tests.sh): a second block entry `BlockEntry.chain_entry` recorded in
+  `jit_translate.cpp` right after the prologue's `mov rbx,rdi`/`mov r14,rsi`
+  (BEFORE the R10 window load and vec prologue loads). Chain slots patch to
+  `chain_entry` instead of `fn`, so a chain edge skips the predecessor's
+  frame teardown AND the successor's push/frame/reg-setup (~17 instrs/edge).
+  The chain ROOT allocates ONE unified 32 KB frame
+  (`kChainSkipFrameBytes = 0x8000`, the vreg-space ceiling: 4095 vregs × 8 B)
+  that every block in the chain reuses; successors enter at `chain_entry`
+  without allocating. The epilogue becomes a lease: [state flush: flags +
+  flush_all_vregs + vec writeback + store PC + mov rdi/rbx rsi/r14] [5-NOP
+  chain slot] [cold exit: mov rsp,rbp; pop×6; ret] — the cold exit is only
+  reached when the slot is unpatched (chain edges `jmp` past it, keeping the
+  chain root's frame). `patch_chain`'s unpatched-slot guard is `0x90` (5 NOPs)
+  under chain-skip vs `0xC3` (ret+4 NOPs) otherwise; `BIFROST_JIT_VERIFY`
+  un-patch restores 5 NOPs so the block falls through into the cold exit.
+  CRITICAL invariants: (1) `chain_entry` MUST be recorded BEFORE the R10
+  window load — R10 is only loaded by window-using blocks, so a chain into a
+  window block from a non-window predecessor carries stale R10 (the first
+  chain-skip bug: r10=0xd0 → SIGSEGV in `mov (%rax),%rax` after `add %r10,%rax`).
+  (2) The default path of `emit_taken_path_epilogue` MUST keep the
+  `mov rsp,rbp; pop×6` BEFORE the slot — dropping it makes the unpatched `ret`
+  pop the dispatcher's return address off the block's own frame and jump to
+  garbage (the second bug: RIP=0x555500000008). (3) RBX/R14 need no setup on
+  the chain edge (reserved regs, never reassigned in a body). (4) vec blocks
+  re-run their vec prologue loads at `chain_entry` (the predecessor's
+  epilogue wrote back dirty vectors to cpu.v_lo/v_hi first). Measured on
+  multi-block workloads: bench_fib +18.8% (0.653→0.530s), bench_sort +16.6%
+  (0.699→0.583s), bench_matrix +1.2%; bench_mips NEUTRAL (single self-loop
+  block — the selfloop slot already skips all this overhead). Leave the env
+  default OFF (opt-in) until the game confirms a win.
 - The prologue's 10-byte `movabs r10, window_base` (WIN_REG) is emitted
   LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
   SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles

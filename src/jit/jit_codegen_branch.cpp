@@ -44,19 +44,37 @@ void FrostJIT::emit_taken_path_epilogue() {
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
     emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
-    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-    emit_pop(R15); emit_pop(R14); emit_pop(R13);
-    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     // ── Taken-path chain slot ──
-    // 5 bytes reserved at the end of the taken path: `ret` + 4 NOPs.
-    // Identical layout to the shared epilogue's chain slot so
-    // patch_chain() (which guards on the slot starting with 0xC3) can
-    // patch either one. Until patched, the taken path returns to the
-    // dispatcher as before.
+    // 5 bytes reserved at the end of the taken path. Under chain-skip the
+    // slot is 5 NOPs followed by the cold exit (`mov rsp,rbp; pop×6; ret`),
+    // matching the shared epilogue's lease layout so patch_chain() can
+    // patch either slot to the successor's chain_entry. Otherwise it's
+    // `ret` + 4 NOPs (the original layout). Until patched, the taken path
+    // returns to the dispatcher as before (falling through the NOPs into
+    // the cold exit under chain-skip).
     taken_chain_patch_off_ = code_buf_used_;
     has_taken_chain_slot_ = true;
-    emit_ret();                                  // 0xC3
-    emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
+    if (chain_skip_enabled()) {
+        emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 5 × 0x90
+        // Cold exit (only reached when the slot above is unpatched).
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        emit_ret();
+    } else {
+        // Default layout (original): restore the callee-saved regs FIRST,
+        // then the slot is a bare `ret` + 4 NOPs. When patched, the jmp
+        // skips the restore (the target's prologue re-pushes); when
+        // unpatched, the ret returns to the dispatcher with a balanced
+        // stack. The restore MUST precede the slot — a `ret` before it
+        // would pop the dispatcher's return address off the block's own
+        // frame and jump to garbage.
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        emit_ret();                                  // 0xC3
+        emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
+    }
 }
 // ── FrostJIT::compile_ir_branch ────────────────────────────────────────
 // Handles conditional/unconditional branch ops and supervisor calls.

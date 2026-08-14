@@ -15,6 +15,7 @@
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
 #   ./scripts/run_tests.sh --fwd        # run with BIFROST_ENABLE_FWD=1
+#   ./scripts/run_tests.sh --chain-skip # run with BIFROST_CHAIN_SKIP=1
 #   ./scripts/run_tests.sh --verbose    # show full output of each test
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
@@ -77,6 +78,7 @@ while [ $# -gt 0 ]; do
         --bench)        RUN_BENCH=1; RUN_ALL=0 ;;
         --no-jit)       EMU_FLAGS="--no-jit" ;;
         --fwd)          ENV_PREFIX="BIFROST_ENABLE_FWD=1" ;;
+        --chain-skip)   ENV_PREFIX="BIFROST_CHAIN_SKIP=1" ;;
         --verbose|-v)   VERBOSE=1 ;;
         --quick)        QUICK=1 ;;
         --filter)       FILTER="$2"; shift ;;

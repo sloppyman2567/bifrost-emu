@@ -209,6 +209,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
+    chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
@@ -485,10 +486,31 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5); // mov rbp, rsp
-    emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
-    emit_u32(stack_bytes);  // sub rsp, stack_bytes
+emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
+    // Chain-skip (BIFROST_CHAIN_SKIP=1): allocate ONE unified 32 KB frame
+    // instead of a per-block stack_bytes frame. Chain successors jump to
+    // this block's body WITHOUT pushing/allocating, so they reuse this
+    // block's frame — and this block may itself have been chained into
+    // from a predecessor whose frame is identical. The 32 KB ceiling
+    // (max_vreg 4095 × 8 B) is never exceeded: vreg_slot_ offsets for a
+    // block are always ≤ its own max_vreg, and the pre-scan below caps at
+    // 4095. Disabled mode keeps the old per-block frame.
+    emit_u32(chain_skip_enabled() ? kChainSkipFrameBytes : stack_bytes);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
     emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
+    // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
+    // window load and the vector-cache prologue loads. Chain edges jump to
+    // this offset, skipping the predecessor's frame teardown and THIS
+    // block's push/frame/reg-setup (~17 instructions) while still
+    // re-running the R10 window load and the vec loads. Both are required:
+    // R10 is only loaded by window-using blocks, so a chain into a window
+    // block from a non-window predecessor carries stale R10; and a chain
+    // successor must pin the CURRENT guest vectors (the predecessor's
+    // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX/R14
+    // need no setup — they hold cpu/emu persistently across the chain
+    // edge (reserved regs, never reassigned in a body). Disabled mode
+    // leaves chain_entry_off_ unused (chain slots patch to fn instead).
+    chain_entry_off_ = code_buf_used_;
     // 1.5.2-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
@@ -639,18 +661,41 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // the correct RDI=cpu / RSI=emu.
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx
     emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
-    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
-    emit_pop(R15); emit_pop(R14); emit_pop(R13);
-    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-    // ── Chain slot ──
-    // 5 bytes reserved at the end of every block. Initially `ret` + 4
-    // NOPs (acts as a plain return to the C dispatcher). When the
-    // block's chain target has been translated, patch_chain() overwrites
-    // all 5 bytes with `jmp rel32` → target block's entry, skipping the
-    // dispatcher entirely for straight-line / unconditional-branch code.
-    size_t chain_patch_off = code_buf_used_;
-    emit_ret();                                  // 0xC3
-    emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
+    size_t chain_patch_off;
+    if (chain_skip_enabled()) {
+        // ── Chain-skip epilogue ─────────────────────────────────────
+        // Chain edge layout: [slot] [cold exit]. The 5-byte slot is all
+        // NOPs initially; patch_chain() overwrites it with `jmp rel32` →
+        // successor's chain_entry (past its push/frame/reg-setup). The
+        // successor reuses THIS block's 32 KB frame, so the callee-saved
+        // regs are NOT restored on the chain edge — the cold exit
+        // (`mov rsp,rbp; pop×6; ret`) is only reached when the slot is
+        // still unpatched, at which point it restores the frame exactly as
+        // the old `ret`+NOPs layout did. RBX/R14 already went to RDI/RSI
+        // for the successor's prologue-agnostic body (it reads cpu/emu
+        // from RDI/RSI at chain_entry just like fn does).
+        chain_patch_off = code_buf_used_;
+        emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 5 × 0x90
+        // Cold exit (only reached when the slot above is unpatched).
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        emit_ret();
+    } else {
+        // ── Chain-capable epilogue (original layout) ────────────────
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        // ── Chain slot ──
+        // 5 bytes reserved at the end of every block. Initially `ret` + 4
+        // NOPs (acts as a plain return to the C dispatcher). When the
+        // block's chain target has been translated, patch_chain() overwrites
+        // all 5 bytes with `jmp rel32` → target block's entry, skipping the
+        // dispatcher entirely for straight-line / unconditional-branch code.
+        chain_patch_off = code_buf_used_;
+        emit_ret();                                  // 0xC3
+        emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
+    }
     // Patch branch targets to epilogue.
     for (auto& p : branch_target_patches_) {
         int32_t rel = static_cast<int32_t>(epilogue_off - (p.patch_off + 5));
@@ -687,6 +732,12 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     if (unchainable_end_) chain_target_pc_ = 0;
     BlockEntry entry;
     entry.fn = fn;
+    // Chain-skip entry point (BIFROST_CHAIN_SKIP=1): chain slots patch to
+    // the body start past the push/frame/reg-setup prologue instead of fn.
+    // Only set when the gate is on; otherwise chain slots target fn and
+    // try_chain_block ignores this field.
+    if (chain_skip_enabled())
+        entry.chain_entry = (uint64_t(*)(CPU*, Emulator*))(code_buf_ + chain_entry_off_);
     entry.ends_with_branch = ir_block.ends_with_branch;
     entry.chain_patch_off = chain_patch_off;
     entry.chain_target_pc = chain_target_pc_;

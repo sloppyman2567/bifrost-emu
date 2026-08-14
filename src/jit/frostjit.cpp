@@ -43,6 +43,16 @@
 #include <unordered_map>
 #include <vector>
 namespace arm64emu {
+// ── Chain-skip env gate (BIFROST_CHAIN_SKIP=1, default OFF) ────────────
+// Read once (static local, mirrors the BIFROST_NO_SELFLOOP pattern in
+// jit_codegen_branch.cpp). When enabled, every block is emitted with a
+// chain-skip entry point (BlockEntry.chain_entry) and a lease-style
+// epilogue (chain slot before the callee-saved restore), so chain edges
+// skip the predecessor's frame teardown AND the successor's prologue.
+bool FrostJIT::chain_skip_enabled() {
+    static const bool on = (getenv("BIFROST_CHAIN_SKIP") != nullptr);
+    return on;
+}
 // ── Compile-time layout checks ─────────────────────────────────────────
 // The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)
 // for direct memory access in generated x86 code. If the CPU struct layout

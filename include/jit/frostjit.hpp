@@ -341,6 +341,28 @@ public:
     static constexpr int CPU_REG = RBX;
     static constexpr int EMU_REG = R14;
     static constexpr int WIN_REG = R10;
+    // Chain-skip (BIFROST_CHAIN_SKIP=1, default OFF): chain edges jump
+    // directly to the successor's body start, skipping the predecessor's
+    // frame teardown and the successor's push/frame/reg-setup prologue.
+    // The chain root allocates ONE unified frame that every block in the
+    // chain reuses, so the per-edge savings are ~17 instructions (6
+    // pushes + 6 pops + mov rbp,rsp + sub rsp + mov rbx,rdi + mov r14,rsi
+    // + mov rsp,rbp). Correctness rests on: cpu.regs[] being current at
+    // every guest-instruction boundary (STORE_REG writes it directly), and
+    // the frame holding only SSA scratch vregs (def-before-use per block,
+    // so cross-block home overlap is harmless). The chain slot moves BEFORE
+    // the callee-saved restore; the cold exit (mov rsp,rbp; pop×6; ret) is
+    // only reached when the slot is unpatched.
+    //
+    // The unified frame is 32 KB = the vreg-space ceiling (4095 vregs × 8
+    // bytes). Only one frame is active per chain (successors don't
+    // re-allocate), and chains are sequential not nested, so stack usage
+    // is 32 KB per chain + C-call slack — reentrant JIT entry (GLFW cb
+    // runner, dlopen) gets its own frame naturally.
+    static constexpr uint32_t kChainSkipFrameBytes = 0x8000;  // 32 KiB
+    // Env gate, read once (mirrors the BIFROST_NO_SELFLOOP pattern).
+    // False by default; opt in with BIFROST_CHAIN_SKIP=1.
+    static bool chain_skip_enabled();
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
@@ -409,6 +431,14 @@ private:
     // SVC, conditional branch — runtime-dependent next PC).
     struct BlockEntry {
         uint64_t (*fn)(CPU*, Emulator*) = nullptr;
+        // Chain-skip entry point (BIFROST_CHAIN_SKIP=1): a second entry into
+        // the block PAST the prologue (push/frame/reg-setup), at the block
+        // body (vec-cache prologue loads included). Chain slots patch to
+        // here instead of `fn`, so a chain edge skips the predecessor's
+        // frame teardown AND the successor's prologue — the chain root's
+        // 32 KB unified frame is reused by every block in the chain. NULL
+        // when chain-skip is disabled (chain slots then target `fn`).
+        uint64_t (*chain_entry)(CPU*, Emulator*) = nullptr;
         bool ends_with_branch = false;
         size_t  chain_patch_off = 0;   // offset of the 5-byte chain slot in code_buf_
         uint64_t chain_target_pc = 0;  // statically-known next PC, or 0
@@ -950,6 +980,13 @@ private:
     bool    has_selfloop_slot_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
+    // Chain-skip entry (BIFROST_CHAIN_SKIP=1): offset right after the
+    // window/vec-cache prologue setup but PAST the push/frame/reg-setup,
+    // i.e. the earliest point a chain successor may jump to. Chain slots
+    // patch to here (recorded in BlockEntry.chain_entry); the successor
+    // reuses the chain root's unified 32 KB frame. For blocks with no vec
+    // cache this equals block_body_start_off_.
+    size_t  chain_entry_off_ = 0;        // offset of chain-skip entry point
     // Taken-path chain state (reset at translate_block start).
     // Conditional branches (BRCOND/CBZ/CBNZ/TBZ/TBNZ) emit a SECOND 5-byte
     // chain slot at the end of their taken-path epilogue (ret + 4 NOPs).

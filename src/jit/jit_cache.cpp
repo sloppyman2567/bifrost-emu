@@ -26,9 +26,10 @@ namespace arm64emu {
 bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     if (!code_buf_) return false;
     if (chain_patch_off + 5 > CODE_BUF_SIZE) return false;
-    // Verify the slot still contains the unpatched `ret` + NOPs pattern.
-    // If it's already patched (0xE9), don't patch again.
-    if (code_buf_[chain_patch_off] != 0xC3) return false;
+    // Verify the slot still contains the unpatched pattern: `ret` + NOPs
+    // (default) or 5 NOPs (chain-skip lease layout). If it's already
+    // patched (0xE9), don't patch again.
+    if (code_buf_[chain_patch_off] != (chain_skip_enabled() ? 0x90 : 0xC3)) return false;
     // Compute the relative displacement: target - (slot + 5).
     int32_t rel = static_cast<int32_t>(target_fn
                             - (code_buf_ + chain_patch_off + 5));
@@ -53,7 +54,12 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     if (!entry.chained && entry.chain_target_pc != 0) {
         auto it = blocks_.find(entry.chain_target_pc);
         if (it != blocks_.end() && it->second.fn != nullptr) {
-            if (patch_chain(entry.chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
+            // Chain-skip: patch to the successor's chain_entry (past its
+            // prologue) so the successor reuses this block's frame.
+            const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
+                ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
+                : reinterpret_cast<const uint8_t*>(it->second.fn);
+            if (patch_chain(entry.chain_patch_off, target)) {
                 entry.chained = true;
                 block_chains_patched++;
             }
@@ -65,7 +71,10 @@ void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     if (!entry.taken_chained && entry.has_taken_chain_slot && entry.taken_chain_target_pc != 0) {
         auto it = blocks_.find(entry.taken_chain_target_pc);
         if (it != blocks_.end() && it->second.fn != nullptr) {
-            if (patch_chain(entry.taken_chain_patch_off, reinterpret_cast<const uint8_t*>(it->second.fn))) {
+            const uint8_t* target = (chain_skip_enabled() && it->second.chain_entry)
+                ? reinterpret_cast<const uint8_t*>(it->second.chain_entry)
+                : reinterpret_cast<const uint8_t*>(it->second.fn);
+            if (patch_chain(entry.taken_chain_patch_off, target)) {
                 entry.taken_chained = true;
                 block_chains_patched++;
             }
@@ -81,7 +90,9 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
     // the index is maintained at translate-time.
     auto target_it = blocks_.find(target_pc);
     if (target_it == blocks_.end()) return;
-    const uint8_t* target_fn = reinterpret_cast<const uint8_t*>(target_it->second.fn);
+    const uint8_t* target_fn = (chain_skip_enabled() && target_it->second.chain_entry)
+        ? reinterpret_cast<const uint8_t*>(target_it->second.chain_entry)
+        : reinterpret_cast<const uint8_t*>(target_it->second.fn);
     if (target_fn == nullptr) return;
     auto try_patch = [&](uint64_t src_pc) {
         auto sit = blocks_.find(src_pc);
