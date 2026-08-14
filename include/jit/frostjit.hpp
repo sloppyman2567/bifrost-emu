@@ -932,7 +932,7 @@ private:
     bool vec_cache_may_enable(const IRBlock& block);
     void vec_cache_reset();
     void vec_emit_prologue_loads();      // movsd+movhpd loads before body start
-    void vec_cache_writeback_all();      // dirty XMM → cpu.v_lo/v_hi (epilogue)
+    void vec_cache_writeback_all(bool clear_flags = true);  // dirty XMM → cpu.v_lo/v_hi (epilogue)
     void vec_cache_mark_dirty(int vreg);
     void vec_emit_load_lo_hi(int xmm, int vreg);
     // VEX 3-byte emission for the cached SIMD paths (map: 1=0F, 2=0F38,

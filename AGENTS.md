@@ -81,6 +81,36 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (Vn >> sh) + ((Vn >> (sh-1)) & 1) (isolation: PSRL (sh-1) then PSLL/PSRL
   (esize*8-1) round-trip, no mask constant). URSRA sh==esize*8 → top-bit
   test; SRSRA sh==esize*8 → 0 (sign-fill cancels the round carry).
+- SIMD DUP (general, GPR→vector) is native for ALL element sizes and both
+  Q values (table guard in `simd_dp.txt`: imm5 ∈ {1,2,4,8}, no Q predicate —
+  the old `imm5==8 && Q` was dead code: `dup Vd.2d` needs sf=1 which the
+  decoder rejects at `decoder.cpp:433`). `memset` in the game does
+  `dup v0.16b, w1` (0x4E010C20) then `mov x1, v0.d[0]` (UMOV), so the
+  broadcast crosses a block boundary and the next block reads `cpu.v_lo`.
+  Codegen: mask low esize via `(RAX<<(64-esize*8))>>(64-esize*8)` then
+  shift-replicate up the qword (RCX scratch); `vmovq xd,rax` (+`vmovddup`
+  only for Q=1 — VMOVQ already zeroes the upper 64 bits for Q=0); memory
+  path stores RAX to v_lo and, for Q=0, zeroes v_hi. CRITICAL: the
+  shift-replicate chain DESTROYS src1 when `ensure_vreg` returns RAX
+  (s==RAX), while RAX stays mapped to src1 — drop the mapping FIRST via
+  `clobber_host_reg(RAX)` (spills if dirty) or a later reader of src1 in
+  the same block reloads the broadcast. Both the vec path and the memory
+  path need this; the memory path's trailing Q=0 clobber only masked the
+  clean-src1 case.
+- `emit_taken_path_epilogue()` must NOT clear the vec-cache dirty flags:
+  `vec_cache_writeback_all()` clears `vec_dirty_` as a codegen-time side
+  effect, and the FALL-THROUGH (main) epilogue is emitted LATER — if the
+  taken path already cleared the flags, the fall-through epilogue emits NO
+  writeback and dirty vectors (e.g. memset's dup broadcast) are lost on
+  the fall-through exit. Call it with `vec_cache_writeback_all(false)`.
+  Self-loop blocks are exempt (they use the self-loop slot, not
+  `emit_taken_path_epilogue`), which is why the FMA loops never hit this —
+  a non-self-loop conditional branch (memset's `b.hi`) exposed it as a
+  corrupted memset → PNG inflate "bad huffman code". Diagnose with
+  `BIFROST_JIT_DUMP=1` and objdump the generated x86 (block dump is the
+  raw bytes after "→ N bytes of x86 code"); `BIFROST_JIT_VERIFY` +
+  `BIFROST_JIT_VERIFY_MEM` won't catch it because chains skip the
+  verified epilogue and the divergence is a memory write, not a register.
 - Vector FMOV immediate (cmode=0xF in the AdvSIMD modified-immediate block,
   e.g. `fmov v31.2d, #20.0` = 0x6F01F69F) is NOT a NOP: expand via
   AdvSIMDExpandImm. 64-bit (op bit29 set): `(imm8&0x3f)<<48`, sign bit →

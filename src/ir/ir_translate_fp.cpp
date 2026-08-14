@@ -595,7 +595,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::SIMD_DUP: {
             // dup Vd.2d, Rn → broadcast Rn to both halves
             uint16_t val = load_arm_reg(block, d.rn);
-            emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
+            emit(block, IROp::SIMD_DUP, d.rd, val, 0, 8, 0, 1, 0, cur_pc);
             return true;
         }
         // ── SIMD LD1/ST1 — native (128-bit load/store) ─────────────
@@ -739,10 +739,14 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                      0, 0, 0, ct.subop, cur_pc);
                 return true;
             case simd::Family::DUP:
-                // GPR->vector broadcast, native only for .2d (table guard).
+                // GPR->vector broadcast, native for all element sizes
+                // (table guard: imm5 = esize in {1,2,4,8}). width = esize,
+                // flags_op = Q (1.5.2-alpha).
                 {
                     uint16_t val = load_arm_reg(block, d.rn);
-                    emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
+                    uint8_t esize = static_cast<uint8_t>((op >> 16) & 0x1F);
+                    uint8_t q = static_cast<uint8_t>((op >> 30) & 1);
+                    emit(block, IROp::SIMD_DUP, d.rd, val, 0, esize, 0, q, 0, cur_pc);
                     return true;
                 }
             case simd::Family::MODIMM: {

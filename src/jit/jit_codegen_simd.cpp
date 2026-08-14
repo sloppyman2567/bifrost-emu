@@ -560,7 +560,33 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         }
         // ── SIMD DUP (broadcast GPR to both halves) ────────────────
         case IROp::SIMD_DUP: {
-            // v_lo[dest] = v_hi[dest] = src1 (GPR value)
+            // v_lo[dest] = v_hi[dest] = broadcast of src1's low element.
+            // width = esize (1/2/4/8, default 8); flags_op = Q.
+            // esize<8: mask the low element then shift-replicate it across
+            // the qword in RAX (RCX = scratch); esize==8: full GPR value.
+            const int esize = inst.width ? static_cast<int>(inst.width) : 8;
+            const bool q = inst.flags_op != 0;
+            auto emit_dup_qword = [&]() {
+                if (esize >= 8) return;
+                clobber_host_reg(RCX);
+                switch (esize) {
+                case 1:  // keep low byte, replicate to 8 copies
+                    emit_shift_imm8(RAX, 4, 56); emit_shift_imm8(RAX, 5, 56);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 8);  emit_or_reg(RAX, RCX);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 16); emit_or_reg(RAX, RCX);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 32); emit_or_reg(RAX, RCX);
+                    break;
+                case 2:  // keep low halfword, replicate to 4 copies
+                    emit_shift_imm8(RAX, 4, 48); emit_shift_imm8(RAX, 5, 48);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 16); emit_or_reg(RAX, RCX);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 32); emit_or_reg(RAX, RCX);
+                    break;
+                case 4:  // keep low word, replicate to 2 copies
+                    emit_shift_imm8(RAX, 4, 32); emit_shift_imm8(RAX, 5, 32);
+                    emit_mov_reg(RCX, RAX); emit_shift_imm8(RAX, 4, 32); emit_or_reg(RAX, RCX);
+                    break;
+                }
+            };
             // ── Vector cache fast path (1.5.2-alpha) ──────────────
             // dest pinned: vmovq xd, gpr (zero upper) then vmovddup
             // (broadcast low qword to both halves) — no memory bounce.
@@ -571,14 +597,22 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     if (s != RAX) {
                         clobber_host_reg(RAX);
                         emit_mov_reg(RAX, s);
+                    } else if (esize < 8) {
+                        // s == RAX: the shift-replicate chain below destroys
+                        // src1's value in RAX while RAX is still mapped to
+                        // src1. Drop the mapping (spilling if dirty) BEFORE
+                        // the chain so later readers of src1 in this block
+                        // reload from its home instead of the broadcast.
+                        clobber_host_reg(RAX);
                     }
+                    emit_dup_qword();
                     // vmovq xd, rax  (VEX.128.66.0F.W1 6E /r — pp=66, NOT F3:
                     // the F3.0F.W1 6E form is not a valid AVX encoding; the
                     // assembler emits 66.0F.W1 6E with the XMM dest in
                     // ModRM.reg and vvvv=1111 unused).
                     emit_vex3(1, true, 0, 1, xd, RAX, true, 0x6E);
                     // vmovddup xd, xd  (VEX.128.F2.0F.WIG 12: broadcast low qword)
-                    emit_vex3(1, false, 0, 3, xd, xd, true, 0x12);
+                    if (q) emit_vex3(1, false, 0, 3, xd, xd, true, 0x12);
                     vec_cache_mark_dirty(static_cast<int>(inst.dest));
                     return true;
                 }
@@ -594,11 +628,26 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 // vreg currently in RAX BEFORE we overwrite it.
                 clobber_host_reg(RAX);
                 emit_mov_reg(RAX, s);
+            } else if (esize < 8) {
+                // s == RAX: the shift-replicate chain destroys src1's value
+                // in RAX while RAX is still mapped to src1. Drop the mapping
+                // (spilling if dirty) BEFORE the chain so later readers of
+                // src1 reload from its home instead of the broadcast. (For
+                // Q=0 the old code's trailing clobber masked this when src1
+                // was clean, but a dirty src1 — or Q=1 — corrupted it.)
+                clobber_host_reg(RAX);
             }
+            emit_dup_qword();
             int32_t offlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             int32_t offhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
             emit_store(CPU_REG, offlo, RAX);
-            emit_store(CPU_REG, offhi, RAX);
+            if (q) {
+                emit_store(CPU_REG, offhi, RAX);
+            } else {
+                clobber_host_reg(RAX);
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, offhi, RAX);
+            }
             // src1 stays cached in its original reg (s) for later readers.
             // RAX holds a copy (not a cached vreg) — no mapping to update.
             return true;

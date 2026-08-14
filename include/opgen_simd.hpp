@@ -73,7 +73,7 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF00FC00U) == 0x2F004400U) return Op{Family::SHIFT, 32, 6, "SRI"};
     if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 33, 7, "URSRA"};
     if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 34, 8, "SRSRA"};
-    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0x1F) == 0x08 && Q)) return Op{Family::DUP, 35, 0, "DUP"};
+    if ((op & 0xBFE0FC00U) == 0x0E000C00U && ((((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8))) return Op{Family::DUP, 35, 0, "DUP"};
     if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 36, 0, "AESE"};
     if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 37, 4, "PMULL"};
     if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 38, 5, "PMULL2"};

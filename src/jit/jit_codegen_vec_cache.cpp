@@ -150,7 +150,7 @@ void FrostJIT::vec_emit_prologue_loads() {
     }
 }
 
-void FrostJIT::vec_cache_writeback_all() {
+void FrostJIT::vec_cache_writeback_all(bool clear_flags) {
     if (!vec_cache_active_) return;
     for (int i = 0; i < vec_pinned_count_; i++) {
         int v = vec_pinned_[i];
@@ -163,7 +163,7 @@ void FrostJIT::vec_cache_writeback_all() {
         emit_byte(rex(false, r, false, false));
         emit_byte(0x0F); emit_byte(0x17);              // movhpd
         emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
-        vec_dirty_[v] = false;
+        if (clear_flags) vec_dirty_[v] = false;
     }
 }
 

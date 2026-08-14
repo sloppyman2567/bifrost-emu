@@ -12,7 +12,7 @@
 #   FP        = SIMD_FP op (0..7 FADD..FMINNM, 0xB FMULX, 0xD FABD,
 #                            0xE FMLA, 0xF FMLS)
 #   SHIFT     = shift kind (0..6 = SHL/USHR/SSHR/USRA/SSRA/SLI/SRI)
-#   DUP       = GPR->vector DUP (native .2d only)
+#   DUP       = GPR->vector DUP (native, all element sizes)
 #   CRYPTO    = AES_CRYPTO sub (0..3 AESE..AESIMC, 4 PMULL, 5 PMULL2)
 
 # ── Integer SIMD_ARITH (mask strips Q(30); matches ir_translate_fp.cpp) ──
@@ -73,8 +73,8 @@ SRI     0xBF00FC00   0x2F004400   SHIFT     6   -
 URSRA   0xBF00FC00   0x2F003400   SHIFT     7   -
 SRSRA   0xBF00FC00   0x0F003400   SHIFT     8   -
 
-# ── GPR->vector DUP (native .2d) ─────────────────────────────────────────
-DUP     0xBFE0FC00   0x0E000C00   DUP       0   ((op >> 16) & 0x1F) == 0x08 && Q
+# ── GPR->vector DUP (native for all element sizes 1/2/4/8, Q=0 and Q=1) ──
+DUP     0xBFE0FC00   0x0E000C00   DUP       0   (((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4 || ((op >> 16) & 0x1F) == 8)
 
 # ── AES / PMULL (AESE row covers AESD/AESMC/AESIMC via bits[11:10]) ──────
 AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -

@@ -91,6 +91,44 @@ static void test_scalar_shift(void) {
     check("scalar_shl_ushr_sshr", ok);
 }
 
+/* ── DUP (general): GPR -> vector broadcast, all element sizes ──
+ * The simd_dp DUP guard was `imm5 == 0x08 && Q` (native .2d only), so
+ * the game's `dup vN.16b, wM` (0x4E010C20) ran ~9K times per million
+ * instructions through the interpreter. Now native for esize 1/2/4/8
+ * with both Q=0 (8 bytes, v_hi zeroed) and Q=1 (16 bytes).
+ * Encoding: 0x0E000C00 | (sf<<31) | (Q<<30) | (imm5<<16) | (rn<<5) | rd. */
+#define DUP_GPR_WORD(rd, rn, imm5, sf, Q) \
+    (0x0E000C00u | ((sf) << 31) | ((Q) << 30) | ((imm5) << 16) | ((rn) << 5) | (rd))
+
+static void test_dup_gpr(void) {
+    int ok = 1;
+    /* dup v0.16b, w1: 16 copies of a byte */
+    uint8_t b[16] = {0};
+    asm volatile("mov w1, #0xAB\n\t.inst " STR(DUP_GPR_WORD(0, 1, 1, 0, 1))
+                 "\n\tstr q0, [%0]" :: "r"(b) : "memory");
+    for (int i = 0; i < 16; i++) if (b[i] != 0xAB) ok = 0;
+    /* dup v2.4h, w3: 8 copies of a halfword */
+    uint16_t h[8] = {0};
+    asm volatile("mov w3, #0x1234\n\t.inst " STR(DUP_GPR_WORD(2, 3, 2, 0, 1))
+                 "\n\tstr q2, [%0]" :: "r"(h) : "memory");
+    for (int i = 0; i < 8; i++) if (h[i] != 0x1234) ok = 0;
+    /* dup v4.2s, w5: 4 copies of a word */
+    uint32_t w[4] = {0};
+    asm volatile("movz w5, #0xBEEF\n\tmovk w5, #0xDEAD, lsl #16\n\t.inst " STR(DUP_GPR_WORD(4, 5, 4, 0, 1))
+                 "\n\tstr q4, [%0]" :: "r"(w) : "memory");
+    for (int i = 0; i < 4; i++) if (w[i] != 0xDEADBEEFu) ok = 0;
+    /* Q=0 forms: only 8 bytes, v_hi must stay zero */
+    uint64_t q0[2] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+    asm volatile("mov w9, #0xCD\n\t.inst " STR(DUP_GPR_WORD(8, 9, 1, 0, 0))
+                 "\n\tstr q8, [%0]" :: "r"(q0) : "memory");
+    if (q0[0] != 0xCDCDCDCDCDCDCDCDULL || q0[1] != 0) ok = 0;
+    uint64_t q1[2] = {0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+    asm volatile("movz w11, #0x3344\n\tmovk w11, #0x1122, lsl #16\n\t.inst " STR(DUP_GPR_WORD(10, 11, 4, 0, 0))
+                 "\n\tstr q10, [%0]" :: "r"(q1) : "memory");
+    if (q1[0] != 0x1122334411223344ULL || q1[1] != 0) ok = 0;
+    check("dup_gpr_all_sizes", ok);
+}
+
 /* ── SLI semantics: Vd = (Vn << shift) | (Vd & ((1<<shift)-1)) ──
  * The source shifts left; the destination's LOW shift bits are
  * retained in place (per ARM ARM: the new zero bits created by the
@@ -208,6 +246,7 @@ static void test_add_xor(void) {
 int main(void) {
     test_shifts();
     test_scalar_shift();
+    test_dup_gpr();
     test_sli_rotl();
     test_sri_rotr();
     test_usra();

@@ -34,7 +34,13 @@ namespace arm64emu {
 // edge before this).
 void FrostJIT::emit_taken_path_epilogue() {
     // Write back dirty cached vectors first (see BRCOND_ZERO above).
-    vec_cache_writeback_all();
+    // clear_flags=false: this is the TAKEN-path exit, but the FALL-THROUGH
+    // (main) epilogue is emitted LATER in codegen and must ALSO get the
+    // writeback for its own exit path. vec_cache_writeback_all() clears the
+    // dirty flags as a side effect, so emitting here with the default would
+    // silently drop the writeback from the fall-through epilogue (the vec
+    // cache's dirty state is a codegen-time concept, not a runtime one).
+    vec_cache_writeback_all(false);
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
     emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
