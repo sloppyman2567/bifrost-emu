@@ -50,6 +50,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num);
 // syscall dispatcher and the JIT native vDSO fast path. Returns true if
 // the call was handled (result set in cpu.regs[0]); false otherwise.
 bool syscall_vdso_clock(Emulator& emu, CPU& cpu, uint64_t num);
+// Syscall histogram (BIFROST_STATS_PERIOD printout). Counts every syscall;
+// prints top-N with per-second rates. Defined in syscalls.cpp.
+void dump_syscall_histogram(double dt);
 // ── misc.cpp sub-handlers  ──────────────────────────
 // syscall_misc() dispatches to these in order. Each returns
 // SYSCALL_NOT_HANDLED if it doesn't recognize `num`.

@@ -5,6 +5,7 @@
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "core/emulator.h"
 #include "jit/frostjit.hpp"
+#include "syscalls/syscalls.h"
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -308,6 +309,14 @@ void Emulator::dump_periodic_stats(double dt) {
     last_ci_cap_    = ci_cap;    last_bl_cap_     = bl_cap;
     last_max_sz_    = max_sz;    last_decfail_    = decfail;
     last_ionly_     = ionly;
+    // SIGPROF bucket snapshot too: games/loops that exit via exit_group
+    // (or are killed by a timeout) never reach print_jit_stats's exit-time
+    // dump, so the jit/dispatch/translate/interp split was unobservable
+    // without a clean exit. Inert unless BIFROST_PROF=1.
+    dump_prof_snapshot();
+    // Syscall histogram (attributes the SIGPROF "other" bucket). Always
+    // counted; printed whenever this periodic reporter runs.
+    dump_syscall_histogram(dt);
 }
 void Emulator::jit_step(CPU& cpu) {
     jit_->run_block(cpu, *this);

@@ -30,9 +30,85 @@
 #include <cstdlib>
 #include <cstring>
 namespace arm64emu {
+// ── Syscall histogram (BIFROST_STATS_PERIOD printout) ──────────────────
+// Every syscall increments an atomic counter. The counts are summed and
+// printed (top-N with per-second rate) from Emulator::dump_periodic_stats
+// so a "where does the time go" run can attribute the SIGPROF "other"
+// bucket to specific syscalls without a clean guest exit.
+namespace {
+constexpr size_t SYSCALL_HIST_MAX = 512;
+std::atomic<uint64_t> g_syscall_hist[SYSCALL_HIST_MAX]{};
+const char* syscall_name(uint64_t num) {
+    switch (num) {
+        case 23: return "select";      case 40: return "sendto";
+        case 41: return "sendmsg";      case 43: return "recvmsg";
+        case 45: return "recvfrom";     case 48: return "faccessat";
+        case 49: return "chdir";        case 50: return "fchdir";
+        case 56: return "openat";       case 57: return "close";
+        case 61: return "getdents64";   case 62: return "lseek";
+        case 63: return "read";         case 64: return "write";
+        case 72: return "pselect6";     case 73: return "ppoll";
+        case 78: return "readlinkat";   case 79: return "fstatat";
+        case 80: return "fstat";        case 93: return "exit";
+        case 94: return "exit_group";   case 96: return "set_tid_address";
+        case 98: return "futex";        case 99: return "set_robust_list";
+        case 100: return "get_robust_list"; case 129: return "kill";
+        case 130: return "tkill";       case 131: return "tgkill";
+        case 169: return "gettimeofday"; case 174: return "rt_sigaction";
+        case 178: return "gettimeofday_alt"; case 179: return "sysinfo";
+        case 198: return "socket";      case 203: return "connect";
+        case 214: return "brk";         case 215: return "munmap";
+        case 220: return "clone";       case 221: return "execve";
+        case 222: return "mmap";        case 435: return "clone3";
+        case 226: return "mprotect";    case 229: return "mremap";
+        case 232: return "mincore";     case 233: return "madvise";
+        case 113: return "clock_gettime"; case 114: return "clock_getres";
+        case 172: return "getpid";      case 173: return "gettid";
+        case 278: return "prctl";
+        default: return nullptr;
+    }
+}
+}  // namespace
+void dump_syscall_histogram(double dt) {
+    // Copy out then sort a top-N by count.
+    struct Entry { uint64_t num; uint64_t count; };
+    Entry top[16];
+    size_t ntop = 0;
+    uint64_t total = 0;
+    for (size_t i = 0; i < SYSCALL_HIST_MAX; i++) {
+        uint64_t c = g_syscall_hist[i].load(std::memory_order_relaxed);
+        if (!c) continue;
+        total += c;
+        // Insertion-sort into the (small) top list, descending.
+        size_t pos = ntop;
+        for (size_t j = 0; j < ntop; j++) {
+            if (c > top[j].count) { pos = j; break; }
+        }
+        if (pos < 16) {
+            if (ntop < 16) ntop++;
+            for (size_t k = ntop - 1; k > pos; k--) top[k] = top[k - 1];
+            top[pos] = Entry{i, c};
+        }
+    }
+    if (!ntop) return;
+    fprintf(stderr, "[%s] syscalls: %llu total (%.1f/s)\n", CODENAME,
+            static_cast<unsigned long long>(total),
+            dt > 0 ? total / dt : 0.0);
+    for (size_t j = 0; j < ntop; j++) {
+        const char* name = syscall_name(top[j].num);
+        fprintf(stderr, "[%s]   %3llu %-16s %10llu (%.1f%%, %.1f/s)\n", CODENAME,
+                static_cast<unsigned long long>(top[j].num),
+                name ? name : "?",
+                static_cast<unsigned long long>(top[j].count),
+                100.0 * top[j].count / total,
+                dt > 0 ? top[j].count / dt : 0.0);
+    }
+}
 // ── Main dispatcher ────────────────────────────────────────────────────
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
+    if (num < SYSCALL_HIST_MAX)
+        g_syscall_hist[num].fetch_add(1, std::memory_order_relaxed);
     // 1.5.2-alpha: vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and
