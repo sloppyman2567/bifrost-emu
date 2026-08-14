@@ -136,13 +136,12 @@ void DisplayThunk::register_function_(const std::string& lib,
     }
     uint32_t sym_id = DisplayThunk::ID_BASE + local_id;
     uint64_t addr = impl_->trampoline_base + local_id * DisplayThunk::TRAMPOLINE_SIZE;
-    // Write the trampoline.
-    uint32_t buf[4];
-    buf[0] = 0xD2800000u | (static_cast<uint32_t>(sym_id) << 5);     // movz x9, #sym_id
-    buf[1] = 0xD2800000u | (static_cast<uint32_t>(DisplayThunk::SYSCALL_NUMBER) << 5) | 8; // movz x8, #0x1000
-    buf[2] = 0xD4000001u;  // svc #0
-    buf[3] = 0xD65F03C0u;  // ret
-    impl_->mem->write(addr, buf, sizeof(buf));
+    // Write the trampoline via the shared helper: movz x9, #sym_id;
+    // movz x8, #SYSCALL; svc #0; ret. (Hand-rolled encodings here
+    // previously dropped the Rd field and loaded sym_id into x0, which
+    // the dispatcher reads from x9 — every display call misrouted.)
+    write_thunk_trampoline(*impl_->mem, addr, sym_id,
+                           static_cast<uint16_t>(DisplayThunk::SYSCALL_NUMBER));
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
                            n_stack, n_float, flags});
     impl_->id_to_idx_.push_back({
@@ -158,12 +157,8 @@ void DisplayThunk::register_function_(const std::string& lib,
     }
 }
 void DisplayThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) {
-    uint32_t buf[4];
-    buf[0] = 0xD2800000u | (static_cast<uint32_t>(sym_id) << 5);
-    buf[1] = 0xD2800000u | (static_cast<uint32_t>(DisplayThunk::SYSCALL_NUMBER) << 5) | 8;
-    buf[2] = 0xD4000001u;
-    buf[3] = 0xD65F03C0u;
-    mem.write(addr, buf, sizeof(buf));
+    write_thunk_trampoline(mem, addr, sym_id,
+                           static_cast<uint16_t>(DisplayThunk::SYSCALL_NUMBER));
 }
 uint64_t DisplayThunk::resolve(const std::string& lib, const std::string& sym) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
@@ -209,20 +204,28 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
     // When the THUNK_PROXY flag is set, the symbol is handled by the
-    // DisplayProxy (SDL2-based software fallback) when the host library
-    // is unavailable. If the host function IS available, we prefer it
-    // (it provides full functionality). The proxy is only used as a
-    // fallback when the host library is not installed or has no display.
+    // DisplayProxy (SDL2-based software fallback). The proxy is preferred
+    // over the host library: its handles (Display*, Window, GC) are guest
+    // addresses, so they round-trip through guest memory correctly. The
+    // host-lib path returns a HOST Display* which cannot be translated
+    // back through guest memory — marking it as a pointer arg bounces it
+    // and crashes. The host library is only a fallback when no SDL proxy
+    // can be initialized (headless host).
     if (entry.flags & THUNK_PROXY) {
-        if (!entry.host_fn && impl_->proxy_) {
-            return proxy_dispatch_(cpu, entry.name);
+        if (impl_->proxy_) {
+            if (!impl_->proxy_->ready()) {
+                impl_->proxy_->init(640, 480, impl_->mem);
+            }
+            if (impl_->proxy_->ready()) {
+                return proxy_dispatch_(cpu, entry.name);
+            }
         }
         if (!entry.host_fn) {
             // No host function and no proxy — return 0 (NULL).
             cpu.regs[0] = 0;
             return 0;
         }
-        // Host function is available — fall through to standard dispatch.
+        // Proxy unavailable (headless) — fall through to host dispatch.
     }
 
     // ── Float-only AAPCS64 path (Vulkan float params, etc.) ──────────
@@ -340,22 +343,40 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // ── Pointer arg translation ────────────────────────────────────────
     auto translate_ptr = [&](uint64_t& a, int idx,
                              std::vector<uint8_t>* bounce,
+                             std::vector<uint8_t>* pristine,
                              uint64_t* guest_orig, bool* need_wb) {
-        (void)idx;
         if (a == 0 || !impl_->mem) return;
         uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(a);
         if (host_ptr) { a = reinterpret_cast<uint64_t>(host_ptr); return; }
         // High-stack / sparse-page pointer: bounce through a host buffer.
+        // Default 64 KiB covers fixed-size output structs (XEvent, etc.);
+        // known big-buffer functions size the bounce from their args so we
+        // neither truncate the data nor write 64 KiB of garbage back over a
+        // small guest object (mirrors the SizeKind sizing in thunk.cpp).
         size_t kBounce = 65536;
+        const std::string& n = entry.name;
+        if (n == "XChangeProperty" && idx == 6) {
+            // (display, window, prop, type, format, mode, data, nelements)
+            uint64_t sz = args[7] * (args[4] / 8u);
+            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+        } else if ((n == "XDrawString" || n == "XDrawImageString") && idx == 5) {
+            uint64_t sz = args[6];
+            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+        } else if (n == "XSetWMProtocols" && idx == 2) {
+            uint64_t sz = args[3] * sizeof(unsigned long);  // Atom = 8 bytes
+            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+        }
         bounce->resize(kBounce);
         try { impl_->mem->read(a, bounce->data(), kBounce); }
         catch (...) { bounce->assign(kBounce, 0); }
+        *pristine = *bounce;   // snapshot before the host call
         *guest_orig = a;
         *need_wb = true;
         a = reinterpret_cast<uint64_t>(bounce->data());
     };
 
     std::vector<uint8_t> bounce_bufs[kMaxArgs];
+    std::vector<uint8_t> bounce_pristine[kMaxArgs];
     uint64_t bounce_guest[kMaxArgs] = {0};
     bool bounce_wb[kMaxArgs] = {false};
 
@@ -363,6 +384,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {
                 translate_ptr(args[i], i, &bounce_bufs[i],
+                              &bounce_pristine[i],
                               &bounce_guest[i], &bounce_wb[i]);
             }
         }
@@ -421,12 +443,37 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             args[4], args[5], args[6], args[7]);
     }
 
-    // Write bounced pointer args back into guest memory.
+    // Write bounced pointer args back into guest memory. Only the byte
+    // range the host actually modified is written back — writing the full
+    // bounce (64 KiB by default) over a small guest object (e.g. a stack
+    // XEvent or XColor above the 4 GiB direct window) clobbered adjacent
+    // guest memory. Diffing against the pre-call snapshot also makes
+    // input-only pointers (host never writes them) a no-op writeback.
+    // A wrong pointer mask (e.g. an XID marked as a pointer) can bounce an
+    // unmapped guest address; Memory::write throws UnmappedMemory there, so
+    // guard the writeback or the exception escapes dispatch into the
+    // syscall handler.
     if (impl_->mem) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (bounce_wb[i] && bounce_guest[i]) {
-                impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
-                                  bounce_bufs[i].size());
+                const auto& after = bounce_bufs[i];
+                const auto& before = bounce_pristine[i];
+                if (after.size() != before.size()) continue;
+                size_t first = after.size(), last = 0;
+                for (size_t j = 0; j < after.size(); j++) {
+                    if (after[j] != before[j]) {
+                        if (first > j) first = j;
+                        last = j + 1;
+                    }
+                }
+                if (last <= first) continue;  // host didn't touch it
+                try {
+                    impl_->mem->write(bounce_guest[i] + first,
+                                      after.data() + first, last - first);
+                } catch (...) {
+                    // Best-effort: the host call already happened; don't let
+                    // a bad writeback corrupt the emulator's control flow.
+                }
             }
         }
     }
@@ -1343,8 +1390,8 @@ void DisplayThunk::register_known_symbols_() {
     } while(0)
     REG_X11_PTR(XOpenDisplay, 0x01);             // arg 0: const char* name
     REG_X11_PTR(XCloseDisplay, 0x01);            // arg 0: Display*
-    REG_X11_EX(XCreateWindow, 0x501, 3);         // args 0,8,10 ptrs; 3 stack args
-    REG_X11_PTR(XCreateSimpleWindow, 0x01);      // arg 0: Display*
+    REG_X11_EX(XCreateWindow, 0xA01, 3);         // args 0,9,11 ptrs; 3 stack args
+    REG_X11_EX(XCreateSimpleWindow, 0x01, 1);    // arg 0: Display*; 1 stack arg (background pixel)
     REG_X11_PTR(XDestroyWindow, 0x01);           // arg 0: Display*
     REG_X11_PTR(XMapWindow, 0x01);               // arg 0: Display*
     REG_X11_PTR(XUnmapWindow, 0x01);             // arg 0: Display*
@@ -1354,12 +1401,12 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XNextEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
     REG_X11_PTR(XPeekEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
     REG_X11_PTR(XEventsQueued, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XWindowEvent, 0x0B);             // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckWindowEvent, 0x0B);        // arg 0: Display*, arg 3: XEvent*
-    REG_X11_PTR(XMaskEvent, 0x03);               // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckMaskEvent, 0x03);          // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckTypedEvent, 0x03);         // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckTypedWindowEvent, 0x0B);   // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XWindowEvent, 0x09);             // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XCheckWindowEvent, 0x09);        // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XMaskEvent, 0x05);               // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckMaskEvent, 0x05);          // arg 0: Display*, arg 2: XEvent*
+    REG_X11_PTR(XCheckTypedEvent, 0x09);         // arg 0: Display*, arg 3: XEvent*
+    REG_X11_PTR(XCheckTypedWindowEvent, 0x11);   // arg 0: Display*, arg 4: XEvent*
     REG_X11_PTR(XPutBackEvent, 0x03);            // arg 0: Display*, arg 1: XEvent*
     REG_X11_PTR(XSendEvent, 0x10);               // arg 0: Display*, arg 4: XEvent*
     REG_X11_PTR(XDisplayWidth, 0x01);            // arg 0: Display*
@@ -1384,9 +1431,9 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XSetWindowBackgroundPixmap, 0x01); // arg 0: Display*
     REG_X11_PTR(XStoreName, 0x03);               // arg 0: Display*, arg 2: const char*
     REG_X11_PTR(XFetchName, 0x07);               // arg 0: Display*, arg 2: char**
-    REG_X11_PTR(XSetWMProtocols, 0x08);          // arg 0: Display*, arg 3: Atom*
+    REG_X11_PTR(XSetWMProtocols, 0x04);          // arg 0: Display*, arg 2: Atom*
     REG_X11_PTR(XInternAtom, 0x03);              // arg 0: Display*, arg 1: const char*
-    REG_X11_PTR(XInternAtoms, 0x1F);             // arg 0: Display*, arg 1: char**, arg 4: Atom*
+    REG_X11_PTR(XInternAtoms, 0x13);             // arg 0: Display*, arg 1: char**, arg 4: Atom*
     REG_X11_PTR(XGetAtomName, 0x01);             // arg 0: Display*
     REG_X11_PTR(XCreateColormap, 0x01);          // arg 0: Display*
     REG_X11_PTR(XFreeColormap, 0x01);            // arg 0: Display*
@@ -1401,7 +1448,7 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XSetDashes, 0x09);               // arg 0: Display*, arg 3: const char*
     REG_X11_PTR(XDrawString, 0x20);              // arg 0: Display*, arg 4: const char*
     REG_X11_PTR(XDrawImageString, 0x20);         // arg 0: Display*, arg 4: const char*
-    REG_X11_PTR(XTextExtents, 0x90);             // arg 0: XFontStruct*, arg 1: const char*, arg 4: int*, arg 5: int*, arg 6: int*
+    REG_X11_PTR(XTextExtents, 0x3F);             // args 0,1,2,3,4,5 ptrs (font, str, 3 int* outs, XCharStruct*)
     REG_X11_PTR(XLoadFont, 0x03);                // arg 0: Display*, arg 1: const char*
     REG_X11_PTR(XUnloadFont, 0x01);              // arg 0: Display*
     REG_X11_PTR(XQueryFont, 0x01);               // arg 0: Display*
@@ -1421,7 +1468,7 @@ void DisplayThunk::register_known_symbols_() {
     REG_X11_PTR(XSetInputFocus, 0x01);           // arg 0: Display*
     REG_X11_PTR(XGetInputFocus, 0x05);           // arg 0: Display*, arg 2: int*
     REG_X11_PTR(XChangeProperty, 0x80);          // arg 0: Display*, arg 6: const unsigned char*
-    REG_X11_PTR(XGetWindowProperty, 0xFE);       // multiple pointer args
+    REG_X11_EX(XGetWindowProperty, 0xF81, 4);    // args 0,7,8,9,10,11 ptrs; 4 stack args
     REG_X11_PTR(XDeleteProperty, 0x01);          // arg 0: Display*
     REG_X11_PTR(XGetWindowAttributes, 0x07);     // arg 0: Display*, arg 2: XWindowAttributes*
     #undef REG_X11
@@ -1515,7 +1562,7 @@ void DisplayThunk::register_known_symbols_() {
     REG_XEXT(XShmAttach);
     REG_XEXT(XShmDetach);
     REG_XEXT_EX(XShmPutImage, 0x0F, 3);           // args 0-3 are ptrs; 3 stack args
-    REG_XEXT(XShmGetImage);
+    REG_XEXT_PTR(XShmGetImage, 0x04);            // arg 2: XImage*
     #undef REG_XEXT
     #undef REG_XEXT_PTR
     // ── libGLX.so.2 (GLX) ───────────────────────────────────────────

@@ -235,13 +235,14 @@ void DisplayProxy::XDrawRectangle(uint64_t display_guest, uint64_t window_guest,
     (void)display_guest; (void)window_guest; (void)gc;
 #if defined(BIFROST_USE_SDL2)
     if (!renderer_) return;
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + (int)w > (int)width_) w = (int)width_ - x;
-    if (y + (int)h > (int)height_) h = (int)height_ - y;
-    if (w <= 0 || h <= 0) return;
+    int iw = (int)w, ih = (int)h;
+    if (x < 0) { iw += x; x = 0; }
+    if (y < 0) { ih += y; y = 0; }
+    if (x + iw > (int)width_) iw = (int)width_ - x;
+    if (y + ih > (int)height_) ih = (int)height_ - y;
+    if (iw <= 0 || ih <= 0) return;
     SDL_SetRenderDrawColor((SDL_Renderer*)renderer_, 255, 255, 255, 255);
-    SDL_Rect r = {x, y, (int)w, (int)h};
+    SDL_Rect r = {x, y, iw, ih};
     SDL_RenderDrawRect((SDL_Renderer*)renderer_, &r);
 #endif
 }

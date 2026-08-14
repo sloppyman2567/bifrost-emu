@@ -24,6 +24,61 @@ Files: `src/frost_graphics/display_thunk.cpp` (~1580 lines),
 
 ## Fixed (this review)
 
+### Third pass (trampoline encoding + proxy-first routing)
+
+- **Trampoline encoding bug (the one that made the whole X11/Wayland path
+  dead):** `DisplayThunk::register_function_` and `write_trampoline_` wrote
+  `movz x0, #sym_id` — the hand-rolled `0xD2800000 | (sym_id << 5)` dropped
+  the Rd field (bit 0-4 = 0 → x0), even though the comment said "movz x9".
+  The syscall dispatcher (`misc.cpp:948`) reads the symbol id from `x9`, so
+  every display call carried the id in the wrong register: XOpenDisplay
+  (`sym_id=0x20e2`) arrived as a `[thunk] dispatch: glClear` with `a0=0x20e2`,
+  and no `[display-thunk] dispatch` line ever appeared. GraphicThunk and
+  AudioThunk use the shared `MOVZ_Xd_IMM16(9, …)` helper and were unaffected.
+  Both writers now call `write_thunk_trampoline(...)` like AudioThunk does.
+- **Proxy-first routing for THUNK_PROXY symbols:** the dispatch used to prefer
+  the host library whenever `host_fn` was present. But a host `Display*` (e.g.
+  `0x55a7…` from `XOpenDisplay`) is a HOST pointer: marking arg0 as a pointer
+  sent it down the bounce path as guest memory → `XCreateSimpleWindow` crashed
+  (SIGSEGV, exit 139). The DisplayProxy's handles are guest addresses and
+  round-trip correctly. Now, for `THUNK_PROXY` symbols the proxy is always
+  tried first (lazily initialized, `ready()` checked); the host library is only
+  a fallback when no SDL proxy can be initialized (headless host).
+- **Validated end-to-end:** `DISPLAY=:0 ./bifrost-emu ctest_real/x11_minimal.elf`
+  now exits 0 (`XOpenDisplay OK`, `XCreateSimpleWindow OK win=…`, `ALL PASS`)
+  instead of `FAIL (XOpenDisplay returned NULL)` / SIGSEGV.
+
+### Second pass (X11 host-path masks + crash guards)
+
+- `XCreateSimpleWindow` — was `REG_X11_PTR` (no `n_stack`); the 9th arg
+  (background pixel) lives on the guest stack and was never read in the host
+  path. Now `REG_X11_EX(..., 0x01, 1)`.
+- `XCreateWindow` mask `0x501 → 0xA01` — was marking XID `visual`@8 and XID
+  `valuemask`@10 as pointers and missing the real `Visual*`@9 and
+  `XSetWindowAttributes*`@11. Wrong masks send small XID values down the 64 KiB
+  bounce path (see crash guard below).
+- Event functions: `XWindowEvent`/`XCheckWindowEvent` `0x0B → 0x09`,
+  `XMaskEvent`/`XCheckMaskEvent` `0x03 → 0x05`,
+  `XCheckTypedEvent` `0x03 → 0x09`,
+  `XCheckTypedWindowEvent` `0x0B → 0x11` (Window XIDs and ints were marked as
+  pointers; `XEvent*` outs were missed).
+- `XTextExtents` `0x90 → 0x3F` (was missing the font struct, string, and the
+  three `int*` outputs).
+- `XInternAtoms` `0x1F → 0x13` (count / only_if_exists are ints).
+- `XGetWindowProperty` — was mask `0xFE`, `n_stack=0` on a 12-arg function;
+  now `REG_X11_EX(..., 0xF81, 4)` so the five output pointers on the stack are
+  read and translated.
+- `XShmGetImage` — `XImage*`@2 was untranslated; now `REG_XEXT_PTR(..., 0x04)`.
+- `DisplayThunk::dispatch` — the bounced-pointer writeback now catches
+  `Memory::write`'s `UnmappedMemory`. A wrong mask (or any non-window pointer)
+  used to throw out of `dispatch` into the syscall handler, corrupting the
+  emulator's control flow. This also caps the blast radius of the remaining
+  "full 64 KiB writeback" design (see Skipped).
+- `DisplayProxy::XDrawRectangle` — clamped via signed ints like `XFillRectangle`
+  (unsigned `w += x` underflowed for negative x).
+
+### First pass
+
 - `proxy_dispatch_` read guest-stack slots for X11 functions whose parameters
   all live in x0–x7, passing garbage (masked because the proxy `(void)`s the
   affected params). Corrected to use the real register args and drop the
