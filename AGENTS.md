@@ -79,6 +79,22 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   replicated per 32-bit lane. A NOP here corrupts Qt QRectF values built
   with `fmov v.2d,#imm` + `str q` (NaN rects → broken rounded rect).
   JIT falls back to CALL_INTERP for this (not in the simd_dp table).
+- AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC/MSL is Family::MODIMM in the
+  simd_dp table (mask `0x9F800C00`, base `0x0F000400`, guard `immh
+  bits[22:19]==0`) and MUST precede the SHIFT rows: every 32-bit `movi
+  vN.2s` has immh==0 and would otherwise be swallowed by the esize==1
+  SSHR path (the game's `movi vN.2s,#imm` was ~500K interp executions).
+  cmode = bits[15:12], imm8 = bits[18:16]:bits[9:5], op=bit29 (MVNI/BIC),
+  Q=bit30; ORR/BIC read the DESTINATION as their source (IR SIMD_ORRIMM is
+  a read-modify-write, not a copy). JIT: `movabs`+`vmovq` (+`vmovddup`
+  for Q=1), ORR=`vpor xd,xd,xmm0`, BIC=`vpandn xd,xmm0,xd` (imm in scratch
+  XMM0). CRITICAL: do NOT add a SHRN exclusion clause to the guard
+  (`bits[15:10] != 0x21`): every valid SHRN has immh (bits[22:19]) >= 1,
+  so `immh==0` already separates it, while cmode=8 MOVI (16-bit LSL #0)
+  ALSO has bits[15:10] = 0x21 — the crude clause made `movi vN.4h,#imm`
+  silently return 0 in BOTH interp and JIT (0x0F058560 = movi v6.4h,#0xab
+  → all zeros). The `immh==0` guard is the only safe discriminator.
+  FMOV (cmode=0xF) is excluded by the guard and stays on the interpreter.
 - FP-FMA semantics: FMADD = c + a*b, FMSUB = c − a*b, FNMADD = −(a*b + c),
   FNMSUB = a*b − c. FNMADD/FNMSUB are NOT −a*b±c aliases — encoding those
   wrong corrupts any value computed via `-(a*b+c)` / `a*b−c` (musl `pow`,

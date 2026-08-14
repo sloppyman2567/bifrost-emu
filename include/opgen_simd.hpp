@@ -19,10 +19,11 @@ enum class Family : uint8_t {
     INT_CMP = 1,
     LOGIC = 2,
     FP = 3,
-    SHIFT = 4,
-    DUP = 5,
-    CRYPTO = 6,
-    UNKNOWN = 7,
+    MODIMM = 4,
+    SHIFT = 5,
+    DUP = 6,
+    CRYPTO = 7,
+    UNKNOWN = 8,
 };
 
 struct Op {
@@ -62,19 +63,20 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBFA0FC00U) == 0x2EA0D400U) return Op{Family::FP, 22, 13, "FABD"};
     if ((op & 0xBFA0FC00U) == 0x0E20CC00U) return Op{Family::FP, 23, 14, "FMLA"};
     if ((op & 0xBFA0FC00U) == 0x0EA0CC00U) return Op{Family::FP, 24, 15, "FMLS"};
-    if ((op & 0xBF00FC00U) == 0x0F005400U) return Op{Family::SHIFT, 25, 0, "SHL"};
-    if ((op & 0xBF00FC00U) == 0x2F000400U) return Op{Family::SHIFT, 26, 1, "USHR"};
-    if ((op & 0xBF00FC00U) == 0x0F000400U) return Op{Family::SHIFT, 27, 2, "SSHR"};
-    if ((op & 0xBF00FC00U) == 0x2F001400U) return Op{Family::SHIFT, 28, 3, "USRA"};
-    if ((op & 0xBF00FC00U) == 0x0F001400U) return Op{Family::SHIFT, 29, 4, "SSRA"};
-    if ((op & 0xBF00FC00U) == 0x2F005400U) return Op{Family::SHIFT, 30, 5, "SLI"};
-    if ((op & 0xBF00FC00U) == 0x2F004400U) return Op{Family::SHIFT, 31, 6, "SRI"};
-    if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 32, 7, "URSRA"};
-    if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 33, 8, "SRSRA"};
-    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0x1F) == 0x08 && Q)) return Op{Family::DUP, 34, 0, "DUP"};
-    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 35, 0, "AESE"};
-    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 36, 4, "PMULL"};
-    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 37, 5, "PMULL2"};
+    if ((op & 0x9F800C00U) == 0x0F000400U && (((op >> 19) & 0xF) == 0)) return Op{Family::MODIMM, 25, 0, "MOVI"};
+    if ((op & 0xBF00FC00U) == 0x0F005400U) return Op{Family::SHIFT, 26, 0, "SHL"};
+    if ((op & 0xBF00FC00U) == 0x2F000400U) return Op{Family::SHIFT, 27, 1, "USHR"};
+    if ((op & 0xBF00FC00U) == 0x0F000400U) return Op{Family::SHIFT, 28, 2, "SSHR"};
+    if ((op & 0xBF00FC00U) == 0x2F001400U) return Op{Family::SHIFT, 29, 3, "USRA"};
+    if ((op & 0xBF00FC00U) == 0x0F001400U) return Op{Family::SHIFT, 30, 4, "SSRA"};
+    if ((op & 0xBF00FC00U) == 0x2F005400U) return Op{Family::SHIFT, 31, 5, "SLI"};
+    if ((op & 0xBF00FC00U) == 0x2F004400U) return Op{Family::SHIFT, 32, 6, "SRI"};
+    if ((op & 0xBF00FC00U) == 0x2F003400U) return Op{Family::SHIFT, 33, 7, "URSRA"};
+    if ((op & 0xBF00FC00U) == 0x0F003400U) return Op{Family::SHIFT, 34, 8, "SRSRA"};
+    if ((op & 0xBFE0FC00U) == 0x0E000C00U && (((op >> 16) & 0x1F) == 0x08 && Q)) return Op{Family::DUP, 35, 0, "DUP"};
+    if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 36, 0, "AESE"};
+    if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 37, 4, "PMULL"};
+    if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 38, 5, "PMULL2"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

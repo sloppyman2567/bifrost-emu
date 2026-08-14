@@ -705,6 +705,72 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit(block, IROp::SIMD_DUP, d.rd, val, 0, 0, 0, 0, 0, cur_pc);
                     return true;
                 }
+            case simd::Family::MODIMM: {
+                // AdvSIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
+                // Mirror of the interpreter's block in interp_fp.cpp
+                // (cmode = bits[15:12], imm8 = bits[18:16]:bits[9:5],
+                // op = bit29, Q = bit30). MOVI/MVNI write a broadcast
+                // constant; ORR/BIC read-modify-write the DESTINATION.
+                // cmode=0xF (FMOV) never reaches here (guard rejects it)
+                // and stays on the interpreter.
+                uint8_t cmode = (op >> 12) & 0xF;
+                uint8_t imm8 = static_cast<uint8_t>(
+                    (((op >> 16) & 0x7) << 5) | ((op >> 5) & 0x1F));
+                bool opbit = (op >> 29) & 1;
+                bool q = (op >> 30) & 1;
+                uint64_t pattern = 0;
+                bool orr_bic = false;   // ORR/BIC read Vd as their source
+                if ((cmode & 0x9) == 0x0) {
+                    // 0xx0: MOVI/MVNI 32-bit LSL #((cmode>>1)&3)*8
+                    uint32_t imm = static_cast<uint32_t>(imm8)
+                                   << (((cmode >> 1) & 3) * 8);
+                    if (opbit) imm = ~imm;
+                    pattern = (uint64_t)imm | ((uint64_t)imm << 32);
+                } else if ((cmode & 0x9) == 0x1) {
+                    // 0xx1: ORR/BIC 32-bit LSL (read Vd)
+                    uint32_t imm = static_cast<uint32_t>(imm8)
+                                   << (((cmode >> 1) & 3) * 8);
+                    pattern = (uint64_t)imm | ((uint64_t)imm << 32);
+                    orr_bic = true;
+                } else if ((cmode & 0xD) == 0x8) {
+                    // 10x0: MOVI/MVNI 16-bit LSL #((cmode&2)?8:0)
+                    uint64_t imm = static_cast<uint16_t>(
+                        static_cast<uint16_t>(imm8) << ((cmode & 2) ? 8 : 0));
+                    if (opbit) imm = static_cast<uint16_t>(~imm) & 0xFFFFu;
+                    pattern = imm | (imm << 16) | (imm << 32) | (imm << 48);
+                } else if ((cmode & 0xD) == 0x9) {
+                    // 10x1: ORR/BIC 16-bit LSL (read Vd)
+                    uint64_t imm = static_cast<uint16_t>(
+                        static_cast<uint16_t>(imm8) << ((cmode & 2) ? 8 : 0));
+                    pattern = imm | (imm << 16) | (imm << 32) | (imm << 48);
+                    orr_bic = true;
+                } else if ((cmode & 0xE) == 0xC) {
+                    // 110x: MOVI/MVNI 32-bit MSL #((cmode&1)+1)*8
+                    int shift = ((cmode & 1) + 1) * 8;
+                    uint32_t ones = (shift == 16) ? 0xFFFFu : 0xFFu;
+                    uint32_t imm = (static_cast<uint32_t>(imm8) << shift) | ones;
+                    if (opbit) imm = ~imm;
+                    pattern = (uint64_t)imm | ((uint64_t)imm << 32);
+                } else if (cmode == 0xE && !opbit) {
+                    // MOVI 8-bit: replicate imm8 across all bytes
+                    for (int i = 0; i < 8; i++)
+                        pattern |= static_cast<uint64_t>(imm8) << (i * 8);
+                } else if (cmode == 0xE && opbit) {
+                    // MOVI 64-bit: each imm8 bit selects 0x00/0xFF byte
+                    for (int i = 0; i < 8; i++)
+                        if (imm8 & (1u << i))
+                            pattern |= 0xFFULL << (i * 8);
+                } else {
+                    break;  // cmode=0xF FMOV → interpreter (matches guard)
+                }
+                if (orr_bic)
+                    emit(block, IROp::SIMD_ORRIMM, d.rd, 0, 0, 0, opbit, q,
+                         pattern, cur_pc);
+                else
+                    emit(block, IROp::SIMD_MOVI, d.rd, 0, 0, 0, 0, q,
+                         pattern, cur_pc);
+                return true;
+            }
             case simd::Family::FP: {
                 // Vector FP 2-source / FMA. bit22: 0=single, 1=double.
                 bool is_double = (op >> 22) & 1;

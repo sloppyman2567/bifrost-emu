@@ -41,6 +41,8 @@ static bool vec_cache_compatible_op(IROp op) {
         case IROp::SIMD_FP_ARITH:
         case IROp::SIMD_LOGICAL:
         case IROp::SIMD_DUP:
+        case IROp::SIMD_MOVI:     // constant broadcast — cached fast path
+        case IROp::SIMD_ORRIMM:   // dest read-modify-write — cached fast path
         case IROp::NOP: case IROp::IMM: case IROp::MOV:
         case IROp::LOAD_REG: case IROp::STORE_REG:
         case IROp::LOAD_MEM: case IROp::STORE_MEM:
@@ -88,6 +90,16 @@ bool FrostJIT::vec_cache_may_enable(const IRBlock& block) {
             }
         } else if (inst.op == IROp::SIMD_DUP) {
             // src1 is a GPR vreg (>= 32); only the vector dest is pinned.
+            if (inst.dest < 32 && !vec_used[inst.dest]) {
+                vec_used[inst.dest] = true; used_count++;
+            }
+        } else if (inst.op == IROp::SIMD_MOVI) {
+            // Constant broadcast: dest is the only vector operand.
+            if (inst.dest < 32 && !vec_used[inst.dest]) {
+                vec_used[inst.dest] = true; used_count++;
+            }
+        } else if (inst.op == IROp::SIMD_ORRIMM) {
+            // Read-modify-write: dest is both source and dest.
             if (inst.dest < 32 && !vec_used[inst.dest]) {
                 vec_used[inst.dest] = true; used_count++;
             }

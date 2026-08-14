@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
+
+### Vector `movi vN.2s, #imm` (~500K interp executions) is now native JIT
+
+- **New `MODIMM` family in the simd_dp table.** The 0x0F0004xx modified-
+  immediate encodings share the SHIFT table's `0x0F000400` SSHR base, so
+  every 32-bit `movi vN.2s` (which has immh==0) was misrouted as an
+  esize==1 shift → CALL_INTERP. A `MODIMM` row (mask `0x9F800C00`,
+  guard `bits[22:19]==0`) now precedes the SHIFT rows and classifies
+  MOVI/MVNI/ORR/BIC/MSL; FMOV (cmode=0xF) still falls back. `make opgen`
+  regenerates the classifier; the interpreter block remains the semantic
+  reference.
+- **Two new IR ops + JIT codegen.** `SIMD_MOVI` broadcasts a pre-expanded
+  64-bit lane pattern (`v_lo[dest]=imm`, `v_hi[dest]=Q?imm:0`) and
+  `SIMD_ORRIMM` does the read-modify-write ORR/BIC form (cond = op bit).
+  Codegen uses `movabs` + `vmovq` (+ `vmovddup` for Q=1) on the vec-cache
+  fast path, `vpandn`/`vpor` for BIC/ORR with the pattern in a scratch
+  XMM0, and GPR or/and + `not` on the memory path. Both ops are marked
+  vec-cache compatible (pre-scan treats dest as used).
+- **Fixed a latent cmode=8 MOVI bug (interp AND JIT).** The modified-
+  immediate entry guard carried a crude SHRN exclusion
+  (`bits[15:10] != 0x21`) meant to keep shift-right-narrow apart from the
+  immediate space. But cmode=8 MOVI (16-bit LSL #0) also has
+  `bits[15:10] = 1000 o2 1 = 0x21`, so `movi vN.4h, #imm` silently returned
+  0 in both modes. Every valid SHRN has `immh (bits[22:19]) >= 1`, so the
+  `bits[22:19]==0` guard already excludes SHRN; the extra clause was
+  redundant and is gone from both the interpreter and the table.
+
+Added `ctest_real/test_movi_imm.c` (`.inst`-pinned MOVI/MVNI across LSL
+0/8/16/24, 8-bit, 64-bit, MSL#8/#16, and ORR/BIC 32/16-bit with
+read-modify-write pre-sets; no libm). Full suite: **193/193 PASS**.
+
 ## [Unreleased] — native FCVT rounding + de-interp of FP blocks (2026-08-13)
 
 ### Interpreter share cut ~2x (13.9% → ~7-8% of wall time); FPS 2 → 6

@@ -603,6 +603,82 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // RAX holds a copy (not a cached vreg) — no mapping to update.
             return true;
         }
+        // ── SIMD MOVI/MVNI (broadcast lane pattern, AdvSIMD modified imm) ──
+        // v_lo[dest] = imm; v_hi[dest] = Q ? imm : 0. flags_op = Q.
+        // One movabs + one vmovq (vmovq already zeroes the upper half for
+        // Q=0); vmovddup broadcasts the pattern to both halves for Q=1.
+        case IROp::SIMD_MOVI: {
+            clobber_host_reg(RAX);
+            emit_mov_imm64(RAX, inst.imm);
+            {
+                int xd = vec_xmm(static_cast<int>(inst.dest));
+                if (xd >= 0) {
+                    emit_vex3(1, true, 0, 1, xd, RAX, true, 0x6E);  // vmovq xd, rax
+                    if (inst.flags_op)
+                        emit_vex3(1, false, 0, 3, xd, xd, true, 0x12);  // vmovddup xd,xd
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
+            }
+            int32_t mofflo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t moffhi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_store(CPU_REG, mofflo, RAX);
+            if (inst.flags_op) {
+                emit_store(CPU_REG, moffhi, RAX);
+            } else {
+                emit_mov_imm32_zext(RAX, 0);
+                emit_store(CPU_REG, moffhi, RAX);
+            }
+            return true;
+        }
+        // ── SIMD ORR/BIC immediate (read-modify-write the destination) ──
+        // v_lo[dest],v_hi[dest] = dest OR/BIC imm. cond = 0=ORR, 1=BIC;
+        // flags_op = Q. ORR/BIC (vector, immediate) read Vd as their source,
+        // exactly like the interpreter's apply_or_bic_u{32,16}.
+        case IROp::SIMD_ORRIMM: {
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX));
+            clobber_host_reg(RAX);
+            emit_mov_imm64(RAX, inst.imm);
+            {
+                int xd = vec_xmm(static_cast<int>(inst.dest));
+                if (xd >= 0) {
+                    // Pattern into scratch XMM0, then VEX logical with xd.
+                    emit_vex3(1, true, 0, 1, 0, RAX, true, 0x6E);    // vmovq xmm0, rax
+                    if (inst.flags_op)
+                        emit_vex3(1, false, 0, 3, 0, 0, true, 0x12); // vmovddup xmm0,xmm0
+                    if (inst.cond) {
+                        // BIC: xd = xd & ~imm = vpandn xd, xmm0(imm), xd
+                        emit_vex3(1, false, 0, 1, xd, xd, true, 0xDF);
+                    } else {
+                        // ORR: xd = xd | imm
+                        emit_vex3(1, false, xd, 1, xd, 0, true, 0xEB);
+                    }
+                    if (!inst.flags_op)
+                        emit_vex3(1, false, 0, 3, xd, xd, true, 0x7E);  // vmovq xd,xd → zero upper
+                    vec_cache_mark_dirty(static_cast<int>(inst.dest));
+                    return true;
+                }
+            }
+            // Memory path: GPR or/and against the pattern in RAX.
+            int32_t olo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            int32_t ohi = V_HI_OFF + static_cast<int>(inst.dest) * 8;
+            emit_load(RCX, CPU_REG, olo);
+            if (inst.cond) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
+            else           { emit_or_reg(RCX, RAX); }
+            emit_store(CPU_REG, olo, RCX);
+            if (inst.flags_op) {
+                emit_mov_imm64(RAX, inst.imm);
+                emit_load(RCX, CPU_REG, ohi);
+                if (inst.cond) { emit_not_reg(RAX); emit_and_reg(RCX, RAX); }
+                else           { emit_or_reg(RCX, RAX); }
+                emit_store(CPU_REG, ohi, RCX);
+            } else {
+                emit_mov_imm32_zext(RCX, 0);
+                emit_store(CPU_REG, ohi, RCX);
+            }
+            return true;
+        }
         // ── SIMD LDST (read/write v_lo/v_hi to/from vregs) ─────────
         case IROp::SIMD_LDST: {
             // width=1 (load): src1=lo vreg, src2=hi vreg → v_lo[dest], v_hi[dest]

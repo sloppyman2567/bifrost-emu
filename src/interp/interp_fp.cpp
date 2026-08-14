@@ -1576,9 +1576,18 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             }
             // Advanced SIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
             // Encoding: 0 Q op 01111 0 abc cmode o2 1 defgh Rd
-            // Must require immh==0 (bits[23:20]) so shift-by-immediate
+            // Must require immh==0 (bits[22:19]) so shift-by-immediate
             // encodings (SHL/USHR/SSHR, which share bits[28:24]=01111) are
-            // not stolen. Also exclude SHRN (bits[15:10]=100001).
+            // not stolen. Real MOVI/MVNI/ORR/BIC always have bits[22:19]==0.
+            //
+            // NOTE: no SHRN exclusion (bits[15:10]=100001) is needed here:
+            // every VALID SHRN has immh (bits[22:19]) >= 1 (its immh:immb
+            // field encodes the source size + shift), so the bits[22:19]==0
+            // test already separates SHRN from this block. A crude
+            // `bits[15:10] != 0x21` clause instead REJECTED cmode=8 MOVI
+            // (16-bit LSL #0), whose bits[15:10] = 1000 o2 1 = 100001 == the
+            // SHRN opcode, silently zeroing `movi vN.4h, #imm` in both the
+            // interp and the JIT (0x0F058560 = movi v6.4h, #0xab returned 0).
             //
             // cmode/op decode per ARM ARM:
             //   0xx0 op=0/1 → MOVI/MVNI 32-bit LSL #(cmode[2:1]*8)
@@ -1593,9 +1602,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // so bits[23:20] can look like "immh==0" while bits[22:19]!=0.
             // Real MOVI/MVNI/ORR/BIC always have bits[22:19]==0.
             if (((op & ~((1u << 30) | (1u << 29))) & 0xFF800C00) == 0x0F000400
-                && ((op >> 19) & 0xF) == 0
-                && (((op >> 10) & 0x3F) != 0x21
-                    || ((op >> 29) & 1))) {
+                && ((op >> 19) & 0xF) == 0) {
                 uint8_t cmode = (op >> 12) & 0xF;
                 uint8_t imm8 = static_cast<uint8_t>(
                     (((op >> 16) & 0x7) << 5) | ((op >> 5) & 0x1F));

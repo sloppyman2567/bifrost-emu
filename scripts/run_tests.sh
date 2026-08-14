@@ -281,6 +281,7 @@ INTEGRATION_TESTS=(
     # divided terrain coords by 2^64). Covers signed/unsigned x 32/64-bit
     # + NaN and saturation edges (no libm — builds under setup-tests).
     "fcvt_fpsrc|ctest_real/test_fcvt_fpsrc.elf||10|ALL PASS"
+    "movi_imm|ctest_real/test_movi_imm.elf||10|test_movi_imm: ALL PASS"
     "fib|ctest_real/fib.elf||5"
     "fwd_repro|ctest_real/fwd_repro.elf||5"
     "fwd_repro2|ctest_real/fwd_repro2.elf||5"

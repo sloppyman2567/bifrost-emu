@@ -48,6 +48,20 @@ FABD    0xBFA0FC00   0x2EA0D400   FP        0xD   -
 FMLA    0xBFA0FC00   0x0E20CC00   FP        0xE   -
 FMLS    0xBFA0FC00   0x0EA0CC00   FP        0xF   -
 
+# ── AdvSIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL) ────────────────
+# Encoding: 0 Q op 01111 0 000 abc cmode o2 1 defgh Rd (bit9+1 const).
+# MUST precede the SHIFT rows: the 32-bit SHL/USHR/SSHR bases share
+# bits[31:24]=0x0F and bits[11:10]=01, so they match this mask too. They are
+# distinguished by the immh guard bits[22:19]==0 — valid shifts always set
+# immh (shift amount), while MOVI/MVNI/ORR/BIC/MSL never do (bits[22:19]
+# hold the fixed 0000 prefix). No SHRN exclusion (bits[15:10]=0x21) is
+# needed: every valid SHRN has immh (bits[22:19]) >= 1, so the immh==0 guard
+# already separates it; a crude bits[15:10] clause would REJECT cmode=8 MOVI
+# (16-bit LSL #0, whose bits[15:10] = 1000 o2 1 = 0x21 == the SHRN opcode).
+# FMOV (cmode=0xF) stays on the interpreter. The interpreter block is the
+# semantic reference.
+MOVI    0x9F800C00   0x0F000400   MODIMM    0   ((op >> 19) & 0xF) == 0
+
 # ── Vector shift-by-immediate (sm mask 0xBF00FC00) ───────────────────────
 SHL     0xBF00FC00   0x0F005400   SHIFT     0   -
 USHR    0xBF00FC00   0x2F000400   SHIFT     1   -
