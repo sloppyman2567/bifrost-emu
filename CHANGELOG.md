@@ -46,6 +46,37 @@ single + double, 32/64-bit dests, no libm so `make setup-tests` builds
 it). Verified: full suite **196/196 PASS** (`./scripts/run_tests.sh
 --test-all`).
 
+## [Unreleased] — native SIMD-scalar FP-source int↔FP converts (2026-08-13)
+
+### Chunk math `scvtf sN, sN` (~1.6M interp executions) is now native JIT
+
+- **`0x5E200800` two-register-misc group handled natively.** The SIMD-scalar
+  `scvtf/ucvtf sN,sN` (int→FP, FP register source — what GCC/clang emit for
+  `(float)int_var` when the int is already in an FP register) and
+  `fcvtzs/fcvtzu sN,sN` (FP→int, FP register dest) fell to CALL_INTERP
+  (opcode 0x1D / 0x1B; the classprof raw-word sampler identified them as
+  the top fallback). The IR translator reuses `FP_I2F_FIXED`/`FP_F2I_FIXED`
+  with `imms=1` (FP source/dest) and `immr=0` (no fixed-point scale); the
+  JIT gate mirror keeps the block-split prediction in sync.
+- **Fixed a `FP_I2F_FIXED`/`FP_F2I_FIXED` fbits sentinel bug.** `immr` is
+  the fbits field with a `? : 64` default for unset, so an `immr=0` "plain
+  integer" emit was treated as fbits=64 and divided every terrain
+  coordinate by 2^64 — all heights → 0 → flat water + void (a regression
+  caught by the user immediately). `immr` is now raw fbits (0 = no scale)
+  and the 2^±fbits multiply is skipped when fbits==0.
+- **FP→int saturation now pre-checks the input range.** x86's `cvttsd2si`
+  returns INT64_MIN as a sentinel for *all* out-of-range inputs, so
+  post-convert clamps turned 2^64 into 0 (unsigned) and positive overflow
+  into the negative clamp. The codegen compares the double against
+  ±2^63 / 2^64 first and saturates explicitly; the subtract-2^63 trick and
+  the width clamps only run on in-range values. The interpreter's
+  FP-source `fcvtzs` also got an explicit `std::isnan` → 0 (C++
+  `static_cast<int32_t>(NaN)` is UB → INT32_MIN on x86).
+
+Added `ctest_real/test_fcvt_fpsrc.c` (FP-source scvtf/ucvtf/fcvtzs/fcvtzu,
+signed/unsigned × 32/64-bit + NaN + saturation edges, no libm). Full
+suite: **197/197 PASS** (`--test-all`), **192/192** default.
+
 ## [Unreleased] — JIT dispatch overhead halved + taken-path chaining (2026-08-13)
 
 ### Block dispatch overhead cut ~2x (~21% → ~10% of wall time)

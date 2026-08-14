@@ -146,6 +146,17 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             // register source/dest (e.g. GCC's `scvtf s0, s0, #1`).
             if (fpfixed::classify(op).family == fpfixed::Family::FIXCONV)
                 return fp_gate >= 0 && !(fp_gate & 0x20);
+            // SIMD-scalar int↔FP conversions, FP source/dest (0x5E200800
+            // group: SCVTF/UCVTF opcode 0x1D, FCVTZS/FCVTZU opcode 0x1B).
+            // Mirror of ir_translate_fp.cpp's FP_SCALAR block — only those
+            // two opcodes translate natively; any other opcode in the group
+            // (FRINTN etc.) falls back to CALL_INTERP, so predict interp.
+            if ((op & 0xDF3E0C00) == 0x5E200800) {
+                uint8_t gopc = (op >> 12) & 0x1F;
+                if (gopc == 0x1D || gopc == 0x1B)
+                    return fp_gate >= 0 && !(fp_gate & 0x20);
+                return true;
+            }
             // FMA family (FMADD/FMSUB/FNMADD/FNMSUB).
             if ((op & 0xFF000000) == 0x1F000000)
                 return fp_gate >= 0 && !(fp_gate & 0x40);

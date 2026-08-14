@@ -275,6 +275,12 @@ INTEGRATION_TESTS=(
     # fell back to CALL_INTERP. Forced encodings check FCVTNS/MS/PS/ZS in
     # single+double with 32/64-bit dests (no libm — builds under setup-tests).
     "fcvt_round|ctest_real/test_fcvt_round.elf||10|PASS"
+    # FP-source int<->FP regression (v1.5.2-alpha): SIMD-scalar SCVTF/UCVTF
+    # (FP source) and FCVTZS/FCVTZU (FP dest) in the 0x5E200800 two-register-
+    # misc group fell back to CALL_INTERP (and a codegen fbits=64 sentinel
+    # divided terrain coords by 2^64). Covers signed/unsigned x 32/64-bit
+    # + NaN and saturation edges (no libm — builds under setup-tests).
+    "fcvt_fpsrc|ctest_real/test_fcvt_fpsrc.elf||10|ALL PASS"
     "fib|ctest_real/fib.elf||5"
     "fwd_repro|ctest_real/fwd_repro.elf||5"
     "fwd_repro2|ctest_real/fwd_repro2.elf||5"

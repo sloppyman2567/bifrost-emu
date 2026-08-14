@@ -3659,24 +3659,24 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 }
                 if (opcode == 0x1B) {  // FCVTZS/FCVTZU (FP → int, FP dest)
                     if (is_double) {
-                        // double-precision → 64-bit int
                         double v = read_fp_d(cpu, rn);
-                        uint64_t out = is_unsigned
-                            ? static_cast<uint64_t>(v >= 18446744073709551616.0 ? UINT64_MAX
-                                                   : v < 0.0 ? 0 : static_cast<uint64_t>(v))
-                            : static_cast<uint64_t>(v >=  9223372036854775808.0 ? INT64_MAX
-                                                   : v < -9223372036854775808.0 ? INT64_MIN
-                                                   : static_cast<int64_t>(v));
+                        uint64_t out = std::isnan(v) ? 0
+                            : (is_unsigned
+                               ? static_cast<uint64_t>(v >= 18446744073709551616.0 ? UINT64_MAX
+                                                      : v < 0.0 ? 0 : static_cast<uint64_t>(v))
+                               : static_cast<uint64_t>(v >=  9223372036854775808.0 ? INT64_MAX
+                                                      : v < -9223372036854775808.0 ? INT64_MIN
+                                                      : static_cast<int64_t>(v)));
                         cpu.v_lo[rd] = out;
                     } else {
-                        // single-precision → 32-bit int
                         float v = read_fp_s(cpu, rn);
-                        uint64_t out = is_unsigned
-                            ? static_cast<uint64_t>(static_cast<uint32_t>(v >= 4294967296.0f ? UINT32_MAX
-                                                   : v < 0.0f ? 0 : static_cast<uint32_t>(v)))
-                            : static_cast<uint64_t>(static_cast<uint32_t>(v >= 2147483648.0f ? INT32_MAX
-                                                   : v < -2147483648.0f ? INT32_MIN
-                                                   : static_cast<int32_t>(v)));
+                        uint64_t out = std::isnan(v) ? 0
+                            : (is_unsigned
+                               ? static_cast<uint64_t>(static_cast<uint32_t>(v >= 4294967296.0f ? UINT32_MAX
+                                                                          : v < 0.0f ? 0 : static_cast<uint32_t>(v)))
+                               : static_cast<uint64_t>(static_cast<uint32_t>(v >= 2147483648.0f ? INT32_MAX
+                                                                          : v < -2147483648.0f ? INT32_MIN
+                                                                          : static_cast<int32_t>(v))));
                         // Zero-extend 32-bit result into 64-bit FP register
                         cpu.v_lo[rd] = out & 0xFFFFFFFFULL;
                     }

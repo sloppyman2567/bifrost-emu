@@ -379,6 +379,42 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     return true;
                 }
             }
+            // ── SIMD scalar int↔FP conversions, FP source/dest (0x5E200800) ──
+            // "Advanced SIMD scalar two-register miscellaneous" group
+            // (bits[31:24]=0x5E, Q=bit30=1). The integer lives in an FP
+            // register (Dn/Sn) instead of a GPR — GCC/clang emit these for
+            // `(float)int_var` when the int is already in an FP register
+            // (e.g. the voxel game's chunk math does `scvtf sN, sN` on
+            // every coordinate). Group mask mirrors interp_fp.cpp:
+            //   (op & 0xDF3E0C00) == 0x5E200800
+            //   opcode = bits[16:12]: 0x1D = SCVTF/UCVTF (int→FP),
+            //                          0x1B = FCVTZS/FCVTZU (FP→int)
+            //   size = bit 22 (also = 64-bit int width), U = bit 29.
+            // Reuse FP_I2F_FIXED/FP_F2I_FIXED with imms=1 (FP source/dest)
+            // and immr=0. In the fixed-point table immr = fbits is always
+            // 1..64, so the JIT treats immr==0 as "plain integer form" and
+            // skips the 2^fbits scale entirely — the conversion is exact.
+            if ((op & 0xDF3E0C00) == 0x5E200800) {
+                uint8_t gopc = (op >> 12) & 0x1F;
+                bool is_unsigned = (op >> 29) & 1;
+                bool is_double = (op >> 22) & 1;
+                if (gopc == 0x1D) {  // SCVTF/UCVTF: int bits in FP reg → FP
+                    emit(block, IROp::FP_I2F_FIXED, rd, rn, 0, is_double, 0,
+                         is_double, is_unsigned, cur_pc);
+                    block.insts.back().immr = 0;   // fbits = 0 (integer form)
+                    block.insts.back().imms = 1;   // FP register source
+                    return true;
+                }
+                if (gopc == 0x1B) {  // FCVTZS/FCVTZU: FP → int bits in FP reg
+                    emit(block, IROp::FP_F2I_FIXED, rd, rn, 0, is_double, 0,
+                         is_double, is_unsigned, cur_pc);
+                    block.insts.back().immr = 0;   // fbits = 0 (integer form)
+                    block.insts.back().imms = 1;   // FP register dest
+                    return true;
+                }
+                // Other opcodes (FRINTN, FABS, …) live in the 0x1E… group,
+                // not here — fall through to CALL_INTERP if ever seen.
+            }
             // FCVT (float ↔ double conversion).
             // Encoding: 0x1E624000 (D→S) or 0x1E22C000 (S→D).
             // SCVTF mask 0x7F3E0000 also matches FCVT (0x1E22C000 &

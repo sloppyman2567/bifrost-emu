@@ -205,6 +205,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             if (class_prof_en_) {
                 int ci = (int)d.cls;
                 if (ci >= 0 && ci < 128) class_counts_[ci]++;
+                // Sample raw words of the FP/SIMD classes that fall back to
+                // the interpreter, to spot the next native-codegen target.
+                static uint64_t raw_counts_[4096] = {0};
+                static uint32_t raw_words_[4096] = {0};
+                static int raw_slots_ = 0;
+                if ((ci == (int)InstClass::FP_SCALAR || ci == (int)InstClass::SIMD_DP)
+                    && raw_slots_ < 4096) {
+                    uint32_t w = d.raw;
+                    bool found = false;
+                    for (int k = 0; k < raw_slots_; k++) {
+                        if (raw_words_[k] == w) { raw_counts_[k]++; found = true; break; }
+                    }
+                    if (!found) { raw_words_[raw_slots_] = w; raw_counts_[raw_slots_++] = 1; }
+                }
                 static uint64_t since_print_ = 0;
                 if (++since_print_ >= class_prof_period_) {
                     since_print_ = 0;
@@ -248,6 +262,20 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         }
                     }
                     fprintf(stderr, "\n");
+                    // Top fallback FP/SIMD raw words (translate via
+                    // aarch64-linux-gnu-objdump for the exact mnemonic).
+                    if (raw_slots_) {
+                        for (int rank = 0; rank < 12; rank++) {
+                            int best = -1;
+                            for (int k = 0; k < raw_slots_; k++)
+                                if (best < 0 || raw_counts_[k] > raw_counts_[best]) best = k;
+                            if (best < 0 || raw_counts_[best] == 0) break;
+                            fprintf(stderr, "  [fp/simd] %08x x%llu\n",
+                                    raw_words_[best], (unsigned long long)raw_counts_[best]);
+                            raw_counts_[best] = 0;
+                        }
+                        raw_slots_ = 0;
+                    }
                 }
             }
         }

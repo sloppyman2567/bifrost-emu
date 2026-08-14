@@ -424,21 +424,10 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             bool is_unsigned = (inst.imm != 0);
             bool is_64bit_dest = (inst.flags_op != 0);
             bool fp_dest = (inst.imms & 1) != 0;  // subop 3: int result into an FP reg
-            int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
+            int fbits = static_cast<int>(inst.immr);  // 0 = plain integer form (no scale)
             check_fp_reg_index(inst.src1, "FP_F2I_FIXED src1");
             clobber_flags();
             flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            // Compute 2^fbits as a double constant in RCX → movq xmm1.
-            // std::ldexp(1.0, fbits) gives the exact double; we materialize
-            // it as a 64-bit immediate. For fbits=64, ldexp gives +inf
-            // (0x7FF0000000000000), which is the correct scale: any finite
-            // non-zero `a` becomes ±inf, and the saturate path clamps.
-            double scale = std::ldexp(1.0, fbits);
-            uint64_t scale_bits;
-            memcpy(&scale_bits, &scale, 8);
-            emit_mov_imm64(RCX, scale_bits);
-            // movq xmm1, rcx
-            emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
             // Load FP value into XMM0 (as double; promote single via cvtss2sd).
             int32_t off1 = V_LO_OFF + static_cast<int>(inst.src1) * 8;
             if (is_double) {
@@ -451,8 +440,20 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 // cvtss2sd xmm0, xmm0 (promote to double)
                 emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0);
             }
-            // mulsd xmm0, xmm1 (scale by 2^fbits)
-            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
+            if (fbits != 0) {
+                // Compute 2^fbits as a double constant in RCX → movq xmm1.
+                // std::ldexp(1.0, fbits) gives the exact double; for fbits=64
+                // that is +inf, so any finite non-zero `a` becomes ±inf and
+                // the saturate path clamps — matching the interpreter.
+                double scale = std::ldexp(1.0, fbits);
+                uint64_t scale_bits;
+                memcpy(&scale_bits, &scale, 8);
+                emit_mov_imm64(RCX, scale_bits);
+                // movq xmm1, rcx
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
+                // mulsd xmm0, xmm1 (scale by 2^fbits)
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
+            }
             // NaN check: ucomisd xmm0, xmm0 sets PF=1 iff NaN/unordered.
             // JNP (cc=0xB) jumps when PF=0 (not NaN). Note: cc=0x5 is JNE,
             // NOT JNP — see the cc table in x86_backend.cpp.
@@ -464,31 +465,85 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // Not-NaN path: truncate + saturate (reuse FP_F2I codegen pattern).
             size_t notnan_path = code_buf_used_;
             patch_jcc_rel32(jnp_patch, static_cast<int32_t>(notnan_path - (jnp_patch + 6)));
-            // The saturating conversion uses CVTTSD2SI rax, xmm0 (signed
-            // 64-bit truncation), then clamps. For unsigned dest, we use
-            // the subtract-2^63 trick on the (already-scaled) double.
+            // The saturating conversion. x86's cvttsd2si returns INT64_MIN
+            // as a sentinel for ALL out-of-range inputs, so a post-convert
+            // clamp cannot distinguish +overflow from -overflow (or from a
+            // legitimate -2^63). We range-check the double FIRST against
+            // ±2^63 / 2^64 and saturate explicitly, then cvttsd2si is exact
+            // and the per-width clamp below only narrows in-range values.
             if (is_unsigned) {
-                // 2^63 in double precision.
+                // if (v >= 2^64) → UINT_MAX. 2^64 = 0x43F0000000000000.
+                emit_mov_imm64(RCX, 0x43F0000000000000ULL);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xD1); // movq xmm2, rcx
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC2); // ucomisd xmm0, xmm2
+                size_t jae_hi = emit_jcc_rel32_placeholder(0x3);  // JAE
+                // if (v < 0.0) → 0.
+                emit_byte(0x0F); emit_byte(0x57); emit_byte(0xD2); // xorps xmm2, xmm2
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC2); // ucomisd xmm0, xmm2
+                size_t jb_neg = emit_jcc_rel32_placeholder(0x2);  // JB (v < 0)
+                // v in [0, 2^64): subtract-2^63 trick. 2^63 = 0x43E0000000000000.
                 emit_mov_imm64(RCX, 0x43E0000000000000ULL);
-                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
-                // ucomisd xmm0, xmm1
-                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1);
-                size_t jae_patch = emit_jcc_rel32_placeholder(0x3);  // JAE
-                // small path: cvttsd2si rax, xmm0
-                emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9); // movq xmm1, rcx
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1); // ucomisd xmm0, xmm1
+                size_t jae_large = emit_jcc_rel32_placeholder(0x3);  // JAE
+                // small path: v in [0, 2^63)
+                emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0); // cvttsd2si rax
                 size_t jmp_small = emit_jmp_rel32_placeholder();
+                // large path: subsd 2^63, cvttsd2si, add 2^63
                 size_t large_path = code_buf_used_;
-                patch_jcc_rel32(jae_patch, static_cast<int32_t>(large_path - (jae_patch + 6)));
-                // subsd xmm0, xmm1; cvttsd2si rax; add rax, 2^63
-                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1);
-                emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0);
+                patch_jcc_rel32(jae_large, static_cast<int32_t>(large_path - (jae_large + 6)));
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1); // subsd xmm0, xmm1
+                emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0); // cvttsd2si rax
                 emit_mov_imm64(RCX, 0x8000000000000000ULL);
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8);  // add rax, rcx
-                size_t done_unsigned = code_buf_used_;
-                patch_jmp_rel32(jmp_small, static_cast<int32_t>(done_unsigned - (jmp_small + 5)));
+                size_t jmp_large = emit_jmp_rel32_placeholder();
+                // v >= 2^64 → UINT_MAX (full width for 64-bit dest; the
+                // 32-bit clamp below narrows it to 0xFFFFFFFF, and it must
+                // NOT be 0xFFFFFFFFFFFFFFFF because that would read as a
+                // negative sign-extended value and clamp to 0 instead).
+                size_t hi_path = code_buf_used_;
+                patch_jcc_rel32(jae_hi, static_cast<int32_t>(hi_path - (jae_hi + 6)));
+                if (is_64bit_dest)
+                    emit_mov_imm64(RAX, 0xFFFFFFFFFFFFFFFFULL);
+                else
+                    emit_mov_imm32_zext(RAX, 0xFFFFFFFFu);
+                size_t jmp_hi = emit_jmp_rel32_placeholder();
+                // v < 0 → 0.
+                size_t neg_path = code_buf_used_;
+                patch_jcc_rel32(jb_neg, static_cast<int32_t>(neg_path - (jb_neg + 6)));
+                emit_mov_imm32_zext(RAX, 0);
+                size_t jmp_neg = emit_jmp_rel32_placeholder();
+                size_t done_conv = code_buf_used_;
+                patch_jmp_rel32(jmp_small, static_cast<int32_t>(done_conv - (jmp_small + 5)));
+                patch_jmp_rel32(jmp_large, static_cast<int32_t>(done_conv - (jmp_large + 5)));
+                patch_jmp_rel32(jmp_hi, static_cast<int32_t>(done_conv - (jmp_hi + 5)));
+                patch_jmp_rel32(jmp_neg, static_cast<int32_t>(done_conv - (jmp_neg + 5)));
             } else {
-                // Signed: cvttsd2si rax, xmm0 (saturates implicitly per x86 semantics).
+                // Signed. +overflow: v >= 2^63 → INT_MAX (width-narrowed below).
+                // -overflow: v < -2^63 → INT_MIN.
+                emit_mov_imm64(RCX, 0x43E0000000000000ULL);  // 2^63
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9); // movq xmm1, rcx
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1); // ucomisd xmm0, xmm1
+                size_t jae_pos = emit_jcc_rel32_placeholder(0x3);  // JAE (v >= 2^63)
+                emit_mov_imm64(RCX, 0xC3E0000000000000ULL);  // -2^63
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9); // movq xmm1, rcx
+                emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1); // ucomisd xmm0, xmm1
+                size_t jb_neg = emit_jcc_rel32_placeholder(0x2);  // JB (v < -2^63)
+                // in range: cvttsd2si rax, xmm0
                 emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0);
+                size_t jmp_ok = emit_jmp_rel32_placeholder();
+                size_t pos_path = code_buf_used_;
+                patch_jcc_rel32(jae_pos, static_cast<int32_t>(pos_path - (jae_pos + 6)));
+                emit_mov_imm64(RAX, 0x7FFFFFFFFFFFFFFFULL);  // INT64_MAX
+                size_t jmp_pos = emit_jmp_rel32_placeholder();
+                size_t neg2_path = code_buf_used_;
+                patch_jcc_rel32(jb_neg, static_cast<int32_t>(neg2_path - (jb_neg + 6)));
+                emit_mov_imm64(RAX, 0x8000000000000000ULL);  // INT64_MIN (sign-extends to 32-bit too)
+                size_t jmp_neg2 = emit_jmp_rel32_placeholder();
+                size_t done_conv = code_buf_used_;
+                patch_jmp_rel32(jmp_ok, static_cast<int32_t>(done_conv - (jmp_ok + 5)));
+                patch_jmp_rel32(jmp_pos, static_cast<int32_t>(done_conv - (jmp_pos + 5)));
+                patch_jmp_rel32(jmp_neg2, static_cast<int32_t>(done_conv - (jmp_neg2 + 5)));
             }
             // Saturate to dest range.
             if (!is_64bit_dest) {
@@ -603,7 +658,7 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             bool is_unsigned = (inst.imm != 0);
             bool is_64bit_src = (inst.flags_op != 0);
             bool fp_src = (inst.imms & 1) != 0;  // subop 2: int bits in an FP reg
-            int fbits = inst.immr ? static_cast<int>(inst.immr) : 64;
+            int fbits = static_cast<int>(inst.immr);  // 0 = plain integer form (no scale)
             check_fp_reg_index(inst.dest, "FP_I2F_FIXED dest");
             uint8_t rex_w = (is_64bit_src || is_unsigned) ? 0x48 : 0x00;
             clobber_flags();
@@ -649,13 +704,16 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             }
             // Multiply by 2^-fbits (= divide by 2^fbits). Use double precision
             // for the scale to avoid losing bits, even for single dest.
-            double inv_scale = std::ldexp(1.0, -fbits);
-            uint64_t inv_bits;
-            memcpy(&inv_bits, &inv_scale, 8);
-            emit_mov_imm64(RCX, inv_bits);
-            emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
-            // mulsd xmm0, xmm1
-            emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
+            // Skipped for fbits==0 (plain integer conversion).
+            if (fbits != 0) {
+                double inv_scale = std::ldexp(1.0, -fbits);
+                uint64_t inv_bits;
+                memcpy(&inv_bits, &inv_scale, 8);
+                emit_mov_imm64(RCX, inv_bits);
+                emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC9);
+                // mulsd xmm0, xmm1
+                emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1);
+            }
             // Store to v_lo[dest] (single-precision: demote first).
             int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
             if (is_double) {

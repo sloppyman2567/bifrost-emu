@@ -98,7 +98,30 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   so the block-split gate agrees with the translator). A mask of only
   `(op & 0x7F3E0000) == 0x1E380000` (FCVTZS/FCVTZU only) silently routes
   every `floor()` (fcvtms) and `ceil()` (fcvtps) through the interpreter —
-  Minecraft chunk/mesh math ran half in interp (interp share 13.9% → 7%).
+   Minecraft chunk/mesh math ran half in interp (interp share 13.9% → 7%).
+- SIMD-scalar int↔FP conversions with FP register source/dest (the 0x5E200800
+  "two-register-misc" group: `scvtf s2, s2` opcode 0x1D, `fcvtzs s2, s2`
+  opcode 0x1B; size=bit22, U=bit29) are native in the JIT via
+  `FP_I2F_FIXED`/`FP_F2I_FIXED` with `imms=1` (FP source/dest) and
+  `immr=0`. CRITICAL: in those two codegen ops `immr` is the fbits field
+  and its sentinel is `immr ? immr : 64` — an emit with `immr=0` (plain
+  integer conversion) was treated as **fbits=64** and divided every terrain
+  coordinate by 2^64 (all heights → 0 → flat water + void). Keep `immr`
+  meaning raw fbits (0 = no scale) and skip the 2^±fbits multiply when
+  `fbits==0`. GCC/clang emit the FP-source forms for `(float)int_var` when
+  the int already sits in an FP register — the voxel game's chunk math does
+  `scvtf sN, sN` on every coordinate (~1.6M interp executions before this).
+- FP→int saturation in the JIT must PRE-CHECK the input range, never trust
+  `cvttsd2si`'s INT64_MIN sentinel: x86 returns 0x8000000000000000 for ALL
+  out-of-range inputs, so a post-convert clamp can't tell +overflow from
+  −overflow (2^64 → 0 via the subtract-2^63 wrap; positive overflow → the
+  negative clamp). Range-check against ±2^63 (signed) / 2^64 (unsigned)
+  first and saturate explicitly; the subtract-2^63 trick is then exact and
+  the width clamp only narrows in-range values. For unsigned-64 the sat_hi
+  value must be width-aware (UINT64_MAX only for 64-bit dest — UINT64_MAX
+  reads as negative sign-extended and the 32-bit clamp turns it into 0).
+  The interpreter's FP-source fcvtzs also needs an explicit `std::isnan` →
+  0 (C++ `static_cast<int32_t>(NaN)` is UB and yields INT32_MIN on x86).
 - `instr_will_call_interp`'s FP gate polarity: "native" must predict NO
   interp call, so the return is `fp_gate >= 0 && !(fp_gate & bit)`.
   `fp_gate < 0 || (fp_gate & bit)` is INVERTED — under the default unset
@@ -219,13 +242,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **191 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **192 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic). The only historical skip was `test_dladdr_glibc`,
   which must be a glibc-DYNAMIC binary or its dlopen stub skips with
   exit 77.
 - `./scripts/run_tests.sh --test-all` — default suite + 5 interactive
-  stdin tests = **196 pass / 0 fail / 0 skip**, incl. downloaded
+  stdin tests = **197 pass / 0 fail / 0 skip**, incl. downloaded
   real-world binaries. Subsets: `--quick` (no benches),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
