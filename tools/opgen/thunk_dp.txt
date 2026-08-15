@@ -253,6 +253,43 @@ glFenceSync              GL     ii            -     -              -   # conditi
 glDrawBuffers            GL     ip            -     -              -   # n, const GLenum *bufs
 glBindFragDataLocation   GL     iip           -     -              -   # program,color,const GLchar *name
 glCreateVertexArrays     GL     ip            -     -              -   # n, GLuint *arrays
+# ── AAA future-proofing (2026-08-15): UBO / instancing / compute / TF / ─
+#    samplers / queries / base-vertex / primitive-restart. These cover the
+#    GL 3.3+/4.x core features modern engines (Unity/Unreal/CryEngine) use
+#    for camera matrices (UBO), instanced terrain/grass (divisor), GPU
+#    culling/particles (compute+SSBO), mesh batching (base-vertex/restart)
+#    and separate sampler state. All take the generic integer path.
+glGetUniformBlockIndex      GL     ip            -     -              -   # program, const GLchar* name -> GLuint
+glUniformBlockBinding       GL     iii           -     -              -   # program, blockIndex, binding
+glGetActiveUniformBlockiv   GL     iiip          -     -              -   # program, blockIndex, pname, GLint* params
+glGetActiveUniformBlockName GL     iiipp         -     -              -   # program, blockIndex, bufSize, length, name
+glGetActiveUniform          GL     iiipppp       -     -              -   # program,index,bufSize,len,size,type,name
+glGetActiveAttrib           GL     iiipppp       -     -              -   # program,index,bufSize,len,size,type,name
+glVertexAttribDivisor       GL     ii            -     -              -   # index, divisor
+glDrawElementsBaseVertex    GL     iiiii         -     EL_PTR         -   # arg3: indices (offset or ptr)
+glDrawRangeElements         GL     iiiiii        -     -              -   # mode,start,end,count,type,indices
+glPrimitiveRestartIndex     GL     i             -     -              -   # index
+glDispatchCompute           GL     iii           -     -              -   # numGroupsX,Y,Z
+glMemoryBarrier             GL     i             -     -              -   # barriers bitmask
+glBindImageTexture          GL     iiiiiii       -     -              -   # unit,tex,lvl,layered,layer,access,format
+glBeginTransformFeedback    GL     i             -     -              -   # primitiveMode
+glEndTransformFeedback      GL     -             -     -              -   # (void)
+glTransformFeedbackVaryings GL     iipi          -     TF_VARYINGS    -   # program,count,varyings,bufferMode
+glGenSamplers               GL     ip            -     -              -   # count, GLuint* samplers
+glDeleteSamplers            GL     ip            -     -              -   # count, const GLuint* samplers
+glBindSampler               GL     ii            -     -              -   # unit, sampler
+glSamplerParameteri         GL     iii           -     -              -   # sampler, pname, param
+glSamplerParameterf         GL     iif           -     -              -   # sampler, pname, float param
+glSamplerParameteriv        GL     iip           -     -              -   # sampler, pname, const GLint* param
+glSamplerParameterfv        GL     iip           -     -              -   # sampler, pname, const GLfloat* param
+glGenQueries                GL     ip            -     -              -   # count, GLuint* ids
+glDeleteQueries             GL     ip            -     -              -   # count, const GLuint* ids
+glIsQuery                   GL     i             -     -              -   # id -> GLboolean
+glBeginQuery                GL     ii            -     -              -   # target, id
+glEndQuery                  GL     i             -     -              -   # target
+glGetQueryiv                GL     iip           -     -              -   # target, pname, GLint* params
+glGetQueryObjectiv          GL     iip           -     -              -   # id, pname, GLint* params
+glGetQueryObjectuiv         GL     iip           -     -              -   # id, pname, GLuint* params
 
 # ── libGLESv2.so / libGLESv2.so.2 ──────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE

@@ -671,8 +671,21 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   set, then `untrack_allocation`s it (returns GL_TRUE);
   `FLUSH_BUFFER` (glFlushMappedBufferRange) pushes just the flushed range
   early (GL_MAP_FLUSH_EXPLICIT_BIT / persistent-coherent best-effort).
-  Transient map/write/unmap-per-frame works fully; persistent-coherent-
-  WITHOUT-explicit-flush stays unsupported (writes never land). Buffer
+  Transient map/write/unmap-per-frame works fully.
+  **PCWFC (Persistent-Coherent Writeback For Coherence, 2026-08-15):**
+  persistent+coherent mappings (`GL_MAP_PERSISTENT_BIT` 0x40 +
+  `GL_MAP_COHERENT_BIT` 0x80 + `GL_MAP_WRITE_BIT`) are now SUPPORTED — the
+  "serious engine" streaming pattern (map once, write every frame through
+  the returned pointer, never unmap). `UNMAP_BUFFER` keeps persistent
+  mappings alive (GL_ARB_buffer_storage: a persistent mapping stays valid
+  after glUnmapBuffer) instead of erasing the bounce; `dispatch()` calls
+  `sync_persistent_mappings_()` right before every buffer-consuming call
+  (glDraw* family, glCopyBufferSubData, glGetBufferSubData, glTexBuffer/
+  glTexBufferRange) to push all live persistent bounces back to the host —
+  the practical coherence guarantee (host sees writes at the moment the GPU
+  would read them). This is the ONLY release point for persistent bounces:
+  `glDeleteBuffers` frees any still-live mappings. Do NOT try to sync on
+  map/unmap alone — the whole point is the guest never unmaps. Buffer
   size comes from host `glGetBufferParameteriv(GL_BUFFER_SIZE)` resolved
   at init (NOT a registered thunk symbol — resolve via dlsym like the
   GLFW fns). The current target→buffer binding is read from the
@@ -683,11 +696,48 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   resolved at init alongside the GLFW fns. `glGetBufferParameteriv` is
   ALSO a table row with the `QUERY` policy (falls through to host — the
   tracker doesn't answer GL_BUFFER_SIZE). New guest test:
-  `ctest_real/test_sdl_gl_mapbuffer.c` (14 checks, "ALL PASS" pattern,
+  `ctest_real/test_sdl_gl_mapbuffer.c` (21 checks, "ALL PASS" pattern,
   exit 77 = skip without GL/SDL/display). Still UNSUPPORTED:
   `glDebugMessageCallback`'s callback is a GUEST function pointer that must
   NOT be handed to the host setter (mirror the `*_CB`/error-callback
   interception pattern) — do not add it as a plain passthrough row.
+- **Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15)**: uniform
+  blocks (`glGetUniformBlockIndex` `ip`, `glUniformBlockBinding` `iii`,
+  `glGetActiveUniformBlockiv` `iiip`, `glGetActiveUniformBlockName`
+  `iiipp`), shader introspection (`glGetActiveUniform`/`glGetActiveAttrib`
+  `iiipppp`), instancing divisor (`glVertexAttribDivisor` `ii`), the
+  modern draw/batch entry points (`glDrawElementsBaseVertex` `iiiii`
+  `EL_PTR` arg3, `glDrawRangeElements` `iiiiii` generic — indices at arg5,
+  outside EL_PTR's arg3-only scope, `glPrimitiveRestartIndex` `i`),
+  query objects (`glGenQueries`/`glDeleteQueries` `ip`, `glIsQuery` `i`,
+  `glBeginQuery`/`glEndQuery`, `glGetQueryiv`/`glGetQueryObjectiv`/
+  `glGetQueryObjectuiv` `iip`), sampler objects (`glGenSamplers`/
+  `glDeleteSamplers` `ip`, `glBindSampler` `ii`, `glSamplerParameteri`
+  `iii`, `glSamplerParameterf` `iif` mixed-FP, `glSamplerParameteriv`/
+  `glSamplerParameterfv` `iip`), compute (`glDispatchCompute` `iii`,
+  `glMemoryBarrier` `i`, `glBindImageTexture` `iiiiiii`), and transform
+  feedback (`glBeginTransformFeedback` `i`, `glEndTransformFeedback` `-`,
+  `glTransformFeedbackVaryings`). `glTransformFeedbackVaryings` uses the
+  NEW `TF_VARYINGS` policy: its `varyings` arg is a NESTED array of
+  C-string pointers (like glShaderSource's strings, but with a `count`
+  not a lengths array — args are `iipi`), so the dispatch arm
+  (`THUNK_TF_VARYINGS` flag, set in register_known_symbols_ like
+  `THUNK_SHADER_SOURCE`) reads `count` pointers from the translated
+  args[2] guest array, bounces each string, and passes `args[3]` as the
+  `bufferMode` GLenum verbatim. ARGS-count pitfall: count the POINTER args
+  too — glGetActiveUniform/Attrib take 7 args (4 pointers) and
+  glGetActiveUniformBlockName takes 5 (2 pointers); undercounting them
+  (`iiippp`/`iiip`) left the trailing `name` pointer untranslated. New
+  guest test: `ctest_real/test_sdl_gl_modern.c` (17 checks, "ALL PASS"
+  pattern, exit 77 = skip without GL >= 3.3/SDL/display). Host-specific
+  note: this sdl2-compat host errors (INVALID_ENUM 1280) on
+  `glSamplerParameteri(GL_TEXTURE_MIN_FILTER, GL_NEAREST)` but accepts
+  `GL_TEXTURE_MAG_FILTER`/`GL_TEXTURE_WRAP_T` — host and guest agree, so
+  it's not a thunk bug; the test uses the accepted params.
+  Still UNSUPPORTED: `glDebugMessageCallback`'s callback is a GUEST
+  function pointer that must NOT be handed to the host setter (mirror the
+  `*_CB`/error-callback interception pattern) — do not add it as a plain
+  passthrough row.
 - **DisplayThunk (Vulkan/Wayland/X11/XCB/GBM/GLX/RandR/Xkb) is
   table-driven too (1.5.3-alpha):** the SAME `tools/opgen/thunk_dp.txt` →
   `opgen_thunk.hpp` pipeline now carries the ~275 display symbols

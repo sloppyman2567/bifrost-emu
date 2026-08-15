@@ -61,6 +61,7 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'MIX_VERSION', 'MIX_OPEN_AUDIO', 'THREAD_CREATE',
                 'THREAD_WAIT',
                 'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',
+                'TF_VARYINGS',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
                 'VK_CREATE_DEVICE', 'VK_PRESENT')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',

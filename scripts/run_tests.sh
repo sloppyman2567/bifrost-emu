@@ -349,6 +349,14 @@ INTEGRATION_TESTS=(
     # (GL_MAP_WRITE_BIT), and that flush pushes ranges early. Needs
     # DISPLAY + host GL. Exit 77 = skip when unavailable.
     "sdl_gl_mapbuffer|ctest_real/test_sdl_gl_mapbuffer.elf||30|ALL PASS"
+    # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
+    # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
+    # shader introspection (GetActiveUniform/GetActiveAttrib), instancing
+    # (VertexAttribDivisor), base-vertex/range/restart draws,
+    # query + sampler objects, compute dispatch/memory barrier/image
+    # texture, and the nested-string glTransformFeedbackVaryings arm.
+    # Needs DISPLAY + host GL >= 3.3. Exit 77 = skip when unavailable.
+    "sdl_gl_modern|ctest_real/test_sdl_gl_modern.elf||40|ALL PASS"
     # Vulkan host-path smoke test (1.5.3): dlopen(libvulkan.so.1) via the
     # internal dlopen syscall → vkGetInstanceProcAddr → create instance
     # (deep-marshalled VkApplicationInfo + extension string array) →

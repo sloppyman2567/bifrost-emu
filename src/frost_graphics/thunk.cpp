@@ -121,6 +121,7 @@ static constexpr uint8_t THUNK_RET_STRING    = 1u << 0;
 static constexpr uint8_t THUNK_SHADER_SOURCE = 1u << 1;
 static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
 static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
+static constexpr uint8_t THUNK_TF_VARYINGS   = 1u << 4;
 struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
@@ -896,7 +897,51 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     constexpr uint32_t kGLMapWriteBit = 0x0002;
     constexpr uint32_t kGLMapInvalidateRangeBit = 0x0004;
     constexpr uint32_t kGLMapInvalidateBufferBit = 0x0008;
+    constexpr uint32_t kGLMapPersistentBit = 0x0040;
+    constexpr uint32_t kGLMapCoherentBit = 0x0080;
     constexpr uint32_t kGLBufferSize = 0x8764;
+    // PCWFC (Persistent-Coherent Writeback For Coherence): a mapping with
+    // GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT is a
+    // "serious engine" streaming buffer — the guest maps it ONCE, writes
+    // it every frame through the returned pointer, and never unmaps it
+    // (glUnmapBuffer on a persistent mapping keeps it valid per GL). The
+    // bounce only wrote back on unmap/flush, so the host GPU never saw the
+    // writes. sync_persistent_mappings_() pushes every live persistent
+    // bounce back to the host buffer, and dispatch() calls it right before
+    // any call that consumes buffer data (draws, copies, getSubData,
+    // texbuffer) — the practical "coherence" guarantee (host sees writes at
+    // the moment the GPU would read them).
+    auto sync_persistent_mappings_ = [&]() {
+        if (impl_->gl_buffer_mappings_.empty() || !impl_->gl_buffer_subdata_fn_)
+            return;
+        std::vector<GraphicThunkImpl::BufferMapping> snaps;
+        {
+            std::lock_guard<std::mutex> g(impl_->mu);
+            for (const auto& kv : impl_->gl_buffer_mappings_) {
+                const auto& m = kv.second;
+                if ((m.access & (kGLMapPersistentBit | kGLMapCoherentBit |
+                                 kGLMapWriteBit)) ==
+                    (kGLMapPersistentBit | kGLMapCoherentBit | kGLMapWriteBit)) {
+                    snaps.push_back(m);
+                }
+            }
+        }
+        if (snaps.empty()) return;
+        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
+        for (const auto& m : snaps) {
+            uint8_t* hp = impl_->mem->guest_to_host_ptr(m.bounce);
+            if (hp) {
+                reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
+                    m.target, m.offset, m.size, hp);
+            }
+        }
+    };
+    auto is_buffer_consumer_ = [](const std::string& n) {
+        if (n.compare(0, 6, "glDraw") == 0) return true;  // glDraw* family
+        if (n == "glCopyBufferSubData" || n == "glGetBufferSubData") return true;
+        if (n == "glTexBuffer" || n == "glTexBufferRange") return true;
+        return false;
+    };
     if (entry.spec) {
         thunk::Policy mpol = entry.spec->policy;
         if (mpol == thunk::Policy::MAP_BUFFER) {
@@ -987,12 +1032,18 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
                 GraphicThunkImpl::BufferMapping m{};
                 bool found = false;
+                bool persistent = false;
                 {
                     std::lock_guard<std::mutex> g(impl_->mu);
                     auto it = impl_->gl_buffer_mappings_.find(buffer);
                     if (it != impl_->gl_buffer_mappings_.end()) {
                         m = it->second;
-                        impl_->gl_buffer_mappings_.erase(it);
+                        // PCWFC: a persistent mapping stays valid after
+                        // glUnmapBuffer (GL_ARB_buffer_storage semantics) —
+                        // keep the bounce + mapping alive so per-frame
+                        // writes through the returned pointer still land.
+                        persistent = (m.access & kGLMapPersistentBit) != 0;
+                        if (!persistent) impl_->gl_buffer_mappings_.erase(it);
                         found = true;
                     }
                 }
@@ -1004,10 +1055,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                             m.target, m.offset, m.size, host_ptr);
                     }
                 }
-                if (found) impl_->mem->untrack_allocation(m.bounce, m.size);
+                if (found && !persistent) impl_->mem->untrack_allocation(m.bounce, m.size);
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x "
-                            "%s\n", buffer, target, found ? "ok" : "(not mapped)");
+                            "%s%s\n", buffer, target, found ? "ok" : "(not mapped)",
+                            persistent ? " (persistent, kept)" : "");
             }
             cpu.regs[0] = 1;  // GL_TRUE
             return 0;
@@ -1346,6 +1398,56 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
+    // glTransformFeedbackVaryings(program, count, const GLchar *const *varyings,
+    // bufferMode): the varyings array is a nested array of C-string pointers
+    // (exactly like glShaderSource's strings), so it needs the same per-string
+    // translation/bounce. args[3] is bufferMode (a GLenum, NOT a length array),
+    // so unlike shaderSource there is no lens vector — strings are read until
+    // their NUL terminator.
+    if (entry.flags & THUNK_TF_VARYINGS) {
+        int count = static_cast<int>(args[1]);
+        if (count < 0) count = 0;
+        if (count > 64) count = 64;
+        const char* host_strs[64];
+        std::vector<std::vector<uint8_t>> bounces;
+        bounces.reserve(static_cast<size_t>(count));
+        // args[2] already translated to a host pointer to the guest pointer array.
+        const uint64_t* guest_arr = reinterpret_cast<const uint64_t*>(args[2]);
+        for (int i = 0; i < count; i++) {
+            uint64_t gp = guest_arr ? guest_arr[i] : 0;
+            if (gp == 0) { host_strs[i] = ""; continue; }
+            uint8_t* hp = impl_->mem ? impl_->mem->guest_to_host_ptr(gp) : nullptr;
+            if (hp) { host_strs[i] = reinterpret_cast<const char*>(hp); continue; }
+            size_t n = 0;
+            constexpr size_t kMaxStr = 1 << 20;
+            for (; n < kMaxStr; n++) {
+                uint8_t c = 0;
+                try { impl_->mem->read(gp + n, &c, 1); } catch (...) { break; }
+                if (c == 0) break;
+            }
+            if (n > (16ull << 20)) n = 16ull << 20;
+            bounces.emplace_back(n + 1, 0);
+            try {
+                impl_->mem->read(gp, bounces.back().data(), n);
+            } catch (...) {
+                bounces.back().assign(n + 1, 0);
+            }
+            host_strs[i] = reinterpret_cast<const char*>(bounces.back().data());
+        }
+        using Fn = void (*)(uint64_t, int, const char* const*, uint32_t);
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] transformFeedbackVaryings: program=0x%llx "
+                    "count=%d str0='%.60s' mode=0x%llx\n",
+                    static_cast<unsigned long long>(args[0]), count,
+                    (host_strs[0] ? host_strs[0] : ""),
+                    static_cast<unsigned long long>(args[3]));
+        }
+        reinterpret_cast<Fn>(entry.host_fn)(
+            args[0], count, host_strs, static_cast<uint32_t>(args[3]));
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
     if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
@@ -1390,6 +1492,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     uint64_t ret = 0;
+    // PCWFC: before any call that consumes buffer data (draw/copy/get/
+    // texbuffer), push every live persistent+coherent bounce back to the
+    // host so the GPU reads the guest's per-frame writes. Coherent mapping
+    // semantics: the server sees client writes at the moment it reads them.
+    if (entry.spec && !impl_->gl_buffer_mappings_.empty() &&
+        is_buffer_consumer_(entry.name)) {
+        sync_persistent_mappings_();
+    }
     if (entry.n_stack >= 1) {
         using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1446,6 +1556,33 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     } else if (entry.name == "SDL_DestroySemaphore") {
         std::lock_guard<std::mutex> g(impl_->mu);
         impl_->sdl_sems_.erase(args[0]);
+    }
+
+    // glDeleteBuffers(n, names): free any live mappings (persistent bounces
+    // are kept alive across unmap, so this is their only release point).
+    if (entry.name == "glDeleteBuffers" && impl_->mem) {
+        uint32_t n = static_cast<uint32_t>(args[0]);
+        if (n > 0 && n < 1024 && args[1]) {
+            const uint32_t* names =
+                reinterpret_cast<const uint32_t*>(args[1]);
+            // Erase under the lock (so concurrent map/unmap can't see a
+            // half-freed mapping), then untrack the bounces OUTSIDE it —
+            // same pattern as the UNMAP_BUFFER arm (untrack_allocation
+            // touches Memory's own locks and must not run under impl_->mu).
+            std::vector<GraphicThunkImpl::BufferMapping> freed;
+            {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                for (uint32_t i = 0; i < n; i++) {
+                    auto it = impl_->gl_buffer_mappings_.find(names[i]);
+                    if (it != impl_->gl_buffer_mappings_.end()) {
+                        freed.push_back(it->second);
+                        impl_->gl_buffer_mappings_.erase(it);
+                    }
+                }
+            }
+            for (auto& m : freed)
+                impl_->mem->untrack_allocation(m.bounce, m.size);
+        }
     }
 
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
@@ -1711,6 +1848,7 @@ void GraphicThunk::register_known_symbols_() {
         }
         if (spec.ret == thunk::RetKind::STRING)       flags |= THUNK_RET_STRING;
         if (spec.policy == thunk::Policy::SHADER_SOURCE) flags |= THUNK_SHADER_SOURCE;
+        if (spec.policy == thunk::Policy::TF_VARYINGS) flags |= THUNK_TF_VARYINGS;
         if (spec.policy == thunk::Policy::GET_PROC)   flags |= THUNK_GET_PROC;
 
         for (uint32_t i = 0; i < fd.n; i++) {

@@ -28,6 +28,8 @@
 #define GL_MAP_READ_BIT         0x0001
 #define GL_MAP_WRITE_BIT        0x0002
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
+#define GL_MAP_PERSISTENT_BIT   0x0040
+#define GL_MAP_COHERENT_BIT     0x0080
 #define GL_BUFFER_SIZE          0x8764
 #define SDL_INIT_VIDEO          0x00000020u
 #define SDL_WINDOW_OPENGL       0x00000002u
@@ -43,6 +45,7 @@ typedef const char*  (*SDL_GetError_t)(void);
 
 typedef void (*glGenBuffers_t)(int, uint32_t*);
 typedef void (*glBindBuffer_t)(unsigned, uint32_t);
+typedef void (*glDeleteBuffers_t)(int, const uint32_t*);
 typedef void (*glBufferData_t)(unsigned, uintptr_t, const void*, unsigned);
 typedef void (*glGetBufferSubData_t)(unsigned, uintptr_t, uintptr_t, void*);
 typedef void* (*glMapBuffer_t)(unsigned, unsigned);
@@ -111,6 +114,7 @@ int main(void) {
 
     glGenBuffers_t glGenBuffers;
     glBindBuffer_t glBindBuffer;
+    glDeleteBuffers_t glDeleteBuffers;
     glBufferData_t glBufferData;
     glGetBufferSubData_t glGetBufferSubData;
     glMapBuffer_t glMapBuffer;
@@ -122,6 +126,7 @@ int main(void) {
     glGetIntegerv_t glGetIntegerv;
     LOAD(hgl, glGenBuffers_t, glGenBuffers);
     LOAD(hgl, glBindBuffer_t, glBindBuffer);
+    LOAD(hgl, glDeleteBuffers_t, glDeleteBuffers);
     LOAD(hgl, glBufferData_t, glBufferData);
     LOAD(hgl, glGetBufferSubData_t, glGetBufferSubData);
     LOAD(hgl, glMapBuffer_t, glMapBuffer);
@@ -213,6 +218,69 @@ int main(void) {
     /* Unmapping an unmapped buffer must not crash and returns GL_TRUE. */
     int un2 = glUnmapBuffer(GL_ARRAY_BUFFER);
     chk(un2 == 1, "double unmap safe");
+
+    /* PCWFC: persistent+coherent mapping — the "serious engine" pattern.
+     * The guest maps once (PERSISTENT|COHERENT|WRITE), writes through the
+     * returned pointer every frame, and NEVER unmaps; the GPU must see the
+     * writes. The emulator keeps the bounce alive and syncs it back to the
+     * host buffer before any buffer-consuming call (here: glGetBufferSubData
+     * acts as the consumer). */
+    {
+        unsigned char pc[64];
+        for (int i = 0; i < 64; i++) pc[i] = (unsigned char)(0xE0 + i);
+        glBufferData(GL_ARRAY_BUFFER, 64, pc, GL_STATIC_DRAW);
+
+        unsigned char* pm = (unsigned char*)glMapBufferRange(
+            GL_ARRAY_BUFFER, 0, 64,
+            GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT | GL_MAP_WRITE_BIT);
+        chk(pm != NULL && pm != (unsigned char*)1,
+            "persistent+coherent map returns a real ptr");
+
+        /* Write every frame worth of data through the persistent pointer,
+         * with NO unmap in between — the consumer must see it. */
+        unsigned char f1[64];
+        for (int i = 0; i < 64; i++) f1[i] = (unsigned char)(i + 1);
+        memcpy(pm, f1, 64);
+        unsigned char pc_rb[64];
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, 64, pc_rb);
+        chk(memcmp(pc_rb, f1, 64) == 0,
+            "coherent write visible to consumer without unmap");
+
+        /* A second frame of writes, still never unmapped. */
+        unsigned char f2[64];
+        for (int i = 0; i < 64; i++) f2[i] = (unsigned char)(0x10 + i);
+        memcpy(pm, f2, 64);
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, 64, pc_rb);
+        chk(memcmp(pc_rb, f2, 64) == 0,
+            "second coherent write visible (multi-frame pattern)");
+
+        /* Unmapping a persistent mapping keeps it valid (GL_ARB_buffer_storage):
+         * the pointer still aliases the buffer and writes still land. */
+        int up = glUnmapBuffer(GL_ARRAY_BUFFER);
+        chk(up == 1, "unmap persistent returns GL_TRUE");
+        unsigned char f3[64];
+        for (int i = 0; i < 64; i++) f3[i] = (unsigned char)(0x20 + i);
+        memcpy(pm, f3, 64);
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, 64, pc_rb);
+        chk(memcmp(pc_rb, f3, 64) == 0,
+            "persistent mapping survives unmap (writes still land)");
+
+        /* Explicit flush path still works alongside persistent mappings. */
+        for (int i = 0; i < 16; i++) pm[i] = (unsigned char)(0x90 + i);
+        glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, 16);
+        glGetBufferSubData(GL_ARRAY_BUFFER, 0, 64, pc_rb);
+        unsigned char want_fl[16];
+        for (int i = 0; i < 16; i++) want_fl[i] = (unsigned char)(0x90 + i);
+        chk(memcmp(pc_rb, want_fl, 16) == 0,
+            "persistent + flush: flushed range lands");
+        chk(memcmp(pc_rb + 16, f3 + 16, 48) == 0,
+            "persistent + flush: unflushed range untouched");
+
+        /* Cleanup: deleting the buffer frees the persistent bounce. */
+        glDeleteBuffers(1, &buf);
+        glGenBuffers(1, &buf);
+        glBindBuffer(GL_ARRAY_BUFFER, buf);
+    }
 
     chk(glGetError() == 0, "no GL error");
 
