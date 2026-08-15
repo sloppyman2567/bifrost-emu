@@ -594,40 +594,51 @@ void optimize_ir(IRBlock& block) {
                     int immr = inst.immr % width;
                     int imms = inst.imms;
                     uint64_t result;
-                    if (imms < immr) {
-                        // LSL/BFI case: extract low (imms+1) bits, shift
-                        // left by (width - immr).
-                        uint64_t field_mask = (1ULL << (imms + 1)) - 1;
-                        uint64_t field = a & field_mask;
-                        int sh = width - immr;
-                        result = field << sh;
+                    // Mirror the interpreter's SBFM/UBFM semantics
+                    // (interpreter.cpp InstClass::SBFM) exactly:
+                    //   imms >= immr (extract): extracted = (src >> immr)
+                    //       & ones(imms-immr+1); SBFM sign-extends from
+                    //       bit (imms-immr).
+                    //   imms <  immr (rotate/BFI): field = src &
+                    //       ones(imms+1); SBFM sign-extends from bit imms;
+                    //       then shift left by (width - immr).
+                    // The old fold used ROR(a, immr) and ones(imms+1) for
+                    // the extract case. That is only correct when immr == 0
+                    // (SXTB/SXTH/SXTW), because ROR wraps the low immr bits
+                    // up to the top of the register and ones(imms+1) keeps
+                    // them: `asr w4, w2, #4` (SBFM #4,#31) of 0x88 folded
+                    // to ROR(0x88,4)=0x80000008 instead of 8, and
+                    // `sbfx w3, w2, #4, #4` (SBFM #4,#7) folded the field
+                    // 8 to +8 instead of -8 (sign-extended from bit imms=7
+                    // instead of bit imms-immr=3). Only exposed under
+                    // BIFROST_ENABLE_FWD=1 because FWD propagates the
+                    // source constant into the loop's first iteration.
+                    if (imms >= immr) {
+                        // Extract case (SBFX/UBFX/ASR/LSR immediate).
+                        int len = imms - immr + 1;
+                        uint64_t mask = (len == 64) ? ~0ULL : ((1ULL << len) - 1);
+                        uint64_t extracted = (a >> immr) & mask;
                         if (inst.op == IROp::SBFM) {
-                            // Sign-extend from bit (imms + sh)
-                            int sb = 1ULL << (imms + sh);
-                            result = ((result ^ sb) - sb);
-                        }
-                    } else {
-                        // Normal case: ROR(a, immr) then extract [imms:0]
-                        uint64_t rotated = a;
-                        if (immr != 0) {
-                            if (width == 64) {
-                                rotated = (a >> immr) | (a << (64 - immr));
-                            } else {
-                                uint32_t v = static_cast<uint32_t>(a);
-                                rotated = ((v >> immr) | (v << (32 - immr))) & 0xFFFFFFFFULL;
+                            uint64_t m = (1ULL << (len - 1));
+                            if (extracted & m) {
+                                uint64_t high = ~mask & (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
+                                extracted |= high;
                             }
                         }
-                        uint64_t mask = (imms < width - 1)
-                            ? ((1ULL << (imms + 1)) - 1)
-                            : (width == 64 ? ~0ULL : 0xFFFFFFFFULL);
-                        uint64_t extracted = rotated & mask;
-                        if (inst.op == IROp::SBFM && imms < width - 1) {
-                            int sb = 1ULL << imms;
-                            result = ((extracted ^ sb) - sb);
-                            if (width == 32) result &= 0xFFFFFFFFULL;
-                        } else {
-                            result = extracted;
+                        result = extracted;
+                    } else {
+                        // Rotate/BFI case (SBFIZ/UBFIZ/BFI/LSL).
+                        int fw = imms + 1;
+                        uint64_t field = a & ((fw >= 64) ? ~0ULL : ((1ULL << fw) - 1));
+                        if (inst.op == IROp::SBFM) {
+                            if (fw < 64 && (field & (1ULL << (fw - 1)))) {
+                                uint64_t high_bits = ~((1ULL << fw) - 1);
+                                if (width == 32) high_bits &= 0xFFFFFFFFULL;
+                                field |= high_bits;
+                            }
                         }
+                        int lsb = width - immr;
+                        result = (lsb >= 64) ? 0 : (field << lsb);
                     }
                     if (width == 32) result &= 0xFFFFFFFFULL;
                     inst.op = IROp::IMM;

@@ -173,7 +173,30 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `BIFROST_JIT_VERIFY=1` + FWD=1 → zero divergences, `BIFROST_ENABLE_FWD=1`
   run_tests.sh = 198/198, plain suite = 198/198. FWD is still OFF by default;
   it measures ~6% on bench_mips (~0.91s vs ~0.97s) but gives ~4% on
-  chunkmesh_mesh — leave the env default alone unless the game shows a win.**
+  chunkmesh_mesh — leave the env default alone unless the game shows a win.
+  **FIXED (2026-08-15): the last FWD-only failure (scratch sxtest.c sbfx loop,
+  `sbfx i=0 src=88 got=8 want=2147483640`, both should be -8; ~16 failures
+  pre-SBFM-JIT-fix → 1 after) was NOT in the forward-walk cache or the regalloc
+  — it was the SBFM/UBFM CONSTANT FOLD in `ir_optimize.cpp` (~line 590). The
+  fold computed the `imms >= immr` (extract) case as `ROR(a, immr) &
+  ones(imms+1)` with sign-extend from bit `imms`. ROR is only equivalent to
+  `a >> immr` when immr == 0 (SXTB/SXTH/SXTW, the only forms the fold had ever
+  exercised), because ROR wraps the low immr bits to the TOP of the register
+  and ones(imms+1) keeps them: `asr w4, w2, #4` (SBFM #4,#31) of 0x88 folded
+  to ROR(0x88,4)=0x80000008 instead of 8, and `sbfx w3, w2, #4, #4` (SBFM
+  #4,#7) folded the 4-bit field 8 to +8 instead of -8 (sign bit lives at bit
+  imms-immr=3, not imms=7). The wrong `want=2147483640` was exactly the
+  folded `0x80000008` minus 0x10. Fix: mirror `interpreter.cpp:446-513`
+  exactly — extract case `(a >> immr) & ones(imms-immr+1)` + sign-extend from
+  bit (imms-immr); rotate case (`imms < immr`, SBFIZ/UBFIZ/BFI/LSL) field =
+  `a & ones(imms+1)` + sign-extend from bit imms, then `<< (width-immr)`;
+  guard `len==64`/`fw==64` (no UB shifts). FWD alone exposes it because
+  `arm_reg_cache` propagates the source constant into the loop's first
+  iteration (i=0); without FWD the LOAD_REG stays a real load and consts is
+  cleared. Re-verified: sxtest ALL OK under FWD/JIT/VERIFY/VERIFY_MEM/
+  REGALLOC_CHECK, 203/203 suite, 198/198 quick, FWD quick 198/198,
+  `BIFROST_JIT_VERIFY=1` 203/203 + 198/198, `REGALLOC_CHECK` 198/198,
+  FWD+VERIFY+MEM quick 198/198, all cneg/scalarabs/neon/permute/xtn repros.**
 - `emit_taken_path_epilogue()` must NOT clear the vec-cache dirty flags:
   `vec_cache_writeback_all()` clears `vec_dirty_` as a codegen-time side
   effect, and the FALL-THROUGH (main) epilogue is emitted LATER — if the
