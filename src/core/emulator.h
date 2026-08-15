@@ -351,6 +351,33 @@ private:
     std::mutex threads_mu_;
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};
+    // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ──────────
+    // 1.5.3-alpha. The game spawns worker threads (timer/music/event) via
+    // SDL_CreateThread and joins them with SDL_WaitThread. These are real
+    // concurrent guest threads: each gets its own GuestThread (own CPU +
+    // host thread + optional per-thread JIT), a fresh guest stack, and a
+    // per-thread glibc TLS block (via DynamicLinker::allocate_thread_tls).
+    // The guest SDL_Thread* handle is a small guest-addressable struct
+    // (guest handle_addr) that stores the thread's done flag + exit code;
+    // SDL_WaitThread futex-waits on it. Resources (stack + TLS + handle)
+    // live until the thread is joined, so a concurrently-running thread
+    // never touches freed guest memory. A handle != 0 returned by
+    // SDL_CreateThread means success; the game cbz-checks it (fatal error
+    // path on NULL, e.g. "Error: Unable to start timer thread").
+    struct SdlThread {
+        CPU cpu;
+        std::thread host_thread;
+        uint64_t stack_top = 0;
+        uint64_t stack_size = 0;
+        uint64_t tls = 0;        // per-thread TLS block base (TPIDR_EL0)
+        uint64_t handle_addr = 0;  // guest VA of the SDL_Thread* handle
+        uint64_t tid = 0;
+    };
+    std::unordered_map<uint64_t, std::unique_ptr<SdlThread>> sdl_threads_;
+    std::mutex sdl_threads_mu_;
+    uint64_t spawn_sdl_thread(uint64_t fn, uint64_t data);
+    int64_t wait_sdl_thread(uint64_t handle, uint64_t status_ptr);
+    void wire_thunk_sdl_thread_runner_();
     // Guest VA of libc's __libc_single_threaded BSS word (set by the
     // dynamic linker during link(); 0 for musl). spawn_thread flips it
     // to 0 when creating the first guest thread (glibc's pthread_create
@@ -469,6 +496,9 @@ private:
     std::unique_ptr<DynamicLinker> dyn_linker_;
     // Friend declaration must come AFTER GuestThread is defined.
     friend void thread_entry(Emulator* emu, GuestThread* gt);
+    // SDL thunk threads (SDL_CreateThread): the entry trampoline that
+    // runs the guest thread function until it returns to the sentinel LR.
+    friend void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st);
     // ── Syscall layer friends (so handlers can access private state) ──
     // Each handler lives in src/syscalls/{fs,mem,threads,time,ioctls}.cpp
     // and needs to read/write brk_, brk_mu_, phdr_addr_, etc. directly.
@@ -503,6 +533,18 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
+    // 1.5.3-alpha: stop + join every SDL worker thread. Real Linux
+    // exit_group kills ALL threads; our exit_group handler only clears
+    // the calling CPU's running flag. SDL threads spawned via
+    // SDL_CreateThread run in REAL host std::threads and may be blocked
+    // in host SDL calls (SDL_SemWait, SDL_Delay) at that point. This
+    // sets each thread's cpu.running=false (so its interpreter loop
+    // exits), wakes blocked host SDL semaphore waits via the thunk, then
+    // joins each host thread. Without this, ~Emulator destroys joinable
+    // std::threads → std::terminate ("terminate called without an active
+    // exception"). Called at the end of run() and again defensively in
+    // ~Emulator (idempotent).
+    void stop_sdl_threads();
     // 1.5.3-alpha: wire the GraphicThunk's GLFW-callback runner to a
     // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
     // d0..=fargs, pc = callback, run step() to the sentinel LR).

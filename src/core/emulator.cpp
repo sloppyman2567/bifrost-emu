@@ -45,6 +45,11 @@ Emulator::~Emulator() {
     // dereference freed memory. Without this, a signal arriving after
     // the destructor runs would crash with UAF.
     g_active_emu_ = nullptr;
+    // Defensive: if run() never reached its join_threads()/stop path
+    // (e.g. an exception unwound out of run), stop + join any still-runny
+    // SDL threads so their joinable std::threads aren't destroyed here.
+    // Idempotent — run() already cleared sdl_threads_ in the normal path.
+    stop_sdl_threads();
 }
 void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
     return &excl_monitor_shards_[excl_shard_idx(addr)];
@@ -235,6 +240,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 if (thunk->enabled()) {
                     thunk->init(mem_);
                     wire_thunk_glfw_cb_runner_();
+                    wire_thunk_sdl_thread_runner_();
                 }
                 // Capture the thunk pointer (not `this`) so the
                 // callback doesn't depend on the Emulator's lifetime
@@ -709,6 +715,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (thunk->enabled()) {
                 thunk->init(mem_);
                 wire_thunk_glfw_cb_runner_();
+                wire_thunk_sdl_thread_runner_();
             }
         }
         if (auto* athunk = graphics_.audio_thunk()) {
@@ -1333,6 +1340,11 @@ int Emulator::run() {
     }
     // Wait for any spawned threads to exit
     join_threads();
+    // Also stop + join SDL worker threads: exit_group only clears the
+    // calling CPU's running flag, so SDL threads may still be running
+    // (one may be blocked in a host SDL call). Without this, ~Emulator
+    // destroys joinable std::threads → std::terminate.
+    stop_sdl_threads();
     auto t1 = std::chrono::steady_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
     if (verbose_) {
@@ -1501,6 +1513,32 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
                 // Swallow: restore and let the game continue polling.
             }
             restore();
+            return 0;
+        });
+}
+// ── wire_thunk_sdl_thread_runner_ — SDL_CreateThread/WaitThread ──────
+// 1.5.3-alpha. SDL_CreateThread passes a guest AArch64 function pointer;
+// host SDL_CreateThread would run it as x86-64 (SIGSEGV). Instead we
+// spawn a REAL guest thread (own CPU + host thread + fresh stack +
+// per-thread glibc TLS) running the guest function, and SDL_WaitThread
+// joins it. The guest SDL_Thread* handle is a guest-addressable struct
+// whose done-word the wait blocks on (see thread_mgr.cpp).
+void Emulator::wire_thunk_sdl_thread_runner_() {
+    auto* thunk = graphics_.thunk();
+    if (!thunk || !thunk->enabled()) return;
+    thunk->set_sdl_thread_runner(
+        [this](CPU& cpu, uint32_t op, uint64_t a0, uint64_t a1,
+               uint64_t a2) -> uint64_t {
+            (void)cpu;
+            if (op == 0) {
+                // create: a0=fn, a1=name (unused), a2=data
+                return spawn_sdl_thread(a0, a2);
+            }
+            if (op == 1) {
+                // wait: a0=thread handle, a1=status ptr (may be 0)
+                wait_sdl_thread(a0, a1);
+                return 0;
+            }
             return 0;
         });
 }

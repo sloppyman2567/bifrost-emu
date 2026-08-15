@@ -650,6 +650,44 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
   fails if the header drifted from the spec). Do NOT hand-edit the
   generated header or re-add ad-hoc REG_* entries in thunk.cpp.
+- GL3.3+/DSA future-game coverage (2026-08): `glBufferStorage` (SIZE
+  `arg1`), `glCreateBuffers`, `glTexStorage2D/3D`, `glTexImage3D` (10 args,
+  arg9 pixels via `p` = 64 KiB default bounce — a `z` token needs a SIZE
+  policy, so pointer args without one must use `p`), `glBlitFramebuffer`,
+  `glDrawArrays/ElementsInstanced` (Instanced uses `EL_PTR` on arg3),
+  `glBindBufferBase/Range`, `glGetBufferSubData` (SIZE `arg2`),
+  `glCopyBufferSubData`, `glCopyTexSubImage2D`, `glClientWaitSync`/`glFenceSync`
+  (GLsync round-trips as an opaque integer), `glDrawBuffers`,
+  `glBindFragDataLocation`, `glCreateVertexArrays` are all table rows.
+  **glMapBuffer/glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange
+  (2026-08) are NATIVE via a guest-window bounce**: the host glMapBuffer
+  returns a HOST pointer the guest cannot deref (address-space mismatch),
+  so the `MAP_BUFFER` dispatch arm allocates a bounce with
+  `Memory::mmap_alloc` (inside the 4 GiB direct window → guest JIT reads/
+  writes it fast), seeds it from the host buffer when `GL_MAP_READ_BIT`
+  (0x1) is set (skipped under `GL_MAP_INVALIDATE_*`), and returns the
+  bounce's GUEST address; `UNMAP_BUFFER` copies the bounce back into the
+  host buffer via host `glBufferSubData` when `GL_MAP_WRITE_BIT` (0x2) is
+  set, then `untrack_allocation`s it (returns GL_TRUE);
+  `FLUSH_BUFFER` (glFlushMappedBufferRange) pushes just the flushed range
+  early (GL_MAP_FLUSH_EXPLICIT_BIT / persistent-coherent best-effort).
+  Transient map/write/unmap-per-frame works fully; persistent-coherent-
+  WITHOUT-explicit-flush stays unsupported (writes never land). Buffer
+  size comes from host `glGetBufferParameteriv(GL_BUFFER_SIZE)` resolved
+  at init (NOT a registered thunk symbol — resolve via dlsym like the
+  GLFW fns). The current target→buffer binding is read from the
+  GLStateTracker's general `buffer_bindings_` map (extended to cover ALL
+  glBindBuffer/Base/Range targets, not just ARRAY/ELEMENT); `glMapBuffer`
+  on an unbound buffer returns NULL (matches GL). Raw host fns
+  `glGetBufferParameteriv`/`glGetBufferSubData`/`glBufferSubData` are
+  resolved at init alongside the GLFW fns. `glGetBufferParameteriv` is
+  ALSO a table row with the `QUERY` policy (falls through to host — the
+  tracker doesn't answer GL_BUFFER_SIZE). New guest test:
+  `ctest_real/test_sdl_gl_mapbuffer.c` (14 checks, "ALL PASS" pattern,
+  exit 77 = skip without GL/SDL/display). Still UNSUPPORTED:
+  `glDebugMessageCallback`'s callback is a GUEST function pointer that must
+  NOT be handed to the host setter (mirror the `*_CB`/error-callback
+  interception pattern) — do not add it as a plain passthrough row.
 - **DisplayThunk (Vulkan/Wayland/X11/XCB/GBM/GLX/RandR/Xkb) is
   table-driven too (1.5.3-alpha):** the SAME `tools/opgen/thunk_dp.txt` →
   `opgen_thunk.hpp` pipeline now carries the ~275 display symbols

@@ -3129,6 +3129,80 @@ int64_t DynamicLinker::tls_tp_offset(uint64_t mod_id) const {
     }
     return 0;
 }
+// ── allocate_thread_tls ────────────────────────────────────────────────
+// Allocate a fresh per-thread TLS block (variant-I glibc layout) for a
+// new guest thread spawned outside clone() (e.g. SDL_CreateThread via the
+// thunk). Mirrors the a0==0 path of the 0x1001 _dl_allocate_tls syscall
+// (src/syscalls/misc.cpp) — see that handler for the full layout
+// description. Layout:
+//   [block .. block+lib_size)          = lib TLS (negative TP offsets)
+//   [block+lib_size .. block+lib_size+tcb_size) = TCB header
+//   [block+lib_size+tcb_size .. total) = main exe TLS (positive TP offsets)
+// Returns the TCB pointer (== TPIDR_EL0), or 0 on failure.
+uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
+    std::lock_guard<std::recursive_mutex> lk(loader_lock());
+    uint64_t lib_size = 0;
+    uint64_t main_memsz = 0;
+    uint64_t main_align = 1;
+    for (const auto& obj : objects_) {
+        if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        if (obj.is_main) {
+            main_memsz = obj.tls.memsz;
+            main_align = obj.tls.align ? obj.tls.align : 16;
+        } else {
+            uint64_t a = obj.tls.align ? obj.tls.align : 16;
+            lib_size = (lib_size + a - 1) & ~(a - 1);
+            lib_size += obj.tls.memsz;
+        }
+    }
+    lib_size = (lib_size + 15) & ~15ULL;
+    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;
+    uint64_t tcb_size = (main_align > 1)
+        ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
+        : TLS_TCB_SIZE_BASE;
+    uint64_t total_tls_size = lib_size + tcb_size + main_memsz;
+    uint64_t tcb;
+    if (total_tls_size == 0) {
+        // No TLS — return a minimal zeroed block.
+        constexpr uint64_t FALLBACK_SIZE = 4096;
+        uint64_t block = mem.mmap_alloc(FALLBACK_SIZE);
+        if (block == 0) return 0;
+        std::vector<uint8_t> zeros(FALLBACK_SIZE, 0);
+        mem.write(block, zeros.data(), FALLBACK_SIZE);
+        tcb = (block + FALLBACK_SIZE - 16) & ~0xFULL;
+        return tcb;
+    }
+    constexpr uint64_t PTHREAD_SLACK = 8192;
+    uint64_t alloc_size = total_tls_size + PTHREAD_SLACK;
+    alloc_size = (alloc_size + 63) & ~63ULL;
+    uint64_t block = mem.mmap_alloc(alloc_size);
+    if (block == 0) return 0;
+    std::vector<uint8_t> zeros(alloc_size, 0);
+    mem.write(block, zeros.data(), alloc_size);
+    tcb = block + lib_size;  // TP points to TCB header start
+    // ── Copy each module's TLS template to its per-thread slot ──
+    for (const auto& obj : objects_) {
+        if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        int64_t tp_off = obj.tls_tp_offset;
+        uint64_t dst = static_cast<uint64_t>(
+            static_cast<int64_t>(tcb) + tp_off);
+        uint64_t src = static_tls_base_ + obj.tls_block_offset;
+        uint64_t filesz = obj.tls.filesz;
+        if (filesz > 0 && filesz <= obj.tls.memsz) {
+            try {
+                std::vector<uint8_t> tpl(filesz);
+                mem.read(src, tpl.data(), filesz);
+                mem.write(dst, tpl.data(), filesz);
+            } catch (...) {}
+        }
+    }
+    // ── Zero ONLY the DTV pointer in tcbhead_t (see syscall 0x1001) ──
+    constexpr uint64_t TCB_DTV_OFFSET = 8;  // tcbhead_t.dtv
+    try {
+        mem.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
+    } catch (...) {}
+    return tcb;
+}
 // ── resolve_reloc_symbol ───────────────────────────────────────────────
 // version index for this symbol and try the versioned symbol table first.
 // This lets relocations that request a specific version (e.g. memcpy@GLIBC_2.17)

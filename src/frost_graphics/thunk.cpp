@@ -92,6 +92,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 // Host GL/EGL/SDL2 headers — optional. If not available, the thunk
 // compiles but all entry points return stubs. The Makefile sets
@@ -215,6 +216,42 @@ struct GraphicThunkImpl {
     // Borrow-CPU runner installed by the Emulator to invoke stored guest
     // GLFW callbacks (see GraphicThunk::GlfwCbRunner).
     GraphicThunk::GlfwCbRunner glfw_cb_runner_;
+    // Borrow-CPU / thread-spawn runner installed by the Emulator for
+    // SDL_CreateThread/SDL_WaitThread (see GraphicThunk::SdlThreadRunner).
+    GraphicThunk::SdlThreadRunner sdl_thread_runner_;
+    // Host SDL_sem* objects the guest created via SDL_CreateSemaphore.
+    // On exit_group the SDL worker threads may be blocked inside host
+    // SDL_SemWait; wake_sdl_semaphores() posts each so the blocked host
+    // call returns and the SDL thread's interpreter loop can observe
+    // cpu.running==false (see the SDL shutdown wakeup contract above).
+    std::unordered_set<uint64_t> sdl_sems_;
+    // Host SDL_SemPost function pointer, resolved at init (SDL3/SDL2-compat
+    // exports SDL_SemPost; on the generic dispatch path the registered
+    // entry.host_fn may be a guest trampoline, so use the raw dlsym result).
+    void* sdl_sem_post_fn_ = nullptr;
+    // 2026-08: glMapBuffer/glMapBufferRange/glUnmapBuffer bounce support.
+    // The host glMapBuffer returns a HOST pointer the guest cannot deref,
+    // so dispatch() instead allocates a guest-window bounce buffer (via
+    // Memory::mmap_alloc, inside the 4 GiB direct window so the guest JIT
+    // can read/write it fast), seeds it from the host buffer on map
+    // (GL_MAP_READ_BIT), and copies it back on unmap (GL_MAP_WRITE_BIT).
+    // Raw host GL fns resolved at init (not the registered entries, whose
+    // host_fn may be trampolines on some paths).
+    void* gl_get_buffer_parameteriv_fn_ = nullptr;  // buffer size query
+    void* gl_get_buffer_subdata_fn_ = nullptr;      // host buffer → bounce
+    void* gl_buffer_subdata_fn_ = nullptr;          // bounce → host buffer
+    // Active mappings: buffer id → bounce state (guest addr, size, offset
+    // into the GL buffer, access bits). Keys on the buffer NAME so
+    // glUnmapBuffer (which only knows the target) can find it via the
+    // tracker's target→buffer binding.
+    struct BufferMapping {
+        uint64_t bounce = 0;   // guest address of the bounce allocation
+        uint64_t size = 0;     // bytes mapped (range length / whole buffer)
+        uint64_t offset = 0;   // byte offset into the GL buffer
+        uint32_t target = 0;   // target used at map time (for writeback)
+        uint32_t access = 0;   // GL_MAP_* bits from the caller
+    };
+    std::unordered_map<uint32_t, BufferMapping> gl_buffer_mappings_;
     // Find or create the LibTable for `lib`. Returns pointer into libs_.
     LibTable* find_or_create_lib_(const std::string& lib) {
         for (auto& l : libs_) {
@@ -590,6 +627,82 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     auto [lib_idx, ent_idx] = impl_->id_to_idx_[local_id];
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
+
+    // ── SDL_mixer policies ────────────────────────────────────────────
+    // SDL_mixer is never linked into the emulator, so every Mix_* entry's
+    // host_fn is NULL and the generic stub path below would return 0. Two
+    // symbols need non-zero semantics:
+    //   MIX_VERSION   -> Mix_Linked_Version(): the game dereferences the
+    //                    returned SDL_version* (reads major/minor/patch),
+    //                    so return a guest-addressable SDL_version{2,0,1}.
+    //   MIX_OPEN_AUDIO-> Mix_OpenAudio/OpenAudioDevice: return -1 so the
+    //                    game takes its graceful no-audio path (it checks
+    //                    for != 0 and disables sound/music) instead of
+    //                    believing audio is open.
+    if (entry.spec) {
+        thunk::Policy pol = entry.spec->policy;
+        if (pol == thunk::Policy::MIX_VERSION) {
+            // SDL_version is {Uint8 major, Uint8 minor, Uint8 patch}.
+            static const uint8_t kVer[8] = {2, 0, 1, 0, 0, 0, 0, 0};
+            if (impl_->mem && impl_->string_cache_base) {
+                if (impl_->string_cache_off + 8 > impl_->STRING_CACHE_SIZE)
+                    impl_->string_cache_off = 0;
+                uint64_t guest = impl_->string_cache_base + impl_->string_cache_off;
+                impl_->mem->write(guest, kVer, sizeof(kVer));
+                impl_->string_cache_off = static_cast<uint32_t>(
+                    (impl_->string_cache_off + 8 + 7u) & ~7u);
+                if (dbg().thunk_trace) {
+                    fprintf(stderr, "[thunk] Mix_Linked_Version -> {2,0,1} @ 0x%llx\n",
+                            static_cast<unsigned long long>(guest));
+                }
+                cpu.regs[0] = guest;
+                return 0;
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
+        if (pol == thunk::Policy::MIX_OPEN_AUDIO) {
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] %s -> -1 (audio unavailable)\n",
+                        entry.name.c_str());
+            }
+            cpu.regs[0] = static_cast<uint64_t>(-1);
+            return 0;
+        }
+        if (pol == thunk::Policy::THREAD_CREATE) {
+            // SDL_CreateThread(fn, name, data): spawn a REAL guest thread
+            // running fn(data) on its own CPU. The Emulator wires the
+            // runner; it returns a guest SDL_Thread* handle (or 0 on
+            // failure, which the game cbz-checks → fatal error path).
+            if (impl_->sdl_thread_runner_) {
+                uint64_t handle = impl_->sdl_thread_runner_(
+                    cpu, 0, cpu.regs[0], cpu.regs[1], cpu.regs[2]);
+                if (dbg().thunk_trace) {
+                    fprintf(stderr, "[thunk] SDL_CreateThread(fn=0x%llx, "
+                            "name=0x%llx, data=0x%llx) -> 0x%llx\n",
+                            static_cast<unsigned long long>(cpu.regs[0]),
+                            static_cast<unsigned long long>(cpu.regs[1]),
+                            static_cast<unsigned long long>(cpu.regs[2]),
+                            static_cast<unsigned long long>(handle));
+                }
+                cpu.regs[0] = handle;
+            } else {
+                cpu.regs[0] = 0;
+            }
+            return 0;
+        }
+        if (pol == thunk::Policy::THREAD_WAIT) {
+            // SDL_WaitThread(thread, status): block until the thread's
+            // function returns, write its exit code to *status (if
+            // non-null), and free the thread's resources.
+            if (impl_->sdl_thread_runner_) {
+                impl_->sdl_thread_runner_(cpu, 1, cpu.regs[0], cpu.regs[1], 0);
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
+    }
+
     if (!entry.host_fn) {
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s (stub, returns 0)\n",
@@ -764,6 +877,184 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (uint8_t i = 0; i < entry.n_stack && (8 + i) < kMaxArgs; i++) {
             uint64_t slot = cpu.sp + static_cast<uint64_t>(i) * 8ull;
             impl_->mem->read(slot, &args[8 + i], sizeof(uint64_t));
+        }
+    }
+
+    // ── glMapBuffer / glMapBufferRange / glUnmapBuffer / glFlushMappedBufferRange ──
+    // 2026-08: the host glMapBuffer returns a HOST pointer the guest cannot
+    // deref (address-space mismatch). Instead, bounce through a guest-window
+    // allocation: mmap_alloc() hands out guest addresses inside the 4 GiB
+    // direct window, so the guest JIT can read/write the bounce fast. On
+    // map, seed the bounce from the host buffer when GL_MAP_READ_BIT is
+    // set (contents undefined otherwise / under GL_MAP_INVALIDATE_*); on
+    // unmap, copy the bounce back into the host buffer when GL_MAP_WRITE_BIT
+    // is set, then free the bounce. GL_MAP_FLUSH_EXPLICIT_BIT ranges are
+    // pushed early by the FLUSH_BUFFER arm. Transient map/write/unmap per
+    // frame works fully; persistent-coherent-without-explicit-flush stays
+    // unsupported (the writes would never land on the host).
+    constexpr uint32_t kGLMapReadBit = 0x0001;
+    constexpr uint32_t kGLMapWriteBit = 0x0002;
+    constexpr uint32_t kGLMapInvalidateRangeBit = 0x0004;
+    constexpr uint32_t kGLMapInvalidateBufferBit = 0x0008;
+    constexpr uint32_t kGLBufferSize = 0x8764;
+    if (entry.spec) {
+        thunk::Policy mpol = entry.spec->policy;
+        if (mpol == thunk::Policy::MAP_BUFFER) {
+            bool is_range = (entry.name == "glMapBufferRange");
+            uint32_t target = static_cast<uint32_t>(args[0]);
+            uint32_t access = static_cast<uint32_t>(is_range ? args[3] : args[1]);
+            uint64_t offset = is_range ? args[1] : 0;
+            uint64_t length = is_range ? args[2] : 0;
+            cpu.regs[0] = 0;
+            if (!impl_->mem || !impl_->gl_state_tracker_ ||
+                !impl_->gl_get_buffer_parameteriv_fn_) {
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] %s: unavailable (mem/tracker/host fns)\n",
+                            entry.name.c_str());
+                return 0;
+            }
+            uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+            if (buffer == 0) {
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] %s: no buffer bound to target 0x%x\n",
+                            entry.name.c_str(), target);
+                return 0;  // GL: map of an unbound buffer → NULL
+            }
+            {
+                // Re-check + insert under the same lock so two threads
+                // mapping the same buffer can't double-allocate.
+                std::lock_guard<std::mutex> g(impl_->mu);
+                if (impl_->gl_buffer_mappings_.count(buffer)) {
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] %s: buffer %u already mapped\n",
+                                entry.name.c_str(), buffer);
+                    return 0;  // GL: mapping an already-mapped buffer → NULL
+                }
+            }
+            if (!is_range) {
+                // Whole-buffer map: query the host for the buffer size.
+                int32_t size = 0;
+                using ParamFn = void (*)(uint32_t, uint32_t, int32_t*);
+                reinterpret_cast<ParamFn>(impl_->gl_get_buffer_parameteriv_fn_)(
+                    target, kGLBufferSize, &size);
+                length = (size > 0) ? static_cast<uint64_t>(size) : 0;
+            }
+            if (length == 0) {
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] %s: buffer %u has zero size\n",
+                            entry.name.c_str(), buffer);
+                return 0;
+            }
+            uint64_t bounce = impl_->mem->mmap_alloc(length);
+            if (bounce == 0) {
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] %s: mmap_alloc(%llu) failed\n",
+                            entry.name.c_str(),
+                            static_cast<unsigned long long>(length));
+                return 0;
+            }
+            // Seed the bounce from the host buffer if the guest may read it.
+            if ((access & kGLMapReadBit) &&
+                !(access & (kGLMapInvalidateRangeBit | kGLMapInvalidateBufferBit)) &&
+                impl_->gl_get_buffer_subdata_fn_) {
+                uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(bounce);
+                if (host_ptr) {
+                    using GetSubFn = void (*)(uint32_t, uint64_t, uint64_t, void*);
+                    reinterpret_cast<GetSubFn>(impl_->gl_get_buffer_subdata_fn_)(
+                        target, offset, length, host_ptr);
+                }
+            }
+            {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                impl_->gl_buffer_mappings_[buffer] =
+                    GraphicThunkImpl::BufferMapping{bounce, length, offset,
+                                                    target, access};
+            }
+            cpu.regs[0] = bounce;
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] %s: buffer=%u target=0x%x off=%llu "
+                        "len=%llu acc=0x%x → bounce=0x%llx\n",
+                        entry.name.c_str(), buffer, target,
+                        static_cast<unsigned long long>(offset),
+                        static_cast<unsigned long long>(length), access,
+                        static_cast<unsigned long long>(bounce));
+            }
+            return 0;
+        }
+        if (mpol == thunk::Policy::UNMAP_BUFFER) {
+            uint32_t target = static_cast<uint32_t>(args[0]);
+            if (impl_->mem && impl_->gl_state_tracker_ && impl_->gl_buffer_subdata_fn_) {
+                uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+                GraphicThunkImpl::BufferMapping m{};
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    auto it = impl_->gl_buffer_mappings_.find(buffer);
+                    if (it != impl_->gl_buffer_mappings_.end()) {
+                        m = it->second;
+                        impl_->gl_buffer_mappings_.erase(it);
+                        found = true;
+                    }
+                }
+                if (found && (m.access & kGLMapWriteBit)) {
+                    uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(m.bounce);
+                    if (host_ptr) {
+                        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
+                        reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
+                            m.target, m.offset, m.size, host_ptr);
+                    }
+                }
+                if (found) impl_->mem->untrack_allocation(m.bounce, m.size);
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x "
+                            "%s\n", buffer, target, found ? "ok" : "(not mapped)");
+            }
+            cpu.regs[0] = 1;  // GL_TRUE
+            return 0;
+        }
+        if (mpol == thunk::Policy::FLUSH_BUFFER) {
+            // glFlushMappedBufferRange(target, offset, length): push the
+            // guest-written range to the host now (GL_MAP_FLUSH_EXPLICIT /
+            // persistent+coherent best-effort). The bounce holds
+            // buffer[offset..offset+size), so flush its [offset..+length).
+            uint32_t target = static_cast<uint32_t>(args[0]);
+            uint64_t offset = args[1];
+            uint64_t length = args[2];
+            if (impl_->mem && impl_->gl_state_tracker_ && impl_->gl_buffer_subdata_fn_) {
+                uint32_t buffer = impl_->gl_state_tracker_->buffer_binding(target);
+                GraphicThunkImpl::BufferMapping m{};
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> g(impl_->mu);
+                    auto it = impl_->gl_buffer_mappings_.find(buffer);
+                    if (it != impl_->gl_buffer_mappings_.end()) {
+                        m = it->second;
+                        found = true;
+                    }
+                }
+                if (found && (m.access & kGLMapWriteBit)) {
+                    // The bounce holds buffer[offset..offset+size); map the
+                    // flush request into it and clamp to the mapped range.
+                    uint64_t rel = (offset >= m.offset) ? offset - m.offset : 0;
+                    uint64_t n = length;
+                    if (rel + n > m.size) n = (rel < m.size) ? m.size - rel : 0;
+                    uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(m.bounce + rel);
+                    if (host_ptr && n > 0) {
+                        using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
+                        reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
+                            m.target, offset, n, host_ptr);
+                    }
+                }
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] glFlushMappedBufferRange: buffer=%u "
+                            "target=0x%x off=%llu len=%llu %s\n",
+                            buffer, target,
+                            static_cast<unsigned long long>(offset),
+                            static_cast<unsigned long long>(length),
+                            found ? "ok" : "(not mapped)");
+            }
+            cpu.regs[0] = 0;
+            return 0;
         }
     }
 
@@ -1143,6 +1434,20 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    // Track host SDL semaphores the guest creates so wake_sdl_semaphores()
+    // can release a worker thread blocked in SDL_SemWait when the guest
+    // exits (exit_group only stops the calling CPU). SDL_CreateSemaphore
+    // returns the host SDL_sem*; SDL_DestroySemaphore takes it as a0.
+    if (entry.name == "SDL_CreateSemaphore") {
+        if (ret) {
+            std::lock_guard<std::mutex> g(impl_->mu);
+            impl_->sdl_sems_.insert(ret);
+        }
+    } else if (entry.name == "SDL_DestroySemaphore") {
+        std::lock_guard<std::mutex> g(impl_->mu);
+        impl_->sdl_sems_.erase(args[0]);
+    }
+
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
@@ -1199,6 +1504,35 @@ void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {
     impl_->glfw_last_delivered_err_code_ = 0;
     impl_->glfw_last_delivered_err_desc_.clear();
 }
+// ── set_sdl_thread_runner — SDL thread spawn/join hook ────────────────
+void GraphicThunk::set_sdl_thread_runner(SdlThreadRunner runner) {
+    if (!impl_) return;
+    impl_->sdl_thread_runner_ = std::move(runner);
+}
+// ── wake_sdl_semaphores — release SDL worker threads at guest exit ─────
+void GraphicThunk::wake_sdl_semaphores() {
+    if (!impl_ || !impl_->sdl_sem_post_fn_) return;
+    // Snapshot under mu_, then post OUTSIDE the lock: SDL_SemPost is a
+    // host call and must not run while holding the registry mutex.
+    std::vector<uint64_t> sems;
+    {
+        std::lock_guard<std::mutex> g(impl_->mu);
+        sems.reserve(impl_->sdl_sems_.size());
+        for (uint64_t s : impl_->sdl_sems_) sems.push_back(s);
+    }
+    if (sems.empty()) return;
+    using SemPostFn = int (*)(void*);
+    SemPostFn post = reinterpret_cast<SemPostFn>(impl_->sdl_sem_post_fn_);
+    for (uint64_t s : sems) {
+        // Post twice: a binary semaphore with a blocked waiter needs one
+        // post to wake it; a second covers a just-reposted waiter racing
+        // back into SDL_SemWait before the thread loop observes
+        // cpu.running==false. Extra posts on an unwaited semaphore merely
+        // bump the count (harmless at shutdown).
+        post(reinterpret_cast<void*>(s));
+        post(reinterpret_cast<void*>(s));
+    }
+}
 // ── register_known_symbols_ — populate the registry ────────────────────
 // Called once by init(). Each entry maps a (library, symbol) pair to
 // the host function pointer (when the host has the dev headers) or to
@@ -1240,13 +1574,20 @@ void GraphicThunk::register_known_symbols_() {
     static const char* kEglSonames[]  = {"libEGL.so", "libEGL.so.1"};
     static const char* kSdlSonames[]  = {"libSDL2.so", "libSDL2-2.0.so.0"};
     static const char* kGlfwSonames[] = {"libglfw.so.3", "libglfw.so"};
-    // Indexed by thunk::LibFamily (GL, GLES, EGL, SDL, GLFW).
+    static const char* kMixSonames[]  = {"libSDL2_mixer-2.0.so.0",
+                                          "libSDL2_mixer.so"};
+    // Indexed by thunk::LibFamily (GL, GLES, EGL, SDL, GLFW, MIX).
     static const FamilyDef kFamilies[] = {
         {kGlSonames,   2, kHaveGL},
         {kGlesSonames, 2, kHaveGL},
         {kEglSonames,  2, kHaveEGL},
         {kSdlSonames,  2, kHaveSDL},
         {kGlfwSonames, 2, kHaveGL},
+        // SDL_mixer: never linked into the emulator, so `have` is false —
+        // every Mix_* host_fn stays NULL and dispatch() takes the stub path
+        // (returns 0). MIX_VERSION / MIX_OPEN_AUDIO are handled in
+        // dispatch() before the host-fn stub check.
+        {kMixSonames,  2, false},
     };
 
     // GLFW isn't linked into the emulator, so force-load it first so
@@ -1279,6 +1620,22 @@ void GraphicThunk::register_known_symbols_() {
     impl_->glfw_set_window_size_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwSetWindowSize") : nullptr;
 
+    // Raw host GL fns for the glMapBuffer bounce (buffer size query and
+    // the two buffer-copy primitives). glGetBufferParameteriv is not a
+    // registered thunk symbol, so resolve it directly.
+    impl_->gl_get_buffer_parameteriv_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glGetBufferParameteriv") : nullptr;
+    impl_->gl_get_buffer_subdata_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glGetBufferSubData") : nullptr;
+    impl_->gl_buffer_subdata_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glBufferSubData") : nullptr;
+
+    // Raw host SDL_SemPost for wake_sdl_semaphores() (the registered
+    // SDL_SemPost entry's host_fn is a guest-callable trampoline, so the
+    // wake path uses this raw dlsym result instead).
+    impl_->sdl_sem_post_fn_ =
+        kHaveSDL ? dlsym(RTLD_DEFAULT, "SDL_SemPost") : nullptr;
+
     // Install a HOST-side error-capture trampoline so real GLFW errors
     // (from host libglfw itself) are recorded and later forwarded to the
     // guest's glfwSetErrorCallback. We MUST NOT hand the guest callback
@@ -1310,7 +1667,8 @@ void GraphicThunk::register_known_symbols_() {
             spec.lib != thunk::LibFamily::GLES &&
             spec.lib != thunk::LibFamily::EGL &&
             spec.lib != thunk::LibFamily::SDL &&
-            spec.lib != thunk::LibFamily::GLFW) {
+            spec.lib != thunk::LibFamily::GLFW &&
+            spec.lib != thunk::LibFamily::MIX) {
             continue;
         }
         const FamilyDef& fd = kFamilies[static_cast<int>(spec.lib)];

@@ -49,7 +49,7 @@ The emitted header defines (namespace arm64emu::thunk):
 import sys
 
 VALID_ARGS = set('ifpz')
-VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW',
+VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
               'GLX', 'RANDR', 'XKB')
 VALID_RET = ('-', 'str')
@@ -58,6 +58,9 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'CURSOR_CB', 'GLFW_POLL', 'KEY_CB', 'MOUSE_CB',
                 'FRAMEBUFFER_CB', 'WINDOW_SIZE_CB', 'FOCUS_CB', 'ERROR_CB',
                 'GLFW_CREATE',
+                'MIX_VERSION', 'MIX_OPEN_AUDIO', 'THREAD_CREATE',
+                'THREAD_WAIT',
+                'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
                 'VK_CREATE_DEVICE', 'VK_PRESENT')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',

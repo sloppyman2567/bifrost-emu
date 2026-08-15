@@ -13,7 +13,9 @@
 #include "core/emulator.h"
 #include "core/memory.h"
 #include "core/signal.h"   // exit_robust_list helper
+#include "frontend/dynamic_linker.h"  // allocate_thread_tls (SDL threads)
 #include "jit/frostjit.hpp"  // needed for per-thread JIT + jit_.reset()
+#include "frost/thunk.hpp"    // GraphicThunk::wake_sdl_semaphores (stop_sdl_threads)
 #include "bifrost/version.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -324,6 +326,46 @@ void Emulator::join_threads() {
     }
     threads_.clear();
 }
+void Emulator::stop_sdl_threads() {
+    // Snapshot the SDL threads under the lock so we can set running=false
+    // on each WITHOUT holding the lock while joining (the thread entry
+    // takes sdl_threads_mu_ in wait_sdl_thread, so joining under it could
+    // deadlock).
+    std::vector<SdlThread*> pts;
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        pts.reserve(sdl_threads_.size());
+        for (auto& [h, st] : sdl_threads_) {
+            pts.push_back(st.get());
+        }
+    }
+    if (pts.empty()) return;
+    // Ask each SDL thread to stop: its interpreter loop exits on the next
+    // step() return when cpu.running is false.
+    for (SdlThread* st : pts) {
+        st->cpu.running = false;
+    }
+    // Wake any thread blocked inside a host SDL wait (SDL_SemWait): post
+    // every host SDL semaphore the guest created so the host call returns
+    // and the loop can observe running==false.
+    if (GraphicThunk* th = graphics_.thunk()) {
+        th->wake_sdl_semaphores();
+    }
+    // Join each host thread now that it's signalled to stop. The worker
+    // blocked in host SDL_SemWait returns (we just posted), the timer's
+    // SDL_Delay(1) returns on its own, and the one-shot event thread has
+    // already finished. Joining outside sdl_threads_mu_ avoids the
+    // wait_sdl_thread lock ordering.
+    for (SdlThread* st : pts) {
+        if (st->host_thread.joinable()) {
+            st->host_thread.join();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        sdl_threads_.clear();
+    }
+}
 CPU* Emulator::find_cpu_by_tid(int tid) {
     if (tid == 1) return &main_cpu_;
     std::lock_guard<std::mutex> g(threads_mu_);
@@ -439,6 +481,194 @@ int Emulator::reap_fork_child(int pid, int options, bool& found) {
     // kernel's wait4(), so this should never be called.
     (void)pid; (void)options;
     found = false;
+    return 0;
+}
+// ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ─────────────
+// 1.5.3-alpha. The game spawns worker threads (timer, music, event) via
+// SDL_CreateThread and joins them with SDL_WaitThread. These are REAL
+// concurrent guest threads: the guest SDL_Thread* handle is a small
+// guest-addressable struct whose word 0 is a "done" futex flag and word 8
+// holds the exit code. The host thread runs the guest function until it
+// RETs to a sentinel LR (0x1000, the same unmapped sentinel the GLFW
+// borrow-CPU runner uses), then records the exit code and futex-wakes the
+// done word so SDL_WaitThread unblocks.
+//
+// Guest handle layout (allocated via mem_.mmap_alloc, all zeroed):
+//   +0  u64 done   (0 = running, 1 = finished) — futex word
+//   +8  u64 status (int32 exit code from the thread function)
+void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
+    CPU& cpu = st->cpu;
+    constexpr uint64_t SENTINEL_LR = 0x1000;
+    uint64_t count = 0;
+    int32_t exit_code = 0;
+    try {
+        // Run the guest thread function with the interpreter until it RETs
+        // (pc == sentinel LR) or the thread is asked to stop. Per-instruction
+        // stepping (mirroring the GLFW borrow-CPU runner) is REQUIRED here:
+        // the game's setjmp/longjmp exception path re-enters the thread
+        // function's continuation inside a nested jit_call_helper invocation,
+        // whose loop only stops at its own return_pc and knows nothing about
+        // the 0x1000 sentinel — a JIT-dispatched thread fn whose final RET
+        // restores LR=0x1000 then gets dispatched as code (decode error).
+        // With step() the sentinel check applies to every instruction, and
+        // the thread bodies (timer/worker/event) are syscall/thunk-bound so
+        // interpreter speed is fine.
+        while (cpu.running && cpu.pc != SENTINEL_LR) {
+            emu->step(cpu);
+            count++;
+            if ((count & 0xFFF) == 0) {
+                emu->drain_host_signals(cpu);
+                emu->drain_pending_signals(cpu);
+                emu->add_guest_instructions(4096);
+            }
+            if ((count & 0xFFFFF) == 0) {
+                if (!emu->mem().is_mapped(cpu.pc, 4)) break;
+            }
+        }
+        // The thread function's return value is in x0/w0 (AArch64 ABI:
+        // SDL_ThreadFunction returns int). Read it as the exit code.
+        exit_code = static_cast<int32_t>(cpu.regs[0] & 0xFFFFFFFF);
+    } catch (DecodeError& e) {
+        uint64_t fault_pc = cpu.pc;
+        int signo = (fault_pc < 4096) ? BIFROST_SIGSEGV : BIFROST_SIGILL;
+        int si_code = (fault_pc < 4096) ? SEGV_MAPERR_EMU : ILL_ILLOPC_EMU;
+        if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
+            fprintf(stderr,
+                "[%s] SDL thread 0x%llx: %s at pc=0x%llx (no handler — terminating)\n",
+                CODENAME, static_cast<unsigned long long>(st->handle_addr),
+                (signo == BIFROST_SIGSEGV) ? "SIGSEGV (NULL deref)"
+                                            : "SIGILL (illegal instruction)",
+                static_cast<unsigned long long>(fault_pc));
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[%s] SDL thread 0x%llx: exception: %s\n",
+                CODENAME, static_cast<unsigned long long>(st->handle_addr),
+                e.what());
+    }
+    // Record the exit code + set the done flag, then futex-wake any
+    // SDL_WaitThread waiter on the handle's done word.
+    if (st->handle_addr) {
+        Memory& mem = emu->mem();
+        try {
+            mem.store<uint64_t>(st->handle_addr + 8,
+                                static_cast<uint64_t>(static_cast<uint32_t>(exit_code)));
+            mem.store<uint64_t>(st->handle_addr + 0, 1);
+        } catch (...) {}
+        auto* slot = emu->get_futex(st->handle_addr);
+        {
+            std::lock_guard<std::mutex> lk(slot->mu);
+            slot->cv.notify_all();
+        }
+    }
+    emu->decrement_alive_threads();
+}
+uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
+    // Allocate a guest stack. 256 KiB is plenty for the game's worker
+    // threads (they use only a few stack frames + call chains).
+    constexpr uint64_t STACK_SIZE = 256 * 1024;
+    uint64_t stack = mem_.mmap_alloc(STACK_SIZE);
+    if (stack == 0) return 0;
+    // Per-thread glibc TLS (TPIDR_EL0). Mirrors the clone path's TLS.
+    uint64_t tls = 0;
+    if (dyn_linker_) {
+        tls = dyn_linker_->allocate_thread_tls(mem_);
+    }
+    // Guest SDL_Thread* handle: a 32-byte zeroed block.
+    constexpr uint64_t HANDLE_SIZE = 32;
+    uint64_t handle = mem_.mmap_alloc(HANDLE_SIZE);
+    if (handle == 0) {
+        mem_.untrack_allocation(stack, STACK_SIZE);
+        return 0;
+    }
+    {
+        std::vector<uint8_t> zeros(HANDLE_SIZE, 0);
+        mem_.write(handle, zeros.data(), HANDLE_SIZE);
+    }
+    auto st = std::make_unique<SdlThread>();
+    st->cpu.regs[0] = data;               // SDL_ThreadFunction(void* data)
+    st->cpu.pc = fn;
+    st->cpu.sp = stack + STACK_SIZE;
+    st->cpu.regs[30] = 0x1000;            // sentinel LR: RET here = thread done
+    st->cpu.running = true;
+    st->cpu.pstate = 0;
+    st->cpu.tid = next_tid_.fetch_add(1);
+    st->tid = static_cast<uint64_t>(st->cpu.tid);
+    st->stack_top = stack + STACK_SIZE;
+    st->stack_size = STACK_SIZE;
+    st->tls = tls;
+    st->handle_addr = handle;
+    if (tls) {
+        st->cpu.tpidr_el0 = tls;
+        st->cpu.tpidrro_el0 = tls;
+    }
+    alive_threads_.fetch_add(1);
+    if (libc_single_threaded_addr_) {
+        mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
+    }
+    SdlThread* stp = st.get();
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        sdl_threads_[handle] = std::move(st);
+    }
+    stp->host_thread = std::thread(sdl_thread_entry, this, stp);
+    return handle;
+}
+int64_t Emulator::wait_sdl_thread(uint64_t handle, uint64_t status_ptr) {
+    // Find the thread by its guest handle.
+    SdlThread* st = nullptr;
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        auto it = sdl_threads_.find(handle);
+        if (it == sdl_threads_.end()) {
+            // Unknown handle (e.g. WaitThread on a NULL thread): no-op.
+            if (status_ptr) {
+                try { mem_.store<int32_t>(status_ptr, 0); } catch (...) {}
+            }
+            return 0;
+        }
+        st = it->second.get();
+    }
+    // Block until the done flag is set. The thread entry futex-wakes this
+    // word after the guest function returns.
+    {
+        auto* slot = get_futex(handle);
+        std::unique_lock<std::mutex> lk(slot->mu);
+        slot->cv.wait(lk, [&]() {
+            uint64_t done = 0;
+            try { done = mem_.load<uint64_t>(handle); } catch (...) { return true; }
+            return done != 0;
+        });
+    }
+    // Read the exit code and write it through the status pointer.
+    int32_t exit_code = 0;
+    try {
+        exit_code = static_cast<int32_t>(
+            mem_.load<uint64_t>(handle + 8) & 0xFFFFFFFF);
+    } catch (...) {}
+    if (status_ptr) {
+        try { mem_.store<int32_t>(status_ptr, exit_code); } catch (...) {}
+    }
+    // Join the host thread and free the guest resources (stack + handle).
+    // TLS is intentionally not freed (matching clone() threads: their
+    // TLS block is also not reclaimed on join).
+    //
+    // ORDER IS CRITICAL: join FIRST, erase AFTER. The thread entry sets
+    // the done flag + futex-wakes BEFORE it returns from sdl_thread_entry,
+    // so when the cv wait above returns the host thread may still be
+    // running (decrement_alive_threads + return). erasing the SdlThread
+    // first destroys its std::thread member while still joinable →
+    // std::terminate ("terminate called without an active exception").
+    // The join is cheap: the thread is one instruction from returning.
+    uint64_t stack_top = st->stack_top, stack_size = st->stack_size;
+    if (st->host_thread.joinable()) st->host_thread.join();
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        sdl_threads_.erase(handle);
+    }
+    if (stack_top && stack_size) {
+        mem_.untrack_allocation(stack_top - stack_size, stack_size);
+    }
+    if (handle) mem_.untrack_allocation(handle, 32);
     return 0;
 }
 } // namespace arm64emu

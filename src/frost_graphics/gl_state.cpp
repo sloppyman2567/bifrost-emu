@@ -206,6 +206,17 @@ uint32_t GLStateTracker::element_array_buffer_binding() const {
     return element_array_buffer_binding_;
 }
 
+void GLStateTracker::set_buffer_binding(uint32_t target, uint32_t buffer) {
+    std::lock_guard<std::mutex> g(mu_);
+    buffer_bindings_[target] = buffer;
+}
+
+uint32_t GLStateTracker::buffer_binding(uint32_t target) const {
+    std::lock_guard<std::mutex> g(mu_);
+    auto it = buffer_bindings_.find(target);
+    return it != buffer_bindings_.end() ? it->second : 0;
+}
+
 void GLStateTracker::set_texture_binding(uint32_t target, uint32_t texture) {
     std::lock_guard<std::mutex> g(mu_);
     uint32_t key = (active_texture_ << 16) | (target & 0xFFFF);
@@ -559,6 +570,7 @@ bool GLStateTracker::tracks_state(const std::string& name) const {
         "glStencilFunc", "glStencilOp", "glStencilMask",
         "glStencilFuncSeparate", "glStencilOpSeparate",
         "glStencilMaskSeparate", "glUseProgram", "glBindBuffer",
+        "glBindBufferBase", "glBindBufferRange",
         "glBindTexture", "glBindFramebuffer", "glBindRenderbuffer",
         "glPixelStorei", "glHint",
     };
@@ -718,11 +730,26 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
     if (name == "glBindBuffer") {
         uint32_t target = static_cast<uint32_t>(args[0]);
         uint32_t buffer = static_cast<uint32_t>(args[1]);
+        // Record the binding for ANY target in the general map (the
+        // glMapBuffer/glUnmapBuffer bounce consults it).
+        set_buffer_binding(target, buffer);
         if (target == 0x8892) { // GL_ARRAY_BUFFER
             set_array_buffer_binding(buffer);
         } else if (target == 0x8893) { // GL_ELEMENT_ARRAY_BUFFER
             set_element_array_buffer_binding(buffer);
         }
+        return;
+    }
+    if (name == "glBindBufferBase" || name == "glBindBufferRange") {
+        // target, index, buffer[, offset, size] — the general binding map
+        // keys by target; last-index-wins is accurate enough for the
+        // glMapBuffer bounce (glMapBuffer on an indexed target uses the
+        // base binding, which is what glBindBufferBase sets).
+        uint32_t target = static_cast<uint32_t>(args[0]);
+        uint32_t buffer = (name == "glBindBufferBase")
+                              ? static_cast<uint32_t>(args[2])
+                              : static_cast<uint32_t>(args[4]);
+        set_buffer_binding(target, buffer);
         return;
     }
     if (name == "glBindTexture") {

@@ -212,6 +212,16 @@ public:
     uint64_t lib_tls_size() const { return lib_tls_size_; }
     // Size of the TCB header (tcbhead_t), rounded up to main exe alignment.
     uint64_t tcb_size() const { return tcb_size_; }
+    // Allocate a fresh per-thread TLS block (variant-I glibc layout) for a
+    // new guest thread and return its TCB pointer (== the thread's
+    // TPIDR_EL0), or 0 on failure. Mirrors the a0==0 path of the 0x1001
+    // _dl_allocate_tls syscall: computes lib_size / main TLS / tcb_size,
+    // mmaps a zeroed block ([lib TLS | TCB | main TLS]), copies each
+    // object's TLS template to its per-thread slot, and zeroes the DTV
+    // pointer in the TCB header. Used by SDL_CreateThread thunking to
+    // spawn real guest threads with correct glibc TLS. Takes loader_lock()
+    // internally.
+    uint64_t allocate_thread_tls(Memory& mem);
     // ── ld-linux shim base address ─────────────────────────────────
     // The shim's data page (_rtld_global_ro etc.) is at shim_base_,
     // and the code page (function stubs) is at shim_base_ + 4096.

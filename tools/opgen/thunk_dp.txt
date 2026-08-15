@@ -227,8 +227,32 @@ glTexParameterf           GL     iif           -     -              -   # mixed:
 glCompressedTexImage2D    GL     iiii  iiii p  -     -              -   # arg8: data (64 KiB bounce)
 glScissor                 GL     iiii          -     -              -
 glClearDepthf             GL     f             -     -              -
-glPolygonOffset           GL     ii            -     -              -   # 2 floats; legacy int passthrough
-glSampleCoverage          GL     ii            -     -              -   # float,bool; legacy int passthrough
+glPolygonOffset          GL     ii            -     -              -   # 2 floats; legacy int passthrough
+glSampleCoverage         GL     ii            -     -              -   # float,bool; legacy int passthrough
+# ── Future-game coverage (2026-08): DSA / GL3.3+ entry points ──────────
+glBufferStorage          GL     iizi          -     -              arg1 # arg2: const void *data (size=arg1)
+glCreateBuffers          GL     ip            -     -              -   # arg1: GLuint *buffers
+glTexStorage2D           GL     iiii i         -     -              -   # target,levels,ifmt,w,h
+glTexStorage3D           GL     iiiiii        -     -              -   # +depth
+glTexImage3D             GL     iiii iiiii p   -     -              -   # 10 args; arg9 pixels (64 KiB bounce)
+glBlitFramebuffer        GL     iiiiiiii      -     -              -   # src/dst rects
+glDrawArraysInstanced    GL     iiii          -     -              -   # mode,first,count,primcount
+glDrawElementsInstanced  GL     iiii i         -     EL_PTR         -   # arg3: indices (offset or ptr)
+glBindBufferBase         GL     iii           -     -              -   # target,index,buffer
+glBindBufferRange        GL     iiiii         -     -              -   # target,index,offset,size,buffer
+glGetBufferSubData       GL     iiiz          -     -              arg2 # arg3: data (size=arg2)
+glGetBufferParameteriv    GL     iip           -     QUERY          -   # target,pname,params
+glCopyBufferSubData      GL     iiiii         -     -              -   # readTgt,writeTgt,ro,wo,size
+glMapBuffer              GL     ii            -     MAP_BUFFER     -
+glMapBufferRange         GL     iiii          -     MAP_BUFFER     -
+glUnmapBuffer            GL     i             -     UNMAP_BUFFER   -
+glFlushMappedBufferRange GL     iii           -     FLUSH_BUFFER   -
+glCopyTexSubImage2D      GL     iiiiiiii      -     -              -   # target,lvl,xoff,yoff,x,y,w,h
+glClientWaitSync         GL     iii           -     -              -   # sync,flags,timeout (GLsync opaque)
+glFenceSync              GL     ii            -     -              -   # condition,flags → GLsync opaque
+glDrawBuffers            GL     ip            -     -              -   # n, const GLenum *bufs
+glBindFragDataLocation   GL     iip           -     -              -   # program,color,const GLchar *name
+glCreateVertexArrays     GL     ip            -     -              -   # n, GLuint *arrays
 
 # ── libGLESv2.so / libGLESv2.so.2 ──────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -370,6 +394,8 @@ eglGetProcAddress         EGL    p             -     GET_PROC       -
 # ── libSDL2.so / libSDL2-2.0.so.0 ──────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
 SDL_Init                  SDL    i             -     -              -
+SDL_InitSubSystem         SDL    i             -     -              -
+SDL_QuitSubSystem         SDL    i             -     -              -
 SDL_Quit                  SDL    -             -     -              -
 SDL_CreateWindow          SDL    piiiii         -     -              -   # arg0: title string
 SDL_CreateWindowAndRenderer SDL  iiiii         -     -              -
@@ -411,12 +437,17 @@ SDL_PauseAudioDevice      SDL    ii            -     -              -
 SDL_ClearQueuedAudio      SDL    i             -     -              -   # dev
 SDL_LockAudioDevice       SDL    i             -     -              -
 SDL_UnlockAudioDevice     SDL    i             -     -              -
+SDL_BuildAudioCVT         SDL    piiiiii       -     -              -   # arg0: SDL_AudioCVT* in/out
+SDL_ConvertAudio          SDL    p             -     -              -   # arg0: SDL_AudioCVT*
 SDL_LoadWAV               SDL    pppp          -     -              -   # file, spec, buf out, len out
 SDL_FreeWAV               SDL    p             -     -              -   # arg0: audio buffer
 SDL_SetHint               SDL    pp            -     -              -   # args0/1: name,value strings
 SDL_GetHint               SDL    p             str   -              -   # arg0: name string
 SDL_CreateRenderer        SDL    iii           -     -              -
 SDL_DestroyRenderer       SDL    i             -     -              -
+SDL_SetRenderTarget       SDL    ii            -     -              -
+SDL_GetRendererOutputSize SDL    ipp           -     -              -
+SDL_GetRendererInfo       SDL    ip            -     -              -   # arg1: SDL_RendererInfo* out
 SDL_SetRenderDrawColor    SDL    iiii          -     -              -
 SDL_RenderClear           SDL    i             -     -              -
 SDL_RenderPresent         SDL    i             -     PRESENT        -
@@ -428,6 +459,7 @@ SDL_UpdateTexture         SDL    ipzi          -     -              PITCH_H # ar
 SDL_RenderSetViewport     SDL    ii            -     -              -
 SDL_RenderSetLogicalSize  SDL    iii           -     -              -
 SDL_SetRenderDrawBlendMode SDL   ii            -     -              -
+SDL_SetTextureBlendMode   SDL    ii            -     -              -
 SDL_MapRGB                SDL    iiii          -     -              -
 SDL_MapRGBA               SDL    iiiii         -     -              -
 SDL_GetRGB                SDL    iiiii         -     -              -
@@ -446,16 +478,26 @@ SDL_RWread                SDL    ipii          -     -              -   # arg1: 
 SDL_RWwrite               SDL    ipii          -     -              -   # arg1: ptr
 SDL_RWseek                SDL    iii           -     -              -
 SDL_RWtell                SDL    i             -     -              -
+SDL_FreeRW                SDL    i             -     -              -
 SDL_GetKeyboardState      SDL    i             -     -              -
 SDL_GetModState           SDL    -             -     -              -
 SDL_SetModState           SDL    i             -     -              -
 SDL_GetMouseState         SDL    -             -     -              -
 SDL_GetGlobalMouseState   SDL    -             -     -              -
+SDL_GetCPUCount           SDL    -             -     -              -
+SDL_CreateSemaphore       SDL    i             -     -              -   # arg0: initial value
+SDL_DestroySemaphore      SDL    i             -     -              -
+SDL_SemWait               SDL    i             -     -              -
+SDL_SemTryWait            SDL    i             -     -              -
+SDL_SemPost               SDL    i             -     -              -
+SDL_JoystickOpen          SDL    i             -     -              -   # arg0: device_index
 SDL_WarpMouseInWindow     SDL    iii           -     -              -
 SDL_ShowCursor            SDL    i             -     -              -
-SDL_CreateCursor          SDL    iiii          -     -              -
+SDL_SetRelativeMouseMode  SDL    i             -     -              -
+SDL_CreateCursor          SDL    ppiiii        -     -              -
 SDL_FreeCursor            SDL    i             -     -              -
 SDL_SetCursor             SDL    i             -     -              -
+SDL_GetCursor             SDL    -             -     -              -
 SDL_GetNumVideoDisplays   SDL    -             -     -              -
 SDL_GetDisplayBounds      SDL    ii            -     -              -
 SDL_GetCurrentVideoMode   SDL    i             -     -              -
@@ -463,6 +505,8 @@ SDL_GetWindowDisplayIndex SDL    i             -     -              -
 SDL_Vulkan_LoadLibrary    SDL    i             -     -              -
 SDL_Vulkan_GetVkGetInstanceProcAddr SDL i     -     -              -
 SDL_Vulkan_CreateSurface  SDL    ii            -     -              -
+SDL_CreateThread          SDL    ppp           -     THREAD_CREATE   -   # guest fn ptr can't reach host
+SDL_WaitThread            SDL    ip            -     THREAD_WAIT     -   # no-op (threads never created)
 
 # ── libglfw.so.3 / libglfw.so ──────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -504,6 +548,42 @@ glfwSetFramebufferSizeCallback GLFW ii         -     FRAMEBUFFER_CB -
 glfwSetWindowSizeCallback GLFW   ii            -     WINDOW_SIZE_CB -
 glfwSetWindowFocusCallback GLFW  ii            -     FOCUS_CB       -
 glfwGetProcAddress        GLFW   p             -     GET_PROC       -
+
+# ── libSDL2_mixer-2.0.so.0 / libSDL2_mixer.so ──────────────────────────
+# SDL_mixer has NO host library linked into the emulator, so the host_fn
+# for every Mix_* symbol is NULL and dispatch() returns 0 (the generic
+# stub path). Albion (and other SDL_mixer games) call these during audio
+# init; returning 0 means "audio unavailable", which the game handles by
+# disabling sound/music and continuing. Two symbols need real semantics:
+#   MIX_VERSION      -> Mix_Linked_Version(): the game dereferences the
+#                       returned SDL_version* (major/minor/patch), so the
+#                       stub must write {2,0,1} into guest memory and
+#                       return that guest address (NOT 0).
+#   MIX_OPEN_AUDIO   -> Mix_OpenAudio/OpenAudioDevice: returning 0 would
+#                       make the game think audio is open and call
+#                       Mix_QuerySpec/AllocateChannels; returning -1 sends
+#                       it down the graceful no-audio path (SDL_QuitSubSystem).
+# NAME                    LIBS   ARGS          RET   POLICY         SIZE
+Mix_Linked_Version        MIX    -             -     MIX_VERSION    -
+Mix_OpenAudio             MIX    iiii          -     MIX_OPEN_AUDIO -
+Mix_OpenAudioDevice       MIX    iiiiip        -     MIX_OPEN_AUDIO -
+Mix_QuerySpec             MIX    ppp           -     -              -
+Mix_AllocateChannels      MIX    i             -     -              -
+Mix_CloseAudio            MIX    -             -     -              -
+Mix_PauseMusic            MIX    -             -     -              -
+Mix_ResumeMusic           MIX    -             -     -              -
+Mix_HaltMusic             MIX    -             -     -              -
+Mix_HaltChannel           MIX    i             -     -              -
+Mix_PlayingMusic          MIX    -             -     -              -
+Mix_Playing               MIX    i             -     -              -
+Mix_PlayMusic             MIX    ii            -     -              -
+Mix_PlayChannelTimed      MIX    iiii          -     -              -
+Mix_VolumeMusic           MIX    i             -     -              -
+Mix_Volume                MIX    ii            -     -              -
+Mix_SetPanning            MIX    iii           -     -              -
+Mix_HookMusic             MIX    ii            -     -              -
+Mix_LoadMUS_RW            MIX    ii            -     -              -
+Mix_FreeMusic             MIX    i             -     -              -
 
 # ────────────────────────────────────────────────────────────────────────
 # DisplayThunk symbols (consumed by display_thunk.cpp's

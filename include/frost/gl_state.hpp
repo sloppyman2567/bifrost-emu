@@ -213,6 +213,11 @@ public:
     // bound) or a real guest pointer (client-side vertex/index arrays).
     uint32_t array_buffer_binding() const;
     uint32_t element_array_buffer_binding() const;
+    // 2026-08: general target→buffer binding map (glMapBuffer/glUnmapBuffer
+    // need to know which buffer is bound to an arbitrary target, e.g.
+    // GL_COPY_READ_BUFFER / GL_PIXEL_UNPACK_BUFFER / GL_UNIFORM_BUFFER).
+    void set_buffer_binding(uint32_t target, uint32_t buffer);
+    uint32_t buffer_binding(uint32_t target) const;
     void set_texture_binding(uint32_t target, uint32_t texture);
     void set_pixel_store_i(uint32_t pname, int param);
     void set_hint(uint32_t target, uint32_t mode);
@@ -297,6 +302,10 @@ private:
     uint32_t current_program_ = 0;
     uint32_t array_buffer_binding_ = 0;
     uint32_t element_array_buffer_binding_ = 0;
+    // General target→buffer binding map (any target, not just the two the
+    // legacy accessors cover). Populated by the glBindBuffer/Base/Range
+    // handlers; consulted by the glMapBuffer/glUnmapBuffer bounce logic.
+    std::unordered_map<uint32_t, uint32_t> buffer_bindings_;
     // Per-texture-unit bindings: unit -> target -> texture name.
     // Flat map: (unit << 16) | target -> texture name.
     std::unordered_map<uint32_t, uint32_t> texture_bindings_;

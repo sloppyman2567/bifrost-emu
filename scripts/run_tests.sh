@@ -343,6 +343,12 @@ INTEGRATION_TESTS=(
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
+    # glMapBuffer/glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange
+    # bounce (2026-08): verifies the guest gets a guest-window bounce that
+    # seeds from the host buffer (GL_MAP_READ_BIT), writebacks on unmap
+    # (GL_MAP_WRITE_BIT), and that flush pushes ranges early. Needs
+    # DISPLAY + host GL. Exit 77 = skip when unavailable.
+    "sdl_gl_mapbuffer|ctest_real/test_sdl_gl_mapbuffer.elf||30|ALL PASS"
     # Vulkan host-path smoke test (1.5.3): dlopen(libvulkan.so.1) via the
     # internal dlopen syscall → vkGetInstanceProcAddr → create instance
     # (deep-marshalled VkApplicationInfo + extension string array) →

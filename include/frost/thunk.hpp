@@ -145,6 +145,35 @@ public:
         const int64_t* iargs, size_t n_iargs,
         const double* fargs, size_t n_fargs)>;
     void set_glfw_cb_runner(GlfwCbRunner runner);
+    // ── SDL thread runner (SDL_CreateThread / SDL_WaitThread) ──────────
+    // 1.5.3-alpha. The game spawns worker threads (a timer thread, a
+    // music/audio thread, an event thread) via SDL_CreateThread and
+    // joins them with SDL_WaitThread. Host SDL_CreateThread would try to
+    // run the guest AArch64 function pointer as x86-64 (SIGSEGV), so the
+    // thunk can't use it. Instead the Emulator wires a runner that spawns
+    // a REAL guest thread (own CPU + guest stack + per-thread glibc TLS)
+    // running the guest function, and joins it from SDL_WaitThread.
+    //
+    // op codes:
+    //   op 0 = create: a0=fn, a1=name (ignored), a2=data → returns the
+    //          guest SDL_Thread* handle (a guest-addressable struct the
+    //          game stores and passes back to SDL_WaitThread), or 0.
+    //   op 1 = wait:   a0=thread handle, a1=status ptr (may be 0) →
+    //          blocks until the thread function returns, writes the exit
+    //          code to *a1 if non-null, frees the thread's resources,
+    //          returns 0.
+    using SdlThreadRunner = std::function<uint64_t(
+        CPU& cpu, uint32_t op, uint64_t a0, uint64_t a1, uint64_t a2)>;
+    void set_sdl_thread_runner(SdlThreadRunner runner);
+    // ── SDL shutdown wakeup ────────────────────────────────────────────
+    // 1.5.3-alpha. SDL_CreateThread spawns REAL host threads that run the
+    // guest thread function. When the guest calls exit_group, only the
+    // calling CPU stops; the SDL worker threads may still be blocked in
+    // host SDL calls (SDL_SemWait, SDL_Delay). Teardown then destroys
+    // joinable std::threads → std::terminate. This method posts every
+    // host SDL semaphore created by the guest so a blocked SDL_SemWait
+    // returns and the thread's interpreter loop observes cpu.running==false.
+    void wake_sdl_semaphores();
     // ── Diagnostics ──────────────────────────────────────────────────
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
