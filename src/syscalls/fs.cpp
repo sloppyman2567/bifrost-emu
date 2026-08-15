@@ -252,12 +252,12 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         case 57: { // close
             if (dbg().xtrace) {
                 auto n = fds_.get(static_cast<int>(a0));
-                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu hfd=%d\n", cpu.tid, a0,
+                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu hfd=%d\n", cpu.tid, (unsigned long long)a0,
                         n ? n->host_fd() : -1);
             }
             int r = fds_.close(static_cast<int>(a0));
             if (dbg().xtrace)
-                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu res=%d\n", cpu.tid, a0, r);
+                fprintf(stderr, "[FDLIFE] t%d close gfd=%llu res=%d\n", cpu.tid, (unsigned long long)a0, r);
             ret_host(r);
             return 0;
         }
@@ -423,7 +423,7 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                 uint16_t xlen = static_cast<uint16_t>(hdr[2]) << 8 | hdr[3];
                 if (dbg().xfull) { uint8_t fb[80]={0}; mem_.read(base0, fb, std::min<uint64_t>(len0,80));
                     fprintf(stderr,"[XFULL] len=%llu\n", (unsigned long long)len0);
-                    for(int q=0;q<std::min<uint64_t>(len0,80);q+=16){ fprintf(stderr,"  %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x | %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x\n",
+                    for(uint64_t q=0;q<std::min<uint64_t>(len0,80);q+=16){ fprintf(stderr,"  %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x | %02x.%02x.%02x.%02x %02x.%02x.%02x.%02x\n",
                         fb[q],fb[q+1],fb[q+2],fb[q+3],fb[q+4],fb[q+5],fb[q+6],fb[q+7],
                         fb[q+8],fb[q+9],fb[q+10],fb[q+11],fb[q+12],fb[q+13],fb[q+14],fb[q+15]); } }
                 if (dbg().xtrace) {

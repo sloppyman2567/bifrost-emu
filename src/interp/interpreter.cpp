@@ -66,12 +66,6 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     {
         static bool nss_trace_ = dbg().nss;
         if (nss_trace_) {
-            static bool inited_ = false;
-            static uint64_t base_ = 0;
-            if (!inited_) {
-                // resolved at first call; libc maps at 0x500191e000
-                inited_ = true;
-            }
             const uint64_t pc = cpu.pc;
             if ((pc == 0x5001a220a0ULL) || (pc == 0x5001a22180ULL) ||
                 (pc == 0x5001a21d40ULL) || (pc == 0x5001a22620ULL) ||
@@ -104,7 +98,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         (unsigned long long)cpu.regs[3], (int)cpu.regs[4], (int)cpu.regs[5],
                         (unsigned)cpu.regs[6], (unsigned)cpu.regs[7],
                         (unsigned)cpu.regs[8], (unsigned)cpu.regs[9],
-                        (unsigned long long)cpu.regs[10], (unsigned long long)cpu.regs[11]);
+                        (unsigned long long)cpu.regs[10], (unsigned long long)cpu.regs[11],
+                        (unsigned long long)cpu.regs[12]);
                 fflush(stderr);
             }
         }

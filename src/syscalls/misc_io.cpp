@@ -355,7 +355,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int gfd = register_host_fd(emu, hfd, O_RDWR);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d socket dom=%llu type=%llu hfd=%d gfd=%d\n",
-                        cpu.tid, a0, a1, hfd, gfd);
+                        cpu.tid, (unsigned long long)a0, (unsigned long long)a1, hfd, gfd);
             ret_host(gfd);
             return 0;
         }
@@ -369,7 +369,7 @@ int64_t syscall_misc_io(Emulator& emu, CPU& cpu, uint64_t num) {
             int g1 = register_host_fd(emu, fds[1], O_RDWR);
             if (dbg().xtrace)
                 fprintf(stderr, "[FDLIFE] t%d socketpair dom=%llu type=%llu hfd0=%d gfd0=%d hfd1=%d gfd1=%d\n",
-                        cpu.tid, a0, a1, fds[0], g0, fds[1], g1);
+                        cpu.tid, (unsigned long long)a0, (unsigned long long)a1, fds[0], g0, fds[1], g1);
             mem_.store<int>(a3, g0);
             mem_.store<int>(a3 + 4, g1);
             ret_host(0);

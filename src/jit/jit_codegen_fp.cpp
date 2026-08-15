@@ -83,7 +83,6 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             clobber_flags();
             flush_invalidate_host_regs(1u << RAX);
             bool is_double = (inst.width == 64);
-            uint8_t prefix = is_double ? 0xF2 : 0xF3;
             // Load FP value into XMM0 (fp_load_operand: reg-reg move when
             // the fp cache pins src1, else memory load).
             fp_load_operand(0, inst.src1, is_double);
