@@ -210,15 +210,18 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
     if (no_fp_cache_) return false;
     if (!has_fma3()) return false;
     int fp_use[32] = {};
+    bool fp_written[32] = {};
     for (const IRInst& inst : block.insts) {
         if (!fp_cache_compatible_op(inst.op)) return false;
         switch (inst.op) {
             case IROp::FP_BINOP:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use); fp_touch(inst.src2, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FP_UNOP:
             case IROp::FP_MOV:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FP_CMP:
                 fp_touch(inst.src1, fp_use);
@@ -226,16 +229,21 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
                 break;
             case IROp::FP_MOVI:
                 fp_touch(inst.dest, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FP_F2I:
                 fp_touch(inst.src1, fp_use);
                 break;
             case IROp::FP_I2F:
                 fp_touch(inst.dest, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FP_F2I_FIXED:
                 fp_touch(inst.src1, fp_use);
-                if (inst.imms & 1) fp_touch(inst.dest, fp_use);  // fp_dest subop
+                if (inst.imms & 1) {
+                    fp_touch(inst.dest, fp_use);  // fp_dest subop
+                    fp_written[inst.dest] = true;
+                }
                 break;
             case IROp::FP_I2F_FIXED:
                 fp_touch(inst.dest, fp_use);
@@ -245,6 +253,7 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
             case IROp::FCVT_D2S:
             case IROp::FRINT:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FMADD:
             case IROp::FMSUB:
@@ -252,9 +261,11 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
             case IROp::FNMSUB:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use);
                 fp_touch(inst.src2, fp_use); fp_touch(inst.imm, fp_use);  // Va (acc)
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FMOV_G2F:
                 fp_touch(inst.dest, fp_use);
+                fp_written[inst.dest] = true;
                 break;
             case IROp::FMOV_F2G:
                 fp_touch(inst.src1, fp_use);
@@ -285,12 +296,14 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
                               VEC_XMM_END - VEC_XMM_START + 1);
     vec_cache_active_ = true;
     fp_cache_active_ = true;
+    for (int i = 0; i < 32; i++) vec_written_this_block_[i] = false;
     int xmm = VEC_XMM_START;
     for (int i = 0; i < limit; i++) {
         int v = cand[i].second;
         vec_cache_[v] = xmm;
         vec_xmm_owner_[xmm] = v;
         vec_pinned_[vec_pinned_count_++] = v;
+        vec_written_this_block_[v] = fp_written[v];
         xmm++;
     }
     return true;
@@ -303,6 +316,7 @@ void FrostJIT::vec_cache_reset() {
     for (int i = 0; i < 32; i++) {
         vec_cache_[i] = -1;
         vec_dirty_[i] = false;
+        vec_written_this_block_[i] = false;
     }
     for (int i = 0; i < 16; i++) vec_xmm_owner_[i] = -1;
 }
@@ -351,6 +365,33 @@ void FrostJIT::vec_cache_writeback_all(bool clear_flags) {
         // MOVSD (F2 0F 11) — 64-bit store. A bare 0F 11 (MOVUPS) would
         // write the XMM's upper half into the NEXT register's lo slot,
         // silently corrupting v_lo[v+1] every time v is written back.
+        emit_byte(0xF2);
+        emit_byte(rex(false, r, false, false));
+        emit_byte(0x0F); emit_byte(0x11);              // movsd
+        emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + v * 8);
+        if (!fp_cache_active_) {
+            emit_byte(rex(false, r, false, false));
+            emit_byte(0x0F); emit_byte(0x17);          // movhpd
+            emit_modrm_disp(xmm, CPU_REG, V_HI_OFF + v * 8);
+        }
+        if (clear_flags) vec_dirty_[v] = false;
+    }
+}
+
+void FrostJIT::vec_cache_writeback_all_pinned(bool clear_flags) {
+    if (!vec_cache_active_) return;
+    for (int i = 0; i < vec_pinned_count_; i++) {
+        int v = vec_pinned_[i];
+        // Flush a pinned reg iff it is statically dirty AT this point OR
+        // written anywhere in the block. The second term covers the
+        // loop-carried accumulator: written after this call in the IR, so
+        // clean at this codegen point, but dirty at runtime on the next
+        // self-loop iteration. It is always safe to flush a clean reg
+        // (its XMM value equals its slot).
+        if (!vec_dirty_[v] && !vec_written_this_block_[v]) continue;
+        int xmm = vec_cache_[v];
+        bool r = (xmm >= 8);
+        // MOVSD (F2 0F 11) — 64-bit store (see vec_cache_writeback_all).
         emit_byte(0xF2);
         emit_byte(rex(false, r, false, false));
         emit_byte(0x0F); emit_byte(0x11);              // movsd

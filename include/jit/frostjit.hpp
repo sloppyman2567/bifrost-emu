@@ -1064,6 +1064,7 @@ private:
     int  vec_cache_[32];      // vector reg → host XMM index, or -1
     int  vec_xmm_owner_[16];  // host XMM index → vector reg, or -1
     bool vec_dirty_[32];      // XMM holds newer value than cpu.v_lo/v_hi
+    bool vec_written_this_block_[32];  // pinned reg written by ANY op in this block (fp-cache pre-scan)
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
@@ -1099,6 +1100,17 @@ private:
     void vec_cache_reset();
     void vec_emit_prologue_loads();      // movsd+movhpd loads before body start
     void vec_cache_writeback_all(bool clear_flags = true);  // dirty XMM → cpu.v_lo/v_hi (epilogue)
+    // Flush every pinned XMM that is written ANYWHERE in the block (not
+    // just the statically-dirty-at-call set). The static set is computed at
+    // codegen time and misses loop-carried dirtiness: in a self-loop block,
+    // a pinned FP reg written AFTER a BL_CALL in the IR (e.g. an accumulator
+    // in `fadd s8,s8,s0` following `bl grad3`) is clean at the pre-call
+    // writeback's codegen point but DIRTY at runtime on the next iteration
+    // (the self-loop back-edge keeps it cached). Skipping its flush makes
+    // the post-call reload read a stale cpu.v_lo entry. vec_written_this_block_
+    // (filled by the fp-cache pre-scan) is the exact minimal superset:
+    // `dirty-at-call ∪ loop-carried` = `written anywhere in the block`.
+    void vec_cache_writeback_all_pinned(bool clear_flags = true);
     void vec_cache_mark_dirty(int vreg);
     void vec_emit_load_lo_hi(int xmm, int vreg);
     // FP-cache-aware operand load/store helpers. When the fp cache is

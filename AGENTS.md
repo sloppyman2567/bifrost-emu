@@ -156,6 +156,28 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   raw bytes after "→ N bytes of x86 code"); `BIFROST_JIT_VERIFY` +
   `BIFROST_JIT_VERIFY_MEM` won't catch it because chains skip the
   verified epilogue and the divergence is a memory write, not a register.
+- The fp-cache pre-call guard around BL_CALL/BLR_CALL (`vec_cache_writeback_all_pinned`
+  in jit_codegen_vec_cache.cpp, called from frostjit.cpp) MUST flush every
+  pinned reg that is written ANYWHERE in the block, not just the regs
+  statically dirty AT the call point. The static set is computed at codegen
+  time and misses loop-carried dirtiness: a self-loop block that does
+  `bl grad3; fadd s8,s8,s0` keeps the accumulator s8 cached across the
+  self-loop back-edge, so on the NEXT iteration s8 is dirty when the call
+  executes — but the pre-call writeback was emitted with s8 clean (the fadd
+  comes after the call in the IR) and skipped it, so the post-call reload
+  (`vec_emit_prologue_loads`) read a STALE cpu.v_lo[8] and the sum
+  re-accumulated from the wrong base (JIT `g=41.0` vs interp `g=16.0` on an
+  8-iter grad3 loop; 2M-loop JIT=6000001 vs interp=-500000; the host x86
+  ground truth was the interp value). The exact minimal flush set is
+  `dirty-at-call ∪ loop-carried` = `written-anywhere-in-block`, tracked as
+  `vec_written_this_block_[]` filled by the fp_cache_may_enable pre-scan
+  (dest-write ops: FP_BINOP/UNOP/MOV/MOVI/I2F, FCVT_S2D/D2S, FRINT, the FMA
+  family, FMOV_G2F, FP_F2I_FIXED fp_dest). Clean regs write back identical
+  values, so over-flushing is always safe. Cost: ~0.5% on the game (26.5 →
+  26.4ms/column) — the post-call reload reads every pinned reg anyway.
+  `BIFROST_NO_FP_CACHE=1` or `BIFROST_NO_SELFLOOP=1` both dodge the bug
+  (no pinning / no carried dirtiness); the divergence is deterministic and
+  JIT_VERIFY/MEM blind to it.
 - Vector FMOV immediate (cmode=0xF in the AdvSIMD modified-immediate block,
   e.g. `fmov v31.2d, #20.0` = 0x6F01F69F) is NOT a NOP: expand via
   AdvSIMDExpandImm. 64-bit (op bit29 set): `(imm8&0x3f)<<48`, sign bit →

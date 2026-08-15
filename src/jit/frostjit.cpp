@@ -748,7 +748,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // regs back before the call and reload them after, so the
             // cache stays authoritative. Lo-only in fp-cache mode (the
             // writeback/prologue branch on fp_cache_active_).
-            if (vec_cache_active_) vec_cache_writeback_all();
+            // Flush pinned regs written ANYWHERE in the block, not just the
+            // statically-dirty set: a pinned FP reg written AFTER this call
+            // in the IR (loop-carried accumulator) is clean at this codegen
+            // point but dirty at runtime on the next self-loop iteration —
+            // skipping its flush makes the post-call reload read a stale
+            // cpu.v_lo entry.
+            if (vec_cache_active_) vec_cache_writeback_all_pinned();
             // RAX = target (from the ARM reg / vreg src1 — after the flush
             // it's in cpu.regs[src1] or its stack slot).
             load_vreg_to_reg(RAX, inst.src1);
@@ -782,8 +788,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // ── Cache guard ─────────────────────────────────────────
             // Same writeback+reload as BLR_CALL: the callee may clobber any
             // XMM3-15 / cpu.v_lo entry, so the pinned regs are flushed before
-            // the call and reloaded after it.
-            if (vec_cache_active_) vec_cache_writeback_all();
+            // the call and reloaded after it. Flush regs written anywhere in
+            // the block — a reg written after this call in the IR (loop-carried
+            // accumulator in a self-loop block) is statically clean here but
+            // dirty at runtime on the next iteration (see vec_cache_writeback_all_pinned).
+            if (vec_cache_active_) vec_cache_writeback_all_pinned();
             // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
             emit_mov_imm_to_rax(inst.imm);
             emit_store(CPU_REG, PC_OFF, RAX);
