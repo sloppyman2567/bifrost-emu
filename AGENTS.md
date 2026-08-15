@@ -490,7 +490,16 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   only other writer; jit_call_helper previously fell straight to the
   unlocked `blocks_.find` on every call). Also measured NEUTRAL on the
   game's noise (body-bound, see above) but removes a per-call map find from
-  the hottest call path.
+  the hottest call path. Its dispatch loop uses the SAME thread-local
+  watchdog as run_block (`++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT`,
+  1e12, disables the JIT on trip) — do NOT reintroduce a per-invocation
+  `steps > 10000000` cap: window_loop's helper legitimately dispatches >10M
+  blocks in ~40s of gameplay, the old cap broke it mid-game and returned a
+  garbage pc (0x41fd7c) into the caller's block. The caller's BL_CALL epilogue
+  then overwrote cpu.pc with the static fall-through (0x400f38), main's tail
+  block popped the frame twice and ret'd through a stack-resident LR
+  (pc=0x3efffbb8) → DecodeError. Fixed 2026-08-15; the minecraft game now
+  runs past the 200s mark where it previously crashed at ~40s.
 - The prologue's 10-byte `movabs r10, window_base` (WIN_REG) is emitted
   LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
   SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles

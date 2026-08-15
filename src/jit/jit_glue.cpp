@@ -328,8 +328,25 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     uint64_t return_pc = cpu->regs[30];  // LR set by BL_CALL's STORE_REG
     cpu->pc = target_pc;
     auto* jit = emu->jit();
-    int steps = 0;
+    // ── Block-dispatch watchdog (mirrors run_block) ────────────────
+    // Thread-local count of dispatches through this helper, checked
+    // against GLOBAL_BLOCK_LIMIT (1e12 ≈ 14h of pure dispatch). The old
+    // per-invocation `steps > 10000000` cap broke LEGITIMATE long-running
+    // BL_CALLs: window_loop's helper dispatches >10M blocks in ~40s of
+    // gameplay, so the cap cut it off mid-game and returned a garbage pc
+    // (0x41fd7c) into main's block. main's block then overwrote cpu.pc
+    // with its static fall-through (0x400f38), main's tail block popped
+    // the frame and ret'd through a stack-resident LR (pc=0x3efffbb8) →
+    // DecodeError. A legit callee must never be cut off; like run_block's
+    // watchdog this is a pure codegen-bug safety valve.
+    thread_local uint64_t tls_call_blocks_ = 0;
     while (cpu->running && cpu->pc != return_pc) {
+        if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
+            if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
+            fprintf(stderr, "[JIT] jit_call_helper watchdog: %llu blocks dispatched by a thread — disabling JIT (likely codegen bug)\n",
+                    static_cast<unsigned long long>(tls_call_blocks_));
+            break;
+        }
         if (jit) {
             // Fast path mirrors run_block (last-block + inline caches) but
             // ALSO populates them — jit_call_helper is the only entry point
@@ -342,12 +359,10 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
                 cpu->pc = fn(cpu, emu);
-                if (++steps > 10000000) break;
                 continue;
             }
         }
         emu->step(*cpu);
-        if (++steps > 10000000) break;
     }
     return cpu->pc;
 }
