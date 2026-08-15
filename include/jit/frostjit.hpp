@@ -49,6 +49,15 @@ namespace arm64emu {
 struct CPU;
 class Emulator;
 class Memory;
+// Regalloc bloat diagnostics (BIFROST_REGALLOC_STATS=1). Counted at the
+// (codegen-time) spill/reload emit sites; reset per translated block.
+struct regalloc_stats_t {
+    uint64_t spill_stack = 0, spill_arm = 0;    // write-backs to stack / cpu.regs[]
+    uint64_t reload_stack = 0, reload_arm = 0;  // loads from stack / cpu.regs[]
+    uint64_t evicts = 0;                        // evict_vreg calls (dirty or not)
+};
+void regalloc_stats_reset();
+const regalloc_stats_t& regalloc_stats_get();
 // Interpreter step function (called inline by JIT for unsupported ops).
 extern "C" void jit_interp_step(Emulator* emu, CPU* cpu);
 extern "C" void jit_vdso_clock_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);

@@ -12,6 +12,7 @@
 //   6. Returns a function pointer to the compiled block.
 #include "jit/frostjit.hpp"
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include "frontend/dynamic_linker.h"
 #include "ir/ir.hpp"
 #include "ir/ir.h"
@@ -309,6 +310,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
+    regalloc_stats_reset();
     // Only clear the vreg arrays up to the previous block's max_vreg_+1,
     // not all 4096 entries. This saves ~12KB of writes per block
     // translation when blocks are small (typical: max_vreg_ ≈ 33-100).
@@ -864,6 +866,21 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         }
     }
     kills_per_op_.clear();
+    // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
+    // Counts the spill/reload instruction density of THIS block. A high
+    // reload:spill ratio for the same vreg within a block is the bloat
+    // signal (stack round-trips the allocator should have avoided).
+    if (dbg().regalloc_stats) {
+        const auto& rs = regalloc_stats_get();
+        uint64_t spills = rs.spill_stack + rs.spill_arm;
+        uint64_t reloads = rs.reload_stack + rs.reload_arm;
+        fprintf(stderr, "[regalloc] pc=%#llx insts=%zu spill=%llu(%llu/arm %llu) reload=%llu(%llu/arm %llu) evict=%llu\n",
+                (unsigned long long)start_pc, ir_block.insts.size(),
+                (unsigned long long)spills, (unsigned long long)rs.spill_stack,
+                (unsigned long long)rs.spill_arm, (unsigned long long)reloads,
+                (unsigned long long)rs.reload_stack, (unsigned long long)rs.reload_arm,
+                (unsigned long long)rs.evicts);
+    }
     // ── Epilogue ─────────────────────────────────────────────────
     size_t epilogue_off = code_buf_used_;
     // Materialize pending host flags to cpu.pstate before returning.

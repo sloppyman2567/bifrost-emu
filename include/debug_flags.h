@@ -37,6 +37,8 @@ struct DebugFlags {
     // ── loader / interpreter traces ──────────────────────────────────
     bool ld2  = false;  // BIFROST_LD2_DBG  — second-run dynamic-linker
     bool nss  = false;  // BIFROST_NSS_TRACE
+    // ── JIT codegen diagnostics ──────────────────────────────────────
+    bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
@@ -75,6 +77,7 @@ struct DebugFlags {
         f.exec_trace= all || env("BIFROST_EXEC_TRACE");
         f.ld2       = all || env("BIFROST_LD2_DBG");
         f.nss       = all || env("BIFROST_NSS_TRACE");
+        f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;

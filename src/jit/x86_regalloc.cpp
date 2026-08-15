@@ -26,6 +26,9 @@
 #include <cstdlib>   // getenv, abort
 #include <cstdint>   // UINT32_MAX
 namespace arm64emu {
+static regalloc_stats_t g_rs;
+void regalloc_stats_reset() { g_rs = regalloc_stats_t{}; }
+const regalloc_stats_t& regalloc_stats_get() { return g_rs; }
 // Bounds-check helper: ensures vreg index is within the fixed-size arrays.
 // If a block exceeds MAX_VREGS, we'd have a buffer overflow. This check
 // catches it at the earliest point (vreg allocation) instead of silently
@@ -97,12 +100,15 @@ void FrostJIT::check_fp_reg_index(int idx, const char* context) const {
 void FrostJIT::evict_vreg(int v) {
     int r = vreg_home_[v];
     if (r < 0) return;
+    g_rs.evicts++;
     if (vreg_dirty_[v]) {
         if (v <= 31) {
             emit_store_arm(v, r);  // write back to cpu.regs[]/sp
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, r);
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -151,9 +157,11 @@ void FrostJIT::drop_vreg(int v) {
         // Value is dirty — preserve it by spilling to memory first.
         if (v <= 31) {
             emit_store_arm(v, r);
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, r);
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -172,9 +180,11 @@ void FrostJIT::clobber_host_reg(int host_reg) {
         // Preserve the dirty value by spilling to memory.
         if (v <= 31) {
             emit_store_arm(v, host_reg);
+            g_rs.spill_arm++;
         } else {
             int32_t off = vreg_stack_slot(v);
             emit_store(RBP, off, host_reg);
+            g_rs.spill_stack++;
         }
     }
     vreg_home_[v] = -1;
@@ -257,9 +267,11 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     // Load v into r.
     if (v <= 31) {
         emit_load_arm(r, v);
+        g_rs.reload_arm++;
     } else {
         int32_t off = vreg_stack_slot(v);
         emit_load(r, RBP, off);
+        g_rs.reload_stack++;
     }
     vreg_home_[v] = r;
     reg_vreg_[r] = v;
@@ -397,6 +409,7 @@ void FrostJIT::flush_scratch_host_regs(uint16_t mask) {
                 // Dirty scratch: spill to its stack slot.
                 int32_t off = vreg_stack_slot(v);
                 emit_store(RBP, off, r);
+                g_rs.spill_stack++;
             }
             // Mark as non-dirty (we just wrote it to its home — or it
             // already was).
@@ -513,9 +526,11 @@ void FrostJIT::load_vreg_to_reg(int dst, int v) {
     // Not cached — load from memory (cpu.regs[] or stack slot).
     if (v <= 31) {
         emit_load_arm(dst, v);
+        g_rs.reload_arm++;
     } else {
         int32_t off = vreg_stack_slot(v);
         emit_load(dst, RBP, off);
+        g_rs.reload_stack++;
     }
 }
 void FrostJIT::store_reg_to_vreg(int v, int src) {
