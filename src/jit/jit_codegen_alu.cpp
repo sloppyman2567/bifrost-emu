@@ -430,20 +430,13 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // resolve_arm_cond_with_carry uses the default mapping.
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
-            // Full flush before the CSEL body. We keep flush_all_vregs here
-            // (not the targeted variant) because the CSEL body uses
-            // load_vreg_to_reg which does NOT update the cache. If we left
-            // vregs cached in R8/R9/etc., the cache state would be inconsistent
-            // with the actual register contents after the load_vreg_to_reg
-            // calls. The full invalidate is conservative but correct.
-            bool saved_fih = flags_in_host_;
-            bool saved_ffs = flags_from_sub_;
-            emit_pushfq();
-            flush_all_vregs();
-            invalidate_all_vregs();
-            emit_popfq();
-            flags_in_host_ = saved_fih;
-            flags_from_sub_ = saved_ffs;
+            // Targeted flush+invalidate of the three registers the body
+            // clobbers (RAX=src1, RCX=src2, RDX=dest). Stores don't clobber
+            // RFLAGS, so no pushfq/popfq is needed around the flush (BRCOND
+            // precedent, jit_codegen_branch.cpp:226-228). This also preserves
+            // vregs cached in R8/R9/etc. across the body — the old
+            // flush_all_vregs+invalidate_all_vregs evicted everything.
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
             if (need_cmc) emit_byte(0xF5);  // cmc
             // Load src1 → RAX, src2 → RCX.
             if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);

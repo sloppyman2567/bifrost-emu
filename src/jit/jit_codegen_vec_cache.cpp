@@ -155,6 +155,7 @@ static bool fp_cache_compatible_op(IROp op) {
     switch (op) {
         // Scalar FP ops with cache-aware fast paths:
         case IROp::FP_BINOP:
+        case IROp::FP_CSEL:
         case IROp::FP_UNOP:
         case IROp::FP_MOV:
         case IROp::FP_CMP:
@@ -215,6 +216,7 @@ bool FrostJIT::fp_cache_may_enable(const IRBlock& block) {
         if (!fp_cache_compatible_op(inst.op)) return false;
         switch (inst.op) {
             case IROp::FP_BINOP:
+            case IROp::FP_CSEL:
                 fp_touch(inst.dest, fp_use); fp_touch(inst.src1, fp_use); fp_touch(inst.src2, fp_use);
                 fp_written[inst.dest] = true;
                 break;

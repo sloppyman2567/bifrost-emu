@@ -938,6 +938,7 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::STXR_FAST: return "STXR_FAST";
                     case IROp::STLR_FAST: return "STLR_FAST";
                     case IROp::AES_CRYPTO: return "AES_CRYPTO";
+                    case IROp::FP_CSEL: return "FP_CSEL";
                     default: return "?";
                     }
                     return "?";

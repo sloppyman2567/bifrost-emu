@@ -84,3 +84,9 @@ busybox-musl
 # Runtime artifacts
 .freebuff/
 .build.lock
+
+# Ad-hoc JIT audit / media / scratch files
+findings.md
+subaru_stairs.mp4
+subaru_stairs_mmv.mp4
+ctest_real/minecraft_weekend/t

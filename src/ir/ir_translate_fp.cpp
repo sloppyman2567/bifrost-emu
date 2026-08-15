@@ -495,24 +495,10 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             // FCSEL (FP conditional select).
             // Encoding: (op & 0xFF200C00) == 0x1E200C00, cond in bits[15:12].
             // FCSEL Sd/Dd, Sn, Sm, cond → if cond: dest = n else dest = m.
-            // We emit a CSEL-like sequence via a GPR scratch + CSEL IR op,
-            // since we don't have a native FP_CSEL IR op. But actually we
-            // can do this natively by loading both FP values into GPRs and
-            // using CSEL.
+            // Native FP_CSEL → VBLENDVPS/VPD in the JIT.
             if ((op & 0xFF200C00) == 0x1E200C00 && ftype <= 1) {
                 uint8_t cond = (op >> 12) & 0xF;
-                // Load both FP values into GPR scratch vregs.
-                uint16_t val_n = g_alloc.alloc();
-                emit(block, IROp::FMOV_F2G, val_n, rn, 0, 0, 0, 0, 0, cur_pc);
-                uint16_t val_m = g_alloc.alloc();
-                emit(block, IROp::FMOV_F2G, val_m, rm, 0, 0, 0, 0, 0, cur_pc);
-                // CSEL between the two GPR values.
-                uint16_t selected = g_alloc.alloc();
-                emit(block, IROp::CSEL, selected, val_n, val_m, 0, cond, 0, 0, cur_pc);
-                // Store the selected value back to v_lo[rd].
-                emit(block, IROp::FMOV_G2F, rd, selected, 0, 0, 0, 0, 0, cur_pc);
-                // FMOV_G2F zeroes v_hi[rd] per ARM semantics, so no extra
-                // zero-store is needed for single-precision (ftype == 0).
+                emit(block, IROp::FP_CSEL, rd, rn, rm, ftype, cond, 0, 0, cur_pc);
                 return true;
             }
             // Scalar 64-bit shift-by-immediate (SHL/USHR/SSHR Dd, Dn, #imm).

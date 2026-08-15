@@ -256,6 +256,12 @@ UNIT_TESTS=(
     # an FP register. Without this fix, `(double)19` returned 0.0, which
     # broke toybox `time` (rusage delta computation used SCVTF).
     "jit_scvtf_fp|ctest/jit_scvtf_fp.elf||5|ALL PASS"
+    # NEW: FCSEL native FP conditional select (VBLENDVPS/VPD). All 16
+    # conditions x single+double, the HI/LS cmc path (flags from ADDS),
+    # the pstate-load path (flag setter and fcsel in different blocks +
+    # volatile int op between), NaN bitwise selection, +0.0/-0.0 bit-exact,
+    # and real C ternaries.
+    "jit_fcsel|ctest/jit_fcsel.elf||5|fcsel: PASS"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)

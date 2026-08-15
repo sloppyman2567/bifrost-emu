@@ -309,6 +309,7 @@ enum class IROp : uint8_t {
     // CALL_INTERP (which calls the interpreter's software table-driven
     // implementation in interp_crypto.hpp).
     AES_CRYPTO,
+    FP_CSEL,  // fcsel Sd/Dd,Sn,Sm,cond → v_lo[d] = cond ? v_lo[n] : v_lo[m]; v_hi[d]=0
 };
 // Condition codes (same encoding as ARM64 cond field).
 // 0=EQ, 1=NE, 2=CS, 3=CC, 4=MI, 5=PL, 6=VS, 7=VC,

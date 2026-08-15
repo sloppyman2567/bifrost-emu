@@ -18,6 +18,7 @@
 //
 // Cases handled:
 //   FMOV_G2F / FMOV_F2G / FMOV_G2FHI / FMOV_FHI2G — GPR↔FP moves
+//   FP_CSEL      — scalar FP conditional select (VBLENDVPS/VPD)
 //   FP_BINOP     — scalar FP add/sub/mul/div/max/min/fnmul (SSE2)
 //   FP_UNOP      — scalar FP mov/abs/neg/sqrt (SSE2)
 //   FP_F2I       — FP→int conversion (FCVTZS/FCVTZU)
@@ -53,6 +54,82 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
         case IROp::FMOV_F2G:    emit_fmov_helper(/*dir=*/1, /*field=*/0, inst.src1, inst.src1, inst.dest); return true;
         case IROp::FMOV_G2FHI:  emit_fmov_helper(/*dir=*/0, /*field=*/1, inst.dest, inst.src1, inst.dest); return true;
         case IROp::FMOV_FHI2G:  emit_fmov_helper(/*dir=*/1, /*field=*/1, inst.src1, inst.src1, inst.dest); return true;
+        // ── FP conditional select (FCSEL Sd/Dd, Sn, Sm, cond) ──────────
+        // v_lo[dest] = cond ? v_lo[src1] : v_lo[src2]; v_hi[dest] = 0
+        // → VBLENDVPS/VPD with a flags-derived sign mask in XMM0.
+        // The mask build (mov/cmov/vmovq) is RFLAGS-neutral, so the guest
+        // flags stay valid in host RFLAGS after this op.
+        case IROp::FP_CSEL: {
+            bool is_double = (inst.width == 1);
+            if (!has_fma3()) {  // VEX-encoded blendv requires AVX (FMA3 implies AVX)
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            // Flags: mirror integer CSEL (jit_codegen_alu.cpp). If flags
+            // are already in host RFLAGS (e.g. after TST/CCMP in an
+            // fp-cache block — fp-cache FP ops are RFLAGS-neutral, so the
+            // flags survive), consume them directly. If not, load from
+            // pstate (normalize CF to SUB convention). Do NOT call
+            // clobber_flags() — the whole point is to consume live flags.
+            bool loaded_from_pstate = !flags_in_host_;
+            // The body clobbers RAX (src1/zero) and RCX (src2/mask);
+            // the flags-load path additionally uses RDX and R8
+            // (emit_load_flags_from_pstate, x86_backend.cpp:409).
+            uint16_t clob = (1u << RAX) | (1u << RCX);
+            if (loaded_from_pstate) clob |= (1u << RDX) | (1u << R8);
+            flush_invalidate_host_regs(clob);
+            if (loaded_from_pstate) {
+                emit_load_flags_from_pstate();
+                emit_normalize_cf_to_sub_convention();
+                flags_from_sub_ = true;
+                flags_in_host_ = true;
+            }
+            // Condition code (SUB convention; HI/LS after ADD/TST need cmc).
+            bool need_cmc = false;
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
+            if (need_cmc) emit_byte(0xF5);  // cmc — invert CF for HI/LS
+            // Build the mask: mask = (cond) ? sign-bit-set : 0, flags-neutral.
+            // mov rax,0; mov rcx, imm; cmovcc rax,rcx; vmovq xmm0,rax.
+            emit_mov_imm32_zext(RAX, 0);
+            // Mask sign bit: only lane0's sign bit matters — the blend
+            // dest is a scalar stored via movss/movsd (low 32/64 bits), so
+            // the upper lanes are never observable in scalar-fp blocks.
+            // Double: bit63. Single: bit31.
+            emit_mov_imm64(RCX, is_double ? 0x8000000000000000ULL
+                                          : 0x0000000080000000ULL);
+            if (inst.cond == 0xE || inst.cond == 0xF) {
+                // AL/NV: the interpreter's cond_true() treats both as
+                // always-true (decoder.cpp), so mask = sign-bit-set →
+                // select src1 unconditionally.
+                emit_mov_reg(RAX, RCX);
+            } else {                   // cmov rax, rcx = 48 0F 4x C1
+                emit_byte(0x48); emit_byte(0x0F);
+                emit_byte(static_cast<uint8_t>(0x40 + cc));
+                emit_byte(0xC1);
+            }
+            emit_vmovq_gpr_to_xmm(0, RAX);   // XMM0 = mask (blendv mask operand)
+            if (need_cmc) emit_byte(0xF5);   // cmc — restore CF
+            // Operands. VBLENDVPS/VPD semantics (Intel): DEST = (mask lane
+            // sign bit SET) ? SRC2(ModRM.rm) : SRC1(VEX.vvvv). So the
+            // cond-TRUE value (ARM n = src1) goes in ModRM.rm and the
+            // cond-FALSE value (ARM m = src2) in VEX.vvvv.
+            int xn = fp_resolve_operand(inst.src1, 1, is_double);  // ModRM.rm = SRC2 (cond true)
+            int xm = fp_resolve_operand(inst.src2, 2, is_double);  // VEX.vvvv = SRC1 (cond false)
+            // Blend into XMM1 (scratch; safe to alias a source). Then
+            // fp_store_operand handles pinned (reg-reg mov + mark dirty) or
+            // memory dest. VBLENDVPS/VPD are both 66.0F3A.W0 encodings —
+            // VEX.W must stay 0 even for the double form (width is carried
+            // solely by the opcode 4A=PS / 4B=PD); W=1 → #UD.
+            emit_vex3(3, false, xm, 1, 1, xn, true, is_double ? 0x4B : 0x4A);
+            emit_byte(0x00);          // /is4: mask register = XMM0
+            fp_store_operand(1, inst.dest, is_double);
+            fp_zero_hi(inst.dest);
+            // If we loaded flags from pstate, clear flags_in_host_ so the
+            // epilogue doesn't re-materialize with the CF-normalized x86
+            // flags (mirror jit_codegen_alu.cpp:482-498).
+            if (loaded_from_pstate) flags_in_host_ = false;
+            return true;
+        }
         // ── FP scalar arithmetic — native SSE2 codegen ──────────────
         // These ops use XMM0/XMM1 as scratch, loading from and storing
         // to v_lo[]/v_hi[] via CPU_REG (RBX). They don't interact with

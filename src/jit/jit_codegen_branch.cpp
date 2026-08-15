@@ -197,14 +197,14 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         }
         case IROp::BRCOND: {
             if (!flags_in_host_) {
-                // emit_normalize_cf_to_sub_convention only clobber
-                // RAX/RCX/RDX. Use targeted flush+invalidate to preserve
-                // vregs cached in R8/R9/R11/R12/R13/R15 across the flag
-                // load. This is a big win in branch-heavy code (loops with
-                // many live variables).
+                // emit_load_flags_from_pstate clobbers RAX/RCX/RDX/R8
+                // (R8 in the V-convention xor at x86_backend.cpp:409). Use
+                // targeted flush+invalidate to preserve vregs cached in
+                // R9/R11/R12/R13/R15 across the flag load. This is a big win
+                // in branch-heavy code (loops with many live variables).
                 // No pushfq/popfq: the goal is to LOAD flags, and
                 // popfq would restore the pre-load (garbage) flags.
-                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX) | (1u << R8);
                 flush_dirty_host_regs(FLAGS3);
                 flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
