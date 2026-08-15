@@ -95,49 +95,127 @@ Files: `src/frost_graphics/display_thunk.cpp` (~1580 lines),
 
 ## Skipped / deferred (real issues, not yet fixed)
 
-### 1. Vulkan pointer-arg masks are systematically wrong (17 of 23)
+### 1. Vulkan pointer-arg masks — FIXED (1.5.3-alpha)
 
-The `REG_VK_PTR(name, mask)` registrations translate opaque handles
+The `REG_VK_PTR(name, mask)` registrations translated opaque handles
 (`VkDevice`, `VkPhysicalDevice`, `VkQueue`) and integer args as guest
-pointers, and miss the real output pointers. In the host-Vulkan path this
-passes corrupted args to the driver. Not fixed here because the host-Vulkan
-path has no guest test to verify against (the demo target is SDL2+GL) and
-a wrong correction can silently break the one limping case.
+pointers, and missed the real output pointers — the host path passed
+corrupted args to the driver. All masks were re-derived from the real
+Vulkan 1.x signatures and corrected. **Design rule: opaque Vk handles pass
+VERBATIM** — the guest stores the host pointer the host returned, so a
+handle arg round-trips through the value the guest already holds and must
+NOT be marked as a pointer (marking bounces it to a 64 KiB zero buffer and
+crashes the driver). Only true pointer args are masked: structs / string
+arrays / `VkBool32*`-style OUT slots.
 
-Corrected masks (verified against the Vulkan 1.x signatures):
+In addition to the mask fix, three symbols get a dedicated
+`vk_dispatch_()` deep-marshalling path (see `display_thunk.cpp`):
 
-| Function | Current mask (wrong) | Correct mask |
-|---|---|---|
-| `vkCreateInstance` | `0x03` | `0x07` (bits 0,1,2) |
-| `vkDestroyInstance` | `0x02` | `0x02` |
-| `vkEnumeratePhysicalDevices` | `0x06` | `0x06` |
-| `vkGetPhysicalDeviceProperties` | `0x02` | `0x02` |
-| `vkCreateDevice` | `0x07` | `0x0E` (bits 1,2,3) |
-| `vkDestroyDevice` | `0x02` | `0x02` |
-| `vkGetDeviceQueue` | `0x06` | `0x08` (bit 3 = ppQueue) |
-| `vkCreateSwapchainKHR` | `0x07` | `0x0D` (bits 0,2,3) |
-| `vkGetSwapchainImagesKHR` | `0x06` | `0x08` (bit 3 = pImages) |
-| `vkAcquireNextImageKHR` | `0x1E` | `0x20` (bit 5 = pImageIndex) |
-| `vkQueuePresentKHR` | `0x02` | `0x02` |
-| `vkAllocateCommandBuffers` | `0x06` | `0x06` |
-| `vkQueueSubmit` | `0x06` | `0x04` (bit 2 = pSubmits) |
-| `vkMapMemory` | `0x0E` | `0x20` (bit 5 = ppData) |
-| `vkFlushMappedMemoryRanges` | `0x02` | `0x04` (bit 2 = pRanges) |
-| `vkWaitForFences` | `0x06` | `0x04` (bit 2 = pFences) |
-| `vkGetQueryPoolResults` | `0x0E` | `0x20` (bit 5 = pData) |
-| `vkUpdateDescriptorSets` | `0x02` | `0x14` (bits 2,4) |
-| `vkAllocateDescriptorSets` | `0x02` | `0x06` (bits 1,2) |
-| `vkCreateGraphicsPipelines` | `0x0E` | `0x28` (bits 3,5) |
-| `vkCreateImage` | `0x06` | `0x0D` (bits 0,2,3) |
-| `vkBindBufferMemory` | `0x06` | `0x07` (bits 0,1,2) |
-| `vkBindImageMemory` | `0x06` | `0x07` (bits 0,1,2) |
+- `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` read the `pName` string
+  from **arg 1** (the generic `THUNK_GET_PROC` reads arg 0, the GL
+  convention), and resolve it against the registered symbol table.
+- `vkCreateInstance` deep-copies `VkApplicationInfo` + the
+  `ppEnabledLayerNames` / `ppEnabledExtensionNames` string arrays into a
+  per-call host staging buffer (`VkStage`), passes `pAllocator=NULL`
+  (`VkAllocationCallbacks` holds unmarshallable host fn pointers; symmetric
+  across create/destroy), and writes the host instance back to `pInstance`.
+- `vkCreateDevice` deep-copies the `pQueueCreateInfos` array (with
+  `pQueuePriorities` floats), the layer/extension string arrays, and the
+  220-byte `pEnabledFeatures` block; writes the host device back.
 
-Caveat when fixing output pointers (`pInstance`, `ppQueue`, `pDevice`,
-`pPipelines`, `pImageIndex`): the generic `translate_ptr` bounce path writes
-the full 64 KiB buffer back to the guest, which would clobber adjacent guest
-memory for an output struct that falls outside the 4 GiB direct window.
-Output pointers are usually small heap objects inside the direct window
-(identity translation, no bounce), so this only bites stack outputs.
+`VkStage` pre-reserves its staging buffer (64 KiB) — `alloc()`/`bytes()`/
+`guest_str*()` hand out pointers into `buf.data()` and a later `resize()`
+would REALLOCATE and dangle every earlier pointer (this crashed
+`_M_default_append` in the first test run). Guest-driven counts are capped
+(string arrays <= 1024, queue arrays <= 16, queue priorities <= 64).
+
+Validation gate: `ctest_real/test_vulkan.elf` (musl-static, loads
+`libvulkan.so.1` via the internal dlopen syscall, then runs instance →
+enumerate → device → queue → wait → destroy against the host driver).
+Exit 77 = skip when the host has no Vulkan loader.
+
+Corrected masks (from the real Vulkan 1.x signatures; output pointers must
+stay masked so the host writes the returned handle into real guest
+memory):
+
+| Function | Old (wrong) | New | Notes |
+|---|---|---|---|
+| `vkCreateInstance` | `0x03` | `0x07` | pCreateInfo, pAllocator, pInstance(out) |
+| `vkDestroyInstance` | `0x02` | `0x02` | pAllocator |
+| `vkEnumeratePhysicalDevices` | `0x06` | `0x06` | pCount(out), pPhysicalDevices(out) |
+| `vkGetPhysicalDeviceProperties` | `0x02` | `0x02` | pProperties(out) |
+| `vkGetPhysicalDeviceFeatures` | `0x02` | `0x02` | pFeatures(out) |
+| `vkGetPhysicalDeviceMemoryProperties` | `0x02` | `0x02` | pMemoryProperties(out) |
+| `vkGetPhysicalDeviceQueueFamilyProperties` | `0x06` | `0x06` | pCount(out), pProps(out) |
+| `vkCreateDevice` | `0x07` | `0x0E` | pCreateInfo, pAllocator, pDevice(out) |
+| `vkDestroyDevice` | `0x02` | `0x02` | pAllocator |
+| `vkGetDeviceQueue` | `0x06` | `0x08` | ppQueue(out) |
+| `vkQueueWaitIdle` | `0x02` | `0x00` | no pointers |
+| `vkCreateSwapchainKHR` | `0x07` | `0x0E` | pCreateInfo, pAllocator, pSwapchain(out) |
+| `vkDestroySwapchainKHR` | `0x02` | `0x04` | swapchain, pAllocator |
+| `vkGetSwapchainImagesKHR` | `0x06` | `0x0C` | pCount(out), pImages(out) |
+| `vkAcquireNextImageKHR` | `0x1E` | `0x20` | pImageIndex(out) |
+| `vkQueuePresentKHR` | `0x02` | `0x02` | pPresentInfo |
+| `vkCreateCommandPool` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pPool(out) |
+| `vkDestroyCommandPool` | `0x02` | `0x04` | pool, pAllocator |
+| `vkAllocateCommandBuffers` | `0x06` | `0x06` | pAllocateInfo, pCommandBuffers(out) |
+| `vkFreeCommandBuffers` | `0x02` | `0x08` | pCommandBuffers |
+| `vkBeginCommandBuffer` | `0x02` | `0x02` | pBeginInfo |
+| `vkQueueSubmit` | `0x06` | `0x04` | pSubmits |
+| `vkCreateImage` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pImage(out) |
+| `vkDestroyImage` | `0x02` | `0x04` | image, pAllocator |
+| `vkGetImageMemoryRequirements` | `0x02` | `0x04` | pMemoryRequirements(out) |
+| `vkBindImageMemory` | `0x06` | `0x00` | no pointers (all handles + size) |
+| `vkCreateImageView` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pView(out) |
+| `vkDestroyImageView` | `0x02` | `0x04` | view, pAllocator |
+| `vkCreateBuffer` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pBuffer(out) |
+| `vkDestroyBuffer` | `0x02` | `0x04` | buffer, pAllocator |
+| `vkGetBufferMemoryRequirements` | `0x02` | `0x04` | pMemoryRequirements(out) |
+| `vkBindBufferMemory` | `0x06` | `0x00` | no pointers |
+| `vkAllocateMemory` | `0x06` | `0x0E` | pAllocateInfo, pAllocator, pMemory(out) |
+| `vkFreeMemory` | `0x02` | `0x04` | memory, pAllocator |
+| `vkMapMemory` | `0x0E` | `0x20` | ppData(out) |
+| `vkFlushMappedMemoryRanges` | `0x02` | `0x04` | pRanges |
+| `vkInvalidateMappedMemoryRanges` | `0x02` | `0x04` | pRanges |
+| `vkCreateRenderPass` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pPass(out) |
+| `vkDestroyRenderPass` | `0x02` | `0x04` | pass, pAllocator |
+| `vkCreateFramebuffer` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pFramebuffer(out) |
+| `vkDestroyFramebuffer` | `0x02` | `0x04` | framebuffer, pAllocator |
+| `vkCreateShaderModule` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pModule(out) |
+| `vkDestroyShaderModule` | `0x02` | `0x04` | module, pAllocator |
+| `vkCreatePipelineCache` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pCache(out) |
+| `vkDestroyPipelineCache` | `0x02` | `0x04` | cache, pAllocator |
+| `vkCreateGraphicsPipelines` | `0x0E` | `0x28` | pCreateInfos, pAllocator, pPipelines(out) |
+| `vkCreateComputePipelines` | `0x0E` | `0x28` | pCreateInfos, pAllocator, pPipelines(out) |
+| `vkDestroyPipeline` | `0x02` | `0x04` | pipeline, pAllocator |
+| `vkCreatePipelineLayout` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pLayout(out) |
+| `vkDestroyPipelineLayout` | `0x02` | `0x04` | layout, pAllocator |
+| `vkCreateDescriptorSetLayout` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pLayout(out) |
+| `vkDestroyDescriptorSetLayout` | `0x02` | `0x04` | layout, pAllocator |
+| `vkAllocateDescriptorSets` | `0x02` | `0x06` | pAllocateInfo, pDescriptorSets(out) |
+| `vkFreeDescriptorSets` | `0x00` | `0x08` | pDescriptorSets |
+| `vkUpdateDescriptorSets` | `0x02` | `0x14` | pDescriptorWrites, pDescriptorCopies |
+| `vkCreateDescriptorPool` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pPool(out) |
+| `vkDestroyDescriptorPool` | `0x02` | `0x04` | pool, pAllocator |
+| `vkCreateFence` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pFence(out) |
+| `vkDestroyFence` | `0x02` | `0x04` | fence, pAllocator |
+| `vkResetFences` | `0x00` | `0x04` | pFences |
+| `vkGetFenceStatus` | `0x02` | `0x00` | no pointers |
+| `vkWaitForFences` | `0x06` | `0x04` | pFences |
+| `vkCreateSemaphore` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pSemaphore(out) |
+| `vkDestroySemaphore` | `0x02` | `0x04` | semaphore, pAllocator |
+| `vkCreateEvent` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pEvent(out) |
+| `vkDestroyEvent` | `0x02` | `0x04` | event, pAllocator |
+| `vkCreateQueryPool` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pQueryPool(out) |
+| `vkDestroyQueryPool` | `0x02` | `0x04` | queryPool, pAllocator |
+| `vkGetQueryPoolResults` | `0x0E` | `0x20` | pData(out) |
+| `vkCreateSampler` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pSampler(out) |
+| `vkDestroySampler` | `0x02` | `0x04` | sampler, pAllocator |
+
+Known remaining limitation: `pNext` chains on the create-info structs are
+passed VERBATIM (guest addresses). Guest RAM is host-mapped so the host can
+walk a plain-data chain, but a `pNext` struct containing further nested
+pointers would mis-dereference. Not needed by the current validation gate.
 
 ### 2. Generic host dispatch caps at 9 args (`Fn9`) — FIXED
 
@@ -166,8 +244,10 @@ Corrected masks: `XCreateGC 0x05 → 0x09` (args 0,3), `XChangeGC 0x05 → 0x09`
   `SDL_WINDOWEVENT_CLOSE`, exposed via `DisplayProxy::quit_requested()`
   (matches the `FrostGraphics` drain pattern). Guest-visible wiring
   (e.g. a `WM_DELETE_WINDOW` ClientMessage) is future work.
-- `DisplayThunkImpl::vk_handle_map_` is declared but never used. Not removed
-  (Vulkan-adjacent; out of scope of the no-Vulkan fix pass).
+- ~~`DisplayThunkImpl::vk_handle_map_` is declared but never used. Not removed
+  (Vulkan-adjacent; out of scope of the no-Vulkan fix pass).~~ **FIXED
+  (1.5.3-alpha)**: opaque handles round-trip VERBATIM (the guest stores the
+  host pointer), so no handle-map translation is needed at all.
 - `XGetAtomName` returns a pointer into a `static char[32]`; the proxy path
   re-caches it via `cache_host_string_` (fine); a second call overwrites the
   first string, which Xlib permits (only one live pointer expected).
@@ -175,10 +255,13 @@ Corrected masks: `XCreateGC 0x05 → 0x09` (args 0,3), `XChangeGC 0x05 → 0x09`
 ## Verification
 
 - `make` — clean build, no new warnings.
-- `make check-all` — 190/190 pass, 0 fail.
+- `make check-all` — 201/201 pass, 0 fail (incl. `vulkan`, the
+  `ctest_real/test_vulkan.elf` host-Vulkan gate).
 - `./scripts/run_tests.sh --unit` — 41/41.
 - `DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf` — exit 0.
 - `DISPLAY=:0 ./bifrost-emu ctest_real/test_gl_state.elf` — ALL PASS.
+- `./bifrost-emu ctest_real/test_vulkan.elf` — VULKAN TEST PASSED (host
+  RADV driver, AMD Radeon RX 7600).
 
 ## Real-world run: rudolf-cart (SDL2 + legacy GL + GLU)
 

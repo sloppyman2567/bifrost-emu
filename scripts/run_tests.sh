@@ -342,6 +342,14 @@ INTEGRATION_TESTS=(
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
+    # Vulkan host-path smoke test (1.5.3): dlopen(libvulkan.so.1) via the
+    # internal dlopen syscall → vkGetInstanceProcAddr → create instance
+    # (deep-marshalled VkApplicationInfo + extension string array) →
+    # enumerate physical devices → create device (queue create-info array
+    # + pQueuePriorities + features) → get queue → wait idle → destroy.
+    # Exercises the THUNK_VULKAN dispatch. Exit 77 = skip when the host has
+    # no Vulkan loader/driver (env-dependent).
+    "vulkan|ctest_real/test_vulkan.elf||30|VULKAN TEST PASSED"
     # GL state tracker regression (1.5.2-alpha): verifies GLStateTracker
     # mirrors guest GL state and answers queries (glIsEnabled,
     # glGetIntegerv, glGetFloatv, glGetBooleanv) consistently. Headless —

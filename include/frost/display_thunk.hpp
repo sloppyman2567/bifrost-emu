@@ -46,6 +46,7 @@ class Memory;
 class CPU;
 class DisplayProxy;
 struct DisplayThunkImpl;
+struct SymbolEntry;  // defined in frost_graphics/thunk_common.hpp
 class DisplayThunk {
 public:
     DisplayThunk();
@@ -72,6 +73,7 @@ public:
     static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
     static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
     static constexpr uint8_t THUNK_PROXY         = 1u << 4;
+    static constexpr uint8_t THUNK_VULKAN        = 1u << 5;
  private:
     std::unique_ptr<DisplayThunkImpl> impl_;
     void register_function_(const std::string& lib,
@@ -84,6 +86,7 @@ public:
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
     uint64_t proxy_dispatch_(CPU& cpu, const std::string& sym_name);
+    bool vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace);
     DisplayProxy* proxy();
 };
 } // namespace arm64emu

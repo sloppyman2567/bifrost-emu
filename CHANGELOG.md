@@ -17,6 +17,46 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   Historical release sections in `CHANGELOG.md` / `version.hpp` / `ROADMAP.md`
   (`1.4.5-alpha`, `1.5.0.alpha`, `1.5.1-alpha`) are kept as release history.
 
+## [Unreleased] — Vulkan host path via DisplayThunk (1.5.3-alpha)
+
+### Guest Vulkan apps can now drive the host Vulkan loader/driver
+
+- **All ~79 Vulkan pointer masks corrected** (`REG_VK_PTR`). The old masks
+  marked opaque Vk handles (VkDevice/VkPhysicalDevice/VkQueue) and integer
+  args as guest pointers and missed the real output pointers, passing
+  corrupted args to the host driver. Masks were re-derived from the real
+  Vulkan 1.x signatures. **Design rule: opaque Vk handles pass VERBATIM** —
+  the guest stores the host pointer the host returned, so a handle arg
+  round-trips through the value the guest already holds; only true pointer
+  args (structs / string arrays / OUT slots) get the bounce/identity
+  translation. The dead `vk_handle_map_` translation table is removed.
+- **New `THUNK_VULKAN` dispatch flag + `vk_dispatch_` deep-marshalling
+  path.** `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` read the `pName`
+  string from arg 1 (the generic `THUNK_GET_PROC` reads arg 0, the GL
+  convention) and resolve it against the registered symbol table.
+  `vkCreateInstance` deep-copies `VkApplicationInfo` + the layer/extension
+  string arrays; `vkCreateDevice` deep-copies the `pQueueCreateInfos` array
+  (with `pQueuePriorities`), layer/extension string arrays, and the
+  220-byte `pEnabledFeatures` block. Both pass `pAllocator=NULL`
+  (`VkAllocationCallbacks` holds unmarshallable host fn pointers) and write
+  the host instance/device back to the OUT handle slot. `VkResult` is
+  masked to 32 bits; missing host loader returns
+  `VK_ERROR_INITIALIZATION_FAILED`.
+- **Per-call `VkStage` host staging buffer** pre-reserves 64 KiB — the
+  initial version handed out pointers into a growing `std::vector` and a
+  later `resize()` reallocated, dangling every earlier pointer (crashed
+  `_M_default_append` on the first test run). Guest-driven counts are
+  capped (string arrays ≤ 1024, queue arrays ≤ 16, priorities ≤ 64).
+- **Validation gate: `ctest_real/test_vulkan.elf`.** Static musl test that
+  loads `libvulkan.so.1` via the emulator's internal dlopen syscall
+  (a static guest's own dlopen can only load real AArch64 `.so` files from
+  the guest VFS), then runs instance → enumerate physical devices →
+  device → queue → wait idle → destroy against the host driver. Passes on
+  the host RADV driver (AMD Radeon RX 7600). Exit 77 = skip when the host
+  has no Vulkan loader. Wired into `make setup-tests` (vendored
+  Vulkan-Headers 1.4.357.0 in `ctest_real/vulkan_headers/`) and the
+  `vulkan` integration test. Suite is now 201/201.
+
 ## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
 
 ### Vector `movi vN.2s, #imm` (~500K interp executions) is now native JIT

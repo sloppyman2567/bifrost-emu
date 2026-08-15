@@ -35,8 +35,6 @@ struct DisplayThunkImpl {
     };
     std::vector<LibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-    // Vulkan handle table: guest VkInstance/VkDevice → host handle.
-    std::unordered_map<uint64_t, uint64_t> vk_handle_map_;
     // DisplayProxy for X11/Wayland fallback (1.5.2-alpha).
     std::unique_ptr<DisplayProxy> proxy_;
     // Guest-visible scratch page for host→guest string returns
@@ -227,6 +225,16 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         // Proxy unavailable (headless) — fall through to host dispatch.
+    }
+
+    // ── Vulkan marshalling path ──────────────────────────────────────
+    // vkCreateInstance/vkCreateDevice carry nested guest pointers (string
+    // arrays + struct arrays) that the generic bounce can't fix, and the
+    // proc-addr functions read the pName string from arg 1. Everything
+    // else falls through to the generic path with the (corrected) pointer
+    // masks — opaque handles pass verbatim, out pointers bounce back.
+    if (entry.flags & THUNK_VULKAN) {
+        if (vk_dispatch_(cpu, entry, trace)) return 0;
     }
 
     // ── Float-only AAPCS64 path (Vulkan float params, etc.) ──────────
@@ -489,7 +497,246 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     cpu.regs[0] = ret;
     return 0;
 }
-// ── proxy_dispatch_ — route X11/Wayland calls to DisplayProxy ──────────
+// ── Vulkan marshalling (1.5.3-alpha) ───────────────────────────────────
+// The generic bounce path copies pointer args byte-for-byte, which cannot
+// fix the NESTED guest pointers inside the instance/device create infos
+// (ppEnabledExtensionNames string arrays, pQueueCreateInfos struct array
+// with pQueuePriorities, pApplicationInfo). Those two entry points get a
+// deep-copy into a per-call host staging buffer. Opaque Vk handles are
+// intentionally NOT translated: the guest stores the host pointer the
+// host returned, so passing handle args verbatim round-trips them. Only
+// the OUT handle slots (pInstance / pDevice) are written back after the
+// host call.
+namespace {
+// Per-call host staging buffer. All nested strings, struct copies and
+// pointer arrays for one Vulkan call live here; it is destroyed when the
+// call returns.
+struct VkStage {
+    std::vector<uint8_t> buf;
+    // Reserve once up front: `alloc`/`bytes`/`guest_str*` hand out pointers
+    // into `buf.data()`, and `resize` would REALLOCATE (dangling every
+    // earlier pointer) once a later string/array grows the buffer. Every
+    // size below is capped (guest_str 511 chars, string arrays/queue
+    // arrays <= 1024/16 entries), so total staging stays well under this.
+    explicit VkStage() { buf.reserve(65536); }
+    size_t put(size_t sz, size_t align) {
+        size_t off = (buf.size() + align - 1u) & ~(align - 1u);
+        buf.resize(off + sz);
+        return off;
+    }
+    template <typename T> T* alloc() {
+        return reinterpret_cast<T*>(buf.data() + put(sizeof(T), alignof(T)));
+    }
+    void* bytes(size_t sz, size_t align) {
+        return buf.data() + put(sz, align);
+    }
+    // Copy a guest string into staging. Returns the host pointer (or
+    // nullptr when the guest pointer is 0). Short strings only — a cap of
+    // 511 chars is fine for extension / app names.
+    const char* guest_str(Memory* mem, uint64_t g) {
+        if (!g) return nullptr;
+        char tmp[512];
+        size_t n = 0;
+        try {
+            while (n + 1 < sizeof(tmp)) {
+                uint8_t c = 0;
+                mem->read(g + n, &c, 1);
+                tmp[n++] = static_cast<char>(c);
+                if (c == 0) break;
+            }
+        } catch (...) { /* unmapped — truncate */ }
+        tmp[n] = 0;
+        size_t off = put(n + 1, 1);
+        std::memcpy(buf.data() + off, tmp, n + 1);
+        return reinterpret_cast<const char*>(buf.data() + off);
+    }
+    // Copy a guest array of `count` char* into staging, re-pointing each
+    // string into the staging buffer. Returns the host array pointer (or
+    // nullptr when the guest array / count is 0).
+    const char** guest_str_array(Memory* mem, uint64_t arr, uint32_t count) {
+        if (!arr || count == 0 || count > 1024) return nullptr;
+        const char** out = reinterpret_cast<const char**>(
+            bytes(static_cast<size_t>(count) * sizeof(const char*), 8));
+        for (uint32_t i = 0; i < count; i++) {
+            uint64_t p = 0;
+            try { mem->read(arr + static_cast<uint64_t>(i) * 8u, &p, 8); }
+            catch (...) { p = 0; }
+            out[i] = guest_str(mem, p);
+        }
+        return out;
+    }
+};
+// Frozen (spec-stable) layouts of the Vulkan structs we deep-copy. These
+// are plain C structs with natural alignment, so they match the AArch64
+// guest layout exactly.
+struct VkAppInfoH {
+    int32_t  sType; void* pNext; const char* pApplicationName;
+    uint32_t applicationVersion; const char* pEngineName;
+    uint32_t engineVersion; uint32_t apiVersion;
+};
+struct VkInstanceCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    const VkAppInfoH* pApplicationInfo; uint32_t enabledLayerCount;
+    const char* const* ppEnabledLayerNames; uint32_t enabledExtensionCount;
+    const char* const* ppEnabledExtensionNames;
+};
+struct VkDeviceQueueCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t queueFamilyIndex;
+    uint32_t queueCount; const float* pQueuePriorities;
+};
+struct VkDeviceCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t queueCreateInfoCount; const VkDeviceQueueCreateInfoH* pQueueCreateInfos;
+    uint32_t enabledLayerCount; const char* const* ppEnabledLayerNames;
+    uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
+    const void* pEnabledFeatures;  // VkPhysicalDeviceFeatures (220 bytes, frozen)
+};
+constexpr size_t kPhysicalDeviceFeaturesBytes = 220;
+// Read a guest struct by value into `dst` (zero-fill on unmapped).
+template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
+    if (dst) {
+        if (!g) { std::memset(dst, 0, sizeof(*dst)); return; }
+        try { mem->read(g, dst, sizeof(*dst)); }
+        catch (...) { std::memset(dst, 0, sizeof(*dst)); }
+    }
+}
+} // namespace
+
+bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) {
+    Memory* mem = impl_->mem;
+    if (!mem) return false;
+    const std::string& name = entry.name;
+
+    // ── vkGetInstanceProcAddr / vkGetDeviceProcAddr ────────────────
+    // The generic THUNK_GET_PROC path reads the name from arg 0 (GL
+    // convention); Vulkan's proc-addr functions take the name in arg 1
+    // (arg 0 is the instance/device handle).
+    if (entry.flags & THUNK_GET_PROC) {
+        char namebuf[256];
+        size_t n = 0;
+        uint64_t pname = cpu.regs[1];
+        if (pname) {
+            try {
+                while (n + 1 < sizeof(namebuf)) {
+                    uint8_t c = 0;
+                    mem->read(pname + n, &c, 1);
+                    namebuf[n++] = static_cast<char>(c);
+                    if (c == 0) break;
+                }
+            } catch (...) { /* truncate */ }
+        }
+        namebuf[n] = 0;
+        uint64_t found = 0;
+        if (namebuf[0]) {
+            for (const auto& lib : impl_->libs_) {
+                for (const auto& e : lib.entries) {
+                    if (e.name == namebuf) { found = e.guest_addr; break; }
+                }
+                if (found) break;
+            }
+        }
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkGetProcAddr('%s') → 0x%llx\n",
+                    namebuf[0] ? namebuf : "(null)",
+                    static_cast<unsigned long long>(found));
+        }
+        cpu.regs[0] = found;
+        return true;
+    }
+
+    // ── vkCreateInstance ─────────────────────────────────────────────
+    // (pCreateInfo, pAllocator, pInstance) — arg 2 is the OUT handle.
+    if (name == "vkCreateInstance") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }  // VK_ERROR_INITIALIZATION_FAILED
+        VkStage st;
+        VkInstanceCreateInfoH* info = st.alloc<VkInstanceCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[0], info);
+        if (info->pApplicationInfo) {
+            VkAppInfoH* app = st.alloc<VkAppInfoH>();
+            read_guest_struct(mem, reinterpret_cast<uint64_t>(info->pApplicationInfo), app);
+            app->pApplicationName = st.guest_str(mem, reinterpret_cast<uint64_t>(app->pApplicationName));
+            app->pEngineName      = st.guest_str(mem, reinterpret_cast<uint64_t>(app->pEngineName));
+            info->pApplicationInfo = app;
+        }
+        info->ppEnabledLayerNames = st.guest_str_array(
+            mem, reinterpret_cast<uint64_t>(info->ppEnabledLayerNames), info->enabledLayerCount);
+        info->ppEnabledExtensionNames = st.guest_str_array(
+            mem, reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames), info->enabledExtensionCount);
+        uint64_t host_instance = 0;
+        // pAllocator (arg 1): always NULL. VkAllocationCallbacks contains
+        // host function pointers that cannot be marshalled; passing NULL is
+        // the only correct choice and is symmetric across create/destroy.
+        uint64_t ret = reinterpret_cast<uint64_t (*)(const void*, const void*, void*)>(entry.host_fn)(
+            info, nullptr, &host_instance);
+        if (cpu.regs[2] && host_instance) {
+            try { mem->write(cpu.regs[2], &host_instance, sizeof(host_instance)); }
+            catch (...) { /* out pointer unmapped — result lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateInstance → %d (instance=%p)\n",
+                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_instance));
+        }
+        return true;
+    }
+
+    // ── vkCreateDevice ───────────────────────────────────────────────
+    // (physicalDevice, pCreateInfo, pAllocator, pDevice) — arg 3 is the
+    // OUT handle.
+    if (name == "vkCreateDevice") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkDeviceCreateInfoH* info = st.alloc<VkDeviceCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        if (info->pQueueCreateInfos && info->queueCreateInfoCount &&
+            info->queueCreateInfoCount <= 16) {
+            VkDeviceQueueCreateInfoH* arr = reinterpret_cast<VkDeviceQueueCreateInfoH*>(
+                st.bytes(static_cast<size_t>(info->queueCreateInfoCount) * sizeof(VkDeviceQueueCreateInfoH), 8));
+            for (uint32_t i = 0; i < info->queueCreateInfoCount; i++) {
+                uint64_t g = reinterpret_cast<uint64_t>(info->pQueueCreateInfos)
+                           + static_cast<uint64_t>(i) * sizeof(VkDeviceQueueCreateInfoH);
+                read_guest_struct(mem, g, &arr[i]);
+                if (arr[i].pQueuePriorities && arr[i].queueCount && arr[i].queueCount <= 64) {
+                    float* pf = reinterpret_cast<float*>(
+                        st.bytes(static_cast<size_t>(arr[i].queueCount) * sizeof(float), 8));
+                    try {
+                        mem->read(reinterpret_cast<uint64_t>(arr[i].pQueuePriorities),
+                                  pf, static_cast<size_t>(arr[i].queueCount) * sizeof(float));
+                    } catch (...) { std::memset(pf, 0, static_cast<size_t>(arr[i].queueCount) * sizeof(float)); }
+                    arr[i].pQueuePriorities = pf;
+                }
+            }
+            info->pQueueCreateInfos = arr;
+        }
+        info->ppEnabledLayerNames = st.guest_str_array(
+            mem, reinterpret_cast<uint64_t>(info->ppEnabledLayerNames), info->enabledLayerCount);
+        info->ppEnabledExtensionNames = st.guest_str_array(
+            mem, reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames), info->enabledExtensionCount);
+        if (info->pEnabledFeatures) {
+            void* f = st.bytes(kPhysicalDeviceFeaturesBytes, 8);
+            try { mem->read(reinterpret_cast<uint64_t>(info->pEnabledFeatures), f, kPhysicalDeviceFeaturesBytes); }
+            catch (...) { std::memset(f, 0, kPhysicalDeviceFeaturesBytes); }
+            info->pEnabledFeatures = f;
+        }
+        uint64_t host_device = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_device);
+        if (cpu.regs[3] && host_device) {
+            try { mem->write(cpu.regs[3], &host_device, sizeof(host_device)); }
+            catch (...) { /* out pointer unmapped — result lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateDevice → %d (device=%p)\n",
+                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_device));
+        }
+        return true;
+    }
+
+    // Not one of the deep-marshalling entry points — let the generic path
+    // handle it with the corrected pointer masks.
+    return false;
+}
 // Called when a symbol has the THUNK_PROXY flag. The DisplayProxy provides
 // a SDL2-based software fallback for X11/Wayland functions when the host
 // libraries are unavailable or have no display.
@@ -1199,108 +1446,121 @@ void DisplayThunk::register_known_symbols_() {
     const char* vk_libs[] = {"libvulkan.so.1", "libvulkan.so"};
     void* vk_handle = dlopen("libvulkan.so.1", RTLD_LAZY);
     if (!vk_handle) vk_handle = dlopen("libvulkan.so", RTLD_LAZY);
+    // 1.5.3-alpha: pointer masks corrected against the real Vulkan 1.x
+    // signatures. Opaque Vk* handle args are NOT pointers — they pass
+    // VERBATIM (the guest stores the host pointer the host returned, so a
+    // handle round-trips back through the value it already holds). Only
+    // true pointer args (structs / string arrays / output pointers) get
+    // the bounce/identity translation. The previous masks marked handles
+    // as pointers, which bounced them to 64 KiB zero buffers and crashed
+    // the host driver. Output pointers (pInstance, ppQueue, pImages, …)
+    // MUST stay marked so the host writes the returned handle into real
+    // (guest) memory.
     #define REG_VK(name) do { \
         void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
-        for (const char* L : vk_libs) register_function_(L, #name, p); \
+        for (const char* L : vk_libs) \
+            register_function_(L, #name, p, 0, 0, 0, THUNK_VULKAN); \
     } while(0)
     #define REG_VK_PTR(name, ptrs) do { \
         void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
-        for (const char* L : vk_libs) register_function_(L, #name, p, ptrs); \
+        for (const char* L : vk_libs) \
+            register_function_(L, #name, p, ptrs, 0, 0, THUNK_VULKAN); \
     } while(0)
     #define REG_VK_PROC(name) do { \
         void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
         if (!p) p = reinterpret_cast<void*>(1); \
         for (const char* L : vk_libs) \
-            register_function_(L, #name, p, 0x01, 0, 0, THUNK_GET_PROC); \
+            register_function_(L, #name, p, 0, 0, 0, \
+                               THUNK_VULKAN | THUNK_GET_PROC); \
     } while(0)
     // Core instance/device functions.
-    REG_VK_PTR(vkCreateInstance, 0x03);         // arg 0: pCreateInfo, arg 1: pAllocator
-    REG_VK_PTR(vkDestroyInstance, 0x02);        // arg 1: pAllocator
-    REG_VK_PTR(vkEnumeratePhysicalDevices, 0x06); // arg 1: pCount, arg 2: pPhysicalDevices
-    REG_VK_PTR(vkGetPhysicalDeviceProperties, 0x02); // arg 1: pProperties (large struct)
-    REG_VK_PTR(vkGetPhysicalDeviceFeatures, 0x02); // arg 1: pFeatures
-    REG_VK_PTR(vkGetPhysicalDeviceMemoryProperties, 0x02); // arg 1: pMemoryProperties
-    REG_VK_PTR(vkGetPhysicalDeviceQueueFamilyProperties, 0x06); // arg 1: pCount, arg 2: pQueueFamilyProperties
-    REG_VK_PTR(vkCreateDevice, 0x07);           // arg 0: pCreateInfo, arg 2: ppDevice, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyDevice, 0x02);          // arg 1: pAllocator
-    REG_VK_PTR(vkGetDeviceQueue, 0x06);          // arg 2: ppQueue, arg 3: pAllocator
+    REG_VK_PTR(vkCreateInstance, 0x07);            // pCreateInfo, pAllocator, pInstance
+    REG_VK_PTR(vkDestroyInstance, 0x02);           // pAllocator
+    REG_VK_PTR(vkEnumeratePhysicalDevices, 0x06);  // pCount, pPhysicalDevices (out)
+    REG_VK_PTR(vkGetPhysicalDeviceProperties, 0x02);          // pProperties (out)
+    REG_VK_PTR(vkGetPhysicalDeviceFeatures, 0x02);            // pFeatures (out)
+    REG_VK_PTR(vkGetPhysicalDeviceMemoryProperties, 0x02);    // pMemoryProperties (out)
+    REG_VK_PTR(vkGetPhysicalDeviceQueueFamilyProperties, 0x06); // pCount, pQueueFamilyProperties (out)
+    REG_VK_PTR(vkCreateDevice, 0x0E);              // pCreateInfo, pAllocator, pDevice
+    REG_VK_PTR(vkDestroyDevice, 0x02);             // pAllocator
+    REG_VK_PTR(vkGetDeviceQueue, 0x08);            // ppQueue (out)
     REG_VK(vkDeviceWaitIdle);
-    REG_VK_PTR(vkQueueWaitIdle, 0x02);          // arg 1: pFence (actually VkQueue, but opaque)
+    REG_VK(vkQueueWaitIdle);
     // Swapchain (KHR extension).
-    REG_VK_PTR(vkCreateSwapchainKHR, 0x07);     // arg 0: pCreateInfo, arg 2: ppSwapchain, arg 3: pAllocator
-    REG_VK_PTR(vkDestroySwapchainKHR, 0x02);    // arg 1: pAllocator
-    REG_VK_PTR(vkGetSwapchainImagesKHR, 0x06);  // arg 1: pCount, arg 2: pImages
-    REG_VK_PTR(vkAcquireNextImageKHR, 0x1E);    // arg 3: pImageIndex, arg 4: pAcquireFence
-    REG_VK_PTR(vkQueuePresentKHR, 0x02);         // arg 1: pPresentInfo
+    REG_VK_PTR(vkCreateSwapchainKHR, 0x0E);        // pCreateInfo, pAllocator, pSwapchain
+    REG_VK_PTR(vkDestroySwapchainKHR, 0x04);       // swapchain, pAllocator
+    REG_VK_PTR(vkGetSwapchainImagesKHR, 0x0C);     // pCount (out), pImages (out)
+    REG_VK_PTR(vkAcquireNextImageKHR, 0x20);       // pImageIndex (out)
+    REG_VK_PTR(vkQueuePresentKHR, 0x02);           // pPresentInfo
     // Command buffers.
-    REG_VK_PTR(vkCreateCommandPool, 0x06);       // arg 0: pCreateInfo, arg 2: ppCommandPool, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyCommandPool, 0x02);      // arg 1: pAllocator
-    REG_VK_PTR(vkAllocateCommandBuffers, 0x06);  // arg 0: pAllocateInfo, arg 1: pCommandBuffers
-    REG_VK_PTR(vkFreeCommandBuffers, 0x02);      // arg 1: pCommandBuffers
-    REG_VK_PTR(vkBeginCommandBuffer, 0x02);      // arg 1: pBeginInfo
+    REG_VK_PTR(vkCreateCommandPool, 0x0E);         // pCreateInfo, pAllocator, pPool
+    REG_VK_PTR(vkDestroyCommandPool, 0x04);        // pool, pAllocator
+    REG_VK_PTR(vkAllocateCommandBuffers, 0x06);    // pAllocateInfo, pCommandBuffers (out)
+    REG_VK_PTR(vkFreeCommandBuffers, 0x08);        // pCommandBuffers
+    REG_VK_PTR(vkBeginCommandBuffer, 0x02);        // pBeginInfo
     REG_VK(vkEndCommandBuffer);
     REG_VK(vkResetCommandBuffer);
-    REG_VK_PTR(vkQueueSubmit, 0x06);             // arg 1: pSubmitInfo, arg 3: pFence
+    REG_VK_PTR(vkQueueSubmit, 0x04);               // pSubmits
     // Image / image views.
-    REG_VK_PTR(vkCreateImage, 0x06);             // arg 0: pCreateInfo, arg 2: ppImage, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyImage, 0x02);            // arg 1: pAllocator
-    REG_VK_PTR(vkGetImageMemoryRequirements, 0x02); // arg 1: pMemoryRequirements
-    REG_VK_PTR(vkBindImageMemory, 0x06);         // arg 2: pMemory, arg 3: pBindInfo
-    REG_VK_PTR(vkCreateImageView, 0x06);         // arg 0: pCreateInfo, arg 2: ppImageView, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyImageView, 0x02);        // arg 1: pAllocator
+    REG_VK_PTR(vkCreateImage, 0x0E);               // pCreateInfo, pAllocator, pImage
+    REG_VK_PTR(vkDestroyImage, 0x04);              // image, pAllocator
+    REG_VK_PTR(vkGetImageMemoryRequirements, 0x04); // pMemoryRequirements (out)
+    REG_VK_PTR(vkBindImageMemory, 0x00);
+    REG_VK_PTR(vkCreateImageView, 0x0E);           // pCreateInfo, pAllocator, pView
+    REG_VK_PTR(vkDestroyImageView, 0x04);          // view, pAllocator
     // Buffers.
-    REG_VK_PTR(vkCreateBuffer, 0x06);            // arg 0: pCreateInfo, arg 2: ppBuffer, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyBuffer, 0x02);           // arg 1: pAllocator
-    REG_VK_PTR(vkGetBufferMemoryRequirements, 0x02); // arg 1: pMemoryRequirements
-    REG_VK_PTR(vkBindBufferMemory, 0x06);        // arg 2: pMemory, arg 3: pBindInfo
+    REG_VK_PTR(vkCreateBuffer, 0x0E);              // pCreateInfo, pAllocator, pBuffer
+    REG_VK_PTR(vkDestroyBuffer, 0x04);             // buffer, pAllocator
+    REG_VK_PTR(vkGetBufferMemoryRequirements, 0x04); // pMemoryRequirements (out)
+    REG_VK_PTR(vkBindBufferMemory, 0x00);
     // Memory.
-    REG_VK_PTR(vkAllocateMemory, 0x06);          // arg 0: pAllocateInfo, arg 2: ppDeviceMemory, arg 3: pAllocator
-    REG_VK_PTR(vkFreeMemory, 0x02);              // arg 1: pAllocator
-    REG_VK_PTR(vkMapMemory, 0x0E);               // arg 2: pOffset, arg 3: pSize, arg 4: ppData
+    REG_VK_PTR(vkAllocateMemory, 0x0E);            // pAllocateInfo, pAllocator, pDeviceMemory
+    REG_VK_PTR(vkFreeMemory, 0x04);                // memory, pAllocator
+    REG_VK_PTR(vkMapMemory, 0x20);                 // ppData (out)
     REG_VK(vkUnmapMemory);
-    REG_VK_PTR(vkFlushMappedMemoryRanges, 0x02); // arg 0: pMemoryRange
-    REG_VK_PTR(vkInvalidateMappedMemoryRanges, 0x02); // arg 0: pMemoryRange
+    REG_VK_PTR(vkFlushMappedMemoryRanges, 0x04);   // pRanges
+    REG_VK_PTR(vkInvalidateMappedMemoryRanges, 0x04); // pRanges
     // Render pass / framebuffers.
-    REG_VK_PTR(vkCreateRenderPass, 0x06);        // arg 0: pCreateInfo, arg 2: ppRenderPass, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyRenderPass, 0x02);       // arg 1: pAllocator
-    REG_VK_PTR(vkCreateFramebuffer, 0x06);       // arg 0: pCreateInfo, arg 2: ppFramebuffer, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyFramebuffer, 0x02);     // arg 1: pAllocator
+    REG_VK_PTR(vkCreateRenderPass, 0x0E);          // pCreateInfo, pAllocator, pPass
+    REG_VK_PTR(vkDestroyRenderPass, 0x04);         // pass, pAllocator
+    REG_VK_PTR(vkCreateFramebuffer, 0x0E);         // pCreateInfo, pAllocator, pFramebuffer
+    REG_VK_PTR(vkDestroyFramebuffer, 0x04);        // framebuffer, pAllocator
     // Shaders / pipelines.
-    REG_VK_PTR(vkCreateShaderModule, 0x06);      // arg 0: pCreateInfo, arg 2: ppShaderModule, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyShaderModule, 0x02);    // arg 1: pAllocator
-    REG_VK_PTR(vkCreatePipelineCache, 0x06);     // arg 0: pCreateInfo, arg 2: ppPipelineCache, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyPipelineCache, 0x02);   // arg 1: pAllocator
-    REG_VK_PTR(vkCreateGraphicsPipelines, 0x0E); // arg 2: pPipelines, arg 3: pPipelineCache
-    REG_VK_PTR(vkCreateComputePipelines, 0x0E);  // arg 2: pPipelines, arg 3: pPipelineCache
-    REG_VK_PTR(vkDestroyPipeline, 0x02);         // arg 1: pAllocator
-    REG_VK_PTR(vkCreatePipelineLayout, 0x06);    // arg 0: pCreateInfo, arg 2: ppPipelineLayout, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyPipelineLayout, 0x02);   // arg 1: pAllocator
-    REG_VK_PTR(vkCreateDescriptorSetLayout, 0x06); // arg 0: pCreateInfo, arg 2: ppLayout, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyDescriptorSetLayout, 0x02); // arg 1: pAllocator
-    REG_VK_PTR(vkAllocateDescriptorSets, 0x02);  // arg 0: pAllocateInfo, arg 1: pDescriptorSets
-    REG_VK(vkFreeDescriptorSets);
-    REG_VK_PTR(vkUpdateDescriptorSets, 0x02);    // arg 0: pWriteInfo, arg 1: pCopyInfo
-    REG_VK_PTR(vkCreateDescriptorPool, 0x06);     // arg 0: pCreateInfo, arg 2: ppPool, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyDescriptorPool, 0x02);   // arg 1: pAllocator
+    REG_VK_PTR(vkCreateShaderModule, 0x0E);        // pCreateInfo, pAllocator, pModule
+    REG_VK_PTR(vkDestroyShaderModule, 0x04);       // module, pAllocator
+    REG_VK_PTR(vkCreatePipelineCache, 0x0E);       // pCreateInfo, pAllocator, pCache
+    REG_VK_PTR(vkDestroyPipelineCache, 0x04);      // cache, pAllocator
+    REG_VK_PTR(vkCreateGraphicsPipelines, 0x28);   // pCreateInfos, pPipelines (out)
+    REG_VK_PTR(vkCreateComputePipelines, 0x28);    // pCreateInfos, pPipelines (out)
+    REG_VK_PTR(vkDestroyPipeline, 0x04);           // pipeline, pAllocator
+    REG_VK_PTR(vkCreatePipelineLayout, 0x0E);      // pCreateInfo, pAllocator, pLayout
+    REG_VK_PTR(vkDestroyPipelineLayout, 0x04);     // layout, pAllocator
+    REG_VK_PTR(vkCreateDescriptorSetLayout, 0x0E); // pCreateInfo, pAllocator, pLayout
+    REG_VK_PTR(vkDestroyDescriptorSetLayout, 0x04);// layout, pAllocator
+    REG_VK_PTR(vkAllocateDescriptorSets, 0x06);    // pAllocateInfo, pDescriptorSets (out)
+    REG_VK_PTR(vkFreeDescriptorSets, 0x08);         // pDescriptorSets
+    REG_VK_PTR(vkUpdateDescriptorSets, 0x14);      // pDescriptorWrites, pDescriptorCopies
+    REG_VK_PTR(vkCreateDescriptorPool, 0x0E);      // pCreateInfo, pAllocator, pPool
+    REG_VK_PTR(vkDestroyDescriptorPool, 0x04);     // pool, pAllocator
     // Fences / semaphores / events.
-    REG_VK_PTR(vkCreateFence, 0x06);             // arg 0: pCreateInfo, arg 2: ppFence, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyFence, 0x02);            // arg 1: pAllocator
-    REG_VK(vkResetFences);
-    REG_VK_PTR(vkGetFenceStatus, 0x02);          // arg 1: pFence (actually VkFence, but opaque)
-    REG_VK_PTR(vkWaitForFences, 0x06);            // arg 1: pFences, arg 2: pWaitValues, arg 3: pFlags
-    REG_VK_PTR(vkCreateSemaphore, 0x06);          // arg 0: pCreateInfo, arg 2: ppSemaphore, arg 3: pAllocator
-    REG_VK_PTR(vkDestroySemaphore, 0x02);        // arg 1: pAllocator
-    REG_VK_PTR(vkCreateEvent, 0x06);             // arg 0: pCreateInfo, arg 2: ppEvent, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyEvent, 0x02);            // arg 1: pAllocator
+    REG_VK_PTR(vkCreateFence, 0x0E);               // pCreateInfo, pAllocator, pFence
+    REG_VK_PTR(vkDestroyFence, 0x04);              // fence, pAllocator
+    REG_VK_PTR(vkResetFences, 0x04);               // pFences
+    REG_VK(vkGetFenceStatus);
+    REG_VK_PTR(vkWaitForFences, 0x04);             // pFences
+    REG_VK_PTR(vkCreateSemaphore, 0x0E);           // pCreateInfo, pAllocator, pSemaphore
+    REG_VK_PTR(vkDestroySemaphore, 0x04);          // semaphore, pAllocator
+    REG_VK_PTR(vkCreateEvent, 0x0E);               // pCreateInfo, pAllocator, pEvent
+    REG_VK_PTR(vkDestroyEvent, 0x04);              // event, pAllocator
     REG_VK(vkSetEvent);
     REG_VK(vkResetEvent);
     // Query pools.
-    REG_VK_PTR(vkCreateQueryPool, 0x06);         // arg 0: pCreateInfo, arg 2: ppQueryPool, arg 3: pAllocator
-    REG_VK_PTR(vkDestroyQueryPool, 0x02);        // arg 1: pAllocator
-    REG_VK_PTR(vkGetQueryPoolResults, 0x0E);     // arg 1: pCount, arg 2: pData, arg 3: pFlags
+    REG_VK_PTR(vkCreateQueryPool, 0x0E);           // pCreateInfo, pAllocator, pQueryPool
+    REG_VK_PTR(vkDestroyQueryPool, 0x04);          // queryPool, pAllocator
+    REG_VK_PTR(vkGetQueryPoolResults, 0x20);       // pData (out)
     // Sampler.
-    REG_VK_PTR(vkCreateSampler, 0x06);           // arg 0: pCreateInfo, arg 2: ppSampler, arg 3: pAllocator
-    REG_VK_PTR(vkDestroySampler, 0x02);          // arg 1: pAllocator
+    REG_VK_PTR(vkCreateSampler, 0x0E);             // pCreateInfo, pAllocator, pSampler
+    REG_VK_PTR(vkDestroySampler, 0x04);            // sampler, pAllocator
     // vkGetInstanceProcAddr / vkGetDeviceProcAddr (essential for extension loading).
     REG_VK_PROC(vkGetInstanceProcAddr);
     REG_VK_PROC(vkGetDeviceProcAddr);
