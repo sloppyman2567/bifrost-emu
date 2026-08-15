@@ -1301,6 +1301,18 @@ void GraphicThunk::register_known_symbols_() {
     }
 
     for (const thunk::Spec& spec : thunk::specs) {
+        // 1.5.3-alpha: the table now also carries the DisplayThunk
+        // families (VK/WL/X11/...). GraphicThunk only owns the graphic
+        // families — skip the rest BEFORE indexing kFamilies (which is
+        // sized for GL/GLES/EGL/SDL/GLFW only; display families have
+        // higher LibFamily values).
+        if (spec.lib != thunk::LibFamily::GL &&
+            spec.lib != thunk::LibFamily::GLES &&
+            spec.lib != thunk::LibFamily::EGL &&
+            spec.lib != thunk::LibFamily::SDL &&
+            spec.lib != thunk::LibFamily::GLFW) {
+            continue;
+        }
         const FamilyDef& fd = kFamilies[static_cast<int>(spec.lib)];
         // Host fn resolution: real dlsym when the host has the library,
         // null stub otherwise. GET_PROC must stay non-null: dispatch

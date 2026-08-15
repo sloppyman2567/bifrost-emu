@@ -11,6 +11,7 @@
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
+#include "opgen_thunk.hpp"  // 1.5.3-alpha: symbol signature table (single source of truth)
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
@@ -112,7 +113,8 @@ void DisplayThunk::register_function_(const std::string& lib,
                                         uint16_t pointer_args,
                                         uint8_t n_stack,
                                         uint8_t n_float,
-                                        uint8_t flags) {
+                                        uint8_t flags,
+                                        const thunk::Spec* spec) {
     bool trace = dbg().thunk_trace;
     // Find or create the LibTable for `lib`.
     DisplayThunkImpl::LibTable* lt = nullptr;
@@ -142,7 +144,7 @@ void DisplayThunk::register_function_(const std::string& lib,
     write_thunk_trampoline(*impl_->mem, addr, sym_id,
                            static_cast<uint16_t>(DisplayThunk::SYSCALL_NUMBER));
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
-                           n_stack, n_float, flags});
+                           n_stack, n_float, flags, spec});
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
@@ -361,19 +363,31 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Default 64 KiB covers fixed-size output structs (XEvent, etc.);
         // known big-buffer functions size the bounce from their args so we
         // neither truncate the data nor write 64 KiB of garbage back over a
-        // small guest object (mirrors the SizeKind sizing in thunk.cpp).
+        // small guest object. The per-symbol SIZE column of the spec
+        // overrides it (mirrors the SizeKind sizing in thunk.cpp); the
+        // argument positions are implied by the symbol, so no name compares.
         size_t kBounce = 65536;
-        const std::string& n = entry.name;
-        if (n == "XChangeProperty" && idx == 6) {
-            // (display, window, prop, type, format, mode, data, nelements)
-            uint64_t sz = args[7] * (args[4] / 8u);
-            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
-        } else if ((n == "XDrawString" || n == "XDrawImageString") && idx == 5) {
-            uint64_t sz = args[6];
-            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
-        } else if (n == "XSetWMProtocols" && idx == 2) {
-            uint64_t sz = args[3] * sizeof(unsigned long);  // Atom = 8 bytes
-            if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+        const thunk::SizeKind sk = entry.spec ? entry.spec->size
+                                              : thunk::SizeKind::NONE;
+        switch (sk) {
+        case thunk::SizeKind::X_DRAWSTR:
+            // XDrawString/XDrawImageString(display, d, gc, x, y, string, len):
+            // the string (arg 5) is sized by the length arg 6.
+            if (idx == 5) {
+                uint64_t sz = args[6];
+                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
+        case thunk::SizeKind::X_SETWMPROTO:
+            // XSetWMProtocols(display, w, protocols, count): the Atom array
+            // (arg 2) is sized by the count arg 3 (Atom = 8 bytes).
+            if (idx == 2) {
+                uint64_t sz = args[3] * sizeof(unsigned long);
+                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
+        default:
+            break;
         }
         bounce->resize(kBounce);
         try { impl_->mem->read(a, bounce->data(), kBounce); }
@@ -618,7 +632,6 @@ void read_guest_bytes(Memory* mem, uint64_t g, void* dst, size_t n) {
 bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) {
     Memory* mem = impl_->mem;
     if (!mem) return false;
-    const std::string& name = entry.name;
 
     // ── vkGetInstanceProcAddr / vkGetDeviceProcAddr ────────────────
     // The generic THUNK_GET_PROC path reads the name from arg 0 (GL
@@ -659,7 +672,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
 
     // ── vkCreateInstance ─────────────────────────────────────────────
     // (pCreateInfo, pAllocator, pInstance) — arg 2 is the OUT handle.
-    if (name == "vkCreateInstance") {
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_INSTANCE) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }  // VK_ERROR_INITIALIZATION_FAILED
         VkStage st;
         VkInstanceCreateInfoH* info = st.alloc<VkInstanceCreateInfoH>();
@@ -696,7 +709,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // ── vkCreateDevice ───────────────────────────────────────────────
     // (physicalDevice, pCreateInfo, pAllocator, pDevice) — arg 3 is the
     // OUT handle.
-    if (name == "vkCreateDevice") {
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DEVICE) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
         VkStage st;
         VkDeviceCreateInfoH* info = st.alloc<VkDeviceCreateInfoH>();
@@ -754,7 +767,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // host faults reading e.g. pSwapchains[0]. Re-point every array into
     // the staging buffer (handles round-trip VERBATIM), and writeback
     // pResults after the call.
-    if (name == "vkQueuePresentKHR") {
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_PRESENT) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
         VkStage st;
         VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();
@@ -1512,475 +1525,133 @@ uint64_t DisplayThunk::trampoline_base() const {
     return impl_->trampoline_base;
 }
 // ── register_known_symbols_ ────────────────────────────────────────────
+// 1.5.3-alpha: TABLE-DRIVEN. tools/opgen/thunk_dp.txt (generated into
+// include/opgen_thunk.hpp) is now the single source of truth for which
+// (library, symbol) DisplayThunk thunks and how it marshals each one.
+// The former REG_VK*/REG_WL*/REG_X11*/REG_GBM*/REG_GLX*/REG_RANDR*/REG_XKB*
+// macro ladders (275 registrations) lived as hand-written code that
+// drifted from the dispatch masks and had no drift guard; they are gone.
+// This loop iterates the table, keeps only the DisplayThunk families
+// (VK/WL/WL_EGL/X11/X11XCB/XCB/GBM/XEXT/GLX/RANDR/XKB), derives the legacy
+// ABI-shape fields (pointer_args / n_stack / n_float / flags) from the
+// ARGS column, and registers each symbol under every soname of its family
+// — the same pattern GraphicThunk's loop uses. Adding a symbol is now a
+// one-line spec row, and `make opgen-thunk-check` fails CI if the spec
+// and the generated header drift.
+//
+// Pointer-arg semantics: 'p'/'z' in ARGS marks a translated pointer (the
+// identity/bounce path), 'i' marks a VERBATIM arg. Opaque Vk* / wl_* /
+// XID / Display* handles pass VERBATIM — the guest stores the host pointer
+// the host returned, so a handle round-trips back through the value it
+// already holds; only true pointer args (structs / string arrays / output
+// pointers) get the translation. ARGS length > 8 implies stack args
+// (n_stack = len - 8). The derived masks reproduce the pre-migration
+// registration EXACTLY, with one fix: XCreateWindow now carries all 12
+// args (n_stack 4), so its XSetWindowAttributes* (arg 11, a stack pointer)
+// is actually read and translated instead of being silently dropped.
 void DisplayThunk::register_known_symbols_() {
-    // ── libvulkan.so.1 ─────────────────────────────────────────────
-    const char* vk_libs[] = {"libvulkan.so.1", "libvulkan.so"};
-    void* vk_handle = dlopen("libvulkan.so.1", RTLD_LAZY);
-    if (!vk_handle) vk_handle = dlopen("libvulkan.so", RTLD_LAZY);
-    // 1.5.3-alpha: pointer masks corrected against the real Vulkan 1.x
-    // signatures. Opaque Vk* handle args are NOT pointers — they pass
-    // VERBATIM (the guest stores the host pointer the host returned, so a
-    // handle round-trips back through the value it already holds). Only
-    // true pointer args (structs / string arrays / output pointers) get
-    // the bounce/identity translation. The previous masks marked handles
-    // as pointers, which bounced them to 64 KiB zero buffers and crashed
-    // the host driver. Output pointers (pInstance, ppQueue, pImages, …)
-    // MUST stay marked so the host writes the returned handle into real
-    // (guest) memory.
-    #define REG_VK(name) do { \
-        void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
-        for (const char* L : vk_libs) \
-            register_function_(L, #name, p, 0, 0, 0, THUNK_VULKAN); \
-    } while(0)
-    #define REG_VK_PTR(name, ptrs) do { \
-        void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
-        for (const char* L : vk_libs) \
-            register_function_(L, #name, p, ptrs, 0, 0, THUNK_VULKAN); \
-    } while(0)
-    #define REG_VK_PROC(name) do { \
-        void* p = vk_handle ? dlsym(vk_handle, #name) : nullptr; \
-        if (!p) p = reinterpret_cast<void*>(1); \
-        for (const char* L : vk_libs) \
-            register_function_(L, #name, p, 0, 0, 0, \
-                               THUNK_VULKAN | THUNK_GET_PROC); \
-    } while(0)
-    // Core instance/device functions.
-    REG_VK_PTR(vkCreateInstance, 0x07);            // pCreateInfo, pAllocator, pInstance
-    REG_VK_PTR(vkDestroyInstance, 0x02);           // pAllocator
-    REG_VK_PTR(vkEnumeratePhysicalDevices, 0x06);  // pCount, pPhysicalDevices (out)
-    REG_VK_PTR(vkGetPhysicalDeviceProperties, 0x02);          // pProperties (out)
-    REG_VK_PTR(vkGetPhysicalDeviceFeatures, 0x02);            // pFeatures (out)
-    REG_VK_PTR(vkGetPhysicalDeviceMemoryProperties, 0x02);    // pMemoryProperties (out)
-    REG_VK_PTR(vkGetPhysicalDeviceQueueFamilyProperties, 0x06); // pCount, pQueueFamilyProperties (out)
-    REG_VK_PTR(vkCreateDevice, 0x0E);              // pCreateInfo, pAllocator, pDevice
-    REG_VK_PTR(vkDestroyDevice, 0x02);             // pAllocator
-    REG_VK_PTR(vkGetDeviceQueue, 0x08);            // ppQueue (out)
-    REG_VK(vkDeviceWaitIdle);
-    REG_VK(vkQueueWaitIdle);
-    // Swapchain (KHR extension).
-    REG_VK_PTR(vkCreateSwapchainKHR, 0x0E);        // pCreateInfo, pAllocator, pSwapchain
-    REG_VK_PTR(vkDestroySwapchainKHR, 0x04);       // swapchain, pAllocator
-    REG_VK_PTR(vkGetSwapchainImagesKHR, 0x0C);     // pCount (out), pImages (out)
-    REG_VK_PTR(vkAcquireNextImageKHR, 0x20);       // pImageIndex (out)
-    REG_VK_PTR(vkQueuePresentKHR, 0x02);           // pPresentInfo
-    // Command buffers.
-    REG_VK_PTR(vkCreateCommandPool, 0x0E);         // pCreateInfo, pAllocator, pPool
-    REG_VK_PTR(vkDestroyCommandPool, 0x04);        // pool, pAllocator
-    REG_VK_PTR(vkAllocateCommandBuffers, 0x06);    // pAllocateInfo, pCommandBuffers (out)
-    REG_VK_PTR(vkFreeCommandBuffers, 0x08);        // pCommandBuffers
-    REG_VK_PTR(vkBeginCommandBuffer, 0x02);        // pBeginInfo
-    REG_VK(vkEndCommandBuffer);
-    REG_VK(vkResetCommandBuffer);
-    REG_VK_PTR(vkQueueSubmit, 0x04);               // pSubmits
-    // Image / image views.
-    REG_VK_PTR(vkCreateImage, 0x0E);               // pCreateInfo, pAllocator, pImage
-    REG_VK_PTR(vkDestroyImage, 0x04);              // image, pAllocator
-    REG_VK_PTR(vkGetImageMemoryRequirements, 0x04); // pMemoryRequirements (out)
-    REG_VK_PTR(vkBindImageMemory, 0x00);
-    REG_VK_PTR(vkCreateImageView, 0x0E);           // pCreateInfo, pAllocator, pView
-    REG_VK_PTR(vkDestroyImageView, 0x04);          // view, pAllocator
-    // Buffers.
-    REG_VK_PTR(vkCreateBuffer, 0x0E);              // pCreateInfo, pAllocator, pBuffer
-    REG_VK_PTR(vkDestroyBuffer, 0x04);             // buffer, pAllocator
-    REG_VK_PTR(vkGetBufferMemoryRequirements, 0x04); // pMemoryRequirements (out)
-    REG_VK_PTR(vkBindBufferMemory, 0x00);
-    // Memory.
-    REG_VK_PTR(vkAllocateMemory, 0x0E);            // pAllocateInfo, pAllocator, pDeviceMemory
-    REG_VK_PTR(vkFreeMemory, 0x04);                // memory, pAllocator
-    REG_VK_PTR(vkMapMemory, 0x20);                 // ppData (out)
-    REG_VK(vkUnmapMemory);
-    REG_VK_PTR(vkFlushMappedMemoryRanges, 0x04);   // pRanges
-    REG_VK_PTR(vkInvalidateMappedMemoryRanges, 0x04); // pRanges
-    // Render pass / framebuffers.
-    REG_VK_PTR(vkCreateRenderPass, 0x0E);          // pCreateInfo, pAllocator, pPass
-    REG_VK_PTR(vkDestroyRenderPass, 0x04);         // pass, pAllocator
-    REG_VK_PTR(vkCreateFramebuffer, 0x0E);         // pCreateInfo, pAllocator, pFramebuffer
-    REG_VK_PTR(vkDestroyFramebuffer, 0x04);        // framebuffer, pAllocator
-    // Shaders / pipelines.
-    REG_VK_PTR(vkCreateShaderModule, 0x0E);        // pCreateInfo, pAllocator, pModule
-    REG_VK_PTR(vkDestroyShaderModule, 0x04);       // module, pAllocator
-    REG_VK_PTR(vkCreatePipelineCache, 0x0E);       // pCreateInfo, pAllocator, pCache
-    REG_VK_PTR(vkDestroyPipelineCache, 0x04);      // cache, pAllocator
-    REG_VK_PTR(vkCreateGraphicsPipelines, 0x28);   // pCreateInfos, pPipelines (out)
-    REG_VK_PTR(vkCreateComputePipelines, 0x28);    // pCreateInfos, pPipelines (out)
-    REG_VK_PTR(vkDestroyPipeline, 0x04);           // pipeline, pAllocator
-    REG_VK_PTR(vkCreatePipelineLayout, 0x0E);      // pCreateInfo, pAllocator, pLayout
-    REG_VK_PTR(vkDestroyPipelineLayout, 0x04);     // layout, pAllocator
-    REG_VK_PTR(vkCreateDescriptorSetLayout, 0x0E); // pCreateInfo, pAllocator, pLayout
-    REG_VK_PTR(vkDestroyDescriptorSetLayout, 0x04);// layout, pAllocator
-    REG_VK_PTR(vkAllocateDescriptorSets, 0x06);    // pAllocateInfo, pDescriptorSets (out)
-    REG_VK_PTR(vkFreeDescriptorSets, 0x08);         // pDescriptorSets
-    REG_VK_PTR(vkUpdateDescriptorSets, 0x14);      // pDescriptorWrites, pDescriptorCopies
-    REG_VK_PTR(vkCreateDescriptorPool, 0x0E);      // pCreateInfo, pAllocator, pPool
-    REG_VK_PTR(vkDestroyDescriptorPool, 0x04);     // pool, pAllocator
-    // Fences / semaphores / events.
-    REG_VK_PTR(vkCreateFence, 0x0E);               // pCreateInfo, pAllocator, pFence
-    REG_VK_PTR(vkDestroyFence, 0x04);              // fence, pAllocator
-    REG_VK_PTR(vkResetFences, 0x04);               // pFences
-    REG_VK(vkGetFenceStatus);
-    REG_VK_PTR(vkWaitForFences, 0x04);             // pFences
-    REG_VK_PTR(vkCreateSemaphore, 0x0E);           // pCreateInfo, pAllocator, pSemaphore
-    REG_VK_PTR(vkDestroySemaphore, 0x04);          // semaphore, pAllocator
-    REG_VK_PTR(vkCreateEvent, 0x0E);               // pCreateInfo, pAllocator, pEvent
-    REG_VK_PTR(vkDestroyEvent, 0x04);              // event, pAllocator
-    REG_VK(vkSetEvent);
-    REG_VK(vkResetEvent);
-    // Query pools.
-    REG_VK_PTR(vkCreateQueryPool, 0x0E);           // pCreateInfo, pAllocator, pQueryPool
-    REG_VK_PTR(vkDestroyQueryPool, 0x04);          // queryPool, pAllocator
-    REG_VK_PTR(vkGetQueryPoolResults, 0x20);       // pData (out)
-    // Sampler.
-    REG_VK_PTR(vkCreateSampler, 0x0E);             // pCreateInfo, pAllocator, pSampler
-    REG_VK_PTR(vkDestroySampler, 0x04);            // sampler, pAllocator
-    // Surface / WSI (1.5.3-alpha). Handles (VkSurfaceKHR) pass verbatim;
-    // only true pointer args are masked. Needed for the headless swapchain
-    // path (VK_KHR_surface + VK_EXT_headless_surface).
-    REG_VK_PTR(vkDestroySurfaceKHR, 0x04);             // surface, pAllocator
-    REG_VK_PTR(vkCreateHeadlessSurfaceEXT, 0x0E);      // pCreateInfo, pAllocator, pSurface(out)
-    REG_VK_PTR(vkGetPhysicalDeviceSurfaceSupportKHR, 0x08);      // pSupported (out)
-    REG_VK_PTR(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, 0x04); // pSurfaceCapabilities (out)
-    REG_VK_PTR(vkGetPhysicalDeviceSurfaceFormatsKHR, 0x0C);      // pCount(out), pFormats(out)
-    REG_VK_PTR(vkGetPhysicalDeviceSurfacePresentModesKHR, 0x0C); // pCount(out), pModes(out)
-    // vkGetInstanceProcAddr / vkGetDeviceProcAddr (essential for extension loading).
-    REG_VK_PROC(vkGetInstanceProcAddr);
-    REG_VK_PROC(vkGetDeviceProcAddr);
-    #undef REG_VK
-    #undef REG_VK_PTR
-    #undef REG_VK_PROC
-    // ── libwayland-client.so.0 ────────────────────────────────────
-    // Wayland functions take pointer args (const char* name, wl_proxy*,
-    // wl_listener*, void* impl, etc.) that need guest→host translation.
-    const char* wl_libs[] = {"libwayland-client.so.0", "libwayland-client.so"};
-    void* wl_handle = dlopen("libwayland-client.so.0", RTLD_LAZY);
-    if (!wl_handle) wl_handle = dlopen("libwayland-client.so", RTLD_LAZY);
-    #define REG_WL(name) do { \
-        void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
-        for (const char* L : wl_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_WL_PTR(name, ptrs) do { \
-        void* p = wl_handle ? dlsym(wl_handle, #name) : nullptr; \
-        for (const char* L : wl_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_WL_PTR(wl_display_connect, 0x01);       // arg 0: const char *name
-    REG_WL(wl_display_connect_to_fd);            // arg 0: int fd (not pointer)
-    REG_WL(wl_display_disconnect);               // arg 0: wl_display* (opaque handle, not translated)
-    REG_WL(wl_display_get_fd);
-    REG_WL(wl_display_dispatch);
-    REG_WL(wl_display_dispatch_pending);
-    REG_WL_PTR(wl_display_dispatch_queue, 0x02); // arg 1: wl_event_queue*
-    REG_WL_PTR(wl_display_roundtrip, 0x01);      // arg 0: wl_display*
-    REG_WL_PTR(wl_display_flush, 0x01);          // arg 0: wl_display*
-    REG_WL_PTR(wl_display_read_events, 0x01);    // arg 0: wl_display*
-    REG_WL_PTR(wl_display_prepare_read, 0x01);   // arg 0: wl_display*
-    REG_WL_PTR(wl_display_cancel_read, 0x01);    // arg 0: wl_display*
-    REG_WL(wl_proxy_marshal);                     // variadic — can't thunk safely
-    REG_WL_PTR(wl_proxy_create, 0x01);           // arg 0: wl_proxy* (factory)
-    REG_WL_PTR(wl_proxy_destroy, 0x01);          // arg 0: wl_proxy*
-    REG_WL_PTR(wl_proxy_get_user_data, 0x01);    // arg 0: wl_proxy*
-    REG_WL_PTR(wl_proxy_set_user_data, 0x03);    // arg 0: wl_proxy*, arg 1: void*
-    REG_WL_PTR(wl_proxy_get_id, 0x01);           // arg 0: wl_proxy*
-    REG_WL_PTR(wl_proxy_get_class, 0x01);        // arg 0: wl_proxy*
-    REG_WL_PTR(wl_proxy_add_listener, 0x03);     // arg 0: wl_proxy*, arg 1: void** impl
-    REG_WL_PTR(wl_proxy_get_listener, 0x01);     // arg 0: wl_proxy*
-    REG_WL(wl_proxy_marshal_constructor);         // variadic
-    REG_WL(wl_proxy_marshal_constructor_versioned); // variadic
-    REG_WL_PTR(wl_proxy_set_tag, 0x03);          // arg 0: wl_proxy*, arg 1: const char**
-    REG_WL_PTR(wl_proxy_get_tag, 0x01);          // arg 0: wl_proxy*
-    REG_WL_PTR(wl_proxy_wrapper_destroy, 0x01);  // arg 0: wl_proxy*
-    REG_WL_PTR(wl_event_queue_destroy, 0x01);    // arg 0: wl_event_queue*
-    #undef REG_WL
-    #undef REG_WL_PTR
-    // ── libwayland-egl.so.1 ──────────────────────────────────────
-    const char* wl_egl_libs[] = {"libwayland-egl.so.1", "libwayland-egl.so"};
-    void* wl_egl_handle = dlopen("libwayland-egl.so.1", RTLD_LAZY);
-    if (!wl_egl_handle) wl_egl_handle = dlopen("libwayland-egl.so", RTLD_LAZY);
-    #define REG_WL_EGL(name) do { \
-        void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
-        for (const char* L : wl_egl_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_WL_EGL_PTR(name, ptrs) do { \
-        void* p = wl_egl_handle ? dlsym(wl_egl_handle, #name) : nullptr; \
-        for (const char* L : wl_egl_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_WL_EGL_PTR(wl_egl_window_create, 0x03);    // args: wl_surface*, int, int
-    REG_WL_EGL_PTR(wl_egl_window_destroy, 0x01);   // arg 0: wl_egl_window*
-    REG_WL_EGL_PTR(wl_egl_window_get_attached_size, 0x03); // arg 0: window, arg 1: int*, arg 2: int*
-    REG_WL_EGL_PTR(wl_egl_window_resize, 0x01);    // arg 0: wl_egl_window*
-    REG_WL_EGL_PTR(wl_egl_window_get_buffer_scale, 0x01);
-    REG_WL_EGL_PTR(wl_egl_window_set_buffer_scale, 0x01);
-    REG_WL_EGL_PTR(wl_egl_window_set_buffer_transform, 0x01);
-    #undef REG_WL_EGL
-    #undef REG_WL_EGL_PTR
-    // ── libX11.so.6 ───────────────────────────────────────────────
-    // X11 functions take pointer args (Display*, Window, GC, XEvent*,
-    // char*, etc.) that need guest→host translation.
-    const char* x11_libs[] = {"libX11.so.6", "libX11.so"};
-    void* x11_handle = dlopen("libX11.so.6", RTLD_LAZY);
-    if (!x11_handle) x11_handle = dlopen("libX11.so", RTLD_LAZY);
-    #define REG_X11(name) do { \
-        void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
-        for (const char* L : x11_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_X11_PTR(name, ptrs) do { \
-        void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
-        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_X11_EX(name, ptrs, nstack) do { \
-        void* p = x11_handle ? dlsym(x11_handle, #name) : nullptr; \
-        for (const char* L : x11_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
-    } while(0)
-    REG_X11_PTR(XOpenDisplay, 0x01);             // arg 0: const char* name
-    REG_X11_PTR(XCloseDisplay, 0x01);            // arg 0: Display*
-    REG_X11_EX(XCreateWindow, 0xA01, 3);         // args 0,9,11 ptrs; 3 stack args
-    REG_X11_EX(XCreateSimpleWindow, 0x01, 1);    // arg 0: Display*; 1 stack arg (background pixel)
-    REG_X11_PTR(XDestroyWindow, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XMapWindow, 0x01);               // arg 0: Display*
-    REG_X11_PTR(XUnmapWindow, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XFlush, 0x01);                   // arg 0: Display*
-    REG_X11_PTR(XSync, 0x01);                    // arg 0: Display*
-    REG_X11_PTR(XPending, 0x01);                 // arg 0: Display*
-    REG_X11_PTR(XNextEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
-    REG_X11_PTR(XPeekEvent, 0x03);               // arg 0: Display*, arg 1: XEvent*
-    REG_X11_PTR(XEventsQueued, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XWindowEvent, 0x09);             // arg 0: Display*, arg 3: XEvent*
-    REG_X11_PTR(XCheckWindowEvent, 0x09);        // arg 0: Display*, arg 3: XEvent*
-    REG_X11_PTR(XMaskEvent, 0x05);               // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckMaskEvent, 0x05);          // arg 0: Display*, arg 2: XEvent*
-    REG_X11_PTR(XCheckTypedEvent, 0x09);         // arg 0: Display*, arg 3: XEvent*
-    REG_X11_PTR(XCheckTypedWindowEvent, 0x11);   // arg 0: Display*, arg 4: XEvent*
-    REG_X11_PTR(XPutBackEvent, 0x03);            // arg 0: Display*, arg 1: XEvent*
-    REG_X11_PTR(XSendEvent, 0x10);               // arg 0: Display*, arg 4: XEvent*
-    REG_X11_PTR(XDisplayWidth, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XDisplayHeight, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XDisplayWidthMM, 0x01);          // arg 0: Display*
-    REG_X11_PTR(XDisplayHeightMM, 0x01);         // arg 0: Display*
-    REG_X11_PTR(DefaultRootWindow, 0x01);        // arg 0: Display*
-    REG_X11_PTR(BlackPixel, 0x01);               // arg 0: Display*
-    REG_X11_PTR(WhitePixel, 0x01);               // arg 0: Display*
-    REG_X11_PTR(XSetForeground, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XSetBackground, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XFillRectangle, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XDrawRectangle, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XDrawLine, 0x01);                // arg 0: Display*
-    REG_X11_PTR(XDrawPoint, 0x01);               // arg 0: Display*
-    REG_X11_PTR(XCopyArea, 0x01);                // arg 0: Display*
-    REG_X11_PTR(XCreateGC, 0x09);                // arg 0: Display*, arg 3: XGCValues*
-    REG_X11_PTR(XFreeGC, 0x01);                  // arg 0: Display*
-    REG_X11_PTR(XCreatePixmap, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XFreePixmap, 0x01);              // arg 0: Display*
-    REG_X11_PTR(XSetWindowBackground, 0x01);     // arg 0: Display*
-    REG_X11_PTR(XSetWindowBackgroundPixmap, 0x01); // arg 0: Display*
-    REG_X11_PTR(XStoreName, 0x03);               // arg 0: Display*, arg 2: const char*
-    REG_X11_PTR(XFetchName, 0x07);               // arg 0: Display*, arg 2: char**
-    REG_X11_PTR(XSetWMProtocols, 0x04);          // arg 0: Display*, arg 2: Atom*
-    REG_X11_PTR(XInternAtom, 0x03);              // arg 0: Display*, arg 1: const char*
-    REG_X11_PTR(XInternAtoms, 0x13);             // arg 0: Display*, arg 1: char**, arg 4: Atom*
-    REG_X11_PTR(XGetAtomName, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XCreateColormap, 0x01);          // arg 0: Display*
-    REG_X11_PTR(XFreeColormap, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XAllocColor, 0x05);              // arg 0: Display*, arg 2: XColor*
-    REG_X11_PTR(XFreeColors, 0x05);              // arg 0: Display*, arg 2: unsigned long*
-    REG_X11_PTR(XSetClipMask, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XSetClipOrigin, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XCopyGC, 0x01);                  // arg 0: Display*
-    REG_X11_PTR(XChangeGC, 0x09);                // arg 0: Display*, arg 3: XGCValues*
-    REG_X11_PTR(XSetFunction, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XSetLineAttributes, 0x01);       // arg 0: Display*
-    REG_X11_PTR(XSetDashes, 0x09);               // arg 0: Display*, arg 3: const char*
-    REG_X11_PTR(XDrawString, 0x20);              // arg 0: Display*, arg 4: const char*
-    REG_X11_PTR(XDrawImageString, 0x20);         // arg 0: Display*, arg 4: const char*
-    REG_X11_PTR(XTextExtents, 0x3F);             // args 0,1,2,3,4,5 ptrs (font, str, 3 int* outs, XCharStruct*)
-    REG_X11_PTR(XLoadFont, 0x03);                // arg 0: Display*, arg 1: const char*
-    REG_X11_PTR(XUnloadFont, 0x01);              // arg 0: Display*
-    REG_X11_PTR(XQueryFont, 0x01);               // arg 0: Display*
-    REG_X11_PTR(XFreeFont, 0x01);                // arg 0: Display*
-    REG_X11_PTR(XListFonts, 0x1B);               // arg 0: Display*, arg 1: const char*, arg 3: char***
-    REG_X11_PTR(XFreeFontNames, 0x01);           // arg 0: char**
-    REG_X11_PTR(XCreateBitmapFromData, 0x08);    // arg 0: Display*, arg 3: const char*
-    REG_X11_PTR(XCreatePixmapFromBitmapData, 0x01); // arg 0: Display*
-    REG_X11_EX(XQueryPointer, 0x1FD, 1);         // args 0,2..8 ptrs; 1 stack arg
-    REG_X11_EX(XWarpPointer, 0x01, 1);           // arg 0: Display*; 1 stack arg
-    REG_X11_PTR(XGrabPointer, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XUngrabPointer, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XGrabKeyboard, 0x01);            // arg 0: Display*
-    REG_X11_PTR(XUngrabKeyboard, 0x01);          // arg 0: Display*
-    REG_X11_PTR(XBell, 0x01);                    // arg 0: Display*
-    REG_X11_PTR(XScreenCount, 0x01);             // arg 0: Display*
-    REG_X11_PTR(XSetInputFocus, 0x01);           // arg 0: Display*
-    REG_X11_PTR(XGetInputFocus, 0x05);           // arg 0: Display*, arg 2: int*
-    REG_X11_PTR(XChangeProperty, 0x80);          // arg 0: Display*, arg 6: const unsigned char*
-    REG_X11_EX(XGetWindowProperty, 0xF81, 4);    // args 0,7,8,9,10,11 ptrs; 4 stack args
-    REG_X11_PTR(XDeleteProperty, 0x01);          // arg 0: Display*
-    REG_X11_PTR(XGetWindowAttributes, 0x07);     // arg 0: Display*, arg 2: XWindowAttributes*
-    #undef REG_X11
-    #undef REG_X11_PTR
-    // ── libX11-xcb.so.1 ─────────────────────────────────────────
-    const char* x11xcb_libs[] = {"libX11-xcb.so.1", "libX11-xcb.so"};
-    void* x11xcb_handle = dlopen("libX11-xcb.so.1", RTLD_LAZY);
-    if (!x11xcb_handle) x11xcb_handle = dlopen("libX11-xcb.so", RTLD_LAZY);
-    #define REG_X11XCB(name) do { \
-        void* p = x11xcb_handle ? dlsym(x11xcb_handle, #name) : nullptr; \
-        for (const char* L : x11xcb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_X11XCB(XGetXCBConnection);
-    #undef REG_X11XCB
-    // ── libxcb.so.1 ─────────────────────────────────────────────
-    const char* xcb_libs[] = {"libxcb.so.1", "libxcb.so"};
-    void* xcb_handle = dlopen("libxcb.so.1", RTLD_LAZY);
-    if (!xcb_handle) xcb_handle = dlopen("libxcb.so", RTLD_LAZY);
-    #define REG_XCB(name) do { \
-        void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
-        for (const char* L : xcb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_XCB_PTR(name, ptrs) do { \
-        void* p = xcb_handle ? dlsym(xcb_handle, #name) : nullptr; \
-        for (const char* L : xcb_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_XCB_PTR(xcb_connect, 0x02);              // arg 0: const char*, arg 1: int*
-    REG_XCB(xcb_disconnect);
-    REG_XCB(xcb_connection_has_error);
-    REG_XCB_PTR(xcb_get_setup, 0x01);            // arg 0: xcb_connection_t*
-    REG_XCB(xcb_setup_roots_iterator);
-    REG_XCB(xcb_screen_allowed_depths_iterator);
-    REG_XCB(xcb_depth_visuals_iterator);
-    REG_XCB(xcb_generate_id);
-    REG_XCB_PTR(xcb_create_window, 0x01);        // arg 0: xcb_connection_t*
-    REG_XCB_PTR(xcb_create_window_checked, 0x01);
-    REG_XCB_PTR(xcb_destroy_window, 0x01);
-    REG_XCB_PTR(xcb_map_window, 0x01);
-    REG_XCB_PTR(xcb_unmap_window, 0x01);
-    REG_XCB_PTR(xcb_flush, 0x01);
-    REG_XCB_PTR(xcb_get_file_descriptor, 0x01);
-    REG_XCB_PTR(xcb_wait_for_event, 0x01);
-    REG_XCB_PTR(xcb_poll_for_event, 0x01);
-    REG_XCB_PTR(xcb_free, 0x01);
-    REG_XCB(xcb_visualtype_get);
-    #undef REG_XCB
-    #undef REG_XCB_PTR
-    // ── libgbm.so.1 ───────────────────────────────────────────────
-    const char* gbm_libs[] = {"libgbm.so.1", "libgbm.so"};
-    void* gbm_handle = dlopen("libgbm.so.1", RTLD_LAZY);
-    if (!gbm_handle) gbm_handle = dlopen("libgbm.so", RTLD_LAZY);
-    #define REG_GBM(name) do { \
-        void* p = gbm_handle ? dlsym(gbm_handle, #name) : nullptr; \
-        for (const char* L : gbm_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_GBM(gbm_create_device);
-    REG_GBM(gbm_device_destroy);
-    REG_GBM(gbm_bo_create);
-    REG_GBM(gbm_bo_destroy);
-    REG_GBM(gbm_bo_get_width);
-    REG_GBM(gbm_bo_get_height);
-    REG_GBM(gbm_bo_get_stride);
-    REG_GBM(gbm_bo_get_format);
-    REG_GBM(gbm_bo_get_handle);
-    REG_GBM(gbm_bo_map);
-    REG_GBM(gbm_bo_unmap);
-    REG_GBM(gbm_surface_create);
-    REG_GBM(gbm_surface_destroy);
-    REG_GBM(gbm_surface_lock_front_buffer);
-    REG_GBM(gbm_surface_release_buffer);
-    #undef REG_GBM
-    // ── libXext.so.6 (XShm) ─────────────────────────────────────────
-    const char* xext_libs[] = {"libXext.so.6", "libXext.so"};
-    void* xext_handle = dlopen("libXext.so.6", RTLD_LAZY);
-    if (!xext_handle) xext_handle = dlopen("libXext.so", RTLD_LAZY);
-    #define REG_XEXT(name) do { \
-        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
-        for (const char* L : xext_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_XEXT_PTR(name, ptrs) do { \
-        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
-        for (const char* L : xext_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_XEXT_EX(name, ptrs, nstack) do { \
-        void* p = xext_handle ? dlsym(xext_handle, #name) : nullptr; \
-        for (const char* L : xext_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
-    } while(0)
-    REG_XEXT(XShmQueryExtension);
-    REG_XEXT(XShmGetEventBase);
-    REG_XEXT_PTR(XShmCreateImage, 0x33);          // args 0,1,4,5 are pointers
-    REG_XEXT(XShmAttach);
-    REG_XEXT(XShmDetach);
-    REG_XEXT_EX(XShmPutImage, 0x0F, 3);           // args 0-3 are ptrs; 3 stack args
-    REG_XEXT_PTR(XShmGetImage, 0x04);            // arg 2: XImage*
-    #undef REG_XEXT
-    #undef REG_XEXT_PTR
-    // ── libGLX.so.2 (GLX) ───────────────────────────────────────────
-    const char* glx_libs[] = {"libGLX.so.2", "libGLX.so"};
-    void* glx_handle = dlopen("libGLX.so.2", RTLD_LAZY);
-    if (!glx_handle) glx_handle = dlopen("libGLX.so", RTLD_LAZY);
-    #define REG_GLX(name) do { \
-        void* p = glx_handle ? dlsym(glx_handle, #name) : nullptr; \
-        for (const char* L : glx_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_GLX_PTR(name, ptrs) do { \
-        void* p = glx_handle ? dlsym(glx_handle, #name) : nullptr; \
-        for (const char* L : glx_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_GLX_PTR(glXChooseVisual, 0x04);           // arg 2: int* (NULL-terminated attrib list)
-    REG_GLX(glXCreateContext);
-    REG_GLX(glXDestroyContext);
-    REG_GLX(glXMakeCurrent);
-    REG_GLX(glXSwapBuffers);
-    REG_GLX(glXGetClientString);
-    REG_GLX(glXQueryExtensionsString);
-    REG_GLX(glXQueryServerString);
-    REG_GLX(glXGetFBConfigs);
-    REG_GLX_PTR(glXGetFBConfigAttrib, 0x08);      // arg 3: int* (value out)
-    REG_GLX_PTR(glXCreateWindow, 0x08);           // arg 3: int* attrib_list
-    REG_GLX(glXDestroyWindow);
-    REG_GLX(glXCreatePbuffer);
-    REG_GLX(glXDestroyPbuffer);
-    #undef REG_GLX
-    #undef REG_GLX_PTR
-    // ── libXrandr.so.2 (RandR) ──────────────────────────────────────
-    const char* randr_libs[] = {"libXrandr.so.2", "libXrandr.so"};
-    void* randr_handle = dlopen("libXrandr.so.2", RTLD_LAZY);
-    if (!randr_handle) randr_handle = dlopen("libXrandr.so", RTLD_LAZY);
-    #define REG_RANDR(name) do { \
-        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
-        for (const char* L : randr_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_RANDR_PTR(name, ptrs) do { \
-        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
-        for (const char* L : randr_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_RANDR_EX(name, ptrs, nstack) do { \
-        void* p = randr_handle ? dlsym(randr_handle, #name) : nullptr; \
-        for (const char* L : randr_libs) register_function_(L, #name, p, ptrs, nstack, 0, THUNK_PROXY); \
-    } while(0)
-    REG_RANDR(XRRGetScreenResources);
-    REG_RANDR(XRRGetScreenResourcesCurrent);
-    REG_RANDR(XRRFreeScreenResources);
-    REG_RANDR(XRRGetCrtcInfo);
-    REG_RANDR(XRRFreeCrtcInfo);
-    REG_RANDR(XRRGetOutputInfo);
-    REG_RANDR(XRRFreeOutputInfo);
-    REG_RANDR_EX(XRRSetCrtcConfig, 0x103, 2);   // args 0,1,8 ptrs; 2 stack args
-    REG_RANDR(XRRGetScreenSizeRange);
-    #undef REG_RANDR
-    #undef REG_RANDR_PTR
-    // ── libXkblib.so (Xkb) ──────────────────────────────────────────
-    const char* xkb_libs[] = {"libXkblib.so", "libX11-xcb.so"};
-    void* xkb_handle = dlopen("libXkblib.so", RTLD_LAZY);
-    if (!xkb_handle) xkb_handle = dlopen("libX11-xcb.so", RTLD_LAZY);
-    #define REG_XKB(name) do { \
-        void* p = xkb_handle ? dlsym(xkb_handle, #name) : nullptr; \
-        for (const char* L : xkb_libs) register_function_(L, #name, p, 0, 0, 0, THUNK_PROXY); \
-    } while(0)
-    #define REG_XKB_PTR(name, ptrs) do { \
-        void* p = xkb_handle ? dlsym(xkb_handle, #name) : nullptr; \
-        for (const char* L : xkb_libs) register_function_(L, #name, p, ptrs, 0, 0, THUNK_PROXY); \
-    } while(0)
-    REG_XKB(XkbOpenDevice);
-    REG_XKB(XkbGetMap);
-    REG_XKB_PTR(XkbGetState, 0x04);               // arg 2: XkbState* out
-    REG_XKB(XkbSetState);
-    REG_XKB(XkbSetAutoRepeatRate);
-    REG_XKB_PTR(XkbGetAutoRepeatRate, 0x0C);      // arg 2: unsigned int* delay, arg 3: unsigned int* interval
-    REG_XKB(XkbFreeKeyboard);
-    #undef REG_XKB
-    #undef REG_XKB_PTR
+    struct FamilyDef {
+        const char* const* sonames;
+        uint32_t n;
+        void* handle;  // dlopen'd host handle (null = host lib unavailable)
+    };
+    static const char* kVkSonames[]   = {"libvulkan.so.1", "libvulkan.so"};
+    static const char* kWlSonames[]   = {"libwayland-client.so.0", "libwayland-client.so"};
+    static const char* kWlEglSonames[] = {"libwayland-egl.so.1", "libwayland-egl.so"};
+    static const char* kX11Sonames[]  = {"libX11.so.6", "libX11.so"};
+    static const char* kX11XcbSonames[] = {"libX11-xcb.so.1", "libX11-xcb.so"};
+    static const char* kXcbSonames[]  = {"libxcb.so.1", "libxcb.so"};
+    static const char* kGbmSonames[]  = {"libgbm.so.1", "libgbm.so"};
+    static const char* kXextSonames[] = {"libXext.so.6", "libXext.so"};
+    static const char* kGlxSonames[]  = {"libGLX.so.2", "libGLX.so"};
+    static const char* kRandrSonames[] = {"libXrandr.so.2", "libXrandr.so"};
+    static const char* kXkbSonames[]  = {"libXkblib.so", "libX11-xcb.so"};
+    // Indexed by (LibFamily - LibFamily::VK). The generator emits the
+    // display families contiguously after the GraphicThunk families, so
+    // VK is the first DisplayThunk family.
+    static FamilyDef kFamilies[] = {
+        {kVkSonames, 2, nullptr},    // VK
+        {kWlSonames, 2, nullptr},    // WL
+        {kWlEglSonames, 2, nullptr}, // WL_EGL
+        {kX11Sonames, 2, nullptr},   // X11
+        {kX11XcbSonames, 2, nullptr},// X11XCB
+        {kXcbSonames, 2, nullptr},   // XCB
+        {kGbmSonames, 2, nullptr},   // GBM
+        {kXextSonames, 2, nullptr},  // XEXT
+        {kGlxSonames, 2, nullptr},   // GLX
+        {kRandrSonames, 2, nullptr}, // RANDR
+        {kXkbSonames, 2, nullptr},   // XKB
+    };
+
+    constexpr int kFirstDisplayFamily = static_cast<int>(thunk::LibFamily::VK);
+
+    for (const thunk::Spec& spec : thunk::specs) {
+        const int fam = static_cast<int>(spec.lib) - kFirstDisplayFamily;
+        if (fam < 0 || fam >= static_cast<int>(sizeof(kFamilies) / sizeof(kFamilies[0]))) {
+            continue;  // GraphicThunk's families (GL/GLES/EGL/SDL/GLFW) or UNKNOWN
+        }
+        FamilyDef& fd = kFamilies[fam];
+        // Lazy host-library load: first soname, then the second.
+        if (!fd.handle) {
+            fd.handle = dlopen(fd.sonames[0], RTLD_LAZY);
+            if (!fd.handle) fd.handle = dlopen(fd.sonames[1], RTLD_LAZY);
+        }
+        void* host_fn = fd.handle ? dlsym(fd.handle, spec.name) : nullptr;
+        // GetProcAddress must stay non-null: dispatch returns the
+        // trampoline before calling it, but a null host_fn short-circuits
+        // to 0 first.
+        if (spec.policy == thunk::Policy::VK_GET_PROC && !host_fn) {
+            host_fn = reinterpret_cast<void*>(1);
+        }
+
+        // Derive the legacy ABI-shape fields from the ARGS column so the
+        // dispatcher's proxy/vulkan/generic paths keep working unchanged.
+        uint16_t pointer_args = 0;
+        uint8_t n_float = 0, n_int = 0, n_args = 0;
+        for (const char* a = spec.args; *a; ++a, ++n_args) {
+            switch (*a) {
+            case 'p': case 'z':
+                pointer_args |= static_cast<uint16_t>(1u << n_args);
+                break;
+            case 'f': n_float++; break;
+            default:  n_int++; break;
+            }
+        }
+        uint8_t n_stack = 0;
+        uint8_t flags = 0;
+        if (n_float > 0 && n_int > 0) {
+            // Mixed int+float ABI: n_stack holds the integer arity (x0..).
+            flags |= THUNK_MIXED_FP;
+            n_stack = static_cast<uint8_t>(n_int);
+        } else if (n_float > 0) {
+            n_stack = 0;
+        } else if (n_args > 8) {
+            // Args 8+ live on the guest stack at SP (AAPCS64).
+            n_stack = static_cast<uint8_t>(n_args - 8);
+        }
+        switch (spec.policy) {
+        case thunk::Policy::PROXY:
+            flags |= THUNK_PROXY;
+            break;
+        case thunk::Policy::VK_GET_PROC:
+            flags |= THUNK_VULKAN | THUNK_GET_PROC;
+            break;
+        case thunk::Policy::VK_CREATE_INSTANCE:
+        case thunk::Policy::VK_CREATE_DEVICE:
+        case thunk::Policy::VK_PRESENT:
+        case thunk::Policy::VULKAN:
+            flags |= THUNK_VULKAN;
+            break;
+        default:
+            break;
+        }
+        if (spec.ret == thunk::RetKind::STRING) flags |= THUNK_RET_STRING;
+
+        for (uint32_t i = 0; i < fd.n; i++) {
+            register_function_(fd.sonames[i], spec.name, host_fn,
+                               pointer_args, n_stack, n_float, flags, &spec);
+        }
+    }
 }
+
 } // namespace arm64emu

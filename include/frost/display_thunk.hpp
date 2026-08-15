@@ -42,6 +42,7 @@
 #include <string>
 #include <vector>
 namespace arm64emu {
+namespace thunk { struct Spec; }
 class Memory;
 class CPU;
 class DisplayProxy;
@@ -82,7 +83,8 @@ public:
                             uint16_t pointer_args = 0,
                             uint8_t n_stack = 0,
                             uint8_t n_float = 0,
-                            uint8_t flags = 0);
+                            uint8_t flags = 0,
+                            const thunk::Spec* spec = nullptr);
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
     uint64_t proxy_dispatch_(CPU& cpu, const std::string& sym_name);

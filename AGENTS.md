@@ -586,6 +586,34 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `include/opgen_thunk.hpp`), then `make opgen-thunk-check` (CI guard —
   fails if the header drifted from the spec). Do NOT hand-edit the
   generated header or re-add ad-hoc REG_* entries in thunk.cpp.
+- **DisplayThunk (Vulkan/Wayland/X11/XCB/GBM/GLX/RandR/Xkb) is
+  table-driven too (1.5.3-alpha):** the SAME `tools/opgen/thunk_dp.txt` →
+  `opgen_thunk.hpp` pipeline now carries the ~275 display symbols
+  (families `VK`/`WL`/`WL_EGL`/`X11`/`X11XCB`/`XCB`/`GBM`/`XEXT`/`GLX`/
+  `RANDR`/`XKB`; policies `PROXY`/`VULKAN`/`VK_GET_PROC`/
+  `VK_CREATE_INSTANCE`/`VK_CREATE_DEVICE`/`VK_PRESENT`; size kinds
+  `X_DRAWSTR`/`X_SETWMPROTO`). The hand-rolled `REG_VK*/REG_WL*/REG_X11*`
+  macro ladders in `display_thunk.cpp` are GONE. `DisplayThunk::
+  register_known_symbols_` iterates `thunk::specs`, filters to the display
+  families, derives the legacy ABI shape (`pointer_args`/`n_stack`/
+  `n_float`/`flags`) from the ARGS column, and registers each symbol under
+  every soname of its family. ARGS semantics: `'p'/'z'` = translated
+  pointer, `'i'` = VERBATIM arg (opaque Vk*/wl_*/XID/Display* handles
+  round-trip as the host pointer the host returned); ARGS length > 8 ⇒
+  stack args (n_stack = len−8); mixed int+float ⇒ `THUNK_MIXED_FP` with
+  n_stack = int arity. Dispatch routes by POLICY (not symbol name) for the
+  deep-marshalling entry points (`VK_GET_PROC`, `VK_CREATE_INSTANCE`,
+  `VK_CREATE_DEVICE`, `VK_PRESENT`) and sizes bounces by `SizeKind`
+  (thunk.cpp's `SizeKind` switch gains a `default:` so new kinds are safe).
+  X11/WL host-fallback masks reproduce the pre-migration registrations
+  FAITHFULLY (the proxy path is name-driven and authoritative; masks only
+  affect the headless host-lib fallback) with two corrections: XCreateWindow
+  carries all 12 args (n_stack 4, so its XSetWindowAttributes* stack arg is
+  read/translated instead of dropped), and XChangeProperty's old arg-6 size
+  override is dropped (dead code — its mask bit marks arg 7). Adding a
+  display symbol = one spec row + `make opgen-thunk`; `thunk.cpp` filters
+  its own loop to GL/GLES/EGL/SDL/GLFW so it never indexes `kFamilies`
+  with a display-family value.
 - GLFW callbacks (1.5.2-alpha): the callback setters — `glfwSetCursorPosCallback`
   (`CURSOR_CB`), `glfwSetKeyCallback` (`KEY_CB`), `glfwSetMouseButtonCallback`
   (`MOUSE_CB`), `glfwSetFramebufferSizeCallback` (`FRAMEBUFFER_CB`),

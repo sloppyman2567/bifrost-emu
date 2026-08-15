@@ -504,3 +504,311 @@ glfwSetFramebufferSizeCallback GLFW ii         -     FRAMEBUFFER_CB -
 glfwSetWindowSizeCallback GLFW   ii            -     WINDOW_SIZE_CB -
 glfwSetWindowFocusCallback GLFW  ii            -     FOCUS_CB       -
 glfwGetProcAddress        GLFW   p             -     GET_PROC       -
+
+# ────────────────────────────────────────────────────────────────────────
+# DisplayThunk symbols (consumed by display_thunk.cpp's
+# register_known_symbols_). Families below map to their own sonames, and
+# each symbol registers under every soname of its family. The ARGS column
+# reproduces the pointer masks the thunk used historically: a 'p'/'z' at
+# every translated pointer position, 'i' for verbatim args (opaque Vk*
+# / XID / wl_* handles pass VERBATIM — the guest stores the host pointer
+# the host returned). ARGS length > 8 implies stack args (n_stack =
+# len-8). Trailing 'i's beyond the last pointer may be elided.
+#
+# Policy mapping (dispatch switches on these, not symbol names):
+#   PROXY            -> DisplayProxy (SDL2) first, host lib as headless fallback
+#   VULKAN           -> host lib path with pointer-mask marshalling
+#   VK_GET_PROC      -> vkGet*ProcAddr: read pName from arg 1 (not arg 0),
+#                       return the registered trampoline
+#   VK_CREATE_INSTANCE / VK_CREATE_DEVICE / VK_PRESENT
+#                    -> deep-marshalling entry points (nested guest pointers)
+# SIZE kinds:
+#   X_DRAWSTR        -> XDrawString/XDrawImageString: string arg sized by
+#                       the following length arg
+#   X_SETWMPROTO     -> XSetWMProtocols: Atom array sized by the count arg
+# ────────────────────────────────────────────────────────────────────────
+# libvulkan.so.1
+vkGetInstanceProcAddr       VK   i              -     VK_GET_PROC      -
+vkGetDeviceProcAddr         VK   i              -     VK_GET_PROC      -
+vkCreateInstance            VK   ppp            -     VK_CREATE_INSTANCE -
+vkCreateDevice              VK   ippp           -     VK_CREATE_DEVICE  -
+vkQueuePresentKHR           VK   ip             -     VK_PRESENT        -
+vkDestroyInstance           VK   ip             -     VULKAN            -
+vkEnumeratePhysicalDevices  VK   ipp            -     VULKAN            -
+vkGetPhysicalDeviceProperties        VK   ip   -     VULKAN            -
+vkGetPhysicalDeviceFeatures          VK   ip   -     VULKAN            -
+vkGetPhysicalDeviceMemoryProperties  VK   ip   -     VULKAN            -
+vkGetPhysicalDeviceQueueFamilyProperties VK ipp  -     VULKAN            -
+vkDestroyDevice             VK   ip             -     VULKAN            -
+vkGetDeviceQueue            VK   iiip           -     VULKAN            -
+vkDeviceWaitIdle            VK   i              -     VULKAN            -
+vkQueueWaitIdle             VK   i              -     VULKAN            -
+vkCreateSwapchainKHR        VK   ippp           -     VULKAN            -
+vkDestroySwapchainKHR       VK   iip            -     VULKAN            -
+vkGetSwapchainImagesKHR     VK   iipp           -     VULKAN            -
+vkAcquireNextImageKHR       VK   iiiiip         -     VULKAN            -
+vkCreateCommandPool         VK   ippp           -     VULKAN            -
+vkDestroyCommandPool        VK   iip            -     VULKAN            -
+vkAllocateCommandBuffers    VK   ipp            -     VULKAN            -
+vkFreeCommandBuffers        VK   iiip           -     VULKAN            -
+vkBeginCommandBuffer        VK   ip             -     VULKAN            -
+vkEndCommandBuffer          VK   i              -     VULKAN            -
+vkResetCommandBuffer        VK   ii             -     VULKAN            -
+vkQueueSubmit               VK   iipi           -     VULKAN            -
+vkCreateImage               VK   ippp           -     VULKAN            -
+vkDestroyImage              VK   iip            -     VULKAN            -
+vkGetImageMemoryRequirements VK  iip            -     VULKAN            -
+vkBindImageMemory           VK   iiii           -     VULKAN            -
+vkCreateImageView           VK   ippp           -     VULKAN            -
+vkDestroyImageView          VK   iip            -     VULKAN            -
+vkCreateBuffer              VK   ippp           -     VULKAN            -
+vkDestroyBuffer             VK   iip            -     VULKAN            -
+vkGetBufferMemoryRequirements VK iip            -     VULKAN            -
+vkBindBufferMemory          VK   iiii           -     VULKAN            -
+vkAllocateMemory            VK   ippp           -     VULKAN            -
+vkFreeMemory                VK   iip            -     VULKAN            -
+vkMapMemory                 VK   iiiiip         -     VULKAN            -
+vkUnmapMemory               VK   ii             -     VULKAN            -
+vkFlushMappedMemoryRanges   VK   iip            -     VULKAN            -
+vkInvalidateMappedMemoryRanges VK iip           -     VULKAN            -
+vkCreateRenderPass          VK   ippp           -     VULKAN            -
+vkDestroyRenderPass         VK   iip            -     VULKAN            -
+vkCreateFramebuffer         VK   ippp           -     VULKAN            -
+vkDestroyFramebuffer        VK   iip            -     VULKAN            -
+vkCreateShaderModule        VK   ippp           -     VULKAN            -
+vkDestroyShaderModule       VK   iip            -     VULKAN            -
+vkCreatePipelineCache       VK   ippp           -     VULKAN            -
+vkDestroyPipelineCache      VK   iip            -     VULKAN            -
+vkCreateGraphicsPipelines   VK   iiipip         -     VULKAN            -
+vkCreateComputePipelines    VK   iiipip         -     VULKAN            -
+vkDestroyPipeline           VK   iip            -     VULKAN            -
+vkCreatePipelineLayout      VK   ippp           -     VULKAN            -
+vkDestroyPipelineLayout     VK   iip            -     VULKAN            -
+vkCreateDescriptorSetLayout VK   ippp           -     VULKAN            -
+vkDestroyDescriptorSetLayout VK  iip            -     VULKAN            -
+vkAllocateDescriptorSets    VK   ipp            -     VULKAN            -
+vkFreeDescriptorSets        VK   iiip           -     VULKAN            -
+vkUpdateDescriptorSets      VK   iipip          -     VULKAN            -
+vkCreateDescriptorPool      VK   ippp           -     VULKAN            -
+vkDestroyDescriptorPool     VK   iip            -     VULKAN            -
+vkCreateFence               VK   ippp           -     VULKAN            -
+vkDestroyFence              VK   iip            -     VULKAN            -
+vkResetFences               VK   iip            -     VULKAN            -
+vkGetFenceStatus            VK   ii             -     VULKAN            -
+vkWaitForFences             VK   iipii          -     VULKAN            -
+vkCreateSemaphore           VK   ippp           -     VULKAN            -
+vkDestroySemaphore          VK   iip            -     VULKAN            -
+vkCreateEvent               VK   ippp           -     VULKAN            -
+vkDestroyEvent              VK   iip            -     VULKAN            -
+vkSetEvent                  VK   ii             -     VULKAN            -
+vkResetEvent                VK   ii             -     VULKAN            -
+vkCreateQueryPool           VK   ippp           -     VULKAN            -
+vkDestroyQueryPool          VK   iip            -     VULKAN            -
+vkGetQueryPoolResults       VK   iiiiipii       -     VULKAN            -
+vkCreateSampler             VK   ippp           -     VULKAN            -
+vkDestroySampler            VK   iip            -     VULKAN            -
+vkDestroySurfaceKHR         VK   iip            -     VULKAN            -
+vkCreateHeadlessSurfaceEXT  VK   ippp           -     VULKAN            -
+vkGetPhysicalDeviceSurfaceSupportKHR    VK   iiip  -     VULKAN            -
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR VK iip  -     VULKAN            -
+vkGetPhysicalDeviceSurfaceFormatsKHR    VK   iipp  -     VULKAN            -
+vkGetPhysicalDeviceSurfacePresentModesKHR VK iipp -     VULKAN            -
+# libwayland-client.so.0
+wl_display_connect          WL   p              -     PROXY             -
+wl_display_connect_to_fd    WL   i              -     PROXY             -
+wl_display_disconnect       WL   i              -     PROXY             -
+wl_display_get_fd           WL   i              -     PROXY             -
+wl_display_dispatch         WL   i              -     PROXY             -
+wl_display_dispatch_pending WL   i              -     PROXY             -
+wl_display_dispatch_queue   WL   ip             -     PROXY             -
+wl_display_roundtrip        WL   p              -     PROXY             -
+wl_display_flush            WL   p              -     PROXY             -
+wl_display_read_events      WL   p              -     PROXY             -
+wl_display_prepare_read     WL   p              -     PROXY             -
+wl_display_cancel_read      WL   p              -     PROXY             -
+wl_proxy_marshal            WL   -              -     PROXY             -   # variadic — stub
+wl_proxy_create             WL   pi             -     PROXY             -
+wl_proxy_destroy            WL   p              -     PROXY             -
+wl_proxy_get_user_data      WL   p              -     PROXY             -
+wl_proxy_set_user_data      WL   pp             -     PROXY             -
+wl_proxy_get_id             WL   p              -     PROXY             -
+wl_proxy_get_class          WL   p              -     PROXY             -
+wl_proxy_add_listener       WL   ppi            -     PROXY             -
+wl_proxy_get_listener       WL   p              -     PROXY             -
+wl_proxy_marshal_constructor WL  -              -     PROXY             -   # variadic — stub
+wl_proxy_marshal_constructor_versioned WL -     -     PROXY             -   # variadic — stub
+wl_proxy_set_tag            WL   ppi            -     PROXY             -
+wl_proxy_get_tag            WL   p              -     PROXY             -
+wl_proxy_wrapper_destroy    WL   p              -     PROXY             -
+wl_event_queue_destroy      WL   p              -     PROXY             -
+# libwayland-egl.so.1
+wl_egl_window_create        WL_EGL ppi          -     PROXY             -
+wl_egl_window_destroy       WL_EGL p            -     PROXY             -
+wl_egl_window_get_attached_size WL_EGL ppi      -     PROXY             -
+wl_egl_window_resize        WL_EGL piiii        -     PROXY             -
+wl_egl_window_get_buffer_scale WL_EGL p         -     PROXY             -
+wl_egl_window_set_buffer_scale WL_EGL pi        -     PROXY             -
+wl_egl_window_set_buffer_transform WL_EGL pi    -     PROXY             -
+# libX11.so.6
+XOpenDisplay               X11   p              -     PROXY             -
+XCloseDisplay              X11   p              -     PROXY             -
+XCreateWindow              X11   piiiiiiiipip   -     PROXY             -   # 12 args: Display*,Window,int,int,uint,uint,uint,int,uint,Visual*,ulong,XSetWindowAttributes*
+XCreateSimpleWindow        X11   piiiiiiii      -     PROXY             -   # 9 args: 8 regs + background on stack
+XDestroyWindow             X11   pi             -     PROXY             -
+XMapWindow                 X11   pi             -     PROXY             -
+XUnmapWindow               X11   pi             -     PROXY             -
+XFlush                     X11   p              -     PROXY             -
+XSync                      X11   pi             -     PROXY             -
+XPending                   X11   p              -     PROXY             -
+XNextEvent                 X11   pp             -     PROXY             -
+XPeekEvent                 X11   pp             -     PROXY             -
+XEventsQueued              X11   pi             -     PROXY             -
+XWindowEvent               X11   piip           -     PROXY             -
+XCheckWindowEvent          X11   piip           -     PROXY             -
+XMaskEvent                 X11   pip            -     PROXY             -
+XCheckMaskEvent            X11   pip            -     PROXY             -
+XCheckTypedEvent           X11   piip           -     PROXY             -
+XCheckTypedWindowEvent     X11   piiip          -     PROXY             -
+XPutBackEvent              X11   pp             -     PROXY             -
+XSendEvent                 X11   iiiip          -     PROXY             -
+XDisplayWidth              X11   pi             -     PROXY             -
+XDisplayHeight             X11   pi             -     PROXY             -
+XDisplayWidthMM            X11   pi             -     PROXY             -
+XDisplayHeightMM           X11   pi             -     PROXY             -
+DefaultRootWindow          X11   p              -     PROXY             -
+BlackPixel                 X11   pi             -     PROXY             -
+WhitePixel                 X11   pi             -     PROXY             -
+XSetForeground             X11   pii            -     PROXY             -
+XSetBackground             X11   pii            -     PROXY             -
+XFillRectangle             X11   piiiiii        -     PROXY             -
+XDrawRectangle             X11   piiiiii        -     PROXY             -
+XDrawLine                  X11   piiiiii        -     PROXY             -
+XDrawPoint                 X11   piiii          -     PROXY             -
+XCopyArea                  X11   p              -     PROXY             -   # 10 real args; only Display* translated
+XCreateGC                  X11   piip           -     PROXY             -
+XFreeGC                    X11   pi             -     PROXY             -
+XCreatePixmap              X11   piiii          -     PROXY             -
+XFreePixmap                X11   pi             -     PROXY             -
+XSetWindowBackground       X11   pii            -     PROXY             -
+XSetWindowBackgroundPixmap X11   pii            -     PROXY             -
+XStoreName                 X11   ppi            -     PROXY             -
+XFetchName                 X11   ppp            -     PROXY             -
+XSetWMProtocols            X11   iizi           -     PROXY             X_SETWMPROTO
+XInternAtom                X11   ppi            -     PROXY             -
+XInternAtoms               X11   ppiip          -     PROXY             -
+XGetAtomName               X11   pi             -     PROXY             -
+XCreateColormap            X11   piii           -     PROXY             -
+XFreeColormap              X11   pi             -     PROXY             -
+XAllocColor                X11   pip            -     PROXY             -
+XFreeColors                X11   pipii          -     PROXY             -
+XSetClipMask               X11   pii            -     PROXY             -
+XSetClipOrigin             X11   piii           -     PROXY             -
+XCopyGC                    X11   piii           -     PROXY             -
+XChangeGC                  X11   piip           -     PROXY             -
+XSetFunction               X11   pii            -     PROXY             -
+XSetLineAttributes         X11   piiiii         -     PROXY             -
+XSetDashes                 X11   piipi          -     PROXY             -
+XDrawString                X11   iiiiizi         -     PROXY             X_DRAWSTR
+XDrawImageString           X11   iiiiizi         -     PROXY             X_DRAWSTR
+XTextExtents               X11   ppppppi        -     PROXY             -
+XLoadFont                  X11   pp             -     PROXY             -
+XUnloadFont                X11   pi             -     PROXY             -
+XQueryFont                 X11   pi             -     PROXY             -
+XFreeFont                  X11   pi             -     PROXY             -
+XListFonts                 X11   ppipp          -     PROXY             -
+XFreeFontNames             X11   p              -     PROXY             -
+XCreateBitmapFromData      X11   iiip           -     PROXY             -
+XCreatePixmapFromBitmapData X11  piiiiiii       -     PROXY             -
+XQueryPointer              X11   pippppppp      -     PROXY             -   # 9 args: root window (arg1) is an XID, verbatim
+XWarpPointer               X11   piiiiiiii      -     PROXY             -
+XGrabPointer               X11   piiiiiii       -     PROXY             -
+XUngrabPointer             X11   pi             -     PROXY             -
+XGrabKeyboard              X11   piiiii         -     PROXY             -
+XUngrabKeyboard            X11   pi             -     PROXY             -
+XBell                      X11   pi             -     PROXY             -
+XScreenCount               X11   p              -     PROXY             -
+XSetInputFocus             X11   piii           -     PROXY             -
+XGetInputFocus             X11   pip            -     PROXY             -
+XChangeProperty            X11   iiiiiiip       -     PROXY             -   # legacy mask: only arg7 (nelements) translated
+XGetWindowProperty         X11   piiiiiippppp   -     PROXY             -   # 12 args: Display*,Window,Atom,long,long,Bool,Atom,Atom*,int*,ulong*,ulong*,uchar**
+XDeleteProperty            X11   pi             -     PROXY             -
+XGetWindowAttributes       X11   ppp            -     PROXY             -
+# libX11-xcb.so.1
+XGetXCBConnection          X11XCB i             -     PROXY             -
+# libxcb.so.1
+xcb_connect                XCB   ip             -     PROXY             -
+xcb_disconnect             XCB   i              -     PROXY             -
+xcb_connection_has_error   XCB   i              -     PROXY             -
+xcb_get_setup              XCB   p              -     PROXY             -
+xcb_setup_roots_iterator   XCB   i              -     PROXY             -
+xcb_screen_allowed_depths_iterator XCB i        -     PROXY             -
+xcb_depth_visuals_iterator XCB   i              -     PROXY             -
+xcb_generate_id            XCB   i              -     PROXY             -
+xcb_create_window          XCB   p              -     PROXY             -   # 13 real args; only connection translated
+xcb_create_window_checked  XCB   p              -     PROXY             -
+xcb_destroy_window         XCB   pi             -     PROXY             -
+xcb_map_window             XCB   pi             -     PROXY             -
+xcb_unmap_window           XCB   pi             -     PROXY             -
+xcb_flush                  XCB   p              -     PROXY             -
+xcb_get_file_descriptor    XCB   p              -     PROXY             -
+xcb_wait_for_event         XCB   p              -     PROXY             -
+xcb_poll_for_event         XCB   p              -     PROXY             -
+xcb_free                   XCB   p              -     PROXY             -
+xcb_visualtype_get         XCB   i              -     PROXY             -
+# libgbm.so.1
+gbm_create_device          GBM   i              -     PROXY             -
+gbm_device_destroy         GBM   i              -     PROXY             -
+gbm_bo_create              GBM   iiiii          -     PROXY             -
+gbm_bo_destroy             GBM   i              -     PROXY             -
+gbm_bo_get_width           GBM   i              -     PROXY             -
+gbm_bo_get_height          GBM   i              -     PROXY             -
+gbm_bo_get_stride          GBM   i              -     PROXY             -
+gbm_bo_get_format          GBM   i              -     PROXY             -
+gbm_bo_get_handle          GBM   i              -     PROXY             -
+gbm_bo_map                 GBM   iiiiiiii       -     PROXY             -
+gbm_bo_unmap               GBM   iiiiii         -     PROXY             -
+gbm_surface_create         GBM   iiiii          -     PROXY             -
+gbm_surface_destroy        GBM   i              -     PROXY             -
+gbm_surface_lock_front_buffer GBM i             -     PROXY             -
+gbm_surface_release_buffer GBM   ii             -     PROXY             -
+# libXext.so.6 (XShm)
+XShmQueryExtension         XEXT  i              -     PROXY             -
+XShmGetEventBase           XEXT  i              -     PROXY             -
+XShmCreateImage            XEXT  ppiippii       -     PROXY             -
+XShmAttach                 XEXT  ii             -     PROXY             -
+XShmDetach                 XEXT  ii             -     PROXY             -
+XShmPutImage               XEXT  ppppiiiiiii    -     PROXY             -   # 11 args: 3 stack args
+XShmGetImage               XEXT  iipiii         -     PROXY             -
+# libGLX.so.2
+glXChooseVisual            GLX   iip            -     PROXY             -
+glXCreateContext           GLX   iiii           -     PROXY             -
+glXDestroyContext          GLX   ii             -     PROXY             -
+glXMakeCurrent             GLX   iii            -     PROXY             -
+glXSwapBuffers             GLX   ii             -     PROXY             -
+glXGetClientString         GLX   ii             -     PROXY             -
+glXQueryExtensionsString   GLX   ii             -     PROXY             -
+glXQueryServerString       GLX   iii            -     PROXY             -
+glXGetFBConfigs            GLX   ii             -     PROXY             -
+glXGetFBConfigAttrib       GLX   iiip           -     PROXY             -
+glXCreateWindow            GLX   iiip           -     PROXY             -
+glXDestroyWindow           GLX   ii             -     PROXY             -
+glXCreatePbuffer           GLX   iii            -     PROXY             -
+glXDestroyPbuffer          GLX   ii             -     PROXY             -
+# libXrandr.so.2
+XRRGetScreenResources      RANDR ii             -     PROXY             -
+XRRGetScreenResourcesCurrent RANDR ii           -     PROXY             -
+XRRFreeScreenResources     RANDR i              -     PROXY             -
+XRRGetCrtcInfo             RANDR iii            -     PROXY             -
+XRRFreeCrtcInfo            RANDR i              -     PROXY             -
+XRRGetOutputInfo           RANDR iii            -     PROXY             -
+XRRFreeOutputInfo          RANDR i              -     PROXY             -
+XRRSetCrtcConfig           RANDR ppiiiiiipi     -     PROXY             -   # 10 args: outputs ptr is arg8 (stack)
+XRRGetScreenSizeRange      RANDR iiiiii         -     PROXY             -
+# libXkblib.so (also registered under libX11-xcb.so)
+XkbOpenDevice              XKB   iiiiii         -     PROXY             -
+XkbGetMap                  XKB   iii            -     PROXY             -
+XkbGetState                XKB   iip            -     PROXY             -
+XkbSetState                XKB   iii            -     PROXY             -
+XkbSetAutoRepeatRate       XKB   iiii           -     PROXY             -
+XkbGetAutoRepeatRate       XKB   iipp           -     PROXY             -
+XkbFreeKeyboard            XKB   iii            -     PROXY             -

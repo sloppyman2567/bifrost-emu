@@ -78,6 +78,38 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   teardown. Passes on RADV. Exit 77 = skip when the host driver lacks
   headless surface. Suite is now 202/202.
 
+## [Unreleased] — DisplayThunk registration is table-driven (1.5.3-alpha)
+
+### One symbol table for every thunk (696 symbols, CI-guarded)
+
+- **DisplayThunk (Vulkan/Wayland/X11/XCB/GBM/GLX/RandR/Xkb) moved onto the
+  same generated table as GraphicThunk.** The ~275 hand-rolled
+  `REG_VK*/REG_WL*/REG_X11*/REG_GBM*/REG_GLX*/REG_RANDR*/REG_XKB*` macro
+  registrations in `display_thunk.cpp` are deleted. The display symbols now
+  live in `tools/opgen/thunk_dp.txt` (families `VK`/`WL`/`WL_EGL`/`X11`/
+  `X11XCB`/`XCB`/`GBM`/`XEXT`/`GLX`/`RANDR`/`XKB`), and
+  `DisplayThunk::register_known_symbols_` iterates `thunk::specs`, keeps only
+  the display families, lazily `dlopen`s each family's sonames, and derives
+  the legacy ABI shape (`pointer_args`/`n_stack`/`n_float`/`flags`) from the
+  ARGS column. `thunk.cpp` filters its own loop to GL/GLES/EGL/SDL/GLFW so it
+  never indexes its GL-only `kFamilies` array with a display-family value.
+- **Dispatch routes by POLICY / SIZE instead of comparing symbol names.**
+  The deep-marshalling entry points are recognized by policy
+  (`VK_GET_PROC`, `VK_CREATE_INSTANCE`, `VK_CREATE_DEVICE`, `VK_PRESENT`),
+  and the bounce-buffer size overrides switch on `SizeKind`
+  (`X_DRAWSTR` = string sized by the length arg, `X_SETWMPROTO` = Atom array
+  sized by the count arg) rather than `translate_ptr` name-compares.
+- **X11/WL host-fallback masks reproduced faithfully** (the DisplayProxy path
+  is name-driven and authoritative; masks only affect the headless host-lib
+  fallback) with two corrections: `XCreateWindow` carries all 12 args
+  (`n_stack` 4, so its `XSetWindowAttributes*` stack arg is read/translated
+  instead of dropped), and `XChangeProperty`'s old arg-6 size override is
+  dropped (dead code — its mask bit marks arg 7).
+- A mask-diff harness (`/tmp/opencode/verify_masks.py`) compared the derived
+  table masks against every pre-migration registration; all 274 symbols match
+  except the documented `XCreateWindow` fix.
+- Suite remains **202/202**; `make opgen-thunk-check` guards spec drift.
+
 ## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
 
 ### Vector `movi vN.2s, #imm` (~500K interp executions) is now native JIT
