@@ -350,6 +350,11 @@ INTEGRATION_TESTS=(
     # Exercises the THUNK_VULKAN dispatch. Exit 77 = skip when the host has
     # no Vulkan loader/driver (env-dependent).
     "vulkan|ctest_real/test_vulkan.elf||30|VULKAN TEST PASSED"
+    # Headless WSI swapchain path (1.5.3-alpha): VK_KHR_surface +
+    # VK_EXT_headless_surface — create headless surface, query caps/formats/
+    # present modes, create swapchain, get images, acquire, present, teardown.
+    # Exit 77 = skip when the host driver lacks VK_EXT_headless_surface.
+    "vulkan_swapchain|ctest_real/test_vulkan_swapchain.elf||30|SWAPCHAIN TEST PASSED"
     # GL state tracker regression (1.5.2-alpha): verifies GLStateTracker
     # mirrors guest GL state and answers queries (glIsEnabled,
     # glGetIntegerv, glGetFloatv, glGetBooleanv) consistently. Headless —

@@ -591,6 +591,13 @@ struct VkDeviceCreateInfoH {
     uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
     const void* pEnabledFeatures;  // VkPhysicalDeviceFeatures (220 bytes, frozen)
 };
+// VkPresentInfoKHR (spec-stable, no padding on AArch64).
+struct VkPresentInfoH {
+    int32_t sType; void* pNext; uint32_t waitSemaphoreCount;
+    const void* pWaitSemaphores; uint32_t swapchainCount;
+    const void* pSwapchains; const uint32_t* pImageIndices;
+    int32_t* pResults;  // VkResult array (may be NULL)
+};
 constexpr size_t kPhysicalDeviceFeaturesBytes = 220;
 // Read a guest struct by value into `dst` (zero-fill on unmapped).
 template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
@@ -599,6 +606,12 @@ template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
         try { mem->read(g, dst, sizeof(*dst)); }
         catch (...) { std::memset(dst, 0, sizeof(*dst)); }
     }
+}
+// Read `n` guest bytes into `dst` (zero-fill on unmapped).
+void read_guest_bytes(Memory* mem, uint64_t g, void* dst, size_t n) {
+    if (!g || !n) { if (dst && n) std::memset(dst, 0, n); return; }
+    try { mem->read(g, dst, n); }
+    catch (...) { std::memset(dst, 0, n); }
 }
 } // namespace
 
@@ -729,6 +742,64 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (trace) {
             fprintf(stderr, "[display-thunk] vkCreateDevice → %d (device=%p)\n",
                     static_cast<int32_t>(ret), reinterpret_cast<void*>(host_device));
+        }
+        return true;
+    }
+
+    // ── vkQueuePresentKHR ─────────────────────────────────────────────
+    // (queue, pPresentInfo) — pPresentInfo's NESTED pointers
+    // (pWaitSemaphores / pSwapchains / pImageIndices / pResults) are guest
+    // addresses the host cannot dereference: the generic bounce copies the
+    // top-level struct but leaves nested guest pointers untouched, so the
+    // host faults reading e.g. pSwapchains[0]. Re-point every array into
+    // the staging buffer (handles round-trip VERBATIM), and writeback
+    // pResults after the call.
+    if (name == "vkQueuePresentKHR") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();
+        read_guest_struct(mem, cpu.regs[1], pi);
+        pi->pNext = nullptr;  // verbatim guest pNext chains are not host-readable
+        if (pi->waitSemaphoreCount && pi->pWaitSemaphores && pi->waitSemaphoreCount <= 16) {
+            uint64_t* arr = reinterpret_cast<uint64_t*>(
+                st.bytes(static_cast<size_t>(pi->waitSemaphoreCount) * 8u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(pi->pWaitSemaphores), arr,
+                             static_cast<size_t>(pi->waitSemaphoreCount) * 8u);
+            pi->pWaitSemaphores = arr;
+        }
+        if (pi->swapchainCount && pi->pSwapchains && pi->swapchainCount <= 16) {
+            uint64_t* arr = reinterpret_cast<uint64_t*>(
+                st.bytes(static_cast<size_t>(pi->swapchainCount) * 8u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(pi->pSwapchains), arr,
+                             static_cast<size_t>(pi->swapchainCount) * 8u);
+            pi->pSwapchains = arr;
+        }
+        if (pi->pImageIndices && pi->swapchainCount && pi->swapchainCount <= 16) {
+            uint32_t* arr = reinterpret_cast<uint32_t*>(
+                st.bytes(static_cast<size_t>(pi->swapchainCount) * 4u, 4));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(pi->pImageIndices), arr,
+                             static_cast<size_t>(pi->swapchainCount) * 4u);
+            pi->pImageIndices = arr;
+        }
+        int32_t* results_host = nullptr;
+        uint64_t results_guest = 0;
+        if (pi->pResults && pi->swapchainCount && pi->swapchainCount <= 16) {
+            results_host = reinterpret_cast<int32_t*>(
+                st.bytes(static_cast<size_t>(pi->swapchainCount) * 4u, 4));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(pi->pResults), results_host,
+                             static_cast<size_t>(pi->swapchainCount) * 4u);
+            results_guest = reinterpret_cast<uint64_t>(pi->pResults);
+            pi->pResults = results_host;
+        }
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], pi);
+        if (results_guest && results_host) {
+            try { mem->write(results_guest, results_host, static_cast<size_t>(pi->swapchainCount) * 4u); }
+            catch (...) { /* out pointer unmapped — results lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkQueuePresentKHR → %d\n", static_cast<int32_t>(ret));
         }
         return true;
     }
@@ -1561,6 +1632,15 @@ void DisplayThunk::register_known_symbols_() {
     // Sampler.
     REG_VK_PTR(vkCreateSampler, 0x0E);             // pCreateInfo, pAllocator, pSampler
     REG_VK_PTR(vkDestroySampler, 0x04);            // sampler, pAllocator
+    // Surface / WSI (1.5.3-alpha). Handles (VkSurfaceKHR) pass verbatim;
+    // only true pointer args are masked. Needed for the headless swapchain
+    // path (VK_KHR_surface + VK_EXT_headless_surface).
+    REG_VK_PTR(vkDestroySurfaceKHR, 0x04);             // surface, pAllocator
+    REG_VK_PTR(vkCreateHeadlessSurfaceEXT, 0x0E);      // pCreateInfo, pAllocator, pSurface(out)
+    REG_VK_PTR(vkGetPhysicalDeviceSurfaceSupportKHR, 0x08);      // pSupported (out)
+    REG_VK_PTR(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, 0x04); // pSurfaceCapabilities (out)
+    REG_VK_PTR(vkGetPhysicalDeviceSurfaceFormatsKHR, 0x0C);      // pCount(out), pFormats(out)
+    REG_VK_PTR(vkGetPhysicalDeviceSurfacePresentModesKHR, 0x0C); // pCount(out), pModes(out)
     // vkGetInstanceProcAddr / vkGetDeviceProcAddr (essential for extension loading).
     REG_VK_PROC(vkGetInstanceProcAddr);
     REG_VK_PROC(vkGetDeviceProcAddr);

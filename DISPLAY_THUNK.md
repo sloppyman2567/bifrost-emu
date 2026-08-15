@@ -122,6 +122,14 @@ In addition to the mask fix, three symbols get a dedicated
 - `vkCreateDevice` deep-copies the `pQueueCreateInfos` array (with
   `pQueuePriorities` floats), the layer/extension string arrays, and the
   220-byte `pEnabledFeatures` block; writes the host device back.
+- `vkQueuePresentKHR` deep-copies `pPresentInfo`: its NESTED pointers
+  (`pWaitSemaphores` / `pSwapchains` / `pImageIndices` / `pResults`) are
+  guest addresses the host cannot dereference — the generic bounce copies
+  the top-level struct but leaves nested guest pointers untouched, so the
+  host faults on `pSwapchains[0]`. Every array is re-pointed into staging
+  (handles round-trip verbatim) and `pResults` is written back after the
+  call. (Same class of bug would hit `vkQueueSubmit` / `vkUpdateDescriptorSets`
+  on real rendering — deferred to a later pass.)
 
 `VkStage` pre-reserves its staging buffer (64 KiB) — `alloc()`/`bytes()`/
 `guest_str*()` hand out pointers into `buf.data()` and a later `resize()`
@@ -129,10 +137,13 @@ would REALLOCATE and dangle every earlier pointer (this crashed
 `_M_default_append` in the first test run). Guest-driven counts are capped
 (string arrays <= 1024, queue arrays <= 16, queue priorities <= 64).
 
-Validation gate: `ctest_real/test_vulkan.elf` (musl-static, loads
+Validation gates: `ctest_real/test_vulkan.elf` (musl-static, loads
 `libvulkan.so.1` via the internal dlopen syscall, then runs instance →
-enumerate → device → queue → wait → destroy against the host driver).
-Exit 77 = skip when the host has no Vulkan loader.
+enumerate → device → queue → wait → destroy against the host driver) and
+`ctest_real/test_vulkan_swapchain.elf` (VK_KHR_surface +
+VK_EXT_headless_surface: create headless surface, query caps/formats/
+present modes, create swapchain, get images, acquire, present, teardown).
+Exit 77 = skip when the host has no Vulkan loader / headless surface.
 
 Corrected masks (from the real Vulkan 1.x signatures; output pointers must
 stay masked so the host writes the returned handle into real guest
@@ -211,11 +222,23 @@ memory):
 | `vkGetQueryPoolResults` | `0x0E` | `0x20` | pData(out) |
 | `vkCreateSampler` | `0x06` | `0x0E` | pCreateInfo, pAllocator, pSampler(out) |
 | `vkDestroySampler` | `0x02` | `0x04` | sampler, pAllocator |
+| `vkDestroySurfaceKHR` | — | `0x04` | surface, pAllocator |
+| `vkCreateHeadlessSurfaceEXT` | — | `0x0E` | pCreateInfo, pAllocator, pSurface(out) |
+| `vkGetPhysicalDeviceSurfaceSupportKHR` | — | `0x08` | pSupported(out) |
+| `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` | — | `0x04` | pSurfaceCapabilities(out) |
+| `vkGetPhysicalDeviceSurfaceFormatsKHR` | — | `0x0C` | pCount(out), pFormats(out) |
+| `vkGetPhysicalDeviceSurfacePresentModesKHR` | — | `0x0C` | pCount(out), pModes(out) |
+
+The surface format/present-mode masks are `0x0C` (args 2,3 = pCount, array
+out) — the surface HANDLE is arg 1 and must pass verbatim. The initial
+draft marked them `0x06` (args 1,2), which bounced the VkSurfaceKHR handle
+and crashed RADV.
 
 Known remaining limitation: `pNext` chains on the create-info structs are
 passed VERBATIM (guest addresses). Guest RAM is host-mapped so the host can
 walk a plain-data chain, but a `pNext` struct containing further nested
-pointers would mis-dereference. Not needed by the current validation gate.
+pointers would mis-dereference. `vkQueuePresentKHR` NULLs `pNext` (staged).
+Not needed by the current validation gates.
 
 ### 2. Generic host dispatch caps at 9 args (`Fn9`) — FIXED
 
@@ -255,13 +278,15 @@ Corrected masks: `XCreateGC 0x05 → 0x09` (args 0,3), `XChangeGC 0x05 → 0x09`
 ## Verification
 
 - `make` — clean build, no new warnings.
-- `make check-all` — 201/201 pass, 0 fail (incl. `vulkan`, the
-  `ctest_real/test_vulkan.elf` host-Vulkan gate).
+- `make check-all` — 202/202 pass, 0 fail (incl. `vulkan` and
+  `vulkan_swapchain`, the host-Vulkan gates).
 - `./scripts/run_tests.sh --unit` — 41/41.
 - `DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf` — exit 0.
 - `DISPLAY=:0 ./bifrost-emu ctest_real/test_gl_state.elf` — ALL PASS.
 - `./bifrost-emu ctest_real/test_vulkan.elf` — VULKAN TEST PASSED (host
   RADV driver, AMD Radeon RX 7600).
+- `./bifrost-emu ctest_real/test_vulkan_swapchain.elf` — SWAPCHAIN TEST
+  PASSED (headless surface + swapchain + acquire/present on RADV).
 
 ## Real-world run: rudolf-cart (SDL2 + legacy GL + GLU)
 

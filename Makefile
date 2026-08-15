@@ -297,7 +297,7 @@ setup-tests:
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
 		extra=""; \
-		if [ "$$src" = "ctest_real/test_vulkan.c" ]; then extra="-Ictest_real/vulkan_headers/include"; fi; \
+		case "$$src" in ctest_real/test_vulkan*.c) extra="-Ictest_real/vulkan_headers/include";; esac; \
 		if $$CC -static -O2 $$extra -o "$$elf" "$$src" 2>/dev/null; then \
 			count=$$((count + 1)); \
 		fi; \

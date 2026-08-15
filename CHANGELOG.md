@@ -56,6 +56,27 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   has no Vulkan loader. Wired into `make setup-tests` (vendored
   Vulkan-Headers 1.4.357.0 in `ctest_real/vulkan_headers/`) and the
   `vulkan` integration test. Suite is now 201/201.
+- **Headless WSI swapchain path (VK_KHR_surface + VK_EXT_headless_surface).**
+  Registered the surface functions with corrected masks
+  (`vkCreateHeadlessSurfaceEXT 0x0E`, `vkDestroySurfaceKHR 0x04`,
+  `vkGetPhysicalDeviceSurfaceSupportKHR 0x08`,
+  `vkGetPhysicalDeviceSurfaceCapabilitiesKHR 0x04`,
+  `vkGetPhysicalDeviceSurfaceFormatsKHR / vkGetPhysicalDeviceSurfacePresentModesKHR
+  0x0C` — args 2,3; the surface HANDLE is arg 1 and must pass verbatim).
+  `vkQueuePresentKHR` gets a deep-marshalling path: `pPresentInfo`'s NESTED
+  pointers (`pWaitSemaphores`/`pSwapchains`/`pImageIndices`/`pResults`) are
+  guest addresses the host cannot dereference — the generic bounce copies
+  the top-level struct but leaves nested guest pointers untouched, so the
+  host faults on `pSwapchains[0]`. All arrays are re-pointed into the
+  `VkStage` staging buffer (handles round-trip verbatim) and `pResults` is
+  written back. (The same nested-pointer class affects `vkQueueSubmit` /
+  `vkUpdateDescriptorSets` on real rendering — deferred.)
+- **`ctest_real/test_vulkan_swapchain.elf`** drives the whole headless WSI
+  lifecycle: instance + headless-surface extension → create headless
+  surface → query support/caps/formats/present modes → device with
+  VK_KHR_swapchain → create swapchain → get images → acquire → present →
+  teardown. Passes on RADV. Exit 77 = skip when the host driver lacks
+  headless surface. Suite is now 202/202.
 
 ## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
 
