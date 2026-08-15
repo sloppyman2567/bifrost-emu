@@ -133,12 +133,19 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (packusdw/pminud) else CALL_INTERP. `instr_will_call_interp` stays
   classify(…)==UNKNOWN-driven so no gate edits were needed. New test:
   `ctest/jit_simd_misc.c` (30 checks, "checks passed" pattern). Test-expected
-  values for ABS must use the shift/xor abs form in a SEPARATE loop from
-  the src fill: a self-loop with two interleaved STORE_MEMs trips a
-  pre-existing scalar JIT bug — the second store's flag/vreg flush loses
-  state that a flag-setting op earlier in the body fed to a later
-  flag-consuming op (interp fine; verified broken on the pre-1.5.3 baseline,
-  so NOT caused by these SIMD ops). Do NOT "fix" it as part of SIMD work.
+  values for ABS use the shift/xor abs form — the scalar JIT had a
+  sign-extension bug for negative operands that the src-fill loop exposed
+  as a cneg/abs miscompile (see the SBFM note below).
+  **FIXED (2026-08-15):** the general-case SBFM sign-extension in
+  `jit_codegen_alu.cpp` shifted by `width - field_width` and then used a
+  64-bit `sar` — for a 32-bit op (sxtb/sxth/sbfx W) the sign bit lands at
+  bit 31 but the 64-bit SAR reads bit 63, so `sxtb w3, w21` of byte `0xf8`
+  returned `0xf8` (248) instead of `0xfffffff8`, turning `cmp w3,#0`+`csel`
+  into the wrong branch. Fix: shift by `64 - field_width` (sign bit reaches
+  bit 63) and let the trailing `mov %eax,%eax` truncate to the W container.
+  Verified: cneg3 (was `want=248` for i=0), all cneg/scalarabs repros,
+  203/203 suite, `BIFROST_JIT_VERIFY=1`+`JIT_VERIFY_MEM`, `REGALLOC_CHECK`,
+  `ENABLE_FWD=1` all clean. Interp was already correct.
 - FWD (`BIFROST_ENABLE_FWD=1`, the `arm_reg_cache` load-forwarding in
   `ir_optimize.cpp`) is disabled by default: it had a "subtle correctness bug"
   since the original author (commit 1257f7b). The original regalloc clobber bug

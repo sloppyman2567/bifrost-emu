@@ -631,7 +631,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // bit (imms - immr). Sign-extend by shifting left then right.
             if (inst.op == IROp::SBFM && imms < width - 1) {
                 int field_width = imms - immr + 1;
-                int sh = width - field_width;
+                // Shift the sign bit up to bit 63 so the 64-bit SAR below
+                // sign-extends correctly. For 32-bit ops (sxtb/sxth/sbfx W)
+                // `width - field_width` puts the sign bit at bit 31, but a
+                // 64-bit SAR reads bit 63 — a negative byte (0xf8) would
+                // come back as 248 instead of 0xfffffff8. The trailing
+                // `mov %eax,%eax` truncates the 64-bit sign-extended result
+                // to the 32-bit W container.
+                int sh = 64 - field_width;
                 if (sh > 0) {
                     emit_shift_imm8(RAX, 4, sh);
                     emit_shift_imm8(RAX, 7, sh);

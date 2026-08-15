@@ -114,16 +114,16 @@ static void test_rbit_8b(void) {
 }
 
 // ── ABS ──────────────────────────────────────────────────────────────
-// NOTE: expected values are computed in a SEPARATE loop from src filling.
-// Computing exp in the same loop as the src store trips a pre-existing
-// JIT scalar bug: a self-loop with two interleaved STORE_MEMs between the
-// flag-setting op and a flag-consuming op (here the shift/xor abs) loses
-// flags/cached regs across the back-edge (interp is fine, and the
-// separate-loop form below works in both modes).
+// Regression note: exp used to be computed in a SEPARATE loop from src
+// filling because the scalar JIT's general-case SBFM sign-extension
+// (sxtb w) shifted by width-field_width and 64-bit SAR'd — a negative
+// byte came back zero-extended (0xf8 = 248 instead of 0xfffffff8),
+// miscompiling the shift/xor abs when the self-loop exposed it. Fixed
+// 2026-08-15 (shift by 64-field_width so bit 63 holds the sign); a single
+// loop now exercises the fix and passes in both modes.
 static void test_abs_16b(void) {
     int8_t src[16], out[16], exp[16];
-    for (int i = 0; i < 16; i++) src[i] = (int8_t)(-8 + i);
-    for (int i = 0; i < 16; i++) { int8_t v = src[i]; exp[i] = (int8_t)((v + (v >> 7)) ^ (v >> 7)); }
+    for (int i = 0; i < 16; i++) { int8_t v = (int8_t)(-8 + i); src[i] = v; exp[i] = (int8_t)((v + (v >> 7)) ^ (v >> 7)); }
     __asm__ volatile (
         "ldr q0, [%[s]]\n"
         "abs v1.16b, v0.16b\n"
@@ -135,8 +135,7 @@ static void test_abs_16b(void) {
 
 static void test_abs_8h(void) {
     int16_t src[8], out[8], exp[8];
-    for (int i = 0; i < 8; i++) src[i] = (int16_t)(-3000 + i * 1000);
-    for (int i = 0; i < 8; i++) { int16_t v = src[i]; exp[i] = (int16_t)((v + (v >> 15)) ^ (v >> 15)); }
+    for (int i = 0; i < 8; i++) { int16_t v = (int16_t)(-3000 + i * 1000); src[i] = v; exp[i] = (int16_t)((v + (v >> 15)) ^ (v >> 15)); }
     __asm__ volatile (
         "ldr q0, [%[s]]\n"
         "abs v1.8h, v0.8h\n"
