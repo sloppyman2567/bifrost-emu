@@ -34,6 +34,21 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
             clobber_host_reg(RAX);  // spill dirty vreg in RAX before reuse
             emit_mov_reg(RAX, s);
         }
+        // ── FP-cache path (FMOV_G2F only — lo half): ────────────────
+        // Store the GPR value into the pinned XMM (reg-reg) instead of
+        // memory, mark it dirty, and zero v_hi in memory as usual. The
+        // G2FHI form (fp_field=1) always uses the memory path — v_hi is
+        // never cached in fp-cache blocks.
+        if (fp_cache_active_ && fp_field == 0) {
+            int xd = vec_xmm(idx);
+            if (xd >= 0) {
+                emit_vmovq_gpr_to_xmm(xd, s);
+                vec_cache_mark_dirty(idx);
+                fp_zero_hi(idx);
+                // src1 stays cached in s (value not modified).
+                return;
+            }
+        }
         emit_store(CPU_REG, fp_off, RAX);
         // FMOV_G2F (fp_field==0) also zeros v_hi[idx] per ARM semantics.
         // The zero-load clobbers RAX, so we must spill any dirty vreg
@@ -52,6 +67,15 @@ void FrostJIT::emit_fmov_helper(int dir, int fp_field, uint16_t idx,
     } else {
         // FP → GPR: load fp_off into a fresh vreg for dest.
         int d = alloc_reg();
+        if (fp_cache_active_ && fp_field == 0) {
+            int xs = vec_xmm(idx);
+            if (xs >= 0) {
+                // Pinned source: reg-reg move (no memory).
+                emit_vmovq_xmm_to_gpr(d, xs);
+                set_vreg_reg(dest, d);
+                return;
+            }
+        }
         emit_load(d, CPU_REG, fp_off);
         set_vreg_reg(dest, d);
     }

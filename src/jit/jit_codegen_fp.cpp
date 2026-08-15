@@ -84,10 +84,9 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             flush_invalidate_host_regs(1u << RAX);
             bool is_double = (inst.width == 64);
             uint8_t prefix = is_double ? 0xF2 : 0xF3;
-            // Load FP value into XMM0: movsd/movss xmm0, [rbx+off]
-            int32_t off = V_LO_OFF + static_cast<int>(inst.src1) * 8;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-            emit_modrm_disp(0, CPU_REG, off);
+            // Load FP value into XMM0 (fp_load_operand: reg-reg move when
+            // the fp cache pins src1, else memory load).
+            fp_load_operand(0, inst.src1, is_double);
             // x86 rounding mode mapping (SSE4.1 roundsd/roundss imm8):
             //   0 = round-to-nearest (even)
             //   1 = round-down (-inf)
@@ -117,14 +116,10 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             emit_byte(is_double ? 0x0B : 0x0A);
             emit_byte(0xC0);  // xmm0, xmm0
             emit_byte(x86_mode);
-            // Store result: movsd/movss [rbx+off], xmm0
-            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, off_d);
-            // Zero v_hi[dest] (upper 64 bits cleared per AArch64
-            // scalar FP write semantics). Uses RAX (already flushed).
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            // Store result (fp_store_operand: pinned dest → reg-reg + dirty, else
+            // memory) and zero v_hi.
+            fp_store_operand(0, inst.dest, is_double);
+            fp_zero_hi(inst.dest);
             return false;
         }
         // ── FMADD / FMSUB / FNMADD / FNMSUB: FP fused multiply-add family
@@ -190,29 +185,12 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             int32_t off2 = V_LO_OFF + static_cast<int>(inst.src2) * 8;  // Vm
             int32_t off_acc = V_LO_OFF + static_cast<int>(inst.imm) * 8; // Va
             if (has_fma3()) {
-                // ── FMA3 native codegen ──
-                // Load Va (accumulator) into XMM0 — the FMA3 231 form uses
-                // XMM0 as both acc input and result dest.
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(0, CPU_REG, off_acc);  // movsd xmm0, [rbx+off_acc]
-                // Load Vn into XMM1 (the NDS register — multiply operand 1).
-                emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
-                emit_modrm_disp(1, CPU_REG, off1);  // movsd xmm1, [rbx+off1]
-                // Vm is read directly from memory via ModRM.rm (no load needed).
-                // Pick opcode based on operation:
-                //   FMADD         → vfmadd231  (0xB9)
-                //   FMSUB/FNMADD  → vfnmadd231 (0xBD)  (numerically same)
-                //   FNMSUB        → vfnmsub231 (0xBF)
-                //
-                // Opcodes per Intel SDM Vol 2A, FMA3 table:
-                //   vfmadd231ss/sd:  0xB9   (132=0x99, 213=0xA9, 231=0xB9)
-                //   vfnmadd231ss/sd: 0xBD   (132=0x9D, 213=0xAD, 231=0xBD)
-                //   vfnmsub231ss/sd: 0xBF   (132=0x9F, 213=0xAF, 231=0xBF)
-                //
-                // NOTE: FMA3 uses VEX.pp=01 (66 prefix) for BOTH ss and sd —
-                // the W bit (not pp) distinguishes single (W=0) from double
-                // (W=1). This is different from scalar SSE FP (mulsd uses
-                // pp=11/F2, mulss uses pp=10/F3).
+                // ── FMA3 native codegen (fp-cache aware) ──
+                // 231 form: dest = op(Vn*Vm, dest), where dest starts as Va
+                // (the accumulator). When the fp cache pins the operands,
+                // the pinned XMMs are used in place (no memory); unpinned
+                // operands load into the scratch XMMs 1/2 (XMM0 is the
+                // unpinned-dest result register and is never pinned).
                 uint8_t opcode;
                 switch (inst.op) {
                     case IROp::FMADD:  opcode = 0xB9; break;  // vfmadd231   (acc + prod)
@@ -221,33 +199,71 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                     case IROp::FNMSUB: opcode = 0xBB; break;  // vfmsub231   (prod - acc)
                     default: return false;  // unreachable
                 }
-                // VEX 3-byte prefix:
-                //   C4
-                //   byte1: 0xE2  (R~=X~=B~=1 for low registers xmm0-xmm7
-                //                 and rbx; mmmmm=00010 for 0F38 map)
-                //   byte2: W<<7 | (~1)<<3 | 0<<2 | pp
-                //     W = is_double ? 1 : 0
-                //     vvvv~ = ~0001 = 1110 (NDS = xmm1)
-                //     L = 0 (LIG — ignored by FMA3, set to 0 for 128-bit)
-                //     pp = 01 (66 — mandatory for FMA3, NOT F2/F3!)
-                //
-                // NOTE: VEX byte1's R/X/B bits are INVERTED relative to
-                // REX.R/X/B. For low registers (no high bit), R=X=B=0 in
-                // REX sense, so R~=X~=B~=1 in VEX. The old code used 0x02
-                // (R~=X~=B~=0) which means R=X=B=1 — indicating xmm8-15
-                // and rbx-with-REX.B, causing the CPU to access xmm8 as
-                // the destination and segfault on the memory operand.
-                uint8_t vex_b1 = 0xE2;
-                uint8_t vex_b2 = (is_double ? 0x80 : 0x00)   // W
-                               | (0x0E << 3)                   // vvvv~ = ~1 = 1110
-                               | 0x00                          // L = 0
-                               | 0x01;                         // pp = 01 (66)
-                emit_byte(0xC4);
-                emit_byte(vex_b1);
-                emit_byte(vex_b2);
-                emit_byte(opcode);
-                // ModRM: reg=xmm0 (dest + acc), rm=[rbx+off2] (Vm memory operand).
-                emit_modrm_disp(0, CPU_REG, off2);
+                int xd = vec_xmm(inst.dest);
+                int xacc = vec_xmm(inst.imm);
+                int dst_xmm;
+                bool copy_acc;
+                if (xd >= 0) {
+                    dst_xmm = xd;
+                    copy_acc = (xacc != xd);
+                } else {
+                    dst_xmm = 0;  // compute into XMM0 (unpinned dest)
+                    copy_acc = true;
+                }
+                // Resolve Vn/Vm BEFORE the acc copy: the acc copy overwrites
+                // the dest XMM, so any source pinned to that SAME XMM (dest
+                // aliases src1/src2 while acc is elsewhere — e.g. GCC's
+                // `fmsub d0, d0, d1, d2`) would have its value destroyed
+                // before the FMA reads it. Reload such a source from v_lo
+                // into its scratch instead of using the pinned XMM.
+                int xs1 = vec_xmm(inst.src1);
+                int xs2 = vec_xmm(inst.src2);
+                if (copy_acc && xd >= 0) {
+                    if (xs1 == xd) { fp_load_operand(1, inst.src1, is_double); xs1 = 1; }
+                    if (xs2 == xd) { fp_load_operand(2, inst.src2, is_double); xs2 = 2; }
+                }
+                if (xs1 < 0) { fp_load_operand(1, inst.src1, is_double); xs1 = 1; }
+                if (xs2 < 0) { fp_load_operand(2, inst.src2, is_double); xs2 = 2; }
+                // Copy Va (acc) into the dest XMM, LAST, so the source loads
+                // above are never clobbered by it.
+                if (xd >= 0) {
+                    if (xacc >= 0 && xacc != xd) {
+                        // movsd/movss xmm_d, xmm_acc (dest = acc)
+                        emit_byte(prefix);
+                        emit_byte(rex(false, xd >= 8, false, xacc >= 8));
+                        emit_byte(0x0F); emit_byte(0x10);
+                        emit_byte(modrm(3, xd & 7, xacc & 7));
+                    } else if (xacc < 0) {
+                        // acc unpinned: load from memory into XMM0, move to dest
+                        emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                        emit_modrm_disp(0, CPU_REG, off_acc);
+                        emit_byte(prefix);
+                        emit_byte(rex(false, xd >= 8, false, false));
+                        emit_byte(0x0F); emit_byte(0x10);
+                        emit_byte(modrm(3, xd & 7, 0));
+                    }
+                    // xacc == xd: dest already holds acc
+                } else {
+                    if (xacc >= 0) {
+                        emit_byte(prefix);
+                        emit_byte(rex(false, false, false, xacc >= 8));
+                        emit_byte(0x0F); emit_byte(0x10);
+                        emit_byte(modrm(3, 0, xacc & 7));
+                    } else {
+                        emit_byte(prefix); emit_byte(0x0F); emit_byte(0x10);
+                        emit_modrm_disp(0, CPU_REG, off_acc);
+                    }
+                }
+                // VEX.128.66.0F38.W[is_double]: vfmadd231ss/sd xmmD, xmmS1, xmmS2
+                // (FMA3 uses pp=01 for BOTH ss and sd — the W bit selects width).
+                emit_vex3(2, is_double, xs1, 1, dst_xmm, xs2, true, opcode);
+                if (xd >= 0) {
+                    vec_cache_mark_dirty(inst.dest);
+                } else {
+                    fp_store_operand(0, inst.dest, is_double);
+                }
+                fp_zero_hi(inst.dest);
+                return false;
             } else {
                 // ── Decomposed path (no FMA3) ──
                 // Load Vn into XMM0, Vm into XMM1, multiply → XMM0 = Vn*Vm
@@ -302,12 +318,10 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
                     emit_byte(0xC1);
                 }
             }
-            // Store result (in XMM0) to v_lo[dest]
-            int32_t off_d = V_LO_OFF + static_cast<int>(inst.dest) * 8;
-            emit_byte(prefix); emit_byte(0x0F); emit_byte(0x11);
-            emit_modrm_disp(0, CPU_REG, off_d);
-            emit_mov_imm32_zext(RAX, 0);
-            emit_store(CPU_REG, V_HI_OFF + static_cast<int>(inst.dest) * 8, RAX);
+            // Store result (in XMM0) to v_lo[dest] (fp_store_operand: pinned
+            // dest → reg-reg + dirty, else memory) and zero v_hi.
+            fp_store_operand(0, inst.dest, is_double);
+            fp_zero_hi(inst.dest);
             return false;
         }
         default:

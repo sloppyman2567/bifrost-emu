@@ -501,6 +501,10 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // The cache's correctness relies on never flushing mid-block, which the
     // all-or-nothing scan guarantees.
     vec_cache_may_enable(ir_block);
+    // Scalar-FP cache (lo-only): only when the vec cache is NOT active for
+    // this block — the two are exclusive (both pin into XMM3-15 and share
+    // cpu.v_lo, so a block is either vector-cached or scalar-FP-cached).
+    if (!vec_cache_active_) fp_cache_may_enable(ir_block);
     // ── Prologue ─────────────────────────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);

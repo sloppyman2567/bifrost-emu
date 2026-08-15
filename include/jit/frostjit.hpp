@@ -1059,6 +1059,20 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
+    // Scalar-FP cache (1.5.2-alpha): the same XMM3-15 pinning machinery
+    // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v_lo[0..31]
+    // with NEON vectors. A block is EITHER a vec-cache block OR an fp-cache
+    // block (never both — the gates are exclusive), so the pinned XMMs and
+    // dirty tracking are shared. The fp cache is LO-ONLY:
+    //   - prologue loads only v_lo[vreg] (movsd)
+    //   - v_hi[vreg] is NEVER pinned; hi writes go straight to memory
+    //     (every scalar FP write zeroes it except FP_MOV double which
+    //     copies it, both done inline in the op codegen)
+    //   - writeback stores only v_lo[vreg]
+    // Scalar FP regs also overlap the GPR vreg space in the allocator:
+    // vregs 0-31 are guest GPRs, so the FP operands use the raw ARM reg
+    // indices (0-31) directly, never allocator vregs.
+    bool fp_cache_active_ = false;
     // Returns the host XMM reg pinning guest vector `vreg`, or -1.
     int  vec_xmm(int vreg) const {
         return (vec_cache_active_ && vreg >= 0 && vreg < 32)
@@ -1068,11 +1082,37 @@ private:
     // cache-aware (or GPR-only) AND the distinct vectors used fit in
     // XMM3-15 AND the host has FMA3 (AVX). Pins the used vectors.
     bool vec_cache_may_enable(const IRBlock& block);
+    // Pre-scan `block` for the scalar-FP cache. Runs only when the vec
+    // cache is NOT active for this block (the two are exclusive). Every
+    // op must be GPR-only, an FP op with a cache-aware fast path, or a
+    // call with a writeback+reload guard. Pins up to 13 most-used FP regs
+    // into XMM3-15 (partial pinning — the least-used regs stay in memory).
+    bool fp_cache_may_enable(const IRBlock& block);
     void vec_cache_reset();
     void vec_emit_prologue_loads();      // movsd+movhpd loads before body start
     void vec_cache_writeback_all(bool clear_flags = true);  // dirty XMM → cpu.v_lo/v_hi (epilogue)
     void vec_cache_mark_dirty(int vreg);
     void vec_emit_load_lo_hi(int xmm, int vreg);
+    // FP-cache-aware operand load/store helpers. When the fp cache is
+    // active and the FP reg is pinned, they use reg-reg moves (no memory);
+    // otherwise they load/store cpu.v_lo[vreg] exactly as the non-cached
+    // codegen does. `is_double` selects MOVSD/MOVSS width.
+    void fp_load_operand(int xmm, int vreg, bool is_double);
+    void fp_store_operand(int xmm, int vreg, bool is_double);
+    // Resolve FP operand `vreg` to the XMM that holds its value: the pinned
+    // XMM if cached (no code emitted), else `scratch` after loading
+    // v_lo[vreg] into it. For ops whose arithmetic can take any XMM
+    // (FMADD family) this avoids the redundant copy fp_load_operand emits
+    // for pinned operands.
+    int  fp_resolve_operand(int vreg, int scratch, bool is_double);
+    // Zero v_hi[vreg] (pxor xmm0, xmm0 + movsd [hi], xmm0). No GPR touched.
+    // v_hi is never cached in fp-cache blocks, so this is always a memory
+    // store. MUST be called after the lo result is stored.
+    void fp_zero_hi(int vreg);
+    // movq xmm, gpr / movq gpr, xmm (66 REX.W 0F 6E/7E), handling XMM8-15
+    // via REX.R and extended GPRs via REX.B.
+    void emit_vmovq_gpr_to_xmm(int xmm, int gpr);
+    void emit_vmovq_xmm_to_gpr(int gpr, int xmm);
     // VEX 3-byte emission for the cached SIMD paths (map: 1=0F, 2=0F38,
     // 3=0F3A; vvvv = NDS source reg; pp: 0=ps, 1=pd/66; W = 64-bit op).
     void emit_vex3(int map, bool w, int vvvv, int pp, int reg_field,

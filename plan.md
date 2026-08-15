@@ -6,7 +6,9 @@ genuine Perlin-noise work (2 fresh chunk loads/frame ≈ 87ms of the ~92ms
 spike frames), and the JIT itself is the limiter for the FP-heavy phases.
 
 Status: Phase 1 (baseline) DONE, diagnosis confirmed. Committed baseline is
-`87a33ed`. Next: Phase 2 (FMOV compaction).
+`87a33ed`. Phases 2-3 DONE (committed: `5e2234e` FMOV, fp-cache work in the
+tree awaiting commit). Heightmap 26.5 → **13.1ms (~2x)**, FWD neutral on
+the game. Next: Phase 4 (leaf-call inlining).
 
 ## Phase 1 results (measurement — 2026-08-14)
 
@@ -128,13 +130,39 @@ Reuse the vec-cache machinery (`jit_codegen_vec_cache.cpp`) for scalar FP:
 - `bench_mips` byte-identical (`done: acc=0xf800800a2c4ff835`) under
   `BIFROST_JIT_VERIFY` / `BIFROST_JIT_VERIFY_MEM`.
 - `test_sdl_gl_triangle` ALL PASS.
-- Game: fresh-column heightmap 26.5 → ~9-11ms; fresh chunk 43.6 → ~20ms;
+- Game: fresh-column heightmap 26.5 → **13.1ms** (~2x); FWD neutral
+  (13.2ms). Fresh chunk ~43.6 → ~22ms (DBG-GEN cadence ~2x faster);
   spike frames roughly halve.
 
+### Phase 3 results (2026-08-14) — verification caught THREE encoding bugs
+- **`emit_vmovq_xmm_to_gpr` (jit_codegen_vec_cache.cpp)**: `movq` (both
+  `66 REX.W 0F 6E/7E` variants) puts the XMM in ModRM.reg and the GPR in
+  ModRM.rm; the helper had reg/rm AND the REX.R/REX.B bits swapped, so it
+  emitted `movq %xmm0,%rbx` — clobbered the CPU base reg → SIGSEGV / -nan
+  (crash root cause).
+- **`fp_store_operand` pinned path**: `0F 11` is the STORE form (ModRM.reg =
+  SOURCE, ModRM.rm = DEST); the REX.R/REX.B extension bits follow source/
+  dest. It emitted `movsd xmm0, xmm3` (read pinned dest, write scratch) —
+  the pinned dest XMM was never written, so the stale v_lo value was written
+  back at the BL_CALL guard (residual-garbage root cause).
+- **FMA dest/src1 aliasing (jit_codegen_fp.cpp)**: the FMA3 231 form reads
+  Vn from the VEX.vvvv register; GCC's `fmsub d0, d0, d1, d2` puts Vn in the
+  SAME vreg as dest, so the `movsd xmm_d, xmm_acc` copy clobbered Vn before
+  the FMA read it (`c − c*b` instead of `c − a*b`). Fixed by resolving Vn/Vm
+  BEFORE the acc copy and reloading any source pinned to the dest XMM from
+  v_lo into a scratch (jit_fma.elf 28/28 was failing; 0/28 now).
+- All three are ModRM/VEX field-ordering bugs of the same class; the
+  `BIFROST_JIT_VERIFY` v_lo comparison (jit_dispatch.cpp) was added to catch
+  fp-cache-only corruption (the old GPR-only compare couldn't).
+- Full matrix clean: 199/199, chain-skip 194/194, FWD 194/194, bench_mips
+  byte-identical, bench_matrix correct, triangle ALL PASS, zero JIT_VERIFY
+  divergences.
+
 ## Expected outcome
-- Heightmap ~2.5-3x (26.5ms → ~9-11ms) → ~1.1-1.2 GIPS on that phase.
+- Heightmap ~2x so far (26.5ms → **13.1ms**, ~800 MIPS on that phase);
+  Phase 4 (leaf-call inlining of grad3) is the step toward ~9-11ms / 1 GIPS.
 - Same win flows into mesh (cglm float math) and lighting.
-- Fresh chunk 43.6ms → ~20ms; exploration spikes halve.
+- Fresh chunk 43.6ms → ~22ms; exploration spikes halve.
 
 ## Honest caveats
 - Phase 3 touches the hottest codegen paths; regalloc bugs hide here — the

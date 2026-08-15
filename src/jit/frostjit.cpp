@@ -742,6 +742,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
                 evict_vreg(31);
             }
+            // ── Cache guard ─────────────────────────────────────────
+            // The callee (jit_call_helper → the target block) may clobber
+            // ANY XMM3-15 and ANY cpu.v_lo entry. Write the pinned FP/vec
+            // regs back before the call and reload them after, so the
+            // cache stays authoritative. Lo-only in fp-cache mode (the
+            // writeback/prologue branch on fp_cache_active_).
+            if (vec_cache_active_) vec_cache_writeback_all();
             // RAX = target (from the ARM reg / vreg src1 — after the flush
             // it's in cpu.regs[src1] or its stack slot).
             load_vreg_to_reg(RAX, inst.src1);
@@ -755,6 +762,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_pop(WIN_REG);
             emit_store(CPU_REG, PC_OFF, RCX);
             invalidate_all_vregs();
+            if (vec_cache_active_) vec_emit_prologue_loads();
             return false;  // does NOT end the block
         }
         // Call the target block via jit_call_helper, then continue the block.
@@ -771,6 +779,11 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (vreg_home_[31] >= 0 && vreg_dirty_[31]) {
                 evict_vreg(31);
             }
+            // ── Cache guard ─────────────────────────────────────────
+            // Same writeback+reload as BLR_CALL: the callee may clobber any
+            // XMM3-15 / cpu.v_lo entry, so the pinned regs are flushed before
+            // the call and reloaded after it.
+            if (vec_cache_active_) vec_cache_writeback_all();
             // Set cpu.pc = target_pc so the callee's chain/self-loop logic works.
             emit_mov_imm_to_rax(inst.imm);
             emit_store(CPU_REG, PC_OFF, RAX);
@@ -795,6 +808,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // Invalidate ALL cache mappings after the call.
             // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
             invalidate_all_vregs();
+            if (vec_cache_active_) vec_emit_prologue_loads();
             return false;  // does NOT end the block
         }
         default:

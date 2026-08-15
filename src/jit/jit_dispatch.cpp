@@ -627,6 +627,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(cpu.sp), static_cast<unsigned long long>(ref.sp));
             diverged = true;
         }
+        // Compare FP state (v_lo/v_hi) too — the vec/fp caches write
+        // v_lo directly and a GPR-only compare can't see it (the fp-cache
+        // call-guard corruption bug manifested only here).
+        for (int i = 0; i < 32; i++) {
+            if (cpu.v_lo[i] != ref.v_lo[i]) {
+                fprintf(stderr, "[VERIFY] v_lo[%d]: jit=0x%llx ref=0x%llx\n",
+                        i, static_cast<unsigned long long>(cpu.v_lo[i]),
+                        static_cast<unsigned long long>(ref.v_lo[i]));
+                diverged = true;
+            }
+        }
         if (cpu.pstate != ref.pstate) {
             // pstate comparison: mask out the internal from_sub marker bit
             // (bit 27) since it's a JIT implementation detail, not part of

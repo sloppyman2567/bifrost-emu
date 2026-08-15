@@ -50,9 +50,15 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                     d = alloc_reg_excluding(s, -1);
                     emit_mov_reg(d, s);
                 } else if (inst.sf == 1) {
-                    // FP register: load from cpu.v_lo[src1]
+                    // FP register: load from cpu.v_lo[src1] (or, when the fp
+                    // cache pins src1, the pinned XMM — reg-reg move).
                     d = alloc_reg();
-                    emit_load(d, CPU_REG, V_LO_OFF + 8 * inst.src1);
+                    int xs = vec_xmm(inst.src1);
+                    if (xs >= 0) {
+                        emit_vmovq_xmm_to_gpr(d, xs);
+                    } else {
+                        emit_load(d, CPU_REG, V_LO_OFF + 8 * inst.src1);
+                    }
                 } else {
                     d = alloc_reg();
                     emit_load_arm(d, inst.src1);
@@ -71,8 +77,15 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             {
                 int s = ensure_vreg(inst.src1);
                 if (inst.sf == 1 && inst.dest <= 30) {
-                    // FP register: store to cpu.v_lo[dest]
-                    emit_store(CPU_REG, V_LO_OFF + 8 * inst.dest, s);
+                    // FP register: store to cpu.v_lo[dest] (or, when the fp
+                    // cache pins dest, the pinned XMM — reg-reg move + dirty).
+                    int xd = vec_xmm(inst.dest);
+                    if (xd >= 0) {
+                        emit_vmovq_gpr_to_xmm(xd, s);
+                        vec_cache_mark_dirty(inst.dest);
+                    } else {
+                        emit_store(CPU_REG, V_LO_OFF + 8 * inst.dest, s);
+                    }
                 } else {
                     emit_store_arm(inst.dest, s);
                 }
