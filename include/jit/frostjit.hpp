@@ -178,10 +178,10 @@ public:
     // path even on FMA3-capable CPUs (debugging).
     const CpuFeatures& cpu_features() const { return cpu_features_; }
     bool has_fma3() const { return cpu_features_.has_fma3() && !no_fma3_; }
-    // 1.5.2-alpha: AVX2 (256-bit VEX SIMD) gating, mirroring has_fma3().
+    // 1.5.3-alpha: AVX2 (256-bit VEX SIMD) gating, mirroring has_fma3().
     // Override via BIFROST_NO_AVX2=1 to force the 128-bit SSE2 path.
     bool has_avx2() const { return cpu_features_.has_avx2() && !no_avx2_; }
-    // 1.5.2-alpha: vDSO clock fast-path range (set by Emulator::enable_jit()).
+    // 1.5.3-alpha: vDSO clock fast-path range (set by Emulator::enable_jit()).
     void set_vdso_range(uint64_t base, uint64_t size) { vdso_base_ = base; vdso_size_ = size; }
     bool in_vdso(uint64_t pc) const {
         return vdso_base_ != 0 && pc >= vdso_base_ && pc < vdso_base_ + vdso_size_;
@@ -194,11 +194,11 @@ public:
     // codegen sites. Now we do, falling back to CALL_INTERP on hosts
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
-    // 1.5.2-alpha: SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
+    // 1.5.3-alpha: SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
     // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
     // pre-Westmere hosts without the check.
     bool has_sse42() const { return cpu_features_.sse42; }
-    // 1.5.2-alpha: crypto instruction set detection.
+    // 1.5.3-alpha: crypto instruction set detection.
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
     bool has_sha()       const { return cpu_features_.has_sha(); }
@@ -243,7 +243,7 @@ public:
     // share the main's FrostJIT in shared-JIT mode).
     static thread_local uint64_t tls_watchdog_last_pc_;
     static thread_local uint32_t tls_watchdog_count_;
-    // 1.5.2-alpha: Per-thread single-entry "last block" fast cache.
+    // 1.5.3-alpha: Per-thread single-entry "last block" fast cache.
     // Bypasses the shared_mutex lookup for tight loops where the same
     // PC is dispatched repeatedly. Stores just the (pc, fn, instr_count)
     // tuple — the minimum needed to call the block. The fn pointer is
@@ -284,13 +284,13 @@ public:
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
-    // 1.5.2-alpha: Per-thread inline cache for block transitions.
+    // 1.5.3-alpha: Per-thread inline cache for block transitions.
     // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
     // that multi-block cycles (A→B→A→B), virtual dispatch, switch tables,
     // and computed gotos don't pay the shared_mutex + unordered_map cost
     // on every dispatch.
     //
-    // 1.5.2-alpha: grew from 16 → 256 slots and made the lookup inline
+    // 1.5.3-alpha: grew from 16 → 256 slots and made the lookup inline
     // in run_block. With a 16-slot direct-mapped cache, a game with a
     // hot working set of dozens of blocks thrashed constantly: ~3.2M
     // dispatches/sec fell through to the shared_mutex + unordered_map
@@ -335,7 +335,7 @@ public:
     // unbounded memory growth; eviction is LRU-ish (clear on overflow).
     // Thread-local for the same reason as the watchdog.
     //
-    // 1.5.2-alpha: runtime promotion is DISABLED by default (BIFROST_HOT_INTERP
+    // 1.5.3-alpha: runtime promotion is DISABLED by default (BIFROST_HOT_INTERP
     // opts back in). The translator already marks CALL_INTERP-heavy blocks
     // interp_only, and demoting hot mixed blocks (1-2 fallbacks + natives)
     // measured slower on the real game (~8-10%) because it drags native
@@ -434,7 +434,7 @@ private:
     CpuFeatures cpu_features_{};
     bool no_fma3_ = false;  // true if BIFROST_NO_FMA3=1 (force decomposed path)
     bool no_avx2_ = false;  // true if BIFROST_NO_AVX2=1 (force 128-bit SIMD path)
-    // ── vDSO range (1.5.2-alpha fast path) ──────────────────────────
+    // ── vDSO range (1.5.3-alpha fast path) ──────────────────────────
     // Cached at enable_jit() time so the SVC codegen can recognize SVC
     // instructions translated from the vDSO clock stubs and emit a native
     // fast path (jit_vdso_clock_svc) that skips the interpreter entirely.
@@ -506,7 +506,7 @@ private:
         // a self-loop, or self-loop chaining is disabled via BIFROST_NO_SELFLOOP).
         bool    has_selfloop_slot = false;
         size_t  selfloop_patch_off = 0;  // offset of the 5-byte jmp slot in code_buf_
-        // Taken-path chaining (1.5.2-alpha): a second 5-byte chain slot at
+        // Taken-path chaining (1.5.3-alpha): a second 5-byte chain slot at
         // the end of the conditional-branch TAKEN path (ret + 4 NOPs). When
         // the taken target is translated, it's patched to `jmp rel32` so the
         // loop-back edge of a hot conditional loop skips the dispatcher.
@@ -1055,7 +1055,7 @@ private:
     size_t  taken_chain_patch_off_ = 0;  // offset of the 5-byte taken-path slot
     uint64_t taken_chain_target_pc_ = 0; // taken-path target (inst.imm)
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
-    // ── XMM vector register cache (1.5.2-alpha) ───────────────────
+    // ── XMM vector register cache (1.5.3-alpha) ───────────────────
     // Guest vector regs (0-31) pinned into host XMM3-15 across the whole
     // block. Only blocks whose vector-touching ops are all cache-aware
     // (SIMD_FP_FMA / SIMD_FP_ARITH) plus GPR-only ops activate the cache;
@@ -1077,7 +1077,7 @@ private:
     bool vec_cache_active_ = false;
     int  vec_pinned_count_ = 0;
     int  vec_pinned_[32];     // pinned vector regs, in assignment order
-    // Scalar-FP cache (1.5.2-alpha): the same XMM3-15 pinning machinery
+    // Scalar-FP cache (1.5.3-alpha): the same XMM3-15 pinning machinery
     // reused for scalar FP regs (s0-s31 / d0-d31), which share cpu.v_lo[0..31]
     // with NEON vectors. A block is EITHER a vec-cache block OR an fp-cache
     // block (never both — the gates are exclusive), so the pinned XMMs and

@@ -623,7 +623,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   display symbol = one spec row + `make opgen-thunk`; `thunk.cpp` filters
   its own loop to GL/GLES/EGL/SDL/GLFW so it never indexes `kFamilies`
   with a display-family value.
-- GLFW callbacks (1.5.2-alpha): the callback setters — `glfwSetCursorPosCallback`
+- GLFW callbacks (1.5.3-alpha): the callback setters — `glfwSetCursorPosCallback`
   (`CURSOR_CB`), `glfwSetKeyCallback` (`KEY_CB`), `glfwSetMouseButtonCallback`
   (`MOUSE_CB`), `glfwSetFramebufferSizeCallback` (`FRAMEBUFFER_CB`),
   `glfwSetWindowSizeCallback` (`WINDOW_SIZE_CB`), `glfwSetWindowFocusCallback`

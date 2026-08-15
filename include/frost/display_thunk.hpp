@@ -1,7 +1,7 @@
 // frost/display_thunk.hpp — DisplayThunk: forward guest display/Vulkan/
 // Wayland/X11/GBM calls to host.
 //
-// 1.5.2-alpha: NEW. DisplayThunk handles the modern display stack:
+// 1.5.3-alpha: NEW. DisplayThunk handles the modern display stack:
 //   - Vulkan (libvulkan.so): vkCreateInstance, vkCreateDevice,
 //     vkCreateSwapchainKHR, vkQueuePresentKHR, vkAcquireNextImageKHR,
 //     vkAllocateCommandBuffers, vkQueueSubmit, etc.

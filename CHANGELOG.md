@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — version bump to 1.5.3-alpha (2026-08-15)
+
+- All version references across the tree are normalized to **1.5.3-alpha**:
+  `include/bifrost/version.hpp` (`VERSION` + new 1.5.3-alpha history block),
+  `main.cpp`, `api/bifrost.h`, `Makefile`, `scripts/setup-rootfs.sh`,
+  `bifrost.toml.sample`, `README.md`, `ROADMAP.md`, and ~54 code/header
+  files (inline `v1.5.2-alpha` comments). `ctest/test_capi.c` now asserts
+  `bifrost_version() == "1.5.3-alpha"`. Historical release sections in
+  `CHANGELOG.md` / `version.hpp` / `ROADMAP.md` (`1.4.5-alpha`, `1.5.0.alpha`,
+  `1.5.1-alpha`, `1.5.2-alpha`) are kept as release history.
+
 ## [Unreleased] — version bump to 1.5.2-alpha (2026-08-13)
 
 - All version references across the tree are normalized to **1.5.2-alpha**:
@@ -15,7 +26,8 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   files (inline `v1.5.0.alpha` / `v1.5.1-alpha` / `v1.5.1.alpha` comments).
   `ctest/test_capi.c` now asserts `bifrost_version() == "1.5.2-alpha"`.
   Historical release sections in `CHANGELOG.md` / `version.hpp` / `ROADMAP.md`
-  (`1.4.5-alpha`, `1.5.0.alpha`, `1.5.1-alpha`) are kept as release history.
+  (`1.4.5-alpha`, `1.5.0.alpha`, `1.5.1-alpha`, `1.5.2-alpha`) are kept as
+  release history.
 
 ## [Unreleased] — Vulkan host path via DisplayThunk (1.5.3-alpha)
 

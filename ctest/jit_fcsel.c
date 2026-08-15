@@ -1,7 +1,7 @@
 /*
  * jit_fcsel.c — JIT native FP conditional-select (FCSEL) tests.
  *
- * Background (1.5.2-alpha):
+ * Background (1.5.3-alpha):
  *   FCSEL Sd/Dd, Sn, Sm, cond previously lowered to a 4-op chain
  *   (FMOV_F2G; FMOV_F2G; CSEL; FMOV_G2F) ≈ 20+ host instructions
  *   including a pushfq/popfq and a full vreg flush. It is now a single

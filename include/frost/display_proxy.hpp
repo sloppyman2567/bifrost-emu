@@ -1,7 +1,7 @@
 // frost_graphics/display_proxy.hpp — host-side display proxy for guest
 // X11/Wayland apps.
 //
-// 1.5.2-alpha: NEW. Displays owns ONE host SDL2 window and exposes
+// 1.5.3-alpha: NEW. Displays owns ONE host SDL2 window and exposes
 // guest-callable proxy entry points for a minimal X11 and Wayland
 // surface-creation + draw loop.
 //

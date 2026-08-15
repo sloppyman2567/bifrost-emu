@@ -191,6 +191,20 @@ namespace arm64emu {
 //     top remaining fallback); fixed latent esize=8 SSHR SIGILL (PSRAQ
 //     is AVX-512F only, now CALL_INTERP).
 //   - Version bump: all version refs normalized to 1.5.2-alpha.
-constexpr const char* VERSION  = "1.5.2-alpha";
+//
+// 1.5.3-alpha (2026-08-15): thunk/table consolidation + graphics thunking.
+//   New in 1.5.3-alpha (high-level — see CHANGELOG.md for the full list):
+//   - GLFW callback setters (KEY_CB/MOUSE_CB/FRAMEBUFFER_CB/WINDOW_SIZE_CB/
+//     FOCUS_CB/ERROR_CB) store guest AArch64 callbacks and deliver them on
+//     change after each GLFW_POLL; HiDPI GLFW_CREATE compensation.
+//   - Vulkan host path via DisplayThunk: all ~79 pointer masks corrected,
+//     vkGetInstanceProcAddr/GetDeviceProcAddr/CreateInstance/CreateDevice/
+//     QueuePresentKHR deep marshalling; headless WSI swapchain support.
+//   - DisplayThunk (Vulkan/Wayland/X11/XCB/GBM/GLX/RandR/Xkb, 696 symbols)
+//     moved onto the same generated table as GraphicThunk
+//     (tools/opgen/thunk_dp.txt → opgen_thunk.hpp); dispatch routes by
+//     POLICY/SIZE, not symbol-name compares.
+//   - Version bump: all version refs normalized to 1.5.3-alpha.
+constexpr const char* VERSION  = "1.5.3-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

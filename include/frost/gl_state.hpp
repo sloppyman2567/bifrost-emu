@@ -1,7 +1,7 @@
 // frost/gl_state.hpp — GLStateTracker: mirrors guest OpenGL state for
 // consistent query results across thunked calls.
 //
-// 1.5.2-alpha: NEW. The thunk forwards GL/EGL/SDL2 calls to the host,
+// 1.5.3-alpha: NEW. The thunk forwards GL/EGL/SDL2 calls to the host,
 // but state queries (glIsEnabled, glGetIntegerv, etc.) can return
 // inconsistent results if the host context differs from what the guest
 // expects. GLStateTracker maintains a software-side mirror of the
@@ -208,7 +208,7 @@ public:
     void set_program(uint32_t program);
     void set_array_buffer_binding(uint32_t buffer);
     void set_element_array_buffer_binding(uint32_t buffer);
-    // 1.5.2.alpha: used to decide whether the final arg of
+    // 1.5.3-alpha: used to decide whether the final arg of
     // glVertexAttribPointer / glDrawElements is a VBO byte offset (buffer
     // bound) or a real guest pointer (client-side vertex/index arrays).
     uint32_t array_buffer_binding() const;

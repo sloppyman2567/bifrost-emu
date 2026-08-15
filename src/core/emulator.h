@@ -478,7 +478,7 @@ private:
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
-    // 1.5.2-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    // 1.5.3-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
     // also called from the syscall dispatcher and the JIT trampoline.
     friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────
@@ -503,7 +503,7 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
-    // 1.5.2-alpha: wire the GraphicThunk's GLFW-callback runner to a
+    // 1.5.3-alpha: wire the GraphicThunk's GLFW-callback runner to a
     // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
     // d0..=fargs, pc = callback, run step() to the sentinel LR).
     // Called after the thunk is initialized on both the dynamic-linker

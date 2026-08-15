@@ -84,7 +84,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
     if (syscall_misc_signal(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_io(emu, cpu, num)     != SYSCALL_NOT_HANDLED) return 0;
     if (syscall_misc_process(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
-    // 1.5.2-alpha: extended syscalls (xattr, kcmp, membarrier,
+    // 1.5.3-alpha: extended syscalls (xattr, kcmp, membarrier,
     // copy_file_range, pkey_*, pidfd_*, io_uring stubs, capget/capset,
     // personality, mseal, etc.).
     if (syscall_misc_extended(emu, cpu, num) != SYSCALL_NOT_HANDLED) return 0;
@@ -937,7 +937,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         // when disabled, this case is unreachable (no trampolines are
         // ever written to guest memory).
         case GraphicThunk::SYSCALL_NUMBER: {
-            // 1.5.2-alpha: the thunk syscall is shared by GraphicThunk,
+            // 1.5.3-alpha: the thunk syscall is shared by GraphicThunk,
             // AudioThunk, and DisplayThunk. Each has its own per-thunk
             // symbol_id namespace starting from 0, so we try each in
             // order until one accepts the symbol_id.

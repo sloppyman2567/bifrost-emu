@@ -2765,7 +2765,7 @@ uint64_t DynamicLinker::load_shared_library(CPU& cpu,
         return 0;
     }
     // Allocate a fresh base address via the Memory's mmap_alloc().
-    // (1.5.2: mmap_alloc's base is MMAP_BASE_MIN inside the 4 GiB
+    // (1.5.3: mmap_alloc's base is MMAP_BASE_MIN inside the 4 GiB
     // direct window — the SAME region where the thunk trampolines and
     // string caches are allocated. The allocator tracks ALL allocations
     // so library bases can't collide with the trampolines; that was the
@@ -2868,9 +2868,9 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
 // Returns true if `soname` matches the naming pattern of a library that
 // the thunk resolver might handle. We accept:
 //   - Graphics (GraphicThunk): libGL*, libEGL*, libSDL2*, libGLESv2*
-//   - Audio (AudioThunk, 1.5.2-alpha): libasound*, libpulse*,
+//   - Audio (AudioThunk, 1.5.3-alpha): libasound*, libpulse*,
 //     libopenal*
-//   - Display (DisplayThunk, 1.5.2-alpha): libvulkan*, libwayland-*,
+//   - Display (DisplayThunk, 1.5.3-alpha): libvulkan*, libwayland-*,
 //     libX11*, libgbm*
 // (libSDL2 is in both graphics and audio — both thunks will try to
 // resolve its symbols, and the dispatcher tries graphics first.)
@@ -2889,13 +2889,13 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
         || starts_with(soname, "libglfw.so")) {
         return true;
     }
-    // Audio (1.5.2-alpha).
+    // Audio (1.5.3-alpha).
     if (starts_with(soname, "libasound")
         || starts_with(soname, "libpulse")
         || starts_with(soname, "libopenal")) {
         return true;
     }
-    // Display (1.5.2-alpha).
+    // Display (1.5.3-alpha).
     if (starts_with(soname, "libvulkan")
         || starts_with(soname, "libwayland-")
         || starts_with(soname, "libX11")

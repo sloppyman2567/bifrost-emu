@@ -67,7 +67,7 @@ struct CpuFeatures {
     // True iff the JIT can use SSE4.1 codegen (roundss/roundsd,
     // pblendw, etc.). This is the most common "modern" baseline.
     bool has_sse41() const { return sse41; }
-    // 1.5.2-alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
+    // 1.5.3-alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
     bool has_aesni()     const { return aesni; }
     bool has_pclmulqdq() const { return pclmulqdq; }
     bool has_sha()       const { return sha; }

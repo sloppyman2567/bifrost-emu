@@ -274,13 +274,13 @@ INTEGRATION_TESTS=(
     "dynlink_test|ctest_real/test_dynlink.elf||5|test_dynlink: ALL PASS"
     "fcvtzu_test|ctest_real/fcvtzu_test.elf||5|OK"
     "fcvtzu_test2|ctest_real/fcvtzu_test2.elf||5|passed"
-    # FCVT rounding-mode regression (1.5.2-alpha): FP→int conversions only
+    # FCVT rounding-mode regression (1.5.3-alpha): FP→int conversions only
     # handled FCVTZS/FCVTZU (rmode=3, toward zero). floor() compiles to
     # FCVTMS (rmode=2) and ceil() to FCVTPS (rmode=1), so chunk/mesh math
     # fell back to CALL_INTERP. Forced encodings check FCVTNS/MS/PS/ZS in
     # single+double with 32/64-bit dests (no libm — builds under setup-tests).
     "fcvt_round|ctest_real/test_fcvt_round.elf||10|PASS"
-    # FP-source int<->FP regression (1.5.2-alpha): SIMD-scalar SCVTF/UCVTF
+    # FP-source int<->FP regression (1.5.3-alpha): SIMD-scalar SCVTF/UCVTF
     # (FP source) and FCVTZS/FCVTZU (FP dest) in the 0x5E200800 two-register-
     # misc group fell back to CALL_INTERP (and a codegen fbits=64 sentinel
     # divided terrain coords by 2^64). Covers signed/unsigned x 32/64-bit
@@ -293,44 +293,44 @@ INTEGRATION_TESTS=(
     "fwd_repro3|ctest_real/fwd_repro3.elf||5"
     "fwd_repro4|ctest_real/fwd_repro4.elf||5"
     "fwd_repro5|ctest_real/fwd_repro5.elf||5"
-    # FP correctness regression (1.5.2-alpha): FABS single-precision
+    # FP correctness regression (1.5.3-alpha): FABS single-precision
     # in the JIT was using a double-width sign mask (cleared bit 63 not
     # bit 31), so fabsf() of a negative float left it negative. This
     # test forces the FABS instruction via volatile and checks the sign
     # bit is cleared. Also confirms 0.3f-0.1f matches host IEEE-754.
     "fabs_sign|ctest_real/test_fabs2.elf||10|ALL PASS"
-    # FP correctness regression (1.5.2-alpha): FABD (floating-point
+    # FP correctness regression (1.5.3-alpha): FABD (floating-point
     # absolute difference, |a-b|) was completely unimplemented — musl's
     # fabsf(got-want) is lowered to `fabd` by the compiler, so a broken
     # FABD silently returned the first operand, breaking float
     # comparisons. Tests single + double precision.
     "fabd|ctest_real/test_fabd.elf||10|ALL PASS"
-    # SIMD vector FP 2-source regression (1.5.2-alpha): the vector forms
+    # SIMD vector FP 2-source regression (1.5.3-alpha): the vector forms
     # of FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FABD/FMAXNM/FMINNM (0x0E/0x2E group,
     # .2s/.4s) were completely unimplemented — NEON-vectorized FP silently
     # produced wrong results. Tests all ops in single precision (.4s, .2s).
     "simd_vec_fp|ctest_real/test_simd_vec_fp.elf||10|ALL PASS"
-    # SIMD vector FP fused 3-source regression (1.5.2-alpha): FMLA/FMLS
+    # SIMD vector FP fused 3-source regression (1.5.3-alpha): FMLA/FMLS
     # (Vd = Vd +/- Vn*Vm) were completely unimplemented — NEON-vectorized
     # matmul/convolution kernels (GCC lowers a*b+c to fmla) hit DecodeError
     # (SIGILL). Tests both ops in single (.4s/.2s) and double (.2d).
     "simd_fmla|ctest_real/test_simd_fmla.elf||10|ALL PASS"
-    # SADDW/SADDW2 + UMINP vector regression (1.5.2-alpha): widening add
+    # SADDW/SADDW2 + UMINP vector regression (1.5.3-alpha): widening add
     # and pairwise unsigned min, all sizes + low/high half selection. These
     # were silently NOP'd; now covered (busybox df / iperf3 depend on them).
     "simd_saddw_uminp|ctest_real/test_simd_saddw_uminp.elf||10|ALL PASS"
-    # vDSO fast-path regression (1.5.2-alpha): clock_gettime /
+    # vDSO fast-path regression (1.5.3-alpha): clock_gettime /
     # clock_getres / gettimeofday served entirely from the JIT/instr fast
     # path without entering the syscall dispatcher (mirrors real Linux,
     # where the vDSO never traps into the kernel). 10 checks, incl. a
     # 100k-call monotonic non-decreasing loop.
     "vdso_clock|ctest_real/test_vdso_clock.elf||10|ALL PASS"
-    # UMOV regression (1.5.2-alpha): vector element → GPR extraction for
+    # UMOV regression (1.5.3-alpha): vector element → GPR extraction for
     # B/H/S/D across both halves. Covered the pre-existing bug report
     # (`umov v.d[1]` returning garbage) which turned out to be a test-asm
     # constraint artifact — the handler is correct and stays locked in.
     "simd_umov|ctest_real/test_simd_umov.elf||10|ALL PASS"
-    # Vector shift-by-immediate regression (1.5.2-alpha): USRA/SSRA/SLI/SRI
+    # Vector shift-by-immediate regression (1.5.3-alpha): USRA/SSRA/SLI/SRI
     # across H/S/D, Q=1 and Q=0, incl. boundary shifts (0 and esize*8).
     # Exercises the AVX2 256-bit and SSE2 128-bit codegen paths plus the
     # interpreter; also guards the Q=0 v_hi-zeroing fix.
@@ -355,7 +355,7 @@ INTEGRATION_TESTS=(
     # present modes, create swapchain, get images, acquire, present, teardown.
     # Exit 77 = skip when the host driver lacks VK_EXT_headless_surface.
     "vulkan_swapchain|ctest_real/test_vulkan_swapchain.elf||30|SWAPCHAIN TEST PASSED"
-    # GL state tracker regression (1.5.2-alpha): verifies GLStateTracker
+    # GL state tracker regression (1.5.3-alpha): verifies GLStateTracker
     # mirrors guest GL state and answers queries (glIsEnabled,
     # glGetIntegerv, glGetFloatv, glGetBooleanv) consistently. Headless —
     # no DISPLAY needed (state setters are thunked to host libGL, queries
@@ -487,7 +487,7 @@ DYNAMIC_TESTS=(
     # iterations + dladdr/dl_iterate_phdr workers. Verifies the loader mutex
     # (recursive_lock) and CPU borrow make concurrent dl* calls race-free.
     "test_dlopen_mt|ctest_real/test_dlopen_mt.elf||60|test_dlopen_mt: ALL PASS"
-    # 1.5.2-alpha: dladdr tests. Verifies the dladdr symbol override is
+    # 1.5.3-alpha: dladdr tests. Verifies the dladdr symbol override is
     # enabled and routes user dladdr() calls through our implementation.
     # test_dladdr uses the internal syscall (static musl); test_dladdr_glibc
     # calls the real glibc dladdr@GLIBC_2.34 symbol (dynamic glibc).

@@ -350,7 +350,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint8_t rn = (op >> 5) & 0x1F;
             uint8_t rd = op & 0x1F;
             (void)U;
-            // 1.5.2-alpha: ARMv8 Crypto Extensions (AES, SHA1, SHA256,
+            // 1.5.3-alpha: ARMv8 Crypto Extensions (AES, SHA1, SHA256,
             // PMULL). These are checked first because their encodings
             // overlap with regular SIMD ops in the same major group
             // (bits[28:24]=0b01110) but have specific high-bit patterns

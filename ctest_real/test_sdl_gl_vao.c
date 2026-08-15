@@ -2,7 +2,7 @@
  *
  * Exercises the entry points real SDL2+GL games use: VAOs, VBOs/EBOs,
  * shaders, matrix uniforms and glDrawElements — the paths added in
- * 1.5.2.alpha (VAO registration, binding-aware glVertexAttribPointer /
+ * 1.5.3-alpha (VAO registration, binding-aware glVertexAttribPointer /
  * glDrawElements, glUniformMatrix*fv pointer translation fix).
  *
  * Build:

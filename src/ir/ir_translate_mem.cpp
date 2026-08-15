@@ -29,7 +29,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         case InstClass::LDRSW: case InstClass::LDRSB: case InstClass::LDRSH:
         case InstClass::STR_IMM: case InstClass::STR_UNS: case InstClass::STR_REG: {
             // SIMD&FP LDR/STR (B/H/S/D/Q) are translated natively below.
-            // 1.5.2-alpha: previously these fell back to CALL_INTERP
+            // 1.5.3-alpha: previously these fell back to CALL_INTERP
             // because the GPR path below reads/writes cpu.regs[d.rt] while
             // vector instructions address cpu.v_lo/v_hi[d.rt]. The vector
             // branch handles the vreg storage (SIMD_LD16/ST16 for 16-byte
@@ -175,7 +175,7 @@ bool translate_mem(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
         }
         // ── LDP/STP ──────────────────────────────────────────────────
         // Native IR translation for GPR pair load/store.
-        // 1.5.2-alpha: SIMD LDP/STP (is_vec=true) now gets native IR
+        // 1.5.3-alpha: SIMD LDP/STP (is_vec=true) now gets native IR
         // translation using LOAD_MEM/STORE_MEM + SIMD_LDST, matching
         // the pattern used by SIMD_LD1/ST1. This eliminates a major
         // CALL_INTERP fallback for FP/SIMD-heavy code (function

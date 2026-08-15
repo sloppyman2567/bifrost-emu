@@ -73,7 +73,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            // ── Vector cache fast path (1.5.2-alpha) ──────────────
+            // ── Vector cache fast path (1.5.3-alpha) ──────────────
             // Full-128-bit bitwise op on pinned XMM regs: one VEX op for
             // AND/ORR/EOR, VPANDN for BIC, and 2-3 VEX ops for ORN/EON
             // (using XMM0, which is scratch in cache-active blocks).
@@ -290,7 +290,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_arith_half(off1hi, off2hi, offdhi);
             return true;
         }
-        // ── SIMD FP lane-wise arithmetic (1.5.2-alpha) ─────────────
+        // ── SIMD FP lane-wise arithmetic (1.5.3-alpha) ─────────────
         // Emits packed SSE: addps/subps/mulps/divps/minps/maxps (single,
         // 0F prefix) or addpd/... (double, 66 0F prefix). FABD = sub then
         // clear sign bit (andps). width = element bytes (4/8); flags_op
@@ -321,7 +321,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_call_interp(inst.arm_pc, false);
                     return true;
             }
-            // ── Vector cache fast path (1.5.2-alpha) ──────────────
+            // ── Vector cache fast path (1.5.3-alpha) ──────────────
             // Same single-VEX-instruction trick as SIMD_FP_FMA: when all
             // three operands are pinned in host XMM regs, the whole
             // 128-bit vector op is one vaddps/pd-family instruction.
@@ -420,7 +420,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 emit_call_interp(inst.arm_pc, false);
                 return true;
             }
-            // ── Vector cache fast path (1.5.2-alpha) ──────────────
+            // ── Vector cache fast path (1.5.3-alpha) ──────────────
             // When v_lo/v_hi of dest/src1/src2 are all pinned in host XMM
             // regs (vec_cache_active_ from the block pre-scan), the whole
             // 128-bit vector is processed in ONE fused VEX instruction —
@@ -672,7 +672,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     break;
                 }
             };
-            // ── Vector cache fast path (1.5.2-alpha) ──────────────
+            // ── Vector cache fast path (1.5.3-alpha) ──────────────
             // dest pinned: vmovq xd, gpr (zero upper) then vmovddup
             // (broadcast low qword to both halves) — no memory bounce.
             {
@@ -1064,7 +1064,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         }
         // ── SIMD SHL/USHR/SSHR/USRA/SSRA/SLI/SRI (vector, by immediate) ──
         // v1.4.5-alpha: native SSE2 codegen via psllw/pslld/psllq (SHL),
-        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). 1.5.2-alpha:
+        // psrlw/psrld/psrlq (USHR), psraw/psrad (SSHR). 1.5.3-alpha:
         // extended to USRA/SSRA/SLI/SRI (accumulate / insert-merge) and
         // added an AVX2 256-bit VEX path on capable hosts. Previously
         // these all fell back to CALL_INTERP (~20% overhead on SIMD-heavy
@@ -1368,7 +1368,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             }
             return true;
         }
-        // ── 1.5.2-alpha: AES / PMULL native codegen ──────────────────
+        // ── 1.5.3-alpha: AES / PMULL native codegen ──────────────────
         // Uses AES-NI (aesenc/aesdec/aesimc/aesmc) and PCLMULQDQ
         // (pclmulqdq) when the host CPU supports them. Falls back to
         // CALL_INTERP on hosts without these extensions.

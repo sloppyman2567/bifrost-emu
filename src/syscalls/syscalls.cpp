@@ -115,7 +115,7 @@ void dump_syscall_histogram(double dt) {
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
     note_syscall(num);
-    // 1.5.2-alpha: vDSO clock fast-path. The vDSO clock stubs
+    // 1.5.3-alpha: vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and
     // skip the full syscall dispatch (drain_host_signals + six subsystem

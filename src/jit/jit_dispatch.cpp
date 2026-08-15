@@ -50,7 +50,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // Disable the JIT permanently and fall back to pure interpreter.
     // This is a safety valve; normal programs never hit it.
     //
-    // 1.5.2-alpha: the counter is THREAD-LOCAL. The old
+    // 1.5.3-alpha: the counter is THREAD-LOCAL. The old
     // total_blocks_executed_.fetch_add(1) was a `lock xadd` on EVERY
     // dispatch (fast path included) — ~15-25 cycles of serializing
     // atomic traffic per block transition, which was a large fraction of
@@ -69,7 +69,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         return cpu.pc;
     }
     uint64_t pc = cpu.pc;
-    // ── 1.5.2-alpha: single-entry "last block" fast cache ────────
+    // ── 1.5.3-alpha: single-entry "last block" fast cache ────────
     // Tight loops dispatch the same PC thousands of times in a row.
     // Bypass the shared_mutex + unordered_map lookup entirely when the
     // PC matches the cached one. The cached fn pointer is stable across
@@ -77,7 +77,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // entry is safe to call — worst case it runs an older (still-correct)
     // translation.
     //
-    // 1.5.2-alpha: trimmed to the bare minimum. The per-PC watchdog is
+    // 1.5.3-alpha: trimmed to the bare minimum. The per-PC watchdog is
     // gone from the fast path (the thread-local global watchdog above
     // still counts every dispatch, and a single-PC hot loop through the
     // dispatcher is the normal non-self-loopable case). The block's
@@ -99,11 +99,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         tls_instr_ += tls_last_block_.instr_count;
         return tls_last_block_.fn(&cpu, &emu);
     }
-    // 1.5.2-alpha: inline cache for block-to-block transitions.
+    // 1.5.3-alpha: inline cache for block-to-block transitions.
     // Catches the common case of sequential block-to-block transitions
     // (B/BL fallthrough, CBZ/CBNZ taken paths) without taking the
     // shared_mutex. Direct-mapped by a PC hash that mixes high and low
-    // bits; grown to 256 slots (1.5.2-alpha) so a game's hot working
+    // bits; grown to 256 slots (1.5.3-alpha) so a game's hot working
     // set stays resident instead of thrashing to the slow path. The
     // lookup is inlined — a separate call would be most of its cost.
     {
@@ -284,7 +284,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     }
     blocks_executed++;
     instructions_executed += entry.instr_count;
-    // 1.5.2-alpha: populate the single-entry last-block cache so the
+    // 1.5.3-alpha: populate the single-entry last-block cache so the
     // next dispatch of the same PC can take the fast path. Only cache
     // non-interp_only blocks with a valid fn pointer.
     if (entry.fn && !entry.interp_only) {

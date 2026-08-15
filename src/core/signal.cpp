@@ -206,7 +206,7 @@ bool SignalTable::pop_frame(SignalFrame& out) {
 // Per-CPU signal mask. SIG_BLOCK/SIG_UNBLOCK/SIG_SETMASK. SIGKILL and
 // SIGSTOP cannot be blocked.
 //
-// 1.5.2-alpha BUGFIX: the old code wrote the old mask to `old_set_addr`
+// 1.5.3-alpha BUGFIX: the old code wrote the old mask to `old_set_addr`
 // BEFORE reading the new mask from `new_set_addr`. If the caller passes
 // the same pointer for both (which is technically allowed by POSIX as a
 // "swap" pattern), the read of new_mask would read the OLD mask that we

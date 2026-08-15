@@ -1,6 +1,6 @@
 // frost_graphics/thunk.cpp — graphic API thunking (v1.4.5-alpha).
 //
-// 1.5.2-alpha: also hosts the FrostGraphics::audio_thunk() and
+// 1.5.3-alpha: also hosts the FrostGraphics::audio_thunk() and
 // FrostGraphics::display_thunk() lazy-creator methods (the AudioThunk
 // and DisplayThunk implementations live in their own .cpp files).
 //
@@ -76,10 +76,10 @@
 // for the FrostGraphics::thunk() accessor.
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
-#include "frost/audio_thunk.hpp"    // 1.5.2-alpha: AudioThunk full def
-#include "frost/display_thunk.hpp"  // 1.5.2-alpha: DisplayThunk full def
-#include "frost/gl_state.hpp"       // 1.5.2-alpha: GLStateTracker
-#include "opgen_thunk.hpp"          // 1.5.2.alpha: symbol signature table
+#include "frost/audio_thunk.hpp"    // 1.5.3-alpha: AudioThunk full def
+#include "frost/display_thunk.hpp"  // 1.5.3-alpha: DisplayThunk full def
+#include "frost/gl_state.hpp"       // 1.5.3-alpha: GLStateTracker
+#include "opgen_thunk.hpp"          // 1.5.3-alpha: symbol signature table
 #include "thunk_common.hpp"         // shared SymbolEntry + trampoline encodings
 #include "debug_flags.h"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
@@ -160,13 +160,13 @@ struct GraphicThunkImpl {
     // safe). The dispatch() path is lock-free after init() — it only
     // reads id_to_idx_, which is set once and never resized.
     std::mutex mu;
-    // 1.5.2-alpha: GL state tracker for consistent query results.
+    // 1.5.3-alpha: GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
-    // 1.5.2.alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
+    // 1.5.3-alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
     // pixel buffer can be bounced at its full size (pitch * height)
     // instead of the 64 KiB default (which truncates larger frames).
     std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> sdl_tex_sizes_;
-    // 1.5.2-alpha: generic GLFW callback delivery. Each glfwSetXxxCallback
+    // 1.5.3-alpha: generic GLFW callback delivery. Each glfwSetXxxCallback
     // is a *_CB-policy symbol: dispatch() stores the guest callback here
     // instead of handing it to host GLFW (host can't invoke guest AArch64
     // callbacks). After glfwPollEvents/glfwWaitEvents (GLFW_POLL policy),
@@ -422,7 +422,7 @@ struct GraphicThunkImpl {
 // ── GraphicThunk method implementations ───────────────────────────────
 GraphicThunk::GraphicThunk() {
     impl_ = std::make_unique<GraphicThunkImpl>();
-    // 1.5.2-alpha: thunking is now ENABLED BY DEFAULT.
+    // 1.5.3-alpha: thunking is now ENABLED BY DEFAULT.
     // Previously required BIFROST_THUNK_GRAPHICS=1. Now we always try
     // to thunk graphic calls; if the host doesn't have GL/EGL/SDL2
     // libraries, the symbols resolve to stubs that return 0 (safe
@@ -475,7 +475,7 @@ bool GraphicThunk::init(Memory& mem) {
     // Register the known GL/EGL/SDL2 entry points.
     register_known_symbols_();
     impl_->initialized = true;
-    // 1.5.2-alpha: initialize GL state tracker.
+    // 1.5.3-alpha: initialize GL state tracker.
     impl_->gl_state_tracker_ = std::make_unique<GLStateTracker>();
     if (dbg().thunk_trace) {
         fprintf(stderr, "[thunk] init: %zu symbols registered, "
@@ -501,7 +501,7 @@ void GraphicThunk::register_function_(const std::string& lib,
     for (const auto& e : lt->entries) {
         if (e.name == sym) return;
     }
-    // 1.5.2-alpha: symbol_id includes ID_BASE_GRAPHICS to
+    // 1.5.3-alpha: symbol_id includes ID_BASE_GRAPHICS to
     // avoid collisions with AudioThunk/DisplayThunk IDs.
     uint32_t local_id = static_cast<uint32_t>(impl_->id_to_idx_.size());
     if (local_id >= GraphicThunk::MAX_SYMBOLS) {
@@ -600,7 +600,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // ── GLFW callback registration (CURSOR_CB/KEY_CB/MOUSE_CB/…) ─────
-    // 1.5.2-alpha: the guest callback is AArch64 code host GLFW cannot
+    // 1.5.3-alpha: the guest callback is AArch64 code host GLFW cannot
     // invoke, so we store it keyed by window and deliver it from the
     // GLFW_POLL path. NEVER hand the guest address to host
     // glfwSetCursorPosCallback etc — the host would call it as x86-64
@@ -1068,7 +1068,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
-    // 1.5.2-alpha: GL state query interception — after pointer translation
+    // 1.5.3-alpha: GL state query interception — after pointer translation
     // so that pointer args in queries (glGetIntegerv, etc.) point to host
     // memory. Only intercept functions tagged QUERY in the spec.
     bool is_gl_query = (entry.spec &&
@@ -1124,7 +1124,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
-    // 1.5.2-alpha: GLFW event pump — after the host poll/ wait returns,
+    // 1.5.3-alpha: GLFW event pump — after the host poll/ wait returns,
     // deliver any registered guest cursor-position callbacks (the game
     // computes per-frame mouse deltas from them, which drives camera
     // look). The guest callback runs via the borrow-CPU runner.
@@ -1205,7 +1205,7 @@ void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {
 // a null stub (when the host doesn't have the headers, but we still
 // want the symbol to resolve so the guest doesn't fail at dlsym time).
 //
-// 1.5.2.alpha: the symbol inventory is TABLE-DRIVEN. tools/opgen/thunk_dp.txt
+// 1.5.3-alpha: the symbol inventory is TABLE-DRIVEN. tools/opgen/thunk_dp.txt
 // (generated into include/opgen_thunk.hpp) lists every (lib family, symbol)
 // with its AAPCS64 arg kinds, return kind, dispatch policy and bounce size.
 // This loop derives the legacy ABI-shape fields (pointer_args / n_stack /
@@ -1371,7 +1371,7 @@ GraphicThunk* FrostGraphics::thunk() {
     }
     return thunk_.get();
 }
-// 1.5.2-alpha: audio_thunk() and display_thunk() — same lazy pattern.
+// 1.5.3-alpha: audio_thunk() and display_thunk() — same lazy pattern.
 // They live here for the same reason thunk() does: the FrostGraphics
 // header only forward-declares AudioThunk / DisplayThunk, so the
 // unique_ptr ctor needs the full type, which is only visible in this

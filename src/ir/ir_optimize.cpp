@@ -114,7 +114,7 @@ static bool is_pure(IROp op) {
         case IROp::ATOMIC:                               // read/write memory
         case IROp::LDXR_FAST: case IROp::STXR_FAST:     // read/write + monitor
         case IROp::STLR_FAST:                            // write + monitor
-        case IROp::AES_CRYPTO:                           // 1.5.2-alpha: read/write v_lo/v_hi
+        case IROp::AES_CRYPTO:                           // 1.5.3-alpha: read/write v_lo/v_hi
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:

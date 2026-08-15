@@ -1,6 +1,6 @@
 // frost_graphics/display_proxy.cpp — DisplayProxy implementation.
 //
-// 1.5.2-alpha: NEW. Owns a single host SDL2 window and translates
+// 1.5.3-alpha: NEW. Owns a single host SDL2 window and translates
 // minimal X11 / Wayland calls from the guest into SDL2 render calls.
 //
 // Guest handles (Display*, Window, wl_display*, wl_surface*) are guest-
@@ -217,7 +217,7 @@ void DisplayProxy::wl_surface_commit(uint64_t surface_guest) {
 void DisplayProxy::wl_surface_destroy(uint64_t surface_guest) {
     free_handle(surface_guest);
 }
-// ── Additional X11 proxy methods (1.5.2-alpha) ────────────────────────
+// ── Additional X11 proxy methods (1.5.3-alpha) ────────────────────────
 // These provide a SDL2-based software fallback for common X11 functions
 // used by desktop applications. They are called from DisplayThunk::dispatch
 // when the THUNK_PROXY flag is set and the host library is unavailable.

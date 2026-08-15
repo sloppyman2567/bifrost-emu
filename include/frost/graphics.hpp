@@ -63,7 +63,7 @@
 namespace arm64emu {
 // Forward-declare GraphicThunk (defined in src/frost_graphics/thunk.cpp).
 class GraphicThunk;
-// Forward-declare AudioThunk and DisplayThunk (1.5.2-alpha).
+// Forward-declare AudioThunk and DisplayThunk (1.5.3-alpha).
 class AudioThunk;
 class DisplayThunk;
 // Forward-declare FrostInput (defined in frost/input.hpp).
@@ -195,13 +195,13 @@ public:
     // See src/frost_graphics/thunk.cpp for the implementation and the
     // list of supported entry points.
     GraphicThunk* thunk();
-    // ── EXPERIMENTAL: Audio API thunking (1.5.2-alpha) ─────────────
+    // ── EXPERIMENTAL: Audio API thunking (1.5.3-alpha) ─────────────
     // Returns the AudioThunk instance owned by this FrostGraphics.
     // The thunk intercepts guest dlsym calls for libasound/libpulse/
     // libSDL2 (audio)/libopenal and forwards them to the host.
     // Opt-in via BIFROST_THUNK_AUDIO=1 or [thunk] audio = true.
     AudioThunk* audio_thunk();
-    // ── EXPERIMENTAL: Display API thunking (1.5.2-alpha) ───────────
+    // ── EXPERIMENTAL: Display API thunking (1.5.3-alpha) ───────────
     // Returns the DisplayThunk instance. Intercepts guest dlsym calls
     // for libvulkan/libwayland-client/libX11/libgbm.
     // Opt-in via BIFROST_THUNK_DISPLAY=1 or [thunk] display = true.
@@ -246,7 +246,7 @@ private:
     // unique_ptr to avoid pulling the GraphicThunk definition into
     // this header.
     std::unique_ptr<GraphicThunk> thunk_;
-    // 1.5.2-alpha: AudioThunk and DisplayThunk instances.
+    // 1.5.3-alpha: AudioThunk and DisplayThunk instances.
     std::unique_ptr<AudioThunk>   audio_thunk_;
     std::unique_ptr<DisplayThunk> display_thunk_;
     // FrostInput instance (created in the constructor, always present).

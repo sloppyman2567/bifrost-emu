@@ -40,8 +40,18 @@ status, see [TESTS.md](TESTS.md).
 7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
 8. **More real-world binary testing.**
 
-### v1.5.2-alpha additions (in-progress)
+### v1.5.3-alpha additions (in-progress)
 
+- **DisplayThunk moved onto the shared opgen table** (696 symbols via
+  `tools/opgen/thunk_dp.txt`); dispatch routes by POLICY/SIZE. Vulkan
+  host path: corrected pointer masks + deep marshalling
+  (`vkGetInstanceProcAddr`/`vkCreateInstance`/`vkCreateDevice`/
+  `vkQueuePresentKHR`), headless WSI swapchain.
+  Regression: `ctest_real/test_vulkan.elf`,
+  `ctest_real/test_vulkan_swapchain.elf`.
+- **GLFW callback setters** (KEY/MOUSE/FRAMEBUFFER/WINDOW_SIZE/FOCUS/
+  ERROR `*_CB` policies) store guest AArch64 callbacks and deliver them
+  on change after each `GLFW_POLL`; HiDPI `GLFW_CREATE` compensation.
 - **GL state tracker fixed** (was crashing with SIGSEGV + 57 failures;
   now ALL PASS under JIT & interpreter). `ctest_real/test_gl_state.elf`.
 - **FABS/FNEG single-precision JIT codegen** — the sign mask was

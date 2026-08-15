@@ -12,14 +12,14 @@ machine without QEMU or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.5.2-alpha
+  bifrost-emu  v1.5.3-alpha
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.5.2-alpha](https://img.shields.io/badge/version-1.5.2--alpha-orange.svg)](CHANGELOG.md)
+[![Version: 1.5.3-alpha](https://img.shields.io/badge/version-1.5.3--alpha-orange.svg)](CHANGELOG.md)
 
 ## What is bifrost-emu?
 

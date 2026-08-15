@@ -35,7 +35,7 @@ class Memory {
 public:
     static constexpr uint64_t PAGE_SIZE = 4096;
     static constexpr uint64_t PAGE_MASK = PAGE_SIZE - 1;
-    // 1.5.2-alpha: Address space limits for robustness and security.
+    // 1.5.3-alpha: Address space limits for robustness and security.
     // These prevent a malicious/buggy guest from exhausting host memory
     // or corrupting emulator-internal state.
     //
@@ -181,7 +181,7 @@ public:
     bool in_direct_window(uint64_t addr) const {
         return direct_window_ && addr < DIRECT_WINDOW_SIZE;
     }
-    // 1.5.2-alpha: translate a guest address to a host pointer.
+    // 1.5.3-alpha: translate a guest address to a host pointer.
     // Used by the graphic/audio/display thunks to pass pointer arguments
     // to host GL/EGL/SDL2/ALSA functions. Returns nullptr if the address
     // is not in the direct window (addresses ≥ 4 GiB can't be directly
@@ -209,27 +209,27 @@ private:
     // malloc/free churn, then mmap starts failing and musl mallocng
     // silently builds its arena at address 0 — BRK #1000 in get_meta).
     std::map<uint64_t, uint64_t> free_ranges_;
-    // 1.5.2-alpha: ASLR for mmap base. Randomized at construction time
+    // 1.5.3-alpha: ASLR for mmap base. Randomized at construction time
     // using /dev/urandom (not rand — must be unpredictable to prevent
     // guest-side info leaks). The base is page-aligned and within the
     // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
     uint64_t mmap_next_ = 0;
-    // 1.5.2-alpha: Total page count for OOM protection. Tracked
+    // 1.5.3-alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on
     // munmap) to avoid O(pages_.size()) scans on the hot path.
     // Mutable because read() (a const method) auto-allocates pages.
     mutable std::atomic<size_t> total_pages_{0};
-    // 1.5.2-alpha: Validate that an address range doesn't overlap
+    // 1.5.3-alpha: Validate that an address range doesn't overlap
     // kernel space or the NULL page region. Returns true if the range
     // is valid for guest allocation.
     bool is_valid_guest_range(uint64_t addr, uint64_t size) const;
-    // 1.5.2-alpha: Check page count against MAX_TOTAL_PAGES.
+    // 1.5.3-alpha: Check page count against MAX_TOTAL_PAGES.
     // Returns true if the allocation would exceed the limit.
     bool would_exceed_page_limit(size_t num_pages) const;
-    // 1.5.2-alpha: Add an address range to the free list, merging it with
+    // 1.5.3-alpha: Add an address range to the free list, merging it with
     // any adjacent free ranges (kept sorted by start address).
     void add_free_range(uint64_t addr, uint64_t size);
-    // 1.5.2-alpha: Remove an address range from the free list (used when
+    // 1.5.3-alpha: Remove an address range from the free list (used when
     // a MAP_FIXED allocation lands on top of reclaimed space).
     void remove_free_range(uint64_t addr, uint64_t size);
 };

@@ -801,7 +801,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 case 1:  // FUTEX_WAKE
                 case 10: // FUTEX_WAKE_BITSET
                 {
-                    // 1.5.2-alpha fast path: skip the slot mutex when
+                    // 1.5.3-alpha fast path: skip the slot mutex when
                     // there are no waiters. This is the common case for
                     // pthread_mutex_unlock on an uncontended lock — the
                     // thread calls FUTEX_WAKE(1) but no one is waiting.

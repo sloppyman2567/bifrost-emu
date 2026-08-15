@@ -47,7 +47,7 @@
 //   - Pointer args outside the 4 GiB direct window bounce through a
 //     host buffer (writeback). Nested structs of pointers may still
 //     need per-symbol handlers (see glShaderSource).
-//   - GL state tracking: 1.5.2-alpha adds GLStateTracker, a
+//   - GL state tracking: 1.5.3-alpha adds GLStateTracker, a
 //     software-side mirror of guest GL state (capabilities, blend,
 //     depth, stencil, viewport, texture bindings, program, pixel
 //     store, hints) so state queries (glIsEnabled, glGetIntegerv,
@@ -125,7 +125,7 @@ public:
     // value to cpu.regs[0]; on success it's already set by dispatch().
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
     // ── Guest callback delivery hook (GLFW callbacks) ──────────────────
-    // 1.5.2-alpha: GLFW callback setters (glfwSetCursorPosCallback /
+    // 1.5.3-alpha: GLFW callback setters (glfwSetCursorPosCallback /
     // glfwSetKeyCallback / glfwSetMouseButtonCallback /
     // glfwSetFramebufferSizeCallback / glfwSetWindowSizeCallback /
     // glfwSetWindowFocusCallback / glfwSetErrorCallback) are *_CB-policy
@@ -159,7 +159,7 @@ public:
     //   ret                       ; return to guest caller (x30)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
-    // 1.5.2-alpha: per-thunk ID base to avoid collisions.
+    // 1.5.3-alpha: per-thunk ID base to avoid collisions.
     // Each thunk type gets a non-overlapping range of symbol_ids.
     // The dispatch handler checks the range to route to the correct
     // thunk without trying each one sequentially.
@@ -173,7 +173,7 @@ public:
 private:
     std::unique_ptr<GraphicThunkImpl> impl_;
     // Per-library registration helpers (defined in thunk.cpp).
-    // 1.5.2-alpha: added pointer_args bitmask (bit N = arg N
+    // 1.5.3-alpha: added pointer_args bitmask (bit N = arg N
     // is a pointer needing guest→host translation).
     void register_function_(const std::string& lib,
                             const std::string& sym,

@@ -183,7 +183,7 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         default:
             break;
     }
-    // 1.5.2-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
+    // 1.5.3-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
     // natively translated (ir_translate_mem.cpp) — the old is_vec gate
     // here forced every one of them to CALL_INTERP, splitting FP-heavy
     // blocks every 1-2 instructions and killing the pinned-XMM vec cache
@@ -287,7 +287,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // call chain (busybox id hung in do_wait after printing its output).
     // Chain-skip is opt-in (the game doesn't use it), so under chain-skip
     // fall back to the block-end-at-BL behavior (BL ends the block, the
-    // call edge dispatches via chain slots — the pre-1.5.2 path).
+    // call edge dispatches via chain slots — the pre-1.5.3 path).
     bl_call_disabled_ = chain_skip_enabled();
     // W^X: toggle the code buffer to writable before emitting x86 code.
     // (No-op if W^X is disabled or the buffer is already writable.)
@@ -573,7 +573,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
     // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
     // demoted tiny native FP blocks to the interpreter (~2x slower) and
-    // split FP-heavy blocks every 2 instructions. 1.5.2-alpha: base the
+    // split FP-heavy blocks every 2 instructions. 1.5.3-alpha: base the
     // decision on the ACTUAL number of CALL_INTERP ops in the generated
     // IR instead — only blocks that genuinely run the interpreter get
     // demoted. Native FP blocks now stay in the JIT.
@@ -751,7 +751,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // edge (reserved regs, never reassigned in a body). Disabled mode
     // leaves chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
-    // 1.5.2-alpha: load the direct-window base into R10 ONLY if the
+    // 1.5.3-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
     // prologue — pure overhead for the many tiny ALU/FP/vector blocks
