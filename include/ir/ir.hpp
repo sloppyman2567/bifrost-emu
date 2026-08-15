@@ -86,6 +86,12 @@ enum class IROp : uint8_t {
     BR,             // pc = src1 (unconditional, register)
     BRCOND,         // if cond(imm): pc = target(imm)  (also arm_pc for fallthrough bookkeeping)
     BRCOND_FALLTHRU,// like BRCOND but fall-through branch — used for B (taken always) / BL
+    BRCOND_SKIP,    // mid-block conditional skip (leaf inlining). if cond(imm):
+                    // jump over the next `imm` IR ops (to the op right after
+                    // the skip region). Does NOT end the block — both paths
+                    // stay inline. Used to flatten a leaf's forward branch.
+                    // cond = ARM64 condition code; imm = number of IR ops in
+                    // the skipped region; arm_pc = the branch's ARM PC.
     BL_CALL,        // BL within block — call target block, continue after return.
                     // imm = target PC, arm_pc = BL's PC (LR = arm_pc + 4).
                     // Does NOT end the block. Caller-saved ARM regs (x0-x18, x30)

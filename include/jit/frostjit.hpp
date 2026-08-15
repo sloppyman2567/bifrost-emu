@@ -218,6 +218,7 @@ public:
         std::atomic<uint64_t> max_size{0};
         std::atomic<uint64_t> decode_fail{0};
         std::atomic<uint64_t> interp_only{0};
+        std::atomic<uint64_t> leaf_inlined{0};
     } block_profile;
     // Loop watchdog state — thread-local so multiple threads sharing a
     // single FrostJIT instance (shared-JIT mode) don't corrupt each
@@ -883,6 +884,10 @@ private:
     }
     // IR compiler helpers.
     struct BranchPatch { size_t patch_off; int target_kind; };
+    // BRCOND_SKIP (leaf inlining) forward-jump fixup. When the compile loop
+    // reaches IR op index `target_op`, it patches the rel32 jcc at
+    // `jcc_offset` to skip the region emitted between the jcc and that op.
+    struct SkipFixup { size_t jcc_offset; int target_op; };
     void emit_call_interp(uint64_t arm_pc, bool ends_block);
     void emit_call_vdso_clock(uint64_t arm_pc);
     void emit_call_native_svc(uint64_t arm_pc);
@@ -949,6 +954,9 @@ private:
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;
     std::vector<BranchPatch> branch_target_patches_;
+    // Pending BRCOND_SKIP forward-jump fixups (patched by translate_block's
+    // compile loop when the op AFTER the skip region is reached).
+    std::vector<SkipFixup> skip_fixups_;
     bool rax_holds_next_pc_ = false;
     bool flags_in_host_ = false;
     bool flags_from_sub_ = false;

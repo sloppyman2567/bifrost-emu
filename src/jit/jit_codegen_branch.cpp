@@ -323,6 +323,39 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
         case IROp::CALL_INTERP:
             emit_call_interp(inst.arm_pc, false);
             return 0;
+        case IROp::BRCOND_SKIP: {
+            // 1.5.3-alpha: mid-block conditional skip (leaf inlining). If
+            // cond(imm) holds, jump over the next `imm` IR ops (the skip
+            // region). Unlike BRCOND this does NOT end the block and does
+            // NOT touch PC or materialize flags — both paths stay inline.
+            // The flags come from the preceding flag-setting op (the branch
+            // in the leaf follows a tst/cmp), which set host RFLAGS.
+            if (!flags_in_host_) {
+                constexpr uint16_t FLAGS3 = (1u << RAX) | (1u << RCX) | (1u << RDX);
+                flush_dirty_host_regs(FLAGS3);
+                flush_scratch_host_regs(FLAGS3);
+                emit_load_flags_from_pstate();
+                emit_normalize_cf_to_sub_convention();
+                invalidate_host_regs(FLAGS3);
+                flags_from_sub_ = true;  // CF is now in SUB convention
+                flags_in_host_ = true;
+            }
+            bool need_cmc_for_hi_ls = false;
+            uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc_for_hi_ls);
+            // The leaf scan only accepts non-carry conditions (EQ/NE/MI/PL/
+            // VS/VC/GE/LT/GT/LE), so the cmc dance never fires here — kept
+            // for symmetry with BRCOND and to be safe if that list grows.
+            if (need_cmc_for_hi_ls) emit_byte(0xF5);  // cmc — invert CF
+            size_t jcc_patch = emit_jcc_rel32_placeholder(cc);
+            if (need_cmc_for_hi_ls) emit_byte(0xF5);  // cmc — restore CF
+            // Record the fixup: translate_block's compile loop patches the
+            // rel32 when it reaches the op AFTER the region (index = this
+            // op + 1 + region size). Flags stay in host; the region's own
+            // ops clobber them as the guest requires on the not-taken path.
+            skip_fixups_.push_back(
+                {jcc_patch, static_cast<int>(cur_op_index_ + 1 + inst.imm)});
+            return 0;
+        }
         case IROp::SVC:
             // Native syscall dispatch. vDSO clock stubs keep their fast
             // path (jit_vdso_clock_svc reads the host clock directly,

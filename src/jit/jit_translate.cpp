@@ -14,6 +14,7 @@
 #include "core/emulator.h"
 #include "frontend/dynamic_linker.h"
 #include "ir/ir.hpp"
+#include "ir/ir.h"
 #include "opgen_simd.hpp"
 #include "opgen_fpfixed.hpp"
 #include <atomic>
@@ -188,6 +189,91 @@ static bool instr_will_call_interp(const DecodedInst& d) {
     // (each FP load/store cost ~18 interpreter steps in the voxel game).
     return false;
 }
+// ── Leaf inlining scan (1.5.3-alpha) ────────────────────────────────────
+// A small leaf function (no calls, no memory, no stack usage, straight-line
+// or with a single forward conditional branch) can be inlined into its
+// caller's block. Inlining replaces a BL_CALL — whose codegen flushes ALL
+// vregs + the fp-cache writeback/reload (~26 movsd in fp-cache blocks) and
+// dispatches through jit_call_helper — with the leaf's body translated
+// inline, so the caller block continues at the leaf's RET. The game's
+// grad3 (16 instrs, one forward b.eq) is the target: ~80K calls per
+// worldgen column.
+//
+// The scan walks linearly from the BL target and must end at a RET within
+// 16 instructions. Every instruction must be inline-compatible:
+//   - no branches except ONE forward conditional (Bcond) whose skip region
+//     [pc+4, pc+4+imm) stays inside the leaf (becomes a BRCOND_SKIP)
+//   - no memory, no SP access, no system/syscall, no vector/SIMD
+//   - carry-dependent conditions (CS/CC/HI/LS) rejected: the skip's jcc
+//     needs a cmc dance that would corrupt CF on the taken path
+struct LeafScanResult {
+    int size = 0;            // non-RET instructions before the RET (0 = no)
+    bool has_branch = false;
+    uint64_t branch_pc = 0;  // pc of the forward branch
+    uint64_t branch_target = 0;
+};
+static LeafScanResult leaf_scan(Emulator& emu, uint64_t target) {
+    LeafScanResult r;
+    uint64_t pc = target;
+    for (int n = 0; n < 16; n++) {
+        uint32_t inst;
+        try {
+            inst = emu.mem().fetch_inst(pc);
+        } catch (...) { return {}; }
+        DecodedInst d;
+        if (!decode(d, inst)) return {};
+        if (d.reads_sp || d.writes_sp) return {};
+        if (d.cls == InstClass::RET) {
+            // Any recorded branch must target on or before the RET.
+            if (r.has_branch && r.branch_target > pc) return {};
+            r.size = n;
+            return r;
+        }
+        switch (d.cls) {
+            // Control flow / system / memory / atomics / vectors / adrp → no.
+            case InstClass::B: case InstClass::BL: case InstClass::BR:
+            case InstClass::BLR:
+            case InstClass::CBZ: case InstClass::CBNZ:
+            case InstClass::TBZ: case InstClass::TBNZ:
+            case InstClass::SVC: case InstClass::SVC_IMM:
+            case InstClass::HVC_IMM: case InstClass::SMC_IMM:
+            case InstClass::BRK: case InstClass::BRK_IMM:
+            case InstClass::HLT: case InstClass::HLT_IMM:
+            case InstClass::MSR: case InstClass::MSR_SYS:
+            case InstClass::MRS: case InstClass::MRS_SYS:
+            case InstClass::CLREX: case InstClass::CLREX_INST:
+            case InstClass::BARRIER: case InstClass::HINT: case InstClass::SYS_NOP:
+            case InstClass::LDR_IMM: case InstClass::STR_IMM:
+            case InstClass::LDR_UNS: case InstClass::STR_UNS:
+            case InstClass::LDR_REG: case InstClass::STR_REG:
+            case InstClass::LDP: case InstClass::STP:
+            case InstClass::LDRSW: case InstClass::LDRSB: case InstClass::LDRSH:
+            case InstClass::LDXR: case InstClass::STXR:
+            case InstClass::LDAXR: case InstClass::STLXR:
+            case InstClass::STLR: case InstClass::LDAR:
+            case InstClass::LSE_ATOMIC:
+            case InstClass::SIMD_LD1: case InstClass::SIMD_ST1:
+            case InstClass::ADR: case InstClass::ADRP:
+            case InstClass::UNKNOWN:
+                return {};
+            case InstClass::Bcond: {
+                // Forward conditional branch only; exactly one per leaf.
+                if (d.imm <= 0) return {};
+                if (r.has_branch) return {};
+                uint8_t c = d.cond & 0xF;
+                if (c == 2 || c == 3 || c == 8 || c == 9) return {};  // CS/CC/HI/LS
+                r.has_branch = true;
+                r.branch_pc = pc;
+                r.branch_target = pc + 4 + static_cast<uint64_t>(d.imm);
+                break;
+            }
+            default:
+                break;  // data-processing / scalar FP → OK
+        }
+        pc += 4;
+    }
+    return {};  // no RET within the cap
+}
 // ── translate_block ───────────────────────────────────────────────
 uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Emulator*) {
     ProfTranslateGuard prof_g;
@@ -209,6 +295,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     code_buf_overflow_ = false;
     call_interp_branch_patches_.clear();
     branch_target_patches_.clear();
+    skip_fixups_.clear();
     rax_holds_next_pc_ = false;
     flags_in_host_ = false;
     flags_from_sub_ = false;
@@ -268,6 +355,27 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
+    // 1.5.3-alpha: leaf inlining. When a BL targets a small leaf (no calls/
+    // memory/stack, ≤16 instrs), its body is translated inline instead of
+    // emitting a BL_CALL — the caller block continues past the leaf's RET.
+    // The inlined body may contain ONE forward conditional branch (flattened
+    // via BRCOND_SKIP).
+    //
+    // DISABLED BY DEFAULT (opt-in via BIFROST_ENABLE_LEAF_INLINE=1): the
+    // 2026-08-15 measurement was a NET LOSS. Inlining the 15-instr grad3 leaf
+    // into the minecraft game's noise3 caller blocks grew the x86 ~2x (7370
+    // vs 3541 bytes for the same loop region) because the leaf's FP regs
+    // (s0-s3) contend with the caller's live set inside the 9-host-reg pool —
+    // a BL_CALL flushes once around the call, but an inlined body spills
+    // throughout. Game heightmap: 26.5ms/column → 37.4ms/column (-41%). Even
+    // the ideal mirror workload (pure-ALU leaf, dedicated loop) was ~6%
+    // slower. The correctness is proven (BRCOND_SKIP + the cur_pc
+    // next_pc/verify/interp_only accounting), so it stays available for a
+    // future regalloc change that can run the leaf with a fresh register
+    // context.
+    static const bool leaf_inline_enabled_ = (getenv("BIFROST_ENABLE_LEAF_INLINE") != nullptr);
+    bool has_inlined_leaf = false;  // exempts the block from the >32 interp_only demotion
+    bool has_brcond_skip = false;   // blocks with BRCOND_SKIP skip optimize_ir (op-count stability)
     while (!block_ended && instr_count < MAX_BLOCK_REG_PRESSURE) {
         // ── Block splitting at known entry points ──────────────────
         if (instr_count > 0 && blocks_.find(cur_pc) != blocks_.end()) {
@@ -281,6 +389,95 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         } catch (...) { block_profile.decode_fail++; break; }
         DecodedInst d;
         if (!decode(d, inst)) { block_profile.decode_fail++; break; }
+        // ── Leaf inlining (before the normal BL translation) ───────
+        if (d.cls == InstClass::BL && leaf_inline_enabled_ && !bl_call_disabled_) {
+            uint64_t target = cur_pc + static_cast<uint64_t>(d.imm);
+            LeafScanResult scan = leaf_scan(emu, target);
+            if (getenv("BIFROST_DEBUG_INLINE")) {
+                fprintf(stderr, "[leaf] pc=0x%llx bl->0x%llx scan.size=%d has_branch=%d\n",
+                        (unsigned long long)cur_pc, (unsigned long long)target,
+                        scan.size, (int)scan.has_branch);
+            }
+            if (scan.size > 0) {
+                // Translate the leaf body into a temp block first; splice
+                // into ir_block only on success (keeps the LR store + partial
+                // leaf out of the block if anything goes wrong).
+                IRBlock leaf_block;
+                leaf_block.start_pc = target;
+                uint64_t lp = target;
+                uint64_t lend = target + static_cast<uint64_t>(scan.size) * 4;
+                int leaf_count = 0;
+                bool leaf_ok = true;
+                while (lp < lend && leaf_ok) {
+                    uint32_t li;
+                    try {
+                        li = emu.mem().fetch_inst(lp);
+                    } catch (...) { leaf_ok = false; break; }
+                    DecodedInst ld;
+                    if (!decode(ld, li)) { leaf_ok = false; break; }
+                    if (ld.cls == InstClass::RET) break;  // leaf end (not translated)
+                    if (ld.cls == InstClass::Bcond) {
+                        // d.imm is the full relative offset in bytes
+                        // (target = pc + imm, mirroring the interp).
+                        uint64_t bt = lp + static_cast<uint64_t>(ld.imm);
+                        size_t skip_idx = leaf_block.insts.size();
+                        size_t region_start = skip_idx + 1;
+                        emit(leaf_block, IROp::BRCOND_SKIP, 0, 0, 0, 0,
+                             static_cast<uint8_t>(ld.cond & 0xF), 0, 0, lp);
+                        has_brcond_skip = true;
+                        // Translate the not-taken region [lp+4, bt) inline.
+                        uint64_t rp = lp + 4;
+                        while (rp < bt && leaf_ok) {
+                            uint32_t ri;
+                            try {
+                                ri = emu.mem().fetch_inst(rp);
+                            } catch (...) { leaf_ok = false; break; }
+                            DecodedInst rd;
+                            if (!decode(rd, ri)) { leaf_ok = false; break; }
+                            translate_to_ir(leaf_block, rd, rp);
+                            leaf_count++;
+                            rp += 4;
+                        }
+                        if (!leaf_ok) break;
+                        // Patch the skip's region size (in IR ops) now that
+                        // the region has been translated.
+                        uint64_t region_ops = leaf_block.insts.size() - region_start;
+                        leaf_block.insts[skip_idx].imm = region_ops;
+                        leaf_count++;  // the branch instruction itself
+                        lp = bt;
+                        continue;
+                    }
+                    translate_to_ir(leaf_block, ld, lp);
+                    leaf_count++;
+                    lp += 4;
+                }
+                if (leaf_ok && leaf_count == scan.size) {
+                    // Inline: LR = bl_pc+4, then the leaf body, then continue
+                    // the caller at cur_pc+4.
+                    uint16_t lr = load_imm(ir_block, cur_pc + 4);
+                    store_arm_reg(ir_block, 30, lr);
+                    ir_block.insts.insert(ir_block.insts.end(),
+                                          leaf_block.insts.begin(),
+                                          leaf_block.insts.end());
+                    instr_count += leaf_count;
+                    ir_block.count = instr_count;
+                    has_inlined_leaf = true;
+                    block_profile.leaf_inlined++;
+                    if (getenv("BIFROST_DEBUG_INLINE"))
+                        fprintf(stderr, "[leaf] INLINED bl@0x%llx -> 0x%llx (%d instrs)\n",
+                                (unsigned long long)cur_pc, (unsigned long long)target,
+                                leaf_count);
+                    cur_pc += 4;  // caller continuation after the BL
+                    continue;
+                }
+                if (getenv("BIFROST_DEBUG_INLINE"))
+                    fprintf(stderr, "[leaf] REJECTED bl@0x%llx -> 0x%llx leaf_ok=%d count=%d/%d\n",
+                            (unsigned long long)cur_pc, (unsigned long long)target,
+                            (int)leaf_ok, leaf_count, scan.size);
+                // Fall through to the normal BL_CALL path (partial leaf
+                // IR is discarded — it lived only in leaf_block).
+            }
+        }
         bool will_call_interp = instr_will_call_interp(d);
         if (will_call_interp && call_interp_count >= MAX_CALL_INTERP_PER_BLOCK && instr_count > 0) {
             // Split here — the next instruction starts a new block.
@@ -382,8 +579,21 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     for (auto& ir_inst : ir_block.insts) {
         if (ir_inst.op == IROp::CALL_INTERP) actual_call_interp++;
     }
-    if (instr_count > 32 ||
-        (actual_call_interp > 0 && actual_call_interp * 2 > instr_count)) {
+    // Inlined-leaf blocks stay in the JIT: their instr_count is NOT a
+// contiguous guest-pc count (the inlined leaf body + implicit BL/RET
+// break the start_pc + count*4 model), so the interp_only step-count
+// semantics and the >32 register-pressure demotion don't apply. The
+// inlined body is native by construction (leaf scan rejects memory,
+// calls, stack, and system ops); CALL_INTERP-heavy caller code still
+// splits naturally via MAX_CALL_INTERP_PER_BLOCK. If the block is
+// nonetheless demoted (defensive), the count below would run the wrong
+// number of interpreter steps — so never demote inline blocks.
+bool demote_interp = false;
+if (!has_inlined_leaf) {
+    demote_interp = (instr_count > 32) ||
+                    (actual_call_interp > 0 && actual_call_interp * 2 > instr_count);
+}
+if (demote_interp) {
         if (getenv("BIFROST_CLASS_PROF")) {
             static uint64_t dump_ct = 0;
             if (++dump_ct <= 300) {
@@ -440,8 +650,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
         if (ir_inst.op == IROp::CALL_INTERP) { has_call_interp = true; }
     }
     // ── Optimize the IR ──────────────────────────────────────────
+    // Skip optimization for blocks containing BRCOND_SKIP: optimize_ir's
+    // DCE could erase pure-dead ops inside the skip region, which would
+    // invalidate the region's op count stored in the BRCOND_SKIP imm (the
+    // compile-loop fixup target is an IR op index). The inlined bodies are
+    // already tight native FP/GPR code; skipping the pass costs little.
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
-    if (!no_opt_) optimize_ir(ir_block);
+    if (!no_opt_ && !has_brcond_skip) optimize_ir(ir_block);
     static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
     if (dump_ir_) {
         fprintf(stderr, "══ Block @ 0x%llx (%d ARM instrs) ══\n",
@@ -622,6 +837,16 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
         const IRInst& inst = ir_block.insts[i];
         cur_op_index_ = i;
+        // Patch pending BRCOND_SKIP forward jumps: when the op AFTER the
+        // skip region is reached, its code starts at the current offset, so
+        // a region's jcc (emitted at the branch's position) must target it.
+        // The fixup fires exactly once per skip (single-pass match).
+        for (auto& f : skip_fixups_) {
+            if (f.target_op == static_cast<int>(i)) {
+                int32_t rel = static_cast<int32_t>(code_buf_used_ - (f.jcc_offset + 6));
+                patch_jcc_rel32(f.jcc_offset, rel);
+            }
+        }
         if (compile_ir_inst(inst)) break;
         // A non-IMM op defining a vreg invalidates any const entry for it
         // (defensive; the monotonic allocator makes collisions impossible).
@@ -656,7 +881,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // block / the dispatcher).
     vec_cache_writeback_all();
     if (!rax_holds_next_pc_) {
-        uint64_t next_pc = start_pc + ir_block.count * 4;
+        // 1.5.3-alpha: inline blocks' instr_count is not a contiguous
+        // guest-pc count (the inlined leaf body + implicit BL/RET break
+        // the linear model), so the fall-through next_pc is the builder's
+        // cur_pc — the first untranslated instruction (BL+4 or the cap
+        // point). Blocks without inlined leaves keep the cheap formula.
+        uint64_t next_pc = has_inlined_leaf ? cur_pc : start_pc + ir_block.count * 4;
         emit_mov_imm_to_rax(next_pc);
         // Fall-through (MAX_BLOCK hit before any block-ender): the next
         // PC is statically known, so this block is chainable to it.
@@ -773,7 +1003,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.taken_chained = false;
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
-    entry.verified_once = has_bl_call || has_call_interp;
+    entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

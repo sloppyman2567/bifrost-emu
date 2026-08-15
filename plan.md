@@ -7,8 +7,10 @@ spike frames), and the JIT itself is the limiter for the FP-heavy phases.
 
 Status: Phase 1 (baseline) DONE, diagnosis confirmed. Committed baseline is
 `87a33ed`. Phases 2-3 DONE (committed: `5e2234e` FMOV, fp-cache work in the
-tree awaiting commit). Heightmap 26.5 → **13.1ms (~2x)**, FWD neutral on
-the game. Next: Phase 4 (leaf-call inlining).
+tree awaiting commit). Heightmap 26.5 → **13.1ms (~2x)** was NOT
+reproducible — the current JIT baseline is **26.5ms/column (~430 MIPS)**;
+FWD neutral on the game. Phase 4 (leaf-call inlining) is implemented but
+measured NEGATIVE (-41%, off by default via `BIFROST_ENABLE_LEAF_INLINE`).
 
 ## Phase 1 results (measurement — 2026-08-14)
 
@@ -115,14 +117,29 @@ Reuse the vec-cache machinery (`jit_codegen_vec_cache.cpp`) for scalar FP:
 - Careful with BL_CALL/BLR_CALL: flush pinned FP vregs (cheap, only dirty
   ones) before the helper call, invalidate after.
 
-### Phase 4 — Leaf-call inlining (pushes past 2x)
-- Runtime-detect BL_CALL/BLR_CALL targets that are single-block leaves
-  (translate the target; verify 1 block ending in RET, no internal
-  branches). `grad3` qualifies (16 instr).
-- Splice the leaf's IR into the caller on re-translation, eliminating the
-  call round-trip (flush/invalidate/prologue/epilogue/helper).
-- The 8×grad3 round-trips become the dominant cost after Phase 3, so this
-  is the step that gets the heightmap from ~1.5x to ~2.5-3x.
+### Phase 4 — Leaf-call inlining — NEGATIVE, kept opt-in (2026-08-15)
+- Implemented: `BRCOND_SKIP` IROp (flattened single forward Bcond → host
+  jcc over the not-taken region), `leaf_scan()` (frameless leafs ≤16 instrs,
+  no memory/SP/system/vector/calls, one forward non-carry Bcond), splice of
+  the leaf IR into the caller at BL sites. Accounting fixed: Bcond target
+  uses `pc + imm` (byte offset, NOT `pc + 4 + imm` — double-count bug that
+  swallowed the continuation's `fneg` and corrupted the mirror test);
+  inlined blocks get `next_pc = cur_pc` (contiguous `start_pc + count*4`
+  breaks), `verified_once = has_inlined_leaf` (JIT runs 2 more guest steps
+  than instr_count: BL + RET), and are never interp_only.
+- **Measured result: NET LOSS — off by default.** Inlining the 15-instr
+  grad3 into the game's noise3 caller blocks grew the loop x86 ~2x (7370 vs
+  3541 bytes) — the leaf's FP regs (s0-s3) contend with the caller's live
+  set inside the 9-host-reg pool; a BL_CALL flushes once around the call,
+  an inlined body spills throughout. Game heightmap: 26.5 → **37.4ms/column
+  (-41%)**. Even the ideal pure-ALU mirror workload (200K-leaf loop) was
+  ~6% slower (232 vs 219ms/run).
+- Correctness is proven (mirror test `acc=50000` under default, opt-in, and
+  JIT_VERIFY+MEM; quick suite 194/194, chain-skip, FWD, regalloc-check,
+  bench_mips byte-identical all green with the feature ON). Enable with
+  `BIFROST_ENABLE_LEAF_INLINE=1` for future regalloc work (the block would
+  need to run the leaf with a fresh register context to win).
+- Debug prints: `BIFROST_DEBUG_INLINE=1` logs scan/inline/reject lines.
 
 ### Phase 5 — Verify (full matrix)
 - `make check-all` / quick suite 194/194; full 199/199.
@@ -159,10 +176,12 @@ Reuse the vec-cache machinery (`jit_codegen_vec_cache.cpp`) for scalar FP:
   divergences.
 
 ## Expected outcome
-- Heightmap ~2x so far (26.5ms → **13.1ms**, ~800 MIPS on that phase);
-  Phase 4 (leaf-call inlining of grad3) is the step toward ~9-11ms / 1 GIPS.
+- Heightmap 26.5ms baseline (JIT) vs 284ms interp (~10.7x). Phase 2/3 wins
+  are ~neutral-to-15%; Phase 4 (leaf inlining) measured NEGATIVE (-41%) and
+  is off by default — the heightmap is body-throughput-bound (~430 MIPS), not
+  dispatch-bound, so the next real win must cut executed guest instructions
+  or per-op host code, not call/dispatch overhead.
 - Same win flows into mesh (cglm float math) and lighting.
-- Fresh chunk 43.6ms → ~22ms; exploration spikes halve.
 
 ## Honest caveats
 - Phase 3 touches the hottest codegen paths; regalloc bugs hide here — the
