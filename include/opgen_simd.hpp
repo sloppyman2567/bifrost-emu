@@ -24,7 +24,13 @@ enum class Family : uint8_t {
     DUP = 6,
     UMOV = 7,
     CRYPTO = 8,
-    UNKNOWN = 9,
+    PMISC = 9,
+    CVTF = 10,
+    ADDP = 11,
+    XTN = 12,
+    TBL = 13,
+    INS = 14,
+    UNKNOWN = 15,
 };
 
 struct Op {
@@ -83,6 +89,25 @@ inline Op classify(uint32_t op) {
     if ((op & 0xFFFFFC00U) == 0x4E284800U) return Op{Family::CRYPTO, 41, 0, "AESE"};
     if ((op & 0xFFE0FC00U) == 0x4E60E000U) return Op{Family::CRYPTO, 42, 4, "PMULL"};
     if ((op & 0xFFE0FC00U) == 0x4EE0E000U) return Op{Family::CRYPTO, 43, 5, "PMULL2"};
+    if ((op & 0xBFE0FC00U) == 0x0E205800U) return Op{Family::PMISC, 44, 0, "CNT"};
+    if ((op & 0xBFE0FC00U) == 0x2E205800U) return Op{Family::PMISC, 45, 1, "NOT"};
+    if ((op & 0xBFE0FC00U) == 0x2E605800U) return Op{Family::PMISC, 46, 2, "RBIT"};
+    if ((op & 0xBF21FC00U) == 0x0E20B800U) return Op{Family::PMISC, 47, 3, "ABS"};
+    if ((op & 0xBF21FC00U) == 0x2E20B800U) return Op{Family::PMISC, 48, 4, "NEG"};
+    if ((op & 0xBF20FC00U) == 0x0E20D800U && (size == 0)) return Op{Family::CVTF, 49, 0, "SCVTF"};
+    if ((op & 0xBF20FC00U) == 0x2E20D800U && (size == 0)) return Op{Family::CVTF, 50, 1, "UCVTF"};
+    if ((op & 0xBF21FC00U) == 0x0E21B800U && (size == 2)) return Op{Family::CVTF, 51, 2, "FCVTZS"};
+    if ((op & 0xBF21FC00U) == 0x2E21B800U && (size == 2)) return Op{Family::CVTF, 52, 3, "FCVTZU"};
+    if ((op & 0xBF20FC00U) == 0x0E20BC00U && (size == 0)) return Op{Family::ADDP, 53, 0, "ADDP"};
+    if ((op & 0xBF20FC00U) == 0x0E202800U && (size < 3)) return Op{Family::XTN, 54, 0, "XTN"};
+    if ((op & 0xBF20FC00U) == 0x2E202800U && (size < 3)) return Op{Family::XTN, 55, 1, "SQXTUN"};
+    if ((op & 0xBF20FC00U) == 0x0E204800U && (size < 3)) return Op{Family::XTN, 56, 2, "SQXTN"};
+    if ((op & 0xBF20FC00U) == 0x2E204800U && (size < 3)) return Op{Family::XTN, 57, 3, "UQXTN"};
+    if ((op & 0xBFE0FC00U) == 0x0E000000U) return Op{Family::TBL, 58, 0, "TBL1"};
+    if ((op & 0xBFE0FC00U) == 0x0E002000U) return Op{Family::TBL, 59, 1, "TBL2"};
+    if ((op & 0xBFE0FC00U) == 0x0E001000U) return Op{Family::TBL, 60, 2, "TBX1"};
+    if ((op & 0xBFE0FC00U) == 0x0E003000U) return Op{Family::TBL, 61, 3, "TBX2"};
+    if ((op & 0xBFE00400U) == 0x2E000400U && (((op >> 16) & 0x0F) != 0)) return Op{Family::INS, 62, 0, "INS"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

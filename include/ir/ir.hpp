@@ -203,6 +203,54 @@ enum class IROp : uint8_t {
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_FMA,
+    // Native SIMD 2-register misc (CNT/NOT/RBIT/ABS/NEG, 1.5.3-alpha).
+    // Unary lane-wise ops on the FULL 128-bit source (v_lo + v_hi).
+    //   imm  = opcode (0=CNT, 1=NOT, 2=RBIT, 3=ABS, 4=NEG)
+    //   width = element size in bytes (1..8; CNT/NOT/RBIT only valid 1/2/4,
+    //           ABS/NEG valid 1/2/4/8)
+    //   flags_op = Q (0=64-bit operand: process v_lo only, ZERO v_hi;
+    //                 1=128-bit: process v_lo AND v_hi)
+    SIMD_2REG,
+    // Native SIMD vector int<->FP converts (SCVTF/UCVTF/FCVTZS/FCVTZU,
+    // 1.5.3-alpha). Operates on the FULL 128-bit source.
+    //   imm  = opcode (0=SCVTF s32->f32, 1=UCVTF u32->f32, 2=FCVTZS f32->s32,
+    //                  3=FCVTZU f32->u32)
+    //   width = element size in bytes (4 only; the 8-byte 2D/1D forms stay
+    //           on the interpreter)
+    //   flags_op = Q (0=64-bit operand: process v_lo only, ZERO v_hi;
+    //                 1=128-bit: process v_lo AND v_hi)
+    SIMD_CVTF,
+    // Native SIMD ADDP (vector pairwise add, 1.5.3-alpha). Byte pairs only
+    // (esize=1, 8B/16B — the interp's size=0 path is the semantic ref).
+    //   width = 1
+    //   flags_op = Q (0=64-bit operand: 8B -> 4 results in v_lo, ZERO v_hi;
+    //                 1=128-bit: 16B -> 8 results in v_lo, v_hi = high 8)
+    SIMD_ADDP,
+    // Native SIMD narrowing (XTN/SQXTN/SQXTUN/UQXTN, 1.5.3-alpha). Reads the
+    // FULL 128-bit source (both 64-bit halves) and narrows each element to
+    // half width. Dest element size = width/2.
+    //   imm  = opcode (0=XTN, 1=SQXTUN, 2=SQXTN, 3=UQXTN)
+    //   width = SOURCE element size in bytes (2, 4, 8)
+    //   flags_op = Q (0=low 64 bits written, v_hi=0; 1=HIGH 64 bits written,
+    //                 v_lo preserved — the *2 forms)
+    SIMD_XTN,
+    // Native SIMD TBL/TBX (vector table lookup, 1.5.3-alpha). Two forms:
+    // one or two source table regs (TBL1/TBX1 vs TBL2/TBX2). Vn (rn) is the
+    // TABLE, Vm (rm) is the INDEX vector (interp_fp.cpp case 0x0E000000).
+    //   Vd[i] = table[index[i]]; out-of-range -> 0 (TBL) / keep old (TBX).
+    //   src1 = table vreg (rn, first of nregs); src2 = index vreg (rm).
+    //   cond = (is_tbx << 1) | Q; flags_op = number of table regs
+    //          (1 = TBL1/TBX1, 2 = TBL2/TBX2)
+    SIMD_TBL,
+    // Native SIMD INS (element, vector -> element, 1.5.3-alpha). Copies one
+    // element of src2 into dest at a byte offset: the interp's
+    // read-modify-write on v_lo/v_hi. GPR-mediated (NOT vec-cache pinned).
+    //   src1 = destination vreg (read-modify-write), src2 = source vector
+    //   width = element size in bytes (1, 2, 4, 8)
+    //   imm   = destination element byte offset (didx * esize)
+    //   aux   = source element index (sidx)
+    //   flags_op = Q (1=128-bit destination, 0=64-bit)
+    SIMD_INS,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

@@ -64,6 +64,7 @@ CpuFeatures detect_cpu_features() {
         //   bit 28: AVX
         //   bit 29: F16C (half-precision conversion)
         //   bit 12: FMA3 (Fused Multiply-Add, three-operand VEX form)
+        const uint32_t ecx_ssse3   = 1u << 9;
         const uint32_t ecx_sse41   = 1u << 19;
         const uint32_t ecx_sse42   = 1u << 20;
         const uint32_t ecx_popcnt  = 1u << 23;
@@ -72,6 +73,7 @@ CpuFeatures detect_cpu_features() {
         const uint32_t ecx_fma3    = 1u << 12;
         const uint32_t ecx_aesni   = 1u << 25;  // AES-NI (Westmere+)
         const uint32_t ecx_pclmulqdq = 1u << 1; // PCLMULQDQ (Westmere+)
+        f.ssse3  = (c & ecx_ssse3)  != 0;
         f.sse41  = (c & ecx_sse41)  != 0;
         f.sse42  = (c & ecx_sse42)  != 0;
         f.popcnt = (c & ecx_popcnt) != 0;
@@ -170,6 +172,7 @@ const char* cpu_features_string(const CpuFeatures& f) {
             while (k < n) { *p++ = s[k]; k++; }
         }
     };
+    if (f.ssse3)     append("ssse3");
     if (f.sse41)     append("sse4.1");
     if (f.sse42)     append("sse4.2");
     if (f.popcnt)    append("popcnt");

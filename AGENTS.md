@@ -114,6 +114,31 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `set_vreg_reg(dest, d)` (mirror the interp's full-element write).
   Translator skips rd==31 (XZR). `instr_will_call_interp` auto-syncs via
   classify (Family::UMOV ≠ UNKNOWN).
+- SIMD 2-REG (CNT/NOT/RBIT/ABS/NEG), SIMD_CVTF (SCVTF/UCVTF/FCVTZS/FCVTZU),
+  SIMD_ADDP (byte-pair), SIMD_XTN (XTN/SQXTUN/SQXTN/UQXTN), SIMD_TBL/TBX,
+  and SIMD_INS (element,vector) are native in the JIT (jit_codegen_simd.cpp,
+  1.5.3-alpha, memory path — never vec-cache pinned, so all XMM0-15 are
+  free scratch and every helper is REX-aware). Field contract per op
+  (ir_translate_fp.cpp SIMD_DP case): 2REG/CVTF/XTN → `imm`=subop,
+  `width`=esize (CVTF always 4), `flags_op`=Q; ADDP → `flags_op`=Q;
+  TBL → `flags_op`=(is_tbx<<1)|Q, `imm`=nregs (1/2); INS → `width`=esize,
+  `imm`=dest-byte-offset, `aux`=src element index, `flags_op`=Q (unused,
+  built manually via IRInst because emit() has no aux arg). Do NOT shuffle
+  these (the TBL case once read cond/flags_op and silently ran as TBX1 with
+  Q=0 — bytes ≥8 came back 0). FCVTZS/FCVTZU truncation MUST use the F3
+  prefix: `66 0F 5B` is cvtps2dq (ROUNDS, the 12.75→13 bug); truncation is
+  `F3 0F 5B` (cvttps2dq, `sse2_f3` helper). TBL/TBX needs SSSE3 (pshufb:
+  dst=TABLE, src=CONTROL; OOR control byte has bit7 → 0); esize-2/4 XTN
+  pack via packssdw/packsswb, esize-4 SQXTUN/UQXTN need SSE4.1
+  (packusdw/pminud) else CALL_INTERP. `instr_will_call_interp` stays
+  classify(…)==UNKNOWN-driven so no gate edits were needed. New test:
+  `ctest/jit_simd_misc.c` (30 checks, "checks passed" pattern). Test-expected
+  values for ABS must use the shift/xor abs form in a SEPARATE loop from
+  the src fill: a self-loop with two interleaved STORE_MEMs trips a
+  pre-existing scalar JIT bug — the second store's flag/vreg flush loses
+  state that a flag-setting op earlier in the body fed to a later
+  flag-consuming op (interp fine; verified broken on the pre-1.5.3 baseline,
+  so NOT caused by these SIMD ops). Do NOT "fix" it as part of SIMD work.
 - FWD (`BIFROST_ENABLE_FWD=1`, the `arm_reg_cache` load-forwarding in
   `ir_optimize.cpp`) is disabled by default: it had a "subtle correctness bug"
   since the original author (commit 1257f7b). The original regalloc clobber bug
@@ -676,14 +701,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **198 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **203 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **198 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 193),
+  (interactive + real-world are the standard default) = **203 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 198),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
@@ -694,7 +719,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **198 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **203 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three

@@ -194,6 +194,10 @@ public:
     // codegen sites. Now we do, falling back to CALL_INTERP on hosts
     // without SSE4.1.
     bool has_sse41() const { return cpu_features_.has_sse41(); }
+    // 1.5.3-alpha: SSSE3 gating (pshufb for the native TBL/TBX table
+    // lookup). Same runtime-guard pattern as has_sse41() — pshufb would
+    // SIGILL on pre-Core2 hosts without the check.
+    bool has_ssse3() const { return cpu_features_.has_ssse3(); }
     // 1.5.3-alpha: SSE4.2 gating (pcmpgtq for esize=8 CMGT). Same
     // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
     // pre-Westmere hosts without the check.

@@ -102,3 +102,72 @@ UMOV    0xBFE0FC00   0x0E003C00   UMOV       0   -
 AESE    0xFFFFFC00   0x4E284800   CRYPTO     0   -
 PMULL   0xFFE0FC00   0x4E60E000   CRYPTO     4   -
 PMULL2  0xFFE0FC00   0x4EE0E000   CRYPTO     5   -
+
+# ── PMISC: CNT/NOT/RBIT/ABS/NEG (2-reg misc) ─────────────────────────────
+# CNT/NOT/RBIT share sub2 0x0E205800 (interp collapses them) but differ in
+# U (bit29) and size[0] (bit22). Mask 0xBFE0FC00 keeps U, size, bit21 and
+# bits[15:10] so each gets a distinct row:
+#   CNT  = 0x0E205800 (U=0, size=0) — popcount per byte
+#   NOT  = 0x2E205800 (U=1, size=0) — bitwise invert
+#   RBIT = 0x2E605800 (U=1, size=1) — bit-reverse per byte
+# ABS/NEG share sub3 0x0E20B800 but FCVTZS/FCVTZU also match that base with
+# bit16 (0x10000) set, so mask 0xBF21FC00 keeps bit16 and strips size:
+#   ABS = 0x0E20B800 (U=0), NEG = 0x2E20B800 (U=1)
+# ABS of INT_MIN returns the input unchanged (ARM semantics).
+CNT     0xBFE0FC00   0x0E205800   PMISC      0   -
+NOT     0xBFE0FC00   0x2E205800   PMISC      1   -
+RBIT    0xBFE0FC00   0x2E605800   PMISC      2   -
+ABS     0xBF21FC00   0x0E20B800   PMISC      3   -
+NEG     0xBF21FC00   0x2E20B800   PMISC      4   -
+
+# ── CVTF: vector integer <-> FP converts (2-reg misc) ────────────────────
+# SCVTF/UCVTF (int->fp) match 0x0E20D800/0x2E20D800 with size 0/1. CRITICAL:
+# FRECPE/FRSQRTE share these exact sub3_noq values but use size 2/3 — the
+# `size == 0` guard is what keeps them on the interpreter. size==1 (2D/1D,
+# 64-bit ints) stays interp too (no vector 64-bit int<->fp in SSE2/AVX2).
+# FCVTZS/FCVTZU (fp->int) match 0x0E21B800/0x2E21B800 (bit16 set on the
+# ABS/NEG base); guard size == 2 (4S/2S native), size==3 (2D/1D) stays
+# interp. NaN -> 0, out-of-range saturates.
+SCVTF   0xBF20FC00   0x0E20D800   CVTF       0   size == 0
+UCVTF   0xBF20FC00   0x2E20D800   CVTF       1   size == 0
+FCVTZS  0xBF21FC00   0x0E21B800   CVTF       2   size == 2
+FCVTZU  0xBF21FC00   0x2E21B800   CVTF       3   size == 2
+
+# ── ADDP (vector, pairwise add) ──────────────────────────────────────────
+# Interp's ADDP is BYTE-pair only — correct for size=0 (8B/16B) alone; the
+# size-stripped case label feeds H/S/D pairs through byte logic. Guard
+# `size == 0` keeps the common 8B/16B form native and leaves H/S/D ADDP on
+# the interpreter untouched.
+ADDP    0xBF20FC00   0x0E20BC00   ADDP       0   size == 0
+
+# ── XTN family (vector narrowing) ────────────────────────────────────────
+# bits[15:10]: 001010 -> XTN (U=0) / SQXTUN (U=1); 010010 -> SQXTN (U=0) /
+# UQXTN (U=1). size selects the SOURCE element size (2x the dest): 0 -> 16b
+# src/8b dst, 1 -> 32/16, 2 -> 64/32. Always reads the FULL 128-bit source.
+# Q=0 writes low 64 bits + zeroes high; Q=1 (the *2 variants) writes the
+# HIGH 64 bits preserving the low half. size==3 is a DecodeError.
+XTN     0xBF20FC00   0x0E202800   XTN        0   size < 3
+SQXTUN  0xBF20FC00   0x2E202800   XTN        1   size < 3
+SQXTN   0xBF20FC00   0x0E204800   XTN        2   size < 3
+UQXTN   0xBF20FC00   0x2E204800   XTN        3   size < 3
+
+# ── TBL/TBX (vector table lookup, 1-2 source regs) ───────────────────────
+# Encoding: 0 Q 0 0 1110 size 0 0 Rm op2 L Rn Rd. op2 = bit12 (TBX), L =
+# bit13 (2nd source). bits[15:10] carry both, so each 1/2-reg form is a
+# distinct row. TBL3/TBL4/TBX3/TBX4 (bits[15:10]=0x10/0x18/0x14/0x1C) have
+# NO row -> classify UNKNOWN -> interpreter (kept there deliberately).
+# Vd[i] = table[index[i]]; out-of-range -> 0 (TBL) / keep (TBX).
+TBL1    0xBFE0FC00   0x0E000000   TBL        0   -
+TBL2    0xBFE0FC00   0x0E002000   TBL        1   -
+TBX1    0xBFE0FC00   0x0E001000   TBL        2   -
+TBX2    0xBFE0FC00   0x0E003000   TBL        3   -
+
+# ── INS (element, vector) ────────────────────────────────────────────────
+# Same 0x2E000000 prefix as EXT but bit10 (0x400) is 1 (EXT keeps bit10=0,
+# putting imm4 in bits[14:11]). imm5 (bits[20:16]) encodes the dest element
+# size + index; lowest set bit = esize, upper bits = dest index. Guard keeps
+# imm5 low nibble non-zero so esize is 1/2/4/8 (imm5=0/0x10 -> DecodeError
+# stays on the interp). src element index = bits[14:11] / esize.
+# GCC lowers vextq_u8 to a 2-source TBL whose index vector is built with
+# these INS moves — native here avoids the interp round-trip.
+INS     0xBFE00400   0x2E000400   INS        0   ((op >> 16) & 0x0F) != 0

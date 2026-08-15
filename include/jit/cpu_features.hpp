@@ -39,6 +39,7 @@ namespace arm64emu {
 // is nice-to-have but rarely worth the code-size cost in the JIT).
 struct CpuFeatures {
     uint32_t bits = 0;
+    bool ssse3        : 1;  // SSSE3 — pshufb, phaddw, pabsd, ... (Core 2+)
     bool sse41        : 1;  // SSE4.1 — paddq, pblendw, roundss/roundsd, pmaxsb, ...
     bool sse42        : 1;  // SSE4.2 — pcmpestri, popcnt on XMM
     bool popcnt       : 1;  // POPCNT instruction (LZCNT lives in ABM/BMI1 separately)
@@ -67,6 +68,10 @@ struct CpuFeatures {
     // True iff the JIT can use SSE4.1 codegen (roundss/roundsd,
     // pblendw, etc.). This is the most common "modern" baseline.
     bool has_sse41() const { return sse41; }
+    // True iff the JIT can use SSSE3 codegen (pshufb for TBL/TBX).
+    // SSSE3 is a prerequisite of SSE4.1, so it is nearly always present
+    // on has_sse41() hosts, but we detect it independently for correctness.
+    bool has_ssse3() const { return ssse3; }
     // 1.5.3-alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
     bool has_aesni()     const { return aesni; }
     bool has_pclmulqdq() const { return pclmulqdq; }

@@ -41,6 +41,88 @@ namespace arm64emu {
 // The case bodies below are verbatim from jit_codegen_fp.cpp ()
 // — no logic changes, just moved to a separate file/method.
 bool FrostJIT::compile_ir_simd(const IRInst& inst) {
+    // ── Local emit helpers for the memory-path SIMD ops (1.5.3-alpha) ──
+    // The ops below (SIMD_2REG/CVTF/ADDP/XTN/TBL/INS) are NOT in
+    // vec_cache_compatible_op, so the vec cache is never active in their
+    // blocks and every XMM reg is free scratch. All emit helpers are
+    // REX.R/REX.B-aware so XMM0-15 can be used freely.
+    auto emit_xmm_rex = [&](int dst, int src) {
+        uint8_t rex = 0x40;
+        if (dst >= 8) rex |= 0x04;   // REX.R
+        if (src >= 8) rex |= 0x01;   // REX.B
+        if (rex != 0x40) emit_byte(rex);
+    };
+    auto modrm3 = [&](int dst, int src) {
+        emit_byte(0xC0 | ((dst & 7) << 3) | (src & 7));
+    };
+    // SSE2 two-operand integer op: 66 [REX] 0F op reg,reg
+    auto sse2_op = [&](int op, int dst, int src) {
+        emit_byte(0x66); emit_xmm_rex(dst, src); emit_byte(0x0F);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
+    };
+    // SSSE3/SSE4.1 two-operand integer op in the 0F 38 map.
+    auto sse2_38 = [&](int op, int dst, int src) {
+        emit_byte(0x66); emit_xmm_rex(dst, src); emit_byte(0x0F); emit_byte(0x38);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
+    };
+    // Scalar SSE FP op (0F map, no 66): 0F [REX] op reg,reg [ib]
+    auto sse_fp = [&](int op, int dst, int src) {
+        emit_xmm_rex(dst, src); emit_byte(0x0F);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
+    };
+    // Truncating SSE FP→int (F3 prefix): F3 [REX] 0F op reg,reg
+    // (cvttps2dq/cvttpd2dq — 66 0F 5B cvtps2dq ROUNDS; F3 0F 5B truncates)
+    auto sse2_f3 = [&](int op, int dst, int src) {
+        emit_byte(0xF3); emit_xmm_rex(dst, src); emit_byte(0x0F);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(dst, src);
+    };
+    // Imm-shift in the 0F 71/72/73 group: 66 [REX] 0F op /digit ib.
+    // kind: SHL=4, SHR=5, SAR=7 (see emit_shift_imm8).
+    auto sse2_imm = [&](int op, int dst, int digit, uint8_t cnt) {
+        emit_byte(0x66); emit_xmm_rex(0, dst); emit_byte(0x0F);
+        emit_byte(static_cast<uint8_t>(op)); modrm3(digit, dst);
+        emit_byte(cnt);
+    };
+    // movdqa dst, src (register form).
+    auto movdqa = [&](int dst, int src) { sse2_op(0x6F, dst, src); };
+    // 64-bit loads/stores to the guest vreg memory space (movsd/movhpd).
+    auto load_lo = [&](int xmm, int off) {
+        emit_byte(0xF2); emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x10);
+        emit_modrm_disp(xmm & 7, CPU_REG, off);
+    };
+    auto load_hi = [&](int xmm, int off) {
+        emit_byte(0x66); emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x16);
+        emit_modrm_disp(xmm & 7, CPU_REG, off);
+    };
+    auto store_lo = [&](int xmm, int off) {
+        emit_byte(0xF2); emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x11);
+        emit_modrm_disp(xmm & 7, CPU_REG, off);
+    };
+    auto store_hi = [&](int xmm, int off) {
+        emit_byte(0x66); emit_xmm_rex(xmm, 0); emit_byte(0x0F); emit_byte(0x17);
+        emit_modrm_disp(xmm & 7, CPU_REG, off);
+    };
+    // Load a full 16-byte vector (v_lo + v_hi) into an XMM reg.
+    auto load_vec = [&](int xmm, int vreg) {
+        load_lo(xmm, V_LO_OFF + vreg * 8);
+        load_hi(xmm, V_HI_OFF + vreg * 8);
+    };
+    // Store the low 8 bytes of an XMM reg to a vector, zeroing v_hi for Q=0.
+    auto store_vec = [&](int xmm, int vreg, bool q) {
+        store_lo(xmm, V_LO_OFF + vreg * 8);
+        if (q) store_hi(xmm, V_HI_OFF + vreg * 8);
+        else   fp_zero_hi(vreg);
+    };
+    // Broadcast a 64-bit constant into both halves of an XMM register:
+    // movabs RAX, c; vmovq xmm, rax; punpcklqdq xmm, xmm
+    auto emit_mask = [&](int xmm, uint64_t c) {
+        clobber_flags();
+        flush_invalidate_host_regs(1u << RAX);
+        clobber_host_reg(RAX);
+        emit_mov_imm64(RAX, c);
+        emit_vmovq_gpr_to_xmm(xmm, RAX);
+        sse2_op(0x6C, xmm, xmm);  // punpcklqdq
+    };
     switch (inst.op) {
         // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native SSE2 ────
         case IROp::SIMD_LOGICAL: {
@@ -1506,6 +1588,393 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             // mapping incorrect. The interpreter's table-driven
             // implementation is correct.)
             emit_call_interp(inst.arm_pc, false);
+            return true;
+        }
+        // ── SIMD 2-REG MISC (CNT/NOT/RBIT/ABS/NEG) — native SSE2 ─────
+        // imm = subop (0=CNT, 1=NOT, 2=RBIT, 3=ABS, 4=NEG); width = esize
+        // (CNT/NOT/RBIT are per-byte, ABS/NEG use the lane width);
+        // flags_op = Q. Full 128-bit source; Q=0 zeroes v_hi.
+        case IROp::SIMD_2REG: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize = static_cast<int>(inst.width);
+            const int subop = static_cast<int>(inst.imm);
+            if ((subop == 3 || subop == 4) &&
+                esize != 1 && esize != 2 && esize != 4 && esize != 8) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            switch (subop) {
+                case 0: {  // CNT — per-byte popcount (Muła SWAR, 16-bit lanes)
+                    emit_mask(2, 0x5555555555555555ULL);
+                    emit_mask(3, 0x3333333333333333ULL);
+                    emit_mask(4, 0x0F0F0F0F0F0F0F0FULL);
+                    movdqa(1, 0);
+                    sse2_imm(0x71, 0, 2, 1);   // psrlw xmm0, 1
+                    sse2_op(0xDB, 0, 2);       // pand xmm0, 0x5555
+                    sse2_op(0xF8, 1, 0);       // psubb xmm1, xmm0 (2-bit popcounts)
+                    movdqa(0, 1);
+                    sse2_op(0xDB, 1, 3);       // pand xmm1, 0x3333
+                    sse2_imm(0x71, 0, 2, 2);   // psrlw xmm0, 2
+                    sse2_op(0xDB, 0, 3);       // pand xmm0, 0x3333
+                    sse2_op(0xFC, 1, 0);       // paddb xmm1, xmm0 (4-bit popcounts)
+                    movdqa(0, 1);
+                    sse2_imm(0x71, 0, 2, 4);   // psrlw xmm0, 4
+                    sse2_op(0xFC, 1, 0);       // paddb xmm1, xmm0
+                    sse2_op(0xDB, 1, 4);       // pand xmm1, 0x0F0F
+                    movdqa(0, 1);
+                    break;
+                }
+                case 1: {  // NOT — byte-wise invert
+                    sse2_op(0x74, 1, 1);       // pcmpeqb xmm1, xmm1 (all ones)
+                    sse2_op(0xEF, 0, 1);       // pxor xmm0, xmm1
+                    break;
+                }
+                case 2: {  // RBIT — reverse bits within each byte (3 stages)
+                    emit_mask(2, 0xAAAAAAAAAAAAAAAAULL);
+                    emit_mask(3, 0x5555555555555555ULL);
+                    emit_mask(4, 0xCCCCCCCCCCCCCCCCULL);
+                    emit_mask(5, 0x3333333333333333ULL);
+                    emit_mask(6, 0xF0F0F0F0F0F0F0F0ULL);
+                    emit_mask(7, 0x0F0F0F0F0F0F0F0FULL);
+                    // stage 1: (x<<1)&0xAAAA | (x>>1)&0x5555
+                    movdqa(1, 0);
+                    sse2_imm(0x71, 1, 6, 1);   // psllw xmm1, 1
+                    sse2_op(0xDB, 1, 2);       // pand 0xAAAA
+                    sse2_imm(0x71, 0, 2, 1);   // psrlw xmm0, 1
+                    sse2_op(0xDB, 0, 3);       // pand 0x5555
+                    sse2_op(0xEB, 0, 1);       // por
+                    // stage 2: (x<<2)&0xCCCC | (x>>2)&0x3333
+                    movdqa(1, 0);
+                    sse2_imm(0x71, 1, 6, 2);   // psllw xmm1, 2
+                    sse2_op(0xDB, 1, 4);       // pand 0xCCCC
+                    sse2_imm(0x71, 0, 2, 2);   // psrlw xmm0, 2
+                    sse2_op(0xDB, 0, 5);       // pand 0x3333
+                    sse2_op(0xEB, 0, 1);       // por
+                    // stage 3: (x<<4)&0xF0F0 | (x>>4)&0x0F0F
+                    movdqa(1, 0);
+                    sse2_imm(0x71, 1, 6, 4);   // psllw xmm1, 4
+                    sse2_op(0xDB, 1, 6);       // pand 0xF0F0
+                    sse2_imm(0x71, 0, 2, 4);   // psrlw xmm0, 4
+                    sse2_op(0xDB, 0, 7);       // pand 0x0F0F
+                    sse2_op(0xEB, 0, 1);       // por
+                    break;
+                }
+                case 3: {  // ABS — lane-wise absolute value
+                    if (esize == 8) {
+                        movdqa(1, 0);
+                        sse2_imm(0x72, 1, 4, 31);  // psrad xmm1, 31
+                        sse2_op(0x70, 1, 1);       // pshufd xmm1, xmm1, 0xF5
+                        emit_byte(0xF5);           // broadcast dword1/3 → 64-bit signs
+                        sse2_op(0xEF, 0, 1);       // pxor xmm0, xmm1
+                        sse2_op(0xFB, 0, 1);       // psubq xmm0, xmm1  ((x^s)-s)
+                    } else {
+                        int cmp = (esize == 1) ? 0x64 : (esize == 2) ? 0x65 : 0x66;
+                        int sub = (esize == 1) ? 0xF8 : (esize == 2) ? 0xF9 : 0xFA;
+                        sse2_op(0xEF, 1, 1);       // pxor xmm1, xmm1 (zero)
+                        sse2_op(cmp, 1, 0);        // xmm1 = (xmm1 > xmm0) = sign mask
+                        movdqa(2, 0);
+                        sse2_op(0xEF, 2, 1);       // xmm2 = x ^ sign
+                        sse2_op(sub, 2, 1);        // xmm2 = (x ^ sign) - sign
+                        movdqa(0, 2);
+                    }
+                    break;
+                }
+                default: {  // NEG — lane-wise negate (0 - x)
+                    int sub = (esize == 1) ? 0xF8 : (esize == 2) ? 0xF9
+                           : (esize == 4) ? 0xFA : 0xFB;
+                    sse2_op(0xEF, 1, 1);           // pxor xmm1, xmm1
+                    sse2_op(sub, 1, 0);            // xmm1 = 0 - x
+                    movdqa(0, 1);
+                    break;
+                }
+            }
+            store_vec(0, static_cast<int>(inst.dest), inst.flags_op != 0);
+            return true;
+        }
+        // ── SIMD CVTF (SCVTF/UCVTF/FCVTZS/FCVTZU, 32-bit lanes) ──────
+        // imm = subop (0=SCVTF s32→f32, 1=UCVTF u32→f32, 2=FCVTZS f32→s32,
+        // 3=FCVTZU f32→u32). width is always 4. flags_op = Q.
+        case IROp::SIMD_CVTF: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int subop = static_cast<int>(inst.imm);
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            switch (subop) {
+                case 0:  // SCVTF
+                    sse_fp(0x5B, 0, 0);           // cvtdq2ps xmm0, xmm0
+                    break;
+                case 1: {  // UCVTF — (float)(x>>1)*2 + (float)(x&1)
+                    emit_mask(1, 0x0000000100000001ULL);
+                    movdqa(2, 0);
+                    sse2_imm(0x72, 2, 2, 1);      // psrld xmm2, 1
+                    sse_fp(0x5B, 2, 2);           // cvtdq2ps xmm2, xmm2
+                    sse_fp(0x58, 2, 2);           // addps xmm2, xmm2
+                    sse2_op(0xDB, 0, 1);          // pand xmm0, 1
+                    sse_fp(0x5B, 0, 0);           // cvtdq2ps xmm0, xmm0
+                    sse_fp(0x58, 2, 0);           // addps xmm2, xmm0
+                    movdqa(0, 2);
+                    break;
+                }
+                case 2: {  // FCVTZS — truncate; NaN/±inf → 0 (matches interp)
+                    emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
+                    emit_mask(7, 0x7F8000007F800000ULL);
+                    movdqa(3, 0);
+                    sse_fp(0xC2, 3, 0); emit_byte(0);  // cmpps xmm3, xmm0, 0 (x==x)
+                    movdqa(4, 0);
+                    sse_fp(0x54, 4, 5);              // andps xmm4, 0x7FFFFFFF → |x|
+                    movdqa(6, 4);
+                    sse_fp(0xC2, 6, 7); emit_byte(0); // cmpps xmm6, +inf, 0 (|x|==inf)
+                    sse_fp(0x55, 6, 3);              // andnps xmm6, xmm3 → finite
+                    sse2_f3(0x5B, 0, 0);             // cvttps2dq xmm0 (indefinite out-of-range)
+                    sse2_op(0xDB, 0, 6);             // xmm0 &= finite
+                    break;
+                }
+                default: {  // FCVTZU — truncate; negatives → 0; NaN/±inf → 0
+                    emit_mask(5, 0x7FFFFFFF7FFFFFFFULL);
+                    emit_mask(7, 0x7F8000007F800000ULL);
+                    emit_mask(8, 0x4F0000004F000000ULL);  // 2^31
+                    emit_mask(9, 0x8000000080000000ULL);  // sign bit
+                    movdqa(3, 0);
+                    sse_fp(0xC2, 3, 0); emit_byte(0);  // x==x
+                    movdqa(4, 0);
+                    sse_fp(0x54, 4, 5);                // |x|
+                    movdqa(6, 4);
+                    sse_fp(0xC2, 6, 7); emit_byte(0);  // |x|==inf
+                    sse_fp(0x55, 6, 3);                // finite
+                    sse2_op(0xEF, 10, 10);             // pxor xmm10, xmm10 (0.0)
+                    sse_fp(0x5F, 0, 10);               // maxps xmm0, 0 (negatives → 0)
+                    movdqa(11, 0);
+                    sse_fp(0xC2, 11, 8); emit_byte(5); // cmpps xmm11, 2^31, 5 (>=)
+                    movdqa(1, 0);
+                    sse_fp(0x5C, 1, 8);                // subps xmm1, xmm8 (x - 2^31)
+                    sse2_f3(0x5B, 1, 1);               // cvttps2dq xmm1 (indefinite for x≥2^32)
+                    sse2_op(0xEB, 1, 9);               // xmm1 |= 0x80000000
+                    sse2_f3(0x5B, 0, 0);               // cvttps2dq xmm0 (lo)
+                    sse2_op(0xDB, 1, 11);              // xmm1 = hi & sel
+                    sse2_op(0xDF, 11, 0);              // xmm11 = ~sel & lo
+                    sse2_op(0xEB, 1, 11);              // xmm1 = (sel&hi)|(~sel&lo)
+                    sse2_op(0xDB, 1, 6);               // xmm1 &= finite
+                    movdqa(0, 1);
+                    break;
+                }
+            }
+            store_vec(0, static_cast<int>(inst.dest), inst.flags_op != 0);
+            return true;
+        }
+        // ── SIMD ADDP (pairwise byte add, 8B/16B) — native SSE2 ──────
+        // Vd[i]   = Vn[2i] + Vn[2i+1]  (wrapping 8-bit)
+        // Vd[8+i] = Vm[2i] + Vm[2i+1]  (Q=1);  8B form: Vd[4+i] = Vm pairs.
+        case IROp::SIMD_ADDP: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const bool q = inst.flags_op != 0;
+            clobber_flags();
+            emit_mask(2, 0x00FF00FF00FF00FFULL);   // 0x00FF per 16-bit lane
+            auto reduce = [&](int x) {
+                movdqa(1, x);
+                sse2_imm(0x71, 1, 2, 8);   // psrlw xmm1, 8  (b1 → low bytes)
+                sse2_op(0xDB, x, 2);       // pand xmm{x}, 0x00FF (b0)
+                sse2_op(0xFD, x, 1);       // paddw xmm{x}, xmm1  (b0 + b1)
+                sse2_op(0xDB, x, 2);       // pand → (b0+b1) & 0xFF
+                sse2_op(0x67, x, x);       // packuswb xmm{x}, xmm{x}
+            };
+            load_vec(0, static_cast<int>(inst.src1));
+            reduce(0);
+            int32_t dlo = V_LO_OFF + static_cast<int>(inst.dest) * 8;
+            if (q) {
+                store_lo(0, dlo);
+                load_vec(0, static_cast<int>(inst.src2));
+                reduce(0);
+                store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+            } else {
+                // 8B form: dest[0..3] = Vn pairs, dest[4..7] = Vm pairs.
+                movdqa(3, 0);                        // save r_n
+                load_vec(0, static_cast<int>(inst.src2));
+                reduce(0);                           // r_m
+                emit_mask(4, 0x00000000FFFFFFFFULL); // keep low 4 bytes of r_n
+                sse2_op(0xDB, 3, 4);                 // r_n & 0xFFFFFFFF
+                sse2_imm(0x73, 0, 7, 4);             // pslldq xmm0, 4 (r_m[0..3] → bytes 4-7)
+                sse2_op(0xEB, 0, 3);                 // por
+                store_lo(0, dlo);
+                fp_zero_hi(static_cast<int>(inst.dest));
+            }
+            return true;
+        }
+        // ── SIMD XTN (XTN/SQXTUN/SQXTN/UQXTN, narrowing) — native ────
+        // width = SOURCE esize (2/4/8); imm = subop (0=XTN, 1=SQXTUN,
+        // 2=SQXTN, 3=UQXTN); flags_op = Q (0 → v_lo + zero v_hi, 1 → v_hi,
+        // preserving v_lo). Full 128-bit source; 8 result bytes.
+        case IROp::SIMD_XTN: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize = static_cast<int>(inst.width);
+            const int subop = static_cast<int>(inst.imm);
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            switch (subop) {
+                case 0: {  // XTN — truncate
+                    if (esize == 2) {
+                        emit_mask(1, 0x00FF00FF00FF00FFULL);
+                        sse2_op(0xDB, 0, 1);      // pand 0x00FF
+                        sse2_op(0x67, 0, 0);      // packuswb
+                    } else if (esize == 4) {
+                        emit_mask(1, 0x0000FFFF0000FFFFULL);
+                        sse2_op(0xDB, 0, 1);      // pand 0x0000FFFF
+                        sse2_imm(0x72, 0, 6, 16); // pslld xmm0, 16
+                        sse2_imm(0x72, 0, 4, 16); // psrad xmm0, 16 (sign-extend)
+                        sse2_op(0x6B, 0, 0);      // packssdw
+                    } else {                     // esize 8
+                        sse2_op(0x70, 0, 0);      // pshufd xmm0, xmm0, 0x08
+                        emit_byte(0x08);          // low 32 of each qword
+                    }
+                    break;
+                }
+                case 1: {  // SQXTUN — signed → unsigned saturating
+                    if (esize == 2) {
+                        sse2_op(0x67, 0, 0);      // packuswb (SSE2)
+                    } else if (esize == 4) {
+                        if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                        sse2_38(0x2B, 0, 0);      // packusdw (SSE4.1)
+                    } else {
+                        emit_call_interp(inst.arm_pc, false);
+                        return true;
+                    }
+                    break;
+                }
+                case 2: {  // SQXTN — signed → signed saturating
+                    if (esize == 2) {
+                        sse2_op(0x63, 0, 0);      // packsswb
+                    } else if (esize == 4) {
+                        sse2_op(0x6B, 0, 0);      // packssdw
+                    } else {
+                        emit_call_interp(inst.arm_pc, false);
+                        return true;
+                    }
+                    break;
+                }
+                default: {  // UQXTN — unsigned → unsigned saturating
+                    if (esize == 2) {
+                        if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                        emit_mask(1, 0x00FF00FF00FF00FFULL);
+                        sse2_38(0x3A, 0, 1);      // pminuw xmm0, 0x00FF
+                        sse2_op(0x67, 0, 0);      // packuswb
+                    } else if (esize == 4) {
+                        if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                        emit_mask(1, 0x0000FFFF0000FFFFULL);
+                        sse2_38(0x3B, 0, 1);      // pminud xmm0, 0x0000FFFF
+                        sse2_imm(0x72, 0, 6, 16); // pslld 16
+                        sse2_imm(0x72, 0, 4, 16); // psrad 16
+                        sse2_op(0x6B, 0, 0);      // packssdw
+                    } else {
+                        emit_call_interp(inst.arm_pc, false);
+                        return true;
+                    }
+                    break;
+                }
+            }
+            if (inst.flags_op) {
+                store_lo(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+            } else {
+                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                fp_zero_hi(static_cast<int>(inst.dest));
+            }
+            return true;
+        }
+        // ── SIMD TBL/TBX (vector table lookup) — native SSSE3 ────────
+        // src1 = table base (rn; table regs are rn..rn+nregs-1), src2 =
+        // index vector (rm). flags_op = (is_tbx<<1)|Q; imm = nregs (1/2).
+        // Out-of-range indices → 0 (TBL) / keep dest byte (TBX). Only
+        // XMM0-9 used; all helpers are REX-aware. Requires SSSE3 (pshufb).
+        case IROp::SIMD_TBL: {
+            if (vec_cache_active_ || !has_ssse3() || inst.imm > 2) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            clobber_flags();
+            const bool is_tbx = (inst.flags_op & 2) != 0;
+            const bool q = (inst.flags_op & 1) != 0;
+            const int nregs = static_cast<int>(inst.imm);
+            const int bp = q ? 16 : 8;                 // bytes per table reg
+            const int table_len = nregs * bp;
+            // ge(T) = (idx >= T) = pcmpgtb(paddb(idx,0x80), (T-129)&0xFF)
+            //   (unsigned-compare trick: idx+128 as signed > -(129-T) ⟺ idx ≥ T)
+            const uint8_t thr_bp = static_cast<uint8_t>((bp - 129) & 0xFF);
+            const uint8_t thr_tl = static_cast<uint8_t>((table_len - 129) & 0xFF);
+            load_vec(0, static_cast<int>(inst.src2));   // X0 = index vector
+            load_vec(1, static_cast<int>(inst.src1));   // X1 = table reg 1
+            if (nregs == 2)
+                load_vec(3, (static_cast<int>(inst.src1) + 1) & 31);  // X3 = table reg 2
+            emit_mask(4, bp == 16 ? 0x1010101010101010ULL : 0x0808080808080808ULL);
+            emit_mask(5, 0x8080808080808080ULL);
+            emit_mask(6, static_cast<uint64_t>(thr_bp) * 0x0101010101010101ULL);
+            emit_mask(7, static_cast<uint64_t>(thr_tl) * 0x0101010101010101ULL);
+            movdqa(9, 0);                               // X9 = index copy
+            // control1 = idx | ge(bp); result1 = table1[control1]
+            movdqa(8, 9);
+            sse2_op(0xFC, 8, 5);                        // paddb X8, 0x80
+            sse2_op(0x64, 8, 6);                        // X8 = ge(bp)
+            sse2_op(0xEB, 0, 8);                        // X0 = control1
+            sse2_38(0x00, 1, 0);                        // X1 = table1[control1]
+            movdqa(2, 1);                               // X2 = result (so far)
+            if (nregs == 2) {
+                // control2 = (idx - bp) | ge(table_len); result2 = table2[control2]
+                movdqa(8, 9);
+                sse2_op(0xFC, 8, 5);
+                sse2_op(0x64, 8, 7);                    // X8 = ge(table_len)
+                movdqa(0, 9);
+                sse2_op(0xF8, 0, 4);                    // psubb X0 = idx - bp
+                sse2_op(0xEB, 0, 8);                    // X0 = control2
+                sse2_38(0x00, 3, 0);                    // X3 = table2[control2]
+                sse2_op(0xEB, 2, 3);                    // X2 |= result2
+            }
+            if (is_tbx) {
+                // out = (dest & ge) | (result & ~ge)
+                load_vec(0, static_cast<int>(inst.dest));   // X0 = dest
+                sse2_op(0xDB, 0, 8);                       // X0 = dest & ge(tl)
+                sse2_op(0xDF, 8, 2);                       // X8 = ~ge & result
+                sse2_op(0xEB, 0, 8);                       // X0 = TBX out
+            } else {
+                movdqa(0, 2);                              // X0 = TBL out
+            }
+            store_vec(0, static_cast<int>(inst.dest), q);
+            return true;
+        }
+        // ── SIMD INS (element, vector → element) — native GPR RMW ───
+        // Copies the element at sidx (aux) of src1 into the element at
+        // didx (imm / esize) of dest. GPR-mediated read-modify-write on
+        // cpu.v_lo/v_hi (never vec-cache pinned). flags_op = Q.
+        case IROp::SIMD_INS: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize = static_cast<int>(inst.width);
+            const int src_byte = static_cast<int>(inst.aux) * esize;
+            const int sq = src_byte / 8;                   // 0 → v_lo, 1 → v_hi
+            const int32_t soff = (sq ? V_HI_OFF : V_LO_OFF)
+                + static_cast<int>(inst.src1) * 8 + (src_byte % 8);
+            const int dst_byte = static_cast<int>(inst.imm);
+            const int dq = dst_byte / 8;
+            const int b_in_q = dst_byte % 8;               // field offset in the qword
+            const int32_t doff = (dq ? V_HI_OFF : V_LO_OFF)
+                + static_cast<int>(inst.dest) * 8;
+            // Mask: keep everything except the esize-byte field at b_in_q.
+            const int field_top = b_in_q * 8 + esize * 8;
+            const uint64_t keep_high = (field_top < 64) ? (~0ULL << field_top) : 0;
+            const uint64_t keep_low = (b_in_q == 0) ? 0 : (~0ULL >> (64 - b_in_q * 8));
+            const uint64_t mask = keep_high | keep_low;
+            clobber_flags();
+            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
+            // Source element → RCX (zero-extended), shifted to its dest field.
+            switch (esize) {
+                case 1: emit_load8(RCX, CPU_REG, soff); break;
+                case 2: emit_load16(RCX, CPU_REG, soff); break;
+                case 4: emit_load32(RCX, CPU_REG, soff); break;
+                default: emit_load(RCX, CPU_REG, soff); break;
+            }
+            emit_shift_imm8(RCX, 4, static_cast<uint8_t>(b_in_q * 8));
+            emit_load(RAX, CPU_REG, doff);                 // dest qword
+            emit_mov_imm64(RDX, mask);
+            emit_and_reg(RAX, RDX);                        // dest & mask (clear field)
+            emit_or_reg(RAX, RCX);                         // | element << shift
+            emit_store(CPU_REG, doff, RAX);
             return true;
         }
         default:

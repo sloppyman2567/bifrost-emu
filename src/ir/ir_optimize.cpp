@@ -115,6 +115,9 @@ static bool is_pure(IROp op) {
         case IROp::LDXR_FAST: case IROp::STXR_FAST:     // read/write + monitor
         case IROp::STLR_FAST:                            // write + monitor
         case IROp::AES_CRYPTO:                           // 1.5.3-alpha: read/write v_lo/v_hi
+        case IROp::SIMD_2REG: case IROp::SIMD_CVTF:      // 1.5.3-alpha: write v_lo/v_hi
+        case IROp::SIMD_ADDP: case IROp::SIMD_XTN:       // 1.5.3-alpha: write v_lo/v_hi
+        case IROp::SIMD_TBL: case IROp::SIMD_INS:        // 1.5.3-alpha: write v_lo/v_hi
         // TST_ZERO / BRCOND_ZERO / BRCOND_BIT also have side effects
         // (they read flags or branch) — never DCE.
         case IROp::TST_ZERO:
@@ -938,6 +941,12 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::STXR_FAST: return "STXR_FAST";
                     case IROp::STLR_FAST: return "STLR_FAST";
                     case IROp::AES_CRYPTO: return "AES_CRYPTO";
+                    case IROp::SIMD_2REG:  return "SIMD_2REG";
+                    case IROp::SIMD_CVTF:  return "SIMD_CVTF";
+                    case IROp::SIMD_ADDP:  return "SIMD_ADDP";
+                    case IROp::SIMD_XTN:   return "SIMD_XTN";
+                    case IROp::SIMD_TBL:   return "SIMD_TBL";
+                    case IROp::SIMD_INS:   return "SIMD_INS";
                     case IROp::FP_CSEL: return "FP_CSEL";
                     default: return "?";
                     }

@@ -877,6 +877,83 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                     emit(block, IROp::AES_CRYPTO, d.rd, d.rn, d.rm, 0, 0, 0, ct.subop, cur_pc);
                 }
                 return true;
+            case simd::Family::PMISC: {
+                // CNT/NOT/RBIT/ABS/NEG (2-reg misc). imm = ct.subop
+                // (0=CNT, 1=NOT, 2=RBIT, 3=ABS, 4=NEG). width = esize,
+                // flags_op = Q. Full 128-bit source; Q=0 zeroes v_hi.
+                emit(block, IROp::SIMD_2REG, d.rd, d.rn, 0,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::CVTF: {
+                // SCVTF/UCVTF/FCVTZS/FCVTZU (2-reg misc). imm = ct.subop
+                // (0=SCVTF, 1=UCVTF, 2=FCVTZS, 3=FCVTZU). The table guard
+                // restricts to size==0 (SCVTF/UCVTF) / size==2 (FCVTZS/ZU),
+                // so width is always 4 bytes (f32<->s32/u32); the 8-byte
+                // 2D/1D forms fall back to the interpreter. flags_op = Q.
+                emit(block, IROp::SIMD_CVTF, d.rd, d.rn, 0, 4, 0,
+                     static_cast<uint8_t>(Q), ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::ADDP: {
+                // ADDP (vector, byte-pair). guard `size == 0` keeps the
+                // 8B/16B form here; H/S/D stay on the interpreter.
+                emit(block, IROp::SIMD_ADDP, d.rd, d.rn, d.rm, 1, 0,
+                     static_cast<uint8_t>(Q), 0, cur_pc);
+                return true;
+            }
+            case simd::Family::XTN: {
+                // XTN/SQXTUN/SQXTN/UQXTN (narrowing). width = SOURCE esize
+                // (2/4/8 bytes); imm = ct.subop (0=XTN, 1=SQXTUN, 2=SQXTN,
+                // 3=UQXTN); flags_op = Q (0=low half + zero high, 1=high
+                // half + preserve low). Full 128-bit source.
+                uint8_t src_esize = static_cast<uint8_t>(2 << size);
+                emit(block, IROp::SIMD_XTN, d.rd, d.rn, 0, src_esize, 0,
+                     static_cast<uint8_t>(Q), ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::TBL: {
+                // TBL/TBX (table lookup). src1 = table (rn), src2 = index
+                // (rm). flags_op = (is_tbx << 1) | Q (is_tbx = bit12);
+                // imm = nregs (1 = TBL1/TBX1, 2 = TBL2/TBX2). The codegen
+                // reads the index vector and the table from v_lo/v_hi
+                // directly (not vec-cache pinned).
+                bool is_tbx = (op & 0x1000) != 0;
+                int nregs = ((op >> 13) & 0x3) + 1;
+                emit(block, IROp::SIMD_TBL, d.rd, d.rn, d.rm, 0, 0,
+                     static_cast<uint8_t>((is_tbx << 1) | Q),
+                     static_cast<uint8_t>(nregs), cur_pc);
+                return true;
+            }
+            case simd::Family::INS: {
+                // INS (element, vector). imm5 = (didx << (size+1)) | (1<<size):
+                // lowest set bit = esize, upper bits = dest index. src byte
+                // offset = bits[14:11], sidx = src_off / esize. flags_op = Q.
+                // GPR-mediated read-modify-write (not vec-cache pinned).
+                // Built manually: needs aux = sidx (emit() has no aux arg).
+                uint8_t imm5 = static_cast<uint8_t>((op >> 16) & 0x1F);
+                int esize_log2 = 0;
+                for (int b = 0; b < 5; b++) {
+                    if (imm5 & (1u << b)) { esize_log2 = b; break; }
+                }
+                uint8_t ins_esize = static_cast<uint8_t>(1u << esize_log2);
+                int didx = imm5 >> (esize_log2 + 1);
+                int src_off = (op >> 11) & 0xF;
+                int sidx = src_off / ins_esize;
+                IRInst inst{};
+                inst.op = IROp::SIMD_INS;
+                inst.dest = d.rd;                       // destination vreg
+                inst.src1 = d.rn;                       // source vector (Vn)
+                inst.src2 = d.rd;                       // read-modify-write dest
+                inst.width = ins_esize;                 // element size in bytes
+                inst.imm = static_cast<uint64_t>(didx * ins_esize);  // dest byte offset
+                inst.aux = static_cast<uint16_t>(sidx); // source element index
+                inst.flags_op = static_cast<uint8_t>((op >> 30) & 1); // Q
+                inst.arm_pc = cur_pc;
+                block.insts.push_back(inst);
+                return true;
+            }
             default:
                 break;
             }
