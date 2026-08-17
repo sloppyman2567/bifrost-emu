@@ -49,6 +49,25 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     make_executable();
     return true;
 }
+void FrostJIT::patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn) {
+    if (!code_buf_ || !target_fn) return;
+    auto it = pending_call_sites_.find(target_pc);
+    if (it == pending_call_sites_.end() || it->second.empty()) return;
+    // W^X: writable for the duration of all slot rewrites.
+    make_writable();
+    for (size_t off : it->second) {
+        if (off + 5 > CODE_BUF_SIZE) continue;
+        // The slot must still be an unpatched `E8` call; skip already-patched
+        // sites (defensive — a target translates at most once).
+        if (code_buf_[off] != 0xE8) continue;
+        // Compute the relative displacement: target - (slot + 5).
+        int32_t rel = static_cast<int32_t>(target_fn - (code_buf_ + off + 5));
+        memcpy(code_buf_ + off + 1, &rel, 4);
+    }
+    it->second.clear();  // patched — drop the records
+    std::atomic_thread_fence(std::memory_order_release);
+    make_executable();
+}
 void FrostJIT::try_chain_block(uint64_t /*pc*/, BlockEntry& entry) {
     // Fall-through chain slot.
     if (!entry.chained && entry.chain_target_pc != 0) {

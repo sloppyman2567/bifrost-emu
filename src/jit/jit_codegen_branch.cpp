@@ -52,9 +52,21 @@ void FrostJIT::emit_taken_path_epilogue() {
     // `ret` + 4 NOPs (the original layout). Until patched, the taken path
     // returns to the dispatcher as before (falling through the NOPs into
     // the cold exit under chain-skip).
-    taken_chain_patch_off_ = code_buf_used_;
-    has_taken_chain_slot_ = true;
+    //
+    // CRITICAL: taken_chain_patch_off_ must be recorded at the START of
+    // the actual 5-byte slot in BOTH layouts (patch_chain() guards on the
+    // slot's first byte being 0x90 / 0xC3). Under chain-skip the slot is
+    // the 5 NOPs emitted first; under the default layout the slot is the
+    // `ret` emitted AFTER the callee-saved restore. Recording at the top of
+    // the function (before the restore) left the default-mode offset 13
+    // bytes early (pointing at `mov rsp,rbp`), so every default-mode
+    // taken-path chain failed the 0xC3 guard and silently never patched
+    // (regression introduced by the chain-skip restructure). A direct BL
+    // call relies on the callee's taken-path chain, so that silent failure
+    // surfaced as the callee returning after its entry block.
     if (chain_skip_enabled()) {
+        taken_chain_patch_off_ = code_buf_used_;
+        has_taken_chain_slot_ = true;
         emit_nop(); emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 5 × 0x90
         // Cold exit (only reached when the slot above is unpatched).
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
@@ -72,6 +84,8 @@ void FrostJIT::emit_taken_path_epilogue() {
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        taken_chain_patch_off_ = code_buf_used_;
+        has_taken_chain_slot_ = true;
         emit_ret();                                  // 0xC3
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }

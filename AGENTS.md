@@ -931,3 +931,27 @@ not musl-`-static`.
   the fadd result, so it FAILS on interp AND JIT AND real hardware. The
   store it targets (`str d8,[x19,#336]` → `[0x17150]`) is fine. No source
   file exists; it is not in the suite. Do not chase it.
+- **Direct-BL-call callee-completion guard FIXED (2026-08-17)**: the guard's
+  completion test must be `cpu.pc == x30 && cpu.pc == bl_pc + 4` (frostjit.cpp
+  BL_CALL case), NOT the naive `cpu.pc == x30`. The naive test is fooled when
+  a mid-callee block ends at its final BL: `MAX_BL_CALL_PER_BLOCK=2`
+  (jit_translate.cpp:362) sets `chain_target_pc_ = bl_pc + 4`, which is
+  EXACTLY x30 (the value BL just wrote to LR) — so if that continuation block
+  isn't translated yet, the callee's fn returns EARLY with `cpu.pc == x30`
+  and the guard falsely resumes the caller while the callee is mid-body with
+  its frame still pushed. Observed: fmt_fp's 0x1dd0 frame leaked → printf_core
+  exit @0x298c reads x30=[wrong sp+80]=0 → DecodeError pc=0 on jit_fcvt.elf.
+  Pinning cpu.pc to the caller's actual continuation (`arm_pc + 4`) rules the
+  collision out (true completion's exit block does BR x30 → cpu.pc = x30 =
+  arm_pc+4; a mid-callee break returns a pc inside the callee, never the
+  caller's continuation). Codegen: `cmp cpu.pc,x30; jne INCOMPLETE; mov rcx,
+  arm_pc+4; cmp cpu.pc,rcx; jne INCOMPLETE; [resume: invalidate_all_vregs +
+  vec_emit_prologue_loads]; jmp past; [INCOMPLETE: mov rsp,rbp; pop×6; ret]`.
+  The layout REQUIRES a `jmp` over the INCOMPLETE block on the resume path —
+  falling through resumes then `ret`s (pops the dispatcher's return addr).
+  The temporary `dbg_guard_entry/dbg_guard_incomplete` probes were removed
+  (they corrupted RBX and crashed block @0x400c5c — never trust probe output);
+  `[DBG3]` call tracing in jit_call_helper is gated behind `BIFROST_DBG_GUARD=1`
+  (was unconditional per-block spam). Verified: jit_fcvt 6/6 ALL PASS exit 0,
+  full suite **205/205**, and `BIFROST_NO_DIRECT_CALL=1` /
+  `BIFROST_CHAIN_SKIP=1` / `BIFROST_INTERP_BL_CALL=1` all exit 0 on jit_fcvt.

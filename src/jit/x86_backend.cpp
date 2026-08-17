@@ -270,6 +270,14 @@ size_t FrostJIT::emit_jmp_rel32_placeholder() {
 void FrostJIT::patch_jmp_rel32(size_t off, int32_t rel) {
     memcpy(code_buf_+off+1, &rel, 4);
 }
+size_t FrostJIT::emit_call_rel32_placeholder() {
+    size_t off = code_buf_used_; emit_byte(0xE8); emit_u32(0); return off;
+}
+void FrostJIT::patch_call_rel32(size_t off, const uint8_t* target) {
+    int64_t rel = target - (code_buf_ + off + 5);
+    int32_t rel32 = static_cast<int32_t>(rel);
+    memcpy(code_buf_+off+1, &rel32, 4);
+}
 size_t FrostJIT::emit_jcc_rel32_placeholder(uint8_t cc) {
     size_t off = code_buf_used_; emit_byte(0x0F); emit_byte(0x80+cc); emit_u32(0); return off;
 }

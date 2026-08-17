@@ -345,6 +345,8 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // DecodeError. A legit callee must never be cut off; like run_block's
     // watchdog this is a pure codegen-bug safety valve.
     thread_local uint64_t tls_call_blocks_ = 0;
+    static const bool dbg_call_trace_ = (getenv("BIFROST_DBG_GUARD") != nullptr);
+    uint64_t dbg2_count = 0;
     while (cpu->running && cpu->pc != return_pc) {
         if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
             if (jit) jit->jit_disabled_.store(true, std::memory_order_relaxed);
@@ -375,12 +377,25 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             int ic = 0;
             auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
+                uint64_t pcbefore = cpu->pc;
                 cpu->pc = fn(cpu, emu);
+                if (dbg_call_trace_) {
+                    fprintf(stderr, "[DBG3] %llu: 0x%llx -> 0x%llx (fn=0x%llx sp=0x%llx x30=0x%llx)\n",
+                            (unsigned long long)++dbg2_count, (unsigned long long)pcbefore,
+                            (unsigned long long)cpu->pc, (unsigned long long)fn,
+                            (unsigned long long)cpu->sp, (unsigned long long)cpu->regs[30]);
+                }
                 continue;
             }
+        }
+        if (getenv("BIFROST_DBG_GUARD")) {
+            fprintf(stderr, "[STEP] pc=0x%llx sp=0x%llx x30=0x%llx\n",
+                    (unsigned long long)cpu->pc, (unsigned long long)cpu->sp,
+                    (unsigned long long)cpu->regs[30]);
         }
         emu->step(*cpu);
     }
     return cpu->pc;
 }
+
 } // namespace arm64emu

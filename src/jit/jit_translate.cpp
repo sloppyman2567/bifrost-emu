@@ -1354,6 +1354,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     }
     // Save max_vreg_ so the next translate_block only clears what's needed.
     prev_max_vreg_ = max_vreg_;
+    // Patch any direct BL call slots (from already-translated callers)
+    // that target this block to call `fn` directly. Runs under the
+    // exclusive blocks_mutex_ (all translate_block callers hold it).
+    if (direct_call_enabled()) {
+        patch_pending_calls(start_pc, reinterpret_cast<const uint8_t*>(fn));
+    }
     // Verify dirty_host_regs_ invariant (active in debug or with
     // BIFROST_REGALLOC_CHECK=1 — catches regalloc maintenance bugs).
     verify_dirty_host_regs_();

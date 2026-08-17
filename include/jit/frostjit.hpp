@@ -420,6 +420,11 @@ public:
     // Env gate, read once (mirrors the BIFROST_NO_SELFLOOP pattern).
     // False by default; opt in with BIFROST_CHAIN_SKIP=1.
     static bool chain_skip_enabled();
+    // Direct BL call gate (default ON). BL_CALL sites emit a patchable
+    // `call rel32` to the target block fn directly instead of going
+    // through jit_call_helper → lookup_call_target. Disable with
+    // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
+    static bool direct_call_enabled();
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
@@ -584,9 +589,19 @@ private:
     // all blocks. This makes it cheap enough to call on every cache
     // hit, not just at translate-time.
     std::unordered_map<uint64_t, std::vector<uint64_t>> back_refs_;
+    // Direct BL call sites (see emit_call_rel32_placeholder): code offsets
+    // of the patchable `call rel32` slot, keyed by BL target pc, recorded
+    // at BL_CALL codegen time. When the target block finally translates,
+    // its fn patches every recorded caller (end of translate_block, under
+    // blocks_mutex_). Grows only for BL targets not yet translated at
+    // caller-codegen time.
+    std::unordered_map<uint64_t, std::vector<size_t>> pending_call_sites_;
     // Patch a block's chain slot to jump directly to `target_fn`.
     // Returns true if the patch was applied.
     bool patch_chain(size_t chain_patch_off, const uint8_t* target_fn);
+    // Patch every recorded direct BL call slot targeting `target_pc` so the
+    // `call rel32` lands on `target_fn`. Mirrors patch_chain's W^X pattern.
+    void patch_pending_calls(uint64_t target_pc, const uint8_t* target_fn);
     // Try to chain `entry` to its already-translated target (if any),
     // and try to chain any existing blocks whose target is `pc`.
     void try_chain_block(uint64_t pc, BlockEntry& entry);
@@ -691,6 +706,13 @@ private:
     }
     size_t emit_jmp_rel32_placeholder();
     void patch_jmp_rel32(size_t off, int32_t rel);
+    // Direct BL call slot: `E8 <disp32>` (5 bytes). Patchable in place to
+    // point the call at any block fn — unlike emit_call_abs (movabs+call),
+    // the rel32 form needs no register for the target. The slot initially
+    // targets a slow-path dispatcher; when the target block translates, the
+    // disp32 is rewritten (patch_pending_calls / patch_call_rel32).
+    size_t emit_call_rel32_placeholder();
+    void patch_call_rel32(size_t off, const uint8_t* target);
     size_t emit_jcc_rel32_placeholder(uint8_t cc);
     void patch_jcc_rel32(size_t off, int32_t rel);
     // rel8 jumps (short, ±127 bytes). Return offset of placeholder; patch later.

@@ -53,6 +53,14 @@ bool FrostJIT::chain_skip_enabled() {
     static const bool on = (getenv("BIFROST_CHAIN_SKIP") != nullptr);
     return on;
 }
+// ── Direct BL call env gate (default ON) ───────────────────────────────
+// BL_CALL sites emit a patchable `call rel32` to the target block fn
+// directly, skipping the jit_call_helper → lookup_call_target round-trip.
+// BIFROST_NO_DIRECT_CALL=1 disables it (bisection / debugging).
+bool FrostJIT::direct_call_enabled() {
+    static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
+    return on;
+}
 // ── Compile-time layout checks ─────────────────────────────────────────
 // The JIT hardcodes offsets into the CPU struct (REGS_OFF, SP_OFF, etc.)
 // for direct memory access in generated x86 code. If the CPU struct layout
@@ -811,19 +819,131 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // so we can't save RAX across the call. The return value
             // (next PC) will be in RAX after the call — we must NOT
             // overwrite it with a pop.
-            // 1 push (WIN_REG) → odd → emit_call_aligned adds alignment.
-            emit_push(WIN_REG);
-            emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
-            // RAX = return value (next PC). Save it to RCX before popping WIN_REG.
-            // RCX is caller-saved and was already invalidated by the call.
-            emit_mov_reg(RCX, RAX);  // RCX = next PC
-            emit_pop(WIN_REG);
-            // Store next PC to cpu.pc.
-            emit_store(CPU_REG, PC_OFF, RCX);
-            // Invalidate ALL cache mappings after the call.
-            // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
+            if (direct_call_enabled()) {
+                // ── Direct BL call ─────────────────────────────────
+                // Emit a patchable `call rel32` slot instead of routing
+                // through jit_call_helper → lookup_call_target. Once the
+                // target block translates, the slot is patched to call its
+                // fn directly (a normal SysV-ABI function: RDI=cpu,
+                // RSI=emu, returns the next pc in RAX). The block fn
+                // preserves RBX/RBP/R12-15 itself and R10 is saved below,
+                // so the caller's live state survives the direct call.
+                // Until patched, the slot dispatches through slow_path
+                // (jit_call_helper) — identical semantics to the old path.
+                // Alignment: 1 push (WIN_REG) → odd → emit_call_aligned
+                // would emit `sub rsp,8; pushfq` around the call; mirror
+                // that exactly so the direct target AND slow_path both see
+                // RSP%16==0 at their call site (body-entry RSP%16==8).
+                emit_push(WIN_REG);
+                emit_sub_rsp_imm8(8);
+                emit_pushfq();
+                size_t call_slot = emit_call_rel32_placeholder();
+                // resume (reached by the direct call's `ret` AND by
+                // slow_path's `ret`): restore the aligned frame.
+                emit_popfq();
+                emit_add_rsp_imm8(8);
+                emit_pop(WIN_REG);
+                size_t jmp_past = emit_jmp_rel32_placeholder();  // skip slow_path
+                // slow_path: dispatch through jit_call_helper. Entered at
+                // RSP%16==8 (after the slot's call pushed a return addr);
+                // `sub rsp,8` makes the helper call aligned. `ret` pops the
+                // slot's return address back into resume.
+                size_t slow_off = code_buf_used_;
+                emit_sub_rsp_imm8(8);
+                emit_mov_imm64(RAX, reinterpret_cast<uint64_t>(jit_call_helper));
+                emit_byte(0xFF); emit_byte(0xD0);  // call rax
+                emit_add_rsp_imm8(8);
+                emit_ret();
+                patch_jmp_rel32(jmp_past,
+                    static_cast<int32_t>(code_buf_used_ - (jmp_past + 5)));
+                // Slot initially targets slow_path; override to the block fn
+                // when already translated, else record for later patching
+                // (end of the target's translate_block).
+                patch_call_rel32(call_slot, code_buf_ + slow_off);
+                uint64_t (*tfn)(CPU*, Emulator*) = lookup_only(inst.imm);
+                if (tfn) {
+                    patch_call_rel32(call_slot, reinterpret_cast<const uint8_t*>(tfn));
+                } else {
+                    if (pending_call_sites_.size() > 1000000) pending_call_sites_.clear();
+                    pending_call_sites_[inst.imm].push_back(call_slot);
+                }
+            } else {
+                // Original path: call jit_call_helper (target not yet
+                // translated or BIFROST_NO_DIRECT_CALL=1 bisection gate).
+                emit_push(WIN_REG);
+                emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
+                // RAX = return value (next PC). Save it to RCX before popping WIN_REG.
+                // RCX is caller-saved and was already invalidated by the call.
+                emit_mov_reg(RCX, RAX);  // RCX = next PC
+                emit_pop(WIN_REG);
+                // Store next PC to cpu.pc.
+                emit_store(CPU_REG, PC_OFF, RCX);
+                // Invalidate ALL cache mappings after the call.
+                // The callee may have modified ANY cpu.regs[] entry (x0-x30, sp).
+                invalidate_all_vregs();
+                if (vec_cache_active_) vec_emit_prologue_loads();
+                return false;  // does NOT end the block
+            }
+            // ── Callee-completion guard ─────────────────────────────
+            // The direct call runs the WHOLE callee only while every block
+            // on its path is chained. If a chain slot still targets a
+            // not-yet-translated block (e.g. a fall-through edge the first
+            // call never took), the callee's fn returns EARLY — right
+            // after its entry block — with cpu.pc pointing MID-CALLEE and
+            // the callee's frame still pushed on the guest stack. Resuming
+            // the caller natively then skips the rest of the callee and
+            // corrupts sp/pc (the observed DecodeError-at-pc=0 crash).
+            //
+            // COMPLETE ⟺ cpu.pc == x30 AND x30 == bl_pc + 4: the callee's
+            // exit block does BR x30 to the CALLER's continuation, storing
+            // it into cpu.pc. The naive cpu.pc == x30 test alone is NOT
+            // sufficient — a mid-callee block that ends at its final BL
+            // (the MAX_BL_CALL_PER_BLOCK=2 cap sets chain_target_pc_ =
+            // bl_pc+4, and x30 is that same bl_pc+4) returns EARLY with
+            // cpu.pc == x30 when the continuation block isn't translated
+            // yet. The guard then falsely resumes the caller while the
+            // callee is mid-body with its frame still pushed (the observed
+            // fmt_fp 0x1dd0 frame leak → printf_core reads x30=[wrong
+            // sp+80]=0 → DecodeError pc=0). Pinning cpu.pc to the caller's
+            // actual continuation (bl_pc+4) rules that collision out.
+            // When incomplete, restore this block's frame and `ret` to the
+            // C dispatcher — it reads cpu.pc (the mid-callee address) and
+            // continues the callee, translating/chaining the missing
+            // blocks on demand. This unwinds correctly through nested
+            // direct calls too: each level's post_call sees cpu.pc != its
+            // own continuation and also unwinds, so control reaches the
+            // dispatcher.
+            emit_load(RCX, CPU_REG, REGS_OFF + 30 * 8);  // rcx = x30
+            emit_load(RAX, CPU_REG, PC_OFF);             // rax = cpu.pc
+            emit_cmp_reg(RAX, RCX);                      // cpu.pc == x30?
+            size_t jne_incomplete = emit_jcc_rel32_placeholder(5); // JNE → INCOMPLETE
+            emit_mov_imm64(RCX, inst.arm_pc + 4);        // rcx = bl continuation
+            emit_cmp_reg(RAX, RCX);                      // cpu.pc == bl_pc+4?
+            size_t jne_incomplete2 = emit_jcc_rel32_placeholder(5);
+            // ── COMPLETE: cpu.pc == x30 == the caller's continuation ──
+            // Invalidate ALL cache mappings after the call. The callee may
+            // have modified ANY cpu.regs[] entry (x0-x30, sp).
             invalidate_all_vregs();
             if (vec_cache_active_) vec_emit_prologue_loads();
+            size_t jmp_resume_done = emit_jmp_rel32_placeholder();  // skip INCOMPLETE
+            // ── INCOMPLETE ──────────────────────────────────────────
+            // Return to the C dispatcher. The ret pops the dispatcher's
+            // return address even when this block was entered via a chain
+            // edge (the whole chain shares the chain root's single return
+            // address), and cpu.pc is already the mid-callee pc. The
+            // block's cached vregs/vecs were flushed before the call, so
+            // nothing is lost by skipping the epilogue.
+            size_t incomplete_off = code_buf_used_;
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+            emit_pop(R15); emit_pop(R14); emit_pop(R13);
+            emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+            emit_ret();
+            patch_jcc_rel32(jne_incomplete,
+                static_cast<int32_t>(incomplete_off - (jne_incomplete + 6)));
+            patch_jcc_rel32(jne_incomplete2,
+                static_cast<int32_t>(incomplete_off - (jne_incomplete2 + 6)));
+            patch_jmp_rel32(jmp_resume_done,
+                static_cast<int32_t>(code_buf_used_ - (jmp_resume_done + 5)));
             return false;  // does NOT end the block
         }
         default:
