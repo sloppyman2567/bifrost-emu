@@ -1019,6 +1019,18 @@ private:
     // definition numbers (VregAlloc monotonic) and the scan covers aux
     // (SMADDL/SMSUBL accumulator) in addition to src1/src2.
     std::vector<int> vreg_last_use_op_;
+    // vreg_uses_[v] = sorted (ascending) list of IR op indices that READ
+    // vreg `v` as a source (src1/src2/aux), built by the same use-scan as
+    // kills_per_op_/vreg_last_use_op_. Powers Belady's-optimal register
+    // eviction (alloc_reg/alloc_reg_excluding): when a host reg is needed,
+    // evict the cached vreg whose NEXT use is furthest in the future — dead
+    // vregs (no remaining read) are evicted first since a dead eviction
+    // costs at most a spill store and never a reload. For straight-line
+    // basic blocks this provably minimizes reloads, unlike the old LRU
+    // timestamps which can evict a hot vreg needed on the very next op.
+    // Indexed by any vreg in [0, 4096). Cleared with the other block-local
+    // scans at the end of translate_block.
+    std::vector<std::vector<uint16_t>> vreg_uses_;
     // fold_ahead_kind_[i] = fold-lookahead classification of IR op i:
     //   0 = no fold ahead
     //   1 = IMM whose dest's ONLY read is op i+1, and op i+1 is a foldable
@@ -1046,6 +1058,14 @@ private:
     // LOAD_MEM/STORE_MEM: a dead scratch vreg already in the destination
     // host reg needs neither a spill (no later reader) nor a reload.
     bool vreg_last_use_this_op(int v) const;
+    // Index of the first IR op that reads vreg `v` at-or-after op `cur`
+    // (the current compile position, cur_op_index_), or -1 if `v` has no
+    // remaining read (dead). Used by Belady's-optimal eviction in
+    // alloc_reg/alloc_reg_excluding: the candidate with the furthest next
+    // use (or none at all) is evicted first. Exact for straight-line basic
+    // blocks — vreg_uses_ is built by the same block use-scan as
+    // kills_per_op_, so the "future" is fully known at codegen time.
+    int next_use_after(int v, size_t cur) const;
     // Optimized variant of load_vreg_to_reg for ops that clobber a set of
     // host regs. Avoids the flush→reload sandwich (`mov dst,slot; mov
     // slot,dst`) when the previous op left `v` cached in `dst`:

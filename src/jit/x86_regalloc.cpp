@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cstdlib>   // getenv, abort
 #include <cstdint>   // UINT32_MAX
+#include <climits>    // INT_MAX
 namespace arm64emu {
 static regalloc_stats_t g_rs;
 void regalloc_stats_reset() { g_rs = regalloc_stats_t{}; }
@@ -203,25 +204,32 @@ int FrostJIT::alloc_reg(int preferred) {
         int r = ALLOC_REGS[i];
         if (reg_vreg_[r] == -1) return r;
     }
-    // All regs taken — evict the LRU vreg (true least-recently-used, not FIFO).
-    // Scan all alloc regs and pick the one whose cached vreg has the smallest
-    // vreg_last_use_ timestamp. This avoids evicting a hot vreg just because
-    // it was allocated first (the old FIFO behavior that always evicted
-    // ALLOC_REGS[0] = RAX).
-    int best_r = ALLOC_REGS[0];
-    uint32_t best_ts = vreg_last_use_[reg_vreg_[best_r]];
-    for (int i = 1; i < NUM_ALLOC_REGS; i++) {
+    // All regs taken — evict the cached vreg whose NEXT use is furthest in
+    // the future (Belady's optimal algorithm). Dead vregs (no remaining
+    // read) are evicted first: a dead eviction costs at most a spill store
+    // and never a reload, while LRU can evict a hot vreg that is needed
+    // again on the very next op. Provably minimizes reloads for
+    // straight-line basic blocks; the exact future is free because
+    // vreg_uses_ comes from the same block use-scan that already produces
+    // kills_per_op_ and vreg_last_use_op_.
+    int best_r = -1;
+    int best_score = -1;  // furthest next use wins; dead (no next use) = INT_MAX
+    for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
         int v = reg_vreg_[r];
-        if (v >= 0 && vreg_last_use_[v] < best_ts) {
-            best_ts = vreg_last_use_[v];
+        if (v < 0) continue;
+        int nu = next_use_after(v, cur_op_index_);
+        int score = (nu < 0) ? INT_MAX : nu;
+        if (score > best_score) {
+            best_score = score;
             best_r = r;
         }
     }
-    int r = best_r;
-    int v = reg_vreg_[r];
-    if (v >= 0) evict_vreg(v);
-    return r;
+    // All regs are occupied, so best_r is always set; keep a defensive
+    // fallback anyway (evicting ALLOC_REGS[0] matches the pre-Belady LRU).
+    if (best_r < 0) best_r = ALLOC_REGS[0];
+    evict_vreg(reg_vreg_[best_r]);
+    return best_r;
 }
 // Allocate a host reg excluding `excl1` and `excl2`. Used by ALU codegen
 // to place `dest` in a reg that doesn't collide with src1/src2's host regs,
@@ -233,17 +241,21 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         if (r == excl1 || r == excl2) continue;
         if (reg_vreg_[r] == -1) return r;
     }
-    // No free reg — evict a non-excluded reg using true LRU.
-    // Scan all non-excluded alloc regs and pick the one with the oldest
-    // vreg_last_use_ timestamp.
+    // No free reg — evict a non-excluded reg using Belady's next-use (see
+    // alloc_reg): evict the vreg whose next use is furthest in the future,
+    // dead vregs first. Optimal for straight-line blocks and strictly
+    // better than the old LRU timestamps.
     int best_r = -1;
-    uint32_t best_ts = UINT32_MAX;
+    int best_score = -1;  // furthest next use wins; dead (no next use) = INT_MAX
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
         if (r == excl1 || r == excl2) continue;
         int v = reg_vreg_[r];
-        if (v >= 0 && vreg_last_use_[v] < best_ts) {
-            best_ts = vreg_last_use_[v];
+        if (v < 0) continue;
+        int nu = next_use_after(v, cur_op_index_);
+        int score = (nu < 0) ? INT_MAX : nu;
+        if (score > best_score) {
+            best_score = score;
             best_r = r;
         }
     }
@@ -433,6 +445,21 @@ bool FrostJIT::vreg_last_use_this_op(int v) const {
         if (k == v) return true;
     }
     return false;
+}
+// ── next_use_after (Belady's eviction) ──────────────────────────────────
+// First IR op index (>= cur) that reads vreg `v`, or -1 if `v` is dead
+// (no remaining reader). Dead vregs are the best eviction candidates — a
+// dead eviction costs at most a spill store and never a reload. The
+// per-vreg use lists come from the same block use-scan that builds
+// kills_per_op_, so within a basic block the future is fully known and
+// evicting the furthest-next-use vreg is provably reload-optimal.
+int FrostJIT::next_use_after(int v, size_t cur) const {
+    if (v < 0 || static_cast<size_t>(v) >= vreg_uses_.size()) return -1;
+    const std::vector<uint16_t>& u = vreg_uses_[v];
+    for (uint16_t idx : u) {
+        if (static_cast<size_t>(idx) > cur) return static_cast<int>(idx);
+    }
+    return -1;
 }
 bool FrostJIT::vreg_fast_keep_candidate(int v, int reg, int dest_vreg) const {
     if (v <= 32 || v >= 4096 || v == dest_vreg) return false;
