@@ -834,7 +834,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     //     dest), so we don't kill it (handled in the compile loop below).
     {
         size_t n = ir_block.insts.size();
-        std::vector<int> last_use(4096, -1);
+        vreg_last_use_op_.assign(4096, -1);
         for (size_t i = 0; i < n; i++) {
             const IRInst& inst = ir_block.insts[i];
             if (inst.op != IROp::LOAD_REG) {
@@ -842,17 +842,50 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 // Bounds-check: vreg space is 0-4095. A block with vregs
                 // >=4096 indicates a translator bug; cap to avoid OOB.
                 if (inst.src1 > 31 && inst.src1 < 4096)
-                    last_use[inst.src1] = static_cast<int>(i);
+                    vreg_last_use_op_[inst.src1] = static_cast<int>(i);
                 if (inst.src2 > 31 && inst.src2 < 4096)
-                    last_use[inst.src2] = static_cast<int>(i);
+                    vreg_last_use_op_[inst.src2] = static_cast<int>(i);
             }
+            // aux is a vreg for SMADDL/UMADDL/SMSUBL/UMSUBL (accumulator);
+            // SIMD_INS stores a small element index (< 33, filtered out).
+            if (inst.aux > 31 && inst.aux < 4096)
+                vreg_last_use_op_[inst.aux] = static_cast<int>(i);
         }
         // Build kills_per_op_: for each op i, the list of scratch vregs
         // whose last use is i (dest is excluded at kill time in the loop).
         kills_per_op_.assign(n, {});
         for (int v = 32; v < 4096; v++) {
-            if (last_use[v] >= 0) {
-                kills_per_op_[last_use[v]].push_back(static_cast<uint16_t>(v));
+            if (vreg_last_use_op_[v] >= 0) {
+                kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
+            }
+        }
+        // ── Fold-lookahead pre-scan ─────────────────────────────────
+        // For each IMM whose dest's ONLY read is the immediately-following
+        // op (and that op is a foldable ALU/shift consuming the dest as a
+        // dead src2), classify it so the IMM codegen can skip emitting the
+        // mov entirely — the consumer folds the const into an x86
+        // immediate and never reads the vreg's host mapping or stack slot.
+        // The conditions mirror the consumer's fold guards EXACTLY
+        // (jit_codegen_alu.cpp): the IMM case additionally verifies the
+        // imm32 sign-extension fit for the ALU class before skipping.
+        fold_ahead_kind_.assign(n, 0);
+        for (size_t i = 0; i + 1 < n; i++) {
+            const IRInst& im = ir_block.insts[i];
+            if (im.op != IROp::IMM) continue;
+            if (!(im.dest > 32 && im.dest < 4096)) continue;
+            if (vreg_last_use_op_[im.dest] != static_cast<int>(i + 1)) continue;
+            const IRInst& nx = ir_block.insts[i + 1];
+            if (nx.src2 != im.dest || nx.dest == nx.src2 || nx.src1 == nx.src2) continue;
+            switch (nx.op) {
+                case IROp::ADD: case IROp::SUB: case IROp::AND:
+                case IROp::OR:  case IROp::XOR:
+                    fold_ahead_kind_[i] = 1;  // ALU fold — const must survive imm32 sign-extend
+                    break;
+                case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+                    fold_ahead_kind_[i] = 2;  // shift fold — any count folds
+                    break;
+                default:
+                    break;
             }
         }
     }
@@ -926,8 +959,22 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 }
             }
         }
+        // Dead-scratch-dest drop: if THIS op's dest is a scratch vreg
+        // (33+) whose last use is at-or-before this op — never read as a
+        // source, or read only in-place (dest == src1) — the value is dead
+        // once the op has been emitted. Drop its host mapping NOW (no
+        // spill) so it neither occupies a host reg for the rest of the
+        // block nor gets written back by the epilogue's flush. Exact
+        // because vreg numbers are block-local unique-per-definition
+        // (VregAlloc monotonic) and the use-scan covers src1/src2/aux.
+        if (inst.dest > 32 && inst.dest < 4096 &&
+            vreg_last_use_op_[inst.dest] <= static_cast<int>(i)) {
+            kill_vreg(inst.dest);
+        }
     }
     kills_per_op_.clear();
+    fold_ahead_kind_.clear();
+    vreg_last_use_op_.clear();
     // ── Regalloc bloat diagnostic (BIFROST_REGALLOC_STATS=1) ─────
     // Counts the spill/reload instruction density of THIS block. A high
     // reload:spill ratio for the same vreg within a block is the bloat

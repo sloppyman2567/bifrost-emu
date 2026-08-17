@@ -1009,6 +1009,28 @@ private:
     // which permits skipping the flush→reload sandwich for scratch vregs
     // already cached in the target host reg.
     size_t cur_op_index_ = 0;
+    // vreg_last_use_op_[v] = index of the IR op that LAST reads scratch
+    // vreg `v` as a source (src1/src2/aux), or -1 if `v` is never read as
+    // a source in this block. Populated by the same use-scan that builds
+    // kills_per_op_. The compile loop uses it for the dead-scratch-dest
+    // drop: a dest whose last use is at-or-before its own defining op is
+    // dead immediately, so its host mapping can be dropped without a spill.
+    // Exact because IR scratch vregs are block-local with unique-per-
+    // definition numbers (VregAlloc monotonic) and the scan covers aux
+    // (SMADDL/SMSUBL accumulator) in addition to src1/src2.
+    std::vector<int> vreg_last_use_op_;
+    // fold_ahead_kind_[i] = fold-lookahead classification of IR op i:
+    //   0 = no fold ahead
+    //   1 = IMM whose dest's ONLY read is op i+1, and op i+1 is a foldable
+    //       ALU (ADD/SUB/AND/OR/XOR) consuming it as a dead src2 — the
+    //       IMM codegen may skip the mov if the const survives imm32
+    //       sign-extension (the consumer's exact fold check).
+    //   2 = same but the consumer is a shift (SHL/SHR/SAR/ROR) — any count
+    //       folds, so the IMM mov is always skippable.
+    // The consumer's fold conditions are replicated EXACTLY so a skipped
+    // mov never leaves a vreg unmapped that the consumer then reads (its
+    // ensure_vreg would reload garbage from the stack slot).
+    std::vector<uint8_t> fold_ahead_kind_;
     // ── Block-local constant tracking ────────────────────────────────
     // jit_consts_[v] = constant value of scratch vreg `v`, populated when
     // the IMM op that defines it is compiled. Used to fold a constant src2

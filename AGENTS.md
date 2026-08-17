@@ -896,6 +896,24 @@ not musl-`-static`.
   reset was in the unrecoverable set (lost `jit_dispatch.cpp` or Opt-B
   items 2/3/4) — the recovered Opt-A + cross-wire tree is hang-free,
   205/205.
+- **Opt-B items 2/3/4 RE-IMPLEMENTED (2026-08-17, committed)**: dead-scratch-
+  dest drop + fold lookahead + SUBS evict skip, rebuilt from the AGENTS.md
+  contract + SESSION_SUMMARY rather than recovered source. All three share
+  new liveness state: `vreg_last_use_op_[]` (per-vreg last-read op index,
+  -1 if never read) and `fold_ahead_kind_[]` (per-op fold-lookahead class),
+  both built in translate_block's use-scan. CRITICAL: the use-scan MUST
+  cover `inst.aux` (SMADDL/SMSUBL accumulator) — the original scan only
+  counted src1/src2, so a dest dropped as "dead" could still be read as an
+  maddl accumulator. SIMD_INS also stores an element index in aux (< 33,
+  filtered by the `> 31` check). The fold-lookahead IMM skip exact-matches
+  the consumer's fold guards (jit_codegen_alu.cpp) INCLUDING the imm32
+  sign-extend fit for the ALU class; a skipped mov whose consumer did not
+  fold would leave the vreg unmapped and reload garbage. If you touch the
+  fold guards on either side, mirror the change in BOTH places. bench_mips
+  383-390 → **360-364 ms** (~6%). Verified: 205/205, REGALLOC_CHECK 200/200,
+  FWD 200/200, JIT_VERIFY zero new divergences (rw_*/pthread/vulkan failures
+  under JIT_VERIFY are pre-existing race/display false-positives — they fail
+  identically at the parent commit).
 - **`ctest/fadd_repro2.elf` is a BROKEN test, not an emulator bug**: it
   checks `g_r` (`[x19+0x158]`, a bss global never written by `main`) for
   the fadd result, so it FAILS on interp AND JIT AND real hardware. The

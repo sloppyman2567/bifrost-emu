@@ -399,9 +399,15 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             if (inst.dest != inst.src1 && inst.dest != 0) {
                 // Drop src1's mapping (don't spill — set_vreg_reg will
                 // handle the transition). If src1 was dirty, spill first
-                // to preserve its value for later readers.
+                // to preserve its value for later readers — UNLESS src1 is
+                // a dead scratch vreg (its last use is THIS op, e.g. a
+                // chain `sub x0, x0, x1` where x0's vreg dies here): then
+                // its value is consumed by the op and never read again, so
+                // the spill is dead work and only the mapping is dropped.
                 if (vreg_home_[inst.src1] == RAX) {
-                    if (vreg_dirty_[inst.src1]) {
+                    bool src1_dead = (inst.src1 > 32 &&
+                                      vreg_last_use_this_op(inst.src1));
+                    if (vreg_dirty_[inst.src1] && !src1_dead) {
                         evict_vreg(inst.src1);
                     } else {
                         vreg_home_[inst.src1] = -1;

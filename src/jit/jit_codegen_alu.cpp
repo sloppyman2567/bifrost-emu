@@ -35,6 +35,25 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             if (inst.dest) {
                 if (inst.dest > 32 && inst.dest < 4096)
                     jit_consts_[inst.dest] = inst.imm;
+                // Fold lookahead: when the immediately-following op folds
+                // this constant into an x86 immediate form (dead src2), the
+                // mov we'd emit here is dead code — skip it. The pre-scan
+                // (jit_translate.cpp) only marks IMMs whose dest's ONLY read
+                // is that foldable consumer, so the conditions here match
+                // the consumer's fold guards EXACTLY (including the imm32
+                // sign-extension fit for the ALU class): a skipped mov whose
+                // consumer then did NOT fold would leave the vreg unmapped
+                // and the consumer's ensure_vreg would reload garbage.
+                if (cur_op_index_ < fold_ahead_kind_.size()) {
+                    uint8_t fa = fold_ahead_kind_[cur_op_index_];
+                    if (fa == 1) {
+                        int64_t c = static_cast<int64_t>(inst.imm);
+                        if (static_cast<int64_t>(static_cast<int32_t>(c)) == c)
+                            return 0;
+                    } else if (fa == 2) {
+                        return 0;
+                    }
+                }
                 int d = alloc_reg_for(inst.dest, -1);
                 if (inst.imm <= 0xFFFFFFFFULL) {
                     emit_mov_imm32_zext(d, static_cast<uint32_t>(inst.imm));
