@@ -338,7 +338,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     IRBlock ir_block;
     ir_block.start_pc = start_pc;
     ir_reset_vreg_alloc();
-    // Limit block size based on register pressure. With 9 host regs and
+    // Limit block size based on register pressure. With 10 host regs and
     // >256 vregs, the allocator's spill/reload traffic becomes a
     // correctness hazard. Cap blocks at 32 instructions — enough for
     // tight loops, short enough that vreg count stays manageable.
@@ -824,7 +824,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // last use, instead of keeping them cached until eviction. Without
     // this, the register allocator treats all vregs as live until the end
     // of the block, causing unnecessary spills when register pressure is
-    // high (e.g., 5+ live vregs but 9 host regs, with 4+ dead vregs
+    // high (e.g., 5+ live vregs but 10 host regs, with 4+ dead vregs
     // occupying the other regs).
     //
     // Only scratch vregs (33+) are tracked for killing. ARM reg vregs

@@ -493,15 +493,17 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   memchr/strchr, pointer loops) rely on it.
 - Chain-skip (`BIFROST_CHAIN_SKIP=1`, DEFAULT OFF — `--chain-skip` in
   run_tests.sh): a second block entry `BlockEntry.chain_entry` recorded in
-  `jit_translate.cpp` right after the prologue's `mov rbx,rdi`/`mov r14,rsi`
-  (BEFORE the R10 window load and vec prologue loads). Chain slots patch to
+  `jit_translate.cpp` right after the prologue's `mov rbx,rdi`/emu-slot
+  store (BEFORE the R10 window load and vec prologue loads). Chain slots
+  patch to
   `chain_entry` instead of `fn`, so a chain edge skips the predecessor's
   frame teardown AND the successor's push/frame/reg-setup (~17 instrs/edge).
   The chain ROOT allocates ONE unified 32 KB frame
   (`kChainSkipFrameBytes = 0x8000`, the vreg-space ceiling: 4095 vregs × 8 B)
   that every block in the chain reuses; successors enter at `chain_entry`
   without allocating. The epilogue becomes a lease: [state flush: flags +
-  flush_all_vregs + vec writeback + store PC + mov rdi/rbx rsi/r14] [5-NOP
+  flush_all_vregs + vec writeback + store PC + mov rdi/rbx rsi=<emu slot>]
+  [5-NOP
   chain slot] [cold exit: mov rsp,rbp; pop×6; ret] — the cold exit is only
   reached when the slot is unpatched (chain edges `jmp` past it, keeping the
   chain root's frame). `patch_chain`'s unpatched-slot guard is `0x90` (5 NOPs)
@@ -514,8 +516,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   (2) The default path of `emit_taken_path_epilogue` MUST keep the
   `mov rsp,rbp; pop×6` BEFORE the slot — dropping it makes the unpatched `ret`
   pop the dispatcher's return address off the block's own frame and jump to
-  garbage (the second bug: RIP=0x555500000008). (3) RBX/R14 need no setup on
-  the chain edge (reserved regs, never reassigned in a body). (4) vec blocks
+  garbage (the second bug: RIP=0x555500000008). (3) RBX needs no setup on
+  the chain edge (reserved reg, never reassigned in a body); R14 IS
+  allocatable (10th alloc reg, 1.5.4-alpha) so emu does NOT flow through a
+  register — the predecessor's epilogue loads RSI from the shared chain
+  frame's FIXED emu slot (emu_slot_off() = -(kChainSkipFrameBytes-8),
+  below every block's per-block vreg/lazy-slot ceiling of -32512), and a
+  successor that skips its own prologue reads that same slot (the value is
+  the constant Emulator*). In non-chain-skip mode the emu slot is per-block
+  at -8*(num_stack_slots_+1), inside the +64-byte frame cushion. Do NOT
+  change the emu slot to a per-block offset under chain-skip — different
+  blocks in a chain have different vreg slot layouts that overlap another
+  block's per-block emu offset. (4) vec blocks
   re-run their vec prologue loads at `chain_entry` (the predecessor's
   epilogue wrote back dirty vectors to cpu.v_lo/v_hi first). The stack-frame
   pre-scan in jit_translate.cpp must cover EVERY vreg the block may touch,

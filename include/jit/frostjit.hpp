@@ -740,7 +740,8 @@ private:
     // Scratch x86 regs available for allocation:
     //   Caller-saved (clobbered by C calls): RAX, RCX, RDX, R8, R9, R11
     //   Callee-saved (preserved by C calls): R12, R13, R15
-    // Persistent: RBX=CPU, R14=EMU, R10=window, RBP=frame.
+    // Persistent: RBX=CPU, R10=window, RBP=frame. R14 is allocatable
+    // (emu lives in a frame slot, see emu_slot_off).
     //
     // The pool includes R12/R13/R15 (callee-saved). This gives 9
     // registers instead of 6, and vregs cached in callee-saved regs
