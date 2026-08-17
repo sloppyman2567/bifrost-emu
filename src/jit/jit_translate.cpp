@@ -35,6 +35,7 @@ struct ProfTranslateGuard {
 };
 // (end block) instead of BL_CALL (call within block).
 extern thread_local bool bl_call_disabled_;
+extern thread_local bool blr_call_disabled_;
 // ── instr_will_call_interp — heuristic for block splitting ─────────────
 // Returns true if the given ARM64 instruction is likely to generate a
 // CALL_INTERP IR op (i.e. the JIT can't codegen it natively). Used by
@@ -289,6 +290,13 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // fall back to the block-end-at-BL behavior (BL ends the block, the
     // call edge dispatches via chain slots — the pre-1.5.3 path).
     bl_call_disabled_ = chain_skip_enabled();
+    // Bisection gates: BIFROST_NO_BL_CALL / BIFROST_NO_BLR_CALL disable the
+    // native call-within-block for that form only (BL/BLR falls back to a
+    // plain block-end dispatch, or CALL_INTERP for BLR).
+    static const bool no_bl_call_ = (getenv("BIFROST_NO_BL_CALL") != nullptr);
+    static const bool no_blr_call_ = (getenv("BIFROST_NO_BLR_CALL") != nullptr);
+    bl_call_disabled_ = bl_call_disabled_ || no_bl_call_;
+    blr_call_disabled_ = no_blr_call_;
     // W^X: toggle the code buffer to writable before emitting x86 code.
     // (No-op if W^X is disabled or the buffer is already writable.)
     make_writable();
@@ -647,9 +655,17 @@ if (demote_interp) {
     // curl. The JIT's output is correct — the verify mode's re-run is wrong.
     bool has_bl_call = false;
     bool has_call_interp = false;
+    bool has_svc = false;
     for (auto& ir_inst : ir_block.insts) {
         if (ir_inst.op == IROp::BL_CALL || ir_inst.op == IROp::BLR_CALL) { has_bl_call = true; break; }
         if (ir_inst.op == IROp::CALL_INTERP) { has_call_interp = true; }
+    }
+    // SVC must be scanned in its own loop: the loop above breaks on the first
+    // BL_CALL/BLR_CALL, so a block that ends `bl foo; ...; svc #0` (BL_CALL
+    // does not end the block, SVC does) would leave has_svc false and let
+    // verify re-execute a non-idempotent syscall on the interp re-run.
+    for (auto& ir_inst : ir_block.insts) {
+        if (ir_inst.op == IROp::SVC) { has_svc = true; break; }
     }
     // ── Optimize the IR ──────────────────────────────────────────
     // Skip optimization for blocks containing BRCOND_SKIP: optimize_ir's
@@ -660,7 +676,13 @@ if (demote_interp) {
     static bool no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
     if (!no_opt_ && !has_brcond_skip) optimize_ir(ir_block);
     static bool dump_ir_ = (getenv("BIFROST_JIT_DUMP") != nullptr);
-    if (dump_ir_) {
+    // BIFROST_DUMP_PC=0x... restricts the IR dump to a single block pc
+    // (useful when BIFROST_JIT_DUMP would flood with thousands of blocks).
+    static uint64_t dump_pc_ = []() -> uint64_t {
+        const char* s = getenv("BIFROST_DUMP_PC");
+        return s ? strtoull(s, nullptr, 0) : 0;
+    }();
+    if ((dump_ir_ && (!dump_pc_ || start_pc == dump_pc_)) || start_pc == force_dump_pc_.load()) {
         fprintf(stderr, "══ Block @ 0x%llx (%d ARM instrs) ══\n",
                 static_cast<unsigned long long>(start_pc), instr_count);
         dump_ir(ir_block);
@@ -834,6 +856,46 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
             }
         }
     }
+    // ── Flag-loop-carry pre-scan ────────────────────────────────────
+    // Decides whether a self-loop back-edge may skip the taken-path
+    // pstate materialization (jit_codegen_branch.cpp BRCOND case). A
+    // block is "flag loop-carried" if any flag-CONSUMING op (one that
+    // reads guest NZCV) appears before the first flag-SETTING op. If a
+    // consumer runs first, the flags it reads come from the PREVIOUS
+    // iteration, so the loop-back edge must still materialize host flags
+    // to pstate for the loop top to reload. Consumers are checked BEFORE
+    // the setter mark for ops that are both (ADCS/SBCS read C, CCMP reads
+    // cond): an ADCS at the block head reads loop-carried C.
+    flags_loop_carried_ = false;
+    {
+        bool flag_setter_seen = false;
+        for (const IRInst& inst : ir_block.insts) {
+            bool consumer = false;
+            switch (inst.op) {
+                case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
+                case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
+                case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:
+                    consumer = true;
+                    break;
+                default:
+                    break;
+            }
+            if (consumer && !flag_setter_seen) {
+                flags_loop_carried_ = true;
+                break;
+            }
+            switch (inst.op) {
+                case IROp::ADDS: case IROp::SUBS:
+                case IROp::ADCS: case IROp::SBCS:
+                case IROp::TST: case IROp::TST_ZERO:
+                case IROp::CCMP: case IROp::FP_CMP:
+                    flag_setter_seen = true;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
     // ── Compile IR ───────────────────────────────────────────────
     jit_consts_.clear();
     for (size_t i = 0; i < ir_block.insts.size(); i++) {
@@ -986,7 +1048,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         make_executable();
         return nullptr;
     }
-    if (dump_ir_) {
+    if (dump_ir_ || start_pc == force_dump_pc_.load()) {
         size_t code_len = code_buf_used_ - block_start;
         fprintf(stderr, "  → %zu bytes of x86 code @ %p:\n    ",
                 code_len, static_cast<void*>(code_buf_ + block_start));
@@ -1021,6 +1083,10 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
     entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
+    // SVC presence: the verify-mode interp re-run re-executes the syscall —
+    // non-idempotent syscalls (read/poll/...) return different values the
+    // second time, so verify must treat SVC blocks as artifacts, not bugs.
+    entry.has_svc = has_svc;
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.
@@ -1076,6 +1142,21 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         // to see the JIT's modification — a false-positive PC divergence.
         std::vector<bool> arm_reg_known(32, false);
         std::vector<uint64_t> arm_reg_val(32, 0);
+        // MEMFULL cannot verify blocks that CALL the interpreter or dispatch a
+        // callee mid-block: the interp re-run steps exactly instr_count
+        // instructions, so a BL/BLR lands it mid-callee-prologue (LR pushed on
+        // the stack) while the JIT's BL_CALL completed the whole call — a false
+        // memory divergence. SVC mutates guest memory via syscalls. Skip flagging
+        // such blocks for has_unresolved_store so MEMFULL only diff-matches
+        // straight-line store blocks (the SIMD_ST16 copy loop is the target).
+        bool has_call_like = false;
+        for (const auto& inst : ir_block.insts) {
+            if (inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
+                inst.op == IROp::CALL_INTERP || inst.op == IROp::SVC) {
+                has_call_like = true;
+                break;
+            }
+        }
         for (auto& inst : ir_block.insts) {
             if (inst.op == IROp::LOAD_REG && inst.src1 <= 31) {
                 if (inst.dest < 4096) {
@@ -1121,12 +1202,33 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                     } else {
                         // Base reg was modified but we don't know the new value.
                         // Skip (accept false positive).
+                        if (!has_call_like) entry.has_unresolved_store = true;
                         continue;
                     }
                     if (!entry.store_infos) {
                         entry.store_infos = std::make_shared<std::vector<BlockEntry::StoreInfo>>();
                     }
                     entry.store_infos->push_back(si);
+                } else {
+                    // Base could not be traced to an ARM reg at all (e.g. the
+                    // address is loaded from memory). Invisible to the
+                    // store_infos verifier — flag for the MEMFULL full-diff.
+                    if (!has_call_like) entry.has_unresolved_store = true;
+                }
+            } else if (inst.op == IROp::SIMD_ST16) {
+                // 16-byte vector store (LDR/STR Q, LDP/STP Q, LD1/ST1).
+                // Invisible to the store_infos verifier: the MEM compare only
+                // handles widths 1/2/4/8, and the register verify can't see a
+                // wrong-address vector store (registers stay correct). Flag the
+                // block so MEMFULL's full-memory diff covers it (the inflate
+                // copy loop's `stp q29,q28` / `stur q30` corrupted memory here).
+                if (!has_call_like) entry.has_unresolved_store = true;
+                static bool trace_simdst16_ = (getenv("BIFROST_TRACE_SIMDST16") != nullptr);
+                if (trace_simdst16_) {
+                    fprintf(stderr, "[SIMDST16] block @ 0x%llx: SIMD_ST16 src2=%d flags_op=%u imm=%lld\n",
+                            static_cast<unsigned long long>(start_pc),
+                            inst.src2, inst.flags_op ? inst.flags_op : 1,
+                            static_cast<long long>(inst.imm));
                 }
             } else if (inst.op == IROp::STORE_REG) {
                 // Mark the dest ARM reg as modified FROM THIS POINT ON.

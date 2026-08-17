@@ -243,12 +243,26 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // ── Taken path ──
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
+            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            bool is_selfloop = (inst.imm == current_start_pc_);
+            // On a self-loop back-edge, skip the pstate materialization
+            // entirely when the block never reads loop-carried flags
+            // (flags_loop_carried_, precomputed in translate_block): the
+            // next iteration's first flag-setting op re-establishes host
+            // flags before any consumer, so the pstate store is dead work
+            // every iteration (~60 bytes of pushfq/bit-extract/store).
+            bool skip_taken_materialize =
+                is_selfloop && !no_selfloop_ && !flags_loop_carried_;
             // If CMC was emitted, re-invert CF before materializing flags.
-            if (need_cmc_for_hi_ls) {
-                emit_byte(0xF5);  // cmc — restore CF to original
+            // Skipped along with the materialize: the loop body re-sets CF
+            // before any consumer reads it.
+            if (!skip_taken_materialize) {
+                if (need_cmc_for_hi_ls) {
+                    emit_byte(0xF5);  // cmc — restore CF to original
+                }
+                // Materialize flags to pstate (the taken-target block may read them).
+                materialize_flags_to_pstate();
             }
-            // Materialize flags to pstate (the taken-target block may read them).
-            materialize_flags_to_pstate();
             // ── Self-loop chaining ──
             // If the taken target is the block's own start PC, emit a 5-byte
             // `jmp rel32` placeholder. After the block is fully compiled,
@@ -258,8 +272,6 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // tight loops (e.g. bench_mips: 7.4s → 1.4s).
             //
             // Disable with BIFROST_NO_SELFLOOP=1 for debugging.
-            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
-            bool is_selfloop = (inst.imm == current_start_pc_);
             if (is_selfloop && !no_selfloop_) {
                 has_selfloop_slot_ = true;
                 selfloop_patch_off_ = code_buf_used_;

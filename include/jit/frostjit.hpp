@@ -211,6 +211,11 @@ public:
     // ordering (we don't need cross-thread synchronization, just atomic
     // increments to avoid torn writes).
     std::atomic<uint64_t> blocks_translated{0};
+    // Debug: when non-zero, the next translate_block at this pc dumps its IR
+    // + emitted x86 regardless of BIFROST_JIT_DUMP/BIFROST_DUMP_PC (used by
+    // the verify divergence handler — dlopen'd-library block pcs shift with
+    // the env/binary, so a fixed BIFROST_DUMP_PC can't target them).
+    std::atomic<uint64_t> force_dump_pc_{0};
     std::atomic<uint64_t> blocks_executed{0};
     std::atomic<uint64_t> instructions_executed{0};
     std::atomic<uint64_t> cache_hits{0};
@@ -499,6 +504,10 @@ private:
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // number of CALL_INTERP fallbacks in this block
+        // True if the block contains an SVC (syscall / thunk) instruction.
+        // The verify re-run must NOT re-execute such blocks (the syscall has
+        // host side effects), so the full-memory verifier (MEMFULL) skips them.
+        bool    has_svc = false;
         // Self-loop chaining: when the block's BRCOND taken target equals its
         // own start PC, a 5-byte `jmp rel32` slot is emitted on the taken path.
         // After the block is fully compiled, translate_block patches this slot
@@ -559,6 +568,12 @@ private:
         // (atomic refcount increment) instead of deep-copying the vector.
         // Null by default; only populated in BIFROST_JIT_VERIFY mode.
         std::shared_ptr<std::vector<StoreInfo>> store_infos;
+        // True if this block contains a STORE_MEM whose address base could
+        // NOT be statically resolved to an ARM reg (e.g. the base is loaded
+        // from memory). Such stores are invisible to the store_infos-based
+        // memory verifier. Set at translate time; used by the MEMFULL
+        // (BIFROST_JIT_VERIFY_MEMFULL) full-memory diff.
+        bool has_unresolved_store = false;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -973,6 +988,13 @@ private:
     bool rax_holds_next_pc_ = false;
     bool flags_in_host_ = false;
     bool flags_from_sub_ = false;
+    // True if the block reads guest NZCV before a flag-setting op runs
+    // (computed by translate_block's pre-scan). A self-loop block with
+    // this false can skip the taken-path pstate materialization on its
+    // loop-back edge: no op in the body reads loop-carried flags, so the
+    // stale pstate is never consumed before the next flag-setter
+    // re-establishes host flags. (jit_codegen_branch.cpp BRCOND case.)
+    bool flags_loop_carried_ = false;
     // ── Liveness-based register freeing ─────────────────────────────
     // kills_per_op_[i] = list of scratch vregs whose last use is IR op i
     // (and that are not the dest of op i). After compiling op i, each

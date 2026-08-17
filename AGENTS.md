@@ -868,3 +868,36 @@ not musl-`-static`.
 ## Child DOX Index
 
 (none — single-tree emulator; parent Downloads rail indexes this folder)
+
+## Session History (2026-08-17)
+
+- **BRCOND self-loop flag-materialize skip is committed now** (the Opt-A
+  batch, previously uncommitted and wiped by a `git reset --hard`; recovered
+  from `/tmp/opencode/opt_backup/` — copies kept at
+  `~/Downloads/bifrost_opt_backup/`). It is THE 2.5× bench_mips win
+  (0.93s → 0.38s): on a self-loop back-edge with no loop-carried flag
+  consumers (`flags_loop_carried_`, pre-scan in `jit_translate.cpp`), the
+  taken path skips the ~60-byte pstate materialize. Disabling only that
+  (`is_selfloop && !no_selfloop_ && false`) reverts bench_mips to ~0.96s —
+  the win is entirely that skip, verified with clean rebuilds. The batch
+  also includes the MEMFULL `has_svc`/`has_unresolved_store`/`has_call_like`
+  verify skips, `BIFROST_DUMP_PC`/`force_dump_pc_`, and the
+  `BIFROST_INTERP_BL_CALL`/`BIFROST_NO_BL_CALL`/`BIFROST_NO_BLR_CALL`
+  bisection gates. `blr_call_disabled_` is defined in `ir_translate.cpp`
+  next to `bl_call_disabled_` (the definition was in a file lost to the
+  reset; it was hand-re-added).
+- **Opt-B (generic codegen quality: IMM fold lookahead, dead-scratch-dest
+  drop, SUBS dead-src1 evict skip, STORE_MEM cross-wire) is LOST** — the
+  last three items' source was wiped and only the STORE_MEM cross-wire
+  survived (stash + `~/Downloads/bifrost_opt_backup/`). DO NOT re-apply the
+  cross-wire as-is: it measured as a standalone ~6% LOSS on bench_mips
+  (400 vs 375 ms, correct but slower); the real wins were the other three
+  (full set measured ~354 ms). The toybox-echo JIT hang that motivated the
+  reset was in the unrecoverable set (lost `jit_dispatch.cpp` or Opt-B
+  items 2/3/4) — the recovered Opt-A + cross-wire tree is hang-free,
+  205/205.
+- **`ctest/fadd_repro2.elf` is a BROKEN test, not an emulator bug**: it
+  checks `g_r` (`[x19+0x158]`, a bss global never written by `main`) for
+  the fadd result, so it FAILS on interp AND JIT AND real hardware. The
+  store it targets (`str d8,[x19,#336]` → `[0x17150]`) is fine. No source
+  file exists; it is not in the suite. Do not chase it.

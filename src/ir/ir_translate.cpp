@@ -33,6 +33,7 @@ namespace arm64emu {
 // instead of BL_CALL (call within block). Set by translate_block when
 // re-translating a block whose BL_CALL targets aren't translated yet.
 thread_local bool bl_call_disabled_ = false;
+thread_local bool blr_call_disabled_ = false;
 // ── translate_to_ir ────────────────────────────────────────────────────
 // ── Translator ──────────────────────────────────────────────────────────
 bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {

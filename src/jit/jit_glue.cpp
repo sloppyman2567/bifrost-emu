@@ -327,6 +327,11 @@ void Emulator::jit_step(CPU& cpu) {
 extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc) {
     uint64_t return_pc = cpu->regs[30];  // LR set by BL_CALL's STORE_REG
     cpu->pc = target_pc;
+    // BIFROST_INTERP_BL_CALL=1: run every BL_CALL/BLR_CALL callee through
+    // the interpreter (bisection gate — confirms corruption originates in a
+    // callee block, which jit_call_helper dispatches WITHOUT the run_block
+    // verify path, so MEMFULL never sees those blocks).
+    static const bool interp_bl_call_ = (getenv("BIFROST_INTERP_BL_CALL") != nullptr);
     auto* jit = emu->jit();
     // ── Block-dispatch watchdog (mirrors run_block) ────────────────
     // Thread-local count of dispatches through this helper, checked
@@ -347,7 +352,19 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
                     static_cast<unsigned long long>(tls_call_blocks_));
             break;
         }
-        if (jit) {
+        if (jit && !interp_bl_call_) {
+            // Verify mode: route BL_CALL/BLR_CALL targets through run_block
+            // so the register + MEMFULL verify machinery covers callee
+            // blocks. lookup_call_target dispatches fn directly, bypassing
+            // run_block's verify path — so a corrupting SIMD_ST16 callee
+            // (the inflate copy loop) was invisible to BIFROST_JIT_VERIFY
+            // (MFTRACE never fired; the block is entered via `bl`, not the
+            // dispatcher). Under verify this is slower but catches the bug.
+            static const bool verify_mode_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
+            if (verify_mode_) {
+                cpu->pc = jit->run_block(*cpu, *emu);
+                continue;
+            }
             // Fast path mirrors run_block (last-block + inline caches) but
             // ALSO populates them — jit_call_helper is the only entry point
             // for BL_CALL/BLR_CALL targets and previously never wrote the
