@@ -994,7 +994,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
                 }
                 emit_push(WIN_REG);
-                emit_mov_reg(RDI, EMU_REG);
+                emit_load(RDI, RBP, emu_slot_off());
                 emit_mov_reg(RSI, CPU_REG);
                 emit_mov_reg(RDX, RAX);
                 emit_mov_imm32(RCX, (inst.dest + i) & 31);
@@ -1088,7 +1088,7 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                     emit_add_reg_imm(RAX, static_cast<int32_t>(inst.imm + 16 * i));
                 }
                 emit_push(WIN_REG);
-                emit_mov_reg(RDI, EMU_REG);
+                emit_load(RDI, RBP, emu_slot_off());
                 emit_mov_reg(RSI, CPU_REG);
                 emit_mov_reg(RDX, RAX);
                 emit_mov_imm32(RCX, broadcast ? (inst.src2 & 31) : ((inst.src2 + i) & 31));

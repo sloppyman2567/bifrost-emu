@@ -759,7 +759,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // 4095. Disabled mode keeps the old per-block frame.
     emit_u32(chain_skip_enabled() ? kChainSkipFrameBytes : stack_bytes);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB); // mov rbx, rdi
-    emit_byte(0x49); emit_byte(0x89); emit_byte(0xF6); // mov r14, rsi
+    // Stash the Emulator* into the frame slot (emu_slot_off(), below the
+    // block's vreg slots / the chain-skip frame ceiling). R14 is then FREE
+    // for vreg allocation in every block — all emu-consuming codegen sites
+    // load emu from this slot instead of R14 (1.5.4-alpha). RSI still holds
+    // emu at this point (entry arg), untouched since the prologue started.
+    emit_store(RBP, emu_slot_off(), RSI);
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): recorded here, BEFORE the
     // window load and the vector-cache prologue loads. Chain edges jump to
     // this offset, skipping the predecessor's frame teardown and THIS
@@ -768,10 +773,13 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // R10 is only loaded by window-using blocks, so a chain into a window
     // block from a non-window predecessor carries stale R10; and a chain
     // successor must pin the CURRENT guest vectors (the predecessor's
-    // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX/R14
-    // need no setup — they hold cpu/emu persistently across the chain
-    // edge (reserved regs, never reassigned in a body). Disabled mode
-    // leaves chain_entry_off_ unused (chain slots patch to fn instead).
+    // epilogue wrote its dirty vectors back to cpu.v_lo/v_hi). RBX needs no
+    // setup — it holds cpu persistently across the chain edge (reserved
+    // reg). R14 is allocatable (1.5.4-alpha), so emu does NOT flow through
+    // a register: the predecessor's epilogue set RSI=emu from the shared
+    // chain frame's fixed emu slot (emu_slot_off()), and a successor that
+    // skips its own prologue still reads that slot. Disabled mode leaves
+    // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
     // 1.5.3-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
@@ -1039,15 +1047,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     emit_store(CPU_REG, PC_OFF, RAX);
     // ── Chain-capable epilogue ────────────────────────────────────
     // For block chaining we jump directly from one block's epilogue to
-    // the next block's prologue. The next prologue reloads RBX/R14 from
-    // RDI/RSI (the System-V arg registers), so before restoring our own
-    // callee-saved regs we copy the live CPU/EMU pointers into RDI/RSI.
+    // the next block's prologue. The next prologue reloads RBX from
+    // RDI (the System-V arg register) and stashes emu from RSI into its
+    // frame slot, so before restoring our own callee-saved regs we copy
+    // the live CPU/EMU pointers into RDI/RSI (emu re-read from the frame
+    // slot — R14 is a free vreg register now).
     // When the block returns (unchained `ret`), clobbering RDI/RSI is
     // fine — they're caller-saved and the dispatcher doesn't read them
     // after the call. When the block is chained, the next prologue sees
     // the correct RDI=cpu / RSI=emu.
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx
-    emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
+    emit_load(RSI, RBP, emu_slot_off());  // rsi = emu (from the frame slot; R14 is a free vreg reg now)
     size_t chain_patch_off;
     if (chain_skip_enabled()) {
         // ── Chain-skip epilogue ─────────────────────────────────────

@@ -43,7 +43,7 @@ void FrostJIT::emit_taken_path_epilogue() {
     vec_cache_writeback_all(false);
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
-    emit_mov_reg(RSI, EMU_REG);   // mov rsi, r14
+    emit_load(RSI, RBP, emu_slot_off()); // rsi = emu
     // ── Taken-path chain slot ──
     // 5 bytes reserved at the end of the taken path. Under chain-skip the
     // slot is 5 NOPs followed by the cold exit (`mov rsp,rbp; pop×6; ret`),
@@ -313,7 +313,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
                 // restore regs, ret) — harmless, never executed.
                 emit_store(CPU_REG, PC_OFF, RAX);
                 emit_mov_reg(RDI, CPU_REG);
-                emit_mov_reg(RSI, EMU_REG);
+                emit_load(RSI, RBP, emu_slot_off());
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
                 emit_pop(R15); emit_pop(R14); emit_pop(R13);
                 emit_pop(R12); emit_pop(RBP); emit_pop(RBX);

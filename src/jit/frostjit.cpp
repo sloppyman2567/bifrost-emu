@@ -339,7 +339,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-            emit_mov_reg(RDI, EMU_REG);
+            emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             emit_mov_imm32(RCX, inst.width);
@@ -356,7 +356,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-            emit_mov_reg(RDI, EMU_REG);
+            emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
@@ -374,7 +374,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
                 (1u << RAX) | (1u << RCX) | (1u << RDX) |
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             flush_invalidate_host_regs(MEM_CLOBBER);
-            emit_mov_reg(RDI, EMU_REG);
+            emit_load(RDI, RBP, emu_slot_off());
             emit_mov_reg(RSI, CPU_REG);
             load_vreg_to_reg(RDX, inst.src1);
             load_vreg_to_reg(RCX, inst.src2);
@@ -766,7 +766,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             load_vreg_to_reg(RAX, inst.src1);
             emit_store(CPU_REG, PC_OFF, RAX);
             emit_mov_reg(RDI, CPU_REG);
-            emit_mov_reg(RSI, EMU_REG);
+            emit_load(RSI, RBP, emu_slot_off());
             emit_mov_reg(RDX, RAX);  // RDX = target_pc
             emit_push(WIN_REG);
             emit_call_aligned(&jit_call_helper, /*num_pushed=*/1);
@@ -804,7 +804,7 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             emit_store(CPU_REG, PC_OFF, RAX);
             // Set args: RDI = cpu, RSI = emu, RDX = target_pc.
             emit_mov_reg(RDI, CPU_REG);
-            emit_mov_reg(RSI, EMU_REG);
+            emit_load(RSI, RBP, emu_slot_off());
             emit_mov_imm64(RDX, inst.imm);  // RDX = target_pc (use imm64 for >4GB)
             // Save WIN_REG (R10, caller-saved) before the call.
             // emit_call_abs clobbers RAX (to load the function address),

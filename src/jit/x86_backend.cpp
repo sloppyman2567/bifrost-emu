@@ -704,7 +704,7 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     // Args: jit_load_mem_slow(emu, cpu, addr, width)
     //   RDI = emu, RSI = cpu, RDX = addr, RCX = width
     emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
-    emit_mov_reg(RDI, EMU_REG);          // rdi = emu
+    emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
     emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
     emit_mov_reg(RDX, dst);              // rdx = addr
     emit_mov_imm32(RCX, w);              // rcx = width
@@ -758,7 +758,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_push(src_reg);            // save val (RCX)  — 1 push
     emit_push(RAX);                // save RAX        — 2 pushes
     emit_push(WIN_REG);            // save R10        — 3 pushes (ODD)
-    emit_mov_reg(RDI, EMU_REG);    // rdi = emu
+    emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
     emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
     emit_mov_reg(RDX, R8);         // rdx = addr (from R8)
     emit_mov_reg(RCX, src_reg);    // rcx = val (from src_reg=RCX)

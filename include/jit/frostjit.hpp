@@ -748,10 +748,18 @@ private:
     // preserves them across calls. This dramatically reduces eviction
     // traffic in SIMD-heavy blocks that fall back to the interpreter
     // frequently.
-    static constexpr int NUM_ALLOC_REGS = 9;
-    static constexpr int ALLOC_REGS[9] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15};
+    static constexpr int NUM_ALLOC_REGS = 10;
+    // R14 is allocatable too (1.5.4-alpha): EMU_REG is no longer read from
+    // the register — every emu-consuming codegen site loads it from the
+    // frame slot (emu_slot_off(), written by the prologue), so R14 is free
+    // for vregs in EVERY block. Measured NEUTRAL on the deterministic
+    // suite (bench_mips's "spills" are STORE_MEM slow-path pushes, not
+    // register-pressure evictions, so its hot blocks never exceed 9 live
+    // vregs); kept as a strict allocator capacity increase for
+    // pressure-heavy blocks that DO exceed 9 live vregs.
+    static constexpr int ALLOC_REGS[10] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15, R14};
     // Returns true if `r` is caller-saved (clobbered by C calls).
-    // R12/R13/R15 are callee-saved → preserved across calls.
+    // R12/R13/R14/R15 are callee-saved → preserved across calls.
     static constexpr bool is_caller_saved(int r) {
         return r == RAX || r == RCX || r == RDX ||
                r == R8  || r == R9  || r == R11 ||
@@ -785,6 +793,25 @@ private:
     // Max vreg from the previous block — used to bound the array-clearing
     // in translate_block() so we don't zero all 4096 entries every time.
     int prev_max_vreg_ = 0;
+    // Frame-slot offset (relative to RBP) where the prologue stashes the
+    // Emulator* so R14 is free for vreg allocation. Every emu-consuming
+    // codegen site loads it from here (never from R14), and the epilogue
+    // restores RSI=emu from it for the dispatcher / chain edge.
+    //   - normal mode:  8 bytes below the block's lowest vreg slot
+    //     (-8*(num_stack_slots_+1)), inside the +64-byte frame cushion so
+    //     no vreg ever collides with it.
+    //   - chain-skip:   a FIXED offset just below the 32 KB unified frame's
+    //     vreg ceiling (-(kChainSkipFrameBytes-8)). Different blocks in a
+    //     chain have different per-block vreg slot layouts that CAN overlap
+    //     another block's emu slot — a fixed bottom-of-frame slot is the
+    //     only collision-free choice. The value is constant (same Emulator
+    //     for the whole process), so a chain successor that skips its own
+    //     prologue still reads the correct emu.
+    int32_t emu_slot_off() const {
+        if (chain_skip_enabled())
+            return -static_cast<int32_t>(kChainSkipFrameBytes - 8);
+        return -8 * (num_stack_slots_ + 1);
+    }
     // ── FP register index validation ───────────────────────────────
     // FP ops (FP_BINOP, FP_UNOP, FP_F2I, FP_I2F, FP_CMP, FP_MOVI, FMADD,
     // SIMD_*) use inst.dest/src1/src2 as FP register indices (0-31).

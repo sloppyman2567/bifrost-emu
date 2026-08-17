@@ -125,7 +125,7 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     emit_mov_imm_to_rax(arm_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     // Set args: RDI = emu, RSI = cpu.
-    emit_mov_reg(RDI, EMU_REG);
+    emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
     emit_call_aligned(&jit_interp_step, /*num_pushed=*/2);
     emit_pop(RAX);       // restore RAX
@@ -178,7 +178,7 @@ void FrostJIT::emit_call_vdso_clock(uint64_t arm_pc) {
     emit_mov_imm_to_rax(arm_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     // Set args: RDI = emu, RSI = cpu, RDX = svc_pc.
-    emit_mov_reg(RDI, EMU_REG);
+    emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
     emit_mov_reg(RDX, RAX);
     emit_call_aligned(&jit_vdso_clock_svc, /*num_pushed=*/2);
@@ -212,7 +212,7 @@ void FrostJIT::emit_call_native_svc(uint64_t arm_pc) {
     emit_mov_imm_to_rax(arm_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     // Set args: RDI = emu, RSI = cpu, RDX = svc_pc.
-    emit_mov_reg(RDI, EMU_REG);
+    emit_load(RDI, RBP, emu_slot_off());
     emit_mov_reg(RSI, CPU_REG);
     emit_mov_reg(RDX, RAX);
     emit_call_aligned(&jit_native_svc, /*num_pushed=*/2);
