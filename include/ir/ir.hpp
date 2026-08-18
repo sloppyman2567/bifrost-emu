@@ -251,6 +251,16 @@ enum class IROp : uint8_t {
     //   aux   = source element index (sidx)
     //   flags_op = Q (1=128-bit destination, 0=64-bit)
     SIMD_INS,
+    // Native SIMD permute (ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2, 1.5.3-alpha).
+    // Element-wise permute of two source vectors into dest (the interp's
+    // permute-pairs block in interp_fp.cpp is the semantic reference).
+    //   src1 = source A (rn), src2 = source B (rm)
+    //   width = element size in bytes (1, 2, 4, 8)
+    //   imm  = opc6 (bits[15:10] of the encoding): 0x06=UZP1, 0x0A=TRN1,
+    //          0x0E=ZIP1, 0x16=UZP2, 0x1A=TRN2, 0x1E=ZIP2
+    //   flags_op = Q (0=64-bit operands: process v_lo only, ZERO v_hi;
+    //                 1=128-bit: process v_lo AND v_hi)
+    SIMD_PERMUTE,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

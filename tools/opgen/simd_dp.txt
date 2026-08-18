@@ -171,3 +171,19 @@ TBX2    0xBFE0FC00   0x0E003000   TBL        3   -
 # GCC lowers vextq_u8 to a 2-source TBL whose index vector is built with
 # these INS moves — native here avoids the interp round-trip.
 INS     0xBFE00400   0x2E000400   INS        0   ((op >> 16) & 0x0F) != 0
+
+# ── PERMUTE: ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 (3-reg same, U=0) ─────────────
+# Encoding: 0 Q size 01110 00 Rm 0 opc 10 Rn Rd (U=0, bit21=0). opc6 =
+# bits[15:10] (empirically from gas, matches interp_fp.cpp): UZP1=0x06,
+# TRN1=0x0A, ZIP1=0x0E, UZP2=0x16, TRN2=0x1A, ZIP2=0x1E. Mask strips
+# Q/size/Rm/Rn/Rd and keeps U(29), bits[28:24]=01110, bit21 and opc6
+# (bits[15:10]) so each op is a distinct row — IRSUB = opc6 verbatim.
+# Guard `Q || size != 3` keeps the degenerate Q=0 1D forms (size==3) on
+# the interpreter (its `pairs < 1 -> 1` clamp reads past the 8-byte Q=0
+# operand — only the well-defined forms are mirrored natively).
+UZP1    0x3F20FC00   0x0E001800   PERMUTE    0x06   Q || size != 3
+TRN1    0x3F20FC00   0x0E002800   PERMUTE    0x0A   Q || size != 3
+ZIP1    0x3F20FC00   0x0E003800   PERMUTE    0x0E   Q || size != 3
+UZP2    0x3F20FC00   0x0E005800   PERMUTE    0x16   Q || size != 3
+TRN2    0x3F20FC00   0x0E006800   PERMUTE    0x1A   Q || size != 3
+ZIP2    0x3F20FC00   0x0E007800   PERMUTE    0x1E   Q || size != 3

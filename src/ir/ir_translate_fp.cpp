@@ -954,6 +954,19 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 block.insts.push_back(inst);
                 return true;
             }
+            case simd::Family::PERMUTE: {
+                // ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 (permute pairs). src1 = rn,
+                // src2 = rm; imm = ct.subop = opc6 (0x06/0x0A/0x0E/0x16/
+                // 0x1A/0x1E); width = esize; flags_op = Q. The table guard
+                // `Q || size != 3` keeps the degenerate Q=0 1D forms
+                // (size==3) on the interpreter — its `pairs < 1 -> 1` clamp
+                // reads past the 8-byte Q=0 operand, so only the well-defined
+                // forms are mirrored natively.
+                emit(block, IROp::SIMD_PERMUTE, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
             default:
                 break;
             }

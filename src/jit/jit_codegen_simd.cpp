@@ -28,13 +28,62 @@
 #include "ir/ir.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 // Slow-path helpers (defined extern "C" in x86_backend.cpp).
 extern "C" {
 void jit_load_mem16_slow(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t addr, int dst);
 void jit_store_mem16_slow(arm64emu::Emulator* emu, arm64emu::CPU* cpu, uint64_t addr, int src);
 }
+
 namespace arm64emu {
+// ── SIMD_PERMUTE pshufb control-mask builder ────────────────────────────
+// Builds the two 16-byte pshufb control masks for a ZIP/UZP/TRN permutation.
+// Mirrors the interpreter's permute-pairs block in interp_fp.cpp exactly:
+// source A occupies bytes 0..len, source B logically bytes len..2len, and
+// each output byte `o` selects one source byte. maskA/maskB are the pshufb
+// controls for A and B respectively; bytes not sourced from a register get
+// 0x80 (pshufb -> 0), so the two masked results POR together exactly.
+// opc6 = bits[15:10] of the encoding (0x06 UZP1, 0x0A TRN1, 0x0E ZIP1,
+// 0x16 UZP2, 0x1A TRN2, 0x1E ZIP2); esize = element size in bytes; q =
+// 128-bit (Q=1) vs 64-bit (Q=0, only the first 8 output bytes used).
+static void build_permute_masks(uint8_t opc6, int esize, bool q,
+                                uint8_t maskA[16], uint8_t maskB[16]) {
+    for (int k = 0; k < 16; k++) { maskA[k] = 0x80; maskB[k] = 0x80; }
+    const bool part = (opc6 == 0x16 || opc6 == 0x1A || opc6 == 0x1E);
+    const bool is_zip = (opc6 == 0x0E || opc6 == 0x1E);
+    const bool is_uzp = (opc6 == 0x06 || opc6 == 0x16);
+    int pairs = (q ? 16 : 8) / (esize * 2);
+    if (pairs < 1) pairs = 1;
+    const int total = pairs * 2;
+    const int out_bytes = q ? 16 : 8;
+    for (int oi = 0; oi < total; oi++) {
+        int src_byte = 0;
+        bool from_b = false;
+        if (is_zip) {
+            // out[2i] = A[base+i], out[2i+1] = B[base+i], base=part*pairs*esize
+            src_byte = part * pairs * esize + (oi >> 1) * esize;
+            from_b = (oi & 1) != 0;
+        } else if (is_uzp) {
+            // out[0..half) = A even/odd elements, out[half..) = B's
+            const int half = total >> 1;
+            const int lane = 2 * ((oi < half) ? oi : (oi - half)) + (part ? 1 : 0);
+            src_byte = lane * esize;
+            from_b = oi >= half;
+        } else {
+            // TRN: out[2i] = A[2i+part], out[2i+1] = B[2i+part]
+            src_byte = (2 * (oi >> 1) + (part ? 1 : 0)) * esize;
+            from_b = (oi & 1) != 0;
+        }
+        for (int j = 0; j < esize; j++) {
+            const int out_byte = oi * esize + j;
+            if (out_byte >= out_bytes) break;
+            (from_b ? maskB : maskA)[out_byte] =
+                static_cast<uint8_t>(src_byte + j);
+        }
+    }
+}
+
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
 // not (caller falls through to the next dispatcher or residual switch).
@@ -122,6 +171,22 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
         emit_mov_imm64(RAX, c);
         emit_vmovq_gpr_to_xmm(xmm, RAX);
         sse2_op(0x6C, xmm, xmm);  // punpcklqdq
+    };
+    // Load an arbitrary 16-byte constant (two 64-bit halves) into an XMM
+    // reg. XMM5 is a dedicated scratch (the memory-path SIMD ops below are
+    // never vec-cache pinned, so every XMM reg is free).
+    auto emit_mask16 = [&](int xmm, const uint8_t m[16]) {
+        uint64_t lo = 0, hi = 0;
+        memcpy(&lo, m, 8);
+        memcpy(&hi, m + 8, 8);
+        clobber_flags();
+        flush_invalidate_host_regs(1u << RAX);
+        clobber_host_reg(RAX);
+        emit_mov_imm64(RAX, lo);
+        emit_vmovq_gpr_to_xmm(xmm, RAX);
+        emit_mov_imm64(RAX, hi);
+        emit_vmovq_gpr_to_xmm(5, RAX);
+        sse2_op(0x6C, xmm, 5);  // punpcklqdq xmm, xmm5
     };
     switch (inst.op) {
         // ── SIMD LOGICAL (AND/ORR/EOR/BIC/ORN/EON) — native SSE2 ────
@@ -1975,6 +2040,35 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             emit_and_reg(RAX, RDX);                        // dest & mask (clear field)
             emit_or_reg(RAX, RCX);                         // | element << shift
             emit_store(CPU_REG, doff, RAX);
+            return true;
+        }
+        // ── SIMD PERMUTE (ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2) — SSSE3 ─────
+        // Element-wise permute of two source vectors. imm = opc6
+        // (0x06 UZP1, 0x0A TRN1, 0x0E ZIP1, 0x16 UZP2, 0x1A TRN2, 0x1E
+        // ZIP2). Memory path: reads cpu.v_lo/v_hi directly (never
+        // vec-cache pinned), so all XMM regs are free scratch. Requires
+        // SSSE3 (pshufb): the two 16-byte control masks select bytes from
+        // each source (0x80 elsewhere -> 0) and the masked halves POR
+        // together. XMM0=A, XMM1=B, XMM2/3=maskA/maskB.
+        case IROp::SIMD_PERMUTE: {
+            if (vec_cache_active_ || !has_ssse3()) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            const int esize = static_cast<int>(inst.width);
+            const bool q = inst.flags_op != 0;
+            uint8_t maskA[16], maskB[16];
+            build_permute_masks(static_cast<uint8_t>(inst.imm), esize, q,
+                                maskA, maskB);
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));   // X0 = A
+            load_vec(1, static_cast<int>(inst.src2));   // X1 = B
+            emit_mask16(2, maskA);
+            emit_mask16(3, maskB);
+            sse2_38(0x00, 0, 2);   // X0 = pshufb(A, maskA)
+            sse2_38(0x00, 1, 3);   // X1 = pshufb(B, maskB)
+            sse2_op(0xEB, 0, 1);   // X0 |= X1
+            store_vec(0, static_cast<int>(inst.dest), q);
             return true;
         }
         default:

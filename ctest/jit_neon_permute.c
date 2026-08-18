@@ -78,6 +78,296 @@ static void test_trn2_8h(void) {
     CHECK(memcmp(out, exp, 16) == 0, "trn2 v.8h");
 }
 
+// ── Full PERMUTE family coverage (native JIT since 1.5.3-alpha) ────────
+// Q=1 forms: 16-byte operands, v_lo + v_hi. Each expected value is
+// computed in C from the same semantics as interp_fp.cpp's permute block.
+
+static void test_zip1_8h(void) {
+    uint16_t a[8], b[8], out[8], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    for (int i = 0; i < 4; i++) { exp[2*i] = a[i]; exp[2*i+1] = b[i]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip1 v2.8h, v0.8h, v1.8h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip1 v.8h");
+}
+
+static void test_zip2_8h(void) {
+    uint16_t a[8], b[8], out[8], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    for (int i = 0; i < 4; i++) { exp[2*i] = a[4+i]; exp[2*i+1] = b[4+i]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip2 v2.8h, v0.8h, v1.8h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip2 v.8h");
+}
+
+static void test_zip1_4s(void) {
+    uint32_t a[4], b[4], out[4], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint32_t)(0x1000 + i); b[i] = (uint32_t)(0x2000 + i); }
+    exp[0] = a[0]; exp[1] = b[0]; exp[2] = a[1]; exp[3] = b[1];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip1 v2.4s, v0.4s, v1.4s\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip1 v.4s");
+}
+
+static void test_zip2_4s(void) {
+    uint32_t a[4], b[4], out[4], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint32_t)(0x1000 + i); b[i] = (uint32_t)(0x2000 + i); }
+    exp[0] = a[2]; exp[1] = b[2]; exp[2] = a[3]; exp[3] = b[3];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip2 v2.4s, v0.4s, v1.4s\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip2 v.4s");
+}
+
+static void test_zip1_2d(void) {
+    uint64_t a[2], b[2], out[2], exp[2];
+    a[0] = 0x11111111ULL; a[1] = 0x22222222ULL;
+    b[0] = 0x33333333ULL; b[1] = 0x44444444ULL;
+    exp[0] = a[0]; exp[1] = b[0];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip1 v2.2d, v0.2d, v1.2d\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip1 v.2d");
+}
+
+static void test_zip2_2d(void) {
+    uint64_t a[2], b[2], out[2], exp[2];
+    a[0] = 0x11111111ULL; a[1] = 0x22222222ULL;
+    b[0] = 0x33333333ULL; b[1] = 0x44444444ULL;
+    exp[0] = a[1]; exp[1] = b[1];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "zip2 v2.2d, v0.2d, v1.2d\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "zip2 v.2d");
+}
+
+static void test_uzp2_8h(void) {
+    uint16_t a[8], b[8], out[8], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    exp[0]=a[1]; exp[1]=a[3]; exp[2]=a[5]; exp[3]=a[7];
+    exp[4]=b[1]; exp[5]=b[3]; exp[6]=b[5]; exp[7]=b[7];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "uzp2 v2.8h, v0.8h, v1.8h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "uzp2 v.8h");
+}
+
+static void test_uzp1_16b(void) {
+    uint8_t a[16], b[16], out[16], exp[16];
+    for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 8; i++) { exp[i] = a[2*i]; exp[8+i] = b[2*i]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "uzp1 v2.16b, v0.16b, v1.16b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "uzp1 v.16b");
+}
+
+static void test_uzp2_16b(void) {
+    uint8_t a[16], b[16], out[16], exp[16];
+    for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 8; i++) { exp[i] = a[2*i+1]; exp[8+i] = b[2*i+1]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "uzp2 v2.16b, v0.16b, v1.16b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "uzp2 v.16b");
+}
+
+static void test_uzp1_4s(void) {
+    uint32_t a[4], b[4], out[4], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint32_t)(0x1000 + i); b[i] = (uint32_t)(0x2000 + i); }
+    exp[0] = a[0]; exp[1] = a[2]; exp[2] = b[0]; exp[3] = b[2];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "uzp1 v2.4s, v0.4s, v1.4s\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "uzp1 v.4s");
+}
+
+static void test_uzp2_4s(void) {
+    uint32_t a[4], b[4], out[4], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint32_t)(0x1000 + i); b[i] = (uint32_t)(0x2000 + i); }
+    exp[0] = a[1]; exp[1] = a[3]; exp[2] = b[1]; exp[3] = b[3];
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "uzp2 v2.4s, v0.4s, v1.4s\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "uzp2 v.4s");
+}
+
+static void test_trn1_8h(void) {
+    uint16_t a[8], b[8], out[8], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint16_t)(0x10 + i); b[i] = (uint16_t)(0x20 + i); }
+    for (int i = 0; i < 4; i++) { exp[2*i] = a[2*i]; exp[2*i+1] = b[2*i]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "trn1 v2.8h, v0.8h, v1.8h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "trn1 v.8h");
+}
+
+static void test_trn1_16b(void) {
+    uint8_t a[16], b[16], out[16], exp[16];
+    for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 8; i++) { exp[2*i] = a[2*i]; exp[2*i+1] = b[2*i]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "trn1 v2.16b, v0.16b, v1.16b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "trn1 v.16b");
+}
+
+static void test_trn2_16b(void) {
+    uint8_t a[16], b[16], out[16], exp[16];
+    for (int i = 0; i < 16; i++) { a[i] = (uint8_t)i; b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 8; i++) { exp[2*i] = a[2*i+1]; exp[2*i+1] = b[2*i+1]; }
+    __asm__ volatile (
+        "ldr q0, [%[a]]\n"
+        "ldr q1, [%[b]]\n"
+        "trn2 v2.16b, v0.16b, v1.16b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 16) == 0, "trn2 v.16b");
+}
+
+// Q=0 forms: 8-byte operands — only v_lo is meaningful, v_hi is zeroed
+// (matches the emulator's interp; real HW leaves the upper bits alone).
+
+static void test_zip1_4h_q0(void) {
+    uint16_t a[4], b[4], out[8], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    exp[0] = a[0]; exp[1] = b[0]; exp[2] = a[1]; exp[3] = b[1];
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "zip1 v2.4h, v0.4h, v1.4h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "zip1 v.4h");
+}
+
+static void test_zip2_4h_q0(void) {
+    uint16_t a[4], b[4], out[8], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    exp[0] = a[2]; exp[1] = b[2]; exp[2] = a[3]; exp[3] = b[3];
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "zip2 v2.4h, v0.4h, v1.4h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "zip2 v.4h");
+}
+
+static void test_uzp1_8b_q0(void) {
+    uint8_t a[8], b[8], out[16], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint8_t)(0x10 + i); b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 4; i++) { exp[i] = a[2*i]; exp[4+i] = b[2*i]; }
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "uzp1 v2.8b, v0.8b, v1.8b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "uzp1 v.8b");
+}
+
+static void test_uzp2_8b_q0(void) {
+    uint8_t a[8], b[8], out[16], exp[8];
+    for (int i = 0; i < 8; i++) { a[i] = (uint8_t)(0x10 + i); b[i] = (uint8_t)(0x80 + i); }
+    for (int i = 0; i < 4; i++) { exp[i] = a[2*i+1]; exp[4+i] = b[2*i+1]; }
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "uzp2 v2.8b, v0.8b, v1.8b\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "uzp2 v.8b");
+}
+
+static void test_trn1_4h_q0(void) {
+    uint16_t a[4], b[4], out[8], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    exp[0] = a[0]; exp[1] = b[0]; exp[2] = a[2]; exp[3] = b[2];
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "trn1 v2.4h, v0.4h, v1.4h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "trn1 v.4h");
+}
+
+static void test_trn2_4h_q0(void) {
+    uint16_t a[4], b[4], out[8], exp[4];
+    for (int i = 0; i < 4; i++) { a[i] = (uint16_t)(0x100 + i); b[i] = (uint16_t)(0x200 + i); }
+    exp[0] = a[1]; exp[1] = b[1]; exp[2] = a[3]; exp[3] = b[3];
+    __asm__ volatile (
+        "ldr d0, [%[a]]\n"
+        "ldr d1, [%[b]]\n"
+        "trn2 v2.4h, v0.4h, v1.4h\n"
+        "str q2, [%[out]]\n"
+        :: [a]"r"(a), [b]"r"(b), [out]"r"(out) : "v0","v1","v2","memory"
+    );
+    CHECK(memcmp(out, exp, 8) == 0, "trn2 v.4h");
+}
+
 static void test_sshll(void) {
     int8_t src[8] = {-8, -1, 0, 1, 2, 3, 4, 5};
     int16_t out[8] = {0};
@@ -141,6 +431,26 @@ int main(void) {
     test_zip2_16b();
     test_uzp1_8h();
     test_trn2_8h();
+    test_zip1_8h();
+    test_zip2_8h();
+    test_zip1_4s();
+    test_zip2_4s();
+    test_zip1_2d();
+    test_zip2_2d();
+    test_uzp2_8h();
+    test_uzp1_16b();
+    test_uzp2_16b();
+    test_uzp1_4s();
+    test_uzp2_4s();
+    test_trn1_8h();
+    test_trn1_16b();
+    test_trn2_16b();
+    test_zip1_4h_q0();
+    test_zip2_4h_q0();
+    test_uzp1_8b_q0();
+    test_uzp2_8b_q0();
+    test_trn1_4h_q0();
+    test_trn2_4h_q0();
     test_sshll();
     test_ushll();
     test_shrn();

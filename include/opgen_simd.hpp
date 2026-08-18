@@ -30,7 +30,8 @@ enum class Family : uint8_t {
     XTN = 12,
     TBL = 13,
     INS = 14,
-    UNKNOWN = 15,
+    PERMUTE = 15,
+    UNKNOWN = 16,
 };
 
 struct Op {
@@ -108,6 +109,12 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBFE0FC00U) == 0x0E001000U) return Op{Family::TBL, 60, 2, "TBX1"};
     if ((op & 0xBFE0FC00U) == 0x0E003000U) return Op{Family::TBL, 61, 3, "TBX2"};
     if ((op & 0xBFE00400U) == 0x2E000400U && (((op >> 16) & 0x0F) != 0)) return Op{Family::INS, 62, 0, "INS"};
+    if ((op & 0x3F20FC00U) == 0x0E001800U && (Q || size != 3)) return Op{Family::PERMUTE, 63, 6, "UZP1"};
+    if ((op & 0x3F20FC00U) == 0x0E002800U && (Q || size != 3)) return Op{Family::PERMUTE, 64, 10, "TRN1"};
+    if ((op & 0x3F20FC00U) == 0x0E003800U && (Q || size != 3)) return Op{Family::PERMUTE, 65, 14, "ZIP1"};
+    if ((op & 0x3F20FC00U) == 0x0E005800U && (Q || size != 3)) return Op{Family::PERMUTE, 66, 22, "UZP2"};
+    if ((op & 0x3F20FC00U) == 0x0E006800U && (Q || size != 3)) return Op{Family::PERMUTE, 67, 26, "TRN2"};
+    if ((op & 0x3F20FC00U) == 0x0E007800U && (Q || size != 3)) return Op{Family::PERMUTE, 68, 30, "ZIP2"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 
