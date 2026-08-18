@@ -239,6 +239,30 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (vk_dispatch_(cpu, entry, trace)) return 0;
     }
 
+    // ── Double-only AAPCS64 path (glOrtho, glClearDepth, …) ──────────
+    if (entry.flags & DisplayThunk::THUNK_DOUBLE) {
+        double dv[8] = {0};
+        for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
+            std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+        }
+        if (trace) {
+            fprintf(stderr, "[display-thunk] dispatch: %s (double×%u) d0=%g d1=%g d2=%g d3=%g\n",
+                    entry.name.c_str(), entry.n_float,
+                    dv[0], dv[1], dv[2], dv[3]);
+        }
+        switch (entry.n_float) {
+        case 1: { using Fn = void (*)(double); reinterpret_cast<Fn>(entry.host_fn)(dv[0]); break; }
+        case 2: { using Fn = void (*)(double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1]); break; }
+        case 3: { using Fn = void (*)(double, double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2]); break; }
+        case 4: { using Fn = void (*)(double, double, double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3]); break; }
+        case 5: { using Fn = void (*)(double, double, double, double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3], dv[4]); break; }
+        case 6: { using Fn = void (*)(double, double, double, double, double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3], dv[4], dv[5]); break; }
+        default: { using Fn = void (*)(double, double, double, double, double, double, double, double); reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3], dv[4], dv[5], dv[6], dv[7]); break; }
+        }
+        cpu.regs[0] = 0;
+        return 0;
+    }
+
     // ── Float-only AAPCS64 path (Vulkan float params, etc.) ──────────
     if (entry.n_float > 0 && !(entry.flags & THUNK_MIXED_FP)
         && !(entry.flags & THUNK_GET_PROC)) {
@@ -1607,19 +1631,25 @@ void DisplayThunk::register_known_symbols_() {
         // Derive the legacy ABI-shape fields from the ARGS column so the
         // dispatcher's proxy/vulkan/generic paths keep working unchanged.
         uint16_t pointer_args = 0;
-        uint8_t n_float = 0, n_int = 0, n_args = 0;
+        uint8_t n_float = 0, n_double = 0, n_int = 0, n_args = 0;
         for (const char* a = spec.args; *a; ++a, ++n_args) {
             switch (*a) {
             case 'p': case 'z':
                 pointer_args |= static_cast<uint16_t>(1u << n_args);
                 break;
             case 'f': n_float++; break;
+            case 'd': n_double++; break;
             default:  n_int++; break;
             }
         }
         uint8_t n_stack = 0;
         uint8_t flags = 0;
-        if (n_float > 0 && n_int > 0) {
+        if (n_double > 0) {
+            // Double-only AAPCS64 ABI: args in d0..d{n-1}; n_float carries
+            // the double count, THUNK_DOUBLE selects the double read path.
+            flags |= DisplayThunk::THUNK_DOUBLE;
+            n_float = static_cast<uint8_t>(n_double);
+        } else if (n_float > 0 && n_int > 0) {
             // Mixed int+float ABI: n_stack holds the integer arity (x0..).
             flags |= THUNK_MIXED_FP;
             n_stack = static_cast<uint8_t>(n_int);

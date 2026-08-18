@@ -23,6 +23,7 @@ bench.sh
 toybox-aarch64
 toybox
 ctest_real/realworld/
+ctest_real/teeworlds/
 
 # Downloaded musl cross-toolchain (fetched on demand by tools/fetch-musl-toolchain.sh)
 tools/aarch64-linux-musl-cross/

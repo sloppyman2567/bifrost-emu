@@ -58,15 +58,17 @@
 #             arg1    size = guest arg1 (glBufferData: data is arg2)
 #             arg2    size = guest arg2 (glBufferSubData: data is arg3)
 #             TEX2D   size = w*h*bpp from args 3,4,6,7 (glTexImage2D)
-#             TEXSUB  same as TEX2D (glTexSubImage2D)
+#             TEXSUB  size = w*h*bpp from args 4,5,6,7 (glTexSubImage2D:
+#                     target, level, xoffset, yoffset, width, height,
+#                     format, type, pixels — args 3 is yoffset, NOT width)
 #             PITCH_H size = pitch(arg3) * recorded texture height
 #
-# Legacy-fidelity notes: symbols that predate the FP/mixed ABI flags are
-# registered today as plain integer passthrough even when the C prototype
-# uses doubles/floats (glOrtho, glClearDepth, glMultiTexCoord2f, glPolygonOffset,
-# glSampleCoverage, glfwSetCursorPos, …). The spec below reproduces that
-# behavior exactly ('i' tokens), so the table-to-registration parity check
-# holds. Fixing those ABIs is a separate task with its own tests.
+# Legacy-fidelity notes: symbols that predate the FP/mixed ABI flags were
+# registered as plain integer passthrough even when the C prototype uses
+# floats (glMultiTexCoord2f, glPolygonOffset, glSampleCoverage). Doubles
+# ('d' ARGS kind) are now supported natively: glOrtho/glClearDepth etc.
+# are real double rows. Float cases below still use 'i' (or 'f' where the
+# ABI was fixed) — verify against the C prototype before editing.
 
 # ── libGL.so / libGL.so.1 ──────────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -89,7 +91,7 @@ glIsEnabled               GL     i             -     QUERY          -
 glViewport                GL     iiii          -     -              -
 glMatrixMode              GL     i             -     -              -
 glLoadIdentity            GL     -             -     -              -
-glOrtho                   GL     iiiiii        -     -              -   # doubles; legacy int passthrough
+glOrtho                   GL     dddddd        -     -              -   # 6 GLdouble: left,right,bottom,top,znear,zfar
 glPushMatrix              GL     -             -     -              -
 glPopMatrix               GL     -             -     -              -
 glRotatef                 GL     ffff          -     -              -
@@ -134,13 +136,14 @@ glFogfv                   GL     ip            -     -              -   # arg1: 
 glFogi                    GL     ii            -     -              -
 glFogCoordf               GL     f             -     -              -
 glColorMaterial           GL     ii            -     -              -   # face, mode
+glAlphaFunc               GL     if            -     -              -   # GLenum func, GLclampf ref (mixed)
 glTexEnvi                 GL     iii           -     -              -   # target, pname, GLint param
 glLoadMatrixf             GL     p             -     -              -   # arg0: const GLfloat *m
 glMultMatrixf             GL     p             -     -              -   # arg0: const GLfloat *m
 glPixelStorei             GL     ii            -     -              -
 glReadPixels              GL     iiiiiiz       -     -              READPIXELS # arg6: void *pixels
 glDrawBuffer              GL     i             -     -              -
-glClearDepth              GL     i             -     -              -   # double; legacy int passthrough
+glClearDepth              GL     d             -     -              -   # GLdouble depth
 glClearStencil            GL     i             -     -              -
 glPointSize               GL     f             -     -              -
 glLineWidth               GL     f             -     -              -
@@ -234,7 +237,7 @@ glBufferStorage          GL     iizi          -     -              arg1 # arg2: 
 glCreateBuffers          GL     ip            -     -              -   # arg1: GLuint *buffers
 glTexStorage2D           GL     iiii i         -     -              -   # target,levels,ifmt,w,h
 glTexStorage3D           GL     iiiiii        -     -              -   # +depth
-glTexImage3D             GL     iiii iiiii p   -     -              -   # 10 args; arg9 pixels (64 KiB bounce)
+glTexImage3D             GL     iiii iiiii z   -     -              TEX3D  # 10 args; arg9 pixels (w*h*d*bpp)
 glBlitFramebuffer        GL     iiiiiiii      -     -              -   # src/dst rects
 glDrawArraysInstanced    GL     iiii          -     -              -   # mode,first,count,primcount
 glDrawElementsInstanced  GL     iiii i         -     EL_PTR         -   # arg3: indices (offset or ptr)
@@ -516,7 +519,7 @@ SDL_RWwrite               SDL    ipii          -     -              -   # arg1: 
 SDL_RWseek                SDL    iii           -     -              -
 SDL_RWtell                SDL    i             -     -              -
 SDL_FreeRW                SDL    i             -     -              -
-SDL_GetKeyboardState      SDL    i             -     -              -
+SDL_GetKeyboardState      SDL    p             -     -              -   # int* numkeys out
 SDL_GetModState           SDL    -             -     -              -
 SDL_SetModState           SDL    i             -     -              -
 SDL_GetMouseState         SDL    -             -     -              -
@@ -536,7 +539,7 @@ SDL_FreeCursor            SDL    i             -     -              -
 SDL_SetCursor             SDL    i             -     -              -
 SDL_GetCursor             SDL    -             -     -              -
 SDL_GetNumVideoDisplays   SDL    -             -     -              -
-SDL_GetDisplayBounds      SDL    ii            -     -              -
+SDL_GetDisplayBounds      SDL    ip            -     -              -   # displayIndex, out SDL_Rect*
 SDL_GetCurrentVideoMode   SDL    i             -     -              -
 SDL_GetWindowDisplayIndex SDL    i             -     -              -
 SDL_Vulkan_LoadLibrary    SDL    i             -     -              -
@@ -544,6 +547,41 @@ SDL_Vulkan_GetVkGetInstanceProcAddr SDL i     -     -              -
 SDL_Vulkan_CreateSurface  SDL    ii            -     -              -
 SDL_CreateThread          SDL    ppp           -     THREAD_CREATE   -   # guest fn ptr can't reach host
 SDL_WaitThread            SDL    ip            -     THREAD_WAIT     -   # no-op (threads never created)
+# ── teeworlds PLT coverage (2026-08): audio, clipboard, display modes,
+#    joystick introspection and window-border API. SDL_free is a real
+#    policy arm (the guest may free strings that live in the string cache);
+#    SDL_OpenAudio embeds a GUEST callback so it returns -1 without
+#    reaching host SDL2; JOY_GUID / JOY_GUID_STR handle the 16-byte
+#    SDL_JoystickGUID by-value return / by-value parameter.
+SDL_WasInit                SDL    i             -     -              -
+SDL_GetVersion             SDL    p             -     -              -   # out SDL_version*
+SDL_GetNumDisplayModes     SDL    i             -     -              -
+SDL_GetDesktopDisplayMode  SDL    ip            -     -              -   # display, out SDL_DisplayMode*
+SDL_GetDisplayMode         SDL    iip           -     -              -   # display, mode, out SDL_DisplayMode*
+SDL_GetRelativeMouseState  SDL    pp            -     -              -   # out int* x, int* y
+SDL_GetScancodeFromKey     SDL    i             -     -              -
+SDL_GL_GetDrawableSize     SDL    ipp           -     -              -   # window, out w, out h
+SDL_MaximizeWindow         SDL    i             -     -              -
+SDL_MinimizeWindow         SDL    i             -     -              -
+SDL_SetWindowBordered      SDL    ii            -     -              -
+SDL_SetClipboardText       SDL    p             -     -              -   # arg0: text string
+SDL_GetClipboardText       SDL    -             str   -              -
+SDL_SetHintWithPriority    SDL    ppi           -     -              -   # args0/1: name,value strings
+SDL_free                   SDL    p             -     SDL_FREE       -
+SDL_NumJoysticks           SDL    -             -     -              -
+SDL_JoystickClose          SDL    i             -     -              -
+SDL_JoystickGetAttached    SDL    i             -     -              -
+SDL_JoystickGetAxis        SDL    ii            -     -              -
+SDL_JoystickGetGUID        SDL    i             -     JOY_GUID       -   # 16-byte GUID returned in x0/x1
+SDL_JoystickGetGUIDString  SDL    iipi          -     JOY_GUID_STR   -   # guid by value x0/x1, out buf x2, size x3
+SDL_JoystickName           SDL    i             str   -              -
+SDL_JoystickNameForIndex   SDL    i             str   -              -
+SDL_JoystickNumAxes        SDL    i             -     -              -
+SDL_JoystickNumBalls       SDL    i             -     -              -
+SDL_JoystickNumButtons     SDL    i             -     -              -
+SDL_OpenAudio              SDL    pp            -     SDL_OPEN_AUDIO -   # guest callback in spec; never reach host
+SDL_PauseAudio             SDL    i             -     -              -
+SDL_CloseAudio             SDL    -             -     -              -
 
 # ── libglfw.so.3 / libglfw.so ──────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE

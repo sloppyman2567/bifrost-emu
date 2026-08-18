@@ -48,7 +48,7 @@ The emitted header defines (namespace arm64emu::thunk):
 """
 import sys
 
-VALID_ARGS = set('ifpz')
+VALID_ARGS = set('ifpzd')
 VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
               'GLX', 'RANDR', 'XKB')
@@ -62,10 +62,12 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'THREAD_WAIT',
                 'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',
                 'TF_VARYINGS',
+                'SDL_FREE', 'SDL_OPEN_AUDIO', 'JOY_GUID', 'JOY_GUID_STR',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
                 'VK_CREATE_DEVICE', 'VK_PRESENT')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',
-              'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO')
+              'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
+              'TEX3D')
 
 HEADER = r"""// opgen_thunk.hpp — GENERATED. DO NOT EDIT.
 //
@@ -109,6 +111,7 @@ enum class SizeKind : uint8_t {
     QUEUEAUDIO = 7,
     X_DRAWSTR = 8,
     X_SETWMPROTO = 9,
+    TEX3D = 10,
 };
 
 struct Spec {
@@ -154,7 +157,7 @@ def parse_rows(spec_path):
                 raise SystemExit(2)
             if any(c not in VALID_ARGS for c in args):
                 print("spec %s:%d: bad ARGS token(s) in %r for %s "
-                      "(allowed: i f p z or '-')"
+                      "(allowed: i f p z d or '-')"
                       % (spec_path, lineno, args, name), file=sys.stderr)
                 raise SystemExit(2)
             if ret not in VALID_RET:

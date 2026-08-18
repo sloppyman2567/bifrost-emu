@@ -60,6 +60,28 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
     }
     return res;
 }
+// Temporary decode-error crash diagnostic (BIFROST_DBG_GUARD=1): dump the
+// guest x29 frame chain so a NULL-function-pointer call (pc=0 DecodeError)
+// can be traced back to its caller.
+void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst) {
+    if (!getenv("BIFROST_DBG_GUARD")) return;
+    fprintf(stderr, "[DECODE] pc=0x%llx sp=0x%llx x30=0x%llx x29=0x%llx inst=0x%08x\n",
+            (unsigned long long)cpu.pc, (unsigned long long)cpu.sp,
+            (unsigned long long)cpu.regs[30], (unsigned long long)cpu.regs[29],
+            inst);
+    uint64_t fp_v = cpu.regs[29];
+    for (int fr = 0; fr < 24 && fp_v != 0 && fp_v != ~0ULL; fr++) {
+        uint64_t next_fp = 0, lr = 0;
+        try {
+            mem.read(fp_v, &next_fp, 8);
+            mem.read(fp_v + 8, &lr, 8);
+        } catch (...) { break; }
+        fprintf(stderr, "  #%d fp=0x%llx lr=0x%llx\n", fr,
+                (unsigned long long)fp_v, (unsigned long long)lr);
+        if (next_fp <= fp_v && next_fp != 0) break;
+        fp_v = next_fp;
+    }
+}
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;
     // ── TEMP: NSS trace ─────────────────────────────────────────
@@ -403,8 +425,10 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                 uint8_t immr = (d.raw >> 16) & 0x3F;
                 uint8_t imms = (d.raw >> 10) & 0x3F;
                 int width = d.sf ? 64 : 32;
-                if (!d.sf && (immr & 0x20 || imms & 0x20))
+                if (!d.sf && (immr & 0x20 || imms & 0x20)) {
+                    dump_decode_error(cpu, mem_, inst);
                     throw DecodeError(cpu.pc, inst);
+                }
                 uint64_t src = cpu.regs[d.rn];
                 if (!d.sf) src &= 0xFFFFFFFF;
                 int datasize = width;
@@ -574,7 +598,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     case 1: res = a | imm_val; break;
                     case 2: res = a ^ imm_val; break;
                     case 3: res = a & imm_val; set_flags = true; break;
-                    default: throw DecodeError(cpu.pc, inst);
+                    default: dump_decode_error(cpu, mem_, inst);
+                    throw DecodeError(cpu.pc, inst);
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = res;
@@ -685,7 +710,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                     case 1: res = a | b; break;   // ORR (N=0) or ORN (N=1)
                     case 2: res = a ^ b; break;   // EOR (N=0) or EON (N=1)
                     case 3: res = a & b; set_flags = true; break; // ANDS (N=0) or BICS (N=1)
-                    default: throw DecodeError(cpu.pc, inst);
+                    default: dump_decode_error(cpu, mem_, inst);
+                    throw DecodeError(cpu.pc, inst);
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
                 if (d.rd != 31) cpu.regs[d.rd] = res;
@@ -715,7 +741,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
                         case InstClass::CSINC: res = b + 1; break;
                         case InstClass::CSINV: res = ~b;    break;
                         case InstClass::CSNEG: res = -b;    break;
-                        default: throw DecodeError(cpu.pc, inst);
+                        default: dump_decode_error(cpu, mem_, inst);
+                    throw DecodeError(cpu.pc, inst);
                     }
                 }
                 if (!d.sf) res &= 0xFFFFFFFF;
@@ -1533,6 +1560,7 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     // If we reach here, the instruction was not recognized by the decoder
     // switch above. Bail with a DecodeError so the caller can report the
     // PC and the offending instruction word.
+    dump_decode_error(cpu, mem_, inst);
     throw DecodeError(cpu.pc, inst);
 }
 // ---------------------------------------------------------------------------

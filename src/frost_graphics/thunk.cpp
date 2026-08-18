@@ -122,6 +122,7 @@ static constexpr uint8_t THUNK_SHADER_SOURCE = 1u << 1;
 static constexpr uint8_t THUNK_MIXED_FP      = 1u << 2;
 static constexpr uint8_t THUNK_GET_PROC      = 1u << 3;
 static constexpr uint8_t THUNK_TF_VARYINGS   = 1u << 4;
+static constexpr uint8_t THUNK_DOUBLE        = 1u << 5;
 struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
@@ -135,6 +136,13 @@ struct GraphicThunkImpl {
     uint64_t string_cache_base = 0;
     static constexpr uint64_t STRING_CACHE_SIZE = 4096;
     uint32_t string_cache_off = 0;
+    // 2026-08: SDL_free bookkeeping for the string cache. SDL_GetClipboardText
+    // / SDL_GetError / joystick-name returns hand the guest a pointer INTO
+    // this cache; the guest later SDL_free()s it. Host free() must never see
+    // these GUEST addresses (they are not host heap pointers), so track each
+    // allocation and let SDL_free reclaim the slot instead.
+    std::unordered_map<uint32_t, uint32_t> string_cache_live_;   // cache offset -> len, allocated since last wrap
+    std::vector<std::pair<uint32_t, uint32_t>> string_cache_freed_; // {offset, len} reusable slots (first-fit)
     // Registry: (library, symbol_name) → SymbolEntry.
     // We use a flat vector per-library for cache-friendly enumeration
     // (the dynamic linker iterates all symbols when populating its
@@ -271,13 +279,46 @@ struct GraphicThunkImpl {
         if (!mem || !string_cache_base || !host_str) return 0;
         size_t len = std::strlen(host_str) + 1;
         if (len > STRING_CACHE_SIZE) len = STRING_CACHE_SIZE;
-        if (string_cache_off + len > STRING_CACHE_SIZE)
+        // First-fit a freed slot large enough to hold the string, so an
+        // SDL_free of a previously cached string actually reuses the space.
+        for (auto it = string_cache_freed_.begin();
+             it != string_cache_freed_.end(); ++it) {
+            if (it->second >= len) {
+                uint32_t off = it->first;
+                string_cache_freed_.erase(it);
+                mem->write(string_cache_base + off, host_str, len);
+                string_cache_live_[off] = static_cast<uint32_t>(len);
+                return string_cache_base + off;
+            }
+        }
+        if (string_cache_off + len > STRING_CACHE_SIZE) {
             string_cache_off = 0;
+            // Bump wrap: every prior slot is stale — drop the tracking
+            // (live and freed) so freed-slot reuse can't resurrect old data.
+            string_cache_live_.clear();
+            string_cache_freed_.clear();
+        }
         uint64_t guest = string_cache_base + string_cache_off;
         mem->write(guest, host_str, len);
+        string_cache_live_[string_cache_off] = static_cast<uint32_t>(len);
         string_cache_off = static_cast<uint32_t>(
             (string_cache_off + len + 7u) & ~7u);
         return guest;
+    }
+    // SDL_free on a pointer that may live in the string cache (a guest
+    // address, NOT a host heap allocation). Reclaim the cache slot so the
+    // next cache_host_string_ can reuse it. Anything outside the cache or
+    // not tracked is a leak-safe no-op (arbitrary guest heap pointers pass
+    // straight through — SDL's own allocator owns those on the real system).
+    void free_cache_string_(uint64_t guest) {
+        if (!guest || !string_cache_base) return;
+        if (guest < string_cache_base) return;
+        uint64_t off = guest - string_cache_base;
+        if (off >= STRING_CACHE_SIZE) return;
+        auto it = string_cache_live_.find(static_cast<uint32_t>(off));
+        if (it == string_cache_live_.end()) return;
+        string_cache_freed_.push_back({it->first, it->second});
+        string_cache_live_.erase(it);
     }
     // Deliver stored GLFW callbacks after a host poll. For each
     // registered window, read the host state (cursor position, key/button
@@ -670,6 +711,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = static_cast<uint64_t>(-1);
             return 0;
         }
+        if (pol == thunk::Policy::SDL_OPEN_AUDIO) {
+            // SDL_OpenAudio(desired, obtained): the SDL_AudioSpec embeds a
+            // GUEST callback fn ptr that must never reach host SDL2. Mirror
+            // MIX_OPEN_AUDIO: return -1 so the game takes its no-audio path.
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] %s -> -1 (audio unavailable)\n",
+                        entry.name.c_str());
+            }
+            cpu.regs[0] = static_cast<uint64_t>(-1);
+            return 0;
+        }
+        if (pol == thunk::Policy::SDL_FREE) {
+            // SDL_free(ptr): the guest may free a string returned by
+            // SDL_GetClipboardText / SDL_GetError / joystick-name getters,
+            // which lives in the GUEST string cache — reclaim the cache slot
+            // instead of calling host free() (the pointer is a guest address,
+            // not a host heap allocation). Arbitrary guest heap pointers are
+            // a leak-safe no-op. Must run BEFORE the generic host-fn stub
+            // check (SDL_free has no host call at all).
+            if (impl_ && impl_->mem && impl_->string_cache_base)
+                impl_->free_cache_string_(cpu.regs[0]);
+            cpu.regs[0] = 0;
+            return 0;
+        }
         if (pol == thunk::Policy::THREAD_CREATE) {
             // SDL_CreateThread(fn, name, data): spawn a REAL guest thread
             // running fn(data) on its own CPU. The Emulator wires the
@@ -769,6 +834,65 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
             return 0;
         }
+    }
+
+    // ── Double-only AAPCS64 path (glOrtho, glClearDepth, …) ─────────
+    // Guest AArch64 passes GLdouble args in d0..d{n-1} (low 64 bits of
+    // v0..). Host SysV AMD64 expects them in XMM0.. — the C++ cast below
+    // places them there automatically.
+    if (entry.flags & THUNK_DOUBLE) {
+        double dv[8] = {0};
+        for (uint8_t i = 0; i < entry.n_float && i < 8; i++) {
+            std::memcpy(&dv[i], &cpu.v_lo[i], sizeof(double));
+        }
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] dispatch: %s (double×%u) d0=%g d1=%g d2=%g d3=%g\n",
+                    entry.name.c_str(), entry.n_float,
+                    dv[0], dv[1], dv[2], dv[3]);
+        }
+        switch (entry.n_float) {
+        case 1: {
+            using Fn = void (*)(double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0]);
+            break;
+        }
+        case 2: {
+            using Fn = void (*)(double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1]);
+            break;
+        }
+        case 3: {
+            using Fn = void (*)(double, double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2]);
+            break;
+        }
+        case 4: {
+            using Fn = void (*)(double, double, double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3]);
+            break;
+        }
+        case 5: {
+            using Fn = void (*)(double, double, double, double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3], dv[4]);
+            break;
+        }
+        case 6: {
+            using Fn = void (*)(double, double, double, double, double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3], dv[4], dv[5]);
+            break;
+        }
+        default: {
+            using Fn = void (*)(double, double, double, double, double, double,
+                                double, double);
+            reinterpret_cast<Fn>(entry.host_fn)(dv[0], dv[1], dv[2], dv[3],
+                                                dv[4], dv[5], dv[6], dv[7]);
+            break;
+        }
+        }
+        cpu.regs[0] = 0;
+        // No GLStateTracker handler consumes double-typed state setters
+        // (glOrtho/glClearDepth are not tracked), so skip it here.
+        return 0;
     }
 
     // ── Float-only AAPCS64 path (glClearColor, glVertex3f, …) ────────
@@ -879,6 +1003,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t slot = cpu.sp + static_cast<uint64_t>(i) * 8ull;
             impl_->mem->read(slot, &args[8 + i], sizeof(uint64_t));
         }
+    }
+
+    // ── SDL_JoystickGetGUID — 16-byte struct return by value ───────────
+    // Host SysV x86-64 returns SDL_JoystickGUID (16 bytes, two INTEGER
+    // fields) in RAX:RDX; the guest expects it in x0:x1. The row's ARGS is
+    // 'i', so the pointer loop never translates the opaque SDL_Joystick*
+    // handle — it round-trips as the host pointer SDL_JoystickOpen returned.
+    // This arm MUST run before the pointer-args loop.
+    if (entry.spec && entry.spec->policy == thunk::Policy::JOY_GUID) {
+        struct Guid16 { uint64_t lo, hi; };
+        Guid16 g{0, 0};
+        if (entry.host_fn) {
+            using Fn = Guid16 (*)(uint64_t);
+            g = reinterpret_cast<Fn>(entry.host_fn)(cpu.regs[0]);
+        }
+        cpu.regs[0] = g.lo;
+        cpu.regs[1] = g.hi;
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] SDL_JoystickGetGUID(0x%llx) -> %016llx%016llx\n",
+                    static_cast<unsigned long long>(args[0]),
+                    static_cast<unsigned long long>(g.hi),
+                    static_cast<unsigned long long>(g.lo));
+        }
+        return 0;
     }
 
     // ── glMapBuffer / glMapBufferRange / glUnmapBuffer / glFlushMappedBufferRange ──
@@ -1185,9 +1333,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
             break;
         case thunk::SizeKind::TEX2D:
-        case thunk::SizeKind::TEXSUB:
-            // pixels buffer (arg8): width * height * bytes-per-pixel from
-            // format/type. Host reads exactly this much.
+            // glTexImage2D(target, level, internalformat, width, height,
+            // border, format, type, pixels): pixels is arg8. Width/height
+            // are args 3/4.
             if (idx == 8) {
                 uint64_t w = args[3], h = args[4];
                 uint64_t fmt = args[6], type = args[7];
@@ -1205,6 +1353,55 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     default: break;                                  // UNSIGNED_BYTE etc.
                 }
                 uint64_t sz = w * h * channels * type_sz;
+                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
+        case thunk::SizeKind::TEXSUB:
+            // glTexSubImage2D(target, level, xoffset, yoffset, width,
+            // height, format, type, pixels): pixels is arg8. Width/height
+            // are args 4/5 (args 3 is yoffset, NOT width).
+            if (idx == 8) {
+                uint64_t w = args[4], h = args[5];
+                uint64_t fmt = args[6], type = args[7];
+                uint64_t channels = 1;
+                switch (fmt) {
+                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
+                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
+                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
+                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
+                }
+                uint64_t type_sz = 1;
+                switch (type) {
+                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
+                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
+                    default: break;                                  // UNSIGNED_BYTE etc.
+                }
+                uint64_t sz = w * h * channels * type_sz;
+                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
+        case thunk::SizeKind::TEX3D:
+            // glTexImage3D(target, level, internalformat, width, height,
+            // depth, border, format, type, pixels): pixels is arg9. Host
+            // reads width*height*depth*channels*type_size — a font atlas
+            // volume dwarfs the default 64 KiB bounce.
+            if (idx == 9) {
+                uint64_t w = args[3], h = args[4], d = args[5];
+                uint64_t fmt = args[7], type = args[8];
+                uint64_t channels = 1;
+                switch (fmt) {
+                    case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
+                    case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
+                    case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
+                    default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
+                }
+                uint64_t type_sz = 1;
+                switch (type) {
+                    case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
+                    case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
+                    default: break;                                  // UNSIGNED_BYTE etc.
+                }
+                uint64_t sz = w * h * d * channels * type_sz;
                 if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
             }
             break;
@@ -1274,6 +1471,32 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                               &bounce_guest[i], &bounce_wb[i]);
             }
         }
+    }
+
+    // ── SDL_JoystickGetGUIDString — guid BY VALUE, out-buffer bounce ──
+    // Guest AAPCS64: x0/x1 = 16-byte SDL_JoystickGUID (by value), x2 =
+    // char* pszGUID (OUT), x3 = cbGUID. The pointer-args loop above already
+    // translated args[2]: either a bounce (write back below) or a direct
+    // host alias (host wrote into guest memory in place, nothing to copy).
+    // Must run AFTER the pointer-args loop so args[2] is host-addressable.
+    if (entry.spec && entry.spec->policy == thunk::Policy::JOY_GUID_STR) {
+        if (entry.host_fn && args[2] != 0) {
+            uint64_t lo = args[0], hi = args[1];
+            int size = static_cast<int>(args[3]);
+            if (size < 0) size = 0;
+            using Fn = void (*)(uint64_t, uint64_t, char*, int);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                lo, hi, reinterpret_cast<char*>(args[2]), size);
+            if (impl_->mem && bounce_guest[2] && bounce_wb[2]) {
+                // Clamp the writeback to the guest's buffer capacity
+                // (cbGUID) so we never overrun pszGUID[cbGUID].
+                size_t wb = static_cast<size_t>(size);
+                if (wb > bounce_bufs[2].size()) wb = bounce_bufs[2].size();
+                impl_->mem->write(bounce_guest[2], bounce_bufs[2].data(), wb);
+            }
+        }
+        cpu.regs[0] = 0;
+        return 0;
     }
 
     // ── glfwCreateWindow HiDPI compensation ───────────────────────────
@@ -1500,7 +1723,31 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         is_buffer_consumer_(entry.name)) {
         sync_persistent_mappings_();
     }
-    if (entry.n_stack >= 1) {
+    if (entry.n_stack >= 4) {
+        using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn12>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9], args[10], args[11]);
+    } else if (entry.n_stack == 3) {
+        using Fn11 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn11>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9], args[10]);
+    } else if (entry.n_stack == 2) {
+        using Fn10 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn10>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9]);
+    } else if (entry.n_stack == 1) {
         using Fn9 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t, uint64_t, uint64_t, uint64_t,
                                   uint64_t);
@@ -1585,6 +1832,24 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    if (entry.name == "SDL_PollEvent" && dbg().thunk_trace) {
+        uint32_t ev = 0, evx = 0, evy = 0;
+        if (args[0]) {
+            uint8_t* hp = nullptr;
+            if (bounce_guest[0]) {
+                hp = bounce_bufs[0].data();
+            } else {
+                hp = reinterpret_cast<uint8_t*>(args[0]);
+            }
+            if (hp) {
+                ev = *reinterpret_cast<uint32_t*>(hp);
+                evx = *reinterpret_cast<uint32_t*>(hp + 16);
+                evy = *reinterpret_cast<uint32_t*>(hp + 20);
+            }
+        }
+        fprintf(stderr, "[thunk] SDL_PollEvent -> %llu type=0x%x x=%u y=%u\n",
+                static_cast<unsigned long long>(ret), ev, evx, evy);
+    }
     if (entry.spec && entry.spec->ret == thunk::RetKind::STRING) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
@@ -1824,19 +2089,26 @@ void GraphicThunk::register_known_symbols_() {
         // Derive the legacy ABI-shape fields from the ARGS column so the
         // dispatcher's float/mixed/generic paths keep working unchanged.
         uint16_t pointer_args = 0;
-        uint8_t n_float = 0, n_int = 0, n_args = 0;
+        uint8_t n_float = 0, n_double = 0, n_int = 0, n_args = 0;
         for (const char* a = spec.args; *a; ++a, ++n_args) {
             switch (*a) {
             case 'p': case 'z':
                 pointer_args |= static_cast<uint16_t>(1u << n_args);
                 break;
             case 'f': n_float++; break;
+            case 'd': n_double++; break;
             default:  n_int++; break;
             }
         }
         uint8_t n_stack = 0;
         uint8_t flags = 0;
-        if (n_float > 0 && n_int > 0) {
+        if (n_double > 0) {
+            // Double-only AAPCS64 ABI: args in d0..d{n-1}. n_float carries
+            // the double count; THUNK_DOUBLE tells dispatch to read them as
+            // 8-byte doubles (from cpu.v_lo) rather than 4-byte floats.
+            flags |= THUNK_DOUBLE;
+            n_float = n_double;
+        } else if (n_float > 0 && n_int > 0) {
             // Mixed int+float ABI: n_stack holds the integer arity (x0..).
             flags |= THUNK_MIXED_FP;
             n_stack = n_int;

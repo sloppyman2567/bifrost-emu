@@ -69,6 +69,9 @@ public:
 };
 // Forward-declare DynamicLinker (defined in src/frontend/dynamic_linker.h).
 class DynamicLinker;
+// Temporary decode-error crash diagnostic (BIFROST_DBG_GUARD=1): dumps the
+// guest x29 frame chain at every DecodeError throw site.
+void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst);
 // ── Emulator ──────────────────────────────────────────────────────────
 class Emulator {
 public:

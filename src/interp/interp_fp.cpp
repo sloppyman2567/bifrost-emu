@@ -381,7 +381,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     case 0x02: esize = 2; break;
                     case 0x04: esize = 4; break;
                     case 0x08: esize = 8; break;
-                    default: throw DecodeError(cpu.pc, inst);
+                    default: dump_decode_error(cpu, mem_, inst);
+                throw DecodeError(cpu.pc, inst);
                 }
                 int elems = (Q ? 16 : 8) / esize;
                 uint64_t src = cpu.regs[rn];
@@ -407,15 +408,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // causing multi-element __thread TLS arrays to get corrupted
             // (only lane 0 was correct, lanes 1+ stayed 0 or stale).
             case 0x0E000400: {
+                // imm5 = (index << (size+1)) | (1 << size): lowest set bit
+                // gives esize, remaining high bits give the element index.
+                // The old switch only matched imm5 == {1,2,4,8} (index 0),
+                // so `dup v23.2s, v1.s[1]` (imm5=12 = (1<<3)|4) threw
+                // DecodeError inside sha256_finish.
                 uint8_t imm5 = (op >> 16) & 0x1F;
-                int esize, idx;
-                switch (imm5 & 0x1F) {
-                    case 0x01: esize = 1; idx = imm5 >> 1; break;
-                    case 0x02: esize = 2; idx = imm5 >> 2; break;
-                    case 0x04: esize = 4; idx = imm5 >> 3; break;
-                    case 0x08: esize = 8; idx = imm5 >> 4; break;
-                    default: throw DecodeError(cpu.pc, inst);
+                int esize = 0, idx = 0;
+                for (int b = 0; b < 5; b++) {
+                    if (imm5 & (1 << b)) { esize = 1 << b; break; }
                 }
+                idx = imm5 >> (esize == 1 ? 1 : (esize == 2 ? 2 : (esize == 4 ? 3 : 4)));
                 // Read the source element from Vn.
                 uint64_t src_val;
                 int elems_per_qword = 8 / esize;
@@ -1194,7 +1197,10 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             case 0x0E204800: case 0x0E604800: case 0x0EA04800:  // SQXTN (U=0)
             case 0x2E204800: case 0x2E604800: case 0x2EA04800:  // UQXTN (U=1)
             {
-                if (size == 3) throw DecodeError(cpu.pc, inst);
+                if (size == 3) {
+                    dump_decode_error(cpu, mem_, inst);
+                    throw DecodeError(cpu.pc, inst);
+                }
                 int src_esize = 2 << size;      // 2 / 4 / 8 bytes
                 int dst_esize = src_esize >> 1; // 1 / 2 / 4 bytes
                 int elems = 16 / src_esize;     // 8 / 4 / 2
@@ -1480,7 +1486,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else if (imm5 & 0x02) { esize = 2; didx = imm5 >> 2; }
                 else if (imm5 & 0x04) { esize = 4; didx = imm5 >> 3; }
                 else if (imm5 & 0x08) { esize = 8; didx = imm5 >> 4; }
-                else throw DecodeError(cpu.pc, inst);
+                else { dump_decode_error(cpu, mem_, inst);
+                    throw DecodeError(cpu.pc, inst); }
                 int src_off = (op >> 11) & 0xF;
                 int sidx = src_off / esize;
                 uint64_t src_val;
@@ -2934,7 +2941,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             Q, (op >> 29) & 1, (op >> 22) & 3);
                 return;
             }
-            throw DecodeError(cpu.pc, op);
+            dump_decode_error(cpu, mem_, op);
+                throw DecodeError(cpu.pc, op);
             return;
         }
         // ── FP scalar (FMOV/FADD/FSUB/FMUL/FDIV/FCMP/FCVT/...) ────

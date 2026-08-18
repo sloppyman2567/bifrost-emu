@@ -955,3 +955,56 @@ not musl-`-static`.
   (was unconditional per-block spam). Verified: jit_fcvt 6/6 ALL PASS exit 0,
   full suite **205/205**, and `BIFROST_NO_DIRECT_CALL=1` /
   `BIFROST_CHAIN_SKIP=1` / `BIFROST_INTERP_BL_CALL=1` all exit 0 on jit_fcvt.
+
+## Session History (2026-08-18) — teeworlds boots to the menu
+
+- **The teeworlds malloc-spin root cause was a STALE BINARY, not an emulator
+  bug**: the installed `bifrost-emu` had an inverted UBFM/SBFM/BFM interp
+  guard (threw `DecodeError` on every `sf=1` bitfield op), so
+  `__libc_early_init` aborted mid-borrow-CPU-run, `ptmalloc_init` never
+  self-linked `main_arena`, all bins stayed zeroed, and `_int_malloc`'s
+  smallbin→tcache stash loop spun on `bin->bk == NULL`. A plain `make`
+  rebuild from the correct source fixed the hang — no source change needed.
+  Do NOT re-diagnose emulator memory-model corruption for this game.
+- **Thunk gap work (all landed, suite 205/205, quick 200/200):**
+  - Added 29 SDL rows + `glAlphaFunc` (GL, ARGS `if` mixed) to
+    `tools/opgen/thunk_dp.txt`: audio trio (`SDL_OpenAudio` SDL_OPEN_AUDIO
+    returns −1 — the `SDL_AudioSpec` embeds a GUEST callback that must
+    never reach host SDL2; `SDL_CloseAudio`/`SDL_PauseAudio` generic),
+    clipboard (`SDL_GetClipboardText` RET `str`, `SDL_SetClipboardText` `p`),
+    display modes (`SDL_GetDesktopDisplayMode`/`SDL_GetDisplayMode` `ip`/`iip`,
+    `SDL_GetNumDisplayModes` `i`), `SDL_WasInit` `i`, `SDL_GetVersion` `p`,
+    `SDL_GL_GetDrawableSize` `ipp`, window (`SDL_MaximizeWindow`/`MinimizeWindow`/`SetWindowBordered`),
+    joystick introspection (`SDL_NumJoysticks`/`JoystickClose`/`GetAttached`/`GetAxis`/
+    `NumAxes`/`NumBalls`/`NumButtons`, `SDL_JoystickName`/`NameForIndex` RET `str`),
+    and the rest (`SDL_GetRelativeMouseState` `pp`, `SDL_GetScancodeFromKey`,
+    `SDL_SetHintWithPriority` `ppi`, `SDL_free`).
+  - **New policies**: `SDL_FREE` (proper string-cache free: `string_cache_live_`
+    offset→len map + `string_cache_freed_` first-fit reuse in
+    `cache_host_string_`; never forwards guest cache pointers to host free),
+    `SDL_OPEN_AUDIO` (return −1), `JOY_GUID` (16-byte `SDL_JoystickGUID`
+    returned in x0/x1 via host RAX:RDX), `JOY_GUID_STR` (guid passed BY
+    VALUE in x0/x1, out-buffer arg2 bounced at cbGUID size, writeback
+    clamped to cbGUID so pszGUID[33] never overruns).
+  - **Marshalling bugs found while booting teeworlds**: `SDL_GetDisplayBounds`
+    was `ii` (guest `SDL_Rect*` passed verbatim → host SIGSEGV; fixed to `ip`),
+    `SDL_GetKeyboardState` was `i` (guest `int*` verbatim → host SDL wrote
+    into guest memory; fixed to `p`), `SDL_GetRelativeMouseState` fixed `-`→`pp`
+    (two guest out-pointers).
+  - **glTexImage3D needed a `TEX3D` SizeKind + a 10-arg call path**: the font
+    atlas volume (w×h×d×bpp) dwarfed the 64 KiB default bounce (host gallium
+    memcpy'd past it → SIGSEGV), AND the generic host-call ladder only went to
+    Fn9 — `args[9]` (pixels) was silently dropped so host glTexImage3D read a
+    garbage pixels pointer. Added `TEX3D` (validated in thunkgen.py
+    `VALID_SIZE` + the header's SizeKind enum) and the Fn10/Fn11/Fn12 ladder
+    in `dispatch()` (mirroring display_thunk.cpp).
+- **SIMD DUP(element,vector) interp bug**: `dup v23.2s, v1.s[1]`
+  (0x0E0C0437, imm5=12=(1<<3)|4) in `sha256_finish` threw DecodeError — the
+  `case 0x0E000400` handler only matched imm5 ∈ {1,2,4,8} (index 0). Replaced
+  the switch with the same ctz-based decode as the INS case. JIT side is
+  unaffected (element DUP isn't in the simd_dp table → CALL_INTERP).
+- **teeworlds now boots to the menu** (map/skins/fonts load, "No joysticks
+  found", audio gracefully disabled) and runs a stable 45s+ frame loop with
+  zero SIGSEGV/DecodeError under `DISPLAY=:0`. The remaining
+  `incorrect data check` / `invalid distance too far back` lines are the
+  datafile loader tolerating resource quirks, not emulator failures.
