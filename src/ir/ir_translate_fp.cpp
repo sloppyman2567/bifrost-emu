@@ -967,6 +967,18 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                      ct.subop, cur_pc);
                 return true;
             }
+            case simd::Family::PAIRMIN: {
+                // SMAXP/SMINP/UMAXP/UMINP (pairwise max/min). src1 = rn,
+                // src2 = rm; imm = ct.subop (0=SMAXP, 1=SMINP, 2=UMAXP,
+                // 3=UMINP); width = esize; flags_op = Q. Q=1: Vd =
+                // pairwise(Vn) ++ pairwise(Vm); Q=0: Vd = pairwise(Vn)
+                // only. size==3 has no valid encoding (gas rejects the
+                // .1d/.2d pairwise forms), so esize is always 1/2/4 here.
+                emit(block, IROp::SIMD_PAIRMIN, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
             default:
                 break;
             }

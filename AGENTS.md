@@ -48,11 +48,28 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   not a silent NOP; log via `BIFROST_SIMD_TRACE=1`. Implement the missing
   op rather than re-silencing. SADDW/SADDW2 (0x0E201000) and UMINP
   (0x2E20AC00) sub3_noq groups are covered. The pairwise max/min family
-  (SMAXP/SMINP/UMAXP/UMINP) case label covers ALL sizes 0-3
-  (0x2E20A400/0x2E60A400/0x2EA0A400/0x2EE0A400 for max, +bit11 for min);
-  do not narrow it back to size=0 — GCC's vectorized memchr/strchr emit
-  `umaxp v31.4s` (size=2), which a size-0-only case label silently
-  DecodeErrors (SIGILL in interp-only, SIGABRT via JIT CALL_INTERP).
+  (SMAXP/SMINP/UMAXP/UMINP) is native in the JIT (`SIMD_PAIRMIN`,
+  1.5.3-alpha) AND covered in the interp; the interp sub_noq case needs
+  ALL SIXTEEN labels (0x0E*/0x2E* × 0xA400/0xAC00 × sizes 0-3) — the
+  old code listed only the UMAXP max forms, so SMAXP/SMINP/UMINP threw
+  DecodeError in interp-only mode and the signed forms were invisible to
+  JIT_VERIFY (verify compares JIT vs interp, so a missing interp label =
+  DecodeError, not a value mismatch). Do not narrow it back to size=0 —
+  GCC's vectorized memchr/strchr emit `umaxp v31.4s` (size=2), which a
+  size-0-only case label silently DecodeErrors (SIGILL in interp-only,
+  SIGABRT via JIT CALL_INTERP). Q=0 pairwise SEMANTICS: BOTH sources
+  always contribute — Vd low 8 bytes = {pairwise(Vn), pairwise(Vm)},
+  the Vm half is NOT zeroed (real-ARM; the sub3_noq UMINP handler at
+  interp_fp.cpp ~2649 always did this, and `test_simd_saddw_uminp` Q=0
+  checks depend on it). The interp 0x20A400 handler originally gated the
+  Vm half on Q (Q=0 → {Vn pairs, 0,0,0,0}) and the first JIT attempt
+  copied that; a punpcklqdq merge for Q=0 ALSO breaks it (pushes Vm's
+  bytes into v_hi, which store_vec discards) — Q=0 needs
+  `pslldq X5,4; por X4,X5` (each XMM holds its out_bytes=4 results in the
+  low bytes, high bytes 0x80'd by the pshufb masks); only Q=1 uses
+  punpcklqdq. `ctest/jit_simd_pairmin.c` covers all 4 ops × esizes
+  {1,2,4} × both Q, plus the teeworlds `uminp v0.16b,v0.16b,v0.16b`
+  self form.
   TBL/TBX all four forms
   (TBL1 0x0E000000, TBL2 0x0E002000, TBX1 0x0E001000, TBX2 0x0E003000;
   op2=bit12, L=bit13) are in interp — GCC lowers `vextq_u8` to TBL2 +

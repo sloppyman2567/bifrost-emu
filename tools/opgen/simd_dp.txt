@@ -187,3 +187,22 @@ ZIP1    0x3F20FC00   0x0E003800   PERMUTE    0x0E   Q || size != 3
 UZP2    0x3F20FC00   0x0E005800   PERMUTE    0x16   Q || size != 3
 TRN2    0x3F20FC00   0x0E006800   PERMUTE    0x1A   Q || size != 3
 ZIP2    0x3F20FC00   0x0E007800   PERMUTE    0x1E   Q || size != 3
+
+# ── PAIRMIN: SMAXP/SMINP/UMAXP/UMINP (pairwise max/min) ────────────────
+# Encoding: 0 Q U 01110 size Rm 01101 0 Rn Rd (3-register same, like
+# ADD/SUB). Empirical from gas (matches interp_fp.cpp case 0x2E20A400):
+#   SMAXP=0x0E20A400, SMINP=0x0E20AC00, UMAXP=0x2E20A400, UMINP=0x2E20AC00
+# (size=0 shown; the size bits[23:22] are masked off so one row covers all
+# sizes). bit11 = max(0)/min(1), bit29 (U) = signed(0)/unsigned(1). IRSUB =
+# subop (0=SMAXP, 1=SMINP, 2=UMAXP, 3=UMINP). Mask keeps U(29),
+# bits[28:24]=01110, bit21 and bits[15:10] (0x29/0x2A/0x2B) so min/max and
+# signed/unsigned are distinct rows. size==3 (.1d/.2d) is NOT a valid
+# encoding — gas rejects it (pairwise needs >= 2 elements), so the masked-off
+# size bits harmlessly cover sizes 0-2. Semantics: BOTH sources always
+# contribute — Q=1 -> Vd = pairwise(Vn) ++ pairwise(Vm) (16 bytes);
+# Q=0 -> Vd low 8 bytes = pairwise(Vn) ++ pairwise(Vm) (8 bytes, real-ARM;
+# the Vm half is NOT zeroed — see AGENTS.md Q=0 pairwise note).
+SMAXP    0x3F20FC00   0x0E20A400   PAIRMIN    0   -
+SMINP    0x3F20FC00   0x0E20AC00   PAIRMIN    1   -
+UMAXP    0x3F20FC00   0x2E20A400   PAIRMIN    2   -
+UMINP    0x3F20FC00   0x2E20AC00   PAIRMIN    3   -

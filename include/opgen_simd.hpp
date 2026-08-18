@@ -31,7 +31,8 @@ enum class Family : uint8_t {
     TBL = 13,
     INS = 14,
     PERMUTE = 15,
-    UNKNOWN = 16,
+    PAIRMIN = 16,
+    UNKNOWN = 17,
 };
 
 struct Op {
@@ -115,6 +116,10 @@ inline Op classify(uint32_t op) {
     if ((op & 0x3F20FC00U) == 0x0E005800U && (Q || size != 3)) return Op{Family::PERMUTE, 66, 22, "UZP2"};
     if ((op & 0x3F20FC00U) == 0x0E006800U && (Q || size != 3)) return Op{Family::PERMUTE, 67, 26, "TRN2"};
     if ((op & 0x3F20FC00U) == 0x0E007800U && (Q || size != 3)) return Op{Family::PERMUTE, 68, 30, "ZIP2"};
+    if ((op & 0x3F20FC00U) == 0x0E20A400U) return Op{Family::PAIRMIN, 69, 0, "SMAXP"};
+    if ((op & 0x3F20FC00U) == 0x0E20AC00U) return Op{Family::PAIRMIN, 70, 1, "SMINP"};
+    if ((op & 0x3F20FC00U) == 0x2E20A400U) return Op{Family::PAIRMIN, 71, 2, "UMAXP"};
+    if ((op & 0x3F20FC00U) == 0x2E20AC00U) return Op{Family::PAIRMIN, 72, 3, "UMINP"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

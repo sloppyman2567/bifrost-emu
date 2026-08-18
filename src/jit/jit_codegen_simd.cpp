@@ -84,6 +84,29 @@ static void build_permute_masks(uint8_t opc6, int esize, bool q,
     }
 }
 
+// ── SIMD_PAIRMIN pshufb even/odd deinterleave masks ─────────────────────
+// Pairwise max/min of a vector = lane-wise max/min of its EVEN and ODD
+// elements (out[i] = max/min(a[2i], a[2i+1])). Each source register is
+// deinterleaved with pshufb into even/odd registers, the pmin/pmax op
+// fuses them, and for Q=1 the two halves punpcklqdq together. `out_bytes`
+// is 8 for Q=1 (elems/2 results) and 4 for Q=0 (elems/2 results of the
+// 8-byte operand); the trailing mask bytes are 0x80 (pshufb -> 0), so the
+// Q=0 low 64 bits come out {results, 0,0,0,0} exactly like the interp.
+// esize = element size in bytes (1, 2, 4).
+static void build_pair_masks(int esize, bool q,
+                             uint8_t maskEven[16], uint8_t maskOdd[16]) {
+    for (int k = 0; k < 16; k++) { maskEven[k] = 0x80; maskOdd[k] = 0x80; }
+    const int out_bytes = q ? 8 : 4;
+    const int results = out_bytes / esize;
+    for (int oi = 0; oi < results; oi++) {
+        for (int j = 0; j < esize; j++) {
+            const int o = oi * esize + j;
+            maskEven[o] = static_cast<uint8_t>((2 * oi) * esize + j);
+            maskOdd[o]  = static_cast<uint8_t>((2 * oi + 1) * esize + j);
+        }
+    }
+}
+
 // ── FrostJIT::compile_ir_simd ─────────────────────────────────────────
 // Handles all SIMD_* IR ops. Returns true if the op was handled, false if
 // not (caller falls through to the next dispatcher or residual switch).
@@ -2068,6 +2091,100 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             sse2_38(0x00, 0, 2);   // X0 = pshufb(A, maskA)
             sse2_38(0x00, 1, 3);   // X1 = pshufb(B, maskB)
             sse2_op(0xEB, 0, 1);   // X0 |= X1
+            store_vec(0, static_cast<int>(inst.dest), q);
+            return true;
+        }
+        // ── SIMD PAIRMIN (SMAXP/SMINP/UMAXP/UMINP) — pairwise max/min ──
+        // Pairwise min/max = lane-wise min/max of the EVEN and ODD elements
+        // of each source (deinterleaved via pshufb), combined so Q=1 gives
+        // pairwise(Vn) ++ pairwise(Vm). imm = subop (0=SMAXP, 1=SMINP,
+        // 2=UMAXP, 3=UMINP); width = esize (1/2/4 — size==3 never encodes);
+        // flags_op = Q. Memory path (never vec-cache pinned). Signed byte/
+        // dword and ALL unsigned word/dword need SSE4.1 (pmin* ops);
+        // unsigned byte and signed word are SSE2. esize==8 is a defensive
+        // CALL_INTERP (no valid encoding exists, but the size bits are left
+        // in the classify mask). XMM0=A, XMM1=B, XMM2/3=even/odd masks,
+        // XMM4/5 = fusing scratch.
+        case IROp::SIMD_PAIRMIN: {
+            if (vec_cache_active_) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            const int esize = static_cast<int>(inst.width);
+            const bool q = inst.flags_op != 0;
+            const int subop = static_cast<int>(inst.imm);
+            if (esize != 1 && esize != 2 && esize != 4) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            const bool is_min = (subop == 1 || subop == 3);
+            const bool is_uns = (subop == 2 || subop == 3);
+            uint8_t op_byte = 0;
+            bool need38 = false;
+            bool supported = true;
+            if (is_uns) {
+                if (esize == 1) {
+                    op_byte = is_min ? 0xDA : 0xDE;   // pminub/pmaxub (SSE2)
+                } else {
+                    if (!has_sse41()) { supported = false; }
+                    else {
+                        need38 = true;
+                        op_byte = is_min
+                            ? (esize == 2 ? 0x3A : 0x3B)   // pminuw/pminud
+                            : (esize == 2 ? 0x3E : 0x3F);  // pmaxuw/pmaxud
+                    }
+                }
+            } else {  // signed
+                if (esize == 2) {
+                    op_byte = is_min ? 0xEA : 0xEE;   // pminsw/pmaxsw (SSE2)
+                } else {
+                    if (!has_sse41()) { supported = false; }
+                    else {
+                        need38 = true;
+                        op_byte = is_min
+                            ? (esize == 1 ? 0x38 : 0x39)   // pminsb/pminsd
+                            : (esize == 1 ? 0x3C : 0x3D);  // pmaxsb/pmaxsd
+                    }
+                }
+            }
+            if (!supported) {
+                emit_call_interp(inst.arm_pc, false);
+                return true;
+            }
+            uint8_t maskEven[16], maskOdd[16];
+            build_pair_masks(esize, q, maskEven, maskOdd);
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));   // X0 = A (Vn)
+            load_vec(1, static_cast<int>(inst.src2));   // X1 = B (Vm)
+            emit_mask16(2, maskEven);
+            emit_mask16(3, maskOdd);
+            movdqa(4, 0);            // X4 = A copy
+            sse2_38(0x00, 4, 2);     // X4 = even(A)
+            sse2_38(0x00, 0, 3);     // X0 = odd(A)
+            if (need38) sse2_38(op_byte, 4, 0);
+            else        sse2_op(op_byte, 4, 0);   // X4 = minmax(even(A), odd(A))
+            movdqa(5, 1);            // X5 = B copy
+            sse2_38(0x00, 5, 2);     // X5 = even(B)
+            sse2_38(0x00, 1, 3);     // X1 = odd(B)
+            if (need38) sse2_38(op_byte, 5, 1);
+            else        sse2_op(op_byte, 5, 1);   // X5 = minmax(even(B), odd(B))
+            // Pack both halves: a pairwise op ALWAYS reads both sources.
+            // Q=1: punpcklqdq gives [8 result bytes of Vn, 8 of Vm].
+            // Q=0: each XMM holds its out_bytes=4 result bytes in the low
+            // bytes (high bytes 0x80'd by the masks); pslldq the Vm half
+            // up by 4 bytes and OR it in so the low 8 bytes come out
+            // {pairwise(Vn), pairwise(Vm)} — real ARM semantics, matching
+            // the interp. (The old Q=0 path zeroed the Vm half, breaking
+            // Q=0 uses with differing srcs; a plain punpcklqdq for Q=0
+            // would push Vm's bytes into v_hi, which store_vec then
+            // discards for Q=0.)
+            if (q) {
+                sse2_op(0x6C, 4, 5);     // punpcklqdq X4 = [low64(X4), low64(X5)]
+            } else {
+                sse2_imm(0x73, 5, 7, 4); // pslldq X5, 4 (up to byte 4)
+                sse2_op(0xEB, 4, 5);     // por  X4, X5
+            }
+            movdqa(0, 4);
             store_vec(0, static_cast<int>(inst.dest), q);
             return true;
         }

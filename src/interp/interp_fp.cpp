@@ -994,25 +994,21 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   U=1, C=0: UMAXP (unsigned pairwise max)
             //   U=1, C=1: UMINP (unsigned pairwise min)
             // After sub_noq (Q stripped, U kept):
-            //   U=0 → sub_noq = 0x2E20A400
-            //   U=1 → sub_noq = 0x6E20A400
-            // Wait — 0x6E... & ~(1<<30) = 0x2E... So both U=0 and U=1
-            // map to sub_noq = 0x2E20A400! The U bit (29) is NOT
-            // distinguished by sub_noq because sub_noq only strips Q (30).
-            //
-            // Actually: 0x2E = 0010 1110 (bit 29=1, bit 30=0)
-            //           0x6E = 0110 1110 (bit 29=1, bit 30=1)
-            // After stripping Q (bit 30): both become 0x2E.
-            // So U=0 and U=1 BOTH map to 0x2E20A400 after sub_noq!
-            // That means the existing case 0x2E20A400 already handles
-            // BOTH SMAXP/SMINP (U=0) AND UMAXP/UMINP (U=1).
-            //
-            // The bug was NOT that UMAXP didn't match — it DID match
-            // (via sub_noq). The bug was that the code used unsigned
-            // comparison (uint64_t), which is correct for UMAXP but
-            // WRONG for SMAXP. We now check the U bit at runtime to
-            // select signed vs unsigned comparison.
-            case 0x2E20A400: case 0x2E60A400: case 0x2EA0A400: case 0x2EE0A400: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0); size 0-3
+            //   U=1 → sub_noq = 0x2E20A400 (UMAXP/UMINP, Q=0 base 0x2E)
+            //   U=0 → sub_noq = 0x0E20A400 (SMAXP/SMINP, Q=0 base 0x0E)
+            // sub_noq strips ONLY Q (bit 30), so the U bit (29) still
+            // distinguishes signed (0x0E*) from unsigned (0x2E*) — both
+            // label sets must be present or the signed forms throw
+            // DecodeError. The handler reads the runtime U bit (op>>29)
+            // and C bit (op>>11, max vs min) so one shared body serves
+            // all four ops; the 0x*C00 (bit11=1 = min) label sets are
+            // REQUIRED too — sub_noq keeps bit 11, so without them
+            // SMINP/UMINP fall through to DecodeError (the original code
+            // only listed the max forms and threw SIGILL on the min ops).
+            case 0x0E20A400: case 0x0E60A400: case 0x0EA0A400: case 0x0EE0A400:
+            case 0x0E20AC00: case 0x0E60AC00: case 0x0EA0AC00: case 0x0EE0AC00:
+            case 0x2E20A400: case 0x2E60A400: case 0x2EA0A400: case 0x2EE0A400:
+            case 0x2E20AC00: case 0x2E60AC00: case 0x2EA0AC00: case 0x2EE0AC00: {  // UMAXP/UMINP (U=1) and SMAXP/SMINP (U=0); size 0-3
                 // bit 15. Verified by comparing UMAXP (0x6e20a400) vs UMINP
                 // (0x6e20ac00) — they differ only at bit 11. The old code
                 // used bit 15, which is part of the opcode that
@@ -1065,10 +1061,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     int64_t res = do_pair(n0, n1);
                     memcpy(out + i * esize, &res, esize);
                 }
-                // Second half: pairwise op on Vm (only for Q=1; for Q=0
-                // the output is only 8 bytes and the second half goes to
-                // the zeroed v_hi).
-                if (Q) {
+                // Second half: pairwise op on Vm. This runs for BOTH Q=0
+                // and Q=1: a 64-bit (Q=0) pairwise op packs half its
+                // result bytes from Vn and half from Vm into v_lo — the
+                // second half is NOT zeroed. (The old Q=0 gating produced
+                // {Vn pairs, 0,0,0,0}, which broke any Q=0 use where the
+                // sources differ; the sub3_noq UMINP handler at ~2649
+                // already computed both halves, and real ARM does too.)
+                {
                     int half = (elems / 2) * esize;  // offset into out
                     for (int i = 0; i < elems / 2; i++) {
                         int64_t m0 = load_elem(buf_m + (2*i) * esize);

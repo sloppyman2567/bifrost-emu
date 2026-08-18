@@ -261,6 +261,17 @@ enum class IROp : uint8_t {
     //   flags_op = Q (0=64-bit operands: process v_lo only, ZERO v_hi;
     //                 1=128-bit: process v_lo AND v_hi)
     SIMD_PERMUTE,
+    // Native SIMD pairwise max/min (SMAXP/SMINP/UMAXP/UMINP, 1.5.3-alpha).
+    // Element-wise min/max of adjacent pairs within each source (the
+    // interp's pairwise block in interp_fp.cpp is the semantic reference).
+    // Q=1: Vd = pairwise(Vn) ++ pairwise(Vm) (first half then second half);
+    // Q=0: Vd = pairwise(Vn) only, 4 result bytes, rest zero.
+    //   src1 = source A (rn), src2 = source B (rm)
+    //   width = element size in bytes (1, 2, 4 — size==3 has no valid
+    //           encoding, gas rejects .1d/.2d)
+    //   imm  = subop (0=SMAXP, 1=SMINP, 2=UMAXP, 3=UMINP)
+    //   flags_op = Q (0=64-bit operands, 1=128-bit)
+    SIMD_PAIRMIN,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype
