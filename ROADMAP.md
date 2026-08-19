@@ -95,6 +95,117 @@ status, see [TESTS.md](TESTS.md).
     (render onto every swapchain image, not just image 0) and add
     multi-frame fences + semaphore-based acquire/present sync so
     double-buffered engines run at native throughput.
+14. **Tier-2 JIT: region/trace compilation (the performance milestone).**
+    Rationale (measured 2026-08-19): SIGPROF on the minecraft game shows
+    the `jit` bucket (generated native code) at 56-71% of wall time while
+    dispatch/thunks/mmap are <25% combined — the residual emulator cost is
+    the per-block regalloc spill/reload at every block boundary, not
+    dispatch or marshalling. Design spec below.
+
+### Tier-2 JIT — design spec (2026-08-19)
+
+**Goal:** kill the per-block boundary cost. Today every block
+`flush_all_vregs()` + `vec_cache_writeback_all()` at its epilogue and the
+successor reloads those same values from `cpu.regs[]`/stack — the values
+cross the boundary in memory even when the same host register would do.
+FWD (`BIFROST_ENABLE_FWD=1`) mitigates only the LOAD_REG round-trip
+(~4% on chunkmesh; AGENTS.md: "the real cost is regalloc spill/reload
+bloat, not round-trips"). Tier-2 compiles a **region** (a trace or a
+natural loop) as ONE unit with a WHOLE-REGION register allocation, so
+loop-carried values stay resident in host registers across the back-edge
+and across internal block edges.
+
+**Existing groundwork (reuse, don't reinvent):**
+- Block IR + liveness already exist per block (`IRBlock`,
+  `kills_per_op_`/`vreg_last_use_op_`/`fold_ahead_kind_` in
+  translate_block). A region is just a linear list of blocks' IR with
+  cross-block edge links.
+- Chain-skip's shared 32 KB frame (`kChainSkipFrameBytes`) already gives
+  every chained block a unified vreg slot space — the region allocator
+  can claim per-region stack slots from the SAME ceiling.
+- Cross-block BRCOND flag-materialize skip already proved cross-block
+  value analysis is tractable here (`pending_flag_mat_`,
+  `chain_back_references` retroactive patching, `reads_pstate_before_set`).
+- Block profiling exists (`tls_hot_pc_counts_` is the naive per-PC counter;
+  `dump_pc_histogram` resolves hot guest PCs; `block_profile` records
+  block-end reasons). `BIFROST_PC_HIST=1` data already names the hot loops.
+
+**Phase 1 — trace collection (profile-guided):**
+- Add a cheap per-block-edge execution counter (a `uint32_t` on
+  `BlockEntry`, incremented at dispatch, flushed to a shared map on the
+  slow path like `tls_hot_pc_counts_`). Identify hot heads: a block whose
+  execution count crosses `TIER2_MIN_HITS` (tunable, start ~10K).
+- From a hot head, grow a **trace** by walking guest control flow at
+  translate time: decode straight-line, follow the most-taken successor
+  (the chain-patch target if present, else the fall-through), never
+  crossing an SVC / CALL_INTERP / indirect-BR / interp_only block /
+  BL_CALL with an untranslated callee. Cap length (start 64 blocks or
+  ~2048 guest instructions). Record the side exits.
+- Trace becomes an `IRBlock` list with entry/exit contracts. Key
+  correctness rule from chain-skip: every region-internal edge must be a
+  provable value-carrying edge (no hidden pstate/vector reads on entry —
+  reuse the `reads_pstate_before_set` pre-scan per block; vectors via the
+  existing vec-cache writeback-on-exit contract).
+
+**Phase 2 — whole-region register allocation:**
+- Allocate the region's vregs as ONE linear scan over the concatenated IR,
+  exactly like today's per-block scan but spanning internal edges:
+  live-in = the value contract (ARM regs read before write at region
+  entry), live-out = the boundary flush set.
+- The allocator reuses `x86_regalloc.cpp` primitives
+  (`alloc_reg_for`/`evict_vreg`/`kill_vreg`/`set_vreg_reg`) but the
+  "block boundary" is now just a point where today's code would flush —
+  the region allocator instead keeps loop-carried vregs in their host reg
+  across the back-edge (the self-loop slot already does this for a single
+  block; tier-2 generalizes it to multi-block loops).
+- Spills only when pressure exceeds the 10 GPRs; the Belady next-use
+  eviction already in the allocator extends naturally to the region.
+
+**Phase 3 — cross-block optimization on the region IR:**
+- LICM: move loop-invariant `LOAD_MEM`/`IMM`/ALU out of the loop body
+  (with the existing alias rules: only direct-window loads are safe to
+  hoist, same reasoning as the const-folding guards).
+- Constant propagation across edges (extend `jit_consts_` — today it is
+  per-block; a region shares one map keyed by vreg).
+- Dead-code elimination across internal edges (a value defined in block A
+  and never read after block B is dropped, not flushed).
+- Reuse the flag-skip analysis for the loop back-edge instead of
+  materializing pstate every iteration.
+
+**Execution model — keep it a superset of today:**
+- A region is compiled to a single function in `code_buf_` with its own
+  `BlockEntry`-style entry; the region's head PC maps to the region fn in
+  `blocks_` (overrides the single block). Region-internal edges jump
+  directly (no dispatcher round-trip). Side exits jump to the existing
+  per-block entry points (patched via the existing `back_refs_`/
+  `patch_chain` machinery) so a region exit is indistinguishable from a
+  normal block exit.
+- Regions do NOT participate in BL_CALL/BLR_CALL interop: a BL/BLR inside
+  a trace ends the trace (call edge dispatches normally). This keeps the
+  direct-call epilogue contract intact.
+- Verify mode (`BIFROST_JIT_VERIFY=1`) treats the region fn like any other
+  block (compare exit cpu state against interp) — this is the primary
+  correctness net; a `BIFROST_TIER2=0` env gate (default ON once stable)
+  gives A/B.
+- W^X: region emission uses the same make_writable/make_executable bracket.
+
+**Acceptance / milestones:**
+- M1: trace collection + region compilation with NO cross-block opt, whole-
+  region allocation only → measure bench_mips / bench_matrix / CoreMark /
+  chunkmesh under `BIFROST_TIER2=1`. Target: >15% on bench_mips beyond the
+  current ~360ms, suite 205/205 + `BIFROST_JIT_VERIFY` clean.
+- M2: add LICM + cross-block const-prop + region DCE. Re-measure; keep the
+  FWD interaction honest (AGENTS.md: the two `ir_optimize.cpp` folds were
+  dropped for hanging CoreMark under FWD — the region pass must NOT assume
+  FWD, and any fold added here needs the same FWD+verify soak).
+- M3: minecraft game A/B — frame time at a fixed render tick, not FPS
+  (FPS spikes are host frame pacing). Expect the SIGPROF `jit` bucket to
+  shrink; chunk loads already <20ms.
+
+**Non-goals for v1:** multi-entry regions, exception/overflow bookkeeping
+inside a region, hardware-synchronized writes inside a region, region
+splitting under register pressure, cross-region optimization. Keep the
+IR/regalloc APIs stable so tier-2 is additive, not a rewrite.
 
 ### v1.5.3-alpha additions (shipped 2026-08-15)
 
