@@ -44,11 +44,32 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 namespace arm64emu {
 struct CPU;
 class Emulator;
 class Memory;
+// ── Tier-2 trace (ROADMAP #14, Phase 1 step 2) ──────────────────────────
+// A candidate tier-2 trace: a linear run of guest blocks whose IR will be
+// compiled as ONE region with ONE register allocation (a later task). Pure
+// data collection — collect_tier2_trace() emits no code, touches no block
+// cache, and compiles nothing.
+struct Tier2Trace {
+    struct Block {
+        uint64_t pc;            // block start PC
+        IRBlock  ir;            // translated IR for this block
+        // Side exits: for each conditional branch in this block whose taken
+        // target leaves the trace, the (target_pc, ir_op_index). A back-edge
+        // to the trace head is recorded here too (target_pc == head_pc).
+        std::vector<std::pair<uint64_t, int>> side_exits;
+    };
+    std::vector<Block> blocks;
+    uint64_t head_pc = 0;
+    uint64_t total_insts = 0;   // sum of block instruction counts
+    bool ok = false;            // false = trace aborted (never compile)
+    const char* stop_reason = nullptr;  // why collection stopped (debug)
+};
 // Regalloc bloat diagnostics (BIFROST_REGALLOC_STATS=1). Counted at the
 // (codegen-time) spill/reload emit sites; reset per translated block.
 struct regalloc_stats_t {
@@ -226,6 +247,10 @@ public:
     // tier2_hits_threshold() slow-path executions while BIFROST_TIER2=1.
     // Printed by dump_periodic_stats alongside the block-end reasons.
     std::atomic<uint64_t> tier2_hot_heads{0};
+    // Tier-2 trace counter (ROADMAP #14, Phase 1 step 2): traces that reached
+    // ok=true (>= 2 blocks) during collection. Not yet wired into periodic
+    // stats — that belongs to the compilation task.
+    std::atomic<uint64_t> tier2_traces{0};
     // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
     // blocks stop early. avg instructions/block is the JIT's #1 dispatch
     // overhead lever, and these counters reveal whether blocks split at
@@ -437,6 +462,15 @@ public:
     static bool     tier2_enabled();
     static uint32_t tier2_hits_threshold();
     static bool     tier2_trace_enabled();
+    // Tier-2 trace collection (ROADMAP #14, Phase 1 step 2). Walks guest
+    // code from a hot head, translating each instruction to IR, and returns
+    // a candidate trace (blocks + side exits) for a later task to compile as
+    // one region. PURE COLLECTION: emits no code, never touches blocks_ beyond
+    // read-only membership checks, and resets g_alloc per block so it never
+    // consumes the global regalloc. Call with the block table quiescent (the
+    // hot-head fire site in run_block holds the shared lock). Implemented in
+    // src/jit/jit_tier2.cpp.
+    Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,

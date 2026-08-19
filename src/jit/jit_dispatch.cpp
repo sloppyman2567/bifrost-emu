@@ -164,6 +164,13 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 it->second.tier2_hot_logged = true;
                 entry.tier2_hot_logged = true;
                 tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+                // Tier-2 Phase 1 step 2 trigger hook: collect (NEVER compile)
+                // a candidate trace from this hot head — the trace walker in
+                // jit_tier2.cpp. PURE COLLECTION: it only reads blocks_ (we're
+                // under the shared lock) and resets g_alloc per block, so this
+                // has no effect on the running block. The result is discarded
+                // here; the compilation task consumes it later.
+                (void)collect_tier2_trace(emu, pc);
                 if (tier2_trace_enabled()) {
                     fprintf(stderr, "[tier2] hot head pc=0x%llx exec=%u\n",
                             static_cast<unsigned long long>(pc),

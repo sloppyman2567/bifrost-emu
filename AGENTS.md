@@ -1336,6 +1336,43 @@ not musl-`-static`.
   generated AArch64 asm, `BIFROST_NO_CHAIN=1 BIFROST_NO_SELFLOOP=1` +
   `BIFROST_TIER2_HITS=1000`) fired exactly **260 hot heads** (one per block,
   once each) and printed `tier2: hot_heads=260` in the periodic reporter.
+- **Tier-2 trace collection contract (Phase 1 step 2, 2026-08-19):**
+  `FrostJIT::collect_tier2_trace(emu, head_pc)` (src/jit/jit_tier2.cpp) walks
+  guest code from a hot head and produces a `Tier2Trace` (linear block list,
+  each with its `IRBlock` + `side_exits` (target_pc, ir-op-index pairs for
+  taken edges leaving the trace)) — PURE COLLECTION, no code emission, no
+  blocks_ writes (read-only `.find` membership checks only), and
+  `ir_reset_vreg_alloc()` per block so the global thread-local allocator is
+  never consumed. Triggered from the hot-head fire site in run_block
+  (jit_dispatch.cpp, under the shared blocks_mutex_ — safe). Caps: 64 blocks
+  or 2048 guest instructions (ROADMAP #14). Stop classification: ABORTS
+  (ok stays false) = call_interp / svc / indirect_br / bl / decode_fail /
+  vreg_exhaust; NORMAL ends = cold_entry / revisit / ret / b_exit /
+  b_backedge / block_cap / inst_cap. `ok = !aborted && blocks.size() >= 2`
+  (a 1-block trace is just the existing block JIT); `too_short` is set only
+  when a non-aborted trace ends with no specific reason. `tier2_traces`
+  counts ok=true traces (not yet wired into periodic stats). The walker
+  follows only FALL-THROUGH edges; taken targets become side_exits /
+  back-edges (target==head_pc). Same decode/translate machinery as
+  translate_block (fetch_inst + decode + translate_to_ir, same branch-target
+  formulas ip+d.imm), and the BL/BLR/CALL_INTERP/SVC abort rules mirror
+  M1's "no calls in traces". The trigger hook is a call-only stub; the
+  compilation task consumes the trace later. Measured on the synthetic
+  cold-fall-through workload (`/tmp/opencode/tier2_coldchain5.elf`: head
+  `subs;b.ne t1` with a never-executed 2240-add fall-through chain + 260-block
+  Bcond thrash cycle): head fires as a hot head and the walker collects a
+  **64-block / 2018-inst trace ending in `block_cap` with `ok=1`**, head's
+  b.ne recorded as a side exit to t1; the 259 thrash blocks each yield
+  1-block `cold_entry` traces (their fall-throughs are warm) and the cycle's
+  `b head` block yields 1-block `b_exit`. Bench_mips acc unchanged
+  (0xf800800a2c4ff835) with tier2 on; quick suite 200/200. Known caveat (not
+  a walker bug): a hot head only fires when its inline-cache slot is thrashed
+  — a block whose hash slot is not shared with any later-dispatching block
+  self-pins in the 256-slot direct-mapped cache and never reaches the slow
+  path (exec_count stays 1). On the synthetic thrash cycles the t-blocks
+  fire (odd slots, each shared by a +1024-byte twin) but a head at a slot
+  with no later writer does not; place the head so its slot collides with a
+  later cycle block if you need it to fire.
 - **IMPORTANT FINDING for the next tier-2 step:** user hot loops are entered
   via BL/BLR from `_start`/`__libc_start_main`, so they run INSIDE
   `jit_call_helper`'s dispatch loop (`lookup_call_target`, which has its OWN
@@ -1350,3 +1387,30 @@ not musl-`-static`.
   thread-local caches and `blocks_` map) or the feature stays inert on real
   workloads. Documented here so it's not re-discovered; the env gates +
   counter plumbing is exactly what the spec asked for and is a correct seed.
+
+## Session History (2026-08-19) — Tier-2 Phase 1 step 2 (trace walker)
+
+- **`collect_tier2_trace` landed and VERIFIED with an `ok=1` multi-block
+  trace.** Implementation + contract in the Local Contracts section above.
+  Working state: `make` clean, quick suite **200/200**, bench_mips acc
+  `0xf800800a2c4ff835` unchanged with tier2 on, synthetic workload
+  demonstrates the full 64-block/2048-inst walk ending in `block_cap` with
+  the head's conditional branch recorded as a side_exit. Committed: NOT yet
+  (leave for the compilation task).
+- **The hot-head firing condition is the inline-cache slot**, not the slow
+  path itself: `BlockEntry.exec_count` only increments on a slow-path cache
+  HIT (`blocks_.find` succeeds), and a block whose 256-slot direct-mapped
+  inline-cache slot (`((pc>>2)^(pc>>17)) & 255`) is never overwritten by a
+  later-dispatching block SELF-PINS and never fires (exec_count stays 1).
+  On the coldchain thrash cycles the t-blocks fire (each odd slot is shared
+  by a +1024-byte twin) but a head at an unshared slot (or a slot shared
+  only by other fast-path-pinned blocks) does not. Placement rule: put the
+  head so its slot collides with a block that dispatches AFTER it each
+  cycle. Unresolved micro-mystery (not blocking): on coldchain4 the slot-0
+  trio (head 0x400080 / t31 0x402480 / t159 0x402880) never dispatches via
+  the slow path at all (0 DBG_PC entry probes, absent from the hot-head
+  list) yet still executes — the fast-path mechanics behind that asymmetry
+  were not fully explained and were not needed once the head was moved to a
+  shared odd slot (coldchain5). Workloads: /tmp/opencode/tier2_coldchain
+  {1,2,3,4,5}.s/.elf (coldchain5 = head at 0x400084 slot 1, 2239-add
+  fall-through chain → fires + walks 64 blocks).
