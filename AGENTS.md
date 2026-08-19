@@ -1310,3 +1310,43 @@ not musl-`-static`.
   vkCmdDraw/DrawIndexed + descriptor sets in a real frame, depth
   buffers, per-image command buffers (currently the test clears image 0
   only).
+
+## Session History (2026-08-19) — Tier-2 Phase 1 step 1 (hot-head counters)
+
+- **Tier-2 (ROADMAP #14) Phase 1 first step landed: per-block slow-path
+  execution counters + env gates + hot-head diagnostics. NO trace building /
+  region compilation yet.** `BlockEntry.exec_count` (uint32_t) + `tier2_hot_logged`
+  (bool) in frostjit.hpp; `FrostJIT::tier2_enabled()` / `tier2_hits_threshold()`
+  (default 10000) / `tier2_trace_enabled()` static getters in frostjit.cpp
+  (read once, mirroring `chain_skip_enabled`); `FrostJIT::tier2_hot_heads`
+  (std::atomic<uint64_t>) counter. `run_block`'s SLOW-PATH cache-HIT branch
+  (jit_dispatch.cpp, after `cache_hits++`, under the shared `blocks_mutex_`)
+  does `++it->second.exec_count` and, on crossing the threshold with
+  `BIFROST_TIER2=1`, sets `tier2_hot_logged`, bumps `tier2_hot_heads`, and logs
+  `[tier2] hot head pc=0x.. exec=N` under `BIFROST_TIER2_TRACE=1`. The fast
+  paths (`tls_last_block_` / inline cache) and the interp_only demotion
+  machinery (`tls_hot_pc_counts_` / `HOT_PC_THRESHOLD`) are untouched; with
+  `BIFROST_TIER2` unset the whole block is skipped (two static-bool reads) so
+  behavior is byte-identical. `dump_periodic_stats` prints
+  `tier2: hot_heads=<delta>` after the block-end reasons (jit_glue.cpp,
+  aggregated across per-thread JITs like the other counters). Verified:
+  `make` clean, quick suite **200/200** (tier2 off), bench_mips acc
+  `0xf800800a2c4ff835` identical with tier2 off/on/on+trace, and a synthetic
+  261-block top-level asm loop (`/tmp/opencode/tier2_toploop.elf`, built from
+  generated AArch64 asm, `BIFROST_NO_CHAIN=1 BIFROST_NO_SELFLOOP=1` +
+  `BIFROST_TIER2_HITS=1000`) fired exactly **260 hot heads** (one per block,
+  once each) and printed `tier2: hot_heads=260` in the periodic reporter.
+- **IMPORTANT FINDING for the next tier-2 step:** user hot loops are entered
+  via BL/BLR from `_start`/`__libc_start_main`, so they run INSIDE
+  `jit_call_helper`'s dispatch loop (`lookup_call_target`, which has its OWN
+  thread-local last-block + inline caches) or inside direct `call rel32`
+  chains — they NEVER reach `run_block`'s slow path. `run_block` slow-path
+  dispatches are essentially only the libc `_start`/startup blocks (31 on a
+  simple static musl binary), so `exec_count` stays ~1 for every real hot
+  block and hot heads will NOT fire on games/benchmarks with this placement.
+  The counter only grows when the 256-slot inline cache thrashes on a
+  top-level loop (>256 distinct blocks in the cycle). The next step should
+  ALSO increment in `lookup_call_target`'s slow path (it shares the same
+  thread-local caches and `blocks_` map) or the feature stays inert on real
+  workloads. Documented here so it's not re-discovered; the env gates +
+  counter plumbing is exactly what the spec asked for and is a correct seed.

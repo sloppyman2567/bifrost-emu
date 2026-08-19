@@ -39,6 +39,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <unordered_map>
 #include <vector>
@@ -59,6 +60,29 @@ bool FrostJIT::chain_skip_enabled() {
 // BIFROST_NO_DIRECT_CALL=1 disables it (bisection / debugging).
 bool FrostJIT::direct_call_enabled() {
     static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
+    return on;
+}
+// ── Tier-2 env gates (BIFROST_TIER2, default OFF) ──────────────────────
+// Tier-2 is the future trace/region JIT (ROADMAP #14). Phase 1 feeds it
+// with per-block hot-head detection: BlockEntry::exec_count counts slow-path
+// dispatches, and a block crossing tier2_hits_threshold() under BIFROST_TIER2
+// is flagged/logged (BIFROST_TIER2_TRACE=1). This first step builds NO
+// traces yet — later tasks grow regions from these hot heads. All gates read
+// once (mirroring chain_skip_enabled), so the default (BIFROST_TIER2 unset)
+// changes no behavior.
+bool FrostJIT::tier2_enabled() {
+    static const bool on = (getenv("BIFROST_TIER2") != nullptr);
+    return on;
+}
+uint32_t FrostJIT::tier2_hits_threshold() {
+    static const uint32_t hits = [] {
+        const char* s = getenv("BIFROST_TIER2_HITS");
+        return s ? static_cast<uint32_t>(strtoul(s, nullptr, 10)) : 10000;
+    }();
+    return hits;
+}
+bool FrostJIT::tier2_trace_enabled() {
+    static const bool on = (getenv("BIFROST_TIER2_TRACE") != nullptr);
     return on;
 }
 // ── Compile-time layout checks ─────────────────────────────────────────

@@ -149,6 +149,28 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
+        // ── Tier-2 hot-head detection (BIFROST_TIER2=1, default OFF) ──
+        // Count SLOW-PATH dispatches per block (BlockEntry::exec_count) and
+        // flag the block once it crosses tier2_hits_threshold() — the tier-2
+        // trace/region "hot head" feed (ROADMAP #14, Phase 1; a later task
+        // builds traces from these). Plain increment under the shared lock
+        // (single-threaded per block is typical; the map mutation is under a
+        // lock anyway). This is NOT the interp_only demotion machinery
+        // (tls_hot_pc_counts_ / HOT_PC_THRESHOLD) and the fast paths
+        // (tls_last_block_ / inline cache) stay untouched.
+        if (tier2_enabled() && !entry.tier2_hot_logged) {
+            uint32_t n = ++it->second.exec_count;
+            if (n >= tier2_hits_threshold()) {
+                it->second.tier2_hot_logged = true;
+                entry.tier2_hot_logged = true;
+                tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+                if (tier2_trace_enabled()) {
+                    fprintf(stderr, "[tier2] hot head pc=0x%llx exec=%u\n",
+                            static_cast<unsigned long long>(pc),
+                            static_cast<unsigned>(n));
+                }
+            }
+        }
         // Per-PC hotness tracking (thread-local, no lock needed for the
         // counter, but promoting to interp_only needs exclusive lock).
         // Runtime promotion to interp_only is DISABLED by default: the

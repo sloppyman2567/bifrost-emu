@@ -222,6 +222,10 @@ public:
     std::atomic<uint64_t> cache_misses{0};
     std::atomic<uint64_t> interpreter_fallbacks{0};
     std::atomic<uint64_t> block_chains_patched{0};
+    // Tier-2 hot-head counter (ROADMAP #14, Phase 1): blocks that crossed
+    // tier2_hits_threshold() slow-path executions while BIFROST_TIER2=1.
+    // Printed by dump_periodic_stats alongside the block-end reasons.
+    std::atomic<uint64_t> tier2_hot_heads{0};
     // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
     // blocks stop early. avg instructions/block is the JIT's #1 dispatch
     // overhead lever, and these counters reveal whether blocks split at
@@ -425,6 +429,14 @@ public:
     // through jit_call_helper → lookup_call_target. Disable with
     // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
     static bool direct_call_enabled();
+    // Tier-2 (trace/region JIT) env gates (ROADMAP #14, Phase 1). Read once
+    // at first use, mirroring chain_skip_enabled(). BIFROST_TIER2=1 enables
+    // hot-head detection (default OFF — no behavior change when unset);
+    // BIFROST_TIER2_HITS = the "hot head" threshold (default 10000);
+    // BIFROST_TIER2_TRACE=1 logs each hot head as it fires.
+    static bool     tier2_enabled();
+    static uint32_t tier2_hits_threshold();
+    static bool     tier2_trace_enabled();
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
@@ -509,6 +521,17 @@ private:
         bool    interp_only = false;  // true if block is too CALL_INTERP-heavy to JIT — run via interpreter
         int     interp_only_count = 0; // number of ARM instructions to step for interp_only blocks
         int     call_interp_count = 0; // number of CALL_INTERP fallbacks in this block
+        // Tier-2 hot-head detection counter (ROADMAP #14, Phase 1). Counts
+        // SLOW-PATH dispatches of this block (incremented under the shared
+        // blocks_mutex_ in run_block; the fast paths never touch it). When it
+        // crosses tier2_hits_threshold() under BIFROST_TIER2=1, the block is
+        // flagged as a "hot head" — a future tier-2 task builds a trace/region
+        // from it. This is NOT the interp_only demotion machinery
+        // (tls_hot_pc_counts_ / HOT_PC_THRESHOLD).
+        uint32_t exec_count = 0;
+        // Set once the block has been flagged as a hot head, so the flag +
+        // trace-fire happen exactly once per block (exec_count keeps counting).
+        bool     tier2_hot_logged = false;
         // True if the block contains an SVC (syscall / thunk) instruction.
         // The verify re-run must NOT re-execute such blocks (the syscall has
         // host side effects), so the full-memory verifier (MEMFULL) skips them.
