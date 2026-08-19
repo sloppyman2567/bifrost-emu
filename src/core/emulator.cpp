@@ -1516,6 +1516,101 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             return 0;
         });
 }
+// ── call_guest_function — borrow-CPU guest function call (C API) ───────
+// 1.5.3-alpha. libbifrost's bifrost_call() lets embedders invoke an
+// arbitrary guest function (e.g. a callback, an exported entry, or a
+// helper in a loaded library) and read back x0. Same borrow-CPU pattern
+// as wire_thunk_glfw_cb_runner_ / guest_call_args_: save/restore ALL
+// architectural state, set x0..x7 and d0..d7 from the argument arrays,
+// pc = fn, LR = sentinel (0x1000), step() until the callee RETs (or a
+// 50M-instruction limit), restore, return x0.
+uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
+                                       const int64_t* iargs, size_t n_iargs,
+                                       const double* fargs, size_t n_fargs,
+                                       double* fp_result) {
+    if (fn == 0) return 0;
+    struct SavedState {
+        uint64_t regs[32];
+        uint64_t sp, pc;
+        uint32_t pstate;
+        uint64_t v_lo[32], v_hi[32];
+        uint32_t fpcr, fpsr;
+        uint64_t tpidr_el0, tpidrro_el0;
+        uint64_t sigmask;
+        bool running;
+    } saved;
+    std::memcpy(saved.regs, cpu.regs, sizeof(saved.regs));
+    saved.sp = cpu.sp;
+    saved.pc = cpu.pc;
+    saved.pstate = cpu.pstate;
+    std::memcpy(saved.v_lo, cpu.v_lo, sizeof(saved.v_lo));
+    std::memcpy(saved.v_hi, cpu.v_hi, sizeof(saved.v_hi));
+    saved.fpcr = cpu.fpcr;
+    saved.fpsr = cpu.fpsr;
+    saved.tpidr_el0 = cpu.tpidr_el0;
+    saved.tpidrro_el0 = cpu.tpidrro_el0;
+    saved.sigmask = cpu.sigmask;
+    saved.running = cpu.running;
+    auto restore = [&]() {
+        std::memcpy(cpu.regs, saved.regs, sizeof(saved.regs));
+        cpu.sp = saved.sp;
+        cpu.pc = saved.pc;
+        cpu.pstate = saved.pstate;
+        std::memcpy(cpu.v_lo, saved.v_lo, sizeof(saved.v_lo));
+        std::memcpy(cpu.v_hi, saved.v_hi, sizeof(saved.v_hi));
+        cpu.fpcr = saved.fpcr;
+        cpu.fpsr = saved.fpsr;
+        cpu.tpidr_el0 = saved.tpidr_el0;
+        cpu.tpidrro_el0 = saved.tpidrro_el0;
+        cpu.sigmask = saved.sigmask;
+        cpu.running = saved.running;
+    };
+    if (dyn_linker_ && dyn_linker_->static_tls_size() > 0 &&
+        cpu.tpidr_el0 == 0) {
+        cpu.tpidr_el0 = dyn_linker_->thread_pointer();
+        cpu.tpidrro_el0 = cpu.tpidr_el0;
+    }
+    // Scratch stack (thread-local so concurrent guest threads can't
+    // clobber each other's callee frame).
+    static thread_local uint64_t scratch_stack = 0;
+    if (scratch_stack == 0) {
+        scratch_stack = mem_.mmap_alloc(8192);
+        if (scratch_stack == 0) return 0;
+    }
+    uint64_t stack_top = scratch_stack + 8192;
+    constexpr uint64_t SENTINEL_LR = 0x1000;
+    cpu.pc = fn;
+    cpu.sp = stack_top;
+    if (n_iargs > 8) n_iargs = 8;
+    if (n_fargs > 8) n_fargs = 8;
+    for (size_t i = 0; i < n_iargs; i++)
+        cpu.regs[i] = static_cast<uint64_t>(iargs[i]);
+    for (size_t i = 0; i < n_fargs; i++) {
+        std::memcpy(&cpu.v_lo[i], &fargs[i], sizeof(fargs[i]));
+        cpu.v_hi[i] = 0;
+    }
+    cpu.regs[30] = SENTINEL_LR;
+    cpu.running = true;
+    cpu.pstate = 0;
+    constexpr uint64_t CALL_LIMIT = 50'000'000;
+    uint64_t steps = 0;
+    uint64_t result = 0;
+    try {
+        while (cpu.running && cpu.pc != SENTINEL_LR && steps < CALL_LIMIT) {
+            step(cpu);
+            steps++;
+        }
+        result = cpu.regs[0];
+        if (fp_result) {
+            std::memcpy(fp_result, &cpu.v_lo[0], sizeof(double));
+        }
+    } catch (const std::exception&) {
+        result = 0;
+        if (fp_result) *fp_result = 0.0;
+    }
+    restore();
+    return result;
+}
 // ── wire_thunk_sdl_thread_runner_ — SDL_CreateThread/WaitThread ──────
 // 1.5.3-alpha. SDL_CreateThread passes a guest AArch64 function pointer;
 // host SDL_CreateThread would run it as x86-64 (SIGSEGV). Instead we

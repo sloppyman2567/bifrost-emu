@@ -115,6 +115,16 @@ void dump_syscall_histogram(double dt) {
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
     note_syscall(num);
+    // C API svc hook: lets embedders observe/intercept every guest syscall
+    // BEFORE the vDSO clock fast-path and normal dispatch. Returning 1
+    // overrides the result (x0) and skips emulator handling.
+    if (svc_hook_) {
+        uint64_t result = 0;
+        if (svc_hook_(svc_hook_ud_, num, &cpu.regs[0], &result)) {
+            cpu.regs[0] = result;
+            return;
+        }
+    }
     // 1.5.3-alpha: vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and

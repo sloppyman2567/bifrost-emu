@@ -75,7 +75,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi
 
 all: $(TARGET)
 
@@ -294,6 +294,7 @@ setup-tests:
 	for src in ctest/*.c ctest_real/*.c; do \
 		[ -f "$$src" ] || continue; \
 		case " $(GLIBC_DYN_SRCS) " in *" $$src "*) continue ;; esac; \
+		case "$$src" in ctest/test_capi.c) continue ;; esac; \
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
 		extra=""; \
@@ -337,6 +338,17 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET)
+check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET) test-capi
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
+
+# Host-side C API test: test_capi.c links libbifrost.a and runs on the
+# HOST (it cannot be cross-compiled as a guest ELF). Builds and runs it.
+# Note: the guest hello.elf path is relative to the repo root.
+test-capi: lib $(TARGET)
+	@echo "=== Building host C API test ==="
+	@mkdir -p build
+	@$(CXX) -O1 -g -Iapi -x c -c ctest/test_capi.c -o build/test_capi_host.o
+	@$(CXX) build/test_capi_host.o libbifrost.a -o build/test_capi_host $(LDFLAGS)
+	@echo "=== Running host C API test ==="
+	@./build/test_capi_host

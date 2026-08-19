@@ -12,7 +12,10 @@
 #include "core/emulator.h"
 #include "core/cpu.h"
 #include "core/memory.h"
+#include "frontend/dynamic_linker.h"
 #include "jit/frostjit.hpp"
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <string>
@@ -25,8 +28,10 @@ struct bifrost_emu {
     arm64emu::Emulator emu;
     bool    running   = false;
     int     exit_code = 0;
-    bool    jit_enabled = false;
+    bool    jit_enabled = true;  // JIT is the default (matches bifrost.h)
+    bool    jit_verify   = false;
     char    last_error[256] = {};
+    std::vector<uint64_t> breakpoints;
 };
 // Helper: set the last error message (truncated to fit).
 static void set_error(bifrost_emu* e, const char* msg) {
@@ -75,11 +80,28 @@ int bifrost_load_elf(bifrost_emu_t* emu, const char* path,
         return -1;
     }
 }
+// Helper: apply the JIT verify env var (read by FrostJIT at first block
+// dispatch). Must be set BEFORE the first block runs, so bifrost_set_jit
+// and bifrost_run both apply it when the JIT is being enabled.
+static void apply_jit_verify_env(bifrost_emu* e) {
+    if (e->jit_verify) {
+        setenv("BIFROST_JIT_VERIFY", "1", 1);
+    } else {
+        unsetenv("BIFROST_JIT_VERIFY");
+    }
+}
 // ── Execution ──────────────────────────────────────────────────────────
 int bifrost_run(bifrost_emu_t* emu) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return -1;
     try {
+        // JIT is the default execution mode (matches bifrost.h). If the
+        // caller enabled it (or left the default), make sure a FrostJIT
+        // instance exists before running.
+        if (e->jit_enabled && !e->emu.jit()) {
+            apply_jit_verify_env(e);
+            e->emu.enable_jit();
+        }
         e->exit_code = e->emu.run();
         e->running = false;
         return e->exit_code;
@@ -98,6 +120,12 @@ int bifrost_step(bifrost_emu_t* emu) {
     if (!e) return -1;
     try {
         auto& cpu = e->emu.main_cpu();
+        // Breakpoint check: stop BEFORE executing the instruction at a
+        // breakpoint address.
+        if (std::find(e->breakpoints.begin(), e->breakpoints.end(), cpu.pc)
+            != e->breakpoints.end()) {
+            return 1;
+        }
         e->emu.step(cpu);
         return 0;
     } catch (const std::exception& ex) {
@@ -116,6 +144,10 @@ int bifrost_step_n(bifrost_emu_t* emu, uint64_t count) {
     try {
         auto& cpu = e->emu.main_cpu();
         for (uint64_t i = 0; i < count; i++) {
+            if (std::find(e->breakpoints.begin(), e->breakpoints.end(), cpu.pc)
+                != e->breakpoints.end()) {
+                return 1;
+            }
             e->emu.step(cpu);
         }
         return 0;
@@ -294,8 +326,14 @@ void bifrost_set_jit(bifrost_emu_t* emu, int enable) {
     auto* e = reinterpret_cast<bifrost_emu*>(emu);
     if (!e) return;
     if (enable) {
-        e->emu.enable_jit();
-        e->emu.set_jit_enabled(true);
+        // If the JIT isn't initialized yet (e.g. set_jit called before
+        // run), initialize it now so the flag takes effect immediately.
+        if (!e->emu.jit()) {
+            apply_jit_verify_env(e);
+            e->emu.enable_jit();
+        } else {
+            e->emu.set_jit_enabled(true);
+        }
     } else {
         e->emu.set_jit_enabled(false);
     }
@@ -311,10 +349,12 @@ void bifrost_set_jit_threshold(bifrost_emu_t* emu, uint64_t n) {
     e->emu.set_jit_threshold(n);
 }
 void bifrost_set_jit_verify(bifrost_emu_t* emu, int enable) {
-    // BIFROST_JIT_VERIFY is read from the environment at JIT init time.
-    // For the C API, we set the env var before enabling JIT if needed.
-    // This is a pragmatic approach — the env var is checked once.
-    (void)emu; (void)enable;
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e) return;
+    e->jit_verify = (enable != 0);
+    // Apply immediately so a caller that enabled the JIT earlier (or
+    // left the default) still gets verify on the next run.
+    apply_jit_verify_env(e);
 }
 // ── JIT statistics ─────────────────────────────────────────────────────
 int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats) {
@@ -337,17 +377,80 @@ int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats) 
     return 0;
 }
 // ── Breakpoints ────────────────────────────────────────────────────────
-// NOTE: Hardware breakpoint injection is not yet implemented. These
-// functions are reserved for future use — callers should poll
-// bifrost_get_pc() after bifrost_step()/bifrost_step_n() to detect
-// when a target address is reached. See api/bifrost.h for details.
+// Breakpoints are evaluated on the interpreter step path (bifrost_step /
+// bifrost_step_n); the main run loop does NOT honor them. See bifrost.h.
 int bifrost_set_breakpoint(bifrost_emu_t* emu, uint64_t addr) {
-    (void)emu; (void)addr;
-    return 0;  // reserved — see note above
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e) return -1;
+    if (std::find(e->breakpoints.begin(), e->breakpoints.end(), addr)
+        == e->breakpoints.end()) {
+        e->breakpoints.push_back(addr);
+    }
+    return 0;
 }
 int bifrost_remove_breakpoint(bifrost_emu_t* emu, uint64_t addr) {
-    (void)emu; (void)addr;
-    return 0;  // reserved — see note above
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e) return -1;
+    e->breakpoints.erase(
+        std::remove(e->breakpoints.begin(), e->breakpoints.end(), addr),
+        e->breakpoints.end());
+    return 0;
+}
+// ── Guest function calls ───────────────────────────────────────────────
+uint64_t bifrost_call(bifrost_emu_t* emu, uint64_t fn,
+                      const int64_t* args, size_t n_args,
+                      const double* fargs, size_t n_fargs) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || fn == 0) return 0;
+    try {
+        auto& cpu = e->emu.main_cpu();
+        return e->emu.call_guest_function(cpu, fn, args, n_args,
+                                          fargs, n_fargs);
+    } catch (const std::exception& ex) {
+        set_error(e, ex.what());
+        return 0;
+    } catch (...) {
+        set_error(e, "unknown error");
+        return 0;
+    }
+}
+double bifrost_call_f(bifrost_emu_t* emu, uint64_t fn,
+                      const int64_t* args, size_t n_args,
+                      const double* fargs, size_t n_fargs) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || fn == 0) return 0.0;
+    double fres = 0.0;
+    try {
+        auto& cpu = e->emu.main_cpu();
+        e->emu.call_guest_function(cpu, fn, args, n_args,
+                                   fargs, n_fargs, &fres);
+    } catch (const std::exception& ex) {
+        set_error(e, ex.what());
+        return 0.0;
+    } catch (...) {
+        set_error(e, "unknown error");
+        return 0.0;
+    }
+    return fres;
+}
+uint64_t bifrost_lookup_symbol(bifrost_emu_t* emu, const char* name) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || !name || !*name) return 0;
+    try {
+        auto* dl = e->emu.dyn_linker();
+        if (!dl) return 0;
+        return dl->resolve_symbol(name);
+    } catch (...) {
+        return 0;
+    }
+}
+// ── Syscall hook ───────────────────────────────────────────────────────
+int bifrost_set_svc_hook(bifrost_emu_t* emu, bifrost_svc_hook_fn fn,
+                         void* userdata) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e) return -1;
+    e->emu.set_svc_hook(fn, userdata);
+    return 0;
 }
 // ── Error reporting ────────────────────────────────────────────────────
 const char* bifrost_get_error(const bifrost_emu_t* emu) {

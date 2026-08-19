@@ -99,6 +99,29 @@ public:
     // Execute a syscall on the given CPU (reads x8 for number, x0-x5 for
     // args, writes return to x0). Used by the IR executor for SVC.
     void syscall(CPU& cpu);
+    // SVC hook: invoked at the top of syscall() for EVERY guest syscall
+    // (interpreter + JIT native svc both funnel through Emulator::syscall;
+    // the JIT thunk fast path for num==0x1000 bypasses it). Returns 1 to
+    // handle the syscall: *result is written back to x0 and normal dispatch
+    // is skipped. Returns 0 to let the emulator handle it normally.
+    int (*svc_hook_)(void* ud, uint64_t num, const uint64_t* args,
+                     uint64_t* result) = nullptr;
+    void* svc_hook_ud_ = nullptr;
+    void set_svc_hook(int (*fn)(void*, uint64_t, const uint64_t*, uint64_t*),
+                      void* ud) {
+        svc_hook_ = fn;
+        svc_hook_ud_ = ud;
+    }
+    // Borrow-CPU guest function call: save/restore ALL architectural state,
+    // set x0..xN from iargs and d0..dN from fargs, pc = fn, LR = sentinel,
+    // run step() until the callee RETs, then restore and return x0. If
+    // fp_result is non-null, the callee's d0 (FP return value) is written
+    // there too. Mirrors the dynamic linker's guest_call_args_ / GLFW
+    // callback runner pattern. Used by libbifrost's bifrost_call().
+    uint64_t call_guest_function(CPU& cpu, uint64_t fn,
+                                 const int64_t* iargs, size_t n_iargs,
+                                 const double* fargs, size_t n_fargs,
+                                 double* fp_result = nullptr);
     // Drain any host-forwarded signals (SIGINT/SIGTERM/SIGCHLD) to the
     // guest. Called by spawned threads at syscall boundaries.
     bool drain_host_signals(CPU& cpu);

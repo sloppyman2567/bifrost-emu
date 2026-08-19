@@ -1110,3 +1110,63 @@ not musl-`-static`.
   All five FP→int sites now route through `fp_to_signed_sat`/
   `fp_to_unsigned_sat` (see the FP→int contract). Interp now 205/205, matching
   the JIT. Verified with `ctest/jit_int_fp_conv.elf` (ALL PASS both modes).
+
+## Session History (2026-08-19) — C API refinement (libbifrost)
+
+- **`bifrost_call` (guest function invocation) landed in the C API**: new
+  `Emulator::call_guest_function(CPU&, fn, iargs, n_iargs, fargs, n_fargs,
+  double* fp_result = nullptr)` in `src/core/emulator.cpp` (~1519) — borrow-CPU
+  pattern identical to `wire_thunk_glfw_cb_runner_`/`guest_call_args_`:
+  save/restore ALL architectural state (regs/sp/pc/pstate/v_lo/v_hi/fpcr/fpsr/
+  tpidr_el0/tpidrro_el0/sigmask/running), TLS init if `tpidr_el0==0` and the
+  dynlinker has static TLS, per-thread scratch stack via `mem_.mmap_alloc(8192)`
+  (thread_local, 0 = unallocated sentinel), iargs→x0..x7 (clamped to 8),
+  fargs→d0..d7 (v_lo[i], v_hi zeroed), LR = `SENTINEL_LR` (0x1000), step() loop
+  until pc==SENTINEL_LR or `CALL_LIMIT` (50M) — interpreter only, so it is
+  deterministic regardless of JIT state. Returns x0; `fp_result` gets d0 as a
+  double (a callee returning `double`/`float` puts its result in d0, NOT x0 —
+  plain `bifrost_call` would return garbage for FP-returning functions). The C
+  API surface: `bifrost_call` (int) + `bifrost_call_f` (double, new — returns
+  the d0 result). Guest tests use AArch64 machine-code stubs written into guest
+  memory via `bifrost_write_mem` (add/ret 0x8b010000/0xd65f03c0, fadd/ret
+  0x1e612800/0xd65f03c0, getpid stub mov x8,#172 0xd2801588 + svc#0 0xd4000001
+  + ret) at `sp-4096` (writable guest stack region).
+- **SVC hook landed in the C API**: `Emulator::set_svc_hook(fn, ud)` +
+  `svc_hook_`/`svc_hook_ud_` members (`src/core/emulator.h` ~102). Invoked at
+  the TOP of `Emulator::syscall()` (`src/syscalls/syscalls.cpp:121`) BEFORE the
+  vDSO clock fast-path and normal dispatch. Return 1 = handled: *result →
+  x0, dispatch skipped; 0 = emulator handles. Sees interpreter AND JIT native
+  svc (both funnel through `Emulator::syscall`), but NOT the thunk `0x1000`
+  fast path (`jit_thunk_svc` bypasses the dispatcher — documented in the
+  header). C API: `bifrost_set_svc_hook` returns int (0/-1 for NULL emu).
+  Test intercepts guest getpid (syscall 172) → 0xCAFEBABE and confirms
+  passthrough still dispatches.
+- **C API JIT default fixed**: `bifrost_emu::jit_enabled` now defaults
+  `true` in `api/bifrost_capi.cpp` (was false — the header docs claimed JIT
+  was default but `bifrost_run` never enabled it). `bifrost_run` auto-enables
+  JIT when `jit_enabled && !emu.jit()`; `bifrost_set_jit(1)` initializes the
+  FrostJIT immediately (before run) or re-enables via `set_jit_enabled(true)`
+  if already constructed. `bifrost_set_jit_verify` is no longer a no-op: it
+  stores the flag and calls `apply_jit_verify_env()` (setenv/unsetenv
+  `BIFROST_JIT_VERIFY`) — must be set before first block dispatch (the JIT
+  reads the env at init). NOTE: `bifrost_set_jit(1)` now constructs the JIT
+  eagerly; calling it before `bifrost_load_elf` is fine but the docs still say
+  set it after load.
+- **Real breakpoints**: `bifrost_set_breakpoint`/`bifrost_remove_breakpoint`
+  now store guest addresses in a per-emu `std::vector<uint64_t>`; `bifrost_step`
+  and `bifrost_step_n` check `cpu.pc` against the list BEFORE executing and
+  return 1 on a hit (0 = stepped normally, -1 = error). `bifrost_run` does NOT
+  honor breakpoints (runs to completion) — documented. The old stubs returned 0
+  always and the header told callers to poll `bifrost_get_pc` instead.
+- **`bifrost_lookup_symbol`** wraps `DynamicLinker::resolve_symbol` (dynamic
+  binaries + thunk symbols; static musl has no .dynsym → 0). NULL/empty name
+  and NULL emu guarded.
+- **`ctest/test_capi.c` is a HOST binary** (links libbifrost.a; cannot be
+  cross-compiled as a guest ELF) — extended from 22 to 54 checks covering the
+  new API (JIT default, verify env, breakpoints incl. NULL-emu error paths,
+  bifrost_call/bifrost_call_f via machine-code stubs, svc hook intercept +
+  passthrough + clear, lookup_symbol guards, PC restoration after calls).
+  Wired into the build: `make test-capi` (new Makefile target) and appended to
+  `check-all`; `setup-tests` now skips `ctest/test_capi.c` in the musl
+  cross-compile loop (it was silently failing there before). 54/54, suite
+  205/205 both JIT and `--no-jit`.

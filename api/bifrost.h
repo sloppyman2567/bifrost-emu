@@ -20,9 +20,11 @@
 //
 //     bifrost_emu_t* emu = bifrost_create();
 //     bifrost_load_elf(emu, "hello.elf", argc, argv);
-//     bifrost_set_jit(emu, 1);          // enable frostJIT (default)
-//     int exit_code = bifrost_run(emu);
+//     int exit_code = bifrost_run(emu);   // JIT is on by default
 //     bifrost_destroy(emu);
+//
+// Use bifrost_set_jit(emu, 0) before bifrost_run() to force the
+// interpreter.
 //
 // For interactive use (single-stepping, state inspection):
 //
@@ -69,12 +71,37 @@ int bifrost_load_elf(bifrost_emu_t* emu, const char* path,
 // Run the emulator until the guest calls exit().
 // Returns the guest's exit code.
 int bifrost_run(bifrost_emu_t* emu);
-// Execute a single instruction. Returns 0 on success, -1 on error.
+// Execute a single instruction. Returns 0 on success, 1 if a breakpoint was
+// hit (see below), -1 on error.
 int bifrost_step(bifrost_emu_t* emu);
 // Check if the emulator is still running (guest hasn't called exit).
 int bifrost_is_running(const bifrost_emu_t* emu);
 // Get the current exit code (valid after bifrost_run returns).
 int bifrost_get_exit_code(const bifrost_emu_t* emu);
+// ── Guest function calls ────────────────────────────────────────────────
+// Call a guest function at `fn` with up to 8 integer arguments (x0-x7,
+// from `args`) and up to 8 floating-point arguments (d0-d7, from `fargs`).
+// The function is invoked with a scratch guest stack and a sentinel LR
+// (0x1000), so it must return with `ret` like any normal AArch64 function.
+// All CPU state is saved and restored around the call. Returns x0 after
+// the callee returns (0 if fn==0, the call threw, or it exceeded the
+// 50M-instruction step limit). Useful for invoking guest callbacks, init
+// functions, or exported helpers from an embedder.
+uint64_t bifrost_call(bifrost_emu_t* emu, uint64_t fn,
+                      const int64_t* args, size_t n_args,
+                      const double* fargs, size_t n_fargs);
+// Same as bifrost_call, but returns the callee's FP return value (d0) as
+// a double. For a callee that returns its result in an FP register (e.g.
+// a C function returning double/float), use this instead of bifrost_call
+// (whose return value is x0). Returns 0.0 on error (fn==0, throw, or step
+// limit).
+double bifrost_call_f(bifrost_emu_t* emu, uint64_t fn,
+                      const int64_t* args, size_t n_args,
+                      const double* fargs, size_t n_fargs);
+// Look up a symbol by name across all loaded objects (dynamic binaries
+// and thunk-registered symbols). Returns the absolute guest address, or
+// 0 if not found (or the binary has no dynamic symbol table).
+uint64_t bifrost_lookup_symbol(bifrost_emu_t* emu, const char* name);
 // ── Register access ─────────────────────────────────────────────────────
 // Get a general-purpose register (0-30). x31 reads as 0 (XZR).
 uint64_t bifrost_get_reg(const bifrost_emu_t* emu, int reg);
@@ -108,13 +135,15 @@ void bifrost_set_verbose(bifrost_emu_t* emu, int enable);
 // execution and caches them. Subsequent executions of the same block
 // run the cached native code directly, skipping decode + interpret.
 //
-// JIT is the default execution mode in 1.5.3-alpha. It improves performance on
-// compute-heavy workloads (~6.4x over the interpreter on bench_mips).
-// Use bifrost_set_jit_verify() to catch divergences during development.
+// JIT is the default execution mode in 1.5.3-alpha (bifrost_run enables
+// it automatically). It improves performance on compute-heavy workloads
+// (~6.4x over the interpreter on bench_mips). Use bifrost_set_jit_verify()
+// to catch divergences during development.
 //
-// Must be called AFTER bifrost_load_elf() and BEFORE bifrost_run().
+// If called, it should be called AFTER bifrost_load_elf() and BEFORE
+// bifrost_run().
 void bifrost_set_jit(bifrost_emu_t* emu, int enable);
-// Check if the JIT is enabled.
+// Check if the JIT is enabled (true by default).
 int bifrost_get_jit(const bifrost_emu_t* emu);
 // Enable/disable JIT verification mode. When enabled, the JIT runs
 // each block through both the JIT compiler AND the interpreter, then
@@ -122,7 +151,9 @@ int bifrost_get_jit(const bifrost_emu_t* emu);
 // prints the divergence and aborts. This is useful for debugging
 // JIT correctness issues. Has significant performance overhead.
 //
-// Only effective when JIT is also enabled.
+// Only effective when JIT is also enabled. Must be set BEFORE
+// bifrost_run() (the verify flag is read when the first block is
+// dispatched).
 void bifrost_set_jit_verify(bifrost_emu_t* emu, int enable);
 // ── JIT statistics ────────────────────────────────────────────────────
 // JIT statistics structure. Filled by bifrost_get_jit_stats().
@@ -140,7 +171,9 @@ typedef struct {
 // Get JIT statistics. Returns 0 on success, -1 if JIT is not enabled.
 int bifrost_get_jit_stats(const bifrost_emu_t* emu, bifrost_jit_stats_t* stats);
 // ── Bulk execution ───────────────────────────────────────────────────
-// Execute `count` instructions. Returns 0 on success, -1 on error.
+// Execute up to `count` instructions. Returns 0 on success, 1 if a
+// breakpoint was hit before `count` steps completed (execution stops at
+// the breakpoint), -1 on error.
 // Useful for host-driven step loops: run a batch of instructions, then
 // inspect state. More efficient than calling bifrost_step() in a loop
 // because it avoids the per-call function-call overhead.
@@ -180,15 +213,37 @@ void bifrost_set_fpcr(bifrost_emu_t* emu, uint32_t value);
 // instructions, then switch to JIT. This avoids JIT compilation overhead
 // for short programs. Set to 0 (default) to use JIT from the start.
 void bifrost_set_jit_threshold(bifrost_emu_t* emu, uint64_t n);
+// ── Syscall hook ──────────────────────────────────────────────────────
+// SVC hook: called for EVERY guest syscall (interpreter AND JIT native
+// svc both funnel through the emulator's syscall dispatcher; the internal
+// thunk fast path for num==0x1000 bypasses it). The hook runs BEFORE the
+// syscall is handled, with `args` pointing at x0-x5 (the syscall arg
+// registers).
+//
+// Return 1 to handle the syscall yourself: set *result to the value the
+// guest should see in x0 and skip the emulator's own dispatch. Return 0
+// to let the emulator handle it normally. The hook may also observe and
+// let the emulator proceed. Set to NULL to remove.
+typedef int (*bifrost_svc_hook_fn)(void* userdata, uint64_t num,
+                                   const uint64_t* args, uint64_t* result);
+// Install/remove the syscall hook. Pass fn=NULL to remove. Returns 0 on
+// success, -1 on error (NULL emu).
+int bifrost_set_svc_hook(bifrost_emu_t* emu, bifrost_svc_hook_fn fn,
+                         void* userdata);
 // ── Breakpoints ──────────────────────────────────────────────────────
-// NOTE: Breakpoint support is currently a polling-based stub — the
-// caller is expected to compare bifrost_get_pc() against the desired
-// address after each bifrost_step() / bifrost_step_n() call. Hardware
-// breakpoint injection is not yet implemented. The functions below are
-// reserved for future use and currently always return 0 (success).
-// Set a breakpoint at guest address `addr`. (Reserved — see note above.)
+// Breakpoints are evaluated on the interpreter path (bifrost_step() /
+// bifrost_step_n()): each step stops BEFORE executing the instruction at
+// a breakpoint address and returns 1 (bifrost_step_n returns 1 as soon as
+// it reaches a breakpoint, even before `count` steps elapse). The main
+// execution loop (bifrost_run()) does NOT honor breakpoints — it runs to
+// completion. Use bifrost_step()/bifrost_step_n() for breakpoint-based
+// debugging.
+//
+// Set a breakpoint at guest address `addr`. Returns 0 on success, -1 on
+// error (NULL emu).
 int bifrost_set_breakpoint(bifrost_emu_t* emu, uint64_t addr);
-// Remove a breakpoint at guest address `addr`. (Reserved — see note above.)
+// Remove a breakpoint at guest address `addr`. Returns 0 on success, -1
+// on error.
 int bifrost_remove_breakpoint(bifrost_emu_t* emu, uint64_t addr);
 // ── Error reporting ──────────────────────────────────────────────────
 // Get the last error message. Returns a pointer to a static buffer valid
