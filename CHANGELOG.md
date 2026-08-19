@@ -6,6 +6,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.5.3-alpha] — Vulkan command-buffer rendering (2026-08-19)
+
+### Real Vulkan frames now render through DisplayThunk
+
+The Vulkan path previously stopped at swapchain acquire/present. This
+milestone adds the whole command-recording + submission path so guest
+games can actually draw.
+
+- **`vkCmd*` family (~36 functions) added to the thunk table**
+  (`tools/opgen/thunk_dp.txt` → 851 symbols): `vkCmdBeginRenderPass`,
+  `vkCmdEndRenderPass`, `vkCmdNextSubpass`, `vkCmdBindPipeline`,
+  `vkCmdBindDescriptorSets`, `vkCmdBindVertexBuffers`, `vkCmdBindIndexBuffer`,
+  `vkCmdSetViewport`, `vkCmdSetScissor`, `vkCmdPushConstants`,
+  `vkCmdClearColorImage`, `vkCmdClearDepthStencilImage`, `vkCmdCopyBuffer`,
+  `vkCmdCopyImage`, `vkCmdCopyBufferToImage`, `vkCmdCopyImageToBuffer`,
+  `vkCmdCopyBufferToImage`, `vkCmdCopyQueryPoolResults`, `vkCmdDispatch`,
+  `vkCmdPipelineBarrier`, `vkCmdWaitEvents`, `vkCmdDraw`,
+  `vkCmdDrawIndexed`, and friends. Flat-struct commands (barriers, clears,
+  viewport, draws) ride the existing generic pointer-bounce path; only
+  functions whose structs nest guest pointers need deep marshalling.
+- **Four new deep-marshal policies** (opgen `VALID_POLICY` +
+  `register_known_symbols_` + dedicated arms in `vk_dispatch_`):
+  - `VK_SUBMIT` (`vkQueueSubmit`) — re-points each `VkSubmitInfo`'s
+    `pWaitSemaphores` / `pWaitDstStageMask` / `pCommandBuffers` /
+    `pSignalSemaphores` arrays into staging (handles round-trip verbatim).
+  - `VK_CREATE_RENDERPASS` (`vkCreateRenderPass`) — deep-copies the whole
+    `VkRenderPassCreateInfo` tree: attachment array, subpass array
+    (recursing into each subpass's input/color/resolve/depth/preserve
+    reference arrays), and dependency array.
+  - `VK_CREATE_FRAMEBUFFER` (`vkCreateFramebuffer`) — re-points the
+    image-view handle array.
+  - `VK_BEGIN_RENDERPASS` (`vkCmdBeginRenderPass`) — re-points the
+    `VkClearValue` array.
+  All arms zero `pNext` (guest chains aren't host-readable), cap counts
+  (≤16 submits / ≤32 subpasses/attachments) to stay in the `VkStage`
+  bounce, call the host fn through typed function pointers, write back
+  OUT handles (render pass / framebuffer at arg 3), and emit
+  `BIFROST_THUNK_TRACE` lines. `VkSubmitInfo`/`VkRenderPassCreateInfo`/
+  `VkSubpassDescription`/`VkFramebufferCreateInfo`/`VkRenderPassBeginInfo`
+  frozen-layout structs added next to `VkPresentInfoH` (verified against
+  the vendored Vulkan-Headers, natural AArch64 alignment).
+- **`test_vulkan_swapchain.elf` now records and submits a real
+  clear-color frame**: acquire → command pool/command buffer →
+  `vkCreateRenderPass` (LOAD_OP_CLEAR, initial UNDEFINED → final
+  PRESENT_SRC_KHR) → `vkCreateImageView` → `vkCreateFramebuffer` →
+  `vkCmdBeginRenderPass` (red clear) → `vkCmdEndRenderPass` →
+  `vkEndCommandBuffer` → `vkQueueSubmit` → present. 22 checks, exit 0 =
+  pass, 77 = skip without a display. Verified under BOTH JIT and
+  `--no-jit` on the live RADV (RX 7600) path; quick suite 200/200.
+
 ## [1.5.3-alpha] — Android native bridge adapter + C API dl* wrappers (2026-08-19)
 
 ### libbifrost can now act as an ART native bridge (`-XX:NativeBridge`)

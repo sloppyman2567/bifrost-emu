@@ -64,7 +64,9 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'TF_VARYINGS',
                 'SDL_FREE', 'SDL_OPEN_AUDIO', 'JOY_GUID', 'JOY_GUID_STR',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
-                'VK_CREATE_DEVICE', 'VK_PRESENT')
+                'VK_CREATE_DEVICE', 'VK_PRESENT', 'VK_SUBMIT',
+                'VK_CREATE_RENDERPASS', 'VK_CREATE_FRAMEBUFFER',
+                'VK_BEGIN_RENDERPASS')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
               'TEX3D')

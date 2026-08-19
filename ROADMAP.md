@@ -55,6 +55,18 @@ status, see [TESTS.md](TESTS.md).
     `bifrost_set_jit_verify`, and `bifrost_lookup_symbol`. Host-side
     `ctest/test_capi.c` grown to 54 checks (`make test-capi`).
 
+10. **Vulkan command-buffer rendering** — the `vkCmd*` family (~36
+    functions) added to the DisplayThunk table (851 symbols), plus four
+    new deep-marshal policies: `VK_SUBMIT` (`vkQueueSubmit`), 
+    `VK_CREATE_RENDERPASS`, `VK_CREATE_FRAMEBUFFER`, and
+    `VK_BEGIN_RENDERPASS` (`vkCmdBeginRenderPass`). These re-point nested
+    guest pointer arrays (submit info's semaphore/cmd-buffer lists, render
+    pass attachment/subpass/dependency trees, framebuffer image-view
+    lists, clear-value arrays) into staging so the host driver reads real
+    host pointers. `test_vulkan_swapchain.elf` now records and submits a
+    real clear-color frame (acquire → render pass clear → submit →
+    present) under both JIT and interpreter on the live GPU.
+
  9. **Android native bridge adapter (thin)** — `api/native_bridge.h/.cpp`
     export a clean-room `NativeBridgeCallbacks` mirror (`NativeBridgeItf`,
     `version = 4`) over the C API, so ART can use libbifrost as a
@@ -68,13 +80,21 @@ status, see [TESTS.md](TESTS.md).
 
 ### Planned
 
- 9. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
 10. **More real-world binary testing** (wider GL3.3+/4.x coverage as
     games demand it; input latency tuning).
 11. **Native bridge next steps** — JNIEnv object marshalling /
     JavaBridge semantics if an ATL integration ever needs them;
     CriticalNative trampolines (v7 claim); guest signal forwarding
     through `getSignalHandler`.
+12. **Vulkan pipeline stage** — graphics pipelines + shader modules
+    (`vkCreateGraphicsPipelines`/`vkCreateShaderModule` deep marshal,
+    spirv module handling), `vkCmdDraw`/`vkCmdDrawIndexed` + descriptor
+    sets in a real frame, depth buffers, and a textured-triangle guest
+    demo.
+13. **Vulkan command-pool growth** — recycle per-frame command buffers
+    (render onto every swapchain image, not just image 0) and add
+    multi-frame fences + semaphore-based acquire/present sync so
+    double-buffered engines run at native throughput.
 
 ### v1.5.3-alpha additions (shipped 2026-08-15)
 

@@ -264,6 +264,175 @@ int main(void) {
     CHECK(r == VK_SUCCESS && imageIndex < nimages, "vkAcquireNextImageKHR");
     if (r != VK_SUCCESS) return 1;
 
+    /* ── Real frame: render-pass clear + submit + present ──────────────
+     * Records a command buffer that begins a render pass (clearing the
+     * swapchain image to red), ends it, submits the buffer to the queue,
+     * and presents. Exercises the whole command-recording + submission
+     * path through the DisplayThunk: vkCmd* family (new rows), the
+     * VK_SUBMIT / VK_BEGIN_RENDERPASS / VK_CREATE_RENDERPASS /
+     * VK_CREATE_FRAMEBUFFER deep-marshal arms, and the existing
+     * vkQueuePresentKHR arm. */
+    PFN_vkCreateCommandPool vkCreateCommandPool =
+        (PFN_vkCreateCommandPool)vkGetDeviceProcAddr(device, "vkCreateCommandPool");
+    PFN_vkDestroyCommandPool vkDestroyCommandPool =
+        (PFN_vkDestroyCommandPool)vkGetDeviceProcAddr(device, "vkDestroyCommandPool");
+    PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers =
+        (PFN_vkAllocateCommandBuffers)vkGetDeviceProcAddr(device, "vkAllocateCommandBuffers");
+    PFN_vkFreeCommandBuffers vkFreeCommandBuffers =
+        (PFN_vkFreeCommandBuffers)vkGetDeviceProcAddr(device, "vkFreeCommandBuffers");
+    PFN_vkBeginCommandBuffer vkBeginCommandBuffer =
+        (PFN_vkBeginCommandBuffer)vkGetDeviceProcAddr(device, "vkBeginCommandBuffer");
+    PFN_vkEndCommandBuffer vkEndCommandBuffer =
+        (PFN_vkEndCommandBuffer)vkGetDeviceProcAddr(device, "vkEndCommandBuffer");
+    PFN_vkCreateRenderPass vkCreateRenderPass =
+        (PFN_vkCreateRenderPass)vkGetDeviceProcAddr(device, "vkCreateRenderPass");
+    PFN_vkDestroyRenderPass vkDestroyRenderPass =
+        (PFN_vkDestroyRenderPass)vkGetDeviceProcAddr(device, "vkDestroyRenderPass");
+    PFN_vkCreateImageView vkCreateImageView =
+        (PFN_vkCreateImageView)vkGetDeviceProcAddr(device, "vkCreateImageView");
+    PFN_vkDestroyImageView vkDestroyImageView =
+        (PFN_vkDestroyImageView)vkGetDeviceProcAddr(device, "vkDestroyImageView");
+    PFN_vkCreateFramebuffer vkCreateFramebuffer =
+        (PFN_vkCreateFramebuffer)vkGetDeviceProcAddr(device, "vkCreateFramebuffer");
+    PFN_vkDestroyFramebuffer vkDestroyFramebuffer =
+        (PFN_vkDestroyFramebuffer)vkGetDeviceProcAddr(device, "vkDestroyFramebuffer");
+    PFN_vkCmdBeginRenderPass vkCmdBeginRenderPass =
+        (PFN_vkCmdBeginRenderPass)vkGetDeviceProcAddr(device, "vkCmdBeginRenderPass");
+    PFN_vkCmdEndRenderPass vkCmdEndRenderPass =
+        (PFN_vkCmdEndRenderPass)vkGetDeviceProcAddr(device, "vkCmdEndRenderPass");
+    PFN_vkQueueSubmit vkQueueSubmit =
+        (PFN_vkQueueSubmit)vkGetDeviceProcAddr(device, "vkQueueSubmit");
+    CHECK(vkCreateCommandPool != NULL && vkBeginCommandBuffer != NULL &&
+          vkEndCommandBuffer != NULL, "got command-buffer fns");
+    CHECK(vkCreateRenderPass != NULL && vkCreateFramebuffer != NULL, "got render-pass fns");
+    CHECK(vkCmdBeginRenderPass != NULL && vkCmdEndRenderPass != NULL, "got cmd render-pass fns");
+    CHECK(vkQueueSubmit != NULL, "got vkQueueSubmit");
+    if (!vkCreateCommandPool || !vkBeginCommandBuffer || !vkEndCommandBuffer ||
+        !vkCreateRenderPass || !vkCreateFramebuffer || !vkCmdBeginRenderPass ||
+        !vkCmdEndRenderPass || !vkQueueSubmit) return 1;
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo cpci = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = present_family,
+    };
+    r = vkCreateCommandPool(device, &cpci, NULL, &pool);
+    CHECK(r == VK_SUCCESS && pool != VK_NULL_HANDLE, "vkCreateCommandPool");
+    if (r != VK_SUCCESS) return 1;
+
+    VkCommandBufferAllocateInfo cbai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    r = vkAllocateCommandBuffers(device, &cbai, &cmd);
+    CHECK(r == VK_SUCCESS && cmd != VK_NULL_HANDLE, "vkAllocateCommandBuffers");
+    if (r != VK_SUCCESS) return 1;
+
+    VkAttachmentDescription att = {
+        .format = formats[0].format,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+    VkAttachmentReference color_ref = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    VkSubpassDescription subpass = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &color_ref,
+    };
+    VkSubpassDependency dep = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+    VkRenderPassCreateInfo rpci = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &att,
+        .subpassCount = 1,
+        .pSubpasses = &subpass,
+        .dependencyCount = 1,
+        .pDependencies = &dep,
+    };
+    VkRenderPass renderpass = VK_NULL_HANDLE;
+    r = vkCreateRenderPass(device, &rpci, NULL, &renderpass);
+    CHECK(r == VK_SUCCESS && renderpass != VK_NULL_HANDLE, "vkCreateRenderPass");
+    if (r != VK_SUCCESS) return 1;
+
+    VkImageViewCreateInfo ivci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = images[imageIndex],
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = formats[0].format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    VkImageView view = VK_NULL_HANDLE;
+    r = vkCreateImageView(device, &ivci, NULL, &view);
+    CHECK(r == VK_SUCCESS && view != VK_NULL_HANDLE, "vkCreateImageView");
+    if (r != VK_SUCCESS) return 1;
+
+    VkFramebufferCreateInfo fbci = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = renderpass,
+        .attachmentCount = 1,
+        .pAttachments = &view,
+        .width = extent.width,
+        .height = extent.height,
+        .layers = 1,
+    };
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    r = vkCreateFramebuffer(device, &fbci, NULL, &framebuffer);
+    CHECK(r == VK_SUCCESS && framebuffer != VK_NULL_HANDLE, "vkCreateFramebuffer");
+    if (r != VK_SUCCESS) return 1;
+
+    VkCommandBufferBeginInfo cbbi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    r = vkBeginCommandBuffer(cmd, &cbbi);
+    CHECK(r == VK_SUCCESS, "vkBeginCommandBuffer");
+
+    VkClearValue clear = { .color = { { 1.0f, 0.2f, 0.2f, 1.0f } } };
+    VkRenderPassBeginInfo rpbi = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = renderpass,
+        .framebuffer = framebuffer,
+        .renderArea = { .offset = { 0, 0 }, .extent = extent },
+        .clearValueCount = 1,
+        .pClearValues = &clear,
+    };
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdEndRenderPass(cmd);
+    r = vkEndCommandBuffer(cmd);
+    CHECK(r == VK_SUCCESS, "record clear frame + vkEndCommandBuffer");
+
+    VkSubmitInfo submit = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmd,
+    };
+    r = vkQueueSubmit(queue, 1, &submit, VK_NULL_HANDLE);
+    CHECK(r == VK_SUCCESS, "vkQueueSubmit");
+    if (r != VK_SUCCESS) return 1;
+
     VkPresentInfoKHR present = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .swapchainCount = 1,
@@ -271,10 +440,17 @@ int main(void) {
         .pImageIndices = &imageIndex,
     };
     r = vkQueuePresentKHR(queue, &present);
-    CHECK(r == VK_SUCCESS, "vkQueuePresentKHR");
+    CHECK(r == VK_SUCCESS, "vkQueuePresentKHR after submit");
 
     if (vkDeviceWaitIdle) vkDeviceWaitIdle(device);
     CHECK(1, "vkDeviceWaitIdle");
+
+    if (vkDestroyFramebuffer) vkDestroyFramebuffer(device, framebuffer, NULL);
+    if (vkDestroyImageView) vkDestroyImageView(device, view, NULL);
+    if (vkDestroyRenderPass) vkDestroyRenderPass(device, renderpass, NULL);
+    if (vkFreeCommandBuffers) vkFreeCommandBuffers(device, pool, 1, &cmd);
+    if (vkDestroyCommandPool) vkDestroyCommandPool(device, pool, NULL);
+    CHECK(1, "destroy frame objects");
 
     if (vkDestroySwapchainKHR) vkDestroySwapchainKHR(device, swapchain, NULL);
     if (vkDestroySurfaceKHR) vkDestroySurfaceKHR(instance, surface, NULL);

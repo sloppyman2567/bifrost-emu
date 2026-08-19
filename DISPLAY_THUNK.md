@@ -27,8 +27,10 @@ ladders (~275 registrations) in `register_known_symbols_` are gone.
   first), `VULKAN` → `THUNK_VULKAN`, `VK_GET_PROC` → `THUNK_VULKAN` +
   `THUNK_GET_PROC` (reads the proc name from arg 1, not arg 0), and the
   deep-marshalling entry points (`VK_CREATE_INSTANCE`, `VK_CREATE_DEVICE`,
-  `VK_PRESENT`) are dispatched by POLICY rather than by comparing symbol
-  names. The SIZE column overrides the 64 KiB bounce size (`X_DRAWSTR` sizes
+  `VK_PRESENT`, `VK_SUBMIT`, `VK_CREATE_RENDERPASS`, `VK_CREATE_FRAMEBUFFER`,
+  `VK_BEGIN_RENDERPASS`) are dispatched by POLICY rather than by comparing
+  symbol names. The SIZE column overrides the 64 KiB bounce size
+  (`X_DRAWSTR` sizes
   the string from the length arg; `X_SETWMPROTO` sizes the Atom array from the
   count arg) instead of name-compares in `translate_ptr`.
 - X11/WL host-fallback masks reproduce the pre-migration registration
@@ -42,7 +44,7 @@ ladders (~275 registrations) in `register_known_symbols_` are gone.
   the display families never index its GL-only `kFamilies` array.
 
 Adding a display symbol = one spec row + `make opgen-thunk`. Current table:
-**696 symbols** (GraphicThunk + DisplayThunk).
+**851 symbols** (GraphicThunk + DisplayThunk).
 
 ## Architecture
 
@@ -147,7 +149,7 @@ NOT be marked as a pointer (marking bounces it to a 64 KiB zero buffer and
 crashes the driver). Only true pointer args are masked: structs / string
 arrays / `VkBool32*`-style OUT slots.
 
-In addition to the mask fix, three symbols get a dedicated
+In addition to the mask fix, nine symbols get a dedicated
 `vk_dispatch_()` deep-marshalling path (see `display_thunk.cpp`):
 
 - `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` read the `pName` string
@@ -167,8 +169,32 @@ In addition to the mask fix, three symbols get a dedicated
   the top-level struct but leaves nested guest pointers untouched, so the
   host faults on `pSwapchains[0]`. Every array is re-pointed into staging
   (handles round-trip verbatim) and `pResults` is written back after the
-  call. (Same class of bug would hit `vkQueueSubmit` / `vkUpdateDescriptorSets`
-  on real rendering — deferred to a later pass.)
+  call.
+- `vkQueueSubmit` (`VK_SUBMIT` policy) deep-copies each `VkSubmitInfo`:
+  its `pWaitSemaphores` / `pWaitDstStageMask` / `pCommandBuffers` /
+  `pSignalSemaphores` arrays are nested guest pointers, re-pointed into
+  staging (handles round-trip verbatim). No writeback (input-only).
+- `vkCreateRenderPass` (`VK_CREATE_RENDERPASS`) deep-copies the whole
+  `VkRenderPassCreateInfo` tree: the `pAttachments` array, the `pSubpasses`
+  array (recursing into each subpass's `pInputAttachments` /
+  `pColorAttachments` / `pResolveAttachments` / `pDepthStencilAttachment` /
+  `pPreserveAttachments`), and the `pDependencies` array. OUT render-pass
+  handle written back to arg 3.
+- `vkCreateFramebuffer` (`VK_CREATE_FRAMEBUFFER`) re-points the nested
+  `pAttachments` image-view handle array. OUT handle written back to arg 3.
+- `vkCmdBeginRenderPass` (`VK_BEGIN_RENDERPASS`) re-points the nested
+  `pClearValues` array (16-byte `VkClearValue`s); `renderArea` is by-value.
+
+The four command/submit arms (added 2026-08-19 for real-frame rendering)
+zero `pNext` (guest chains aren't host-readable), cap counts (≤16 submits /
+≤32 subpasses/attachments) inside the `VkStage` bounce, and are driven by
+frozen-layout structs (`VkSubmitInfoH`/`VkRenderPassCreateInfoH`/
+`VkSubpassDescriptionH`/`VkAttachmentDescriptionH`/`VkAttachmentReferenceH`/
+`VkSubpassDependencyH`/`VkFramebufferCreateInfoH`/`VkRenderPassBeginInfoH`)
+placed right after `VkPresentInfoH`, verified byte-for-byte against the
+vendored vulkan_core.h on natural AArch64 alignment. Flat-struct `vkCmd*`
+rows (barriers, clears, viewport/scissor, binds, draws, copies) need NO
+deep marshal — only structs containing pointer members do.
 
 `VkStage` pre-reserves its staging buffer (64 KiB) — `alloc()`/`bytes()`/
 `guest_str*()` hand out pointers into `buf.data()` and a later `resize()`

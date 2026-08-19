@@ -636,6 +636,55 @@ struct VkPresentInfoH {
     const void* pSwapchains; const uint32_t* pImageIndices;
     int32_t* pResults;  // VkResult array (may be NULL)
 };
+// VkSubmitInfo (command-buffer submission; handles round-trip verbatim).
+struct VkSubmitInfoH {
+    int32_t sType; void* pNext; uint32_t waitSemaphoreCount;
+    const void* pWaitSemaphores; const void* pWaitDstStageMask;
+    uint32_t commandBufferCount; const void* pCommandBuffers;
+    uint32_t signalSemaphoreCount; const void* pSignalSemaphores;
+};
+// VkAttachmentDescription (9 u32s, flat) / VkAttachmentReference (2 u32s).
+struct VkAttachmentDescriptionH {
+    uint32_t flags, format, samples, loadOp, storeOp,
+             stencilLoadOp, stencilStoreOp, initialLayout, finalLayout;
+};
+struct VkAttachmentReferenceH { uint32_t attachment; uint32_t layout; };
+// VkSubpassDependency (7 u32s, flat).
+struct VkSubpassDependencyH {
+    uint32_t srcSubpass, dstSubpass, srcStageMask, dstStageMask,
+             srcAccessMask, dstAccessMask, dependencyFlags;
+};
+// VkSubpassDescription — carries NESTED arrays (re-pointed in the arm).
+struct VkSubpassDescriptionH {
+    uint32_t flags, pipelineBindPoint, inputAttachmentCount;
+    const void* pInputAttachments;
+    uint32_t colorAttachmentCount;
+    const void* pColorAttachments;
+    const void* pResolveAttachments;
+    const void* pDepthStencilAttachment;
+    uint32_t preserveAttachmentCount;
+    const void* pPreserveAttachments;
+};
+// VkRenderPassCreateInfo — pAttachments/pSubpasses/pDependencies arrays.
+struct VkRenderPassCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t attachmentCount; const void* pAttachments;
+    uint32_t subpassCount; const void* pSubpasses;
+    uint32_t dependencyCount; const void* pDependencies;
+};
+// VkFramebufferCreateInfo — pAttachments is an array of VkImageView handles.
+struct VkFramebufferCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint64_t renderPass; uint32_t attachmentCount;
+    const void* pAttachments; uint32_t width, height, layers;
+};
+// VkRenderPassBeginInfo — renderArea is by-value; pClearValues is nested.
+struct VkRenderPassBeginInfoH {
+    int32_t sType; void* pNext; uint64_t renderPass; uint64_t framebuffer;
+    int32_t renderAreaOffX, renderAreaOffY;
+    uint32_t renderAreaExtW, renderAreaExtH;
+    uint32_t clearValueCount; const void* pClearValues;
+};
 constexpr size_t kPhysicalDeviceFeaturesBytes = 220;
 // Read a guest struct by value into `dst` (zero-fill on unmapped).
 template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
@@ -838,6 +887,195 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (trace) {
             fprintf(stderr, "[display-thunk] vkQueuePresentKHR → %d\n", static_cast<int32_t>(ret));
         }
+        return true;
+    }
+
+    // ── vkQueueSubmit ─────────────────────────────────────────────────
+    // (queue, submitCount, pSubmits, fence) — each VkSubmitInfo has NESTED
+    // pWaitSemaphores / pWaitDstStageMask / pCommandBuffers /
+    // pSignalSemaphores arrays of opaque handles the host can't read from
+    // guest addresses. Re-point every array into the staging buffer; the
+    // handles themselves round-trip verbatim. No writeback (input-only).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_SUBMIT) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        uint32_t submit_count = static_cast<uint32_t>(cpu.regs[1]);
+        if (submit_count > 16) {
+            cpu.regs[0] = 0xFFFFFFFEu;  // VK_ERROR_DEVICE_LOST
+            return true;
+        }
+        VkSubmitInfoH* arr = reinterpret_cast<VkSubmitInfoH*>(
+            st.bytes(static_cast<size_t>(submit_count) * sizeof(VkSubmitInfoH), 8));
+        for (uint32_t i = 0; i < submit_count; i++) {
+            uint64_t g = cpu.regs[2] + static_cast<uint64_t>(i) * sizeof(VkSubmitInfoH);
+            read_guest_struct(mem, g, &arr[i]);
+            arr[i].pNext = nullptr;  // guest pNext chains are not host-readable
+            auto repoint_u64 = [&](const void*& p, uint32_t count) {
+                if (count == 0 || count > 16) { p = nullptr; return; }
+                uint64_t* a = reinterpret_cast<uint64_t*>(
+                    st.bytes(static_cast<size_t>(count) * 8u, 8));
+                read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
+                                 static_cast<size_t>(count) * 8u);
+                p = a;
+            };
+            auto repoint_u32 = [&](const void*& p, uint32_t count) {
+                if (count == 0 || count > 16) { p = nullptr; return; }
+                uint32_t* a = reinterpret_cast<uint32_t*>(
+                    st.bytes(static_cast<size_t>(count) * 4u, 4));
+                read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
+                                 static_cast<size_t>(count) * 4u);
+                p = a;
+            };
+            repoint_u64(arr[i].pWaitSemaphores, arr[i].waitSemaphoreCount);
+            repoint_u32(arr[i].pWaitDstStageMask, arr[i].waitSemaphoreCount);
+            repoint_u64(arr[i].pCommandBuffers, arr[i].commandBufferCount);
+            repoint_u64(arr[i].pSignalSemaphores, arr[i].signalSemaphoreCount);
+        }
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint64_t)>(entry.host_fn)(
+            cpu.regs[0], submit_count, arr, cpu.regs[3]);
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkQueueSubmit → %d\n", static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkCreateRenderPass ─────────────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pRenderPass) — the create info
+    // carries NESTED pAttachments (VkAttachmentDescription array),
+    // pSubpasses (VkSubpassDescription array whose members ALSO nest
+    // pColorAttachments / pInputAttachments / pResolveAttachments /
+    // pDepthStencilAttachment / pPreserveAttachments), and pDependencies.
+    // Deep-copy the whole tree into staging; the OUT handle (arg 3) is
+    // written back. pAllocator (arg 2) is always NULL (host fn pointers
+    // cannot be marshalled).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_RENDERPASS) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkRenderPassCreateInfoH* info = st.alloc<VkRenderPassCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->attachmentCount && info->pAttachments && info->attachmentCount <= 32) {
+            VkAttachmentDescriptionH* a = reinterpret_cast<VkAttachmentDescriptionH*>(
+                st.bytes(static_cast<size_t>(info->attachmentCount) * sizeof(VkAttachmentDescriptionH), 4));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pAttachments), a,
+                             static_cast<size_t>(info->attachmentCount) * sizeof(VkAttachmentDescriptionH));
+            info->pAttachments = a;
+        }
+        if (info->subpassCount && info->pSubpasses && info->subpassCount <= 32) {
+            VkSubpassDescriptionH* sp = reinterpret_cast<VkSubpassDescriptionH*>(
+                st.bytes(static_cast<size_t>(info->subpassCount) * sizeof(VkSubpassDescriptionH), 8));
+            for (uint32_t i = 0; i < info->subpassCount; i++) {
+                uint64_t g = reinterpret_cast<uint64_t>(info->pSubpasses)
+                           + static_cast<uint64_t>(i) * sizeof(VkSubpassDescriptionH);
+                read_guest_struct(mem, g, &sp[i]);
+                auto repoint_refs = [&](const void*& p, uint32_t count) {
+                    if (count == 0 || count > 32) { p = nullptr; return; }
+                    VkAttachmentReferenceH* a = reinterpret_cast<VkAttachmentReferenceH*>(
+                        st.bytes(static_cast<size_t>(count) * sizeof(VkAttachmentReferenceH), 4));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
+                                     static_cast<size_t>(count) * sizeof(VkAttachmentReferenceH));
+                    p = a;
+                };
+                repoint_refs(sp[i].pInputAttachments, sp[i].inputAttachmentCount);
+                repoint_refs(sp[i].pColorAttachments, sp[i].colorAttachmentCount);
+                if (sp[i].pResolveAttachments && sp[i].colorAttachmentCount) {
+                    VkAttachmentReferenceH* a = reinterpret_cast<VkAttachmentReferenceH*>(
+                        st.bytes(static_cast<size_t>(sp[i].colorAttachmentCount) * sizeof(VkAttachmentReferenceH), 4));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(sp[i].pResolveAttachments), a,
+                                     static_cast<size_t>(sp[i].colorAttachmentCount) * sizeof(VkAttachmentReferenceH));
+                    sp[i].pResolveAttachments = a;
+                } else {
+                    sp[i].pResolveAttachments = nullptr;
+                }
+                if (sp[i].pDepthStencilAttachment) {
+                    VkAttachmentReferenceH* a = st.alloc<VkAttachmentReferenceH>();
+                    read_guest_struct(mem, reinterpret_cast<uint64_t>(sp[i].pDepthStencilAttachment), a);
+                    sp[i].pDepthStencilAttachment = a;
+                }
+                if (sp[i].preserveAttachmentCount && sp[i].pPreserveAttachments && sp[i].preserveAttachmentCount <= 32) {
+                    uint32_t* a = reinterpret_cast<uint32_t*>(
+                        st.bytes(static_cast<size_t>(sp[i].preserveAttachmentCount) * 4u, 4));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(sp[i].pPreserveAttachments), a,
+                                     static_cast<size_t>(sp[i].preserveAttachmentCount) * 4u);
+                    sp[i].pPreserveAttachments = a;
+                }
+            }
+            info->pSubpasses = sp;
+        }
+        if (info->dependencyCount && info->pDependencies && info->dependencyCount <= 32) {
+            VkSubpassDependencyH* d = reinterpret_cast<VkSubpassDependencyH*>(
+                st.bytes(static_cast<size_t>(info->dependencyCount) * sizeof(VkSubpassDependencyH), 4));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pDependencies), d,
+                             static_cast<size_t>(info->dependencyCount) * sizeof(VkSubpassDependencyH));
+            info->pDependencies = d;
+        }
+        uint64_t host_renderpass = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_renderpass);
+        if (cpu.regs[3] && host_renderpass) {
+            try { mem->write(cpu.regs[3], &host_renderpass, sizeof(host_renderpass)); }
+            catch (...) { /* out pointer unmapped — result lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateRenderPass → %d (renderpass=%p)\n",
+                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_renderpass));
+        }
+        return true;
+    }
+
+    // ── vkCreateFramebuffer ────────────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pFramebuffer) — pAttachments is a
+    // NESTED array of VkImageView handles; re-point into staging (handles
+    // round-trip verbatim). OUT handle (arg 3) written back.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_FRAMEBUFFER) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkFramebufferCreateInfoH* info = st.alloc<VkFramebufferCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->attachmentCount && info->pAttachments && info->attachmentCount <= 32) {
+            uint64_t* a = reinterpret_cast<uint64_t*>(
+                st.bytes(static_cast<size_t>(info->attachmentCount) * 8u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pAttachments), a,
+                             static_cast<size_t>(info->attachmentCount) * 8u);
+            info->pAttachments = a;
+        }
+        uint64_t host_framebuffer = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_framebuffer);
+        if (cpu.regs[3] && host_framebuffer) {
+            try { mem->write(cpu.regs[3], &host_framebuffer, sizeof(host_framebuffer)); }
+            catch (...) { /* out pointer unmapped — result lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateFramebuffer → %d (framebuffer=%p)\n",
+                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_framebuffer));
+        }
+        return true;
+    }
+
+    // ── vkCmdBeginRenderPass ───────────────────────────────────────────
+    // (commandBuffer, pRenderPassBegin, contents) — pClearValues is a
+    // NESTED array of VkClearValue (16 bytes each); re-point into staging.
+    // renderArea is by-value (VkRect2D, 16 bytes), no translation needed.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_BEGIN_RENDERPASS) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkRenderPassBeginInfoH* b = st.alloc<VkRenderPassBeginInfoH>();
+        read_guest_struct(mem, cpu.regs[1], b);
+        b->pNext = nullptr;
+        if (b->clearValueCount && b->pClearValues && b->clearValueCount <= 32) {
+            uint64_t* a = reinterpret_cast<uint64_t*>(
+                st.bytes(static_cast<size_t>(b->clearValueCount) * 16u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(b->pClearValues), a,
+                             static_cast<size_t>(b->clearValueCount) * 16u);
+            b->pClearValues = a;
+        }
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, uint32_t)>(entry.host_fn)(
+            cpu.regs[0], b, static_cast<uint32_t>(cpu.regs[2]));
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkCmdBeginRenderPass → %d\n", static_cast<int32_t>(ret));
         return true;
     }
 
@@ -1669,6 +1907,10 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_INSTANCE:
         case thunk::Policy::VK_CREATE_DEVICE:
         case thunk::Policy::VK_PRESENT:
+        case thunk::Policy::VK_SUBMIT:
+        case thunk::Policy::VK_CREATE_RENDERPASS:
+        case thunk::Policy::VK_CREATE_FRAMEBUFFER:
+        case thunk::Policy::VK_BEGIN_RENDERPASS:
         case thunk::Policy::VULKAN:
             flags |= THUNK_VULKAN;
             break;

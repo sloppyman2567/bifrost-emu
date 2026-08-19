@@ -793,7 +793,9 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `opgen_thunk.hpp` pipeline now carries the ~275 display symbols
   (families `VK`/`WL`/`WL_EGL`/`X11`/`X11XCB`/`XCB`/`GBM`/`XEXT`/`GLX`/
   `RANDR`/`XKB`; policies `PROXY`/`VULKAN`/`VK_GET_PROC`/
-  `VK_CREATE_INSTANCE`/`VK_CREATE_DEVICE`/`VK_PRESENT`; size kinds
+  `VK_CREATE_INSTANCE`/`VK_CREATE_DEVICE`/`VK_PRESENT`/`VK_SUBMIT`/
+  `VK_CREATE_RENDERPASS`/`VK_CREATE_FRAMEBUFFER`/`VK_BEGIN_RENDERPASS`;
+  size kinds
   `X_DRAWSTR`/`X_SETWMPROTO`). The hand-rolled `REG_VK*/REG_WL*/REG_X11*`
   macro ladders in `display_thunk.cpp` are GONE. `DisplayThunk::
   register_known_symbols_` iterates `thunk::specs`, filters to the display
@@ -805,8 +807,29 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   stack args (n_stack = len−8); mixed int+float ⇒ `THUNK_MIXED_FP` with
   n_stack = int arity. Dispatch routes by POLICY (not symbol name) for the
   deep-marshalling entry points (`VK_GET_PROC`, `VK_CREATE_INSTANCE`,
-  `VK_CREATE_DEVICE`, `VK_PRESENT`) and sizes bounces by `SizeKind`
+  `VK_CREATE_DEVICE`, `VK_PRESENT`, `VK_SUBMIT`, `VK_CREATE_RENDERPASS`,
+  `VK_CREATE_FRAMEBUFFER`, `VK_BEGIN_RENDERPASS`) and sizes bounces by `SizeKind`
   (thunk.cpp's `SizeKind` switch gains a `default:` so new kinds are safe).
+  The four command/submit policies (added 2026-08-19 for real-frame
+  rendering) deep-marshal structs that NEST guest pointers, which the
+  generic bounce can't translate: `VK_SUBMIT` (vkQueueSubmit's
+  pWaitSemaphores/pWaitDstStageMask/pCommandBuffers/pSignalSemaphores
+  arrays), `VK_CREATE_RENDERPASS` (the whole VkRenderPassCreateInfo tree,
+  recursing into per-subpass attachment/reference/preserve arrays),
+  `VK_CREATE_FRAMEBUFFER` (image-view handle array), and
+  `VK_BEGIN_RENDERPASS` (clear-value array). All four arms zero `pNext`,
+  cap counts (≤16 submits / ≤32 subpasses/attachments) inside the
+  `VkStage` bounce, write back OUT handles at arg 3, and are driven by the
+  frozen-layout structs (`VkSubmitInfoH`/`VkRenderPassCreateInfoH`/
+  `VkSubpassDescriptionH`/`VkAttachmentDescriptionH`/`VkAttachmentReferenceH`/
+  `VkSubpassDependencyH`/`VkFramebufferCreateInfoH`/`VkRenderPassBeginInfoH`)
+  placed right after `VkPresentInfoH` — verified byte-for-byte against the
+  vendored vulkan_core.h on natural AArch64 alignment. Flat-struct `vkCmd*`
+  rows (barriers, clears, viewport/scissor, binds, draws, copies) need NO
+  deep marshal — only structs containing pointer members do. Regression:
+  `ctest_real/test_vulkan_swapchain.elf` records + submits a clear-color
+  frame (render pass → image view → framebuffer → begin → end → submit →
+  present) and passes under JIT and `--no-jit`.
   X11/WL host-fallback masks reproduce the pre-migration registrations
   FAITHFULLY (the proxy path is name-driven and authoritative; masks only
   affect the headless host-lib fallback) with two corrections: XCreateWindow
@@ -1234,3 +1257,38 @@ not musl-`-static`.
 - Verified: `make test-nb` **61/61**, `make test-capi` **54/54** (the
   libffi link didn't regress it), quick suite **200/200**,
   `opgen-check`/`opgen-thunk-check` clean.
+
+## Session History (2026-08-19) — Vulkan command-buffer rendering
+
+- **`vkCmd*` family (~36 functions) + 4 deep-marshal policies landed** —
+  real Vulkan frames now render through DisplayThunk. The table grew
+  696 → **851 symbols** (`tools/opgen/thunk_dp.txt`). New policies in
+  `VALID_POLICY` (thunkgen.py): `VK_SUBMIT`, `VK_CREATE_RENDERPASS`,
+  `VK_CREATE_FRAMEBUFFER`, `VK_BEGIN_RENDERPASS`; all four map to
+  `THUNK_VULKAN` in `register_known_symbols_` and get dedicated arms in
+  `vk_dispatch_` (display_thunk.cpp). The arms re-point nested guest
+  pointer arrays into the `VkStage` bounce (submit info's
+  pWaitSemaphores/pWaitDstStageMask/pCommandBuffers/pSignalSemaphores;
+  render-pass attachment/subpass/dependency trees recursing into per-
+  subpass reference arrays; framebuffer image-view handles; render-pass
+  clear values), zero `pNext`, cap counts (≤16 submits / ≤32
+  subpasses/attachments), call through typed host-fn pointers, and write
+  back OUT handles (render pass/framebuffer at arg 3). Driven by
+  frozen-layout structs (`VkSubmitInfoH` … `VkRenderPassBeginInfoH`)
+  next to `VkPresentInfoH`, verified byte-for-byte vs the vendored
+  vulkan_core.h. Flat-struct `vkCmd*` rows (barriers, clears, viewport,
+  binds, draws, copies) ride the generic bounce — only structs with
+  pointer members need a policy. `opgen-thunk-check` clean (851).
+- **`test_vulkan_swapchain.elf` now records + submits a real clear-color
+  frame** (22 checks, exit 0 / 77-skip): acquire → command pool +
+  command buffer → vkCreateRenderPass (LOAD_OP_CLEAR, initial UNDEFINED
+  → final PRESENT_SRC_KHR) → vkCreateImageView → vkCreateFramebuffer →
+  vkCmdBeginRenderPass (red clear) → vkCmdEndRenderPass →
+  vkEndCommandBuffer → vkQueueSubmit → present → wait → destroy.
+  Verified **both JIT and `--no-jit` on the live RADV RX 7600**; quick
+  suite **200/200**; CHANGELOG/ROADMAP/DISPLAY_THUNK/AGENTS.md updated.
+- TODO (next milestone): graphics pipelines + shader modules
+  (`vkCreateGraphicsPipelines`/`vkCreateShaderModule` deep marshal),
+  vkCmdDraw/DrawIndexed + descriptor sets in a real frame, depth
+  buffers, per-image command buffers (currently the test clears image 0
+  only).
