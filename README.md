@@ -354,8 +354,8 @@ by the `ctest_real/bench_*.elf` binaries themselves:
 
 The tight-ALU self-loop speedup is the top end; mixed real workloads
 (games, worldgen, GL) land in the 10-40x range. Tight loops benefit
-from the dispatch/flag-skip/regalloc work of the current unreleased
-cycle — the interpreter is unchanged and runs ~56 MIPS regardless.
+from the dispatch/flag-skip/regalloc work of the 1.5.3-alpha cycle —
+the interpreter is unchanged and runs ~56 MIPS regardless.
 CoreMark (aarch64 guest) runs at ~2,200 iterations/sec plain and
 ~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (~6% of native
 x86_64 speed) with all CRCs validated.

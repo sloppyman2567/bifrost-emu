@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
-## [Unreleased] — interpreter FP→int saturation rewrite (2026-08-18)
+## [1.5.3-alpha] — interpreter FP→int saturation rewrite (2026-08-18)
 
 ### Interp FCVTZU sentinel bug: `fcvtzu xN, dM` of values ≥ 2^63
 
@@ -41,7 +41,7 @@ Verified: `ctest/jit_int_fp_conv.elf` ALL PASS under both JIT and
 204/205). Also updated the stale `run_tests.sh` header comment
 (203/198 → 205/200).
 
-## [Unreleased] — cross-block BRCOND flag-materialize skip (2026-08-18)
+## [1.5.3-alpha] — cross-block BRCOND flag-materialize skip (2026-08-18)
 
 ### The CoreMark win: dead pstate materializes are skipped across block edges
 
@@ -76,7 +76,7 @@ to clean HEAD (zero new failures; `test_sem` flips to passing),
 FWD+VERIFY bench_mips byte-identical (acc=0xf800800a2c4ff835, 0
 divergences).
 
-## [Unreleased] — native SIMD permute + pairwise max/min (2026-08-18)
+## [1.5.3-alpha] — native SIMD permute + pairwise max/min (2026-08-18)
 
 ### teeworlds' menu loop stops running ZIP/UZP/TRN and UMINP through the interpreter
 
@@ -114,7 +114,7 @@ Two more teeworlds SIMD_DP interpreter sinks went native:
 Full suite **205/205**, quick **200/200**, JIT_VERIFY clean, interp-only
 19/19, `test_simd_saddw_uminp` ALL PASS.
 
-## [Unreleased] — glTexSubImage2D bounce + teeworlds boot fixes (2026-08-18)
+## [1.5.3-alpha] — glTexSubImage2D bounce + teeworlds boot fixes (2026-08-18)
 
 ### teeworlds now boots to the menu under `DISPLAY=:0`
 
@@ -146,7 +146,7 @@ SIGSEGV/DecodeError under `DISPLAY=:0`. The remaining "incorrect data
 check" / "invalid distance too far back" lines are the datafile loader
 tolerating resource quirks, not emulator failures.
 
-## [Unreleased] — native BL_CALL/BLR_CALL within blocks (2026-08-17)
+## [1.5.3-alpha] — native BL_CALL/BLR_CALL within blocks (2026-08-17)
 
 ### Direct and indirect function calls stop re-dispatching through the block dispatcher
 
@@ -187,7 +187,7 @@ verify-mode routing of BL_CALL/BLR_CALL targets through `run_block` under
 JIT_VERIFY — so the register + MEMFULL verifier now covers callee blocks —
 came in the self-loop flag-skip batch below.)
 
-## [Unreleased] — JIT register-allocation quality batch (2026-08-17)
+## [1.5.3-alpha] — JIT register-allocation quality batch (2026-08-17)
 
 ### Dead-dest drop, IMM fold lookahead, SUBS evict skip, Belady eviction, R14 freed
 
@@ -237,7 +237,7 @@ were DROPPED — they hang CoreMark under `BIFROST_ENABLE_FWD=1` (99% CPU
 spin, worth only ~0.4% alone). Do not re-add without diagnosing the FWD
 hang; the SBFM/UBFM constant fold fix below is unrelated and stays.
 
-## [Unreleased] — pstate materialize skip on flag-independent self-loops (2026-08-17)
+## [1.5.3-alpha] — pstate materialize skip on flag-independent self-loops (2026-08-17)
 
 ### THE 2.5x bench_mips win (0.93s → 0.38s)
 
@@ -266,7 +266,7 @@ after a `git reset --hard` wiped the uncommitted tree):
 
 Full suite **205/205**; bench_mips acc byte-identical.
 
-## [Unreleased] — glMapBuffer bounce + AAA GL rows (2026-08-15)
+## [1.5.3-alpha] — glMapBuffer bounce + AAA GL rows (2026-08-15)
 
 ### Guest-window buffer mapping + GL3.3+/4.x "AAA future-proofing" thunk rows
 
@@ -330,7 +330,7 @@ Suite is now **205/205**; `make opgen-thunk-check` clean. Still
 UNSUPPORTED (documented): `glDebugMessageCallback`'s callback is a GUEST
 function pointer that must NOT be handed to the host setter.
 
-## [Unreleased] — SBFM/UBFM constant-fold + 32-bit sign-extension fixes (2026-08-15)
+## [1.5.3-alpha] — SBFM/UBFM constant-fold + 32-bit sign-extension fixes (2026-08-15)
 
 ### The last two FWD-only correctness bugs (FWD-dependent constant folding)
 
@@ -362,7 +362,7 @@ Verified: sxtest ALL OK under FWD/JIT/VERIFY/VERIFY_MEM/REGALLOC_CHECK,
 full suite **205/205**, FWD quick 200/200, all cneg/scalarabs/neon/
 permute/xtn repros.
 
-## [Unreleased] — native SIMD 2REG/CVTF/ADDP/XTN/TBL/INS codegen (2026-08-15)
+## [1.5.3-alpha] — native SIMD 2REG/CVTF/ADDP/XTN/TBL/INS codegen (2026-08-15)
 
 ### The last six SIMD_DP JIT fallback families are native
 
@@ -395,7 +395,7 @@ Field contract per op (ir_translate_fp.cpp SIMD_DP case): 2REG/CVTF/XTN →
 FWD stays correct. New test: `ctest/jit_simd_misc.c` (30 checks, "checks
 passed" pattern). Full suite **205/205**.
 
-## [Unreleased] — version bump to 1.5.3-alpha (2026-08-15)
+## [1.5.3-alpha] — version bump to 1.5.3-alpha (2026-08-15)
 
 - All version references across the tree are normalized to **1.5.3-alpha**:
   `include/bifrost/version.hpp` (`VERSION` + new 1.5.3-alpha history block),
@@ -406,7 +406,7 @@ passed" pattern). Full suite **205/205**.
   `CHANGELOG.md` / `version.hpp` / `ROADMAP.md` (`1.4.5-alpha`, `1.5.0.alpha`,
   `1.5.1-alpha`, `1.5.2-alpha`) are kept as release history.
 
-## [Unreleased] — version bump to 1.5.2-alpha (2026-08-13)
+## [1.5.3-alpha] — version bump to 1.5.2-alpha (2026-08-13)
 
 - All version references across the tree are normalized to **1.5.2-alpha**:
   `include/bifrost/version.hpp` (`VERSION` + new 1.5.2-alpha history block),
@@ -418,7 +418,7 @@ passed" pattern). Full suite **205/205**.
   (`1.4.5-alpha`, `1.5.0.alpha`, `1.5.1-alpha`, `1.5.2-alpha`) are kept as
   release history.
 
-## [Unreleased] — Vulkan host path via DisplayThunk (1.5.3-alpha)
+## [1.5.3-alpha] — Vulkan host path via DisplayThunk (1.5.3-alpha)
 
 ### Guest Vulkan apps can now drive the host Vulkan loader/driver
 
@@ -479,7 +479,7 @@ passed" pattern). Full suite **205/205**.
   teardown. Passes on RADV. Exit 77 = skip when the host driver lacks
   headless surface. Suite is now 202/202.
 
-## [Unreleased] — DisplayThunk registration is table-driven (1.5.3-alpha)
+## [1.5.3-alpha] — DisplayThunk registration is table-driven (1.5.3-alpha)
 
 ### One symbol table for every thunk (696 symbols, CI-guarded)
 
@@ -511,7 +511,7 @@ passed" pattern). Full suite **205/205**.
   except the documented `XCreateWindow` fix.
 - Suite remains **202/202**; `make opgen-thunk-check` guards spec drift.
 
-## [Unreleased] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
+## [1.5.3-alpha] — native AdvSIMD modified-immediate MOVI/MVNI/ORR/BIC (2026-08-13)
 
 ### Vector `movi vN.2s, #imm` (~500K interp executions) is now native JIT
 
@@ -543,7 +543,7 @@ Added `ctest_real/test_movi_imm.c` (`.inst`-pinned MOVI/MVNI across LSL
 0/8/16/24, 8-bit, 64-bit, MSL#8/#16, and ORR/BIC 32/16-bit with
 read-modify-write pre-sets; no libm). Full suite: **193/193 PASS**.
 
-## [Unreleased] — native scalar 64-bit shift-by-immediate (2026-08-13)
+## [1.5.3-alpha] — native scalar 64-bit shift-by-immediate (2026-08-13)
 
 ### `ushr dN, dM, #imm` (the game's #1 remaining FP/SIMD fallback) is native
 
@@ -573,7 +573,7 @@ Added `scalar_shl_ushr_sshr` to `ctest/jit_neon.c` (`.inst`-pinned D-form
 shifts at #1/#32/#64 for SHL/USHR/SSHR incl. the interp fallback edges).
 Game wall time ~30.5s → ~22.3s. Full suite: **193/193 PASS**.
 
-## [Unreleased] — native FCVT rounding + de-interp of FP blocks (2026-08-13)
+## [1.5.3-alpha] — native FCVT rounding + de-interp of FP blocks (2026-08-13)
 
 ### Interpreter share cut ~2x (13.9% → ~7-8% of wall time); FPS 2 → 6
 
@@ -613,7 +613,7 @@ single + double, 32/64-bit dests, no libm so `make setup-tests` builds
 it). Verified: full suite **196/196 PASS** (`./scripts/run_tests.sh
 --test-all`).
 
-## [Unreleased] — native SIMD-scalar FP-source int↔FP converts (2026-08-13)
+## [1.5.3-alpha] — native SIMD-scalar FP-source int↔FP converts (2026-08-13)
 
 ### Chunk math `scvtf sN, sN` (~1.6M interp executions) is now native JIT
 
@@ -644,7 +644,7 @@ Added `ctest_real/test_fcvt_fpsrc.c` (FP-source scvtf/ucvtf/fcvtzs/fcvtzu,
 signed/unsigned × 32/64-bit + NaN + saturation edges, no libm). Full
 suite: **197/197 PASS** (`--test-all`), **192/192** default.
 
-## [Unreleased] — JIT dispatch overhead halved + taken-path chaining (2026-08-13)
+## [1.5.3-alpha] — JIT dispatch overhead halved + taken-path chaining (2026-08-13)
 
 ### Block dispatch overhead cut ~2x (~21% → ~10% of wall time)
 
@@ -676,7 +676,7 @@ from ~3 FPS to ~10 FPS with chunks loaded. Four changes:
 
 Verified: full suite **195/195 PASS** (`./scripts/run_tests.sh --test-all`).
 
-## [Unreleased] — vDSO clock fast-path + AVX2 SIMD shifts (2026-08-01)
+## [1.5.3-alpha] — vDSO clock fast-path + AVX2 SIMD shifts (2026-08-01)
 
 ### vDSO clock syscalls now run entirely in the fast path
 
@@ -730,7 +730,7 @@ back to the interpreter. They are now native codegen:
   both halves, Q=1/Q=0, boundary shifts) passes under JIT (AVX2 + SSE2
   paths) and interpreter.
 
-## [Unreleased] — Strict SIMD + SADDW/UMINP (2026-08-01)
+## [1.5.3-alpha] — Strict SIMD + SADDW/UMINP (2026-08-01)
 
 ### Unhandled SIMD now fails loudly + two more real-world ops
 
@@ -760,7 +760,7 @@ Both run through the interpreter and are reached from the JIT via its
 (8 checks, ALL PASS under JIT and interpreter). `rw_busybox_df` and
 `rw_iperf3_version` now pass under the strict (throwing) mode.
 
-## [Unreleased] — v1.5.2-alpha batch (2026-08-13)
+## [1.5.3-alpha] — v1.5.2-alpha batch (2026-08-13)
 
 ### FP/SIMD correctness + GL state + dladdr + vDSO
 
@@ -825,7 +825,7 @@ fixed, `dladdr()` is enabled, and a guest vDSO is now loaded.
   emulator's syscall handler. Compatibility/correctness win (glibc takes
   its normal vDSO code path); the direct clock fast-path is future work.
 
-## [Unreleased] — Current session (2026-07-26)
+## [1.5.3-alpha] — Current session (2026-07-26)
 
 ### Build/test fixes + SDL2/GL demo verification + docs refresh
 
@@ -873,7 +873,7 @@ the current state.
 - Updated `TESTS.md` counts to reflect new unit/integration tests.
 - Added `agent.md` to project root.
 
-## [Unreleased] — Turn 106 (2026-07-15)
+## [1.5.3-alpha] — Turn 106 (2026-07-15)
 
 ### Code review cleanup + optimization + all 171 tests pass
 
@@ -933,7 +933,7 @@ the deleted code. All pthread tests pass again.
 **Test results:** 171/171 pass (0 skip, 0 fail). Warning-clean
 under `-Wall -Wextra`.
 
-## [Unreleased] — Turn 105 (2026-07-15)
+## [1.5.3-alpha] — Turn 105 (2026-07-15)
 
 ### Argument-passing guest call + dl_iterate_phdr + dladdr + process_vm_writev
 
@@ -1009,7 +1009,7 @@ struct that must match glibc's exact layout across versions.
 164/164 pass (7 skip: iperf3 deps). `dladdr`, `dl_iterate_phdr`,
 `process_vm_writev` all verified manually.
 
-## [Unreleased] — Turn 104 (2026-07-15)
+## [1.5.3-alpha] — Turn 104 (2026-07-15)
 
 ### dlopen support improvements + process_vm_readv
 
@@ -1127,7 +1127,7 @@ Returns the total bytes copied, or -EFAULT on memory access errors.
 164/164 pass (7 skip: iperf3 deps not downloaded). `test_dlopen`
 passes. New `process_vm_readv` test verified manually.
 
-## [Unreleased] — Turn 103 (2026-07-15)
+## [1.5.3-alpha] — Turn 103 (2026-07-15)
 
 ### Code hygiene + syscall accuracy pass
 
@@ -1212,7 +1212,7 @@ All new stubs return `-ENOSYS` so guests fall back gracefully.
 `libiperf.so.0`, `test_dlopen` needs dlopen support — both fail
 identically on the previous commit).
 
-## [Unreleased] — Turn 89 (2026-07-12)
+## [1.5.3-alpha] — Turn 89 (2026-07-12)
 
 ### FRINT native JIT codegen — floor/ceil/round/trunc now execute natively
 
@@ -1375,7 +1375,7 @@ handled: 215 → 240.
 - Updated test counts in `TESTS.md` and `README.md` (167→168 total,
   119→124 default pass).
 
-## [Unreleased] — Turn 79 (2026-07-10)
+## [1.5.3-alpha] — Turn 79 (2026-07-10)
 
 ### 8-thread multi-wave TLS corruption fixed
 
@@ -1419,7 +1419,7 @@ reused cached stacks across waves.
 **Test results:** 125/125 pass with rootfs (glibc 2.40 + musl), under
 JIT. No regressions.
 
-## [Unreleased] — Turn 78 (2026-07-10)
+## [1.5.3-alpha] — Turn 78 (2026-07-10)
 
 ### glibc 2.40+ dynamic binaries now work (DT_RELR support)
 
@@ -1518,7 +1518,7 @@ glibc 2.38 (it doesn't produce DT_RELR sections).
   struct pthread on first allocation, serving as zeroed TLS for .tbss
   variables).
 
-## [Unreleased] — Turn 77 (2026-07-09)
+## [1.5.3-alpha] — Turn 77 (2026-07-09)
 
 ### glibc dynamic pthreads now work end-to-end
 
@@ -1606,7 +1606,7 @@ fixes the four remaining bugs that kept glibc dynamic
   (`hello_dyn_musl`, `test_dyn_full_musl`) now also pass once the
   musl toolchain is fetched.
 
-## [Unreleased] — Turn 76 (2026-07-09)
+## [1.5.3-alpha] — Turn 76 (2026-07-09)
 
 ### glibc dynamic pthread infrastructure
 
@@ -1656,7 +1656,7 @@ fixes the four remaining bugs that kept glibc dynamic
   new one-command `setup-rootfs-all.sh`. Updated Limitations section
   with accurate glibc pthread status.
 
-## [Unreleased] — Turn 75 (2026-07-09)
+## [1.5.3-alpha] — Turn 75 (2026-07-09)
 
 ### Toolchain download hardening
 
