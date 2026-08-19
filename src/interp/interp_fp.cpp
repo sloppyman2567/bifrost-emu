@@ -93,6 +93,31 @@ static inline uint16_t f2h(float f) {
 static inline uint16_t d2h(double d) {
     return f2h(static_cast<float>(d));
 }
+// ── FP→int conversion with ARM saturation semantics ──────────────────
+// A C++ static_cast<int64_t>/<uint64_t> of a double in [2^63, 2^64) (or
+// outside the signed range) lowers to x86 cvttsd2si, which returns the
+// 0x8000000000000000 sentinel for ANY out-of-range input — NOT the
+// architectural saturate. Range-check first; the unsigned [2^63, 2^64)
+// band is handled with the subtract-2^63-then-add-back trick so the
+// sentinel never surfaces (mirrors the JIT; AGENTS.md).
+static inline int64_t fp_to_signed_sat(double v, bool is_64bit) {
+    double hi = is_64bit ? 9223372036854775808.0 : 2147483648.0;
+    double lo = -hi;
+    if (std::isnan(v)) return 0;
+    if (v >= hi) return is_64bit ? INT64_MAX : INT32_MAX;
+    if (v < lo)  return is_64bit ? INT64_MIN : INT32_MIN;
+    return is_64bit ? static_cast<int64_t>(v) : static_cast<int32_t>(v);
+}
+static inline uint64_t fp_to_unsigned_sat(double v, bool is_64bit) {
+    double hi = is_64bit ? 18446744073709551616.0 : 4294967296.0;
+    if (std::isnan(v) || v <= 0.0) return 0;
+    if (v >= hi) return is_64bit ? ~0ULL : 0xFFFFFFFFu;
+    if (v >= 9223372036854775808.0) {
+        uint64_t r = static_cast<uint64_t>(v - 9223372036854775808.0);
+        return is_64bit ? r + 0x8000000000000000ULL : static_cast<uint32_t>(r);
+    }
+    return is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(v);
+}
 // execute_fp — handle all FP/SIMD instruction classes.
 //
 // Called from Emulator::execute() for:
@@ -2502,9 +2527,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             memcpy(&f, vn + i * esize, 4);
                             if (std::isfinite(f)) {
                                 if (is_unsigned) {
-                                    r = (f < 0.0f) ? 0 : static_cast<uint32_t>(f);
+                                    r = fp_to_unsigned_sat(f, false);
                                 } else {
-                                    r = static_cast<uint32_t>(static_cast<int32_t>(f));
+                                    r = static_cast<uint32_t>(static_cast<int32_t>(fp_to_signed_sat(f, false)));
                                 }
                             } else {
                                 r = 0;  // NaN/±inf → 0
@@ -2514,9 +2539,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             memcpy(&d, vn + i * esize, 8);
                             if (std::isfinite(d)) {
                                 if (is_unsigned) {
-                                    r = (d < 0.0) ? 0 : static_cast<uint64_t>(d);
+                                    r = fp_to_unsigned_sat(d, true);
                                 } else {
-                                    r = static_cast<uint64_t>(static_cast<int64_t>(d));
+                                    r = static_cast<uint64_t>(fp_to_signed_sat(d, true));
                                 }
                             } else {
                                 r = 0;
@@ -3378,40 +3403,42 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 uint8_t rmode = (op >> 19) & 0x3;    // bits 20:19: 0=N,1=P,2=M,3=Z
                 bool is_unsigned = ((op >> 16) & 1);  // bit 16 = U
                 bool is_64bit = sf_val;
-                auto round_d = [&](double v) -> int64_t {
-                    if (is_away) return static_cast<int64_t>(std::round(v));  // A: ties away from zero
+                auto round_d = [&](double v) -> double {
+                    if (is_away) return std::round(v);      // A: ties away from zero
                     switch (rmode) {
-                        case 0: return static_cast<int64_t>(std::llrint(v));   // N
-                        case 1: return static_cast<int64_t>(std::ceil(v));     // P
-                        case 2: return static_cast<int64_t>(std::floor(v));    // M
-                        default: return static_cast<int64_t>(std::trunc(v));   // Z
+                        case 0: return std::nearbyint(v);   // N (nearest-even)
+                        case 1: return std::ceil(v);        // P
+                        case 2: return std::floor(v);       // M
+                        default: return v;                  // Z (trunc — identity)
                     }
                 };
-                auto round_s = [&](float v) -> int64_t {
-                    if (is_away) return static_cast<int64_t>(std::roundf(v));
+                auto round_s = [&](float v) -> double {
+                    if (is_away) return std::round(v);      // A: ties away from zero
                     switch (rmode) {
-                        case 0: return static_cast<int64_t>(std::llrintf(v));
-                        case 1: return static_cast<int64_t>(std::ceilf(v));
-                        case 2: return static_cast<int64_t>(std::floorf(v));
-                        default: return static_cast<int64_t>(std::truncf(v));
+                        case 0: return std::nearbyint(v);   // N (nearest-even)
+                        case 1: return std::ceil(v);        // P
+                        case 2: return std::floor(v);       // M
+                        default: return v;                  // Z (trunc — identity)
                     }
                 };
                 if (ftype) {
                     double a = read_fp_d(cpu, rn);
+                    double r = round_d(a);
                     if (is_unsigned) {
-                        uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_d(a));
+                        uint64_t v = fp_to_unsigned_sat(r, is_64bit);
                         cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                     } else {
-                        int64_t v = round_d(a);
+                        int64_t v = fp_to_signed_sat(r, is_64bit);
                         cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                     }
                 } else {
                     float a = read_fp_s(cpu, rn);
+                    double r = round_s(a);
                     if (is_unsigned) {
-                        uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(round_s(a));
+                        uint64_t v = fp_to_unsigned_sat(r, is_64bit);
                         cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                     } else {
-                        int64_t v = round_s(a);
+                        int64_t v = fp_to_signed_sat(r, is_64bit);
                         cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                     }
                 }
@@ -3461,24 +3488,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             if ((op & 0x7F3E0000) == 0x1E380000) {  // FCVTZS/FCVTZU
                 bool is_unsigned = ((op >> 16) & 1);
                 bool is_64bit = sf_val;
-                if (ftype) {
-                    double a = read_fp_d(cpu, rn);
-                    if (is_unsigned) {
-                        uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
-                        cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
-                    } else {
-                        int64_t v = static_cast<int64_t>(a);
-                        cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
-                    }
+                double a = ftype ? read_fp_d(cpu, rn)
+                                 : static_cast<double>(read_fp_s(cpu, rn));
+                if (is_unsigned) {
+                    uint64_t v = fp_to_unsigned_sat(a, is_64bit);
+                    cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                 } else {
-                    float a = read_fp_s(cpu, rn);
-                    if (is_unsigned) {
-                        uint64_t v = (a < 0) ? 0 : static_cast<uint64_t>(a);
-                        cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
-                    } else {
-                        int64_t v = static_cast<int64_t>(a);
-                        cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
-                    }
+                    int64_t v = fp_to_signed_sat(a, is_64bit);
+                    cpu.regs[rd] = is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(static_cast<int32_t>(v));
                 }
                 return;
             }
@@ -3510,11 +3527,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                              : static_cast<double>(read_fp_s(cpu, rn));
                             double scaled = std::ldexp(a, fbits);
                             if (is_unsigned) {
-                                double hi = is_64bit ? 18446744073709551616.0
-                                                     : 4294967296.0;
-                                uint64_t v = (std::isnan(a) || scaled < 0.0) ? 0
-                                           : (scaled >= hi) ? (is_64bit ? ~0ULL : 0xFFFFFFFFu)
-                                           : static_cast<uint64_t>(scaled);
+                                uint64_t v = fp_to_unsigned_sat(scaled, is_64bit);
                                 cpu.regs[rd] = is_64bit ? v : static_cast<uint32_t>(v);
                             } else {
                                 double hi = is_64bit ? 9223372036854775808.0
@@ -3676,23 +3689,15 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 if (opcode == 0x1B) {  // FCVTZS/FCVTZU (FP → int, FP dest)
                     if (is_double) {
                         double v = read_fp_d(cpu, rn);
-                        uint64_t out = std::isnan(v) ? 0
-                            : (is_unsigned
-                               ? static_cast<uint64_t>(v >= 18446744073709551616.0 ? UINT64_MAX
-                                                      : v < 0.0 ? 0 : static_cast<uint64_t>(v))
-                               : static_cast<uint64_t>(v >=  9223372036854775808.0 ? INT64_MAX
-                                                      : v < -9223372036854775808.0 ? INT64_MIN
-                                                      : static_cast<int64_t>(v)));
+                        uint64_t out = is_unsigned
+                            ? fp_to_unsigned_sat(v, true)
+                            : static_cast<uint64_t>(fp_to_signed_sat(v, true));
                         cpu.v_lo[rd] = out;
                     } else {
                         float v = read_fp_s(cpu, rn);
-                        uint64_t out = std::isnan(v) ? 0
-                            : (is_unsigned
-                               ? static_cast<uint64_t>(static_cast<uint32_t>(v >= 4294967296.0f ? UINT32_MAX
-                                                                          : v < 0.0f ? 0 : static_cast<uint32_t>(v)))
-                               : static_cast<uint64_t>(static_cast<uint32_t>(v >= 2147483648.0f ? INT32_MAX
-                                                                          : v < -2147483648.0f ? INT32_MIN
-                                                                          : static_cast<int32_t>(v))));
+                        uint64_t out = is_unsigned
+                            ? fp_to_unsigned_sat(v, false)
+                            : static_cast<uint64_t>(fp_to_signed_sat(v, false));
                         // Zero-extend 32-bit result into 64-bit FP register
                         cpu.v_lo[rd] = out & 0xFFFFFFFFULL;
                     }

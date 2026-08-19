@@ -327,6 +327,27 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   reads as negative sign-extended and the 32-bit clamp turns it into 0).
   The interpreter's FP-source fcvtzs also needs an explicit `std::isnan` →
   0 (C++ `static_cast<int32_t>(NaN)` is UB and yields INT32_MIN on x86).
+  **FIXED (2026-08-18):** the interpreter's FP→int conversions were REWRITTEN
+  to route through two file-scope helpers in `interp_fp.cpp`,
+  `fp_to_signed_sat()`/`fp_to_unsigned_sat()` (is_64bit param), used by ALL
+  five conversion sites: the rounding-mode scalar family (FCVTNS/PS/MS/AS/ZU,
+  rmode bits[20:19], is_away bit18, U bit16 — the lambdas now return the
+  rounded `double` via `std::nearbyint`/`round`/`ceil`/`floor`, NOT a
+  pre-truncated `int64_t`), the scalar FCVTZS/FCVTZU integer variant
+  (0x7F3E0000), the fixed-point FCVTZS/FCVTZU (`fpfixed::FIXCONV` subop 1),
+  the FP-scalar 64-bit 0x5E group (opcode 0x1B, FP source/dest), and the
+  vector FCVTZS/FCVTZU (esize 4 and 8). The bug was `static_cast<uint64_t>(d)`
+  of a double in [2^63, 2^64): GCC lowers it to x86 `cvttsd2si` (SIGNED
+  convert), which returns the 0x8000000000000000 sentinel for ANY out-of-range
+  input, so `fcvtzu_x_d(1e19)` returned 9223372036854775808 instead of
+  10000000000000000000. The scalar 64-bit unsigned band needs the
+  subtract-2^63-then-add-back trick (`(uint64_t)(v − 2^63) + 0x8000000000000000ULL`)
+  exactly like the JIT; the 32-bit unsigned band needs the same trick at 2^31
+  (`fp_to_unsigned_sat` returns the low-32 value for `is_64bit=false` — a
+  plain `static_cast<uint32_t>(f)` for f ≥ 2^31 hits cvttss2si's 0x80000000
+  sentinel too). Do NOT revert these sites to raw casts. Verified:
+  `ctest/jit_int_fp_conv.elf` ALL PASS under JIT and `--no-jit`, full suite
+  205/205 in BOTH modes (interp previously 204/205 with the fcvtzu fail).
 - `instr_will_call_interp`'s FP gate polarity: "native" must predict NO
   interp call, so the return is `fp_gate >= 0 && !(fp_gate & bit)`.
   `fp_gate < 0 || (fp_gate & bit)` is INVERTED — under the default unset
@@ -1083,3 +1104,9 @@ not musl-`-static`.
   zero SIGSEGV/DecodeError under `DISPLAY=:0`. The remaining
   `incorrect data check` / `invalid distance too far back` lines are the
   datafile loader tolerating resource quirks, not emulator failures.
+- **Interp FCVTZU sentinel bug FIXED (2026-08-18)**: `fcvtzu_x_d(1e19)` failed
+  under `--no-jit` (interp 204/205; JIT passed). Raw `static_cast<uint64_t>(d)`
+  for d in [2^63, 2^64) lowers to cvttsd2si → the 0x8000000000000000 sentinel.
+  All five FP→int sites now route through `fp_to_signed_sat`/
+  `fp_to_unsigned_sat` (see the FP→int contract). Interp now 205/205, matching
+  the JIT. Verified with `ctest/jit_int_fp_conv.elf` (ALL PASS both modes).
