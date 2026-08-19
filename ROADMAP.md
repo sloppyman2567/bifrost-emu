@@ -48,18 +48,33 @@ status, see [TESTS.md](TESTS.md).
    `ctest/jit_int_fp_conv.elf`.
 
 8. **C API (libbifrost) refinement** — `bifrost_call`/`bifrost_call_f`
-   (invoke guest functions with int+FP args, save/restore all state),
-   `bifrost_set_svc_hook` (intercept every guest syscall before
-   dispatch), real breakpoints on `bifrost_step`/`bifrost_step_n`, JIT
-   on-by-default (was documented but not enabled), working
-   `bifrost_set_jit_verify`, and `bifrost_lookup_symbol`. Host-side
-   `ctest/test_capi.c` grown to 54 checks (`make test-capi`).
+    (invoke guest functions with int+FP args, save/restore all state),
+    `bifrost_set_svc_hook` (intercept every guest syscall before
+    dispatch), real breakpoints on `bifrost_step`/`bifrost_step_n`, JIT
+    on-by-default (was documented but not enabled), working
+    `bifrost_set_jit_verify`, and `bifrost_lookup_symbol`. Host-side
+    `ctest/test_capi.c` grown to 54 checks (`make test-capi`).
+
+ 9. **Android native bridge adapter (thin)** — `api/native_bridge.h/.cpp`
+    export a clean-room `NativeBridgeCallbacks` mirror (`NativeBridgeItf`,
+    `version = 4`) over the C API, so ART can use libbifrost as a
+    `-XX:NativeBridge` replacement for QEMU-TCG in an ATL-style Android
+    layer. `loadLibrary`/`isSupported`/`getError`/`getSignalHandler` +
+    libffi trampolines for scalar shorty signatures (JNIEnv/jobject
+    prefix, x/d-reg split per AAPCS, `bifrost_call`/`bifrost_call_f`
+    borrow-CPU drive). Foundation: C API `bifrost_dlopen`/`bifrost_dlsym`/
+    `bifrost_dlclose`. Host test `ctest/test_nb.c` = 61 checks
+    (`make test-nb`).
 
 ### Planned
 
-8. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
-9. **More real-world binary testing** (wider GL3.3+/4.x coverage as
+ 9. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
+10. **More real-world binary testing** (wider GL3.3+/4.x coverage as
     games demand it; input latency tuning).
+11. **Native bridge next steps** — JNIEnv object marshalling /
+    JavaBridge semantics if an ATL integration ever needs them;
+    CriticalNative trampolines (v7 claim); guest signal forwarding
+    through `getSignalHandler`.
 
 ### v1.5.3-alpha additions (shipped 2026-08-15)
 

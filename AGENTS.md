@@ -1170,3 +1170,67 @@ not musl-`-static`.
   `check-all`; `setup-tests` now skips `ctest/test_capi.c` in the musl
   cross-compile loop (it was silently failing there before). 54/54, suite
   205/205 both JIT and `--no-jit`.
+
+## Session History (2026-08-19) — Android native bridge adapter (libbifrost)
+
+- **C API dl* wrappers landed**: `bifrost_dlopen(emu, path, flags)` →
+  guest base addr handle (wraps `DynamicLinker::load_library`, flags
+  ignored/eager, refcount bump on re-load), `bifrost_dlsym(emu, handle,
+  name)` (wraps `resolve_symbol_in`; 0 on miss), `bifrost_dlclose(emu,
+  handle)` (wraps `close_library`; 0 success / -1 error; NULL-emu guards
+  set the error string). In `api/bifrost.h` + `api/bifrost_capi.cpp`.
+  `DynamicLinker` exists even for static ELFs (emulator.cpp:712), so this
+  works after any `bifrost_load_elf`.
+- **`api/native_bridge.h` + `api/native_bridge.cpp` — the thin Android
+  native bridge adapter**: `api/native_bridge.h` is a clean-room ABI
+  mirror of `NativeBridgeCallbacks` (21 fields, version 1→8 field order,
+  `JNICallType`, `NativeBridgeSignalHandlerFn`,
+  `NativeBridgeRuntimeCallbacks/Values`, `native_bridge_namespace_t`,
+  `extern "C" NativeBridgeCallbacks NativeBridgeItf;`). The cpp fills it:
+  `version = 4` (nb-qemu claim → `isCompatibleWith` returns
+  `bridge_version <= 4`, so ART's `isCompatibleWith(3)`/`(4)` pass but
+  `(7)` fails → legacy `getTrampoline` path). `getTrampoline` resolves via
+  `bifrost_dlsym` and builds a **libffi closure** with the JNI native
+  shape `ret f(JNIEnv*, jobject, <shorty args>)`; the closure body splits
+  args into guest x-regs (iargs) / d-regs (fargs) per AAPCS (F packed
+  into the low 32 bits of a double, since `call_guest_function` moves
+  doubles into v_lo[]; F returns read the low 32 of the d0 double), then
+  `bifrost_call`/`bifrost_call_f`. Shorty↔ffi: Z uint8, B sint8, C
+  uint16, S sint16, I sint32, J sint64, F float, D double, L pointer, V
+  void. `isSupported` = ELF magic + ELFCLASS64 + e_machine==183.
+  `loadLibrary`→`bifrost_dlopen`; `unloadLibrary` frees the handle's
+  closures then `bifrost_dlclose`; `getError`→`bifrost_get_error`;
+  `getSignalHandler`→NULL (emulator manages host signals);
+  `getAppEnv`/`createNamespace`/`linkNamespaces`/`getVendorNamespace`/
+  `getExportedNamespace`/`getTrampolineForFunctionPointer`→NULL/false;
+  `loadLibraryExt` routes to loadLibrary ignoring ns;
+  `getTrampolineWithJNICallType` passes Regular, NULL for CriticalNative.
+  CRITICAL: **`ffi_prep_cif` stores a pointer to the arg-types array (it
+  does NOT copy)** — the array MUST live as long as the cif. A stack-local
+  `ffi_type* atypes[16]` in `nb_get_trampoline` died at function return and
+  segfaulted inside libffi's closure assembly on the FIRST call (the
+  minimal-ffi repro in /tmp survived only because the call happened inside
+  main while the array was still alive). Fix: `NbTramp` carries a
+  `ffi_type* atypes[16]` member and `ffi_prep_cif` is passed `tramp->atypes`.
+- **`ctest/nb_lib.c` + `ctest/nb_testlib.so` (gitignored, built by
+  `make test-nb` / `setup-tests`)**: AArch64 JNI-shaped test lib
+  (env/thiz prefix) — `nb_add` ("JJJ", add x0,x2,x3), `nb_fadd` ("DDD",
+  fadd d0,d0,d1), `nb_gets` ("JJ", and x0,x2,#0xff), `nb_mix` ("DID",
+  scvtf d1,w2 + fadd d0,d1,d0), `nb_fmul` ("FFF", fmul s0,s0,s1). Built
+  with the musl cross toolchain `-O2 -shared -fPIC -nostdlib`.
+- **`ctest/test_nb.c` (HOST binary) + `make test-nb`**: 61 checks —
+  init/version==4/wiring, isCompatibleWith(3/4/7/100), getSignalHandler
+  NULL, getAppEnv NULL, isNativeBridgeFunctionPointer false,
+  isSupported(+/-), per-shorty trampoline calls incl. negatives +
+  float/double edge cases, unknown symbol/bad shorty → NULL,
+  CriticalNative→NULL, Regular routes, getTrampolineForFunctionPointer
+  NULL, loadLibrary(nonexistent)→NULL + getError, unload/refcount
+  (double unload → -1), direct C API dlopen/dlsym/dlclose round trip +
+  NULL-emu error paths, shutdown → loadLibrary NULL. Wired into
+  `check-all`; `setup-tests` skips `ctest/nb_lib.c` in the musl loop and
+  builds `nb_testlib.so` separately. Makefile: libffi auto-detect
+  (`NB_FFI_OK` probe → `LIB_SOURCES += api/native_bridge.cpp` +
+  `LDFLAGS += -lffi`, else build warning).
+- Verified: `make test-nb` **61/61**, `make test-capi` **54/54** (the
+  libffi link didn't regress it), quick suite **200/200**,
+  `opgen-check`/`opgen-thunk-check` clean.

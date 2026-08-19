@@ -226,6 +226,7 @@ make debug
 # Static library (for embedding bifrost-emu in other projects)
 make lib
 make test-capi  # build + run the host-side C API test (54 checks)
+make test-nb    # build + run the native bridge adapter test (61 checks)
 ```
 
 ### Cross-Compiling Test Binaries
@@ -380,10 +381,46 @@ Key features:
   return 1 and set `*result` to handle the syscall yourself (or 0 to
   pass it through). Note: the internal thunk fast path (syscall
   `0x1000`) bypasses the hook.
+- **Guest dlopen/dlsym/dlclose** — `bifrost_dlopen(emu, path, flags)`
+  loads a guest shared object and returns its base address as an opaque
+  handle (re-load bumps the refcount), `bifrost_dlsym(emu, handle, name)`
+  resolves a guest symbol (0 on miss), `bifrost_dlclose(emu, handle)`
+  unloads it (0 success / -1 error). Foundation for the native bridge
+  adapter below.
 
 The full API reference and semantics live in `api/bifrost.h`. A
 host-side test (`ctest/test_capi.c`, built via `make test-capi`, wired
 into `make check-all`) covers the API with 54 checks.
+
+## Android native bridge adapter (`api/native_bridge.h`)
+
+bifrost can act as an ART native bridge (`-XX:NativeBridge`), the
+drop-in replacement for QEMU-TCG in an ATL-style Android translation
+layer. `api/native_bridge.h` is a clean-room ABI mirror of Android's
+`NativeBridgeCallbacks`; `api/native_bridge.cpp` fills the table over
+the C API:
+
+```c
+#include "native_bridge.h"
+bifrost_emu_t* emu = bifrost_create();
+bifrost_load_elf(emu, "system_lib.elf", argc, argv);
+bifrost_nb_init(emu);                     // fills NativeBridgeItf
+void* lib = NativeBridgeItf.loadLibrary("game_native.so", 0);
+// ART: NativeBridgeGetTrampoline(lib, "Java_com_example_Native_foo", "JID", 3)
+long (*foo)(void*, void*, long, double) =
+    (long(*)(void*, void*, long, double))
+    NativeBridgeItf.getTrampoline(lib, "Java_com_example_Native_foo", "JID", 3);
+long r = foo(NULL, NULL, 42, 2.5);        // borrows the CPU, calls into guest
+bifrost_nb_shutdown();
+```
+
+The thin adapter scope: `loadLibrary`/`isSupported`/`getError`/
+`getSignalHandler` + borrow-CPU trampolines for scalar shorty
+signatures (JNIEnv/jobject prefix, x/d-reg split per AAPCS, libffi
+closures, `bifrost_call`/`bifrost_call_f` drive). No namespaces, no
+CriticalNative, no borrowed method pointers — `version = 4` claims the
+pre-Q ABI so ART uses the legacy `getTrampoline` path. Host test
+`ctest/test_nb.c` (61 checks, `make test-nb`, wired into `check-all`).
 
 ## Performance
 

@@ -48,7 +48,21 @@ OBJECTS  := $(patsubst %.cpp,$(OBJDIR)/%.o,$(SOURCES))
 DEPS     := $(OBJECTS:.o=.d)   # auto-generated header dependency files
 
 # Library objects (everything except main.cpp, PLUS the C API wrapper)
+# and the native bridge adapter (if libffi is available, see below).
 LIB_SOURCES := $(filter-out main.cpp,$(SOURCES)) api/bifrost_capi.cpp
+
+# Native bridge adapter (api/native_bridge.cpp): exports the Android ART
+# NativeBridgeItf table so libbifrost can serve as a native bridge
+# (-XX:NativeBridge) for AArch64 apps on x86_64 hosts. Trampolines are
+# libffi closures, so libffi is a hard dependency when enabled. Auto-
+# disabled (with a warning) if libffi is unavailable.
+NB_FFI_OK := $(shell echo 'int main(void){return 0;}' | $(CXX) -x c++ - -lffi -o /dev/null 2>/dev/null && echo yes)
+ifeq ($(NB_FFI_OK),yes)
+    LIB_SOURCES += api/native_bridge.cpp
+    LDFLAGS += -lffi
+else
+    $(warning "libffi not found — native bridge adapter (api/native_bridge.cpp) disabled; install libffi-dev")
+endif
 LIB_OBJECTS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(LIB_SOURCES))
 
 HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
@@ -75,7 +89,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
 
 all: $(TARGET)
 
@@ -294,7 +308,7 @@ setup-tests:
 	for src in ctest/*.c ctest_real/*.c; do \
 		[ -f "$$src" ] || continue; \
 		case " $(GLIBC_DYN_SRCS) " in *" $$src "*) continue ;; esac; \
-		case "$$src" in ctest/test_capi.c) continue ;; esac; \
+		case "$$src" in ctest/test_capi.c|ctest/nb_lib.c) continue ;; esac; \
 		elf="$${src%.c}.elf"; \
 		[ -f "$$elf" ] && [ "$$elf" -nt "$$src" ] && continue; \
 		extra=""; \
@@ -304,6 +318,11 @@ setup-tests:
 		fi; \
 	done; \
 	echo "Cross-compiled $$count musl-static test binaries."
+	@CC=tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc; \
+	if [ ! -f ctest/nb_testlib.so ] || [ "ctest/nb_testlib.so" -ot "ctest/nb_lib.c" ]; then \
+		$$CC -O2 -shared -fPIC -nostdlib ctest/nb_lib.c -o ctest/nb_testlib.so && \
+		echo "Built ctest/nb_testlib.so (native bridge test lib)."; \
+	fi
 	@CC=tools/aarch64-linux-gnu-cross/bin/aarch64-none-linux-gnu-gcc; \
 	count=0; \
 	for src in $(GLIBC_DYN_SRCS); do \
@@ -338,7 +357,7 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET) test-capi
+check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET) test-capi test-nb
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
 
@@ -352,3 +371,24 @@ test-capi: lib $(TARGET)
 	@$(CXX) build/test_capi_host.o libbifrost.a -o build/test_capi_host $(LDFLAGS)
 	@echo "=== Running host C API test ==="
 	@./build/test_capi_host
+
+# Cross-compile the guest AArch64 shared object used by the native bridge
+# host test (a -nostdlib -shared lib with JNI-shaped functions; must be
+# rebuilt whenever ctest/nb_lib.c changes).
+NB_TESTLIB := ctest/nb_testlib.so
+$(NB_TESTLIB): ctest/nb_lib.c
+	@$(CROSS_CC) -O2 -shared -fPIC -nostdlib ctest/nb_lib.c -o $@
+	@echo "Built $@"
+
+# Host-side native bridge test: test_nb.c links libbifrost.a (which
+# contains the adapter when libffi is present) and runs on the HOST. It
+# drives the NativeBridgeItf table exactly as ART's libnativebridge would:
+# loadLibrary the guest .so, getTrampoline per JNI shorty, and call each
+# trampoline through the borrow-CPU path.
+test-nb: lib $(TARGET) $(NB_TESTLIB)
+	@echo "=== Building host native bridge test ==="
+	@mkdir -p build
+	@$(CXX) -O1 -g -Iapi -x c -c ctest/test_nb.c -o build/test_nb_host.o
+	@$(CXX) build/test_nb_host.o libbifrost.a -o build/test_nb_host $(LDFLAGS)
+	@echo "=== Running host native bridge test ==="
+	@./build/test_nb_host

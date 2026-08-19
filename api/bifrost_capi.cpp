@@ -444,6 +444,51 @@ uint64_t bifrost_lookup_symbol(bifrost_emu_t* emu, const char* name) {
         return 0;
     }
 }
+// ── Guest dynamic linking ──────────────────────────────────────────────
+uint64_t bifrost_dlopen(bifrost_emu_t* emu, const char* path, int flags) {
+    (void)flags;  // accepted for API compatibility; resolution is eager
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || !path || !*path) return 0;
+    try {
+        auto* dl = e->emu.dyn_linker();
+        if (!dl) return 0;
+        auto& cpu = e->emu.main_cpu();
+        return dl->load_library(cpu, path);
+    } catch (const std::exception& ex) {
+        set_error(e, ex.what());
+        return 0;
+    } catch (...) {
+        set_error(e, "unknown error");
+        return 0;
+    }
+}
+uint64_t bifrost_dlsym(bifrost_emu_t* emu, uint64_t handle, const char* name) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || !name || !*name || handle == 0) return 0;
+    try {
+        auto* dl = e->emu.dyn_linker();
+        if (!dl) return 0;
+        return dl->resolve_symbol_in(handle, name);
+    } catch (...) {
+        return 0;
+    }
+}
+int bifrost_dlclose(bifrost_emu_t* emu, uint64_t handle) {
+    auto* e = reinterpret_cast<bifrost_emu*>(emu);
+    if (!e || handle == 0) return -1;
+    try {
+        auto* dl = e->emu.dyn_linker();
+        if (!dl) return -1;
+        auto& cpu = e->emu.main_cpu();
+        return dl->close_library(cpu, handle);
+    } catch (const std::exception& ex) {
+        set_error(e, ex.what());
+        return -1;
+    } catch (...) {
+        set_error(e, "unknown error");
+        return -1;
+    }
+}
 // ── Syscall hook ───────────────────────────────────────────────────────
 int bifrost_set_svc_hook(bifrost_emu_t* emu, bifrost_svc_hook_fn fn,
                          void* userdata) {

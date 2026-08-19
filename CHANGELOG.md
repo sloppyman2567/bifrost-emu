@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.5.3-alpha] — Android native bridge adapter + C API dl* wrappers (2026-08-19)
+
+### libbifrost can now act as an ART native bridge (`-XX:NativeBridge`)
+
+The emulator exports the **Android `NativeBridgeCallbacks` interface**
+(a clean-room ABI mirror of `libnativebridge`'s struct, Apache 2.0; the
+adapter implementation is original Unlicense code) so a future ATL-like
+Android layer can swap QEMU-TCG for bifrost. This is the "thin adapter"
+scope decided for this milestone: `loadLibrary`/`isSupported`/`getError`/
+`getSignalHandler` + borrow-CPU trampolines for scalar shorty signatures.
+No namespace support, no CriticalNative, no borrowed method pointers.
+
+- **`api/native_bridge.h`** — exact `NativeBridgeCallbacks` ABI mirror
+  (21 fields, `version` 1→8 order), `JNICallType`, `NativeBridgeSignalHandlerFn`,
+  `NativeBridgeRuntimeCallbacks/Values`, `native_bridge_namespace_t`,
+  `extern "C" NativeBridgeCallbacks NativeBridgeItf;`, and
+  `bifrost_nb_init(bifrost_emu_t*)` / `bifrost_nb_shutdown()`.
+- **`api/native_bridge.cpp`** — the adapter. `version = 4` (nb-qemu-style
+  claim: pre-Q, no vendor namespace; `isCompatibleWith` returns
+  `bridge_version <= 4` so ART takes the legacy `getTrampoline` path).
+  `getTrampoline` resolves the guest symbol via `bifrost_dlsym`, builds a
+  **libffi closure** whose host signature is the JNI native-method shape
+  `ret f(JNIEnv*, jobject, <shorty args>)`, and the closure body splits
+  the args into guest x-regs / d-regs per AAPCS then drives the guest via
+  `bifrost_call`/`bifrost_call_f`. Shorty↔ffi map covers Z/B/C/S/I/J/F/D/L/V
+  (F is packed into the low 32 bits of a double because
+  `call_guest_function` moves doubles into v_lo[]; F returns read the low
+  32 bits of the d0 double). `isSupported` checks the ELF magic +
+  ELFCLASS64 + `e_machine == 183`. `loadLibrary`→`bifrost_dlopen`,
+  `unloadLibrary` (frees the handle's closures + `bifrost_dlclose`),
+  `getError`→`bifrost_get_error`. `getSignalHandler`→NULL (the emulator
+  manages its own host signal forwarding). `createNamespace`/
+  `linkNamespaces`/`loadLibraryExt`-with-ns/`getTrampolineForFunctionPointer`
+  → NULL/false (thin scope).
+- **`ctest/nb_lib.c` + `ctest/nb_testlib.so`** — AArch64 test lib with
+  JNI-shaped functions (env/thiz prefix) covering int, double, float,
+  and mixed shorties: `nb_add` ("JJJ"), `nb_fadd` ("DDD"), `nb_gets`
+  ("JJ"), `nb_mix` ("DID"), `nb_fmul` ("FFF").
+- **`ctest/test_nb.c` + `make test-nb`** — 61-check host test driving
+  `NativeBridgeItf` end-to-end (init/version/compat/signal/env, per-shorty
+  trampoline calls incl. negative + float-edge cases, error paths,
+  unload/refcount, shutdown). Wired into `check-all`.
+
+### C API dl* wrappers (the adapter's foundation)
+
+`bifrost_dlopen`/`bifrost_dlsym`/`bifrost_dlclose` wrap the dynamic
+linker's `load_library`/`resolve_symbol_in`/`close_library` so embedders
+can load guest shared objects and look up symbols without going through
+thunk registration. `bifrost_dlopen` returns the guest base address as
+the opaque handle (re-load bumps the refcount); `bifrost_dlsym` returns
+the guest function address (0 on miss); `bifrost_dlclose` returns 0 on
+success / -1 on error. NULL-emu guards set the error string.
+
+Note: the trampoline's arg-types array must live as long as the `ffi_cif`
+(`ffi_prep_cif` stores the pointer, it does not copy) — stored in the
+`NbTramp` struct, not a stack-local (a stack-local `atypes[]` segfaulted
+inside libffi's closure assembly on the first call).
+
+Verified: `make test-nb` **61/61**, `make test-capi` **54/54** (regression),
+quick suite **200/200**, `opgen-check`/`opgen-thunk-check` clean.
+
 ## [1.5.3-alpha] — C API refinement: bifrost_call, svc hook, breakpoints (2026-08-19)
 
 ### libbifrost: real guest function calls, syscall hooks, and debug breakpoints

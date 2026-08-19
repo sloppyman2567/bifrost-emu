@@ -102,6 +102,25 @@ double bifrost_call_f(bifrost_emu_t* emu, uint64_t fn,
 // and thunk-registered symbols). Returns the absolute guest address, or
 // 0 if not found (or the binary has no dynamic symbol table).
 uint64_t bifrost_lookup_symbol(bifrost_emu_t* emu, const char* name);
+// ── Guest dynamic linking ─────────────────────────────────────────────
+// Load a guest AArch64 shared object into the emulator at runtime (the
+// equivalent of dlopen). `path` is a host filesystem path. `flags` is
+// accepted for API compatibility (RTLD_LAZY/RTLD_NOW/RTLD_GLOBAL) but
+// resolution is always eager and symbols are always registered globally.
+// Returns the guest load address (the library handle) on success, or 0
+// on failure. If the library is already loaded, the existing handle is
+// returned with its refcount bumped (glibc _dl_open semantics).
+uint64_t bifrost_dlopen(bifrost_emu_t* emu, const char* path, int flags);
+// Resolve a symbol within a specific loaded library's scope (the
+// equivalent of dlsym with a handle): the library's own .dynsym first,
+// then its DT_NEEDED dependencies. Returns the absolute guest address,
+// or 0 if not found.
+uint64_t bifrost_dlsym(bifrost_emu_t* emu, uint64_t handle, const char* name);
+// Decrement a library's refcount (the equivalent of dlclose). When the
+// refcount reaches 0 the library's DT_FINI_ARRAY runs (in reverse order)
+// and the library is marked unloaded. Returns 0 on success, -1 on error
+// (invalid handle / library not loaded).
+int bifrost_dlclose(bifrost_emu_t* emu, uint64_t handle);
 // ── Register access ─────────────────────────────────────────────────────
 // Get a general-purpose register (0-30). x31 reads as 0 (XZR).
 uint64_t bifrost_get_reg(const bifrost_emu_t* emu, int reg);
