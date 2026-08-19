@@ -1414,3 +1414,64 @@ not musl-`-static`.
   shared odd slot (coldchain5). Workloads: /tmp/opencode/tier2_coldchain
   {1,2,3,4,5}.s/.elf (coldchain5 = head at 0x400084 slot 1, 2239-add
   fall-through chain → fires + walks 64 blocks).
+
+## Session History (2026-08-19) — Tier-2 Phase 1 step 3 (region compiler)
+
+- **`compile_tier2_region` (M1) landed and VERIFIED — commit `c848391`.**
+  `src/jit/jit_tier2.cpp` now contains the whole-region compiler: one x86
+  function per trace, ONE regalloc pass over the concatenated block IR
+  (vregs remapped to a single region vreg space), inline prologue (RBX/RBP/
+  R12-R15, lazy R10 window), per-block body via `compile_ir_inst`, manual
+  BRCOND/BRCOND_ZERO/BRCOND_BIT terms (flag-prep + `cmc` for HI/LS +
+  `emit_jcc_rel32_placeholder`), inlined cold exits with per-edge
+  `RegionSnapshot` restore (flags/dirty/reg_vreg_/vreg_home_/vreg_dirty_),
+  an optional `Lback` jmp to body_start when the last block's taken target
+  is the head (back-edge / loop region), and JCC `0F 8x rel32` patching.
+  Registration is done by the CALLERS (run_block fire site +
+  `lookup_call_target`), which compile, then write a fresh `BlockEntry`
+  (fn=rfn, instr_count=total_insts, ends_with_branch, chained, verified_once
+  — M1 skips region verification). `dump_periodic_stats` prints
+  `tier2: hot_heads=<delta> regions=<delta>` (new `tier2_regions` atomic).
+- **M1 validation (final):** chain_skip disabled → nullptr; trace.ok;
+  nblk≥2; every block exactly 1 side_exit at last op index; term ∈
+  {BRCOND, BRCOND_ZERO, BRCOND_BIT}; NON-last block may not target the head
+  (mid-trace back-edge rejected); **last block's taken target == head_pc →
+  Lback, else → ordinary cold exit (LINEAR regions supported)**. This is
+  relaxed from the original "back-edge required" design: the walker follows
+  only fall-through, so a trace's last block is RET/B/0-side-exit unless the
+  64-block cap lands on a cond-branch block — natural backward-branch loops
+  therefore produce traces ending on the exit block and were being rejected.
+  M1 regions form realistically as LINEAR fall-through chains (taken edges =
+  cold exits); loop regions only at cap coincidence.
+- **Verified:** synthetic `/tmp/opencode/tier2_region*.elf` — a 300-block
+  fall-through chain `[subs x3,#1; b.eq x_exit]` entered via BLR 500 times
+  (x3=300 → all 300 run; the fn body CHAINS so only the entry block ever
+  hits the dispatcher). With `BIFROST_TIER2_HITS=1` the entry block fires on
+  its first slow-path dispatch and the walker collects the 64-block cap
+  trace → the region compiles (16752 B for 128 insts) and runs on every
+  call; the t64 fall-through cold exit + t1 re-entry taken branch both
+  exercise the deferred-epilogue snapshot restore. Results byte-identical
+  to baseline across x3 ∈ {10, 300} (exit status 244 = x1=500), JIT_VERIFY
+  clean (the region itself is unverified but the follow-on blocks catch any
+  corruption), quick suite **200/200** tier2 OFF and ON, bench_mips acc
+  `0xf800800a2c4ff835` identical, bench_matrix 656.5 MFLOPS unchanged.
+- **Hot-head firing CONFIRMED the step-2 caveat (blocks NEVER reach the
+  slow path twice):** on the BLR workload, `exec=1` fires at
+  `BIFROST_TIER2_HITS=1`, `exec=2` at HITS=2, and then it STOPS — the fn
+  body runs as one chained jmp sequence (fall-through chain slots) so only
+  the entry block is dispatched, and its inline-cache slot self-pins after
+  two dispatches (nothing else ever writes that slot). Regions only formed
+  because HITS=1 fired on the very first slow-path dispatch. With HITS≥5 no
+  fire, ever. The x3=300 variant forms FOUR regions (t1..t64, t65..t128,
+  t129..t192, t193..t256 — the 44-block tail can't form one: the last block
+  is an unconditional `b t1`, term class B ∉ {BRCOND, ZERO, BIT} → rejected)
+  because each region's L_exit lands on a freshly-translated head. The
+  M1 speedup (>15% on bench_mips) CANNOT be measured yet: no real benchmark
+  fires (all hot loops chained/cached, exec_count ~1-2). **Next work item:
+  a hot-head counter that counts CHAINED/self-loop execution without a
+  per-dispatch atomic** (the documented fast-path rule) — tier-2 stays inert
+  on real workloads until that exists.
+- Region code size is ~260 B per 2-instr block (vs ~60-80 B for the same
+  block standalone) — the inlined cold exits + per-edge snapshot restores
+  are the bulk. 64-block traces fit in `code_buf_` fine; a trace budget
+  (bytes, not just block/inst caps) belongs in the next step if traces grow.

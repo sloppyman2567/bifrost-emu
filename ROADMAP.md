@@ -131,6 +131,39 @@ and across internal block edges.
   block-end reasons). `BIFROST_PC_HIST=1` data already names the hot loops.
 
 **Phase 1 — trace collection (profile-guided):**
+  **STATUS: SHIPPED (2026-08-19).** Step 1 (commits `377aad8`): per-block
+  `BlockEntry.exec_count` uint32 counter + env gates (`BIFROST_TIER2`,
+  `BIFROST_TIER2_HITS` default 10000, `BIFROST_TIER2_TRACE`), incremented on
+  run_block's slow-path cache-HIT branch and `lookup_call_target`'s slow path
+  (the BL/BLR-entry path real hot loops actually use — run_block's slow path
+  only sees libc startup blocks once chains absorb the steady-state loops).
+  Step 2 (`410aea1`): `collect_tier2_trace` walker — pure read-only
+  collection, 64-block / 2048-guest-inst caps, ABORTS on call_interp / svc /
+  indirect_br / bl / decode_fail / vreg_exhaust. Step 3 (`c848391`):
+  `compile_tier2_region` M1 — one x86 function per trace, one whole-region
+  regalloc pass over the concatenated block IR, inlined cold exits with
+  per-edge snapshot restore, optional Lback to body_start for back-edge
+  (loop) regions, JCC rel32 patching. Wired into the run_block fire site and
+  lookup_call_target (caller registers the returned fn in `blocks_`).
+  **M1 verification finding:** the walker follows only fall-through, so a
+  trace's last block is RET/B/0-side-exit except when the 64-block cap lands
+  exactly on a cond-branch block — M1 regions form realistically as LINEAR
+  fall-through chains (taken edges = cold exits); natural backward-branch
+  loop regions only at cap coincidence. The validation was relaxed to accept
+  both (last block's taken target == head → Lback, else ordinary cold exit).
+  **Hot-head firing caveat (still true):** chained loops (bench_matrix's
+  2-block loop) and chained/cached callee bodies never reach the slow path,
+  so exec_count stays ~1-2 and no region fires on real workloads — hot-heads
+  fire only on inline-cache slot thrash (>~128-256 distinct blocks sharing
+  slots) or a single-entry callee whose slot collides. Phase-2 planning must
+  add a fire mechanism that counts CHAINED/self-loop execution (no per-
+  dispatch atomics — the documented fast-path rule) or tier-2 stays inert on
+  the minecraft game. Verified M1: synthetic 300-block BLR loop forms 4
+  chained regions (t1..t64, t65..t128, t129..t192, t193..t256) + x3=10
+  variant forms 1, results byte-identical to baseline, JIT_VERIFY clean,
+  quick suite 200/200 tier2 off/on, bench_mips acc `0xf800800a2c4ff835`
+  unchanged, bench_matrix 656.5 MFLOPS unchanged. Region code size is large
+  (~260 B per 2-instr block) — code-buffer pressure is a real M1 constraint.
 - Add a cheap per-block-edge execution counter (a `uint32_t` on
   `BlockEntry`, incremented at dispatch, flushed to a shared map on the
   slow path like `tls_hot_pc_counts_`). Identify hot heads: a block whose
@@ -194,6 +227,12 @@ and across internal block edges.
   region allocation only → measure bench_mips / bench_matrix / CoreMark /
   chunkmesh under `BIFROST_TIER2=1`. Target: >15% on bench_mips beyond the
   current ~360ms, suite 205/205 + `BIFROST_JIT_VERIFY` clean.
+  **STATUS: code complete + correctness-verified (c848391); the >15%
+  measurement is BLOCKED on the hot-head firing caveat above** — no real
+  benchmark fires a region yet (all hot loops are chained/cached), so the
+  speedup cannot be measured. The compilation machinery itself is proven
+  correct by the synthetic workloads; the next work item is the
+  chained/self-loop hot-head counter so real loops fire.
 - M2: add LICM + cross-block const-prop + region DCE. Re-measure; keep the
   FWD interaction honest (AGENTS.md: the two `ir_optimize.cpp` folds were
   dropped for hanging CoreMark under FWD — the region pass must NOT assume
