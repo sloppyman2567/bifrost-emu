@@ -315,6 +315,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
+    pending_flag_mat_.clear();
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
@@ -1152,6 +1153,17 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // non-idempotent syscalls (read/poll/...) return different values the
     // second time, so verify must treat SVC blocks as artifacts, not bugs.
     entry.has_svc = has_svc;
+    // 1.5.5-alpha: cross-block flag-materialize skip. Reads-pstate status is
+    // exactly flags_loop_carried_ (the pre-scan above: a flag consumer
+    // before any setter ⇒ the block needs pstate as an INPUT). Predecessors
+    // consult this to skip dead materializes on their edges into this block.
+    entry.reads_pstate_before_set = flags_loop_carried_;
+    // Move the pending materialize sites recorded during BRCOND codegen into
+    // the entry so chain_back_references can jmp-past them once the targets
+    // translate clean. (Self-loops never record — flags_loop_carried_ is
+    // available at compile time, no retroactive patch needed.)
+    entry.pending_flag_mat_ = std::move(pending_flag_mat_);
+    pending_flag_mat_.clear();
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

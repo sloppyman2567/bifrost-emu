@@ -90,6 +90,30 @@ void FrostJIT::emit_taken_path_epilogue() {
         emit_nop(); emit_nop(); emit_nop(); emit_nop();  // 4 × 0x90
     }
 }
+// ── FrostJIT::flag_mat_decision ────────────────────────────────────────
+// Decides whether a BRCOND edge into `target_pc` may skip its pstate
+// materialization (the dead-work removal on hot loop edges). The pstate
+// write is only consumed by a successor that READS pstate before setting
+// flags (BlockEntry::reads_pstate_before_set, from translate_block's
+// flags_loop_carried_ pre-scan):
+//   - target already translated and clean → Skip (omit the materialize).
+//   - target already translated and dirty  → None (emit it — successor
+//     needs pstate as an input).
+//   - target not yet translated → SkipAndRecord (emit it conservatively,
+//     but record the code range so chain_back_references can jmp-past it
+//     when the successor translates clean). The must-emit default keeps
+//     the invariant "a pstate-reading successor always receives fresh
+//     pstate from every incoming edge" trivially true for unknown targets.
+// Called under blocks_mutex_ (all translate_block callers hold it), so
+// the blocks_ read is safe.
+FrostJIT::FlagMatSkip FrostJIT::flag_mat_decision(uint64_t target_pc) {
+    if (getenv("BIFROST_NO_FLAGSKIP")) return FlagMatSkip::None;
+    if (target_pc == 0) return FlagMatSkip::None;
+    auto it = blocks_.find(target_pc);
+    if (it == blocks_.end()) return FlagMatSkip::SkipAndRecord;
+    return it->second.reads_pstate_before_set ? FlagMatSkip::None
+                                              : FlagMatSkip::Skip;
+}
 // ── FrostJIT::compile_ir_branch ────────────────────────────────────────
 // Handles conditional/unconditional branch ops and supervisor calls.
 // All of these set rax_holds_next_pc_=true and return 1 (ends block)
@@ -247,10 +271,35 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // ── Fall-through (not-taken) path: materialize flags, set RAX = fall-through PC ──
             // If CMC was emitted (for HI/LS after ADD/TST), re-invert CF so
             // materialize_flags_to_pstate sees the original carry flag.
-            if (need_cmc_for_hi_ls) {
-                emit_byte(0xF5);  // cmc — restore CF to original
+            //
+            // 1.5.5-alpha: cross-block flag-materialize skip. The pstate
+            // write is only consumed by a successor that READS pstate before
+            // setting flags (reads_pstate_before_set). If the fall-through
+            // successor is already translated and provably never does, the
+            // materialize is dead work on every fall-through execution —
+            // omit it. If the successor isn't translated yet, emit it and
+            // record the site so chain_back_references jmp-pasts it later if
+            // the successor translates clean. This generalizes the self-loop
+            // skip in the taken path below to 2-block loops (the matrix_test
+            // hot loop is 0x401ea4 ↔ 0x401e90; both edges ran a ~27-instruction
+            // dead materialize per iteration, ~25% of the loop code).
+            FlagMatSkip ft_skip = flag_mat_decision(inst.arm_pc + 4);
+            if (ft_skip == FlagMatSkip::Skip) {
+                // Known-clean successor never reads pstate — omit the
+                // materialize AND its cmc restore (host CF after the JCC is
+                // block-local; the successor re-establishes its own flags
+                // before any consumer, so stale pstate is never observed).
+            } else {
+                size_t mat_start = code_buf_used_;
+                if (need_cmc_for_hi_ls) {
+                    emit_byte(0xF5);  // cmc — restore CF to original
+                }
+                materialize_flags_to_pstate();
+                if (ft_skip == FlagMatSkip::SkipAndRecord) {
+                    pending_flag_mat_.push_back(
+                        {inst.arm_pc + 4, mat_start, code_buf_used_ - mat_start});
+                }
             }
-            materialize_flags_to_pstate();
             emit_mov_imm_to_rax(inst.arm_pc + 4);
             size_t jmp_to_epilogue = emit_jmp_rel32_placeholder();
             branch_target_patches_.push_back({jmp_to_epilogue, 0});
@@ -267,15 +316,37 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // every iteration (~60 bytes of pushfq/bit-extract/store).
             bool skip_taken_materialize =
                 is_selfloop && !no_selfloop_ && !flags_loop_carried_;
+            // 1.5.5-alpha: extend the self-loop skip to cross-block edges.
+            // The self-loop case uses the current block's flags_loop_carried_
+            // (source == target, so the block's own pre-scan decides). A
+            // cross-block taken edge instead consults the TARGET's
+            // reads_pstate_before_set — either known at compile time (skip
+            // outright) or recorded in pending_flag_mat_ for a retroactive
+            // jmp-past once the target translates clean.
+            FlagMatSkip t_skip;
+            if (is_selfloop) {
+                t_skip = skip_taken_materialize ? FlagMatSkip::Skip : FlagMatSkip::None;
+            } else {
+                t_skip = flag_mat_decision(inst.imm);
+                skip_taken_materialize = (t_skip == FlagMatSkip::Skip);
+            }
             // If CMC was emitted, re-invert CF before materializing flags.
             // Skipped along with the materialize: the loop body re-sets CF
             // before any consumer reads it.
-            if (!skip_taken_materialize) {
+            if (skip_taken_materialize) {
+                // Known-clean successor (self-loop or cross-block) never
+                // reads pstate — omit materialize AND cmc restore.
+            } else {
+                size_t mat_start = code_buf_used_;
                 if (need_cmc_for_hi_ls) {
                     emit_byte(0xF5);  // cmc — restore CF to original
                 }
                 // Materialize flags to pstate (the taken-target block may read them).
                 materialize_flags_to_pstate();
+                if (t_skip == FlagMatSkip::SkipAndRecord) {
+                    pending_flag_mat_.push_back(
+                        {inst.imm, mat_start, code_buf_used_ - mat_start});
+                }
             }
             // ── Self-loop chaining ──
             // If the taken target is the block's own start PC, emit a 5-byte

@@ -609,10 +609,18 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     static_cast<unsigned long long>(pc));
         }
         // PCs match — compare register state.
-        // NOTE: we skip pstate comparison for blocks ending with BRCOND
-        // because CBNZ/CBZ are translated as TST+BRCOND, and the TST
-        // materializes flags that the interpreter's CBNZ never sets.
-        // This is a known semantic difference, not a real divergence.
+        // pstate comparison note: only meaningful when this block READS
+        // pstate as an input (reads_pstate_before_set, from the same
+        // flags_loop_carried_ pre-scan the JIT uses for the cross-block
+        // flag-materialize skip). A block that never consumes pstate before
+        // setting its own flags may legitimately see STALE pstate at its
+        // boundary — a predecessor that knew it was clean skipped (or
+        // jmp-pasted) the pstate materialize, so comparing the JIT's
+        // (stale) output pstate against the interpreter's (fresh) value is
+        // a guaranteed false positive, not a codegen bug. Such blocks'
+        // flag correctness is still fully checked: a miscompiled flag-setter
+        // drives the block's own conditional branch wrong, which the PC
+        // divergence check above catches.
         bool diverged = false;
         for (int i = 0; i < 31; i++) {
             if (cpu.regs[i] != ref.regs[i]) {
@@ -638,7 +646,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 diverged = true;
             }
         }
-        if (cpu.pstate != ref.pstate) {
+        if (cpu.pstate != ref.pstate && entry.reads_pstate_before_set) {
             // pstate comparison: mask out the internal from_sub marker bit
             // (bit 27) since it's a JIT implementation detail, not part of
             // the architectural NZCV state. Only compare the actual flags.

@@ -579,6 +579,34 @@ private:
         // memory verifier. Set at translate time; used by the MEMFULL
         // (BIFROST_JIT_VERIFY_MEMFULL) full-memory diff.
         bool has_unresolved_store = false;
+        // True if this block READS guest pstate (NZCV) before its first
+        // flag-SETTING op. This is exactly translate_block's
+        // flags_loop_carried_ pre-scan: a flag CONSUMER (BRCOND/CSEL/ADCS/
+        // SBCS/CCMP/FP_CSEL/BRCOND_SKIP) appearing before any flag SETTER
+        // (ADDS/SUBS/ADCS/SBCS/TST/CCMP/FP_CMP) means the block consumes
+        // pstate as an INPUT from its predecessor. A block with this == false
+        // never reads pstate, so any pstate materialization on an INCOMING
+        // edge is dead work: predecessors may omit it (compile-time when
+        // this block is already translated) or jmp-past it retroactively
+        // (via pending_flag_mat_ below when this block translates later and
+        // the predecessor couldn't know yet). The invariant that keeps this
+        // sound: an edge's materialize is only ever skipped when the edge's
+        // TARGET provably never reads pstate, so a pstate-reading block
+        // always receives fresh pstate from every incoming edge.
+        bool reads_pstate_before_set = true;  // conservative default
+        // Pending pstate-materialize skip sites recorded during BRCOND
+        // codegen: when an edge targets a successor that ISN'T translated
+        // yet, the (conservative) materialize is emitted and its code range
+        // recorded here. When the successor finally translates with
+        // reads_pstate_before_set == false, chain_back_references patches a
+        // 5-byte `jmp rel32` at code_off that hops over the dead region.
+        // Only populated on conditional-branch blocks.
+        struct PendingFlagMat {
+            uint64_t target_pc;   // successor that must be clean to strip this site
+            size_t   code_off;    // start of the materialize region in code_buf_
+            size_t   code_len;    // length of the region (cmc + pushfq/bit-extract/store)
+        };
+        std::vector<PendingFlagMat> pending_flag_mat_;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -1029,6 +1057,16 @@ private:
     int compile_ir_alu(const IRInst& inst);
     int compile_ir_mem(const IRInst& inst);
     int compile_ir_branch(const IRInst& inst);
+    // BRCOND edge pstate-materialize decision (jit_codegen_branch.cpp,
+    // 1.5.5-alpha cross-block flag-materialize skip):
+    //   None          = successor may read pstate — emit the materialize.
+    //   Skip          = successor provably never reads pstate — omit it
+    //                   (and its preceding cmc restore).
+    //   SkipAndRecord = successor not yet translated — emit it and record
+    //                   the code range in pending_flag_mat_ so a later
+    //                   clean translation of the successor jmp-pasts it.
+    enum class FlagMatSkip { None, Skip, SkipAndRecord };
+    FlagMatSkip flag_mat_decision(uint64_t target_pc);
     // Per-block state (reset at translate_block start).
     std::vector<size_t> call_interp_branch_patches_;
     std::vector<BranchPatch> branch_target_patches_;
@@ -1172,6 +1210,12 @@ private:
     bool    has_taken_chain_slot_ = false;
     size_t  taken_chain_patch_off_ = 0;  // offset of the 5-byte taken-path slot
     uint64_t taken_chain_target_pc_ = 0; // taken-path target (inst.imm)
+    // Pending pstate-materialize skip sites recorded during BRCOND codegen
+    // (see BlockEntry::PendingFlagMat). Built per-block, moved into the
+    // BlockEntry at registration so chain_back_references can strip the
+    // dead materializes when the targets translate clean. Cleared at
+    // translate_block start.
+    std::vector<BlockEntry::PendingFlagMat> pending_flag_mat_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache (1.5.3-alpha) ───────────────────
     // Guest vector regs (0-31) pinned into host XMM3-15 across the whole

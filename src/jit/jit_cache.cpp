@@ -113,6 +113,50 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
         ? reinterpret_cast<const uint8_t*>(target_it->second.chain_entry)
         : reinterpret_cast<const uint8_t*>(target_it->second.fn);
     if (target_fn == nullptr) return;
+    // ── 1.5.5-alpha: strip dead pstate materializes into this block ──
+    // If this freshly-translated block provably never reads pstate
+    // (reads_pstate_before_set == false), any already-compiled predecessor
+    // that recorded a pending materialize site targeting it can drop that
+    // materialize: the successor never consumes pstate, so the write is
+    // dead work on every incoming edge. Patch each recorded region to a
+    // 5-byte `jmp rel32` that hops past it — the jcc lands exactly on
+    // code_off, and the region is followed by `mov rax, next_pc`, so a
+    // jump over it is cheap and safe (cheaper than NOPing the ~25-89 bytes,
+    // which would still cost fetch/decode bandwidth every iteration).
+    // Mirrors patch_chain's W^X + release-fence pattern; the region is
+    // never re-visited (sites are erased below), so this runs once.
+    if (!target_it->second.reads_pstate_before_set) {
+        auto bref = back_refs_.find(target_pc);
+        if (bref != back_refs_.end()) {
+            bool patched_any = false;
+            for (uint64_t src_pc : bref->second) {
+                auto sit = blocks_.find(src_pc);
+                if (sit == blocks_.end()) continue;
+                auto& mats = sit->second.pending_flag_mat_;
+                for (auto itm = mats.begin(); itm != mats.end();) {
+                    if (itm->target_pc != target_pc) {
+                        ++itm;
+                        continue;
+                    }
+                    if (itm->code_len >= 5 &&
+                        itm->code_off + itm->code_len <= CODE_BUF_SIZE) {
+                        if (!patched_any) {
+                            make_writable();
+                            patched_any = true;
+                        }
+                        int32_t rel = static_cast<int32_t>(itm->code_len - 5);
+                        code_buf_[itm->code_off] = 0xE9;  // jmp rel32
+                        memcpy(code_buf_ + itm->code_off + 1, &rel, 4);
+                    }
+                    itm = mats.erase(itm);
+                }
+            }
+            if (patched_any) {
+                std::atomic_thread_fence(std::memory_order_release);
+                make_executable();
+            }
+        }
+    }
     auto try_patch = [&](uint64_t src_pc) {
         auto sit = blocks_.find(src_pc);
         if (sit == blocks_.end()) return;

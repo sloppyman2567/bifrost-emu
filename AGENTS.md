@@ -943,6 +943,51 @@ not musl-`-static`.
   FWD 200/200, JIT_VERIFY zero new divergences (rw_*/pthread/vulkan failures
   under JIT_VERIFY are pre-existing race/display false-positives — they fail
   identically at the parent commit).
+- **Cross-block BRCOND flag-materialize skip (2026-08-18, the CoreMark win)**:
+  the self-loop skip below generalizes to CROSS-BLOCK edges. The hot
+  matrix_test loop is 2 blocks (0x401ea4 ↔ 0x401e90); BOTH edges ran a
+  ~27-instruction dead pstate materialize per iteration (~25% of the loop
+  code). CoreMark: plain 1687→**2210** iters/sec (+31%), FWD+CHAIN_SKIP
+  1836→**2541** (+38%), all CRCs validated. Every BRCOND block that never
+  reads pstate before its first flag write (`reads_pstate_before_set`,
+  = `flags_loop_carried_` from the existing pre-scan) may skip the
+  materialize on either edge. Fall-through edge: `flag_mat_decision(arm_pc+4)`
+  at compile time — target not yet translated → SkipAndRecord (emit +
+  record `{target_pc, code_off, code_len}` in `pending_flag_mat_`); target
+  already translated AND clean → Skip entirely. Taken edge: SkipAndRecord
+  at compile time (the target is usually untranslated then), and
+  `chain_back_references` RETROACTIVELY patches the recorded region to a
+  5-byte `jmp rel32` (rel = code_len−5) once the target translates clean —
+  the JCC lands exactly on the region start, so the jmp hops past the dead
+  ~89 bytes. Safety invariant: a materialize is only ever skipped when the
+  TARGET provably never reads pstate, so a pstate-reading block always
+  receives fresh pstate on every incoming edge. CRITICAL: the shared
+  epilogue's `clobber_flags()` (jit_translate.cpp:1018) is a NO-OP for
+  BRCOND blocks (`flags_in_host_ = false` already set at
+  jit_codegen_branch.cpp:367), so the fall-through (line ~297) and taken
+  (line ~345) materialize calls are the ONLY pstate writes on BRCOND edges.
+  JIT_VERIFY's pstate compare is gated on `entry.reads_pstate_before_set`
+  (a non-reading block may legitimately exit with stale pstate — the stale
+  BRCOND comment in jit_dispatch.cpp was replaced with this contract).
+  `pending_flag_mat_` is cleared at block start (taken_chain_target_pc_=0)
+  and moved into the BlockEntry after `entry.has_svc`. Sites with
+  code_len < 5 are erased without patching. Debug/bisection gate:
+  `BIFROST_NO_FLAGSKIP=1`. Verified: suite **205/205**, JIT_VERIFY quick
+  failure set IDENTICAL to clean HEAD (zero new failures — test_sem flips
+  to passing), FWD+VERIFY bench_mips byte-identical
+  (acc=0xf800800a2c4ff835, 0 divergences), FWD+CHAIN_SKIP+VERIFY
+  bench_matrix 1 pre-existing v_lo[0] upper-half false-positive (identical
+  at parent commit).
+- **The two `ir_optimize.cpp` constant folds are BROKEN and DROPPED
+  (2026-08-18)**: the commutative src1→src2 swap + ZEXT-after-LOAD_MEM→MOV
+  fold HANG CoreMark under `BIFROST_ENABLE_FWD=1` (99% CPU spin, only the
+  banner prints, exit 124; hangs even with `BIFROST_NO_FLAGSKIP=1`, so the
+  folds alone cause it — and bifrost-emu IGNORES SIGTERM, kill with
+  `timeout -s KILL` / `pkill -x -9`). Bisect: clean HEAD FWD+CHAIN_SKIP
+  = 1812.91 iters/sec works; flag-skip without folds = 2496.88 works;
+  folds re-added → hang. Worth only +0.4%; do NOT re-add without
+  diagnosing the FWD hang. `ir_optimize.cpp` is pristine again
+  (`git checkout --`).
 - **`ctest/fadd_repro2.elf` is a BROKEN test, not an emulator bug**: it
   checks `g_r` (`[x19+0x158]`, a bss global never written by `main`) for
   the fadd result, so it FAILS on interp AND JIT AND real hardware. The
@@ -975,6 +1020,19 @@ not musl-`-static`.
 
 ## Session History (2026-08-18) — teeworlds boots to the menu
 
+- **Cross-block BRCOND flag-materialize skip COMMITTED (2026-08-18)**: the
+  CoreMark work from the previous session. Both hot edges of the 2-block
+  matrix_test loop (0x401ea4 ↔ 0x401e90) were running a ~27-instr dead
+  pstate materialize per iteration; now the fall-through edge skips it at
+  compile time when the target is already translated clean, and the taken
+  edge records the emitted region and `chain_back_references` retroactively
+  jmp-pasts it once the target translates (verified firing with a temporary
+  `BIFROST_FLAGMAT_TRACE`: 522 jmp-pasts including src=0x401ea4
+  target=0x401e90). CoreMark: plain 1687→**2210** iters/sec, FWD+CHAIN_SKIP
+  1836→**2541** (+38%), CRCs validated. Full contract in Local Contracts.
+- **The two `ir_optimize.cpp` folds were dropped** — they hang CoreMark
+  under `BIFROST_ENABLE_FWD=1` (see Local Contracts). The flag-skip is the
+  entire win; `ir_optimize.cpp` was reverted with `git checkout --`.
 - **The teeworlds malloc-spin root cause was a STALE BINARY, not an emulator
   bug**: the installed `bifrost-emu` had an inverted UBFM/SBFM/BFM interp
   guard (threw `DecodeError` on every `sf=1` bitfield op), so
