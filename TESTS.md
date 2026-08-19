@@ -10,35 +10,44 @@ their current status under both the frostJIT (default) and interpreter
 
 | Mode | Tests | Pass | Fail | Notes |
 |------|-------|------|------|-------|
-| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 198 | 198 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
-| frostJIT (quick `make check-quick`) | 193 | 193 | 0 | Skip slow benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 198 | 198 | 0 | Same conditions as JIT row |
+| frostJIT (`./bifrost-emu`, default SDL2/GL build) | 205 | 205 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
+| frostJIT (quick `make check-quick`) | 200 | 200 | 0 | Skip the 5 benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
+| Interpreter (`./bifrost-emu --no-jit`) | 205 | 204 | 1 | Same conditions as JIT row; `int_fp_conv` fails (pre-existing interp FCVTZU ≥2^63 bug, see below) |
 
-**198 test programs** are defined in `scripts/run_tests.sh` across eight
+**205 test programs** are defined in `scripts/run_tests.sh` across seven
 categories (see table below). The default `make check` suite runs **all
-198** of them (interactive + real-world are the standard default) and
-reports **198 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
+205** of them (interactive + real-world are the standard default) and
+reports **205 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
 With `make check-quick`, benchmarks are skipped and the suite reports
-**193 pass / 0 fail**.
+**200 pass / 0 fail**.
+
+> **Known interpreter-only failure (pre-existing):** under `--no-jit`,
+> `jit_int_fp_conv` fails `fcvtzu_x_d(1e19)` — the scalar integer-variant
+> FCVTZU handler in `interp_fp.cpp` (~line 3467) does a raw
+> `static_cast<uint64_t>(a)`, which GCC lowers to `cvttsd2si`; any input
+> ≥ 2^63 comes back as the 0x8000000000000000 out-of-range sentinel even
+> though the value (e.g. 1e19 < 2^64) is representable. The JIT's native
+> FCVTZU has the explicit range pre-check and passes. Present since the
+> test was added (2026-06-26); unchanged at the 1.5.3-alpha bump.
 
 ### Test categories
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit tests | 41 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute, scalar shifts) |
-| Integration tests | 67 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, SADDW/UMINP, UMOV, shift-by-imm, vDSO clock) |
+| Unit tests | 44 | `ctest/` — focused JIT regression tests (arithmetic, FP, SIMD, atomics, threads, MVNI, permute, scalar shifts, SIMD misc, SADDW/UMINP, UMOV, shift-by-imm) |
+| Integration tests | 71 | `ctest_real/` + `test/` — real-world programs (div, MD5, sin, fib, signals, syscalls, SHA crypto, SDL2/GL triangle, SIMD vector FP, GL state, pairmin, shift-by-imm, vDSO clock) |
 | Toybox tests | 9 | `ctest_real/toybox` — integration tests via the toybox multi-tool |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (busybox, toybox, iperf3, coreutils) |
 | Dynamic | 15 | Dynamically-linked musl + glibc tests (need rootfs, includes dladdr) |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
 | Interactive | 5 | `test/` + `ctest_real/` — REPL/stdin tests (echo, repl, cat, sh, fgets) |
-| **Total** | **198** | 198 run by default; 193 with `--quick` |
+| **Total** | **205** | 205 run by default; 200 with `--quick` |
 
 ### Running the tests
 
 ```bash
-make check              # run all 198 tests (JIT default, colorized summary)
-make check-quick        # skip slow benchmarks
+make check              # run all 205 tests (JIT default, colorized summary)
+make check-quick        # skip the 5 benchmarks (200 tests)
 make check-nojit        # run under interpreter (--no-jit)
 make check-fwd          # run with BIFROST_ENABLE_FWD=1
 ./scripts/run_tests.sh  # full suite (real-world binaries auto-download when missing)
@@ -155,12 +164,14 @@ natively. They are the regression suite for frostJIT codegen changes.
 | `ctest/jit_fma.elf` | ✅ | ✅ | FMADD/FMSUB/FNMADD/FNMSUB (single+double, 29/29 sub-tests). Native FMA3 codegen on FMA3 hosts (BIFROST_NO_FMA3=1 to force decomposed path). |
 | `ctest/jit_neon.elf` | ✅ | ✅ | NEON SIMD ops (10/10 sub-tests): SHL/USHR, SLI/SRI rotate, USRA, REV32/REV64, INS/UMOV, ADD/XOR. |
 | `ctest/jit_neon_advanced.elf` | ✅ | ✅ | Advanced NEON (11/11 sub-tests): EXT, TBL, UZP1/UZP2, ZIP1/ZIP2, TRN1/TRN2, SHRN, SSHLL, USHLL. |
-| `ctest/jit_neon_permute.elf` | ✅ | ✅ | SIMD permute (8/8 checks): ZIP1/ZIP2 (16-bit), UZP1 (8-bit), TRN2 (8-bit), SSHLL, USHLL, SHRN, EXT. |
-| `ctest/jit_int_fp_conv.elf` | ✅ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests) |
+| `ctest/jit_neon_permute.elf` | ✅ | ✅ | SIMD permute (28/28 checks): ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 (8/16/32-bit), SSHLL, USHLL, SHRN, EXT. |
+| `ctest/jit_int_fp_conv.elf` | ❌ | ✅ | int↔FP conversions: SCVTF/UCVTF/FCVTZS/FCVTZU × 32/64-bit GPR × single/double FP (36/36 sub-tests). Interp fails `fcvtzu_x_d(1e19)` — pre-existing interp FCVTZU ≥2^63 bug (see Summary). |
 | `ctest/jit_ldp_stp.elf` | ✅ | ✅ | LDP/STP pair load/store |
 | `ctest/jit_madd.elf` | ✅ | ✅ | MADD/MSUB/SMADDL/UMADDL/SMULH/UMULH |
 | `ctest/jit_rev.elf` | ✅ | ✅ | REV/REV16/REV32/RBIT |
 | `ctest/jit_simd.elf` | ✅ | ✅ | SIMD logical/DUP/MOVI/LD1/ST1 |
+| `ctest/jit_simd_misc.elf` | ✅ | ✅ | SIMD 2REG (CNT/NOT/RBIT/ABS/NEG), CVTF, byte-pair ADDP, XTN, TBL/TBX, INS (30/30 checks) |
+| `ctest/jit_simd_pairmin.elf` | ✅ | ✅ | SMAXP/SMINP/UMAXP/UMINP pairwise max/min (19/19 checks; esizes 1/2/4, both Q) |
 
 ---
 

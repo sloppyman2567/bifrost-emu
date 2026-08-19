@@ -31,11 +31,13 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
 - Run static and dynamically-linked AArch64 ELF binaries
 - Load shared libraries (musl and glibc) with GOT/PLT relocation, TLS,
   ifuncs, and DT_INIT_ARRAY constructors
-- JIT-compile ARM64 to x86_64 native code (~6x faster than the interpreter)
+- JIT-compile ARM64 to x86_64 native code (10-40x faster than the interpreter on compute benchmarks)
 - Emulate 200+ Linux syscalls (threads, signals, filesystem, memory)
 - Provide a virtual filesystem (/proc, /dev, /sys, framebuffer, audio)
 - Forward GL/EGL/Vulkan/SDL2/ALSA calls to host libraries (thunking)
 - Run multi-threaded guest programs (clone + futex + per-thread JIT)
+- Run real games end-to-end (SDL2/OpenGL demos, a Minecraft-like voxel
+  game, and teeworlds boot to a stable menu/frame loop under `DISPLAY=:0`)
 
 **What it is NOT:**
 - Not a full-system emulator (no kernel — use QEMU-system for that)
@@ -205,13 +207,17 @@ Optional (for full feature set):
 ### Build
 
 ```bash
-# Default build (headless, no SDL2)
+# Default build — auto-detects SDL2 and enables host GL/EGL thunking
+# when sdl2-config is available (BIFROST_USE_SDL2 / GL/EGL thunks)
 make
 
-# With SDL2 window backend for /dev/fb0
+# Force a headless build even if SDL2 is installed
+make USE_SDL2=0
+
+# Force the SDL2 build (errors if sdl2-config is not installed)
 make USE_SDL2=1
 
-# With GL/EGL thunking (forwards guest GL calls to host)
+# With GL/EGL thunking (forwards guest GL calls to host) — on by default
 make USE_SDL2=1 USE_THUNK_GL=1
 
 # Debug build with sanitizers
@@ -237,10 +243,11 @@ make cross SRC=ctest_real/my_test.c OUT=ctest_real/my_test.elf
 ## Testing
 
 ```bash
-# Run the full test suite
+# Run the full test suite (205 tests — interactive + real-world included
+# by default, real-world binaries auto-download when missing)
 make check
 
-# Quick mode (skip benchmarks)
+# Quick mode (skip the 5 benchmarks — 200 tests)
 make check-quick
 
 # Run under the interpreter (catches JIT drift)
@@ -248,10 +255,6 @@ make check-nojit
 
 # JIT divergence checker (slow, catches codegen bugs)
 make verify
-
-# Run all tests (full 198-test suite — interactive + real-world included
-# by default, real-world binaries auto-download when missing)
-make check
 
 # Run only specific categories
 ./scripts/run_tests.sh --unit         # JIT regression tests
@@ -267,16 +270,17 @@ make check
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Unit | 35 | Focused JIT codegen regression tests (`ctest/`) |
-| Integration | 51 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
+| Unit | 44 | Focused JIT codegen regression tests (`ctest/`) |
+| Integration | 71 | Real-world programs exercising multiple subsystems (`ctest_real/` + `test/`) |
 | Toybox | 9 | ToyBox subcommands (echo, seq, ls, md5sum, etc.) |
 | Real-world | 56 | Downloaded static + dynamic glibc binaries (BusyBox, iperf3, coreutils) |
-| Dynamic | 7 | Dynamically-linked binaries (musl + glibc) — need rootfs |
+| Dynamic | 15 | Dynamically-linked binaries (musl + glibc) — need rootfs |
 | Benchmarks | 5 | Performance (MIPS, memcpy, sort, matrix, fib) — skipped with `--quick` |
-| **Total** | **171** | |
+| Interactive | 5 | REPL/stdin tests (echo, repl, cat, sh, fgets_test) |
+| **Total** | **205** | |
 
-Interactive tests (5: echo, repl, cat, sh, fgets_test) are opt-in via
-`--interactive` and not counted in the 171.
+`make check` runs all 205 tests; `make check-quick` skips the 5
+benchmarks for a 200-test run.
 
 ## Configuration
 
@@ -316,6 +320,15 @@ direct window (`SDL_PollEvent`). Trampolines end with `ret` after `svc`.
 dlopen of libGL/libSDL2 uses the thunk when the on-disk `.so` is not
 AArch64 (so host x86_64 libs are never executed as guest code).
 
+Modern GL is covered: `glMapBuffer`/`glMapBufferRange` and
+persistent-coherent mappings use a guest-window bounce (PCWFC
+writeback before buffer-consuming calls), and GL3.3+/4.x rows cover
+uniform blocks, instancing, compute, transform feedback, sampler and
+query objects, DSA (`glCreateBuffers`/`glCreateVertexArrays`),
+`glBufferStorage`, and `glTexImage3D`. GLFW callback setters
+(`glfwSetKeyCallback`, `glfwSetCursorPosCallback`, …) store guest
+AArch64 callbacks and deliver them after each `glfwPollEvents`.
+
 Demo:
 
 ```bash
@@ -328,15 +341,24 @@ See `bifrost.toml.sample` for all options.
 
 ## Performance
 
-On a typical x86_64 host (Ryzen 7, GCC -O3):
+On a typical x86_64 host (Ryzen 7 5800X3D, GCC -O3), timings reported
+by the `ctest_real/bench_*.elf` binaries themselves:
 
 | Benchmark | Interpreter | JIT | Speedup |
 |-----------|-------------|-----|---------|
-| fib(35) | 8.2s | 1.4s | 5.9x |
-| memcpy 1GB | 280 MiB/s | 1850 MiB/s | 6.6x |
-| qsort 1M ints | 2.1s | 0.38s | 5.5x |
-| matrix 1024² | 3.8s | 0.72s | 5.3x |
-| MIPS est. | 97 MIPS | 571 MIPS | 5.9x |
+| fib(35) | 6.4s | 0.20s | ~32x |
+| memcpy 256 MiB | 238 MiB/s | ~2,990 MiB/s | ~13x |
+| qsort 100K ints | 4.0s | 0.27s | ~15x |
+| matrix 256×256 | 15.2 MFLOPS | ~641 MFLOPS | ~42x |
+| MIPS (bench_mips, 800M instr) | ~56 MIPS | ~4,400 MIPS | ~78x |
+
+The tight-ALU self-loop speedup is the top end; mixed real workloads
+(games, worldgen, GL) land in the 10-40x range. Tight loops benefit
+from the dispatch/flag-skip/regalloc work of the current unreleased
+cycle — the interpreter is unchanged and runs ~56 MIPS regardless.
+CoreMark (aarch64 guest) runs at ~2,200 iterations/sec plain and
+~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (~6% of native
+x86_64 speed) with all CRCs validated.
 
 The JIT uses:
 - **AVX-512** (when available) for 512-bit SIMD
@@ -359,7 +381,6 @@ The JIT uses:
 - **Linux user-mode only** — no kernel/system emulation (use QEMU-system)
 - **AArch64 only** — no AArch32 (32-bit ARM) support
 - **x86_64 host only** — no ARM host support (use native execution)
-- **No vDSO** — some clock_gettime paths are emulated, not native
 
 ## Documentation
 

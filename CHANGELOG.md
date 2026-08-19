@@ -6,6 +6,395 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — interpreter FP→int saturation rewrite (2026-08-18)
+
+### Interp FCVTZU sentinel bug: `fcvtzu xN, dM` of values ≥ 2^63
+
+The interpreter's FP→int conversions used raw C++ casts:
+`static_cast<uint64_t>(d)` of a double in [2^63, 2^64) lowers to x86
+`cvttsd2si` (a SIGNED convert), which returns the `0x8000000000000000`
+sentinel for ANY out-of-range input — so `fcvtzu_x_d(1e19)` returned
+9223372036854775808 instead of 10000000000000000000. The JIT was
+already range-checking and saturating; the interpreter disagreed,
+failing `--no-jit` runs (interp 204/205, JIT 205/205).
+
+All five FP→int conversion sites in `interp_fp.cpp` now route through
+two file-scope saturating helpers (`fp_to_signed_sat` /
+`fp_to_unsigned_sat`, width-aware), matching the JIT's semantics:
+
+- **Scalar rounding-mode family** (FCVTNS/PS/MS/AS/ZU): the rounding
+  lambdas now return the rounded **double** (`std::nearbyint`/`round`/
+  `ceil`/`floor`) instead of a pre-truncated `int64_t`, then convert
+  through the helpers.
+- **Scalar FCVTZS/FCVTZU integer variant** (0x7F3E0000), **fixed-point**
+  (`fpfixed::FIXCONV` subop 1), **FP-scalar 0x5E group** (opcode 0x1B),
+  and **vector FCVTZS/FCVTZU** (esize 4 and 8): all use the helpers.
+- The 64-bit unsigned band in [2^63, 2^64) uses the
+  subtract-2^63-then-add-back trick
+  (`(uint64_t)(v − 2^63) + 0x8000000000000000ULL`), exactly like the
+  JIT; the 32-bit unsigned band uses the same trick at 2^31 (a plain
+  `static_cast<uint32_t>(f)` for f ≥ 2^31 hits cvttss2si's 0x80000000
+  sentinel).
+
+Verified: `ctest/jit_int_fp_conv.elf` ALL PASS under both JIT and
+`--no-jit`; full suite **205/205 in both modes** (interp previously
+204/205). Also updated the stale `run_tests.sh` header comment
+(203/198 → 205/200).
+
+## [Unreleased] — cross-block BRCOND flag-materialize skip (2026-08-18)
+
+### The CoreMark win: dead pstate materializes are skipped across block edges
+
+The self-loop flag-materialize skip below generalizes to two-block loops.
+A BRCOND block that never reads pstate before its first flag write
+(`reads_pstate_before_set`, the existing `flags_loop_carried_` pre-scan)
+lets both incoming edges drop the dead ~27-instruction pstate
+materialize per iteration:
+
+- **Fall-through edge:** `flag_mat_decision(arm_pc+4)` at compile time —
+  target already translated clean → skip entirely; target untranslated →
+  emit + record the site in `pending_flag_mat_` (SkipAndRecord).
+- **Taken edge:** SkipAndRecord at compile time (the taken target is
+  usually untranslated then), and `chain_back_references` RETROACTIVELY
+  patches the recorded region to a 5-byte `jmp rel32` (rel = code_len−5)
+  once the target translates clean — the JCC lands exactly on the region
+  start, so the jmp hops past the dead ~89 bytes.
+- **Safety invariant:** a materialize is only ever skipped when the
+  edge's TARGET provably never reads pstate, so a pstate-reading block
+  always receives fresh pstate on every incoming edge. The shared
+  epilogue's `clobber_flags()` is a no-op for BRCOND blocks
+  (`flags_in_host_` cleared at codegen), so the two materialize calls are
+  the ONLY pstate writes on BRCOND edges; JIT_VERIFY's pstate compare is
+  gated on `reads_pstate_before_set`. Bisection gate: `BIFROST_NO_FLAGSKIP=1`.
+
+Measured on CoreMark: **1687 → 2210 iters/sec plain (+31%)** and
+**1836 → 2541 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (+38%)**,
+all CRCs validated (the hot matrix_test loop is 2 blocks; both edges
+previously ran a ~27-instr dead materialize ~25% of the loop code).
+Verified: full suite **205/205**, JIT_VERIFY quick failure set identical
+to clean HEAD (zero new failures; `test_sem` flips to passing),
+FWD+VERIFY bench_mips byte-identical (acc=0xf800800a2c4ff835, 0
+divergences).
+
+## [Unreleased] — native SIMD permute + pairwise max/min (2026-08-18)
+
+### teeworlds' menu loop stops running ZIP/UZP/TRN and UMINP through the interpreter
+
+Two more teeworlds SIMD_DP interpreter sinks went native:
+
+- **SIMD_PERMUTE (ZIP/UZP/TRN).** teeworlds' menu loop ran the whole
+  ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2 family through the interpreter (~25.9M
+  SIMD_DP execs/window, all `.8h` permutes from GCC vectorized packing).
+  New `PERMUTE` rows in the simd_dp spec (`opc6` = bits[15:10] as IRSUB,
+  mask keeps U/bits[28:24]=01110/bit21/opc6; guard `Q || size != 3` keeps
+  the degenerate Q=0 1D forms on the interp) + a `SIMD_PERMUTE` IR op.
+  JIT codegen is memory-path (never vec-cache pinned) SSSE3: two `pshufb`
+  control masks select bytes from each source (0x80 elsewhere → 0) and the
+  masked halves `por` together; the mask builder mirrors the interp's
+  permute-pairs block exactly, Q=0 zeroes `v_hi`. `ir_optimize` marks
+  SIMD_PERMUTE non-pure (writes v_lo/v_hi). `jit_neon_permute.c` extended
+  8 → 28 checks (six ops × esizes 1/2/4/8 × Q=0/1 + the existing
+  sshll/ushll/shrn/ext). teeworlds SIMD_DP interp traffic down **~11x**
+  (25.9M → ~2M/window).
+- **SIMD_PAIRMIN (SMAXP/SMINP/UMAXP/UMINP).** The pairwise max/min
+  family (4 spec rows, mask 0x3F20FC00, IRSUB = subop) went native:
+  `pshufb` even/odd deinterleave + `pmax/pmin` + a Q=0 `pslldq`/`por`
+  merge vs Q=1 `punpcklqdq` (SSE4.1 gate with CALL_INTERP fallback).
+  Q=0 pairwise semantics now match real ARM: BOTH sources contribute —
+  Vd low 8 bytes = {pairwise(Vn), pairwise(Vm)}, the Vm half is NOT
+  zeroed (the old interp handler gated the Vm half on Q and the first
+  JIT attempt copied it; a Q=0 punpcklqdq merge also broke it). The
+  interp's sub_noq case now lists ALL SIXTEEN labels
+  (0x0E/0x2E × 0xA400/0xAC00 × sizes 0-3) — the old code only listed the
+  UMAXP max forms, so SMAXP/SMINP/UMINP threw DecodeError in interp-only
+  mode and were invisible to JIT_VERIFY. teeworlds: ~2.38M/window
+  `uminp` sink eliminated (block-end stays JIT). New test
+  `ctest/jit_simd_pairmin.c` (19 checks).
+
+Full suite **205/205**, quick **200/200**, JIT_VERIFY clean, interp-only
+19/19, `test_simd_saddw_uminp` ALL PASS.
+
+## [Unreleased] — glTexSubImage2D bounce + teeworlds boot fixes (2026-08-18)
+
+### teeworlds now boots to the menu under `DISPLAY=:0`
+
+- **glTexSubImage2D bounce sizing corrected.** The TEXSUB bounce was
+  sized from args 4/5 (width/height) instead of args 3/4
+  (yoffset/width), collapsing to the 64 KiB default whenever yoffset was
+  0 — font-atlas uploads read past the bounce. Fixed; the temporary
+  `BIFROST_GL_ERR_PROBE` diagnostics (entry pending-error, mixed-path and
+  post-dispatch probes, `gl_get_error_fn`) are removed.
+- **SIMD DUP (element, vector) interp decode via ctz.** `dup v23.2s, v1.s[1]`
+  (0x0E0C0437, imm5=12) in `sha256_finish` threw DecodeError — the
+  0x0E000400 handler only matched imm5 ∈ {1,2,4,8} (index 0). Replaced
+  with the same ctz-based decode as the INS case. (JIT side unaffected —
+  element DUP is not in the simd_dp table → CALL_INTERP.)
+- **SDL/GL thunk gap rows** (audio trio `SDL_OpenAudio`/`CloseAudio`/
+  `PauseAudio` — `SDL_OpenAudio` returns −1 because the `SDL_AudioSpec`
+  embeds a GUEST callback that must never reach host SDL2 — clipboard,
+  display modes, joystick introspection, `SDL_GetRelativeMouseState`,
+  `SDL_GetVersion`, `SDL_WasInit`, window controls, `glAlphaFunc`) with
+  new `SDL_OPEN_AUDIO`/`SDL_FREE`/`JOY_GUID`/`JOY_GUID_STR` policies, and
+  `glTexImage3D` got a `TEX3D` SizeKind + the Fn10/Fn11/Fn12 host-call
+  ladder (the font-atlas volume dwarfed the 64 KiB default bounce AND
+  `args[9]` — the pixels pointer — was silently dropped by the generic
+  Fn9-only path).
+
+teeworlds boots to the menu (map/skins/fonts load, "No joysticks found",
+audio gracefully disabled) and runs a stable 45s+ frame loop with zero
+SIGSEGV/DecodeError under `DISPLAY=:0`. The remaining "incorrect data
+check" / "invalid distance too far back" lines are the datafile loader
+tolerating resource quirks, not emulator failures.
+
+## [Unreleased] — native BL_CALL/BLR_CALL within blocks (2026-08-17)
+
+### Direct and indirect function calls stop re-dispatching through the block dispatcher
+
+- **Patchable `call rel32` slot.** BL (direct) and BLR (indirect /
+  function-pointer) calls no longer re-dispatch through the block
+  dispatcher: the caller block emits a patchable `call rel32` slot
+  (patched once the callee's entry block is translated, W^X via mprotect)
+  and the callee runs entirely in the JIT, returning inline to the
+  caller's continuation. `jit_call_helper` dispatches the callee chain
+  only while blocks are still being translated; once chained, the direct
+  call skips dispatch entirely.
+- **Callee-completion guard.** Detects an early fn return (an unchained
+  mid-callee slot) and unwinds to the C dispatcher instead of resuming
+  the caller with the callee's frame leaked. The completion test pins
+  `cpu.pc` to the caller's actual continuation
+  (`cpu.pc == x30 && cpu.pc == bl_pc + 4`): the naive `cpu.pc == x30`
+  test is fooled when a mid-callee block ends at its final BL
+  (`MAX_BL_CALL_PER_BLOCK=2` sets `chain_target_pc_ = bl_pc + 4`, which
+  IS x30) and that continuation block isn't translated yet — the callee
+  returns early with `cpu.pc == x30`, the guard falsely resumes the
+  caller, and the callee's frame leaks (observed as fmt_fp's 0x1dd0 leak
+  → printf_core reads x30=[wrong sp+80]=0 → DecodeError pc=0 on
+  `jit_fcvt.elf`). True completion is the exit block's `br x30`, which
+  stores the caller's continuation into `cpu.pc`.
+- **`jit_call_helper` 10M dispatch cap removed.** The per-invocation
+  `steps > 10000000` safety cap broke long-running BL_CALLs mid-game
+  (window_loop's helper legitimately dispatches >10M blocks in ~40s of
+  gameplay), returned a garbage pc into the caller's block, and the
+  double frame-pop → DecodeError crash hit at ~40s. Replaced with the
+  same thread-local watchdog as run_block
+  (`++tls_call_blocks_ > GLOBAL_BLOCK_LIMIT`).
+
+Verified: `jit_fcvt` 6/6 ALL PASS exit 0, full suite **205/205**, and
+`BIFROST_NO_DIRECT_CALL=1` / `BIFROST_CHAIN_SKIP=1` /
+`BIFROST_INTERP_BL_CALL=1` all exit 0 on `jit_fcvt`. (The
+`BIFROST_NO_BL_CALL`/`BIFROST_NO_BLR_CALL` bisection gates and the
+verify-mode routing of BL_CALL/BLR_CALL targets through `run_block` under
+JIT_VERIFY — so the register + MEMFULL verifier now covers callee blocks —
+came in the self-loop flag-skip batch below.)
+
+## [Unreleased] — JIT register-allocation quality batch (2026-08-17)
+
+### Dead-dest drop, IMM fold lookahead, SUBS evict skip, Belady eviction, R14 freed
+
+Three liveness-driven codegen improvements (rebuilt from the AGENTS.md
+contract after a `git reset --hard` wiped the original uncommitted Opt-B
+source) plus two allocator changes:
+
+- **Dead-scratch-dest drop.** A scratch dest whose last use is at-or-
+  before its own defining op (per `vreg_last_use_op_[]`, built by the
+  block use-scan) is dropped — no spill, no epilogue writeback. CRITICAL:
+  the use-scan now covers `inst.aux` too (SMADDL/SMSUBL accumulator), so
+  a dest later read as an maddl accumulator is never dropped as dead;
+  SIMD_INS's aux element index (< 33) is filtered.
+- **IMM fold lookahead.** `fold_ahead_kind_[]` lets the IMM codegen skip
+  the `mov` entirely when the immediately-following op folds the constant
+  into an x86 immediate form as a dead src2 — the pre-scan exact-matches
+  the consumer's fold guards (jit_codegen_alu.cpp) INCLUDING the imm32
+  sign-extension fit for the ALU class, so a skipped mov never leaves the
+  vreg unmapped (reload garbage).
+- **SUBS/ADDS evict skip.** Skip the src1 spill when src1 is a dead
+  scratch vreg whose last use is the current op (the `sub x0,x0,x1` chain
+  where x0's vreg dies here). ARM-reg src1 keeps the old evict path.
+- **Belady's-optimal register eviction.** Replaces LRU-timestamp eviction
+  in `alloc_reg`/`alloc_reg_excluding`: evict the cached vreg whose next
+  READ is furthest in the future (dead vregs first — at most a spill
+  store, never a reload). For straight-line basic blocks this is provably
+  reload-optimal, where LRU can evict a hot vreg needed on the very next
+  op. The exact future is free: `vreg_uses_[]` (sorted read-op indices)
+  comes from the existing use-scan that already produces `kills_per_op_`
+  and `vreg_last_use_op_` (aux coverage keeps SMADDL/SMSUBL accounted).
+- **R14 freed as the 10th alloc register.** EMU_REG is no longer read
+  from the register: the prologue stashes the `Emulator*` in a frame slot
+  (`emu_slot_off()`, per-block `-8*(N+1)` or a fixed bottom-of-frame slot
+  under chain-skip's shared 32 KB frame) and all 14 emu-consuming codegen
+  sites (LOAD_MEM/STORE_MEM/ATOMIC slow paths, SVC, CALL_INTERP,
+  BL/BLR_CALL, SIMD_LD16/ST16) plus the prologue/epilogue load it from
+  there. R14 joins ALLOC_REGS in every block (a strict capacity increase;
+  measured neutral on the deterministic suite, which never exceeds 9 live
+  vregs).
+
+bench_mips 383-390 → **360-364 ms (~6%)**. Verified: full suite
+**205/205**, REGALLOC_CHECK 200/200, FWD 200/200, JIT_VERIFY zero new
+divergences (rw_*/pthread/vulkan failures are pre-existing race/display
+false-positives). NOTE: two `ir_optimize.cpp` folds that rode along with
+the original batch (commutative src1→src2 swap + ZEXT-after-LOAD_MEM→MOV)
+were DROPPED — they hang CoreMark under `BIFROST_ENABLE_FWD=1` (99% CPU
+spin, worth only ~0.4% alone). Do not re-add without diagnosing the FWD
+hang; the SBFM/UBFM constant fold fix below is unrelated and stays.
+
+## [Unreleased] — pstate materialize skip on flag-independent self-loops (2026-08-17)
+
+### THE 2.5x bench_mips win (0.93s → 0.38s)
+
+On a self-loop back-edge whose block never reads loop-carried flags
+(`flags_loop_carried_`, precomputed in translate_block), the taken path
+skips the ~60-byte pstate materialization every iteration — the loop
+body's first flag-setting op re-establishes host flags before any
+consumer, so the store is dead work. Disabling only this skip reverts
+bench_mips to ~0.96s, so the win is entirely this skip (verified with
+clean rebuilds).
+
+Also in this batch (recovered from `~/Downloads/bifrost_opt_backup/`
+after a `git reset --hard` wiped the uncommitted tree):
+
+- **Verify-mode routing:** BL_CALL/BLR_CALL targets dispatch through
+  `run_block` under `BIFROST_JIT_VERIFY` so the register + MEMFULL
+  verifier covers callee blocks (previously invisible via jit_call_helper's
+  direct fn dispatch); `BIFROST_INTERP_BL_CALL` bisection gate.
+- **MEMFULL skip set:** SVC, `has_unresolved_store`, and BL/BLR
+  (`has_call_like`) blocks are skipped by the memory verifier — the interp
+  re-run re-executes syscalls / lands mid-callee, producing false
+  divergences.
+- **Bisection gates** `BIFROST_NO_BL_CALL` / `BIFROST_NO_BLR_CALL`
+  (`blr_call_disabled_` thread_local defined in ir_translate.cpp), plus
+  `BIFROST_DUMP_PC` / `force_dump_pc_` for targeted IR/x86 dumps.
+
+Full suite **205/205**; bench_mips acc byte-identical.
+
+## [Unreleased] — glMapBuffer bounce + AAA GL rows (2026-08-15)
+
+### Guest-window buffer mapping + GL3.3+/4.x "AAA future-proofing" thunk rows
+
+- **glMapBuffer/glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange
+  are NATIVE via a guest-window bounce.** The host glMapBuffer returns a
+  HOST pointer the guest cannot deref (address-space mismatch), so the
+  `MAP_BUFFER` dispatch arm allocates a bounce with `Memory::mmap_alloc`
+  (inside the 4 GiB direct window → guest JIT reads/writes it fast),
+  seeds it from the host buffer when `GL_MAP_READ_BIT` (0x1) is set
+  (skipped under `GL_MAP_INVALIDATE_*`), and returns the bounce's GUEST
+  address. `UNMAP_BUFFER` copies the bounce back via host
+  `glBufferSubData` when `GL_MAP_WRITE_BIT` (0x2) is set, then
+  `untrack_allocation`s it. `FLUSH_BUFFER` pushes just the flushed range
+  early. Raw host fns (`glGetBufferParameteriv`/`glGetBufferSubData`/
+  `glBufferSubData`) are resolved at init; the GLStateTracker gained a
+  general target→buffer binding map covering ALL `glBindBuffer/Base/Range`
+  targets (not just ARRAY/ELEMENT). `glGetBufferParameteriv` added as a
+  QUERY table row. New guest test: `ctest_real/test_sdl_gl_mapbuffer.c`
+  (14 checks, "ALL PASS", exit 77 = skip).
+- **PCWFC (Persistent-Coherent Writeback For Coherence).**
+  Persistent+coherent mappings (`GL_MAP_PERSISTENT_BIT` 0x40 +
+  `GL_MAP_COHERENT_BIT` 0x80 + `GL_MAP_WRITE_BIT`) are supported:
+  `UNMAP_BUFFER` keeps persistent mappings alive (GL_ARB_buffer_storage:
+  a persistent mapping stays valid after glUnmapBuffer) instead of erasing
+  the bounce, and `dispatch()` calls `sync_persistent_mappings_()` right
+  before every buffer-consuming call (glDraw* family, buffer copy/get,
+  glTexBuffer*) so the host sees writes at the moment the GPU would read
+  them — the only release point for the "map once, write every frame,
+  never unmap" streaming pattern. `glDeleteBuffers` frees still-live
+  mappings.
+- **AAA GL 3.3+/4.x rows:** uniform blocks (`glGetUniformBlockIndex`,
+  `glUniformBlockBinding`, `glGetActiveUniformBlockiv/Name`), shader
+  introspection (`glGetActiveUniform`/`glGetActiveAttrib`), instancing
+  (`glVertexAttribDivisor`, `glDrawElementsBaseVertex`, `glDrawRangeElements`,
+  `glPrimitiveRestartIndex`), query objects (glGen/Delete/Is/Begin/End/
+  GetQuery*), sampler objects, compute (`glDispatchCompute`,
+  `glMemoryBarrier`, `glBindImageTexture`), and transform feedback
+  (`glBegin/EndTransformFeedback`). `glTransformFeedbackVaryings` uses the
+  NEW `TF_VARYINGS` policy: the `varyings` arg is a NESTED array of
+  C-string pointers (like glShaderSource's strings, but with a `count`
+  not a lengths array — args `iipi`), so the dispatch arm reads `count`
+  pointers from the translated args[2] guest array, bounces each string,
+  and passes `args[3]` as `bufferMode` verbatim. ARGS-count pitfall fixed:
+  `glGetActiveUniform/Attrib` take 7 args (4 pointers) and
+  `glGetActiveUniformBlockName` takes 5 — undercounting them left the
+  trailing `name` pointer untranslated. New guest test:
+  `ctest_real/test_sdl_gl_modern.c` (17 checks).
+- **SDL thread teardown fix.** `wait_sdl_thread` joined the `std::thread`
+  AFTER `sdl_threads_.erase()` destroyed it → `std::terminate`. Join
+  first, then erase (snapshot stack/TLS first).
+- **More GL 3.3+/DSA rows:** `glBufferStorage`, `glCreateBuffers`,
+  `glTexStorage2D/3D`, `glTexImage3D` (10 args, arg9 pixels via a `TEX3D`
+  SizeKind — the 64 KiB default bounce dwarfed by real volumes),
+  `glBlitFramebuffer`, Instanced draws, `glBindBufferBase/Range`,
+  `glGetBufferSubData`, `glCopyBufferSubData`, `glCopyTexSubImage2D`,
+  `glClientWaitSync`/`glFenceSync` (GLsync round-trips as an opaque
+  integer), `glDrawBuffers`, `glBindFragDataLocation`,
+  `glCreateVertexArrays`.
+
+Suite is now **205/205**; `make opgen-thunk-check` clean. Still
+UNSUPPORTED (documented): `glDebugMessageCallback`'s callback is a GUEST
+function pointer that must NOT be handed to the host setter.
+
+## [Unreleased] — SBFM/UBFM constant-fold + 32-bit sign-extension fixes (2026-08-15)
+
+### The last two FWD-only correctness bugs (FWD-dependent constant folding)
+
+- **32-bit SBFM sign-extension used a 64-bit SAR.** General-case SBFM
+  codegen shifted by `width − field_width` then emitted a 64-bit `sar` —
+  for 32-bit ops (sxtb/sxth/sbfx W) the sign bit lands at bit 31 but the
+  64-bit SAR reads bit 63, so `sxtb w3, w21` of byte 0xf8 returned 248
+  instead of 0xfffffff8, turning `cmp w3,#0`+`csel` into the wrong branch
+  (the cneg3 miscompile). Fix: shift by `64 − field_width` so the sign
+  bit reaches bit 63; the trailing `mov %eax,%eax` truncates to the W
+  container. No change for 64-bit ops. The interp was already correct.
+- **SBFM/UBFM constant fold used ROR for the extract case.** The fold in
+  `ir_optimize.cpp` computed `imms >= immr` (extract) as `ROR(a, immr) &
+  ones(imms+1)` with sign-extend from bit `imms`. ROR is only equivalent
+  to `a >> immr` when immr==0 (the SXTB/SXTH/SXTW forms the fold had ever
+  exercised), because ROR wraps the low immr bits to the TOP of the
+  register and `ones(imms+1)` keeps them: `asr w4, w2, #4` (SBFM #4,#31)
+  of 0x88 folded to 0x80000008 instead of 8, and `sbfx w3, w2, #4, #4`
+  folded the 4-bit field 8 to +8 instead of −8. Fix mirrors
+  `interpreter.cpp:446-513` exactly: extract case `(a >> immr) &
+  ones(imms−immr+1)` + sign-extend from bit (imms−immr); rotate case
+  (`imms < immr`, SBFIZ/UBFIZ/BFI/LSL) field = `a & ones(imms+1)` +
+  sign-extend from bit imms, then `<< (width−immr)`; guard `len==64`/
+  `fw==64` (no UB shifts). Only exposed under `BIFROST_ENABLE_FWD=1`
+  because `arm_reg_cache` propagates the source constant into the loop's
+  first iteration.
+
+Verified: sxtest ALL OK under FWD/JIT/VERIFY/VERIFY_MEM/REGALLOC_CHECK,
+full suite **205/205**, FWD quick 200/200, all cneg/scalarabs/neon/
+permute/xtn repros.
+
+## [Unreleased] — native SIMD 2REG/CVTF/ADDP/XTN/TBL/INS codegen (2026-08-15)
+
+### The last six SIMD_DP JIT fallback families are native
+
+SSE2/SSSE3/SSE4.1 codegen (memory path — never vec-cache pinned, so all
+XMM0-15 are free scratch and every helper is REX-aware) for the last
+SIMD_DP fallback families, table-driven via `tools/opgen/simd_dp.txt`
+(PMISC/CVTF/ADDP/XTN/TBL rows):
+
+- **SIMD_2REG (CNT/NOT/RBIT/ABS/NEG)** — CNT via Muła SWAR popcount, ABS
+  via the shift/xor sign trick, RBIT bit-reverses per byte; all esizes,
+  Q=0 zeroes `v_hi`.
+- **SIMD_CVTF (SCVTF/UCVTF/FCVTZS/FCVTZU)** — `cvtdq2ps` (+ the u32
+  halving trick), truncation via the F3-prefixed `cvttps2dq` (the `66 0F
+  5B` cvtps2dq ROUNDS — the 12.75→13 bug), NaN/±inf → 0, FCVTZU clamps
+  negatives.
+- **SIMD_ADDP** — byte-pair via `pshufb`/`pavgb` halves.
+- **SIMD_XTN (XTN/SQXTUN/SQXTN/UQXTN)** — `packsswb`/`packssdw`,
+  SSE4.1 `packusdw`/`pminud` for the saturating unsigned forms.
+- **SIMD_TBL/TBX** — SSSE3 `pshufb` (dst=TABLE, src=CONTROL; OOR control
+  byte has bit7 → 0), unsigned-compare `ge()` masks, two-reg tables, TBX
+  merge. GCC lowers `vextq_u8` to TBL2 + `ins` index building.
+- **SIMD_INS (element, vector)** — GPR-mediated read-modify-write on
+  `v_lo`/`v_hi`.
+
+Field contract per op (ir_translate_fp.cpp SIMD_DP case): 2REG/CVTF/XTN →
+`imm`=subop, `width`=esize (CVTF always 4), `flags_op`=Q; TBL →
+`flags_op`=(is_tbx<<1)|Q, `imm`=nregs (1/2); INS → `width`=esize,
+`imm`=dest-byte-offset, `aux`=src element index (built as a raw IRInst —
+`emit()` has no aux arg). `ir_optimize.cpp` updated with the write-sets so
+FWD stays correct. New test: `ctest/jit_simd_misc.c` (30 checks, "checks
+passed" pattern). Full suite **205/205**.
+
 ## [Unreleased] — version bump to 1.5.3-alpha (2026-08-15)
 
 - All version references across the tree are normalized to **1.5.3-alpha**:

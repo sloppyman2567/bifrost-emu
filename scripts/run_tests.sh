@@ -10,7 +10,7 @@
 #   - Supports running under interpreter (--no-jit) or FWD (--fwd)
 #
 # Usage:
-#   ./scripts/run_tests.sh              # run everything (default = JIT, full 203-test suite)
+#   ./scripts/run_tests.sh              # run everything (default = JIT, full 205-test suite)
 #   ./scripts/run_tests.sh --unit       # only unit tests (ctest/)
 #   ./scripts/run_tests.sh --toybox     # only toybox integration tests
 #   ./scripts/run_tests.sh --no-jit     # run under interpreter
@@ -20,9 +20,9 @@
 #   ./scripts/run_tests.sh --filter foo # only run tests matching "foo"
 #   ./scripts/run_tests.sh --quick      # skip bench + slow tests
 #
-# Test count breakdown (203 total standard):
-#   Unit         43  — ctest/*.elf focused JIT regression tests
-#   Integration  67  — ctest_real/*.elf + test/*.elf real programs
+# Test count breakdown (205 total standard):
+#   Unit         44  — ctest/*.elf focused JIT regression tests
+#   Integration  71  — ctest_real/*.elf + test/*.elf real programs
 #   Toybox        9  — ctest_real/toybox subcommands
 #   Real-world   56  — downloaded static + dynamic glibc binaries
 #                      (49 static busybox/toybox + 7 dynamic glibc)
@@ -30,7 +30,7 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 203 tests. Quick suite = 198 (skip benchmarks).
+# Standard suite = 205 tests. Quick suite = 200 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -100,7 +100,7 @@ done
 # The toybox binary is already committed in the repo (ctest_real/toybox).
 # The default full run (RUN_ALL=1) downloads these when missing and also
 # runs the interactive tests, so a bare `run_tests.sh` exercises every
-# category — the full 203-test suite.
+# category — the full 205-test suite.
 #
 # The download itself is bounded by a 90-second timeout — same cap as the
 # toolchain fetch scripts — so a stalled Alpine mirror can't hang the
@@ -183,7 +183,7 @@ fi
 # A test FAILS if output contains "FAIL" or "ERROR" (case-insensitive)
 # and no "PASS"/"OK"/"ALL.*PASS" counterbalances it.
 
-# Standard suite = 203 tests across 7 categories.
+# Standard suite = 205 tests across 7 categories.
 
 # Unit tests (ctest/ — focused JIT regression tests)
 UNIT_TESTS=(

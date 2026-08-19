@@ -6,7 +6,7 @@ status, see [TESTS.md](TESTS.md).
 
 ---
 
-## Current Focus — SDL2/OpenGL demo readiness (2026-07-25)
+## Current Focus — real-game readiness (2026-08-18)
 
 ### Done
 
@@ -15,7 +15,9 @@ status, see [TESTS.md](TESTS.md).
    Regression: `ctest/jit_mvni_softfloat.elf`.
 
 2. **SIMD permute / widen** — ZIP/UZP/TRN + SSHLL/USHLL; MOVI vs SHLL
-   distinguished via immh bits[22:19]. Regression: `ctest/jit_neon_permute.elf`.
+   distinguished via immh bits[22:19]. Regression: `ctest/jit_neon_permute.elf`
+   (now 28 checks); pairwise max/min (SMAXP/SMINP/UMAXP/UMINP) native via
+   `ctest/jit_simd_pairmin.elf`.
 
 3. **GraphicThunk marshalling** — AAPCS64 stack args (`glTexImage2D`),
    FP args (`glClearColor`/`glVertex3f`), guest string cache, nested
@@ -25,22 +27,26 @@ status, see [TESTS.md](TESTS.md).
 
 4. **Demo** — `ctest_real/test_sdl_gl_triangle.elf` (SDL2 window +
    immediate-mode triangle, 30 frames). Build with
-   `make USE_SDL2=1 USE_THUNK_GL=1`.
+   `make USE_SDL2=1 USE_THUNK_GL=1` (now auto-enabled by default).
+
+5. **Real games run end-to-end.** A Minecraft-like voxel game
+   (SDL2/OpenGL, chunk/mesh math, glMapBuffer streaming) runs a stable
+   frame loop; **teeworlds boots to the menu** (map/skins/fonts load,
+   audio gracefully disabled, GLFW callbacks delivered) with zero
+   SIGSEGV/DecodeError under `DISPLAY=:0`.
+
+6. **CoreMark (aarch64 guest) validated** — ~2,210 iters/sec plain,
+   ~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (+38%),
+   all CRCs correct.
 
 ### Planned
 
-5. **AArch32 (32-bit ARM) support.**
-6. ~~**vDSO emulation.**~~ ✅ DONE in v1.5.1-alpha — the vDSO is loaded,
-   `AT_SYSINFO_EHDR` is set, and (new) clock calls from inside the vDSO
-   take a **direct fast-path** that reads the host clock without going
-   through the syscall dispatcher (genuine speedup for tight
-   `clock_gettime` / `std::chrono::now()` loops). Verified with
-   `BIFROST_SYSCALL_TRACE_ALL` showing 0 clock syscalls in both JIT and
-   interpreter modes.
-7. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
-8. **More real-world binary testing.**
+7. **AArch32 (32-bit ARM) support.**
+8. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
+9. **More real-world binary testing** (and the remaining interp
+   FCVTZU ≥2^63 range bug — see TESTS.md).
 
-### v1.5.3-alpha additions (in-progress)
+### v1.5.3-alpha additions (shipped 2026-08-15)
 
 - **DisplayThunk moved onto the shared opgen table** (696 symbols via
   `tools/opgen/thunk_dp.txt`); dispatch routes by POLICY/SIZE. Vulkan
@@ -195,27 +201,27 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 
 ## v1.4.x (feature work — most items shipped in 1.4.0 or 1.5.0.alpha)
 
-1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
-   backend. Build with `make USE_SDL2=1` to enable the window backend;
-   audio output currently goes through OSS `/dev/dsp` passthrough.
+1. **SDL2 audio + input** ✅ DONE (2026-08-18) — SDL audio
+   (`SDL_OpenAudio`/`CloseAudio`/`PauseAudio`), clipboard, joystick
+   introspection, display modes, GLFW callbacks all thunked; teeworlds
+   audio negotiates and disables gracefully. Audio output passthrough
+   via OSS `/dev/dsp` still works (`ctest_real/audio_test.elf`).
 
 2. **Sub-decode the SIMD DP and FP scalar catch-all groups.**
-   Currently these are routed as generic `SIMD_DP` / `FP_SCALAR` and
-   re-dispatched in the interpreter. The hierarchical decoder
-   structure makes adding dedicated `InstClass` values for each a
-   clean refactor — and would make the NEON bug above easier to
-   isolate.
+   ✅ DONE (2026-08) — moved to `src/interp/interp_fp.cpp` with
+   table-generated SIMD_DP classification (`tools/opgen/simd_dp.txt` →
+   `include/opgen_simd.hpp`).
 
 3. **~~Real fork support~~** ✅ DONE in rc.0 — fork() via host fork()
    with CoW memory + execve() for running external AArch64 commands.
    Child disables JIT, inherits CoW copy. Parent's wait4() works.
 
-4. **JIT I/O performance.** The JIT is ~9% slower than the
-   interpreter for I/O-bound workloads (seq 1 10000) because the
-   block-translation overhead (942 blocks for seq) is not amortized
-   when most time is in syscalls. Consider a hybrid mode: interpreter
-   for the first N instructions of each block, then switch to JIT
-   only for hot blocks.
+4. **JIT I/O performance.** ✅ LARGELY ADDRESSED (2026-08) — block
+   dispatch overhead (~21% → ~10% wall on the game) via last-block
+   cache + inline cache + chain-slot edges; cross-block flag-skip
+   (+31-38% CoreMark). The interpreter-for-first-N-instructions hybrid
+   was never adopted (CALL_INTERP-heavy blocks are translated as
+   `interp_only` instead).
 
 5. **~~Native FMA3 codegen for FMADD/FMSUB/FNMADD/FNMSUB.~~**
    ✅ DONE in rc.1 — Function Multi-Versioning (FMV) framework added
@@ -258,9 +264,9 @@ FWD mode. C API (22/22 checks) implemented and verified. See
 Items below this point were NOT in 1.5.0.alpha and are open for future
 feature releases.
 
-1. **SDL2 audio + input** on top of the v1.4.0-alpha SDL2 video
-   backend. Build with `make USE_SDL2=1` to enable the window backend;
-   audio output currently goes through OSS `/dev/dsp` passthrough.
+1. **SDL2 audio + input** ✅ DONE (2026-08-18) — see the v1.4.x item
+   above (audio trio, joystick, clipboard, GLFW callbacks thunked;
+   teeworlds audio negotiates and disables gracefully).
 
 2. **~~VFS bug fixes.~~** ✅ DONE in 1.5.0.alpha (Turn 35, Yggdrasil
    rename). `/dev/random` vs `/dev/urandom` now use distinct pools via
@@ -273,15 +279,16 @@ feature releases.
    (e.g. `/proc/self/fd`, `/proc/net/*`) — see "More procfs coverage"
    below.
 
-3. **Better JIT performance.** Two areas: (a) implement true LRU
-   eviction in the register allocator (currently FIFO), and (b) use
-   the FMV framework to emit AVX2 256-bit SIMD codegen for vector ops
-   that currently fall back to the interpreter (USRA/SSRA/SLI/SRI etc.).
+3. **Better JIT performance.** ✅ DONE (2026-08) — (a) the register
+   allocator now uses Belady-style next-use eviction (regalloc quality
+   batch, 2026-08-17); (b) the FMV framework emits AVX2 256-bit SIMD
+   codegen for the vector shift family (v1.5.1-alpha) with SSE2 and
+   CALL_INTERP fallbacks.
 
-4. **More SIMD coverage.** Add a comprehensive `ctest/jit_neon_advanced.elf`
-   covering SIMD instructions not in the current `jit_neon.elf`:
-   EXT, TBL/TBX, UZP/ZIP/TRN, and the narrowing/widening shifts
-   (SHRN/SSHLL/USHLL).
+4. **More SIMD coverage.** ✅ DONE (2026-08) — `ctest/jit_neon_permute.elf`
+   expanded to 28 checks; new `ctest/jit_simd_pairmin.elf` (19 checks),
+   `ctest/jit_simd_misc.elf` (30 checks: 2REG/CVTF/ADDP/XTN/TBL/INS);
+   native TBL/TBX, UMOV, DUP, FCVT family, shift-by-immediate family.
 
 ---
 
@@ -291,29 +298,24 @@ The v2.0 line will focus on expanding the set of runnable software
 beyond musl-static binaries. This is a significant architectural
 expansion.
 
-1. **Full dynamic linking support.** Bifrost-emu already has limited
-   dynamic linking: it loads the PT_INTERP dynamic linker ELF, maps
-   its segments, and uses its entry point (so the linker's own code
-   handles DT_NEEDED, relocations, etc. via our syscalls). This works
-   for simple dynamically-linked musl binaries. v2.0 will expand this
-   to full dynamic linking: proper DT_NEEDED processing, runtime
-   relocation application, PLT/GOT resolution, and glibc's dynamic
-   linker support. This significantly expands the set of runnable
+1. **Full dynamic linking support.** ✅ DONE (2026-08) — the glibc
+   dynamic linker runs in-guest with DT_NEEDED processing,
+   PLT/GOT resolution, and runtime thunk dlopen; the dynamic suite
+   (`--dynamic`) has 15 passing tests (musl + glibc, threads,
+   pthread stress). This significantly expands the set of runnable
    software — most real-world ARM64 Linux distributions ship
    dynamically-linked binaries.
 
-2. **glibc support.** Currently only musl-static binaries are
-   supported; glibc 2.36+ static binaries hit a decode error on an
-   unhandled instruction after mallocng init. v2.0 will add full
-   glibc compatibility — both static and dynamic — so binaries from
-   Debian/Ubuntu/Fedora ARM64 systems run without modification. This
-   requires expanding the syscall surface (glibc uses many more
-   syscalls than musl) and handling glibc's initialization sequence.
+2. **glibc support.** ✅ DONE (2026-08) — glibc static AND dynamic
+   binaries now run (the mallocng decode error was fixed in 1.5.x);
+   the glibc-dynamic suite (`test_dyn_*`) passes under
+   `BIFROST_ROOT=rootfs`, including pthreads and dladdr/dlsym.
 
-3. **Full interactive application support** — framebuffer/DRM, audio, input.
-   Long-term goal: statically-linked ARM64 SDL2 applications at interactive
-   framerates.
-   Builds on the v1.4.x SDL2 audio + input work.
+3. **Full interactive application support** ✅ SUBSTANTIALLY DONE —
+   SDL2 window + OpenGL/Vulkan thunking reach interactive framerates;
+   a Minecraft-like voxel game and teeworlds boot to a stable
+   frame/menu loop. Remaining polish: input latency tuning, wider
+   GL3.3+/4.x coverage as games demand it.
 
 4. **ASLR** — binaries currently load at their preferred vaddr;
    randomizing load addresses would catch guest programs that
@@ -324,9 +326,11 @@ expansion.
 
 ## Long-term goals
 
-- **Multi-threaded guest support** — currently `clone()` with
-  `CLONE_VM` creates a new vCPU but true SMP semantics (atomic
-  memory ordering, futex wakeups across vCPUs) need work.
+- **Multi-threaded guest support** — ✅ largely DONE: `clone(CLONE_VM)`
+  creates per-thread vCPUs with futex wakeups and JIT; the pthread suite
+  (`test_dyn_pthread_stress`, `test_dyn_pthread_8thread`) passes. True
+  SMP semantics (atomic memory ordering, cross-vCPU futex contention) on
+  multi-core hosts remains future work.
 - **AArch32 (32-bit ARM) support** — bifrost-emu currently only
   handles AArch64. AArch32 would expand compatibility with older
   ARM Linux binaries.

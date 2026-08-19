@@ -269,6 +269,63 @@ preceding LOAD_REG/ADD/SHL had left the source vreg dirty in RAX/RCX.
    guest cb in a map, deliver after `GLFW_POLL`) rather than leaving them
    STUB.
 
+## This session (2026-08-17/18): cross-block flag-skip + BL_CALL + teeworlds
+
+1. **Cross-block BRCOND flag-materialize skip** (the CoreMark win, all
+   committed 2026-08-18): on a BRCOND edge whose target never reads pstate
+   before its first flag write (`reads_pstate_before_set` from the existing
+   pre-scan), skip the ~27-instruction pstate materialize. Fall-through:
+   skip at compile time if the target is already translated clean, else
+   SkipAndRecord; taken: SkipAndRecord + `chain_back_references`
+   retroactively patches the recorded region to a 5-byte `jmp rel32` when
+   the target translates. CoreMark 1687→2210 plain (+31%),
+   1836→2541 FWD+CHAIN_SKIP (+38%), CRCs validated. Gate: BIFROST_NO_FLAGSKIP.
+   The shared epilogue's `clobber_flags()` is a NO-OP for BRCOND blocks, so
+   the materialize calls on both edges are the ONLY pstate writes — the skip
+   invariant is safe. JIT_VERIFY's pstate compare is gated on
+   `reads_pstate_before_set`.
+2. **The two `ir_optimize.cpp` constant folds are BROKEN and DROPPED**: the
+   commutative src1→src2 swap + ZEXT-after-LOAD_MEM→MOV fold HANG CoreMark
+   under FWD=1 (99% CPU spin; bifrost-emu ignores SIGTERM — kill with
+   `timeout -s KILL`/`pkill -x -9`). Only worth +0.4%. `ir_optimize.cpp`
+   reverted pristine. The SBFM/UBFM constant-fold FIX (c2d1f2a) is
+   unrelated and stays.
+3. **Direct-BL-call callee-completion guard fixed (2026-08-17)**: the naive
+   `cpu.pc == x30` test is fooled when a mid-callee block ends at its final
+   BL (`MAX_BL_CALL_PER_BLOCK=2` sets `chain_target_pc_ = bl_pc + 4` == x30).
+   Must be `cpu.pc == x30 && cpu.pc == bl_pc + 4`. Layout requires a `jmp`
+   over the INCOMPLETE block on the resume path. The temporary
+   `dbg_guard_entry/dbg_guard_incomplete` probes were removed (they corrupted
+   RBX); `[DBG3]` tracing is gated behind `BIFROST_DBG_GUARD=1`.
+4. **jit_call_helper 10M watchdog cap removed**: window_loop's helper
+   legitimately dispatches >10M blocks in ~40s of gameplay; the old cap
+   returned a garbage pc mid-game. Same thread-local watchdog as run_block.
+5. **teeworlds malloc-spin root cause = STALE BINARY**, not an emulator bug:
+   the installed bifrost-emu had an inverted UBFM/SBFM/BFM interp guard
+   throwing DecodeError on every sf=1 bitfield op → __libc_early_init aborted
+   → ptmalloc_init never self-linked main_arena → _int_malloc's stash loop
+   spun on bin->bk==NULL. Plain `make` rebuild fixed it. Do NOT re-diagnose
+   memory-model corruption for this game.
+6. **teeworlds boots to the menu**: map/skins/fonts load, "No joysticks
+   found", audio gracefully disabled, stable 45s+ frame loop, zero
+   SIGSEGV/DecodeError under DISPLAY=:0. Remaining `incorrect data check` /
+   `invalid distance too far back` lines are the datafile loader tolerating
+   resource quirks. Thunk gap work for it: SDL rows (audio trio,
+   clipboard, display modes, joystick, `SDL_GetVersion`, window, etc.),
+   new policies `SDL_FREE`/`SDL_OPEN_AUDIO`/`JOY_GUID`/`JOY_GUID_STR`,
+   `glTexImage3D` TEX3D SizeKind + Fn10/Fn11/Fn12 call ladder, GL alpha.
+   Marshalling bugs fixed while booting: `SDL_GetDisplayBounds` `ii`→`ip`,
+   `SDL_GetKeyboardState` `i`→`p`, `SDL_GetRelativeMouseState` `-`→`pp`.
+7. **SIMD DUP(element,vector) interp bug**: `dup v23.2s,v1.s[1]`
+   (imm5=12, index 1) threw DecodeError — the 0x0E000400 handler only
+   matched imm5 ∈ {1,2,4,8}; replaced with the ctz-based decode from INS.
+8. **Suite status**: 205/205 (JIT full), 200/200 (JIT quick), 204/205
+   (interp — `jit_int_fp_conv` fails `fcvtzu_x_d(1e19)`: PRE-EXISTING interp
+   FCVTZU ≥2^63 bug, raw `static_cast<uint64_t>` lowers to cvttsd2si
+   sentinel 0x8000000000000000; present since 2026-06-26, unchanged at
+   e354922. JIT passes. Do NOT silently fix interp without the range
+   pre-check mirroring the JIT.)
+
 ## Critical traps (read AGENTS.md for full list)
 - **`mmap_alloc` is NOT a pure bump allocator anymore:** `munmap`
   (`untrack_allocation(addr, size)`) frees `pages_`, decrements `total_pages_`,
