@@ -225,6 +225,7 @@ make debug
 
 # Static library (for embedding bifrost-emu in other projects)
 make lib
+make test-capi  # build + run the host-side C API test (54 checks)
 ```
 
 ### Cross-Compiling Test Binaries
@@ -338,6 +339,51 @@ DISPLAY=:0 ./bifrost-emu ctest_real/test_sdl_gl_triangle.elf
 ```
 
 See `bifrost.toml.sample` for all options.
+
+## C API (libbifrost)
+
+bifrost-emu exposes a stable C API (`api/bifrost.h`) for embedding the
+emulator in host programs. Build it with `make lib` (produces
+`libbifrost.a`; `main.cpp` is excluded — link your own driver):
+
+```c
+#include "bifrost.h"
+
+bifrost_emu_t* emu = bifrost_create();
+bifrost_load_elf(emu, "hello.elf", argc, argv);
+int exit_code = bifrost_run(emu);   // JIT is on by default
+bifrost_destroy(emu);
+```
+
+Key features:
+
+- **JIT default-on.** `bifrost_run` enables the frostJIT automatically;
+  call `bifrost_set_jit(emu, 0)` to force the interpreter, or
+  `bifrost_set_jit_verify(emu, 1)` (before run) for JIT-vs-interpreter
+  divergence checking.
+- **Register/FP/flag/memory access** — `bifrost_get/set_reg`,
+  `bifrost_get/set_fp_reg_*`, `bifrost_get/set_pstate`, flags,
+  `bifrost_read/write_mem`, SP/PC getters and setters.
+- **Step-loop debugging** — `bifrost_step`/`bifrost_step_n` plus real
+  breakpoints: `bifrost_set_breakpoint(emu, addr)` makes the next
+  `bifrost_step` stop *before* executing that instruction and return 1.
+  (`bifrost_run` ignores breakpoints and runs to completion.)
+- **Guest function calls** — `bifrost_call(emu, fn, iargs, n, fargs, n)`
+  invokes any guest function with up to 8 integer + 8 FP arguments,
+  saving/restoring all CPU state around the call and returning x0.
+  `bifrost_call_f` returns the FP (d0) result instead — use it for
+  functions returning `double`/`float`.
+- **Symbol lookup** — `bifrost_lookup_symbol(emu, "name")` resolves a
+  symbol across loaded dynamic objects and thunk-registered libraries.
+- **Syscall hook** — `bifrost_set_svc_hook(emu, fn, userdata)` installs
+  a callback invoked for every guest syscall before emulator dispatch;
+  return 1 and set `*result` to handle the syscall yourself (or 0 to
+  pass it through). Note: the internal thunk fast path (syscall
+  `0x1000`) bypasses the hook.
+
+The full API reference and semantics live in `api/bifrost.h`. A
+host-side test (`ctest/test_capi.c`, built via `make test-capi`, wired
+into `make check-all`) covers the API with 54 checks.
 
 ## Performance
 

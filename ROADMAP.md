@@ -47,6 +47,14 @@ status, see [TESTS.md](TESTS.md).
    now both pass the full 205-test suite. Regression:
    `ctest/jit_int_fp_conv.elf`.
 
+8. **C API (libbifrost) refinement** — `bifrost_call`/`bifrost_call_f`
+   (invoke guest functions with int+FP args, save/restore all state),
+   `bifrost_set_svc_hook` (intercept every guest syscall before
+   dispatch), real breakpoints on `bifrost_step`/`bifrost_step_n`, JIT
+   on-by-default (was documented but not enabled), working
+   `bifrost_set_jit_verify`, and `bifrost_lookup_symbol`. Host-side
+   `ctest/test_capi.c` grown to 54 checks (`make test-capi`).
+
 ### Planned
 
 8. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).

@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.5.3-alpha] — C API refinement: bifrost_call, svc hook, breakpoints (2026-08-19)
+
+### libbifrost: real guest function calls, syscall hooks, and debug breakpoints
+
+The C API previously shipped dead stubs (`bifrost_set_jit_verify`,
+breakpoints), a JIT-default mismatch (the header claimed JIT was default,
+but `bifrost_run` never enabled it), and no way to call guest code or
+intercept guest syscalls from an embedder. All of that is now functional:
+
+- **`bifrost_call` / `bifrost_call_f` — invoke a guest function.**
+  `Emulator::call_guest_function` (`src/core/emulator.cpp`) borrows the
+  CPU the same way the GLFW callback runner and the dynamic linker's
+  `guest_call_args_` do: save/restore ALL architectural state (regs,
+  sp/pc/pstate, v_lo/v_hi, fpcr/fpsr, tpidr_el0/tpidrro_el0, sigmask,
+  running), init TLS if the dynlinker has static TLS, run on a per-thread
+  `mmap_alloc(8192)` scratch stack with a sentinel LR (0x1000), step() in
+  the interpreter until the callee RETs (or a 50M-instruction cap) — so
+  it is deterministic regardless of JIT state — then restore and return
+  x0. `bifrost_call_f` returns the d0 FP result as a double (FP-returning
+  functions put their result in d0, NOT x0).
+- **`bifrost_set_svc_hook` — observe/intercept every guest syscall.**
+  Invoked at the top of `Emulator::syscall()` before the vDSO clock
+  fast-path and normal dispatch. Return 1 = handled (*result → x0,
+  dispatch skipped); 0 = emulator handles. Sees interpreter AND JIT
+  native svc; the `0x1000` thunk fast path bypasses it (documented).
+- **Real breakpoints.** `bifrost_set_breakpoint`/`bifrost_remove_breakpoint`
+  keep a per-emu address list; `bifrost_step`/`bifrost_step_n` stop BEFORE
+  executing the instruction at a breakpoint and return 1. `bifrost_run`
+  runs to completion (does not honor breakpoints).
+- **JIT default fixed.** `jit_enabled` now defaults `true`;
+  `bifrost_run` auto-enables the FrostJIT. `bifrost_set_jit_verify` now
+  stores the flag and sets/clears the `BIFROST_JIT_VERIFY` env var
+  (read at first block dispatch — set it before run).
+- **`bifrost_lookup_symbol`** wraps `DynamicLinker::resolve_symbol`
+  (dynamic binaries + thunk symbols; static musl has no `.dynsym` → 0).
+
+`ctest/test_capi.c` (a HOST binary — it links libbifrost.a) grew from 22
+to **54 checks** covering all of the above (machine-code stubs written
+into guest memory via `bifrost_write_mem`: `add/ret`, `fadd/ret`, and a
+`mov x8,#172; svc #0; ret` getpid stub). New `make test-capi` target
+wired into `check-all`; `setup-tests` skips it in the musl cross-compile
+loop (it cannot build as a guest ELF). Verified: test-capi **54/54**, full
+suite **205/205** in both JIT and `--no-jit` modes.
+
 ## [1.5.3-alpha] — interpreter FP→int saturation rewrite (2026-08-18)
 
 ### Interp FCVTZU sentinel bug: `fcvtzu xN, dM` of values ≥ 2^63
