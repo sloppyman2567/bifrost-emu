@@ -37,14 +37,21 @@ status, see [TESTS.md](TESTS.md).
 
 6. **CoreMark (aarch64 guest) validated** — ~2,210 iters/sec plain,
    ~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (+38%),
-   all CRCs correct.
+   all CRCs correct. The win is the cross-block BRCOND flag-materialize
+   skip (dead pstate materializes on 2-block loop edges).
+
+7. **Interpreter FP→int conversions rewritten** — all five FP→int sites
+   (`interp_fp.cpp`) route through `fp_to_signed_sat`/`fp_to_unsigned_sat`
+   (range-check + subtract-2^63-then-add-back), fixing the
+   `fcvtzu_x_d(1e19)` sentinel failure under `--no-jit`. Interp and JIT
+   now both pass the full 205-test suite. Regression:
+   `ctest/jit_int_fp_conv.elf`.
 
 ### Planned
 
-7. **AArch32 (32-bit ARM) support.**
 8. **More Vulkan handle-table coverage** (beyond DisplayThunk PoC).
-9. **More real-world binary testing** (and the remaining interp
-   FCVTZU ≥2^63 range bug — see TESTS.md).
+9. **More real-world binary testing** (wider GL3.3+/4.x coverage as
+    games demand it; input latency tuning).
 
 ### v1.5.3-alpha additions (shipped 2026-08-15)
 
@@ -331,9 +338,10 @@ expansion.
   (`test_dyn_pthread_stress`, `test_dyn_pthread_8thread`) passes. True
   SMP semantics (atomic memory ordering, cross-vCPU futex contention) on
   multi-core hosts remains future work.
-- **AArch32 (32-bit ARM) support** — bifrost-emu currently only
-  handles AArch64. AArch32 would expand compatibility with older
-  ARM Linux binaries.
+- **AArch32 (32-bit ARM) support** — NOT planned. bifrost-emu's decoder,
+  IR, interpreter, and JIT are AArch64-only; adding AArch32 would be a
+  second architecture through every layer for a shrinking set of 32-bit
+  binaries. AArch32 guest code should be handled by qemu-arm or box32.
 - **Non-Linux guest OS support** — FreeBSD, OpenBSD user-mode
   emulation. The decoder is OS-agnostic; only the syscall layer
   would need a backend swap.

@@ -374,7 +374,8 @@ The JIT uses:
 - Test ARM64 builds on x86_64 CI runners
 - Test ARM64 game builds (SDL2, OpenGL ES) during development
 - Analyze ARM64 binaries in a sandboxed environment
-- Learn how AArch64 instruction emulation and Linux syscalls work
+- Run real ARM64 games (SDL2/OpenGL voxel games, teeworlds) on x86_64
+  desktops without QEMU
 
 ## Limitations
 

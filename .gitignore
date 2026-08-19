@@ -15,13 +15,16 @@ ctest_real/mangle_probe.c
 # C test binaries (regenerated from .c via musl toolchain)
 ctest/*.elf
 ctest_real/*.elf
+ctest_real/**/*.elf
 
 # Benchmarks / scripts (developer-only, not part of release tarball)
 bench.sh
 
 # External / downloaded test binaries (not part of the repo)
+# NOTE: ctest_real/toybox is intentionally committed (run_tests.sh uses it
+#       and symlinks it into ctest_real/realworld/), so only toybox-aarch64
+#       (the downloadable build) is ignored here.
 toybox-aarch64
-toybox
 ctest_real/realworld/
 ctest_real/teeworlds/
 
