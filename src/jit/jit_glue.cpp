@@ -256,6 +256,7 @@ void Emulator::dump_periodic_stats(double dt) {
     uint64_t decfail = jit_->block_profile.decode_fail.load(std::memory_order_relaxed);
     uint64_t ionly   = jit_->block_profile.interp_only.load(std::memory_order_relaxed);
     uint64_t hot_heads = jit_->tier2_hot_heads.load(std::memory_order_relaxed);
+    uint64_t t2_regions = jit_->tier2_regions.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         for (auto& gt : threads_) {
@@ -272,6 +273,7 @@ void Emulator::dump_periodic_stats(double dt) {
                 decfail   += gt->jit->block_profile.decode_fail.load(std::memory_order_relaxed);
                 ionly     += gt->jit->block_profile.interp_only.load(std::memory_order_relaxed);
                 hot_heads += gt->jit->tier2_hot_heads.load(std::memory_order_relaxed);
+                t2_regions += gt->jit->tier2_regions.load(std::memory_order_relaxed);
             }
         }
     }
@@ -279,7 +281,7 @@ void Emulator::dump_periodic_stats(double dt) {
     static uint64_t last_instr_, last_blocks_, last_blocks_tr_, last_chains_;
     static uint64_t last_natural_, last_entry_, last_ci_cap_, last_bl_cap_,
                     last_max_sz_, last_decfail_, last_ionly_;
-    static uint64_t last_hot_heads_;
+    static uint64_t last_hot_heads_, last_t2_regions_;
     uint64_t d_instr     = instr - last_instr_;
     uint64_t d_blocks    = blocks - last_blocks_;
     uint64_t d_blocks_tr = blocks_tr - last_blocks_tr_;
@@ -309,8 +311,9 @@ void Emulator::dump_periodic_stats(double dt) {
     // Tier-2 hot-head count (BIFROST_TIER2=1): blocks that crossed the
     // BIFROST_TIER2_HITS threshold since the last dump. Inert (0) by default.
     fprintf(stderr,
-            "[%s] tier2: hot_heads=%llu\n", CODENAME,
-            static_cast<unsigned long long>(hot_heads - last_hot_heads_));
+            "[%s] tier2: hot_heads=%llu regions=%llu\n", CODENAME,
+            static_cast<unsigned long long>(hot_heads - last_hot_heads_),
+            static_cast<unsigned long long>(t2_regions - last_t2_regions_));
     last_instr_     = instr;     last_blocks_     = blocks;
     last_blocks_tr_ = blocks_tr; last_chains_     = chains;
     last_natural_   = natural;   last_entry_      = entry;
@@ -318,6 +321,7 @@ void Emulator::dump_periodic_stats(double dt) {
     last_max_sz_    = max_sz;    last_decfail_    = decfail;
     last_ionly_     = ionly;
     last_hot_heads_ = hot_heads;
+    last_t2_regions_ = t2_regions;
     // SIGPROF bucket snapshot too: games/loops that exit via exit_group
     // (or are killed by a timeout) never reach print_jit_stats's exit-time
     // dump, so the jit/dispatch/translate/interp split was unobservable

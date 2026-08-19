@@ -178,6 +178,59 @@ public:
         int cnt = 0;
         auto it = blocks_.find(pc);
         if (it != blocks_.end()) cnt = it->second.instr_count;
+        // ── Tier-2 hot-head detection + region compile (BL/BLR-entered loops) ──
+        // run_block's slow-path counter never fires for real hot loops: they
+        // are entered via BL/BLR from _start/__libc_start_main and run INSIDE
+        // this helper's dispatch loop (or direct `call rel32` chains), so their
+        // blocks stay pinned in the thread-local caches and never reach
+        // run_block's slow path. Mirror the hot-head fire here so tier-2
+        // regions actually trigger on games/benchmarks. No lock is held in
+        // this slow path (lookup_only/translate_and_lookup lock internally),
+        // so increment exec_count under a shared lock and upgrade to exclusive
+        // to compile + register the region (writes blocks_[pc]).
+        if (tier2_enabled() && it != blocks_.end() && !it->second.tier2_hot_logged) {
+            blocks_mutex_.lock_shared();
+            it = blocks_.find(pc);
+            if (it != blocks_.end() && !it->second.tier2_hot_logged) {
+                uint32_t n = ++it->second.exec_count;
+                if (n >= tier2_hits_threshold()) {
+                    it->second.tier2_hot_logged = true;
+                    tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+                    if (tier2_trace_enabled()) {
+                        fprintf(stderr, "[tier2] hot head (bl) pc=0x%llx exec=%u\n",
+                                static_cast<unsigned long long>(pc),
+                                static_cast<unsigned>(n));
+                    }
+                    Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only
+                    if (trace.ok) {
+                        blocks_mutex_.unlock_shared();
+                        blocks_mutex_.lock();
+                        auto it2 = blocks_.find(pc);
+                        if (it2 != blocks_.end()) {
+                            uint64_t (*rfn)(CPU*, Emulator*) = compile_tier2_region(emu, trace);
+                            if (rfn) {
+                                BlockEntry region_entry;
+                                region_entry.fn = rfn;
+                                region_entry.instr_count = static_cast<int>(trace.total_insts);
+                                region_entry.exec_count = it2->second.exec_count;
+                                region_entry.tier2_hot_logged = it2->second.tier2_hot_logged;
+                                region_entry.ends_with_branch = true;
+                                region_entry.chained = true;        // no chain slot
+                                region_entry.taken_chained = true;
+                                region_entry.interp_only = false;
+                                region_entry.verified_once = true;  // M1: no region verify
+                                it2->second = region_entry;
+                                fn = rfn;
+                                cnt = static_cast<int>(trace.total_insts);
+                            }
+                        }
+                        blocks_mutex_.unlock();
+                        blocks_mutex_.lock_shared();
+                    }
+                }
+            }
+            blocks_mutex_.unlock_shared();
+        }
         tls_last_block_ = LastBlockCache{pc, fn, cnt};
         tls_inline_cache_[((pc >> 2) ^ (pc >> 17)) & (INLINE_CACHE_SLOTS - 1)] =
             InlineCacheEntry{pc, fn, cnt};
@@ -251,6 +304,11 @@ public:
     // ok=true (>= 2 blocks) during collection. Not yet wired into periodic
     // stats — that belongs to the compilation task.
     std::atomic<uint64_t> tier2_traces{0};
+    // Tier-2 region counter (ROADMAP #14, Phase 1 step 3): traces successfully
+    // compiled as a whole-region function (blocks_[head_pc] replaced by the
+    // region fn). Printed by dump_periodic_stats alongside hot_heads/traces.
+    // Inert (0) unless BIFROST_TIER2=1 and a hot head fires.
+    std::atomic<uint64_t> tier2_regions{0};
     // Block-end reason profile (BIFROST_BLOCK_PROF=1): why translated
     // blocks stop early. avg instructions/block is the JIT's #1 dispatch
     // overhead lever, and these counters reveal whether blocks split at
@@ -471,6 +529,21 @@ public:
     // hot-head fire site in run_block holds the shared lock). Implemented in
     // src/jit/jit_tier2.cpp.
     Tier2Trace collect_tier2_trace(Emulator& emu, uint64_t head_pc);
+    // Tier-2 region compilation (ROADMAP #14, Phase 1 step 3 / M1). Compiles
+    // a collected trace as ONE x86 function with ONE region-wide register
+    // allocation: the blocks' IR is vreg-remapped to a single space and
+    // concatenated, the terminating branch of each block is handled by the
+    // region compiler (internal fall-through edges stay inline, side exits /
+    // the loop back-edge jump to the shared epilogue or the region body).
+    // Region-internal edges carry flags in host RFLAGS (no per-edge pstate
+    // materialize); only the back-edge and side exits materialize. No
+    // cross-block optimization (M1 scope), no vec-cache/fp-cache (blocks use
+    // the memory paths). Call with the blocks_mutex_ held EXCLUSIVE (the
+    // region fn is written into code_buf_ alongside translate_block's).
+    // Returns nullptr if the trace shape isn't region-qualified. The CALLER
+    // replaces blocks_[head_pc].fn with the returned fn (exec_count /
+    // tier2_hot_logged preserved); implemented in src/jit/jit_tier2.cpp.
+    uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace))(CPU*, Emulator*);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,

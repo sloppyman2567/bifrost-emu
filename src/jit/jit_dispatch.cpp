@@ -164,17 +164,46 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 it->second.tier2_hot_logged = true;
                 entry.tier2_hot_logged = true;
                 tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
-                // Tier-2 Phase 1 step 2 trigger hook: collect (NEVER compile)
-                // a candidate trace from this hot head — the trace walker in
-                // jit_tier2.cpp. PURE COLLECTION: it only reads blocks_ (we're
-                // under the shared lock) and resets g_alloc per block, so this
-                // has no effect on the running block. The result is discarded
-                // here; the compilation task consumes it later.
-                (void)collect_tier2_trace(emu, pc);
                 if (tier2_trace_enabled()) {
                     fprintf(stderr, "[tier2] hot head pc=0x%llx exec=%u\n",
                             static_cast<unsigned long long>(pc),
                             static_cast<unsigned>(n));
+                }
+                // ── Tier-2 Phase 1 step 3 / M1: collect + compile a region ──
+                // The trace walker runs under the shared lock (read-only);
+                // compiling and REGISTERING the region needs the exclusive
+                // lock (it writes blocks_[pc]). Upgrade → compile → register
+                // → downgrade, mirroring the interp_only promotion pattern
+                // above. The region function replaces the single-block fn for
+                // this head PC, so subsequent dispatches run the whole hot
+                // loop body in ONE call (single regalloc pass, no per-block
+                // spill/reload, no per-edge dispatcher round-trips).
+                Tier2Trace trace = collect_tier2_trace(emu, pc);
+                if (trace.ok) {
+                    blocks_mutex_.unlock_shared();
+                    blocks_mutex_.lock();
+                    it = blocks_.find(pc);
+                    if (it != blocks_.end()) {
+                        uint64_t (*rfn)(CPU*, Emulator*) = compile_tier2_region(emu, trace);
+                        if (rfn) {
+                            BlockEntry region_entry;
+                            region_entry.fn = rfn;
+                            region_entry.instr_count = static_cast<int>(trace.total_insts);
+                            region_entry.exec_count = it->second.exec_count;
+                            region_entry.tier2_hot_logged = it->second.tier2_hot_logged;
+                            region_entry.ends_with_branch = true;
+                            region_entry.chained = true;        // region has no chain slot
+                            region_entry.taken_chained = true;
+                            region_entry.interp_only = false;
+                            region_entry.verified_once = true;  // M1: no region verify
+                            it->second = region_entry;
+                            entry = region_entry;
+                        }
+                    }
+                    blocks_mutex_.unlock();
+                    blocks_mutex_.lock_shared();
+                    it = blocks_.find(pc);
+                    if (it != blocks_.end()) entry = it->second;
                 }
             }
         }
