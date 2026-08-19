@@ -78,6 +78,7 @@ bifrost-emu-test*
 # Agent context file — local working notes for AI assistants.
 # NEVER commit this file; it is for cross-session continuity only.
 context.md
+SESSION_SUMMARY.md
 
 # Backup directory (created before file modifications for safe rollback)
 .backup/
