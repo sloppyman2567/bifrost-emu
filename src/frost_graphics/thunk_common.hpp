@@ -84,6 +84,10 @@ struct SymbolEntry {
     // legacy/manual registrations; dispatch() switches on its
     // policy/size/ret columns instead of comparing symbol names.
     const thunk::Spec* spec = nullptr;
+    // Precomputed at registration: is this name in the GLStateTracker
+    // tracked-state set? dispatch() tests this bool instead of hashing
+    // the name string on every one of the ~1.5M thunk calls/s.
+    bool        tracks_state = false;
 };
 // Write a 16-byte trampoline at the given guest address for the given
 // sym_id. Used by all three thunks.

@@ -558,7 +558,7 @@ bool GLStateTracker::try_handle_query(const std::string& name, const uint64_t ar
     return false;
 }
 
-bool GLStateTracker::tracks_state(const std::string& name) const {
+bool GLStateTracker::tracks_state(const std::string& name) {
     // Keep in sync with the name set below (track_state_change). A
     // function-local static builds the set once on first call.
     static const std::unordered_set<std::string> kTracked = {

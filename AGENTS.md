@@ -444,6 +444,24 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   "other" bucket to specific syscalls. `BIFROST_CLASS_PROF=1` is the
   per-class dynamic histogram in the interpreter; with JIT ON it shows
   exactly which instruction classes run through the interp fallback.
+  **DISPATCH BUCKET ATTRIBUTION (2026-08-19):** the SIGPROF "dispatch"
+  bucket is NOT the block-cache/dispatch machinery — it counts any sample
+  whose RIP lands inside a run_block stack frame, so it INCLUDES all host
+  work done mid-block: the thunk path (jit_thunk_svc → GraphicThunk::
+  dispatch → host GL/SDL) and the mmap/munmap churn (Memory::mmap_alloc's
+  reused-window `memset`, ~1.2 GB/s ≈ 4% of a core on the minecraft game —
+  NOT a 24% hotspot; a per-call byte counter refuted the earlier crude
+  caller-probe attribution). "Dispatch" samples resolving to libc memcpy/
+  syscall/sem_trywait are host Mesa/GL driver work running inside the
+  run_block frame, not emulator overhead. The emulator core is fast: chunk
+  loads are <20ms and render FPS spikes are host frame pacing. Measure
+  these with a direct byte counter (g_memset-style), never a stack-scan
+  caller probe. The thunk name-hash cost WAS real and is fixed: a string-
+  keyed `unordered_set` lookup in GLStateTracker::tracks_state ran on
+  EVERY thunk call (~1.5M/s) until `tracks_state` was precomputed as a
+  bool on SymbolEntry at registration (thunk_common.hpp + the three
+  dispatch sites in thunk.cpp) — dispatch samples in the string hashtable
+  went 31/389 → 0.
 - Block dispatch has THREE layers: a single-entry last-block cache, an
   inlined 256-slot direct-mapped inline cache (hash
   `((pc >> 2) ^ (pc >> 17)) & 255`), then the shared-mutex + unordered_map

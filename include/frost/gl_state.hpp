@@ -258,8 +258,10 @@ public:
     // BEFORE track_state_change, so non-GL thunk calls (the vast majority —
     // buffer/texture uploads, GLFW, SDL) skip the 32-name linear scan in
     // track_state_change entirely. Membership is static (set at first use);
-    // exact same name set, so this is a pure optimization.
-    bool tracks_state(const std::string& name) const;
+    // exact same name set, so this is a pure optimization. Static so the
+    // dispatcher can precompute the flag once per symbol at registration
+    // (the bool is then tested on the hot path instead of a string hash).
+    static bool tracks_state(const std::string& name);
 
 private:
     // ── Internal helpers ─────────────────────────────────────────────

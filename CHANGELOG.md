@@ -56,6 +56,25 @@ games can actually draw.
   pass, 77 = skip without a display. Verified under BOTH JIT and
   `--no-jit` on the live RADV (RX 7600) path; quick suite 200/200.
 
+### Thunk dispatch: GLStateTracker string-hash removed from the hot path
+
+- `GLStateTracker::tracks_state(name)` did a string-keyed `unordered_set`
+  lookup on **every** thunk call (~1.5M/s on the minecraft game) just to
+  decide whether to track a state change. `tracks_state` is now a
+  `bool` precomputed on `SymbolEntry` at registration
+  (`thunk_common.hpp`); all three dispatch sites in `thunk.cpp` test the
+  flag instead of hashing the name. SIGPROF dispatch samples in the
+  string hashtable went 31/389 → 0.
+- Follow-up profiling established what the SIGPROF "dispatch" bucket
+  actually contains: it is NOT block-dispatch overhead — it counts all
+  host work that runs inside a `run_block` stack frame, i.e. the thunk
+  path (`jit_thunk_svc` → `GraphicThunk::dispatch` → host GL/SDL) and the
+  `mmap_alloc` reused-window `memset` (measured ~1.2 GB/s ≈ 4% of a core
+  via a direct byte counter, not a hotspot). Residual "dispatch" samples
+  in libc `memcpy`/`syscall`/`sem_trywait` are host Mesa/GL driver work.
+  The emulator core itself is fast: chunk loads are <20ms and render FPS
+  spikes are host frame pacing, not emulator overhead.
+
 ## [1.5.3-alpha] — Android native bridge adapter + C API dl* wrappers (2026-08-19)
 
 ### libbifrost can now act as an ART native bridge (`-XX:NativeBridge`)

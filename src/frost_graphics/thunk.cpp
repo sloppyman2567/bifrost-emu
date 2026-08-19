@@ -592,7 +592,8 @@ void GraphicThunk::register_function_(const std::string& lib,
     uint64_t addr = impl_->trampoline_base + local_id * GraphicThunk::TRAMPOLINE_SIZE;
     write_trampoline_(*impl_->mem, addr, sym_id);
     lt->entries.push_back({sym, host_fn, addr, sym_id, pointer_args,
-                           n_stack, n_float, flags, spec});
+                           n_stack, n_float, flags, spec,
+                           GLStateTracker::tracks_state(sym)});
     impl_->id_to_idx_.push_back({
         static_cast<uint32_t>(std::distance(impl_->libs_.data(), lt)),
         static_cast<uint32_t>(lt->entries.size() - 1)
@@ -932,7 +933,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         }
         cpu.regs[0] = 0;
-        if (impl_->gl_state_tracker_) {
+        if (impl_->gl_state_tracker_ && entry.tracks_state) {
             impl_->gl_state_tracker_->track_state_change(entry.name, local_args, fv, entry.n_float);
         }
         return 0;
@@ -985,7 +986,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
         cpu.regs[0] = 0;
-        if (impl_->gl_state_tracker_) {
+        if (impl_->gl_state_tracker_ && entry.tracks_state) {
             uint64_t mixed_args[12] = {0};
             mixed_args[0] = iv[0];
             impl_->gl_state_tracker_->track_state_change(entry.name, mixed_args, fv, entry.n_float);
@@ -1854,8 +1855,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
     }
     cpu.regs[0] = ret;
-    if (impl_->gl_state_tracker_ &&
-        impl_->gl_state_tracker_->tracks_state(entry.name)) {
+    if (impl_->gl_state_tracker_ && entry.tracks_state) {
         impl_->gl_state_tracker_->track_state_change(entry.name, args, nullptr, 0);
     }
     // Lightweight frame counter: print every 5 present/swap calls when
