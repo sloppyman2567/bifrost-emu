@@ -145,25 +145,43 @@ and across internal block edges.
   per-edge snapshot restore, optional Lback to body_start for back-edge
   (loop) regions, JCC rel32 patching. Wired into the run_block fire site and
   lookup_call_target (caller registers the returned fn in `blocks_`).
+  Step 4 (`ad5098a`): IN-CODE hot-head counter + back-edge region firing —
+  prologue counters count CHAINED entry so hot loops actually fire regions
+  mid-run (see the firing note below).
   **M1 verification finding:** the walker follows only fall-through, so a
   trace's last block is RET/B/0-side-exit except when the 64-block cap lands
   exactly on a cond-branch block — M1 regions form realistically as LINEAR
   fall-through chains (taken edges = cold exits); natural backward-branch
   loop regions only at cap coincidence. The validation was relaxed to accept
   both (last block's taken target == head → Lback, else ordinary cold exit).
-  **Hot-head firing caveat (still true):** chained loops (bench_matrix's
-  2-block loop) and chained/cached callee bodies never reach the slow path,
-  so exec_count stays ~1-2 and no region fires on real workloads — hot-heads
-  fire only on inline-cache slot thrash (>~128-256 distinct blocks sharing
-  slots) or a single-entry callee whose slot collides. Phase-2 planning must
-  add a fire mechanism that counts CHAINED/self-loop execution (no per-
-  dispatch atomics — the documented fast-path rule) or tier-2 stays inert on
-  the minecraft game. Verified M1: synthetic 300-block BLR loop forms 4
-  chained regions (t1..t64, t65..t128, t129..t192, t193..t256) + x3=10
-  variant forms 1, results byte-identical to baseline, JIT_VERIFY clean,
-  quick suite 200/200 tier2 off/on, bench_mips acc `0xf800800a2c4ff835`
-  unchanged, bench_matrix 656.5 MFLOPS unchanged. Region code size is large
-  (~260 B per 2-instr block) — code-buffer pressure is a real M1 constraint.
+  **Hot-head firing — SOLVED (step 4, commit `ad5098a`):** dispatch-side
+  counters (run_block slow path / lookup_call_target) could never fire on
+  real workloads — chained loops and chained/cached callee bodies never
+  reach the slow path (exec_count stays ~1-2); hot-heads fired only on
+  inline-cache slot thrash. The in-code counter fixes it: every block's
+  prologue carries an 8-byte counter + inc/cmp/jne/fire sequence emitted
+  right after `chain_entry_off_`, so EVERY entry (cold dispatch AND chain
+  edges) is counted; crossing `BIFROST_TIER2_HITS` calls `tier2_fire_stub`
+  from inside the running block, which collects the head's trace, compiles
+  it as a region, and force-patches the loop's back-edge taken chain slots
+  to `jmp` into the region (next iteration enters the region). The counter
+  is gated on `!wex_enabled_` (it writes the code page) and
+  `!chain_skip_enabled_` (regions don't compose with chain-skip), and only
+  emitted for M1-eligible heads (last op BRCOND/ZERO/BIT, no SVC/BR/BL/BLR/
+  CALL_INTERP). Once a block fires, `tier2_counter_disable` overwrites the
+  6-byte `inc` with `jmp rel32` over the whole counter+fire sequence, so
+  hot blocks stop paying the ~6-cycle per-entry cost for the rest of the
+  run. Self-loops are naturally excluded (their loop-back jumps to
+  `block_body_start_off_`, past the counter). Walker was relaxed to match:
+  the `cold_entry` stop was removed (real loops have all blocks already
+  translated; the region re-compiles from IR) and a conditional branch
+  whose TAKEN target == head ends the trace as `b_backedge` (a natural
+  loop's taken back-edge becomes the region's Lback instead of walking out
+  on the fall-through). Verified: 2-block natural loop (20M iters)
+  272-273ms → 249-251ms (~8% win); bench_matrix/bench_sort neutral (hot
+  loops are self-loops M1 cannot fuse, or blr-heavy); bench_mips acc
+  `0xf800800a2c4ff835` unchanged; quick suite 200/200 tier2 off/on;
+  JIT_VERIFY adds zero new divergences.
 - Add a cheap per-block-edge execution counter (a `uint32_t` on
   `BlockEntry`, incremented at dispatch, flushed to a shared map on the
   slow path like `tls_hot_pc_counts_`). Identify hot heads: a block whose

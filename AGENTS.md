@@ -1373,6 +1373,47 @@ not musl-`-static`.
   fire (odd slots, each shared by a +1024-byte twin) but a head at a slot
   with no later writer does not; place the head so its slot collides with a
   later cycle block if you need it to fire.
+- **Tier-2 in-code hot-head counter contract (Phase 1 step 4, 2026-08-19):**
+  supersedes the dispatch-side counter placement for REAL firing. Under
+  `BIFROST_TIER2=1` every block reserves 8 bytes of counter data immediately
+  before the fn entry; M1-eligible heads (last IR op BRCOND/ZERO/BIT, no
+  SVC/BR/BL_CALL/BLR_CALL/CALL_INTERP) also get a ~46-byte prologue sequence
+  at `chain_entry_off_` (`inc/cmp/jne` against that data + a fire path that
+  loads `rdi=[rbp+emu_slot_off()]`, `rsi=head_pc` and calls
+  `tier2_fire_stub` via `emit_call_aligned(...,0)` — pushfq/popfq preserves
+  RFLAGS and ABI alignment). Every entry (cold dispatch AND chain edge) is
+  counted; self-loops excluded (their back-edge jumps to
+  `block_body_start_off_`). Crossing `BIFROST_TIER2_HITS` fires
+  `tier2_fire_region`, which runs under the EXCLUSIVE blocks_mutex_ from a
+  JIT frame (try/catch; never let an exception cross the JIT boundary), sets
+  `tier2_hot_logged` BEFORE collect/compile (one-shot: a failing shape fails
+  identically every time), collects + compiles the trace, registers the
+  region over `blocks_[pc]` preserving exec_count/hot_logged, and
+  force-patches every trace block whose side_exit targets the head: its
+  taken chain slot is overwritten with `jmp region-fn` REGARDLESS of
+  patch_chain's unpatched-pattern guard (we WANT to redirect a live chain;
+  blocks without a taken slot are left to try_chain_block later, which
+  chains to the region). The region prologue expects exactly the entry
+  state the taken-path epilogue sets (RDI=cpu/RSI=emu), so the hijack is
+  transparent. After firing, `tier2_counter_disable` overwrites the 6-byte
+  `inc` at `tier2_counter_off` with `E9 rel32` of `(tier2_counter_len - 5)`
+  to skip the whole sequence (bench_matrix was +1.5% slower until this —
+  a fired block's counter kept charging ~6 cycles/entry forever). Both
+  `tier2_counter_off`/`len` are recorded at emit time (`len` varies because
+  `emit_load` picks disp8/disp32 for the emu-slot load; `num_stack_slots_`
+  is finalized at jit_translate.cpp ~751 so `emu_slot_off()` is stable).
+  Gating: `!wex_enabled_` (counter writes the code page) and
+  `!chain_skip_enabled_` (regions don't compose with chain-skip) — data
+  bytes are reserved for all blocks but only eligible heads get the code.
+  Walker relaxations that made real firing possible: the `cold_entry` stop
+  is GONE (real loops have all blocks translated; the region re-compiles
+  from IR anyway) and a cond-branch whose TAKEN target == head ends the
+  trace as `b_backedge` so a natural loop's taken back-edge becomes the
+  region's Lback. M1 pays off only on 2+ block natural loops (~8% on the
+  20M-iter synthetic); bench_matrix/bench_sort are neutral because their
+  dominant loops are self-loops (unfusable at M1) or blr-heavy. Do NOT
+  re-add a per-dispatch atomic or a fast-path counter — the in-code
+  prologue counter is the only place that sees CHAINED execution.
 - **IMPORTANT FINDING for the next tier-2 step:** user hot loops are entered
   via BL/BLR from `_start`/`__libc_start_main`, so they run INSIDE
   `jit_call_helper`'s dispatch loop (`lookup_call_target`, which has its OWN
@@ -1387,6 +1428,80 @@ not musl-`-static`.
   thread-local caches and `blocks_` map) or the feature stays inert on real
   workloads. Documented here so it's not re-discovered; the env gates +
   counter plumbing is exactly what the spec asked for and is a correct seed.
+  **SOLVED (commit `ad5098a`):** this exact gap is why Phase 1 step 4 added
+  the IN-CODE hot-head counter — see the Local Contracts section below.
+
+## Session History (2026-08-19) — Tier-2 Phase 1 step 4 (in-code hot-head counter)
+
+- **In-code hot-head counters + back-edge region firing landed (`ad5098a`).**
+  Dispatch-side counters are dead on real workloads (see the finding above);
+  the fix counts CHAINED execution from inside the block. Every block's
+  prologue reserves 8 bytes of counter state immediately before the fn entry
+  and (for M1-eligible heads only) emits a ~46-byte sequence right after
+  `chain_entry_off_`: `inc dword[rip+disp]` + `cmp dword[rip+disp],imm32` +
+  `jne skip` + fire path (`mov rdi,[rbp+emu_slot_off]`; `movabs rsi,head_pc`;
+  `emit_call_aligned(&tier2_fire_stub,0)` — pushfq/popfq preserves RFLAGS and
+  restores ABI alignment; the call is relocatable via movabs+call because
+  code_buf_ ↔ binary-text distance isn't known). The RIP-relative disp32 to
+  the counter is known because the 8 data bytes were emitted first
+  (block_start-8). Both cold dispatches AND chain edges run the prologue, so
+  every entry counts. Self-loops are naturally excluded (their loop-back
+  jumps to `block_body_start_off_`, past the counter). Head eligibility
+  (`tier2_head_eligible`, computed in translate_block): last IR op must be
+  BRCOND/BRCOND_ZERO/BRCOND_BIT AND no SVC/BR/BL_CALL/BLR_CALL/CALL_INTERP
+  anywhere in the block (walker/region compiler abort on those). Gated on
+  `!wex_enabled_` (counter writes the code page) and `!chain_skip_enabled_`
+  (regions don't compose with chain-skip). Data bytes are still reserved for
+  all blocks under tier2 (8 dead bytes, no runtime cost).
+- **`tier2_fire_region` (jit_tier2.cpp) runs under the EXCLUSIVE lock from a
+  JIT frame** (the stub is called mid-block, so exceptions must never escape
+  — try/catch + `try_lock` unlock). Bails on `wex_enabled_ || !tier2_enabled()`.
+  One-shot per block: `tier2_hot_logged` is set BEFORE collect/compile (same
+  block → same trace shape → a failed attempt fails identically every time).
+  Registers the region over `blocks_[pc]` preserving exec_count/
+  tier2_hot_logged; then force-patches every trace block whose side_exit
+  targets the head: its taken chain slot (set up by the taken-path epilogue
+  with RDI=cpu/RSI=emu) is overwritten with `jmp region-fn` regardless of
+  patch_chain's unpatched-pattern guard (patch_chain REFUSES already-patched
+  slots; here we WANT to redirect a live chain). Blocks with no taken chain
+  slot yet are left to `try_chain_block` later (it will chain to
+  `blocks_[pc].fn` = the region now). The region prologue expects exactly
+  the same entry state, so the hijack is transparent.
+- **Counter neutralization (`tier2_counter_disable`)**: after a block fires,
+  its counter would keep charging ~6 cycles per entry forever — bench_matrix
+  went 249-250ms (off) → 252-254ms (on) until this was added. The fix
+  overwrites the 6-byte `inc` at `tier2_counter_off` with `E9 rel32` of
+  `(tier2_counter_len - 5)` so the whole counter+fire sequence is skipped by
+  a single taken branch. `tier2_counter_len` must be recorded at emit time
+  (it varies: `emu_slot_off()` uses disp8 vs disp32 on the `mov rdi,[rbp+]`
+  depending on the block's stack-slot count — `num_stack_slots_` is finalized
+  at line ~751 before the prologue, so the offset is stable). Called on ALL
+  three fire paths (in-code, run_block slow path, lookup_call_target) under
+  their exclusive-lock sections. With this, bench_matrix tier2-on returns to
+  249-251ms (parity).
+- **Walker relaxations (needed for real firing):** (a) the `cold_entry` stop
+  was REMOVED — real loops have all blocks already translated (they ran long
+  enough to be hot), so stopping at the first cached block aborted every real
+  trace at 1 block; the region compiler re-compiles from IR regardless of
+  whether a standalone block exists. (b) a conditional branch whose TAKEN
+  target == head_pc now ends the trace with `stop_reason="b_backedge"` and
+  `trace_ends_after_block=true` — without it, a natural loop whose back-edge
+  is the taken path (`b.ne .L3` at the loop bottom) walks OUT on the
+  fall-through and follows the exit.
+- **Measured:** 2-block natural loop (20M iters, `/tmp/opencode/tier2_fire/
+  bigloop.elf`) 272-273ms → 249-251ms = ~8% win (the region replaces 2
+  prologues + 2 epilogues + 1 dispatcher per iteration with 1 flush_all_vregs
+  + 1 jmp). bench_matrix neutral (outer k-loop fires a 2-block/13-inst region
+  at 0x40050c but the inner 256³ self-loop dominates and M1 can't fuse a
+  1-block loop); bench_sort neutral (qsort's compare calls are blr-heavy and
+  the partition inner loop is a self-loop); bench_mips acc
+  `0xf800800a2c4ff835` unchanged (self-loop, zero tier2 activity). Quick
+  suite 200/200 tier2 OFF (49s) and ON (55s); JIT_VERIFY zero NEW
+  divergences (bigloop exits 239 / matrix 1 / sort 3 — all IDENTICAL without
+  tier2, pre-existing verify-mode artifacts). Takeaway: M1 pays off on
+  2+ block natural loops only — the dominant hot loops of most benchmarks
+  are self-loops, which need either self-loop region support or a larger
+  loop-fusion unit (Phase 2).
 
 ## Session History (2026-08-19) — Tier-2 Phase 1 step 2 (trace walker)
 
