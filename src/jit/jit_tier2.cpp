@@ -9,8 +9,11 @@
 // code, never touches blocks_ beyond read-only membership checks, and never
 // compiles anything.
 //
-// Stop classification: an ABORT (call_interp / svc / indirect_br / bl /
-// decode_fail / vreg_exhaust) makes the trace unusable (ok stays false).
+// Stop classification: an ABORT (call_interp / svc / indirect_br /
+// bl_untranslated / decode_fail / vreg_exhaust) makes the trace unusable
+// (ok stays false). BL aborts only when the callee isn't pre-translated
+// (bl_untranslated); a call-aware trace fuses BL/BLR as BL_CALL/BLR_CALL
+// body ops that invoke the standalone callee fn (see compile_tier2_region).
 // A NORMAL end (cold_entry / revisit / ret / b_exit / b_backedge / block_cap
 // / inst_cap) yields a valid bounded trace; ok is then decided by block count.
 //
@@ -136,21 +139,48 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             }
 
             // ── Trace-aborting instruction classes (never in a region) ──
+            static const bool no_callregion_ =
+                (getenv("BIFROST_NO_CALLREGION") != nullptr);
             if (d.cls == InstClass::SVC || d.cls == InstClass::SVC_IMM) {
                 trace.stop_reason = "svc";
                 aborted = true;
                 break;
             }
-            if (d.cls == InstClass::BR || d.cls == InstClass::BLR) {
+            if (d.cls == InstClass::BR) {
+                // An indirect `br xN` is a data-dependent JUMP (RET is its own
+                // InstClass) — the walker can't follow it.
                 trace.stop_reason = "indirect_br";
                 aborted = true;
                 break;
             }
             if (d.cls == InstClass::BL) {
-                // M1 keeps calls out of traces: a region must not dispatch a
-                // call edge (ROADMAP #14: "BL/BLR inside a trace ends the
-                // trace"). Simpler and correct.
-                trace.stop_reason = "bl";
+                if (!no_callregion_ &&
+                    lookup_only(ip + static_cast<uint64_t>(d.imm)) != nullptr) {
+                    // Call-aware region: a BL is a direct CALL. The callee is
+                    // NOT part of the trace — the region's BL_CALL codegen
+                    // invokes the (already-translated) standalone callee fn
+                    // via a patchable `call rel32`, and the trace continues at
+                    // the caller's fall-through (ip+4). Requiring the callee
+                    // pre-translated means the direct-call slot patches
+                    // immediately; an untranslated callee would bounce through
+                    // jit_call_helper → INCOMPLETE unwind → dispatcher on
+                    // every iteration, which is worse than no region.
+                    // BIFROST_NO_CALLREGION=1 restores the M1 abort.
+                } else {
+                    trace.stop_reason = "bl_untranslated";
+                    aborted = true;
+                    break;
+                }
+            }
+            if (d.cls == InstClass::BLR && no_callregion_) {
+                // BLR (function pointer): the target is dynamic, so no
+                // pre-translation check is possible. BLR_CALL codegen routes
+                // through jit_call_helper, which runs the whole callee and
+                // returns the caller's continuation — correct from inside a
+                // region, so BLR is allowed by default (Track 1; the worldgen
+                // noise path is blr-heavy). BIFROST_NO_CALLREGION=1 restores
+                // the M1 abort.
+                trace.stop_reason = "indirect_br";
                 aborted = true;
                 break;
             }
@@ -335,7 +365,18 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 // alongside translate_block's output). Returns nullptr if the trace shape
 // isn't region-qualified.
 uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace))(CPU*, Emulator*) {
-    (void)emu;  // M1 regions never call back into guest code
+    (void)emu;
+    // Call-aware regions (Track 1): a trace may now contain BL_CALL/BLR_CALL
+    // body ops. Their codegen invokes guest callee fns (direct `call rel32`
+    // for BL, jit_call_helper for BLR) that run with their OWN frames and
+    // clobber all caller-saved state, so the region treats a call site as a
+    // hard boundary: pins are disabled, LICM stops hoisting arch loads, and
+    // the region's per-op regalloc reloads everything after the call (the
+    // call's invalidate_all_vregs leaves the same clean state the region body
+    // starts from). The region frame is laid out exactly like a standalone
+    // block's (push rbx/rbp/r12-r15, mov rbp,rsp), so the BL_CALL
+    // callee-completion guard's INCOMPLETE path (`mov rsp,rbp; pop×6; ret`)
+    // correctly unwinds a mid-callee return to the C dispatcher.
     if (!code_buf_ || !trace.ok) return nullptr;
     // Regions don't compose with chain-skip: helpers like emu_slot_off()
     // branch on chain_skip_enabled() and the chain frame is a fixed 32 KB
@@ -439,6 +480,28 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                       blocks[i].pc, static_cast<size_t>(blocks[i].ir.count)};
     }
 
+    // Region-wide "contains a call" flag (Track 1 call-aware regions). A
+    // BL_CALL/BLR_CALL invokes guest code that can write ANY cpu.regs[] entry
+    // and clobber all caller-saved host state, so:
+    //   - pinning is disabled (a pin would hold a stale loop-carried value
+    //     once the callee overwrites its cpu.regs[] slot — the pin scan below
+    //     already refused call-containing regions; this is the same check
+    //     hoisted so LICM can consult it too);
+    //   - LICM must NOT hoist LOAD_REG of an arch that the REGION never writes
+    //     (the callee may write it mid-loop, and a hoisted read would freeze
+    //     the pre-call value). Pure scratch IMM/ALU chains stay hoistable —
+    //     they live in the region's own frame slots, which the callee (its own
+    //     frame) never touches.
+    const bool has_call = [&]() {
+        for (const IRInst& inst : region_ir) {
+            if (inst.op == IROp::SVC || inst.op == IROp::BR ||
+                inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
+                inst.op == IROp::CALL_INTERP)
+                return true;
+        }
+        return false;
+    }();
+
     // ── Phase 2 loop-carried arch GPR pinning (back-edge regions) ─────
     // Runs BEFORE the LICM pass below: LICM consults arch_pin_ to avoid
     // hoisting a LOAD_REG of a pinned arch (the pin already makes the body
@@ -466,16 +529,12 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
         if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
-            bool has_call = false;
-            for (const IRInst& inst : region_ir) {
-                if (inst.op == IROp::SVC || inst.op == IROp::BR ||
-                    inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
-                    inst.op == IROp::CALL_INTERP) {
-                    has_call = true;
-                    break;
-                }
-            }
-            if (!has_call) {
+            if (has_call) {
+                // Call-aware region: the callee can write any cpu.regs[], so a
+                // pin (loop-carried in the register, cpu.regs[] possibly
+                // stale/deferred) would hold a stale value after the call.
+                // No pins.
+            } else {
                 uint16_t first_write[32];
                 uint16_t first_read[32];
                 bool direct_write[32];
@@ -656,7 +715,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     // what gets pinned). A pinned read with NO hoisted
                     // consumer is un-hoisted below (refine), so a bare load
                     // does not regress to a per-iteration slot read.
-                    return !arch_written[s];
+                    // Call-aware region: the CALLEE may write this arch
+                    // mid-loop, so a hoisted read would freeze the pre-call
+                    // value — never hoist arch loads when the region calls.
+                    return !arch_written[s] && !has_call;
                 }
                 if (s == 0) return true;  // no source
                 if (s > 32 && s < 4096) return hoisted_vreg[s];
@@ -1123,8 +1185,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         // ── Body op (normal compile path) ───────────────────────────
         if (compile_ir_inst(inst)) {
             // A body op ended the block. The walker guarantees this never
-            // happens (CALL_INTERP / BL / SVC / BR abort the trace), so this
-            // is defensive only.
+            // happens (CALL_INTERP / SVC / BR abort the trace; BL/BLR fuse as
+            // BL_CALL/BLR_CALL which return false and do not end the block),
+            // so this is defensive only.
             code_buf_used_ = block_start;
             make_executable();
             return nullptr;

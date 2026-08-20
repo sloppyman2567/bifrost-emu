@@ -1977,3 +1977,61 @@ not musl-`-static`.
   counter, `BIFROST_T2_DUMP` region bytes dump, `tier2_region_entries`
   stats) REMOVED; the gated `[tier2]` trace lines and `back_refs_` repatch
   remain. Uncommitted — tree at HEAD `85a09e9` + M2/M2b + this work.
+
+## Session History (2026-08-20) — Track 1: call-aware regions (BL/BLR in traces)
+
+- **Call-aware regions landed (plan.md Track 1, uncommitted at `2c04f77` +
+  this diff, confined to `src/jit/jit_tier2.cpp` +85/−21).** The walker no
+  longer aborts on calls: **BL** is fused when the callee is ALREADY
+  translated (`lookup_only(ip + d.imm) != nullptr` — the direct-call slot
+  patches immediately; an untranslated callee would bounce jit_call_helper →
+  INCOMPLETE unwind → dispatcher every iteration, worse than no region →
+  aborts as `bl_untranslated`); **BLR** is allowed UNCONDITIONALLY (dynamic
+  target, no pre-translation check possible — BLR_CALL codegen routes through
+  jit_call_helper which runs the whole callee and returns the continuation;
+  the worldgen noise path is blr-heavy). Both translate to BL_CALL/BLR_CALL
+  body ops (ir_translate.cpp:656-698 — they do NOT end the block), the trace
+  continues at ip+4 (the caller's continuation stays INLINE in the region),
+  and the callee is never part of the trace. `BIFROST_NO_CALLREGION=1`
+  restores the M1 aborts. BR/SVC/CALL_INTERP still abort.
+- **Why the region frame tolerates calls (verified by reading sources, not
+  the summary):** the region prologue is byte-identical to a standalone
+  block's (push rbx/rbp/r12-r15, mov rbp,rsp, sub rsp,stack_bytes with
+  stack_bytes%16==0) so body-entry RSP%16==8 and BL_CALL's alignment sequence
+  (push WIN_REG; sub rsp,8; pushfq; call) is valid; the completion guard's
+  INCOMPLETE path (`mov rsp,rbp; pop×6; ret`) correctly unwinds the REGION
+  frame to the C dispatcher; `emu_slot_off()` = -8*(num_stack_slots_+1) is
+  set up by the region (num_stack_slots_ = region_max_vreg - 32, +64-byte
+  cushion). `optimize_ir` (run per walker block with force_fwd) is already
+  call-safe: BL_CALL/BLR_CALL clear arm_reg_cache (ir_optimize.cpp ~675),
+  invalidate consts (~102), and DSE preserves preceding STORE_REGs incl. the
+  x30 link store (~301, special case ~310). The head block must be CALL-FREE
+  for the in-code counter (tier2_head_eligible excludes BL_CALL/BLR_CALL), so
+  real call regions are ≥2 blocks with the call in a LATER block.
+- **LICM arch-load hoisting gated on `!has_call`:** a region-wide
+  `const bool has_call` (scan for SVC/BR/BL_CALL/BLR_CALL/CALL_INTERP over
+  region_ir) is computed once after concatenation and consulted by BOTH the
+  pin scan (replacing its local scan — pins stay disabled for call regions:
+  a callee can write any cpu.regs[] entry, so a deferred pin could go stale)
+  and `src_invariant`'s LOAD_REG branch (`return !arch_written[s] &&
+  !has_call`). Pure scratch IMM/ALU chains remain hoistable — they live in
+  the region's own frame slots, which the callee (its own frame) never
+  touches. Do NOT re-enable arch-load hoisting under has_call even for
+  "never-written-in-region" archs — the callee writes them mid-loop.
+- **New harnesses `/tmp/opencode/m6bl.S` / `m6blr.S` (+ .elf):** 2-block
+  natural loop (head `subs;b.eq` call-free → fires; body `add;bl/blr
+  .leaf;add;b .Lhead`) calling a leaf via BL / function-pointer BLR. Trace
+  log confirms fusion: `blocks=2 insts=6 ok=1 stop=b_backedge`, region 457 B
+  (BL, direct call+guard) / 387 B (BLR, helper), back-edge + chain-in
+  repatched. m5one's `bl` is in the OUTER loop (outside the traced self-loop)
+  so it does NOT exercise this path — don't reuse it as a call-region test.
+- **Verification:** m6bl/m6blr tri-mode byte-identical
+  (`0x9999999999999992`, matches closed form acc_{n+1}=6·acc_n+38 ×262144);
+  JIT_VERIFY + REGALLOC_CHECK clean on both; all m5/m3/m2 harnesses tri-mode
+  MATCH; game_demo rc=0 tier2 ON+OFF; bench_mips acc `0xf800800a2c4ff835`
+  both modes + REGALLOC_CHECK; quick suite **200/200** tier2 ON, full suite
+  **205/205** default. Micro-harness timing NEUTRAL (~200ms both modes — the
+  leaf's own standalone prologue/epilogue dominates a 6-inst loop; the payoff
+  question is worldgen's fat noise loops → plan.md Track 0 minecraft A/B).
+- Not committed alongside: `.gitignore` (+rules.md personal file) and
+  untracked `plan.md` (Track 0-5 roadmap + do-not-regress list).
