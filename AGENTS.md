@@ -2139,3 +2139,42 @@ not musl-`-static`.
   quick suite 200/200 under both flags; full suite 205/205 default.
   m3loop_quick fires NO regions in either mode (pre-existing quirk, parity
   confirmed) — use full m3loop for back-edge-region fire testing.
+
+## Session History (2026-08-20) — loop regions only (CoreMark +3.5%); Track 2 superseded
+
+- **LINEAR REGIONS DECLINED BY DEFAULT (committed `0c518c5`).** compile_
+  tier2_region now returns nullptr unless `last_is_backedge` (the trace is a
+  real loop); `BIFROST_T2_LINEAR=1` restores all-region behavior. Reason: a
+  linear region over a walked-out loop body re-pays a full region entry
+  (prologue + cold-exit ret) EVERY iteration — strictly worse than the
+  chained standalone blocks it replaces. Measured on CoreMark (guest binary
+  at `/home/gamingpc/Downloads/reviewing:/bifrost-emu-1.4.5-alpha/coremark/
+  coremark.exe`): plain **3479** iters/s, tier2 all-regions **3239** (−7%),
+  tier2 loops-only **3602** (+3.5%), "Correct operation validated". Genuine
+  loops are unaffected: a back-edge that is a TAKEN conditional or an
+  unconditional `b head` ends the trace with stop=b_backedge and still
+  fuses (m3loop/m5/m6 shapes all verified). Only truly linear runs — and
+  walks that exit a loop through an OUTER edge — are declined.
+- **Counter tax quantified on billion-entry workloads:** CoreMark with
+  `BIFROST_TIER2_HITS=99999999` (counters never neutralize) drops to
+  **894 iters/s** (~4x slower than baseline). The per-entry inc/cmp/jne
+  toll across ALL M1-eligible blocks is enormous when never fired;
+  neutralization-after-fire is what makes the default viable. HITS=1000 ≈
+  default (3264 vs 3239 pre-loops-only). Do NOT ship tier2 defaults that
+  leave large numbers of hot blocks un-neutralized.
+- **Track 2 (cross-block pinning) SUPERSEDED, not implemented.** The premise
+  ("pins can't cover CoreMark's 2-block loop") is stale: the pc-hist shows
+  this build's hot loops at 0x400f7c/0x401020/0x400f58/0x401f84/0x401de0/
+  0x402848 (NOT the old 0x401e90/0x401ea4 pair), and tier2 already fuses
+  them — e.g. an 11-block/45-inst region at 0x400f7c. A region's single
+  regalloc pass carries registers across blocks strictly better than pins
+  could. Cross-block pinning remains relevant ONLY for loops regions can't
+  capture (side-exit-heavy shapes); revisit if such a workload appears.
+- Profiling recipe that found all this: `BIFROST_PROF=1 BIFROST_PC_HIST=1
+  BIFROST_STATS_PERIOD=5` prints a sampled guest-PC histogram (top 20) —
+  use it to find REAL hot PCs before assuming old ones; block starts may
+  sit a few bytes before the sampled PCs (samples land mid-body).
+- Verified for `0c518c5`: harnesses tri-mode byte-identical (m4lin now
+  forms no region — falls back to chained blocks, acc unchanged),
+  JIT_VERIFY clean on m5big/m3loop_quick, game_demo rc=0, bench_mips acc
+  `0xf800800a2c4ff835`, quick 200/200 tier2 ON, full suite 205/205.
