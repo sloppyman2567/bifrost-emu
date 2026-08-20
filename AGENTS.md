@@ -2064,3 +2064,22 @@ not musl-`-static`.
   `/tmp/opencode/m6bl.S`/`m6blr.S` (2-block loop, BL/BLR inside block 2,
   head call-free so the counter fires; acc `0x9999999999999992` matches the
   closed form acc_{n+1}=6·acc_n+38 ×262144).
+
+## Session History (2026-08-20) — tier2 counter "optimization": measured, rejected
+
+- **Wrap-based 2-instruction hot counter REJECTED after measurement — do NOT
+  re-attempt without a µop-level argument.** Hypothesis: the tier-2 in-code
+  counter (`inc dword; cmp imm32; jne`, jit_translate.cpp ~838) looks like 3
+  instructions, so a `inc byte[rip+bctr]; jne` wrap form (slow path every
+  256th entry bumps a dword wrap-counter + `cmp ceil(threshold/256)`) should
+  halve the per-entry tax. Measured on m3loop (536M head entries,
+  `BIFROST_TIER2_HITS=99999999` so nothing ever fires/neutralizes), old vs
+  new via git-stash A/B: OLD tax ≈162 ms (3880−3718), NEW tax ≈195 ms
+  (3915−3719) — the new form is ~20% WORSE plus 8 extra code bytes.
+  Root cause: x86 MACRO-FUSION — cmp/jne fuses to ONE µop, so the old
+  sequence was already ~2 µops like the new one; the byte-store form adds a
+  store-forwarding quirk for nothing. Also fixed en route: `FE /0` is the
+  BYTE inc, `FF /0` is DWORD (a FF-encoded "byte" counter never sets ZF and
+  never fires — caught by disassembling BIFROST_JIT_DUMP output). Change
+  reverted (`git checkout --`); tree at HEAD `ebd2764`. The exact-form
+  requirement for tiny thresholds (HITS≤255) is moot with the revert.
