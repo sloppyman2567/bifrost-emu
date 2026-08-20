@@ -312,6 +312,8 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     unchainable_end_ = false;
     has_selfloop_slot_ = false;
     selfloop_patch_off_ = 0;
+    tier2_counter_off_ = 0;
+    tier2_counter_len_ = 0;
     has_taken_chain_slot_ = false;
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
@@ -334,6 +336,20 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
+    // Tier-2 in-code hot-head counter (BIFROST_TIER2=1, default OFF): reserve
+    // 8 bytes of counter state immediately BEFORE the fn entry (unreachable
+    // data — the fn starts at block_start below, so the entry point stays the
+    // prologue). The prologue emits the RIP-relative increment against this
+    // slot; the counter counts EVERY entry into the block (cold dispatch AND
+    // chain edges — both run the prologue) so CHAINED hot loops fire, which
+    // the dispatch-side counters (run_block slow path / lookup_call_target)
+    // can never see. Gated on !wex_enabled_ (the counter writes the code page
+    // — a W^X buffer would fault on the `inc`) and !chain_skip_enabled()
+    // (regions don't compose with chain-skip). Self-loops are naturally
+    // excluded: their loop-back jumps to block_body_start_off_ (past the
+    // prologue), so only cold entries count (~1).
+    if (tier2_enabled() && !wex_enabled_ && !chain_skip_enabled())
+        emit_u64(0);  // uint32 counter + 4 bytes padding (RIP-relative inc)
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
     IRBlock ir_block;
@@ -782,6 +798,73 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // skips its own prologue still reads that slot. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
+    // ── Tier-2 in-code hot-head counter (BIFROST_TIER2=1, default OFF) ──
+    // Emitted here (after chain_entry_off_, before the R10 window load and
+    // vec prologue loads) so BOTH cold entries (falling through the prologue)
+    // and chain-skip entries (jumping to chain_entry_off_) hit it — every
+    // execution of the block is counted. At this point RBX=cpu/RBP=frame are
+    // set and RDI/RSI are still the entry args (already stashed), so the fire
+    // path can clobber the caller-saved regs freely (the window load and vec
+    // loads that follow use no GPR scratch). The counter data lives 8 bytes
+    // before block_start (see above); the RIP-relative disp32 is known here
+    // because that data was emitted first.
+    //
+    // Head eligibility: only blocks that could form an M1 region get a
+    // counter. The walker/region compiler require EVERY trace block to end in
+    // a conditional branch (BRCOND/BRCOND_ZERO/BRCOND_BIT) and abort on
+    // SVC/BR/BLR/BL/CALL_INTERP, so a block whose last op is anything else
+    // (B/RET/BRCOND_FALLTHRU/BL_CALL/…) can never be a useful head — its
+    // trace would abort or be rejected. Skipping the counter on those keeps
+    // the per-entry overhead (~6 cycles) off the vast majority of blocks
+    // (calls, returns, syscalls, straight-line fall-throughs).
+    bool tier2_head_eligible = false;
+    if (tier2_enabled() && !wex_enabled_ && !chain_skip_enabled()) {
+        if (!ir_block.insts.empty()) {
+            IROp last_op = ir_block.insts.back().op;
+            if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||
+                last_op == IROp::BRCOND_BIT) {
+                tier2_head_eligible = true;
+                for (const auto& inst : ir_block.insts) {
+                    if (inst.op == IROp::SVC || inst.op == IROp::BR ||
+                        inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
+                        inst.op == IROp::CALL_INTERP) {
+                        tier2_head_eligible = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (tier2_head_eligible) {
+        tier2_counter_off_ = code_buf_used_;
+        const size_t data_off = block_start - 8;
+        const uint32_t threshold = tier2_hits_threshold();
+        // inc dword [rip+disp]         (FF 05 disp32)
+        size_t inc_off = code_buf_used_;
+        emit_byte(0xFF); emit_byte(0x05);
+        emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (inc_off + 6))));
+        // cmp dword [rip+disp], imm32  (81 3D disp32 imm32)
+        size_t cmp_off = code_buf_used_;
+        emit_byte(0x81); emit_byte(0x3D);
+        emit_u32(static_cast<uint32_t>(static_cast<int32_t>(data_off - (cmp_off + 10))));
+        emit_u32(threshold);
+        // jne short skip                (75 rel8 — patched after the call)
+        size_t jne_off = code_buf_used_;
+        emit_byte(0x75); emit_byte(0x00);
+        // Fire path: rdi = emu (frame slot), rsi = head pc, call the stub.
+        // emit_call_aligned(…, 0) wraps emit_call_abs (movabs+call, so the
+        // target is reachable regardless of the code_buf_ ↔ binary text
+        // distance) in pushfq/popfq, preserving RFLAGS AND restoring the
+        // ABI stack alignment for the stub (JIT body RSP%16==8 at this
+        // point; pushfq makes it 16-aligned for the `call`).
+        emit_load(RDI, RBP, emu_slot_off());
+        emit_mov_imm64(RSI, start_pc);
+        emit_call_aligned(reinterpret_cast<void*>(&tier2_fire_stub), 0);
+        // Patch the jne to skip the fire path (land right after the call).
+        const int8_t rel = static_cast<int8_t>(code_buf_used_ - (jne_off + 2));
+        code_buf_[jne_off + 1] = static_cast<uint8_t>(rel);
+        tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
+    }
     // 1.5.3-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
@@ -1146,6 +1229,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.taken_chain_patch_off = taken_chain_patch_off_;
     entry.taken_chain_target_pc = taken_chain_target_pc_;
     entry.taken_chained = false;
+    entry.tier2_counter_off = tier2_counter_off_;
+    entry.tier2_counter_len = tier2_counter_len_;
     entry.instr_count = instr_count;
     entry.call_interp_count = call_interp_count;
     entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;

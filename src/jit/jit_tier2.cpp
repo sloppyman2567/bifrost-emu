@@ -79,13 +79,12 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
             trace_ended = true;
             break;
         }
-        // Cold-entry correctness: a PC that's already a standalone block (other
-        // than the head, which fired as a hot head) is not traceable — stop.
-        if (cur_pc != head_pc && blocks_.find(cur_pc) != blocks_.end()) {
-            trace.stop_reason = "cold_entry";
-            trace_ended = true;
-            break;
-        }
+        // NOTE: there is deliberately NO "cold_entry" stop here anymore.
+        // Real hot loops have ALL their blocks already translated (they ran
+        // long enough to be hot), so stopping at the first cached block used
+        // to abort every real trace at 1 block. The region compiler re-compiles
+        // trace blocks from their IR regardless of whether a standalone block
+        // exists, so walking through already-translated guest code is correct.
         // Only the head may be revisited (as a back-edge).
         if (cur_pc != head_pc &&
             std::find(visited.begin(), visited.end(), cur_pc) != visited.end()) {
@@ -197,6 +196,16 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
                 tb.side_exits.push_back(
                     {target, static_cast<int>(tb.ir.insts.size() - 1)});
                 block_ended = true;
+                // A conditional branch whose TAKEN target is the head is the
+                // loop's back-edge: end the trace HERE (this block's taken edge
+                // becomes the region's Lback). Without this, a natural loop
+                // whose back-edge is the taken path (GCC emits `b.ne .L3` at
+                // the loop bottom) would walk out of the loop on the
+                // fall-through and the trace would follow the exit instead.
+                if (target == head_pc) {
+                    trace.stop_reason = "b_backedge";
+                    trace_ends_after_block = true;
+                }
                 break;
             }
             // Unconditional branch: no fall-through — the trace ends here. A
@@ -799,6 +808,132 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                 static_cast<int>(region_flags_loop_carried));
     }
     return fn;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tier-2 Phase 1 step 4: IN-CODE hot-head firing.
+//
+// The dispatch-side counters (run_block slow path / lookup_call_target) can
+// never fire on real workloads: hot loops run as chained jmp sequences (or
+// inside jit_call_helper's dispatch loop), so only the loop's entry block
+// reaches the dispatcher a couple of times and its inline-cache slot then
+// self-pins. Block prologues therefore carry an execution counter that
+// counts EVERY entry — cold dispatch AND chain edges — and once it crosses
+// tier2_hits_threshold() calls tier2_fire_stub() from inside the running
+// block. This compiles the head's trace as a region and force-patches the
+// loop's back-edge taken-chain slot so the NEXT iteration jumps into the
+// region instead of the old per-block functions.
+void tier2_fire_stub(Emulator* emu, uint64_t pc) {
+    if (!emu) return;
+    FrostJIT* jit = emu->jit();
+    if (!jit) return;
+    jit->tier2_fire_region(*emu, pc);
+}
+
+void FrostJIT::tier2_counter_disable(size_t counter_off, size_t counter_len) {
+    if (!counter_off || counter_len < 6) return;
+    // Overwrite the leading `inc dword[rip+disp]` (6 bytes) with
+    // `jmp rel32` over the whole counter+fire sequence. The block keeps
+    // paying a single taken branch (~1-2 cycles) instead of the
+    // inc+cmp+jne+fire fetch on every entry. Callers hold the exclusive
+    // lock; tier-2 only runs in non-W^X mode (RWX buffer), so the write is
+    // safe while other threads execute the block (a torn byte would only
+    // land in the skipped region — the jmp is written atomically-ish as the
+    // first byte + rel; x86 fetch of a torn JMP could theoretically see a
+    // stale displacement, but the OLD bytes at the target of that jmp are
+    // the dead counter sequence, and this runs once per block).
+    size_t off = counter_off;
+    if (off + 6 > CODE_BUF_SIZE) return;
+    const int32_t rel = static_cast<int32_t>(static_cast<int64_t>(counter_len) - 5);
+    code_buf_[off] = 0xE9;
+    memcpy(code_buf_ + off + 1, &rel, 4);
+    std::atomic_thread_fence(std::memory_order_release);
+}
+
+void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
+    // Runs from INSIDE a generated block (prologue fire path). Never let an
+    // exception cross the JIT frame boundary (std::terminate).
+    try {
+        // W^X bail: the in-code counter writes the code page (a non-W^X RWX
+        // buffer), and the compile here would mprotect the page we're
+        // currently executing from. Regions only exist in shared-JIT mode.
+        if (wex_enabled_ || !tier2_enabled()) return;
+        blocks_mutex_.lock();
+        auto it = blocks_.find(pc);
+        if (it == blocks_.end()) {
+            blocks_mutex_.unlock();
+            return;
+        }
+        BlockEntry old_entry = it->second;
+        if (old_entry.tier2_hot_logged) {
+            blocks_mutex_.unlock();
+            return;
+        }
+        // Mark hot-logged BEFORE attempting collection/compilation: the same
+        // block always produces the same trace shape, so a failed attempt
+        // would fail identically on every re-fire. One shot per block.
+        it->second.tier2_hot_logged = true;
+        tier2_counter_disable(it->second.tier2_counter_off,
+                              it->second.tier2_counter_len);
+        tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
+
+        Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only, we hold the lock
+        uint64_t (*rfn)(CPU*, Emulator*) = trace.ok ? compile_tier2_region(emu, trace) : nullptr;
+        if (rfn) {
+            if (tier2_trace_enabled()) {
+                fprintf(stderr,
+                        "[tier2] in-code region fired pc=0x%llx blocks=%zu insts=%llu\n",
+                        static_cast<unsigned long long>(pc), trace.blocks.size(),
+                        static_cast<unsigned long long>(trace.total_insts));
+            }
+            BlockEntry region_entry;
+            region_entry.fn = rfn;
+            region_entry.instr_count = static_cast<int>(trace.total_insts);
+            region_entry.exec_count = old_entry.exec_count;
+            region_entry.tier2_hot_logged = true;
+            region_entry.ends_with_branch = true;
+            region_entry.chained = true;        // region has no chain slot
+            region_entry.taken_chained = true;
+            region_entry.interp_only = false;
+            region_entry.verified_once = true;  // M1: no region verify
+            it->second = region_entry;
+
+            // ── Re-patch the loop back-edge into the region ──────────
+            // Every trace block whose side exit targets the head is a
+            // back-edge block; its taken chain slot currently `jmp`s to the
+            // OLD head fn (or is still unpatched `ret`). Overwrite it with
+            // `jmp region-fn` unconditionally (patch_chain refuses already-
+            // patched slots — its 0xC3/0x90 guard). The taken-path epilogue
+            // set RDI=cpu/RSI=emu right before the slot, and the region
+            // prologue expects exactly that, so the hijack is transparent.
+            // A block whose taken slot is still unpatched is left alone —
+            // try_chain_block later chains it to the region (blocks_[pc].fn
+            // is the region now), and until then the old head fn handles one
+            // extra iteration then lands in the region via ITS back-edge.
+            for (const auto& tb : trace.blocks) {
+                if (tb.side_exits.empty() || tb.side_exits[0].first != pc) continue;
+                auto bit = blocks_.find(tb.pc);
+                if (bit == blocks_.end() || !bit->second.has_taken_chain_slot) continue;
+                size_t off = bit->second.taken_chain_patch_off;
+                if (off + 5 > CODE_BUF_SIZE) continue;
+                make_writable();  // no-op in non-W^X shared-JIT mode (we bailed above)
+                int32_t rel = static_cast<int32_t>(reinterpret_cast<const uint8_t*>(rfn) -
+                                                   (code_buf_ + off + 5));
+                code_buf_[off] = 0xE9;
+                memcpy(code_buf_ + off + 1, &rel, 4);
+                std::atomic_thread_fence(std::memory_order_release);
+                make_executable();
+                if (tier2_trace_enabled()) {
+                    fprintf(stderr, "[tier2]   back-edge %llx → region (chain slot @0x%zx)\n",
+                            static_cast<unsigned long long>(tb.pc), off);
+                }
+            }
+        }
+        blocks_mutex_.unlock();
+    } catch (...) {
+        // Never let a collect/compile/registration failure escape a JIT frame.
+        if (blocks_mutex_.try_lock()) blocks_mutex_.unlock();
+    }
 }
 
 }  // namespace arm64emu

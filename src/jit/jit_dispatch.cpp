@@ -163,6 +163,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             if (n >= tier2_hits_threshold()) {
                 it->second.tier2_hot_logged = true;
                 entry.tier2_hot_logged = true;
+                // Stop the block's in-code counter (if any) paying its
+                // per-entry cost now that it has fired.
+                tier2_counter_disable(it->second.tier2_counter_off,
+                                      it->second.tier2_counter_len);
                 tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
                 if (tier2_trace_enabled()) {
                     fprintf(stderr, "[tier2] hot head pc=0x%llx exec=%u\n",

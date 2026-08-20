@@ -86,6 +86,11 @@ extern "C" void jit_native_svc(Emulator* emu, CPU* cpu, uint64_t svc_pc);
 extern "C" uint64_t jit_ldxr(Emulator* emu, CPU* cpu, uint64_t addr, int width);
 extern "C" uint64_t jit_stxr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
 extern "C" void jit_stlr(Emulator* emu, CPU* cpu, uint64_t addr, uint64_t val, int width);
+// Tier-2 in-code fire stub: called from generated block prologues (the
+// per-block hot-head counter, BIFROST_TIER2=1). A plain free function so the
+// prologue can take its address at codegen time; forwards to
+// emu->jit()->tier2_fire_region(). Implemented in src/jit/jit_tier2.cpp.
+void tier2_fire_stub(Emulator* emu, uint64_t pc);
 class FrostJIT {
 public:
     FrostJIT();
@@ -195,6 +200,8 @@ public:
                 uint32_t n = ++it->second.exec_count;
                 if (n >= tier2_hits_threshold()) {
                     it->second.tier2_hot_logged = true;
+                    tier2_counter_disable(it->second.tier2_counter_off,
+                                          it->second.tier2_counter_len);
                     tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
                     if (tier2_trace_enabled()) {
                         fprintf(stderr, "[tier2] hot head (bl) pc=0x%llx exec=%u\n",
@@ -544,6 +551,25 @@ public:
     // replaces blocks_[head_pc].fn with the returned fn (exec_count /
     // tier2_hot_logged preserved); implemented in src/jit/jit_tier2.cpp.
     uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace))(CPU*, Emulator*);
+    // Tier-2 in-code fire path (ROADMAP #14, Phase 1 step 4). Called from the
+    // per-block hot-head counter emitted in block prologues (BIFROST_TIER2=1):
+    // counts CHAINED execution (which never reaches run_block's slow path),
+    // and once a block crosses tier2_hits_threshold() mid-run this collects +
+    // compiles a region for it and re-patches the loop back-edge chain slot(s)
+    // so the next iteration jumps into the region. Executes from INSIDE a
+    // running block: must not throw (wrapped in try/catch), must not touch the
+    // W^X machinery (bails when wex_enabled_ — an in-code counter writes the
+    // code page, which only exists in non-W^X shared-JIT mode), and takes the
+    // exclusive lock only around the map mutations. Implemented in
+    // src/jit/jit_tier2.cpp.
+    void tier2_fire_region(Emulator& emu, uint64_t pc);
+    // Neutralize a block's tier-2 in-code counter after it fires: overwrites
+    // the prologue `inc dword[rip]` (6 bytes) with `jmp rel32` past the whole
+    // counter+fire sequence so the block stops paying ~6 cycles/entry. No-op
+    // when no counter was emitted (off==0). Writes the code page directly —
+    // callers hold the exclusive blocks_mutex_ (and tier-2 only runs in
+    // non-W^X mode, so the buffer is RWX). Implemented in src/jit/jit_tier2.cpp.
+    void tier2_counter_disable(size_t counter_off, size_t counter_len);
     // Total number of host GPRs (RAX..R15). Used by the register
     // allocator's bounds checks and the dirty_host_regs_ bitmask. The
     // old code hardcoded `16` in multiple places (x86_regalloc.cpp:66,
@@ -639,6 +665,18 @@ private:
         // Set once the block has been flagged as a hot head, so the flag +
         // trace-fire happen exactly once per block (exec_count keeps counting).
         bool     tier2_hot_logged = false;
+        // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
+        // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
+        // path against it). 0 = no counter emitted (block ineligible, or tier-2
+        // off). The fire path overwrites the `inc` with a `jmp rel32` over the
+        // whole counter+fire sequence once the block fires, so a hot block
+        // stops paying the per-entry counter cost for the rest of the run.
+        size_t   tier2_counter_off = 0;
+        // Total length of the tier-2 counter+fire sequence at
+        // tier2_counter_off (inc+cmp+jne+fire path). tier2_counter_disable
+        // overwrites the leading `inc` (6 bytes) with `jmp rel32` of
+        // (tier2_counter_len - 5) to skip the whole sequence. 0 = none.
+        size_t   tier2_counter_len = 0;
         // True if the block contains an SVC (syscall / thunk) instruction.
         // The verify re-run must NOT re-execute such blocks (the syscall has
         // host side effects), so the full-memory verifier (MEMFULL) skips them.
@@ -1321,6 +1359,12 @@ private:
     bool    has_selfloop_slot_ = false;
     size_t  selfloop_patch_off_ = 0;     // offset of the 5-byte jmp slot
     size_t  block_body_start_off_ = 0;   // offset of block body (after prologue)
+    // Tier-2 in-code hot-head counter (BIFROST_TIER2=1): offset of the
+    // prologue counter+fire sequence (0 = none emitted). Carried into
+    // BlockEntry.tier2_counter_off so tier2_counter_disable can neutralize it
+    // after the block fires.
+    size_t  tier2_counter_off_ = 0;
+    size_t  tier2_counter_len_ = 0;  // length of that sequence (see above)
     // Chain-skip entry (BIFROST_CHAIN_SKIP=1): offset right after the
     // window/vec-cache prologue setup but PAST the push/frame/reg-setup,
     // i.e. the earliest point a chain successor may jump to. Chain slots
