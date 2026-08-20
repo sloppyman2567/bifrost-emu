@@ -441,6 +441,18 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     }
     // The last block's taken edge → the loop back-edge iff it targets the head.
     bool last_is_backedge = (blocks[nblk - 1].side_exits[0].first == trace.head_pc);
+    // LOOP REGIONS ONLY (default, 2026-08-20): a LINEAR region over a
+    // walked-out loop body re-pays a full region entry (prologue + cold-exit
+    // ret to the dispatcher) every iteration — strictly worse than the
+    // chained standalone blocks it replaces. Measured on CoreMark: tier2
+    // all-regions 3239 iters/s vs plain 3479 (-7%); loops-only 3602 (+3.5%).
+    // Genuine loops whose back-edge is a TAKEN conditional or an
+    // unconditional `b head` end their trace with stop=b_backedge and still
+    // fuse; only truly linear runs (and walks that exit a loop through an
+    // outer edge) are declined. BIFROST_T2_LINEAR=1 restores all-region
+    // behavior for bisection.
+    static const bool t2_linear_ = (getenv("BIFROST_T2_LINEAR") != nullptr);
+    if (!last_is_backedge && !t2_linear_) return nullptr;
 
     // ── Vreg remap + IR concatenation ────────────────────────────────
     // Each block's IR used its own scratch numbering (starts at 33, the
