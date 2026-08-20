@@ -116,6 +116,61 @@ back-edges.
   clean, JIT_VERIFY no new failures. Performance pinned ≈ NO_PIN (~1%).
   The temporary per-region pin bisection gates and trace dumps were removed.
 
+### Phase 2 step 3 — self-loop region fusion (the whole Phase-2 goal)
+
+- **The head block of a tight self-loop is now fused into a tier-2 region
+  with a LICM preheader.** The in-code hot-head counter counts CHAINED
+  execution, so a self-loop head fires, `collect_tier2_trace` walks the
+  single-block trace, and `compile_tier2_region` compiles the region with
+  the loop's back-edge as an inline `Lback` jmp. Synthetic raw-asm harness
+  m5big: **1.553s → 0.961s JIT vs tier2 (~38%)**, acc byte-identical.
+- **Region reachability REQUIRES the `back_refs_` chain repatch:** a region
+  replaces `blocks_[head]`, but the head is reached through chain slots in
+  other blocks (`jmp old-head-fn`) or a BL_CALL direct `call rel32` —
+  neither goes through the dispatcher, so cache invalidation alone leaves
+  the region compiled-but-dead. `tier2_fire_region` now repatches (a) every
+  trace block whose side-exit targets the head (the back-edge: its taken
+  slot, or the MAIN slot for `BRCOND_FALLTHRU`) and (b) every block in
+  `back_refs_[head]` to `jmp region-fn` under the same RDI=cpu/RSI=emu
+  entry contract the taken-path epilogue sets.
+- **Wrong-slot repatch fixed (game_demo 56s → 2.2s):** `back_refs_[T]`
+  conflates referrers whose MAIN slot targets T with referrers whose TAKEN
+  slot targets T. The repatch picked `taken_chain_patch_off` whenever
+  `has_taken_chain_slot`, so a block whose fall-through targets the head but
+  whose taken edge goes elsewhere (block 0x40064c: MAIN→head, TAKEN→
+  loop-exit) had its loop-EXIT slot hijacked into the region — the hot loop
+  bounced through the region prologue once per iteration (2.1e9 entries).
+  Now mirrors `try_chain_block` (repatch by the recorded
+  `chain_target_pc`/`taken_chain_target_pc`; both edges if both target the
+  head), and `BlockEntry.is_region` skips blocks that became a different
+  region's head (overlapping traces share blocks — repatching a region
+  head's stale standalone slots cross-wires regions).
+- **LICM preheader liveness fixed (m5 corruption):** the preheader compiled
+  with an out-of-range op cursor made every vreg look dead to the Belady
+  allocator (`next_use_after` → -1), so `alloc_reg` evicted the FIRST reg —
+  RAX — clobbering a just-loaded operand (`v44 = v41 + v43` became `2*v43`).
+  Preheader ops now compile with a synthetic `PREHEADER_BASE + k` cursor and
+  injected `vreg_uses_` positions, so the preheader chain's real next-uses
+  are visible (fold-ahead stays off via its bounds check).
+
+### Phase 3 — M2 region optimizations (SHIPPED)
+
+- **Region DCE, LICM, and cross-block const-prop over the concatenated
+  back-edge region IR**, gated by `BIFROST_NO_RDCE` / `BIFROST_NO_LICM`.
+  LICM hoists loop-invariant pure-GPR ops + GPR `LOAD_REG` of never-written
+  non-pinned archs into a preheader emitted once per region entry (the Lback
+  jumps past it). Cross-block const-prop extends the fold-lookahead to an
+  IMM with exactly one consumer anywhere later in the region. Region IR is
+  optimized with FWD forced on (`optimize_ir(block, force_fwd)`) so real
+  invariant chains threaded through a GPR can be hoisted.
+- **BRCOND_FALLTHRU region terms:** a trace whose last block is an
+  unconditional `b` back-edge now compiles with the Lback INLINE at the term
+  (m3loop, test-at-top + `b .Lloop` bottom: **3.71s → 2.25s, ~39%**).
+- **Verified:** tri-mode (interp/JIT/tier2) byte-identical on the m5/m3/m2
+  harnesses, game_demo rc=0 at parity (2.2s, suite 15s timeout passes),
+  quick suites 200/200 tier2 off/on, JIT_VERIFY + tier2 zero new
+  divergences, bench_mips acc `0xf800800a2c4ff835` unchanged.
+
 ## [1.5.3-alpha] — Vulkan command-buffer rendering (2026-08-19)
 
 ### Real Vulkan frames now render through DisplayThunk

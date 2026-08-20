@@ -212,7 +212,21 @@ and across internal block edges.
   at the materialize is still the loop-carried value), and (b) every
   region exit flushes ALL pins, not just snapshot-dirty ones (loop-
   carried-deferred pins make the snapshot "clean" a lie). All CoreMark
-  CRCs correct under tier2, pinned ≈ NO_PIN performance.** Measured
+  CRCs correct under tier2, pinned ≈ NO_PIN performance.** **STATUS:
+  step 3 (SELF-LOOP REGION FUSION) SHIPPED (2026-08-20, commit
+  `28c82e6`)** — the whole Phase-2 goal: the in-code hot-head counter
+  fires on CHAINED execution, so a tight self-loop head now fuses into
+  a region with a LICM preheader and an inline Lback (m5big 1.55s →
+  0.96s, ~38%; the `back_refs_` chain repatch makes the region
+  REACHABLE — cache invalidation alone can't reach a head entered via
+  a chain slot or BL_CALL direct call). Two correctness bugs fixed in
+  that commit: the chain-in repatch now selects the slot by the
+  recorded `chain_target_pc`/`taken_chain_target_pc` (the
+  `has_taken_chain_slot` heuristic hijacked the wrong edge on a block
+  whose fall-through targets the head but whose taken edge goes
+  elsewhere — game_demo 56s → 2.2s) and skips `is_region` heads, and
+  the LICM preheader got synthetic liveness so the Belady allocator
+  doesn't evict just-loaded operands. Measured
   performance-neutral overall (bench_mips ~1%, CoreMark 0 — its hot loop
   is a 2-block cross-block loop). Next: carry
   pins across a 2-block chained loop via the chain edge (today the
@@ -231,6 +245,17 @@ and across internal block edges.
   eviction already in the allocator extends naturally to the region.
 
 **Phase 3 — cross-block optimization on the region IR:**
+  **STATUS: M2 SHIPPED (2026-08-20, commit `28c82e6`)** — region DCE,
+  LICM (hoisted invariants → preheader emitted once per entry; the Lback
+  jumps past it), and cross-block const-prop (fold-lookahead extended to
+  an IMM with exactly one consumer anywhere later in the region) are all
+  live on back-edge region IR, gated by `BIFROST_NO_RDCE` /
+  `BIFROST_NO_LICM`. Region IR is optimized with FWD forced on
+  (`optimize_ir` `force_fwd`) so real invariant chains threaded through a
+  GPR hoist; the standalone two `ir_optimize.cpp` folds remain dropped
+  (they hung CoreMark under FWD). Also added BRCOND_FALLTHRU region terms
+  (unconditional `b` back-edge compiled with the Lback INLINE — m3loop
+  3.71s → 2.25s, ~39%). Remaining notes below are historical.
 - LICM: move loop-invariant `LOAD_MEM`/`IMM`/ALU out of the loop body
   (with the existing alias rules: only direct-window loads are safe to
   hoist, same reasoning as the const-folding guards).
@@ -263,16 +288,26 @@ and across internal block edges.
   region allocation only → measure bench_mips / bench_matrix / CoreMark /
   chunkmesh under `BIFROST_TIER2=1`. Target: >15% on bench_mips beyond the
   current ~360ms, suite 205/205 + `BIFROST_JIT_VERIFY` clean.
-  **STATUS: code complete + correctness-verified (c848391); the >15%
-  measurement is BLOCKED on the hot-head firing caveat above** — no real
-  benchmark fires a region yet (all hot loops are chained/cached), so the
-  speedup cannot be measured. The compilation machinery itself is proven
-  correct by the synthetic workloads; the next work item is the
-  chained/self-loop hot-head counter so real loops fire.
+  **STATUS: code complete + correctness-verified (c848391). The firing
+  caveat is SOLVED (ad5098a + 28c82e6):** the in-code hot-head counter
+  counts CHAINED execution and the `back_refs_` chain repatch makes
+  regions reachable, so real loops fire mid-run. M1 pays off only on
+  2+ block natural loops (~8% on a 20M-iter synthetic); the dominant hot
+  loops of most benchmarks are SELF-loops, which M1 cannot fuse but
+  self-loop region fusion (Phase 2 step 3) now handles. bench_mips
+  remains a self-loop (zero tier2 activity, acc unchanged) — measure the
+  real win on a loop-heavy workload, not bench_mips.
 - M2: add LICM + cross-block const-prop + region DCE. Re-measure; keep the
   FWD interaction honest (AGENTS.md: the two `ir_optimize.cpp` folds were
   dropped for hanging CoreMark under FWD — the region pass must NOT assume
   FWD, and any fold added here needs the same FWD+verify soak).
+  **STATUS: SHIPPED (2026-08-20, commit `28c82e6`)** — region DCE, LICM
+  (preheader), and cross-block const-prop are live on back-edge region IR,
+  plus BRCOND_FALLTHRU terms (m3loop 3.71s → 2.25s, ~39%; m5big self-loop
+  fusion 1.55s → 0.96s, ~38%). The FWD interaction is handled by running
+  the region IR through `optimize_ir(block, force_fwd)` (no hangs; the
+  dropped standalone folds stay dropped). Suite 200/200 tier2 off/on,
+  tri-mode byte-identical on the m3/m5/m2 harnesses.
 - M3: minecraft game A/B — frame time at a fixed render tick, not FPS
   (FPS spikes are host frame pacing). Expect the SIGPROF `jit` bucket to
   shrink; chunk loads already <20ms.

@@ -12,23 +12,25 @@ their current status under both the frostJIT (default) and interpreter
 |------|-------|------|------|-------|
 | frostJIT (`./bifrost-emu`, default SDL2/GL build) | 205 | 205 | 0 | Full suite incl. interactive (real-world binaries auto-download) |
 | frostJIT (quick `make check-quick`) | 200 | 200 | 0 | Skip the 5 benchmarks (1 skip possible: `sdl_gl_triangle` without DISPLAY) |
-| Interpreter (`./bifrost-emu --no-jit`) | 205 | 204 | 1 | Same conditions as JIT row; `int_fp_conv` fails (pre-existing interp FCVTZU ≥2^63 bug, see below) |
+| Interpreter (`./bifrost-emu --no-jit`) | 205 | 205 | 0 | Same conditions as JIT row |
 
 **205 test programs** are defined in `scripts/run_tests.sh` across seven
 categories (see table below). The default `make check` suite runs **all
 205** of them (interactive + real-world are the standard default) and
-reports **205 pass / 0 fail** with SDL2/GL enabled and a DISPLAY.
-With `make check-quick`, benchmarks are skipped and the suite reports
-**200 pass / 0 fail**.
+reports **205 pass / 0 fail** in BOTH the frostJIT and `--no-jit`
+interpreter modes. With `make check-quick`, benchmarks are skipped and
+the suite reports **200 pass / 0 fail**.
 
-> **Known interpreter-only failure (pre-existing):** under `--no-jit`,
-> `jit_int_fp_conv` fails `fcvtzu_x_d(1e19)` — the scalar integer-variant
-> FCVTZU handler in `interp_fp.cpp` (~line 3467) does a raw
+> **Interpreter FCVTZU bug FIXED (2026-08-18):** under `--no-jit`,
+> `jit_int_fp_conv` used to fail `fcvtzu_x_d(1e19)` — the scalar
+> integer-variant FCVTZU handler in `interp_fp.cpp` did a raw
 > `static_cast<uint64_t>(a)`, which GCC lowers to `cvttsd2si`; any input
-> ≥ 2^63 comes back as the 0x8000000000000000 out-of-range sentinel even
-> though the value (e.g. 1e19 < 2^64) is representable. The JIT's native
-> FCVTZU has the explicit range pre-check and passes. Present since the
-> test was added (2026-06-26); unchanged at the 1.5.4-alpha bump.
+> ≥ 2^63 came back as the 0x8000000000000000 out-of-range sentinel even
+> though the value (e.g. 1e19 < 2^64) is representable. All five FP→int
+> conversion sites now route through `fp_to_signed_sat()`/
+> `fp_to_unsigned_sat()` (with the subtract-2^63-then-add-back trick for
+> the scalar 64-bit unsigned band, exactly like the JIT), so the
+> interpreter is 205/205, matching frostJIT.
 
 ### Test categories
 
