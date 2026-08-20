@@ -343,12 +343,14 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // slot; the counter counts EVERY entry into the block (cold dispatch AND
     // chain edges — both run the prologue) so CHAINED hot loops fire, which
     // the dispatch-side counters (run_block slow path / lookup_call_target)
-    // can never see. Gated on !wex_enabled_ (the counter writes the code page
-    // — a W^X buffer would fault on the `inc`) and !chain_skip_enabled()
-    // (regions don't compose with chain-skip). Self-loops are naturally
-    // excluded: their loop-back jumps to block_body_start_off_ (past the
-    // prologue), so only cold entries count (~1).
-    if (tier2_enabled() && !wex_enabled_ && !chain_skip_enabled())
+    // can never see. Gated on !wex_enabled_ only (the counter writes the code
+    // page — a W^X buffer would fault on the `inc`). Chain-skip COMPOSES with
+    // tier-2 (1.5.4-alpha): the reservation MUST stay active there or the
+    // counter's RIP-relative inc would read/write the PREVIOUS block's last
+    // 8 code bytes (layout-dependent corruption → SIGSEGV). Self-loops are
+    // naturally excluded: their loop-back jumps to block_body_start_off_
+    // (past the prologue), so only cold entries count (~1).
+    if (tier2_enabled() && !wex_enabled_)
         emit_u64(0);  // uint32 counter + 4 bytes padding (RIP-relative inc)
     size_t block_start = code_buf_used_;
     // ── Translate ARM64 → IR ─────────────────────────────────────
@@ -818,7 +820,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // the per-entry overhead (~6 cycles) off the vast majority of blocks
     // (calls, returns, syscalls, straight-line fall-throughs).
     bool tier2_head_eligible = false;
-    if (tier2_enabled() && !wex_enabled_ && !chain_skip_enabled()) {
+    // Chain-skip composes with tier-2 (1.5.4-alpha): the counter sits AFTER
+    // chain_entry_off_, so chain edges (bare jmps to chain_entry) count too.
+    // Regions entered via a chain edge use the region's own chain-skip entry
+    // (compile_tier2_region's chain_out); the unified 32 KB frame makes the
+    // vreg-slot layouts compatible.
+    if (tier2_enabled() && !wex_enabled_) {
         if (!ir_block.insts.empty()) {
             IROp last_op = ir_block.insts.back().op;
             if (last_op == IROp::BRCOND || last_op == IROp::BRCOND_ZERO ||

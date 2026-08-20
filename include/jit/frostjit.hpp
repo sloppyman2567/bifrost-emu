@@ -214,10 +214,17 @@ public:
                         blocks_mutex_.lock();
                         auto it2 = blocks_.find(pc);
                         if (it2 != blocks_.end()) {
-                            uint64_t (*rfn)(CPU*, Emulator*) = compile_tier2_region(emu, trace);
+                            uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
+                            uint64_t (*rfn)(CPU*, Emulator*) =
+                                compile_tier2_region(emu, trace, &chain_fn);
                             if (rfn) {
                                 BlockEntry region_entry;
                                 region_entry.fn = rfn;
+                                // Chain-skip: publish the post-frame-setup
+                                // entry (bare chain jmps must skip the
+                                // region's frame allocation).
+                                if (chain_skip_enabled() && chain_fn)
+                                    region_entry.chain_entry = chain_fn;
                                 region_entry.instr_count = static_cast<int>(trace.total_insts);
                                 region_entry.exec_count = it2->second.exec_count;
                                 region_entry.tier2_hot_logged = it2->second.tier2_hot_logged;
@@ -550,7 +557,15 @@ public:
     // Returns nullptr if the trace shape isn't region-qualified. The CALLER
     // replaces blocks_[head_pc].fn with the returned fn (exec_count /
     // tier2_hot_logged preserved); implemented in src/jit/jit_tier2.cpp.
-    uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace))(CPU*, Emulator*);
+    // chain_out (optional): receives the region's CHAIN-SKIP entry point
+    // (code_buf_ + the post-frame-setup label, mirroring BlockEntry.
+    // chain_entry for standalone blocks) when chain-skip is enabled. Chain
+    // edges are bare jmps carrying the ROOT's rbp/rsp, so they must enter
+    // past the region's frame allocation; cold dispatches use fn (which
+    // allocates the unified kChainSkipFrameBytes frame under chain-skip).
+    // nullptr when chain-skip is off (fn handles both entries there).
+    uint64_t (*compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
+                                    uint64_t (**chain_out)(CPU*, Emulator*) = nullptr))(CPU*, Emulator*);
     // Tier-2 in-code fire path (ROADMAP #14, Phase 1 step 4). Called from the
     // per-block hot-head counter emitted in block prologues (BIFROST_TIER2=1):
     // counts CHAINED execution (which never reaches run_block's slow path),

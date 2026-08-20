@@ -364,8 +364,10 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 // Called with blocks_mutex_ held EXCLUSIVE (the region fn lands in code_buf_
 // alongside translate_block's output). Returns nullptr if the trace shape
 // isn't region-qualified.
-uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace))(CPU*, Emulator*) {
+uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace,
+                                          uint64_t (**chain_out)(CPU*, Emulator*)))(CPU*, Emulator*) {
     (void)emu;
+    if (chain_out) *chain_out = nullptr;
     // Call-aware regions (Track 1): a trace may now contain BL_CALL/BLR_CALL
     // body ops. Their codegen invokes guest callee fns (direct `call rel32`
     // for BL, jit_call_helper for BLR) that run with their OWN frames and
@@ -378,11 +380,19 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     // callee-completion guard's INCOMPLETE path (`mov rsp,rbp; pop×6; ret`)
     // correctly unwinds a mid-callee return to the C dispatcher.
     if (!code_buf_ || !trace.ok) return nullptr;
-    // Regions don't compose with chain-skip: helpers like emu_slot_off()
-    // branch on chain_skip_enabled() and the chain frame is a fixed 32 KB
-    // unified slot that conflicts with the region's per-region frame. Under
-    // chain-skip, decline (the single-block JIT handles everything).
-    if (chain_skip_enabled()) return nullptr;
+    // Chain-skip COMPOSITION (1.5.4-alpha): under BIFROST_CHAIN_SKIP=1 the
+    // region allocates the same unified kChainSkipFrameBytes frame as every
+    // block, records a chain_entry label after the emu stash (before the R10
+    // window load / pin preloads / preheader), and publishes it via
+    // *chain_out. A chain edge is a bare jmp carrying the chain ROOT's
+    // rbp/rsp, so it enters past the frame allocation and runs the body with
+    // vreg slots relative to the root frame — legal because every
+    // chain-skip frame has identical layout (vreg ceiling -32512 < 32 KiB,
+    // fixed emu slot at -(kChainSkipFrameBytes-8)). Cold dispatches enter at
+    // fn, which allocates the unified frame itself. Region exits keep the
+    // `mov rsp,rbp; pop×6; ret` shape: with rbp = the root frame they unwind
+    // the whole chain back to the dispatcher — exactly what a standalone
+    // block's cold exit does when chained over.
 
     const auto& blocks = trace.blocks;
     const size_t nblk = blocks.size();
@@ -501,6 +511,16 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
         return false;
     }();
+    // Chain-skip composition declines CALL-CONTAINING regions: the
+    // BL_CALL completion guard's INCOMPLETE unwind (`mov rsp,rbp; pop×6;
+    // ret`) assumes rbp is the region's own frame, but a chain-entered
+    // region inherits the chain ROOT's rbp — the unwind would discard the
+    // live host return addresses (the documented busybox do_wait hang that
+    // forced bl_call_disabled_ under chain-skip, jit_translate.cpp:283).
+    // Call-free regions compose fully. (Under chain-skip the translator
+    // already lowers guest BL to a block-ending BRCOND_FALLTHRU, so BL_CALL
+    // cannot appear here anyway; this guards BLR_CALL/CALL_INTERP/SVC.)
+    if (chain_skip_enabled() && has_call) return nullptr;
 
     // ── Phase 2 loop-carried arch GPR pinning (back-edge regions) ─────
     // Runs BEFORE the LICM pass below: LICM consults arch_pin_ to avoid
@@ -929,9 +949,18 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     emit_push(R13); emit_push(R14); emit_push(R15);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5);  // mov rbp, rsp
     emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
-    emit_u32(stack_bytes);                              // sub rsp, stack_bytes
+    // Chain-skip: allocate the SAME unified 32 KB frame as every block so a
+    // chain edge into the region's chain_entry sees an identical layout
+    // (vreg slots -8*(v-32) fit either way; emu_slot_off() is mode-aware).
+    emit_u32(chain_skip_enabled() ? kChainSkipFrameBytes : stack_bytes);
     emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB);  // mov rbx, rdi (CPU)
     emit_store(RBP, emu_slot_off(), RSI);               // stash Emulator*
+    // Chain-skip entry label (mirror translate_block's chain_entry_off_):
+    // recorded AFTER the emu stash, BEFORE the R10 window load / pin
+    // preloads / preheader. Chain edges bare-jmp here with the ROOT's
+    // rbp/rsp/rbx intact; everything from this point on (window load, pins,
+    // preheader, body) re-runs per entry exactly like a chained block.
+    const size_t region_chain_entry_off = code_buf_used_;
     // Direct-window base into R10 only if some region op touches the window.
     {
         bool uses_window = false;
@@ -1346,6 +1375,9 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     prev_max_vreg_ = max_vreg_;  // next translate_block's clear_limit (jit_translate.cpp:326)
     auto fn = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(code_buf_ + block_start);
     if (code_buf_overflow_ || size == 0) return nullptr;
+    if (chain_out && chain_skip_enabled())
+        *chain_out = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(
+            code_buf_ + region_chain_entry_off);
     tier2_regions++;
     if (tier2_trace_enabled()) {
         fprintf(stderr,
@@ -1425,7 +1457,9 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
         tier2_hot_heads.fetch_add(1, std::memory_order_relaxed);
 
         Tier2Trace trace = collect_tier2_trace(emu, pc);  // read-only, we hold the lock
-        uint64_t (*rfn)(CPU*, Emulator*) = trace.ok ? compile_tier2_region(emu, trace) : nullptr;
+        uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
+        uint64_t (*rfn)(CPU*, Emulator*) =
+            trace.ok ? compile_tier2_region(emu, trace, &chain_fn) : nullptr;
         if (rfn) {
             if (tier2_trace_enabled()) {
                 fprintf(stderr,
@@ -1435,6 +1469,10 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             }
             BlockEntry region_entry;
             region_entry.fn = rfn;
+            // Chain-skip: publish the post-frame-setup entry so chain edges
+            // (bare jmps with the ROOT's rbp/rsp) skip the frame allocation.
+            if (chain_skip_enabled() && chain_fn)
+                region_entry.chain_entry = chain_fn;
             region_entry.instr_count = static_cast<int>(trace.total_insts);
             region_entry.exec_count = old_entry.exec_count;
             region_entry.tier2_hot_logged = true;
@@ -1476,6 +1514,11 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             // try_chain_block later chains it to the region (blocks_[pc].fn
             // is the region now), and until then the old head fn handles one
             // extra iteration then lands in the region via ITS back-edge.
+            // Chain-skip: slots are lease-style bare jmps carrying the ROOT's
+            // frame, so they must enter at the region's chain_entry (past the
+            // frame allocation), not fn.
+            const uint8_t* enter_target = reinterpret_cast<const uint8_t*>(
+                (chain_skip_enabled() && chain_fn) ? chain_fn : rfn);
             for (const auto& tb : trace.blocks) {
                 if (tb.side_exits.empty() || tb.side_exits[0].first != pc) continue;
                 auto bit = blocks_.find(tb.pc);
@@ -1500,7 +1543,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
                 }
                 if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
                 make_writable();  // no-op in non-W^X shared-JIT mode (we bailed above)
-                int32_t rel = static_cast<int32_t>(reinterpret_cast<const uint8_t*>(rfn) -
+                int32_t rel = static_cast<int32_t>(enter_target -
                                                    (code_buf_ + off + 5));
                 code_buf_[off] = 0xE9;
                 memcpy(code_buf_ + off + 1, &rel, 4);
@@ -1566,7 +1609,7 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
                         if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
                         make_writable();
                         int32_t rel = static_cast<int32_t>(
-                            reinterpret_cast<const uint8_t*>(rfn) - (code_buf_ + off + 5));
+                            enter_target - (code_buf_ + off + 5));
                         code_buf_[off] = 0xE9;
                         memcpy(code_buf_ + off + 1, &rel, 4);
                         std::atomic_thread_fence(std::memory_order_release);

@@ -188,10 +188,16 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     blocks_mutex_.lock();
                     it = blocks_.find(pc);
                     if (it != blocks_.end()) {
-                        uint64_t (*rfn)(CPU*, Emulator*) = compile_tier2_region(emu, trace);
+                        uint64_t (*chain_fn)(CPU*, Emulator*) = nullptr;
+                        uint64_t (*rfn)(CPU*, Emulator*) =
+                            compile_tier2_region(emu, trace, &chain_fn);
                         if (rfn) {
                             BlockEntry region_entry;
                             region_entry.fn = rfn;
+                            // Chain-skip: publish the post-frame-setup entry
+                            // (bare chain jmps must skip the frame alloc).
+                            if (chain_skip_enabled() && chain_fn)
+                                region_entry.chain_entry = chain_fn;
                             region_entry.instr_count = static_cast<int>(trace.total_insts);
                             region_entry.exec_count = it->second.exec_count;
                             region_entry.tier2_hot_logged = it->second.tier2_hot_logged;
