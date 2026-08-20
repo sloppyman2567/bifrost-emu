@@ -91,6 +91,31 @@ back-edges.
   `0xf800800a2c4ff835`. Bisection gates: `BIFROST_NO_PIN=1` (pins off,
   slot on), `BIFROST_NO_SELFLOOP=1` (both off).
 
+### Phase 2 step 2 — region pin correctness (two bugs fixed)
+
+- **CSEL flag-materialize dropped pin mappings (crcmatrix):** CSEL codegen
+  runs `flush_all_vregs()` + `invalidate_all_vregs()` when materializing
+  pstate→RFLAGS; the flush stored only compile-time-dirty pins, and
+  `invalidate_all_vregs()` cleared ALL pin mappings, so a later
+  `LOAD_REG x0` read stale `cpu.regs[0]` instead of the pin r12.
+  `invalidate_all_vregs()` now re-establishes the pin mappings (mapping-only,
+  no reload) — a clean pin at the CSEL is still the loop-carried value.
+- **Region cold exits returned stale `cpu.regs[]` for loop-carried-deferred
+  pins (crclist/crcstate):** the per-block snapshot "clean/dirty" is a
+  compile-time lie for pins written in a later block of the same loop. A cold
+  exit at block 0 (whose IR never writes the pin) skipped the store, so the
+  caller read the pre-loop value. Every region exit now flushes ALL pins
+  (`emit_flush_all_pins()`, after `flush_all_vregs()`); the Lback still does
+  not flush.
+- **Defensive:** `LOAD_MEM`/`ATOMIC` added to the direct-write list in both
+  pin scans (they write the dest via `set_vreg_reg`/`store_reg_to_vreg`,
+  bypassing STORE_REG — a pinned vreg written by one would be abandoned).
+- **Verified:** all CoreMark CRCs correct (crclist 0xe714, crcmatrix 0x1fd7,
+  crcstate 0x8e3a, crcfinal 0x25b5), suite 205/205, quick 200/200 tier2 ON
+  and OFF, bench_mips acc `0xf800800a2c4ff835` both modes, REGALLOC_CHECK
+  clean, JIT_VERIFY no new failures. Performance pinned ≈ NO_PIN (~1%).
+  The temporary per-region pin bisection gates and trace dumps were removed.
+
 ## [1.5.3-alpha] — Vulkan command-buffer rendering (2026-08-19)
 
 ### Real Vulkan frames now render through DisplayThunk

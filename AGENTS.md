@@ -1689,3 +1689,65 @@ not musl-`-static`.
   pthread/sem/sig/toybox-rw/GL/vulkan set), bench_mips acc
   `0xf800800a2c4ff835`. Bisection gates kept: `BIFROST_NO_PIN=1` (pins off,
   slot on), `BIFROST_NO_SELFLOOP=1` (both off).
+
+## Session History (2026-08-20) — Tier-2 Phase 2 step 2 (region pin correctness fix)
+
+- **Two pin bugs found via CoreMark bisection; both FIXED — all three CRCs
+  now correct (crclist 0xe714, crcmatrix 0x1fd7, crcstate 0x8e3a, crcfinal
+  0x25b5) under `BIFROST_TIER2=1`, matching NO_PIN.** The pre-fix pinned
+  run was deterministic-but-wrong (crclist 0xfdcc, crcstate 0x2812).
+  Diagnosed with a temporary per-region pin gate (pin-only / skip-pin,
+  REMOVED after bisection): **region 0x401010's pins ALONE corrupted crclist**
+  (a list-pointer chase loop); crcmatrix's 0x401e44 needed the CSEL fix.
+- **BUG 1 (crcmatrix, region 0x401e44) — CSEL flag-materialize dropped pin
+  mappings.** CSEL codegen (jit_codegen_alu.cpp:405) runs
+  `flush_all_vregs()` + `invalidate_all_vregs()` when `!flags_in_host_`
+  (pstate→RFLAGS materialize). The flush stored only compile-time-DIRTY pins
+  (r13/r14/r15); the CLEAN pin r12 (x0, first write later in the block) was
+  NOT stored, then `invalidate_all_vregs()` dropped ALL pin mappings. A later
+  `LOAD_REG x0` compiled to `mov (%rbx),%rax` (stale cpu.regs[0]) instead of
+  reading r12 → loop-carried x0 lost. FIX: `invalidate_all_vregs()`
+  (x86_regalloc.cpp ~592) RE-ESTABLISHES the pin mappings after the clear —
+  `vreg_home_[a]=arch_pin_[a]`, `reg_vreg_[r]=a`, `vreg_dirty_[a]=true`,
+  `dirty_host_regs_|=1<<r`, LRU bump. Mapping-only (NO reload — cpu.regs[a]
+  may be stale; a reload would destroy the loop-carried value). Safe because
+  the CSEL materialize clobbers only FLAGS3 and call-like ops are excluded
+  from pinned blocks (has_call eligibility), so the pin registers always hold
+  the current arch values. **Do NOT "optimize" this to only re-pin dirty
+  vregs — the whole point is that a clean pin at the CSEL is still the
+  loop-carried value at runtime.**
+- **BUG 2 (crclist, region 0x401010) — cold exits returned STALE cpu.regs[]
+  for loop-carried-deferred pins.** Region exits flush only the pins DIRTY at
+  the compile-time snapshot. A pin deferred in block 1 (STORE_REG → pin reg)
+  on a prior Lback iteration is "clean" at block 0's snapshot (block 0's IR
+  never writes it), so the block-0 cold exit (`x26==x4` "found" path at
+  0x1cc) returned without storing x2 (r12) → the caller at 0x400f70 read the
+  pre-loop list pointer → wrong list navigation → wrong CRC. Same class as the
+  fp-cache pre-call "loop-carried dirtiness" bug: the snapshot's clean/dirty
+  is a per-block compile-time lie for pins written in a later block of the
+  SAME loop. FIX: `emit_flush_all_pins()` in `compile_tier2_region` — every
+  exit (L_exit AND every cold side-exit) unconditionally emits
+  `emit_store_arm(a, arch_pin_[a])` for ALL pins, after flush_all_vregs.
+  Over-flushing is safe (pins always hold the current arch value; the extra
+  store to an already-current cpu.regs[a] is redundant). The Lback still does
+  NOT flush (that's the perf point). Note region 0x401cb8 had the SAME latent
+  bug (x0/x1 deferred in block 1, cold exit at block 0 flushed only x2/x3)
+  but happened to pass because the exit targets don't read x0/x1.
+- **Defensive: LOAD_MEM and ATOMIC added to the direct-write list** in BOTH
+  pin scans (jit_tier2.cpp + jit_translate.cpp): they write the dest arch
+  vreg via `set_vreg_reg`/`store_reg_to_vreg` bypassing STORE_REG, so a pinned
+  vreg written by one would land in a scratch reg the next iteration clobbers
+  → abandoned pin. NOT the actual CoreMark bug (region arch writes all went
+  via STORE_REG) but correct defensive coverage; keep the EXPLICIT-list rule
+  (branch dummy dest=0 must never flag x0).
+- **Performance:** pinned ≈ NO_PIN ≈ +~1% guest-measured over NO_PIN on
+  CoreMark (3275 vs 3243, noisy guest clock), correct in both. Region exits
+  are cold paths — the extra pin stores cost nothing measurable. Wall-clock
+  tier2-ON vs OFF on auto-scaled CoreMark ~16s vs ~21s (auto-scale makes this
+  noisy). Verified: full suite **205/205** (tier2 OFF default), quick
+  **200/200** tier2 ON, bench_mips acc `0xf800800a2c4ff835` both modes,
+  REGALLOC_CHECK clean, JIT_VERIFY quick failure set IDENTICAL to tier2-OFF
+  (the only diffs are failure FLAVOR of the same pre-existing racy tests:
+  test_pthread_cond rc=137 vs 134, vulkan 139 vs 134).
+- Bisection gates `BIFROST_SKIP_PIN_PC`/`BIFROST_PIN_ONLY_PC` and the
+  `BIFROST_PIN_TRACE`/`[rbin]` region dumps were TEMPORARY and are REMOVED.

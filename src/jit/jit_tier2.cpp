@@ -571,12 +571,20 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
                                 inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
                                 inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
                                 inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
-                                inst.op == IROp::SIMD_UMOV)) {
+                                inst.op == IROp::SIMD_UMOV ||
+                                inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
                         // Direct arch-GPR writers (store_reg_to_vreg /
                         // set_vreg_reg), bypassing STORE_REG — the pin would
-                        // hold a stale value. EXPLICIT list, NOT a dest<=30
-                        // catch-all: branch ops carry a dummy dest=0 that
-                        // would wrongly flag x0.
+                        // hold a stale value. LOAD_MEM/ATOMIC write the
+                        // loaded result into the dest vreg directly
+                        // (set_vreg_reg(inst.dest, RAX) / store_reg_to_vreg),
+                        // so a pinned vreg's value would land in a plain
+                        // scratch register that the NEXT iteration's code
+                        // freely clobbers — the pin is abandoned and the
+                        // loop-carried value is lost (CoreMark region
+                        // corruption: wrong CRCs). EXPLICIT list, NOT a
+                        // dest<=30 catch-all: branch ops carry a dummy
+                        // dest=0 that would wrongly flag x0.
                         direct_write[inst.dest] = true;
                     }
                 }
@@ -796,9 +804,25 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
     // ── Cold fall-through exit (L_exit), live state ─────────────────
     // The last block's not-taken path falls through here. exit_pc is the
     // guest PC right after the last block (the walker stopped there).
+    // Flush EVERY pinned arch vreg at every exit, not just the ones dirty
+    // at the snapshot: a pin can be loop-carried-deferred (block 1 — or a
+    // prior Lback iteration — wrote it via STORE_REG into its pin register),
+    // so a snapshot "clean" pin may still hold the current value ONLY in the
+    // register while cpu.regs[] is stale. A cold exit taken at a block whose
+    // IR never writes the pin would otherwise return the stale cpu.regs[]
+    // value to the caller (CoreMark crclist: x2 was deferred in block 1,
+    // then the "found" cold exit at block 0 returned the pre-loop pointer →
+    // wrong list navigation → wrong CRC). Over-flushing is safe — pins always
+    // hold the current arch value at runtime.
+    auto emit_flush_all_pins = [&]() {
+        for (int a = 0; a <= 30; a++) {
+            if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
+        }
+    };
     uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
     clobber_flags();
     flush_all_vregs();
+    emit_flush_all_pins();
     emit_mov_imm_to_rax(exit_pc);
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);        // mov rdi, rbx
@@ -830,6 +854,7 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
         if (s.need_cmc_) emit_byte(0xF5);  // restore CF for the materialize
         materialize_flags_to_pstate();
         flush_all_vregs();
+        emit_flush_all_pins();
         emit_mov_imm_to_rax(c.side_pc);
         emit_store(CPU_REG, PC_OFF, RAX);
         emit_mov_reg(RDI, CPU_REG);

@@ -206,8 +206,15 @@ and across internal block edges.
   `BIFROST_NO_PIN`/`BIFROST_JIT_VERIFY` gates). REQUIRED the new
   BRCOND_ZERO/BRCOND_BIT tight self-loop slot (CBZ/CBNZ/TBZ/TBNZ
   while-loops), which is the measurable win (~2.7x vs dispatcher on
-  bench_mips). Measured performance-neutral overall (bench_mips ~1%,
-  CoreMark 0 — its hot loop is a 2-block cross-block loop). Next: carry
+  bench_mips). **STATUS: step 2 (region pin correctness) SHIPPED
+  (2026-08-20) — two determinism bugs fixed: (a) CSEL's
+  `invalidate_all_vregs()` now re-establishes pin mappings (a clean pin
+  at the materialize is still the loop-carried value), and (b) every
+  region exit flushes ALL pins, not just snapshot-dirty ones (loop-
+  carried-deferred pins make the snapshot "clean" a lie). All CoreMark
+  CRCs correct under tier2, pinned ≈ NO_PIN performance.** Measured
+  performance-neutral overall (bench_mips ~1%, CoreMark 0 — its hot loop
+  is a 2-block cross-block loop). Next: carry
   pins across a 2-block chained loop via the chain edge (today the
   successor re-runs its prologue).
 - Allocate the region's vregs as ONE linear scan over the concatenated IR,

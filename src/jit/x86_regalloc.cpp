@@ -600,6 +600,31 @@ void FrostJIT::invalidate_all_vregs() {
         }
     }
     dirty_host_regs_ = 0;
+    // Phase 2 (loop-carried arch-GPR pinning): RESTORE the pin mappings.
+    // The pins (R12-R15) hold the CURRENT arch-vreg values at runtime —
+    // they survive whatever invalidate_all_vregs' callers do: the CSEL
+    // flag-materialize path clobbers only FLAGS3 (RAX/RCX/RDX/R8), and
+    // call-like ops (CALL_INTERP / SVC / vDSO) are EXCLUDED from pinned
+    // blocks by the eligibility scan (has_call), so a call can never
+    // modify cpu.regs[a] under a live pin. Dropping the mapping here
+    // (as the original invalidate did) strands a pinned vreg: a later
+    // LOAD_REG reads cpu.regs[a], which is STALE for a deferred store —
+    // the CoreMark region corruption (LOAD_REG x0 after a CSEL read the
+    // pre-loop x0 instead of the loop-carried pin r12). The pin must be
+    // re-claimed by MAPPING ONLY — do NOT re-emit a load, cpu.regs[a]
+    // may be stale and would destroy the loop-carried value. Mark dirty:
+    // the pin is the current value, so any flush stores it (a redundant
+    // store to an already-current cpu.regs[a] is harmless).
+    for (int a = 0; a <= 30; a++) {
+        if (arch_pin_[a] >= 0) {
+            int r = arch_pin_[a];
+            vreg_home_[a] = r;
+            reg_vreg_[r] = a;
+            vreg_dirty_[a] = true;
+            dirty_host_regs_ |= (1u << r);
+            vreg_last_use_[a] = ++regalloc_lru_counter_;
+        }
+    }
     flags_in_host_ = false;
 }
 // ── force_vreg_to_reg ──────────────────────────────────────────────────
