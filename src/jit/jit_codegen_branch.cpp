@@ -438,7 +438,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             // branch block, but the code size increase is negligible (<1%
             // of the 64MB code buffer for typical programs).
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // 1.5.3-alpha: emit the taken-path epilogue with a SECOND chain
+            // 1.5.4-alpha: emit the taken-path epilogue with a SECOND chain
             // slot so the taken edge (typically the loop-back of a hot
             // conditional loop) also skips the dispatcher. Skipped when a
             // self-loop slot was emitted — that jmp already goes straight
@@ -474,7 +474,7 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             emit_call_interp(inst.arm_pc, false);
             return 0;
         case IROp::BRCOND_SKIP: {
-            // 1.5.3-alpha: mid-block conditional skip (leaf inlining). If
+            // 1.5.4-alpha: mid-block conditional skip (leaf inlining). If
             // cond(imm) holds, jump over the next `imm` IR ops (the skip
             // region). Unlike BRCOND this does NOT end the block and does
             // NOT touch PC or materialize flags — both paths stay inline.

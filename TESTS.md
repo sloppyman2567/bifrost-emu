@@ -28,7 +28,7 @@ With `make check-quick`, benchmarks are skipped and the suite reports
 > ≥ 2^63 comes back as the 0x8000000000000000 out-of-range sentinel even
 > though the value (e.g. 1e19 < 2^64) is representable. The JIT's native
 > FCVTZU has the explicit range pre-check and passes. Present since the
-> test was added (2026-06-26); unchanged at the 1.5.3-alpha bump.
+> test was added (2026-06-26); unchanged at the 1.5.4-alpha bump.
 
 ### Test categories
 

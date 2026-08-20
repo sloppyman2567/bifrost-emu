@@ -1,5 +1,5 @@
 // jit_simd_pairmin.c — SMAXP/SMINP/UMAXP/UMINP (pairwise max/min) coverage.
-// Native in the JIT since 1.5.3-alpha. Expected values computed in C from
+// Native in the JIT since 1.5.4-alpha. Expected values computed in C from
 // the same semantics as interp_fp.cpp's pairwise block: Q=1 -> Vd =
 // pairwise(Vn) ++ pairwise(Vm) (16 bytes); Q=0 -> Vd = pairwise(Vn) ++
 // pairwise(Vm) packed into the low 8 bytes (both sources ALWAYS

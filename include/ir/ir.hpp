@@ -186,7 +186,7 @@ enum class IROp : uint8_t {
     SIMD_SRSRA,    // dest += round(src1 >>> imm) (signed, round-half-up)
     SIMD_SLI,      // dest = (src1 << imm) | (dest & ((1<<imm)-1))
     SIMD_SRI,      // dest = (src1 >> imm) | (dest & ~((1<<(esize*8-imm))-1))
-    // Native SIMD FP lane-wise arithmetic (1.5.3-alpha). Same shape as
+    // Native SIMD FP lane-wise arithmetic (1.5.4-alpha). Same shape as
     // SIMD_ARITH but for FP elements. Operates on v_lo/v_hi (each 8
     // bytes) across all lanes; JIT emits SSE addps/subps/mulps/divps/
     // minps/maxps (single) or addpd/... (double). FABD = sub + clear
@@ -196,14 +196,14 @@ enum class IROp : uint8_t {
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_ARITH,
-    // Native SIMD FP fused 3-source (FMLA/FMLS, 1.5.3-alpha). Accumulates
+    // Native SIMD FP fused 3-source (FMLA/FMLS, 1.5.4-alpha). Accumulates
     // into dest: dest = dest ± src1*src2 per lane. Same shape as
     // SIMD_FP_ARITH but reads the OLD dest as the accumulator.
     //   imm  = opcode (0=fmla, 1=fmls)
     //   width = element size in bytes (4=float, 8=double)
     //   flags_op = Q (0=64-bit operand, 1=128-bit: process v_lo AND v_hi)
     SIMD_FP_FMA,
-    // Native SIMD 2-register misc (CNT/NOT/RBIT/ABS/NEG, 1.5.3-alpha).
+    // Native SIMD 2-register misc (CNT/NOT/RBIT/ABS/NEG, 1.5.4-alpha).
     // Unary lane-wise ops on the FULL 128-bit source (v_lo + v_hi).
     //   imm  = opcode (0=CNT, 1=NOT, 2=RBIT, 3=ABS, 4=NEG)
     //   width = element size in bytes (1..8; CNT/NOT/RBIT only valid 1/2/4,
@@ -212,7 +212,7 @@ enum class IROp : uint8_t {
     //                 1=128-bit: process v_lo AND v_hi)
     SIMD_2REG,
     // Native SIMD vector int<->FP converts (SCVTF/UCVTF/FCVTZS/FCVTZU,
-    // 1.5.3-alpha). Operates on the FULL 128-bit source.
+    // 1.5.4-alpha). Operates on the FULL 128-bit source.
     //   imm  = opcode (0=SCVTF s32->f32, 1=UCVTF u32->f32, 2=FCVTZS f32->s32,
     //                  3=FCVTZU f32->u32)
     //   width = element size in bytes (4 only; the 8-byte 2D/1D forms stay
@@ -220,13 +220,13 @@ enum class IROp : uint8_t {
     //   flags_op = Q (0=64-bit operand: process v_lo only, ZERO v_hi;
     //                 1=128-bit: process v_lo AND v_hi)
     SIMD_CVTF,
-    // Native SIMD ADDP (vector pairwise add, 1.5.3-alpha). Byte pairs only
+    // Native SIMD ADDP (vector pairwise add, 1.5.4-alpha). Byte pairs only
     // (esize=1, 8B/16B — the interp's size=0 path is the semantic ref).
     //   width = 1
     //   flags_op = Q (0=64-bit operand: 8B -> 4 results in v_lo, ZERO v_hi;
     //                 1=128-bit: 16B -> 8 results in v_lo, v_hi = high 8)
     SIMD_ADDP,
-    // Native SIMD narrowing (XTN/SQXTN/SQXTUN/UQXTN, 1.5.3-alpha). Reads the
+    // Native SIMD narrowing (XTN/SQXTN/SQXTUN/UQXTN, 1.5.4-alpha). Reads the
     // FULL 128-bit source (both 64-bit halves) and narrows each element to
     // half width. Dest element size = width/2.
     //   imm  = opcode (0=XTN, 1=SQXTUN, 2=SQXTN, 3=UQXTN)
@@ -234,7 +234,7 @@ enum class IROp : uint8_t {
     //   flags_op = Q (0=low 64 bits written, v_hi=0; 1=HIGH 64 bits written,
     //                 v_lo preserved — the *2 forms)
     SIMD_XTN,
-    // Native SIMD TBL/TBX (vector table lookup, 1.5.3-alpha). Two forms:
+    // Native SIMD TBL/TBX (vector table lookup, 1.5.4-alpha). Two forms:
     // one or two source table regs (TBL1/TBX1 vs TBL2/TBX2). Vn (rn) is the
     // TABLE, Vm (rm) is the INDEX vector (interp_fp.cpp case 0x0E000000).
     //   Vd[i] = table[index[i]]; out-of-range -> 0 (TBL) / keep old (TBX).
@@ -242,7 +242,7 @@ enum class IROp : uint8_t {
     //   cond = (is_tbx << 1) | Q; flags_op = number of table regs
     //          (1 = TBL1/TBX1, 2 = TBL2/TBX2)
     SIMD_TBL,
-    // Native SIMD INS (element, vector -> element, 1.5.3-alpha). Copies one
+    // Native SIMD INS (element, vector -> element, 1.5.4-alpha). Copies one
     // element of src2 into dest at a byte offset: the interp's
     // read-modify-write on v_lo/v_hi. GPR-mediated (NOT vec-cache pinned).
     //   src1 = destination vreg (read-modify-write), src2 = source vector
@@ -251,7 +251,7 @@ enum class IROp : uint8_t {
     //   aux   = source element index (sidx)
     //   flags_op = Q (1=128-bit destination, 0=64-bit)
     SIMD_INS,
-    // Native SIMD permute (ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2, 1.5.3-alpha).
+    // Native SIMD permute (ZIP1/ZIP2/UZP1/UZP2/TRN1/TRN2, 1.5.4-alpha).
     // Element-wise permute of two source vectors into dest (the interp's
     // permute-pairs block in interp_fp.cpp is the semantic reference).
     //   src1 = source A (rn), src2 = source B (rm)
@@ -261,7 +261,7 @@ enum class IROp : uint8_t {
     //   flags_op = Q (0=64-bit operands: process v_lo only, ZERO v_hi;
     //                 1=128-bit: process v_lo AND v_hi)
     SIMD_PERMUTE,
-    // Native SIMD pairwise max/min (SMAXP/SMINP/UMAXP/UMINP, 1.5.3-alpha).
+    // Native SIMD pairwise max/min (SMAXP/SMINP/UMAXP/UMINP, 1.5.4-alpha).
     // Element-wise min/max of adjacent pairs within each source (the
     // interp's pairwise block in interp_fp.cpp is the semantic reference).
     // Q=1: Vd = pairwise(Vn) ++ pairwise(Vm) (first half then second half);
@@ -362,7 +362,7 @@ enum class IROp : uint8_t {
                    // src1=addr, src2=value, dest=ARM reg for status (rs)
     STLR_FAST,     // jit_stlr(emu, cpu, src1, src2, width); store-release
                    // src1=addr, src2=value
-    // 1.5.3-alpha: Native ARMv8 Crypto Extensions (AES-NI / PCLMULQDQ).
+    // 1.5.4-alpha: Native ARMv8 Crypto Extensions (AES-NI / PCLMULQDQ).
     // These operate on the full 128-bit V register (v_lo + v_hi).
     // dest = result vreg; src1 = state vreg; src2 = key vreg (AES) or
     // second operand (PMULL).

@@ -47,7 +47,7 @@
 //   - Pointer args outside the 4 GiB direct window bounce through a
 //     host buffer (writeback). Nested structs of pointers may still
 //     need per-symbol handlers (see glShaderSource).
-//   - GL state tracking: 1.5.3-alpha adds GLStateTracker, a
+//   - GL state tracking: 1.5.4-alpha adds GLStateTracker, a
 //     software-side mirror of guest GL state (capabilities, blend,
 //     depth, stencil, viewport, texture bindings, program, pixel
 //     store, hints) so state queries (glIsEnabled, glGetIntegerv,
@@ -125,7 +125,7 @@ public:
     // value to cpu.regs[0]; on success it's already set by dispatch().
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
     // ── Guest callback delivery hook (GLFW callbacks) ──────────────────
-    // 1.5.3-alpha: GLFW callback setters (glfwSetCursorPosCallback /
+    // 1.5.4-alpha: GLFW callback setters (glfwSetCursorPosCallback /
     // glfwSetKeyCallback / glfwSetMouseButtonCallback /
     // glfwSetFramebufferSizeCallback / glfwSetWindowSizeCallback /
     // glfwSetWindowFocusCallback / glfwSetErrorCallback) are *_CB-policy
@@ -146,7 +146,7 @@ public:
         const double* fargs, size_t n_fargs)>;
     void set_glfw_cb_runner(GlfwCbRunner runner);
     // ── SDL thread runner (SDL_CreateThread / SDL_WaitThread) ──────────
-    // 1.5.3-alpha. The game spawns worker threads (a timer thread, a
+    // 1.5.4-alpha. The game spawns worker threads (a timer thread, a
     // music/audio thread, an event thread) via SDL_CreateThread and
     // joins them with SDL_WaitThread. Host SDL_CreateThread would try to
     // run the guest AArch64 function pointer as x86-64 (SIGSEGV), so the
@@ -166,7 +166,7 @@ public:
         CPU& cpu, uint32_t op, uint64_t a0, uint64_t a1, uint64_t a2)>;
     void set_sdl_thread_runner(SdlThreadRunner runner);
     // ── SDL shutdown wakeup ────────────────────────────────────────────
-    // 1.5.3-alpha. SDL_CreateThread spawns REAL host threads that run the
+    // 1.5.4-alpha. SDL_CreateThread spawns REAL host threads that run the
     // guest thread function. When the guest calls exit_group, only the
     // calling CPU stops; the SDL worker threads may still be blocked in
     // host SDL calls (SDL_SemWait, SDL_Delay). Teardown then destroys
@@ -188,7 +188,7 @@ public:
     //   ret                       ; return to guest caller (x30)
     static constexpr uint64_t TRAMPOLINE_SIZE  = 16;
     static constexpr uint64_t MAX_SYMBOLS      = 4096;  // 64 KiB page / 16 B
-    // 1.5.3-alpha: per-thunk ID base to avoid collisions.
+    // 1.5.4-alpha: per-thunk ID base to avoid collisions.
     // Each thunk type gets a non-overlapping range of symbol_ids.
     // The dispatch handler checks the range to route to the correct
     // thunk without trying each one sequentially.
@@ -202,7 +202,7 @@ public:
 private:
     std::unique_ptr<GraphicThunkImpl> impl_;
     // Per-library registration helpers (defined in thunk.cpp).
-    // 1.5.3-alpha: added pointer_args bitmask (bit N = arg N
+    // 1.5.4-alpha: added pointer_args bitmask (bit N = arg N
     // is a pointer needing guest→host translation).
     void register_function_(const std::string& lib,
                             const std::string& sym,

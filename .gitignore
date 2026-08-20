@@ -2,6 +2,7 @@
 bifrost-emu
 bifrost-emu-dbg
 *.o
+*.d
 *.a
 *.so
 *.dSYM/

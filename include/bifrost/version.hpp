@@ -205,6 +205,23 @@ namespace arm64emu {
 //     (tools/opgen/thunk_dp.txt → opgen_thunk.hpp); dispatch routes by
 //     POLICY/SIZE, not symbol-name compares.
 //   - Version bump: all version refs normalized to 1.5.3-alpha.
-constexpr const char* VERSION  = "1.5.3-alpha";
+//
+// 1.5.4-alpha (2026-08-19): Tier-2 JIT (region/trace compilation), Phase 1
+//   + Phase 2 step 1 (ROADMAP #14). High-level — see CHANGELOG.md:
+//   - Phase 1 (profile-guided trace collection + compilation): per-block
+//     execution counters + env gates (BIFROST_TIER2), read-only
+//     collect_tier2_trace walker (64-block / 2048-inst caps), the
+//     compile_tier2_region M1 whole-region compiler (one x86 fn per trace,
+//     single regalloc pass, inlined cold exits with snapshot restore,
+//     optional Lback), and IN-CODE hot-head counters so chained loops
+//     actually fire regions mid-run (~8% on a 2-block natural loop).
+//   - Phase 2 step 1: loop-carried arch-GPR pinning (R12-R15) across
+//     tight self-loops and region back-edges — deferred cpu.regs stores,
+//     pins excluded from the allocator. Performance-neutral on
+//     bench_mips/CoreMark but correct and verified; the BRCOND_ZERO/
+//     BRCOND_BIT tight self-loop slot (CBZ/CBNZ/TBZ/TBNZ while-loops)
+//     is the real win (~2.7x vs dispatcher).
+//   - Version bump: all version refs normalized to 1.5.4-alpha.
+constexpr const char* VERSION  = "1.5.4-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

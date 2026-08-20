@@ -58,7 +58,7 @@ int main(int argc, const char* argv[]) {
     CHECK(r == 0, "bifrost_load_elf(\"ctest/hello.elf\")");
 
     // Check version
-    CHECK(strcmp(bifrost_version(), "1.5.3-alpha") == 0, "version is 1.5.3-alpha");
+    CHECK(strcmp(bifrost_version(), "1.5.4-alpha") == 0, "version is 1.5.4-alpha");
 
     // Check initial state
     CHECK(bifrost_is_running(emu), "is_running after load");

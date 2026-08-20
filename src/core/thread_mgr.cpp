@@ -484,7 +484,7 @@ int Emulator::reap_fork_child(int pid, int options, bool& found) {
     return 0;
 }
 // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ─────────────
-// 1.5.3-alpha. The game spawns worker threads (timer, music, event) via
+// 1.5.4-alpha. The game spawns worker threads (timer, music, event) via
 // SDL_CreateThread and joins them with SDL_WaitThread. These are REAL
 // concurrent guest threads: the guest SDL_Thread* handle is a small
 // guest-addressable struct whose word 0 is a "done" futex flag and word 8

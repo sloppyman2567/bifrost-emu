@@ -1,9 +1,9 @@
-// frost_graphics/display_thunk.cpp — DisplayThunk implementation (1.5.3-alpha).
+// frost_graphics/display_thunk.cpp — DisplayThunk implementation (1.5.4-alpha).
 //
 // See include/frost/display_thunk.hpp for the design overview. This file
 // implements the DisplayThunk class for Vulkan / Wayland / X11 / GBM.
 //
-// 1.5.3-alpha: DisplayThunk now uses the same full dispatch logic as
+// 1.5.4-alpha: DisplayThunk now uses the same full dispatch logic as
 // GraphicThunk (stack args, float args, string returns, GetProcAddress,
 // mixed int+float) and integrates DisplayProxy for X11/Wayland fallback
 // when host libraries are unavailable.
@@ -11,7 +11,7 @@
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
-#include "opgen_thunk.hpp"  // 1.5.3-alpha: symbol signature table (single source of truth)
+#include "opgen_thunk.hpp"  // 1.5.4-alpha: symbol signature table (single source of truth)
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
@@ -36,7 +36,7 @@ struct DisplayThunkImpl {
     };
     std::vector<LibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-    // DisplayProxy for X11/Wayland fallback (1.5.3-alpha).
+    // DisplayProxy for X11/Wayland fallback (1.5.4-alpha).
     std::unique_ptr<DisplayProxy> proxy_;
     // Guest-visible scratch page for host→guest string returns
     // (XGetAtomName, glGetString, …). Ring-allocated.
@@ -59,7 +59,7 @@ struct DisplayThunkImpl {
 };
 DisplayThunk::DisplayThunk() {
     impl_ = std::make_unique<DisplayThunkImpl>();
-    // 1.5.3-alpha: display thunking enabled by default.
+    // 1.5.4-alpha: display thunking enabled by default.
     // Set BIFROST_NO_THUNK_DISPLAY=1 to disable.
     const char* disable = getenv("BIFROST_NO_THUNK_DISPLAY");
     impl_->enabled = !(disable && disable[0] != '0');
@@ -88,7 +88,7 @@ bool DisplayThunk::init(Memory& mem) {
         return false;
     }
     impl_->string_cache_off = 0;
-    // 1.5.3-alpha: lazily create the DisplayProxy. It owns an SDL2 window
+    // 1.5.4-alpha: lazily create the DisplayProxy. It owns an SDL2 window
     // and provides a software fallback for X11/Wayland calls when the host
     // libraries are unavailable or have no display.
     impl_->proxy_ = std::make_unique<DisplayProxy>();
@@ -535,7 +535,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     cpu.regs[0] = ret;
     return 0;
 }
-// ── Vulkan marshalling (1.5.3-alpha) ───────────────────────────────────
+// ── Vulkan marshalling (1.5.4-alpha) ───────────────────────────────────
 // The generic bounce path copies pointer args byte-for-byte, which cannot
 // fix the NESTED guest pointers inside the instance/device create infos
 // (ppEnabledExtensionNames string arrays, pQueueCreateInfos struct array
@@ -1787,7 +1787,7 @@ uint64_t DisplayThunk::trampoline_base() const {
     return impl_->trampoline_base;
 }
 // ── register_known_symbols_ ────────────────────────────────────────────
-// 1.5.3-alpha: TABLE-DRIVEN. tools/opgen/thunk_dp.txt (generated into
+// 1.5.4-alpha: TABLE-DRIVEN. tools/opgen/thunk_dp.txt (generated into
 // include/opgen_thunk.hpp) is now the single source of truth for which
 // (library, symbol) DisplayThunk thunks and how it marshals each one.
 // The former REG_VK*/REG_WL*/REG_X11*/REG_GBM*/REG_GLX*/REG_RANDR*/REG_XKB*

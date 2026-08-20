@@ -72,7 +72,7 @@ struct CpuFeatures {
     // SSSE3 is a prerequisite of SSE4.1, so it is nearly always present
     // on has_sse41() hosts, but we detect it independently for correctness.
     bool has_ssse3() const { return ssse3; }
-    // 1.5.3-alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
+    // 1.5.4-alpha: AES-NI / PCLMULQDQ / SHA-NI for native crypto codegen.
     bool has_aesni()     const { return aesni; }
     bool has_pclmulqdq() const { return pclmulqdq; }
     bool has_sha()       const { return sha; }

@@ -378,7 +378,7 @@ private:
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};
     // ── SDL thunk threads (SDL_CreateThread / SDL_WaitThread) ──────────
-    // 1.5.3-alpha. The game spawns worker threads (timer/music/event) via
+    // 1.5.4-alpha. The game spawns worker threads (timer/music/event) via
     // SDL_CreateThread and joins them with SDL_WaitThread. These are real
     // concurrent guest threads: each gets its own GuestThread (own CPU +
     // host thread + optional per-thread JIT), a fresh guest stack, and a
@@ -534,7 +534,7 @@ private:
     friend int64_t syscall_time(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_ioctls(Emulator&, CPU&, uint64_t);
     friend int64_t syscall_misc(Emulator&, CPU&, uint64_t);
-    // 1.5.3-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
+    // 1.5.4-alpha: shared vDSO clock fast-path handler (syscalls/time.cpp),
     // also called from the syscall dispatcher and the JIT trampoline.
     friend bool syscall_vdso_clock(Emulator&, CPU&, uint64_t);
     // ── Internal helpers ──────────────────────────────────────────────
@@ -559,7 +559,7 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
-    // 1.5.3-alpha: stop + join every SDL worker thread. Real Linux
+    // 1.5.4-alpha: stop + join every SDL worker thread. Real Linux
     // exit_group kills ALL threads; our exit_group handler only clears
     // the calling CPU's running flag. SDL threads spawned via
     // SDL_CreateThread run in REAL host std::threads and may be blocked
@@ -571,7 +571,7 @@ private:
     // exception"). Called at the end of run() and again defensively in
     // ~Emulator (idempotent).
     void stop_sdl_threads();
-    // 1.5.3-alpha: wire the GraphicThunk's GLFW-callback runner to a
+    // 1.5.4-alpha: wire the GraphicThunk's GLFW-callback runner to a
     // borrow-CPU guest invocation (save/restore CPU, set x0..=iargs,
     // d0..=fargs, pc = callback, run step() to the sentinel LR).
     // Called after the thunk is initialized on both the dynamic-linker

@@ -15,10 +15,10 @@
 #include "bifrost/version.hpp"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
-#include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (1.5.3-alpha)
+#include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (1.5.4-alpha)
 #include "frost/thunk.hpp"        // GraphicThunk full definition (for init/resolve)
-#include "frost/audio_thunk.hpp"  // 1.5.3-alpha: AudioThunk
-#include "frost/display_thunk.hpp"// 1.5.3-alpha: DisplayThunk
+#include "frost/audio_thunk.hpp"  // 1.5.4-alpha: AudioThunk
+#include "frost/display_thunk.hpp"// 1.5.4-alpha: DisplayThunk
 #include "jit/frostjit.hpp"
 #include <algorithm>
 #include <atomic>
@@ -260,7 +260,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
-            // 1.5.3-alpha: also init AudioThunk and DisplayThunk if
+            // 1.5.4-alpha: also init AudioThunk and DisplayThunk if
             // enabled. They share the thunk syscall (0x1000) with
             // GraphicThunk; the dispatcher in misc.cpp tries each in
             // order. The dynamic linker's thunk_resolver_ is set to
@@ -753,7 +753,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top
-    // 1.5.3-alpha: load the embedded vDSO before building the stack so
+    // 1.5.4-alpha: load the embedded vDSO before building the stack so
     // AT_SYSINFO_EHDR can point to it. The vDSO provides
     // gettimeofday/clock_gettime/clock_getres/rt_sigreturn stubs.
     load_vdso();
@@ -876,7 +876,7 @@ std::vector<std::string> Emulator::build_default_guest_env() {
     }
     return envs;
 }
-// ── vDSO loader (1.5.3-alpha) ───────────────────────────────────────
+// ── vDSO loader (1.5.4-alpha) ───────────────────────────────────────
 // Maps the embedded AArch64 vDSO ELF into guest memory and returns the
 // base address (the ELF header location = AT_SYSINFO_EHDR). The vDSO
 // provides gettimeofday/clock_gettime/clock_getres/__kernel_rt_sigreturn
@@ -1419,7 +1419,7 @@ void Emulator::step(CPU& cpu) {
 // implemented in src/core/signal.cpp — see that file for the full
 // disposition table.
 // ── wire_thunk_glfw_cb_runner_ — guest GLFW callback delivery ─────────
-// 1.5.3-alpha. glfwSetCursorPosCallback/glfwSetKeyCallback/… register
+// 1.5.4-alpha. glfwSetCursorPosCallback/glfwSetKeyCallback/… register
 // guest AArch64 callbacks; host GLFW can't invoke them, so GraphicThunk
 // stores them and asks us to run them after each
 // glfwPollEvents/glfwWaitEvents. We borrow the CPU the same way the
@@ -1517,7 +1517,7 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
         });
 }
 // ── call_guest_function — borrow-CPU guest function call (C API) ───────
-// 1.5.3-alpha. libbifrost's bifrost_call() lets embedders invoke an
+// 1.5.4-alpha. libbifrost's bifrost_call() lets embedders invoke an
 // arbitrary guest function (e.g. a callback, an exported entry, or a
 // helper in a loaded library) and read back x0. Same borrow-CPU pattern
 // as wire_thunk_glfw_cb_runner_ / guest_call_args_: save/restore ALL
@@ -1612,7 +1612,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     return result;
 }
 // ── wire_thunk_sdl_thread_runner_ — SDL_CreateThread/WaitThread ──────
-// 1.5.3-alpha. SDL_CreateThread passes a guest AArch64 function pointer;
+// 1.5.4-alpha. SDL_CreateThread passes a guest AArch64 function pointer;
 // host SDL_CreateThread would run it as x86-64 (SIGSEGV). Instead we
 // spawn a REAL guest thread (own CPU + host thread + fresh stack +
 // per-thread glibc TLS) running the guest function, and SDL_WaitThread

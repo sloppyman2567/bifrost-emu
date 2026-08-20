@@ -2868,9 +2868,9 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
 // Returns true if `soname` matches the naming pattern of a library that
 // the thunk resolver might handle. We accept:
 //   - Graphics (GraphicThunk): libGL*, libEGL*, libSDL2*, libGLESv2*
-//   - Audio (AudioThunk, 1.5.3-alpha): libasound*, libpulse*,
+//   - Audio (AudioThunk, 1.5.4-alpha): libasound*, libpulse*,
 //     libopenal*
-//   - Display (DisplayThunk, 1.5.3-alpha): libvulkan*, libwayland-*,
+//   - Display (DisplayThunk, 1.5.4-alpha): libvulkan*, libwayland-*,
 //     libX11*, libgbm*
 // (libSDL2 is in both graphics and audio — both thunks will try to
 // resolve its symbols, and the dispatcher tries graphics first.)
@@ -2889,13 +2889,13 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
         || starts_with(soname, "libglfw.so")) {
         return true;
     }
-    // Audio (1.5.3-alpha).
+    // Audio (1.5.4-alpha).
     if (starts_with(soname, "libasound")
         || starts_with(soname, "libpulse")
         || starts_with(soname, "libopenal")) {
         return true;
     }
-    // Display (1.5.3-alpha).
+    // Display (1.5.4-alpha).
     if (starts_with(soname, "libvulkan")
         || starts_with(soname, "libwayland-")
         || starts_with(soname, "libX11")

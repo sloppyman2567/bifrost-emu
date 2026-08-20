@@ -199,6 +199,17 @@ and across internal block edges.
   existing vec-cache writeback-on-exit contract).
 
 **Phase 2 — whole-region register allocation:**
+  **STATUS: step 1 (loop-carried arch-GPR pinning) SHIPPED (2026-08-19,
+  commit `64ccf49`).** Pins R12-R15 to loop-carried arch GPRs across
+  tight self-loops and region back-edges (preloads, deferred cpu.regs
+  stores, allocator-pool exclusion, explicit direct-writer op list,
+  `BIFROST_NO_PIN`/`BIFROST_JIT_VERIFY` gates). REQUIRED the new
+  BRCOND_ZERO/BRCOND_BIT tight self-loop slot (CBZ/CBNZ/TBZ/TBNZ
+  while-loops), which is the measurable win (~2.7x vs dispatcher on
+  bench_mips). Measured performance-neutral overall (bench_mips ~1%,
+  CoreMark 0 — its hot loop is a 2-block cross-block loop). Next: carry
+  pins across a 2-block chained loop via the chain edge (today the
+  successor re-runs its prologue).
 - Allocate the region's vregs as ONE linear scan over the concatenated IR,
   exactly like today's per-block scan but spanning internal edges:
   live-in = the value contract (ARM regs read before write at region

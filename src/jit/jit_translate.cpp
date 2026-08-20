@@ -184,14 +184,14 @@ static bool instr_will_call_interp(const DecodedInst& d) {
         default:
             break;
     }
-    // 1.5.3-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
+    // 1.5.4-alpha: SIMD&FP LDR/STR (B/H/S/D/Q) and SIMD LDP/STP are all
     // natively translated (ir_translate_mem.cpp) — the old is_vec gate
     // here forced every one of them to CALL_INTERP, splitting FP-heavy
     // blocks every 1-2 instructions and killing the pinned-XMM vec cache
     // (each FP load/store cost ~18 interpreter steps in the voxel game).
     return false;
 }
-// ── Leaf inlining scan (1.5.3-alpha) ────────────────────────────────────
+// ── Leaf inlining scan (1.5.4-alpha) ────────────────────────────────────
 // A small leaf function (no calls, no memory, no stack usage, straight-line
 // or with a single forward conditional branch) can be inlined into its
 // caller's block. Inlining replaces a BL_CALL — whose codegen flushes ALL
@@ -382,7 +382,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     uint64_t cur_pc = start_pc;
     int instr_count = 0;
     bool block_ended = false;
-    // 1.5.3-alpha: leaf inlining. When a BL targets a small leaf (no calls/
+    // 1.5.4-alpha: leaf inlining. When a BL targets a small leaf (no calls/
     // memory/stack, ≤16 instrs), its body is translated inline instead of
     // emitting a BL_CALL — the caller block continues past the leaf's RET.
     // The inlined body may contain ONE forward conditional branch (flattened
@@ -598,7 +598,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // OVER-predicts (it fires for FP_SCALAR/SIMD_DP ops that the IR
     // translator actually handles natively, e.g. FMOV/FCVT/FADD), which
     // demoted tiny native FP blocks to the interpreter (~2x slower) and
-    // split FP-heavy blocks every 2 instructions. 1.5.3-alpha: base the
+    // split FP-heavy blocks every 2 instructions. 1.5.4-alpha: base the
     // decision on the ACTUAL number of CALL_INTERP ops in the generated
     // IR instead — only blocks that genuinely run the interpreter get
     // demoted. Native FP blocks now stay in the JIT.
@@ -865,7 +865,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
         code_buf_[jne_off + 1] = static_cast<uint8_t>(rel);
         tier2_counter_len_ = code_buf_used_ - tier2_counter_off_;
     }
-    // 1.5.3-alpha: load the direct-window base into R10 ONLY if the
+    // 1.5.4-alpha: load the direct-window base into R10 ONLY if the
     // block actually touches guest memory through the direct window.
     // Previously every block paid a 10-byte movabs r10, imm64 in its
     // prologue — pure overhead for the many tiny ALU/FP/vector blocks
@@ -1240,7 +1240,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // block / the dispatcher).
     vec_cache_writeback_all();
     if (!rax_holds_next_pc_) {
-        // 1.5.3-alpha: inline blocks' instr_count is not a contiguous
+        // 1.5.4-alpha: inline blocks' instr_count is not a contiguous
         // guest-pc count (the inlined leaf body + implicit BL/RET break
         // the linear model), so the fall-through next_pc is the builder's
         // cur_pc — the first untranslated instruction (BL+4 or the cap

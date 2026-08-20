@@ -1,4 +1,4 @@
-// test_vulkan_swapchain.c — headless WSI swapchain smoke test (1.5.3-alpha).
+// test_vulkan_swapchain.c — headless WSI swapchain smoke test (1.5.4-alpha).
 //
 // Drives the full VK_KHR_surface + VK_EXT_headless_surface swapchain path
 // through the DisplayThunk: create instance with the headless-surface

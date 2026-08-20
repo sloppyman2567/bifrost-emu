@@ -6,6 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.5.4-alpha] — Tier-2 JIT: region/trace compilation (2026-08-19)
+
+The performance milestone (ROADMAP #14). Today every block flushes all
+vregs to `cpu.regs[]`/stack at its epilogue and the successor reloads
+the same values from memory — SIGPROF showed that per-block boundary
+cost (regalloc spill/reload bloat), not dispatch or marshalling, is the
+residual emulator overhead. Tier-2 compiles a **region** (a trace or a
+natural loop) as ONE unit with a whole-region register allocation, so
+values stay resident in host registers across internal block edges and
+back-edges.
+
+### Phase 1 — profile-guided trace collection + compilation (SHIPPED)
+
+- **Step 1 (per-block hot-head counters):** `BlockEntry.exec_count`
+  uint32 counters + env gates (`BIFROST_TIER2=1` to enable,
+  `BIFROST_TIER2_HITS` default 10000, `BIFROST_TIER2_TRACE`),
+  incremented on the slow-path cache hits of `run_block` and
+  `lookup_call_target` (the BL/BLR entry path real hot loops use).
+  With `BIFROST_TIER2` unset the whole feature is skipped, so behavior
+  is byte-identical to previous releases.
+- **Step 2 (`collect_tier2_trace` walker):** pure read-only collection —
+  decode straight-line guest control flow from a hot head, following
+  fall-through edges, capped at 64 blocks / 2048 guest instructions.
+  Aborts on `call_interp` / `svc` / indirect-branch / `bl` /
+  decode-fail / vreg-exhaust; conditional branches whose taken target
+  equals the head end the trace as a `b_backedge` so a natural loop's
+  taken back-edge becomes the region's `Lback`.
+- **Step 3 (`compile_tier2_region` M1):** one x86 function per trace,
+  ONE regalloc pass over the concatenated block IR (region-wide vreg
+  space), inline prologue, manual BRCOND/ZERO/BIT terms, inlined cold
+  exits with per-edge `RegionSnapshot` register/flags restore, and an
+  optional `Lback` jmp back to the body start for loop regions. The
+  caller registers the returned function over the head block's
+  `blocks_` entry. M1 regions form realistically as LINEAR fall-through
+  chains (taken edges = cold exits); loop regions at cap coincidence.
+- **Step 4 (in-code hot-head counter + back-edge region firing):** the
+  key insight that makes tier-2 actually fire on real workloads —
+  dispatch-side counters can't: once chains absorb a loop, only the
+  entry block ever reaches the dispatcher, so `exec_count` stays ~1-2.
+  Every eligible block's prologue now carries an 8-byte counter + an
+  `inc/cmp/jne` sequence at `chain_entry_off_` counting EVERY entry
+  (cold dispatch AND chain edges, self-loops excluded via their
+  body-start jump). Crossing the threshold calls `tier2_fire_stub` from
+  inside the running block, which collects the head's trace, compiles it
+  as a region, and force-patches the loop's taken chain slots to `jmp`
+  into the region (next iteration enters the region). After firing,
+  `tier2_counter_disable` overwrites the 6-byte `inc` with a `jmp` over
+  the whole sequence so hot blocks stop paying the ~6-cycle entry cost.
+  Measured: 2-block natural loop (20M iters) 272-273 ms → 249-251 ms
+  (~8% win); bench_matrix/bench_sort neutral (their hot loops are
+  self-loops M1 cannot fuse, or blr-heavy); JIT_VERIFY adds zero new
+  divergences.
+
+### Phase 2 step 1 — loop-carried arch-GPR pinning
+
+- **R12-R15 pin loop-carried arch GPRs** across tight self-loops and
+  back-edge regions: the prologue preloads the pins once, `STORE_REG`
+  refreshes the pin and DEFERS the `cpu.regs[]` store, the back-edge
+  preserves the pins, and the loop exit flushes once. Pins are excluded
+  from the allocator pool. The region `Lback` no longer flushes all
+  vregs (regions remap scratch vregs to disjoint ranges, so only arch
+  GPRs are live at the back-edge).
+- **BRCOND_ZERO/BRCOND_BIT self-loops now emit the tight 5-byte
+  self-loop slot** (previously BRCOND only) — CBZ/CBNZ/TBZ/TBNZ
+  while-loops (GCC vectorized memchr/strchr) skip the dispatcher
+  (~2.7× vs the dispatcher path on bench_mips). Also a hard prerequisite
+  for deferred pins: without the slot the re-entered prologue preloads
+  stale `cpu.regs[]` for deferred values (infinite loop).
+- **Correctness guards:** the `STORE_REG` keep requires the register to
+  survive the BRCOND term (not FLAGS3={RAX,RCX,RDX,R8}, not another
+  vreg's pin); direct-write detection uses an explicit op list (a
+  `dest<=30` catch-all hits branch ops' dummy `dest=0` and kills the
+  loop-invariant x0 pin); pinning is disabled under
+  `BIFROST_NO_SELFLOOP=1` and `BIFROST_JIT_VERIFY=1` (verify
+  un-patches the self-loop slot, breaking deferral).
+- **Performance verdict (honest):** NEUTRAL — bench_mips 354-357 ms vs
+  HEAD 357-359 (~1%, noise) and CoreMark 3469-3490 vs 3483-3495
+  identical. The pin machinery is a correct, verified stepping stone for
+  cross-block pinning; the CBZ/TBZ tight-slot feature is the measurable
+  win of this milestone.
+- **Verification:** full suite 200/200 (50 s), `REGALLOC_CHECK` clean,
+  JIT_VERIFY failure set identical to the parent commit, bench_mips acc
+  `0xf800800a2c4ff835`. Bisection gates: `BIFROST_NO_PIN=1` (pins off,
+  slot on), `BIFROST_NO_SELFLOOP=1` (both off).
+
 ## [1.5.3-alpha] — Vulkan command-buffer rendering (2026-08-19)
 
 ### Real Vulkan frames now render through DisplayThunk

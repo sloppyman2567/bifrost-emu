@@ -125,7 +125,7 @@ void Emulator::syscall(CPU& cpu) {
             return;
         }
     }
-    // 1.5.3-alpha: vDSO clock fast-path. The vDSO clock stubs
+    // 1.5.4-alpha: vDSO clock fast-path. The vDSO clock stubs
     // (gettimeofday/clock_gettime/clock_getres) trap here with the SVC's
     // return PC inside the vDSO mapping. Read the host clock directly and
     // skip the full syscall dispatch (drain_host_signals + six subsystem

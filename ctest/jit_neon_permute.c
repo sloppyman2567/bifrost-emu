@@ -78,7 +78,7 @@ static void test_trn2_8h(void) {
     CHECK(memcmp(out, exp, 16) == 0, "trn2 v.8h");
 }
 
-// ── Full PERMUTE family coverage (native JIT since 1.5.3-alpha) ────────
+// ── Full PERMUTE family coverage (native JIT since 1.5.4-alpha) ────────
 // Q=1 forms: 16-byte operands, v_lo + v_hi. Each expected value is
 // computed in C from the same semantics as interp_fp.cpp's permute block.
 
