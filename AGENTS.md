@@ -2035,3 +2035,32 @@ not musl-`-static`.
   question is worldgen's fat noise loops → plan.md Track 0 minecraft A/B).
 - Not committed alongside: `.gitignore` (+rules.md personal file) and
   untracked `plan.md` (Track 0-5 roadmap + do-not-regress list).
+
+## Session History (2026-08-20) — Track 1 committed + minecraft A/B methodology
+
+- **Track 1 COMMITTED as `054a4d5`** ("tier2: call-aware regions — fuse
+  BL/BLR into traces (Track 1)"; jit_tier2.cpp + AGENTS.md, +142/−21). The
+  commit message carries the full summary; the contract is in the Session
+  History entry above. Left uncommitted on purpose: `.gitignore`
+  (+rules.md personal file) and untracked `plan.md`.
+- **Minecraft tier2 A/B measured — PARITY, with three hard-won methodology
+  lessons (full protocol in plan.md Track 0):**
+  1. The game's whole loop (ticks + chunkgen) is chained to HOST VSYNC —
+     run with `__GL_SYNC_TO_VBLANK=0` or you measure the monitor.
+  2. **Chunk-generation counts measure PLAYER INPUT**: `[DBG-GEN] done`
+     lines follow the player (still → ~91-chunk ring; walking → hundreds).
+     An interactive user on DISPLAY=:0 poisons every run silently (produced
+     a fake 485-chunk outlier and a fake −13% "regression" that was briefly
+     misdiagnosed as in-code-counter tax — retracted).
+  3. `BIFROST_STATS_PERIOD` prints only when the main run loop spins; this
+     game blocks it in GL/thunk calls most of each frame → ONE dump per run,
+     `0.0 MIPS` (huge dt). Not a usable meter here.
+  Clean protocol: host-timestamp every output line, time
+  `GAME-ENTER-LOOP` → chunk #80 `[DBG-GEN] done` (inside the no-input ring),
+  hands off input for the first ~20 s. Result: OFF avg 2.81 s / ON avg
+  2.80 s (2 reps each) = parity at ±7% resolution. tier2 stays opt-in.
+- Harness note: m5one/m5n/m5big's `bl .inner` is in the OUTER loop, outside
+  the traced self-loop — they do NOT exercise call regions. Use
+  `/tmp/opencode/m6bl.S`/`m6blr.S` (2-block loop, BL/BLR inside block 2,
+  head call-free so the counter fires; acc `0x9999999999999992` matches the
+  closed form acc_{n+1}=6·acc_n+38 ×262144).
