@@ -665,6 +665,14 @@ private:
         // Set once the block has been flagged as a hot head, so the flag +
         // trace-fire happen exactly once per block (exec_count keeps counting).
         bool     tier2_hot_logged = false;
+        // True if this BlockEntry is a tier-2 region fn (registered by
+        // tier2_fire_region). Region entries have NO chain slots (their
+        // chained/taken_chained are set true and the slots are 0), so any
+        // repatch logic must never treat them as standalone blocks — and a
+        // region fire must not repatch the stale standalone slots of a block
+        // that has since become a DIFFERENT region's head (overlapping
+        // traces share blocks; hijacking those slots cross-wires regions).
+        bool     is_region = false;
         // Offset of the tier-2 in-code hot-head counter (8 bytes of counter
         // state just before the fn entry; the prologue `inc`/`cmp`/`jne` fire
         // path against it). 0 = no counter emitted (block ineligible, or tier-2

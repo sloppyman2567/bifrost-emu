@@ -431,7 +431,7 @@ void ir_reset_vreg_alloc();
 //   - Dead code elimination (unused stores/scratch ops)
 //   - Peephole (load+op fusion, mask elimination when sf=1)
 //   - Local register caching (LOAD_REG → reuse cached vreg if value is live)
-void optimize_ir(IRBlock& block);
+void optimize_ir(IRBlock& block, bool force_fwd = false);
 // Dump an IR block to stderr for debugging.
 void dump_ir(const IRBlock& block, FILE* out = stderr);
 } // namespace arm64emu

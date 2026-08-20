@@ -214,7 +214,7 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
     }
 }
 // ── The main optimizer ────────────────────────────────────────────────
-void optimize_ir(IRBlock& block) {
+void optimize_ir(IRBlock& block, bool force_fwd) {
     if (block.insts.empty()) return;
     // LDXR_FAST, STXR_FAST, or STLR_FAST ops. If so, disable the
     // arm_reg_cache load-forwarding (FWD) for the ENTIRE block. These
@@ -228,8 +228,14 @@ void optimize_ir(IRBlock& block) {
     // FWD is a ~5.6% speedup on compute loops — we skip it only for
     // blocks with atomics, which are rare in compute workloads.
     static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
+    // The tier-2 walker forces FWD on for region blocks: without the
+    // STORE_REG→LOAD_REG forwarding, real guest invariant chains (threaded
+    // through a GPR) keep a memory round-trip on every step and LICM can
+    // never hoist them. FWD is verified correct (2026-08-15 fix + suites);
+    // forcing it here only affects region IR, never the standalone JIT.
+    bool fwd_requested = enable_fwd_ || force_fwd;
     bool block_has_atomics = false;
-    if (enable_fwd_) {
+    if (fwd_requested) {
         for (const auto& inst : block.insts) {
             if (inst.op == IROp::ATOMIC ||
                 inst.op == IROp::LDXR_FAST ||
@@ -240,7 +246,7 @@ void optimize_ir(IRBlock& block) {
             }
         }
     }
-    bool fwd_enabled = enable_fwd_ && !block_has_atomics;
+    bool fwd_enabled = fwd_requested && !block_has_atomics;
     ConstMap consts;
     CopyMap  copies;
     // Last vreg → index in insts that defined it (for store-load fwd).

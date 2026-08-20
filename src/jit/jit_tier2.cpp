@@ -231,6 +231,35 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
 
         if (aborted) break;
         if (instr_count == 0) break;  // nothing decoded — discard the block
+        // Mirror translate_block: run the IR optimizer on each block BEFORE
+        // concatenation. Without it the region IR keeps every
+        // STORE_REG→LOAD_REG round-trip that optimize_ir's Pass 1 (store-load
+        // forwarding) would collapse into a single vreg — an invariant chain
+        // threaded through a guest GPR then stays unhoistable to LICM (the
+        // STORE_REG is an arch write, the LOAD_REG reads written state), so
+        // the region's preheader can never absorb it. Same guard as
+        // translate_block: blocks with BRCOND_SKIP skip optimization (its DCE
+        // could erase ops inside the skip region and invalidate the skip's
+        // op-count imm). The term op survives optimization, so re-derive the
+        // recorded side-exit op index (insts.size()-1) afterwards.
+        static bool walker_no_opt_ = (getenv("BIFROST_NO_OPT") != nullptr);
+        bool has_brcond_skip = false;
+        for (const auto& ir_inst : tb.ir.insts) {
+            if (ir_inst.op == IROp::BRCOND_SKIP) {
+                has_brcond_skip = true;
+                break;
+            }
+        }
+        if (!walker_no_opt_ && !has_brcond_skip) {
+            // Force FWD on for region blocks (see optimize_ir's force_fwd):
+            // it collapses STORE_REG→LOAD_REG round-trips into single vregs,
+            // which is what makes real guest invariant chains LICM-hoistable.
+            optimize_ir(tb.ir, /*force_fwd=*/true);
+            if (!tb.side_exits.empty()) {
+                tb.side_exits[0].second =
+                    static_cast<int>(tb.ir.insts.size() - 1);
+            }
+        }
         trace.total_insts += static_cast<uint64_t>(instr_count);
         trace.blocks.push_back(std::move(tb));
         if (trace_ended || trace_ends_after_block) {
@@ -247,9 +276,17 @@ Tier2Trace FrostJIT::collect_tier2_trace(Emulator& emu, uint64_t head_pc) {
         trace.stop_reason = "block_cap";
         trace_ended = true;
     }
-    // Only multi-block traces qualify — a 1-block trace is just the existing
-    // block JIT. An aborted trace is never compiled regardless of length.
-    trace.ok = (!aborted && trace.blocks.size() >= 2);
+    // Multi-block traces qualify for a region — and so does a 1-block
+    // SELF-LOOP (its cond branch targets itself, stop=b_backedge): it gains
+    // the LICM preheader + DCE + const-prop that a plain block can't have,
+    // which is Phase 2's "fuse the self-loop". A 1-block LINEAR trace is
+    // just the existing block JIT and stays rejected. An aborted trace is
+    // never compiled regardless of length.
+    bool self_loop_trace = (trace.blocks.size() == 1 &&
+                            !trace.blocks.empty() &&
+                            trace.blocks[0].side_exits.size() == 1 &&
+                            trace.blocks[0].side_exits[0].first == head_pc);
+    trace.ok = (!aborted && (trace.blocks.size() >= 2 || self_loop_trace));
     if (trace.ok) {
         tier2_traces.fetch_add(1, std::memory_order_relaxed);
     } else if (!aborted && trace.stop_reason == nullptr) {
@@ -308,7 +345,18 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
 
     const auto& blocks = trace.blocks;
     const size_t nblk = blocks.size();
-    if (nblk < 2) return nullptr;
+    if (nblk < 1) return nullptr;
+    if (nblk == 1) {
+        // 1-block region = a SELF-LOOP: the single block's cond branch must
+        // target the head (itself), giving the region an Lback + LICM
+        // preheader. A 1-block LINEAR trace carries no back-edge and gains
+        // nothing over the standalone block JIT — reject it.
+        const auto& b0 = blocks[0];
+        if (b0.side_exits.size() != 1 ||
+            b0.side_exits[0].first != trace.head_pc) {
+            return nullptr;
+        }
+    }
 
     // ── M1 shape validation ──────────────────────────────────────────
     // The region is a linear fall-through chain; every block must be
@@ -328,7 +376,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         IROp term_op = b.ir.insts[term_idx].op;
         if (term_op != IROp::BRCOND && term_op != IROp::BRCOND_ZERO &&
             term_op != IROp::BRCOND_BIT) {
-            return nullptr;
+            // BRCOND_FALLTHRU (an unconditional direct `b target`) is legal
+            // ONLY as the LAST block's term: the walker ends the trace at
+            // every unconditional branch, so a mid-trace one is impossible —
+            // reject defensively. This unlocks the standard GCC loop bottom
+            // `... ; b.eq exit ; body ; b .loop` (cond exit mid-trace +
+            // unconditional back-edge), previously rejected as "term class B".
+            if (!(term_op == IROp::BRCOND_FALLTHRU && i == nblk - 1)) return nullptr;
         }
         if (i < nblk - 1 && b.side_exits[0].first == trace.head_pc) {
             return nullptr;  // mid-trace back-edge
@@ -385,157 +439,33 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                       blocks[i].pc, static_cast<size_t>(blocks[i].ir.count)};
     }
 
-    // ── Codegen state reset (mirror translate_block's start) ─────────
-    make_writable();
-    current_start_pc_ = trace.head_pc;
-    code_buf_overflow_ = false;
-    call_interp_branch_patches_.clear();
-    branch_target_patches_.clear();
-    skip_fixups_.clear();
-    rax_holds_next_pc_ = false;
-    flags_in_host_ = false;
-    flags_from_sub_ = false;
-    chain_target_pc_ = 0;
-    unchainable_end_ = true;  // the region never chains out
-    has_selfloop_slot_ = false;
-    selfloop_patch_off_ = 0;
-    has_taken_chain_slot_ = false;
-    taken_chain_patch_off_ = 0;
-    taken_chain_target_pc_ = 0;
-    pending_flag_mat_.clear();
-    chain_entry_off_ = 0;
-    num_stack_slots_ = 0;
-    vec_cache_reset();  // regions never use the vec/fp cache (memory paths)
-    regalloc_stats_reset();
-    size_t block_start = code_buf_used_;
-    int clear_limit = region_max_vreg + 1;
-    if (clear_limit > 4096) clear_limit = 4096;
-    for (int i = 0; i < clear_limit; i++) {
-        vreg_home_[i] = -1;
-        vreg_dirty_[i] = false;
-        vreg_slot_[i] = 0;
-        vreg_last_use_[i] = 0;
-    }
-    for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
-    max_vreg_ = region_max_vreg;
-    dirty_host_regs_ = 0;
-    // Pre-assign stack slots for every region scratch vreg (fixed frame).
-    for (int v = 33; v <= region_max_vreg; v++) {
-        vreg_slot_[v] = -8 * (v - 32);
-    }
-    num_stack_slots_ = region_max_vreg - 32;
-    if (num_stack_slots_ < 1) num_stack_slots_ = 1;
-    uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
-
-    // ── Liveness over the concatenated region IR (mirror translate_block) ──
-    {
-        size_t n = region_ir.size();
-        vreg_last_use_op_.assign(4096, -1);
-        vreg_uses_.assign(4096, {});
-        for (size_t i = 0; i < n; i++) {
-            const IRInst& inst = region_ir[i];
-            if (inst.op != IROp::LOAD_REG) {
-                if (inst.src1 > 31 && inst.src1 < 4096) {
-                    vreg_last_use_op_[inst.src1] = static_cast<int>(i);
-                    vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(i));
-                }
-                if (inst.src2 > 31 && inst.src2 < 4096) {
-                    vreg_last_use_op_[inst.src2] = static_cast<int>(i);
-                    vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(i));
-                }
-            }
-            if (inst.aux > 31 && inst.aux < 4096) {
-                vreg_last_use_op_[inst.aux] = static_cast<int>(i);
-                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(i));
-            }
-        }
-        kills_per_op_.assign(n, {});
-        for (int v = 32; v < 4096; v++) {
-            if (vreg_last_use_op_[v] >= 0) {
-                kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
-            }
-        }
-        // Fold-lookahead (same guards as translate_block's pre-scan — the
-        // consumer folds the const into an x86 immediate and never reads the
-        // vreg's host mapping, so the IMM codegen may skip its mov).
-        fold_ahead_kind_.assign(n, 0);
-        for (size_t i = 0; i + 1 < n; i++) {
-            const IRInst& im = region_ir[i];
-            if (im.op != IROp::IMM) continue;
-            if (!(im.dest > 32 && im.dest < 4096)) continue;
-            if (vreg_last_use_op_[im.dest] != static_cast<int>(i + 1)) continue;
-            const IRInst& nx = region_ir[i + 1];
-            if (nx.src2 != im.dest || nx.dest == nx.src2 || nx.src1 == nx.src2) continue;
-            switch (nx.op) {
-                case IROp::ADD: case IROp::SUB: case IROp::AND:
-                case IROp::OR:  case IROp::XOR:
-                    fold_ahead_kind_[i] = 1;
-                    break;
-                case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
-                    fold_ahead_kind_[i] = 2;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-    // Region-wide flag-loop-carry: true iff a flag CONSUMER appears before
-    // the first flag SETTER over the concatenated IR. If false, the loop
-    // back-edge may skip the pstate materialization (the loop top's first
-    // flag-setting op re-establishes host flags before any consumer reads
-    // them); if true, the back-edge must materialize (the loop top reads
-    // pstate as an input — same contract as the cross-block skip).
-    bool region_flags_loop_carried = false;
-    {
-        bool setter_seen = false;
-        for (const IRInst& inst : region_ir) {
-            bool consumer = false;
-            switch (inst.op) {
-                case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
-                case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
-                case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:
-                    consumer = true;
-                    break;
-                default:
-                    break;
-            }
-            if (consumer && !setter_seen) {
-                region_flags_loop_carried = true;
-                break;
-            }
-            switch (inst.op) {
-                case IROp::ADDS: case IROp::SUBS:
-                case IROp::ADCS: case IROp::SBCS:
-                case IROp::TST: case IROp::TST_ZERO:
-                case IROp::CCMP: case IROp::FP_CMP:
-                    setter_seen = true;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-
     // ── Phase 2 loop-carried arch GPR pinning (back-edge regions) ─────
-    // When the region's last block loops back to the head (last_is_backedge),
-    // the loop-carried arch GPRs — values READ before they are WRITTEN over
-    // the concatenated region IR — are PINNED to fixed callee-saved regs
-    // (R12-R15) for the whole loop. The prologue preloads them once (every
-    // region entry goes through the prologue; the back-edge jmp to body_start
-    // skips it); STORE_REG refreshes the pin; the back-edge (Lback) NO LONGER
-    // flushes all vregs, so the pinned values survive the loop in registers —
-    // no store→cpu.regs[]→load round trip per iteration. The flush removal
-    // is safe because regions write arch GPRs eagerly (STORE_REG) and FP/
-    // vector regs eagerly (no fp/vec cache), and every block's scratch vregs
-    // are remapped to DISJOINT ranges (compile_tier2_region above), so at the
-    // back-edge the only live state is arch GPRs + FP regs — the flush only
-    // ever stored dead scratch vregs. The pins are excluded from the
-    // allocator pool (pinned_host_regs_), so nothing can claim them mid-loop.
+    // Runs BEFORE the LICM pass below: LICM consults arch_pin_ to avoid
+    // hoisting a LOAD_REG of a pinned arch (the pin already makes the body
+    // read free; hoisting it to a preheader slot would be a per-iteration
+    // regression). Computing the pins on the pre-LICM IR is safe because LICM
+    // only hoists LOAD_REGs of NON-pinned archs, so a pinned arch's read
+    // stays in the body and the pin stays live; an unpinned arch whose read
+    // gets hoisted simply has no pin. When the region's last block loops back
+    // to the head (last_is_backedge), the loop-carried arch GPRs — values READ
+    // before they are WRITTEN over the concatenated region IR — are PINNED to
+    // fixed callee-saved regs (R12-R15) for the whole loop. The prologue
+    // preloads them once (every region entry goes through the prologue; the
+    // back-edge jmp to body_start skips it); STORE_REG refreshes the pin; the
+    // back-edge (Lback) NO LONGER flushes all vregs, so the pinned values
+    // survive the loop in registers — no store→cpu.regs[]→load round trip per
+    // iteration. The flush removal is safe because regions write arch GPRs
+    // eagerly (STORE_REG) and FP/vector regs eagerly (no fp/vec cache), and
+    // every block's scratch vregs are remapped to DISJOINT ranges
+    // (compile_tier2_region above), so at the back-edge the only live state
+    // is arch GPRs + FP regs — the flush only ever stored dead scratch vregs.
+    // The pins are excluded from the allocator pool (pinned_host_regs_), so
+    // nothing can claim them mid-loop.
     {
         for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
         pinned_host_regs_ = 0;
         keep_store_dest_ = false;
-if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
+        if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
             bool has_call = false;
             for (const IRInst& inst : region_ir) {
                 if (inst.op == IROp::SVC || inst.op == IROp::BR ||
@@ -609,6 +539,329 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
         }
     }
 
+    // ── M2 transforms: region DCE + loop-invariant code motion (LICM) ──
+    // Run on the concatenated IR after the pin analysis above (which LICM
+    // consults to avoid hoisting pinned-arch reads) and BEFORE the liveness/
+    // fold analyses below, so those see the transformed IR. Term branches
+    // (BRCOND/ZERO/BIT) carry a dummy dest=0 and are never removed; rblocks'
+    // start/term indices are rebuilt after removals (side_pc/pc/inst_count are
+    // untouched — DCE drops IR ops, never ARM instructions).
+    //
+    // Pure GPR ops: no flags, no memory, no arch writes beyond dest. The
+    // dest>32 scratch guard automatically leaves all FP/SIMD state alone
+    // (those write v_lo/v_hi[dest] with dest = the FP reg index 0-31) and all
+    // arch writes, flag setters, memory ops, STORE_REG, calls and branches in
+    // place.
+    auto is_m2_pure_gpr = [](IROp op) -> bool {
+        switch (op) {
+            case IROp::IMM: case IROp::MOV:
+            case IROp::ADD: case IROp::SUB: case IROp::MUL:
+            case IROp::AND: case IROp::OR:  case IROp::XOR:
+            case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+            case IROp::NOT: case IROp::NEG: case IROp::SEXT: case IROp::ZEXT:
+            case IROp::CLZ: case IROp::CLS: case IROp::RBIT:
+            case IROp::REV16: case IROp::REV32: case IROp::REV64:
+            case IROp::UBFM: case IROp::SBFM: case IROp::EXTR: case IROp::BFM:
+            case IROp::UDIV: case IROp::SDIV:
+            case IROp::SMADDL: case IROp::UMADDL:
+            case IROp::SMULH: case IROp::UMULH:
+            case IROp::SMSUBL: case IROp::UMSUBL:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    // (a) Region DCE: drop pure GPR scratch ops whose dest is never read.
+    // One pass is sufficient: removing an op only removes a DEFINITION, never
+    // a use, so it cannot make another op newly-dead (a leftover dead op
+    // merely computes an unused value — harmless).
+    if (!getenv("BIFROST_NO_RDCE")) {
+        std::vector<uint16_t> uses(4096, 0);
+        for (const auto& inst : region_ir) {
+            if (inst.op != IROp::LOAD_REG) {
+                if (inst.src1 > 31 && inst.src1 < 4096) uses[inst.src1]++;
+                if (inst.src2 > 31 && inst.src2 < 4096) uses[inst.src2]++;
+            }
+            if (inst.aux > 31 && inst.aux < 4096) uses[inst.aux]++;
+        }
+        region_ir.erase(
+            std::remove_if(region_ir.begin(), region_ir.end(),
+                           [&](const IRInst& inst) {
+                               if (!(inst.dest > 32 && inst.dest < 4096)) return false;
+                               if (!is_m2_pure_gpr(inst.op)) return false;
+                               return uses[inst.dest] == 0;
+                           }),
+            region_ir.end());
+    }
+
+    // (b) LICM: for back-edge regions only, hoist loop-invariant pure GPR ops
+    // and GPR LOAD_REG of never-written, non-pinned arch regs into a preheader
+    // emitted once per region entry (the Lback jumps to body_start, past it).
+    // All blocks of a back-edge region run every iteration, so "invariant" =
+    // sources are never redefined in the region: scratch sources must be
+    // defined by a hoisted op (forward pass, defs precede uses), arch sources
+    // must be read-only LOAD_REG (sf=0) that is NOT pinned (arch_pin_ was
+    // computed above; a pinned read is already free in the body, hoisting it
+    // to a preheader slot would be a per-iteration regression). CSEL/CSINC/
+    // CSINV/CSNEG read flags and are excluded (flags may be loop-carried).
+    // IMM IS hoistable: chains like `add x12,x8,x8,lsl#1` lower to
+    // IMM(1);SHL;ADD — excluding the IMM stranded the whole chain in the body
+    // (only the bare LOAD_REGs hoisted, which measured ~1% SLOWER on m2loop3
+    // because the body then reloaded them from slots). A hoisted IMM emits a
+    // dead mov in the preheader (its consumers fold via jit_consts_ or load
+    // the slot once per region entry) — negligible. The hoisted results live
+    // in their pre-assigned stack slots; block0's body is compiled after a
+    // flush+invalidate, so it reloads them from the slots each iteration.
+    std::vector<IRInst> preheader;
+    if (last_is_backedge && !getenv("BIFROST_NO_LICM")) {
+        bool arch_written[32] = {false};
+        for (const auto& inst : region_ir) {
+            if (inst.op == IROp::STORE_REG) {
+                if (inst.sf == 0 && inst.dest <= 30) arch_written[inst.dest] = true;
+            } else if (inst.dest <= 30 &&
+                       (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
+                        inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
+                        inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
+                        inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
+                        inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
+                        inst.op == IROp::SIMD_UMOV ||
+                        inst.op == IROp::LOAD_MEM || inst.op == IROp::ATOMIC)) {
+                arch_written[inst.dest] = true;
+            }
+        }
+        std::vector<bool> hoisted_vreg(4096, false);
+        std::vector<char> hoisted_op(region_ir.size(), 0);
+        for (size_t i = 0; i < region_ir.size(); i++) {
+            const IRInst& inst = region_ir[i];
+            if (!(inst.dest > 32 && inst.dest < 4096)) continue;
+            if (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
+                inst.op == IROp::CSINV || inst.op == IROp::CSNEG)
+                continue;
+            if (inst.op != IROp::LOAD_REG && !is_m2_pure_gpr(inst.op)) continue;
+            auto src_invariant = [&](uint16_t s) -> bool {
+                if (inst.op == IROp::LOAD_REG) {
+                    // LOAD_REG's src1 is the ARCH REG INDEX (0-30), never a
+                    // "no source" marker — x0 = index 0 is a REAL operand. The
+                    // s==0 no-source shortcut below must NOT apply here.
+                    if (inst.sf != 0) return false;   // FP read — not invariant
+                    if (s > 30) return false;         // LOAD_REG src1 must be arch
+                    // A PINNED arch read is allowed to hoist: the preheader
+                    // is emitted AFTER the pin preloads, so the chain resting
+                    // on a pinned base reads the pin directly at region entry
+                    // (the arch is never written in the loop, so the entry
+                    // value is invariant). The pre-header chain removes the
+                    // per-iteration recompute — the real LICM win, and the
+                    // common real-world shape (invariant bases are exactly
+                    // what gets pinned). A pinned read with NO hoisted
+                    // consumer is un-hoisted below (refine), so a bare load
+                    // does not regress to a per-iteration slot read.
+                    return !arch_written[s];
+                }
+                if (s == 0) return true;  // no source
+                if (s > 32 && s < 4096) return hoisted_vreg[s];
+                return false;  // arch/XZR/SP sources on a pure op — never hoist
+            };
+            if (!src_invariant(inst.src1)) continue;
+            if (!src_invariant(inst.src2)) continue;
+            if (!src_invariant(inst.aux)) continue;
+            hoisted_vreg[inst.dest] = true;
+            hoisted_op[i] = 1;
+        }
+        // Refine: un-hoist a hoisted IMM or LOAD_REG with NO hoisted consumer.
+        // A dead preheader mov is harmless, but a hoisted IMM that only fed
+        // body ops (e.g. `mov wN,#imm` feeding a STORE_REG) or a hoisted
+        // PINNED-arch LOAD_REG with no hoisted chain consumer would make the
+        // body consumer load from a slot each iteration (slower than the
+        // in-body mov / free pin read). Safe: any hoisted op that consumed
+        // the IMM is itself a hoisted consumer, so this only ever un-hoists
+        // ops nothing hoisted depends on.
+        for (size_t i = 0; i < region_ir.size(); i++) {
+            if (!hoisted_op[i]) continue;
+            if (region_ir[i].op != IROp::IMM && region_ir[i].op != IROp::LOAD_REG) continue;
+            uint16_t d = region_ir[i].dest;
+            bool any_hoisted_consumer = false;
+            for (size_t j = i + 1; j < region_ir.size(); j++) {
+                if (!hoisted_op[j]) continue;
+                const IRInst& c = region_ir[j];
+                if (c.src1 == d || c.src2 == d || c.aux == d) {
+                    any_hoisted_consumer = true;
+                    break;
+                }
+            }
+            if (!any_hoisted_consumer) {
+                hoisted_op[i] = 0;
+                hoisted_vreg[d] = false;
+            }
+        }
+        std::vector<IRInst> body_ir;
+        body_ir.reserve(region_ir.size());
+        for (size_t i = 0; i < region_ir.size(); i++) {
+            if (hoisted_op[i]) preheader.push_back(region_ir[i]);
+            else body_ir.push_back(region_ir[i]);
+        }
+        region_ir.swap(body_ir);
+    }
+
+    // Rebuild rblocks start/term over the transformed IR (term ops are never
+    // removed, one per block, in order).
+    {
+        size_t blk_idx = 0, start = 0;
+        for (size_t i = 0; i < region_ir.size(); i++) {
+            IROp op = region_ir[i].op;
+            if (op == IROp::BRCOND || op == IROp::BRCOND_ZERO ||
+                op == IROp::BRCOND_BIT || op == IROp::BRCOND_FALLTHRU) {
+                rblocks[blk_idx].start = start;
+                rblocks[blk_idx].term = i;
+                blk_idx++;
+                start = i + 1;
+            }
+        }
+    }
+
+    // ── Codegen state reset (mirror translate_block's start) ─────────
+    make_writable();
+    current_start_pc_ = trace.head_pc;
+    code_buf_overflow_ = false;
+    call_interp_branch_patches_.clear();
+    branch_target_patches_.clear();
+    skip_fixups_.clear();
+    rax_holds_next_pc_ = false;
+    flags_in_host_ = false;
+    flags_from_sub_ = false;
+    chain_target_pc_ = 0;
+    unchainable_end_ = true;  // the region never chains out
+    has_selfloop_slot_ = false;
+    selfloop_patch_off_ = 0;
+    has_taken_chain_slot_ = false;
+    taken_chain_patch_off_ = 0;
+    taken_chain_target_pc_ = 0;
+    pending_flag_mat_.clear();
+    chain_entry_off_ = 0;
+    num_stack_slots_ = 0;
+    vec_cache_reset();  // regions never use the vec/fp cache (memory paths)
+    regalloc_stats_reset();
+    size_t block_start = code_buf_used_;
+    int clear_limit = region_max_vreg + 1;
+    if (clear_limit > 4096) clear_limit = 4096;
+    for (int i = 0; i < clear_limit; i++) {
+        vreg_home_[i] = -1;
+        vreg_dirty_[i] = false;
+        vreg_slot_[i] = 0;
+        vreg_last_use_[i] = 0;
+    }
+    for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
+    max_vreg_ = region_max_vreg;
+    dirty_host_regs_ = 0;
+    // Pre-assign stack slots for every region scratch vreg (fixed frame).
+    for (int v = 33; v <= region_max_vreg; v++) {
+        vreg_slot_[v] = -8 * (v - 32);
+    }
+    num_stack_slots_ = region_max_vreg - 32;
+    if (num_stack_slots_ < 1) num_stack_slots_ = 1;
+    uint32_t stack_bytes = static_cast<uint32_t>(num_stack_slots_ * 8 + 64) & ~15U;
+
+    // ── Liveness over the concatenated region IR (mirror translate_block) ──
+    {
+        size_t n = region_ir.size();
+        vreg_last_use_op_.assign(4096, -1);
+        vreg_uses_.assign(4096, {});
+        for (size_t i = 0; i < n; i++) {
+            const IRInst& inst = region_ir[i];
+            if (inst.op != IROp::LOAD_REG) {
+                if (inst.src1 > 31 && inst.src1 < 4096) {
+                    vreg_last_use_op_[inst.src1] = static_cast<int>(i);
+                    vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(i));
+                }
+                if (inst.src2 > 31 && inst.src2 < 4096) {
+                    vreg_last_use_op_[inst.src2] = static_cast<int>(i);
+                    vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(i));
+                }
+            }
+            if (inst.aux > 31 && inst.aux < 4096) {
+                vreg_last_use_op_[inst.aux] = static_cast<int>(i);
+                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(i));
+            }
+        }
+        kills_per_op_.assign(n, {});
+        for (int v = 32; v < 4096; v++) {
+            if (vreg_last_use_op_[v] >= 0) {
+                kills_per_op_[vreg_last_use_op_[v]].push_back(static_cast<uint16_t>(v));
+            }
+        }
+        // Fold-lookahead (M2 cross-block const-prop — supersedes translate_block's
+        // i+1-adjacent rule): an IMM is fold-ahead-skippable when its dest has
+        // EXACTLY ONE consumer anywhere later in the region (vreg_uses_ size
+        // 1) and that consumer folds the const into an x86 immediate (ALU or
+        // shift kind, same guards). The consumer never reads the vreg's host
+        // mapping, so the IMM codegen may skip its mov. Safety: vregs are
+        // unique per definition (the IMM is the only writer of its dest), the
+        // single-use check guarantees the const vreg is dead AT the consumer
+        // (vreg_last_use_this_op holds at op j), jit_consts_ is populated by
+        // the IMM before any body op (the preheader's clear precedes the body
+        // loop and nothing re-defines the dest between i and j), and the ALU
+        // kind-1 imm32 sign-extend fit is re-checked at the IMM codegen
+        // (emits the mov on mismatch, so a non-folding consumer still finds
+        // the vreg mapped). The shift kind-2 fold has no extra guards.
+        fold_ahead_kind_.assign(n, 0);
+        for (size_t i = 0; i < n; i++) {
+            const IRInst& im = region_ir[i];
+            if (im.op != IROp::IMM) continue;
+            if (!(im.dest > 32 && im.dest < 4096)) continue;
+            if (vreg_uses_[im.dest].size() != 1) continue;  // single consumer
+            if (vreg_last_use_op_[im.dest] <= static_cast<int>(i)) continue;
+            const IRInst& nx = region_ir[vreg_last_use_op_[im.dest]];
+            if (nx.src2 != im.dest || nx.dest == nx.src2 || nx.src1 == nx.src2) continue;
+            switch (nx.op) {
+                case IROp::ADD: case IROp::SUB: case IROp::AND:
+                case IROp::OR:  case IROp::XOR:
+                    fold_ahead_kind_[i] = 1;
+                    break;
+                case IROp::SHL: case IROp::SHR: case IROp::SAR: case IROp::ROR:
+                    fold_ahead_kind_[i] = 2;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    // Region-wide flag-loop-carry: true iff a flag CONSUMER appears before
+    // the first flag SETTER over the concatenated IR. If false, the loop
+    // back-edge may skip the pstate materialization (the loop top's first
+    // flag-setting op re-establishes host flags before any consumer reads
+    // them); if true, the back-edge must materialize (the loop top reads
+    // pstate as an input — same contract as the cross-block skip).
+    bool region_flags_loop_carried = false;
+    {
+        bool setter_seen = false;
+        for (const IRInst& inst : region_ir) {
+            bool consumer = false;
+            switch (inst.op) {
+                case IROp::CSEL: case IROp::CSINC: case IROp::CSINV: case IROp::CSNEG:
+                case IROp::ADCS: case IROp::SBCS: case IROp::CCMP:
+                case IROp::FP_CSEL: case IROp::BRCOND: case IROp::BRCOND_SKIP:
+                    consumer = true;
+                    break;
+                default:
+                    break;
+            }
+            if (consumer && !setter_seen) {
+                region_flags_loop_carried = true;
+                break;
+            }
+            switch (inst.op) {
+                case IROp::ADDS: case IROp::SUBS:
+                case IROp::ADCS: case IROp::SBCS:
+                case IROp::TST: case IROp::TST_ZERO:
+                case IROp::CCMP: case IROp::FP_CMP:
+                    setter_seen = true;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
     // ── Prologue (mirror translate_block) ─────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
@@ -654,6 +907,61 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
             vreg_last_use_[a] = ++regalloc_lru_counter_;
         }
     }
+    // ── M2 preheader (LICM hoisted invariants) ────────────────────────
+    // Emitted AFTER the pin preloads (so hoisted LOAD_REG of a pinned arch
+    // reuses the pin — a clean reg→reg move) and BEFORE body_start (so the
+    // Lback jumps past it). After the preheader the codegen state is
+    // flush+invalidate'd: the hoisted results land in their pre-assigned
+    // stack slots and block0's body (compiled below from a fresh regalloc)
+    // reloads them every iteration. jit_consts_ is populated BEFORE the body
+    // loop so body consumers can fold hoisted IMMs (the body loop's clear is
+    // moved up here; preheader consts persist into the body).
+    jit_consts_.clear();
+    if (!preheader.empty()) {
+        // Liveness for the preheader's OWN chain. Without this, the
+        // preheader compiled with cur_op_index_ = fold_ahead_kind_.size()
+        // (out of range — deliberately, so hoisted IMMs never skip their
+        // mov) made EVERY vreg look dead to the Belady allocator
+        // (next_use_after returned -1 for all, since the real uses lie at
+        // indices < the out-of-range cursor). alloc_reg's Belady eviction
+        // then scored every occupied reg equal (INT_MAX) and picked the
+        // FIRST allocable reg — RAX — evicting a just-loaded operand:
+        // H9's `v44 = v41 + v43` loaded v41 into RAX, then ensure_vreg(v43)
+        // evicted v41 and loaded v43 into RAX, emitting `mov rax,rax; add
+        // rax,rax` → v44 = 2*v43 instead of v41+v43 (m5self's acc came out
+        // 0x33333333 short per call). Fix: inject SYNTHETIC preheader use
+        // positions (PREHEADER_BASE + k) into vreg_uses_ so next_use_after
+        // sees each preheader-defined vreg's real next read, and compile
+        // preheader op k with cur_op_index_ = PREHEADER_BASE + k. Fold-ahead
+        // stays off (its bounds check `cur_op_index_ < fold_ahead_kind_
+        // .size()` is false for the synthetic cursor) and the body's liveness
+        // is unaffected (body indices are all < PREHEADER_BASE, so
+        // next_use_after in the body still returns the correct next body
+        // use; the synthetic high entries are only consulted during
+        // preheader compilation, when the body uses lie BELOW the cursor).
+        constexpr size_t PREHEADER_BASE = 40000;
+        for (size_t k = 0; k < preheader.size(); k++) {
+            const IRInst& inst = preheader[k];
+            if (inst.src1 > 32 && inst.src1 < 4096)
+                vreg_uses_[inst.src1].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+            if (inst.src2 > 32 && inst.src2 < 4096)
+                vreg_uses_[inst.src2].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+            if (inst.aux > 32 && inst.aux < 4096)
+                vreg_uses_[inst.aux].push_back(static_cast<uint16_t>(PREHEADER_BASE + k));
+        }
+        for (size_t k = 0; k < preheader.size(); k++) {
+            cur_op_index_ = PREHEADER_BASE + k;  // real-chain liveness, fold-ahead off
+            const IRInst& inst = preheader[k];
+            if (compile_ir_inst(inst)) {
+                code_buf_used_ = block_start;
+                make_executable();
+                return nullptr;
+            }
+            if (inst.op != IROp::IMM) jit_consts_.erase(inst.dest);
+        }
+        flush_all_vregs();
+        invalidate_all_vregs();
+    }
     size_t body_start = code_buf_used_;
 
     // ── Compile the region body ───────────────────────────────────────
@@ -674,7 +982,8 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
     RegionSnapshot back_snap;
     bool has_back_snap = false;
     size_t last_jcc = 0;         // last block's taken JCC (patched → Lback)
-    jit_consts_.clear();
+    bool last_term_uncond = false;  // last block ends in an unconditional `b`
+    bool skip_exit_sections = false;  // uncond back-edge: L_exit/Lback dead
     size_t blk = 0;
     for (size_t i = 0; i < region_ir.size(); i++) {
         while (blk < nblk && i > rblocks[blk].term) blk++;
@@ -733,6 +1042,37 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
                     uint8_t cc = (inst.cond == 0) ? 3 /*JNC*/ : 2 /*JC*/;
                     jcc = emit_jcc_rel32_placeholder(cc);
                     break;
+                }
+                case IROp::BRCOND_FALLTHRU: {
+                    // Unconditional direct branch — only the LAST block's term
+                    // (validation guarantees it). No JCC: the back-edge case is
+                    // the plain Lback jmp emitted below; the non-back-edge case
+                    // falls through into the L_exit, whose exit_pc becomes the
+                    // branch target. Record the post-body snapshot so the Lback
+                    // still honors region_flags_loop_carried.
+                    if (blk + 1 != nblk) {
+                        code_buf_used_ = block_start;
+                        make_executable();
+                        return nullptr;
+                    }
+                    last_term_uncond = true;
+                    if (last_is_backedge) {
+                        // The back-edge is a PLAIN jmp (no JCC): emit it here,
+                        // right after the last body op, and skip the L_exit /
+                        // Lback sections below (dead code — nothing falls into
+                        // them). Materialize pstate first iff the loop top
+                        // reads it (mirror the cond-back-edge Lback).
+                        if (region_flags_loop_carried) {
+                            materialize_flags_to_pstate();
+                        }
+                        int32_t rel = static_cast<int32_t>(
+                            body_start - (code_buf_used_ + 5));
+                        emit_byte(0xE9);
+                        emit_u32(static_cast<uint32_t>(rel));  // jmp body_start
+                        skip_exit_sections = true;
+                    }
+                    blk++;
+                    continue;
                 }
                 default:
                     code_buf_used_ = block_start;
@@ -803,7 +1143,10 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
 
     // ── Cold fall-through exit (L_exit), live state ─────────────────
     // The last block's not-taken path falls through here. exit_pc is the
-    // guest PC right after the last block (the walker stopped there).
+    // guest PC right after the last block (the walker stopped there) — or
+    // the unconditional branch target when the last block is `b target`.
+    // SKIPPED for an unconditional back-edge (its jmp to body_start was
+    // already emitted inline at the term; nothing falls through here).
     // Flush EVERY pinned arch vreg at every exit, not just the ones dirty
     // at the snapshot: a pin can be loop-carried-deferred (block 1 — or a
     // prior Lback iteration — wrote it via STORE_REG into its pin register),
@@ -819,7 +1162,9 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
             if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
         }
     };
+    if (!skip_exit_sections) {
     uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
+    if (last_term_uncond) exit_pc = rblocks[nblk - 1].side_pc;  // the B target
     clobber_flags();
     flush_all_vregs();
     emit_flush_all_pins();
@@ -831,6 +1176,7 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
     emit_pop(R15); emit_pop(R14); emit_pop(R13);
     emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
     emit_ret();
+    }
 
     // ── Deferred side-exit epilogues (one per non-last block) ───────
     // Restore each block's branch-point codegen state, then emit the
@@ -867,14 +1213,16 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
 
     // ── Loop back-edge (Lback): the last block's taken edge ─────────
     // Only emitted when the last block's taken target is the head (a hot
-    // loop): flush loop-carried state to cpu.regs[]/stack, then jmp to the
+    // loop) AND the last block is a CONDITIONAL branch (an unconditional
+    // back-edge emitted its jmp inline at the term, skip_exit_sections):
+    // flush loop-carried state to cpu.regs[]/stack, then jmp to the
     // region body start. block0's body was compiled with a fresh regalloc
     // state (nothing mapped), so it reloads arch vregs from cpu.regs[] and
     // scratch vregs from their stack slots — the flush makes exactly that
     // state current. Materialize pstate on the back-edge only when the loop
     // top reads it.
     size_t lback_off = code_buf_used_;
-    if (last_is_backedge && has_back_snap) {
+    if (!skip_exit_sections && last_is_backedge && has_back_snap) {
         const RegionSnapshot& s = back_snap;
         flags_in_host_ = s.flags_in_host_;
         flags_from_sub_ = s.flags_from_sub_;
@@ -896,7 +1244,7 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
         // scratch vregs. Pinned arch vregs survive in R12-R15 and block0's
         // body (compiled with the pin mappings pre-established) reuses them.
     }
-    if (last_is_backedge) {
+    if (!skip_exit_sections && last_is_backedge) {
         int32_t rel = static_cast<int32_t>(body_start - (code_buf_used_ + 5));
         emit_byte(0xE9);
         emit_u32(static_cast<uint32_t>(rel));  // jmp body_start
@@ -909,6 +1257,10 @@ if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
     // jcc_patch (linear region). The runtime taken path jumps straight to
     // its deferred exit, skipping all the not-taken inline body between.
     for (size_t k = 0; k < nblk; k++) {
+        // An unconditional-branch last block has no JCC to patch (the Lback
+        // is the plain jmp below / the linear exit falls through into the
+        // L_exit whose exit_pc was already set to the branch target).
+        if (k + 1 == nblk && last_term_uncond) continue;
         size_t target_off;
         size_t jcc;
         if (k + 1 < nblk) {
@@ -1023,12 +1375,31 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             region_entry.instr_count = static_cast<int>(trace.total_insts);
             region_entry.exec_count = old_entry.exec_count;
             region_entry.tier2_hot_logged = true;
+            region_entry.is_region = true;
             region_entry.ends_with_branch = true;
             region_entry.chained = true;        // region has no chain slot
             region_entry.taken_chained = true;
             region_entry.interp_only = false;
             region_entry.verified_once = true;  // M1: no region verify
             it->second = region_entry;
+
+            // ── Cache invalidation for the head ────────────────────────
+            // This fire ran INSIDE the old head fn (its in-code prologue
+            // counter), which the dispatcher reached through the thread-local
+            // last-block / inline caches — so those caches still pin the OLD
+            // fn for pc. A self-loop head NEVER returns to the dispatcher
+            // until the loop exits, so the next entry of pc must not hit the
+            // stale cache or the region stays dead (it compiled but never
+            // ran). Invalidate the current thread's entries for pc — we hold
+            // the exclusive blocks_mutex_ and are on the firing thread, so
+            // touching the TLS is safe; the next dispatch falls to the slow
+            // path and finds blocks_[pc] = the region.
+            if (tls_last_block_.pc == pc) tls_last_block_.pc = ~0ULL;
+            const int islot = static_cast<int>(((pc >> 2) ^ (pc >> 17)) &
+                                               (INLINE_CACHE_SLOTS - 1));
+            if (tls_inline_cache_[islot].pc == pc) {
+                tls_inline_cache_[islot].pc = ~0ULL;
+            }
 
             // ── Re-patch the loop back-edge into the region ──────────
             // Every trace block whose side exit targets the head is a
@@ -1045,9 +1416,26 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
             for (const auto& tb : trace.blocks) {
                 if (tb.side_exits.empty() || tb.side_exits[0].first != pc) continue;
                 auto bit = blocks_.find(tb.pc);
-                if (bit == blocks_.end() || !bit->second.has_taken_chain_slot) continue;
-                size_t off = bit->second.taken_chain_patch_off;
-                if (off + 5 > CODE_BUF_SIZE) continue;
+                if (bit == blocks_.end()) continue;
+                size_t off;
+                if (bit->second.has_taken_chain_slot) {
+                    // Cond-branch back-edge: the TAKEN path chain slot (the
+                    // taken-path epilogue set RDI=cpu/RSI=emu before it).
+                    off = bit->second.taken_chain_patch_off;
+                } else if (tb.ir.insts.back().op == IROp::BRCOND_FALLTHRU) {
+                    // Unconditional `b head` back-edge: there is no taken
+                    // slot — the back-edge IS the block's MAIN chain slot
+                    // (BRCOND_FALLTHRU records chain_target_pc_ and uses the
+                    // epilogue chain slot). Repatch it to the region too, or
+                    // the loop keeps jumping to the old head fn forever and
+                    // the region never runs.
+                    off = bit->second.chain_patch_off;
+                } else {
+                    // No usable chain slot — try_chain_block later chains the
+                    // block to the region (blocks_[pc].fn is the region now).
+                    continue;
+                }
+                if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
                 make_writable();  // no-op in non-W^X shared-JIT mode (we bailed above)
                 int32_t rel = static_cast<int32_t>(reinterpret_cast<const uint8_t*>(rfn) -
                                                    (code_buf_ + off + 5));
@@ -1058,6 +1446,75 @@ void FrostJIT::tier2_fire_region(Emulator& emu, uint64_t pc) {
                 if (tier2_trace_enabled()) {
                     fprintf(stderr, "[tier2]   back-edge %llx → region (chain slot @0x%zx)\n",
                             static_cast<unsigned long long>(tb.pc), off);
+                }
+            }
+
+            // ── Repatch ANY OTHER chain into the head ─────────────────
+            // A 1-block SELF-LOOP region is only ever entered COLD — its
+            // back-edge (tight self-loop slot) is intra-block and can't be
+            // redirected (that would re-run the preheader every iteration),
+            // so the region lives or dies on how the head is REACHED. If the
+            // head is reached via a chain slot in some OTHER block (e.g. the
+            // caller's taken-edge into the self-loop), that slot currently
+            // `jmp`s to the OLD head fn and would bypass the region forever —
+            // the head never returns to the dispatcher. back_refs_[pc] lists
+            // every block whose chain/taken slot targets the head; repatch
+            // them to jmp the region fn (same RDI=cpu/RSI=emu entry contract
+            // as the trace back-edges above). Standalone blocks register in
+            // back_refs_; region fns never do (regions have no chain slots),
+            // so this only touches real blocks.
+            //
+            // SLOT SELECTION (2026-08-20): back_refs_[T] conflates referrers
+            // whose MAIN slot targets T with referrers whose TAKEN slot
+            // targets T (jit_translate.cpp registers both). The old heuristic
+            // (`has_taken_chain_slot ? taken_chain_patch_off :
+            // chain_patch_off`) hijacked the WRONG edge for a block whose
+            // fall-through targets the head but which also has a taken slot
+            // for a DIFFERENT target: block 0x40064c (`b.eq 0x688`, MAIN→
+            // 0x658=head, TAKEN→0x688) got its TAKEN (loop-EXIT) slot
+            // repatched into the region, scrambling the standalone-block
+            // graph so game_demo's hot loop bounced through the region
+            // prologue once per iteration (2.1e9 lock-inc entries = 56s vs
+            // 2.2s). Mirror try_chain_block (jit_cache.cpp): repatch the
+            // MAIN slot when chain_target_pc == pc, the TAKEN slot when
+            // taken_chain_target_pc == pc.
+            auto bref = back_refs_.find(pc);
+            if (bref != back_refs_.end()) {
+                for (uint64_t src_pc : bref->second) {
+                    if (src_pc == pc) continue;  // self — tight slot, not a chain
+                    auto bit = blocks_.find(src_pc);
+                    if (bit == blocks_.end()) continue;
+                    BlockEntry& be = bit->second;
+                    if (be.is_region) continue;      // another region's head — its standalone slots are superseded
+                    if (be.fn == rfn) continue;      // already the region
+                    // Repatch each edge that actually targets the head. A
+                    // block whose BOTH edges target the head gets both.
+                    for (int edge = 0; edge < 2; edge++) {
+                        size_t off;
+                        if (edge == 0) {
+                            if (be.chain_target_pc != pc) continue;
+                            off = be.chain_patch_off;
+                        } else {
+                            if (!be.has_taken_chain_slot ||
+                                be.taken_chain_target_pc != pc)
+                                continue;
+                            off = be.taken_chain_patch_off;
+                        }
+                        if (off == 0 || off + 5 > CODE_BUF_SIZE) continue;
+                        make_writable();
+                        int32_t rel = static_cast<int32_t>(
+                            reinterpret_cast<const uint8_t*>(rfn) - (code_buf_ + off + 5));
+                        code_buf_[off] = 0xE9;
+                        memcpy(code_buf_ + off + 1, &rel, 4);
+                        std::atomic_thread_fence(std::memory_order_release);
+                        make_executable();
+                        if (tier2_trace_enabled()) {
+                            fprintf(stderr,
+                                    "[tier2]   chain-in %llx → region (slot @0x%zx, %s)\n",
+                                    static_cast<unsigned long long>(src_pc), off,
+                                    edge == 0 ? "main" : "taken");
+                        }
+                    }
                 }
             }
         }

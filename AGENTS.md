@@ -1751,3 +1751,229 @@ not musl-`-static`.
   test_pthread_cond rc=137 vs 134, vulkan 139 vs 134).
 - Bisection gates `BIFROST_SKIP_PIN_PC`/`BIFROST_PIN_ONLY_PC` and the
   `BIFROST_PIN_TRACE`/`[rbin]` region dumps were TEMPORARY and are REMOVED.
+
+## Session History (2026-08-20) — M2: region DCE + LICM + cross-block const-prop
+
+- **M2 (ROADMAP lines ~272-275) landed in `src/jit/jit_tier2.cpp`, uncommitted.**
+  Three region-level optimizations over the concatenated back-edge region IR,
+  all gated (OFF by default under the tier2 machinery; the whole file is only
+  active under `BIFROST_TIER2=1`):
+  1. **Region DCE** (`BIFROST_NO_RDCE=1` disables): removes pure-GPR scratch
+     ops (dest>32, `is_m2_pure_gpr` whitelist: IMM/MOV/ADD/SUB/MUL/AND/OR/XOR/
+     SHL/SHR/SAR/ROR/NOT/NEG/SEXT/ZEXT/CLZ/CLS/RBIT/REV16/32/64/UBFM/SBFM/
+     EXTR/BFM/UDIV/SDIV/SMADDL/UMADDL/SMULH/UMULH/SMSUBL/UMSUBL) whose dest is
+     never read. One pass suffices (removal only removes definitions). The
+     dest>32 guard auto-protects FP/SIMD (dest=FP index 0-31) and arch writes.
+  2. **LICM** (`BIFROST_NO_LICM=1` disables): hoists loop-invariant pure GPR
+     ops + GPR LOAD_REG of never-written, NON-pinned archs into a preheader
+     emitted once per region entry (the Lback jumps to body_start, past it).
+     Forward pass with `hoisted_vreg[]`; scratch sources must be hoisted,
+     arch sources must satisfy `!arch_written[s] && arch_pin_[s] == -1`.
+     CSEL family excluded (reads flags). IMM is hoistable (chains like
+     `add x12,x8,x8,lsl#1` = IMM(1);SHL;ADD need the IMM hoisted or the chain
+     strands in the body — excluding it measured ~1% SLOWER on m2loop3 because
+     only the bare LOAD_REGs hoisted and the body reloaded them from slots),
+     then REFINED: un-hoist an IMM with no hoisted consumer (prevents `mov
+     wN,#imm`→slot-load regression). Preheader emission: after pin preloads,
+     before body_start; `jit_consts_.clear()` moved up before it; preheader
+     ops compile with `cur_op_index_ = fold_ahead_kind_.size()` (no fold-ahead
+     skip); then `flush_all_vregs(); invalidate_all_vregs();` so block0's body
+     reloads hoisted results from their pre-assigned stack slots each iter.
+     `rblocks` start/term rebuilt after the transforms by scanning for
+     BRCOND/ZERO/BIT in order.
+  3. **Cross-block const-prop (fold-ahead extension)**: the fold-lookahead
+     pre-scan now marks an IMM fold-ahead-skippable when its dest has EXACTLY
+     ONE consumer ANYWHERE later in the region (`vreg_uses_[dest].size()==1`,
+     use index > i), not just the adjacent `i+1` op. The consumer must be a
+     folding ADD/SUB/AND/OR/XOR (kind 1) or SHL/SHR/SAR/ROR (kind 2) with the
+     standard guards (`src2==dest`, `dest!=src2`, `src1!=src2`). Safety: vregs
+     are unique per def; single-use ⇒ dead at the consumer (the fold's
+     `vreg_last_use_this_op` holds at op j); jit_consts_ survives (line 1000
+     only erases for non-IMM dests, and nothing re-defines the const between
+     i and j); kind-1's imm32 sign-extend fit is re-checked at the IMM codegen
+     (emits the mov on mismatch, so a non-folding consumer still finds the
+     vreg mapped); kind-2 shift fold has no extra guards.
+  **CRITICAL LICM BUG FIXED (the game_demo hang):** the `s==0` "no source"
+  shortcut in `src_invariant` was checked FIRST, so `LOAD_REG x0` (src1=0 =
+  arch reg 0, a REAL operand) returned "no source" → the LICM hoisted x0's
+  reads even when x0 was WRITTEN in the loop (STORE_REG x0) AND/OR pinned. On
+  the minecraft game's 0x400658 loop this froze the game forever (the body
+  read the stale pre-loop x0). The `s==0` shortcut must apply ONLY to
+  non-LOAD_REG ops (LOAD_REG's src1 is always the arch index 0-30). Diagnosed
+  by bisecting game_demo tier2-on hangs: `NO_LICM=1` passed, `NO_RDCE=1` hung
+  → LICM; the `[m2]` region-IR dump (temporary `BIFROST_M2_DUMP`) showed six
+  hoisted `LOAD_REG s1=0` alongside a body `STORE_REG d=0`. LOAD_REG x0
+  hoists are now blocked by both `arch_written` and `arch_pin_`.
+- **Pin analysis moved BEFORE the LICM pass** so LICM can consult `arch_pin_`
+  (a pinned-arch LOAD_REG is already free in the body — hoisting it to a
+  slot is a per-iteration regression). Computing pins pre-LICM is safe: LICM
+  only hoists NON-pinned reads, so a pinned arch's read stays in the body and
+  the pin stays live; an unpinned arch whose read is hoisted simply has no
+  pin. The pin scan itself is unchanged (same rules, explicit direct-write
+  list, first_read/first_write ordering).
+- **Measured (raw-asm 2-block natural loops, /tmp/opencode/m2loop*.S):
+  m2loop4** (heavy invariant chain on an UNPINNED arch — the 4 pins go to
+  x8/x9/x10/x11, so x15's chain is hoistable): tier2 OFF 7.49-7.53s, M1-only
+  (NO_LICM) 5.32-5.35s (~28% win from the region alone), M2 full
+  **5.05-5.06s (~5% LICM over M1)**, NO_RDCE ≈ full (DCE neutral on this
+  workload). **m2loop2** (light invariant): M2 4.32 vs M1 4.33 (LICM neutral —
+  the hoisted 2 ADDs ≈ the added slot load). **m2loop3** (heavy chain on a
+  PINNED base): M2 5.60 vs M1 5.54 — ~1% REGRESSION, because the pinned base
+  (x8) makes the chain non-hoistable AND LICM hoisted only the bare non-pinned
+  LOAD_REG (x14) which then read from a slot instead of the cheap pin; the
+  `arch_pin_`-gating fix does NOT fully cure it (the chain itself is
+  correctly left in the body, so m2loop3's body is unchanged — the ~1% is
+  the lone hoisted x14 slot-load). Lesson: LICM pays off when the invariant
+  chain rests on an unpinned arch (or more invariants than pins); with the
+  pins already covering the invariants, LICM is neutral-to-slightly-negative.
+  Workload-shaping notes: if/else arms need an unconditional `b` (else the
+  walker treats the fall-through as `b_exit` → no region); the loop head must
+  be its OWN block (`b .Lloop` boundary) else the back-edge lands mid-block;
+  the early-exit sentinel must be a rare value (a `tst i,#3;b.eq` exits on
+  iteration 0); and `movz` only loads 16 bits — a `movz x14,#0x4000` sentinel
+  is 16384, not 0x40000000 (the first m2loop timing runs were 16K iterations,
+  hence LICM-neutral).
+- **Verification:** acc byte-identical across interp/JIT/tier2 on all three
+  m2loops (m2loop2 `9c36d0c9c94272e2`, m2loop3 `7fe59a7b0607e75e`, m2loop4
+  `b30ae040b4e1553d`; quick n=20M variants for the interp run, which is slow
+  on 1e9 iters). `BIFROST_TIER2=1 BIFROST_JIT_VERIFY=1` on m2loop2_quick/
+  m2loop4_quick: no divergence lines. bench_sort/bench_matrix tier2+verify
+  divergence sets IDENTICAL to the tier2-OFF baseline (0x4024a4/0x40533c/
+  0x408148 sort, 0x405ec8 matrix — all pre-existing logging-only false
+  positives). Quick suite **200/200** with tier2 OFF AND ON (the game_demo
+  tier2 hang is fixed; a second region 0x40064c now fires cleanly). The
+  game_demo 0x400658 region's bytes dropped 1433 → 1253 once the bogus x0
+  hoists (and the chains they enabled) were gone.
+- Env gates: `BIFROST_NO_RDCE`, `BIFROST_NO_LICM`, plus the existing
+  `BIFROST_NO_PIN` / `BIFROST_NO_SELFLOOP` / `BIFROST_CHAIN_SKIP` (regions
+  decline under chain-skip). All M2 work is uncommitted; the diff is confined
+  to `src/jit/jit_tier2.cpp` (~309 insertions / ~100 deletions, mostly the
+  moved pin block). NOT committed — tree is at HEAD `85a09e9` + this diff.
+
+## Session History (2026-08-20) — M2b: unconditional-branch region terms
+
+- **BRCOND_FALLTHRU term support landed in `compile_tier2_region`
+  (jit_tier2.cpp, uncommitted)** — regions now accept a LAST block that ends
+  in an unconditional direct `b target` (encoded as `IROp::BRCOND_FALLTHRU`,
+  ir_translate.cpp:672-678), which the M1 validation previously rejected as
+  "term class B ∉ {BRCOND, ZERO, BIT}". This unlocks the standard GCC loop
+  idiom `top: cmp; b.hs exit; body; b .loop` (test-at-top cond + UNCOND
+  back-edge), the shape behind the 44-block-tail rejection from Phase 1 step
+  3. The walker already produced it (InstClass::B → side_exit + b_backedge /
+  b_exit); only the compiler dropped it.
+  - **Back-edge case** (`b head`, last_is_backedge): emit the Lback INLINE at
+    the term — `materialize_flags_to_pstate()` iff `region_flags_loop_carried`,
+    then `jmp body_start` (rel32 known at that point). `skip_exit_sections`
+    suppresses the fall-through L_exit AND the deferred Lback section (both
+    dead — nothing falls into them; the last body op falls straight into the
+    inline jmp). `emit_flush_all_pins` was hoisted OUT of the L_exit block
+    because the cold exits use it too.
+  - **Linear case** (`b target != head`): the region just falls through into
+    the L_exit whose `exit_pc` is set to the branch target
+    (`rblocks[nblk-1].side_pc`, not pc+inst_count*4); the JCC patch loop skips
+    the last block (`last_term_uncond`, no JCC exists).
+  - Validation allows BRCOND_FALLTHRU ONLY at `i == nblk-1` (the walker ends
+    the trace at every `b`, so a mid-trace one is impossible — reject
+    defensively). The rblocks term scan (line ~646) recognizes it too.
+- **CRITICAL: the back-edge repatch in `tier2_fire_region` must rewrite the
+  MAIN chain slot, not just the taken slot.** BRCOND_FALLTHRU records
+  `chain_target_pc_` and uses the epilogue's MAIN chain slot
+  (`chain_patch_off`) for its jump — `has_taken_chain_slot` is false, so the
+  old force-patch skipped the back-edge block entirely and the loop kept
+  jumping to the OLD head fn forever (the region compiled but never ran →
+  tier2 measured NEUTRAL on the new shape). Fix: the fire loop now uses
+  `taken_chain_patch_off` when `has_taken_chain_slot`, else
+  `chain_patch_off` when the block's term is BRCOND_FALLTHRU, else skips
+  (try_chain_block later chains to `blocks_[pc].fn` = the region). The main
+  slot of a COND block must NOT be repatched (it is the fall-through into the
+  next trace block).
+- **Measured (m3loop.S, /tmp/opencode, 536,887,296 iters, test-at-top +
+  `b .Lloop` bottom): tier2 OFF 3.71s → M2 **2.25s ≈ 39% faster** (the
+  region replaces 2 prologues + 2 epilogues + 1 dispatcher round-trip per
+  iteration with 1 inline jmp). m2loop2/3/4 (cond back-edge) unchanged
+  (m2loop4 5.05-5.09s). Region: 453 B, blocks=2 insts=12, back_flags_carried=0.
+- **Verified:** m3loop/m3loop_quick acc `0x00100bf1c2ed524b` /
+  `0x00100b214f490000` byte-identical across interp/JIT/tier2 (full-run interp
+  is too slow — compare JIT vs tier2 on the full n, interp on the _quick
+  n=131072 variant); m4lin.S linear-uncond smoke (`b .Lskip` cond + `b
+  .Lexit2` uncond last block) MATCH exit 0; game_demo passes tier2 ON;
+  m2loop2_quick/m2loop4_quick tri-mode MATCH; `BIFROST_JIT_VERIFY=1`+
+  tier2 zero divergence lines on m3loop_quick/m2loop4_quick; bench_sort
+  {0x4024a4,0x40533c,0x408148} / bench_matrix {0x405ec8} / bench_mips clean —
+  IDENTICAL to baseline. Quick suite **200/200** with tier2 OFF and ON.
+- Still unsupported (future work): RET-ending regions (a `br x30` term,
+  IROp::BR, would need pc=x30 load + exit), and BL/BLR inside traces (the
+  worldgen noise path — needs call-aware regions). Uncommitted — tree is at
+  HEAD `85a09e9` + M2 + this diff.
+
+## Session History (2026-08-20) — self-loop regions: preheader liveness + chain repatch fixes
+
+- **Self-loop region fusion (the whole Phase-2 goal): the head block of a
+  tight self-loop is now fused into a tier-2 region with a LICM preheader.**
+  The in-code hot-head counter counts CHAINED execution (the dispatch-side
+  counters never see real hot loops — see the Phase-1 finding), so a
+  self-loop head fires, `collect_tier2_trace` walks it, and the region
+  compiles with the loop's back-edge as an inline Lback. m5self/m5big
+  harness (synthetic raw-asm loops, /tmp/opencode/m5*.S): the region runs
+  and **m5big is 38% faster (1.553s → 0.961s JIT vs tier2)** with a
+  byte-identical acc.
+- **Region reachability REQUIRES the `back_refs_` chain repatch.** A region
+  replaces `blocks_[head]`, but the head is reached via chain slots in
+  OTHER blocks (`jmp old-head-fn`) or via a BL_CALL direct `call rel32`
+  (frostjit.cpp:846) — neither goes through the dispatcher, so cache
+  invalidation alone leaves the region dead (compiled, never entered).
+  `tier2_fire_region` now repatches (a) every trace block whose side-exit
+  targets the head (the back-edge, via its taken slot, or the MAIN slot for
+  BRCOND_FALLTHRU) and (b) every block in `back_refs_[head]` — blocks whose
+  chain/taken slot targets the head — to `jmp region-fn` (same RDI=cpu/
+  RSI=emu entry contract the taken-path epilogue sets). This is what makes
+  the region reachable at all.
+- **CRITICAL: the back_refs_ chain repatch MUST select the slot by the
+  recorded target, not by `has_taken_chain_slot`.** back_refs_[T] conflates
+  referrers whose MAIN slot targets T with referrers whose TAKEN slot
+  targets T (jit_translate.cpp registers both). The old heuristic
+  (`has_taken_chain_slot ? taken_chain_patch_off : chain_patch_off`)
+  hijacked the WRONG edge for a block whose fall-through targets the head
+  but which also has a taken slot for a DIFFERENT target: block 0x40064c
+  (`b.eq 0x688`, MAIN→0x658=head, TAKEN→0x688) in test_game_demo got its
+  TAKEN (loop-EXIT) slot repatched into the region, scrambling the
+  standalone-block graph so the hot loop bounced through the region
+  prologue once per iteration — **2.1e9 region entries = 56s vs 2.2s** (the
+  temporary region-entry lock counter made it worse; the bounce was real).
+  Fix (mirror try_chain_block, jit_cache.cpp): repatch `chain_patch_off`
+  when `chain_target_pc == pc`, `taken_chain_patch_off` only when
+  `taken_chain_target_pc == pc`; both if both edges target the head. Also
+  added `BlockEntry.is_region` and skip repatching any block that is now a
+  DIFFERENT region's head (overlapping traces share blocks — regions
+  contain the same head block; repatching a region head's stale standalone
+  slots cross-wires regions). game_demo: **56s → 2.2s** (parity with JIT),
+  region stays correct.
+- **LICM preheader liveness bug (m5 corruption):** the preheader compiled
+  with `cur_op_index_ = fold_ahead_kind_.size()` (out of range, so hoisted
+  IMMs never skip their mov) made EVERY preheader vreg look dead to the
+  Belady allocator (`next_use_after` returned -1 for all), so `alloc_reg`'s
+  eviction picked the FIRST allocable reg — RAX — clobbering a just-loaded
+  operand mid-expression (H9's `v44 = v41 + v43` loaded v41 into RAX, then
+  v43 into RAX → `add rax,rax` = 2*v43; m5 acc came out 0x33333333 short
+  per call). Fix: inject SYNTHETIC preheader use positions
+  (`PREHEADER_BASE + k`, 40000 + k — fits uint16_t) into `vreg_uses_` for
+  each preheader op's sources (src1/src2/aux, v>32) BEFORE the preheader
+  loop, and compile preheader op k with `cur_op_index_ = PREHEADER_BASE +
+  k`. Fold-ahead stays off (its bounds check `cur_op_index_ <
+  fold_ahead_kind_.size()` is false for the synthetic cursor); body
+  liveness unaffected (body indices all < PREHEADER_BASE, so the body's
+  next_use_after still returns the correct next body use; preheader-defined
+  vregs with only preheader uses are never mapped in the body). v47 (used
+  in the body) is evicted right after its preheader def — its slot holds
+  the value and the body reloads it — correct, one cold spill. Do NOT
+  revert the preheader to compile with the body index; that is the bug.
+- **Verification:** game_demo rc=0 at 2.2s tier2 ON (suite 15s timeout
+  passes); m5one/m5n/m5big/m3loop/m4lin/m2loop2/3/4 tri-mode byte-identical
+  (interp on the _quick variants); bench_mips acc `0xf800800a2c4ff835`
+  unchanged both modes; JIT_VERIFY+tier2 zero divergences on
+  m5n/m5big/m3loop_quick/m2loop4_quick; bench_sort clean, bench_matrix
+  {0x405b98, 0x405ec8} identical to tier2-OFF baseline; quick suites
+  **200/200 tier2 OFF and ON**. Temporary diagnostics (region-entry lock
+  counter, `BIFROST_T2_DUMP` region bytes dump, `tier2_region_entries`
+  stats) REMOVED; the gated `[tier2]` trace lines and `back_refs_` repatch
+  remain. Uncommitted — tree at HEAD `85a09e9` + M2/M2b + this work.
