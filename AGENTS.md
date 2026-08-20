@@ -2083,3 +2083,59 @@ not musl-`-static`.
   never fires — caught by disassembling BIFROST_JIT_DUMP output). Change
   reverted (`git checkout --`); tree at HEAD `ebd2764`. The exact-form
   requirement for tiny thresholds (HITS≤255) is moot with the revert.
+
+## Session History (2026-08-20) — Track 4: regions compose with chain-skip
+
+- **Regions now run under `BIFROST_CHAIN_SKIP=1` (committed `b84cc22`, 4
+  files +91/−20).** compile_tier2_region: allocates the unified
+  `kChainSkipFrameBytes` frame under chain-skip (vreg ceiling −32512 <
+  32 KiB, so slot layouts are identical in any chain root's frame), records
+  a region chain_entry label AFTER the emu stash and BEFORE the R10 window
+  load / pin preloads / preheader (mirroring translate_block's
+  chain_entry_off_), and publishes it via a new `chain_out` out-param
+  (frostjit.hpp declaration + all THREE registration sites: tier2_fire_region,
+  lookup_call_target frostjit.hpp ~217, run_block slow path jit_dispatch.cpp
+  ~191 — each sets `region_entry.chain_entry` when `chain_skip_enabled() &&
+  chain_fn`). Chain edges are bare jmps carrying the ROOT's rbp/rsp/rbx, so
+  they MUST enter past the frame allocation; cold dispatches enter at fn.
+  Region exits keep `mov rsp,rbp; pop×6; ret` — with rbp = the root frame
+  they unwind the whole chain to the dispatcher, same as a chained block's
+  cold exit. tier2_fire_region's two repatch loops (trace back-edges +
+  back_refs_ chain-ins) target `enter_target` = chain_fn under chain-skip,
+  rfn otherwise. BL_CALL's INCOMPLETE unwind inside a region is safe for the
+  same reason (unwinds whatever frame rbp names).
+- **CRITICAL: call-containing regions still DECLINE under chain-skip**
+  (`if (chain_skip_enabled() && has_call) return nullptr;` right after the
+  has_call computation). Reason: under chain-skip a chain-entered region's
+  rbp is the CHAIN ROOT's frame, so the BL_CALL completion guard's
+  INCOMPLETE path (`mov rsp,rbp; pop×6; ret`) would discard the live host
+  return addresses — the exact documented busybox do_wait hang that forced
+  `bl_call_disabled_ = chain_skip_enabled()` (jit_translate.cpp:283-292).
+  Guest BL cannot appear in traces under chain-skip anyway (it lowers to a
+  block-ending BRCOND_FALLTHRU there), but BLR_CALL could — this guard
+  covers it. Do NOT re-enable without redesigning the unwind contract.
+- **LANDMINE (caused an ASLR-flaky SIGSEGV mid-surgery): the 8-byte counter
+  data reservation at jit_translate.cpp ~351 carried its own
+  `!chain_skip_enabled()` gate.** Opening only the counter-emission gate
+  made counters RIP-relative-increment the PREVIOUS block's last 8 code
+  bytes → corrupted code → crashes that vanished under gdb (ASLR off) and
+  moved with env size. Symptom pair to remember: crash ONLY with
+  TIER2+CHAIN_SKIP together + normal-looking single runs + gdb-clean. Fix:
+  reservation gate is now `tier2_enabled() && !wex_enabled_` only.
+- **Walker trace shape differs under chain-skip for call loops:** m6bl's
+  trace becomes 3 blocks with a side_exits=0 middle block (the BL ended the
+  block as BRCOND_FALLTHRU) — the compiler's `side_exits != 1` validation
+  rejects it, so BL-heavy loops simply don't fuse under chain-skip (correct,
+  no fusion). Cond-branch loops (m5/m3/m2 shapes) fuse fine.
+- **Measured: composition is CORRECT but PERF-NEUTRAL** — a region's
+  internal Lback already subsumes what chain-skip saves inside fused loops
+  (m5big: chain-skip 1584ms / tier2 966ms / both 968ms; m3loop: 2760 /
+  1863 / 1853ms). The win is flag compatibility + ground for future work
+  (region cold-exits chaining OUT lease-style instead of reting to the
+  dispatcher — not implemented).
+- Verified: 11 harnesses × {jit, tier2, chain-skip, both} byte-identical;
+  JIT_VERIFY+tier2+chain-skip clean on m5big/m3loop_quick/m2loop4_quick;
+  bench_mips acc `0xf800800a2c4ff835` in all 4 modes; game_demo rc=0 ×4;
+  quick suite 200/200 under both flags; full suite 205/205 default.
+  m3loop_quick fires NO regions in either mode (pre-existing quirk, parity
+  confirmed) — use full m3loop for back-edge-region fire testing.
