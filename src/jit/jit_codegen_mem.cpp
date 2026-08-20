@@ -68,13 +68,97 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             return 0;
         case IROp::STORE_REG:
             // arm64_reg[dest] = src1. Write to cpu.regs[dest] (or v_lo if is_fp).
-            // DON'T cache dest — leave it uncached so it reloads from
-            // cpu.regs[dest] if needed (correct value, just written).
-            // DON'T touch src1 — it stays cached in its reg.
-            // This avoids all aliasing problems and eliminates spills.
+            //
+            // Phase 2 (self-loop / tier-2 region): KEEP dest cached after the
+            // store and DEFER the cpu.regs[] write. The value stays in a
+            // register (a pinned loop-carried vreg in R12-R15, or the
+            // transferred reg of a dead src1) marked DIRTY; the block's own
+            // later LOAD_REG reads reuse the cached register, and the loop
+            // exit (self-loop fall-through / region exit, both of which run
+            // flush_all_vregs before returning OR chaining) writes it back to
+            // cpu.regs[dest] ONCE. Per loop iteration this replaces a store→
+            // cpu.regs→load round trip with pure register traffic.
+            //
+            // Deferral is safe ONLY because keep_store_dest_ is enabled
+            // exclusively for self-loop blocks and back-edge regions whose
+            // exits always flush: a self-loop's taken edge is the loop-back
+            // (taken target == start_pc, so the exit is the fall-through →
+            // shared epilogue with flush_all_vregs), and regions flush at
+            // every cold/side exit. Call-like ops (interpreter, BL/BLR, SVC)
+            // are excluded from pinning — they read cpu.regs[] directly and
+            // would see the stale (deferred) value.
+            //
+            //   * Pinned arch vreg (arch_pin_[dest] >= 0): move src1 into the
+            //     pin (the loop reads it from there), mark dest dirty.
+            //   * Unpinned, src1 dead after this op: transfer src1's register
+            //     to dest (dest stays hot for its later reads), dirty.
+            //   * src1 == dest: dest's own reg already holds the value, dirty.
+            //   * Otherwise (src1 still live): old behavior — eager store to
+            //     cpu.regs[dest], kill the dest mapping.
+            // src1 itself is never touched (stays cached in its reg).
             //
             // instead of cpu.regs[]. This is used for FP LDR/STR.
             {
+                // A kept dest must live in a register the BRCOND term leaves
+                // intact: the term's flag-prep + mov-imm clobber RAX/RCX/RDX/
+                // R8 (FLAGS3) EVERY iteration, and a kept dest in one of
+                // those would be read back garbage by the next iteration's
+                // LOAD_REG (compiled as a direct reg→reg mov). Pins (R12-R15)
+                // and R9/R11 are untouched by the term, so only those are
+                // safe. A register that is another vreg's pin is also unsafe
+                // to steal (it holds that vreg's loop-carried value).
+                if (inst.sf == 0 && inst.dest <= 30 && keep_store_dest_) {
+                    int pin = arch_pin_[inst.dest];
+                    if (pin >= 0) {
+                        int s = ensure_vreg(inst.src1);
+                        if (s != pin) emit_mov_reg(pin, s);
+                        if (vreg_home_[inst.dest] != pin) {
+                            if (vreg_home_[inst.dest] >= 0) {
+                                dirty_host_regs_ &= ~(1u << vreg_home_[inst.dest]);
+                                reg_vreg_[vreg_home_[inst.dest]] = -1;
+                            }
+                            vreg_home_[inst.dest] = pin;
+                            reg_vreg_[pin] = inst.dest;
+                        }
+                        // Deferred store: dest lives in its pin, dirty.
+                        vreg_dirty_[inst.dest] = true;
+                        dirty_host_regs_ |= (1u << pin);
+                        vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+                        return 0;
+                    }
+                    int s = ensure_vreg(inst.src1);
+                    const bool s_safe =
+                        (s != RAX && s != RCX && s != RDX && s != R8) &&
+                        !(pinned_host_regs_ & (1u << s));
+                    if (s_safe && inst.src1 == inst.dest) {
+                        // Self-store: dest's own reg already holds the value.
+                        vreg_dirty_[inst.dest] = true;
+                        dirty_host_regs_ |= (1u << s);
+                        vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+                        return 0;
+                    }
+                    if (s_safe &&
+                        vreg_last_use_op_[inst.src1] <= static_cast<int>(cur_op_index_)) {
+                        // src1 dead after this op — transfer its reg to dest.
+                        if (vreg_home_[inst.dest] >= 0) {
+                            dirty_host_regs_ &= ~(1u << vreg_home_[inst.dest]);
+                            reg_vreg_[vreg_home_[inst.dest]] = -1;
+                            vreg_home_[inst.dest] = -1;
+                        }
+                        vreg_home_[inst.dest] = s;
+                        reg_vreg_[s] = inst.dest;
+                        vreg_home_[inst.src1] = -1;
+                        vreg_dirty_[inst.src1] = false;
+                        vreg_dirty_[inst.dest] = true;
+                        dirty_host_regs_ |= (1u << s);
+                        vreg_last_use_[inst.dest] = ++regalloc_lru_counter_;
+                        return 0;
+                    }
+                    // src1 still live (or its reg is unsafe) — eager store.
+                    emit_store_arm(inst.dest, s);
+                    kill_vreg(inst.dest);
+                    return 0;
+                }
                 int s = ensure_vreg(inst.src1);
                 if (inst.sf == 1 && inst.dest <= 30) {
                     // FP register: store to cpu.v_lo[dest] (or, when the fp

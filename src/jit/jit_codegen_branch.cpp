@@ -175,14 +175,43 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             patch_jcc_rel32(jcc_patch, taken_rel);
             // Restore RFLAGS (CBZ/CBNZ don't modify flags)
             emit_popfq();
+            // ── Self-loop chaining (mirrors BRCOND) ──
+            // A CBZ/CBNZ while-loop (bench_mips's counter loop, GCC
+            // vectorized memchr/strchr) gets the tight 5-byte jmp slot
+            // patched to the block body start, skipping the dispatcher and
+            // prologue every iteration. This is ALSO required for loop-
+            // carried pinning: deferred pins only persist when the back-edge
+            // jumps to the body — a taken path returning to the dispatcher
+            // re-runs the prologue, whose preloads read STALE cpu.regs[]
+            // for the deferred pins (infinite loop).
+            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            bool is_selfloop = (inst.imm == current_start_pc_);
+            if (is_selfloop && !no_selfloop_) {
+                has_selfloop_slot_ = true;
+                selfloop_patch_off_ = code_buf_used_;
+                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
+            }
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // Taken path: store PC, restore regs, ret-with-chain-slot.
-            // The ret is a chain slot patched to `jmp taken_target` once the
-            // taken target is translated (loop-back edges skip the dispatcher).
-            taken_chain_target_pc_ = inst.imm;
-            emit_taken_path_epilogue();
+            if (!has_selfloop_slot_) {
+                // Taken path: store PC, restore regs, ret-with-chain-slot.
+                // The ret is a chain slot patched to `jmp taken_target` once
+                // the taken target is translated (loop-back edges skip the
+                // dispatcher).
+                taken_chain_target_pc_ = inst.imm;
+                emit_taken_path_epilogue();
+            } else {
+                // Self-loop: keep the original dead epilogue (store PC,
+                // restore regs, ret) — harmless, never executed.
+                emit_store(CPU_REG, PC_OFF, RAX);
+                emit_mov_reg(RDI, CPU_REG);
+                emit_load(RSI, RBP, emu_slot_off());
+                emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+                emit_pop(R15); emit_pop(R14); emit_pop(R13);
+                emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+                emit_ret();
+            }
             return 1;
         }
         case IROp::BRCOND_BIT: {
@@ -225,12 +254,36 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             int32_t taken_rel = static_cast<int32_t>(code_buf_used_ - (jcc_patch + 6));
             patch_jcc_rel32(jcc_patch, taken_rel);
             emit_popfq();
+            // ── Self-loop chaining (mirrors BRCOND/BRCOND_ZERO) ──
+            // TBZ/TBNZ while-loops get the tight 5-byte jmp slot patched to
+            // the block body start. Also required for loop-carried pinning:
+            // deferred pins only persist across a back-edge that jumps to the
+            // body, not one that re-enters the prologue (stale preloads).
+            static bool no_selfloop_ = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+            bool is_selfloop = (inst.imm == current_start_pc_);
+            if (is_selfloop && !no_selfloop_) {
+                has_selfloop_slot_ = true;
+                selfloop_patch_off_ = code_buf_used_;
+                emit_byte(0xE9); emit_u32(0);  // jmp rel32 placeholder
+            }
             emit_mov_imm_to_rax(inst.imm);
             rax_holds_next_pc_ = true;
             chain_target_pc_ = inst.arm_pc + 4;  // fall-through PC
-            // Taken path: store PC, restore regs, ret-with-chain-slot.
-            taken_chain_target_pc_ = inst.imm;
-            emit_taken_path_epilogue();
+            if (!has_selfloop_slot_) {
+                // Taken path: store PC, restore regs, ret-with-chain-slot.
+                taken_chain_target_pc_ = inst.imm;
+                emit_taken_path_epilogue();
+            } else {
+                // Self-loop: keep the original dead epilogue — harmless,
+                // never executed (self-loop jmp goes straight to the body).
+                emit_store(CPU_REG, PC_OFF, RAX);
+                emit_mov_reg(RDI, CPU_REG);
+                emit_load(RSI, RBP, emu_slot_off());
+                emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC); // mov rsp, rbp
+                emit_pop(R15); emit_pop(R14); emit_pop(R13);
+                emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+                emit_ret();
+            }
             return 1;
         }
         case IROp::BRCOND: {

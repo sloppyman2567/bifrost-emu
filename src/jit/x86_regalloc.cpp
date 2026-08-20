@@ -196,12 +196,14 @@ void FrostJIT::clobber_host_reg(int host_reg) {
 }
 int FrostJIT::alloc_reg(int preferred) {
     // Try preferred first.
-    if (preferred >= 0 && reg_vreg_[preferred] == -1) {
+    if (preferred >= 0 && reg_vreg_[preferred] == -1 &&
+        !(pinned_host_regs_ & (1u << preferred))) {
         return preferred;
     }
     // Try each alloc reg in order.
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
+        if (pinned_host_regs_ & (1u << r)) continue;
         if (reg_vreg_[r] == -1) return r;
     }
     // All regs taken — evict the cached vreg whose NEXT use is furthest in
@@ -216,6 +218,7 @@ int FrostJIT::alloc_reg(int preferred) {
     int best_score = -1;  // furthest next use wins; dead (no next use) = INT_MAX
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
+        if (pinned_host_regs_ & (1u << r)) continue;
         int v = reg_vreg_[r];
         if (v < 0) continue;
         int nu = next_use_after(v, cur_op_index_);
@@ -238,6 +241,7 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
     // First pass: look for a free reg (skipping excluded ones).
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
+        if (pinned_host_regs_ & (1u << r)) continue;
         if (r == excl1 || r == excl2) continue;
         if (reg_vreg_[r] == -1) return r;
     }
@@ -249,6 +253,7 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
     int best_score = -1;  // furthest next use wins; dead (no next use) = INT_MAX
     for (int i = 0; i < NUM_ALLOC_REGS; i++) {
         int r = ALLOC_REGS[i];
+        if (pinned_host_regs_ & (1u << r)) continue;
         if (r == excl1 || r == excl2) continue;
         int v = reg_vreg_[r];
         if (v < 0) continue;

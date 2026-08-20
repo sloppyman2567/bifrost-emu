@@ -977,6 +977,19 @@ private:
     // vregs); kept as a strict allocator capacity increase for
     // pressure-heavy blocks that DO exceed 9 live vregs.
     static constexpr int ALLOC_REGS[10] = {RAX, RCX, RDX, R8, R9, R11, R12, R13, R15, R14};
+    // Phase 2 (tier-2 whole-region regalloc): loop-carried arch GPR vregs are
+    // PINNED to fixed callee-saved host regs for the whole loop. The pin pool
+    // is a subset of ALLOC_REGS (R12/R13/R14/R15): callee-saved (survives
+    // memory-op C calls), OUTSIDE the flag-prep clobber set (RAX/RCX/RDX/R8)
+    // and the MEM_CLOBBER set (RAX/RCX/RDX/R8/R9/R11), and never written
+    // directly by any codegen path (only ever touched via the alloc pool —
+    // so excluding them from the pool guarantees they hold only pinned
+    // values). The prologue preloads each pinned vreg from cpu.regs[] before
+    // the body, STORE_REG refreshes the pin, and the back-edge jmp to
+    // body_start preserves it — eliminating the store→load round trip that
+    // every loop iteration otherwise pays for its loop-carried arch values.
+    static constexpr int PIN_REGS[4] = {R12, R13, R14, R15};
+    static constexpr int NUM_PIN_REGS = 4;
     // Returns true if `r` is caller-saved (clobbered by C calls).
     // R12/R13/R14/R15 are callee-saved → preserved across calls.
     static constexpr bool is_caller_saved(int r) {
@@ -1007,6 +1020,22 @@ private:
     int32_t vreg_slot_[4096];
     // Number of stack slots used.
     int num_stack_slots_ = 0;
+    // Phase 2 loop-carried pinning (per-compile, reset at block/region start):
+    //   arch_pin_[a]   — host reg pinned to arch GPR vreg a (1-31), -1 if not
+    //                    pinned. The pinned vreg's value lives in that reg for
+    //                    the WHOLE loop; STORE_REG refreshes it, the back-edge
+    //                    preserves it, and body_start reuses it (no reload).
+    //   pinned_host_regs_ — bitmask of PIN_REGS actually reserved this
+    //                    compile; the allocator skips them, so they can never
+    //                    be claimed by scratch vregs.
+    //   keep_store_dest_  — when true, STORE_REG keeps `dest` cached after the
+    //                    store (transferring the stored scratch's reg, or
+    //                    refreshing the pin) so later reads of `dest` reuse the
+    //                    cached value instead of reloading cpu.regs[dest].
+    //                    Enabled for self-loop blocks and tier-2 regions only.
+    int8_t   arch_pin_[32];
+    uint16_t pinned_host_regs_ = 0;
+    bool     keep_store_dest_ = false;
     // Max vreg used in this block.
     int max_vreg_ = 0;
     // Max vreg from the previous block — used to bound the array-clearing

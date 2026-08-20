@@ -1428,8 +1428,35 @@ not musl-`-static`.
   thread-local caches and `blocks_` map) or the feature stays inert on real
   workloads. Documented here so it's not re-discovered; the env gates +
   counter plumbing is exactly what the spec asked for and is a correct seed.
-  **SOLVED (commit `ad5098a`):** this exact gap is why Phase 1 step 4 added
-  the IN-CODE hot-head counter — see the Local Contracts section below.
+   **SOLVED (commit `ad5098a`):** this exact gap is why Phase 1 step 4 added
+   the IN-CODE hot-head counter — see the Local Contracts section below.
+- **Loop-carried arch-GPR pinning contract (Phase 2 step 1, 2026-08-19):**
+  4 pins {R12,R13,R14,R15} hold loop-carried arch GPRs across a tight
+  self-loop (or tier-2 region Lback). The pin set is computed per-block in
+  `translate_block` and `compile_tier2_region`: eligible = arch vreg read
+  (LOAD_REG src1 / STORE_REG src1) before its first write, or never written;
+  written ONLY via STORE_REG (the direct writers are the EXPLICIT list
+  CSEL/CSINC/CSINV/CSNEG/UBFM/SBFM/FP_F2I/FP_F2I_FIXED/FMOV_F2G/FMOV_FHI2G/
+  SIMD_UMOV — do NOT use a dest<=30 catch-all: branch ops carry a DUMMY
+  dest=0 and would flag x0 as directly written, killing bench_mips's x0
+  pin); no SVC/BR/BL_CALL/BLR_CALL/CALL_INTERP in the block. The prologue
+  preloads pins (after chain_entry_off_, before block_body_start_off_).
+  STORE_REG of a pinned vreg moves src1 into the pin and DEFERS the
+  cpu.regs[] store (dirty); the back-edge (self-loop slot / region Lback)
+  preserves the pin; the exit flushes once. The general keep (unpinned dest)
+  may only leave dest in a reg the BRCOND* term does not clobber — the term's
+  flag-prep + mov-imm clobber RAX/RCX/RDX/R8 (FLAGS3) every iteration, so a
+  kept dest there is read back garbage (first version HUNG bench_mips); safe
+  = R9/R11/R12-R15 and not another vreg's pin. Written-then-read vregs are
+  NOT pinned (measured ~6% slower — the pin starves LOAD_MEM's spare reg).
+  Pinning requires the tight self-loop slot, which now exists for BRCOND_ZERO/
+  BRCOND_BIT self-loops too (CBZ/CBNZ/TBZ/TBNZ while-loops); WITHOUT the tight
+  slot the re-entered prologue preloads STALE cpu.regs for deferred pins
+  (infinite loop). Deferral is disabled under `BIFROST_NO_SELFLOOP=1` AND
+  `BIFROST_JIT_VERIFY=1` (verify un-patches the slot). Measured
+  performance-neutral so far (bench_mips ~1%, CoreMark 0 — its hot loop is a
+  2-block cross-block loop; pinning does not cross blocks yet).
+
 
 ## Session History (2026-08-19) — Tier-2 Phase 1 step 4 (in-code hot-head counter)
 
@@ -1590,3 +1617,75 @@ not musl-`-static`.
   block standalone) — the inlined cold exits + per-edge snapshot restores
   are the bulk. 64-block traces fit in `code_buf_` fine; a trace budget
   (bytes, not just block/inst caps) belongs in the next step if traces grow.
+
+## Session History (2026-08-19) — Tier-2 Phase 2 step 1 (loop-carried arch-GPR pinning)
+
+- **Loop-carried arch-GPR pinning (Phase 2, ROADMAP #14) landed — VERIFIED CORRECT
+  but PERFORMANCE-NEUTRAL.** `PIN_REGS[4]={R12,R13,R14,R15}` (+ `NUM_PIN_REGS`,
+  `int8_t arch_pin_[32]`, `uint16_t pinned_host_regs_`, `bool keep_store_dest_`
+  in frostjit.hpp): for self-loop blocks and back-edge tier-2 regions, loop-
+  carried arch vregs (READ before first WRITE, or never-written loop-invariant
+  reads) are pinned to fixed callee-saved regs. The prologue preloads them from
+  cpu.regs[] once (cold/chain entry, AFTER chain_entry_off_ but BEFORE
+  block_body_start_off_ so the back-edge skips them); STORE_REG refreshes the
+  pin and DEFERS the cpu.regs[] store (marks dest dirty in its pin / transferred
+  reg); the back-edge jmp to body (self-loop slot / region Lback) preserves the
+  pins; the loop exit (self-loop fall-through shared epilogue / region cold+side
+  exits) runs flush_all_vregs and writes them back ONCE. The region Lback's
+  `flush_all_vregs()` was REMOVED (regions remap scratch vregs to disjoint
+  ranges, so at the back-edge only arch GPRs are live). Pins are excluded from
+  the allocator pool (alloc_reg/alloc_reg_excluding skip pinned_host_regs_).
+  Per-iteration this replaces a store→cpu.regs→load round trip with two movs
+  for each carried vreg.
+- **CRITICAL prerequisite: BRCOND_ZERO/BRCOND_BIT self-loops now emit the
+  tight 5-byte self-loop slot (mirroring BRCOND)** — previously only BRCOND
+  got it, so a CBZ/CBNZ/TBZ/TBNZ while-loop (bench_mips's hot counter loop,
+  GCC vectorized memchr/strchr) returned to the dispatcher and re-ran the
+  FULL prologue every iteration. The deferred pins are UNSAFE without the
+  tight slot: the re-entered prologue's preloads read STALE cpu.regs[] for the
+  deferred values (the taken path never stored them) → infinite loop. The
+  taken path now emits `E9 rel32` (patched to jmp body_start at block end)
+  + the dead epilogue (store PC, restore regs, ret — never executed). BRCOND's
+  own self-loop dead epilogue matches. The slot change alone is a real feature
+  (tight CBZ/TBZ loops are ~2.7× vs dispatcher per NO_SELFLOOP on bench_mips).
+- **The STORE_REG keep is gated on the kept register surviving the term:**
+  the BRCOND* term's flag-prep + mov-imm clobber RAX/RCX/RDX/R8 (FLAGS3) EVERY
+  iteration, so a kept dest left in a FLAGS3 reg is read back garbage by the
+  next iteration's LOAD_REG (compiled as a direct reg→reg mov). Only R9/R11/
+  R12-R15 survive the term. Pinned dests always go to their pin; the general
+  keep (transfer dead src1's reg / self-store) requires s ∉ FLAGS3 AND s not
+  another vreg's pin, else eager store + kill. The first version without this
+  gate HUNG bench_mips.
+- **Deferral safety invariants:** keep_store_dest_ is enabled ONLY for tight
+  self-loop blocks / back-edge regions (whose exits always flush); call-like
+  ops (SVC/BR/BL_CALL/BLR_CALL/CALL_INTERP) exclude pinning entirely (they
+  read cpu.regs[] directly and would see the stale deferred value);
+  `BIFROST_NO_SELFLOOP=1` disables pinning (no tight slot); `BIFROST_JIT_VERIFY=1`
+  ALSO disables pinning — verify un-patches the self-loop slot, so the taken
+  path re-enters the prologue and reads stale deferred cpu.regs (JIT_VERIFY
+  reported a NEW divergence at pinned block 0x4007a4 until this gate).
+- **Direct-write detection uses an EXPLICIT op list, NOT a dest<=30 catch-all:**
+  branch ops (BRCOND/BRCOND_ZERO/BRCOND_BIT/BRCOND_FALLTHRU/BRCOND_SKIP/BR/
+  BL_CALL/BLR_CALL/CALL_INTERP/SVC) carry a DUMMY dest=0, so a catch-all
+  flagged x0 as directly-written and killed bench_mips's x0 pin (the loop-
+  invariant address base whose pin is the whole point). The real direct arch-
+  GPR writers are CSEL/CSINC/CSINV/CSNEG/UBFM/SBFM/FP_F2I/FP_F2I_FIXED/
+  FMOV_F2G/FMOV_FHI2G/SIMD_UMOV (store_reg_to_vreg/set_vreg_reg bypassing
+  STORE_REG). Keep this list in sync with the codegen.
+- **Written-then-read vregs (pass 2) are NOT pinned — measured ~6% SLOWER**
+  on bench_mips (376-379 vs 354-357 ms): the extra pin occupies a scratch
+  register for the whole loop and the body's LOAD_MEM needs the spare; one
+  extra spill per iteration costs more than the store→load round trip it
+  removes. Pass-1 only (carried + invariant).
+- **Measured:** bench_mips 354-357 ms vs HEAD 357-359 (~1%, noise); CoreMark
+  3469-3490 vs HEAD 3483-3495 (neutral — the hot matrix loop is a 2-BLOCK
+  cross-block loop, which pinning does not cover yet). NO_SELFLOOP baseline
+  is 1018 ms. The pin machinery is a correct, verified stepping stone for
+  cross-block pinning (Phase 2 next: carry pins across a 2-block chained loop
+  via the chain edge, which today re-runs the successor's prologue).
+- Verified: suite 200/200 (50s), REGALLOC_CHECK bench_mips clean, JIT_VERIFY
+  failure set IDENTICAL to HEAD (the one "extra" line test_pthread_mutex also
+  fails at HEAD — flaky timeout rc=137 vs abort 134, same pre-existing racy
+  pthread/sem/sig/toybox-rw/GL/vulkan set), bench_mips acc
+  `0xf800800a2c4ff835`. Bisection gates kept: `BIFROST_NO_PIN=1` (pins off,
+  slot on), `BIFROST_NO_SELFLOOP=1` (both off).

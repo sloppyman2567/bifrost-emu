@@ -516,6 +516,91 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
     }
 
+    // ── Phase 2 loop-carried arch GPR pinning (back-edge regions) ─────
+    // When the region's last block loops back to the head (last_is_backedge),
+    // the loop-carried arch GPRs — values READ before they are WRITTEN over
+    // the concatenated region IR — are PINNED to fixed callee-saved regs
+    // (R12-R15) for the whole loop. The prologue preloads them once (every
+    // region entry goes through the prologue; the back-edge jmp to body_start
+    // skips it); STORE_REG refreshes the pin; the back-edge (Lback) NO LONGER
+    // flushes all vregs, so the pinned values survive the loop in registers —
+    // no store→cpu.regs[]→load round trip per iteration. The flush removal
+    // is safe because regions write arch GPRs eagerly (STORE_REG) and FP/
+    // vector regs eagerly (no fp/vec cache), and every block's scratch vregs
+    // are remapped to DISJOINT ranges (compile_tier2_region above), so at the
+    // back-edge the only live state is arch GPRs + FP regs — the flush only
+    // ever stored dead scratch vregs. The pins are excluded from the
+    // allocator pool (pinned_host_regs_), so nothing can claim them mid-loop.
+    {
+        for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
+        pinned_host_regs_ = 0;
+        keep_store_dest_ = false;
+if (last_is_backedge && !getenv("BIFROST_NO_PIN")) {
+            bool has_call = false;
+            for (const IRInst& inst : region_ir) {
+                if (inst.op == IROp::SVC || inst.op == IROp::BR ||
+                    inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
+                    inst.op == IROp::CALL_INTERP) {
+                    has_call = true;
+                    break;
+                }
+            }
+            if (!has_call) {
+                uint16_t first_write[32];
+                uint16_t first_read[32];
+                bool direct_write[32];
+                for (int i = 0; i < 32; i++) {
+                    first_write[i] = 0xFFFF;
+                    first_read[i] = 0xFFFF;
+                    direct_write[i] = false;
+                }
+                size_t n = region_ir.size();
+                for (size_t i = 0; i < n; i++) {
+                    const IRInst& inst = region_ir[i];
+                    if (inst.op == IROp::STORE_REG) {
+                        if (inst.dest <= 30 && first_write[inst.dest] == 0xFFFF)
+                            first_write[inst.dest] = static_cast<uint16_t>(i);
+                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
+                            first_read[inst.src1] = static_cast<uint16_t>(i);
+                    } else if (inst.op == IROp::LOAD_REG) {
+                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
+                            first_read[inst.src1] = static_cast<uint16_t>(i);
+                    } else if (inst.dest <= 30 &&
+                               (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
+                                inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
+                                inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
+                                inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
+                                inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
+                                inst.op == IROp::SIMD_UMOV)) {
+                        // Direct arch-GPR writers (store_reg_to_vreg /
+                        // set_vreg_reg), bypassing STORE_REG — the pin would
+                        // hold a stale value. EXPLICIT list, NOT a dest<=30
+                        // catch-all: branch ops carry a dummy dest=0 that
+                        // would wrongly flag x0.
+                        direct_write[inst.dest] = true;
+                    }
+                }
+                int n_pins = 0;
+                // Loop-carried vregs (read before first write, or loop-
+                // invariant reads) get pinned — the value persists across the
+                // back-edge in the register. Written-then-read vregs are NOT
+                // pinned (measured ~6% slower on bench_mips: the pin occupies
+                // a scratch register for the whole loop and the body's
+                // LOAD_MEM needs the spare register).
+                for (int a = 0; a <= 30 && n_pins < NUM_PIN_REGS; a++) {
+                    if (direct_write[a]) continue;
+                    if (first_read[a] == 0xFFFF) continue;  // never read — dead
+                    if (first_write[a] != 0xFFFF && first_write[a] < first_read[a])
+                        continue;  // written before first read — not carried
+                    arch_pin_[a] = PIN_REGS[n_pins];
+                    pinned_host_regs_ |= (1u << PIN_REGS[n_pins]);
+                    n_pins++;
+                }
+                keep_store_dest_ = true;
+            }
+        }
+    }
+
     // ── Prologue (mirror translate_block) ─────────────────────────────
     emit_push(RBX); emit_push(RBP); emit_push(R12);
     emit_push(R13); emit_push(R14); emit_push(R15);
@@ -545,6 +630,22 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             emit_mov_imm64(WIN_REG, reinterpret_cast<uint64_t>(window_base_));
     }
     // No vec/fp-cache prologue loads (regions never activate the caches).
+    // Phase 2 pin preloads (cpu.regs[a] → pin reg). Emitted after the R10
+    // window load but before body_start: every region entry runs the full
+    // prologue (there is no chain-entry shortcut for regions), while the
+    // back-edge jmp to body_start skips these — so the pins are loop-carried.
+    // The compile-time mapping is established here too, so block0's body reads
+    // (LOAD_REG/STORE_REG src1) reuse the pin instead of reloading cpu.regs[].
+    // Clean: each pin mirrors cpu.regs[a] exactly.
+    for (int a = 0; a <= 30; a++) {
+        if (arch_pin_[a] >= 0) {
+            emit_load_arm(arch_pin_[a], a);
+            vreg_home_[a] = arch_pin_[a];
+            reg_vreg_[arch_pin_[a]] = a;
+            vreg_dirty_[a] = false;
+            vreg_last_use_[a] = ++regalloc_lru_counter_;
+        }
+    }
     size_t body_start = code_buf_used_;
 
     // ── Compile the region body ───────────────────────────────────────
@@ -762,7 +863,13 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             if (s.need_cmc_) emit_byte(0xF5);
             materialize_flags_to_pstate();
         }
-        flush_all_vregs();
+        // NO flush_all_vregs() here (Phase 2): regions write arch GPRs
+        // eagerly (STORE_REG) and FP/vector regs eagerly (no fp/vec cache),
+        // and each block's scratch vregs occupy DISJOINT remapped ranges, so
+        // at the back-edge the only live values are the arch GPRs (pins +
+        // cpu.regs[] always current) — the flush only ever stored dead
+        // scratch vregs. Pinned arch vregs survive in R12-R15 and block0's
+        // body (compiled with the pin mappings pre-established) reuses them.
     }
     if (last_is_backedge) {
         int32_t rel = static_cast<int32_t>(body_start - (code_buf_used_ + 5));

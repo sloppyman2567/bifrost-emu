@@ -900,6 +900,139 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // these loads run only on cold entry (dispatcher / chain entry) and the
     // pinned XMM regs persist as loop-carried state across iterations.
     vec_emit_prologue_loads();
+    // ── Phase 2 loop-carried arch GPR pinning (self-loop blocks) ──────
+    // For a self-loop block (last op BRCOND/BRCOND_ZERO/BRCOND_BIT taken to
+    // our own start_pc), the loop-carried arch GPRs — values READ before they
+    // are WRITTEN in each iteration — are PINNED to fixed callee-saved regs
+    // (R12-R15) for the whole loop. The prologue preloads them from
+    // cpu.regs[] once (cold/chain entry); STORE_REG refreshes the pin each
+    // iteration; the self-loop back-edge jumps to block_body_start_off_ PAST
+    // these preloads, so the pinned values survive in the registers —
+    // eliminating the store→cpu.regs[]→load round trip every iteration pays
+    // for its loop-carried state (bench_mips: x1/x2/x3/x4). The pinned regs
+    // are excluded from the allocator pool (pinned_host_regs_), so nothing
+    // else can claim them mid-loop.
+    //
+    // Eligibility (conservative — an un-pinned vreg is just a missed
+    // optimization; an incorrectly pinned one is a miscompile):
+    //   * the block actually gets the self-loop slot (is_selfloop &&
+    //     !BIFROST_NO_SELFLOOP — mirrors jit_codegen_branch.cpp).
+    //   * no call-like ops (CALL_INTERP/BL_CALL/BLR_CALL/SVC/BR): those run
+    //     interpreter/guest code that writes cpu.regs[] DIRECTLY without a
+    //     STORE_REG, so the pin would hold a stale value and a later
+    //     LOAD_REG would read it.
+    //   * the arch vreg is written ONLY via STORE_REG (FP_F2I_FIXED /
+    //     FMOV_F2G write arch dests directly through store_reg_to_vreg,
+    //     bypassing pin maintenance).
+    //   * the arch vreg is READ (LOAD_REG src1 or STORE_REG src1) before its
+    //     first write (loop-carried), or never written (loop-invariant).
+    {
+        for (int i = 0; i < 32; i++) arch_pin_[i] = -1;
+        pinned_host_regs_ = 0;
+        keep_store_dest_ = false;
+        bool no_selfloop = (getenv("BIFROST_NO_SELFLOOP") != nullptr);
+        bool is_selfloop = false;
+        if (!ir_block.insts.empty()) {
+            const IRInst& last = ir_block.insts.back();
+            is_selfloop = (last.op == IROp::BRCOND || last.op == IROp::BRCOND_ZERO ||
+                           last.op == IROp::BRCOND_BIT) && last.imm == start_pc;
+        }
+        if (is_selfloop && !no_selfloop && !getenv("BIFROST_NO_PIN") &&
+            !getenv("BIFROST_JIT_VERIFY")) {
+            // Pinning is disabled under BIFROST_JIT_VERIFY: verify mode
+            // un-patches the self-loop slot, so the taken back-edge returns
+            // to the dispatcher and re-runs the prologue — whose preloads
+            // would read STALE cpu.regs[] for the DEFERRED pins (the
+            // deferral assumes the tight jmp-to-body loop). Compiling the
+            // block without pins restores the eager-store behavior the
+            // verifier compares against.
+            bool has_call = false;
+            for (const IRInst& inst : ir_block.insts) {
+                if (inst.op == IROp::SVC || inst.op == IROp::BR ||
+                    inst.op == IROp::BL_CALL || inst.op == IROp::BLR_CALL ||
+                    inst.op == IROp::CALL_INTERP) {
+                    has_call = true;
+                    break;
+                }
+            }
+            if (!has_call) {
+                uint16_t first_write[32];
+                uint16_t first_read[32];
+                bool direct_write[32];
+                for (int i = 0; i < 32; i++) {
+                    first_write[i] = 0xFFFF;
+                    first_read[i] = 0xFFFF;
+                    direct_write[i] = false;
+                }
+                size_t n = ir_block.insts.size();
+                for (size_t i = 0; i < n; i++) {
+                    const IRInst& inst = ir_block.insts[i];
+                    if (inst.op == IROp::STORE_REG) {
+                        if (inst.dest <= 30 && first_write[inst.dest] == 0xFFFF)
+                            first_write[inst.dest] = static_cast<uint16_t>(i);
+                        // src1 is the source VALUE vreg; if it names an arch
+                        // reg (mov xN, xA) that is a READ of arch reg src1.
+                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
+                            first_read[inst.src1] = static_cast<uint16_t>(i);
+                    } else if (inst.op == IROp::LOAD_REG) {
+                        if (inst.src1 <= 30 && first_read[inst.src1] == 0xFFFF)
+                            first_read[inst.src1] = static_cast<uint16_t>(i);
+                    } else if (inst.dest <= 30 &&
+                               (inst.op == IROp::CSEL || inst.op == IROp::CSINC ||
+                                inst.op == IROp::CSINV || inst.op == IROp::CSNEG ||
+                                inst.op == IROp::UBFM || inst.op == IROp::SBFM ||
+                                inst.op == IROp::FP_F2I || inst.op == IROp::FP_F2I_FIXED ||
+                                inst.op == IROp::FMOV_F2G || inst.op == IROp::FMOV_FHI2G ||
+                                inst.op == IROp::SIMD_UMOV)) {
+                        // These ops write an arch GPR dest DIRECTLY (via
+                        // store_reg_to_vreg / set_vreg_reg), bypassing
+                        // STORE_REG — so the pin would hold a stale value.
+                        // Deliberately an EXPLICIT list, NOT a dest<=30
+                        // catch-all: branch ops (BRCOND/BRCOND_ZERO/BRCOND_BIT/
+                        // BRCOND_FALLTHRU/BRCOND_SKIP/BR/BL_CALL/BLR_CALL/
+                        // CALL_INTERP/SVC) carry a DUMMY dest=0 that would
+                        // otherwise flag x0 as directly written and kill the
+                        // x0 pin (bench_mips's loop-invariant address base).
+                        direct_write[inst.dest] = true;
+                    }
+                }
+                int n_pins = 0;
+                // Loop-carried vregs (read before first write, or loop-
+                // invariant reads) get pinned — the value persists across the
+                // back-edge in the register (bench_mips x0/x2). Written-then-
+                // read vregs are NOT pinned: pinning them occupies a scratch
+                // register for the whole loop and measured ~6% SLOWER on
+                // bench_mips (the body's LOAD_MEM needs the spare register;
+                // a single extra spill per iteration costs more than the
+                // store→load round trip it removes).
+                for (int a = 0; a <= 30 && n_pins < NUM_PIN_REGS; a++) {
+                    if (direct_write[a]) continue;
+                    if (first_read[a] == 0xFFFF) continue;  // never read — dead
+                    if (first_write[a] != 0xFFFF && first_write[a] < first_read[a])
+                        continue;  // written before first read — not carried
+                    arch_pin_[a] = PIN_REGS[n_pins];
+                    pinned_host_regs_ |= (1u << PIN_REGS[n_pins]);
+                    n_pins++;
+                }
+                keep_store_dest_ = true;
+            }
+        }
+    }
+    // Emit the pin preloads (cpu.regs[a] → pin reg) right after the vec
+    // prologue loads — after chain_entry_off_ (so chain entries run them)
+    // but before block_body_start_off_ (the self-loop back-edge jumps there,
+    // preserving the pins as loop-carried state). Register the mapping so
+    // body reads of the pinned vreg (LOAD_REG/STORE_REG src1) reuse the pin
+    // directly. The value is CLEAN: it mirrors cpu.regs[a] exactly.
+    for (int a = 0; a <= 30; a++) {
+        if (arch_pin_[a] >= 0) {
+            emit_load_arm(arch_pin_[a], a);
+            vreg_home_[a] = arch_pin_[a];
+            reg_vreg_[arch_pin_[a]] = a;
+            vreg_dirty_[a] = false;
+            vreg_last_use_[a] = ++regalloc_lru_counter_;
+        }
+    }
     // Record the block body start offset (after prologue). Used for
     // self-loop chaining: the selfloop slot is patched to jmp here.
     block_body_start_off_ = code_buf_used_;
