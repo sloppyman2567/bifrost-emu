@@ -2224,3 +2224,26 @@ not musl-`-static`.
     wins big; complexity unjustified by any measured deficiency.
   Lesson: re-measure old bruises before operating — several earlier fixes
   had already healed this one.
+
+## Session History (2026-08-20) — review pass: arch-only exit flush measured ~zero, reverted
+
+- **"Dead scratch stores at region exits" investigated and CLOSED as a
+  non-issue (`git checkout --`, nothing committed).** Hypothesis: region
+  cold exits call `flush_all_vregs()`, which spills dirty scratch vregs
+  (v>32) to stack slots nobody reads after the exit — dead bytes + stores.
+  Measured (CoreMark, git-stash A/B): TOTAL region bytes across all ~61
+  regions changed by **4 bytes** (29898 → 29894); top fat regions
+  byte-identical; CoreMark iters/s within noise. Root cause of the null
+  result: at branch points there IS no dirty scratch in practice — the
+  Belady allocator evicts scratch to slots aggressively (clean loads at
+  next use), optimize_ir's FWD store-load forwarding drains expression
+  chains into eager arch STORE_REGs, and a term's branch operand is loaded
+  fresh by the term's own flag-prep (ensure_vreg from slot). So
+  `flush_all_vregs()` at exits was already near-optimal. Corollary: if a
+  future change increases REGISTER RESIDENCY at exits (e.g. keeping LICM
+  results in regs across the Lback), re-measure this before assuming the
+  flush is free. Also verified en route: `emit_mov_imm_to_rax` already
+  emits the 5-byte zext form for guest PCs <4 GiB (no win there either).
+- Review-pass ideas still open: register-resident LICM results across the
+  Lback (P2 — medium risk, LOAD_MEM-starvation history), IRBlock caching
+  in BlockEntry to shorten exclusive-lock fire pauses (P3).
