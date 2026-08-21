@@ -1850,26 +1850,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         is_buffer_consumer_(entry.name)) {
         sync_persistent_mappings_();
     }
-    if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
-        !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize")) {
-        fprintf(stderr, "[szdbg2] %s args0=%llx args1=%llx args2=%llx "
-                "wb1=%d wb2=%d bounce1=%p bounce2=%p\n",
-                entry.name.c_str(),
-                (unsigned long long)args[0], (unsigned long long)args[1],
-                (unsigned long long)args[2],
-                (int)(bounce_wb[1]), (int)(bounce_wb[2]),
-                (void*)(bounce_bufs[1].empty() ? nullptr : bounce_bufs[1].data()),
-                (void*)(bounce_bufs[2].empty() ? nullptr : bounce_bufs[2].data()));
-        using Fn8t = uint64_t (*)(uint64_t,uint64_t,uint64_t,uint64_t,
-                                  uint64_t,uint64_t,uint64_t,uint64_t);
-        reinterpret_cast<Fn8t>(entry.host_fn)(
-            args[0], args[1], args[2], 0xDEAD0001ull,
-            0xDEAD0002ull, 0xDEAD0003ull, 0xDEAD0004ull, 0xDEAD0005ull);
-        fprintf(stderr, "[szdbg2] n_stack=%u fn8-recheck: %d x %d\n",
-                entry.n_stack,
-                *reinterpret_cast<int*>(args[1]),
-                *reinterpret_cast<int*>(args[2]));
-    }
     if (entry.n_stack >= 4) {
         using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1907,12 +1887,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = reinterpret_cast<Fn8>(entry.host_fn)(
             args[0], args[1], args[2], args[3],
             args[4], args[5], args[6], args[7]);
-        if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
-            !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize"))
-            fprintf(stderr, "[szdbg3] Fn8 fired ret=%llx w=%d h=%d\n",
-                    (unsigned long long)ret,
-                    *reinterpret_cast<int*>(args[1]),
-                    *reinterpret_cast<int*>(args[2]));
     }
 
     // Write bounced pointer args back into guest memory.
