@@ -1282,14 +1282,45 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         size_t p = emit_jmp_rel32_placeholder();
         shared_exit_patch_offs.push_back(p);
     };
+    // ── Chain-out exits (2026-08-20): skip the dispatcher on the way out ──
+    // A cold exit whose target block is ALREADY TRANSLATED can tear down the
+    // region frame completely (leaving the dispatcher's return address on
+    // top of the stack) and bare-jmp the target's fn: the target pushes its
+    // own frame ON TOP of that return address and its eventual `ret` pops it
+    // — exactly how non-chain-skip chain edges nest. Saves one dispatcher
+    // round-trip per taken side-exit. Entry contract matches a chain edge:
+    // RDI=cpu, RSI=emu, RBX=cpu, body-entry RSP%%16==8, flags already
+    // materialized by the variable part. Fallbacks to the plain ret-exit
+    // when the target isn't translated (incl. interp_only), under
+    // BIFROST_JIT_VERIFY (verify must see every block boundary), or with
+    // BIFROST_NO_EXITCHAIN=1. Staleness note: if the target later becomes a
+    // tier-2 region itself, this jmp keeps calling its STANDALONE fn —
+    // correct, just not maximally fast (same class as pending_call_sites_).
+    static const bool no_exitchain_ = (getenv("BIFROST_NO_EXITCHAIN") != nullptr);
+    const bool exitchain_ok =
+        !no_exitchain_ && (getenv("BIFROST_JIT_VERIFY") == nullptr);
+    std::vector<size_t> co_patch_offs;
+    auto emit_chainout_exit = [&](uint64_t pc) -> bool {
+        if (!exitchain_ok) return false;
+        uint64_t (*tfn)(CPU*, Emulator*) = lookup_only(pc);
+        if (!tfn) return false;
+        emit_mov_imm_to_rax(pc);              // rax = exit pc
+        emit_store(CPU_REG, PC_OFF, RAX);     // cpu.pc = exit pc
+        emit_mov_imm64(R11, reinterpret_cast<uint64_t>(tfn));
+        size_t p = emit_jmp_rel32_placeholder();
+        co_patch_offs.push_back(p);
+        return true;
+    };
     if (!skip_exit_sections) {
     uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
     if (last_term_uncond) exit_pc = rblocks[nblk - 1].side_pc;  // the B target
     clobber_flags();
     flush_all_vregs();
     emit_flush_all_pins();
-    emit_mov_imm_to_rax(exit_pc);
-    emit_shared_exit_jmp();
+    if (!emit_chainout_exit(exit_pc)) {
+        emit_mov_imm_to_rax(exit_pc);
+        emit_shared_exit_jmp();
+    }
     }
 
     // ── Deferred side-exit epilogues (one per non-last block) ───────
@@ -1315,8 +1346,25 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         materialize_flags_to_pstate();
         flush_all_vregs();
         emit_flush_all_pins();
-        emit_mov_imm_to_rax(c.side_pc);
-        emit_shared_exit_jmp();
+        if (!emit_chainout_exit(c.side_pc)) {
+            emit_mov_imm_to_rax(c.side_pc);
+            emit_shared_exit_jmp();
+        }
+    }
+
+    // ── Chain-out tail: rdi/rsi/teardown, then jmp the target fn ─────
+    // R11 holds the target fn (set inline per exit); pop x6 restores the
+    // callee-saved regs WITHOUT touching R11, leaving the dispatcher's
+    // return address on top of the stack for the target's own `ret`.
+    size_t co_tail_off = 0;
+    if (!co_patch_offs.empty()) {
+        co_tail_off = code_buf_used_;
+        emit_mov_reg(RDI, CPU_REG);           // mov rdi, rbx
+        emit_load(RSI, RBP, emu_slot_off());  // rsi = emu
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);  // mov rsp, rbp
+        emit_pop(R15); emit_pop(R14); emit_pop(R13);
+        emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
+        emit_byte(0x41); emit_byte(0xFF); emit_byte(0xE3);  // jmp r11
     }
 
     // ── Emit the shared exit tail + patch every exit's jmp ──────────
@@ -1334,6 +1382,8 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         for (size_t p : shared_exit_patch_offs)
             patch_jmp_rel32(p, static_cast<int32_t>(tail_off - (p + 5)));
     }
+    for (size_t p : co_patch_offs)
+        patch_jmp_rel32(p, static_cast<int32_t>(co_tail_off - (p + 5)));
 
     // ── Loop back-edge (Lback): the last block's taken edge ─────────
     // Only emitted when the last block's taken target is the head (a hot
