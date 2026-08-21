@@ -2280,3 +2280,36 @@ not musl-`-static`.
   FLAGS3-exclusion variant, which was byte-diffable via a temporary
   BIFROST_T2_REGIONDUMP hexdump of the published region.
 - Verified revert: m3loop tri-mode MATCH restored, tree clean at HEAD.
+
+## Session History (2026-08-20) — emitter bug variant-1 FIXED (alloc_reg_excluding fallback)
+
+- **Variant-1 of the stale-operand-reg bug FIXED (committed `afab35d`,
+  x86_regalloc.cpp + jit_codegen_alu.cpp).** `alloc_reg_excluding`'s
+  terminal fallback (`return alloc_reg()` when every non-pinned reg is
+  excluded) silently violated the exclusions: alloc_reg could evict an
+  excluded still-live operand and hand its register to the caller as d,
+  after which the caller's canonical `mov d, excl1 ; op d, excl2` read
+  excl2 from the clobbered reg. Fix: desperate pass re-runs Belady
+  excluding ONLY excl2 (+pinned), evicting the winner (value preserved to
+  slot/home), returning it; last resort is excl1's own reg. This is
+  correct by caller contract: excl1 is everywhere the IN-PLACE-SAFE
+  operand (its mov degenerates to no-op; later uses reload from the fresh
+  slot). Audited all 6 call sites against the contract; swapped
+  jit_codegen_alu.cpp:223 to (-1, RCX) (that site's tmp must AVOID RCX,
+  so RCX belongs in excl2 — behavior identical non-desperate).
+- **Variant-2 remains OPEN but unreachable in production:** with a ≤2-reg
+  pool, `ensure_vreg(src2)` can still evict an already-ensured src1
+  (Belady: dead-after-op) and the emitters' cached s1 number goes stale —
+  observed as `xor %r9,%r11` reading the wrong operand after EOR's ensure
+  chain. Production pools never exhaust (9 alloc regs, ≤2 exclusions);
+  ANY future feature steering allocation into small pools MUST fence
+  itself to ≥3 remaining non-pinned regs (fence pattern demonstrated in
+  the P2 attempt, since removed with it). Proper fix design (memory-
+  operand last resort, or allocator op-awareness) is future work.
+- The m3loop corruption repro now emits CORRECT code under the original
+  trigger (FLAGS3-excluded preheader): p4's ADD computes in place into
+  R9 after spilling v46 — verified instruction-by-instruction.
+- Verified `afab35d`: 11 harnesses tri-mode MATCH, JIT_VERIFY clean,
+  REGALLOC_CHECK bench_mips acc `0xf800800a2c4ff835`, game_demo rc=0,
+  CoreMark 3750 iters/s CRCs validated, quick 200/200 tier2 ON, full
+  suite 205/205.
