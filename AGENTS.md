@@ -2313,3 +2313,56 @@ not musl-`-static`.
   REGALLOC_CHECK bench_mips acc `0xf800800a2c4ff835`, game_demo rc=0,
   CoreMark 3750 iters/s CRCs validated, quick 200/200 tier2 ON, full
   suite 205/205.
+
+## Session History (2026-08-20) — Android surface layer Phase 1 (ANativeWindow + EGL)
+
+- **ANativeWindow shim + EGL window-surface interception landed (committed
+  `9f3d5cd`, 11 files +652/−19).** Guest apps dlopen("libandroid.so"),
+  get an ANativeWindow shim from ANativeWindow_fromSurface (JNIEnv/jobject
+  ignored — v1 single-surface singleton), and eglCreateWindowSurface
+  through it creates a REAL host EGL window-surface: pixels present via
+  the DisplayProxy host SDL window. Test:
+  `ctest_real/test_android_surface.elf` (24 checks, "ALL PASS", exit 77
+  skip without DISPLAY/GL; 8/8 stable). Suite now **206/206**.
+- **Architecture:** new ANDROID family (libandroid.so) registered under
+  DISPLAY_THUNK (it owns the DisplayProxy; GraphicThunk never sees it).
+  8 ANativeWindow_* rows with new Policy::ANDROID_WINDOW +
+  THUNK_ANDROID_WINDOW flag; dispatch arm lazily inits the proxy and
+  handles each symbol by name. Window handles are GUEST shim integers
+  (0xA90000000000+1) — declared 'i' in the table so they are NEVER
+  pointer-translated. AndroidSurfaceManager singleton
+  (src/frost_graphics/android_surface.cpp): geometry/format state, host
+  native window resolution — X11 Window id on X11 hosts,
+  wl_egl_window* via libwayland-egl on Wayland hosts.
+- **GraphicThunk EGL interceptions** (consult the manager singleton):
+  eglGetDisplay(EGL_DEFAULT_DISPLAY) wraps SDL's wl_display on Wayland
+  hosts — the surface's wl_surface and the EGLDisplay MUST share a
+  connection or Mesa rejects creation cross-connection;
+  eglCreateWindowSurface substitutes the host native window for the shim
+  handle. eglSwapBuffers needs no interception.
+- **EGL ROW SIGNATURES WERE WRONG — fixed:** eglInitialize was `iii`
+  (major/minor are out-pointers!), eglChooseConfig was `iiiii`
+  (attribs/configs/num_config are pointers; config_size is the ONLY int
+  besides dpy → correct row is `ippip`), eglQuerySurface/
+  GetConfigAttrib were `iiii` (value out-pointer → `iiip`),
+  eglCreateContext/CreateWindowSurface attrib_list → `iiip`,
+  CreatePbufferSurface → `iip`, eglQueryString RET str. With 'i'
+  pointer args, host Mesa dereferenced RAW guest addresses → SIGSEGV
+  (the guest direct window is NOT identity-mapped in the host address
+  space; only thunk-translated aliases are valid host pointers).
+  No existing test called guest-side EGL directly, which is why this
+  survived — test_sdl_gl_triangle uses SDL_GL_CreateContext instead.
+- **EGL spec gotcha that cost an hour:** eglChooseConfig's *num_config
+  receives the TOTAL matching-config count (96), NOT min(count,
+  config_size=4) — a `ncfg <= config_size` sanity check rejects valid
+  answers. Also Mesa refuses REPEATED eglChooseConfig calls on a foreign
+  wl_display with EGL_BAD_CONFIG — the first query must be accepted.
+- **Wayland connection identity:** host EGL on Wayland consumes a
+  wl_egl_window* (libwayland-egl, created from the SDL window's
+  wl_surface), not the raw wl_surface; set_buffers_geometry resizes it
+  via wl_egl_window_resize. X11 path returns the X11 Window id.
+- **Phase 2 (not started): NativeActivity lifecycle** — synthesize
+  ANativeActivity in guest memory, fire onStart/onResume/INIT_WINDOW via
+  the borrow-CPU callback runner so android_native_app_glue mains proceed.
+  **Phase 3: touch** — SDL mouse → AInputQueue MotionEvents (input.cpp
+  has no multitouch yet; SDL2 has it unplumbed).
