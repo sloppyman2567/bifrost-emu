@@ -123,6 +123,69 @@ int main(void) {
     CHECK(inv_r1 == 0xCAFEBABEu, "csinv_true");
     CHECK(inv_r2 == 0x35014541u, "csinv_false");
 
+    /* ── FCMP-producer selects (2026-08-21 R8-scratch regression) ──
+     * FCMP materializes NZCV to pstate (flags_in_host_=false), so every
+     * following conditional select runs the load-flags-from-pstate path.
+     * emit_load_flags_from_pstate once used R8 as scratch while the CSEL
+     * emitter flushed only RAX/RCX/RDX — a CMOVcc else-value staged in
+     * R8 was silently destroyed and every cset after an fcmp returned 0
+     * (minecraft's sign() → step=(0,0,0) → raycast assert / ground
+     * clipping). The carry-condition cases additionally catch a wrong
+     * C extraction in the loader (x86 CF must be ARM C ^ from_sub, not
+     * C ^ N — a right-shift instead of left-shift in the bit trick). */
+    {
+        volatile float fs[] = { 1.0f, -1.0f, 0.0f, 0.5f, -2.5f, 3.0f, 0.0f/0.0f };
+        volatile double fd[] = { 1.0, -1.0, 0.0, 0.5, -2.5, 3.0, 0.0/0.0 };
+        int sign_ok = 1, cs_ok = 1, cc_ok = 1, hi_ok = 1, tr_ok = 1;
+        for (int i = 0; i < 7; i++) {
+            float f = fs[i];
+            __typeof__(f) xx = f;
+            int s = (int)(((0 < xx) - (xx < 0)));       /* fcmp+cset,cset+sub */
+            int w = (f > 0) - (f < 0);
+            if (isnan(f)) w = 0;                         /* NaN: both false */
+            if (s != w) sign_ok = 0;
+            /* csel cs/cc/hi directly after fcmp (C-flag polarity) */
+            uint64_t r_cs, r_cc, r_hi;
+            asm("fcmp %s[fa], %s[fb]\n csel %0, %[x], %[y], cs"
+                : "=r"(r_cs) : [x]"r"(0x1111ULL+i), [y]"r"(0x2222ULL),
+                  [fa]"w"(f), [fb]"w"(0.0f) : "cc");
+            asm("fcmp %s[fa], %s[fb]\n csel %0, %[x], %[y], cc"
+                : "=r"(r_cc) : [x]"r"(0x1111ULL+i), [y]"r"(0x2222ULL),
+                  [fa]"w"(f), [fb]"w"(0.0f) : "cc");
+            asm("fcmp %s[fa], %s[fb]\n csel %0, %[x], %[y], hi"
+                : "=r"(r_hi) : [x]"r"(0x1111ULL+i), [y]"r"(0x2222ULL),
+                  [fa]"w"(f), [fb]"w"(0.0f) : "cc");
+            /* ARM FP flags: C=1 iff f>=0 or unordered; Z=1 iff f==0 */
+            int fc = !(f < 0.0f), fz = (f == 0.0f);
+            if (r_cs != (fc ? 0x1111ULL+i : 0x2222ULL)) cs_ok = 0;
+            if (r_cc != (!fc ? 0x1111ULL+i : 0x2222ULL)) cc_ok = 0;
+            if (r_hi != ((fc && !fz) ? 0x1111ULL+i : 0x2222ULL)) hi_ok = 0;
+            /* double producer + transform variants */
+            double d = fd[i];
+            uint64_t r_inc, r_inv, r_neg;
+            asm("fcmp %d[da], %d[db]\n csinc %0, %[x], %[y], mi"
+                : "=r"(r_inc) : [x]"r"(0x81ULL+i), [y]"r"(0x82ULL),
+                  [da]"w"(d), [db]"w"(0.0) : "cc");
+            asm("fcmp %d[da], %d[db]\n csinv %0, %[x], %[y], ge"
+                : "=r"(r_inv) : [x]"r"(0x81ULL+i), [y]"r"(0x82ULL),
+                  [da]"w"(d), [db]"w"(0.0) : "cc");
+            asm("fcmp %d[da], %d[db]\n csneg %0, %[x], %[y], eq"
+                : "=r"(r_neg) : [x]"r"(0x81ULL+i), [y]"r"(0x82ULL),
+                  [da]"w"(d), [db]"w"(0.0) : "cc");
+            int fmi = (d < 0.0), fge = !(d < 0.0) && !isnan(d);
+            int feq = (d == 0.0) && !isnan(d);
+            if (r_inc != (fmi ? 0x81ULL+i : 0x83ULL) ||
+                r_inv != (fge ? 0x81ULL+i : ~0x82ULL) ||
+                r_neg != (feq ? 0x81ULL+i : (uint64_t)-(int64_t)0x82ULL))
+                tr_ok = 0;
+        }
+        CHECK(sign_ok, "fcmp_cset_sign");
+        CHECK(cs_ok, "fcmp_csel_cs");
+        CHECK(cc_ok, "fcmp_csel_cc");
+        CHECK(hi_ok, "fcmp_csel_hi");
+        CHECK(tr_ok, "fcmp_csinc_csinv_csneg_d");
+    }
+
     printf("csel: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

@@ -1253,8 +1253,10 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             switch (inst.op) {
                 case IROp::BRCOND: {
                     if (!flags_in_host_) {
+                        // FLAGS3 only: the loader clobbers RAX/RCX/RDX
+                        // (RDX-only C^from_sub extraction; see x86_backend.cpp).
                         constexpr uint16_t FLAGS3 =
-                            (1u << RAX) | (1u << RCX) | (1u << RDX) | (1u << R8);
+                            (1u << RAX) | (1u << RCX) | (1u << RDX);
                         flush_dirty_host_regs(FLAGS3);
                         flush_scratch_host_regs(FLAGS3);
                         emit_load_flags_from_pstate();

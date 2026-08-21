@@ -403,6 +403,17 @@ void FrostJIT::emit_materialize_flags(bool from_sub) {
 // Load NZCV from cpu.pstate into host flags.
 // Converts ARM C back to x86 CF: if from_sub (bit 27), x86 CF = NOT ARM C.
 // Otherwise x86 CF = ARM C.
+// Scratch contract: clobbers ONLY RAX/RCX/RDX (and RFLAGS). Callers that
+// flush+invalidate exactly FLAGS3 around this helper are correct. Do NOT
+// add another scratch register here: every other allocatable reg (R8, R9,
+// R11, R12+...) may hold a live vreg at the call site — the old sequence
+// used R8 for the from_sub extraction, and the CSEL/CCMP/BRCOND_SKIP/
+// ADCS-SBCS sites (which flush FLAGS3 only) silently lost whatever vreg
+// was staged in R8. That was the "cset after fcmpe always returns 0"
+// miscompile: FCMP materializes NZCV to pstate (flags_in_host_=false), so
+// the following CSEL ran the loader, whose R8 scratch clobbered the
+// CMOVcc else-value staged in R8 (minecraft's sign() → step=(0,0,0) →
+// raycast assert / falling through the ground).
 void FrostJIT::emit_load_flags_from_pstate() {
     emit_load32(RAX, CPU_REG, PSTATE_OFF);  // eax = pstate
     emit_mov_reg(RCX, RAX);  // rcx = pstate
@@ -420,21 +431,17 @@ void FrostJIT::emit_load_flags_from_pstate() {
     emit_shift_imm8(RDX, 5, 24);
     emit_byte(0x81); emit_byte(0xE2); emit_u32(0x00000040);
     emit_or_reg(RAX, RDX);
-    // C → CF (bit 0): extract ARM C from pstate bit 29.
-    // If from_sub (bit 27 set), invert: x86 CF = NOT ARM C.
-    // If not from_sub, x86 CF = ARM C.
-    emit_mov_reg(RDX, RCX);
-    emit_shift_imm8(RDX, 5, 29);
-    emit_byte(0x83); emit_byte(0xE2); emit_byte(0x01); // and edx, 1 (ARM C)
-    // Test bit 27 (from_sub)
-    emit_byte(0xF7); emit_byte(0xC1); emit_u32(0x08000000); // test ecx, 1<<27
-    // If from_sub (ZF=0 after test), invert C.
-    // We use CMOV: if NOT ZF (from_sub), edx = NOT edx.
-    // Simpler: XOR edx with (pstate >> 27) & 1.
-    emit_mov_reg(R8, RCX);  // r8 = pstate
-    emit_shift_imm8(R8, 5, 27);
-    emit_byte(0x41); emit_byte(0x83); emit_byte(0xE0); emit_byte(0x01); // and r8d, 1
-    emit_xor_reg(RDX, R8);  // if from_sub, flip C
+    // C → CF (bit 0): x86 CF = ARM C (bit 29) XOR from_sub (bit 27).
+    // Computed in RDX alone: X = pstate ^ (pstate << 2) places (C ^ from_sub)
+    // at bit 29 of X — (pstate << 2)'s bit 29 IS pstate's bit 27. A RIGHT
+    // shift here would XOR C with N (bit 31) instead — the sign of the last
+    // compare — silently corrupting every carry-reading condition (CS/CC/
+    // HI/LS) after a pstate load. No second scratch register.
+    emit_mov_reg(RDX, RCX);              // rdx = pstate
+    emit_shift_imm8(RDX, 4, 2);          // rdx = pstate << 2
+    emit_xor_reg(RDX, RCX);              // bit 29 of rdx = C ^ from_sub
+    emit_shift_imm8(RDX, 5, 29);         // move it to bit 0
+    emit_byte(0x83); emit_byte(0xE2); emit_byte(0x01); // and edx, 1
     emit_or_reg(RAX, RDX);
     // V → OF (bit 11): (pstate >> 17) & 0x800
     emit_mov_reg(RDX, RCX);

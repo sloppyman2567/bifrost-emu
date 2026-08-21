@@ -73,10 +73,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // clobber_flags() — the whole point is to consume live flags.
             bool loaded_from_pstate = !flags_in_host_;
             // The body clobbers RAX (src1/zero) and RCX (src2/mask);
-            // the flags-load path additionally uses RDX and R8
-            // (emit_load_flags_from_pstate, x86_backend.cpp:409).
+            // the flags-load path additionally uses RDX
+            // (emit_load_flags_from_pstate is RAX/RCX/RDX-only since the
+            // R8-scratch fix — see the contract comment in x86_backend.cpp).
             uint16_t clob = (1u << RAX) | (1u << RCX);
-            if (loaded_from_pstate) clob |= (1u << RDX) | (1u << R8);
+            if (loaded_from_pstate) clob |= (1u << RDX);
             flush_invalidate_host_regs(clob);
             if (loaded_from_pstate) {
                 emit_load_flags_from_pstate();
