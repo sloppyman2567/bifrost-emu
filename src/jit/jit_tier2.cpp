@@ -1149,6 +1149,68 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
         flush_all_vregs();
         invalidate_all_vregs();
+
+        // ── P2-lite: register-resident LICM results across the Lback ─────
+        // The hoisted invariants now live in their (just-flushed, current)
+        // stack slots and block0's body reloads them on EVERY iteration.
+        // Reload the hottest roots into free CALLEE-SAVED registers here —
+        // emitted BEFORE body_start, so the Lback jumps past it and the
+        // load runs once per region ENTRY — and pin those regs for the
+        // body compile so the allocator never evicts them (same mechanism
+        // as the arch GPR pins; callee-saved is required because RAX/RCX/
+        // RDX/R8/R9/R11 are in the memory ops' MEM_CLOBBER set — the
+        // slow-path C helper destroys caller-saved regs mid-body). The
+        // keeps are read-only in the body (LICM invariants), so they stay
+        // CLEAN: no exit spill, and the kill at their last body use emits
+        // nothing. Blocked when has_call (callee clobbers cpu.regs[] and
+        // caller-saved state — mirrors the arch-pin policy) and fenced to
+        // leave the body ≥3 allocatable regs (the emitter-audit fence: a
+        // steered/pinned pool under 3 regs exposes ALU-emitter variant-2).
+        if (!getenv("BIFROST_NO_KEEPRES") && last_is_backedge && !has_call) {
+            const size_t n_body = region_ir.size();
+            struct KeepCand { uint16_t v; int uses; };
+            std::vector<KeepCand> cands;
+            for (const auto& inst : preheader) {
+                const uint16_t v = inst.dest;
+                if (!(v > 32 && v < 4096)) continue;
+                int u = 0;
+                for (uint16_t ui : vreg_uses_[v]) {
+                    if (ui < n_body) u++;  // body uses (synthetic preheader
+                                           // entries live at PREHEADER_BASE)
+                }
+                if (u > 0) cands.push_back({v, u});
+            }
+            std::sort(cands.begin(), cands.end(),
+                      [](const KeepCand& a, const KeepCand& b) {
+                          return a.uses > b.uses;
+                      });
+            int n_alloc_pinned = 0;
+            for (int r : ALLOC_REGS) {
+                if (pinned_host_regs_ & (1u << r)) n_alloc_pinned++;
+            }
+            const int max_keeps =
+                std::min(NUM_PIN_REGS, NUM_ALLOC_REGS - n_alloc_pinned - 3);
+            int placed = 0;
+            for (const auto& c : cands) {
+                if (placed >= max_keeps) break;
+                int r = -1;
+                for (int pr : PIN_REGS) {
+                    if (!(pinned_host_regs_ & (1u << pr))) { r = pr; break; }
+                }
+                if (r < 0) break;  // all callee-saved regs are arch pins
+                emit_load(r, RBP, vreg_slot_[c.v]);
+                vreg_home_[c.v] = r;
+                reg_vreg_[r] = c.v;
+                vreg_dirty_[c.v] = false;  // read-only: slot stays current
+                vreg_last_use_[c.v] = ++regalloc_lru_counter_;
+                pinned_host_regs_ |= (1u << r);
+                placed++;
+            }
+            if (tier2_trace_enabled()) {
+                fprintf(stderr, "[tier2] keepres: %d candidates, %d pinned\n",
+                        static_cast<int>(cands.size()), placed);
+            }
+        }
     }
     size_t body_start = code_buf_used_;
 
