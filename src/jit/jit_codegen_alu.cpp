@@ -411,7 +411,7 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::CSEL: {
-            // Native CSEL/CSINC/CSINV/CSNEG via jcc+mov.
+            // Native CSEL/CSINC/CSINV/CSNEG via CMOVcc (2026-08-21).
             //
             // Semantics:
             //   CSEL  Rd = cond ? Rn : Rm
@@ -419,36 +419,40 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             //   CSINV Rd = cond ? Rn : ~Rm
             //   CSNEG Rd = cond ? Rn : -Rm
             //
-            // Strategy:
-            //   1. Ensure flags in host RFLAGS.
-            //   2. Flush all vregs (save/restore flags around flush).
-            //   3. Load src1 → RAX, src2 → RCX (with XZR special case).
-            //   4. For CSINC/CSINV/CSNEG: transform RCX (pushfq/popfq
-            //      to preserve flags). For 32-bit ops, zero-extend RCX
-            //      after the transform.
-            //   5. RDX = RAX (d = src1).
-            //   6. jcc skip (if cond TRUE, keep src1); else mov rdx, rcx.
-            //   7. For 32-bit ops, zero-extend RDX.
-            //   8. Store RDX to dest.
+            // Strategy (register-resident, no full flush):
+            //   1. Ensure flags in host RFLAGS (targeted FLAGS3 flush when
+            //      loading from pstate — preserves vregs in R8/R9/R11/R12+,
+            //      BRCOND/CCMP precedent; the old flush_all_vregs+
+            //      invalidate_all_vregs evicted everything and made every
+            //      CSEL in a loop body nuke the register cache).
+            //   2. Ensure both operands in their own registers
+            //      (ensure_two_vregs — variant-2-safe) — no RAX/RCX staging.
+            //   3. d = fresh reg excluding both operands; compute the ELSE
+            //      value into d (mov/lea/not/neg). CSINC uses LEA (flags-
+            //      free); CSINV/CSNEG pushfq/popfq around the transform.
+            //   4. cmovcc d, s1 — cond TRUE selects the then-value. CMOV
+            //      reads RFLAGS without modifying them.
+            //   5. HI/LS carry inversion: cmc before the cmovcc and a
+            //      RESTORING cmc after (the old emitter never restored CF —
+            //      a later flag consumer or the epilogue materialize would
+            //      see the flipped carry when flags were already in host).
             //
             // Carry polarity: arm_cond_to_x86() assumes SUB convention
             // (ARM C = NOT x86 CF). When flags came from ADD/TST
             // (carry_is_direct), CS/CC need swapped mapping, HI/LS need cmc.
-            // Track whether we loaded flags from pstate. If we did, the
-            // flags in pstate are already correct and the epilogue should
-            // NOT re-materialize (the loaded x86 flags have inverted CF,
-            // and materialize(false) would corrupt the C flag).
+            // If we loaded flags from pstate, the flags in pstate are
+            // already correct and the epilogue should NOT re-materialize.
             // If we didn't load (flags were already in host), the epilogue
             // must still materialize them.
             bool loaded_from_pstate = !flags_in_host_;
-            // Ensure flags in host.
             if (!flags_in_host_) {
-                flush_all_vregs();
+                constexpr uint16_t FLAGS3 =
+                    (1u << RAX) | (1u << RCX) | (1u << RDX);
+                flush_dirty_host_regs(FLAGS3);
+                flush_scratch_host_regs(FLAGS3);
                 emit_load_flags_from_pstate();
                 emit_normalize_cf_to_sub_convention();
-                bool saved_fih2 = flags_in_host_;
-                invalidate_all_vregs();
-                flags_in_host_ = saved_fih2;
+                invalidate_host_regs(FLAGS3);
                 flags_in_host_ = true;
                 flags_from_sub_ = true;  // CF is now in SUB convention
             }
@@ -457,54 +461,49 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // resolve_arm_cond_with_carry uses the default mapping.
             bool need_cmc = false;
             uint8_t cc = resolve_arm_cond_with_carry(inst.cond, need_cmc);
-            // Targeted flush+invalidate of the three registers the body
-            // clobbers (RAX=src1, RCX=src2, RDX=dest). Stores don't clobber
-            // RFLAGS, so no pushfq/popfq is needed around the flush (BRCOND
-            // precedent, jit_codegen_branch.cpp:226-228). This also preserves
-            // vregs cached in R8/R9/etc. across the body — the old
-            // flush_all_vregs+invalidate_all_vregs evicted everything.
-            flush_invalidate_host_regs((1u << RAX) | (1u << RCX) | (1u << RDX));
-            if (need_cmc) emit_byte(0xF5);  // cmc
-            // Load src1 → RAX, src2 → RCX.
-            if (inst.src1 == 32) emit_mov_imm32_zext(RAX, 0);
-            else load_vreg_to_reg(RAX, inst.src1);
-            if (inst.src2 == 32) emit_mov_imm32_zext(RCX, 0);
-            else load_vreg_to_reg(RCX, inst.src2);
-            // For CSINC/CSINV/CSNEG, transform RCX (the "else" value).
-            // RCX was invalidated by the targeted flush above, and
-            // load_vreg_to_reg doesn't update the cache, so reg_vreg_[RCX]
-            // is -1. The transform modifies RCX, but since no cached vreg
-            // claims RCX, there's no cache inconsistency.
-            if (inst.op != IROp::CSEL) {
+            // Operands in their own registers (XZR = vreg 32 → immediate 0).
+            const bool z1 = (inst.src1 == 32);
+            const bool z2 = (inst.src2 == 32);
+            int s1 = -1, s2 = -1;
+            if (!z2) s2 = ensure_vreg(inst.src2);
+            if (!z1 && !z2) {
+                ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
+            } else if (!z1) {
+                s1 = ensure_vreg(inst.src1);
+            }
+            // Fresh dest reg excluding both operand regs (variant-2-safe:
+            // alloc after both ensures, afab35d contract).
+            int d = alloc_reg_excluding(z1 ? -1 : s1, z2 ? -1 : s2);
+            // XZR then-value needs a zero REGISTER (cmov has no immediate).
+            if (z1) {
+                s1 = alloc_reg_excluding(d, -1);
+                emit_mov_imm32_zext(s1, 0);
+            }
+            // Else-value into d.
+            if (z2) emit_mov_imm32_zext(d, 0);
+            else if (d != s2) emit_mov_reg(d, s2);
+            if (inst.op == IROp::CSINC) {
+                // lea 1(d), d — flags-free increment.
+                emit_byte(rex(true, d >= 8, false, d >= 8));
+                emit_byte(0x8D);
+                emit_modrm_disp(d, d, 1);
+            } else if (inst.op == IROp::CSINV || inst.op == IROp::CSNEG) {
                 emit_pushfq();
-                if (inst.op == IROp::CSINC) {
-                    // add rcx, 1
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x01);
-                } else if (inst.op == IROp::CSINV) {
-                    emit_not_reg(RCX);
-                } else {  // CSNEG
-                    emit_neg_reg(RCX);
-                }
+                if (inst.op == IROp::CSINV) emit_not_reg(d);
+                else emit_neg_reg(d);
                 emit_popfq();
             }
-            // RDX = RAX (d = src1).
-            emit_mov_reg(RDX, RAX);
-            // jcc skip (if cond TRUE, keep src1 in RDX).
-            // Use placeholder+patch instead of hardcoded offset.
-            size_t jcc_off = emit_jcc_rel8_placeholder(cc);
-            // mov rdx, rcx (cond FALSE: rdx = src2)
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA);
-            // Patch jcc to skip over the 3-byte mov.
-            patch_jcc_rel8(jcc_off, 3);
-            // Store RDX to dest, then cache it in RDX.
-            store_reg_to_vreg(inst.dest, RDX);
-            set_vreg_reg(inst.dest, RDX);
-            // If we loaded flags from pstate, clear flags_in_host_ so the
-            // epilogue doesn't re-materialize. The flags in pstate are
-            // already correct (CSEL doesn't modify flags). Re-materializing
-            // with the loaded x86 flags would corrupt the C flag: the load
-            // inverted CF based on the from_sub bit, and materialize(false)
-            // would set ARM C = x86 CF (the inverted value), losing the C.
+            if (need_cmc) emit_byte(0xF5);  // invert CF for HI/LS
+            // cmovcc d, s1: REX.W + 0F 4x /r — dest d in the REG field,
+            // source s1 in r/m (REX.R=d, REX.B=s1; cc same as jcc).
+            emit_byte(rex(true, d >= 8, false, s1 >= 8));
+            emit_byte(0x0F);
+            emit_byte(0x40 + cc);
+            emit_byte(modrm(3, d & 7, s1 & 7));
+            if (need_cmc) emit_byte(0xF5);  // restore CF for later consumers
+            // Store RDX-style tail: eager store + cache in d.
+            store_reg_to_vreg(inst.dest, d);
+            set_vreg_reg(inst.dest, d);
             // If we loaded flags from pstate, clear flags_in_host_ so the
             // epilogue doesn't re-materialize. The flags in pstate are
             // already correct (CSEL doesn't modify flags). Re-materializing
