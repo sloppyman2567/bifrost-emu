@@ -77,7 +77,11 @@ bool FrostJIT::tier2_enabled() {
 uint32_t FrostJIT::tier2_hits_threshold() {
     static const uint32_t hits = [] {
         const char* s = getenv("BIFROST_TIER2_HITS");
-        return s ? static_cast<uint32_t>(strtoul(s, nullptr, 10)) : 10000;
+        // Default 1000 (2026-08-20): hot blocks neutralize their in-code
+        // counters 10x sooner, and with loop-regions-only the extra regions
+        // the lower bar admits are genuine loops. CoreMark A/B: 3614 vs
+        // 3590 iters/s (3 reps each) — small but reproducible.
+        return s ? static_cast<uint32_t>(strtoul(s, nullptr, 10)) : 1000;
     }();
     return hits;
 }
