@@ -1266,6 +1266,22 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
             if (arch_pin_[a] >= 0) emit_store_arm(a, arch_pin_[a]);
         }
     };
+    // ── Shared exit tail (Track 3: cold-exit dedup) ──────────────────
+    // Every cold exit ends with the SAME fixed sequence (store cpu.pc from
+    // RAX, rdi=cpu, rsi=emu from the frame slot, frame teardown, ret) —
+    // ~33 bytes duplicated per edge. Each exit now ends with `movabs rax,
+    // exit_pc; jmp L_shared_exit` (5 bytes) and ONE copy of the tail is
+    // emitted after all exits. Only the per-edge VARIABLE part (cmc /
+    // flag materialize / flush of that branch point's dirty vregs / pin
+    // stores) remains inline — it differs per edge and cannot be shared
+    // without runtime metadata. Cold exits are rare (taken edges leaving
+    // the trace), so the extra jmp costs nothing measurable; the win is
+    // region bytes + I-cache footprint (an 11-block region saves ~300 B).
+    std::vector<size_t> shared_exit_patch_offs;
+    auto emit_shared_exit_jmp = [&]() {
+        size_t p = emit_jmp_rel32_placeholder();
+        shared_exit_patch_offs.push_back(p);
+    };
     if (!skip_exit_sections) {
     uint64_t exit_pc = rblocks[nblk - 1].pc + rblocks[nblk - 1].inst_count * 4;
     if (last_term_uncond) exit_pc = rblocks[nblk - 1].side_pc;  // the B target
@@ -1273,13 +1289,7 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
     flush_all_vregs();
     emit_flush_all_pins();
     emit_mov_imm_to_rax(exit_pc);
-    emit_store(CPU_REG, PC_OFF, RAX);
-    emit_mov_reg(RDI, CPU_REG);        // mov rdi, rbx
-    emit_load(RSI, RBP, emu_slot_off());  // rsi = emu
-    emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);  // mov rsp, rbp
-    emit_pop(R15); emit_pop(R14); emit_pop(R13);
-    emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
-    emit_ret();
+    emit_shared_exit_jmp();
     }
 
     // ── Deferred side-exit epilogues (one per non-last block) ───────
@@ -1306,13 +1316,23 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         flush_all_vregs();
         emit_flush_all_pins();
         emit_mov_imm_to_rax(c.side_pc);
-        emit_store(CPU_REG, PC_OFF, RAX);
-        emit_mov_reg(RDI, CPU_REG);
-        emit_load(RSI, RBP, emu_slot_off());
+        emit_shared_exit_jmp();
+    }
+
+    // ── Emit the shared exit tail + patch every exit's jmp ──────────
+    // Skipped when no exits exist (1-block uncond-back-edge region: the
+    // term's inline jmp to body_start is the only way out).
+    if (!shared_exit_patch_offs.empty()) {
+        size_t tail_off = code_buf_used_;
+        emit_store(CPU_REG, PC_OFF, RAX);     // cpu.pc = rax (exit pc)
+        emit_mov_reg(RDI, CPU_REG);           // mov rdi, rbx
+        emit_load(RSI, RBP, emu_slot_off());  // rsi = emu
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xEC);  // mov rsp, rbp
         emit_pop(R15); emit_pop(R14); emit_pop(R13);
         emit_pop(R12); emit_pop(RBP); emit_pop(RBX);
         emit_ret();
+        for (size_t p : shared_exit_patch_offs)
+            patch_jmp_rel32(p, static_cast<int32_t>(tail_off - (p + 5)));
     }
 
     // ── Loop back-edge (Lback): the last block's taken edge ─────────
