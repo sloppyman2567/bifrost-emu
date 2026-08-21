@@ -79,6 +79,7 @@
 #include "frost/audio_thunk.hpp"    // 1.5.4-alpha: AudioThunk full def
 #include "frost/display_thunk.hpp"  // 1.5.4-alpha: DisplayThunk full def
 #include "frost/gl_state.hpp"       // 1.5.4-alpha: GLStateTracker
+#include "frost/android_surface.hpp" // Android NativeActivity surface layer
 #include "opgen_thunk.hpp"          // 1.5.4-alpha: symbol signature table
 #include "thunk_common.hpp"         // shared SymbolEntry + trampoline encodings
 #include "debug_flags.h"            // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
@@ -777,6 +778,46 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         cpu.regs[0] = 0;
         return 0;
+    }
+
+    // ── Android surface interception (eglGetDisplay) ─────────────────
+    // On a Wayland host, EGL_DEFAULT_DISPLAY must wrap SDL's wl_display —
+    // the SAME connection the ANativeWindow's wl_surface lives on — or
+    // Mesa rejects eglCreateWindowSurface cross-connection.
+    static const bool no_disp_subst =
+        (getenv("BIFROST_NO_DISPLAY_SUBST") != nullptr);
+    if (entry.name == "eglGetDisplay" && !no_disp_subst) {
+        auto& mgr = frost::AndroidSurfaceManager::instance();
+        if (cpu.regs[0] == 0 && mgr.ready() && mgr.native_display()) {
+            cpu.regs[0] =
+                reinterpret_cast<uint64_t>(mgr.native_display());
+        }
+    }
+    // ── Android surface interception (eglCreateWindowSurface) ────────
+    // When the native-window argument is an ANativeWindow shim handle
+    // (Android surface layer), substitute the HOST native window value so
+    // host EGL creates a real window surface. eglSwapBuffers then presents
+    // through the normal host path with no further interception.
+    if (entry.name == "eglCreateWindowSurface") {
+        auto& mgr = frost::AndroidSurfaceManager::instance();
+        if (frost::AndroidSurfaceManager::is_shim(cpu.regs[2])) {
+            uint64_t hw = mgr.host_native_window();
+            if (hw == 0) {
+                // No host window backing the shim — EGL_NO_SURFACE.
+                if (dbg().thunk_trace)
+                    fprintf(stderr, "[thunk] eglCreateWindowSurface: "
+                            "android shim without host window\n");
+                cpu.regs[0] = 0;
+                return 0;
+            }
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] eglCreateWindowSurface: android "
+                        "shim 0x%llx -> host window 0x%llx\n",
+                        static_cast<unsigned long long>(cpu.regs[2]),
+                        static_cast<unsigned long long>(hw));
+            }
+            cpu.regs[2] = hw;
+        }
     }
 
     // ── GLFW callback registration (CURSOR_CB/KEY_CB/MOUSE_CB/…) ─────

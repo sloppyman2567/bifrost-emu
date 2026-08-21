@@ -409,18 +409,23 @@ glSampleCoverage          GLES   ii            -     -              -
 
 # ── libEGL.so / libEGL.so.1 ────────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
+# NOTE (2026-08-20): pointer args are REAL guest pointers (major/minor
+# out-params, attrib lists, config arrays) and MUST be 'p' so the thunk
+# bounces them through host memory — the guest direct window is not
+# identity-mapped in the host address space, so raw guest pointers
+# segfault inside host Mesa.
 eglGetDisplay             EGL    i             -     -              -
-eglInitialize             EGL    iii           -     -              -
-eglChooseConfig           EGL    iiiii         -     -              -
-eglCreateContext          EGL    iiii          -     -              -
+eglInitialize             EGL    ipp           -     -              -
+eglChooseConfig           EGL    ippip         -     -              -
+eglCreateContext          EGL    iiip          -     -              -
 eglDestroyContext         EGL    ii            -     -              -
 eglMakeCurrent            EGL    iiii          -     -              -
 eglSwapBuffers            EGL    ii            -     -              -
 eglDestroySurface         EGL    ii            -     -              -
-eglCreateWindowSurface    EGL    iiii          -     -              -
-eglCreatePbufferSurface   EGL    iii           -     -              -
-eglQuerySurface           EGL    iiii          -     -              -
-eglGetConfigAttrib        EGL    iiii          -     -              -
+eglCreateWindowSurface    EGL    iiip          -     -              -
+eglCreatePbufferSurface   EGL    iip           -     -              -
+eglQuerySurface           EGL    iiip          -     -              -
+eglGetConfigAttrib        EGL    iiip          -     -              -
 eglGetError               EGL    -             -     -              -
 eglTerminate              EGL    i             -     -              -
 eglBindAPI                EGL    i             -     -              -
@@ -428,7 +433,7 @@ eglReleaseThread          EGL    -             -     -              -
 eglWaitGL                 EGL    -             -     -              -
 eglWaitNative             EGL    i             -     -              -
 eglSwapInterval           EGL    ii            -     -              -
-eglQueryString            EGL    ii            -     -              -
+eglQueryString            EGL    i             str   -              -
 eglGetProcAddress         EGL    p             -     GET_PROC       -
 
 # ── libSDL2.so / libSDL2-2.0.so.0 ──────────────────────────────────────
@@ -998,3 +1003,16 @@ XkbSetState                XKB   iii            -     PROXY             -
 XkbSetAutoRepeatRate       XKB   iiii           -     PROXY             -
 XkbGetAutoRepeatRate       XKB   iipp           -     PROXY             -
 XkbFreeKeyboard            XKB   iii            -     PROXY             -
+# ── Android NativeActivity surface layer (libandroid.so) ─────────────
+# ANativeWindow shims backed by the DisplayProxy host SDL window. The
+# window handle arguments are GUEST shim handles (raw integers, never
+# pointer-translated). fromSurface ignores the JNIEnv/jobject pair —
+# v1 is a single-surface singleton.
+ANativeWindow_fromSurface        ANDROID ii     -     ANDROID_WINDOW -
+ANativeWindow_acquire            ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_release            ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_free               ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_getWidth           ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_getHeight          ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_getFormat          ANDROID i      -     ANDROID_WINDOW -
+ANativeWindow_setBuffersGeometry ANDROID iiii   -     ANDROID_WINDOW -

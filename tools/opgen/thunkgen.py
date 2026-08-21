@@ -51,7 +51,7 @@ import sys
 VALID_ARGS = set('ifpzd')
 VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
-              'GLX', 'RANDR', 'XKB')
+              'GLX', 'RANDR', 'XKB', 'ANDROID')
 VALID_RET = ('-', 'str')
 VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'PRESENT',
@@ -66,7 +66,8 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
                 'VK_CREATE_DEVICE', 'VK_PRESENT', 'VK_SUBMIT',
                 'VK_CREATE_RENDERPASS', 'VK_CREATE_FRAMEBUFFER',
-                'VK_BEGIN_RENDERPASS')
+                'VK_BEGIN_RENDERPASS',
+                'ANDROID_WINDOW')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
               'TEX3D')

@@ -10,6 +10,7 @@
 #include "frost/display_thunk.hpp"
 #include "frost/thunk.hpp"  // for SYSCALL_NUMBER
 #include "frost/display_proxy.hpp"
+#include "frost/android_surface.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
 #include "opgen_thunk.hpp"  // 1.5.4-alpha: symbol signature table (single source of truth)
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
@@ -227,6 +228,71 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return 0;
         }
         // Proxy unavailable (headless) — fall through to host dispatch.
+    }
+
+    // ── Android NativeActivity surface layer (ANDROID_WINDOW) ────────
+    // ANativeWindow shims backed by the DisplayProxy host SDL window.
+    // The window argument is a GUEST shim handle (raw integer, never
+    // translated). fromSurface lazily initializes the proxy so a pure
+    // Android app (no X11 calls of its own) still gets a host window.
+    if (entry.flags & THUNK_ANDROID_WINDOW) {
+        if (!impl_->proxy_) {
+            impl_->proxy_ = std::make_unique<DisplayProxy>();
+            impl_->proxy_->set_memory(impl_->mem);
+        }
+        if (!impl_->proxy_->ready()) {
+            impl_->proxy_->init(800, 600, impl_->mem);
+        }
+        auto& mgr = frost::AndroidSurfaceManager::instance();
+        if (impl_->proxy_->ready()) {
+            mgr.set_host_sdl_window(impl_->proxy_->host_window());
+            // Eagerly resolve the host native window + wl_display NOW so
+            // the guest's later eglGetDisplay(EGL_DEFAULT_DISPLAY)
+            // substitution (same wl_display connection) is armed before
+            // any EGL call.
+            mgr.host_native_window();
+        }
+        const std::string& n = entry.name;
+        if (n == "ANativeWindow_fromSurface") {
+            // (JNIEnv*, jobject) — both opaque; v1 is a single-surface
+            // singleton. Returns 0 (NULL) when no host window exists,
+            // matching Android's behavior without a valid surface.
+            cpu.regs[0] = mgr.from_surface();
+            if (trace) fprintf(stderr, "[android] fromSurface -> 0x%llx\n",
+                               static_cast<unsigned long long>(cpu.regs[0]));
+            return 0;
+        }
+        if (!frost::AndroidSurfaceManager::is_shim(cpu.regs[0])) {
+            // Unknown/foreign handle — mirror Android's EINVAL-ish 0xBAD.../
+            // -EINVAL convention loosely: return -EINVAL.
+            cpu.regs[0] = static_cast<uint64_t>(-22);
+            return 0;
+        }
+        if (n == "ANativeWindow_acquire") {
+            mgr.acquire(cpu.regs[0]);
+            cpu.regs[0] = 0;
+        } else if (n == "ANativeWindow_release" || n == "ANativeWindow_free") {
+            mgr.release(cpu.regs[0]);
+            cpu.regs[0] = 0;
+        } else if (n == "ANativeWindow_getWidth") {
+            cpu.regs[0] = static_cast<uint64_t>(
+                static_cast<int64_t>(mgr.width()));
+        } else if (n == "ANativeWindow_getHeight") {
+            cpu.regs[0] = static_cast<uint64_t>(
+                static_cast<int64_t>(mgr.height()));
+        } else if (n == "ANativeWindow_getFormat") {
+            cpu.regs[0] = static_cast<uint64_t>(
+                static_cast<int64_t>(mgr.format()));
+        } else if (n == "ANativeWindow_setBuffersGeometry") {
+            // (window, width, height, format); 0 keeps the current value.
+            cpu.regs[0] = static_cast<uint64_t>(mgr.set_buffers_geometry(
+                static_cast<int32_t>(cpu.regs[1]),
+                static_cast<int32_t>(cpu.regs[2]),
+                static_cast<int32_t>(cpu.regs[3])));
+        } else {
+            cpu.regs[0] = 0;
+        }
+        return 0;
     }
 
     // ── Vulkan marshalling path ──────────────────────────────────────
@@ -1828,6 +1894,7 @@ void DisplayThunk::register_known_symbols_() {
     static const char* kGlxSonames[]  = {"libGLX.so.2", "libGLX.so"};
     static const char* kRandrSonames[] = {"libXrandr.so.2", "libXrandr.so"};
     static const char* kXkbSonames[]  = {"libXkblib.so", "libX11-xcb.so"};
+    static const char* kAndroidSonames[] = {"libandroid.so", "libandroid.so"};
     // Indexed by (LibFamily - LibFamily::VK). The generator emits the
     // display families contiguously after the GraphicThunk families, so
     // VK is the first DisplayThunk family.
@@ -1843,6 +1910,8 @@ void DisplayThunk::register_known_symbols_() {
         {kGlxSonames, 2, nullptr},   // GLX
         {kRandrSonames, 2, nullptr}, // RANDR
         {kXkbSonames, 2, nullptr},   // XKB
+        {kAndroidSonames, 2, nullptr}, // ANDROID (host lib never present —
+                                       // the dispatch arm owns everything)
     };
 
     constexpr int kFirstDisplayFamily = static_cast<int>(thunk::LibFamily::VK);
@@ -1900,6 +1969,9 @@ void DisplayThunk::register_known_symbols_() {
         switch (spec.policy) {
         case thunk::Policy::PROXY:
             flags |= THUNK_PROXY;
+            break;
+        case thunk::Policy::ANDROID_WINDOW:
+            flags |= THUNK_ANDROID_WINDOW;
             break;
         case thunk::Policy::VK_GET_PROC:
             flags |= THUNK_VULKAN | THUNK_GET_PROC;

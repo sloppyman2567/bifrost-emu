@@ -34,7 +34,8 @@ enum class LibFamily : uint8_t {
     GLX = 14,
     RANDR = 15,
     XKB = 16,
-    UNKNOWN = 17,
+    ANDROID = 17,
+    UNKNOWN = 18,
 };
 
 enum class Policy : uint8_t {
@@ -78,6 +79,7 @@ enum class Policy : uint8_t {
     VK_CREATE_RENDERPASS = 37,
     VK_CREATE_FRAMEBUFFER = 38,
     PROXY = 39,
+    ANDROID_WINDOW = 40,
 };
 
 enum class RetKind : uint8_t {
@@ -434,17 +436,17 @@ inline constexpr Spec specs[] = {
     {LibFamily::GLES, "glGetIntegerv", "ip", RetKind::PLAIN, Policy::QUERY, SizeKind::NONE},
     {LibFamily::GLES, "glSampleCoverage", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglGetDisplay", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglInitialize", "iii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglChooseConfig", "iiiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglCreateContext", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglInitialize", "ipp", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglChooseConfig", "ippip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglCreateContext", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglDestroyContext", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglMakeCurrent", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglSwapBuffers", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglDestroySurface", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglCreateWindowSurface", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglCreatePbufferSurface", "iii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglQuerySurface", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglGetConfigAttrib", "iiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglCreateWindowSurface", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglCreatePbufferSurface", "iip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglQuerySurface", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglGetConfigAttrib", "iiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglGetError", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglTerminate", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglBindAPI", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
@@ -452,7 +454,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::EGL, "eglWaitGL", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglWaitNative", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglSwapInterval", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::EGL, "eglQueryString", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::EGL, "eglQueryString", "i", RetKind::STRING, Policy::NONE, SizeKind::NONE},
     {LibFamily::EGL, "eglGetProcAddress", "p", RetKind::PLAIN, Policy::GET_PROC, SizeKind::NONE},
     {LibFamily::SDL, "SDL_Init", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::SDL, "SDL_InitSubSystem", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
@@ -960,6 +962,14 @@ inline constexpr Spec specs[] = {
     {LibFamily::XKB, "XkbSetAutoRepeatRate", "iiii", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE},
     {LibFamily::XKB, "XkbGetAutoRepeatRate", "iipp", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE},
     {LibFamily::XKB, "XkbFreeKeyboard", "iii", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_fromSurface", "ii", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_acquire", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_release", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_free", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_getWidth", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_getHeight", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_getFormat", "i", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
+    {LibFamily::ANDROID, "ANativeWindow_setBuffersGeometry", "iiii", RetKind::PLAIN, Policy::ANDROID_WINDOW, SizeKind::NONE},
 };
 
 inline constexpr size_t spec_count = sizeof(specs) / sizeof(specs[0]);

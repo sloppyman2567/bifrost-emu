@@ -76,6 +76,7 @@ public:
     static constexpr uint8_t THUNK_PROXY         = 1u << 4;
     static constexpr uint8_t THUNK_VULKAN        = 1u << 5;
     static constexpr uint8_t THUNK_DOUBLE        = 1u << 6;
+    static constexpr uint8_t THUNK_ANDROID_WINDOW = 1u << 7;
  private:
     std::unique_ptr<DisplayThunkImpl> impl_;
     void register_function_(const std::string& lib,

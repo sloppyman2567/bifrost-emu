@@ -2902,6 +2902,11 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
         || starts_with(soname, "libgbm")) {
         return true;
     }
+    // Android NativeActivity surface layer (2026-08-20): ANativeWindow
+    // shims live in DisplayThunk under the ANDROID family.
+    if (starts_with(soname, "libandroid.so")) {
+        return true;
+    }
     return false;
 }
 // ── parse_tls ──────────────────────────────────────────────────────────

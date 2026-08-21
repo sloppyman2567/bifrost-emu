@@ -349,6 +349,12 @@ INTEGRATION_TESTS=(
     # (GL_MAP_WRITE_BIT), and that flush pushes ranges early. Needs
     # DISPLAY + host GL. Exit 77 = skip when unavailable.
     "sdl_gl_mapbuffer|ctest_real/test_sdl_gl_mapbuffer.elf||30|ALL PASS"
+    # Android NativeActivity surface layer (2026-08-20): ANativeWindow
+    # shim + EGL window-surface interception. The guest dlopens
+    # libandroid.so, gets a shim window, and creates a REAL host EGL
+    # window-surface through it (thunk substitutes the host X11 window).
+    # Needs DISPLAY + host GL. Exit 77 = skip when unavailable.
+    "android_surface|ctest_real/test_android_surface.elf||30|ALL PASS"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing
