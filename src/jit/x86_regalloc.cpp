@@ -330,6 +330,43 @@ int FrostJIT::ensure_vreg(int v, int preferred) {
     vreg_last_use_[v] = ++regalloc_lru_counter_;  // mark as recently used
     return r;
 }
+// ── ensure_two_vregs (ALU-emitter variant-2 fix, 2026-08-21) ──────────
+// The old emitter idiom
+//     s1 = ensure_vreg(src1); s2 = ensure_vreg(src2);
+// leaves s1 STALE when the second ensure finds every alloc reg occupied
+// and Belady evicts a DEAD-after-this-op src1 (dead evictions are
+// Belady's preferred victims — score INT_MAX). The emitter then reads
+// src2's register as src1 (the disassembly-confirmed
+// `mov %r9,%r11 ; add %r11,%r11` class; EOR variant-2 from the P2
+// review). This helper re-reads BOTH homes after the last evicting
+// call and re-establishes whichever operand lost its home, so the
+// caller never observes a stale register number or an unmapped
+// operand. Convergence: the re-ensure of an evicted operand needs a
+// victim only when every alloc reg is occupied, and Belady never
+// evicts an operand whose next use is the current op (lowest possible
+// score) while any other occupant exists — terminating for any pool
+// with >= 2 non-pinned regs. Pathological smaller pools fall back to
+// force_two_vregs_to (fixed RAX/RCX placement, eviction-safe).
+void FrostJIT::ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2) {
+    if (v1 == v2) {
+        int r = ensure_vreg(v1);
+        *r1 = r;
+        *r2 = r;
+        return;
+    }
+    ensure_vreg(v2);
+    ensure_vreg(v1);
+    if (vreg_home_[v2] < 0) ensure_vreg(v2);  // v1's ensure evicted v2
+    *r1 = vreg_home_[v1];
+    *r2 = vreg_home_[v2];
+    if (*r1 < 0 || *r2 < 0) {
+        // Defensive: sub-2-reg pools (all pinned but two) — fixed
+        // placement is eviction-safe by construction.
+        force_two_vregs_to(v1, v2, RAX, RCX);
+        *r1 = vreg_home_[v1];
+        *r2 = vreg_home_[v2];
+    }
+}
 // Record that vreg v is now in reg r (e.g., after a computation).
 // The old occupant of reg r is KILLED (not evicted) — its value was
 // already overwritten by the computation, so we must NOT write it back.

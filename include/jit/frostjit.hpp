@@ -1151,6 +1151,10 @@ private:
     // Debug-only: verify the dirty_host_regs_ invariant. Returns true if OK.
     bool verify_dirty_host_regs_() const;
     int  ensure_vreg(int v, int preferred = -1);
+    // Variant-2-safe ensure for TWO operands: re-reads both homes after
+    // the last evicting call so the caller can never observe a stale
+    // register number (see x86_regalloc.cpp for the full contract).
+    void ensure_two_vregs(uint16_t v1, uint16_t v2, int* r1, int* r2);
     void set_vreg_reg(int v, int r);
     void kill_vreg(int v);
     int32_t vreg_stack_slot(int v);

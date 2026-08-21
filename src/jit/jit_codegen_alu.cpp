@@ -128,8 +128,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                 }
             }
             bool commutative = (inst.op != IROp::SUB);
-            int s1 = ensure_vreg(inst.src1);
-            int s2 = ensure_vreg(inst.src2);
+            // Variant-2-safe operand ensure (2026-08-21 audit): the old
+            // `s1 = ensure_vreg(src1); s2 = ensure_vreg(src2);` pair left
+            // s1 stale whenever the second ensure Belady-evicted a
+            // dead-after-this-op src1 (every alloc reg occupied) — the
+            // emitter then read src2's register as src1. ensure_two_vregs
+            // re-reads both homes after the last evicting call.
+            int s1, s2;
+            ensure_two_vregs(inst.src1, inst.src2, &s1, &s2);
             int d;
             // emit_alu_op: emit `d = d op src` for the current inst.op.
             auto emit_alu_op = [&](int d, int src) {
