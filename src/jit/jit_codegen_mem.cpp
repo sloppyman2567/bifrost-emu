@@ -199,9 +199,30 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
             // address is consumed by emit_load_mem, which then OVERWRITES
             // RAX with the loaded data — so drop src1's mapping afterwards
             // (safe: src1 is dead, and its value was consumed as the base).
-            uint16_t kept = load_vreg_to_reg_fast(RAX, inst.src1, inst.dest, MEM_CLOBBER);
-            emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm), inst.width, false);
-            if (kept & (1u << RAX)) kill_vreg(inst.src1);
+            //
+            // Direct-index fast path (indexed addressing, 2026-08-21): the
+            // emitter NEVER destroys the address register, so a src1 cached
+            // in a CALLEE-SAVED reg (an arch pin — the common loop-carried
+            // pointer shape) rides the SIB index directly: no staging copy
+            // into RAX at all. Only taken when neither keep applies; the
+            // full MEM_CLOBBER flush+invalidate still protects other live
+            // vregs from the slow-path C call.
+            const bool keep_rax =
+                vreg_fast_keep_candidate(inst.src1, RAX, inst.dest);
+            const int ahome = vreg_home_[inst.src1];
+            if (!keep_rax && ahome >= R12 && ahome <= R15) {
+                flush_dirty_host_regs(MEM_CLOBBER);
+                flush_scratch_host_regs(MEM_CLOBBER);
+                invalidate_host_regs(MEM_CLOBBER);
+                emit_load_mem(RAX, ahome, static_cast<int32_t>(inst.imm),
+                              inst.width, false);
+            } else {
+                uint16_t kept = load_vreg_to_reg_fast(RAX, inst.src1,
+                                                      inst.dest, MEM_CLOBBER);
+                emit_load_mem(RAX, RAX, static_cast<int32_t>(inst.imm),
+                              inst.width, false);
+                if (kept & (1u << RAX)) kill_vreg(inst.src1);
+            }
             // Keep dest cached in RAX (set_vreg_reg) instead of storing to
             // memory: the loaded value is usually consumed immediately
             // (STORE_REG / next op), and store_reg_to_vreg would kill the
@@ -219,16 +240,32 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             // Fast path for both operands: if src1/src2 are dead scratch
             // vregs already cached in RAX/RCX, keep them there. emit_store_mem
-            // (in-place-address variant, 2026-08-21) destroys RAX (the addr)
-            // on BOTH paths but PRESERVES RCX (pushes/pops it around the
-            // slow call) — the RAX keep is safe because keep candidates die
-            // at this op (vreg_fast_keep_candidate) and the compile loop's
-            // kill_vreg right after this op drops the mapping without
-            // spilling. Decide BOTH operands BEFORE flushing so src2's
-            // cache isn't wiped by src1's flush, then flush+invalidate only
-            // the non-kept regs.
+            // (indexed-address variant, 2026-08-21) PRESERVES both RAX (the
+            // addr rides the SIB index — never copied or destroyed) and RCX
+            // (pushed/popped around the slow call), so kept mappings stay
+            // valid after the store. Decide BOTH operands BEFORE flushing
+            // so src2's cache isn't wiped by src1's flush, then
+            // flush+invalidate only the non-kept regs.
             bool keep1 = vreg_fast_keep_candidate(inst.src1, RAX, inst.dest);
             bool keep2 = vreg_fast_keep_candidate(inst.src2, RCX, inst.dest);
+            // Direct-index fast path (2026-08-21): operands cached in
+            // CALLEE-SAVED regs (arch pins) are passed straight to the
+            // emitter — the address rides the SIB index and the value is
+            // read from its own register, so the pin→RAX/RCX staging movs
+            // disappear. Only when neither keep applies (a keep is cheaper
+            // still); the full MEM_CLOBBER flush+invalidate still runs.
+            const int ahome = vreg_home_[inst.src1];
+            const int vhome = vreg_home_[inst.src2];
+            if (!keep1 && !keep2 &&
+                ahome >= R12 && ahome <= R15 &&
+                vhome >= R12 && vhome <= R15) {
+                flush_dirty_host_regs(MEM_CLOBBER);
+                flush_scratch_host_regs(MEM_CLOBBER);
+                invalidate_host_regs(MEM_CLOBBER);
+                emit_store_mem(ahome, static_cast<int32_t>(inst.imm),
+                               vhome, inst.width);
+                return 0;
+            }
             uint16_t kept_mask = 0;
             if (keep1) kept_mask |= (1u << RAX);
             if (keep2) kept_mask |= (1u << RCX);
