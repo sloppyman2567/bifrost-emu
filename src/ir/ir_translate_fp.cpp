@@ -979,6 +979,69 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                      ct.subop, cur_pc);
                 return true;
             }
+            case simd::Family::ABDL: {
+                // SABDL/UABDL/SABAL/UABAL (widening absolute difference).
+                // src1 = rn, src2 = rm; width = SOURCE esize; imm = subop;
+                // flags_op = Q (source-half select). Dest always 128-bit.
+                emit(block, IROp::SIMD_ABDL, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::ABD: {
+                // SABD/UABD (same-width absolute difference).
+                emit(block, IROp::SIMD_ABD, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::ADDW: {
+                // SADDW/UADDW/SSUBW/USUBW (widening add/sub, narrow src).
+                // width = SOURCE esize (guard keeps size 1..2).
+                emit(block, IROp::SIMD_ADDW, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::ADDHN: {
+                // ADDHN/RADDHN/SUBHN/RSUBHN (add/sub + narrow high).
+                // width = INPUT esize (2<<size; guard keeps size<3);
+                // flags_op = Q selects DEST half.
+                emit(block, IROp::SIMD_ADDHN, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize * 2), 0,
+                     static_cast<uint8_t>(Q), ct.subop, cur_pc);
+                return true;
+            }
+            case simd::Family::SHRN_SAT: {
+                // SQSHRN family (saturating narrowing shift-by-imm).
+                // width = SOURCE esize; imm = subop | (shift << 8) where
+                // shift = esize_src*16 − (immh:immb), guaranteed 1..esize*8
+                // by the immh!=0 guard (immh:immb ∈ [esize*8, 2*esize*8)).
+                uint32_t immh = (op >> 19) & 0xF;
+                uint32_t immb = (op >> 16) & 7;
+                uint32_t shift = esize * 16 - ((immh << 3) | immb);
+                emit(block, IROp::SIMD_SHRN_SAT, d.rd, d.rn, 0,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop | (shift << 8), cur_pc);
+                return true;
+            }
+            case simd::Family::MUL_ELEM: {
+                // Integer by-element multiply family. width = SOURCE esize;
+                // imm = subop | (lane_index << 8). Index bits: H=bit11,
+                // L=bit21, M=bit20; Rm register = bits[19:16]. Formulas
+                // verified against the cross assembler:
+                //   .b[idx] = H:L:M:Rm<3>   .h[idx] = H:L:M   .s[idx] = H:L
+                uint32_t H = (op >> 11) & 1, L = (op >> 21) & 1,
+                         M = (op >> 20) & 1, rm_reg = (op >> 16) & 0xF;
+                uint32_t idx;
+                if (size == 0)      idx = (H << 3) | (L << 2) | (M << 1) | ((rm_reg >> 3) & 1);
+                else if (size == 1) idx = (H << 2) | (L << 1) | M;
+                else                idx = (H << 1) | L;
+                emit(block, IROp::SIMD_MUL_ELEM, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop | (idx << 8), cur_pc);
+                return true;
+            }
             default:
                 break;
             }

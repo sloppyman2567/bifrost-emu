@@ -65,6 +65,8 @@ void GLStateTracker::set_clear_color(float r, float g, float b, float a) {
 
 void GLStateTracker::set_viewport(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> g(mu_);
+    static const bool vpdbg = getenv("BIFROST_VP_DBG");
+    if (vpdbg) fprintf(stderr, "[vp] glViewport(%d,%d,%d,%d)\n", x, y, w, h);
     viewport_ = {x, y, w, h};
 }
 

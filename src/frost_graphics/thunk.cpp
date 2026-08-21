@@ -109,6 +109,7 @@
 #  include <GL/gl.h>
 #endif
 namespace arm64emu {
+static uint64_t s_last_sdl_window_ = 0;  // TEMP size probe
 // ── GraphicThunkImpl — the real implementation (pimpl) ────────────────
 // The GraphicThunk class in frost/thunk.hpp exposes only void* opaque
 // members to keep the header free of GL/EGL/SDL2 includes. The real
@@ -724,16 +725,65 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = static_cast<uint64_t>(-1);
             return 0;
         }
+        if (pol == thunk::Policy::SDL_ALLOC) {
+            // SDL_malloc/calloc/realloc: return GUEST-window memory so the
+            // guest can deref the pointer. mmap_alloc is zero-filled
+            // (calloc semantics for free). realloc copies the old block's
+            // contents (size looked up from the allocation map).
+            uint64_t ret = 0;
+            if (impl_ && impl_->mem) {
+                const char* nm = entry.name.c_str();
+                if (!strcmp(nm, "SDL_malloc")) {
+                    ret = impl_->mem->mmap_alloc(cpu.regs[0]);
+                } else if (!strcmp(nm, "SDL_calloc")) {
+                    ret = impl_->mem->mmap_alloc(cpu.regs[0] * cpu.regs[1]);
+                } else { // SDL_realloc(ptr, size)
+                    uint64_t oldp = cpu.regs[0], newsz = cpu.regs[1];
+                    ret = impl_->mem->mmap_alloc(newsz);
+                    if (oldp && ret) {
+                        for (auto& [a, sz] : impl_->mem->allocations_snapshot()) {
+                            if (a == oldp) {
+                                uint64_t n = std::min(sz, newsz);
+                                uint8_t* hp = impl_->mem->guest_to_host_ptr(oldp);
+                                uint8_t* hq = impl_->mem->guest_to_host_ptr(ret);
+                                if (hp && hq) memcpy(hq, hp, n);
+                                impl_->mem->untrack_allocation(oldp, sz);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            cpu.regs[0] = ret;
+            return 0;
+        }
         if (pol == thunk::Policy::SDL_FREE) {
             // SDL_free(ptr): the guest may free a string returned by
             // SDL_GetClipboardText / SDL_GetError / joystick-name getters,
             // which lives in the GUEST string cache — reclaim the cache slot
             // instead of calling host free() (the pointer is a guest address,
-            // not a host heap allocation). Arbitrary guest heap pointers are
-            // a leak-safe no-op. Must run BEFORE the generic host-fn stub
+            // not a host heap allocation). Pointers handed out by SDL_ALLOC
+            // (mmap_alloc'd guest-window blocks) are untracked here so the
+            // page cap reflects live memory. Any other guest pointer is a
+            // leak-safe no-op. Must run BEFORE the generic host-fn stub
             // check (SDL_free has no host call at all).
-            if (impl_ && impl_->mem && impl_->string_cache_base)
+            if (impl_ && impl_->mem) {
+                uint64_t p = cpu.regs[0];
+                bool freed = false;
+                if (p) {
+                    for (auto& [a, sz] : impl_->mem->allocations_snapshot()) {
+                        if (a == p) {
+                            impl_->mem->untrack_allocation(p, sz);
+                            freed = true;
+                            break;
+                        }
+                    }
+                }
+                if (!freed && impl_->string_cache_base)
+                    impl_->free_cache_string_(p);
+            } else if (impl_ && impl_->string_cache_base) {
                 impl_->free_cache_string_(cpu.regs[0]);
+            }
             cpu.regs[0] = 0;
             return 0;
         }
@@ -1324,14 +1374,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         uint64_t found = 0;
         if (name && name[0]) {
-            for (const auto& lib : impl_->libs_) {
-                for (const auto& e : lib.entries) {
-                    if (e.name == name) {
-                        found = e.guest_addr;
-                        break;
+            // ARB-suffixed aliases (glBindBufferARB, glActiveTextureARB,
+            // …): games built against GL_ARB_* extensions fetch the
+            // suffixed name while the table registers the core name.
+            // Strip a trailing "ARB" and retry before giving up.
+            char corebuf[256];
+            const char* try_names[2] = { name, nullptr };
+            size_t len = strlen(name);
+            if (len > 3 && len < sizeof(corebuf) &&
+                    !strcmp(name + len - 3, "ARB")) {
+                memcpy(corebuf, name, len - 3);
+                corebuf[len - 3] = 0;
+                try_names[1] = corebuf;
+            }
+            for (int ti = 0; ti < 2 && !found; ti++) {
+                if (!try_names[ti]) break;
+                for (const auto& lib : impl_->libs_) {
+                    for (const auto& e : lib.entries) {
+                        if (e.name == try_names[ti]) {
+                            found = e.guest_addr;
+                            break;
+                        }
                     }
+                    if (found) break;
                 }
-                if (found) break;
             }
         }
         if (dbg().thunk_trace) {
@@ -1594,10 +1660,30 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // GLStateTracker knows the binding; the policy comes from the spec.
     if (impl_->gl_state_tracker_ && entry.spec) {
         if (entry.spec->policy == thunk::Policy::VA_PTR) {
+            // Pointer-arg position differs per function:
+            //   glVertexAttribPointer*(index,...,stride,ptr) -> arg5
+            //   glVertexPointer(size,type,stride,ptr)        -> arg3
+            //   glColorPointer(size,size,type,stride,ptr)    -> arg4
+            //   glTexCoordPointer(size,type,stride,ptr)      -> arg1
+            //   glNormalPointer(type,stride,ptr)             -> arg2
+            int pi = 5;
+            const char* nm = entry.name.c_str();
+            if (!strcmp(nm, "glVertexPointer") || !strcmp(nm, "glColorPointer"))
+                pi = 3;                               // (size,type,stride,ptr)
+            else if (!strcmp(nm, "glTexCoordPointer")) pi = 3;  // (size,type,stride,ptr)
+            else if (!strcmp(nm, "glNormalPointer"))   pi = 2;  // (type,stride,ptr)
+            static const bool vaptr_dbg = getenv("BIFROST_GUI_DBG");
+            if (vaptr_dbg && (!strcmp(nm, "glVertexPointer") ||
+                              !strcmp(nm, "glTexCoordPointer")))
+                fprintf(stderr, "[vaptr] %s binding=%u arg=%llx -> %s\n",
+                        nm, impl_->gl_state_tracker_->array_buffer_binding(),
+                        (unsigned long long)args[pi],
+                        impl_->gl_state_tracker_->array_buffer_binding() ?
+                            "OFFSET" : "translate");
             if (impl_->gl_state_tracker_->array_buffer_binding() == 0 &&
-                args[5] != 0) {
-                translate_ptr(args[5], 5, &bounce_bufs[5],
-                              &bounce_guest[5], &bounce_wb[5]);
+                args[pi] != 0) {
+                translate_ptr(args[pi], pi, &bounce_bufs[pi],
+                              &bounce_guest[pi], &bounce_wb[pi]);
             }
         } else if (entry.spec->policy == thunk::Policy::EL_PTR) {
             if (impl_->gl_state_tracker_->element_array_buffer_binding() == 0 &&
@@ -1765,6 +1851,26 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         is_buffer_consumer_(entry.name)) {
         sync_persistent_mappings_();
     }
+    if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
+        !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize")) {
+        fprintf(stderr, "[szdbg2] %s args0=%llx args1=%llx args2=%llx "
+                "wb1=%d wb2=%d bounce1=%p bounce2=%p\n",
+                entry.name.c_str(),
+                (unsigned long long)args[0], (unsigned long long)args[1],
+                (unsigned long long)args[2],
+                (int)(bounce_wb[1]), (int)(bounce_wb[2]),
+                (void*)(bounce_bufs[1].empty() ? nullptr : bounce_bufs[1].data()),
+                (void*)(bounce_bufs[2].empty() ? nullptr : bounce_bufs[2].data()));
+        using Fn8t = uint64_t (*)(uint64_t,uint64_t,uint64_t,uint64_t,
+                                  uint64_t,uint64_t,uint64_t,uint64_t);
+        reinterpret_cast<Fn8t>(entry.host_fn)(
+            args[0], args[1], args[2], 0xDEAD0001ull,
+            0xDEAD0002ull, 0xDEAD0003ull, 0xDEAD0004ull, 0xDEAD0005ull);
+        fprintf(stderr, "[szdbg2] n_stack=%u fn8-recheck: %d x %d\n",
+                entry.n_stack,
+                *reinterpret_cast<int*>(args[1]),
+                *reinterpret_cast<int*>(args[2]));
+    }
     if (entry.n_stack >= 4) {
         using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1802,6 +1908,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = reinterpret_cast<Fn8>(entry.host_fn)(
             args[0], args[1], args[2], args[3],
             args[4], args[5], args[6], args[7]);
+        if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
+            !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize"))
+            fprintf(stderr, "[szdbg3] Fn8 fired ret=%llx w=%d h=%d\n",
+                    (unsigned long long)ret,
+                    *reinterpret_cast<int*>(args[1]),
+                    *reinterpret_cast<int*>(args[2]));
     }
 
     // Write bounced pointer args back into guest memory.
@@ -1812,6 +1924,66 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                   bounce_bufs[i].size());
             }
         }
+    }
+
+    static int gui_dbg_n_ = -1;
+    if (gui_dbg_n_ < 0) gui_dbg_n_ = getenv("BIFROST_GUI_DBG") ? 4000 : 0;
+    if (gui_dbg_n_ > 0) {
+        --gui_dbg_n_;
+        fprintf(stderr, "[g] %s(%llx,%llx,%llx,%llx)%s\n",
+                entry.name.c_str(),
+                (unsigned long long)args[0], (unsigned long long)args[1],
+                (unsigned long long)args[2], (unsigned long long)args[3],
+                "");
+    }
+    if (entry.name == "SDL_GL_SwapWindow" && getenv("BIFROST_FB_DUMP")) {
+        static int frame_n = 0;
+        if (frame_n == 20) {
+            using GSzFn = void (*)(void*, int*, int*);
+            auto gsz = reinterpret_cast<GSzFn>(
+                dlsym(RTLD_DEFAULT, "SDL_GL_GetDrawableSize"));
+            auto rpx = reinterpret_cast<void (*)(int,int,int,int,
+                          unsigned,unsigned,void*)>(
+                dlsym(RTLD_DEFAULT, "glReadPixels"));
+            int dw = 0, dh = 0;
+            if (gsz) gsz(reinterpret_cast<void*>(args[0]), &dw, &dh);
+            if (rpx && dw > 0 && dh > 0 && impl_->mem) {
+                std::vector<uint8_t> px((size_t)dw * dh * 4);
+                rpx(0, 0, dw, dh, 0x1907 /*GL_RGBA*/, 0x1401 /*UNSIGNED_BYTE*/,
+                    px.data());
+                FILE* f = fopen("/tmp/opencode/fb.ppm", "wb");
+                if (f) {
+                    fprintf(f, "P6\n%d %d\n255\n", dw, dh);
+                    for (int i = 0; i < dw * dh; i++)
+                        fwrite(&px[i*4], 1, 3, f);
+                    fclose(f);
+                    fprintf(stderr, "[fbdump] wrote %dx%d\n", dw, dh);
+                }
+            }
+        }
+        ++frame_n;
+    }
+    if (entry.name == "SDL_CreateWindow") s_last_sdl_window_ = ret;
+
+    // TEMP size probe (post-writeback): log what the guest will see.
+    if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
+        !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize")) {
+        int gw = 0, gh = 0;
+        if (bounce_guest[1] && bounce_bufs[1].size() >= 4)
+            memcpy(&gw, bounce_bufs[1].data(), 4);
+        if (bounce_guest[2] && bounce_bufs[2].size() >= 4)
+            memcpy(&gh, bounce_bufs[2].data(), 4);
+        using FlagsFn = uint32_t (*)(void*);
+        using SzFn = void (*)(void*, int*, int*);
+        auto rtld_sz = reinterpret_cast<SzFn>(dlsym(RTLD_DEFAULT, "SDL_GetWindowSize"));
+        int rw = 0, rh = 0;
+        if (rtld_sz) rtld_sz(reinterpret_cast<void*>(args[0]), &rw, &rh);
+        int hw = 0, hh = 0;
+        if (entry.host_fn)
+            reinterpret_cast<SzFn>(entry.host_fn)(
+                reinterpret_cast<void*>(args[0]), &hw, &hh);
+        fprintf(stderr, "[szdbg] %s -> %dx%d | direct_hostfn=%dx%d rtld=%dx%d\n",
+                entry.name.c_str(), gw, gh, hw, hh, rw, rh);
     }
 
     // 1.5.4-alpha: GLFW event pump — after the host poll/ wait returns,
@@ -1874,6 +2046,25 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
+    if (entry.name == "SDL_PollEvent") {
+        static int poll_count = 0;
+        if ((poll_count++ % 300) == 0) {
+            using GSzFn = void (*)(void*, int*, int*);
+            auto gsz = reinterpret_cast<GSzFn>(
+                dlsym(RTLD_DEFAULT, "SDL_GL_GetDrawableSize"));
+            auto wsz = reinterpret_cast<GSzFn>(
+                dlsym(RTLD_DEFAULT, "SDL_GetWindowSize"));
+            void* win = nullptr;
+            // find the tracked window handle from the last CreateWindow
+            win = reinterpret_cast<void*>(s_last_sdl_window_);
+            if (win && gsz && wsz) {
+                int dw=0,dh=0, ww=0,wh=0;
+                gsz(win,&dw,&dh); wsz(win,&ww,&wh);
+                fprintf(stderr, "[szdbg] poll %d: window=%dx%d drawable=%dx%d\n",
+                        poll_count, ww, wh, dw, dh);
+            }
+        }
+    }
     if (entry.name == "SDL_PollEvent" && dbg().thunk_trace) {
         uint32_t ev = 0, evx = 0, evy = 0;
         if (args[0]) {

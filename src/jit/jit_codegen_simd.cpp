@@ -2188,6 +2188,317 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             store_vec(0, static_cast<int>(inst.dest), q);
             return true;
         }
+        // ── SIMD ABD (SABD/UABD — same-width absolute difference) ────
+        // src1=rn, src2=rm; width=esize (1/2/4); imm=subop (0=S, 1=U);
+        // flags_op=Q. r = |a - b| per lane. SSE2-only via the xor-shift
+        // abs trick: t = a-b; m = t >>s (bits-1); r = (t ^ m) - m.
+        case IROp::SIMD_ABD: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize = static_cast<int>(inst.width);
+            const bool q = inst.flags_op != 0;
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            load_vec(1, static_cast<int>(inst.src2));
+            movdqa(2, 0);
+            switch (esize) {
+                case 1: sse2_op(0xF8, 2, 1); break;   // psubb
+                case 2: sse2_op(0xF9, 2, 1); break;   // psubw
+                case 4: sse2_op(0xFA, 2, 1); break;   // psubd
+                default: emit_call_interp(inst.arm_pc, false); return true;
+            }
+            movdqa(3, 2);
+            // XMM shift digits: /2=right, /4=arithmetic, /6=left (NOT the
+            // GPR /5,/7 conventions!)
+            sse2_imm(esize == 4 ? 0x72 : 0x71,
+                     3, 4, static_cast<uint8_t>(esize * 8 - 1)); // psra* by bits-1
+            sse2_op(0xEF, 2, 3);                       // pxor t, m
+            switch (esize) {
+                case 1: sse2_op(0xF8, 2, 3); break;   // psubb
+                case 2: sse2_op(0xF9, 2, 3); break;   // psubw
+                case 4: sse2_op(0xFA, 2, 3); break;   // psubd
+            }
+            movdqa(0, 2);
+            store_vec(0, static_cast<int>(inst.dest), q);
+            return true;
+        }
+        // ── SIMD ABDL (SABDL/UABDL/SABAL/UABAL — widening abs diff) ──
+        // width = SOURCE esize; imm = subop (0=SABDL,1=UABDL,2=SABAL,
+        // 3=UABAL); flags_op = Q (source-half select). The absolute
+        // difference is computed at SOURCE width then zero/sign-extended
+        // to double width (|a|-|b| pattern is extension-safe because the
+        // result is non-negative). Accumulate variants add Vd.
+        case IROp::SIMD_ABDL: {
+            if (vec_cache_active_ || !has_sse41()) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            const int esize = static_cast<int>(inst.width);
+            const bool q = inst.flags_op != 0;
+            const int subop = static_cast<int>(inst.imm);
+            if (esize != 1 && esize != 2 && esize != 4) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            load_vec(1, static_cast<int>(inst.src2));
+            if (q) {
+                // Q=1 ("2" variants): select the HIGH source halves by
+                // shifting them down into the low half.
+                // NOTE: psrldq is 0F 73 /3 — /7 is PSLLDQ!
+                sse2_imm(0x73, 0, 3, 8);   // psrldq X0, 8
+                sse2_imm(0x73, 1, 3, 8);   // psrldq X1, 8
+            }
+            // abs diff at source width (xor-shift trick)
+            movdqa(2, 0);
+            switch (esize) {
+                case 1: sse2_op(0xF8, 2, 1); break;
+                case 2: sse2_op(0xF9, 2, 1); break;
+                case 4: sse2_op(0xFA, 2, 1); break;
+            }
+            movdqa(3, 2);
+            sse2_imm(esize == 4 ? 0x72 : 0x71, 3, 4,
+                     static_cast<uint8_t>(esize * 8 - 1)); // psra* = /4
+            sse2_op(0xEF, 2, 3);
+            switch (esize) {
+                case 1: sse2_op(0xF8, 2, 3); break;
+                case 2: sse2_op(0xF9, 2, 3); break;
+                case 4: sse2_op(0xFA, 2, 3); break;
+            }
+            // Widen low half → full 128 (pmovzx: 20/30/31 bw/wd/dq...
+            // pmovzxbw=0x30, pmovzxwd=0x33, pmovzxdq=0x35)
+            if (esize == 1)      sse2_38(0x30, 2, 2);
+            else if (esize == 2) sse2_38(0x33, 2, 2);
+            else                 sse2_38(0x35, 2, 2);
+            if (subop >= 2) {          // SABAL/UABAL: accumulate into Vd
+                load_vec(3, static_cast<int>(inst.dest));
+                sse2_op(esize == 1 ? 0xFD : esize == 2 ? 0xFE : 0xD4, 2, 3);
+            }
+            movdqa(0, 2);
+            store_vec(0, static_cast<int>(inst.dest), true);  // dest always 128-bit
+            return true;
+        }
+        // ── SIMD ADDW (SADDW/UADDW/SSUBW/USUBW — wide op + narrow src) ─
+        // width = SOURCE esize (2/4); imm = subop (bit13=sub, bit29=uns);
+        // flags_op = Q (source-half select). Dest/Vn always full 128.
+        case IROp::SIMD_ADDW: {
+            if (vec_cache_active_ || !has_sse41()) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            const int esize = static_cast<int>(inst.width);   // src esize
+            const bool q = inst.flags_op != 0;
+            const int subop = static_cast<int>(inst.imm);
+            const bool is_sub = (subop & 2) != 0;
+            const bool is_uns = (subop & 1) != 0;
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));   // wide Vn
+            load_vec(1, static_cast<int>(inst.src2));   // narrow Vm
+            if (q) sse2_imm(0x73, 1, 3, 8);             // psrldq (/3!): Q=1 takes high half
+            // Extend narrow → wide lanes
+            if (esize == 2) sse2_38(is_uns ? 0x33 : 0x23, 1, 1); // pmovzx/pmovsxwd
+            else            sse2_38(is_uns ? 0x35 : 0x25, 1, 1); // pmovzx/pmovsxdq
+            // Wide add/sub (dest width = 2*esize: 4→dword padd/psub, 8→q)
+            if (esize == 2)
+                sse2_op(is_sub ? 0xFA : 0xFE, 0, 1);    // psubd/paddd
+            else
+                sse2_op(is_sub ? 0xFB : 0xD4, 0, 1);    // psubq/paddq
+            store_vec(0, static_cast<int>(inst.dest), true);
+            return true;
+        }
+        // ── SIMD ADDHN (ADDHN/RADDHN/SUBHN/RSUBHN — narrow high half) ──
+        // width = INPUT esize (2/4/8); imm = subop (0=ADDHN, 1=RADDHN,
+        // 2=SUBHN, 3=RSUBHN); flags_op = Q (DEST-half select). Sources
+        // always full 128-bit.
+        case IROp::SIMD_ADDHN: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize_in = static_cast<int>(inst.width);
+            const bool q = inst.flags_op != 0;
+            const int subop = static_cast<int>(inst.imm);
+            const bool is_sub = (subop & 2) != 0;
+            const bool round = (subop & 1) != 0;
+            if (esize_in < 2 || esize_in > 8) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            load_vec(1, static_cast<int>(inst.src2));
+            // Combine sources FIRST (add or subtract), then apply the
+            // rounding constant before the high-half shift.
+            if (is_sub)
+                sse2_op(esize_in == 2 ? 0xF9 : esize_in == 4 ? 0xFA : 0xFB,
+                        0, 1);                            // psub*
+            else
+                sse2_op(esize_in == 2 ? 0xFD : esize_in == 4 ? 0xFE : 0xD4,
+                        0, 1);                            // padd*
+            if (round) {
+                uint8_t rc[16] = {0};
+                uint64_t c = 1ULL << (esize_in * 4 - 1);  // 2^(esize_out*8-1)
+                for (int i = 0; i < 16; i += esize_in)
+                    memcpy(rc + i, &c, esize_in < 8 ? esize_in : 8);
+                emit_mask16(2, rc);
+                sse2_op(esize_in == 2 ? 0xFD : esize_in == 4 ? 0xFE : 0xD4,
+                        0, 2);                            // padd*/paddq
+            }
+            // Shift right to the high half (psrl* = /2)
+            sse2_imm(esize_in == 2 ? 0x71 : esize_in == 4 ? 0x72 : 0x73,
+                     0, 2, static_cast<uint8_t>(esize_in * 4)); // psrl* /2^half
+            // Logical narrow (XTN-style)
+            if (esize_in == 2) {
+                emit_mask(1, 0x00FF00FF00FF00FFULL);
+                sse2_op(0xDB, 0, 1);                      // pand
+                sse2_op(0x67, 0, 0);                      // packuswb
+            } else if (esize_in == 4) {
+                emit_mask(1, 0x0000FFFF0000FFFFULL);
+                sse2_op(0xDB, 0, 1);
+                sse2_imm(0x72, 0, 6, 16);                 // pslld 16
+                sse2_imm(0x72, 0, 4, 16);                 // psrad 16
+                sse2_op(0x6B, 0, 0);                      // packssdw
+            } else {
+                sse2_op(0x70, 0, 0);                      // pshufd
+                emit_byte(0x08);
+            }
+            if (q) {
+                store_hi(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+            } else {
+                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                fp_zero_hi(static_cast<int>(inst.dest));
+            }
+            return true;
+        }
+        // ── SIMD SHRN_SAT (SQSHRN family — saturating narrowing shift) ─
+        // width = SOURCE esize; imm = subop | (shift << 8); flags_op = Q
+        // (dest-half select). Source always full 128-bit.
+        // subop: 0=SQSHRN 1=UQSHRN 2=SQRSHRN 3=URQSHRN 4=SQSHRUN 5=SQRSHRUN
+        case IROp::SIMD_SHRN_SAT: {
+            const int esize = static_cast<int>(inst.width);
+            const int subop = static_cast<int>(inst.imm & 0xFF);
+            const int shift = static_cast<int>((inst.imm >> 8) & 0xFF);
+            const bool q = inst.flags_op != 0;
+            // 64-bit source needs PSRAQ — does not exist in SSE2/AVX2
+            // (VPSRAQ is AVX-512F only). Fall back to the interpreter.
+            if (vec_cache_active_ || esize == 8 ||
+                shift < 1 || shift > esize * 8) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            const bool round = (subop & 2) != 0;
+            const bool unsigned_dst = (subop & 4) != 0;       // RUN variants
+            const bool unsigned_src = (subop & 4) && (subop & 1);
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            if (round) {
+                uint64_t rc = 1ULL << (shift - 1);
+                emit_mask(1, rc);
+                sse2_op(esize == 1 ? 0xFD : esize == 2 ? 0xFE : 0xD4,
+                        0, 1);                                // padd*
+            }
+            // Shift right (logical /2 for unsigned sources, arithmetic /4
+            // for signed)
+            if (unsigned_src)
+                sse2_imm(esize == 1 ? 0x71 : esize == 2 ? 0x72 : 0x73,
+                         0, 2, static_cast<uint8_t>(shift));  // psrl*
+            else
+                sse2_imm(esize == 1 ? 0x71 : 0x72,
+                         0, 4, static_cast<uint8_t>(shift));  // psraw/psrad
+            // Saturating narrow to half width
+            if (unsigned_dst) {
+                if (esize == 1) {
+                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                    emit_mask(1, 0x00FF00FF00FF00FFULL);
+                    sse2_38(0x3E, 0, 1);                  // pmaxuw 0xFF
+                    sse2_op(0x67, 0, 0);                  // packuswb
+                } else {
+                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                    emit_mask(1, 0x0000FFFF0000FFFFULL);
+                    sse2_38(0x3F, 0, 1);                  // pmaxud 0xFFFF
+                    sse2_38(0x2B, 0, 0);                  // packusdw
+                }
+            } else if ((subop & 4)) {
+                // SQSHRUN/SQRSHRUN: signed → unsigned sat; packus clamps
+                // negatives to 0 and positives to max ✓
+                if (esize == 1) sse2_op(0x67, 0, 0);      // packuswb
+                else {
+                    if (!has_sse41()) { emit_call_interp(inst.arm_pc, false); return true; }
+                    sse2_38(0x2B, 0, 0);                  // packusdw
+                }
+            } else {
+                // SQSHRN/SQRSHRN: signed → signed sat
+                if (esize == 1) sse2_op(0x63, 0, 0);      // packsswb
+                else            sse2_op(0x6B, 0, 0);      // packssdw
+            }
+            if (q) {
+                store_hi(0, V_HI_OFF + static_cast<int>(inst.dest) * 8);
+            } else {
+                store_lo(0, V_LO_OFF + static_cast<int>(inst.dest) * 8);
+                fp_zero_hi(static_cast<int>(inst.dest));
+            }
+            return true;
+        }
+        // ── SIMD MUL_ELEM (integer vector x indexed element) ──────────
+        // width = SOURCE esize; imm = subop | (idx << 8); flags_op = Q.
+        // subop: 0=MUL 1=MLA 2=MLS 3=SMULL 4=UMULL 5=SMLAL 6=UMLAL
+        //        7=SMLSL 8=UMLSL 9=SQDMULH 10=SQRDMULH 11=SQDMULL
+        // SQDMULH/SQRDMULH/SQDMULL stay on the interpreter for now
+        // (saturating doubling needs a wider sequence).
+        case IROp::SIMD_MUL_ELEM: {
+            const int esize = static_cast<int>(inst.width);
+            const int subop = static_cast<int>(inst.imm & 0xFF);
+            const int idx = static_cast<int>((inst.imm >> 8) & 0xFF);
+            const bool q = inst.flags_op != 0;
+            const bool widen = (subop >= 3 && subop <= 8) || subop == 11;
+            if (vec_cache_active_ || !has_sse41() || esize == 1 ||
+                esize > 4 || subop >= 9) {
+                emit_call_interp(inst.arm_pc, false); return true;
+            }
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));   // Vn
+            load_vec(1, static_cast<int>(inst.src2));   // Vm
+            // Broadcast Vm[idx] to all lanes of X1
+            if (esize == 2) {
+                if (idx < 4) {
+                    sse2_op(0x70, 1, 1);                // pshuflw
+                    emit_byte(static_cast<uint8_t>(idx * 0x55));
+                    sse2_op(0x70, 1, 1);                // pshufd spread
+                    emit_byte(0x00);
+                } else {
+                    sse2_op(0x70, 1, 1);                // pshufhw
+                    emit_byte(static_cast<uint8_t>((idx - 4) * 0x55));
+                    sse2_op(0x70, 1, 1);                // pshufd: high→both
+                    emit_byte(0xEE);
+                }
+            } else {
+                sse2_op(0x70, 1, 1);                    // pshufd (.s)
+                emit_byte(static_cast<uint8_t>(idx * 0x55));
+            }
+            // Extend both operands to the multiply width
+            const bool uns = (subop == 4 || subop == 6 || subop == 8);
+            if (widen) {
+                // SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL: widen to 2x
+                if (esize == 2) {
+                    sse2_38(uns ? 0x33 : 0x23, 0, 0);   // pmovzx/pmovsxwd
+                    sse2_38(uns ? 0x33 : 0x23, 1, 1);
+                } else {
+                    sse2_38(uns ? 0x35 : 0x25, 0, 0);   // pmovzx/pmovsxdq
+                    sse2_38(uns ? 0x35 : 0x25, 1, 1);
+                }
+            }
+            // Multiply
+            if (esize == 2 && !widen)
+                sse2_op(0xD5, 0, 1);                    // pmullw (exact low 16)
+            else if (widen && esize == 4)
+                if (uns) sse2_op(0xF4, 0, 1);           // pmuludq (unsigned .s→.d)
+                else     sse2_38(0x28, 0, 1);           // pmuldq (signed low 64)
+            else
+                sse2_38(0x40, 0, 1);                    // pmulld (.s MUL/MLA/MLS + widened .h)
+            // Accumulate / subtract
+            if (subop == 1 || subop == 2 || (subop >= 5 && subop <= 8)) {
+                const bool w_sub = (subop == 2 || subop == 7 || subop == 8);
+                const int aw = widen ? esize * 2 : esize;
+                load_vec(2, static_cast<int>(inst.dest));
+                sse2_op(aw == 2 ? (w_sub ? 0xF9 : 0xFD) :
+                        aw == 4 ? (w_sub ? 0xFA : 0xFE) : (w_sub ? 0xFB : 0xD4),
+                        0, 2);
+            }
+            store_vec(0, static_cast<int>(inst.dest), widen ? true : q);
+            return true;
+        }
         default:
             return false;  // not handled — caller falls through
     }

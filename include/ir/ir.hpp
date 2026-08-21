@@ -272,6 +272,33 @@ enum class IROp : uint8_t {
     //   imm  = subop (0=SMAXP, 1=SMINP, 2=UMAXP, 3=UMINP)
     //   flags_op = Q (0=64-bit operands, 1=128-bit)
     SIMD_PAIRMIN,
+    // SIMD widening abs-diff / abs-diff-accumulate (SABDL/UABDL/SABAL/
+    // UABAL). src1=rn, src2=rm; width = SOURCE esize (1/2/4);
+    // imm = subop (0=SABDL, 1=UABDL, 2=SABAL, 3=UABAL); flags_op = Q
+    // (Q selects which SOURCE half; dest is always full 128-bit).
+    SIMD_ABDL,
+    // Same-width absolute difference (SABD/UABD). src1=rn, src2=rm;
+    // width = esize; imm = subop (0=S signed, 1=U unsigned); flags_op = Q.
+    SIMD_ABD,
+    // Widening add/sub with narrow source (SADDW/UADDW/SSUBW/USUBW).
+    // width = SOURCE esize (2/4); imm = subop (0=SADDW, 1=UADDW,
+    // 2=SSUBW, 3=USUBW); flags_op = Q (source-half select).
+    SIMD_ADDW,
+    // Add/sub and narrow high (ADDHN/RADDHN/SUBHN/RSUBHN).
+    // width = INPUT esize (2/4/8); imm = subop (0=ADDHN, 1=RADDHN,
+    // 2=SUBHN, 3=RSUBHN); flags_op = Q (dest-half select: Q=1 writes
+    // v_hi and preserves v_lo — the "2" variants).
+    SIMD_ADDHN,
+    // Saturating narrowing shift-by-immediate (SQSHRN/UQSHRN/SQRSHRN/
+    // URQSHRN/SQSHRUN/SQRSHRUN). width = SOURCE esize; imm = subop |
+    // (shift << 8) where shift = esize_src*16 − (immh:immb), 1..esize*8;
+    // flags_op = Q (dest-half select).
+    SIMD_SHRN_SAT,
+    // Integer by-element multiply family (vector x indexed element):
+    // MUL/MLA/MLS/SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL/SQDMULH/SQRDMULH/
+    // SQDMULL. src1=rn, src2=rm; width = SOURCE esize (1/2/4);
+    // imm = subop | (lane_index << 8); flags_op = Q.
+    SIMD_MUL_ELEM,
     // Native FP↔int conversions
     FP_F2I,        // regs[dest] = (int/uint)(v_lo[src1])
                    // imm = 0 (signed), 1 (unsigned); width = ftype

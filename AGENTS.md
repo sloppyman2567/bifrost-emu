@@ -2406,6 +2406,113 @@ not musl-`-static`.
   **Phase 3: touch** — SDL mouse → AInputQueue MotionEvents (input.cpp
   has no multitouch yet; SDL2 has it unplumbed).
 
+## Session History (2026-08-20) — Neverball (Debian arm64) boots and runs
+
+- **Neverball 1.6.0 (Debian bookworm arm64 .debs) RUNS under bifrost-emu** —
+  SDL2 window + GL context via thunks, menu loop stable 45s+ at ~27% CPU,
+  zero SIGSEGV/DecodeError. Suite quick **201/201** after all changes.
+  Run recipe:
+  ```
+  DISPLAY=:0 BIFROST_ROOT=$PWD/rootfs \
+      LD_LIBRARY_PATH=$PWD/rootfs/usr/lib/aarch64-linux-gnu \
+      ./bifrost-emu rootfs/usr/games/neverball
+  ```
+- **Rootfs additions** (extracted from debs into rootfs/, Debian pool
+  main/<src>/ paths — `lib*` sources live under `main/lib<x>/`):
+  neverball + neverball-data + **neverball-common** (themes/gui live in
+  common, NOT data — "Failure to open classic theme file" means it's
+  missing), libsdl2-image, libsdl2-ttf, libvorbis{,file}, libogg,
+  libtiff6, libjbig0, libLerc4, libdeflate0, libwebp{,demux,mux},
+  libopenhmd0, libhidapi-libusb0, libusb-1.0-0. hidapi source package is
+  `hidapi` (main/h/hidapi), NOT libhidapi; deb.debian.org pool dir
+  listings are flaky — packages.debian.org/trixie/arm64/<pkg>/download
+  gives authoritative mirror URLs.
+- **rootfs/usr/lib/disabled-mesa/**: the rootfs shipped a full AArch64
+  Mesa stack (libGL/libGLX/libGLdispatch/libEGL/gbm/drm). Per the dynlink
+  contract, an on-disk AArch64 lib is mapped as GUEST code and shadows
+  the thunk → guest Mesa does DRM ioctls our VFS can't serve. libGL.so.1*
+  moved to that subdir (off the search path) so libGL resolves through
+  GraphicThunk. Restore if a guest ever needs real guest GL.
+- **LD_LIBRARY_PATH is REQUIRED for Debian layout**: find_library searches
+  $BIFROST_ROOT/{lib,usr/lib} but NOT usr/lib/aarch64-linux-gnu (the
+  Debian multiarch dir). Point LD_LIBRARY_PATH at it (searched AFTER
+  BIFROST_ROOT dirs, BEFORE host paths).
+- **Thunk table grew 851 → 932 symbols** (`tools/opgen/thunk_dp.txt`,
+  `make opgen-thunk`): ~75 rows covering neverball's needs — fixed-function
+  GL (glClipPlane/glColor4ub/glLightModel*/glNormalPointer/glTexGeni/
+  glPointParameterf/fv/glStringMarkerGREMEDY), SDL math wrappers
+  (SDL_{acosf,atan2f,ceilf,cosf,fabs,fabsf,floorf,fmodf,pow,roundf,sinf,
+  sqrt,sqrtf,tanf}), SDL mem/str wrappers (SDL_{memcmp,memcpy,memset,
+  strcmp,strncmp,strncasecmp,strchr,strrchr,strstr,strlen,strlcpy,strtol,
+  strtoll,...}), surface ops (SDL_FillRect/ConvertSurface*/UpperBlit/
+  CreateRGBSurface*From/SetSurfaceBlendMode...), misc (EventState,
+  JoystickEventState, SetWindowGrab, text input, RWops extras).
+  **New Policy::SDL_ALLOC** (thunkgen VALID_POLICY + dispatch arm in
+  thunk.cpp): SDL_malloc/calloc/realloc allocate from Memory::mmap_alloc
+  (guest direct window → guest-derefable pointers); realloc copies old
+  contents using allocations_snapshot() for the size. **SDL_FREE extended**:
+  first checks allocations_snapshot() for an mmap'd block (untrack), else
+  falls back to string-cache reclaim. Stubs returning 0 (varargs/callback
+  traps): SDL_Log (fmt would hit host printf with guest ptrs), SDL_qsort
+  (guest compar callback), SDL_sscanf (varargs), SDL_LoadFile_RW (host-alloc
+  return), SDL_ShowSimpleMessageBox. If a game needs these properly:
+  qsort needs a borrow-CPU callback runner (mirror GLFW *_CB pattern).
+- **GET_PROC ARB-suffix fallback** (thunk.cpp): games built against
+  GL_ARB_* extensions fetch "glBindBufferARB" while the table registers
+  core names. The GET_PROC arm now strips a trailing "ARB" and retries the
+  symbol lookup before returning 0. A NULL here = guest calls through a
+  zeroed glext function-pointer table = DecodeError pc=0.
+- **Interpreter SIMD ops implemented (interp_fp.cpp)** — neverball's real
+  AArch64 libs (libpng NEON filters, libjpeg-turbo IDCT/color) exercised
+  five unimplemented groups; each was a hard DecodeError before:
+  1. **SABDL/UABDL (+2 variants)** sub3_noq {0x0E,0x2E}207000 and
+     **SABAL/UABAL (+2)** {...}207400 (bit10 = accumulate). Widening
+     absolute difference; png_write_filter_row does uabdl+uabal.
+  2. **Integer by-element (vector x indexed element)** — the bits[28:24]=
+     01111 space, DISTINCT from three-same 01110. Index bits: H=bit11,
+     L=bit21, M=bit20; Rm register = bits[19:16] (M excluded). Index
+     formulas verified against the cross assembler: .h[idx] = H:L:M,
+     .s[idx] = H:L, .b[idx] = H:L:M:Rm<3>. Opcodes (bits[15:12]):
+     0000 MLA(U=1), 0001 MLS(U=1), 0010 SMLAL/UMLAL, 0110 SMLSL/UMLSL,
+     1000 MUL(U=0), 1010 SMULL/UMULL, 1100 SQDMULH, 1101 SQRDMULH,
+     1110 SQDMULL (all saturating variants U=0 signed). SQDMULH/SQRDMULH
+     use __int128 doubling products. TRAPS: MLA/MLS are U=1 NON-widen —
+     a naive `!U && !widen` branch sends them to a dead r=0 (silent IDCT
+     corruption → wild jumps); Q=0 same-width ops must ZERO v_hi (stale
+     upper halves leak into later Q=1 reads).
+  3. **ADDHN family CORRECTED + completed**: legacy cases used base
+     0x0E204000 which IS correct (see below) but only covered size=00;
+     added RADDHN/SUBHN/RSUBHN and sizes 01/10. sub_noq = op & 0xFFE0FC00
+     KEEPS size(bits[23:22]) AND bit21(L), so every lane width is its own
+     case value: ADDHN/RADDHN {0x0E,0x2E}{20,60,A0}4000, SUBHN/RSUBHN
+     {…}6000. esize_in = 1<<(size+1); rounding adds 2^(esize_out*8-1)
+     before the high-half shift. glibc strlen's addhn v2.8b = 0x0E204000.
+  4. **Saturating narrowing shift-by-immediate**: SQSHRN/UQSHRN (opc6
+     100101), SQRSHRN/URQSHRN (100111), SQSHRUN (100001), SQRSHRUN
+     (100011) — opc6 = bits[15:10], imm space shares bits[28:24]=01111
+     with by-element so this block MUST run first (SQSHRUN's bits[15:12]
+     =1000 collides with by-element MUL). shift = esize_src*16 −
+     (immh:immb); round adds 2^(shift-1); sat signed/unsigned per variant.
+     libjpeg IDCT tail: sqrshrn v1.8b, v1.8h, #2.
+  5. **SADDW family widened to UADDW/SSUBW/USUBW**: sub3_noq
+     {0x0E,0x2E}{10,30}1000 (bit13 = subtract, bit29 = unsigned).
+     libjpeg color conversion: uaddw v4.8h, v6.8h, v0.8b.
+- **Debug lessons**: (a) objdump on a raw `.word` file shows ".word" even
+  for valid instructions — ALWAYS disassemble in context from the real
+  .so at (pc − lib_base); (b) lib bases come from BIFROST_DYNLINK_TRACE=1
+  ("'libX' base=0x…"), correlate with the [DECODE] pc from
+  BIFROST_DBG_GUARD=1 (which also walks guest FP-chain backtraces);
+  (c) DecodeError thrown inside jit_call_helper CANNOT unwind through JIT
+  frames (std::terminate, no catch runs) — catch inside the helper loop
+  or read the [DECODE] dump instead; (d) pool.debian.org 404s are often
+  wrong source-package names, not missing files.
+- Known cosmetic issues (non-blocking): glGetString returns the extensions
+  string for vendor/renderer/version queries (pre-existing thunk string-
+  cache behavior, neverball tolerates it); "Corrupt JPEG data" lines are
+  benign libjpeg warnings on some texture files; audio gracefully disabled
+  (no host device open). TODO if gameplay needs them: SDL_qsort/sscanf
+  native arms, SDL_LoadFile_RW, joystick event delivery.
+
 ## Session History (2026-08-21) — csel-cmov-repair: the game assert FIXED
 
 - **Root cause of the minecraft assert at tick ~15 (and the ground

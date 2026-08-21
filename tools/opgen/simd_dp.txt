@@ -206,3 +206,45 @@ SMAXP    0x3F20FC00   0x0E20A400   PAIRMIN    0   -
 SMINP    0x3F20FC00   0x0E20AC00   PAIRMIN    1   -
 UMAXP    0x3F20FC00   0x2E20A400   PAIRMIN    2   -
 UMINP    0x3F20FC00   0x2E20AC00   PAIRMIN    3   -
+# ── Neverball groups (2026-08-20): widening abs-diff/add-sub/narrow ─────
+# All MATCH values computed programmatically from assembler-verified
+# encodings (tools script; see session history). Masks:
+#   0xBF20FC00 — three-different space: strips Q(30)+size+Rm/Rn/Rd,
+#                keeps U(29), bit21(fixed 1), opcode bits[15:10]
+#   0xBF00FC00 — imm space: strips Q + bits[23:16] (size/immh/immb),
+#                keeps U + opcode bits[15:10]; needs immh!=0 guard to
+#                not collide with MOVI (immh==0)
+#   0xBF00F400 — by-element space: strips Q + bits[23:16] (size/L/M/Rm),
+#                keeps U + opcode bits[15:12] + bit10(H)
+SABDL   0xBF20FC00   0x0E207000   ABDL      0   -
+UABDL   0xBF20FC00   0x2E207000   ABDL      1   -
+SABAL   0xBF20FC00   0x0E205000   ABDL      2   -
+UABAL   0xBF20FC00   0x2E205000   ABDL      3   -
+SABD    0xBF20FC00   0x0E207400   ABD       0   -
+UABD    0xBF20FC00   0x2E207400   ABD       1   -
+SADDW   0xBF20FC00   0x0E201000   ADDW      0   size != 0 && size < 3
+UADDW   0xBF20FC00   0x2E201000   ADDW      1   size != 0 && size < 3
+SSUBW   0xBF20FC00   0x0E203000   ADDW      2   size != 0 && size < 3
+USUBW   0xBF20FC00   0x2E203000   ADDW      3   size != 0 && size < 3
+ADDHN   0xBF20FC00   0x0E204000   ADDHN     0   size < 3
+RADDHN  0xBF20FC00   0x2E204000   ADDHN     1   size < 3
+SUBHN   0xBF20FC00   0x0E206000   ADDHN     2   size < 3
+RSUBHN  0xBF20FC00   0x2E206000   ADDHN     3   size < 3
+SQSHRN  0xBF00FC00   0x0F009400   SHRN_SAT  0   ((op >> 19) & 0xF) != 0
+UQSHRN  0xBF00FC00   0x2F009400   SHRN_SAT  1   ((op >> 19) & 0xF) != 0
+SQRSHRN 0xBF00FC00   0x0F009C00   SHRN_SAT  2   ((op >> 19) & 0xF) != 0
+URQSHRN 0xBF00FC00   0x2F009C00   SHRN_SAT  3   ((op >> 19) & 0xF) != 0
+SQSHRUN 0xBF00FC00   0x2F008400   SHRN_SAT  4   ((op >> 19) & 0xF) != 0
+SQRSHRUN 0xBF00FC00  0x2F008C00   SHRN_SAT  5   ((op >> 19) & 0xF) != 0
+MUL_ELEM   0xBF00F400 0x0F008000  MUL_ELEM  0   size < 3
+MLA_ELEM   0xBF00F400 0x2F000000  MUL_ELEM  1   size < 3
+MLS_ELEM   0xBF00F400 0x2F004000  MUL_ELEM  2   size < 3
+SMULL_ELEM 0xBF00F400 0x0F00A000  MUL_ELEM  3   size < 3
+UMULL_ELEM 0xBF00F400 0x2F00A000  MUL_ELEM  4   size < 3
+SMLAL_ELEM 0xBF00F400 0x0F002000  MUL_ELEM  5   size < 3
+UMLAL_ELEM 0xBF00F400 0x2F002000  MUL_ELEM  6   size < 3
+SMLSL_ELEM 0xBF00F400 0x0F006000  MUL_ELEM  7   size < 3
+UMLSL_ELEM 0xBF00F400 0x2F006000  MUL_ELEM  8   size < 3
+SQDMULH_ELEM 0xBF00F400 0x0F00C000 MUL_ELEM 9  size < 3
+SQRDMULH_ELEM 0xBF00F400 0x0F00D000 MUL_ELEM 10 size < 3
+SQDMULL_ELEM 0xBF00F400 0x0F00B000 MUL_ELEM 11 size < 3

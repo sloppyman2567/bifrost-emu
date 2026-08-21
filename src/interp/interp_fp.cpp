@@ -626,52 +626,31 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 else cpu.v_hi[rd] = 0;
                 return;
             }
-            // ── ADDHN / SUBHN (vector, narrowing) ──────────────────────
-            // ADDHN: 0 Q 0 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x0E204000)
-            // SUBHN: 0 Q 1 01110 size 1 Rm 0 0000 0 Rn Rd  (base 0x4E204000)
-            // These add/subtract corresponding 2*size-bit elements from Vn
-            // and Vm, take the HIGH half of the result, and place it in the
-            // corresponding size-bit elements of Vd (narrowing).
-            //
-            // default and was silently NOP'd. This broke glibc's SIMD
-            // strlen, which uses `addhn v2.8b, v1.8h, v1.8h` to narrow
-            // the 16-byte CMEQ result to 8 bytes. Without ADDHN, the
-            // narrowing produced all-zeros, so strlen's `cbnz x2` never
-            // branched, creating an infinite loop scanning for the NUL
-            // terminator. This caused the 8thread-with-printf hang.
-            case 0x0E204000: {  // ADDHN
-                int esize_in = 1 << (size + 1);  // 2, 4, 8, 16 bytes
-                int esize_out = esize_in / 2;
-                // ADDHN always reads the FULL 128-bit source (8H/4S/2D).
-                // Q=0: write result to LOW 64 bits of Vd.
-                // Q=1 (ADDHN2): write result to HIGH 64 bits of Vd.
-                int elems = 16 / esize_in;
-                uint8_t buf_n[16], buf_m[16];
-                memcpy(buf_n, &cpu.v_lo[rn], 8);
-                memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
-                memcpy(buf_m, &cpu.v_lo[rm], 8);
-                memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
-                uint8_t out[8];
-                for (int i = 0; i < elems; i++) {
-                    uint64_t a = 0, b = 0;
-                    memcpy(&a, buf_n + i * esize_in, esize_in);
-                    memcpy(&b, buf_m + i * esize_in, esize_in);
-                    uint64_t sum = a + b;
-                    uint64_t hi = sum >> (esize_out * 8);
-                    memcpy(out + i * esize_out, &hi, esize_out);
-                }
-                if (Q) {
-                    // ADDHN2: write to high 64 bits, preserve low 64
-                    memcpy(&cpu.v_hi[rd], out, 8);
-                } else {
-                    // ADDHN: write to low 64 bits, zero high 64
-                    memcpy(&cpu.v_lo[rd], out, 8);
-                    cpu.v_hi[rd] = 0;
-                }
-                return;
-            }
-            case 0x4E204000: {  // SUBHN
-                int esize_in = 1 << (size + 1);
+            // ── ADDHN / RADDHN / SUBHN / RSUBHN (vector, narrowing) ────
+            // Three-DIFFERENT space: 0 Q U 01110 size 1 Rm opcode 000 Rn Rd
+            //   ADDHN  U=0 opcode=0100    RADDHN U=1 opcode=0100 (rounding)
+            //   SUBHN  U=0 opcode=0110    RSUBHN U=1 opcode=0110 (rounding)
+            // Add/subtract corresponding 2*size-byte elements of Vn and Vm,
+            // take the HIGH half (optionally after adding the rounding
+            // constant 2^(esize_out*8-1)), and narrow into Vd. Q selects
+            // the destination half (Q=1 → "2" suffix, writes v_hi).
+            // libjpeg-turbo does `addhn v16.4h, v11.4s, v9.4s`; glibc's SIMD
+            // strlen narrows its CMEQ result with `addhn v2.8b, v1.8h, v1.8h`.
+            // sub_noq keeps size (bits[23:22]) and bit21, so every lane
+            // width is a distinct case value:
+            //   size=00 (.8b/.4h/.2s dest) → 0x?E204000 / 0x?E206000
+            //   size=01                    → 0x?E604000 / 0x?E606000
+            //   size=10                    → 0x?EA04000 / 0x?EA06000
+            case 0x0E204000: case 0x2E204000:  // ADDHN(2) / RADDHN(2), .8b
+            case 0x0E604000: case 0x2E604000:  // ADDHN(2) / RADDHN(2), .4h
+            case 0x0EA04000: case 0x2EA04000:  // ADDHN(2) / RADDHN(2), .2s
+            case 0x0E206000: case 0x2E206000:  // SUBHN(2) / RSUBHN(2), .8b
+            case 0x0E606000: case 0x2E606000:  // SUBHN(2) / RSUBHN(2), .4h
+            case 0x0EA06000: case 0x2EA06000:  // SUBHN(2) / RSUBHN(2), .2s
+            {
+                bool is_sub = (op & 0x2000) != 0;      // opcode bit13
+                bool round  = (op & (1u << 29)) != 0;  // U
+                int esize_in = 1 << (size + 1);        // 2, 4, 8 bytes
                 int esize_out = esize_in / 2;
                 int elems = 16 / esize_in;
                 uint8_t buf_n[16], buf_m[16];
@@ -679,13 +658,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
                 memcpy(buf_m, &cpu.v_lo[rm], 8);
                 memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                uint64_t round_c = round ? (1ULL << (esize_out * 8 - 1)) : 0;
                 uint8_t out[8];
                 for (int i = 0; i < elems; i++) {
                     uint64_t a = 0, b = 0;
                     memcpy(&a, buf_n + i * esize_in, esize_in);
                     memcpy(&b, buf_m + i * esize_in, esize_in);
-                    uint64_t diff = a - b;
-                    uint64_t hi = diff >> (esize_out * 8);
+                    uint64_t r = (is_sub ? a - b : a + b) + round_c;
+                    uint64_t hi = r >> (esize_out * 8);
                     memcpy(out + i * esize_out, &hi, esize_out);
                 }
                 if (Q) {
@@ -2244,6 +2224,196 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
                 }
             }
+            // ── Saturating narrowing shift-by-immediate ────────────────
+            // Encoding: 0 Q U 011111 immh immb opcode Rn Rd (imm space,
+            // bits[28:24]=01111). Opcode (bits[15:10]):
+            //   100001 SQSHRUN (U=1)   100011 SQRSHRUN (U=1)
+            //   100101 SQSHRN (U=0) / UQSHRN (U=1)
+            //   100111 SQRSHRN (U=0) / URQSHRN (U=1)
+            // Shift right by (esize_src*16 − immh:immb), saturate, and
+            // narrow to half-width lanes. Q selects the destination half.
+            // libjpeg-turbo's IDCT tail does `sqrshrn v1.8b, v1.8h, #2`.
+            // MUST be tested before the by-element block below: both live
+            // in the 01111 space and SQSHRUN's bits[15:12] (1000) collides
+            // with by-element MUL.
+            {
+                uint32_t opc6 = (op >> 10) & 0x3F;
+                if (((op >> 24) & 0x1F) == 0x0F &&
+                    (opc6 == 0x21 || opc6 == 0x23 || opc6 == 0x25 || opc6 == 0x27)) {
+                    bool U = (op >> 29) & 1;
+                    bool round = (opc6 & 0x2) != 0;
+                    bool unsigned_dst = !(opc6 & 0x4);   // RUN variants
+                    bool unsigned_src = (opc6 & 0x4) && U; // UQSHRN/URQSHRN only
+                    uint32_t immh = (op >> 19) & 0xF;
+                    uint32_t immb = (op >> 16) & 7;
+                    int esize_src = (immh >= 8) ? 8 : (immh >= 4) ? 4
+                                  : (immh >= 2) ? 2 : 1;
+                    int bits_src = esize_src * 8;
+                    int shift = bits_src * 2 - (int)((immh << 3) | immb);
+                    int elems = (Q ? 16 : 8) / esize_src;
+                    uint64_t round_c = round ? (1ULL << (shift - 1)) : 0;
+                    uint8_t buf_n[16];
+                    memcpy(buf_n, &cpu.v_lo[rn], 8);
+                    memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                    uint8_t out[8];
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0;
+                        memcpy(&a, buf_n + i * esize_src, esize_src);
+                        uint64_t u = a + round_c;   // wraps mod 2^64 (two's complement)
+                        uint64_t wmask = esize_src == 8 ?
+                            ~0ULL : ((1ULL << (esize_src * 8)) - 1);
+                        uint64_t r;
+                        if (unsigned_src) {
+                            // UQSHRN / URQSHRN: logical shift, sat unsigned
+                            uint64_t sh = u >> shift;
+                            r = (sh > wmask) ? wmask : sh;
+                        } else {
+                            // Arithmetic shift right (sign-preserving)
+                            int64_t sh = (int64_t)u >> shift;
+                            if (unsigned_dst) {
+                                // SQSHRUN / SQRSHRUN: negatives clamp to 0
+                                r = (sh < 0) ? 0 :
+                                    ((uint64_t)sh > wmask ? wmask : (uint64_t)sh);
+                            } else {
+                                // SQSHRN / SQRSHRN: sat signed
+                                int64_t lim = (int64_t)1 << (esize_src * 8 - 1);
+                                if (sh > lim - 1) r = (uint64_t)(lim - 1);
+                                else if (sh < -lim) r = (uint64_t)(-lim);
+                                else r = (uint64_t)sh;
+                            }
+                        }
+                        memcpy(out + i * esize_src, &r, esize_src);
+                    }
+                    if (Q) {
+                        memcpy(&cpu.v_hi[rd], out, 8);
+                    } else {
+                        memcpy(&cpu.v_lo[rd], out, 8);
+                        cpu.v_hi[rd] = 0;
+                    }
+                    return;
+                }
+            }
+            // ── Integer by-element (vector x indexed element) ─────────
+            // Encoding: 0 Q U 01111 size L M Rm opcode H 0 Rn Rd
+            // (bits[28:24]=01111 — the "by element" space, distinct from
+            // the three-same 01110 space the sub3 chain below handles).
+            // Index bits: H=bit11, L=bit21, M=bit20; Rm register =
+            // bits[19:16]. Lane sizes: size=01 → H src (.h[idx]), size=10
+            // → S src (.s[idx]). Widening ops (SMULL/UMULL/SMLAL/UMLAL/
+            // SMLSL/UMLSL) double the lane width; MUL/MLA/MLS keep it.
+            // Opcode map (verified against the cross assembler):
+            //   0000 MLA(U=1)  0001 MLS(U=1)  0010 SMLAL/UMLAL
+            //   0110 SMLSL/UMLSL  1000 MUL(U=0)  1010 SMULL/UMULL
+            // libjpeg-turbo's AArch64 IDCT does `smull v18.4s, v7.4h,
+            // v6.h[3]` / `smlal …` — without this the interp SIGILL'd
+            // during JPEG decode.
+            if (((op >> 24) & 0x1F) == 0x0F) {
+                uint32_t opc = (op >> 12) & 0xF;
+                bool U = (op >> 29) & 1;
+                uint32_t sz = (op >> 22) & 3;
+                int H = (op >> 11) & 1, L = (op >> 21) & 1, M = (op >> 20) & 1;
+                uint32_t rm_reg = (op >> 16) & 0xF;
+                int esize_src, idx;
+                if (sz == 1) {                       // .h[idx]
+                    esize_src = 2;
+                    idx = (H << 2) | (L << 1) | M;
+                } else if (sz == 2) {                // .s[idx]
+                    esize_src = 4;
+                    idx = (H << 1) | L;
+                } else if (sz == 0) {                // .b[idx]
+                    esize_src = 1;
+                    idx = (H << 3) | (L << 2) | (M << 1) | ((rm_reg >> 3) & 1);
+                } else {
+                    esize_src = 0;                   // D scalar form: unsupported
+                    idx = 0;
+                }
+                if (esize_src &&
+                    (opc == 0x0 || opc == 0x1 || opc == 0x8 ||
+                     opc == 0x2 || opc == 0x6 || opc == 0xA ||
+                     opc == 0xC || opc == 0xD || opc == 0xE)) {
+                    bool widen = (opc == 0x2 || opc == 0x6 || opc == 0xA ||
+                                  opc == 0xE);
+                    bool is_sub = (opc == 0x1 || opc == 0x6);
+                    bool accum = (opc == 0x0 || opc == 0x2 || opc == 0x6);
+                    int esize = widen ? esize_src * 2 : esize_src;
+                    int elems = (Q ? 16 : 8) / esize;
+                    uint64_t mask = esize == 8 ? ~0ULL : ((1ULL << (esize * 8)) - 1);
+                    uint8_t buf_n[16], buf_m[16], vd[16];
+                    memcpy(buf_n, &cpu.v_lo[rn], 8);
+                    memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf_m, &cpu.v_lo[rm], 8);
+                    memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    if (widen && !accum) {
+                        memset(vd, 0, sizeof(vd));
+                    } else {
+                        memcpy(vd, &cpu.v_lo[rd], 8);
+                        memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    }
+                    uint64_t mul_v = 0;
+                    memcpy(&mul_v, buf_m + idx * esize_src, esize_src);
+                    int64_t smul_v = static_cast<int64_t>(
+                        static_cast<int64_t>(mul_v << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0;
+                        memcpy(&a, buf_n + i * esize, esize);
+                        int64_t sa = static_cast<int64_t>(
+                            static_cast<int64_t>(a << (64 - esize * 8)) >> (64 - esize * 8));
+                        uint64_t acc = 0;
+                        memcpy(&acc, vd + i * esize, esize);
+                        uint64_t r;
+                        if (!widen) {
+                            // MUL (opc 8, U=0) / MLA (opc 0, U=1) /
+                            // MLS (opc 1, U=1) / SQDMULH (opc C) /
+                            // SQRDMULH (opc D): same-width lanes.
+                            if (opc == 0x8) {
+                                r = a * mul_v;
+                            } else if (opc == 0xC || opc == 0xD) {
+                                // Saturating doubling multiply high:
+                                // r = sat_s( (sa*smul*2 [+round]) >> bits )
+                                __int128 p = (__int128)sa * smul_v * 2;
+                                int bw = esize * 8;
+                                if (opc == 0xD) p += (__int128)1 << (bw - 1);
+                                __int128 sh = p >> bw;
+                                __int128 lim = (__int128)1 << (bw - 1);
+                                if (sh > lim - 1) r = (uint64_t)(int64_t)(lim - 1);
+                                else if (sh < -lim) r = (uint64_t)(int64_t)(-lim);
+                                else r = (uint64_t)(int64_t)sh;
+                            } else {
+                                uint64_t prod = a * mul_v;
+                                r = is_sub ? acc - prod : acc + prod;
+                            }
+                        } else if (U) {
+                            uint64_t uprod = a * mul_v;
+                            r = (opc == 0x6) ? acc - uprod :
+                                (opc == 0x2 ? acc + uprod : uprod);
+                        } else {
+                            // Signed widening: SMLAL/SMLSL/SMULL/SQDMULL
+                            __int128 prod = (__int128)sa * smul_v;
+                            __int128 sacc2 = (opc == 0xE) ? 0 : (__int128)(int64_t)acc;
+                            __int128 sr;
+                            if (opc == 0xE) {
+                                // SQDMULL: doubling, saturate to dest width
+                                prod *= 2;
+                                __int128 dlim = (__int128)1 << (esize * 8 - 1);
+                                sr = prod > dlim - 1 ? dlim - 1 :
+                                     prod < -dlim ? -dlim : prod;
+                            } else {
+                                sr = (opc == 0x6) ? sacc2 - prod : sacc2 + prod;
+                            }
+                            r = (uint64_t)(int64_t)sr;
+                        }
+                        r &= mask;
+                        memcpy(vd + i * esize, &r, esize);
+                    }
+                    if (!widen && !Q) {
+                        // Q=0 same-width ops zero the unused upper half.
+                        memset(vd + elems * esize, 0, 16 - elems * esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], vd, 8);
+                    memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    return;
+                }
+            }
             // ── Vector ADD/SUB/MUL (integer) ──────────────────────────
             // Encoding: 0x0E208400 (ADD) / 0x2E208400 (SUB) / 0x0E209C00 (MUL)
             // These are the most common SIMD arithmetic ops used by
@@ -2317,14 +2487,23 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // SADDW / SADDW2 (vector, widening add): sign-extend the
-                // narrow lanes of Vm and add them to the corresponding wide
-                // lanes of Vn. Q selects which half of Vm is used: Q=0 → low
+                // SADDW/UADDW/SSUBW/USUBW (+2 variants, vector, widening
+                // add/sub): extend the narrow lanes of Vm (sign for S*,
+                // zero for U*) and add/subtract them from the wide lanes
+                // of Vn. Q selects which half of Vm is used: Q=0 → low
                 // half (SADDW), Q=1 → high half (SADDW2). Vd/Vn are always
                 // full 128-bit (4S or 2D); the narrow source is 8H or 4S.
                 //   SADDW  v.4s ← v.4s + v.4h   (size=1 → src H)
                 //   SADDW  v.2d ← v.2d + v.2s   (size=2 → src S)
-                if (sub3_noq == 0x0E201000) {
+                // Encoding sub3_noq values (bit13 = subtract):
+                //   SADDW 0x0E201000 UADDW 0x2E201000
+                //   SSUBW 0x0E203000 USUBW 0x2E203000
+                // libjpeg-turbo's color conversion does `uaddw v4.8h,
+                // v6.8h, v0.8b`.
+                if (sub3_noq == 0x0E201000 || sub3_noq == 0x2E201000 ||
+                    sub3_noq == 0x0E203000 || sub3_noq == 0x2E203000) {
+                    bool is_unsigned = (sub3_noq >> 29) & 1;
+                    bool is_sub = (sub3_noq & 0x2000) != 0;
                     int esize_src = 1 << size;            // 2 (H) or 4 (S)
                     int esize_dst = esize_src * 2;
                     int lanes = 16 / esize_dst;         // 4 (4S) or 2 (2D)
@@ -2339,8 +2518,15 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         memcpy(&wide, vn + i * esize_dst, esize_dst);
                         uint64_t narrow = 0;
                         memcpy(&narrow, vm + (src_off + i) * esize_src, esize_src);
-                        int64_t se = (esize_src == 2) ? (int16_t)narrow : (int32_t)narrow;
-                        uint64_t r = wide + (uint64_t)se;
+                        uint64_t ext;
+                        if (is_unsigned) {
+                            ext = narrow;
+                        } else if (esize_src == 2) {
+                            ext = (uint64_t)(int64_t)(int16_t)narrow;
+                        } else {
+                            ext = (uint64_t)(int64_t)(int32_t)narrow;
+                        }
+                        uint64_t r = is_sub ? wide - ext : wide + ext;
                         memcpy(vd + i * esize_dst, &r, esize_dst);
                     }
                     memcpy(&cpu.v_lo[rd], vd, 8);
@@ -2387,6 +2573,88 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     }
                     memcpy(&cpu.v_lo[rd], vd, 8);
                     memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                    return;
+                }
+                // ── Absolute-difference families (three-different + ABD) ──
+                // Opcode bits[14:12] of the three-different space:
+                //   0101 SABAL/UABAL (accumulate)   0111 SABDL/UABDL
+                // sub3_noq keeps size(bits[23:22]) and bit21, so every lane
+                // width is a distinct value: {0x0E,0x2E} | size<<22 |
+                // 0x200000(bit21) | opcode<<12:
+                //   SABDL/UABDL: {0x0E,0x2E}{20,60,A0}7000
+                //   SABAL/UABAL: {0x0E,0x2E}{20,60,A0}5000
+                // libpng's NEON filter row does uabdl v5.8h, v4.8b, v7.8b.
+                // Same-width SABD/UABD (three-same) handled separately below.
+                {
+                    uint32_t opc13 = sub3_noq & 0x7000;   // opcode bits[14:12]
+                    bool is_u = (sub3_noq >> 29) & 1;
+                    if ((sub3_noq & 0x00200000) &&        // bit21 set: three-different
+                        (opc13 == 0x5000 || opc13 == 0x7000)) {
+                        int esize_src = 1 << size;        // 1/2/4
+                        int esize_dst = esize_src * 2;
+                        int lanes = 16 / esize_dst;
+                        bool accum = (opc13 == 0x5000);
+                        uint8_t vn[16], vm[16], vd[16];
+                        memcpy(vn, &cpu.v_lo[rn], 8);
+                        memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                        memcpy(vm, &cpu.v_lo[rm], 8);
+                        memcpy(vm + 8, &cpu.v_hi[rm], 8);
+                        if (accum) {
+                            memcpy(vd, &cpu.v_lo[rd], 8);
+                            memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                        } else {
+                            memset(vd, 0, sizeof(vd));
+                        }
+                        int src_off = Q ? lanes : 0;
+                        for (int i = 0; i < lanes; i++) {
+                            uint64_t an = 0, am = 0;
+                            memcpy(&an, vn + (src_off + i) * esize_src, esize_src);
+                            memcpy(&am, vm + (src_off + i) * esize_src, esize_src);
+                            uint64_t en = is_u ? an :
+                                (uint64_t)((int64_t)(an << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                            uint64_t em = is_u ? am :
+                                (uint64_t)((int64_t)(am << (64 - esize_src * 8)) >> (64 - esize_src * 8));
+                            uint64_t r = (en >= em) ? en - em : em - en;
+                            if (accum) {
+                                uint64_t acc = 0;
+                                memcpy(&acc, vd + i * esize_dst, esize_dst);
+                                r += acc;
+                            }
+                            memcpy(vd + i * esize_dst, &r, esize_dst);
+                        }
+                        memcpy(&cpu.v_lo[rd], vd, 8);
+                        memcpy(&cpu.v_hi[rd], vd + 8, 8);
+                        return;
+                    }
+                }
+                // Same-width absolute difference: SABD/UABD (three-same
+                // space, opcode bits[15:10] = 011100). sub3_noq values:
+                if (sub3_noq == 0x0E207400 || sub3_noq == 0x2E207400 ||
+                    sub3_noq == 0x0E607400 || sub3_noq == 0x2E607400 ||
+                    sub3_noq == 0x0EA07400 || sub3_noq == 0x2EA07400) {
+                    int esize = 1 << size;
+                    int elems = (Q ? 16 : 8) / esize;
+                    bool is_u = (sub3_noq >> 29) & 1;
+                    uint8_t buf_n[16], buf_m[16];
+                    memcpy(buf_n, &cpu.v_lo[rn], 8);
+                    memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                    memcpy(buf_m, &cpu.v_lo[rm], 8);
+                    memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                    uint8_t out[16] = {0};
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t a = 0, b = 0;
+                        memcpy(&a, buf_n + i * esize, esize);
+                        memcpy(&b, buf_m + i * esize, esize);
+                        uint64_t ae = is_u ? a :
+                            (uint64_t)((int64_t)(a << (64 - esize * 8)) >> (64 - esize * 8));
+                        uint64_t be = is_u ? b :
+                            (uint64_t)((int64_t)(b << (64 - esize * 8)) >> (64 - esize * 8));
+                        uint64_t r = (ae >= be) ? ae - be : be - ae;
+                        memcpy(out + i * esize, &r, esize);
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
                     return;
                 }
                 // SMLAL/UMLAL/SMLSL/UMLSL/SMULL/UMULL (vector, widening

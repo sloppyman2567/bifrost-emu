@@ -93,6 +93,7 @@ busybox-musl
 
 # Ad-hoc JIT audit / media / scratch files
 findings.md
+rules.md
 subaru_stairs.mp4
 subaru_stairs_mmv.mp4
 ctest_real/minecraft_weekend/t

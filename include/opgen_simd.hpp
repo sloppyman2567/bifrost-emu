@@ -32,7 +32,13 @@ enum class Family : uint8_t {
     INS = 14,
     PERMUTE = 15,
     PAIRMIN = 16,
-    UNKNOWN = 17,
+    ABDL = 17,
+    ABD = 18,
+    ADDW = 19,
+    ADDHN = 20,
+    SHRN_SAT = 21,
+    MUL_ELEM = 22,
+    UNKNOWN = 23,
 };
 
 struct Op {
@@ -120,6 +126,38 @@ inline Op classify(uint32_t op) {
     if ((op & 0x3F20FC00U) == 0x0E20AC00U) return Op{Family::PAIRMIN, 70, 1, "SMINP"};
     if ((op & 0x3F20FC00U) == 0x2E20A400U) return Op{Family::PAIRMIN, 71, 2, "UMAXP"};
     if ((op & 0x3F20FC00U) == 0x2E20AC00U) return Op{Family::PAIRMIN, 72, 3, "UMINP"};
+    if ((op & 0xBF20FC00U) == 0x0E207000U) return Op{Family::ABDL, 73, 0, "SABDL"};
+    if ((op & 0xBF20FC00U) == 0x2E207000U) return Op{Family::ABDL, 74, 1, "UABDL"};
+    if ((op & 0xBF20FC00U) == 0x0E205000U) return Op{Family::ABDL, 75, 2, "SABAL"};
+    if ((op & 0xBF20FC00U) == 0x2E205000U) return Op{Family::ABDL, 76, 3, "UABAL"};
+    if ((op & 0xBF20FC00U) == 0x0E207400U) return Op{Family::ABD, 77, 0, "SABD"};
+    if ((op & 0xBF20FC00U) == 0x2E207400U) return Op{Family::ABD, 78, 1, "UABD"};
+    if ((op & 0xBF20FC00U) == 0x0E201000U && (size != 0 && size < 3)) return Op{Family::ADDW, 79, 0, "SADDW"};
+    if ((op & 0xBF20FC00U) == 0x2E201000U && (size != 0 && size < 3)) return Op{Family::ADDW, 80, 1, "UADDW"};
+    if ((op & 0xBF20FC00U) == 0x0E203000U && (size != 0 && size < 3)) return Op{Family::ADDW, 81, 2, "SSUBW"};
+    if ((op & 0xBF20FC00U) == 0x2E203000U && (size != 0 && size < 3)) return Op{Family::ADDW, 82, 3, "USUBW"};
+    if ((op & 0xBF20FC00U) == 0x0E204000U && (size < 3)) return Op{Family::ADDHN, 83, 0, "ADDHN"};
+    if ((op & 0xBF20FC00U) == 0x2E204000U && (size < 3)) return Op{Family::ADDHN, 84, 1, "RADDHN"};
+    if ((op & 0xBF20FC00U) == 0x0E206000U && (size < 3)) return Op{Family::ADDHN, 85, 2, "SUBHN"};
+    if ((op & 0xBF20FC00U) == 0x2E206000U && (size < 3)) return Op{Family::ADDHN, 86, 3, "RSUBHN"};
+    if ((op & 0xBF00FC00U) == 0x0F009400U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 87, 0, "SQSHRN"};
+    if ((op & 0xBF00FC00U) == 0x2F009400U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 88, 1, "UQSHRN"};
+    if ((op & 0xBF00FC00U) == 0x0F009C00U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 89, 2, "SQRSHRN"};
+    if ((op & 0xBF00FC00U) == 0x2F009C00U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 90, 3, "URQSHRN"};
+    if ((op & 0xBF00FC00U) == 0x2F008400U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 91, 4, "SQSHRUN"};
+    if ((op & 0xBF00FC00U) == 0x2F008C00U && (((op >> 19) & 0xF) != 0)) return Op{Family::SHRN_SAT, 92, 5, "SQRSHRUN"};
+    if ((op & 0xBF00F400U) == 0x0F008000U && (size < 3)) return Op{Family::MUL_ELEM, 93, 0, "MUL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x2F000000U && (size < 3)) return Op{Family::MUL_ELEM, 94, 1, "MLA_ELEM"};
+    if ((op & 0xBF00F400U) == 0x2F004000U && (size < 3)) return Op{Family::MUL_ELEM, 95, 2, "MLS_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00A000U && (size < 3)) return Op{Family::MUL_ELEM, 96, 3, "SMULL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x2F00A000U && (size < 3)) return Op{Family::MUL_ELEM, 97, 4, "UMULL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F002000U && (size < 3)) return Op{Family::MUL_ELEM, 98, 5, "SMLAL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x2F002000U && (size < 3)) return Op{Family::MUL_ELEM, 99, 6, "UMLAL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F006000U && (size < 3)) return Op{Family::MUL_ELEM, 100, 7, "SMLSL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x2F006000U && (size < 3)) return Op{Family::MUL_ELEM, 101, 8, "UMLSL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00C000U && (size < 3)) return Op{Family::MUL_ELEM, 102, 9, "SQDMULH_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00D000U && (size < 3)) return Op{Family::MUL_ELEM, 103, 16, "SQRDMULH_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00B000U && (size < 3)) return Op{Family::MUL_ELEM, 104, 17, "SQDMULL_ELEM"};
     return Op{Family::UNKNOWN, 0, 0, "unknown"};
 }
 

@@ -105,9 +105,9 @@ glTexImage2D              GL     iiiiiiiiz     -     -              TEX2D  # arg
 glTexSubImage2D           GL     iiiiiiiiz     -     -              TEXSUB # arg8: pixels
 glEnableClientState       GL     i             -     -              -
 glDisableClientState      GL     i             -     -              -
-glVertexPointer           GL     iiip          -     -              -   # arg3: const void *pointer
-glColorPointer            GL     iiip          -     -              -   # arg3: const void *pointer
-glTexCoordPointer         GL     iiip          -     -              -   # arg3: const void *pointer
+glVertexPointer           GL     iiip          -     VA_PTR         -   # arg3: offset (VBO) or ptr
+glColorPointer            GL     iiip          -     VA_PTR         -   # arg3: offset (VBO) or ptr
+glTexCoordPointer         GL     iiip          -     VA_PTR         -   # arg1: offset (VBO) or ptr
 glDrawArrays              GL     iii           -     -              -
 glDrawElements            GL     iiii          -     EL_PTR         -   # arg3: indices (offset or ptr)
 glGetString               GL     i             str   -              -
@@ -469,6 +469,7 @@ SDL_HideWindow            SDL    i             -     -              -
 SDL_RaiseWindow           SDL    i             -     -              -
 SDL_SetWindowFullscreen   SDL    ii            -     -              -
 SDL_GetWindowFlags        SDL    i             -     -              -
+SDL_GetWindowID           SDL    i             -     -              -
 SDL_GetTicks              SDL    -             -     -              -
 SDL_GetPerformanceCounter SDL    -             -     -              -
 SDL_GetPerformanceFrequency SDL  -             -     -              -
@@ -1016,3 +1017,76 @@ ANativeWindow_getWidth           ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getHeight          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getFormat          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_setBuffersGeometry ANDROID iiii   -     ANDROID_WINDOW -
+# ── Neverball (Debian arm64) coverage batch ──────────────────────────
+glClipPlane                GL     ip            -     -              -   # GLenum plane, const GLdouble *equation
+glColor4ub                 GL     iiii          -     -              -
+glLightModelf              GL     if            -     -              -   # mixed FP
+glLightModelfv             GL     ip            -     -              -   # arg1: const GLfloat *
+glLightModeli              GL     ii            -     -              -
+glNormalPointer           GL     iip           -     VA_PTR         -   # arg2: offset (VBO) or ptr
+glTexGeni                  GL     iii           -     -              -
+SDL_acosf                  SDL    f             -     -              -
+SDL_atan2f                 SDL    ff            -     -              -
+SDL_ceilf                  SDL    f             -     -              -
+SDL_cosf                   SDL    f             -     -              -
+SDL_fabs                   SDL    f             -     -              -
+SDL_fabsf                  SDL    f             -     -              -
+SDL_floorf                 SDL    f             -     -              -
+SDL_fmodf                  SDL    ff            -     -              -
+SDL_pow                    SDL    ff            -     -              -
+SDL_roundf                 SDL    f             -     -              -
+SDL_sinf                   SDL    f             -     -              -
+SDL_sqrt                   SDL    f             -     -              -
+SDL_sqrtf                  SDL    f             -     -              -
+SDL_tanf                   SDL    f             -     -              -
+SDL_calloc                 SDL    ii            -     SDL_ALLOC      -   # guest-window allocation
+SDL_malloc                 SDL    i             -     SDL_ALLOC      -
+SDL_realloc                SDL    ip            -     SDL_ALLOC      -
+SDL_memcmp                 SDL    ppp           -     -              -
+SDL_memcpy                 SDL    ppp           -     -              -
+SDL_memset                 SDL    ppi           -     -              -
+SDL_strcmp                 SDL    pp            -     -              -
+SDL_strncmp                SDL    ppi           -     -              -
+SDL_strncasecmp            SDL    ppi           -     -              -
+SDL_strchr                 SDL    pi            -     -              -
+SDL_strrchr                SDL    pi            -     -              -
+SDL_strstr                 SDL    pp            -     -              -
+SDL_strlen                 SDL    p             -     -              -
+SDL_strlcpy                SDL    ppi           -     -              -
+SDL_strtol                 SDL    pip           -     -              -   # (s, endptr, base)
+SDL_strtoll                SDL    pip           -     -              -
+SDL_toupper                SDL    i             -     -              -
+SDL_isdigit                SDL    i             -     -              -
+SDL_isspace                SDL    i             -     -              -
+SDL_utf8strlen             SDL    p             -     -              -
+SDL_Error                  SDL    -             -     -              -
+SDL_SetError               SDL    p             -     -              -
+SDL_Log                    SDL    p             -     -              -   # stub: varargs fmt must not reach host printf
+SDL_qsort                  SDL    ipip          -     -              -   # stub: guest compar callback
+SDL_sscanf                 SDL    pp            -     -              -   # stub: varargs
+SDL_GetDisplayName         SDL    i             str   -              -
+SDL_GetKeyFromName         SDL    p             -     -              -
+SDL_GetKeyName             SDL    i             str   -              -
+SDL_EventState             SDL    iii           -     -              -
+SDL_JoystickEventState     SDL    i             -     -              -
+SDL_SetWindowGrab          SDL    ii            -     -              -
+SDL_ShowSimpleMessageBox   SDL    ippp          -     -              -   # stub: never blocks
+SDL_StartTextInput         SDL    -             -     -              -
+SDL_StopTextInput          SDL    -             -     -              -
+SDL_HasColorKey            SDL    i             -     -              -
+SDL_FillRect               SDL    ipii          -     -              -
+SDL_ConvertSurface         SDL    piip          -     -              -
+SDL_ConvertSurfaceFormat   SDL    pii           -     -              -
+SDL_DuplicateSurface       SDL    p             -     -              -
+SDL_CreateRGBSurfaceFrom   SDL    piiiiiii      -     -              -   # pixels,w,h,depth,pitch,masks
+SDL_CreateRGBSurfaceWithFormatFrom SDL piiii    -     -              -
+SDL_SetSurfaceBlendMode    SDL    pii           -     -              -
+SDL_UpperBlit              SDL    ppii          -     -              -
+SDL_LoadFile_RW            SDL    ip            -     -              -   # stub: host-alloc return
+SDL_RWFromConstMem         SDL    pi            -     -              -
+SDL_RWsize                 SDL    i             -     -              -
+SDL_LockAudio              SDL    -             -     -              -
+SDL_UnlockAudio            SDL    -             -     -              -
+glPointParameterf          GL     if            -     -              -   # mixed FP
+glPointParameterfv         GL     ip            -     -              -   # arg1: const GLfloat *
+glStringMarkerGREMEDY      GL     ip            -     -              -   # debug marker: stub
