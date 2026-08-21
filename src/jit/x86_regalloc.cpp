@@ -268,9 +268,43 @@ int FrostJIT::alloc_reg_excluding(int excl1, int excl2) {
         evict_vreg(reg_vreg_[best_r]);
         return best_r;
     }
-    // All alloc regs are excluded — shouldn't happen (we have 9 alloc regs
-    // and only exclude at most 2). Fall back to alloc_reg.
-    return alloc_reg();
+    // Every non-pinned alloc reg is excl1/excl2 (extreme pressure: e.g. a
+    // region preheader compiled with FLAGS3 + arch pins excluded leaves a
+    // 2-reg pool, and a 2-operand op excludes both). The old fallback —
+    // `return alloc_reg()` — SILENTLY IGNORED the exclusions: alloc_reg
+    // could hand back excl2's register, and the caller's canonical sequence
+    //     mov d, excl1 ; op d, excl2
+    // then read excl2 from the clobbered reg (observed as `add %r11,%r11`
+    // with the SHL result already destroyed in r11 — silent wrong answer).
+    //
+    // The excl1 constraint is RELAXABLE by caller contract: every site
+    // passes the IN-PLACE-SAFE operand as excl1 — their `mov d, excl1`
+    // degenerates to a no-op and the op computes in place; excl1's vreg is
+    // evicted (value preserved to cpu.regs[]/slot) right before returning,
+    // so its later uses reload correctly. excl2 must stay intact. Retry the
+    // Belady scan excluding only excl2; last resort is excl1's own reg
+    // (caller computes in place into it).
+    best_r = -1;
+    best_score = -1;
+    for (int i = 0; i < NUM_ALLOC_REGS; i++) {
+        int r = ALLOC_REGS[i];
+        if (pinned_host_regs_ & (1u << r)) continue;
+        if (r == excl2) continue;
+        int v = reg_vreg_[r];
+        if (v < 0) { best_r = r; break; }  // free beats any eviction
+        int nu = next_use_after(v, cur_op_index_);
+        int score = (nu < 0) ? INT_MAX : nu;
+        if (score > best_score) {
+            best_score = score;
+            best_r = r;
+        }
+    }
+    if (best_r >= 0) {
+        int v = reg_vreg_[best_r];
+        if (v >= 0) evict_vreg(v);
+        return best_r;
+    }
+    return excl1;  // truly nothing else — caller computes in place
 }
 // Ensure vreg v is in an x86 reg. Returns the reg.
 // `preferred` is a HINT for newly loaded vregs only — if v is already

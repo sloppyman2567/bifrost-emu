@@ -220,7 +220,9 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // If s1 is in RCX, move it elsewhere first so forcing src2 into
             // RCX doesn't lose src1.
             if (s1 == RCX) {
-                int tmp = alloc_reg_excluding(RCX, -1);
+                // excl2 = RCX must stay intact (tmp receives s1 moved OUT of
+                // RCX); excl1 = -1 (no in-place-safe operand here).
+                int tmp = alloc_reg_excluding(-1, RCX);
                 emit_mov_reg(tmp, RCX);
                 reg_vreg_[RCX] = -1;
                 vreg_home_[inst.src1] = tmp;
