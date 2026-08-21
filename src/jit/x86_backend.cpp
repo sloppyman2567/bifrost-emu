@@ -738,56 +738,57 @@ void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
     patch_jmp_rel32(jmp_past, end_rel);
 }
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
-    // We use R8 as the address scratch (NOT RDX/RCX, since the caller
-    // passes addr in RAX and val in RCX, and we must not clobber either
-    // before the limit check).
-    //
-    // R8 = addr_reg + off
-    emit_mov_reg(R8, addr_reg);
+    // In-place address variant (2026-08-21): the address register is used
+    // directly for the offset add, limit check, and fast-path store — no
+    // R8 copy, no RAX save/restore in the slow path. CONTRACT: addr_reg's
+    // value is DEAD after this op (destroyed on both paths; the slow-path
+    // C helper clobbers it, the fast path adds WIN_REG into it). The sole
+    // caller (STORE_MEM, jit_codegen_mem.cpp) guarantees this: its RAX
+    // holds either a fresh copy (the vreg's true home is elsewhere) or a
+    // kept DEAD scratch (vreg_fast_keep_candidate requires last-use-here)
+    // whose mapping is dropped right after via kill_vreg — which never
+    // spills. src_reg IS preserved (pushed/popped around the slow call),
+    // and must not equal addr_reg.
     if (off != 0) {
         if (off >= -128 && off <= 127) {
-            emit_byte(rex(true,false,false,R8>=8));
-            emit_byte(0x83); emit_byte(modrm(3,0,R8&7)); emit_byte(static_cast<uint8_t>(off));
+            emit_byte(rex(true,false,false,addr_reg>=8));
+            emit_byte(0x83); emit_byte(modrm(3,0,addr_reg&7)); emit_byte(static_cast<uint8_t>(off));
         } else {
-            emit_byte(rex(true,false,false,R8>=8));
-            emit_byte(0x81); emit_byte(modrm(3,0,R8&7)); emit_u32(static_cast<uint32_t>(off));
+            emit_byte(rex(true,false,false,addr_reg>=8));
+            emit_byte(0x81); emit_byte(modrm(3,0,addr_reg&7)); emit_u32(static_cast<uint32_t>(off));
         }
     }
-    // Limit check: R9 = limit. cmp R8, R9. Limit is < 2^32 → 32-bit mov.
+    // Limit check: lim = limit. Limit is < 2^32 → 32-bit zero-extending mov.
+    int lim = (addr_reg != R9) ? R9 : R8;
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    emit_mov_imm32_zext(R9, static_cast<uint32_t>(limit));
-    emit_cmp_reg(R8, R9);
+    emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
+    emit_cmp_reg(addr_reg, lim);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
     // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
-    // 3 pushes (src, RAX, R10) — ODD, so emit_call_aligned handles the
-    // sub rsp,8 + pushfq + call + popfq + add rsp,8 automatically.
+    // 2 pushes (src, R10) — EVEN, so emit_call_aligned needs no sub/add.
     //
     // Args: RDI=emu, RSI=cpu, RDX=addr, RCX=val, R8=width
-    emit_push(src_reg);            // save val (RCX)  — 1 push
-    emit_push(RAX);                // save RAX        — 2 pushes
-    emit_push(WIN_REG);            // save R10        — 3 pushes (ODD)
+    emit_push(src_reg);            // save val — 1 push
+    emit_push(WIN_REG);            // save R10      — 2 pushes (EVEN)
     emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
     emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
-    emit_mov_reg(RDX, R8);         // rdx = addr (from R8)
-    emit_mov_reg(RCX, src_reg);    // rcx = val (from src_reg=RCX)
-    emit_mov_imm32(R8, w);         // r8 = width
-    emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/3);
+    emit_mov_reg(RDX, addr_reg);   // rdx = addr (addr_reg ≠ RDX by contract)
+    if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val
+    emit_mov_imm32(R8, w);         // r8 = width (after addr → RDX)
+    emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
     emit_pop(WIN_REG);             // restore R10
-    emit_pop(RAX);                 // restore RAX
-    emit_pop(src_reg);             // restore val (RCX)
+    emit_pop(src_reg);             // restore val
     size_t jmp_past = emit_jmp_rel32_placeholder();
-    // Fast path: direct window store.
+    // Fast path: direct window store, in the address register.
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
-    // R8 = R10 + R8 (window_base + guest_addr)
-    // add r8, r10: REX.W+R+B (0x4D), opcode 0x01, modrm(3, r10&7=2, r8&7=0)=0xD0
-    emit_byte(0x4D); emit_byte(0x01); emit_byte(0xD0);
-    // Store to [R8] with the right width.
+    emit_add_reg(addr_reg, WIN_REG);
+    // Store to [addr_reg] with the right width.
     if (w == 8) {
-        emit_byte(rex(true,src_reg>=8,false,R8>=8)); emit_byte(0x89); emit_byte(modrm(0,src_reg&7,R8&7));
-    } else if (w == 4) emit_store32(R8, 0, src_reg);
-    else if (w == 2) emit_store16(R8, 0, src_reg);
-    else if (w == 1) emit_store8(R8, 0, src_reg);
+        emit_byte(rex(true,src_reg>=8,false,addr_reg>=8)); emit_byte(0x89); emit_byte(modrm(0,src_reg&7,addr_reg&7));
+    } else if (w == 4) emit_store32(addr_reg, 0, src_reg);
+    else if (w == 2) emit_store16(addr_reg, 0, src_reg);
+    else if (w == 1) emit_store8(addr_reg, 0, src_reg);
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }

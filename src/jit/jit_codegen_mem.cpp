@@ -219,10 +219,14 @@ int FrostJIT::compile_ir_mem(const IRInst& inst) {
                 (1u << R8)  | (1u << R9)  | (1u << R11);
             // Fast path for both operands: if src1/src2 are dead scratch
             // vregs already cached in RAX/RCX, keep them there. emit_store_mem
-            // PRESERVES RAX and RCX (pushes/pops them around the slow call),
-            // so kept mappings stay valid after the store. Decide BOTH
-            // operands BEFORE flushing so src2's cache isn't wiped by src1's
-            // flush, then flush+invalidate only the non-kept regs.
+            // (in-place-address variant, 2026-08-21) destroys RAX (the addr)
+            // on BOTH paths but PRESERVES RCX (pushes/pops it around the
+            // slow call) — the RAX keep is safe because keep candidates die
+            // at this op (vreg_fast_keep_candidate) and the compile loop's
+            // kill_vreg right after this op drops the mapping without
+            // spilling. Decide BOTH operands BEFORE flushing so src2's
+            // cache isn't wiped by src1's flush, then flush+invalidate only
+            // the non-kept regs.
             bool keep1 = vreg_fast_keep_candidate(inst.src1, RAX, inst.dest);
             bool keep2 = vreg_fast_keep_candidate(inst.src2, RCX, inst.dest);
             uint16_t kept_mask = 0;
