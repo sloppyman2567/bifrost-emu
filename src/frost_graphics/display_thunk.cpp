@@ -751,6 +751,115 @@ struct VkRenderPassBeginInfoH {
     uint32_t renderAreaExtW, renderAreaExtH;
     uint32_t clearValueCount; const void* pClearValues;
 };
+// ── Graphics-pipeline stage (2026-08-21) ──────────────────────────────
+// All layouts verified byte-for-byte against the vendored
+// ctest_real/vulkan_headers vulkan_core.h (natural-alignment LP64 —
+// identical on host x86-64 and guest AArch64).
+struct VkShaderModuleCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; size_t codeSize; const void* pCode;
+};
+struct VkPipelineShaderStageCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t stage;
+    uint64_t module; const char* pName; const void* pSpecializationInfo;
+};
+struct VkSpecializationMapEntryH { uint32_t constantID, offset; size_t size; };
+struct VkSpecializationInfoH {
+    uint32_t mapEntryCount; const VkSpecializationMapEntryH* pMapEntries;
+    size_t dataSize; const void* pData;
+};
+struct VkPipelineVertexInputStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t vertexBindingDescriptionCount; const void* pVertexBindingDescriptions;
+    uint32_t vertexAttributeDescriptionCount; const void* pVertexAttributeDescriptions;
+};
+struct VkPipelineInputAssemblyStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t topology; uint32_t primitiveRestartEnable;
+};
+struct VkPipelineViewportStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t viewportCount;
+    const void* pViewports; uint32_t scissorCount; const void* pScissors;
+};
+struct VkPipelineRasterizationStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t depthClampEnable, rasterizerDiscardEnable, polygonMode,
+             cullMode, frontFace, depthBiasEnable;
+    float depthBiasConstantFactor, depthBiasClamp, depthBiasSlopeFactor, lineWidth;
+};
+struct VkPipelineMultisampleStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t rasterizationSamples;
+    uint32_t sampleShadingEnable; float minSampleShading;
+    const void* pSampleMask; uint32_t alphaToCoverageEnable; uint32_t alphaToOneEnable;
+};
+struct VkStencilOpStateH {
+    uint32_t failOp, passOp, depthFailOp, compareOp, compareMask, writeMask, reference;
+};
+struct VkPipelineDepthStencilStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t depthTestEnable, depthWriteEnable, depthCompareOp,
+             depthBoundsTestEnable, stencilTestEnable;
+    VkStencilOpStateH front, back;
+    float minDepthBounds, maxDepthBounds;
+};
+struct VkPipelineColorBlendStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    uint32_t logicOpEnable, logicOp, attachmentCount;
+    const void* pAttachments; float blendConstants[4];
+};
+struct VkPipelineDynamicStateCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t dynamicStateCount;
+    const void* pDynamicStates;
+};
+struct VkGraphicsPipelineCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t stageCount;
+    const VkPipelineShaderStageCreateInfoH* pStages;
+    const VkPipelineVertexInputStateCreateInfoH* pVertexInputState;
+    const VkPipelineInputAssemblyStateCreateInfoH* pInputAssemblyState;
+    const void* pTessellationState;
+    const VkPipelineViewportStateCreateInfoH* pViewportState;
+    const VkPipelineRasterizationStateCreateInfoH* pRasterizationState;
+    const VkPipelineMultisampleStateCreateInfoH* pMultisampleState;
+    const VkPipelineDepthStencilStateCreateInfoH* pDepthStencilState;
+    const VkPipelineColorBlendStateCreateInfoH* pColorBlendState;
+    const VkPipelineDynamicStateCreateInfoH* pDynamicState;
+    uint64_t layout; uint64_t renderPass; uint32_t subpass;
+    uint64_t basePipelineHandle; int32_t basePipelineIndex;
+};
+// VkPipelineLayoutCreateInfo — pSetLayouts (handle array) + flat ranges.
+struct VkPipelineLayoutCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t setLayoutCount;
+    const void* pSetLayouts; uint32_t pushConstantRangeCount;
+    const void* pPushConstantRanges;
+};
+struct VkDescriptorPoolSizeH { uint32_t type; uint32_t descriptorCount; };
+struct VkDescriptorPoolCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t maxSets;
+    uint32_t poolSizeCount; const VkDescriptorPoolSizeH* pPoolSizes;
+};
+struct VkDescriptorSetLayoutCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags; uint32_t bindingCount;
+    const void* pBindings;
+};
+struct VkDescriptorSetLayoutBindingH {
+    uint32_t binding, descriptorType, descriptorCount, stageFlags;
+    const void* pImmutableSamplers;
+};
+struct VkDescriptorSetAllocateInfoH {
+    int32_t sType; void* pNext; uint64_t descriptorPool;
+    uint32_t descriptorSetCount; const void* pSetLayouts;
+};
+struct VkWriteDescriptorSetH {
+    int32_t sType; void* pNext; uint64_t dstSet;
+    uint32_t dstBinding, dstArrayElement, descriptorCount, descriptorType;
+    const void* pImageInfo; const void* pBufferInfo; const void* pTexelBufferView;
+};
+struct VkDescriptorImageInfoH { uint64_t sampler, imageView; uint32_t imageLayout; };
+struct VkDescriptorBufferInfoH { uint64_t buffer, offset, range; };
+struct VkCopyDescriptorSetH {
+    int32_t sType; void* pNext; uint64_t srcSet;
+    uint32_t srcBinding, srcArrayElement; uint64_t dstSet;
+    uint32_t dstBinding, dstArrayElement, descriptorCount;
+};
 constexpr size_t kPhysicalDeviceFeaturesBytes = 220;
 // Read a guest struct by value into `dst` (zero-fill on unmapped).
 template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
@@ -1142,6 +1251,414 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             cpu.regs[0], b, static_cast<uint32_t>(cpu.regs[2]));
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) fprintf(stderr, "[display-thunk] vkCmdBeginRenderPass → %d\n", static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkCreateShaderModule ─────────────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pShaderModule) — pCode is a NESTED
+    // guest pointer to codeSize bytes of SPIR-V. The staging vector MUST be
+    // reserved for codeSize BEFORE any pointer is taken: a later resize
+    // reallocates buf and dangles every pointer handed out so far (the
+    // 64 KiB default reserve would be blown by any real shader).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_SHADER_MODULE) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkShaderModuleCreateInfoH gi;
+        read_guest_struct(mem, cpu.regs[1], &gi);
+        if (gi.codeSize > (64u << 20)) {
+            cpu.regs[0] = 0xFFFFFFFDu;  // VK_ERROR_INITIALIZATION_FAILED
+            return true;
+        }
+        VkStage st;
+        st.buf.reserve(gi.codeSize + 4096);
+        VkShaderModuleCreateInfoH* info = st.alloc<VkShaderModuleCreateInfoH>();
+        *info = gi;
+        info->pNext = nullptr;
+        if (gi.codeSize && gi.pCode) {
+            void* code = st.bytes(gi.codeSize, 4);  // SPIR-V is u32-aligned
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi.pCode), code, gi.codeSize);
+            info->pCode = code;
+        } else {
+            info->pCode = nullptr;
+            info->codeSize = 0;
+        }
+        uint64_t host_module = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_module);
+        if (cpu.regs[3] && host_module) {
+            try { mem->write(cpu.regs[3], &host_module, sizeof(host_module)); }
+            catch (...) { /* out pointer unmapped — result lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateShaderModule (codeSize=%zu) → %d (module=%p)\n",
+                    gi.codeSize, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_module));
+        }
+        return true;
+    }
+
+    // ── vkCreateGraphicsPipelines ────────────────────────────────────────
+    // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
+    // pPipelines) — each VkGraphicsPipelineCreateInfo carries a tree:
+    // pStages (each with pName string + optional specialization blob),
+    // pVertexInputState (two flat arrays), pViewportState (viewport +
+    // scissor arrays), pMultisampleState (sample mask), pColorBlendState
+    // (attachment array), pDynamicState (enum array). The flat-after-pNext
+    // states (input assembly, tessellation, rasterization, depth/stencil)
+    // are copied verbatim with pNext zeroed. OUT handles (arg 5) written
+    // back. Worst case (8 pipes × 8 stages × 4 KiB spec data) is ~340 KiB,
+    // so the staging vector is reserved up front (realloc would dangle
+    // every pointer handed out so far).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint32_t count = static_cast<uint32_t>(cpu.regs[2]);
+        if (count == 0 || count > 8 || !cpu.regs[3]) {
+            cpu.regs[0] = count == 0 ? 0u : 0xFFFFFFFDu;
+            return true;
+        }
+        VkStage st;
+        st.buf.reserve(512u * 1024u);
+        VkGraphicsPipelineCreateInfoH* infos =
+            reinterpret_cast<VkGraphicsPipelineCreateInfoH*>(st.bytes(count * sizeof(VkGraphicsPipelineCreateInfoH), 8));
+        read_guest_bytes(mem, cpu.regs[3], infos, count * sizeof(VkGraphicsPipelineCreateInfoH));
+        for (uint32_t p = 0; p < count; p++) {
+            VkGraphicsPipelineCreateInfoH* g = &infos[p];
+            g->pNext = nullptr;
+            // Shader stages: pName string + optional specialization info.
+            if (g->stageCount && g->pStages && g->stageCount <= 8) {
+                VkPipelineShaderStageCreateInfoH* ss =
+                    reinterpret_cast<VkPipelineShaderStageCreateInfoH*>(st.bytes(g->stageCount * sizeof(VkPipelineShaderStageCreateInfoH), 8));
+                read_guest_bytes(mem, reinterpret_cast<uint64_t>(g->pStages), ss,
+                                 g->stageCount * sizeof(VkPipelineShaderStageCreateInfoH));
+                for (uint32_t s = 0; s < g->stageCount; s++) {
+                    ss[s].pNext = nullptr;
+                    ss[s].pName = st.guest_str(mem, reinterpret_cast<uint64_t>(ss[s].pName));
+                    if (ss[s].pSpecializationInfo) {
+                        VkSpecializationInfoH gi_spec;
+                        read_guest_struct(mem, reinterpret_cast<uint64_t>(ss[s].pSpecializationInfo), &gi_spec);
+                        VkSpecializationInfoH* spec = st.alloc<VkSpecializationInfoH>();
+                        *spec = gi_spec;
+                        if (gi_spec.mapEntryCount && gi_spec.pMapEntries && gi_spec.mapEntryCount <= 64) {
+                            VkSpecializationMapEntryH* e = reinterpret_cast<VkSpecializationMapEntryH*>(
+                                st.bytes(gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH), 8));
+                            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pMapEntries), e,
+                                             gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH));
+                            spec->pMapEntries = e;
+                        } else { spec->mapEntryCount = 0; spec->pMapEntries = nullptr; }
+                        if (gi_spec.dataSize && gi_spec.pData && gi_spec.dataSize <= 4096) {
+                            void* d = st.bytes(gi_spec.dataSize, 8);
+                            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pData), d, gi_spec.dataSize);
+                            spec->pData = d;
+                        } else { spec->dataSize = 0; spec->pData = nullptr; }
+                        ss[s].pSpecializationInfo = spec;
+                    }
+                }
+                g->pStages = ss;
+            } else { g->stageCount = 0; g->pStages = nullptr; }
+            // Vertex input: two flat description arrays.
+            if (g->pVertexInputState) {
+                VkPipelineVertexInputStateCreateInfoH* vi = st.alloc<VkPipelineVertexInputStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pVertexInputState), vi);
+                vi->pNext = nullptr;
+                if (vi->vertexBindingDescriptionCount && vi->pVertexBindingDescriptions && vi->vertexBindingDescriptionCount <= 32) {
+                    void* a = st.bytes(vi->vertexBindingDescriptionCount * 12u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vi->pVertexBindingDescriptions), a,
+                                     vi->vertexBindingDescriptionCount * 12u);
+                    vi->pVertexBindingDescriptions = a;
+                } else { vi->vertexBindingDescriptionCount = 0; vi->pVertexBindingDescriptions = nullptr; }
+                if (vi->vertexAttributeDescriptionCount && vi->pVertexAttributeDescriptions && vi->vertexAttributeDescriptionCount <= 32) {
+                    void* a = st.bytes(vi->vertexAttributeDescriptionCount * 16u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vi->pVertexAttributeDescriptions), a,
+                                     vi->vertexAttributeDescriptionCount * 16u);
+                    vi->pVertexAttributeDescriptions = a;
+                } else { vi->vertexAttributeDescriptionCount = 0; vi->pVertexAttributeDescriptions = nullptr; }
+                g->pVertexInputState = vi;
+            }
+            // Flat-after-pNext states: verbatim copy, zero pNext.
+            if (g->pInputAssemblyState) {
+                VkPipelineInputAssemblyStateCreateInfoH* s = st.alloc<VkPipelineInputAssemblyStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pInputAssemblyState), s);
+                s->pNext = nullptr;
+                g->pInputAssemblyState = s;
+            }
+            if (g->pTessellationState) {
+                void* s = st.bytes(32, 8);  // sType,pNext,flags,patchControlPoints
+                read_guest_bytes(mem, reinterpret_cast<uint64_t>(g->pTessellationState), s, 32);
+                static_cast<void**>(s)[1] = nullptr;  // zero pNext
+                g->pTessellationState = s;
+            }
+            if (g->pViewportState) {
+                VkPipelineViewportStateCreateInfoH* vs = st.alloc<VkPipelineViewportStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pViewportState), vs);
+                vs->pNext = nullptr;
+                if (vs->viewportCount && vs->pViewports && vs->viewportCount <= 16) {
+                    void* a = st.bytes(vs->viewportCount * 24u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vs->pViewports), a, vs->viewportCount * 24u);
+                    vs->pViewports = a;
+                } else { vs->viewportCount = 0; vs->pViewports = nullptr; }
+                if (vs->scissorCount && vs->pScissors && vs->scissorCount <= 16) {
+                    void* a = st.bytes(vs->scissorCount * 16u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vs->pScissors), a, vs->scissorCount * 16u);
+                    vs->pScissors = a;
+                } else { vs->scissorCount = 0; vs->pScissors = nullptr; }
+                g->pViewportState = vs;
+            }
+            if (g->pRasterizationState) {
+                VkPipelineRasterizationStateCreateInfoH* s = st.alloc<VkPipelineRasterizationStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pRasterizationState), s);
+                s->pNext = nullptr;
+                g->pRasterizationState = s;
+            }
+            if (g->pMultisampleState) {
+                VkPipelineMultisampleStateCreateInfoH* s = st.alloc<VkPipelineMultisampleStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pMultisampleState), s);
+                s->pNext = nullptr;
+                if (s->pSampleMask) {
+                    // (rasterizationSamples + 31) / 32 u32 words; sane cap 8.
+                    uint32_t words = (s->rasterizationSamples + 31u) / 32u;
+                    if (words == 0 || words > 8) words = 1;
+                    uint32_t* a = reinterpret_cast<uint32_t*>(st.bytes(words * 4u, 4));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pSampleMask), a, words * 4u);
+                    s->pSampleMask = a;
+                }
+                g->pMultisampleState = s;
+            }
+            if (g->pDepthStencilState) {
+                VkPipelineDepthStencilStateCreateInfoH* s = st.alloc<VkPipelineDepthStencilStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pDepthStencilState), s);
+                s->pNext = nullptr;
+                g->pDepthStencilState = s;
+            }
+            if (g->pColorBlendState) {
+                VkPipelineColorBlendStateCreateInfoH* s = st.alloc<VkPipelineColorBlendStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pColorBlendState), s);
+                s->pNext = nullptr;
+                if (s->attachmentCount && s->pAttachments && s->attachmentCount <= 16) {
+                    void* a = st.bytes(s->attachmentCount * 32u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pAttachments), a, s->attachmentCount * 32u);
+                    s->pAttachments = a;
+                } else { s->attachmentCount = 0; s->pAttachments = nullptr; }
+                g->pColorBlendState = s;
+            }
+            if (g->pDynamicState) {
+                VkPipelineDynamicStateCreateInfoH* s = st.alloc<VkPipelineDynamicStateCreateInfoH>();
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pDynamicState), s);
+                s->pNext = nullptr;
+                if (s->dynamicStateCount && s->pDynamicStates && s->dynamicStateCount <= 32) {
+                    void* a = st.bytes(s->dynamicStateCount * 4u, 4);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pDynamicStates), a, s->dynamicStateCount * 4u);
+                    s->pDynamicStates = a;
+                } else { s->dynamicStateCount = 0; s->pDynamicStates = nullptr; }
+                g->pDynamicState = s;
+            }
+        }
+        uint64_t* host_pipes = reinterpret_cast<uint64_t*>(st.bytes(count * 8u, 8));
+        std::memset(host_pipes, 0, count * 8u);
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint32_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], cpu.regs[1], count, infos, nullptr, host_pipes);
+        if (cpu.regs[5]) {
+            try { mem->write(cpu.regs[5], host_pipes, count * 8u); }
+            catch (...) { /* out array unmapped — results lost */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) {
+            fprintf(stderr, "[display-thunk] vkCreateGraphicsPipelines (n=%u) → %d (pipe0=%p)\n",
+                    count, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pipes[0]));
+        }
+        return true;
+    }
+
+    // ── vkCreatePipelineLayout ───────────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pPipelineLayout) — pSetLayouts is a
+    // handle array, pPushConstantRanges a flat {u32,u32,u32} array.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_PIPELINE_LAYOUT) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkPipelineLayoutCreateInfoH* info = st.alloc<VkPipelineLayoutCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->setLayoutCount && info->pSetLayouts && info->setLayoutCount <= 16) {
+            uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(info->setLayoutCount * 8u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pSetLayouts), a, info->setLayoutCount * 8u);
+            info->pSetLayouts = a;
+        } else { info->setLayoutCount = 0; info->pSetLayouts = nullptr; }
+        if (info->pushConstantRangeCount && info->pPushConstantRanges && info->pushConstantRangeCount <= 16) {
+            void* a = st.bytes(info->pushConstantRangeCount * 12u, 4);
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pPushConstantRanges), a,
+                             info->pushConstantRangeCount * 12u);
+            info->pPushConstantRanges = a;
+        } else { info->pushConstantRangeCount = 0; info->pPushConstantRanges = nullptr; }
+        uint64_t host_layout = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_layout);
+        if (cpu.regs[3] && host_layout) {
+            try { mem->write(cpu.regs[3], &host_layout, sizeof(host_layout)); }
+            catch (...) { /* out pointer unmapped */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkCreatePipelineLayout → %d (layout=%p)\n",
+                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_layout));
+        return true;
+    }
+
+    // ── vkCreateDescriptorPool ───────────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pDescriptorPool) — pPoolSizes flat.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DESCRIPTOR_POOL) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkDescriptorPoolCreateInfoH* info = st.alloc<VkDescriptorPoolCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->poolSizeCount && info->pPoolSizes && info->poolSizeCount <= 32) {
+            VkDescriptorPoolSizeH* a = reinterpret_cast<VkDescriptorPoolSizeH*>(
+                st.bytes(info->poolSizeCount * sizeof(VkDescriptorPoolSizeH), 4));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pPoolSizes), a,
+                             info->poolSizeCount * sizeof(VkDescriptorPoolSizeH));
+            info->pPoolSizes = a;
+        } else { info->poolSizeCount = 0; info->pPoolSizes = nullptr; }
+        uint64_t host_pool = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_pool);
+        if (cpu.regs[3] && host_pool) {
+            try { mem->write(cpu.regs[3], &host_pool, sizeof(host_pool)); }
+            catch (...) { /* out pointer unmapped */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkCreateDescriptorPool → %d (pool=%p)\n",
+                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pool));
+        return true;
+    }
+
+    // ── vkCreateDescriptorSetLayout ──────────────────────────────────────
+    // (device, pCreateInfo, pAllocator, pSetLayout) — pBindings is an array
+    // whose entries may each carry a pImmutableSamplers handle array.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkDescriptorSetLayoutCreateInfoH* info = st.alloc<VkDescriptorSetLayoutCreateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->bindingCount && info->pBindings && info->bindingCount <= 32) {
+            VkDescriptorSetLayoutBindingH* b = reinterpret_cast<VkDescriptorSetLayoutBindingH*>(
+                st.bytes(info->bindingCount * sizeof(VkDescriptorSetLayoutBindingH), 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pBindings), b,
+                             info->bindingCount * sizeof(VkDescriptorSetLayoutBindingH));
+            for (uint32_t i = 0; i < info->bindingCount; i++) {
+                if (b[i].descriptorCount && b[i].pImmutableSamplers && b[i].descriptorCount <= 64) {
+                    uint64_t* s = reinterpret_cast<uint64_t*>(st.bytes(b[i].descriptorCount * 8u, 8));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(b[i].pImmutableSamplers), s,
+                                     b[i].descriptorCount * 8u);
+                    b[i].pImmutableSamplers = s;
+                } else { b[i].pImmutableSamplers = nullptr; }
+            }
+            info->pBindings = b;
+        } else { info->bindingCount = 0; info->pBindings = nullptr; }
+        uint64_t host_dsl = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_dsl);
+        if (cpu.regs[3] && host_dsl) {
+            try { mem->write(cpu.regs[3], &host_dsl, sizeof(host_dsl)); }
+            catch (...) { /* out pointer unmapped */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkCreateDescriptorSetLayout → %d (dsl=%p)\n",
+                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_dsl));
+        return true;
+    }
+
+    // ── vkAllocateDescriptorSets ─────────────────────────────────────────
+    // (device, pAllocateInfo, pDescriptorSets) — pSetLayouts nested handle
+    // array; OUT pDescriptorSets receives the allocated set handles.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkDescriptorSetAllocateInfoH* info = st.alloc<VkDescriptorSetAllocateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        if (info->descriptorSetCount && info->pSetLayouts && info->descriptorSetCount <= 32) {
+            uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(info->descriptorSetCount * 8u, 8));
+            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pSetLayouts), a,
+                             info->descriptorSetCount * 8u);
+            info->pSetLayouts = a;
+        } else { info->descriptorSetCount = 0; info->pSetLayouts = nullptr; }
+        uint64_t* host_sets = reinterpret_cast<uint64_t*>(st.bytes(info->descriptorSetCount * 8u, 8));
+        std::memset(host_sets, 0, info->descriptorSetCount * 8u);
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, host_sets);
+        if (cpu.regs[2] && ret == 0) {
+            try { mem->write(cpu.regs[2], host_sets, info->descriptorSetCount * 8u); }
+            catch (...) { /* out array unmapped */ }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkAllocateDescriptorSets (n=%u) → %d\n",
+                           info->descriptorSetCount, static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkUpdateDescriptorSets ───────────────────────────────────────────
+    // (device, writeCount, pWrites, copyCount, pCopies) — each write carries
+    // ONE of pImageInfo / pBufferInfo / pTexelBufferView depending on
+    // descriptorType; copies are flat-after-pNext (handles round-trip).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint32_t writes = static_cast<uint32_t>(cpu.regs[1]);
+        const uint32_t copies = static_cast<uint32_t>(cpu.regs[3]);
+        if (writes > 32 || copies > 32) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkWriteDescriptorSetH* w = nullptr;
+        if (writes && cpu.regs[2]) {
+            w = reinterpret_cast<VkWriteDescriptorSetH*>(st.bytes(writes * sizeof(VkWriteDescriptorSetH), 8));
+            read_guest_bytes(mem, cpu.regs[2], w, writes * sizeof(VkWriteDescriptorSetH));
+            for (uint32_t i = 0; i < writes; i++) {
+                w[i].pNext = nullptr;
+                if (w[i].descriptorCount > 64) w[i].descriptorCount = 0;
+                if (!w[i].descriptorCount) {
+                    w[i].pImageInfo = nullptr; w[i].pBufferInfo = nullptr; w[i].pTexelBufferView = nullptr;
+                    continue;
+                }
+                // DescriptorType classification (vendored enum values):
+                // image infos → 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE,
+                // 3 STORAGE_IMAGE, 10 INPUT_ATTACHMENT; texel buffer views
+                // → 4 UNIFORM_TEXEL_BUFFER, 5 STORAGE_TEXEL_BUFFER; buffer
+                // infos → 6/7/8/9 (UNIFORM/STORAGE_[BUFFER_DYNAMIC]) and
+                // any exotic type (best effort). DO NOT use a 1..6 range
+                // for images — 6 is UNIFORM_BUFFER and 4/5 are texel
+                // buffers; that misroute nulled the info pointers and
+                // crashed RADV on the first UBO write.
+                uint32_t t = w[i].descriptorType;
+                bool is_img = t == 1 || t == 2 || t == 3 || t == 10;
+                bool is_tbuf = t == 4 || t == 5;
+                if (is_img && w[i].pImageInfo) {
+                    VkDescriptorImageInfoH* a = reinterpret_cast<VkDescriptorImageInfoH*>(
+                        st.bytes(w[i].descriptorCount * sizeof(VkDescriptorImageInfoH), 8));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pImageInfo), a,
+                                     w[i].descriptorCount * sizeof(VkDescriptorImageInfoH));
+                    w[i].pImageInfo = a;
+                } else { w[i].pImageInfo = nullptr; }
+                if (!is_img && !is_tbuf && w[i].pBufferInfo) {
+                    VkDescriptorBufferInfoH* a = reinterpret_cast<VkDescriptorBufferInfoH*>(
+                        st.bytes(w[i].descriptorCount * sizeof(VkDescriptorBufferInfoH), 8));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pBufferInfo), a,
+                                     w[i].descriptorCount * sizeof(VkDescriptorBufferInfoH));
+                    w[i].pBufferInfo = a;
+                } else { w[i].pBufferInfo = nullptr; }
+                if (is_tbuf && w[i].pTexelBufferView) {
+                    uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(w[i].descriptorCount * 8u, 8));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pTexelBufferView), a,
+                                     w[i].descriptorCount * 8u);
+                    w[i].pTexelBufferView = a;
+                } else { w[i].pTexelBufferView = nullptr; }
+            }
+        }
+        VkCopyDescriptorSetH* c = nullptr;
+        if (copies && cpu.regs[4]) {
+            c = reinterpret_cast<VkCopyDescriptorSetH*>(st.bytes(copies * sizeof(VkCopyDescriptorSetH), 8));
+            read_guest_bytes(mem, cpu.regs[4], c, copies * sizeof(VkCopyDescriptorSetH));
+            for (uint32_t i = 0; i < copies; i++) c[i].pNext = nullptr;
+        }
+        reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], writes, w, copies, c);
+        cpu.regs[0] = 0;
+        if (trace) fprintf(stderr, "[display-thunk] vkUpdateDescriptorSets (w=%u c=%u) → 0\n", writes, copies);
         return true;
     }
 
@@ -1983,6 +2500,13 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_RENDERPASS:
         case thunk::Policy::VK_CREATE_FRAMEBUFFER:
         case thunk::Policy::VK_BEGIN_RENDERPASS:
+        case thunk::Policy::VK_CREATE_SHADER_MODULE:
+        case thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES:
+        case thunk::Policy::VK_CREATE_PIPELINE_LAYOUT:
+        case thunk::Policy::VK_CREATE_DESCRIPTOR_POOL:
+        case thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT:
+        case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
+        case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:
         case thunk::Policy::VULKAN:
             flags |= THUNK_VULKAN;
             break;

@@ -449,8 +449,522 @@ int main(void) {
     if (vkDestroyImageView) vkDestroyImageView(device, view, NULL);
     if (vkDestroyRenderPass) vkDestroyRenderPass(device, renderpass, NULL);
     if (vkFreeCommandBuffers) vkFreeCommandBuffers(device, pool, 1, &cmd);
+    CHECK(1, "destroy clear-frame objects");
+
+    /* ── Graphics pipeline + real vkCmdDraw triangle (2026-08-21) ──────
+     * Exercises the new deep-marshal arms: vkCreateShaderModule (nested
+     * pCode), vkCreateGraphicsPipelines (the full state-struct tree),
+     * vkCreatePipelineLayout, vkCreateDescriptorSetLayout / Pool /
+     * Allocate / Update (UBO binding), plus per-image framebuffers,
+     * a depth attachment, vertex buffer upload via vkCmdUpdateBuffer
+     * (avoids vkMapMemory — its host-pointer bounce is future work),
+     * and a 3-frame draw loop through per-image command buffers. */
+    #include "test_vulkan_spv.h"
+
+    PFN_vkCreateShaderModule vkCreateShaderModule =
+        (PFN_vkCreateShaderModule)vkGetDeviceProcAddr(device, "vkCreateShaderModule");
+    PFN_vkCreateGraphicsPipelines vkCreateGraphicsPipelines =
+        (PFN_vkCreateGraphicsPipelines)vkGetDeviceProcAddr(device, "vkCreateGraphicsPipelines");
+    PFN_vkCreatePipelineLayout vkCreatePipelineLayout =
+        (PFN_vkCreatePipelineLayout)vkGetDeviceProcAddr(device, "vkCreatePipelineLayout");
+    PFN_vkCreateDescriptorSetLayout vkCreateDescriptorSetLayout =
+        (PFN_vkCreateDescriptorSetLayout)vkGetDeviceProcAddr(device, "vkCreateDescriptorSetLayout");
+    PFN_vkCreateDescriptorPool vkCreateDescriptorPool =
+        (PFN_vkCreateDescriptorPool)vkGetDeviceProcAddr(device, "vkCreateDescriptorPool");
+    PFN_vkAllocateDescriptorSets vkAllocateDescriptorSets =
+        (PFN_vkAllocateDescriptorSets)vkGetDeviceProcAddr(device, "vkAllocateDescriptorSets");
+    PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets =
+        (PFN_vkUpdateDescriptorSets)vkGetDeviceProcAddr(device, "vkUpdateDescriptorSets");
+    PFN_vkCreateBuffer vkCreateBuffer =
+        (PFN_vkCreateBuffer)vkGetDeviceProcAddr(device, "vkCreateBuffer");
+    PFN_vkAllocateMemory vkAllocateMemory =
+        (PFN_vkAllocateMemory)vkGetDeviceProcAddr(device, "vkAllocateMemory");
+    PFN_vkGetBufferMemoryRequirements vkGetBufferMemoryRequirements =
+        (PFN_vkGetBufferMemoryRequirements)vkGetDeviceProcAddr(device, "vkGetBufferMemoryRequirements");
+    PFN_vkGetImageMemoryRequirements vkGetImageMemoryRequirements =
+        (PFN_vkGetImageMemoryRequirements)vkGetDeviceProcAddr(device, "vkGetImageMemoryRequirements");
+    PFN_vkBindBufferMemory vkBindBufferMemory =
+        (PFN_vkBindBufferMemory)vkGetDeviceProcAddr(device, "vkBindBufferMemory");
+    PFN_vkCreateImage vkCreateImage =
+        (PFN_vkCreateImage)vkGetDeviceProcAddr(device, "vkCreateImage");
+    PFN_vkBindImageMemory vkBindImageMemory =
+        (PFN_vkBindImageMemory)vkGetDeviceProcAddr(device, "vkBindImageMemory");
+    PFN_vkCmdBindVertexBuffers vkCmdBindVertexBuffers =
+        (PFN_vkCmdBindVertexBuffers)vkGetDeviceProcAddr(device, "vkCmdBindVertexBuffers");
+    PFN_vkCmdBindDescriptorSets vkCmdBindDescriptorSets =
+        (PFN_vkCmdBindDescriptorSets)vkGetDeviceProcAddr(device, "vkCmdBindDescriptorSets");
+    PFN_vkCmdDraw vkCmdDraw =
+        (PFN_vkCmdDraw)vkGetDeviceProcAddr(device, "vkCmdDraw");
+    PFN_vkCmdUpdateBuffer vkCmdUpdateBuffer =
+        (PFN_vkCmdUpdateBuffer)vkGetDeviceProcAddr(device, "vkCmdUpdateBuffer");
+    PFN_vkCmdBindPipeline vkCmdBindPipeline =
+        (PFN_vkCmdBindPipeline)vkGetDeviceProcAddr(device, "vkCmdBindPipeline");
+    CHECK(vkCreateShaderModule && vkCreateGraphicsPipelines &&
+          vkCreatePipelineLayout && vkCreateDescriptorSetLayout, "got pipeline fns");
+    CHECK(vkCreateBuffer && vkAllocateMemory && vkBindBufferMemory, "got buffer fns");
+    CHECK(vkCmdDraw && vkCmdBindVertexBuffers && vkCmdBindDescriptorSets &&
+          vkCmdBindPipeline && vkCmdUpdateBuffer, "got draw fns");
+    if (!vkCreateShaderModule || !vkCreateGraphicsPipelines || !vkCreatePipelineLayout ||
+        !vkCreateDescriptorSetLayout || !vkCreateBuffer || !vkAllocateMemory ||
+        !vkCmdDraw || !vkCmdBindVertexBuffers || !vkCmdBindPipeline) return 1;
+
+    /* Shader modules (nested pCode through the arm). */
+    VkShaderModule vs_module = VK_NULL_HANDLE, fs_module = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo smci = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof(kVertSpv),
+        .pCode = kVertSpv,
+    };
+    r = vkCreateShaderModule(device, &smci, NULL, &vs_module);
+    CHECK(r == VK_SUCCESS && vs_module != VK_NULL_HANDLE, "vkCreateShaderModule (vertex)");
+    smci.pCode = kFragSpv; smci.codeSize = sizeof(kFragSpv);
+    r = vkCreateShaderModule(device, &smci, NULL, &fs_module);
+    CHECK(r == VK_SUCCESS && fs_module != VK_NULL_HANDLE, "vkCreateShaderModule (fragment)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Buffers: interleaved vertex data (pos vec2 + col vec3) + UBO vec4.
+     * Filled per frame via vkCmdUpdateBuffer — no vkMapMemory needed. */
+    VkBuffer vbuf = VK_NULL_HANDLE, ubobuf = VK_NULL_HANDLE;
+    VkMemoryRequirements vreq = {0};
+    VkDeviceMemory vmem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = 3 * 20,
+        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    r = vkCreateBuffer(device, &bci, NULL, &vbuf);
+    CHECK(r == VK_SUCCESS && vbuf != VK_NULL_HANDLE, "vkCreateBuffer (vertex)");
+    bci.size = 16;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    r = vkCreateBuffer(device, &bci, NULL, &ubobuf);
+    CHECK(r == VK_SUCCESS && ubobuf != VK_NULL_HANDLE, "vkCreateBuffer (ubo)");
+    vkGetBufferMemoryRequirements(device, vbuf, &vreq);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = vreq.size,
+    };
+    /* Find HOST_VISIBLE|HOST_COHERENT memory type. */
+    VkPhysicalDeviceMemoryProperties mp = {0};
+    PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties =
+        (PFN_vkGetPhysicalDeviceMemoryProperties)vkGetInstanceProcAddr(instance,
+            "vkGetPhysicalDeviceMemoryProperties");
+    CHECK(vkGetPhysicalDeviceMemoryProperties != NULL, "got memprops fn");
+    vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    mai.memoryTypeIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        if ((vreq.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            mai.memoryTypeIndex = i;
+            break;
+        }
+    }
+    CHECK(mai.memoryTypeIndex != UINT32_MAX, "found HOST_VISIBLE|COHERENT memory type");
+    if (mai.memoryTypeIndex == UINT32_MAX) return 1;
+    r = vkAllocateMemory(device, &mai, NULL, &vmem);
+    CHECK(r == VK_SUCCESS && vmem != VK_NULL_HANDLE, "vkAllocateMemory (host visible)");
+    if (r != VK_SUCCESS) return 1;
+    r = vkBindBufferMemory(device, vbuf, vmem, 0);
+    CHECK(r == VK_SUCCESS, "vkBindBufferMemory (vertex)");
+    r = vkBindBufferMemory(device, ubobuf, vmem, 0);
+    CHECK(r == VK_SUCCESS, "vkBindBufferMemory (ubo)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Depth image + view (D32_SFLOAT, shared across framebuffers). */
+    VkImage depth_image = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkImageCreateInfo dici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_D32_SFLOAT,
+        .extent = { extent.width, extent.height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    r = vkCreateImage(device, &dici, NULL, &depth_image);
+    CHECK(r == VK_SUCCESS && depth_image != VK_NULL_HANDLE, "vkCreateImage (depth)");
+    VkMemoryRequirements dreq = {0};
+    vkGetImageMemoryRequirements(device, depth_image, &dreq);
+    mai.allocationSize = dreq.size;
+    mai.memoryTypeIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        if ((dreq.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            mai.memoryTypeIndex = i;
+            break;
+        }
+    }
+    CHECK(mai.memoryTypeIndex != UINT32_MAX, "found DEVICE_LOCAL memory type");
+    VkDeviceMemory dmem = VK_NULL_HANDLE;
+    r = mai.memoryTypeIndex != UINT32_MAX
+        ? vkAllocateMemory(device, &mai, NULL, &dmem) : VK_ERROR_INITIALIZATION_FAILED;
+    CHECK(r == VK_SUCCESS && dmem != VK_NULL_HANDLE, "vkAllocateMemory (device local)");
+    if (r != VK_SUCCESS) return 1;
+    r = vkBindImageMemory(device, depth_image, dmem, 0);
+    CHECK(r == VK_SUCCESS, "vkBindImageMemory (depth)");
+    VkImageViewCreateInfo dvci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = depth_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_D32_SFLOAT,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1,
+        },
+    };
+    r = vkCreateImageView(device, &dvci, NULL, &depth_view);
+    CHECK(r == VK_SUCCESS && depth_view != VK_NULL_HANDLE, "vkCreateImageView (depth)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Render pass #2: color + depth attachments. */
+    VkAttachmentDescription atts2[2] = {
+        {
+            .format = formats[0].format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        },
+        {
+            .format = VK_FORMAT_D32_SFLOAT,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        },
+    };
+    VkAttachmentReference refs2[2] = {
+        { .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL },
+        { .attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL },
+    };
+    VkSubpassDescription subpass2 = {
+        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &refs2[0],
+        .pDepthStencilAttachment = &refs2[1],
+    };
+    VkRenderPassCreateInfo rpci2 = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .attachmentCount = 2,
+        .pAttachments = atts2,
+        .subpassCount = 1,
+        .pSubpasses = &subpass2,
+        .dependencyCount = 1,
+        .pDependencies = &dep,
+    };
+    VkRenderPass renderpass2 = VK_NULL_HANDLE;
+    r = vkCreateRenderPass(device, &rpci2, NULL, &renderpass2);
+    CHECK(r == VK_SUCCESS && renderpass2 != VK_NULL_HANDLE, "vkCreateRenderPass (color+depth)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Per-image color views + framebuffers. */
+    VkImageView* cviews = calloc(nimages, sizeof(VkImageView));
+    VkFramebuffer* fbs = calloc(nimages, sizeof(VkFramebuffer));
+    for (uint32_t i = 0; i < nimages; i++) {
+        VkImageViewCreateInfo cvci = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = images[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = formats[0].format,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0, .levelCount = 1,
+                .baseArrayLayer = 0, .layerCount = 1,
+            },
+        };
+        r = vkCreateImageView(device, &cvci, NULL, &cviews[i]);
+        if (r != VK_SUCCESS) break;
+        VkImageView fbatts[2] = { cviews[i], depth_view };
+        VkFramebufferCreateInfo fbci2 = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = renderpass2,
+            .attachmentCount = 2,
+            .pAttachments = fbatts,
+            .width = extent.width,
+            .height = extent.height,
+            .layers = 1,
+        };
+        r = vkCreateFramebuffer(device, &fbci2, NULL, &fbs[i]);
+        if (r != VK_SUCCESS) break;
+    }
+    CHECK(r == VK_SUCCESS, "per-image views + framebuffers (color+depth)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Descriptor set: one UBO at binding 0, vertex stage. */
+    VkDescriptorSetLayoutBinding dslb = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+    };
+    VkDescriptorSetLayoutCreateInfo dslci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &dslb,
+    };
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    r = vkCreateDescriptorSetLayout(device, &dslci, NULL, &dsl);
+    CHECK(r == VK_SUCCESS && dsl != VK_NULL_HANDLE, "vkCreateDescriptorSetLayout");
+    if (r != VK_SUCCESS) return 1;
+    VkDescriptorPoolSize poolsz = {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+    };
+    VkDescriptorPoolCreateInfo dpci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 1,
+        .poolSizeCount = 1,
+        .pPoolSizes = &poolsz,
+    };
+    VkDescriptorPool dpool = VK_NULL_HANDLE;
+    r = vkCreateDescriptorPool(device, &dpci, NULL, &dpool);
+    CHECK(r == VK_SUCCESS && dpool != VK_NULL_HANDLE, "vkCreateDescriptorPool");
+    if (r != VK_SUCCESS) return 1;
+    VkDescriptorSetAllocateInfo dsai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = dpool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &dsl,
+    };
+    VkDescriptorSet dset = VK_NULL_HANDLE;
+    r = vkAllocateDescriptorSets(device, &dsai, &dset);
+    CHECK(r == VK_SUCCESS && dset != VK_NULL_HANDLE, "vkAllocateDescriptorSets");
+    if (r != VK_SUCCESS) return 1;
+    VkDescriptorBufferInfo dbi = { .buffer = ubobuf, .offset = 0, .range = 16 };
+    VkWriteDescriptorSet dwrite = {
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = dset,
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pBufferInfo = &dbi,
+    };
+    vkUpdateDescriptorSets(device, 1, &dwrite, 0, NULL);
+    CHECK(1, "vkUpdateDescriptorSets (ubo write)");
+
+    /* Pipeline layout + graphics pipeline (full state tree). */
+    VkPipelineLayoutCreateInfo plci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &dsl,
+    };
+    VkPipelineLayout pipe_layout = VK_NULL_HANDLE;
+    r = vkCreatePipelineLayout(device, &plci, NULL, &pipe_layout);
+    CHECK(r == VK_SUCCESS && pipe_layout != VK_NULL_HANDLE, "vkCreatePipelineLayout");
+    if (r != VK_SUCCESS) return 1;
+
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vs_module,
+            .pName = "main",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = fs_module,
+            .pName = "main",
+        },
+    };
+    VkVertexInputBindingDescription vbind = { .binding = 0, .stride = 20,
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX };
+    VkVertexInputAttributeDescription vattrs[2] = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 0 },
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 8 },
+    };
+    VkPipelineVertexInputStateCreateInfo visa = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &vbind,
+        .vertexAttributeDescriptionCount = 2,
+        .pVertexAttributeDescriptions = vattrs,
+    };
+    VkPipelineInputAssemblyStateCreateInfo iasc = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    };
+    VkViewport viewport = { .x = 0.0f, .y = 0.0f,
+        .width = (float)extent.width, .height = (float)extent.height,
+        .minDepth = 0.0f, .maxDepth = 1.0f };
+    VkRect2D scissor = { .offset = { 0, 0 }, .extent = extent };
+    VkPipelineViewportStateCreateInfo vpsc = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &viewport,
+        .scissorCount = 1, .pScissors = &scissor,
+    };
+    VkPipelineRasterizationStateCreateInfo rast = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo msc = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineDepthStencilStateCreateInfo dss = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+    VkPipelineColorBlendAttachmentState cba = {
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+    VkPipelineColorBlendStateCreateInfo cbs = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1,
+        .pAttachments = &cba,
+    };
+    VkGraphicsPipelineCreateInfo gpci = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2,
+        .pStages = stages,
+        .pVertexInputState = &visa,
+        .pInputAssemblyState = &iasc,
+        .pViewportState = &vpsc,
+        .pRasterizationState = &rast,
+        .pMultisampleState = &msc,
+        .pDepthStencilState = &dss,
+        .pColorBlendState = &cbs,
+        .layout = pipe_layout,
+        .renderPass = renderpass2,
+        .subpass = 0,
+    };
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    r = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, NULL, &pipeline);
+    CHECK(r == VK_SUCCESS && pipeline != VK_NULL_HANDLE, "vkCreateGraphicsPipelines (full tree)");
+    if (r != VK_SUCCESS) return 1;
+
+    /* Per-image command buffers + 3-frame draw loop. */
+    VkCommandBufferAllocateInfo cbai2 = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = nimages,
+    };
+    VkCommandBuffer* cmds = calloc(nimages, sizeof(VkCommandBuffer));
+    r = vkAllocateCommandBuffers(device, &cbai2, cmds);
+    CHECK(r == VK_SUCCESS, "vkAllocateCommandBuffers (per-image)");
+    if (r != VK_SUCCESS) return 1;
+
+    static const float verts[3][5] = {
+        { -0.7f, -0.7f,  1.0f, 0.2f, 0.2f },
+        {  0.7f, -0.7f,  0.2f, 1.0f, 0.2f },
+        {  0.0f,  0.7f,  0.2f, 0.2f, 1.0f },
+    };
+    int frames_ok = 1;
+    for (int frame = 0; frame < 3; frame++) {
+        uint32_t idx = 0;
+        r = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+                                  VK_NULL_HANDLE, VK_NULL_HANDLE, &idx);
+        if (r != VK_SUCCESS) { frames_ok = 0; break; }
+        VkCommandBufferBeginInfo cbbi2 = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        r = vkBeginCommandBuffer(cmds[idx], &cbbi2);
+        if (r != VK_SUCCESS) { frames_ok = 0; break; }
+        /* Vertex + UBO data via vkCmdUpdateBuffer (avoids vkMapMemory). */
+        float ubo_data[4] = { 1.0f, 1.0f, 1.0f, 0.05f * (float)frame };
+        vkCmdUpdateBuffer(cmds[idx], vbuf, 0, sizeof(verts), verts);
+        vkCmdUpdateBuffer(cmds[idx], ubobuf, 0, sizeof(ubo_data), ubo_data);
+        VkClearValue clears[2] = {
+            { .color = { { 0.06f, 0.06f, 0.09f, 1.0f } } },
+            { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
+        };
+        VkRenderPassBeginInfo rpbi2 = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = renderpass2,
+            .framebuffer = fbs[idx],
+            .renderArea = { .offset = { 0, 0 }, .extent = extent },
+            .clearValueCount = 2,
+            .pClearValues = clears,
+        };
+        vkCmdBeginRenderPass(cmds[idx], &rpbi2, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmds[idx], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(cmds[idx], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipe_layout, 0, 1, &dset, 0, NULL);
+        VkDeviceSize voff = 0;
+        vkCmdBindVertexBuffers(cmds[idx], 0, 1, &vbuf, &voff);
+        vkCmdDraw(cmds[idx], 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmds[idx]);
+        r = vkEndCommandBuffer(cmds[idx]);
+        if (r != VK_SUCCESS) { frames_ok = 0; break; }
+        VkSubmitInfo submit2 = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &cmds[idx],
+        };
+        r = vkQueueSubmit(queue, 1, &submit2, VK_NULL_HANDLE);
+        if (r != VK_SUCCESS) { frames_ok = 0; break; }
+        VkPresentInfoKHR present2 = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .swapchainCount = 1,
+            .pSwapchains = &swapchain,
+            .pImageIndices = &idx,
+        };
+        r = vkQueuePresentKHR(queue, &present2);
+        if (r != VK_SUCCESS) { frames_ok = 0; break; }
+        if (vkDeviceWaitIdle) vkDeviceWaitIdle(device);
+    }
+    CHECK(frames_ok, "3-frame vkCmdDraw triangle loop (pipeline+descriptors+depth)");
+
+    /* Teardown of the triangle phase. */
+    if (vkFreeCommandBuffers) vkFreeCommandBuffers(device, pool, nimages, cmds);
+    PFN_vkDestroyPipeline vkDestroyPipeline =
+        (PFN_vkDestroyPipeline)vkGetDeviceProcAddr(device, "vkDestroyPipeline");
+    PFN_vkDestroyPipelineLayout vkDestroyPipelineLayout =
+        (PFN_vkDestroyPipelineLayout)vkGetDeviceProcAddr(device, "vkDestroyPipelineLayout");
+    PFN_vkDestroyDescriptorPool vkDestroyDescriptorPool =
+        (PFN_vkDestroyDescriptorPool)vkGetDeviceProcAddr(device, "vkDestroyDescriptorPool");
+    PFN_vkDestroyDescriptorSetLayout vkDestroyDescriptorSetLayout =
+        (PFN_vkDestroyDescriptorSetLayout)vkGetDeviceProcAddr(device, "vkDestroyDescriptorSetLayout");
+    PFN_vkDestroyBuffer vkDestroyBuffer =
+        (PFN_vkDestroyBuffer)vkGetDeviceProcAddr(device, "vkDestroyBuffer");
+    PFN_vkDestroyImage vkDestroyImage =
+        (PFN_vkDestroyImage)vkGetDeviceProcAddr(device, "vkDestroyImage");
+    PFN_vkFreeMemory vkFreeMemory =
+        (PFN_vkFreeMemory)vkGetDeviceProcAddr(device, "vkFreeMemory");
+    PFN_vkDestroyShaderModule vkDestroyShaderModule =
+        (PFN_vkDestroyShaderModule)vkGetDeviceProcAddr(device, "vkDestroyShaderModule");
+    if (vkDestroyPipeline) vkDestroyPipeline(device, pipeline, NULL);
+    if (vkDestroyPipelineLayout) vkDestroyPipelineLayout(device, pipe_layout, NULL);
+    if (vkDestroyDescriptorPool) vkDestroyDescriptorPool(device, dpool, NULL);
+    if (vkDestroyDescriptorSetLayout) vkDestroyDescriptorSetLayout(device, dsl, NULL);
+    if (vkDestroyBuffer) { vkDestroyBuffer(device, vbuf, NULL); vkDestroyBuffer(device, ubobuf, NULL); }
+    if (vkDestroyImage) vkDestroyImage(device, depth_image, NULL);
+    for (uint32_t i = 0; i < nimages; i++) {
+        if (vkDestroyFramebuffer) vkDestroyFramebuffer(device, fbs[i], NULL);
+        if (vkDestroyImageView) vkDestroyImageView(device, cviews[i], NULL);
+    }
+    if (vkDestroyRenderPass) vkDestroyRenderPass(device, renderpass2, NULL);
+    if (vkDestroyImageView) vkDestroyImageView(device, depth_view, NULL);
+    if (vkFreeMemory) { vkFreeMemory(device, vmem, NULL); vkFreeMemory(device, dmem, NULL); }
+    if (vkDestroyShaderModule) {
+        vkDestroyShaderModule(device, vs_module, NULL);
+        vkDestroyShaderModule(device, fs_module, NULL);
+    }
+    CHECK(1, "destroy triangle objects");
+
     if (vkDestroyCommandPool) vkDestroyCommandPool(device, pool, NULL);
-    CHECK(1, "destroy frame objects");
+    CHECK(1, "destroy command pool");
 
     if (vkDestroySwapchainKHR) vkDestroySwapchainKHR(device, swapchain, NULL);
     if (vkDestroySurfaceKHR) vkDestroySurfaceKHR(instance, surface, NULL);

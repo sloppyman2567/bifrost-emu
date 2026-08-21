@@ -944,6 +944,36 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   ultrawide).
 - `make check-all` now runs BOTH generation guards (`opgen-check` +
   `opgen-thunk-check`) before the test suite, so spec drift fails CI.
+- **Vulkan graphics-pipeline stage (2026-08-21)**: seven more deep-marshal
+  policies — `VK_CREATE_SHADER_MODULE` (nested pCode, staging vector
+  reserved for codeSize BEFORE any pointer is taken — a later resize
+  reallocates and dangles every pointer VkStage handed out), 
+  `VK_CREATE_GRAPHICS_PIPELINES` (the full state tree: stages with pName
+  strings + specialization blobs, vertex-input flat arrays, viewport/
+  scissor, sample mask, blend attachments, dynamic states; flat-after-
+  pNext states copied verbatim; reserve ~512 KiB up front), 
+  `VK_CREATE_PIPELINE_LAYOUT`, `VK_CREATE_DESCRIPTOR_POOL`,
+  `VK_CREATE_DESCRIPTOR_SET_LAYOUT` (+ pImmutableSamplers),
+  `VK_ALLOC_DESCRIPTOR_SETS` (OUT set-handle array), and
+  `VK_UPDATE_DESCRIPTOR_SETS`. DescriptorType classification in the
+  update arm: image infos = types 1/2/3/10, texel buffer views = 4/5,
+  buffer infos = 6/7/8/9 — do NOT use a 1..6 range for images (6 is
+  UNIFORM_BUFFER; the misroute nulled the info pointers and segfaulted
+  RADV on the first UBO write). ALL H-struct layouts were verified
+  byte-for-byte against the vendored vulkan_core.h via a static_assert
+  checker (offsetof+sizeof per field) before being added — keep that
+  discipline for any new struct. Two latent table bugs fixed:
+  `vkCmdUpdateBuffer` and `vkCmdCopyBuffer` had SIX arg tokens for
+  5-parameter functions — the extra 'i' shifted the pointer mask so
+  pData was passed as a raw guest pointer to the host (segfault at the
+  guest .rodata address inside libc memcpy). `test_vulkan_swapchain.elf`
+  now draws a real triangle: glslc-built SPIR-V embedded via
+  `ctest_real/test_vulkan_spv.h`, vertex+UBO buffers uploaded with
+  vkCmdUpdateBuffer (avoids vkMapMemory — its host-pointer bounce is the
+  NEXT milestone, mirror the GL MAP_BUFFER/PCWFC pattern), descriptor
+  set UBO, D32 depth attachment, per-image framebuffers + command
+  buffers, 3-frame draw loop. Passes under JIT and --no-jit on RADV.
+  `make cross` now takes `CROSS_EXTRA=` for extra include paths.
 
 ## Verification
 
@@ -2551,3 +2581,28 @@ not musl-`-static`.
   (with new section) + jit_carry + jit_ccmp pass under
   `BIFROST_JIT_VERIFY=1`; quick suite **201/201**; game 75s run **zero**
   asserts/signals, world tick 4488. **Merge gate MET.**
+
+## Session History (2026-08-21) — Vulkan graphics pipelines + descriptor sets
+
+- **ROADMAP #12 landed**: `vkCreateShaderModule`,
+  `vkCreateGraphicsPipelines`, `vkCreatePipelineLayout`,
+  `vkCreateDescriptorPool/SetLayout`, `vkAllocateDescriptorSets`,
+  `vkUpdateDescriptorSets` all deep-marshal now (seven new policies in
+  thunk_dp.txt + thunkgen VALID_POLICY; arms in `vk_dispatch_`).
+  `test_vulkan_swapchain.elf` draws a real triangle (72 checks, JIT +
+  interp, RADV RX 7600): shader modules from embedded glslc SPIR-V,
+  full pipeline state tree, UBO via descriptor set, D32 depth buffer,
+  per-image framebuffers/cmdbufs, 3-frame draw loop, full teardown.
+- **Two crash bugs found by the test**: (1) descriptor-type misroute in
+  the update arm (is_img range included UNIFORM_BUFFER=6 → all info
+  pointers nulled → RADV segfault); (2) `vkCmdUpdateBuffer`/
+  `vkCmdCopyBuffer` ARGS had six tokens for 5-param functions → pointer
+  mask off by one arg → guest .rodata pointer passed verbatim to host
+  memcpy (dmesg: segfault at 0x40c038 in libc). Fixed both rows to
+  `iiiip`; audited the rest of the vkCmd* family against real
+  signatures (all others correct).
+- **VkStage discipline learned**: the staging vector's pointers dangle on
+  any post-allocation growth — arms with big variable payloads (shader
+  code, pipeline trees) MUST `st.buf.reserve()` up front.
+- **NEXT for Vulkan**: vkMapMemory guest-window bounce (mirror GL
+  MAP_BUFFER + PCWFC persistent-coherent writeback), then real titles.

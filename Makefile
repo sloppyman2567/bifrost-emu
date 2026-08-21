@@ -245,7 +245,7 @@ cross:
 	@if [ -z "$(SRC)" ] || [ -z "$(OUT)" ]; then \
 	echo "Usage: make cross SRC=<file.c> OUT=<file.elf>"; exit 1; \
 	fi
-	@$(CROSS_CC) -static -O2 -o $(OUT) $(SRC)
+	@$(CROSS_CC) -static -O2 $(CROSS_EXTRA) -o $(OUT) $(SRC)
 	@echo "Built $(OUT)"
 
 # Install to /usr/local/bin (override with `make install DESTDIR=/prefix PREFIX=/opt`)
