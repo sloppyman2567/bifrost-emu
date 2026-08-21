@@ -45,6 +45,46 @@ struct DisplayThunkImpl {
     static constexpr uint64_t STRING_CACHE_SIZE = 4096;
     uint32_t string_cache_off = 0;
     std::mutex mu;
+    // ── vkMapMemory guest-window bounce bookkeeping (2026-08-21) ──────
+    // The host mapping address is meaningless in the guest (48-bit host
+    // heap, outside the 4 GiB direct window), so vkMapMemory allocates a
+    // bounce inside the window and returns ITS guest address; the guest
+    // reads/writes it at full JIT speed. Push (bounce→host) before every
+    // GPU-consuming call (queue submit/present), pull (host→bounce) after
+    // every completion wait — the practical HOST_COHERENT guarantee for
+    // both coherent and non-coherent memory (over-pushing non-coherent
+    // memory is harmless). Explicit flush/invalidate move their ranges.
+    struct VkMapped {
+        uint64_t host_ptr;    // host mapping base (a HOST address)
+        uint64_t bounce;      // guest address of the window bounce
+        uint64_t map_offset;  // offset passed to vkMapMemory
+        uint64_t map_size;    // bytes mapped (resolved from VK_WHOLE_SIZE)
+        uint64_t alloc_size;  // total VkDeviceMemory allocation size
+    };
+    std::unordered_map<uint64_t, VkMapped> vk_maps_;    // memory handle → map
+    std::unordered_map<uint64_t, uint64_t> vk_allocs_;  // handle → alloc size
+    std::mutex vk_maps_mu;
+    // Push all bounces back into the host mappings (before submits/presents).
+    void vk_sync_push_all() {
+        std::lock_guard<std::mutex> g(vk_maps_mu);
+        for (auto& kv : vk_maps_) {
+            const VkMapped& m = kv.second;
+            uint8_t* src = mem->guest_to_host_ptr(m.bounce);
+            if (src && m.host_ptr && m.map_size)
+                std::memcpy(reinterpret_cast<void*>(m.host_ptr), src, m.map_size);
+        }
+    }
+    // Pull host mappings into the bounces (after completion waits — the
+    // GPU may have written readback data into the host mapping).
+    void vk_sync_pull_all() {
+        std::lock_guard<std::mutex> g(vk_maps_mu);
+        for (auto& kv : vk_maps_) {
+            const VkMapped& m = kv.second;
+            uint8_t* dst = mem->guest_to_host_ptr(m.bounce);
+            if (dst && m.host_ptr && m.map_size)
+                std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr), m.map_size);
+        }
+    }
     uint64_t cache_host_string_(const char* host_str) {
         if (!mem || !string_cache_base || !host_str) return 0;
         size_t len = std::strlen(host_str) + 1;
@@ -860,6 +900,15 @@ struct VkCopyDescriptorSetH {
     uint32_t srcBinding, srcArrayElement; uint64_t dstSet;
     uint32_t dstBinding, dstArrayElement, descriptorCount;
 };
+// vkMapMemory bounce stage (2026-08-21): VkMemoryAllocateInfo (records the
+// allocation size for VK_WHOLE_SIZE maps) and VkMappedMemoryRange (flat —
+// flush/invalidate move ranges between bounce and host mapping).
+struct VkMemoryAllocateInfoH {
+    int32_t sType; void* pNext; size_t allocationSize; uint32_t memoryTypeIndex;
+};
+struct VkMappedMemoryRangeH {
+    int32_t sType; void* pNext; uint64_t memory; size_t offset; size_t size;
+};
 constexpr size_t kPhysicalDeviceFeaturesBytes = 220;
 // Read a guest struct by value into `dst` (zero-fill on unmapped).
 template <typename T> void read_guest_struct(Memory* mem, uint64_t g, T* dst) {
@@ -1052,6 +1101,10 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             results_guest = reinterpret_cast<uint64_t>(pi->pResults);
             pi->pResults = results_host;
         }
+        // Push all vkMapMemory bounces into their host mappings before the
+        // GPU consumes the frame (PCWFC discipline — the practical
+        // HOST_COHERENT guarantee for mapped memory).
+        impl_->vk_sync_push_all();
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(entry.host_fn)(
             cpu.regs[0], pi);
         if (results_guest && results_host) {
@@ -1106,6 +1159,9 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             repoint_u64(arr[i].pCommandBuffers, arr[i].commandBufferCount);
             repoint_u64(arr[i].pSignalSemaphores, arr[i].signalSemaphoreCount);
         }
+        // Push all vkMapMemory bounces before submit — the GPU reads the
+        // host mappings at execution time.
+        impl_->vk_sync_push_all();
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint64_t)>(entry.host_fn)(
             cpu.regs[0], submit_count, arr, cpu.regs[3]);
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
@@ -1659,6 +1715,270 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             cpu.regs[0], writes, w, copies, c);
         cpu.regs[0] = 0;
         if (trace) fprintf(stderr, "[display-thunk] vkUpdateDescriptorSets (w=%u c=%u) → 0\n", writes, copies);
+        return true;
+    }
+
+    // ── vkAllocateMemory ────────────────────────────────────────────────
+    // (device, pAllocateInfo, pAllocator, pMemory) — records the allocation
+    // size so later VK_WHOLE_SIZE maps can resolve. OUT handle at arg 3.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_ALLOC_MEMORY) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkMemoryAllocateInfoH* info = st.alloc<VkMemoryAllocateInfoH>();
+        read_guest_struct(mem, cpu.regs[1], info);
+        info->pNext = nullptr;
+        size_t alloc_size = info->allocationSize;
+        uint64_t host_mem = 0;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
+            cpu.regs[0], info, nullptr, &host_mem);
+        if (ret == 0 && host_mem) {
+            try { mem->write(cpu.regs[3], &host_mem, sizeof(host_mem)); }
+            catch (...) { /* out pointer unmapped */ }
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            impl_->vk_allocs_[host_mem] = alloc_size;
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkAllocateMemory (%zu bytes) → %d\n",
+                           alloc_size, static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkFreeMemory ─────────────────────────────────────────────────────
+    // (device, memory, pAllocator) — drops our records; if the memory is
+    // still mapped (spec violation, but be defensive like glDeleteBuffers),
+    // push the bounce back and release it before freeing.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_FREE_MEMORY) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint64_t mem_handle = cpu.regs[1];
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto it = impl_->vk_maps_.find(mem_handle);
+            if (it != impl_->vk_maps_.end()) {
+                uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
+                if (src && it->second.host_ptr && it->second.map_size)
+                    std::memcpy(reinterpret_cast<void*>(it->second.host_ptr), src, it->second.map_size);
+                mem->untrack_allocation(it->second.bounce,
+                                        (it->second.map_size + 0xFFFu) & ~0xFFFull);
+                impl_->vk_maps_.erase(it);
+            }
+            impl_->vk_allocs_.erase(mem_handle);
+        }
+        reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], mem_handle, nullptr);
+        cpu.regs[0] = 0;
+        if (trace) fprintf(stderr, "[display-thunk] vkFreeMemory → 0\n");
+        return true;
+    }
+
+    // ── vkMapMemory ──────────────────────────────────────────────────────
+    // (device, memory, offset, size, flags, ppData) — the host driver writes
+    // a HOST pointer into ppData, useless in the guest. Instead: map on the
+    // host with a scratch pointer, allocate a bounce inside the 4 GiB direct
+    // window, seed it from the host mapping, and write the BOUNCE's guest
+    // address into ppData. Guest reads/writes then hit the window at full
+    // JIT speed; coherence comes from the submit/present push + wait pull
+    // (and explicit flush/invalidate ranges).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_MAP_MEMORY) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint64_t mem_handle = cpu.regs[1];
+        const uint64_t offset = cpu.regs[2];
+        uint64_t size = cpu.regs[3];
+        const uint64_t flags = cpu.regs[4];
+        // Resolve VK_WHOLE_SIZE from the recorded allocation size.
+        uint64_t alloc_size = 0;
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto ai = impl_->vk_allocs_.find(mem_handle);
+            if (ai != impl_->vk_allocs_.end()) alloc_size = ai->second;
+        }
+        if (size == ~0ull) {
+            if (alloc_size == 0 || offset >= alloc_size) {
+                cpu.regs[0] = 0xFFFFFFFBu;  // VK_ERROR_MEMORY_MAP_FAILED
+                return true;
+            }
+            size = alloc_size - offset;
+        }
+        // Remap of an already-mapped object: Vulkan returns the same
+        // pointer — return the existing bounce (same offset/size shape).
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto it = impl_->vk_maps_.find(mem_handle);
+            if (it != impl_->vk_maps_.end()) {
+                uint64_t same = it->second.bounce;
+                if (cpu.regs[5]) {
+                    try { mem->write(cpu.regs[5], &same, sizeof(same)); }
+                    catch (...) { /* out pointer unmapped */ }
+                }
+                cpu.regs[0] = 0;
+                return true;
+            }
+        }
+        if (size == 0 || size > (1ull << 30)) {  // sanity cap: 1 GiB per map
+            cpu.regs[0] = 0xFFFFFFFBu;
+            return true;
+        }
+        void* host_ptr = nullptr;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, void**)>(entry.host_fn)(
+            cpu.regs[0], mem_handle, offset, size, flags, &host_ptr);
+        if (ret != 0 || !host_ptr) {
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+            if (trace) fprintf(stderr, "[display-thunk] vkMapMemory → %d (FAILED)\n",
+                               static_cast<int32_t>(ret));
+            return true;
+        }
+        uint64_t bounce = mem->mmap_alloc(size);
+        if (bounce == 0 || bounce == ~0ull) {
+            // No window space — unmap on the host and report failure.
+            reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(cpu.regs[0], mem_handle);
+            cpu.regs[0] = 0xFFFFFFFBu;
+            return true;
+        }
+        uint8_t* dst = mem->guest_to_host_ptr(bounce);
+        std::memcpy(dst, host_ptr, size);  // seed: host → bounce
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            impl_->vk_maps_[mem_handle] = { reinterpret_cast<uint64_t>(host_ptr),
+                                            bounce, offset, size, alloc_size };
+        }
+        if (cpu.regs[5]) {
+            try { mem->write(cpu.regs[5], &bounce, sizeof(bounce)); }
+            catch (...) { /* out pointer unmapped — address lost */ }
+        }
+        cpu.regs[0] = 0;
+        if (trace) fprintf(stderr, "[display-thunk] vkMapMemory (off=0x%llx sz=%llu) → 0 (guest ptr=0x%llx)\n",
+                           (unsigned long long)offset, (unsigned long long)size,
+                           (unsigned long long)bounce);
+        return true;
+    }
+
+    // ── vkUnmapMemory ────────────────────────────────────────────────────
+    // (device, memory) — push the whole bounce back, release the window
+    // range, then unmap on the host.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_UNMAP_MEMORY) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint64_t mem_handle = cpu.regs[1];
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto it = impl_->vk_maps_.find(mem_handle);
+            if (it != impl_->vk_maps_.end()) {
+                uint8_t* src = mem->guest_to_host_ptr(it->second.bounce);
+                if (src && it->second.host_ptr && it->second.map_size)
+                    std::memcpy(reinterpret_cast<void*>(it->second.host_ptr), src, it->second.map_size);
+                mem->untrack_allocation(it->second.bounce,
+                                        (it->second.map_size + 0xFFFu) & ~0xFFFull);
+                impl_->vk_maps_.erase(it);
+            }
+        }
+        reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(cpu.regs[0], mem_handle);
+        cpu.regs[0] = 0;
+        if (trace) fprintf(stderr, "[display-thunk] vkUnmapMemory → 0\n");
+        return true;
+    }
+
+    // ── vkFlushMappedMemoryRanges ────────────────────────────────────────
+    // (device, rangeCount, pRanges) — VkMappedMemoryRange is flat; move each
+    // range bounce → host BEFORE the host flush (which makes non-coherent
+    // memory visible to the GPU).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_FLUSH_MAPPED) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint32_t count = static_cast<uint32_t>(cpu.regs[1]);
+        if (count == 0 || !cpu.regs[2]) { cpu.regs[0] = 0; return true; }
+        if (count > 64) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkMappedMemoryRangeH* rr = reinterpret_cast<VkMappedMemoryRangeH*>(
+            st.bytes(count * sizeof(VkMappedMemoryRangeH), 8));
+        read_guest_bytes(mem, cpu.regs[2], rr, count * sizeof(VkMappedMemoryRangeH));
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            for (uint32_t i = 0; i < count; i++) {
+                rr[i].pNext = nullptr;
+                auto it = impl_->vk_maps_.find(rr[i].memory);
+                if (it == impl_->vk_maps_.end()) continue;
+                const auto& m = it->second;
+                uint64_t off = rr[i].offset;
+                uint64_t sz = rr[i].size;
+                if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
+                if (off < m.map_offset) continue;
+                off -= m.map_offset;
+                if (off >= m.map_size || off + sz > m.map_size) continue;
+                uint8_t* src = mem->guest_to_host_ptr(m.bounce + off);
+                if (src) std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
+            }
+        }
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], count, rr);
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkFlushMappedMemoryRanges (n=%u) → %d\n",
+                           count, static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkInvalidateMappedMemoryRanges ───────────────────────────────────
+    // (device, rangeCount, pRanges) — host invalidate FIRST (pulls GPU
+    // writes into the host mapping), then copy host → bounce so the guest
+    // sees them.
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_INVALIDATE_MAPPED) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint32_t count = static_cast<uint32_t>(cpu.regs[1]);
+        if (count == 0 || !cpu.regs[2]) { cpu.regs[0] = 0; return true; }
+        if (count > 64) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        VkMappedMemoryRangeH* rr = reinterpret_cast<VkMappedMemoryRangeH*>(
+            st.bytes(count * sizeof(VkMappedMemoryRangeH), 8));
+        read_guest_bytes(mem, cpu.regs[2], rr, count * sizeof(VkMappedMemoryRangeH));
+        for (uint32_t i = 0; i < count; i++) rr[i].pNext = nullptr;
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], count, rr);
+        {
+            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            for (uint32_t i = 0; i < count; i++) {
+                auto it = impl_->vk_maps_.find(rr[i].memory);
+                if (it == impl_->vk_maps_.end()) continue;
+                const auto& m = it->second;
+                uint64_t off = rr[i].offset;
+                uint64_t sz = rr[i].size;
+                if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
+                if (off < m.map_offset) continue;
+                off -= m.map_offset;
+                if (off >= m.map_size || off + sz > m.map_size) continue;
+                uint8_t* dst = mem->guest_to_host_ptr(m.bounce + off);
+                if (dst) std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);
+            }
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] vkInvalidateMappedMemoryRanges (n=%u) → %d\n",
+                           count, static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── Completion waits: pull host mappings into the bounces ────────────
+    // vkDeviceWaitIdle / vkQueueWaitIdle / vkWaitForFences — after a
+    // successful wait the GPU may have written readback data into the host
+    // mappings; refresh the bounces so the guest sees it. These symbols
+    // otherwise forward verbatim (plain int args).
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_SYNC_PULL) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        uint64_t ret;
+        if (entry.spec->args[0] == 'p') {
+            // vkWaitForFences(device, fenceCount, pFences, waitAll, timeout)
+            // — bounce the fence handle array, then wait.
+            VkStage st;
+            const uint32_t nf = static_cast<uint32_t>(cpu.regs[1]);
+            if (nf && cpu.regs[2] && nf <= 64) {
+                uint64_t* f = reinterpret_cast<uint64_t*>(st.bytes(nf * 8u, 8));
+                read_guest_bytes(mem, cpu.regs[2], f, nf * 8u);
+                ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, uint64_t)>(entry.host_fn)(
+                    cpu.regs[0], nf, f, static_cast<uint32_t>(cpu.regs[3]), cpu.regs[4]);
+            } else {
+                ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, uint64_t)>(entry.host_fn)(
+                    cpu.regs[0], 0, nullptr, static_cast<uint32_t>(cpu.regs[3]), cpu.regs[4]);
+            }
+        } else {
+            ret = reinterpret_cast<uint64_t (*)(uint64_t)>(entry.host_fn)(cpu.regs[0]);
+        }
+        if (ret == 0) impl_->vk_sync_pull_all();
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace) fprintf(stderr, "[display-thunk] wait+pull → %d\n", static_cast<int32_t>(ret));
         return true;
     }
 
@@ -2507,6 +2827,13 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT:
         case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
         case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:
+        case thunk::Policy::VK_ALLOC_MEMORY:
+        case thunk::Policy::VK_FREE_MEMORY:
+        case thunk::Policy::VK_MAP_MEMORY:
+        case thunk::Policy::VK_UNMAP_MEMORY:
+        case thunk::Policy::VK_FLUSH_MAPPED:
+        case thunk::Policy::VK_INVALIDATE_MAPPED:
+        case thunk::Policy::VK_SYNC_PULL:
         case thunk::Policy::VULKAN:
             flags |= THUNK_VULKAN;
             break;

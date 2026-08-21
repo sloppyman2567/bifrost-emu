@@ -571,6 +571,24 @@ int main(void) {
     CHECK(r == VK_SUCCESS, "vkBindBufferMemory (ubo)");
     if (r != VK_SUCCESS) return 1;
 
+    /* Map the UBO memory: the emulator's vkMapMemory bounce returns a
+     * GUEST address inside the 4 GiB direct window — assert exactly
+     * that (nonzero, < 4 GiB) and write the UBO through it directly. */
+    PFN_vkMapMemory vkMapMemory =
+        (PFN_vkMapMemory)vkGetDeviceProcAddr(device, "vkMapMemory");
+    PFN_vkUnmapMemory vkUnmapMemory =
+        (PFN_vkUnmapMemory)vkGetDeviceProcAddr(device, "vkUnmapMemory");
+    PFN_vkFlushMappedMemoryRanges vkFlushMappedMemoryRanges =
+        (PFN_vkFlushMappedMemoryRanges)vkGetDeviceProcAddr(device, "vkFlushMappedMemoryRanges");
+    CHECK(vkMapMemory && vkUnmapMemory && vkFlushMappedMemoryRanges, "got map fns");
+    void* mapped = NULL;
+    r = vkMapMemory ? vkMapMemory(device, vmem, 0, 16, 0, &mapped) : VK_ERROR_INITIALIZATION_FAILED;
+    CHECK(r == VK_SUCCESS && mapped != NULL, "vkMapMemory (ubo)");
+    CHECK(mapped != NULL && ((uintptr_t)mapped >> 32) == 0,
+          "mapped pointer is a guest address inside the direct window");
+    if (r != VK_SUCCESS || !mapped) return 1;
+    float* ubo_words = (float*)mapped;
+
     /* Depth image + view (D32_SFLOAT, shared across framebuffers). */
     VkImage depth_image = VK_NULL_HANDLE;
     VkImageView depth_view = VK_NULL_HANDLE;
@@ -881,10 +899,20 @@ int main(void) {
         };
         r = vkBeginCommandBuffer(cmds[idx], &cbbi2);
         if (r != VK_SUCCESS) { frames_ok = 0; break; }
-        /* Vertex + UBO data via vkCmdUpdateBuffer (avoids vkMapMemory). */
-        float ubo_data[4] = { 1.0f, 1.0f, 1.0f, 0.05f * (float)frame };
+        /* Vertex data via vkCmdUpdateBuffer; UBO written DIRECTLY
+         * through the mapped pointer — the submit-side push makes it
+         * GPU-visible (coherent-style), the flush exercises the range
+         * arm explicitly. */
+        ubo_words[0] = 1.0f; ubo_words[1] = 1.0f; ubo_words[2] = 1.0f;
+        ubo_words[3] = 0.05f * (float)frame;
         vkCmdUpdateBuffer(cmds[idx], vbuf, 0, sizeof(verts), verts);
-        vkCmdUpdateBuffer(cmds[idx], ubobuf, 0, sizeof(ubo_data), ubo_data);
+        VkMappedMemoryRange flush_range = {
+            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+            .memory = vmem,
+            .offset = 0,
+            .size = 16,
+        };
+        vkFlushMappedMemoryRanges(device, 1, &flush_range);
         VkClearValue clears[2] = {
             { .color = { { 0.06f, 0.06f, 0.09f, 1.0f } } },
             { .depthStencil = { .depth = 1.0f, .stencil = 0 } },
@@ -924,7 +952,11 @@ int main(void) {
         if (r != VK_SUCCESS) { frames_ok = 0; break; }
         if (vkDeviceWaitIdle) vkDeviceWaitIdle(device);
     }
-    CHECK(frames_ok, "3-frame vkCmdDraw triangle loop (pipeline+descriptors+depth)");
+    CHECK(frames_ok, "3-frame vkCmdDraw triangle loop (pipeline+descriptors+depth+mapmemory)");
+
+    /* Unmap: pushes the bounce back and releases the window range. */
+    if (vkUnmapMemory) vkUnmapMemory(device, vmem);
+    CHECK(1, "vkUnmapMemory (ubo bounce released)");
 
     /* Teardown of the triangle phase. */
     if (vkFreeCommandBuffers) vkFreeCommandBuffers(device, pool, nimages, cmds);

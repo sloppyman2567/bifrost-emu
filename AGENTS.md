@@ -974,6 +974,30 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   set UBO, D32 depth attachment, per-image framebuffers + command
   buffers, 3-frame draw loop. Passes under JIT and --no-jit on RADV.
   `make cross` now takes `CROSS_EXTRA=` for extra include paths.
+- **vkMapMemory guest-window bounce (2026-08-21, the Vulkan PCWFC)**:
+  `VK_MAP_MEMORY` maps on the host with a scratch pointer, allocates a
+  bounce via `Memory::mmap_alloc` INSIDE the direct window, seeds it
+  from the host mapping, and writes the BOUNCE's guest address into
+  ppData — the guest derefs it at full JIT speed (the host mapping
+  address is 48-bit host heap, useless in the guest). Bookkeeping in
+  `DisplayThunkImpl::vk_maps_` (handle → host_ptr/bounce/offset/size)
+  + `vk_allocs_` (handle → allocationSize, recorded by the
+  `VK_ALLOC_MEMORY` arm so VK_WHOLE_SIZE maps resolve). Coherence —
+  the practical HOST_COHERENT guarantee for BOTH coherent and
+  non-coherent memory (over-pushing non-coherent is harmless):
+  **push** all bounces → host mappings before vkQueueSubmit and
+  vkQueuePresentKHR; **pull** host → bounces after successful
+  vkDeviceWaitIdle/vkQueueWaitIdle/vkWaitForFences (GPU readback);
+  `VK_FLUSH_MAPPED` moves explicit ranges bounce→host before the host
+  flush; `VK_INVALIDATE_MAPPED` host-invalidates then copies host→
+  bounce; `VK_UNMAP_MEMORY` pushes back, `untrack_allocation`s the
+  window range (page-rounded), then host-unmaps; `VK_FREE_MEMORY`
+  defensively releases a still-mapped bounce before freeing (the
+  glDeleteBuffers pattern). Remapping an already-mapped handle returns
+  the existing bounce. Sanity caps: 1 GiB per map, 64 ranges per
+  flush/invalidate, 64 fences per wait. The test asserts the mapped
+  pointer is nonzero and < 4 GiB, writes the UBO through it directly,
+  flushes explicitly, and renders 3 frames (76 checks, JIT + interp).
 
 ## Verification
 
@@ -2606,3 +2630,16 @@ not musl-`-static`.
   code, pipeline trees) MUST `st.buf.reserve()` up front.
 - **NEXT for Vulkan**: vkMapMemory guest-window bounce (mirror GL
   MAP_BUFFER + PCWFC persistent-coherent writeback), then real titles.
+
+## Session History (2026-08-21) — vkMapMemory guest-window bounce
+
+- **The Vulkan PCWFC landed**: vkMapMemory/vkUnmapMemory/Flush/
+  Invalidate + vkAllocateMemory size tracking, with push-before-submit
+  and pull-after-wait coherence (see Local Contracts). The swapchain
+  test now writes its UBO through a mapped guest pointer inside the
+  direct window (asserted) — 76 checks, JIT + interp, 3 repeat runs
+  stable (bounce alloc/free cycles through mmap_alloc/untrack).
+  Quick suite 201/201, opgen-thunk-check in sync (932).
+- Remaining Vulkan gaps for real titles: sparse bindings, external
+  memory, vkCmdBindTransformFeedbackBuffers etc. — all table rows
+  already; nested-pointer shapes beyond these are additive arms.
