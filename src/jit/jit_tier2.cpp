@@ -813,6 +813,91 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         }
     }
 
+    // ── M2 dest-sourcing rename (2026-08-21) ────────────────────────────
+    // The ALU/shift emitters have an in-place fast path for dest == src1
+    // (compute in src1's register, no alloc, no mov), but translated IR
+    // mints a FRESH scratch dest for every op, so the general path
+    // (alloc_reg_excluding + `mov d,s1` + op) fires almost always — on the
+    // hot core_bench_list region, 64 of 343 dynamic instructions/iteration
+    // were pure reg→reg movs, the single largest waste class. When src1 is
+    // a SCRATCH vreg whose LAST USE is this op and dest is a scratch with
+    // its (unique) def here and no earlier use, rewrite dest := src1 and
+    // rename every later operand that referenced dest — the emitters' fast
+    // path then computes destructively in src1's register. Safety: scratch
+    // vregs are uniquely defined per block and remapped to disjoint ranges
+    // (so dest has exactly one def — this op — and no use can precede it),
+    // src1 dying here means nothing else reads the destroyed value, and
+    // arch vregs (<=32) are excluded so cpu.regs[] homes and pins are
+    // untouched. old_dest > 32 also makes operand renames unambiguous
+    // against LOAD_REG's arch-index src1.
+    if (!getenv("BIFROST_NO_DESTSRC")) {
+        const size_t n = region_ir.size();
+        auto is_destsrc_op = [](IROp op) -> bool {
+            switch (op) {
+                case IROp::ADD: case IROp::SUB: case IROp::AND:
+                case IROp::OR:  case IROp::XOR: case IROp::MUL:
+                case IROp::SHL: case IROp::SHR: case IROp::SAR:
+                case IROp::ROR:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        // Last-use index per vreg and def/use counts (operands: src1 except
+        // on LOAD_REG where it is the arch index, plus src2 and aux).
+        std::vector<int> last_use(4096, -1);
+        std::vector<int> ndefs(4096, 0);
+        std::vector<int> first_use_idx(4096, -1);
+        for (size_t i = 0; i < n; i++) {
+            const IRInst& inst = region_ir[i];
+            uint16_t ops[3] = {inst.src1, inst.src2, inst.aux};
+            for (int k = 0; k < 3; k++) {
+                uint16_t s = ops[k];
+                if (s < 33 || s >= 4096) continue;
+                if (k == 0 && inst.op == IROp::LOAD_REG) continue;  // arch index
+                last_use[s] = static_cast<int>(i);
+                if (first_use_idx[s] < 0) first_use_idx[s] = static_cast<int>(i);
+            }
+            if (inst.dest > 32 && inst.dest < 4096) ndefs[inst.dest]++;
+        }
+        int renamed = 0;
+        for (size_t i = 0; i < n; i++) {
+            IRInst& inst = region_ir[i];
+            if (!is_destsrc_op(inst.op)) continue;
+            if (!(inst.dest > 32 && inst.dest < 4096)) continue;
+            if (!(inst.src1 > 32 && inst.src1 < 4096)) continue;
+            if (inst.dest == inst.src1) continue;
+            if (inst.dest == inst.src2 || inst.dest == inst.aux) continue;
+            // dest: uniquely defined here, never read before its def.
+            if (ndefs[inst.dest] != 1) continue;
+            if (first_use_idx[inst.dest] >= 0 &&
+                first_use_idx[inst.dest] < static_cast<int>(i)) continue;
+            // src1 must die AT this op (it is consumed destructively).
+            if (last_use[inst.src1] != static_cast<int>(i)) continue;
+            const uint16_t old_dest = inst.dest;
+            inst.dest = inst.src1;
+            // Rename all later operand references old_dest → src1.
+            for (size_t j = i + 1; j < n; j++) {
+                IRInst& later = region_ir[j];
+                if (later.op != IROp::LOAD_REG) {
+                    if (later.src1 == old_dest) later.src1 = inst.src1;
+                }
+                if (later.src2 == old_dest) later.src2 = inst.src1;
+                if (later.aux  == old_dest) later.aux  = inst.src1;
+            }
+            // src1 now inherits old_dest's readers: extend its last_use so a
+            // LATER dest-sourcing rename cannot destroy the value those
+            // redirected readers still need (chained-rename case).
+            if (last_use[old_dest] > last_use[inst.src1]) {
+                last_use[inst.src1] = last_use[old_dest];
+            }
+            renamed++;
+        }
+        if (tier2_trace_enabled() && renamed) {
+            fprintf(stderr, "[tier2] destsrc: %d ops rewritten\n", renamed);
+        }
+    }
+
     // ── Codegen state reset (mirror translate_block's start) ─────────
     make_writable();
     current_start_pc_ = trace.head_pc;
@@ -1461,6 +1546,19 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
         *chain_out = reinterpret_cast<uint64_t (*)(CPU*, Emulator*)>(
             code_buf_ + region_chain_entry_off);
     tier2_regions++;
+    // TEMP diagnostic (BIFROST_T2_REGIONDUMP): hexdump the published region
+    // for offline objdump — same gate name the P2 review session used.
+    if (getenv("BIFROST_T2_REGIONDUMP")) {
+        fprintf(stderr, "[t2dump] pc=0x%llx fn=%p bytes=%zu body=%zu\n",
+                static_cast<unsigned long long>(trace.head_pc),
+                reinterpret_cast<void*>(code_buf_ + block_start), size,
+                body_start - block_start);
+        for (size_t k = 0; k < size; k++) {
+            fprintf(stderr, "%02x", code_buf_[block_start + k]);
+            if ((k & 31) == 31) fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "\n");
+    }
     if (tier2_trace_enabled()) {
         fprintf(stderr,
                 "[tier2] region pc=0x%llx blocks=%zu insts=%llu bytes=%zu back_flags_carried=%d\n",
