@@ -2247,3 +2247,36 @@ not musl-`-static`.
 - Review-pass ideas still open: register-resident LICM results across the
   Lback (P2 — medium risk, LOAD_MEM-starvation history), IRBlock caching
   in BlockEntry to shorten exclusive-lock fire pauses (P3).
+
+## Session History (2026-08-20) — review pass: P2 attempted, LATENT ALU-EMITTER BUG found instead
+
+- **P2 (register-resident LICM results) REVERTED — but the attempt exposed a
+  REAL latent miscompile in the ALU emit path. Do NOT re-attempt P2 until
+  the bug below is fixed.**
+- **THE BUG (disassembly-confirmed, m3loop region preheader):** with the
+  preheader allocator steered away from FLAGS3 (temporary
+  `pinned_host_regs_ |= FLAGS3` experiment), a hoisted `SHL` result landed
+  in R11; the following `ADD`'s emitter then emitted
+  `mov %r9,%r11 ; add %r11,%r11` — ensure_vreg(src1) EVICTED src2 (Belady:
+  src2 dead-after-this-op → legal eviction) and reused its register R11 for
+  src1, while the emitter's cached "src2 is in r11" reg number went STALE.
+  Result: add reads src1 twice. Silent wrong answer whenever allocation
+  produces dest/src2 collision with a stale cached operand reg. The
+  standard pattern (`d = alloc_reg_excluding(s1,s2)` after BOTH ensures)
+  should prevent this — some op(s) in jit_codegen_alu.cpp capture an
+  operand's reg, then run an ensure/alloc that can evict it, then use the
+  stale number. AUDIT REQUIRED: every compile_ir_inst ALU path's
+  ensure_vreg/alloc ordering (ADD/SUB/AND/OR/XOR/SHL/SHR/SAR/ROR at minimum;
+  likely copy-pasted). Triggered tonight ONLY because the FLAGS3 exclusion
+  changed allocation; any future allocator-pressure change can hit it.
+- **P2 mechanics that DID work (for the retry):** keep-candidate selection
+  (hoisted dests with real body uses, term-safe home reg ∉ FLAGS3, not arch
+  pins), post-flush remap + pinned_host_regs_ protection + invalidate-tail
+  replication preserving keeps and re-establishing pins dirty. All verified
+  correct when keeps were empty. What does NOT work: steering preheader
+  allocation via the pin mask (triggers the bug above), and opportunistic
+  keeps without steering (roots always land in FLAGS3 first — ALLOC_REGS
+  order — so zero keeps fire). Fix the emitter bug first; then P2 = the
+  FLAGS3-exclusion variant, which was byte-diffable via a temporary
+  BIFROST_T2_REGIONDUMP hexdump of the published region.
+- Verified revert: m3loop tri-mode MATCH restored, tree clean at HEAD.
