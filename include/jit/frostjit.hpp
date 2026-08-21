@@ -851,9 +851,6 @@ private:
     void emit_store16(int base, int32_t off, int src);
     void emit_store8(int base, int32_t off, int src);
     void emit_modrm_disp(int reg, int base, int32_t off);
-    // ModRM+SIB+disp for [WIN_REG + index*1 + disp] (direct-window fast
-    // paths — the guest address register rides the SIB index field).
-    void emit_modrm_sib_win(int reg, int index, int32_t off);
     void emit_add_reg(int dst, int src);
     void emit_add_reg_imm(int dst, int32_t imm);
     void emit_alu_imm(int dst, int kind, int32_t imm);
