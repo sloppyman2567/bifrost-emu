@@ -141,6 +141,23 @@ void FrostJIT::emit_modrm_disp(int reg, int base, int32_t off) {
     else if (off>=-128&&off<=127) { emit_byte(modrm(1,reg&7,base&7)); emit_byte(static_cast<uint8_t>(off)); }
     else { emit_byte(modrm(2,reg&7,base&7)); emit_u32(static_cast<uint32_t>(off)); }
 }
+// ModRM+SIB+disp addressing [WIN_REG + index*1 + disp] for the direct-
+// window fast paths (emit_load_mem / emit_store_mem). WIN_REG is an
+// extension register (R10), so the base is only expressible through a SIB;
+// the index rides in the SIB index field, which is what lets the guest
+// address register be used WITHOUT being copied or destroyed. A disp8 0
+// is kept (mod=01): mod=00 with SIB base=101 is RIP-relative.
+void FrostJIT::emit_modrm_sib_win(int reg, int index, int32_t off) {
+    if (off>=-128&&off<=127) {
+        emit_byte(modrm(1,reg&7,4));
+        emit_byte(sib(0,index&7,WIN_REG&7));
+        emit_byte(static_cast<uint8_t>(off));
+    } else {
+        emit_byte(modrm(2,reg&7,4));
+        emit_byte(sib(0,index&7,WIN_REG&7));
+        emit_u32(static_cast<uint32_t>(off));
+    }
+}
 void FrostJIT::emit_load16(int dst, int base, int32_t off) {
     emit_byte(rex(false,dst>=8,false,base>=8));
     emit_byte(0x0F); emit_byte(0xB7);
@@ -687,82 +704,90 @@ void FrostJIT::emit_mov_imm_to_rax(uint64_t val) {
 }
 void FrostJIT::emit_load_mem(int dst, int addr_reg, int32_t off, int w,
                              bool sign_ext) {
-    // dst = addr_reg + off
-    if (addr_reg != dst) emit_mov_reg(dst, addr_reg);
-    if (off != 0) {
-        if (off >= -128 && off <= 127) {
-            emit_byte(rex(true,false,false,dst>=8));
-            emit_byte(0x83); emit_byte(modrm(3,0,dst&7)); emit_byte(static_cast<uint8_t>(off));
-        } else {
-            emit_byte(rex(true,false,false,dst>=8));
-            emit_byte(0x81); emit_byte(modrm(3,0,dst&7)); emit_u32(static_cast<uint32_t>(off));
-        }
-    }
-    // Check if addr + w <= 4GB. The limit is always < 2^32, so a 32-bit
-    // zero-extending mov is 5-6 bytes instead of the 10-byte movabs.
+    // Indexed window addressing (2026-08-21): the guest address is used
+    // DIRECTLY as the SIB index into [WIN_REG + idx + disp] — the offset
+    // folds into the displacement, and the old base copy + `add WIN_REG`
+    // are gone from the fast path. The window limit check must cover the
+    // SUM addr+off (the old sequence added the offset before checking),
+    // so for off != 0 the sum is materialized once into a scratch (LEA)
+    // and THAT register is both the cmp operand and the SIB index;
+    // off == 0 uses addr_reg itself as the index (never copied, never
+    // destroyed — dst may even equal it, the load reads the index first).
+    // Slow path: jit_load_mem_slow(emu, cpu, addr, width) with the
+    // materialized sum in RDX.
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    int tmp = (dst != RDX) ? RDX : RCX;
-    emit_mov_imm32_zext(tmp, static_cast<uint32_t>(limit));
-    emit_cmp_reg(dst, tmp);
+    // idx = off ? lea-scratch : addr_reg; must differ from dst (the load
+    // writes dst). lim = the limit constant register; must differ from idx.
+    int idx = addr_reg;
+    if (off != 0) {
+        idx = (dst != RDX) ? RDX : ((dst != RCX) ? RCX : R8);
+        emit_byte(rex(true,idx>=8,false,addr_reg>=8)); // lea off(%addr),%idx
+        emit_byte(0x8D);
+        emit_modrm_disp(idx, addr_reg, off);
+    }
+    int lim = (idx != R9) ? R9 : ((idx != R8) ? R8 : RCX);
+    emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
+    emit_cmp_reg(idx, lim);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6); // JBE
     // Slow path. RSP%16==8 at body entry; caller pushes R10 (1 push, ODD)
     // → emit_call_aligned handles the sub rsp,8 + pushfq + call + popfq +
-    // add rsp,8 dance automatically. We just set up args and call.
+    // add rsp,8 dance automatically.
     //
-    // Args: jit_load_mem_slow(emu, cpu, addr, width)
-    //   RDI = emu, RSI = cpu, RDX = addr, RCX = width
+    // Args: RDI = emu, RSI = cpu, RDX = addr, RCX = width
     emit_push(WIN_REG);                  // 1 push — ODD, helper will sub rsp,8
     emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
     emit_mov_reg(RSI, CPU_REG);          // rsi = cpu (for SIGSEGV delivery)
-    emit_mov_reg(RDX, dst);              // rdx = addr
+    if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (+off already in idx)
     emit_mov_imm32(RCX, w);              // rcx = width
     emit_call_aligned(&jit_load_mem_slow, /*num_pushed=*/1);
     emit_pop(WIN_REG);                   // restore R10
     // RAX now has the return value (the loaded data).
     if (dst != RAX) emit_mov_reg(dst, RAX);
     size_t jmp_past = emit_jmp_rel32_placeholder();
-    // Fast path.
+    // Fast path: load [WIN_REG + idx + off?0] through the SIB index.
+    // For off != 0 the sum already includes it — index with NO disp.
+    // REX: W for 64-bit forms, R=dst, X=idx, B=WIN_REG (R10, always).
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
-    emit_add_reg(dst, WIN_REG);
     if (w == 8) {
-        emit_byte(rex(true,dst>=8,false,false)); emit_byte(0x8B); emit_byte(modrm(0,dst&7,dst&7));
+        emit_byte(rex(true,dst>=8,idx>=8,true)); emit_byte(0x8B);
     } else if (w == 4) {
-        if (sign_ext) emit_load32_sx(dst, dst, 0); else emit_load32(dst, dst, 0);
+        if (sign_ext) { emit_byte(rex(true,dst>=8,idx>=8,true)); emit_byte(0x63); }
+        else          { emit_byte(rex(false,dst>=8,idx>=8,true)); emit_byte(0x8B); }
     } else if (w == 2) {
-        if (sign_ext) emit_load16_sx(dst, dst, 0); else emit_load16(dst, dst, 0);
+        emit_byte(rex(false,dst>=8,idx>=8,true));
+        if (sign_ext) { emit_byte(0x0F); emit_byte(0xBF); }
+        else          { emit_byte(0x0F); emit_byte(0xB7); }
     } else if (w == 1) {
-        if (sign_ext) emit_load8_sx(dst, dst, 0); else emit_load8(dst, dst, 0);
+        emit_byte(rex(false,dst>=8,idx>=8,true));
+        if (sign_ext) { emit_byte(0x0F); emit_byte(0xBE); }
+        else          { emit_byte(0x0F); emit_byte(0xB6); }
     }
+    emit_modrm_sib_win(dst, idx, 0);
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }
 void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
-    // In-place address variant (2026-08-21): the address register is used
-    // directly for the offset add, limit check, and fast-path store — no
-    // R8 copy, no RAX save/restore in the slow path. CONTRACT: addr_reg's
-    // value is DEAD after this op (destroyed on both paths; the slow-path
-    // C helper clobbers it, the fast path adds WIN_REG into it). The sole
-    // caller (STORE_MEM, jit_codegen_mem.cpp) guarantees this: its RAX
-    // holds either a fresh copy (the vreg's true home is elsewhere) or a
-    // kept DEAD scratch (vreg_fast_keep_candidate requires last-use-here)
-    // whose mapping is dropped right after via kill_vreg — which never
-    // spills. src_reg IS preserved (pushed/popped around the slow call),
-    // and must not equal addr_reg.
+    // Indexed window addressing (2026-08-21): the address (or its LEA sum
+    // when off != 0) is used DIRECTLY as the SIB index into
+    // [WIN_REG + idx] — no R8 copy, no `add WIN_REG`. addr_reg and src_reg
+    // are BOTH preserved on every path (src pushed/popped around the slow
+    // call; addr only read). The limit check covers the SUM addr+off,
+    // matching the old add-first semantics. Contract: src_reg must not be
+    // R8/R9 (the scratch pair), addr_reg must not be RDX.
+    // idx = off ? lea-scratch : addr_reg.
+    int idx = addr_reg;
     if (off != 0) {
-        if (off >= -128 && off <= 127) {
-            emit_byte(rex(true,false,false,addr_reg>=8));
-            emit_byte(0x83); emit_byte(modrm(3,0,addr_reg&7)); emit_byte(static_cast<uint8_t>(off));
-        } else {
-            emit_byte(rex(true,false,false,addr_reg>=8));
-            emit_byte(0x81); emit_byte(modrm(3,0,addr_reg&7)); emit_u32(static_cast<uint32_t>(off));
-        }
+        idx = (addr_reg != R8) ? R8 : R9;
+        emit_byte(rex(true,idx>=8,false,addr_reg>=8)); // lea off(%addr),%idx
+        emit_byte(0x8D);
+        emit_modrm_disp(idx, addr_reg, off);
     }
     // Limit check: lim = limit. Limit is < 2^32 → 32-bit zero-extending mov.
-    int lim = (addr_reg != R9) ? R9 : R8;
+    int lim = (idx != R9) ? R9 : R8;
     uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
     emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
-    emit_cmp_reg(addr_reg, lim);
+    emit_cmp_reg(idx, lim);
     size_t jbe_patch = emit_jcc_rel32_placeholder(6);
     // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
     // 2 pushes (src, R10) — EVEN, so emit_call_aligned needs no sub/add.
@@ -772,23 +797,27 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_push(WIN_REG);            // save R10      — 2 pushes (EVEN)
     emit_load(RDI, RBP, emu_slot_off()); // rdi = emu
     emit_mov_reg(RSI, CPU_REG);    // rsi = cpu (for SIGSEGV delivery)
-    emit_mov_reg(RDX, addr_reg);   // rdx = addr (addr_reg ≠ RDX by contract)
+    if (idx != RDX) emit_mov_reg(RDX, idx); // rdx = addr (sum in idx)
     if (src_reg != RCX) emit_mov_reg(RCX, src_reg);  // rcx = val
-    emit_mov_imm32(R8, w);         // r8 = width (after addr → RDX)
+    emit_mov_imm32(R8, w);         // r8 = width (after idx → RDX)
     emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(src_reg);             // restore val
     size_t jmp_past = emit_jmp_rel32_placeholder();
-    // Fast path: direct window store, in the address register.
+    // Fast path: direct window store, indexed by the address (sum).
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));
     patch_jcc_rel32(jbe_patch, fast_rel);
-    emit_add_reg(addr_reg, WIN_REG);
-    // Store to [addr_reg] with the right width.
     if (w == 8) {
-        emit_byte(rex(true,src_reg>=8,false,addr_reg>=8)); emit_byte(0x89); emit_byte(modrm(0,src_reg&7,addr_reg&7));
-    } else if (w == 4) emit_store32(addr_reg, 0, src_reg);
-    else if (w == 2) emit_store16(addr_reg, 0, src_reg);
-    else if (w == 1) emit_store8(addr_reg, 0, src_reg);
+        emit_byte(rex(true,src_reg>=8,idx>=8,true)); emit_byte(0x89);
+    } else if (w == 4) {
+        emit_byte(rex(false,src_reg>=8,idx>=8,true)); emit_byte(0x89);
+    } else if (w == 2) {
+        emit_byte(0x66);
+        emit_byte(rex(false,src_reg>=8,idx>=8,true)); emit_byte(0x89);
+    } else if (w == 1) {
+        emit_byte(rex(false,src_reg>=8,idx>=8,true)); emit_byte(0x88);
+    }
+    emit_modrm_sib_win(src_reg, idx, 0);
     int32_t end_rel = static_cast<int32_t>(code_buf_used_ - (jmp_past + 5));
     patch_jmp_rel32(jmp_past, end_rel);
 }
