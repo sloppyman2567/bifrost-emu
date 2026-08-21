@@ -21,7 +21,7 @@ back-edges.
 
 - **Step 1 (per-block hot-head counters):** `BlockEntry.exec_count`
   uint32 counters + env gates (`BIFROST_TIER2=1` to enable,
-  `BIFROST_TIER2_HITS` default 10000, `BIFROST_TIER2_TRACE`),
+  `BIFROST_TIER2_HITS` default 10000 (later 1000, see Phase 4), `BIFROST_TIER2_TRACE`),
   incremented on the slow-path cache hits of `run_block` and
   `lookup_call_target` (the BL/BLR entry path real hot loops use).
   With `BIFROST_TIER2` unset the whole feature is skipped, so behavior
@@ -170,6 +170,61 @@ back-edges.
   harnesses, game_demo rc=0 at parity (2.2s, suite 15s timeout passes),
   quick suites 200/200 tier2 off/on, JIT_VERIFY + tier2 zero new
   divergences, bench_mips acc `0xf800800a2c4ff835` unchanged.
+
+### Phase 4 — call-aware regions, chain-skip composition, exit chaining (SHIPPED, 2026-08-20)
+
+The tier-2 night shift: three features shipped, one perf flip, two
+hypotheses honorably buried. CoreMark under `BIFROST_TIER2=1` went from
+**−7% vs plain JIT to +7.8%** (3479 → ~3749 iters/s, CRCs validated).
+
+- **Call-aware regions:** the walker no longer aborts traces at calls.
+  BL fuses when the callee is already translated (`lookup_only` gate);
+  BLR fuses unconditionally (dynamic target via `jit_call_helper`). Both
+  become `BL_CALL`/`BLR_CALL` body ops invoking standalone callee fns;
+  the trace continues at the fall-through. Region-wide `has_call` gates
+  pinning and LICM arch-load hoisting (a callee can write any
+  `cpu.regs[]`). `BIFROST_NO_CALLREGION=1` restores the M1 aborts.
+- **Regions compose with `BIFROST_CHAIN_SKIP=1`:** the region allocates
+  the unified 32 KB frame, records a `chain_entry` label after the emu
+  stash, and publishes it via a new `chain_out` out-param; all three
+  registration sites set `BlockEntry.chain_entry`. Call-containing
+  regions still decline under chain-skip (the BL_CALL INCOMPLETE unwind
+  assumes the region's own rbp — the documented busybox do_wait
+  landmine). Perf-neutral by design: a region's Lback already subsumes
+  what chain-skip saves inside fused loops; the win is flag
+  compatibility.
+- **Loop regions only:** linear (non-back-edge) regions DECLINED by
+  default (`BIFROST_T2_LINEAR=1` restores) — a walked-out loop body
+  re-pays a full region entry per iteration, strictly worse than chained
+  standalone blocks. This alone flipped CoreMark from −7% to +3.5%.
+- **Shared exit tail:** every cold exit's identical ~30-byte epilogue
+  (pc-store, rdi/rsi, teardown, ret) deduplicated into one tail per
+  region; exits end with `movabs rax, pc; jmp`. Fat regions shrink ~5%
+  (9-block: 2995 → 2818 B).
+- **Chain-out exits:** a cold exit whose target block is already
+  translated tears down the region frame completely and bare-jmps the
+  target's fn — the target nests on the dispatcher's return address
+  exactly like a chain edge, skipping one dispatcher round-trip per
+  taken side-exit. Fallback to the ret-exit when untranslated, under
+  `BIFROST_JIT_VERIFY`, or with `BIFROST_NO_EXITCHAIN=1`. Worth **+4%**
+  on CoreMark.
+- **Hot-head threshold default 10000 → 1000:** counters neutralize 10x
+  sooner; loop-regions-only keeps the extra admits honest (~+0.7%).
+- **Measured dead-end (do not re-attempt):** a wrap-based 2-instruction
+  counter form measured ~20% WORSE than the existing inc+cmp+jne — x86
+  macro-fusion already makes cmp/jne one µop.
+- **Measurement methodology (minecraft):** chunk-generation counts
+  measure PLAYER INPUT; the game loop is chained to host vsync
+  (`__GL_SYNC_TO_VBLANK=0` to decouple); `BIFROST_STATS_PERIOD` prints
+  only when the main run loop spins. Clean protocol: host-timestamp
+  output lines, time GAME-ENTER-LOOP → chunk #80, hands off input.
+  Result: tier2 = parity on minecraft's worldgen burst; tier2 stays
+  opt-in.
+- **Verified:** 11 synthetic harnesses × {jit, tier2, chain-skip,
+  no-exitchain, both} byte-identical; JIT_VERIFY clean; game_demo rc=0
+  across all modes; bench_mips acc `0xf800800a2c4ff835` unchanged; quick
+  suite 200/200 tier2 ON under every flag combination; full suite
+  205/205.
 
 ## [1.5.3-alpha] — Vulkan command-buffer rendering (2026-08-19)
 
