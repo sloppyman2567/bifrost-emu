@@ -2205,3 +2205,22 @@ not musl-`-static`.
   CoreMark 3613 iters/s CRCs validated (loops-only baseline 3602), m5big
   963 ms / m3loop 1853 ms hold, game_demo rc=0, bench_mips acc
   `0xf800800a2c4ff835`, quick 200/200 tier2 ON, full suite 205/205.
+
+## Session History (2026-08-20) — Track 5 re-measured: closed without changes
+
+- **Track 5 (LICM/pin refinement) CLOSED — premises stale, no code change.**
+  Re-measurement on the current tree (post loops-only + shared-tail):
+  - **LICM is strongly POSITIVE now**: m2loop3 LICM 3878ms vs NO_LICM
+    4688ms (+17%), m2loop4 3873 vs 4624 (+16%). The old ~1% m2loop3
+    regression (hoisted bare LOAD_REG reading a slot instead of the cheap
+    pin) is GONE — cured by the arch_pin_-gating fix + refine pass +
+    loops-only default. Tier2 beats plain jit 1.6-2x on all three m2loops.
+  - **Pins earn their keep**: m3loop PIN 1853ms vs NO_PIN 1963ms (+6%),
+    CoreMark 3604 vs 3550 iters/s (+1.5%), m5big neutral.
+  - Pin expansion 4→6 (R9/R11) REJECTED without experiment: removes two
+    regs from the allocatable pool; the closest historical measurement
+    (written-then-read pinning) was ~6% SLOWER on bench_mips. Risk > reward.
+  - Register-resident invariant chains: LICM's slot-based preheader already
+    wins big; complexity unjustified by any measured deficiency.
+  Lesson: re-measure old bruises before operating — several earlier fixes
+  had already healed this one.
