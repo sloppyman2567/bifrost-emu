@@ -693,6 +693,45 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   bench_matrix/sort/memcpy/fib ±1% (noise). Suite 199/199, quick 194/194,
   regalloc-check 194/194, FWD 194/194, bench_mips byte-identical under
   JIT_VERIFY/JIT_VERIFY_MEM/FWD.
+- **Flag-helper scratch contract (2026-08-21, csel-cmov-repair):**
+  `emit_load_flags_from_pstate` (x86_backend.cpp) clobbers ONLY
+  RAX/RCX/RDX (+RFLAGS) — the C^from_sub extraction is computed in RDX
+  alone via `X = pstate ^ (pstate << 2)` then `>>29 &1` (a LEFT shift:
+  `(pstate << 2)`'s bit 29 is pstate's bit 27 = from_sub; a right shift
+  would XOR C with N instead and silently corrupt every carry-reading
+  condition — CS/CC/HI/LS — after a pstate load; PL/LE/GT-style tests
+  still pass, so only carry-condition tests catch it). Do NOT add another
+  scratch register to this helper or to `emit_normalize_cf_to_sub_
+  convention` / `emit_materialize_flags`: every other allocatable reg
+  (R8/R9/R11/R12+) may hold a live vreg at the call site. The historical
+  bug: the loader used R8 for the from_sub extraction while the CSEL/
+  CCMP/BRCOND_SKIP/ADCS-SBCS callers flush ONLY FLAGS3 (BRCOND, tier2
+  BRCOND, and FP_CSEL knew and over-flushed R8). Because FCMP
+  materializes NZCV to pstate (`flags_in_host_=false`) instead of
+  leaving x86 flags in host, every conditional select after an FCMP ran
+  the loader — the cmov-CSEL rewrite stages its ELSE value in a fresh
+  allocatable reg, which landed in R8 and was silently destroyed, making
+  every `cset` after an `fcmp` return 0 (minecraft's `sign()` → DDA
+  `step=(0,0,0)` → `_ivec3s2dir` assert at tick ~15 + ground clipping;
+  the integer-producer fuzz never saw it because SUBS/ADDS/ANDS keep
+  flags in host and skip the loader entirely). Regression coverage:
+  the FCMP-producer section in `ctest/jit_csel.c` (sign interleave +
+  cs/cc/hi after fcmp + csinc/csinv/csneg after f64 fcmp).
+- **CSEL family native CMOVcc lowering (csel-cmov-repair branch,
+  2026-08-21)**: CSEL/CSINC/CSINV/CSNEG lower to `cmovcc` — flags ensured
+  via the targeted FLAGS3 flush when loading from pstate (register-
+  residency preserving; the pre-cmov emitter's flush_all_vregs nuked the
+  cache around every select), operands via `ensure_two_vregs`, fresh dest
+  via `alloc_reg_excluding`, else-value into dest, single `cmovcc d, s1`.
+  The IR translator DECOMPOSES CSINC/CSINV/CSNEG into plain
+  `IROp::CSEL` with a pre-computed transform (ADD/NOT/NEG of Rm), so the
+  emitter's internal CSINC/CSINV/CSNEG branches are dead at the IR level;
+  XZR operands arrive as `load_imm(b,0)` vregs (vreg 32 never reaches the
+  emitter — the `z1/z2 == 32` checks are dead code). Direct-carry HI/LS
+  (flags from ADD/TST still in host) round-trips via pstate to normalize
+  CF (270bb8a). Measured ~+10.7% tier2 CoreMark cumulative with the
+  indexed-window-addressing reapply. Merge gate (60s+ clean game) MET
+  after the R8 fix: 75s run, zero asserts, world tick 4488.
 
 ## Work Guidance
 
@@ -2366,3 +2405,42 @@ not musl-`-static`.
   the borrow-CPU callback runner so android_native_app_glue mains proceed.
   **Phase 3: touch** — SDL mouse → AInputQueue MotionEvents (input.cpp
   has no multitouch yet; SDL2 has it unplumbed).
+
+## Session History (2026-08-21) — csel-cmov-repair: the game assert FIXED
+
+- **Root cause of the minecraft assert at tick ~15 (and the ground
+  clipping)**: `emit_load_flags_from_pstate` used **R8 as scratch** for
+  the from_sub extraction while the cmov-CSEL emitter (and CCMP,
+  BRCOND_SKIP, ADCS/SBCS) flush only FLAGS3 (RAX/RCX/RDX) around the
+  loader. FCMP materializes NZCV to pstate (`flags_in_host_=false`), so
+  every conditional select after an `fcmp` ran the loader; the CMOVcc
+  ELSE-value staged in R8 was physically destroyed while the regalloc
+  still mapped it there → every `cset` after an `fcmp` returned 0.
+  Diagnosis chain: game printf instrumentation (`_ivec3s2dir` dumping the
+  bad vector → `(0,0,0)`; `ray_block` dumping `dir=(0,0,1) step=(0,0,0)`)
+  → minimal repro `/tmp/csel_fp.c` (sign() miscompiled under JIT only) →
+  `BIFROST_JIT_DUMP` of the block → read the emitted x86: `mov r8d,1`
+  (else-value) … `mov r8,rcx; shr r8,27` (loader scratch) … `mov rcx,r8`
+  (garbage else). The single-block integer-producer fuzz never caught it
+  because SUBS/ADDS/ANDS leave flags IN HOST (no loader runs).
+- **Fix**: RDX-only C^from_sub extraction in the loader via
+  `X = pstate ^ (pstate << 2); (X >> 29) & 1` — bit 29 of `(pstate << 2)`
+  is pstate's bit 27 (from_sub). First attempt used `>> 2` which XORs C
+  with **N** instead — caught because musl printf's own fcmp+carry-
+  consuming code garbled `%f` digits ("42.250", "1.\0\0\0"); only
+  carry-condition tests expose it (the sign test passed despite the
+  wrong CF since PL/LE don't read C). Dropped the now-unneeded R8 from
+  the flush masks at BRCOND (branch.cpp), tier2 BRCOND (jit_tier2.cpp),
+  and FP_CSEL (fparith.cpp); removed a dead `test ecx,1<<27` in the
+  loader. Full contract documented in Local Contracts.
+- **Regression coverage**: FCMP-producer section in `ctest/jit_csel.c`
+  (fcmp→cset,cset→sub sign interleave, cs/cc/hi csel after fcmp incl.
+  NaN, csinc/csinv/csneg after f64 fcmp); scratch fuzz
+  `/tmp/csel_fp_fuzz.c` (all 14 conds × f32/f64 × NaN/equal/less/
+  greater, ARM FP-flag model in C).
+- **Verified**: `/tmp/csel_fp.c` byte-identical JIT vs interp; torture +
+  integer fuzz JIT==interp (the torture's own 5 `addhi`/`wform` model
+  failures are mode-independent — test-side, not emulator); jit_csel
+  (with new section) + jit_carry + jit_ccmp pass under
+  `BIFROST_JIT_VERIFY=1`; quick suite **201/201**; game 75s run **zero**
+  asserts/signals, world tick 4488. **Merge gate MET.**
