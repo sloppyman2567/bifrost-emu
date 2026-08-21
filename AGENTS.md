@@ -2178,3 +2178,30 @@ not musl-`-static`.
   forms no region — falls back to chained blocks, acc unchanged),
   JIT_VERIFY clean on m5big/m3loop_quick, game_demo rc=0, bench_mips acc
   `0xf800800a2c4ff835`, quick 200/200 tier2 ON, full suite 205/205.
+
+## Session History (2026-08-20) — Track 3: shared exit tail (cold-exit dedup)
+
+- **Shared exit tail landed (committed `10b0b4d`).** Every region cold exit
+  (L_exit + one deferred epilogue per non-last block) ended with the same
+  ~30-byte fixed sequence: `mov [rbx+PC_OFF], rax; mov rdi,rbx; mov
+  rsi,[rbp+emu_slot]; mov rsp,rbp; pop x6; ret`. Each exit now ends with
+  `movabs rax, exit_pc` + `jmp rel32` to ONE shared tail emitted after the
+  deferred-exit loop (patched via `shared_exit_patch_offs`); only the
+  per-edge VARIABLE part stays inline — cmc / flag materialize /
+  flush_all_vregs of that branch point's dirty vregs / emit_flush_all_pins.
+  The variable part CANNOT be shared without runtime metadata (each branch
+  point has a different live set). Lback unchanged (no tail). Skipped when
+  no exits exist (1-block uncond-back-edge region).
+- **Measured (CoreMark regions, git-stash A/B):** 9-block/32-inst region
+  2995 → 2818 B, 6-block 2344 → 2244, 5-blocks ~−100 each (~5%); savings =
+  (N_exits−1) × (tail−5 B). Single-exit regions (self-loops,
+  skip_exit_sections shapes like m3loop's uncond back-edge) pay exactly
+  +5 B — dedup needs ≥2 exits. Harness regions are tiny (1 exit each), so
+  CoreMark is the place to see the effect.
+- **MEASUREMENT TRAP:** harness region-byte A/Bs mislead — m5big/m3loop
+  showed +5 B and looked like a regression until the stash A/B revealed
+  both have only ONE exit. Always compare on a many-exit region.
+- Verified `10b0b4d`: harness tri-mode byte-identical, JIT_VERIFY clean,
+  CoreMark 3613 iters/s CRCs validated (loops-only baseline 3602), m5big
+  963 ms / m3loop 1853 ms hold, game_demo rc=0, bench_mips acc
+  `0xf800800a2c4ff835`, quick 200/200 tier2 ON, full suite 205/205.
