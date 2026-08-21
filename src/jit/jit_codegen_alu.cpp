@@ -445,6 +445,19 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // If we didn't load (flags were already in host), the epilogue
             // must still materialize them.
             bool loaded_from_pstate = !flags_in_host_;
+            // Direct-carry HI/LS (flags from ADD/TST still in host): the
+            // resolver's cmc mapping assumes the SUB convention — cmc+JA
+            // would compute the INVERTED selection. The old full-flush
+            // emitter got this right for free (it always reloaded flags
+            // from pstate, which normalizes CF). Round-trip via pstate
+            // here: materialize the in-host flags, then the normal load
+            // path below re-establishes them with SUB convention.
+            if (flags_in_host_ && !flags_from_sub_ &&
+                (inst.cond & 0xE) == 0x8) {
+                materialize_flags_to_pstate();  // sets flags_in_host_ = false
+                loaded_from_pstate = true;      // pstate is now current; the
+                                                // epilogue must NOT re-materialize
+            }
             if (!flags_in_host_) {
                 constexpr uint16_t FLAGS3 =
                     (1u << RAX) | (1u << RCX) | (1u << RDX);
