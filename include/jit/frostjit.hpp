@@ -394,6 +394,20 @@ public:
         int instr_count = 0;
     };
     static thread_local LastBlockCache tls_last_block_;
+    // Stats TLS shared by run_block AND jit_call_helper (2026-08-21):
+    // hot-path block/instruction counts, batch-flushed into the shared
+    // atomics every 64K dispatches so BIFROST_STATS_PERIOD / the exit
+    // dump never read stale zeros from a fast-path-parked guest.
+    static thread_local uint64_t tls_stat_exec_;
+    static thread_local uint64_t tls_stat_instr_;
+    void flush_stat_tls() {
+        if (tls_stat_exec_ | tls_stat_instr_) {
+            blocks_executed.fetch_add(tls_stat_exec_, std::memory_order_relaxed);
+            instructions_executed.fetch_add(tls_stat_instr_, std::memory_order_relaxed);
+            tls_stat_exec_ = 0;
+            tls_stat_instr_ = 0;
+        }
+    }
     // 1.5.4-alpha: Per-thread inline cache for block transitions.
     // This is the FEX-Emu pattern: cache the last N (PC→fn) mappings so
     // that multi-block cycles (A→B→A→B), virtual dispatch, switch tables,

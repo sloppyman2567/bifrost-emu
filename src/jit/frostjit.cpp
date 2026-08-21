@@ -133,6 +133,8 @@ thread_local uint64_t FrostJIT::tls_watchdog_last_pc_ = UINT64_MAX;
 thread_local uint32_t FrostJIT::tls_watchdog_count_   = 0;
 thread_local std::unordered_map<uint64_t, uint32_t> FrostJIT::tls_hot_pc_counts_;
 thread_local FrostJIT::LastBlockCache FrostJIT::tls_last_block_;
+thread_local uint64_t FrostJIT::tls_stat_exec_ = 0;
+thread_local uint64_t FrostJIT::tls_stat_instr_ = 0;
 thread_local FrostJIT::InlineCacheEntry FrostJIT::tls_inline_cache_[INLINE_CACHE_SLOTS];
 // emit_load_mem / emit_store_mem live in x86_backend.cpp
 // (they are pure x86 emission with no regalloc/IR awareness).

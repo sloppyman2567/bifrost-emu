@@ -109,7 +109,6 @@
 #  include <GL/gl.h>
 #endif
 namespace arm64emu {
-static uint64_t s_last_sdl_window_ = 0;  // TEMP size probe
 // ── GraphicThunkImpl — the real implementation (pimpl) ────────────────
 // The GraphicThunk class in frost/thunk.hpp exposes only void* opaque
 // members to keep the header free of GL/EGL/SDL2 includes. The real
@@ -1963,29 +1962,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         ++frame_n;
     }
-    if (entry.name == "SDL_CreateWindow") s_last_sdl_window_ = ret;
-
-    // TEMP size probe (post-writeback): log what the guest will see.
-    if (!strcmp(entry.name.c_str(), "SDL_GetWindowSize") ||
-        !strcmp(entry.name.c_str(), "SDL_GL_GetDrawableSize")) {
-        int gw = 0, gh = 0;
-        if (bounce_guest[1] && bounce_bufs[1].size() >= 4)
-            memcpy(&gw, bounce_bufs[1].data(), 4);
-        if (bounce_guest[2] && bounce_bufs[2].size() >= 4)
-            memcpy(&gh, bounce_bufs[2].data(), 4);
-        using FlagsFn = uint32_t (*)(void*);
-        using SzFn = void (*)(void*, int*, int*);
-        auto rtld_sz = reinterpret_cast<SzFn>(dlsym(RTLD_DEFAULT, "SDL_GetWindowSize"));
-        int rw = 0, rh = 0;
-        if (rtld_sz) rtld_sz(reinterpret_cast<void*>(args[0]), &rw, &rh);
-        int hw = 0, hh = 0;
-        if (entry.host_fn)
-            reinterpret_cast<SzFn>(entry.host_fn)(
-                reinterpret_cast<void*>(args[0]), &hw, &hh);
-        fprintf(stderr, "[szdbg] %s -> %dx%d | direct_hostfn=%dx%d rtld=%dx%d\n",
-                entry.name.c_str(), gw, gh, hw, hh, rw, rh);
-    }
-
     // 1.5.4-alpha: GLFW event pump — after the host poll/ wait returns,
     // deliver any registered guest cursor-position callbacks (the game
     // computes per-frame mouse deltas from them, which drives camera
@@ -2046,25 +2022,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
     }
 
-    if (entry.name == "SDL_PollEvent") {
-        static int poll_count = 0;
-        if ((poll_count++ % 300) == 0) {
-            using GSzFn = void (*)(void*, int*, int*);
-            auto gsz = reinterpret_cast<GSzFn>(
-                dlsym(RTLD_DEFAULT, "SDL_GL_GetDrawableSize"));
-            auto wsz = reinterpret_cast<GSzFn>(
-                dlsym(RTLD_DEFAULT, "SDL_GetWindowSize"));
-            void* win = nullptr;
-            // find the tracked window handle from the last CreateWindow
-            win = reinterpret_cast<void*>(s_last_sdl_window_);
-            if (win && gsz && wsz) {
-                int dw=0,dh=0, ww=0,wh=0;
-                gsz(win,&dw,&dh); wsz(win,&ww,&wh);
-                fprintf(stderr, "[szdbg] poll %d: window=%dx%d drawable=%dx%d\n",
-                        poll_count, ww, wh, dw, dh);
-            }
-        }
-    }
     if (entry.name == "SDL_PollEvent" && dbg().thunk_trace) {
         uint32_t ev = 0, evx = 0, evy = 0;
         if (args[0]) {

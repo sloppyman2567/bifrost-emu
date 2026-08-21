@@ -92,8 +92,11 @@ busybox-musl
 .build.lock
 
 # Ad-hoc JIT audit / media / scratch files
-findings.md
-rules.md
+docs/DISPLAY_THUNK.md
+docs/rules.md
+docs/context.md
+docs/findings.md
+docs/SESSION_SUMMARY.md
 subaru_stairs.mp4
 subaru_stairs_mmv.mp4
 ctest_real/minecraft_weekend/t

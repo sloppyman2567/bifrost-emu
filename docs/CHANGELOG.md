@@ -6,6 +6,64 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — CSEL-cmov landing, Vulkan graphics pipelines + vkMapMemory, stats reporter fix (2026-08-21)
+
+### Fixed
+- **CSEL/CCMP/BRCOND_SKIP/ADCS-SBCS flag-loader scratch bug**: 
+  `emit_load_flags_from_pstate` used R8 as scratch while those emitters
+  flush only RAX/RCX/RDX — after an FCMP (which materializes NZCV to
+  pstate), every following conditional select ran the loader and its
+  CMOVcc else-value staged in R8 was silently destroyed. Symptom: every
+  `cset` after an `fcmp` returned 0 (minecraft `sign()` → DDA step
+  (0,0,0) → `_ivec3s2dir` assert at tick ~15 + falling through the
+  ground). Fix: RDX-only `C^from_sub` extraction via
+  `X = pstate ^ (pstate << 2)` — a LEFT shift; a right shift XORs C
+  with N instead and only carry-condition tests catch it. The cmov CSEL
+  lowering (7b23940 + 270bb8a) merged to main with the game-verified
+  merge gate (75s zero-assert run, world tick 4488).
+- **`vkCmdUpdateBuffer`/`vkCmdCopyBuffer` ARGS arity**: six tokens for
+  5-parameter functions — the pointer mask was off by one arg and pData
+  reached the host driver as a raw guest pointer (segfault in libc
+  memcpy, pinpointed via dmesg). Both rows now `iiiip`; the rest of the
+  vkCmd* family audited.
+- **BIFROST_STATS_PERIOD reporter** (never printed mid-run): (1) the
+  check sat in run()'s outer loop, which stops iterating once a game's
+  frame loop parks inside jit_call_helper's callee-dispatch loop — now
+  a background reporter thread ticks on wall time (joined before run()
+  returns); (2) `dump_periodic_stats` silently no-oped under `--no-jit`
+  — now prints interp MIPS + the syscall histogram; (3) hot-path block
+  counters were thread-locals flushed ONLY on the slow path — a
+  fast-path-parked guest never flushed and every reader saw stale zeros
+  ("0.0 MIPS mid-game"). Counters moved to shared TLS
+  (`FrostJIT::tls_stat_exec_/instr_`) with a bounded-staleness
+  batch-flush every 64K dispatches in BOTH run_block and
+  jit_call_helper (one predictable branch per dispatch — NOT a
+  per-dispatch atomic; bench_mips unchanged at 0.358s).
+- Dropped the leftover `BIFROST_VP_DBG` and `[szdbg]` TEMP debug probes
+  from gl_state.cpp/thunk.cpp (the latter also silenced an
+  unused-typedef warning).
+
+### Added
+- **Vulkan graphics-pipeline stage (ROADMAP #12)**: seven deep-marshal
+  policies — vkCreateShaderModule (nested pCode),
+  vkCreateGraphicsPipelines (full state tree), vkCreatePipelineLayout,
+  vkCreateDescriptorPool/SetLayout, vkAllocateDescriptorSets,
+  vkUpdateDescriptorSets. `test_vulkan_swapchain.elf` draws a real
+  vkCmdDraw triangle: embedded glslc SPIR-V, vertex+UBO buffers,
+  descriptor-set UBO, D32 depth, per-image framebuffers/cmdbufs.
+- **vkMapMemory guest-window bounce (the Vulkan PCWFC)**: bounce inside
+  the 4 GiB direct window via mmap_alloc, seeded from the host mapping,
+  with push-before-submit/present, pull-after-waits, explicit
+  flush/invalidate ranges, and defensive release on free.
+- Neverball (Debian arm64) support batch: fixed-function GL thunk rows,
+  SDL math wrappers, SDL_ALLOC policy, widening/narrowing SIMD families
+  (SABDL/UABDL/SABAL/UABAL, SABD/UABD, SADDW family, ADDHN family,
+  saturating SQSHRN family, by-element multiply family).
+
+### Changed
+- Doc reorganization: all docs except README.md and AGENTS.md moved to
+  `docs/`; DISPLAY_THUNK.md is now local-only (gitignored).
+
 ## [1.5.4-alpha] — Tier-2 JIT: region/trace compilation (2026-08-19)
 
 The performance milestone (ROADMAP #14). Today every block flushes all

@@ -196,6 +196,14 @@ public:
     // instructions_executed (not the run-loop dispatch counter) and prints
     // block-end reasons so the codegen-quality levers stay visible mid-run.
     void dump_periodic_stats(double dt);
+    // BIFROST_STATS_PERIOD reporter thread (2026-08-21). The old check sat
+    // in run()'s outer loop, which STOPS ITERATING once a game's frame loop
+    // parks inside jit_call_helper's callee-dispatch loop — the reporter
+    // never evaluated during exactly the mid-run phases it exists for (and
+    // dump_periodic_stats silently no-oped under --no-jit). A detached-free
+    // background thread ticks on wall time regardless of which loop is hot.
+    std::thread stats_reporter_thread_;
+    std::atomic<bool> stats_reporter_stop_{false};
     // ── vCPU management ───────────────────────────────────────────────
     // Futex table: maps a guest address → (mutex, condvar, waiter count).
     // Used by clone-spawned threads for synchronization.

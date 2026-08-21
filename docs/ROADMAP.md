@@ -86,11 +86,15 @@ status, see [TESTS.md](TESTS.md).
     JavaBridge semantics if an ATL integration ever needs them;
     CriticalNative trampolines (v7 claim); guest signal forwarding
     through `getSignalHandler`.
-12. **Vulkan pipeline stage** — graphics pipelines + shader modules
-    (`vkCreateGraphicsPipelines`/`vkCreateShaderModule` deep marshal,
-    spirv module handling), `vkCmdDraw`/`vkCmdDrawIndexed` + descriptor
-    sets in a real frame, depth buffers, and a textured-triangle guest
-    demo.
+12. **[DONE 2026-08-21] Vulkan pipeline stage** — graphics pipelines +
+    shader modules (`vkCreateGraphicsPipelines`/`vkCreateShaderModule`
+    deep marshal, spirv module handling), `vkCmdDraw`/`vkCmdDrawIndexed`
+    + descriptor sets in a real frame, depth buffers, and a
+    textured-triangle guest demo. Shipped with the vkMapMemory
+    guest-window bounce (push-before-submit / pull-after-wait
+    coherence) and per-image framebuffers + command buffers; see
+    docs/CHANGELOG.md and `ctest_real/test_vulkan_swapchain.c`
+    (76 checks, JIT + interp, RADV).
 13. **Vulkan command-pool growth** — recycle per-frame command buffers
     (render onto every swapchain image, not just image 0) and add
     multi-frame fences + semaphore-based acquire/present sync so

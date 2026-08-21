@@ -241,7 +241,20 @@ void Emulator::dump_prof_snapshot() {
 // levers (avg instr/block, CALL_INTERP/BL_CALL caps, max_size) stay visible
 // DURING a run phase. Inert unless BIFROST_STATS_PERIOD is set.
 void Emulator::dump_periodic_stats(double dt) {
-    if (!jit_ || !jit_enabled_) return;
+    if (!jit_ || !jit_enabled_) {
+        // Interpreter mode (--no-jit): no JIT counters, but throughput and
+        // the syscall histogram are still useful. interp_count_ counts
+        // step() calls on the main CPU (benign racy read from the reporter
+        // thread — stats-grade accuracy only).
+        static uint64_t last_ic_ = 0;
+        uint64_t ic = interp_count_;
+        double mips = dt > 0 ? static_cast<double>(ic - last_ic_) / 1e6 / dt : 0.0;
+        last_ic_ = ic;
+        fprintf(stderr, "[%s] guest(interp): %.1f MIPS real (%llu instructions total)\n",
+                CODENAME, mips, static_cast<unsigned long long>(ic));
+        dump_syscall_histogram(dt);
+        return;
+    }
     uint64_t instr  = jit_->instructions_executed.load(std::memory_order_relaxed);
     uint64_t blocks = jit_->blocks_executed.load(std::memory_order_relaxed);
     uint64_t blocks_tr  = jit_->blocks_translated.load(std::memory_order_relaxed);
@@ -391,7 +404,17 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
             auto fn = jit->lookup_call_target(*emu, cpu->pc, ic);
             if (fn) {
                 uint64_t pcbefore = cpu->pc;
-                cpu->pc = fn(cpu, emu);
+                // Bounded-staleness stats (2026-08-21): count BL_CALL
+                // callee blocks into the shared TLS (see run_block) and
+                // batch-flush every 64K — a game's frame loop parked in
+                // this helper used to be invisible to the stats reporter.
+                FrostJIT::tls_stat_instr_ += ic;
+                if (__builtin_expect((++FrostJIT::tls_stat_exec_ & 0xFFFF) != 0, 1)) {
+                    cpu->pc = fn(cpu, emu);
+                } else {
+                    jit->flush_stat_tls();
+                    cpu->pc = fn(cpu, emu);
+                }
                 if (dbg_call_trace_) {
                     fprintf(stderr, "[DBG3] %llu: 0x%llx -> 0x%llx (fn=0x%llx sp=0x%llx x30=0x%llx)\n",
                             (unsigned long long)++dbg2_count, (unsigned long long)pcbefore,

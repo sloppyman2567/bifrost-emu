@@ -1101,6 +1101,34 @@ int Emulator::run() {
     // false positives while still catching true linked-list-cycle /
     // infinite-spin bugs.
     uint64_t last_progress_hash = 0;
+    // ── Periodic reporter thread (BIFROST_STATS_PERIOD=seconds) ────────
+    // MUST be a background thread, not an in-loop check: games park their
+    // frame loops inside jit_call_helper's callee-dispatch loop, so run()'s
+    // outer loop stops iterating right when mid-run profiling matters. The
+    // thread sleeps on wall time and calls dump_periodic_stats (which also
+    // chains the SIGPROF snapshot and syscall histogram). Inert unless the
+    // env var is set. Joined before run() returns.
+    const double stats_period_ = []() {
+        const char* s = getenv("BIFROST_STATS_PERIOD");
+        return s ? atof(s) : 0.0;
+    }();
+    if (stats_period_ > 0.0) {
+        stats_reporter_stop_.store(false, std::memory_order_relaxed);
+        stats_reporter_thread_ = std::thread([this, stats_period_]() {
+            auto last = std::chrono::steady_clock::now();
+            while (!stats_reporter_stop_.load(std::memory_order_relaxed)) {
+                // Sleep in small slices so run() can join quickly on exit.
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(std::min(stats_period_, 0.25)));
+                auto now = std::chrono::steady_clock::now();
+                double dt = std::chrono::duration<double>(now - last).count();
+                if (dt >= stats_period_ && main_cpu_.running) {
+                    dump_periodic_stats(dt);
+                    last = now;
+                }
+            }
+        });
+    }
     while (main_cpu_.running) {
         try {
             // Optional PC trace for debugging. Gated by env var so
@@ -1200,26 +1228,6 @@ int Emulator::run() {
             break;
         }
         count++;
-        // Periodic reporter (BIFROST_STATS_PERIOD=seconds). Prints real
-        // guest throughput + block-structure + SIGPROF buckets every period
-        // so steady-state AND phase-local behavior (startup/worldgen/load)
-        // can be measured without a clean guest exit. Inert unless set.
-        {
-            static const double period_ = []() {
-                const char* s = getenv("BIFROST_STATS_PERIOD");
-                return s ? atof(s) : 0.0;
-            }();
-            if (period_ > 0.0) {
-                static auto last_t_ = std::chrono::steady_clock::now();
-                auto now_t = std::chrono::steady_clock::now();
-                double dt = std::chrono::duration<double>(now_t - last_t_).count();
-                if (dt >= period_) {
-                    dump_periodic_stats(dt);
-                    dump_prof_snapshot();
-                    last_t_ = now_t;
-                }
-            }
-        }
         // Watchdog: if PC hasn't changed, increment same_pc_count.
         if (main_cpu_.pc == last_pc) {
             same_pc_count++;
@@ -1372,6 +1380,12 @@ int Emulator::run() {
         if (jit_ && jit_enabled_) {
             print_jit_stats();
         }
+    }
+    // Stop + join the periodic reporter before returning (it captures
+    // `this`; the Emulator must outlive it by construction, not by luck).
+    if (stats_reporter_thread_.joinable()) {
+        stats_reporter_stop_.store(true, std::memory_order_relaxed);
+        stats_reporter_thread_.join();
     }
     return main_cpu_.exit_code;
 }

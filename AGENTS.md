@@ -2643,3 +2643,39 @@ not musl-`-static`.
 - Remaining Vulkan gaps for real titles: sparse bindings, external
   memory, vkCmdBindTransformFeedbackBuffers etc. — all table rows
   already; nested-pointer shapes beyond these are additive arms.
+
+## Session History (2026-08-21) — stats reporter FIXED, debug probes dropped, docs reorganized
+
+- **BIFROST_STATS_PERIOD never printed mid-run — THREE stacked causes,
+  all fixed**: (1) the period check sat in run()'s outer loop, which
+  STOPS ITERATING once a game's frame loop parks inside
+  jit_call_helper's callee-dispatch loop — now a background reporter
+  thread ticks on wall time (sleeps ≤0.25s slices, joined before run()
+  returns so it never outlives the Emulator); (2)
+  `dump_periodic_stats` silently no-oped under `--no-jit` (`if (!jit_)
+  return;`) — now prints `guest(interp): N MIPS` from interp_count_ +
+  the syscall histogram; (3) the hot-path block/instruction counters
+  were function-local TLS flushed ONLY on run_block's slow path — a
+  fast-path-parked guest (last-block cache / inline cache / chains /
+  jit_call_helper) never flushed and every reader saw stale zeros
+  ("0.0 MIPS mid-game"). Counters moved to
+  `FrostJIT::tls_stat_exec_/tls_stat_instr_` (shared TLS, defined in
+  frostjit.cpp) with `flush_stat_tls()` batch-flushed every 64K
+  dispatches from BOTH run_block fast paths AND jit_call_helper's
+  lookup_call_target loop — one predictable branch per dispatch, NOT a
+  per-dispatch atomic (dispatch-loop contract preserved; bench_mips
+  0.358s unchanged). Verified: game mid-run shows 25.9 MIPS startup /
+  ~55 MIPS steady frame loop; interp bench shows ~62 MIPS; exit dump
+  also un-undercounted now. Do NOT move the reporter back into the run
+  loop or un-batch the flush.
+- **Debug probes dropped**: `BIFROST_VP_DBG` glViewport print
+  (gl_state.cpp) and the `[szdbg]` TEMP size probes +
+  `s_last_sdl_window_` (thunk.cpp) — the latter also carried an
+  unused-local-typedef warning.
+- **Docs reorganized**: every doc except README.md and AGENTS.md moved
+  to `docs/` (AGENTS.md must stay at the repo root — the agent harness
+  reads it there; do not move it). docs/DISPLAY_THUNK.md, docs/rules.md,
+  docs/context.md, docs/findings.md, docs/SESSION_SUMMARY.md are
+  gitignored (local-only notes). CHANGELOG gained the 2026-08-21
+  [Unreleased] section (CSEL fix, arity bugs, reporter, Vulkan
+  pipelines + vkMapMemory, Neverball batch); ROADMAP #12 marked DONE.

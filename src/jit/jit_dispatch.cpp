@@ -89,14 +89,24 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // to do two `lock xadd` atomics (~15-20 cycles each); with avg 4
     // instructions/block that was ~10 cycles of pure counter overhead per
     // guest instruction. Thread-locals are plain adds on the hot path.
-    thread_local uint64_t tls_exec_ = 0;
-    thread_local uint64_t tls_instr_ = 0;
+    // Bounded-staleness stats (2026-08-21): the fast paths below bump the
+    // SHARED TLS counters (tls_stat_exec_/tls_stat_instr_, also used by
+    // jit_call_helper) and batch-flush into the shared atomics every 64K
+    // dispatches — they used to reach the atomics ONLY via the slow path,
+    // so a guest parked in the fast paths (last-block cache / inline
+    // cache / chains / jit_call_helper) never flushed and
+    // BIFROST_STATS_PERIOD + the exit dump read stale zeros (the
+    // "0.0 MIPS mid-game" bug). One predictable branch per dispatch;
+    // NOT a per-dispatch atomic (dispatch-loop contract).
     // Entries are written pc+fn together (slow path), so a pc match alone
     // implies a valid fn — no redundant fn != nullptr test. The ~0ULL
     // empty sentinel is never a real guest PC (48-bit VAs).
     if (__builtin_expect(pc == tls_last_block_.pc, 1)) {
-        tls_exec_++;
-        tls_instr_ += tls_last_block_.instr_count;
+        tls_stat_instr_ += tls_last_block_.instr_count;
+        if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
+            return tls_last_block_.fn(&cpu, &emu);
+        }
+        flush_stat_tls();
         return tls_last_block_.fn(&cpu, &emu);
     }
     // 1.5.4-alpha: inline cache for block-to-block transitions.
@@ -110,8 +120,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         uint64_t (*cached_fn)(CPU*, Emulator*) = nullptr;
         int cached_count = 0;
         if (inline_cache_lookup(pc, &cached_fn, cached_count)) {
-            tls_exec_++;
-            tls_instr_ += cached_count;
+            tls_stat_instr_ += cached_count;
+            if (__builtin_expect((++tls_stat_exec_ & 0xFFFF) != 0, 1)) {
+                return cached_fn(&cpu, &emu);
+            }
+            flush_stat_tls();
             return cached_fn(&cpu, &emu);
         }
     }
@@ -134,10 +147,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     //
     // Flush the thread-local hot-path counters into the shared atomic
     // stats (slow path runs far less often than block dispatches).
-    blocks_executed.fetch_add(tls_exec_, std::memory_order_relaxed);
-    instructions_executed.fetch_add(tls_instr_, std::memory_order_relaxed);
-    tls_exec_ = 0;
-    tls_instr_ = 0;
+    flush_stat_tls();
     //
     // Per-thread state (watchdog, hotness) is thread-local — no lock
     // needed.
