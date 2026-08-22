@@ -5,6 +5,7 @@
 // host context state.
 #include "frost/gl_state.hpp"
 #include "core/cpu.h"
+#include <cmath>
 #include <cstring>
 
 namespace arm64emu {
@@ -43,6 +44,8 @@ void GLStateTracker::reset() {
     texture_bindings_.clear();
     pixel_store_unpack_alignment_ = 4;
     pixel_store_pack_alignment_ = 4;
+    depth_range_near_ = 0.0f;
+    depth_range_far_ = 1.0f;
     hint_fog_ = 0x1400;
     hint_generate_mipmap_ = 0x1400;
     hint_line_smooth_ = 0x1400;
@@ -232,6 +235,31 @@ void GLStateTracker::set_pixel_store_i(uint32_t pname, int param) {
     }
 }
 
+void GLStateTracker::set_depth_range(float near_val, float far_val) {
+    std::lock_guard<std::mutex> g(mu_);
+    // GL clamps depth-range arguments to [0, 1] — mirror the CLAMPED
+    // host state (also keeps the GLint query's float→int conversion in
+    // range; a NaN argument clamps to 0).
+    auto clamp01 = [](float v) {
+        if (std::isnan(v)) return 0.0f;
+        return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    };
+    depth_range_near_ = clamp01(near_val);
+    depth_range_far_ = clamp01(far_val);
+}
+
+int GLStateTracker::pixel_store_unpack_alignment() const {
+    std::lock_guard<std::mutex> g(mu_);
+    int a = pixel_store_unpack_alignment_;
+    return (a == 1 || a == 2 || a == 4 || a == 8) ? a : 4;
+}
+
+int GLStateTracker::pixel_store_pack_alignment() const {
+    std::lock_guard<std::mutex> g(mu_);
+    int a = pixel_store_pack_alignment_;
+    return (a == 1 || a == 2 || a == 4 || a == 8) ? a : 4;
+}
+
 void GLStateTracker::set_hint(uint32_t target, uint32_t mode) {
     std::lock_guard<std::mutex> g(mu_);
     switch (target) {
@@ -270,48 +298,15 @@ bool GLStateTracker::get_integerv_locked(uint32_t pname, int32_t& out_val) const
         case GL::CURRENT_PROGRAM:
             out_val = static_cast<int32_t>(current_program_);
             return true;
-        case GL::MAX_TEXTURE_SIZE:
-            out_val = 4096;
-            return true;
-        case GL::MAX_VERTEX_ATTRIBS:
-            out_val = 16;
-            return true;
-        case GL::MAX_TEXTURE_IMAGE_UNITS:
-            out_val = 8;
-            return true;
-        case GL::MAX_COMBINED_TEXTURE_IMAGE_UNITS:
-            out_val = 32;
-            return true;
-        case GL::MAX_VERTEX_TEXTURE_IMAGE_UNITS:
-            out_val = 0;
-            return true;
-        case GL::MAX_FRAGMENT_UNIFORM_COMPONENTS:
-            out_val = 1024;
-            return true;
-        case GL::MAX_VERTEX_UNIFORM_COMPONENTS:
-            out_val = 1024;
-            return true;
-        case GL::DEPTH_BITS:
-            out_val = 24;
-            return true;
-        case GL::STENCIL_BITS:
-            out_val = 8;
-            return true;
-        case GL::RED_BITS:
-        case GL::GREEN_BITS:
-        case GL::BLUE_BITS:
-        case GL::ALPHA_BITS:
-            out_val = 8;
-            return true;
-        case GL::SUBPIXEL_BITS:
-            out_val = 4;
-            return true;
-        case GL::SAMPLE_BUFFERS:
-            out_val = 0;
-            return true;
-        case GL::SAMPLES:
-            out_val = 0;
-            return true;
+        // NOTE: implementation limits and framebuffer formats (MAX_*,
+        // *_BITS, SAMPLES, …) are deliberately NOT intercepted — the
+        // tracker has no faithful mirror of them, and hardcoded answers
+        // undersell the real host GPU (MAX_TEXTURE_SIZE 4096 on a host
+        // that reports 16384, MAX_VERTEX_TEXTURE_IMAGE_UNITS 0 → engines
+        // disable their vertex-texture-fetch path). Return false so the
+        // dispatcher forwards the query to the host GL, which is
+        // authoritative. Only state the tracker actually mirrors belongs
+        // here (bindings, active unit, current program).
         default:
             return false;
     }
@@ -396,9 +391,12 @@ bool GLStateTracker::try_handle_get_integerv(uint32_t pname, int32_t* out_ptr) c
             return true;
         }
         case GL::DEPTH_RANGE: {
+            // GLint variant: glGetIntegerv ROUNDS floating-point state to
+            // the nearest integer (Khronos glGet type-conversion rules);
+            // a plain cast truncates and diverges from the host driver.
             std::lock_guard<std::mutex> g(mu_);
-            out_ptr[0] = 0;  // near
-            out_ptr[1] = 1;  // far
+            out_ptr[0] = static_cast<int32_t>(std::lround(depth_range_near_));
+            out_ptr[1] = static_cast<int32_t>(std::lround(depth_range_far_));
             return true;
         }
         case GL::COLOR_WRITEMASK: {
@@ -495,8 +493,8 @@ bool GLStateTracker::try_handle_get_floatv(uint32_t pname, float* out_ptr) const
         }
         case GL::DEPTH_RANGE: {
             std::lock_guard<std::mutex> g(mu_);
-            out_ptr[0] = 0.0f;
-            out_ptr[1] = 1.0f;
+            out_ptr[0] = depth_range_near_;
+            out_ptr[1] = depth_range_far_;
             return true;
         }
         default: {
@@ -572,7 +570,7 @@ bool GLStateTracker::tracks_state(const std::string& name) {
         "glStencilMaskSeparate", "glUseProgram", "glBindBuffer",
         "glBindBufferBase", "glBindBufferRange",
         "glBindTexture", "glBindFramebuffer", "glBindRenderbuffer",
-        "glPixelStorei", "glHint",
+        "glPixelStorei", "glHint", "glDepthRangef",
     };
     return kTracked.count(name) != 0;
 }
@@ -741,14 +739,15 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
         return;
     }
     if (name == "glBindBufferBase" || name == "glBindBufferRange") {
-        // target, index, buffer[, offset, size] — the general binding map
-        // keys by target; last-index-wins is accurate enough for the
-        // glMapBuffer bounce (glMapBuffer on an indexed target uses the
-        // base binding, which is what glBindBufferBase sets).
+        // glBindBufferBase(target, index, buffer)
+        // glBindBufferRange(target, index, buffer, offset, size)
+        // — buffer is arg 2 in BOTH (the general binding map keys by
+        // target; last-index-wins is accurate enough for the glMapBuffer
+        // bounce). The old code read args[4] for Range, which is the
+        // SIZE — buffer_bindings_ then held garbage and glMapBuffer on
+        // an indexed target resolved the wrong buffer.
         uint32_t target = static_cast<uint32_t>(args[0]);
-        uint32_t buffer = (name == "glBindBufferBase")
-                              ? static_cast<uint32_t>(args[2])
-                              : static_cast<uint32_t>(args[4]);
+        uint32_t buffer = static_cast<uint32_t>(args[2]);
         set_buffer_binding(target, buffer);
         return;
     }
@@ -773,6 +772,14 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
     if (name == "glHint") {
         set_hint(static_cast<uint32_t>(args[0]),
                  static_cast<uint32_t>(args[1]));
+        return;
+    }
+    if (name == "glDepthRangef") {
+        // glDepthRangef(GLclampf near, GLclampf far) — float-only row,
+        // so the values arrive via fv[] (the float dispatch path).
+        float n = (n_float > 0) ? fv[0] : 0.0f;
+        float f = (n_float > 1) ? fv[1] : 1.0f;
+        set_depth_range(n, f);
         return;
     }
 }

@@ -221,6 +221,12 @@ public:
     void set_texture_binding(uint32_t target, uint32_t texture);
     void set_pixel_store_i(uint32_t pname, int param);
     void set_hint(uint32_t target, uint32_t mode);
+    void set_depth_range(float near_val, float far_val);
+    // Bounce-sizing helpers: the thunk's texture/readpixels bounce size
+    // must account for GL_UNPACK_ALIGNMENT / GL_PACK_ALIGNMENT row
+    // padding (default 4) or the host overreads/overwrites the bounce.
+    int pixel_store_unpack_alignment() const;
+    int pixel_store_pack_alignment() const;
 
     // ── Query handlers ───────────────────────────────────────────────
     // These are called from GraphicThunk::dispatch before forwarding to
@@ -314,6 +320,9 @@ private:
     // Pixel store / hint state.
     int pixel_store_unpack_alignment_ = 4;
     int pixel_store_pack_alignment_ = 4;
+    // Depth range (glDepthRangef; desktop glDepthRange is not a thunk row).
+    float depth_range_near_ = 0.0f;
+    float depth_range_far_ = 1.0f;
     uint32_t hint_fog_ = 0x1400; // GL_DONT_CARE
     uint32_t hint_generate_mipmap_ = 0x1400; // GL_DONT_CARE
     uint32_t hint_line_smooth_ = 0x1400;

@@ -999,6 +999,62 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   pointer is nonzero and < 4 GiB, writes the UBO through it directly,
   flushes explicitly, and renders 3 frames (76 checks, JIT + interp).
 
+## Session History (2026-08-21) — graphics-thunk review pass (bounce padding + depth range)
+
+- **Review of the uncommitted gl_state/thunk/memory.h diff found THREE real
+  issues; all FIXED in-place.**
+  1. **Pixel bounce sizing ignored row alignment (host heap overflow).**
+     The diff added `GLStateTracker::pixel_store_unpack/pack_alignment()`
+     getters with a comment announcing a fix ("the host overreads/overwrites
+     the bounce") but NEVER WIRED THEM IN — zero callers, dead code, bug
+     unfixed. All four pixel SizeKind paths (TEX2D/TEXSUB/TEX3D/READPIXELS)
+     sized bounces to packed `w*h*channels*type_sz` while the host driver
+     accesses `(h-1)*stride+row` bytes (rows strided to GL_UNPACK/
+     GL_PACK_ALIGNMENT). On the bounce path (out-of-window pointers),
+     glReadPixels WROTE past our exact-sized vector (e.g. w=1 h=480 RGB_UB:
+     1919 B written into a 1440 B allocation); uploads overread it.
+     Fix: `pixel_extent_` lambda in translate_ptr computes the padded extent
+     from the tracked alignments (fallback 4); `reserve(extent)` before
+     `resize(packed)` so the ALLOCATION covers every byte the host may
+     stride to while size() stays packed for an exact writeback (guest-
+     visible behavior byte-for-byte unchanged). Catch path switched
+     assign→std::fill (assign could reallocate below the reserved extent).
+     NOTE: in-window pointers take the DIRECT-ALIAS path (no bounce) — the
+     host touching spec-extent guest memory there matches real hardware;
+     only the bounce path needed this.
+  2. **set_depth_range stored raw values unclamped** — GL clamps to [0,1];
+     unclamped storage diverged from host state AND fed potentially huge/
+     NaN floats into static_cast<int32_t> (UB) at the DEPTH_RANGE integerv
+     query. Now clamped (NaN→0) in set_depth_range.
+  3. **glGetIntegerv(GL_DEPTH_RANGE) truncated instead of rounding** — the
+     comment claimed "cast to GLint (GL spec)" but Khronos says GetIntegerv
+     "rounds floating-point values to the nearest integer"; truncation
+     diverges whenever frac≥0.5. Now std::lround + honest comment. Known
+     residual nuance (documented, NOT implemented): DEPTH_RANGE strictly
+     belongs to the linearly-mapped normalized family (1.0→INT_MAX scale);
+     the float query form is what engines actually use — revisit only if a
+     guest compares int-form output against host.
+- **Verified correct by review (no action)**: glBindBufferRange/Base
+  args[2]=buffer fix (old args[4] read the SIZE — real bug fixed);
+  MAP_BUFFER placeholder reservation + drop_placeholder_ atomicity;
+  GLFW deliver_glfw_callbacks_ snapshot + by-value key/mouse state copies
+  (cursor/fb/winsz/focus iterators are never dereferenced after runner
+  calls); cache_host_bytes_ wrap clearing BOTH live_/freed_; limits
+  forwarding (MAX_*/BITS removed from tracker → host authoritative).
+- **Skipped as pre-existing (not introduced by this diff)**:
+  find_allocation TOCTOU double-free window (shared-lock lookup then unique-
+  lock untrack — needs a locked lookup-and-remove API if ever hardened);
+  glfw last-state maps not erased when glfw_cbs_[window] drops at line ~933
+  (bounded, cleared at shutdown); UNMAP racing an in-flight MAP can leak a
+  bounce until glDeleteBuffers (racy multi-threaded guest UB);
+  GL_UNPACK_ROW_LENGTH/PACK_ROW_LENGTH/SKIP_* untracked so stride modeling
+  is incomplete for guests that use them with out-of-window pixels (needs
+  new tracker state).
+- Verified: build clean (0 warnings), quick suite **201/201**, and on live
+  DISPLAY=:0 / RADV: test_sdl_gl_triangle ALL PASS exit 0 (30 frames),
+  test_sdl_gl_mapbuffer ALL PASS (21 checks), test_sdl_gl_modern ALL PASS
+  (17 checks).
+
 ## Verification
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)

@@ -119,6 +119,17 @@ public:
     // Remove an allocation from tracking AND reclaim its pages + address
     // range so a future mmap_alloc can reuse it (Linux munmap semantics).
     void untrack_allocation(uint64_t addr, uint64_t size);
+    // Exact-address lookup in the allocation map (start → page-aligned
+    // size). Returns {false, 0} when `addr` is not a tracked allocation
+    // start. Use this instead of allocations_snapshot() for point
+    // lookups (SDL_free/realloc bounce bookkeeping) — the snapshot
+    // copies the whole map under the lock.
+    std::pair<bool, uint64_t> find_allocation(uint64_t addr) const {
+        std::shared_lock<std::shared_mutex> g(mu_);
+        auto it = allocations_.find(addr);
+        if (it == allocations_.end()) return {false, 0};
+        return {true, it->second};
+    }
     // ── Atomics ───────────────────────────────────────────────────────
     // Used by LSE atomics (CAS) and futex. Returns true if swapped.
     bool atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired);

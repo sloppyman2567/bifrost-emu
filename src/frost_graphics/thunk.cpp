@@ -133,9 +133,13 @@ struct GraphicThunkImpl {
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
         GraphicThunk::TRAMPOLINE_SIZE * GraphicThunk::MAX_SYMBOLS;  // 64 KiB
     // Guest-visible scratch page for host→guest string returns
-    // (glGetString, SDL_GetError, …). Ring-allocated.
+    // (glGetString, SDL_GetError, …). Ring-allocated. 64 KiB so the
+    // wrap (which invalidates every outstanding cached pointer) needs
+    // an implausible amount of live string traffic — SDL semantics
+    // promise SDL_GetError/GetClipboardText results stay valid until
+    // SDL_free, and a wrap hands those addresses to new strings.
     uint64_t string_cache_base = 0;
-    static constexpr uint64_t STRING_CACHE_SIZE = 4096;
+    static constexpr uint64_t STRING_CACHE_SIZE = 65536;
     uint32_t string_cache_off = 0;
     // 2026-08: SDL_free bookkeeping for the string cache. SDL_GetClipboardText
     // / SDL_GetError / joystick-name returns hand the guest a pointer INTO
@@ -276,18 +280,21 @@ struct GraphicThunkImpl {
         }
         return nullptr;
     }
-    uint64_t cache_host_string_(const char* host_str) {
-        if (!mem || !string_cache_base || !host_str) return 0;
-        size_t len = std::strlen(host_str) + 1;
+    // Unified ring-cache allocator for host→guest byte blobs. Registers
+    // the slot in string_cache_live_ (so SDL_free can reclaim it) and
+    // clears the live/freed maps on wrap — BOTH properties the old
+    // MIX_VERSION arm bypassed, desyncing free-slot reuse.
+    uint64_t cache_host_bytes_(const void* bytes, size_t len) {
+        if (!mem || !string_cache_base || !bytes || len == 0) return 0;
         if (len > STRING_CACHE_SIZE) len = STRING_CACHE_SIZE;
-        // First-fit a freed slot large enough to hold the string, so an
+        // First-fit a freed slot large enough to hold the blob, so an
         // SDL_free of a previously cached string actually reuses the space.
         for (auto it = string_cache_freed_.begin();
              it != string_cache_freed_.end(); ++it) {
             if (it->second >= len) {
                 uint32_t off = it->first;
                 string_cache_freed_.erase(it);
-                mem->write(string_cache_base + off, host_str, len);
+                mem->write(string_cache_base + off, bytes, len);
                 string_cache_live_[off] = static_cast<uint32_t>(len);
                 return string_cache_base + off;
             }
@@ -300,11 +307,15 @@ struct GraphicThunkImpl {
             string_cache_freed_.clear();
         }
         uint64_t guest = string_cache_base + string_cache_off;
-        mem->write(guest, host_str, len);
+        mem->write(guest, bytes, len);
         string_cache_live_[string_cache_off] = static_cast<uint32_t>(len);
         string_cache_off = static_cast<uint32_t>(
             (string_cache_off + len + 7u) & ~7u);
         return guest;
+    }
+    uint64_t cache_host_string_(const char* host_str) {
+        if (!host_str) return 0;
+        return cache_host_bytes_(host_str, std::strlen(host_str) + 1);
     }
     // SDL_free on a pointer that may live in the string cache (a guest
     // address, NOT a host heap allocation). Reclaim the cache slot so the
@@ -351,6 +362,16 @@ struct GraphicThunkImpl {
         glfw_last_error_code_ = 0;
         glfw_last_error_desc_.clear();
         if (glfw_cbs_.empty()) return;
+        // Reentrancy: the runner below executes GUEST code, which can
+        // re-enter the thunk (glfwSetKeyCallback unregistering itself —
+        // the one-shot "press any key" pattern — or a nested poll). That
+        // mutates glfw_cbs_ (erase on last-slot-unregister) and the
+        // last-state maps, invalidating any iterator we hold. So iterate
+        // a snapshot of the callback registrations, and never hold a
+        // reference into the last-state maps across a runner call.
+        std::vector<std::pair<uint64_t, GlfwWindowCbs>> cbs_snapshot;
+        cbs_snapshot.reserve(glfw_cbs_.size());
+        for (const auto& kv : glfw_cbs_) cbs_snapshot.push_back(kv);
         using GetPosFn = void (*)(void*, double*, double*);
         using GetKeyFn = int (*)(void*, int);
         using GetSizeFn = void (*)(void*, int*, int*);
@@ -366,7 +387,9 @@ struct GraphicThunkImpl {
         constexpr int GLFW_KEY_LAST = 348;
         constexpr int GLFW_MOUSE_BUTTON_LAST = 7;
         constexpr int GLFW_RELEASE = 0, GLFW_PRESS = 1;
-        for (auto& [window, cbs] : glfw_cbs_) {
+        for (const auto& entry : cbs_snapshot) {
+            const uint64_t window = entry.first;
+            const GlfwWindowCbs& cbs = entry.second;
             void* w = reinterpret_cast<void*>(window);
             int64_t iargs[8];
             double fargs[2];
@@ -399,14 +422,17 @@ struct GraphicThunkImpl {
                     glfw_key_last_[window] = std::move(seed);
                     continue;
                 }
-                auto& last = it->second;
+                // Copy the per-key state by value: the runner below can
+                // re-enter delivery and insert into this map (rehash →
+                // a held reference would dangle). Write back after.
+                auto lastv = it->second;
                 // glfwGetKey only accepts keys >= GLFW_KEY_SPACE (32);
                 // polling 0-31 makes host GLFW fire "Invalid key" errors.
                 for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++) {
                     int cur = getkey(w, k);
                     uint8_t pressed = (cur == GLFW_PRESS) ? 1 : 0;
-                    if (last[k] != pressed) {
-                        last[k] = pressed;
+                    if (lastv[k] != pressed) {
+                        lastv[k] = pressed;
                         iargs[0] = window; iargs[1] = k; iargs[2] = 0;  // scancode
                         iargs[3] = pressed ? GLFW_PRESS : GLFW_RELEASE; // action
                         iargs[4] = 0;                                   // mods
@@ -417,6 +443,7 @@ struct GraphicThunkImpl {
                         glfw_cb_runner_(cpu, cbs.key, iargs, 5, nullptr, 0);
                     }
                 }
+                glfw_key_last_[window] = std::move(lastv);
             }
             // ── Mouse button state ─────────────────────────────────────
             if (cbs.mouse && getbtn) {
@@ -446,7 +473,9 @@ struct GraphicThunkImpl {
                         glfw_cb_runner_(cpu, cbs.mouse, iargs, 4, nullptr, 0);
                     }
                 }
-                it->second = last;
+                // By-key write-back (the runner may have re-entered and
+                // rehashed this map — never hold `it` across it).
+                glfw_mouse_last_[window] = last;
             }
             // ── Framebuffer size ───────────────────────────────────────
             if (cbs.framebuffer && getfbs) {
@@ -688,21 +717,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (pol == thunk::Policy::MIX_VERSION) {
             // SDL_version is {Uint8 major, Uint8 minor, Uint8 patch}.
             static const uint8_t kVer[8] = {2, 0, 1, 0, 0, 0, 0, 0};
-            if (impl_->mem && impl_->string_cache_base) {
-                if (impl_->string_cache_off + 8 > impl_->STRING_CACHE_SIZE)
-                    impl_->string_cache_off = 0;
-                uint64_t guest = impl_->string_cache_base + impl_->string_cache_off;
-                impl_->mem->write(guest, kVer, sizeof(kVer));
-                impl_->string_cache_off = static_cast<uint32_t>(
-                    (impl_->string_cache_off + 8 + 7u) & ~7u);
-                if (dbg().thunk_trace) {
-                    fprintf(stderr, "[thunk] Mix_Linked_Version -> {2,0,1} @ 0x%llx\n",
-                            static_cast<unsigned long long>(guest));
-                }
-                cpu.regs[0] = guest;
-                return 0;
+            uint64_t guest = impl_->cache_host_bytes_(kVer, sizeof(kVer));
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] Mix_Linked_Version -> {2,0,1} @ 0x%llx\n",
+                        static_cast<unsigned long long>(guest));
             }
-            cpu.regs[0] = 0;
+            cpu.regs[0] = guest;
             return 0;
         }
         if (pol == thunk::Policy::MIX_OPEN_AUDIO) {
@@ -740,15 +760,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     uint64_t oldp = cpu.regs[0], newsz = cpu.regs[1];
                     ret = impl_->mem->mmap_alloc(newsz);
                     if (oldp && ret) {
-                        for (auto& [a, sz] : impl_->mem->allocations_snapshot()) {
-                            if (a == oldp) {
-                                uint64_t n = std::min(sz, newsz);
-                                uint8_t* hp = impl_->mem->guest_to_host_ptr(oldp);
-                                uint8_t* hq = impl_->mem->guest_to_host_ptr(ret);
-                                if (hp && hq) memcpy(hq, hp, n);
-                                impl_->mem->untrack_allocation(oldp, sz);
-                                break;
-                            }
+                        // Point lookup — the old code copied the whole
+                        // allocation map per call (O(live allocs)).
+                        auto [found, oldsz] = impl_->mem->find_allocation(oldp);
+                        if (found) {
+                            uint64_t n = std::min(oldsz, newsz);
+                            uint8_t* hp = impl_->mem->guest_to_host_ptr(oldp);
+                            uint8_t* hq = impl_->mem->guest_to_host_ptr(ret);
+                            if (hp && hq) memcpy(hq, hp, n);
+                            impl_->mem->untrack_allocation(oldp, oldsz);
                         }
                     }
                 }
@@ -770,12 +790,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 uint64_t p = cpu.regs[0];
                 bool freed = false;
                 if (p) {
-                    for (auto& [a, sz] : impl_->mem->allocations_snapshot()) {
-                        if (a == p) {
-                            impl_->mem->untrack_allocation(p, sz);
-                            freed = true;
-                            break;
-                        }
+                    auto [found, sz] = impl_->mem->find_allocation(p);
+                    if (found) {
+                        impl_->mem->untrack_allocation(p, sz);
+                        freed = true;
                     }
                 }
                 if (!freed && impl_->string_cache_base)
@@ -1205,8 +1223,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 return 0;  // GL: map of an unbound buffer → NULL
             }
             {
-                // Re-check + insert under the same lock so two threads
-                // mapping the same buffer can't double-allocate.
+                // Reserve the buffer key with a PLACEHOLDER (bounce=0)
+                // under the lock — this is what actually makes the
+                // double-map check atomic. The old code only re-checked
+                // here and inserted much later (after mmap_alloc + host
+                // GL queries), so two threads could both pass the check,
+                // both allocate a bounce, and the second insert would
+                // silently orphan the first. Holders see bounce=0 and
+                // skip writeback/untrack until the real mapping lands.
                 std::lock_guard<std::mutex> g(impl_->mu);
                 if (impl_->gl_buffer_mappings_.count(buffer)) {
                     if (dbg().thunk_trace)
@@ -1214,6 +1238,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                 entry.name.c_str(), buffer);
                     return 0;  // GL: mapping an already-mapped buffer → NULL
                 }
+                impl_->gl_buffer_mappings_[buffer] =
+                    GraphicThunkImpl::BufferMapping{0, 0, 0, target, access};
             }
             if (!is_range) {
                 // Whole-buffer map: query the host for the buffer size.
@@ -1223,10 +1249,21 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     target, kGLBufferSize, &size);
                 length = (size > 0) ? static_cast<uint64_t>(size) : 0;
             }
+            // Slow-path failure cleanup: drop OUR placeholder (and only
+            // the placeholder — bounce==0 — so a real mapping installed
+            // by a racing map after our unmap can't be nuked) or the
+            // buffer stays "mapped" forever.
+            auto drop_placeholder_ = [&]() {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                auto it = impl_->gl_buffer_mappings_.find(buffer);
+                if (it != impl_->gl_buffer_mappings_.end() && it->second.bounce == 0)
+                    impl_->gl_buffer_mappings_.erase(it);
+            };
             if (length == 0) {
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] %s: buffer %u has zero size\n",
                             entry.name.c_str(), buffer);
+                drop_placeholder_();
                 return 0;
             }
             uint64_t bounce = impl_->mem->mmap_alloc(length);
@@ -1235,6 +1272,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     fprintf(stderr, "[thunk] %s: mmap_alloc(%llu) failed\n",
                             entry.name.c_str(),
                             static_cast<unsigned long long>(length));
+                drop_placeholder_();
                 return 0;
             }
             // Seed the bounce from the host buffer if the guest may read it.
@@ -1422,6 +1460,23 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // Default 64 KiB covers modest textures/VBO uploads; the SIZE
         // column of the spec overrides it where the exact size is known.
         size_t kBounce = 65536;
+        // Padded row extent the host driver actually accesses on the
+        // bounce (rows strided to the tracked UNPACK/PACK alignment).
+        // The ALLOCATION must cover it even though the vector's size()
+        // stays at the packed logical size, so the writeback still
+        // copies exactly the guest's logical bytes.
+        uint64_t pad_extent = 0;
+        auto pixel_extent_ = [&](bool upload, uint64_t h,
+                                 uint64_t row_bytes) -> uint64_t {
+            int align = 4;
+            if (impl_->gl_state_tracker_) {
+                align = upload
+                    ? impl_->gl_state_tracker_->pixel_store_unpack_alignment()
+                    : impl_->gl_state_tracker_->pixel_store_pack_alignment();
+            }
+            uint64_t stride = (row_bytes + align - 1) & ~(uint64_t)(align - 1);
+            return h ? (h - 1) * stride + row_bytes : 0;
+        };
         const thunk::SizeKind sk = entry.spec ? entry.spec->size
                                               : thunk::SizeKind::NONE;
         switch (sk) {
@@ -1460,7 +1515,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     default: break;                                  // UNSIGNED_BYTE etc.
                 }
                 uint64_t sz = w * h * channels * type_sz;
-                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h,
+                                               w * channels * type_sz);
+                }
             }
             break;
         case thunk::SizeKind::TEXSUB:
@@ -1484,7 +1543,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     default: break;                                  // UNSIGNED_BYTE etc.
                 }
                 uint64_t sz = w * h * channels * type_sz;
-                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h,
+                                               w * channels * type_sz);
+                }
             }
             break;
         case thunk::SizeKind::TEX3D:
@@ -1509,7 +1572,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     default: break;                                  // UNSIGNED_BYTE etc.
                 }
                 uint64_t sz = w * h * d * channels * type_sz;
-                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h * d,
+                                               w * channels * type_sz);
+                }
             }
             break;
         case thunk::SizeKind::PITCH_H:
@@ -1542,7 +1609,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     default: break;                                  // UNSIGNED_BYTE etc.
                 }
                 uint64_t sz = w * h * channels * type_sz;
-                if (sz > 0 && sz < (64ull << 20)) kBounce = static_cast<size_t>(sz);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(false, h,
+                                               w * channels * type_sz);
+                }
             }
             break;
         case thunk::SizeKind::QUEUEAUDIO:
@@ -1555,11 +1626,19 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         default:
             break;
         }
+        // Reserve capacity for the padded extent BEFORE resize so the
+        // allocation covers every byte the host may stride to, while
+        // size() stays packed for an exact writeback.
+        if (pad_extent > static_cast<uint64_t>(kBounce) &&
+            pad_extent < (64ull << 20))
+            bounce->reserve(static_cast<size_t>(pad_extent));
         bounce->resize(kBounce);
         try {
             impl_->mem->read(a, bounce->data(), kBounce);
         } catch (...) {
-            bounce->assign(kBounce, 0);
+            // Zero in place — assign() could reallocate and shrink the
+            // reserved padded capacity below the host's access extent.
+            std::fill(bounce->begin(), bounce->end(), 0);
         }
         *guest_orig = a;
         *need_wb = true;
