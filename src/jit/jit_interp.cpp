@@ -120,7 +120,9 @@ void jit_thunk_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
     auto* athunk = emu->graphics().audio_thunk();
     if (athunk && athunk->enabled()) {
         int64_t r = athunk->dispatch(*cpu, sym_id);
-        if (r == 0) return;
+        // AudioThunk arms return the REAL guest x0 value (0 is a
+        // legitimate success — e.g. snd_pcm_open). Only -ENOENT means
+        // "not my symbol".
         if (r != -ENOENT) {
             cpu->regs[0] = static_cast<uint64_t>(r);
             return;

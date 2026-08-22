@@ -627,6 +627,11 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   LAZILY: only for blocks containing LOAD_MEM/STORE_MEM/ATOMIC/
   SIMD_LD16/SIMD_ST16. Don't unconditionally re-emit it — it's ~3-4 cycles
   of setup on every entry for blocks that never touch the direct window.
+- **Thunk return-value polarity (audio, 1.5.5-alpha)**: the shared SVC
+  chain treats `return 0` as "handled, do NOT write x0". AudioThunk arms
+  instead return the REAL guest x0 (0 is often success), so BOTH call
+  sites' AUDIO branch must write x0 whenever dispatch != -ENOENT. Any new
+  AudioThunk arm must follow this; do not reintroduce an `r==0` fast path.
 - Native syscall dispatch: the `IROp::SVC` codegen in jit_codegen_branch.cpp
   does NOT call the interpreter for non-vDSO syscalls. It emits
   `emit_call_native_svc` → `jit_native_svc(emu, cpu, svc_pc)`, which sets
@@ -1109,14 +1114,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **208 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **210 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **208 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 203),
+  (interactive + real-world are the standard default) = **210 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 205),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
@@ -2749,6 +2754,63 @@ not musl-`-static`.
 - Remaining Vulkan gaps for real titles: sparse bindings, external
   memory, vkCmdBindTransformFeedbackBuffers etc. — all table rows
   already; nested-pointer shapes beyond these are additive arms.
+
+## Session History (2026-08-22) — working audio path (Linux + Android)
+
+- **The audio thunk was rewritten from "forward to host libs" to
+  "convert to AudioEngine pushes"** (plan:
+  `~/.opencode/plan/android-linux-audio.md`). The old approach stubbed
+  everything because host libasound/libpulse deref opaque structs with
+  HOST pointers. Every arm now converts its call to plain interleaved
+  sample pushes on the shared `Audio` ring via the new
+  `Audio::write_interleaved(fmt, rate, ch, data, bytes)` (U8/S16/S24-in-
+  32/F32 conversion + linear resample + mono→stereo dup; opens the device
+  on first use with the PUSH format so WAV-dump mode records guest
+  layout). `bytes_pushed()` is the headless test counter.
+- **CRITICAL thunk-dispatch contract discovered**: the shared SVC chain
+  (misc.cpp:961 / jit_interp.cpp:122) treats a thunk's `return 0` as
+  "handled, do NOT write x0" — successes that legitimately return 0 left
+  STALE x0 in the guest (guest saw a trampoline address for snd_pcm_open).
+  The AUDIO branch now always writes x0 unless dispatch returns -ENOENT
+  ("not my symbol"). AudioThunk arms return the REAL guest x0 value; only
+  -ENOENT means fall-through to the next thunk. Do not "restore" the old
+  r==0 fast path on the audio branch.
+- **Arms implemented** (name-keyed in AudioThunk::dispatch, host audio
+  libs never called): SDL2 (SDL_OpenAudio/OpenAudioDevice deep-translate
+  of the guest SDL_AudioSpec — freq@0 i32, format@4 u16, channels@6,
+  samples@8, callback@16, userdata@24, size 32 — queue mode via
+  SDL_QueueAudio/GetQueuedAudioSize/ClearQueuedAudio); ALSA subset
+  (snd_pcm_open writes a fake handle into *pcmp; hw_params setters
+  record fmt/rate/ch; writei → engine push returning frames);
+  Pulse simple (pa_sample_spec {u32 fmt,u32 rate,u8 ch} at New);
+  OpenAL buffer/source state machine (push-on-play approximation;
+  AL_FORMAT tags 0x1100-0x1103 + float 0x10010/0x10011).
+- **Android**: AAudio builder pattern is flat-scalar rows recorded
+  host-side; openStream allocates a direct-window bounce and starts a
+  per-stream PUMP THREAD (10 ms tick) that fires the GUEST data callback
+  through the borrow-CPU runner (`wire_thunk_audio_runner_` →
+  `call_guest_function`, main CPU) and pushes bounce→ring. Blocking-mode
+  AAudioStream_write pushes directly. OpenSL ES uses SYNTHETIC VTABLES
+  built in guest RAM: objects are `[itf_word]→[vtable of __osl_*
+  trampolines]`; SL_IID_* symbols are registered rows whose TRAMPOLINE
+  ADDRESSES double as IID identity tags (guests pass them by pointer to
+  GetInterface — pointer equality, never dereferenced). BufferQueue
+  Enqueue pushes immediately then fires the registered callback INLINE
+  on the calling guest thread (streaming-player approximation).
+- Guest callbacks NEVER cross to host libs (GLFW *_CB rule). Pump
+  threads join at Emulator teardown (~Emulator → athunk->shutdown();
+  also ~AudioThunkImpl defensive). Bounce buffers free via
+  untrack_allocation on close (glDeleteBuffers pattern).
+- `is_thunk_supported_lib_` gained libaaudio/libOpenSLES (dlopen filter).
+- Tests: `ctest_real/test_linux_audio.c` (16 checks: ALSA subset + SDL2
+  queue + Pulse simple + /dev/dsp) and `ctest_real/test_android_audio.c`
+  (21 checks: AAudio builder/open/state/write/close + full OpenSL object
+  walk incl. callback-fire count). Both HEADLESS-SAFE (WAV backend counts
+  bytes). Registered in run_tests.sh as linux_audio/android_audio.
+- Guest-test gotcha re-confirmed: the internal dlopen svc number is
+  0x1002 (NOT 0x1001 — that's TLS alloc); dlsym is 0x1003.
+- Verified: build clean, quick suite **205/205**, FULL suite **210/210**,
+  both new tests ALL PASS under JIT.
 
 ## Session History (2026-08-22) — SMOV + saturating-int SIMD family (interp)
 

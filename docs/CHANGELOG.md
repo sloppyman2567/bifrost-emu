@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [Unreleased] — Working audio path (Linux + Android), audio-thunk dispatch arms (2026-08-22)
+
+### Added
+- **AudioEngine core** (`src/audio/`): `Audio::write_interleaved(fmt, rate,
+  ch, data, bytes)` — format-converting push (U8/S16/S24-in-32/F32) with
+  linear resample + mono→stereo dup onto the shared SPSC ring; opens the
+  device on first use with the push format; `bytes_pushed()` test counter;
+  `clear_queued()` for SDL_ClearQueuedAudio.
+- **AudioThunk dispatch arms** (`audio_thunk.cpp` rewritten): every guest
+  audio API now converts to plain sample pushes on the AudioEngine ring
+  (host libasound/libpulse are NEVER called). Arms: SDL2 queue + callback
+  devices (guest SDL_AudioSpec deep-translate; guest callbacks fire via the
+  borrow-CPU runner from per-stream pump threads into direct-window bounce
+  buffers); ALSA subset (open/hw_params/writei/drain/close); Pulse simple;
+  OpenAL buffer/source state machine (push-on-play approximation); AAudio
+  builder pattern + openStream + data-callback pump + blocking write +
+  state/format queries; OpenSL ES via synthetic vtables built in guest RAM
+  (`__osl_*` methods + SL_IID_* identity tags keyed by trampoline address).
+- `wire_thunk_audio_runner_` (Emulator) wires engine + borrow-CPU callback
+  runner; pumps joined at Emulator teardown. New tests: `test_linux_audio`
+  (16 checks), `test_android_audio` (21 checks) — both headless-safe.
+  Suite 210 pass / quick 205.
+
+### Fixed
+- **Thunk return-value contract**: the dispatcher treated a thunk's
+  `return 0` as "handled, don't touch x0", so audio successes returning 0
+  (snd_pcm_open etc.) left stale x0 in the guest. The AUDIO branch at both
+  call sites (misc.cpp + jit_interp.cpp) now always writes x0 unless the
+  arm returns -ENOENT ("not my symbol").
+- `is_thunk_supported_lib_` gained libaaudio/libOpenSLES so Android guests
+  can dlopen them.
+
 ## [Unreleased] — CSEL-cmov landing, Vulkan graphics pipelines + vkMapMemory, stats reporter fix (2026-08-21)
 
 ### Fixed

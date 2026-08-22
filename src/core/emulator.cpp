@@ -51,6 +51,8 @@ Emulator::~Emulator() {
     // SDL threads so their joinable std::threads aren't destroyed here.
     // Idempotent — run() already cleared sdl_threads_ in the normal path.
     stop_sdl_threads();
+    // Stop audio callback pump threads BEFORE the memory/CPU teardown.
+    if (auto* at = graphics_.audio_thunk()) at->shutdown();
 }
 void* Emulator::excl_monitor_shard_pub(uint64_t addr) {
     return &excl_monitor_shards_[excl_shard_idx(addr)];
@@ -272,7 +274,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             // also consult the other thunks. (See set_thunk_resolver
             // extension below.)
             if (auto* athunk = graphics_.audio_thunk()) {
-                if (athunk->enabled()) athunk->init(mem_);
+                if (athunk->enabled()) { athunk->init(mem_); wire_thunk_audio_runner_(); }
             }
             if (auto* dthunk = graphics_.display_thunk()) {
                 if (dthunk->enabled()) dthunk->init(mem_);
@@ -723,7 +725,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             }
         }
         if (auto* athunk = graphics_.audio_thunk()) {
-            if (athunk->enabled()) athunk->init(mem_);
+            if (athunk->enabled()) { athunk->init(mem_); wire_thunk_audio_runner_(); }
         }
         if (auto* dthunk = graphics_.display_thunk()) {
             if (dthunk->enabled()) dthunk->init(mem_);
@@ -1552,6 +1554,18 @@ void Emulator::wire_thunk_android_runner_() {
         return call_guest_function(cpu, fn, iargs, n, nullptr, 0);
     });
 }
+// ── wire_thunk_audio_runner_ — AudioEngine + guest-callback runner ─────
+void Emulator::wire_thunk_audio_runner_() {
+    auto* athunk = graphics_.audio_thunk();
+    if (!athunk || !athunk->enabled()) return;
+    athunk->wire(&audio_, &main_cpu_,
+                 [this](CPU& cpu, uint64_t fn, const int64_t* iargs,
+                        size_t n) -> uint64_t {
+                     return call_guest_function(cpu, fn, iargs, n,
+                                                nullptr, 0);
+                 });
+}
+
 void Emulator::ensure_thunk_linker_() {
     if (dyn_linker_) return;
     dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
@@ -1563,7 +1577,7 @@ void Emulator::ensure_thunk_linker_() {
         }
     }
     if (auto* at = graphics_.audio_thunk()) {
-        if (at->enabled()) at->init(mem_);
+        if (at->enabled()) { at->init(mem_); wire_thunk_audio_runner_(); }
     }
     if (auto* dt = graphics_.display_thunk()) {
         if (dt->enabled()) dt->init(mem_);

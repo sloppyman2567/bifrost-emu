@@ -85,6 +85,12 @@ void Audio::close() {
 ssize_t Audio::write(const uint8_t* data, size_t len) {
     if (!opened_) return -1;
     std::lock_guard<std::mutex> lock(mu_);
+    return write_unlocked_(data, len);
+}
+// write_unlocked_ — core of write(); caller holds mu_. Also feeds the
+// bytes_pushed_ counter (single accounting point).
+ssize_t Audio::write_unlocked_(const uint8_t* data, size_t len) {
+    bytes_pushed_.fetch_add(len, std::memory_order_relaxed);
     // Always buffer the data for potential WAV dump.
     buffer_.insert(buffer_.end(), data, data + len);
 #if defined(BIFROST_USE_SDL2)
@@ -145,6 +151,96 @@ int Audio::ioctl(uint32_t cmd, uint64_t arg) {
             }
             return -ENOSYS;
     }
+}
+// ── write_interleaved() — format-converting push (AudioEngine) ─────────
+// Converts any supported guest format/rate to the device format and hands
+// the result to write(). Opens the device on first use with the PUSH
+// format so headless/WAV-dump mode records the guest's own layout.
+namespace {
+inline float load_sample(uint32_t fmt, const uint8_t* p) {
+    switch (fmt) {
+        case PCM_FMT_U8:  return (static_cast<int>(p[0]) - 128) / 128.0f;
+        case PCM_FMT_S16: {
+            int16_t v;
+            memcpy(&v, p, 2);
+            return v / 32768.0f;
+        }
+        case PCM_FMT_S24: {
+            // signed 24-bit in low bytes of a 32-bit container
+            int32_t v = static_cast<int32_t>(p[0]) |
+                        (static_cast<int32_t>(p[1]) << 8) |
+                        (static_cast<int32_t>(p[2]) << 16);
+            if (v & 0x800000) v -= 0x1000000;
+            return v / 8388608.0f;
+        }
+        case PCM_FMT_F32: {
+            float v;
+            memcpy(&v, p, 4);
+            return v;
+        }
+        default: return 0.0f;
+    }
+}
+inline void store_sample(uint8_t dev_fmt, uint8_t* p, float s) {
+    if (s > 1.0f) s = 1.0f;
+    if (s < -1.0f) s = -1.0f;
+    switch (dev_fmt) {
+        case 1: p[0] = static_cast<uint8_t>(s * 127.0f + 128.0f); break;
+        case 2: {
+            int16_t v = static_cast<int16_t>(lrintf(s * 32767.0f));
+            memcpy(p, &v, 2);
+            break;
+        }
+        case 4: memcpy(p, &s, 4); break;
+        default: break;
+    }
+}
+}  // namespace
+ssize_t Audio::write_interleaved(uint32_t fmt, uint32_t rate, uint8_t ch,
+                                 const uint8_t* data, size_t bytes) {
+    uint8_t fsz = pcm_fmt_size(fmt);
+    if (!fsz || ch == 0 || rate == 0) return -1;
+    size_t frame_sz_in = static_cast<size_t>(fsz) * ch;
+    size_t frames_in = bytes / frame_sz_in;
+    if (frames_in == 0) return 0;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!opened_) open(rate, ch,
+                       fmt == PCM_FMT_S24 ? 4 : pcm_fmt_size(fmt));
+    if (!opened_) return -1;
+    uint8_t dfz = sample_size_;
+    uint8_t dch = channels_;
+    uint32_t drate = sample_rate_;
+    uint32_t dev_fmt = (dfz == 1) ? PCM_FMT_U8
+                     : (dfz == 4) ? PCM_FMT_F32 : PCM_FMT_S16;
+    // Fast path: same format, same rate, same channel count.
+    if (fmt == dev_fmt && ch == dch && rate == drate) {
+        ssize_t r = write_unlocked_(data, frames_in * frame_sz_in);
+        return r < 0 ? -1 : static_cast<ssize_t>(frames_in);
+    }
+    // Convert (+ optionally resample) into conv_ then push.
+    size_t frames_out = (rate == drate) ? frames_in
+        : static_cast<size_t>(static_cast<uint64_t>(frames_in) * drate / rate);
+    if (frames_out == 0) return 0;
+    size_t out_bytes = frames_out * static_cast<size_t>(dfz) * dch;
+    conv_.resize(out_bytes);
+    double step = static_cast<double>(rate) / drate;  // input frames per output frame
+    for (size_t o = 0; o < frames_out; o++) {
+        // Linear interpolation between surrounding input frames when
+        // downsampling/upsampling; clamped index keeps ends clean.
+        double pos = o * step;
+        size_t i0 = static_cast<size_t>(pos);
+        if (i0 >= frames_in) i0 = frames_in - 1;
+        size_t i1 = (i0 + 1 < frames_in) ? i0 + 1 : i0;
+        float frac = static_cast<float>(pos - i0);
+        for (uint8_t c = 0; c < dch; c++) {
+            uint8_t sc = (c < ch) ? c : static_cast<uint8_t>(ch - 1);  // mono→stereo dup
+            float a = load_sample(fmt, data + (i0 * ch + sc) * fsz);
+            float b = load_sample(fmt, data + (i1 * ch + sc) * fsz);
+            store_sample(dev_fmt, &conv_[(o * dch + c) * dfz], a + (b - a) * frac);
+        }
+    }
+    ssize_t r = write_unlocked_(conv_.data(), out_bytes);
+    return r < 0 ? -1 : static_cast<ssize_t>(frames_out);
 }
 // ── backend_name() — diagnostic ────────────────────────────────────────
 const char* Audio::backend_name() const {

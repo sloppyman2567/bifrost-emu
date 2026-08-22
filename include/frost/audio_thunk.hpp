@@ -46,6 +46,12 @@
 namespace arm64emu {
 class Memory;
 class CPU;
+class Audio;
+// Borrow-CPU guest callback runner (same shape as the Android/GLFW wiring):
+// invokes a GUEST function pointer with integer args on the interpreter and
+// returns x0. Never hand guest function pointers to host libraries.
+using AudioCbRunner = std::function<uint64_t(CPU&, uint64_t fn,
+                                             const int64_t* iargs, size_t n)>;
 // Forward-declare the pimpl.
 struct AudioThunkImpl;
 class AudioThunk {
@@ -66,6 +72,13 @@ public:
         const std::function<void(const std::string&, uint64_t)>& cb) const;
     // Dispatch a thunk call. Returns 0 on success, -errno on failure.
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
+    // Wire the AudioEngine + borrow-CPU callback runner. Must be called
+    // after init() (Emulator::ensure_thunk_linker_ does this). The engine
+    // pointer is borrowed (owned by Emulator); runner may be null, in
+    // which case guest audio callbacks are dropped.
+    void wire(Audio* engine, CPU* cb_cpu, AudioCbRunner runner);
+    // Stop all callback pump threads (called at shutdown before teardown).
+    void shutdown();
     // Diagnostics.
     size_t symbol_count() const;
     uint64_t trampoline_base() const;

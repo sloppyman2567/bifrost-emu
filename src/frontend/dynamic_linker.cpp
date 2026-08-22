@@ -2895,6 +2895,10 @@ bool DynamicLinker::is_thunk_supported_lib_(const std::string& soname) {
         || starts_with(soname, "libopenal")) {
         return true;
     }
+    // Android audio (1.5.5-alpha): AAudio + OpenSL ES.
+    if (starts_with(soname, "libaaudio") || starts_with(soname, "libOpenSLES")) {
+        return true;
+    }
     // Display (1.5.4-alpha).
     if (starts_with(soname, "libvulkan")
         || starts_with(soname, "libwayland-")

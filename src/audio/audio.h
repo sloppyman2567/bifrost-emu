@@ -34,6 +34,24 @@
 #include <string>
 #include <vector>
 namespace arm64emu {
+// Sample-format tags for write_interleaved(). Kept as plain constants so
+// thunk arms can pass SDL/ALSA/OpenAL/AAudio enum values through a tiny
+// mapping without pulling host headers in.
+enum PcmFormat : uint32_t {
+    PCM_FMT_U8  = 1,   // unsigned 8-bit
+    PCM_FMT_S16 = 2,   // signed 16-bit host-endian
+    PCM_FMT_S24 = 3,   // signed 24-bit in 4-byte container (low 3 bytes)
+    PCM_FMT_F32 = 4,   // IEEE float32
+};
+inline uint8_t pcm_fmt_size(uint32_t f) {
+    switch (f) {
+        case PCM_FMT_U8: return 1;
+        case PCM_FMT_S16: return 2;
+        case PCM_FMT_F32: return 4;
+        case PCM_FMT_S24: return 4;  // 24-in-32 container
+        default: return 0;
+    }
+}
 class Audio {
 public:
     Audio();
@@ -68,6 +86,30 @@ public:
     // Captures ALL bytes written since open(), even if a real audio
     // device was active (useful for regression testing).
     bool dump_to_wav(const std::string& path);
+    // ── AudioEngine extensions (1.5.5-alpha) ──────────────────────────
+    // Format-converting push used by all thunk arms (SDL2/ALSA/Pulse/
+    // OpenAL/AAudio/OpenSL). `data` is interleaved samples in `fmt` at
+    // `rate` Hz / `ch` channels. Converts to the device format and
+    // linearly resamples when rate differs. Opens the device on first
+    // use (defaults to the push format). Returns FRAMES accepted.
+    ssize_t write_interleaved(uint32_t fmt, uint32_t rate, uint8_t ch,
+                              const uint8_t* data, size_t bytes);
+    // Total PCM bytes accepted through write()/write_interleaved()
+    // since construction (test/diagnostic counter).
+    uint64_t bytes_pushed() const { return bytes_pushed_.load(std::memory_order_relaxed); }
+    // Frames currently queued in the SDL2 ring (0 on other backends).
+    size_t ring_queued_bytes() const {
+        return ring_tail_.load(std::memory_order_relaxed) -
+               ring_head_.load(std::memory_order_relaxed);
+    }
+    // Drop any queued-but-unplayed samples (SDL_ClearQueuedAudio).
+    void clear_queued() {
+#if defined(BIFROST_USE_SDL2)
+        std::lock_guard<std::mutex> g(sdl_mu_);
+        ring_head_.store(ring_tail_.load(std::memory_order_relaxed),
+                         std::memory_order_relaxed);
+#endif
+    }
 private:
     bool opened_ = false;
     uint32_t sample_rate_ = 44100;
@@ -75,6 +117,7 @@ private:
     uint8_t sample_size_ = 2;  // 16-bit
     int fd_ = -1;              // raw PCM output fd (-1 if none)
     std::vector<uint8_t> buffer_;  // accumulated PCM data for WAV dump
+    std::atomic<uint64_t> bytes_pushed_{0};  // test/diagnostic counter
     std::mutex mu_;            // protects buffer_, channels_, sample_rate_
     // ── SDL2 audio backend state ───────────────────────────
     // The SDL2 audio device ID. 0 = no SDL2 device. Stored as uint32_t
@@ -84,6 +127,7 @@ private:
     // (producer); the SDL2 callback reads (consumer). Relaxed atomics
     // for the head/tail indices — no mutex on the hot path.
     std::vector<uint8_t> ring_;
+    std::vector<uint8_t> conv_;  // write_interleaved() scratch (under mu_)
     std::atomic<size_t> ring_head_{0};  // consumer (SDL2 callback)
     std::atomic<size_t> ring_tail_{0};  // producer (guest write)
     size_t ring_mask_ = 0;              // capacity - 1 (capacity is power of 2)
@@ -91,6 +135,8 @@ private:
     // Open the SDL2 audio device with the current sample_rate/channels/
     // sample_size. Returns true on success. Sets sdl_audio_dev_.
     bool open_sdl2_();
+    // Core of write(); caller holds mu_. Also feeds bytes_pushed_.
+    ssize_t write_unlocked_(const uint8_t* data, size_t len);
     // Close the SDL2 audio device. No-op if not open.
     void close_sdl2_();
     // SDL2 audio callback (static, called from SDL2's audio thread).

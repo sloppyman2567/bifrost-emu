@@ -959,7 +959,9 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             auto* athunk = emu.graphics_.audio_thunk();
             if (athunk && athunk->enabled()) {
                 int64_t r = athunk->dispatch(cpu, sym_id);
-                if (r == 0) return 0;
+                // AudioThunk arms return the REAL guest x0 value (0 is a
+                // legitimate success there — e.g. snd_pcm_open). Only
+                // -ENOENT means "not my symbol".
                 if (r != -ENOENT) {
                     ret_host(r);
                     return 0;

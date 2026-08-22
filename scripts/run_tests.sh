@@ -30,7 +30,7 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 205 tests. Quick suite = 200 (skip benchmarks).
+# Standard suite = 210 tests. Quick suite = 205 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -361,6 +361,14 @@ INTEGRATION_TESTS=(
     # native_app_glue .so's. No display needed (AConfiguration + looper
     # fd readiness + queue empty path all headless).
     "android_activity|ctest_real/test_android_activity.elf||30|ALL PASS"
+    # Audio thunk arms (2026-08-22): ALSA subset / SDL2 queue / Pulse
+    # simple / OSS front doors → shared AudioEngine ring. Headless-safe
+    # (WAV-dump backend counts bytes; no host device needed).
+    "linux_audio|ctest_real/test_linux_audio.elf||30|ALL PASS"
+    # Android audio (2026-08-22): AAudio builder/open/write/close +
+    # OpenSL ES synthetic-vtable object model (Enqueue + RegisterCallback).
+    # Headless-safe.
+    "android_audio|ctest_real/test_android_audio.elf||30|ALL PASS"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing
