@@ -1114,13 +1114,13 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **210 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **211 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **210 pass /
+  (interactive + real-world are the standard default) = **211 pass /
   0 fail / 0 skip**. Subsets: `--quick` (no benches, 205),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
@@ -3047,3 +3047,25 @@ not musl-`-static`.
   5. The secondary ifunc resolver in `ensure_thunk_linker_` zeroes its
      result when the instruction limit trips (never return a
      mid-execution register value as a function pointer).
+
+## Session History (2026-08-22) — mambo Vulkan e2e test with real audio
+
+- **`ctest_real/test_mambo_vulkan.c` committed (`67e71c6`)**: SDL2 window +
+  Vulkan textured quad (Matikanetannhauser texture from
+  `assets/mambo/matikanetannhauser_race.webp`, embedded SPIR-V) exercising
+  the full deep-marshal pipeline, plus one-shot audio through the ALSA
+  thunk arm. The audio is REAL decoded PCM from
+  `assets/mambo/mambo_sfx.mp3`, embedded as `ctest_real/mambo_audio.h`
+  (44.1 kHz s16 stereo, ffmpeg offline decode — guests have no MP3
+  decoder; the embed-header pattern matches mambo_tex.h/test_vulkan_spv.h).
+  An earlier version synthesized a sine/noise melody — replaced.
+- **Audio ring capacity 64 KiB → 256 KiB** (`src/audio/audio.cpp`
+  RING_CAPACITY): ~1.5 s @44.1k s16 stereo so burst pushes (the test
+  writes all PCM at once in 16 KiB chunks) never drop samples.
+- **SDL_Vulkan_CreateSurface arity fixed** (`thunk_dp.txt`/`opgen_thunk.hpp`):
+  `ii` → `iip` — the trailing `VkSurfaceKHR*` out-pointer must be
+  translated or host SDL writes through a raw guest address.
+- Source assets tracked under `assets/mambo/`. Registered as
+  `mambo_vulkan` in run_tests.sh (needs DISPLAY + Vulkan, exit 77 skip);
+  default suite now **211**, quick 206. Verified live on DISPLAY=:0/RADV:
+  ALL PASS, "MAMBO VULKAN TEST PASSED — ¡MAMBO!", rc=0.
