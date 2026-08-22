@@ -77,6 +77,7 @@ static void print_banner() {
         "    --jit-threshold N  interpret for N insns then switch to JIT\n"
         "    --rootfs PATH      set rootfs for dynamic linking (BIFROST_ROOT)\n"
         "    --config PATH      load config from PATH\n"
+        "    --android PATH     run a NativeActivity .so (ANativeActivity_onCreate)\n"
         "    --print-config     print resolved config and exit\n"
         "    -V, --version      show version and exit\n"
         "    -h, --help         show this message\n"
@@ -275,6 +276,43 @@ int main(int argc, char** argv) {
             continue;
         }
         if (a == "--bifrost" || a == "--rainbow") { print_rainbow(); arg_i++; continue; }
+        if (a == "--android") {
+            if (arg_i + 1 >= argc) {
+                fprintf(stderr, "bifrost-emu: --android requires a PATH argument\n");
+                return 2;
+            }
+            // --android libfoo.so runs a NativeActivity .so as the main
+            // image. We steal the rest of argv as guest argv[0..] so the
+            // rest of main can reuse the same argv vector.
+            std::string android_so = argv[arg_i + 1];
+            std::vector<std::string> guest_argv;
+            guest_argv.push_back(android_so);
+            for (int i = arg_i + 2; i < argc; i++) guest_argv.push_back(argv[i]);
+            if (raw_tty) set_raw_terminal();
+            Emulator emu;
+            // Mirror the normal path's CLI-over-config precedence
+            // (applied below the loop there; here the branch exits early).
+            emu.set_verbose(verbose || cfg.log_verbose);
+            emu.set_trace(debug || cfg.log_trace);
+            emu.set_brk_verbose(quiet ? false : cfg.log_brk_verbose);
+            // use_jit only ever DISABLES against the config value (--jit
+            // cannot re-enable a config-disabled JIT), matching the
+            // normal path's `if (!use_jit) cfg.jit_enabled = false`.
+            if (use_jit && cfg.jit_enabled) emu.enable_jit();
+            emu.set_jit_threshold(jit_threshold ? jit_threshold
+                                                : cfg.jit_threshold);
+            if (cfg.forward_host_signals) emu.install_host_signal_handlers();
+            try {
+                emu.load_android_activity(android_so, guest_argv);
+                int code = emu.run_android();
+                restore_terminal();
+                return code;
+            } catch (const std::exception& e) {
+                restore_terminal();
+                fprintf(stderr, "bifrost-emu: %s\n", e.what());
+                return 1;
+            }
+        }
         if (a.size() >= 1 && a[0] == '-' && a.size() > 1) {
             fprintf(stderr, "bifrost-emu: unknown option: %s (try --help)\n", a.c_str());
             return 2;

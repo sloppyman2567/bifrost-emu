@@ -62,6 +62,10 @@ public:
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
+    // Android --android driver: ensure the host SDL window exists eagerly
+    // (so ANativeWindow_fromSurface returns a valid shim without a prior
+    // guest ANativeWindow call). Returns the host window pointer or null.
+    void* ensure_android_window();
     static constexpr uint64_t SYSCALL_NUMBER = 0x1000;
     static constexpr uint64_t TRAMPOLINE_SIZE = 16;
     static constexpr uint64_t MAX_SYMBOLS = 2048;  // 32 KiB page

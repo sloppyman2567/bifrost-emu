@@ -44,6 +44,34 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   unused-typedef warning).
 
 ### Added
+- **Android NativeActivity lifecycle layer v2 (2026-08-22)**: `AndroidSurfaceManager` now
+  synthesizes an ANativeActivity + 16-entry callback table in guest
+  memory, fires `onCreate/onStart/onResume/focus/inputQueue/windowCreated`
+  through the borrow-CPU runner (same save/restore+sentinel pattern as
+  GLFW callbacks), and provides a full `ALooper` registry (real
+  `::poll()` on the resolved host fd + input-queue attachments) and
+  `AInputQueue` event store (32-slot table, `0xA90003…` handles;
+  `AMotionEvent_getX` writes the float to guest `v0` because a float
+  return lives in S0 not X0). `SDL_PollEvent` → `ACTION_DOWN/UP/MOVE`
+  + `FINGER*` → `AKeyEvent` via a `SDL_Keycode→AKEYCODE_*` table;
+  `AConfiguration` stubs return 160 dpi / SDK 34 / `en`/`US`; `__android_log_*`
+  formats with a minimal `%-`translator (`%s` translates guest pointers).
+  `kAndroidSonames` now covers `liblog.so`; `DisplayThunk::ensure_android_window()`
+  eagerly arms the window for the `--android` driver. New driver
+  (`--android libfoo.so`, `Emulator::load_android_activity`/`run_android`)
+  boots `native_app_glue` `.so`s without ART/Java; guest test
+  `ctest_real/test_android_activity.elf` (29 checks, headless-safe) added
+  to the suite. Verified: `BIFROST_ANDROID_TAP=1 ./bifrost-emu --android
+  /tmp/test_android_native.so` walks the full lifecycle and renders
+  (`NATIVE ALL PASS`). Review fixes: `pollOnce` now fires one callback
+  and returns `POLL_CALLBACK` (was draining like `pollAll`), the
+  indexed motion getters bounds-check a guest-passed pointer index
+  before the signed compare (OOB read via int32 truncation), the
+  run deadline is opt-in (`BIFROST_ANDROID_TIMEOUT_SECS`; a real game
+  must not be killed after 30 s), the `--android` CLI block honors
+  pre-placed flags (`--no-jit --android x.so` used to ignore them),
+  and the secondary ifunc resolver zeroes its result when the
+  instruction limit trips.
 - **Full ASLR (completes the 1.5.4 heap-only randomization)**: ET_DYN
   executables now load at `Memory::pie_base()` — 0x400000 plus a
   page-granular per-process jitter of up to 128 MiB (~15 bits), kept

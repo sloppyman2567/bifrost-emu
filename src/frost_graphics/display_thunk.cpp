@@ -148,6 +148,20 @@ DisplayProxy* DisplayThunk::proxy() {
     if (!impl_ || !impl_->initialized) return nullptr;
     return impl_->proxy_.get();
 }
+void* DisplayThunk::ensure_android_window() {
+    if (!impl_ || !impl_->mem) return nullptr;
+    if (!impl_->proxy_) {
+        impl_->proxy_ = std::make_unique<DisplayProxy>();
+        impl_->proxy_->set_memory(impl_->mem);
+    }
+    if (!impl_->proxy_->ready()) impl_->proxy_->init(800, 600, impl_->mem);
+    if (!impl_->proxy_->ready()) return nullptr;
+    auto& mgr = frost::AndroidSurfaceManager::instance();
+    mgr.set_memory(impl_->mem);
+    mgr.set_host_sdl_window(impl_->proxy_->host_window());
+    mgr.host_native_window();
+    return impl_->proxy_->host_window();
+}
 void DisplayThunk::register_function_(const std::string& lib,
                                         const std::string& sym,
                                         void* host_fn,
@@ -271,11 +285,356 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // ── Android NativeActivity surface layer (ANDROID_WINDOW) ────────
-    // ANativeWindow shims backed by the DisplayProxy host SDL window.
-    // The window argument is a GUEST shim handle (raw integer, never
+    // v1: ANativeWindow shims backed by the DisplayProxy host SDL window
+    // (the window argument is a GUEST shim handle — raw integer, never
     // translated). fromSurface lazily initializes the proxy so a pure
-    // Android app (no X11 calls of its own) still gets a host window.
+    // Android app still gets a host window.
+    // v2 (2026-08): the framework plumbing
+    // (ALooper/AInputQueue/event getters/AConfiguration/liblog stubs) is
+    // dispatched here too and must NOT require the proxy — glue code
+    // calls AConfiguration_* before any window exists.
     if (entry.flags & THUNK_ANDROID_WINDOW) {
+        auto& mgr = frost::AndroidSurfaceManager::instance();
+        if (impl_->mem) mgr.set_memory(impl_->mem);
+        const std::string& n = entry.name;
+
+        auto set_f32 = [&](float f) {
+            std::memcpy(&cpu.v_lo[0], &f, sizeof(float));
+            cpu.v_hi[0] = 0;
+            cpu.regs[0] = 0;
+        };
+        static constexpr uint64_t kFakeConfig = 0xA90004000005ULL;
+        // Guest NUL-string reader (up to 1 KiB; tolerant of unmapped).
+        auto guest_str = [&](uint64_t addr) -> std::string {
+            if (!addr || !impl_->mem) return {};
+            std::string s;
+            char tmp[64];
+            for (size_t off = 0; off < 1024;) {
+                size_t want = std::min(sizeof(tmp), size_t(1024 - off));
+                try {
+                    impl_->mem->read(addr + off, tmp, want);
+                } catch (...) {
+                    break;
+                }
+                size_t i = 0;
+                for (; i < want; i++) {
+                    if (tmp[i] == '\0') {
+                        s.append(tmp, i);
+                        return s;
+                    }
+                }
+                s.append(tmp, want);
+                off += want;
+            }
+            return s;
+        };
+
+        // ── Framework plumbing: no host window required ───────────────
+        if (n.rfind("ALooper_", 0) == 0) {
+            if (n == "ALooper_prepare") {
+                cpu.regs[0] = mgr.looper_handle();
+            } else if (n == "ALooper_acquire" || n == "ALooper_release") {
+                cpu.regs[0] = 0;
+            } else if (n == "ALooper_pollOnce" || n == "ALooper_pollAll") {
+                int timeout = static_cast<int>(static_cast<int32_t>(cpu.regs[0]));
+                int ofd = -1, oev = 0;
+                void* odata = nullptr;
+                // pollAll drains callback-mode registrations internally;
+                // pollOnce fires ONE callback and reports POLL_CALLBACK (-2).
+                int ident = mgr.looper_poll(cpu, timeout, &ofd, &oev, &odata,
+                                            n == "ALooper_pollAll");
+                if (cpu.regs[1] && impl_->mem) {
+                    int32_t v = ofd;
+                    impl_->mem->write(cpu.regs[1], &v, sizeof(v));
+                }
+                if (cpu.regs[2] && impl_->mem) {
+                    int32_t v = oev;
+                    impl_->mem->write(cpu.regs[2], &v, sizeof(v));
+                }
+                if (cpu.regs[3] && impl_->mem) {
+                    uint64_t v = reinterpret_cast<uintptr_t>(odata);
+                    impl_->mem->write(cpu.regs[3], &v, sizeof(v));
+                }
+                cpu.regs[0] = static_cast<uint64_t>(
+                    static_cast<int64_t>(ident));
+            } else if (n == "ALooper_addFd") {
+                cpu.regs[0] = static_cast<uint64_t>(mgr.looper_add_fd(
+                    cpu.regs[0], static_cast<int>(cpu.regs[1]),
+                    static_cast<int>(cpu.regs[2]),
+                    static_cast<int>(cpu.regs[3]), cpu.regs[4],
+                    reinterpret_cast<void*>(cpu.regs[5])));
+            } else if (n == "ALooper_removeFd") {
+                cpu.regs[0] = static_cast<uint64_t>(mgr.looper_remove_fd(
+                    cpu.regs[0], static_cast<int>(cpu.regs[1])));
+            } else if (n == "ALooper_wake") {
+                mgr.looper_wake(cpu.regs[0]);
+                cpu.regs[0] = 0;
+            } else {
+                cpu.regs[0] = static_cast<uint64_t>(-22);
+            }
+            return 0;
+        }
+        if (n.rfind("AInputQueue_", 0) == 0) {
+            if (n == "AInputQueue_attachLooper") {
+                mgr.queue_attach_looper(cpu.regs[0], cpu.regs[1],
+                                        static_cast<int>(cpu.regs[2]),
+                                        cpu.regs[3],
+                                        reinterpret_cast<void*>(cpu.regs[4]));
+                cpu.regs[0] = 0;
+            } else if (n == "AInputQueue_detachLooper") {
+                mgr.queue_detach_looper(cpu.regs[0]);
+                cpu.regs[0] = 0;
+            } else if (n == "AInputQueue_getEvent") {
+                uint64_t evh = 0;
+                int rc = mgr.queue_get_event(cpu.regs[0], &evh);
+                if (rc == 0 && cpu.regs[1] && impl_->mem) {
+                    impl_->mem->write(cpu.regs[1], &evh, sizeof(evh));
+                }
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(rc));
+            } else if (n == "AInputQueue_preDispatchEvent") {
+                cpu.regs[0] = static_cast<uint64_t>(
+                    mgr.queue_pre_dispatch(cpu.regs[0], cpu.regs[1]));
+            } else if (n == "AInputQueue_finishEvent") {
+                mgr.queue_finish_event(cpu.regs[0], cpu.regs[1]);
+                cpu.regs[0] = 0;
+            } else {
+                cpu.regs[0] = static_cast<uint64_t>(-22);
+            }
+            return 0;
+        }
+        if (n.rfind("AInputEvent_", 0) == 0) {
+            if (n == "AInputEvent_getType")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.event_type(cpu.regs[0]));
+            else if (n == "AInputEvent_getDeviceId")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.event_device_id(cpu.regs[0]));
+            else if (n == "AInputEvent_getSource")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.event_source(cpu.regs[0]));
+            else
+                cpu.regs[0] = 0;
+            return 0;
+        }
+        if (n.rfind("AMotionEvent_", 0) == 0) {
+            if (n == "AMotionEvent_getAction")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.motion_action(cpu.regs[0]));
+            else if (n == "AMotionEvent_getPointerCount")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.motion_pointer_count(cpu.regs[0]));
+            else if (n == "AMotionEvent_getDownTime")
+                cpu.regs[0] = static_cast<uint64_t>(
+                    static_cast<int64_t>(mgr.motion_down_time(cpu.regs[0])));
+            else if (n == "AMotionEvent_getEventTime")
+                cpu.regs[0] = static_cast<uint64_t>(
+                    static_cast<int64_t>(mgr.motion_event_time(cpu.regs[0])));
+            else if (n == "AMotionEvent_getEdgeFlags")
+                cpu.regs[0] = 0;
+            else if (n == "AMotionEvent_getXPrecision" || n == "AMotionEvent_getYPrecision")
+                set_f32(1.0f);
+            else if (n == "AMotionEvent_getHistorySize")
+                cpu.regs[0] = 0;
+            else if (n == "AMotionEvent_getPointerId")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.motion_pointer_id(
+                    cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getX")
+                set_f32(mgr.motion_x(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getY")
+                set_f32(mgr.motion_y(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getRawX")
+                set_f32(mgr.motion_x(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getRawY")
+                set_f32(mgr.motion_y(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getPressure")
+                set_f32(mgr.motion_pressure(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getSize")
+                set_f32(mgr.motion_size(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getTouchMajor")
+                set_f32(mgr.motion_touch_major(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getTouchMinor")
+                set_f32(mgr.motion_touch_minor(cpu.regs[0], static_cast<size_t>(cpu.regs[1])));
+            else if (n == "AMotionEvent_getAxisValue")
+                set_f32(mgr.motion_axis_value(cpu.regs[0],
+                                              static_cast<int>(cpu.regs[1]),
+                                              static_cast<size_t>(cpu.regs[2])));
+            else
+                cpu.regs[0] = 0;
+            return 0;
+        }
+        if (n.rfind("AKeyEvent_", 0) == 0) {
+            if (n == "AKeyEvent_getAction")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_action(cpu.regs[0]));
+            else if (n == "AKeyEvent_getKeyCode")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_code(cpu.regs[0]));
+            else if (n == "AKeyEvent_getMetaState")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_meta_state(cpu.regs[0]));
+            else if (n == "AKeyEvent_getRepeatCount")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_repeat_count(cpu.regs[0]));
+            else if (n == "AKeyEvent_getScanCode")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_scan_code(cpu.regs[0]));
+            else if (n == "AKeyEvent_getFlags")
+                cpu.regs[0] = static_cast<uint64_t>(mgr.key_flags(cpu.regs[0]));
+            else if (n == "AKeyEvent_getDownTime")
+                cpu.regs[0] = static_cast<uint64_t>(
+                    static_cast<int64_t>(mgr.key_down_time(cpu.regs[0])));
+            else if (n == "AKeyEvent_getEventTime")
+                cpu.regs[0] = static_cast<uint64_t>(
+                    static_cast<int64_t>(mgr.key_event_time(cpu.regs[0])));
+            else
+                cpu.regs[0] = 0;
+            return 0;
+        }
+        if (n.rfind("AConfiguration_", 0) == 0) {
+            if (n == "AConfiguration_new") {
+                cpu.regs[0] = kFakeConfig;
+            } else if (n == "AConfiguration_getLanguage") {
+                if (impl_->mem && cpu.regs[1]) {
+                    const char s[] = "en";
+                    impl_->mem->write(cpu.regs[1], s, sizeof(s));
+                }
+                cpu.regs[0] = 0;
+            } else if (n == "AConfiguration_getCountry") {
+                if (impl_->mem && cpu.regs[1]) {
+                    const char s[] = "US";
+                    impl_->mem->write(cpu.regs[1], s, sizeof(s));
+                }
+                cpu.regs[0] = 0;
+            } else if (n == "AConfiguration_getDensity") {
+                cpu.regs[0] = 160;
+            } else if (n == "AConfiguration_getSdkVersion") {
+                cpu.regs[0] = 34;
+            } else if (n == "AConfiguration_getOrientation") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getTouchscreen") {
+                cpu.regs[0] = 3;
+            } else if (n == "AConfiguration_getKeyboard") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getNavigation") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getKeysHidden") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getNavHidden") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getScreenSize") {
+                cpu.regs[0] = 2;
+            } else if (n == "AConfiguration_getScreenLong") {
+                cpu.regs[0] = 0;
+            } else if (n == "AConfiguration_getUiModeType") {
+                cpu.regs[0] = 1;
+            } else if (n == "AConfiguration_getUiModeNight") {
+                cpu.regs[0] = 0x10;
+            } else if (n == "AConfiguration_getMcc" || n == "AConfiguration_getMnc") {
+                cpu.regs[0] = 0;
+            } else {
+                // delete / fromAssetManager / setTo / diff — no-op
+                cpu.regs[0] = 0;
+            }
+            return 0;
+        }
+        if (n.rfind("__android_log", 0) == 0) {
+            std::string tag = guest_str(cpu.regs[1]);
+            if (n == "__android_log_write" || n == "__android_log_buf_write") {
+                std::string text = guest_str(cpu.regs[2]);
+                std::fprintf(stderr, "[android-log] %s: %s\n",
+                             tag.c_str(), text.c_str());
+                cpu.regs[0] = 0;
+                return 0;
+            }
+            // __android_log_print / __android_log_buf_print: varargs fmt
+            std::string fmt = guest_str(cpu.regs[2]);
+            uint64_t slots[12] = {0};
+            size_t nslots = 0;
+            for (int r = 3; r < 8 && nslots < 12; r++)
+                slots[nslots++] = cpu.regs[r];
+            for (size_t i = 0; i < 7 && nslots < 12; i++) {
+                uint64_t v = 0;
+                try { impl_->mem->read(cpu.sp + i * 8, &v, sizeof(v)); }
+                catch (...) { break; }
+                slots[nslots++] = v;
+            }
+            std::string out;
+            out.reserve(512);
+            size_t si = 0;
+            for (size_t i = 0; i < fmt.size() && out.size() < 1024; i++) {
+                char c = fmt[i];
+                if (c != '%') { out.push_back(c); continue; }
+                if (i + 1 >= fmt.size()) break;
+                size_t j = i + 1;
+                while (j < fmt.size() && (fmt[j]=='-'||fmt[j]=='+'||fmt[j]==' '||fmt[j]=='#'||(fmt[j]>='0'&&fmt[j]<='9')||fmt[j]=='.')) j++;
+                std::string lm;
+                while (j < fmt.size() && (fmt[j]=='l'||fmt[j]=='z'||fmt[j]=='h'||fmt[j]=='j'||fmt[j]=='t')) { lm.push_back(fmt[j]); j++; }
+                if (j >= fmt.size()) break;
+                char conv = fmt[j];
+                i = j;
+                if (conv == '%') { out.push_back('%'); continue; }
+                uint64_t iv = si < nslots ? slots[si++] : 0;
+                char tmp[64];
+                switch (conv) {
+                case 's': {
+                    std::string s = guest_str(iv);
+                    out += s.empty() ? std::string("(null)") : s;
+                    break;
+                }
+                case 'd': case 'i': {
+                    if (lm == "ll" || lm == "j")
+                        std::snprintf(tmp, sizeof(tmp), "%lld", (long long)iv);
+                    else if (lm == "l")
+                        std::snprintf(tmp, sizeof(tmp), "%ld", (long)iv);
+                    else if (lm == "z")
+                        std::snprintf(tmp, sizeof(tmp), "%zd", (ssize_t)iv);
+                    else
+                        std::snprintf(tmp, sizeof(tmp), "%d", (int)(int32_t)iv);
+                    out += tmp;
+                    break;
+                }
+                case 'u': {
+                    if (lm == "ll" || lm == "l")
+                        std::snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)iv);
+                    else
+                        std::snprintf(tmp, sizeof(tmp), "%u", (unsigned)iv);
+                    out += tmp;
+                    break;
+                }
+                case 'x': case 'X': {
+                    std::snprintf(tmp, sizeof(tmp), conv=='x'?"%llx":"%llX",
+                                  (unsigned long long)iv);
+                    out += tmp;
+                    break;
+                }
+                case 'o':
+                    std::snprintf(tmp, sizeof(tmp), "%llo", (unsigned long long)iv);
+                    out += tmp;
+                    break;
+                case 'p':
+                    std::snprintf(tmp, sizeof(tmp), "%p",
+                                  reinterpret_cast<void*>(uintptr_t(iv)));
+                    out += tmp;
+                    break;
+                case 'c': {
+                    out.push_back(char(iv & 0xFF));
+                    break;
+                }
+                case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
+                    double d = 0;
+                    if (conv == 'f' || conv == 'F') {
+                        // Varargs double promotion: 64-bit pattern in integer slot.
+                        std::memcpy(&d, &iv, sizeof(d));
+                    } else {
+                        std::memcpy(&d, &iv, sizeof(d));
+                    }
+                    std::snprintf(tmp, sizeof(tmp), "%g", d);
+                    out += tmp;
+                    break;
+                }
+                default:
+                    out.push_back('%');
+                    out.push_back(conv);
+                    break;
+                }
+            }
+            std::fprintf(stderr, "[android-log] %s: %s\n",
+                         tag.c_str(), out.c_str());
+            cpu.regs[0] = static_cast<uint64_t>(out.size());
+            return 0;
+        }
+
+        // ── ANativeWindow shims require the host window ───────────────
         if (!impl_->proxy_) {
             impl_->proxy_ = std::make_unique<DisplayProxy>();
             impl_->proxy_->set_memory(impl_->mem);
@@ -283,7 +642,6 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (!impl_->proxy_->ready()) {
             impl_->proxy_->init(800, 600, impl_->mem);
         }
-        auto& mgr = frost::AndroidSurfaceManager::instance();
         if (impl_->proxy_->ready()) {
             mgr.set_host_sdl_window(impl_->proxy_->host_window());
             // Eagerly resolve the host native window + wl_display NOW so
@@ -292,7 +650,6 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // any EGL call.
             mgr.host_native_window();
         }
-        const std::string& n = entry.name;
         if (n == "ANativeWindow_fromSurface") {
             // (JNIEnv*, jobject) — both opaque; v1 is a single-surface
             // singleton. Returns 0 (NULL) when no host window exists,
@@ -2731,7 +3088,7 @@ void DisplayThunk::register_known_symbols_() {
     static const char* kGlxSonames[]  = {"libGLX.so.2", "libGLX.so"};
     static const char* kRandrSonames[] = {"libXrandr.so.2", "libXrandr.so"};
     static const char* kXkbSonames[]  = {"libXkblib.so", "libX11-xcb.so"};
-    static const char* kAndroidSonames[] = {"libandroid.so", "libandroid.so"};
+    static const char* kAndroidSonames[] = {"libandroid.so", "liblog.so"};
     // Indexed by (LibFamily - LibFamily::VK). The generator emits the
     // display families contiguously after the GraphicThunk families, so
     // VK is the first DisplayThunk family.

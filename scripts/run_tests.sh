@@ -355,6 +355,11 @@ INTEGRATION_TESTS=(
     # window-surface through it (thunk substitutes the host X11 window).
     # Needs DISPLAY + host GL. Exit 77 = skip when unavailable.
     "android_surface|ctest_real/test_android_surface.elf||30|ALL PASS"
+    # Android lifecycle layer v2 (2026-08): ALooper/AInputQueue/event
+    # getters/AConfiguration/liblog plumbing for --android
+    # native_app_glue .so's. No display needed (AConfiguration + looper
+    # fd readiness + queue empty path all headless).
+    "android_activity|ctest_real/test_android_activity.elf||30|ALL PASS"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing

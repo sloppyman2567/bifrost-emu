@@ -41,7 +41,8 @@ at runtime using a JIT compiler, with a switch-based interpreter fallback.
 
 **What it is NOT:**
 - Not a full-system emulator (no kernel — use QEMU-system for that)
-- Not an Android emulator (no APK/ART/Dalvik — it runs Linux ARM64 binaries)
+- No APK/ART/Dalvik — Android apps run as bare NativeActivity `.so`s
+  (see below); there is no Java runtime
 - Not as mature as QEMU-user — it's a smaller, simpler alternative
 
 ## Quick Start
@@ -134,18 +135,31 @@ The rootfs includes:
 
 ### Android Applications
 
-bifrost-emu includes Android-compatible infrastructure for running
-Android-ported Linux apps and games:
+bifrost-emu runs Android **NativeActivity** apps — the `.so` a game ships
+as — without ART/Java or an APK. The emulator plays the framework role:
+it synthesizes the `ANativeActivity` struct, fires
+`onCreate/onStart/onResume/onNativeWindowCreated/...` on guest callbacks,
+and provides `ALooper`, `AInputQueue` (SDL mouse/touch/keyboard → motion/
+key events), `AConfiguration` and `__android_log_*` thunks so
+`android_native_app_glue` code runs unmodified.
 
 ```bash
-# The rootfs has /system/lib64 → /lib64, /vendor/lib64 → /lib64
-# so Android-style DT_NEEDED entries resolve automatically.
-# build.prop advertises arm64-v8a ABI, SDK 29, ro.kernel.qemu=1.
+# Run a NativeActivity .so (renders through the host GL/EGL thunk)
+./bifrost-emu --android libgame.so
+
+# Test hooks:
+#   BIFROST_ANDROID_TAP=1            inject one synthetic screen tap
+#   BIFROST_ANDROID_TIMEOUT_SECS=N   hard wall-clock cap (default: none)
+#   BIFROST_ANDROID_LEGACY_CB=1      pre-API-26 callback-table layout
 ```
 
+The rootfs also has `/system/lib64` → `/lib64`, `/vendor/lib64` → `/lib64`
+so Android-style DT_NEEDED entries resolve automatically, and build.prop
+advertises arm64-v8a ABI, SDK 29, ro.kernel.qemu=1.
+
 For full Android app support (APK loading, Dalvik/ART), use a dedicated
-Android emulator. bifrost-emu targets **Linux ARM64 applications** that
-happen to use Android-style paths.
+Android emulator (or libbifrost's native-bridge adapter). bifrost-emu
+targets NativeActivity-style Linux ARM64 binaries.
 
 ## Architecture
 

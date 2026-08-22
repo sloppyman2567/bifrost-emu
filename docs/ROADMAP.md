@@ -76,7 +76,13 @@ status, see [TESTS.md](TESTS.md).
     prefix, x/d-reg split per AAPCS, `bifrost_call`/`bifrost_call_f`
     borrow-CPU drive). Foundation: C API `bifrost_dlopen`/`bifrost_dlsym`/
     `bifrost_dlclose`. Host test `ctest/test_nb.c` = 61 checks
-    (`make test-nb`).
+    (`make test-nb`). **[DONE 2026-08-22] NativeActivity lifecycle layer:
+    `--android libfoo.so` boots `native_app_glue` `.so`s without ART —
+    ANativeActivity synthesis + callback firing via the borrow-CPU
+    runner, ALooper registry (real ::poll on resolved host fds),
+    AInputQueue + SDL→Android input translation, AConfiguration and
+    liblog stubs (thunk table 999 symbols). Guest test
+    `ctest_real/test_android_activity.elf` (29 checks, headless).**
 
 ### Planned
 

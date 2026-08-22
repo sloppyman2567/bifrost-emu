@@ -1017,6 +1017,87 @@ ANativeWindow_getWidth           ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getHeight          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_getFormat          ANDROID i      -     ANDROID_WINDOW -
 ANativeWindow_setBuffersGeometry ANDROID iiii   -     ANDROID_WINDOW -
+# ── Android NativeActivity lifecycle layer (v2, 2026-08) ─────────────
+# ALooper / AInputQueue / event getters / AConfiguration — the plumbing
+# android_native_app_glue needs to run a guest .so under --android.
+# All handle arguments are GUEST shim integers (0xA9xx range), never
+# pointer-translated. The dispatch arm reads/writes guest out-pointers
+# through Memory directly (pollOnce/pollAll/getEvent). Float-returning
+# getters (AMotionEvent_getX/…) write BOTH x0 and v0 (guest s0).
+ALooper_prepare               ANDROID i      -     ANDROID_WINDOW -
+ALooper_acquire               ANDROID i      -     ANDROID_WINDOW -
+ALooper_release               ANDROID i      -     ANDROID_WINDOW -
+ALooper_pollOnce              ANDROID iiii   -     ANDROID_WINDOW -
+ALooper_pollAll               ANDROID iiii   -     ANDROID_WINDOW -
+ALooper_addFd                 ANDROID iiiiii -     ANDROID_WINDOW -
+ALooper_removeFd              ANDROID ii     -     ANDROID_WINDOW -
+ALooper_wake                  ANDROID i      -     ANDROID_WINDOW -
+AInputQueue_attachLooper      ANDROID iiiii  -     ANDROID_WINDOW -
+AInputQueue_detachLooper      ANDROID i      -     ANDROID_WINDOW -
+AInputQueue_getEvent          ANDROID ii     -     ANDROID_WINDOW -
+AInputQueue_preDispatchEvent  ANDROID ii     -     ANDROID_WINDOW -
+AInputQueue_finishEvent       ANDROID iii    -     ANDROID_WINDOW -
+AInputEvent_getType           ANDROID i      -     ANDROID_WINDOW -
+AInputEvent_getDeviceId       ANDROID i      -     ANDROID_WINDOW -
+AInputEvent_getSource         ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getAction        ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getPointerCount  ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getDownTime      ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getEventTime     ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getEdgeFlags     ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getXPrecision    ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getYPrecision    ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getHistorySize   ANDROID i      -     ANDROID_WINDOW -
+AMotionEvent_getPointerId     ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getX             ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getY             ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getRawX          ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getRawY          ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getPressure      ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getSize          ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getTouchMajor    ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getTouchMinor    ANDROID ii     -     ANDROID_WINDOW -
+AMotionEvent_getAxisValue     ANDROID iii    -     ANDROID_WINDOW -
+AKeyEvent_getAction           ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getKeyCode          ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getMetaState        ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getRepeatCount      ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getScanCode         ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getFlags            ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getDownTime         ANDROID i      -     ANDROID_WINDOW -
+AKeyEvent_getEventTime        ANDROID i      -     ANDROID_WINDOW -
+# AConfiguration: enough for native_app_glue's print_cur_config + games
+# querying density/orientation. fromAssetManager is a stub (no APK
+# assets under the emulator); getters return sane defaults.
+AConfiguration_new            ANDROID -      -     ANDROID_WINDOW -
+AConfiguration_delete         ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_fromAssetManager ANDROID ii   -     ANDROID_WINDOW -
+AConfiguration_setTo          ANDROID ii     -     ANDROID_WINDOW -
+AConfiguration_diff           ANDROID ii     -     ANDROID_WINDOW -
+AConfiguration_getMcc         ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getMnc         ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getLanguage    ANDROID ip     -     ANDROID_WINDOW -
+AConfiguration_getCountry     ANDROID ip     -     ANDROID_WINDOW -
+AConfiguration_getOrientation ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getTouchscreen ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getDensity     ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getKeyboard    ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getNavigation  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getKeysHidden  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getNavHidden   ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getSdkVersion  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getScreenSize  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getScreenLong  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getUiModeType  ANDROID i      -     ANDROID_WINDOW -
+AConfiguration_getUiModeNight ANDROID i      -     ANDROID_WINDOW -
+# liblog.so stubs (registered under the ANDROID family; kAndroidSonames
+# covers both sonames so dlopen("liblog.so") resolves via the thunk).
+# __android_log_print's varargs are read manually from the guest stack
+# with a minimal %-format translator (%s translates guest pointers).
+__android_log_write           ANDROID ipp    -     ANDROID_WINDOW -
+__android_log_print           ANDROID ipp    -     ANDROID_WINDOW -
+__android_log_buf_write       ANDROID ipp    -     ANDROID_WINDOW -
+__android_log_buf_print       ANDROID ipp    -     ANDROID_WINDOW -
 # ── Neverball (Debian arm64) coverage batch ──────────────────────────
 glClipPlane                GL     ip            -     -              -   # GLenum plane, const GLdouble *equation
 glColor4ub                 GL     iiii          -     -              -

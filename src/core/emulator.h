@@ -119,9 +119,16 @@ public:
     // there too. Mirrors the dynamic linker's guest_call_args_ / GLFW
     // callback runner pattern. Used by libbifrost's bifrost_call().
     uint64_t call_guest_function(CPU& cpu, uint64_t fn,
-                                 const int64_t* iargs, size_t n_iargs,
-                                 const double* fargs, size_t n_fargs,
-                                 double* fp_result = nullptr);
+                                  const int64_t* iargs, size_t n_iargs,
+                                  const double* fargs, size_t n_fargs,
+                                  double* fp_result = nullptr);
+    // Android --android driver (2026-08): load a bare .so exporting
+    // ANativeActivity_onCreate and drive its lifecycle via the
+    // AndroidSurfaceManager. argv[0] is the .so path; the rest are guest
+    // argv for diagnostics.
+    void load_android_activity(const std::string& path,
+                               std::vector<std::string>& argv);
+    int run_android();
     // Drain any host-forwarded signals (SIGINT/SIGTERM/SIGCHLD) to the
     // guest. Called by spawned threads at syscall boundaries.
     bool drain_host_signals(CPU& cpu);
@@ -586,6 +593,9 @@ private:
     // Called after the thunk is initialized on both the dynamic-linker
     // and static-ELF paths.
     void wire_thunk_glfw_cb_runner_();
+    void wire_thunk_android_runner_();
+    void ensure_thunk_linker_();
+    uint64_t android_on_create_ = 0;
     static std::string to_hex(uint64_t v) {
         char b[32]; snprintf(b, sizeof(b), "%llx", static_cast<unsigned long long>(v));
         return b;

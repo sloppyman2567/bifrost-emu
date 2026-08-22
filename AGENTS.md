@@ -2784,4 +2784,127 @@ not musl-`-static`.
   docs/context.md, docs/findings.md, docs/SESSION_SUMMARY.md are
   gitignored (local-only notes). CHANGELOG gained the 2026-08-21
   [Unreleased] section (CSEL fix, arity bugs, reporter, Vulkan
-  pipelines + vkMapMemory, Neverball batch); ROADMAP #12 marked DONE.
+   pipelines + vkMapMemory, Neverball batch); ROADMAP #12 marked DONE.
+
+## Session History (2026-08-22) — Android NativeActivity lifecycle layer v2
+
+- **Android support expanded from surface-only (v1) to full NativeActivity
+  lifecycle + input + config/logging — `bifrost-emu --android libfoo.so`
+  boots a native_app_glue .so without ART/Java.** `AndroidSurfaceManager`
+  (frost/android_surface.hpp + android_surface.cpp) now plays the
+  framework role: `create_activity()` synthesizes an ANativeActivity
+  struct + 16-entry callback table in guest memory (modern NDK layout;
+  `BIFROST_ANDROID_LEGACY_CB=1` switches to the pre-API-26 13-entry
+  table); `fire_activity_cb()` reads the GUEST function pointer live and
+  invokes it through the borrow-CPU runner (same save/restore + sentinel
+  LR pattern as `wire_thunk_glfw_cb_runner_`).
+  The Emulator wires it (`wire_thunk_android_runner_`) with a Memory*
+  + fd→host_fd resolver (`fds_.get(gfd)->host_fd()`) so the ALooper +
+  AInputQueue thunks can operate without DisplayThunk knowing the VFS.
+- **ALooper registry** (thunk policy `ANDROID_WINDOW`): `prepare` returns
+  a singleton `0xA90001000001` handle; `addFd/removeFd/wake` mutate the
+  registration table; `pollOnce/pollAll` report readiness via a real
+  `::poll()` on the resolved HOST fd (guest pipes are real host pipes
+  under HostNode) plus input-queue attachments. The first write of a
+  command byte to the msgpipe makes `pollOnce(30) → ident 42` work
+  (verified by `test_android_activity`).
+  `AInputQueue_attach/detachLooper` records the looper+ident+data so
+  `looper_poll` can return LOOPER_ID_INPUT when `pending_` is non-empty.
+  `wake` sets a flag the poll loop checks first. Verified: poll timeout
+  returns -3; fd readiness after `write(pipe)` returns the registered
+  ident.
+- **AInputQueue + event store** (fixed 32-slot table, `0xA90003…` handles):
+  `getEvent` pops from a `deque<InputEvent>` into a free slot and hands
+  out its handle; `preDispatch` returns 0; `finishEvent` frees the slot.
+  `AMotionEvent_getX(foreground)` etc. write the float to guest `v0`
+  (`cpu.v_lo[0]` + zeroed `v_hi`), because a `float` return lives in S0
+  not X0 (the generic `thunk_dispatch_generic` would return garbage in
+  RAX for float-returning host fns). All getters snapshot the event
+  under `mu_` then read fields (no lock held while invoking a runner).
+  `motion_touch_major/minor` derive from `size` (48/36 px). Edge/history
+  getters are stubs.
+- **SDL→Android translation** (`pump_host_events`): `SDL_PollEvent` on the
+  proxy window maps MOUSEBUTTONDOWN/UP→ACTION_DOWN/UP,
+  MOUSEMOTION (pressed→MOVE else HOVER_MOVE), FINGER*→same, KEYDOWN/UP→
+  AKeyEvent via a `SDL_Keycode → AKEYCODE_*` table (a-z 29..54, 0-9
+  7..16, F1..F12 131..142, arrows 19..22, home/end 122/123, etc.,
+  modifiers into `AMETA_*`). Window SIZE_CHANGED updates `width_/height_`
+  and fires `onNativeWindowResized`/`onContentRectChanged` when a CPU is
+  provided. `request_quit` on SDL_QUIT. Tested via
+  `BIFROST_ANDROID_TAP=1` synthetic center tap injected once after the
+  input queue is delivered.
+- **AConfiguration stubs** (20 rows) + **liblog stubs** (`__android_log_*`
+  with a minimal `%-`format translator: `%s` translates a guest pointer
+  via `guest_str`, `%d/%u/%x/%c/%f` from the guest varargs slots `x3..x7`
+  + `[sp]`; writes `[android-log] tag: msg` to stderr). `AConfiguration`
+  returns 160 dpi, SDK 34, PORTRAIT 1, FINGER 3, `en`/`US`.
+- **Opgen growth** `tools/opgen/thunk_dp.txt` 932 → 999 symbols; new rows
+  all family `ANDROID` policy `ANDROID_WINDOW` (the display dispatch arm
+  name-dispatches). The display dispatch arm now handles the framework
+  symbols **without** requiring a host window (AConfiguration getters run
+  before any surface exists); the ANativeWindow path still lazily creates
+  the proxy. `kAndroidSonames` now `{"libandroid.so","liblog.so"}` so
+  either soname resolves via the thunk; `is_thunk_supported_lib_` accepts
+  `liblog.so`. `DisplayThunk::ensure_android_window()` eagerly arms the
+  window for the `--android` driver (so `from_surface` works before any
+  guest call). Needed for `run_android`'s pre-`onNativeWindowCreated`
+  shim creation; previously `from_surface` returned 0 in that mode.
+- **`--android` driver** (`main.cpp` + `Emulator::load_android_activity`
+  / `run_android`): `ensure_thunk_linker_()` extracts the shared
+  dynlinker+thunk+ifunc/init/guest-call wiring (used by both the
+  normal and the android paths so the 50-line lambda duplication was
+  eliminated); `load_android_activity(path, argv)` does
+  `dyn_linker_->load_library(main_cpu_, path)` → resolve
+  `ANativeActivity_onCreate` into `android_on_create_`, builds a dummy
+  initial stack+TLS+vdso+zero-page (no main ELF), `create_activity()`,
+  and eagerly ensures the window. `run_android()` fires
+  `onCreate(activity,NULL,0)`, then `onStart/onResume/focus/inputQueue/`
+  `windowCreated`, drains `pump_host_events(&main_cpu_)` every 4 ms until
+  window close / guest exit_group — NO default deadline (a real game
+  must run indefinitely; `BIFROST_ANDROID_TIMEOUT_SECS=N` opts into a
+  hard cap for CI). `BIFROST_ANDROID_TAP=1` injects the synthetic tap.
+  Then it shuts down gracefully (`onPause/onStop/inputDestroyed/
+  windowDestroyed/`
+  `onDestroy`). Wiring fix: the normal ELF paths now also call
+  `wire_thunk_android_runner_()` so a plain static ELF that `dlopen`s
+  libandroid (like `test_android_activity.elf`) gets its fd resolver
+  even without `--android`.
+- **Guest test** `ctest_real/test_android_activity.elf` (29 checks, "ALL
+  PASS", headless-safe): AConfiguration defaults, looper prepare + poll
+  timeout/wake + pipe fd readiness, input queue attach/empty→finish,
+  null-handle getters, and liblog. Added to `scripts/run_tests.sh` as
+  `android_activity` (no DISPLAY needed). Manual `.so` smoketest
+  `/tmp/test_android_native.so` via `BIFROST_ANDROID_TAP=1 ./bifrost-emu
+  --android /tmp/test_android_native.so` verifies the full lifecycle
+  (`onCreate→onStart→onResume→focus→inputQueueCreated→windowCreated→`
+  config density ok → log → timeout → onStop/inputDestroyed/
+  windowDestroyed→onDestroy→ALL PASS, `rc=0`; run with
+  `BIFROST_ANDROID_TIMEOUT_SECS=N` + `timeout -s KILL` — the emulator
+  ignores SIGTERM).
+- Verified: `make` clean, `opgen-check`/`thunk-check` up-to-date (999),
+  quick suite **202/202** (was 201 before the new test), direct run of
+  `test_android_activity` 29/29 both JIT and `--no-jit`, and the
+  `--android` mode smoketest passes on DISPLAY=:0.
+- **Review pass on this layer found five real defects; all fixed and
+  their contracts hold:**
+  1. **pollOnce/pollAll dispatch flag**: the display arm must pass
+     `dispatch_callbacks = (n == "ALooper_pollAll")`. With `true`,
+     pollOnce drains callback-mode registrations until timeout; real
+     semantics fire ONE callback and return `POLL_CALLBACK(-2)`.
+  2. **Indexed motion getters bounds-check FIRST**:
+     `ANDROID_EVENT_GETTER_IDX` clamps `idx >= 8` BEFORE the signed
+     `pointer_count` compare — a guest-passed huge size_t truncates to a
+     negative int32 and the signed compare alone reads `pointers[]` OOB.
+  3. **No default deadline in run_android**: real games must run until
+     window close / guest exit_group. `BIFROST_ANDROID_TIMEOUT_SECS=N`
+     is the OPT-IN CI cap. A guest exit_group from any thread kills the
+     host process directly (nothing to detect in the pump loop).
+     Remember bifrost-emu ignores SIGTERM — bound test runs with
+     `timeout -s KILL` AND the env cap.
+  4. **main.cpp's --android branch exits the arg loop early**, so it
+     must apply CLI-over-config precedence ITSELF (mirror of the normal
+     path's post-loop overrides): verbose/debug/quiet locals + cfg,
+     `use_jit && cfg.jit_enabled`, threshold = CLI or config.
+  5. The secondary ifunc resolver in `ensure_thunk_linker_` zeroes its
+     result when the instruction limit trips (never return a
+     mid-execution register value as a function pointer).

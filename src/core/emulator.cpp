@@ -17,6 +17,7 @@
 #include "frontend/dynamic_linker.h"
 #include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (1.5.4-alpha)
 #include "frost/thunk.hpp"        // GraphicThunk full definition (for init/resolve)
+#include "frost/android_surface.hpp"// 2026-08: Android activity
 #include "frost/audio_thunk.hpp"  // 1.5.4-alpha: AudioThunk
 #include "frost/display_thunk.hpp"// 1.5.4-alpha: DisplayThunk
 #include "jit/frostjit.hpp"
@@ -300,6 +301,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         return out;
                     });
             }
+            wire_thunk_android_runner_();
             // Register the ifunc resolver callback. BUGFIX: the old
             // IRELATIVE handler just stored the resolver ADDRESS instead
             // of CALLING it. Now we run the resolver in a scratch CPU
@@ -745,6 +747,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 add_all(dthunk);
                 return out;
             });
+        wire_thunk_android_runner_();
     }
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
@@ -1533,6 +1536,102 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             return 0;
         });
 }
+// ── wire_thunk_android_runner_ — Android looper/input + lifecycle ────
+void Emulator::wire_thunk_android_runner_() {
+    auto* dthunk = graphics_.display_thunk();
+    if (!dthunk || !dthunk->enabled()) return;
+    auto& mgr = frost::AndroidSurfaceManager::instance();
+    mgr.set_memory(&mem_);
+    mgr.set_fd_resolver([this](int gfd) -> int {
+        auto n = fds_.get(gfd);
+        if (!n) return -1;
+        return n->host_fd();
+    });
+    mgr.set_runner([this](CPU& cpu, uint64_t fn, const int64_t* iargs,
+                          size_t n) -> uint64_t {
+        return call_guest_function(cpu, fn, iargs, n, nullptr, 0);
+    });
+}
+void Emulator::ensure_thunk_linker_() {
+    if (dyn_linker_) return;
+    dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
+    if (auto* t = graphics_.thunk()) {
+        if (t->enabled()) {
+            t->init(mem_);
+            wire_thunk_glfw_cb_runner_();
+            wire_thunk_sdl_thread_runner_();
+        }
+    }
+    if (auto* at = graphics_.audio_thunk()) {
+        if (at->enabled()) at->init(mem_);
+    }
+    if (auto* dt = graphics_.display_thunk()) {
+        if (dt->enabled()) dt->init(mem_);
+    }
+    GraphicThunk* gthunk = graphics_.thunk();
+    AudioThunk* athunk = graphics_.audio_thunk();
+    DisplayThunk* dthunk = graphics_.display_thunk();
+    dyn_linker_->set_thunk_resolver(
+        [gthunk, athunk, dthunk](const std::string& lib)
+            -> DynamicLinker::ThunkSymbolList {
+            DynamicLinker::ThunkSymbolList out;
+            auto add_all = [&](auto* t) {
+                if (!t || !t->enabled()) return;
+                t->enumerate_symbols(lib, [&](const std::string& s, uint64_t a) {
+                    out.emplace_back(s, a);
+                });
+            };
+            add_all(gthunk);
+            add_all(athunk);
+            add_all(dthunk);
+            return out;
+        });
+    dyn_linker_->set_ifunc_resolver([this](CPU& cpu, uint64_t a) -> uint64_t {
+        if (a == 0) return 0;
+        struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
+        s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        uint64_t scratch=mem_.mmap_alloc(4096); uint64_t top=scratch+4096; constexpr uint64_t SR=0x1000;
+        cpu.pc=a; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        constexpr uint64_t LIM=1'000'000; uint64_t steps=0;
+        try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
+        // Limit tripped → likely infinite resolver: return 0 like the
+        // primary wiring does, never a mid-execution register value.
+        uint64_t result = (steps >= LIM) ? 0 : cpu.regs[0];
+        restore(); return result;
+    });
+    dyn_linker_->set_init_runner([this](CPU& cpu, uint64_t fn) {
+        if(!fn) return;
+        struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
+        s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
+        uint64_t scratch=mem_.mmap_alloc(4096); uint64_t top=scratch+4096; constexpr uint64_t SR=0x1000;
+        cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        constexpr uint64_t LIM=10'000'000; uint64_t steps=0;
+        try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(getenv("BIFROST_DYNLINK_TRACE")) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
+        restore();
+    });
+    dyn_linker_->set_guest_call_args([this](CPU& cpu, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2) -> uint64_t {
+        struct SavedState { uint64_t regs[32]; uint64_t sp, pc; uint32_t pstate; uint64_t v_lo[32], v_hi[32]; uint32_t fpcr, fpsr; uint64_t tpidr_el0, tpidrro_el0; uint64_t sigmask; bool running; } s{};
+        std::memcpy(s.regs, cpu.regs, sizeof(s.regs)); s.sp=cpu.sp; s.pc=cpu.pc; s.pstate=cpu.pstate;
+        std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
+        s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
+        auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
+        if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
+        static thread_local uint64_t ss=0; if(!ss){ ss=mem_.mmap_alloc(8192); }
+        uint64_t top=ss+8192; constexpr uint64_t SR=0x1000;
+        cpu.pc=fn; cpu.sp=top; cpu.regs[0]=a0; cpu.regs[1]=a1; cpu.regs[2]=a2; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
+        constexpr uint64_t LIM=50'000'000; uint64_t steps=0;
+        try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
+        uint64_t r=cpu.regs[0]; restore(); return r;
+    });
+    wire_thunk_android_runner_();
+}
 // ── call_guest_function — borrow-CPU guest function call (C API) ───────
 // 1.5.4-alpha. libbifrost's bifrost_call() lets embedders invoke an
 // arbitrary guest function (e.g. a callback, an exported entry, or a
@@ -1653,5 +1752,151 @@ void Emulator::wire_thunk_sdl_thread_runner_() {
             }
             return 0;
         });
+}
+void Emulator::load_android_activity(const std::string& path,
+                                     std::vector<std::string>& argv) {
+    ensure_thunk_linker_();
+    uint64_t handle = dyn_linker_->load_library(main_cpu_, path);
+    if (handle == 0) {
+        throw std::runtime_error(std::string("load_android_activity: ") +
+                                 dyn_linker_->error());
+    }
+    uint64_t oc = dyn_linker_->resolve_symbol_in(handle, "ANativeActivity_onCreate");
+    if (oc == 0) {
+        throw std::runtime_error("load_android_activity: no ANativeActivity_onCreate in " + path);
+    }
+    android_on_create_ = oc;
+
+    // Stack / env / TLS / vDSO — mirror load_elf_file tail.
+    const uint64_t STACK_TOP = mem_.stack_top();
+    const uint64_t STACK_SIZE = Memory::STACK_SIZE;
+    uint64_t stack_base = STACK_TOP - STACK_SIZE;
+    mem_.map_range(stack_base, STACK_SIZE + 4096);
+    load_vdso();
+    // Dummy LoadInfo for auxv (no real PHDR).
+    ElfLoader::Loaded dummy{};
+    dummy.entry = 0; dummy.phdr_addr = 0; dummy.phnum = 0; dummy.phent = 0;
+    main_cpu_.sp = build_initial_stack(STACK_TOP, argv, dummy);
+    if (dyn_linker_) dyn_linker_->set_guest_environ(guest_envp_addr_);
+    if (!dyn_linker_ || dyn_linker_->static_tls_size() == 0) {
+        if (main_cpu_.tpidr_el0 == 0) {
+            const uint64_t TLS_SCRATCH_SIZE = 65536;
+            uint64_t tls = mem_.mmap_alloc(TLS_SCRATCH_SIZE);
+            main_cpu_.tpidr_el0 = tls + TLS_SCRATCH_SIZE / 2;
+            main_cpu_.tpidrro_el0 = main_cpu_.tpidr_el0;
+        }
+    } else {
+        if (main_cpu_.tpidr_el0 == 0) {
+            uint64_t tp = dyn_linker_->thread_pointer();
+            main_cpu_.tpidr_el0 = tp;
+            main_cpu_.tpidrro_el0 = tp;
+        }
+    }
+    // Brk: one heap page so sbrk/brk consults a valid base.
+    if (brk_ == 0) {
+        uint64_t hp = mem_.mmap_alloc(4096);
+        brk_ = hp + 4096;
+        brk_start_ = brk_;
+    }
+    mem_.map_range(0, 4096);
+    main_cpu_.tid = 1; next_tid_ = 2;
+    main_cpu_.set_tid_address_ptr = 0;
+    main_cpu_.pc = 0;
+    main_cpu_.running = false;
+
+    auto& amgr = frost::AndroidSurfaceManager::instance();
+    wire_thunk_android_runner_();
+    // Create activity structures eagerly so onCreate can fill callbacks.
+    amgr.create_activity();
+    // Eager window so from_surface works before any guest call.
+    if (auto* dt = graphics_.display_thunk()) dt->ensure_android_window();
+}
+
+int Emulator::run_android() {
+    auto& amgr = frost::AndroidSurfaceManager::instance();
+    if (android_on_create_ == 0 || amgr.activity_addr() == 0) return 1;
+    wire_thunk_android_runner_();
+    if (auto* dt = graphics_.display_thunk()) dt->ensure_android_window();
+
+    // Fire ANativeActivity_onCreate(activity, NULL, 0).
+    {
+        int64_t args[3] = {static_cast<int64_t>(amgr.activity_addr()), 0, 0};
+        call_guest_function(main_cpu_, android_on_create_, args, 3, nullptr, 0);
+    }
+
+    // Lifecycle: mirrors framework order. Each fire reads the guest
+    // callback table live — native_app_glue fills its entries inside
+    // onCreate, so later fires dispatch to the glue.
+    amgr.fire_activity_cb(main_cpu_, frost::AndroidSurfaceManager::CB_ON_START);
+    amgr.fire_activity_cb(main_cpu_, frost::AndroidSurfaceManager::CB_ON_RESUME);
+    {
+        int64_t one = 1;
+        amgr.fire_activity_cb(main_cpu_,
+                              frost::AndroidSurfaceManager::CB_ON_WINDOW_FOCUS, &one, 1);
+    }
+    // Input queue before window (order tolerant either way).
+    uint64_t qh = amgr.input_queue_handle();
+    {
+        int64_t qa = static_cast<int64_t>(qh);
+        amgr.fire_activity_cb(main_cpu_,
+                              frost::AndroidSurfaceManager::CB_ON_INPUT_QUEUE_CREATED,
+                              &qa, 1);
+    }
+    uint64_t wh = amgr.from_surface();
+    if (wh) {
+        int64_t wa = static_cast<int64_t>(wh);
+        amgr.fire_activity_cb(main_cpu_,
+                              frost::AndroidSurfaceManager::CB_ON_NATIVE_WINDOW_CREATED,
+                              &wa, 1);
+        // Test hook: one synthetic tap right after the window exists so
+        // the full input path (queue → getEvent → getters) is exercised
+        // without a human moving the mouse.
+        const char* tap = getenv("BIFROST_ANDROID_TAP");
+        if (tap && tap[0] != '0' && tap[0] != '\0') {
+            amgr.inject_test_tap();
+        }
+    }
+
+    // Hard wall-clock cap, OPT-IN via BIFROST_ANDROID_TIMEOUT_SECS=N
+    // (CI safety). Unset/0 = pump until the window closes or a guest
+    // exit_group tears the whole process down.
+    int64_t cap_secs = 0;
+    if (const char* t = getenv("BIFROST_ANDROID_TIMEOUT_SECS")) {
+        cap_secs = strtoll(t, nullptr, 10);
+    }
+    const auto hard_deadline =
+        cap_secs > 0
+            ? std::chrono::steady_clock::now() +
+                  std::chrono::seconds(cap_secs)
+            : std::chrono::steady_clock::time_point::max();
+
+    while (!amgr.quit_requested()) {
+        if (std::chrono::steady_clock::now() > hard_deadline) {
+            std::fprintf(stderr, "[android] hard timeout\n");
+            break;
+        }
+        amgr.pump_host_events(&main_cpu_);
+        // A guest exit_group from any thread terminates the host process
+        // directly; there is nothing to detect here.
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+
+    // Graceful shutdown (no-op if the process already exited).
+    amgr.fire_activity_cb(main_cpu_, frost::AndroidSurfaceManager::CB_ON_PAUSE);
+    amgr.fire_activity_cb(main_cpu_, frost::AndroidSurfaceManager::CB_ON_STOP);
+    {
+        int64_t qa = static_cast<int64_t>(qh);
+        amgr.fire_activity_cb(main_cpu_,
+                              frost::AndroidSurfaceManager::CB_ON_INPUT_QUEUE_DESTROYED,
+                              &qa, 1);
+    }
+    if (wh) {
+        int64_t wa = static_cast<int64_t>(wh);
+        amgr.fire_activity_cb(main_cpu_,
+                              frost::AndroidSurfaceManager::CB_ON_NATIVE_WINDOW_DESTROYED,
+                              &wa, 1);
+    }
+    amgr.fire_activity_cb(main_cpu_, frost::AndroidSurfaceManager::CB_ON_DESTROY);
+    return 0;
 }
 } // namespace arm64emu
