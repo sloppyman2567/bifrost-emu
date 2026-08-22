@@ -31,7 +31,7 @@
 namespace arm64emu {
 // Ring buffer capacity: 64 KiB. At 44100 Hz stereo 16-bit (176400 B/s),
 // this is ~370 ms of audio — plenty to absorb guest write bursts.
-static constexpr size_t RING_CAPACITY = 65536;
+static constexpr size_t RING_CAPACITY = 262144;  // ~1.5 s @44.1k s16 stereo
 // ── Constructor / Destructor ───────────────────────────────────────────
 Audio::Audio() = default;
 Audio::~Audio() {

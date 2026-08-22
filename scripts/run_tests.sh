@@ -30,7 +30,7 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 210 tests. Quick suite = 205 (skip benchmarks).
+# Standard suite = 211 tests. Quick suite = 206 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -369,6 +369,10 @@ INTEGRATION_TESTS=(
     # OpenSL ES synthetic-vtable object model (Enqueue + RegisterCallback).
     # Headless-safe.
     "android_audio|ctest_real/test_android_audio.elf||30|ALL PASS"
+    # MAMBO VULKAN TEST (2026-08-22): SDL2 window + Vulkan textured quad
+    # (Matikanetannhauser) + one-shot mambo sound via the ALSA arm. Needs
+    # DISPLAY + host Vulkan; exit 77 = skip without them.
+    "mambo_vulkan|ctest_real/test_mambo_vulkan.elf||40|MAMBO VULKAN TEST PASSED"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing

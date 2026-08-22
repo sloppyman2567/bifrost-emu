@@ -550,7 +550,7 @@ SDL_GetCurrentVideoMode   SDL    i             -     -              -
 SDL_GetWindowDisplayIndex SDL    i             -     -              -
 SDL_Vulkan_LoadLibrary    SDL    i             -     -              -
 SDL_Vulkan_GetVkGetInstanceProcAddr SDL i     -     -              -
-SDL_Vulkan_CreateSurface  SDL    ii            -     -              -
+SDL_Vulkan_CreateSurface  SDL    iip           -     -              -   # (window, VkInstance, VkSurfaceKHR* out translated)
 SDL_CreateThread          SDL    ppp           -     THREAD_CREATE   -   # guest fn ptr can't reach host
 SDL_WaitThread            SDL    ip            -     THREAD_WAIT     -   # no-op (threads never created)
 # ── teeworlds PLT coverage (2026-08): audio, clipboard, display modes,

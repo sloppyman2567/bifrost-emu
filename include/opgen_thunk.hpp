@@ -583,7 +583,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::SDL, "SDL_GetWindowDisplayIndex", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::SDL, "SDL_Vulkan_LoadLibrary", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::SDL, "SDL_Vulkan_GetVkGetInstanceProcAddr", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
-    {LibFamily::SDL, "SDL_Vulkan_CreateSurface", "ii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
+    {LibFamily::SDL, "SDL_Vulkan_CreateSurface", "iip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
     {LibFamily::SDL, "SDL_CreateThread", "ppp", RetKind::PLAIN, Policy::THREAD_CREATE, SizeKind::NONE},
     {LibFamily::SDL, "SDL_WaitThread", "ip", RetKind::PLAIN, Policy::THREAD_WAIT, SizeKind::NONE},
     {LibFamily::SDL, "SDL_WasInit", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE},
