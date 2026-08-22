@@ -210,6 +210,7 @@ UNIT_TESTS=(
     "rev|ctest/jit_rev.elf||5|PASS"
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
+    "simd_sat|ctest/test_simd_sat.elf||5|ALL PASS"
     "loop|ctest/loop.elf||5|Loop value"
     "test_fb|ctest/test_fb.elf||5|mode:"
     "test_float|ctest/test_float.elf||5|3.14"

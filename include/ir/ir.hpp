@@ -134,6 +134,16 @@ enum class IROp : uint8_t {
                    // imm = lane index (0..15/esize-1); flags_op = Q
                    // (0=W d zero-extended, 1=X d — codegen reads the full
                    // element regardless, mirroring the interpreter)
+    SIMD_SMOV,     // regs[dest] = SIGN-extended element[imm] of vector src1
+                    // (SMOV). width = element size in bytes (1, 2, 4 — the
+                    // .D form is UNALLOCATED and never emitted); imm = lane
+                    // index; flags_op = Q (0=Wd sext to 32 bits, 1=Xd sext
+                    // to 64 bits)
+    SIMD_SATADDSUB,// v_lo[dest],v_hi[dest] = SATURATING src1 +/- src2
+                    // imm = subop (0=SQADD, 1=UQADD, 2=SQSUB, 3=UQSUB);
+                    // width = element size in bytes (1 or 2 ONLY — the table
+                    // guard `size < 2` keeps 32/64-bit lanes on the interp,
+                    // which has no pre-AVX512 native form); flags_op = Q
     SIMD_MOVI,     // v_lo[dest],v_hi[dest] = broadcast of imm (MOVI/MVNI)
                    // imm = pre-expanded 64-bit lane pattern; flags_op = Q
                    // (1=128-bit: v_hi = pattern; 0=64-bit: v_hi = 0)

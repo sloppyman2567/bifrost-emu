@@ -248,3 +248,26 @@ UMLSL_ELEM 0xBF00F400 0x2F006000  MUL_ELEM  8   size < 3
 SQDMULH_ELEM 0xBF00F400 0x0F00C000 MUL_ELEM 9  size < 3
 SQRDMULH_ELEM 0xBF00F400 0x0F00D000 MUL_ELEM 10 size < 3
 SQDMULL_ELEM 0xBF00F400 0x0F00B000 MUL_ELEM 11 size < 3
+
+# ── SMOV (vector element -> GPR, SIGN-extended) ──────────────────────────
+# Same ASIMDINS group as UMOV but bits[15:12]=0010 (sub_noq 0x0E002C00;
+# mask strips Q so .16B-style Q=1 forms share the row). imm5 decodes esize
+# AND index exactly like UMOV (esize = 1 << ctz(imm5), index = imm5 >>
+# (ctz+1)); Q=0 -> Wd sign-extended to 32 bits, Q=1 -> Xd extended to 64.
+# CRITICAL: only B/H/S elements are allocated — the .D form does NOT exist
+# (GNU as rejects it), so the guard admits imm5 ∈ {1,2,4} only and esize==8
+# stays UNKNOWN -> interpreter -> DecodeError.
+SMOV    0xBFE0FC00   0x0E002C00   SMOV       0   ((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4
+
+# ── Saturating add/sub, B/H lanes (SSE2 padds*/psubs* family) ────────────
+# Three-same encodings: SQADD/UQADD 0x{0E,2E}200C00, SQSUB/UQSUB
+# 0x{0E,2E}202C00 (opcode bits[15:10] = 000011 / 001011, U = bit29).
+# Guard `size < 2` keeps ONLY the byte/halfword lane forms native — SSE2
+# has exact saturating instructions for exactly those widths (PADDSB/W,
+# PADDUSB/W, PSUBSB/W, PSUBUSB/W); the 32/64-bit saturating forms stay on
+# the interpreter (no pre-AVX512 native form worth the clamp sequences).
+# 32/64-bit lanes fall through to later rows / UNKNOWN -> interpreter.
+SQADD   0xBF20FC00   0x0E200C00   SATADDSUB  0   size < 2
+UQADD   0xBF20FC00   0x2E200C00   SATADDSUB  1   size < 2
+SQSUB   0xBF20FC00   0x0E202C00   SATADDSUB  2   size < 2
+UQSUB   0xBF20FC00   0x2E202C00   SATADDSUB  3   size < 2

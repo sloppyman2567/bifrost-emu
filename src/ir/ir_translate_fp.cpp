@@ -753,6 +753,34 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                          qbit, index, cur_pc);
                 return true;
             }
+            case simd::Family::SMOV: {
+                // SMOV (vector element -> GPR, sign-extended). Same imm5
+                // decode as UMOV; the table guard admits only esize
+                // 1/2/4 (the .D form is UNALLOCATED and stays UNKNOWN ->
+                // interpreter -> DecodeError). Q=0 writes Wd (sign-extended
+                // 32-bit), Q=1 writes Xd (sign-extended 64-bit).
+                uint8_t imm5 = static_cast<uint8_t>((op >> 16) & 0x1F);
+                int esize_log2 = 0;
+                for (int b = 0; b < 5; b++) {
+                    if (imm5 & (1u << b)) { esize_log2 = b; break; }
+                }
+                uint8_t esize = static_cast<uint8_t>(1u << esize_log2);
+                uint8_t index = static_cast<uint8_t>(imm5 >> (esize_log2 + 1));
+                uint8_t qbit = static_cast<uint8_t>((op >> 30) & 1);
+                if (d.rd != 31)
+                    emit(block, IROp::SIMD_SMOV, d.rd, d.rn, 0, esize, 0,
+                         qbit, index, cur_pc);
+                return true;
+            }
+            case simd::Family::SATADDSUB:
+                // SQADD/UQADD/SQSUB/UQSUB, byte/halfword lanes only
+                // (table guard `size < 2`; 32/64-bit saturating forms
+                // never classify here and stay on the interpreter).
+                // width = esize, imm = subop, flags_op = Q.
+                emit(block, IROp::SIMD_SATADDSUB, d.rd, d.rn, d.rm,
+                     static_cast<uint8_t>(esize), 0, static_cast<uint8_t>(Q),
+                     ct.subop, cur_pc);
+                return true;
             case simd::Family::MODIMM: {
                 // AdvSIMD modified immediate (MOVI/MVNI/ORR/BIC + MSL).
                 // Mirror of the interpreter's block in interp_fp.cpp

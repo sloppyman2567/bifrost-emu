@@ -118,6 +118,71 @@ static inline uint64_t fp_to_unsigned_sat(double v, bool is_64bit) {
     }
     return is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(v);
 }
+// ── Integer saturation helpers (SQADD/UQADD/SQSUB/UQSUB/SQSHL/SQABS/
+//    SQNEG/SUQADD/USQADD family, added 2026-08-22). Width-generic via
+//    `bits` (8/16/32/64); sign-extension through int64 so every width
+//    computes in a common type. __int128 for the 64-bit add/sub so the
+//    overflow case never wraps before the clamp.
+static inline uint64_t sext_lane(uint64_t v, int bits) {
+    return (bits >= 64) ? v
+                        : static_cast<uint64_t>(static_cast<int64_t>(v << (64 - bits)) >>
+                                                (64 - bits));
+}
+static inline uint64_t sat_signed_i128(__int128 v, int bits) {
+    const __int128 hi = (bits >= 64) ? (__int128)INT64_MAX
+                                     : ((__int128)1 << (bits - 1)) - 1;
+    const __int128 lo = -(static_cast<__int128>(1) << (bits - 1));
+    if (v > hi) return static_cast<uint64_t>(hi);
+    if (v < lo) return static_cast<uint64_t>(lo);
+    return static_cast<uint64_t>(static_cast<int64_t>(v));
+}
+// SQADD / SQSUB: signed saturating add/sub of two lane values.
+// CRITICAL: sext_lane returns a uint64_t BIT PATTERN; casting it straight
+// to __int128 ZERO-extends (unsigned→unsigned value conversion), turning
+// e.g. -128 into +1.8e19 → bogus clamp to +max. Route through int64_t so
+// __int128 receives the SIGN-extended value.
+static inline uint64_t sat_add_s(uint64_t a, uint64_t b, int bits) {
+    return sat_signed_i128(
+        static_cast<__int128>(static_cast<int64_t>(sext_lane(a, bits))) +
+        static_cast<__int128>(static_cast<int64_t>(sext_lane(b, bits))),
+        bits);
+}
+static inline uint64_t sat_sub_s(uint64_t a, uint64_t b, int bits) {
+    return sat_signed_i128(
+        static_cast<__int128>(static_cast<int64_t>(sext_lane(a, bits))) -
+        static_cast<__int128>(static_cast<int64_t>(sext_lane(b, bits))),
+        bits);
+}
+// UQADD / UQSUB: unsigned saturating add/sub.
+static inline uint64_t sat_add_u(uint64_t a, uint64_t b, int bits) {
+    const uint64_t max = (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1);
+    uint64_t r = a + b;                 // wrap-safe: detect via <
+    return (r < a || r < b || r > max) ? max : r;
+}
+static inline uint64_t sat_sub_u(uint64_t a, uint64_t b, int /*bits*/) {
+    return (a >= b) ? a - b : 0;
+}
+// SQABS / SQNEG: saturating to the SIGNED range — unlike plain ABS/NEG,
+// INT_MIN saturates to INT_MAX instead of wrapping back to itself.
+static inline uint64_t sat_abs_s(uint64_t v, int bits) {
+    int64_t s = static_cast<int64_t>(sext_lane(v, bits));
+    return sat_signed_i128(s < 0 ? -static_cast<__int128>(s)
+                                 : static_cast<__int128>(s),
+                           bits);
+}
+static inline uint64_t sat_neg_s(uint64_t v, int bits) {
+    return sat_signed_i128(
+        -static_cast<__int128>(static_cast<int64_t>(sext_lane(v, bits))),
+        bits);
+}
+// Signed max/min lane values (SQSHL saturation limits).
+static inline uint64_t smax_lane(int bits) {
+    return (bits >= 64) ? static_cast<uint64_t>(INT64_MAX)
+                        : (1ULL << (bits - 1)) - 1;
+}
+static inline uint64_t smin_lane(int bits) {
+    return sext_lane(static_cast<uint64_t>(1) << (bits - 1), bits);
+}
 // execute_fp — handle all FP/SIMD instruction classes.
 //
 // Called from Emulator::execute() for:
@@ -1126,6 +1191,50 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         val = reinterpret_cast<uint8_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
                 }
                 if (rd != 31) cpu.regs[rd] = val;
+                return;
+            }
+            // ── SMOV (vector element -> GPR, sign-extended) ──────────────
+            // Encoding: same ASIMDINS group as UMOV but bits[15:12]=0010
+            // (sub_noq 0x0E002C00; Q=1 forms land here too because sub_noq
+            // strips bit30). imm5 encodes esize AND index exactly like
+            // UMOV: esize = 1 << ctz(imm5), index = imm5 >> (ctz+1).
+            // Q=0 -> Wd (sign-extend to 32), Q=1 -> Xd (extend to 64).
+            // CRITICAL: only B/H/S elements are allocated — the .D form
+            // does NOT exist (identity extension; GNU as rejects it), so
+            // esize==8 falls through to the DecodeError default.
+            case 0x0E002C00: {
+                uint8_t imm5 = (op >> 16) & 0x1F;
+                int esize_log2 = 0;
+                for (int b = 0; b < 5; b++) {
+                    if (imm5 & (1 << b)) { esize_log2 = b; break; }
+                }
+                int esize = 1 << esize_log2;
+                int index = imm5 >> (esize_log2 + 1);
+                if (esize == 8) break;   // unallocated — DecodeError
+                int elems_per_qword = 8 / esize;
+                uint64_t raw = 0;
+                if (esize == 4) {
+                    raw = (index < elems_per_qword)
+                        ? reinterpret_cast<uint32_t*>(&cpu.v_lo[rn])[index]
+                        : reinterpret_cast<uint32_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
+                } else if (esize == 2) {
+                    raw = (index < elems_per_qword)
+                        ? reinterpret_cast<uint16_t*>(&cpu.v_lo[rn])[index]
+                        : reinterpret_cast<uint16_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
+                } else {  // esize == 1
+                    raw = (index < elems_per_qword)
+                        ? reinterpret_cast<uint8_t*>(&cpu.v_lo[rn])[index]
+                        : reinterpret_cast<uint8_t*>(&cpu.v_hi[rn])[index - elems_per_qword];
+                }
+                uint64_t sext = static_cast<uint64_t>(
+                    static_cast<int64_t>(raw << (64 - esize * 8)) >>
+                    (64 - esize * 8));
+                if (Q) {
+                    if (rd != 31) cpu.regs[rd] = sext;
+                } else {
+                    if (rd != 31) cpu.regs[rd] =
+                        static_cast<uint64_t>(static_cast<uint32_t>(sext));
+                }
                 return;
             }
             // ── CMEQ two registers ──
@@ -2586,14 +2695,24 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 // libpng's NEON filter row does uabdl v5.8h, v4.8b, v7.8b.
                 // Same-width SABD/UABD (three-same) handled separately below.
                 {
-                    uint32_t opc13 = sub3_noq & 0x7000;   // opcode bits[14:12]
+                    // CRITICAL: match the widening abs-diff group by its
+                    // FULL 6-bit opcode — NOT by bits[14:12] alone. The
+                    // crude `(sub3_noq & 0x7000) == 0x5000/0x7000` test
+                    // also matched SRSHL/SQRSHL (opcode 010101/010111),
+                    // SQABS/SQNEG/SUQADD-adjacent two-reg-misc forms
+                    // (011110/011111) etc., silently routing them into
+                    // this handler and corrupting their results.
+                    //   SABDL/UABDL opcode6 = 011100 = 0x1C
+                    //   SABAL/UABAL opcode6 = 010100 = 0x14
+                    // sub3_noq keeps size(bits[23:22]) so one check covers
+                    // all lane widths; U(bit29) picks signed/unsigned.
+                    uint32_t opc6 = (sub3_noq >> 10) & 0x3F;
                     bool is_u = (sub3_noq >> 29) & 1;
-                    if ((sub3_noq & 0x00200000) &&        // bit21 set: three-different
-                        (opc13 == 0x5000 || opc13 == 0x7000)) {
+                    if (opc6 == 0x1C || opc6 == 0x14) {
                         int esize_src = 1 << size;        // 1/2/4
                         int esize_dst = esize_src * 2;
                         int lanes = 16 / esize_dst;
-                        bool accum = (opc13 == 0x5000);
+                        bool accum = (opc6 == 0x14);
                         uint8_t vn[16], vm[16], vd[16];
                         memcpy(vn, &cpu.v_lo[rn], 8);
                         memcpy(vn + 8, &cpu.v_hi[rn], 8);
@@ -2737,6 +2856,195 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         uint8_t ix = idx[i];
                         if (ix < tbl_bytes) out[i] = table[ix];
                         else if (!is_tbx) out[i] = 0;   // TBL: zero, TBX: keep
+                    }
+                    memcpy(&cpu.v_lo[rd], out, 8);
+                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                    else cpu.v_hi[rd] = 0;
+                    return;
+                }
+                // ── Saturating integer arithmetic (three-same) ────────
+                // Encodings verified against the cross assembler:
+                //   SQADD/UQADD   sub3_noq 0x0E200C00 / 0x2E200C00
+                //   SQSUB/UQSUB          0x0E202C00 / 0x2E202C00
+                //   SQSHL/UQSHL (reg)    0x0E204C00 / 0x2E204C00
+                //   SQRSHL/UQRSHL        0x0E205C00 / 0x2E205C00
+                //   SRSHL/URSHL          0x0E205400 / 0x2E205400
+                // The U bit (bit29) selects the unsigned variant. Shift-
+                // by-register amounts: SQSHL reads a SIGNED Vm lane
+                // (negative → arithmetic right), UQSHL an UNSIGNED lane
+                // (left shifts only — huge amounts saturate/fill). The
+                // ROUNDING variants always read a SIGNED amount (their
+                // purpose is variable right-shifts expressed as negative
+                // left-shifts); they round half-up on right shifts only.
+                // Saturation applies only on left overflow.
+                {
+                    const uint32_t s = sub3_noq;
+                    bool is_add = false, is_sub = false, is_shift = false;
+                    switch (s) {
+                    case 0x0E200C00: case 0x2E200C00: is_add = true; break;
+                    case 0x0E202C00: case 0x2E202C00: is_sub = true; break;
+                    case 0x0E204C00: case 0x2E204C00:
+                    case 0x0E205C00: case 0x2E205C00:
+                    case 0x0E205400: case 0x2E205400:
+                        is_shift = true; break;
+                    default: break;
+                    }
+                    if (is_add || is_sub || is_shift) {
+                        const bool uns = (s >> 29) & 1;
+                        const int esize = 1 << size;
+                        const int bits = esize * 8;
+                        const int elems = (Q ? 16 : 8) / esize;
+                        const bool round =
+                            (s == 0x0E205C00 || s == 0x2E205C00 ||
+                             s == 0x0E205400 || s == 0x2E205400);
+                        const bool saturate =
+                            (s != 0x0E205400 && s != 0x2E205400);
+                        const uint64_t umax =
+                            (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1);
+                        uint8_t buf_n[16], buf_m[16];
+                        memcpy(buf_n, &cpu.v_lo[rn], 8);
+                        memcpy(buf_n + 8, &cpu.v_hi[rn], 8);
+                        memcpy(buf_m, &cpu.v_lo[rm], 8);
+                        memcpy(buf_m + 8, &cpu.v_hi[rm], 8);
+                        uint8_t out[16] = {0};
+                        for (int i = 0; i < elems; i++) {
+                            uint64_t a = 0, b = 0;
+                            memcpy(&a, buf_n + i * esize, esize);
+                            memcpy(&b, buf_m + i * esize, esize);
+                            uint64_t r;
+                            if (is_add) {
+                                r = uns ? sat_add_u(a, b, bits)
+                                        : sat_add_s(a, b, bits);
+                            } else if (is_sub) {
+                                r = uns ? sat_sub_u(a, b, bits)
+                                        : sat_sub_s(a, b, bits);
+                            } else if (!round && uns) {
+                                // ── UQSHL: unsigned amount, left-only ──
+                                if (b == 0) {
+                                    r = a;
+                                } else if (b >= (uint64_t)bits) {
+                                    r = (a == 0) ? 0 : umax;  // saturated
+                                } else {
+                                    __int128 wide =
+                                        static_cast<__int128>(a) << b;
+                                    r = (wide >
+                                         static_cast<__int128>(umax))
+                                            ? umax
+                                            : static_cast<uint64_t>(wide);
+                                }
+                            } else {
+                                // ── Signed-amount forms ──
+                                // (SQSHL/SQRSHL/SRSHL/URSHL — the rounding
+                                // variants are signed regardless of U.)
+                                const int64_t sh =
+                                    static_cast<int64_t>(sext_lane(b, bits));
+                                const int64_t sv =
+                                    static_cast<int64_t>(sext_lane(a, bits));
+                                if (sh >= 0) {
+                                    // Left shift. Clamp BEFORE shifting —
+                                    // sh can be up to 2^63-1 and __int128
+                                    // shifts >= 128 are UB.
+                                    if (!saturate) {
+                                        // SRSHL: identical to SSHL here.
+                                        r = (sh >= bits)
+                                            ? 0
+                                            : static_cast<uint64_t>(sv << sh);
+                                    } else if (sv == 0) {
+                                        r = 0;
+                                    } else if (sh >= bits) {
+                                        r = sv < 0 ? smin_lane(bits)
+                                                   : smax_lane(bits);
+                                    } else {
+                                        r = sat_signed_i128(
+                                            static_cast<__int128>(sv) << sh,
+                                            bits);
+                                    }
+                                } else if (sh > -bits) {
+                                    const int64_t rs = -sh;
+                                    uint64_t rv;
+                                    if (uns) {
+                                        // URSHL/UQRSHL lanes are unsigned.
+                                        rv = round
+                                            ? static_cast<uint64_t>(
+                                                  (static_cast<__int128>(a) +
+                                                   (static_cast<__int128>(1)
+                                                    << (rs - 1))) >>
+                                                  rs)
+                                            : a >> rs;
+                                    } else if (round) {
+                                        rv = static_cast<uint64_t>(
+                                            (static_cast<__int128>(sv) +
+                                             (static_cast<__int128>(1)
+                                              << (rs - 1))) >>
+                                            rs);
+                                    } else {
+                                        rv = static_cast<uint64_t>(sv >> rs);
+                                    }
+                                    r = rv;
+                                } else {
+                                    // |shift| >= width: right shifts fill
+                                    // (logical 0 for unsigned lanes).
+                                    r = uns ? 0
+                                            : static_cast<uint64_t>(
+                                                  sv < 0 ? -1 : 0);
+                                }
+                            }
+                            memcpy(out + i * esize, &r, esize);
+                        }
+                        memcpy(&cpu.v_lo[rd], out, 8);
+                        if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                        else cpu.v_hi[rd] = 0;
+                        return;
+                    }
+                }
+                // ── SQABS / SQNEG / SUQADD / USQADD (2-reg misc) ──────
+                //   SQABS/SQNEG   sub3_noq 0x0E207800 / 0x2E207800
+                //   SUQADD/USQADD 0x0E203800 / 0x2E203800 (accumulate into Vd)
+                // Unlike plain ABS/NEG these SATURATE to the signed range:
+                // SQABS(INT_MIN) = INT_MAX, SQNEG(INT_MIN) = INT_MAX.
+                // SUQADD adds UNSIGNED Vn lanes into signed Vd lanes with
+                // signed saturation; USQADD adds SIGNED Vn lanes into
+                // unsigned Vd lanes with unsigned saturation. Q=0 zeroes
+                // the destination upper half like every other vector op.
+                if (sub3_noq == 0x0E207800 || sub3_noq == 0x2E207800 ||
+                    sub3_noq == 0x0E203800 || sub3_noq == 0x2E203800) {
+                    const int esize = 1 << size;
+                    const int bits = esize * 8;
+                    const int elems = (Q ? 16 : 8) / esize;
+                    uint8_t vn[16], vd[16], out[16] = {0};
+                    memcpy(vn, &cpu.v_lo[rn], 8);
+                    memcpy(vn + 8, &cpu.v_hi[rn], 8);
+                    memcpy(vd, &cpu.v_lo[rd], 8);
+                    memcpy(vd + 8, &cpu.v_hi[rd], 8);
+                    const uint64_t umax =
+                        (bits >= 64) ? ~0ULL : ((1ULL << bits) - 1);
+                    for (int i = 0; i < elems; i++) {
+                        uint64_t n = 0;
+                        memcpy(&n, vn + i * esize, esize);
+                        uint64_t r;
+                        if (sub3_noq == 0x0E207800) {         // SQABS
+                            r = sat_abs_s(n, bits);
+                        } else if (sub3_noq == 0x2E207800) {  // SQNEG
+                            r = sat_neg_s(n, bits);
+                        } else if (sub3_noq == 0x0E203800) {  // SUQADD
+                            uint64_t d = 0;
+                            memcpy(&d, vd + i * esize, esize);
+                            r = sat_signed_i128(
+                                static_cast<__int128>(
+                                    static_cast<int64_t>(sext_lane(d, bits))) +
+                                static_cast<__int128>(n),   // Vn is UNSIGNED
+                                bits);
+                        } else {                              // USQADD
+                            uint64_t d = 0;
+                            memcpy(&d, vd + i * esize, esize);
+                            __int128 w = static_cast<__int128>(d) +
+                                         static_cast<int64_t>(n);
+                            r = (w < 0) ? 0
+                                : (w > static_cast<__int128>(umax))
+                                    ? umax
+                                    : static_cast<uint64_t>(w);
+                        }
+                        memcpy(out + i * esize, &r, esize);
                     }
                     memcpy(&cpu.v_lo[rd], out, 8);
                     if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);

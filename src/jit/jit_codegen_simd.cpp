@@ -933,6 +933,59 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
             set_vreg_reg(inst.dest, d);
             return true;
         }
+        // ── SIMD SMOV (vector element -> GPR, SIGN-extended) ────────
+        // Identical element addressing to UMOV (width = esize 1/2/4,
+        // imm = lane index, flags_op = Q), followed by a left+arithmetic-
+        // right shift pair so the sign bit propagates through the 64-bit
+        // register. Q=0 results land in the low 32 bits already correctly
+        // sign-extended (set_vreg_reg stores the full qword; guest W reads
+        // use only the low half). The .D form never reaches here (table
+        // guard keeps it UNKNOWN -> interp -> DecodeError).
+        case IROp::SIMD_SMOV: {
+            const int esize = inst.width ? static_cast<int>(inst.width) : 4;
+            const int index = static_cast<int>(inst.imm);
+            const int byte_off = index * esize;        // offset into the 16-byte vector
+            const int qword = byte_off / 8;            // 0 -> v_lo, 1 -> v_hi
+            const int32_t off = (qword == 0 ? V_LO_OFF : V_HI_OFF)
+                              + static_cast<int>(inst.src1) * 8 + (byte_off % 8);
+            int d = alloc_reg();
+            switch (esize) {
+                case 1:  emit_load8(d, CPU_REG, off);  break;
+                case 2:  emit_load16(d, CPU_REG, off); break;
+                default: emit_load32(d, CPU_REG, off); break;  // 4 bytes
+            }
+            clobber_flags();                           // shifts kill RFLAGS
+            const int sh = 64 - esize * 8;             // 24 / 16 / 32
+            emit_shift_imm8(d, 4, static_cast<uint8_t>(sh));  // shl
+            emit_shift_imm8(d, 7, static_cast<uint8_t>(sh));  // sar
+            set_vreg_reg(inst.dest, d);
+            return true;
+        }
+        // ── SIMD SATADDSUB (SQADD/UQADD/SQSUB/UQSUB, B/H lanes) ─────
+        // imm = subop (0=SQADD,1=UQADD,2=SQSUB,3=UQSUB), width = esize
+        // (1 or 2 ONLY — table guard `size < 2`), flags_op = Q. Lowered
+        // with the EXACT SSE2 saturating instructions; 32/64-bit lanes
+        // have no compact pre-AVX512 form and stay on the interpreter.
+        case IROp::SIMD_SATADDSUB: {
+            if (vec_cache_active_) { emit_call_interp(inst.arm_pc, false); return true; }
+            const int esize = static_cast<int>(inst.width) == 2 ? 2 : 1;
+            const bool q = inst.flags_op != 0;
+            const int subop = static_cast<int>(inst.imm);
+            // opcode[subop][esize]: PADDSB EC/W ED, PADDUSB DC/W DD,
+            // PSUBSB E8/W E9, PSUBUSB D8/W DA
+            static const uint8_t kOp[4][2] = {
+                {0xEC, 0xED},  // SQADD
+                {0xDC, 0xDD},  // UQADD
+                {0xE8, 0xE9},  // SQSUB
+                {0xD8, 0xDA},  // UQSUB
+            };
+            clobber_flags();
+            load_vec(0, static_cast<int>(inst.src1));
+            load_vec(1, static_cast<int>(inst.src2));
+            sse2_op(kOp[subop & 3][esize == 2], 0, 1);  // xmm0 = xmm0 OP xmm1
+            store_vec(0, static_cast<int>(inst.dest), q);
+            return true;
+        }
         // ── SIMD MOVI/MVNI (broadcast lane pattern, AdvSIMD modified imm) ──
         // v_lo[dest] = imm; v_hi[dest] = Q ? imm : 0. flags_op = Q.
         // One movabs + one vmovq (vmovq already zeroes the upper half for

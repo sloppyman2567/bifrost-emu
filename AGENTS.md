@@ -1109,14 +1109,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **203 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **208 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **203 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 198),
+  (interactive + real-world are the standard default) = **208 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 203),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
@@ -1127,7 +1127,7 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 ### Test binary toolchains (how `make setup-tests` builds them)
 
-The suite has **203 tests** across categories (unit/JIT/interp, syscalls,
+The suite has **208 tests** across categories (unit/JIT/interp, syscalls,
 integration, interactive, toybox, real-world, benchmarks, dynamic linking).
 Test `.elf` files are gitignored and rebuilt from `ctest/*.c` +
 `ctest_real/*.c` by `make setup-tests` (also run by `check-all`). Three
@@ -2750,7 +2750,84 @@ not musl-`-static`.
   memory, vkCmdBindTransformFeedbackBuffers etc. — all table rows
   already; nested-pointer shapes beyond these are additive arms.
 
+## Session History (2026-08-22) — SMOV + saturating-int SIMD family (interp)
+
+- **New interpreter ops landed in `interp_fp.cpp` (+ test `ctest/test_simd_sat.c`,
+  21 checks, ALL PASS under JIT and `--no-jit`; quick suite 202/202):**
+  SMOV (`sub_noq 0x0E002C00`, ASIMDINS group bits[15:12]=0010 — do NOT match
+  UMOV's 0011 or SMOULDN'T-be-matched 0001/0010 INS forms; esize==8 (.D) is
+  UNALLOCATED and must fall through to DecodeError), SQADD/UQADD,
+  SQSUB/UQSUB, SQSHL/UQSHL (register), SQRSHL/UQRSHL, SRSHL/URSHL
+  (three-same, inner switch on `sub3_noq`), and SQABS/SQNEG/SUQADD/USQADD
+  (two-reg misc). None are in the simd_dp table yet → JIT CALL_INTERPs them
+  (classify UNKNOWN), so interp is the only semantics today.
+- **THREE bugs found while validating (all fixed):**
+  1. **`static_cast<__int128>(uint64_t)` ZERO-extends.** The sat helpers'
+     `sext_lane` returns the correct BIT PATTERN as uint64_t, but casting it
+     straight to `__int128` converts the unsigned VALUE (+1.8e19 for -128)
+     → every signed saturating op clamped to +max. Fix: route through
+     `static_cast<int64_t>` BEFORE widening to __int128 (sat_add_s/sat_sub_s/
+     sat_neg_s + the SUQADD site). Host repro: `sat_add_s(0x80,0x80,8)`
+     returned 0x7f at ANY optimization level — this was never a miscompile.
+     Rule: uint64 bit patterns must be reinterpreted SIGNED (int64_t) before
+     value-converting to a wider type.
+  2. **The neverball ABDL block's discriminator was too crude**: it tested
+     `(sub3_noq & 0x7000)` ∈ {0x5000,0x7000} (bits[14:12] only) which ALSO
+     matched SRSHL/SQRSHL (opcode 010101/010111) and SQABS/SQNEG
+     (011110/011111), silently routing them into widening-abs-diff logic
+     (nondeterministic garbage output, no crash). Fixed to exact opcode6
+     matches: SABDL/UABDL = 0x1C, SABAL/UABAL = 0x14. When matching inside
+     the sub3_noq region ALWAYS use the full 6-bit opcode — bits[14:12]
+     alone collide across encoding families.
+  3. **Test expectations violated ARM spec** (test-side, emulator correct):
+     `sqshl` of `1<<63` SATURATES to INT64_MAX (not INT64_MIN);
+     SUQADD saturates to the SIGNED range (dest signed, Vn unsigned;
+     −1 + 0xFFFFFFFF → INT32_MAX); USQADD clamps negative sums to 0
+     (dest unsigned, Vn signed; 0 + (−1) → 0).
+- **JIT MIGRATION (same session, later): SMOV + SQADD/UQADD/SQSUB/UQSUB
+  (B/H lanes) are now NATIVE via the table pipeline.** Rows added to
+  `tools/opgen/simd_dp.txt` → `make opgen` (105→110 ops):
+  - SMOV row: mask `0xBFE0FC00` match `0x0E002C00`, guard admits imm5 ∈
+    {1,2,4} only (B/H/S; the .D form is UNALLOCATED and must stay UNKNOWN
+    → interp → DecodeError).
+  - SATADDSUB rows: SQADD/UQADD/SQSUB/UQSUB matches `0x{0E,2E}200C00` /
+    `0x{0E,2E}202C00`, subop {0,1,2,3}, guard **`size < 2`** — byte and
+    halfword lanes ONLY. Rationale: SSE2 has EXACT saturating instructions
+    for those widths (PADDSB EC / PADDSW ED / PADDUSB DC / PADDUSW DD /
+    PSUBSB E8 / PSUBSW E9 / PSUBUSB D8 / PSUBUSW DA); 32/64-bit lanes have
+    no compact pre-AVX512 form and stay on the interpreter.
+  - New IR ops `SIMD_SMOV` / `SIMD_SATADDSUB` (ir.hpp), translator cases in
+    ir_translate_fp.cpp's SIMD_DP family switch, codegen in jit_codegen_simd.cpp
+    right after SIMD_UMOV: SMOV = UMOV's zero-extending element load +
+    `shl d,N; sar d,N` sign-extension (clobber_flags() first — shifts kill
+    RFLAGS; kind 4=SHL/7=SAR). SATADDSUB = vec_cache_active_ guard →
+    CALL_INTERP fallback, load_vec(0/1) + one `sse2_op(kOp[subop][esize2],
+    0, 1)` + store_vec (memory-path style; NOT vec-cache compatible; no GPR
+    flush needed — XMM+memory only). instr_will_call_interp needed NO edits
+    (classify-driven).
+  - STILL interpreter-only (deliberate): SRSHL/SQRSHL/SQSHL-family register
+    shifts (per-lane VARIABLE shifts need AVX2 vpsllv/vpsrav which only
+    cover 32-bit; 8/16-bit widening tricks not worth it yet) and the
+    32/64-bit saturating add/sub forms.
+  - Verified: test_simd_sat 21/21 under JIT, --no-jit AND BIFROST_JIT_VERIFY=1
+    (zero divergences); native path proven by grepping BIFROST_JIT_DUMP bytes
+    for `66 [REX] 0F {EC,DD,E8,D8} c1`; quick suite 202/202.
+- **`test_simd_sat` registered in `scripts/run_tests.sh`** (unit table,
+  after simd_misc: `"simd_sat|ctest/test_simd_sat.elf||5|ALL PASS"`).
+  Suite counts bumped accordingly — full default suite **208 pass / 0 fail
+  / 0 skip**, `--quick` **203** (verified with a real FULL-suite run; the
+  Verification section counts were updated to match). Historical session-
+  history numbers below are records of what was true at their time — do
+  not "fix" them to current totals.
+
+- Debug-methodology reminders: stderr probes print immediately but stdout
+  buffers until exit — never infer ORDER from mixed streams; count probe
+  LINES not positions. And after editing a file, `make setup-tests` does
+  NOT rebuild the emulator binary — run `make` or you validate stale code
+  (a leftover [dbg] print in the output is the tell).
+
 ## Session History (2026-08-21) — stats reporter FIXED, debug probes dropped, docs reorganized
+
 
 - **BIFROST_STATS_PERIOD never printed mid-run — THREE stacked causes,
   all fixed**: (1) the period check sat in run()'s outer loop, which
