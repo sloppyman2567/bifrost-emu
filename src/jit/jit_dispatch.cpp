@@ -159,7 +159,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     if (it != blocks_.end()) {
         entry = it->second;
         cache_hits++;
-        // ── Tier-2 hot-head detection (BIFROST_TIER2=1, default OFF) ──
+        // ── Tier-2 hot-head detection (default ON; BIFROST_TIER2=0 opts out) ──
         // Count SLOW-PATH dispatches per block (BlockEntry::exec_count) and
         // flag the block once it crosses tier2_hits_threshold() — the tier-2
         // trace/region "hot head" feed (ROADMAP #14, Phase 1; a later task

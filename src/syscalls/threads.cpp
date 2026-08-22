@@ -470,7 +470,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 auto allocs = mem_.allocations_snapshot();
                 for (auto& [addr, size] : allocs) {
                     if (addr >= Memory::MMAP_BASE_MIN &&
-                        addr < Memory::STACK_TOP) {
+                        addr < mem_.stack_top()) {
                         // Zero out the pages at this allocation.
                         try {
                             std::vector<uint8_t> zeros(size, 0);
@@ -487,7 +487,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // overwritten by the new binary's segments.
             auto info = ElfLoader::load(mem_, elf_data);
             // Set up a new initial stack.
-            const uint64_t STACK_TOP = Memory::STACK_TOP;
+            const uint64_t STACK_TOP = mem_.stack_top();
             // The stack is already mapped from the parent; just reset SP.
             uint64_t sp = STACK_TOP;
             // Push argv strings.

@@ -321,7 +321,7 @@ void Emulator::dump_periodic_stats(double dt) {
             static_cast<unsigned long long>(max_sz - last_max_sz_),
             static_cast<unsigned long long>(decfail - last_decfail_),
             static_cast<unsigned long long>(ionly - last_ionly_));
-    // Tier-2 hot-head count (BIFROST_TIER2=1): blocks that crossed the
+    // Tier-2 hot-head count (default ON): blocks that crossed the
     // BIFROST_TIER2_HITS threshold since the last dump. Inert (0) by default.
     fprintf(stderr,
             "[%s] tier2: hot_heads=%llu regions=%llu\n", CODENAME,

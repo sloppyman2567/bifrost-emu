@@ -336,7 +336,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     for (int i = 0; i < NUM_HOST_REGS; i++) reg_vreg_[i] = -1;
     max_vreg_ = 0;
     dirty_host_regs_ = 0;  // reset dirty-bitmask
-    // Tier-2 in-code hot-head counter (BIFROST_TIER2=1, default OFF): reserve
+    // Tier-2 in-code hot-head counter (default ON; BIFROST_TIER2=0 opts out):
     // 8 bytes of counter state immediately BEFORE the fn entry (unreachable
     // data — the fn starts at block_start below, so the entry point stays the
     // prologue). The prologue emits the RIP-relative increment against this
@@ -800,7 +800,7 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // skips its own prologue still reads that slot. Disabled mode leaves
     // chain_entry_off_ unused (chain slots patch to fn instead).
     chain_entry_off_ = code_buf_used_;
-    // ── Tier-2 in-code hot-head counter (BIFROST_TIER2=1, default OFF) ──
+    // ── Tier-2 in-code hot-head counter (default ON; BIFROST_TIER2=0 opts out) ──
     // Emitted here (after chain_entry_off_, before the R10 window load and
     // vec prologue loads) so BOTH cold entries (falling through the prologue)
     // and chain-skip entries (jumping to chain_entry_off_) hit it — every

@@ -1055,6 +1055,56 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   test_sdl_gl_mapbuffer ALL PASS (21 checks), test_sdl_gl_modern ALL PASS
   (17 checks).
 
+## Session History (2026-08-21) — full ASLR (exe bias + stack jitter)
+
+- **ASLR was heap-only since 1.5.4; the main ELF and stack sat at FIXED
+  addresses every run.** `PIE_BASE = 0x400000` hard-coded in
+  elf_loader.cpp and `STACK_TOP = 0x3F000000` constant meant code gadgets
+  and stack frames were ROP-addressable across runs. Now randomized in
+  the Memory constructor through one `/dev/urandom` helper
+  (`Memory::random_offset(range)` — page-granular, falls back to host
+  stack-address entropy, then 0):
+  - **ET_DYN load bias** = `PIE_BASE_MIN(0x400000) + rand(≤128 MiB)`
+    (~15 bits), exposed as `Memory::pie_base()` and used by
+    ElfLoader::load for e_type==3. Band ends at 132 MiB — well below
+    MMAP_BASE_MIN (256 MiB) so brk keeps ≥124 MiB headroom before the
+    mmap floor; zero-page guard preserved (first PT_LOAD lands ≥ 4 MiB).
+  - **Main-stack top** = `STACK_TOP − rand(≤16 MiB)` (~12 bits),
+    exposed as `Memory::stack_top()`. Stack bottom stays ≥ 928 MiB >
+    MMAP_BASE_MAX. All five STACK_TOP consumers converted: emulator.cpp
+    initial-stack build + /proc/maps [stack] entry (which now also uses
+    a new `exe_base_` member for the image line instead of hardcoded
+    0x400000), mem.cpp brk guard (`stack_top() - STACK_SIZE`),
+    threads.cpp execve zero-scan bound + sp reset.
+  - ET_EXEC keeps bias 0 (preferred vaddr) per kernel semantics.
+    BIFROST_NO_ASLR=1 pins heap+exe+stack (single cached getenv in
+    Memory::aslr_disabled). Randomization is CONSTANT across execve
+    within one process (ELF reload reuses the same Memory; re-randomizing
+    would require remap + JIT flush — documented limitation).
+  - Do NOT widen the entropy bands without re-checking the window
+    layout contract (heap 256..768 MiB, stack 944..1008 MiB, ELF low).
+- Verified: probe binary (musl-dynamic PIE) prints dladdr fbase + heap +
+  stack addrs — all three differ per run under default env; NO_ASLR pins
+  exactly (fbase=0x400000, top=0x3efff…); quick suite **201/201**, build
+  0 warnings.
+
+## Session History (2026-08-21) — tier2 default ON
+
+- **`BIFROST_TIER2` now defaults ON** (frostjit.cpp `tier2_enabled()`:
+  enabled unless the env var is set AND starts with '0'). Opt-out is
+  `BIFROST_TIER2=0`; `BIFROST_TIER2=1` still means on. Rationale: the
+  feature has been verified correct across months of opt-in runs (suite
+  200/205 under tier2 both modes, JIT_VERIFY clean, region pin bugs all
+  fixed), loops-only compilation keeps it to genuine back-edge regions,
+  and neutralize-after-fire bounds the counter tax — the documented
+  "do NOT ship a default that leaves eligible blocks un-neutralized"
+  condition holds at HITS=1000. Stale comments updated
+  (jit_dispatch.cpp, jit_translate.cpp ×2, jit_glue.cpp,
+  frostjit.hpp — including the stale HITS default: it is 1000, not
+  10000). Verified: bench_mips acc `0xf800800a2c4ff835` with default and
+  TIER2=0; minecraft live run shows `tier2: hot_heads=864 regions=69`
+  in periodic stats by default; quick suite **201/201**.
+
 ## Verification
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)

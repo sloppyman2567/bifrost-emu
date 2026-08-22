@@ -67,10 +67,27 @@ public:
     static constexpr uint64_t MMAP_BASE_MAX = 0x30000000ULL;     // 768 MiB
     static constexpr uint64_t STACK_TOP = 0x3F000000ULL;         // 1008 MiB
     static constexpr uint64_t STACK_SIZE = 64 * 1024 * 1024;   // 64 MiB
+    // ASLR (1.5.4-alpha heap; exe+stack since 2026-08): per-process
+    // randomized load bias for ET_DYN executables and jittered stack top.
+    // The PIE band ends well below MMAP_BASE_MIN so the brk arena keeps
+    // ≥124 MiB of headroom before the mmap floor at any bias we pick.
+    // Entropy is window-constrained by design (the JIT fast path needs
+    // everything inside the 4 GiB window): ~15 bits for the exe base,
+    // ~12 bits for the stack top. ET_EXEC still loads at its preferred
+    // vaddr (bias 0), matching kernel behavior.
+    static constexpr uint64_t PIE_BASE_MIN = 0x400000ULL;
+    static constexpr uint64_t PIE_JITTER = 128ull * 1024 * 1024;
+    static constexpr uint64_t STACK_JITTER = 16ull * 1024 * 1024;
     Memory();
     ~Memory();
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;
+    // Effective (possibly randomized) ET_DYN load bias and main-stack
+    // top. Constant across execve within one process (we reload the ELF
+    // into the same Memory); BIFROST_NO_ASLR=1 pins both.
+    uint64_t pie_base() const { return pie_base_; }
+    uint64_t stack_top() const { return stack_top_; }
+    static bool aslr_disabled();
     // ── Page cache (per-thread, lock-free) ────────────────────────────
     // Each CPU keeps its own PageCache so the hot path avoids the page
     // map mutex. The cache stores a raw pointer into the vector's data;
@@ -225,6 +242,13 @@ private:
     // guest-side info leaks). The base is page-aligned and within the
     // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
     uint64_t mmap_next_ = 0;
+    // Per-process randomized ET_DYN load bias and main-stack top
+    // (see pie_base()/stack_top() above).
+    uint64_t pie_base_ = PIE_BASE_MIN;
+    uint64_t stack_top_ = STACK_TOP;
+    // Page-aligned random offset in [0, range) from /dev/urandom; falls
+    // back to host stack-address entropy, then 0 (fixed layout).
+    static uint64_t random_offset(uint64_t range);
     // 1.5.4-alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on
     // munmap) to avoid O(pages_.size()) scans on the hot path.

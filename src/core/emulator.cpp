@@ -80,11 +80,12 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
         std::vector<yggdrasil::Yggdrasil::MapEntry> out;
         // ELF image: from end_addr_ min down to lowest PT_LOAD start.
         // We don't track the lowest PT_LOAD start, so use end_addr_ as
-        // the upper bound and 0x400000 (typical PIE/static base) as the
+        // the upper bound and the load bias (pie_base() for ET_DYN,
+        // preferred vaddr for ET_EXEC) as the
         // lower bound heuristic. Conservative: covers all code/data.
         if (end_addr_ > 0) {
             yggdrasil::Yggdrasil::MapEntry e;
-            e.start = 0x400000;
+            e.start = exe_base_;
             e.end   = end_addr_;
             std::snprintf(e.perms, sizeof(e.perms), "rwxp");
             out.push_back(e);
@@ -120,11 +121,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
             out.push_back(e);
         }
-        // Stack: fixed 64 MiB at Memory::STACK_TOP - 64 MiB.
+        // Stack: 64 MiB ending at the (ASLR-jittered) stack top.
         {
             yggdrasil::Yggdrasil::MapEntry e;
-            e.start = Memory::STACK_TOP - Memory::STACK_SIZE;
-            e.end   = Memory::STACK_TOP;
+            e.start = mem_.stack_top() - Memory::STACK_SIZE;
+            e.end   = mem_.stack_top();
             std::snprintf(e.perms, sizeof(e.perms), "rw-p");
             e.label = "[stack]";
             out.push_back(e);
@@ -193,6 +194,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     entry_ = info.entry;
     prog_entry_ = info.entry;  // save original entry for AT_ENTRY
     end_addr_ = info.end_addr;
+    exe_base_ = info.base_addr;
     phdr_addr_ = info.phdr_addr;
     phnum_ = info.phnum;
     phent_ = info.phent;
@@ -747,9 +749,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // brk starts just above the loaded image, page-aligned up
     brk_ = (info.end_addr + 0xFFF) & ~0xFFFULL;
     brk_start_ = brk_;
-    // Set up the initial stack image. 1.5.3: STACK_TOP is inside the
-    // 4 GiB direct window so stack accesses hit the JIT fast path.
-    const uint64_t STACK_TOP = Memory::STACK_TOP;
+    // Set up the initial stack image. 1.5.3: the stack is inside the
+    // 4 GiB direct window so stack accesses hit the JIT fast path;
+    // since 2026-08 its top carries per-process ASLR jitter.
+    const uint64_t STACK_TOP = mem_.stack_top();
     const uint64_t STACK_SIZE = Memory::STACK_SIZE;
     uint64_t stack_base = STACK_TOP - STACK_SIZE;
     mem_.map_range(stack_base, STACK_SIZE + 4096);  // +1 page guard at top

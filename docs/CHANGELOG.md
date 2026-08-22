@@ -44,6 +44,17 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   unused-typedef warning).
 
 ### Added
+- **Full ASLR (completes the 1.5.4 heap-only randomization)**: ET_DYN
+  executables now load at `Memory::pie_base()` — 0x400000 plus a
+  page-granular per-process jitter of up to 128 MiB (~15 bits), kept
+  below the mmap heap floor so brk retains ≥124 MiB headroom; the main
+  stack top jitters down by up to 16 MiB (`stack_top()`, ~12 bits).
+  All draws share one /dev/urandom helper; `BIFROST_NO_ASLR=1` pins
+  heap base, exe bias, and stack top for reproducible traces. ET_EXEC
+  keeps its preferred vaddr. Bias is constant across execve within a
+  process (ELF reload reuses the same Memory). Verified: fbase/heap/
+  stack differ per run under default env, all pinned under NO_ASLR;
+  quick suite 201/201.
 - **Vulkan graphics-pipeline stage (ROADMAP #12)**: seven deep-marshal
   policies — vkCreateShaderModule (nested pCode),
   vkCreateGraphicsPipelines (full state tree), vkCreatePipelineLayout,
@@ -61,6 +72,14 @@ with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
   saturating SQSHRN family, by-element multiply family).
 
 ### Changed
+- **Tier-2 JIT enabled by default** (was opt-in via `BIFROST_TIER2=1`).
+  Loops-only region compilation + in-code hot-head counters +
+  neutralize-after-fire make the always-on default viable (counter tax
+  is bounded: hot blocks stop paying it once they fire; CoreMark A/B at
+  the default HITS=1000 showed parity). Opt out with `BIFROST_TIER2=0`.
+  Verified: quick suite 201/201 under the new default, bench_mips acc
+  identical with tier2 on and off, minecraft fires regions on a live
+  run (864 hot heads → 69 regions in the first ~10s window).
 - Doc reorganization: all docs except README.md and AGENTS.md moved to
   `docs/`; DISPLAY_THUNK.md is now local-only (gitignored).
 

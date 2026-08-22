@@ -24,46 +24,44 @@ Memory::Memory() {
     // 1.5.4-alpha: ASLR for mmap base. Randomize the starting address
     // for future mmap_alloc calls using /dev/urandom. The base is
     // page-aligned and within the low heap region (MMAP_BASE_MIN +
-    // random offset up to ~768 MiB of ASLR entropy). It's INSIDE the
+    // random offset up to ~512 MiB of ASLR entropy). It's INSIDE the
     // 4 GiB direct window (1.5.3) so guest heap accesses hit the JIT
     // fast path instead of the pages_ + rwlock slow path.
     // This prevents guest-side info leaks that rely on a fixed mmap
     // base (common in sandbox escapes and ROP chain construction).
     //
-    // We use /dev/urandom (not rand()) because:
-    // 1. rand() is predictable if the guest can observe any output
-    // 2. /dev/urandom is the standard kernel CSPRNG on Linux
-    // 3. It's async-signal-safe (no malloc, no locks)
-    //
-    // BIFROST_NO_ASLR=1 disables randomization (for debugging and
-    // reproducible trace comparison between JIT and interpreter).
-    if (getenv("BIFROST_NO_ASLR")) {
-        mmap_next_ = MMAP_BASE_MIN;
-    } else {
-        int fd = ::open("/dev/urandom", O_RDONLY);
-        if (fd >= 0) {
-            uint64_t entropy = 0;
-            ssize_t n = ::read(fd, &entropy, sizeof(entropy));
-            ::close(fd);
-            if (n == sizeof(entropy)) {
-                // Mask to the entropy range (MMAP_BASE_MAX - MIN),
-                // page-align, add base.
-                uint64_t range = MMAP_BASE_MAX - MMAP_BASE_MIN;
-                entropy &= (range - PAGE_SIZE);
-                mmap_next_ = MMAP_BASE_MIN + (entropy & ~PAGE_MASK);
-            } else {
-                // Fallback: use address of a stack variable as entropy.
-                uint64_t stack_addr = reinterpret_cast<uint64_t>(&p);
-                uint64_t range = MMAP_BASE_MAX - MMAP_BASE_MIN;
-                mmap_next_ = MMAP_BASE_MIN + ((stack_addr ^ 0x5DEECE66DULL)
-                           & (range - PAGE_SIZE) & ~PAGE_MASK);
-            }
-        } else {
-            // /dev/urandom not available (chroot? container?). Use the
-            // low fixed base — better than crashing.
-            mmap_next_ = MMAP_BASE_MIN;
-        }
+    // BIFROST_NO_ASLR=1 disables ALL randomization (heap base, PIE load
+    // bias, stack top) — for debugging and reproducible trace
+    // comparison between JIT and interpreter.
+    mmap_next_ = MMAP_BASE_MIN + random_offset(MMAP_BASE_MAX - MMAP_BASE_MIN);
+    pie_base_ = PIE_BASE_MIN + random_offset(PIE_JITTER);
+    stack_top_ = STACK_TOP - random_offset(STACK_JITTER);
+}
+
+bool Memory::aslr_disabled() {
+    static const bool disabled = getenv("BIFROST_NO_ASLR") != nullptr;
+    return disabled;
+}
+
+uint64_t Memory::random_offset(uint64_t range) {
+    if (aslr_disabled() || range == 0) return 0;
+    uint64_t npages = range / PAGE_SIZE;
+    if (npages == 0) return 0;
+    int fd = ::open("/dev/urandom", O_RDONLY);
+    uint64_t entropy = 0;
+    if (fd >= 0) {
+        ssize_t n = ::read(fd, &entropy, sizeof(entropy));
+        ::close(fd);
+        if (n != sizeof(entropy)) entropy = 0;
     }
+    if (entropy == 0) {
+        // Fallback: use the address of a stack variable as entropy
+        // (urandom unavailable — chroot/container). Better than a
+        // fully fixed layout; still page-aligned.
+        uint64_t stack_addr = reinterpret_cast<uint64_t>(&fd);
+        entropy = stack_addr ^ 0x5DEECE66DULL;
+    }
+    return (entropy % npages) * PAGE_SIZE;
 }
 Memory::~Memory() {
     if (direct_window_) {

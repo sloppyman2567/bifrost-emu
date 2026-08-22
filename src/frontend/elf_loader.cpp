@@ -69,18 +69,19 @@ ElfLoader::Loaded ElfLoader::load(Memory& mem, const std::vector<uint8_t>& data)
     info.end_addr  = 0;
     info.has_lse   = false;
     info.base_addr = 0;  // load bias (0 for ET_EXEC, non-zero for ET_DYN/PIE)
-    // are relative (start at 0). The Linux kernel loads PIE at a random
-    // base address. We load at a fixed base (0x400000) to match the
-    // non-PIE convention and avoid colliding with the zero page (which
-    // we map for NULL-deref safety). Without this, PIE binaries overlap
-    // with the zero page — the first PT_LOAD (vaddr=0) overwrites the
-    // zero page, and NULL dereferences crash instead of returning 0.
+    // ET_DYN images are position-relative (start at 0). The Linux kernel
+    // loads PIE at a random base address (ELF_ET_DYN_BASE + page-aligned
+    // jitter); we mirror that with Memory::pie_base() — 0x400000 plus a
+    // per-process offset, always well above the zero page we map for
+    // NULL-deref safety and below the mmap heap floor. Without a bias,
+    // PIE binaries overlap the zero page — the first PT_LOAD (vaddr=0)
+    // overwrites it, and NULL dereferences crash instead of returning 0.
     // This affected musl dynamic binaries (which are PIE by default),
     // causing host SIGSEGV during dynamic linker initialization.
-    constexpr uint64_t PIE_BASE = 0x400000ULL;
     if (e_type == 3) {  // ET_DYN (PIE or shared library)
-        info.base_addr = PIE_BASE;
-        info.entry += PIE_BASE;
+        uint64_t base = mem.pie_base();
+        info.base_addr = base;
+        info.entry += base;
     }
     // Detect PT_INTERP (dynamic linker path).
     for (auto& h : phdrs) {

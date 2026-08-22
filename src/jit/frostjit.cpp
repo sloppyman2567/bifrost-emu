@@ -62,16 +62,22 @@ bool FrostJIT::direct_call_enabled() {
     static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
     return on;
 }
-// ── Tier-2 env gates (BIFROST_TIER2, default OFF) ──────────────────────
-// Tier-2 is the future trace/region JIT (ROADMAP #14). Phase 1 feeds it
-// with per-block hot-head detection: BlockEntry::exec_count counts slow-path
-// dispatches, and a block crossing tier2_hits_threshold() under BIFROST_TIER2
-// is flagged/logged (BIFROST_TIER2_TRACE=1). This first step builds NO
-// traces yet — later tasks grow regions from these hot heads. All gates read
-// once (mirroring chain_skip_enabled), so the default (BIFROST_TIER2 unset)
-// changes no behavior.
+// ── Tier-2 env gates (BIFROST_TIER2, default ON since 2026-08-21) ──────
+// Tier-2 is the region/loop-fusion JIT (ROADMAP #14): in-code hot-head
+// counters fire on hot loop heads, collect_tier2_trace walks a trace,
+// and compile_tier2_region compiles natural loops with one whole-region
+// regalloc + LICM preheader (+ DCE, const-prop fold-ahead). Only
+// BACK-EDGE regions compile by default (loops-only, measured +3.5% on
+// CoreMark; BIFROST_T2_LINEAR=1 restores all-region). Hot blocks stop
+// paying the counter tax after firing (tier2_counter_disable), which is
+// what makes the always-on default viable — do NOT ship a default that
+// leaves large numbers of eligible blocks un-neutralized.
+// Opt OUT with BIFROST_TIER2=0 (bisection / debugging).
 bool FrostJIT::tier2_enabled() {
-    static const bool on = (getenv("BIFROST_TIER2") != nullptr);
+    static const bool on = [] {
+        const char* s = getenv("BIFROST_TIER2");
+        return !s || s[0] != '0';
+    }();
     return on;
 }
 uint32_t FrostJIT::tier2_hits_threshold() {

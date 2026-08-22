@@ -592,10 +592,15 @@ expansion.
    frame/menu loop. Remaining polish: input latency tuning, wider
    GL3.3+/4.x coverage as games demand it.
 
-4. **ASLR** — binaries currently load at their preferred vaddr;
-   randomizing load addresses would catch guest programs that
-   accidentally depend on absolute addressing. Required for full
-   PIE binary support.
+4. **ASLR** ✅ DONE (2026-08) — heap/mmap base randomized in 1.5.4-alpha;
+   ET_DYN load bias (`Memory::pie_base()`, 0x400000 + up to 128 MiB
+   page-granular jitter, ~15 bits) and main-stack top (`stack_top()`,
+   up to 16 MiB down-jitter, ~12 bits) added 2026-08. Entropy is
+   window-constrained by design (everything must stay inside the 4 GiB
+   direct window for the JIT fast path). `BIFROST_NO_ASLR=1` pins all
+   three for reproducible traces; ET_EXEC still loads at its preferred
+   vaddr, matching kernel semantics. Randomization is constant across
+   execve within one process (ELF reload reuses the same Memory).
 
 ---
 

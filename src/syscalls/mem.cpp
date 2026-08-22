@@ -355,7 +355,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // bogus (e.g. stack-relative) address must not let brk
             // shadow the stack pages. Linux likewise refuses brk growth
             // that would collide with the mmap/stack area.
-            if (new_brk >= Memory::STACK_TOP - Memory::STACK_SIZE) {
+            if (new_brk >= mem_.stack_top() - Memory::STACK_SIZE) {
                 ret_host(brk_);
                 return 0;
             }

@@ -540,10 +540,9 @@ public:
     // through jit_call_helper → lookup_call_target. Disable with
     // BIFROST_NO_DIRECT_CALL=1 (bisection / debugging).
     static bool direct_call_enabled();
-    // Tier-2 (trace/region JIT) env gates (ROADMAP #14, Phase 1). Read once
-    // at first use, mirroring chain_skip_enabled(). BIFROST_TIER2=1 enables
-    // hot-head detection (default OFF — no behavior change when unset);
-    // BIFROST_TIER2_HITS = the "hot head" threshold (default 10000);
+    // Tier-2 (trace/region JIT) env gates (ROADMAP #14). Read once
+    // at first use. Default ON since 2026-08-21; BIFROST_TIER2=0 disables.
+    // BIFROST_TIER2_HITS = the "hot head" threshold (default 1000);
     // BIFROST_TIER2_TRACE=1 logs each hot head as it fires.
     static bool     tier2_enabled();
     static uint32_t tier2_hits_threshold();
