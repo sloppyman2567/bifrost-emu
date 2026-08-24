@@ -3662,3 +3662,28 @@ not musl-`-static`.
   page end would zero-fill on overread. Now byte-exact.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
   quick suite 207/207, swapchain + mambo rc=0 ×3 each on live RADV.
+
+## Session History (2026-08-24) — Phase B batch 3: pipelines generated
+
+- **vkCreateGraphicsPipelines / vkCreateComputePipelines migrated to
+  VK_CMD_DEEP create-style plans** — two hand arms + 14 H structs
+  DELETED (~110 lines incl. the whole frozen pipeline-state tree).
+- **New generator/runtime capabilities:**
+  - VKM_STR (0x40) field flag: NUL-terminated char* fields stage
+    strlen+1 bytes via bounded vk_deep_guest_strlen (cap 256), mirrored
+    in size and fill passes.
+  - STRUCT_IN (out=4) unified: count_arg = len-sibling param index for
+    struct ARRAYS (pCreateInfos), 0xFF sentinel = exactly one
+    (BeginRenderPass/ShaderModule shapes). Count capped at
+    kVkDeepMaxElems.
+  - OUT_HANDLE (out=5) unified the same way: register-count handle
+    ARRAYS get a zeroed bounce of count*8; copyback is gated on
+    host ret==0 (on_success_only rec flag).
+  - latexmath pSampleMask already byte-granular from batch 1 — stages
+    rasterizationSamples bytes vs ceil(/32)*4 needed (harmless
+    overstage; host reads only what it needs).
+- Registry note: BOTH pipeline commands carry len="createInfoCount" on
+  pCreateInfos AND pPipelines — no per-command overrides needed.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
+  (warnings 6→4), quick suite 207/207, swapchain + mambo rc=0 ×3 each
+  on live RADV (both exercise graphics-pipeline creation end-to-end).

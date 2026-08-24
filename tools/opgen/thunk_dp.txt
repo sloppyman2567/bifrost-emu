@@ -775,8 +775,8 @@ vkCreateShaderModule        VK   ippp           -     VK_CMD_DEEP -
 vkDestroyShaderModule       VK   iip            -     VULKAN            -
 vkCreatePipelineCache       VK   ippp           -     VULKAN            -
 vkDestroyPipelineCache      VK   iip            -     VULKAN            -
-vkCreateGraphicsPipelines   VK   iiipip         -     VK_CREATE_GRAPHICS_PIPELINES -
-vkCreateComputePipelines    VK   iiipip         -     VULKAN            -
+vkCreateGraphicsPipelines   VK   iiipip         -     VK_CMD_DEEP -
+vkCreateComputePipelines    VK   iiipip         -     VK_CMD_DEEP            -
 vkDestroyPipeline           VK   iip            -     VULKAN            -
 vkCreatePipelineLayout      VK   ippp           -     VK_CMD_DEEP -
 vkDestroyPipelineLayout     VK   iip            -     VULKAN            -

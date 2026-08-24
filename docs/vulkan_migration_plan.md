@@ -104,11 +104,18 @@ scalar-typed pointer fields (uint32_t* pPreserveAttachments) staged
 with elem_size 8 instead of 4 ('scalar:N' never decoded in field
 emission). Gates re-run: 207/207, RADV ×3 each.
 
-Remaining hand arms (10): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
-GRAPHICS/COMPUTE_PIPELINES, ALLOC_DESCRIPTOR_SETS,
-UPDATE_DESCRIPTOR_SETS, ALLOC/FREE/MAP/UNMAP_MEMORY,
-FLUSH/INVALIDATE_MAPPED, SYNC_PULL, BEGIN_COMMAND_BUFFER.
-Next batch: pipelines (biggest tree), then SUBMIT.
+**Batch 3 DONE (2026-08-24)**: vkCreateGraphicsPipelines +
+vkCreateComputePipelines migrated — the full pipeline state tree
+(pName STRINGS via new VKM_STR flag, specialization blobs, vertex
+input/viewport/multisample/color-blend/dynamic-state sub-structs) plus
+OUT handle arrays with register counts (STRUCT_IN/OUT_HANDLE roles
+unified over count_arg; 0xFF sentinel = single). Two more hand arms +
+14 H structs deleted (~110 lines). Gates re-run: 207/207, RADV ×3 each.
+
+Remaining hand arms (8): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
+ALLOC_DESCRIPTOR_SETS, UPDATE_DESCRIPTOR_SETS, memory arms (permanent),
+SYNC_PULL, BEGIN_COMMAND_BUFFER. Next: SUBMIT (+SUBMIT2), then the
+descriptor-set pair.
 
 ## Hard contracts (violating any = known crash class)
 

@@ -348,6 +348,28 @@ void vk_deep_unknown_stype_once(int32_t s) {
     }
 }
 
+// Bounded guest strlen (strings staged by VKM_STR fields; capped well
+// below any sane pipeline stage name).
+size_t vk_deep_guest_strlen(Memory* mem, uint64_t g) {
+    constexpr size_t kMaxStr = 256;
+    if (!g) return 0;
+    const uint8_t* hp =
+        reinterpret_cast<const uint8_t*>(mem->guest_to_host_ptr(g));
+    if (hp) {
+        size_t n = 0;
+        while (n < kMaxStr && mem->guest_to_host_ptr(g + n) && hp[n]) n++;
+        return n;
+    }
+    size_t n = 0;
+    while (n < kMaxStr) {
+        uint8_t c = 0;
+        try { mem->read(g + n, &c, 1); } catch (...) { break; }
+        if (!c) break;
+        n++;
+    }
+    return n;
+}
+
 // Dry-size walk of a guest pNext chain (must mirror vk_deep_fill_chain
 // allocation-for-allocation — the two-pass staging contract).
 size_t vk_deep_chain_size(Memory* mem, uint64_t head, bool* ok) {
@@ -420,6 +442,18 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
                 if (!*ok) return 0;
                 continue;
             }
+            if (f.elem & thunk::VKM_STR) {
+                uint8_t stackbuf3[512];
+                const void* he3 =
+                    vk_deep_read(mem, g, d->size, stackbuf3, sizeof(stackbuf3));
+                if (!he3) { *ok = false; return 0; }
+                uint64_t sp = reinterpret_cast<uint64_t>(
+                    vk_deep_ptr_field(he3, f));
+                if (!sp) continue;
+                total = (total + 7u) & ~size_t(7);
+                total += vk_deep_guest_strlen(mem, sp) + 1;
+                continue;
+            }
             uint8_t stackbuf[512];
             const void* host_elem =
                 vk_deep_read(mem, g, d->size, stackbuf, sizeof(stackbuf));
@@ -462,6 +496,20 @@ void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
                                reinterpret_cast<uint64_t>(
                                    vk_deep_ptr_field(out, f)),
                                slot);
+            continue;
+        }
+        if (f.elem & thunk::VKM_STR) {
+            // NUL-terminated guest string: stage strlen+1 bytes
+            void** slot = reinterpret_cast<void**>(out + f.off);
+            uint64_t sp = reinterpret_cast<uint64_t>(
+                vk_deep_ptr_field(out, f));
+            if (!sp) { *slot = nullptr; continue; }
+            size_t n = vk_deep_guest_strlen(mem, sp);
+            char* dstp = reinterpret_cast<char*>(st.bytes(n + 1, 1));
+            try { mem->read(sp, dstp, n + 1); }
+            catch (...) { std::memset(dstp, 0, n + 1); }
+            dstp[n] = 0;
+            *slot = dstp;
             continue;
         }
         const void* p = vk_deep_ptr_field(out, f);
@@ -1163,6 +1211,8 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         void* staged_count = nullptr;
         uint32_t staged_elems = 0;
         size_t elem_size = 0;
+        bool on_success_only = false;   // OUT handles: write back only
+                                        // when the host call succeeded
     };
     DeepOutRec vk_out_recs[4];
     int vk_n_out_recs = 0;
@@ -1189,28 +1239,37 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     vk_deep_done |= 1u << r.arg;
                     continue;
                 }
-                // ── SINGLE_STRUCT_IN: stage ONE struct recursively ──
+                // ── STRUCT_IN: stage struct(s) recursively ──────────
                 if (r.out == 4) {
                     if (!args[r.arg]) continue;
+                    uint32_t scount = 1;
+                    if (r.count_arg != 0xFF && r.count_arg < kMaxArgs)
+                        scount = static_cast<uint32_t>(std::min<uint64_t>(
+                            args[r.count_arg], kVkDeepMaxElems));
                     need = (need + 7u) & ~size_t(7);
                     need += vk_deep_size_one(
-                        impl_->mem, args[r.arg], r.desc, 1, 0, &ok);
+                        impl_->mem, args[r.arg], r.desc, scount, 0, &ok);
                     if (!ok) break;
-                    jobs[njobs++] = {static_cast<int>(r.arg), 1u,
+                    jobs[njobs++] = {static_cast<int>(r.arg), scount,
                                      args[r.arg], false, r.desc};
                     vk_deep_done |= 1u << r.arg;
                     continue;
                 }
-                // ── OUT_HANDLE: 8-byte bounce + post-call writeback ──
+                // ── OUT_HANDLE(S): zeroed bounce + post-call writeback
                 if (r.out == 5) {
                     DeepOutRec rec{};
                     rec.arg = r.arg;
                     rec.count_arg_idx = -1;
                     rec.guest_array = args[r.arg];
                     rec.elem_size = 8;
-                    rec.staged_elems = 1;
+                    uint32_t hcount = 1;
+                    if (r.count_arg != 0xFF && r.count_arg < kMaxArgs)
+                        hcount = static_cast<uint32_t>(std::min<uint64_t>(
+                            args[r.count_arg], kVkDeepMaxElems));
+                    rec.staged_elems = hcount;
+                    rec.on_success_only = true;
                     need = (need + 7u) & ~size_t(7);
-                    need += 8;
+                    need += (size_t)hcount * 8;
                     vk_out_recs[vk_n_out_recs++] = rec;
                     vk_deep_done |= 1u << r.arg;
                     continue;
@@ -1326,11 +1385,12 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         rec.staged_count = cb;
                         args[rec.count_arg_idx] =
                             reinterpret_cast<uint64_t>(cb);
-                    } else if (rec.guest_array && rec.staged_elems == 1) {
-                        // OUT_HANDLE bounce (zeroed; host writes the
-                        // handle through it)
-                        void* hb = st.bytes(8, 8);
-                        std::memset(hb, 0, 8);
+                    } else if (rec.guest_array && rec.staged_elems &&
+                               !rec.guest_count_ptr && rec.on_success_only) {
+                        // OUT handle bounce(s), zeroed; host writes the
+                        // handle(s) through them
+                        void* hb = st.bytes((size_t)rec.staged_elems * 8, 8);
+                        std::memset(hb, 0, (size_t)rec.staged_elems * 8);
                         rec.staged = hb;
                         args[rec.arg] =
                             reinterpret_cast<uint64_t>(hb);
@@ -1450,6 +1510,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // guest memory. (VkStage outlives this — declared at function scope.)
     for (int oi = 0; oi < vk_n_out_recs; oi++) {
         const DeepOutRec& rec = vk_out_recs[oi];
+        if (rec.on_success_only && ret != 0) continue;  // OUT handles
         if (rec.staged_count && rec.guest_count_ptr) {
             uint32_t actual = 0;
             std::memcpy(&actual, rec.staged_count, 4);
@@ -1560,82 +1621,6 @@ struct VkSubmitInfoH {
     const void* pWaitSemaphores; const void* pWaitDstStageMask;
     uint32_t commandBufferCount; const void* pCommandBuffers;
     uint32_t signalSemaphoreCount; const void* pSignalSemaphores;
-};
-// ── Graphics-pipeline stage (2026-08-21) ──────────────────────────────
-// All layouts verified byte-for-byte against the vendored
-// ctest_real/vulkan_headers vulkan_core.h (natural-alignment LP64 —
-// identical on host x86-64 and guest AArch64).
-struct VkPipelineShaderStageCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t stage;
-    uint64_t module; const char* pName; const void* pSpecializationInfo;
-};
-struct VkSpecializationMapEntryH { uint32_t constantID, offset; size_t size; };
-struct VkSpecializationInfoH {
-    uint32_t mapEntryCount; const VkSpecializationMapEntryH* pMapEntries;
-    size_t dataSize; const void* pData;
-};
-struct VkComputePipelineCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    VkPipelineShaderStageCreateInfoH stage;
-    uint64_t basePipelineHandle; int32_t basePipelineIndex;
-};
-struct VkPipelineVertexInputStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t vertexBindingDescriptionCount; const void* pVertexBindingDescriptions;
-    uint32_t vertexAttributeDescriptionCount; const void* pVertexAttributeDescriptions;
-};
-struct VkPipelineInputAssemblyStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t topology; uint32_t primitiveRestartEnable;
-};
-struct VkPipelineViewportStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t viewportCount;
-    const void* pViewports; uint32_t scissorCount; const void* pScissors;
-};
-struct VkPipelineRasterizationStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t depthClampEnable, rasterizerDiscardEnable, polygonMode,
-             cullMode, frontFace, depthBiasEnable;
-    float depthBiasConstantFactor, depthBiasClamp, depthBiasSlopeFactor, lineWidth;
-};
-struct VkPipelineMultisampleStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t rasterizationSamples;
-    uint32_t sampleShadingEnable; float minSampleShading;
-    const void* pSampleMask; uint32_t alphaToCoverageEnable; uint32_t alphaToOneEnable;
-};
-struct VkStencilOpStateH {
-    uint32_t failOp, passOp, depthFailOp, compareOp, compareMask, writeMask, reference;
-};
-struct VkPipelineDepthStencilStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t depthTestEnable, depthWriteEnable, depthCompareOp,
-             depthBoundsTestEnable, stencilTestEnable;
-    VkStencilOpStateH front, back;
-    float minDepthBounds, maxDepthBounds;
-};
-struct VkPipelineColorBlendStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t logicOpEnable, logicOp, attachmentCount;
-    const void* pAttachments; float blendConstants[4];
-};
-struct VkPipelineDynamicStateCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t dynamicStateCount;
-    const void* pDynamicStates;
-};
-struct VkGraphicsPipelineCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t stageCount;
-    const VkPipelineShaderStageCreateInfoH* pStages;
-    const VkPipelineVertexInputStateCreateInfoH* pVertexInputState;
-    const VkPipelineInputAssemblyStateCreateInfoH* pInputAssemblyState;
-    const void* pTessellationState;
-    const VkPipelineViewportStateCreateInfoH* pViewportState;
-    const VkPipelineRasterizationStateCreateInfoH* pRasterizationState;
-    const VkPipelineMultisampleStateCreateInfoH* pMultisampleState;
-    const VkPipelineDepthStencilStateCreateInfoH* pDepthStencilState;
-    const VkPipelineColorBlendStateCreateInfoH* pColorBlendState;
-    const VkPipelineDynamicStateCreateInfoH* pDynamicState;
-    uint64_t layout; uint64_t renderPass; uint32_t subpass;
-    uint64_t basePipelineHandle; int32_t basePipelineIndex;
 };
 struct VkDescriptorSetAllocateInfoH {
     int32_t sType; void* pNext; uint64_t descriptorPool;
@@ -2010,177 +1995,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             cpu.regs[0], submit_count, arr, cpu.regs[3]);
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) fprintf(stderr, "[display-thunk] vkQueueSubmit → %d\n", static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── vkCreateGraphicsPipelines ────────────────────────────────────────
-    // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
-    // pPipelines) — each VkGraphicsPipelineCreateInfo carries a tree:
-    // pStages (each with pName string + optional specialization blob),
-    // pVertexInputState (two flat arrays), pViewportState (viewport +
-    // scissor arrays), pMultisampleState (sample mask), pColorBlendState
-    // (attachment array), pDynamicState (enum array). The flat-after-pNext
-    // states (input assembly, tessellation, rasterization, depth/stencil)
-    // are copied verbatim with pNext zeroed. OUT handles (arg 5) written
-    // back. Worst case (8 pipes × 8 stages × 4 KiB spec data) is ~340 KiB,
-    // so the staging vector is reserved up front (realloc would dangle
-    // every pointer handed out so far).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        const uint32_t count = static_cast<uint32_t>(cpu.regs[2]);
-        if (count == 0 || count > 8 || !cpu.regs[3]) {
-            cpu.regs[0] = count == 0 ? 0u : 0xFFFFFFFDu;
-            return true;
-        }
-        VkStage st;
-        st.buf.reserve(512u * 1024u);
-        VkGraphicsPipelineCreateInfoH* infos =
-            reinterpret_cast<VkGraphicsPipelineCreateInfoH*>(st.bytes(count * sizeof(VkGraphicsPipelineCreateInfoH), 8));
-        read_guest_bytes(mem, cpu.regs[3], infos, count * sizeof(VkGraphicsPipelineCreateInfoH));
-        for (uint32_t p = 0; p < count; p++) {
-            VkGraphicsPipelineCreateInfoH* g = &infos[p];
-            g->pNext = nullptr;
-            // Shader stages: pName string + optional specialization info.
-            if (g->stageCount && g->pStages && g->stageCount <= 8) {
-                VkPipelineShaderStageCreateInfoH* ss =
-                    reinterpret_cast<VkPipelineShaderStageCreateInfoH*>(st.bytes(g->stageCount * sizeof(VkPipelineShaderStageCreateInfoH), 8));
-                read_guest_bytes(mem, reinterpret_cast<uint64_t>(g->pStages), ss,
-                                 g->stageCount * sizeof(VkPipelineShaderStageCreateInfoH));
-                for (uint32_t s = 0; s < g->stageCount; s++) {
-                    ss[s].pNext = nullptr;
-                    ss[s].pName = st.guest_str(mem, reinterpret_cast<uint64_t>(ss[s].pName));
-                    if (ss[s].pSpecializationInfo) {
-                        VkSpecializationInfoH gi_spec;
-                        read_guest_struct(mem, reinterpret_cast<uint64_t>(ss[s].pSpecializationInfo), &gi_spec);
-                        VkSpecializationInfoH* spec = st.alloc<VkSpecializationInfoH>();
-                        *spec = gi_spec;
-                        if (gi_spec.mapEntryCount && gi_spec.pMapEntries && gi_spec.mapEntryCount <= 64) {
-                            VkSpecializationMapEntryH* e = reinterpret_cast<VkSpecializationMapEntryH*>(
-                                st.bytes(gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH), 8));
-                            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pMapEntries), e,
-                                             gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH));
-                            spec->pMapEntries = e;
-                        } else { spec->mapEntryCount = 0; spec->pMapEntries = nullptr; }
-                        if (gi_spec.dataSize && gi_spec.pData && gi_spec.dataSize <= 4096) {
-                            void* d = st.bytes(gi_spec.dataSize, 8);
-                            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pData), d, gi_spec.dataSize);
-                            spec->pData = d;
-                        } else { spec->dataSize = 0; spec->pData = nullptr; }
-                        ss[s].pSpecializationInfo = spec;
-                    }
-                }
-                g->pStages = ss;
-            } else { g->stageCount = 0; g->pStages = nullptr; }
-            // Vertex input: two flat description arrays.
-            if (g->pVertexInputState) {
-                VkPipelineVertexInputStateCreateInfoH* vi = st.alloc<VkPipelineVertexInputStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pVertexInputState), vi);
-                vi->pNext = nullptr;
-                if (vi->vertexBindingDescriptionCount && vi->pVertexBindingDescriptions && vi->vertexBindingDescriptionCount <= 32) {
-                    void* a = st.bytes(vi->vertexBindingDescriptionCount * 12u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vi->pVertexBindingDescriptions), a,
-                                     vi->vertexBindingDescriptionCount * 12u);
-                    vi->pVertexBindingDescriptions = a;
-                } else { vi->vertexBindingDescriptionCount = 0; vi->pVertexBindingDescriptions = nullptr; }
-                if (vi->vertexAttributeDescriptionCount && vi->pVertexAttributeDescriptions && vi->vertexAttributeDescriptionCount <= 32) {
-                    void* a = st.bytes(vi->vertexAttributeDescriptionCount * 16u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vi->pVertexAttributeDescriptions), a,
-                                     vi->vertexAttributeDescriptionCount * 16u);
-                    vi->pVertexAttributeDescriptions = a;
-                } else { vi->vertexAttributeDescriptionCount = 0; vi->pVertexAttributeDescriptions = nullptr; }
-                g->pVertexInputState = vi;
-            }
-            // Flat-after-pNext states: verbatim copy, zero pNext.
-            if (g->pInputAssemblyState) {
-                VkPipelineInputAssemblyStateCreateInfoH* s = st.alloc<VkPipelineInputAssemblyStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pInputAssemblyState), s);
-                s->pNext = nullptr;
-                g->pInputAssemblyState = s;
-            }
-            if (g->pTessellationState) {
-                void* s = st.bytes(32, 8);  // sType,pNext,flags,patchControlPoints
-                read_guest_bytes(mem, reinterpret_cast<uint64_t>(g->pTessellationState), s, 32);
-                static_cast<void**>(s)[1] = nullptr;  // zero pNext
-                g->pTessellationState = s;
-            }
-            if (g->pViewportState) {
-                VkPipelineViewportStateCreateInfoH* vs = st.alloc<VkPipelineViewportStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pViewportState), vs);
-                vs->pNext = nullptr;
-                if (vs->viewportCount && vs->pViewports && vs->viewportCount <= 16) {
-                    void* a = st.bytes(vs->viewportCount * 24u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vs->pViewports), a, vs->viewportCount * 24u);
-                    vs->pViewports = a;
-                } else { vs->viewportCount = 0; vs->pViewports = nullptr; }
-                if (vs->scissorCount && vs->pScissors && vs->scissorCount <= 16) {
-                    void* a = st.bytes(vs->scissorCount * 16u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(vs->pScissors), a, vs->scissorCount * 16u);
-                    vs->pScissors = a;
-                } else { vs->scissorCount = 0; vs->pScissors = nullptr; }
-                g->pViewportState = vs;
-            }
-            if (g->pRasterizationState) {
-                VkPipelineRasterizationStateCreateInfoH* s = st.alloc<VkPipelineRasterizationStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pRasterizationState), s);
-                s->pNext = nullptr;
-                g->pRasterizationState = s;
-            }
-            if (g->pMultisampleState) {
-                VkPipelineMultisampleStateCreateInfoH* s = st.alloc<VkPipelineMultisampleStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pMultisampleState), s);
-                s->pNext = nullptr;
-                if (s->pSampleMask) {
-                    // (rasterizationSamples + 31) / 32 u32 words; sane cap 8.
-                    uint32_t words = (s->rasterizationSamples + 31u) / 32u;
-                    if (words == 0 || words > 8) words = 1;
-                    uint32_t* a = reinterpret_cast<uint32_t*>(st.bytes(words * 4u, 4));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pSampleMask), a, words * 4u);
-                    s->pSampleMask = a;
-                }
-                g->pMultisampleState = s;
-            }
-            if (g->pDepthStencilState) {
-                VkPipelineDepthStencilStateCreateInfoH* s = st.alloc<VkPipelineDepthStencilStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pDepthStencilState), s);
-                s->pNext = nullptr;
-                g->pDepthStencilState = s;
-            }
-            if (g->pColorBlendState) {
-                VkPipelineColorBlendStateCreateInfoH* s = st.alloc<VkPipelineColorBlendStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pColorBlendState), s);
-                s->pNext = nullptr;
-                if (s->attachmentCount && s->pAttachments && s->attachmentCount <= 16) {
-                    void* a = st.bytes(s->attachmentCount * 32u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pAttachments), a, s->attachmentCount * 32u);
-                    s->pAttachments = a;
-                } else { s->attachmentCount = 0; s->pAttachments = nullptr; }
-                g->pColorBlendState = s;
-            }
-            if (g->pDynamicState) {
-                VkPipelineDynamicStateCreateInfoH* s = st.alloc<VkPipelineDynamicStateCreateInfoH>();
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(g->pDynamicState), s);
-                s->pNext = nullptr;
-                if (s->dynamicStateCount && s->pDynamicStates && s->dynamicStateCount <= 32) {
-                    void* a = st.bytes(s->dynamicStateCount * 4u, 4);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(s->pDynamicStates), a, s->dynamicStateCount * 4u);
-                    s->pDynamicStates = a;
-                } else { s->dynamicStateCount = 0; s->pDynamicStates = nullptr; }
-                g->pDynamicState = s;
-            }
-        }
-        uint64_t* host_pipes = reinterpret_cast<uint64_t*>(st.bytes(count * 8u, 8));
-        std::memset(host_pipes, 0, count * 8u);
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint32_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], cpu.regs[1], count, infos, nullptr, host_pipes);
-        if (cpu.regs[5]) {
-            try { mem->write(cpu.regs[5], host_pipes, count * 8u); }
-            catch (...) { /* out array unmapped — results lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateGraphicsPipelines (n=%u) → %d (pipe0=%p)\n",
-                    count, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pipes[0]));
-        }
         return true;
     }
 
@@ -2694,66 +2508,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (trace)
             fprintf(stderr, "[display-thunk] vkBeginCommandBuffer → %d\n",
                     static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── vkCreateComputePipelines ─────────────────────────────────────
-    // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
-    //  pPipelines) — each VkComputePipelineCreateInfo embeds a shader
-    // stage with a GUEST pName string and optional specialization info
-    // (map entries + data blob). Mirror of the graphics-pipeline stage
-    // marshalling. OUT handles written back to arg 5.
-    if (entry.spec && entry.name == "vkCreateComputePipelines") {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        const uint32_t count = static_cast<uint32_t>(cpu.regs[2]);
-        if (count == 0 || count > 64 || !cpu.regs[3]) {
-            cpu.regs[0] = count == 0 ? 0u : 0xFFFFFFFDu;
-            return true;
-        }
-        VkStage st;
-        st.buf.reserve(256u * 1024u);
-        VkComputePipelineCreateInfoH* infos =
-            reinterpret_cast<VkComputePipelineCreateInfoH*>(
-                st.bytes(count * sizeof(VkComputePipelineCreateInfoH), 8));
-        read_guest_bytes(mem, cpu.regs[3], infos,
-                         count * sizeof(VkComputePipelineCreateInfoH));
-        for (uint32_t p = 0; p < count; p++) {
-            VkComputePipelineCreateInfoH* c = &infos[p];
-            c->pNext = nullptr;
-            c->stage.pNext = nullptr;
-            c->stage.pName = st.guest_str(mem, reinterpret_cast<uint64_t>(c->stage.pName));
-            if (c->stage.pSpecializationInfo) {
-                VkSpecializationInfoH gi_spec;
-                read_guest_struct(mem, reinterpret_cast<uint64_t>(c->stage.pSpecializationInfo), &gi_spec);
-                VkSpecializationInfoH* spec = st.alloc<VkSpecializationInfoH>();
-                *spec = gi_spec;
-                if (gi_spec.mapEntryCount && gi_spec.pMapEntries && gi_spec.mapEntryCount <= 256) {
-                    VkSpecializationMapEntryH* e = reinterpret_cast<VkSpecializationMapEntryH*>(
-                        st.bytes(gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH), 8));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pMapEntries), e,
-                                     gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH));
-                    spec->pMapEntries = e;
-                } else { spec->mapEntryCount = 0; spec->pMapEntries = nullptr; }
-                if (gi_spec.dataSize && gi_spec.pData && gi_spec.dataSize <= 4096) {
-                    void* d = st.bytes(gi_spec.dataSize, 8);
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pData), d, gi_spec.dataSize);
-                    spec->pData = d;
-                } else { spec->dataSize = 0; spec->pData = nullptr; }
-                c->stage.pSpecializationInfo = spec;
-            }
-        }
-        uint64_t* pipes = reinterpret_cast<uint64_t*>(st.bytes(count * 8u, 8));
-        std::memset(pipes, 0, count * 8u);
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint32_t,
-                                                     const void*, const void*, void*)>(
-            entry.host_fn)(cpu.regs[0], cpu.regs[1], count, infos, nullptr, pipes);
-        if (cpu.regs[5]) {
-            try { mem->write(cpu.regs[5], pipes, count * 8u); } catch (...) {}
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace)
-            fprintf(stderr, "[display-thunk] vkCreateComputePipelines(n=%u) → %d\n",
-                    count, static_cast<int32_t>(ret));
         return true;
     }
 
@@ -3592,7 +3346,6 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_DEVICE:
         case thunk::Policy::VK_PRESENT:
         case thunk::Policy::VK_SUBMIT:
-        case thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES:
         case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
         case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:
         case thunk::Policy::VK_ALLOC_MEMORY:

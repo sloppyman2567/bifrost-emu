@@ -65,22 +65,22 @@ CMD_PLANS = {
     'vkCmdSetScissorWithCount': None, 'vkCmdSetScissorWithCountEXT': None,
 }
 
-# Create-style commands (Phase B batch 1): shape is
-# (handle, const Info* pCreateInfo[, const VkAllocationCallbacks*],
-#  Handle* pOut). Ref roles are DERIVED per parameter:
-#   - const pointer to a described struct        -> out=4 SINGLE_STRUCT_IN
+# Create-style commands (Phase B batches 1–3): create/record shape with
+# pCreateInfo-style params. Ref roles are DERIVED per parameter:
+#   - const pointer to a described struct        -> out=4 STRUCT_IN
+#     (count from the param's len= sibling when present, else single)
 #   - const VkAllocationCallbacks*               -> out=3 NULLIFY
-#   - non-const handle-typed pointer (no len)    -> out=5 OUT_HANDLE
+#   - non-const handle-typed pointer             -> out=5 OUT_HANDLE(S)
 CMD_CREATE_PLANS = {
     'vkCreateShaderModule', 'vkCreatePipelineLayout',
     'vkCreateDescriptorPool', 'vkCreateFramebuffer',
     # Phase B batch 2: nested attachment/subpass/binding trees — the
     # generated recursion consumes them wholesale
     'vkCreateRenderPass', 'vkCreateDescriptorSetLayout',
+    # Phase B batch 3: pipeline trees (pName strings, specialization
+    # blobs, state sub-structs) + OUT handle arrays
+    'vkCreateGraphicsPipelines', 'vkCreateComputePipelines',
 }
-# vkCmdBeginRenderPass: (cmdbuf, const Info*, contents) — same rules,
-# no allocator / no OUT handle (the role scan simply finds none).
-CMD_CREATE_PLANS.add('vkCmdBeginRenderPass')
 
 HEADER = r"""// opgen_vkmarshal.hpp — GENERATED. DO NOT EDIT.
 //
@@ -107,6 +107,7 @@ enum : uint8_t {
 
     VKM_PNEXT = 0x80,   // FLAG (OR'd into elem): this field is a pNext
                         // chain link — walk it via vk_find_struct_by_stype
+    VKM_STR = 0x40,     // FLAG: NUL-terminated char* — stage strlen+1
 };
 
 struct VkFieldDesc {
@@ -137,10 +138,13 @@ struct VkPlanRef {
                            //     AND the count after the host call
                            // 2 = copyback-only (non-const raw pData)
                            // 3 = NULLIFY: write nullptr into this arg
-                           // 4 = SINGLE_STRUCT_IN: stage ONE struct of
-                           //     `desc` at args[arg] (recursively)
-                           // 5 = OUT_HANDLE: 8-byte bounce; value copied
-                           //     back to the guest pointer after the call
+                           // 4 = STRUCT_IN: stage struct(s) of `desc` at
+                           //     args[arg] — count = args[count_arg]
+                           //     (count_arg 0xFF = exactly one)
+                           // 5 = OUT_HANDLE: zeroed bounce; host writes
+                           //     handle(s); copied back to the guest
+                           //     pointer after a successful call
+                           //     (count_arg 0xFF = single handle)
     uint8_t elem_size;     // bytes per element for desc==nullptr arrays
     const VkStructDesc* desc;   // nullptr for verbatim byte staging
 };
@@ -334,7 +338,14 @@ def main():
         if ok:
             plans[cmd] = plist
 
-    # ── create-style plans (see CMD_CREATE_PLANS comment) ─────────────
+    CMD_CREATE_PLANS.add('vkCmdBeginRenderPass')
+
+# ── create-style plans (see CMD_CREATE_PLANS comment) ─────────────
+    # Batch 3 extension: len-carrying params are supported —
+    #   - const Struct* WITH len  -> out=4 staging an ARRAY of structs
+    #     (count = sibling param named by len; count_arg=0xFF = single)
+    #   - Handle* WITH len        -> out=6 OUT handle array written by
+    #     the host, copied back after a successful call
     for cmd in sorted(CMD_CREATE_PLANS):
         c = reg['commands'].get(cmd)
         if c is None:
@@ -342,18 +353,29 @@ def main():
             continue
         plist = []
         ok = True
+        def sibling_index(name):
+            for j, q in enumerate(c.params):
+                if q.name == name:
+                    return j
+            return None
         for pidx, p in enumerate(c.params):
             if not p.is_ptr:
                 continue
+            ln = (p.len_ or '').split(',')[0].strip()
+            cidx = sibling_index(ln) if ln else None
             if not p.const and p.type in reg['handles']:
-                plist.append((pidx, 0, None, 5))       # OUT handle
+                plist.append((pidx, cidx if cidx is not None else 0xFF,
+                              None, 5))          # OUT handle(s)
                 continue
             if p.const and p.type == 'VkAllocationCallbacks':
                 plist.append((pidx, 0, None, 3))       # NULLIFY
                 continue
-            if p.const and p.type in layouts and not p.len_:
+            if p.const and p.type in layouts and \
+                    (not p.len_ or cidx is not None):
                 want_struct(p.type)
-                plist.append((pidx, 0, p.type, 4))     # SINGLE_STRUCT_IN
+                plist.append((pidx,
+                              cidx if cidx is not None else 0xFF,
+                              p.type, 4))              # STRUCT_IN (1..n)
                 continue
             # anything else on a create-style command is unexpected —
             # fail loudly rather than half-marshal
@@ -443,6 +465,9 @@ def main():
                 # chain-link field — runtime walks the guest chain via
                 # vk_find_struct_by_stype instead of staging raw bytes
                 elem |= 0x80
+            elif pf.elem == 'char' and pf.count == 'nullterm':
+                # NUL-terminated string — runtime stages strlen+1 bytes
+                elem |= 0x40
             if pf.count == 'fixed:1':
                 count_off, fixed = 0xFFFF, 1
             elif pf.count == 'nullterm':
@@ -487,9 +512,13 @@ def main():
     for cmd, plist in plans.items():
         refs = []
         for (pidx, cidx, sname, out) in plist:
-            if out in (3, 5):
-                # NULLIFY / OUT_HANDLE: no descriptor, no count
+            if out == 3:
+                # NULLIFY: no descriptor, no count
                 refs.append(f'    {{{pidx},0,0,{out},8,nullptr}},')
+                continue
+            if out == 5:
+                # OUT_HANDLE(S): count_arg = len sibling (0xFF = single)
+                refs.append(f'    {{{pidx},{cidx},0,{out},8,nullptr}},')
                 continue
             if isinstance(sname, tuple):
                 _, esz = sname
