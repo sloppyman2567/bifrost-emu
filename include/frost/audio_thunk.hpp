@@ -77,6 +77,20 @@ public:
     // pointer is borrowed (owned by Emulator); runner may be null, in
     // which case guest audio callbacks are dropped.
     void wire(Audio* engine, CPU* cb_cpu, AudioCbRunner runner);
+    // Start the dedicated-vCPU audio pump (AAA Android path): a host
+    // clock thread fires guest data callbacks on an EXCLUSIVE cloned
+    // vCPU at device-like cadence, decoupled from whatever the guest
+    // main loop is doing. Real SMP semantics — same model as Android's
+    // own AAudio callback thread. When active, inline deferral from
+    // dispatch arms is disabled (single callback mutator). Opt out via
+    // BIFROST_AUDIO_PUMP=0. Safe to call once after wire(); no-op if
+    // already running or no runner was wired.
+    void start_pump();
+    // Called in a FORKED CHILD (host ::fork()): the pump host thread
+    // does not survive fork(), but the std::thread object does — leaving
+    // it joinable makes shutdown's join() wait forever. Detaches the
+    // phantom thread and restarts a fresh pump for the child.
+    void detach_pump_for_fork_child();
     // Stop all callback pump threads (called at shutdown before teardown).
     void shutdown();
     // Diagnostics.

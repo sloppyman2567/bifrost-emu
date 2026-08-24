@@ -1,21 +1,13 @@
 // audio/audio.cpp — Audio backend implementation.
 //
-// v1.4.5-alpha: added SDL2 audio backend. The class now
-// supports three backends, tried in order:
-//   1. SDL2 (if USE_SDL2 was set at build time)
-//   2. OSS /dev/dsp (if available)
-//   3. Headless (always available — buffer + WAV dump)
-//
-// The SDL2 backend uses a callback that pulls from a lock-free SPSC
-// ring buffer. The guest's write() is the producer; SDL2's audio
-// thread is the consumer. This avoids mutex contention on the hot
-// path and gives predictable latency.
-//
-// The OSS backend is the original implementation: write() forwards
-// to ::write(fd_, ...) with non-blocking I/O. Drop-on-EAGAIN.
-//
-// The headless backend just accumulates bytes in `buffer_` for a
-// later dump_to_wav() call. Used when no audio device is available.
+// 1.5.5-alpha REWRITE: multi-stream mixer modeled on real SDL2/SDL3.
+// One physical host device; each guest audio device gets its own logical
+// stream with an independent float ring (converted + resampled at push
+// time). The device callback sums all non-paused streams — so a music
+// queue and an sfx queue play SIMULTANEOUSLY the way real SDL mixes,
+// instead of interleaving sequentially in one shared ring (the old
+// design starved sfx whenever music kept the global level pinned, and
+// ClearQueuedAudio wiped every device at once).
 #include "audio/audio.h"
 #if defined(BIFROST_USE_SDL2)
 #  include <SDL2/SDL.h>
@@ -29,133 +21,12 @@
 #include <sys/ioctl.h>
 #include <linux/soundcard.h>
 namespace arm64emu {
-// Ring buffer capacity: 64 KiB. At 44100 Hz stereo 16-bit (176400 B/s),
-// this is ~370 ms of audio — plenty to absorb guest write bursts.
-static constexpr size_t RING_CAPACITY = 262144;  // ~1.5 s @44.1k s16 stereo
 // ── Constructor / Destructor ───────────────────────────────────────────
 Audio::Audio() = default;
 Audio::~Audio() {
     close();
 }
-// ── open() — open the audio device with the given format ───────────────
-bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
-    // Close any existing device first (idempotent re-open).
-    close();
-    sample_rate_ = sample_rate;
-    channels_ = channels;
-    sample_size_ = sample_size;
-    // Try SDL2 first (preferred backend — cross-platform, low latency).
-#if defined(BIFROST_USE_SDL2)
-    if (open_sdl2_()) {
-        opened_ = true;
-        buffer_.clear();
-        return true;
-    }
-#endif
-    // Fall back to OSS /dev/dsp.
-    fd_ = ::open("/dev/dsp", O_WRONLY | O_NONBLOCK);
-    if (fd_ >= 0) {
-        int fmt = AFMT_S16_NE;
-        int ch = channels;
-        int sr = static_cast<int>(sample_rate);
-        if (::ioctl(fd_, SNDCTL_DSP_SETFMT, &fmt) < 0 || fmt != AFMT_S16_NE) {
-            ::close(fd_); fd_ = -1;
-        } else {
-            ::ioctl(fd_, SNDCTL_DSP_CHANNELS, &ch);
-            ::ioctl(fd_, SNDCTL_DSP_SPEED, &sr);
-        }
-    }
-    opened_ = true;
-    buffer_.clear();
-    return true;
-}
-// ── close() — release resources ────────────────────────────────────────
-void Audio::close() {
-    if (!opened_) return;
-#if defined(BIFROST_USE_SDL2)
-    close_sdl2_();
-#endif
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
-    }
-    opened_ = false;
-}
-// ── write() — push PCM data into the active backend ────────────────────
-ssize_t Audio::write(const uint8_t* data, size_t len) {
-    if (!opened_) return -1;
-    std::lock_guard<std::mutex> lock(mu_);
-    return write_unlocked_(data, len);
-}
-// write_unlocked_ — core of write(); caller holds mu_. Also feeds the
-// bytes_pushed_ counter (single accounting point).
-ssize_t Audio::write_unlocked_(const uint8_t* data, size_t len) {
-    bytes_pushed_.fetch_add(len, std::memory_order_relaxed);
-    // Always buffer the data for potential WAV dump.
-    buffer_.insert(buffer_.end(), data, data + len);
-#if defined(BIFROST_USE_SDL2)
-    if (sdl_audio_dev_ != 0) {
-        // Push into the SPSC ring buffer. The SDL2 callback will pull
-        // from the other side. We use relaxed atomics — the SPSC
-        // invariant (single producer, single consumer) is maintained
-        // because only the guest thread calls write(), and only the
-        // SDL2 audio thread calls the callback.
-        size_t head = ring_head_.load(std::memory_order_relaxed);
-        size_t tail = ring_tail_.load(std::memory_order_relaxed);
-        size_t free_bytes = ring_mask_ + 1 - (tail - head);
-        size_t to_write = std::min(len, free_bytes);
-        for (size_t i = 0; i < to_write; i++) {
-            ring_[(tail + i) & ring_mask_] = data[i];
-        }
-        ring_tail_.store(tail + to_write, std::memory_order_release);
-        // Report full write so the guest doesn't re-send partial data.
-        // Dropped samples (when free_bytes < len) are silent — the
-        // guest would just retry otherwise, increasing latency.
-        return static_cast<ssize_t>(len);
-    }
-#endif
-    // OSS path.
-    if (fd_ >= 0) {
-        ssize_t written = ::write(fd_, data, len);
-        if (written < 0) {
-            // EAGAIN/EWOULDBLOCK — drop for real-time, keep in buffer.
-        }
-        // Report full write so guest doesn't re-send partial data.
-    }
-    return static_cast<ssize_t>(len);
-}
-// ── read() — recording (not yet implemented) ───────────────────────────
-ssize_t Audio::read(uint8_t* buf, size_t len) {
-    (void)buf;
-    (void)len;
-    return 0;
-}
-// ── ioctl() — OSS-style audio ioctls ───────────────────────────────────
-int Audio::ioctl(uint32_t cmd, uint64_t arg) {
-    std::lock_guard<std::mutex> lock(mu_);
-    switch (cmd) {
-        case SNDCTL_DSP_GETFMTS:
-            return 0;  // AFMT_S16_NE available
-        case SNDCTL_DSP_SETFMT:
-            if (static_cast<int>(arg) == AFMT_S16_NE) return 0;
-            return -EINVAL;
-        case SNDCTL_DSP_CHANNELS:
-            channels_ = static_cast<uint8_t>(static_cast<int>(arg));
-            return 0;
-        case SNDCTL_DSP_SPEED:
-            sample_rate_ = static_cast<uint32_t>(static_cast<int>(arg));
-            return 0;
-        default:
-            if (fd_ >= 0) {
-                return ::ioctl(fd_, cmd, arg);
-            }
-            return -ENOSYS;
-    }
-}
-// ── write_interleaved() — format-converting push (AudioEngine) ─────────
-// Converts any supported guest format/rate to the device format and hands
-// the result to write(). Opens the device on first use with the PUSH
-// format so headless/WAV-dump mode records the guest's own layout.
+// ── sample conversion helpers ──────────────────────────────────────────
 namespace {
 inline float load_sample(uint32_t fmt, const uint8_t* p) {
     switch (fmt) {
@@ -196,53 +67,269 @@ inline void store_sample(uint8_t dev_fmt, uint8_t* p, float s) {
     }
 }
 }  // namespace
-ssize_t Audio::write_interleaved(uint32_t fmt, uint32_t rate, uint8_t ch,
-                                 const uint8_t* data, size_t bytes) {
-    uint8_t fsz = pcm_fmt_size(fmt);
-    if (!fsz || ch == 0 || rate == 0) return -1;
-    size_t frame_sz_in = static_cast<size_t>(fsz) * ch;
-    size_t frames_in = bytes / frame_sz_in;
-    if (frames_in == 0) return 0;
-    std::lock_guard<std::mutex> lock(mu_);
-    if (!opened_) open(rate, ch,
-                       fmt == PCM_FMT_S24 ? 4 : pcm_fmt_size(fmt));
-    if (!opened_) return -1;
-    uint8_t dfz = sample_size_;
-    uint8_t dch = channels_;
-    uint32_t drate = sample_rate_;
-    uint32_t dev_fmt = (dfz == 1) ? PCM_FMT_U8
-                     : (dfz == 4) ? PCM_FMT_F32 : PCM_FMT_S16;
-    // Fast path: same format, same rate, same channel count.
-    if (fmt == dev_fmt && ch == dch && rate == drate) {
-        ssize_t r = write_unlocked_(data, frames_in * frame_sz_in);
-        return r < 0 ? -1 : static_cast<ssize_t>(frames_in);
+// convert_to_f32_ — input frames → interleaved float frames at the device
+// rate (linear resample). Caller holds mu_ (uses conv_ scratch only for
+// nothing — writes straight to `out`).
+void Audio::convert_to_f32_(uint32_t fmt, uint32_t rate, uint8_t ch,
+                            const uint8_t* data, size_t frames_in,
+                            std::vector<float>& out) {
+    const uint8_t fsz = pcm_fmt_size(fmt);
+    out.clear();
+    if (!fsz || !ch || !rate || !frames_in) return;
+    if (rate == sample_rate_) {
+        out.reserve(frames_in * channels_);
+        for (size_t i = 0; i < frames_in; i++) {
+            for (uint8_t c = 0; c < channels_; c++) {
+                uint8_t sc = (c < ch) ? c : static_cast<uint8_t>(ch - 1);
+                out.push_back(load_sample(fmt, data + (i * ch + sc) * fsz));
+            }
+        }
+        return;
     }
-    // Convert (+ optionally resample) into conv_ then push.
-    size_t frames_out = (rate == drate) ? frames_in
-        : static_cast<size_t>(static_cast<uint64_t>(frames_in) * drate / rate);
-    if (frames_out == 0) return 0;
-    size_t out_bytes = frames_out * static_cast<size_t>(dfz) * dch;
-    conv_.resize(out_bytes);
-    double step = static_cast<double>(rate) / drate;  // input frames per output frame
+    // Linear resample input rate → device rate.
+    size_t frames_out = static_cast<size_t>(
+        static_cast<uint64_t>(frames_in) * sample_rate_ / rate);
+    out.resize(frames_out * channels_);
+    double step = static_cast<double>(rate) / sample_rate_;
     for (size_t o = 0; o < frames_out; o++) {
-        // Linear interpolation between surrounding input frames when
-        // downsampling/upsampling; clamped index keeps ends clean.
         double pos = o * step;
         size_t i0 = static_cast<size_t>(pos);
         if (i0 >= frames_in) i0 = frames_in - 1;
         size_t i1 = (i0 + 1 < frames_in) ? i0 + 1 : i0;
         float frac = static_cast<float>(pos - i0);
-        for (uint8_t c = 0; c < dch; c++) {
-            uint8_t sc = (c < ch) ? c : static_cast<uint8_t>(ch - 1);  // mono→stereo dup
+        for (uint8_t c = 0; c < channels_; c++) {
+            uint8_t sc = (c < ch) ? c : static_cast<uint8_t>(ch - 1);
             float a = load_sample(fmt, data + (i0 * ch + sc) * fsz);
             float b = load_sample(fmt, data + (i1 * ch + sc) * fsz);
-            store_sample(dev_fmt, &conv_[(o * dch + c) * dfz], a + (b - a) * frac);
+            out[o * channels_ + c] = a + (b - a) * frac;
         }
     }
-    ssize_t r = write_unlocked_(conv_.data(), out_bytes);
-    return r < 0 ? -1 : static_cast<ssize_t>(frames_out);
 }
-// ── backend_name() — diagnostic ────────────────────────────────────────
+// ── physical device ────────────────────────────────────────────────────
+bool Audio::open_device_locked_() {
+    if (opened_) return true;
+#if defined(BIFROST_USE_SDL2)
+    if (open_sdl2_()) {
+        opened_ = true;
+        buffer_.clear();
+        return true;
+    }
+#endif
+    // Fall back to OSS /dev/dsp.
+    fd_ = ::open("/dev/dsp", O_WRONLY | O_NONBLOCK);
+    if (fd_ >= 0) {
+        int fmt = AFMT_S16_NE;
+        int ch = channels_;
+        int sr = static_cast<int>(sample_rate_);
+        if (::ioctl(fd_, SNDCTL_DSP_SETFMT, &fmt) < 0 || fmt != AFMT_S16_NE) {
+            ::close(fd_); fd_ = -1;
+        } else {
+            ::ioctl(fd_, SNDCTL_DSP_CHANNELS, &ch);
+            ::ioctl(fd_, SNDCTL_DSP_SPEED, &sr);
+        }
+    }
+    opened_ = true;
+    buffer_.clear();
+    return true;
+}
+void Audio::close_device_locked_() {
+#if defined(BIFROST_USE_SDL2)
+    close_sdl2_();
+#endif
+    if (fd_ >= 0) {
+        ::close(fd_);
+        fd_ = -1;
+    }
+    opened_ = false;
+}
+// ── logical streams ────────────────────────────────────────────────────
+int Audio::stream_open(uint32_t fmt, uint32_t rate, uint8_t ch) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!rate || !ch || !pcm_fmt_size(fmt)) return 0;
+    if (!opened_) {
+        // First stream fixes the physical device format.
+        sample_rate_ = rate;
+        channels_ = ch;
+        sample_size_ = pcm_fmt_size(fmt);
+        if (sample_size_ == 3) sample_size_ = 4;  // S24-in-32 container
+        open_device_locked_();
+    }
+    Stream s;
+    s.fmt = fmt; s.rate = rate; s.ch = ch;
+    s.cap_frames = 1;
+    while (s.cap_frames * channels_ * sizeof(float) < kStreamRingBytes)
+        s.cap_frames <<= 1;
+    s.ring.assign(s.cap_frames * channels_, 0.0f);
+    const int id = ++next_stream_id_;
+    streams_.emplace(id, std::move(s));
+    return id;
+}
+void Audio::stream_close(int id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    streams_.erase(id);
+}
+void Audio::stream_pause(int id, bool paused) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    if (it != streams_.end()) it->second.paused = paused;
+}
+bool Audio::stream_paused(int id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    return it != streams_.end() && it->second.paused;
+}
+void Audio::stream_clear(int id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    if (it != streams_.end()) {
+        it->second.head = 0;
+        it->second.tail = 0;
+    }
+}
+size_t Audio::stream_queued_frames(int id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    return it == streams_.end() ? 0 : (it->second.tail - it->second.head);
+}
+ssize_t Audio::stream_write(int id, uint32_t fmt, uint32_t rate, uint8_t ch,
+                            const uint8_t* data, size_t bytes) {
+    const uint8_t fsz = pcm_fmt_size(fmt);
+    if (!fsz || !ch || !rate) return -1;
+    const size_t frame_sz_in = static_cast<size_t>(fsz) * ch;
+    const size_t frames_in = bytes / frame_sz_in;
+    if (!frames_in) return 0;
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = streams_.find(id);
+    if (it == streams_.end()) return -1;
+    return push_frames_locked_(it->second, fmt, rate, ch, data, frames_in);
+}
+// ── legacy single-device API (/dev/dsp VFS node) ───────────────────────
+int Audio::ensure_legacy_stream_locked_(uint32_t rate, uint8_t ch,
+                                        uint8_t size) {
+    if (legacy_stream_) return legacy_stream_;
+    if (!opened_) {
+        sample_rate_ = rate;
+        channels_ = ch;
+        sample_size_ = size;
+        open_device_locked_();
+    }
+    Stream s;
+    s.rate = rate; s.ch = ch;
+    s.cap_frames = 1;
+    while (s.cap_frames * channels_ * sizeof(float) < kStreamRingBytes)
+        s.cap_frames <<= 1;
+    s.ring.assign(s.cap_frames * channels_, 0.0f);
+    legacy_stream_ = ++next_stream_id_;
+    streams_.emplace(legacy_stream_, std::move(s));
+    return legacy_stream_;
+}
+bool Audio::open(uint32_t sample_rate, uint8_t channels, uint8_t sample_size) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!opened_) {
+        sample_rate_ = sample_rate;
+        channels_ = channels;
+        sample_size_ = sample_size;
+        open_device_locked_();
+    }
+    ensure_legacy_stream_locked_(sample_rate, channels, sample_size);
+    return true;
+}
+void Audio::close() {
+    std::lock_guard<std::mutex> lock(mu_);
+    streams_.clear();
+    legacy_stream_ = 0;
+    if (opened_) close_device_locked_();
+}
+// push_frames_locked_ — convert input frames and append to a stream ring
+// (all-or-nothing). mu_ held. Returns INPUT frames accepted (0 = full).
+// Shared by stream_write() and the legacy write() path.
+ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
+                                   uint8_t ch, const uint8_t* data,
+                                   size_t frames_in) {
+    if (!frames_in) return 0;
+    const uint8_t fsz = pcm_fmt_size(fmt);
+    if (!fsz || !ch || !rate) return -1;
+    const size_t frame_sz_in = static_cast<size_t>(fsz) * ch;
+    // PARTIAL acceptance: take as many whole INPUT frames as fit in the
+    // ring after conversion (guests may push multi-second buffers in one
+    // write — all-or-nothing would deadlock a write-retry loop).
+    const size_t queued = s.tail - s.head;
+    const size_t free_frames = s.cap_frames - queued;
+    if (!free_frames) return 0;
+    size_t accept_in = frames_in;
+    if (rate != sample_rate_) {
+        // conservative bound: out(accept) = accept*drate/rate (floor)
+        accept_in = free_frames * rate / sample_rate_;
+    } else {
+        accept_in = free_frames;
+    }
+    if (accept_in > frames_in) accept_in = frames_in;
+    if (!accept_in) return 0;
+    convert_to_f32_(fmt, rate, ch, data, accept_in, conv_);
+    const size_t out_frames = conv_.size() / channels_;
+    if (!out_frames || out_frames > free_frames) {
+        if (accept_in > 1) accept_in--;          // rounding safety
+        if (!accept_in) return 0;
+        convert_to_f32_(fmt, rate, ch, data, accept_in, conv_);
+        if (conv_.size() / channels_ > free_frames) return 0;
+    }
+    const size_t mask = s.cap_frames * channels_ - 1;
+    for (size_t i = 0; i < conv_.size(); i++)
+        s.ring[(s.tail * channels_ + i) & mask] = conv_[i];
+    s.tail += out_frames;
+    bytes_pushed_.fetch_add(frames_in * frame_sz_in, std::memory_order_relaxed);
+    // Optional WAV dump records the guest's own bytes (pre-conversion),
+    // matching the old headless behavior.
+    static const bool wav_dump = [] {
+        const char* e = getenv("BIFROST_AUDIO_DUMP");
+        return e && e[0] == '1';
+    }();
+    if (wav_dump)
+        buffer_.insert(buffer_.end(), data, data + frames_in * frame_sz_in);
+    return static_cast<ssize_t>(frames_in);
+}
+
+ssize_t Audio::read(uint8_t* buf, size_t len) {
+    (void)buf;
+    (void)len;
+    return 0;
+}
+// Legacy single-device write (/dev/dsp VFS node): route onto the legacy
+// stream so the data plays through the same mixer as everything else.
+ssize_t Audio::write(const uint8_t* data, size_t len) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const int id = ensure_legacy_stream_locked_(sample_rate_, channels_,
+                                                sample_size_);
+    auto it = streams_.find(id);
+    if (it == streams_.end()) return -1;
+    const uint8_t fsz = sample_size_ ? sample_size_ : 2;
+    const size_t frame_sz = static_cast<size_t>(fsz) * channels_;
+    ssize_t fr = push_frames_locked_(it->second, PCM_FMT_S16, sample_rate_,
+                                     channels_, data, len / frame_sz);
+    if (fr < 0) return -1;
+    return fr * static_cast<ssize_t>(frame_sz);   // bytes accepted
+}
+int Audio::ioctl(uint32_t cmd, uint64_t arg) {
+    std::lock_guard<std::mutex> lock(mu_);
+    switch (cmd) {
+        case SNDCTL_DSP_GETFMTS:
+            return 0;  // AFMT_S16_NE available
+        case SNDCTL_DSP_SETFMT:
+            if (static_cast<int>(arg) == AFMT_S16_NE) return 0;
+            return -EINVAL;
+        case SNDCTL_DSP_CHANNELS:
+            channels_ = static_cast<uint8_t>(static_cast<int>(arg));
+            return 0;
+        case SNDCTL_DSP_SPEED:
+            sample_rate_ = static_cast<uint32_t>(static_cast<int>(arg));
+            return 0;
+        default:
+            if (fd_ >= 0) {
+                return ::ioctl(fd_, cmd, arg);
+            }
+            return -ENOSYS;
+    }
+}
 const char* Audio::backend_name() const {
 #if defined(BIFROST_USE_SDL2)
     if (sdl_audio_dev_ != 0) return "sdl2";
@@ -250,7 +337,6 @@ const char* Audio::backend_name() const {
     if (fd_ >= 0) return "oss";
     return "none";
 }
-// ── dump_to_wav() — write the accumulated PCM to a WAV file ────────────
 bool Audio::dump_to_wav(const std::string& path) {
     std::lock_guard<std::mutex> lock(mu_);
     if (buffer_.empty()) return false;
@@ -283,13 +369,70 @@ bool Audio::dump_to_wav(const std::string& path) {
     fclose(f);
     return true;
 }
+// ── device callback: the MIXER ─────────────────────────────────────────
+// Runs on the SDL2 audio thread (~46×/s). Sums every non-paused stream's
+// float ring into one mix buffer, clips, converts once to the device
+// format. A starved stream contributes silence for its missing frames —
+// exactly real-SDL underrun behavior.
+void Audio::mixer_callback_(void* userdata, uint8_t* stream, int len) {
+    auto* self = static_cast<Audio*>(userdata);
+    if (!self || len <= 0) return;
+    static const bool stats = [] { const char* e=getenv("BIFROST_AUDIO_STATS"); return e&&e[0]=='1'; }();
+    static uint32_t stat_tick = 0;
+    ++stat_tick;
+    if (stats && stat_tick % 92 == 1) {
+        // ~2 s heartbeat: callback count + per-stream backlog
+        fprintf(stderr, "[audio-hb] cbs=%u streams=", stat_tick);
+        std::lock_guard<std::mutex> lk(self->mu_);
+        for (auto& [id, st] : self->streams_)
+            fprintf(stderr, "%d:%llums%s ", id,
+                    (unsigned long long)((st.tail - st.head) * 1000ull /
+                                         self->sample_rate_),
+                    st.paused ? "(p)" : "");
+        fprintf(stderr, "\n");
+    }
+    const uint8_t dfz = self->sample_size_;
+    const uint8_t dch = self->channels_;
+    const size_t frames_needed = static_cast<size_t>(len) / (dfz * dch);
+    std::lock_guard<std::mutex> lock(self->mu_);
+    self->mix_.assign(frames_needed * dch, 0.0f);
+    std::vector<float>& mix = self->mix_;
+    for (auto& [id, s] : self->streams_) {
+        (void)id;
+        if (s.paused) continue;
+        // Stream rings hold DEVICE-channel interleaved float frames
+        // (convert_to_f32_ expands at push time).
+        const size_t avail = s.tail - s.head;
+        const size_t n = std::min(avail, frames_needed);
+        const size_t mask = s.cap_frames * dch - 1;
+        const float* rp = s.ring.data();
+        for (size_t f = 0; f < n; f++) {
+            const size_t rb = ((s.head + f) * dch) & mask;
+            for (uint8_t c = 0; c < dch; c++)
+                mix[f * dch + c] += rp[rb + c];
+        }
+        if (stats && n < avail) { /* partial consume */ }
+        if (stats && stat_tick % 46 == 0)
+            fprintf(stderr, "[mixer] st=%d paused=%d queued=%llums fed=%llums cap=%llums\n",
+                    id, (int)s.paused,
+                    (unsigned long long)((s.tail-s.head)*1000ull/self->sample_rate_),
+                    (unsigned long long)(n*1000ull/self->sample_rate_),
+                    (unsigned long long)(s.cap_frames*1000ull/self->sample_rate_));
+        s.head += n;
+    }
+    // Convert + clip into the output stream.
+    size_t oi = 0;
+    for (size_t f = 0; f < frames_needed; f++) {
+        for (uint8_t c = 0; c < dch; c++) {
+            store_sample(dfz, stream + oi, mix[f * dch + c]);
+            oi += dfz;
+        }
+    }
+}
 // ── SDL2 backend ─────────────────────────────────────────────
 #if defined(BIFROST_USE_SDL2)
 bool Audio::open_sdl2_() {
     std::lock_guard<std::mutex> g(sdl_mu_);
-    // Initialize SDL2 audio subsystem if not already done. We use
-    // SDL_InitSubSystem (not SDL_Init) so we don't clobber any video
-    // subsystem that FrostGraphics may have already initialized.
     if (!SDL_WasInit(SDL_INIT_AUDIO)) {
         if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
             if (getenv("BIFROST_AUDIO_VERBOSE")) {
@@ -299,21 +442,16 @@ bool Audio::open_sdl2_() {
             return false;
         }
     }
-    // Configure the audio spec. SDL2 expects signed 16-bit (or float)
-    // samples; we map our sample_size to the closest SDL format.
     SDL_AudioSpec want{};
     want.freq = static_cast<int>(sample_rate_);
     want.channels = channels_;
     want.samples = 1024;  // ~23 ms at 44100 Hz — low latency
-    want.callback = sdl2_audio_callback_;
+    want.callback = mixer_callback_;
     want.userdata = this;
-    if (sample_size_ == 1) {
-        want.format = AUDIO_U8;       // 8-bit unsigned
-    } else if (sample_size_ == 2) {
-        want.format = AUDIO_S16SYS;   // 16-bit signed (host endian)
-    } else if (sample_size_ == 4) {
-        want.format = AUDIO_F32SYS;   // 32-bit float
-    } else {
+    if (sample_size_ == 1)       want.format = AUDIO_U8;
+    else if (sample_size_ == 2)  want.format = AUDIO_S16SYS;
+    else if (sample_size_ == 4)  want.format = AUDIO_F32SYS;
+    else {
         if (getenv("BIFROST_AUDIO_VERBOSE")) {
             fprintf(stderr, "[audio] unsupported sample_size=%u\n",
                     sample_size_);
@@ -329,24 +467,11 @@ bool Audio::open_sdl2_() {
         }
         return false;
     }
-    // Initialize the SPSC ring buffer. Power-of-2 capacity for fast
-    // masking. We use the larger of RING_CAPACITY and 4× the SDL
-    // buffer size to ensure we never starve the callback.
-    size_t sdl_buf_bytes = static_cast<size_t>(got.size);
-    size_t cap = RING_CAPACITY;
-    while (cap < sdl_buf_bytes * 4) cap *= 2;
-    ring_.assign(cap, 0);
-    ring_mask_ = cap - 1;
-    ring_head_.store(0, std::memory_order_relaxed);
-    ring_tail_.store(0, std::memory_order_relaxed);
-    // Update our format to match what SDL2 actually gave us (may differ
-    // from what we asked for).
     sample_rate_ = static_cast<uint32_t>(got.freq);
     channels_ = static_cast<uint8_t>(got.channels);
     if (got.format == AUDIO_U8) sample_size_ = 1;
     else if (got.format == AUDIO_S16SYS) sample_size_ = 2;
     else if (got.format == AUDIO_F32SYS) sample_size_ = 4;
-    // Start playback.
     SDL_PauseAudioDevice(sdl_audio_dev_, 0);
     if (getenv("BIFROST_AUDIO_VERBOSE")) {
         fprintf(stderr, "[audio] SDL2 audio device opened: %u Hz, %u ch, "
@@ -358,34 +483,9 @@ bool Audio::open_sdl2_() {
 void Audio::close_sdl2_() {
     std::lock_guard<std::mutex> g(sdl_mu_);
     if (sdl_audio_dev_ != 0) {
+        fprintf(stderr, "[audio] HOST DEVICE CLOSE dev=%u\n", sdl_audio_dev_);
         SDL_CloseAudioDevice(sdl_audio_dev_);
         sdl_audio_dev_ = 0;
-    }
-}
-// ── sdl2_audio_callback_ — pull samples from the ring buffer ───────────
-// Called from SDL2's audio thread. Must be fast and lock-free.
-void Audio::sdl2_audio_callback_(void* userdata, uint8_t* stream, int len) {
-    auto* self = static_cast<Audio*>(userdata);
-    if (!self || len <= 0) return;
-    size_t head = self->ring_head_.load(std::memory_order_relaxed);
-    size_t tail = self->ring_tail_.load(std::memory_order_acquire);
-    size_t avail = tail - head;
-    if (avail >= static_cast<size_t>(len)) {
-        // Enough data — copy from the ring buffer.
-        for (int i = 0; i < len; i++) {
-            stream[i] = self->ring_[(head + i) & self->ring_mask_];
-        }
-        self->ring_head_.store(head + len, std::memory_order_release);
-    } else {
-        // Partial — copy what we have, silence the rest. This is the
-        // correct behavior for a real audio device when the producer
-        // is too slow (underrun).
-        size_t i = 0;
-        for (; i < avail; i++) {
-            stream[i] = self->ring_[(head + i) & self->ring_mask_];
-        }
-        memset(stream + i, 0, static_cast<size_t>(len) - i);
-        self->ring_head_.store(head + avail, std::memory_order_release);
     }
 }
 #endif  // BIFROST_USE_SDL2

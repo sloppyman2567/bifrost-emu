@@ -16,6 +16,7 @@
 #include "frontend/dynamic_linker.h"  // allocate_thread_tls (SDL threads)
 #include "jit/frostjit.hpp"  // needed for per-thread JIT + jit_.reset()
 #include "frost/thunk.hpp"    // GraphicThunk::wake_sdl_semaphores (stop_sdl_threads)
+#include "frost/audio_thunk.hpp"
 #include "bifrost/version.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -459,6 +460,11 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // Fix: call install_host_signal_handlers() which sets
         // g_active_emu_ = this (the child's own Emulator).
         install_host_signal_handlers();
+        // Host threads don't survive fork(): release thunk-owned pump
+        // threads (audio etc.) so their shutdown join() can't hang the
+        // child, and let them spawn fresh ones.
+        if (graphics_.audio_thunk())
+            graphics_.audio_thunk()->detach_pump_for_fork_child();
         // Return 0 to indicate "child". The syscall handler will put
         // this in x0, and the normal run loop continues.
         return 0;

@@ -301,7 +301,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         add_all(athunk);
                         add_all(dthunk);
                         return out;
+                });
+                // vkQuake loads every Vulkan entry point through
+                // SDL_Vulkan_GetVkGetInstanceProcAddr — GraphicThunk needs
+                // the DisplayThunk's guest trampoline registry to answer it.
+                if (gthunk && dthunk && dthunk->enabled()) {
+                    gthunk->set_vk_proc_lookup([dthunk](const char* sym) {
+                        return dthunk->resolve("libvulkan.so.1", sym);
                     });
+                }
             }
             wire_thunk_android_runner_();
             // Register the ifunc resolver callback. BUGFIX: the old
@@ -1564,6 +1572,9 @@ void Emulator::wire_thunk_audio_runner_() {
                      return call_guest_function(cpu, fn, iargs, n,
                                                 nullptr, 0);
                  });
+    // Dedicated-vCPU audio pump: guest callbacks fire on a hardware-like
+    // clock (AAA Android requirement), not piggybacked on dispatches.
+    athunk->start_pump();
 }
 
 void Emulator::ensure_thunk_linker_() {
