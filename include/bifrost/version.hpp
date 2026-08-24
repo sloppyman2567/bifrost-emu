@@ -221,7 +221,7 @@ namespace arm64emu {
 //     bench_mips/CoreMark but correct and verified; the BRCOND_ZERO/
 //     BRCOND_BIT tight self-loop slot (CBZ/CBNZ/TBZ/TBNZ while-loops)
 //     is the real win (~2.7x vs dispatcher).
-//   - Version bump: all version refs normalized to 1.5.4-alpha.
-constexpr const char* VERSION  = "1.5.4-alpha";
+//   - Version bump: 1.5.5-alpha (vk.xml registry-driven marshalling).
+constexpr const char* VERSION  = "1.5.5-alpha";
 constexpr const char* CODENAME = "bifrost-emu";
 } // namespace arm64emu

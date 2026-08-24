@@ -12,14 +12,14 @@ machine without QEMU or a cross-compiler.
  | |_) || |_| |    | | \ \| |__| |____) |  | |   
  |____/_____|_|    |_|  \_\\____/|_____/   |_|   
 
-  bifrost-emu  v1.5.4-alpha
+  bifrost-emu  v1.5.5-alpha
   x86_64 ◄─────────────────► ARM64
 ```
 
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](http://unlicense.org/)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)]()
-[![Version: 1.5.4-alpha](https://img.shields.io/badge/version-1.5.4--alpha-orange.svg)](CHANGELOG.md)
+[![Version: 1.5.5-alpha](https://img.shields.io/badge/version-1.5.5--alpha-orange.svg)](CHANGELOG.md)
 
 ## What is bifrost-emu?
 
@@ -451,7 +451,7 @@ by the `ctest_real/bench_*.elf` binaries themselves:
 
 The tight-ALU self-loop speedup is the top end; mixed real workloads
 (games, worldgen, GL) land in the 10-40x range. Tight loops benefit
-from the dispatch/flag-skip/regalloc work of the 1.5.4-alpha cycle —
+from the dispatch/flag-skip/regalloc work of the 1.5.4-alpha cycle and the vk.xml registry-driven marshalling of 1.5.5-alpha —
 the interpreter is unchanged and runs ~56 MIPS regardless.
 CoreMark (aarch64 guest) runs at ~2,200 iterations/sec plain and
 ~2,540 with `BIFROST_ENABLE_FWD=1 BIFROST_CHAIN_SKIP=1` (~6% of native

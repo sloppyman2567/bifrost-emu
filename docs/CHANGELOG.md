@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with pre-release tags (`-beta.N`, `-rc.N`) for unstable versions.
 
+## [1.5.5-alpha] — vk.xml registry-driven Vulkan marshalling, Phase B complete (2026-08-24)
+
+### Added
+- **vk.xml as mechanical ground truth for VK row signatures**:
+  `tools/opgen/vkxml.py` (parser + natural-alignment layout engine),
+  `vkmarshalgen.py` → `include/opgen_vkmarshal.hpp` (1551 struct
+  descriptors / 1479 chainable / 1227-entry sType→descriptor index /
+  49 command plans), `vkxmlcheck.py` (`make vkxml-check`, errors=0 CI
+  gate). All 1698 struct layouts validated by compiled static_asserts
+  against the vendored vulkan_core.h.
+- **Generated pNext chains**: every chainable struct covered via
+  sType lookup; unknown sTypes truncate guest chains safely with a
+  one-shot diagnostic; writeback preserves guest chain links.
+- **VK_CMD_DEEP_OUT**: enumeration staging with count bounce +
+  min(staged, actual) copyback; copyback-only raw OUT refs now
+  byte-vs-element aware.
+- Plan roles: NULLIFY, STRUCT_IN (single/array), OUT_HANDLE(S) with
+  register or struct-nested counts; VKM_STR single strings;
+  VKM_STRARR counted arrays of strings.
+- Modern rows: EndRendering(+KHR), DrawIndirect(+Indexed),
+  ResetQueryPool, timeline semaphore getters, AcquireNextImage2KHR,
+  BindVertexBuffers2(+EXT), Set/ScissorWithCount(+EXT).
+- `test_vulkan_pnext` suite test (26 checks): Properties2 →
+  DriverProperties → IDProperties + Features2 → BDA chains, guard
+  canaries, chain-link preservation, unknown-sType truncation.
+
+### Fixed
+- **Enum-sized C arrays** (`name[<enum>VK_MAX_*_SIZE</enum>]`) parsed
+  as single elements — under-sized structs (DriverProperties 32 vs 536)
+  corrupted pNext-chain staging for any game using Properties2 queries.
+- C-bitfield structs excluded from descriptors (7; unmodelable —
+  chains truncate at them instead of staging garbage).
+
+### Migrated to generated plans (Phase B, 17 hand arms → 5 declared-permanent)
+create-style commands, RenderPass/DescriptorSetLayout trees, Graphics/
+Compute pipelines, SUBMIT/SUBMIT2, UPDATE_DESCRIPTOR_SETS,
+ALLOCATE_DESCRIPTOR_SETS (struct-nested count), CREATE_INSTANCE/
+DEVICE (string arrays), ALLOCATE_COMMAND_BUFFERS, WaitForFences.
+
+### Changed
+- `BIFROST_TIER2` defaults ON; tier2 regions compose with chain-skip.
+- Full ASLR: ET_DYN load bias + main-stack jitter (heap was already
+  randomized); `BIFROST_NO_ASLR=1` pins.
+- AudioEngine multi-stream rewrite (one device, N streams, mixed in
+  the device callback) + dedicated-vCPU audio pump.
+- CSEL family native cmovcc lowering + pstate-loader scratch fix.
+
 ## [Unreleased] — Working audio path (Linux + Android), audio-thunk dispatch arms (2026-08-22)
 
 ### Added
