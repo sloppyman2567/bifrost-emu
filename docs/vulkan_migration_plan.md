@@ -1,0 +1,136 @@
+# Vulkan Migration Plan — Generated Marshalling (Phases A → C → B)
+
+Status: **A1 ✅ DONE · A2 ✅ DONE (scoped) · C1 ✅ partial · C3 ✅ DONE ·
+A3/C2 deferred into Phase B** (see end of file). Nothing committed yet.
+
+## Current state (post milestone-2, commit 82f8147)
+
+- vk.xml machinery live: `tools/opgen/vkxml.py` (parser + validated
+  layout engine, 1698 structs byte-checked vs vendored vulkan_core.h),
+  `vkmarshalgen.py` → `include/opgen_vkmarshal.hpp` (1543 struct
+  descriptors / 1479 chainable / 1227 sType entries / 28 command
+  plans), `vkxmlcheck.py` (`make vkxml-check`, errors=0 gate,
+  warnings 20 → 6).
+- Runtime: `Policy::VK_CMD_DEEP` two-pass staging marshal in
+  display_thunk.cpp (+ new `VK_CMD_DEEP_OUT` for enumerations).
+- Converted: SetViewport/SetScissor/PipelineBarrier/clears/copies/
+  ExecuteCommands/WaitEvents/ResetFences + A2 set below.
+
+## Done in this session
+
+### A1 — generated pNext chains ✅
+- `vkxml.py`: full VkStructureType value extraction (core `<enums>`,
+  `<extension number=M>` blocks with extnumber-default-M rule,
+  `<feature>` promotion blocks, alias chains). Validated: ALL 1250
+  constants in the vendored vulkan_core.h match — zero mismatches.
+  (Two old hand-table entries were WRONG — INHERITANCE_INFO 11→41,
+  DEVICE_GROUP_CMD_BEGIN 1000060001→1000060004 — harmless, never chained.)
+- `vkmarshalgen.py`: descriptors emitted for plan closure ∪ EVERY
+  chainable struct; structs whose nested refs have no computable layout
+  are PRUNED (LUNARG funcptr case) so chains truncate at them safely;
+  `VkFieldDesc.elem` gains VKM_PNEXT (0x80) flag marking pNext links;
+  sorted `kVkStypeIndex[]` + binary-search `vk_find_struct_by_stype()`.
+- Runtime: `vk_marshal_pnext_chain` reimplemented over the generated map
+  (16-entry hand sType table DELETED); writeback now skips the pNext
+  link field [8..16) — the staged HOST pointer must never land in guest
+  memory (latent guest-chain-corruption fix); one-shot unknown-sType
+  diagnostic. VK_CMD_DEEP fill/size passes walk guest chains for
+  VKM_PNEXT fields (input-only).
+- CREATE_DEVICE / Properties2 / Features2 / BEGIN_COMMAND_BUFFER arms
+  upgraded implicitly (same walker).
+
+### A2 — OUT plans ✅ (scoped)
+- `VkPlanRef` gains `out` flag + `elem_size`: auto-derived direction —
+  count sibling is a POINTER → out=1 enumeration; non-const data ptr →
+  out=2 copyback-only; scalar/enum/bitmask arrays stage as raw bytes.
+- Runtime: enumeration staging = 4-byte count bounce (allocated AFTER
+  reserve — hard contract #2) + array staging; post-call copyback writes
+  min(staged, actual) elements AND the actual count to guest memory.
+  Failed plans restore original guest count pointers before the generic
+  path runs.
+- Migrated rows → VK_CMD_DEEP_OUT: EnumeratePhysicalDevices,
+  GetSwapchainImagesKHR, SurfaceFormatsKHR, SurfacePresentModesKHR,
+  QueueFamilyProperties, GetQueryPoolResults. → VK_CMD_DEEP (pure IN):
+  FreeCommandBuffers, FreeDescriptorSets, CmdBindDescriptorSets,
+  CmdBindVertexBuffers, CmdUpdateBuffer, CmdPushConstants.
+- NOT migrated (deliberate): Enumerate{Instance,Device}Extension/Layer
+  properties stay on their hand arms (RT-extension filter lives there);
+  AllocateCommandBuffers needs a struct-nested count source.
+
+### C1 — modern rows ✅ partial
+- Added: vkCmdEndRendering(+KHR), DrawIndirect/DrawIndexedIndirect,
+  ResetQueryPool, SignalSemaphore, GetSemaphoreCounterValue,
+  AcquireNextImage2KHR (all plain VULKAN), BindVertexBuffers2(+KHR),
+  SetViewportWithCount/SetScissorWithCount(+KHR) (auto VK_CMD_DEEP).
+  Table 1042 → 1056 symbols.
+- DEFERRED (nested-array-in-first-arg marshal = command-level recursive
+  plans, see Open work): vkCmdBeginRendering, vkCmdPipelineBarrier2,
+  vkQueueSubmit2, vkCmdPushDescriptorSetKHR, descriptor update templates.
+
+### C3 — declarative extension policy ✅
+- VK_EXT_descriptor_buffer added to the hidden list (advertise ⟺
+  implemented). Update templates are core-1.1-promoted — hiding from
+  enumeration achieves nothing; left alone.
+
+## Deferred decisions (recorded, do not silently re-scope)
+
+- **A3 nullify option**: no consumer exists until Phase B pipelines
+  migration — implement WITH that migration, not before (dead config).
+- **C2 vkCreateAndroidSurfaceKHR**: NOT a small arm. An Android guest
+  enables VK_KHR_android_surface at INSTANCE creation; the host needs
+  Wayland/XCB variants or SDL_Vulkan_CreateSurface instead. Requires
+  instance-extension rewriting in the CREATE_INSTANCE arm first, plus an
+  Android-Vulkan guest test to validate. Revisit as its own milestone.
+
+## Remaining inventory (Phase B)
+
+17 hand deep arms still in display_thunk.cpp: SUBMIT, PRESENT,
+CREATE_INSTANCE/DEVICE, RENDERPASS, FRAMEBUFFER, BEGIN_RENDERPASS,
+SHADER_MODULE, GRAPHICS/COMPUTE_PIPELINES, PIPELINE_LAYOUT,
+DESCRIPTOR_POOL, DESCRIPTOR_SET_LAYOUT, ALLOC_DESCRIPTOR_SETS,
+UPDATE_DESCRIPTOR_SETS, ALLOC/FREE/MAP/UNMAP_MEMORY,
+FLUSH/INVALIDATE_MAPPED, SYNC_PULL, BEGIN_COMMAND_BUFFER.
+Plus the command-level recursive-plan capability (nested arrays inside
+pCreateInfo-style args) which unlocks BeginRendering/PipelineBarrier2/
+Submit2 generically.
+
+## Hard contracts (violating any = known crash class)
+
+1. VkStage arena lives at DISPATCH FUNCTION SCOPE until after the host
+   call (scoped-inside-if SIGSEGV'd mambo_vulkan).
+2. Two-pass staging only: dry size pass → single reserve() → fill.
+   NO pointer handed out before final reserve — including the A2 count
+   bounces (they allocate in the fill phase, counts first).
+3. Caps mandatory: ≤1024 elems/array, ≤4 MiB staging, depth ≤4,
+   ≤8 pNext nodes; failure falls back to generic bounce (never worse
+   than before) AND restores rewritten guest pointers first.
+4. Guest callbacks never cross to host code (debug-messenger precedent:
+   intercept by name, fake handle).
+5. Policy enum is row-derived: adding VALID_POLICY entries does nothing
+   until a spec row uses it; regen opgen_thunk.hpp after spec edits.
+6. Gates per phase: build 0 warnings, `opgen-thunk-check`, `vkxml-check`
+   errors=0, quick suite 207/207, swapchain + mambo rc=0 ×3 on RADV.
+7. Generated chain walking: size pass and fill pass MUST mirror each
+   other allocation-for-allocation (two-pass contract); unknown sType →
+   NULL link + one-shot diagnostic, never garbage staging.
+
+## Verification protocol (every phase)
+
+```
+make -j$(nproc)                      # 0 warnings
+make opgen-thunk-check && make vkxml-check   # up-to-date / errors=0
+./scripts/run_tests.sh --quick       # 207/207
+cd ctest_real && DISPLAY=:0 timeout -s KILL 30 ../bifrost-emu \
+    ./test_vulkan_swapchain.elf      # rc=0 ×3
+DISPLAY=:0 timeout -s KILL 30 ../bifrost-emu \
+    ./test_mambo_vulkan.elf          # rc=0 ×3
+```
+
+All gates PASS for A1+A2+C1+C3 (2026-08-24).
+
+## Open decisions (user answered / defaults)
+
+- Order: A → C → B (user accepted recommendation).
+- Descriptor update templates: hide extension initially ✓ (moot — core-
+  promoted; documented above).
+- PRESENT/SUBMIT arms migrate LAST ✓.

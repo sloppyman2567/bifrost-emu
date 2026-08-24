@@ -3530,3 +3530,86 @@ not musl-`-static`.
   buffer — all documented future work).
 - Verified: quick suite 207/207, mambo_vulkan + vulkan_swapchain rc=0 on
   live RADV (PipelineBarrier exercised by mambo found the lifetime bug).
+
+## Session History (2026-08-24) — vk.xml milestone 3: generated pNext chains (A1) + OUT plans (A2) + C1 rows
+
+- **Plan `docs/vulkan_migration_plan.md` phases A1/A2/C1(partial)/C3
+  LANDED; A3/C2 deferred with recorded reasons; Phase B (17 hand arms)
+  remains.** All gates green: build 0 warnings, opgen-thunk-check,
+  vkxml-check errors=0 (warnings 20→6), quick suite **207/207**,
+  swapchain + mambo rc=0 ×3 on live RADV.
+- **A1 — GENERATED pNEXT CHAINS (hand sType table DELETED):**
+  - `tools/opgen/vkxml.py` gained full VkStructureType extraction
+    (`parse_structure_types` → `reg['stypes']`). THREE sources: core
+    `<enums name="VkStructureType">` children; `<enum extends=...>`
+    inside `<extension number=M>` (extnumber DEFAULTS TO M — the
+    missing-default was the first bug); and inside `<feature>`
+    promotion blocks (explicit extnumber=, container scan required).
+    Alias chains resolved second-pass. VALIDATION: parsed map compared
+    against ALL 1250 constants in vendored vulkan_core.h — zero
+    mismatches. Two old hand-table entries were silently WRONG
+    (COMMAND_BUFFER_INHERITANCE_INFO 11 vs real 41;
+    DEVICE_GROUP_COMMAND_BUFFER_BEGIN_INFO 1000060001 vs 1000060004) —
+    harmless there, but proof the mechanical path beats hand tables.
+  - `vkmarshalgen.py`: descriptors now emitted for plan-closure ∪ EVERY
+    struct with a resolvable sType member (1479 chainable); a pointer
+    FIELD does not force its pointee's layout to exist, so structs whose
+    nested refs have no computable layout are PRUNED iteratively
+    (VkDirectDriverLoadingListLUNARG funcptr member) and excluded from
+    the sType map — runtime truncates guest chains at them (safe).
+    latexmath count members (ShaderModuleCreateInfo codeSize/4 etc.)
+    still skip that FIELD only (pre-existing).
+  - Header: `VKM_PNEXT = 0x80` flag OR'd into VkFieldDesc.elem marks the
+    pNext link; sorted `kVkStypeIndex[]` (1227 entries, dup-stype dedupe)
+    + binary-search inline `vk_find_struct_by_stype(int32_t)`.
+  - Runtime (display_thunk.cpp): `vk_marshal_pnext_chain` reimplemented
+    over the generated map — CREATE_DEVICE / Properties2 / Features2 /
+    BEGIN_COMMAND_BUFFER arms upgraded implicitly; writeback now SKIPS
+    the pNext link bytes [8..16) (the staged HOST pointer previously got
+    written back over the guest's own chain link — latent corruption);
+    one-shot unknown-sType diagnostic (`vk_deep_unknown_stype_once`).
+    VK_CMD_DEEP size/fill passes walk VKM_PNEXT-flagged fields via
+    `vk_deep_chain_size`/`vk_deep_fill_chain` (input-only; ≤8 nodes).
+- **A2 — OUT PLANS (VK_CMD_DEEP_OUT):**
+  - `VkPlanRef` gained `out` + `elem_size`; generator derives direction
+    AUTOMATICALLY: len-target sibling is a POINTER → out=1 enumeration;
+    non-const data ptr → out=2 copyback-only; else out=0 IN. Scalar/
+    enum/bitmask arrays stage as raw bytes with their type_size
+    (VkDeviceSize* offsets = 8B elems, uint32 dynamic offsets = 4B).
+    NOTE: flat POD structs (VkSurfaceFormatKHR 8B, VkQueueFamilyProperties
+    24B) classify as raw staging via type_size BEFORE the layouts check —
+    correct for flat structs, would SKIP nested-pointer translation if a
+    chainable struct ever hit this path.
+  - Runtime: enumeration = read guest *count_ptr → cap kVkDeepMaxElems →
+    4-byte count bounce armed with staged count → host call → copy back
+    min(staged, actual) elements AND actual count to guest. Count bounces
+    allocate in the FILL phase (after reserve) — hard contract #2 caught
+    a dangling-pointer version of this during self-review. Failed plans
+    (garbage counts) restore original guest pointers before generic
+    dispatch. Raw OUT jobs carry BYTES in j.count, struct jobs ELEMENTS.
+  - Rows migrated → VK_CMD_DEEP_OUT: EnumeratePhysicalDevices,
+    GetSwapchainImagesKHR, SurfaceFormatsKHR, SurfacePresentModesKHR,
+    QueueFamilyProperties, GetQueryPoolResults. → VK_CMD_DEEP (IN):
+    FreeCommandBuffers, FreeDescriptorSets, CmdBindDescriptorSets,
+    CmdBindVertexBuffers, CmdUpdateBuffer, CmdPushConstants. NOT moved:
+    extension-properties enumerations (RT filter hand arm),
+    AllocateCommandBuffers (count nested in pAllocateInfo struct).
+- **C1 rows added** (table 1042 → 1056): EndRendering(+KHR),
+  DrawIndirect/DrawIndexedIndirect, ResetQueryPool, SignalSemaphore,
+  GetSemaphoreCounterValue, AcquireNextImage2KHR (plain VULKAN);
+  BindVertexBuffers2(+KHR), Set/ScissorWithCount(+KHR) (auto VK_CMD_DEEP
+  plans). DEFERRED (need command-level recursive plans — arrays nested
+  INSIDE pCreateInfo-style args): BeginRendering, PipelineBarrier2,
+  QueueSubmit2, PushDescriptorSetKHR, update templates.
+- **C3**: VK_EXT_descriptor_buffer hidden from device-extension
+  enumeration (advertise ⟺ implemented). Update templates are
+  core-promoted — hiding is moot, left alone.
+- **DEFERRED decisions**: A3 nullify option lands WITH the pipelines
+  migration (no consumer before it). C2 vkCreateAndroidSurfaceKHR is NOT
+  small: Android guests enable VK_KHR_android_surface at instance
+  creation while the host needs Wayland/XCB (or SDL_Vulkan_CreateSurface)
+  — requires instance-extension rewriting FIRST plus an Android-Vulkan
+  test guest; its own milestone.
+- New contracts in plan file §Hard-contracts: (7) size pass mirrors fill
+  allocation-for-allocation; unknown sType → NULL link + one-shot log.
+  Count bounces never allocate pre-reserve.

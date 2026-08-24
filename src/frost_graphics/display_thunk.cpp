@@ -309,6 +309,7 @@ struct VkStage {
 namespace {
 constexpr size_t kVkDeepMaxElems = 1024;
 constexpr size_t kVkDeepMaxBytes = 4u << 20;   // 4 MiB staging cap
+constexpr int kVkDeepMaxPnextNodes = 8;        // chain-node cap (hand-arm parity)
 
 // Read `size` bytes of guest memory: direct-window alias when possible,
 // otherwise copy into buf (>= size). nullptr on unmapped/garbage.
@@ -335,6 +336,65 @@ uint32_t vk_deep_count(const void* elem, const thunk::VkFieldDesc& f) {
     return n;
 }
 
+// One-shot diagnostic for an unrecognized sType in a guest pNext chain.
+// The chain truncates at that node (safe: the guest sees the rest of its
+// chain untouched instead of garbage); this prints ONCE per process.
+void vk_deep_unknown_stype_once(int32_t s) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+        fprintf(stderr,
+                "[vk-deep] unknown pNext sType %d — chain truncated "
+                "(struct not in vk.xml descriptor set)\n", s);
+    }
+}
+
+// Dry-size walk of a guest pNext chain (must mirror vk_deep_fill_chain
+// allocation-for-allocation — the two-pass staging contract).
+size_t vk_deep_chain_size(Memory* mem, uint64_t head, bool* ok) {
+    size_t total = 0;
+    int guard = 0;
+    while (head && guard++ < kVkDeepMaxPnextNodes) {
+        int32_t s = 0;
+        uint64_t pn = 0;
+        try { mem->read(head, &s, 4); mem->read(head + 8, &pn, 8); }
+        catch (...) { break; }
+        const thunk::VkStructDesc* d = thunk::vk_find_struct_by_stype(s);
+        if (!d) { vk_deep_unknown_stype_once(s); break; }
+        total = (total + 7u) & ~size_t(7);
+        total += d->size;
+        if (total > kVkDeepMaxBytes) { *ok = false; return 0; }
+        head = pn;
+    }
+    return total;
+}
+
+// Fill pass: stage every known chain node and relink host-side. *slot
+// receives the HOST head (nullptr when nothing was staged).
+void vk_deep_fill_chain(Memory* mem, VkStage& st, uint64_t head,
+                        void** slot) {
+    *slot = nullptr;
+    void* prev = nullptr;
+    int guard = 0;
+    while (head && guard++ < kVkDeepMaxPnextNodes) {
+        int32_t s = 0;
+        uint64_t pn = 0;
+        try { mem->read(head, &s, 4); mem->read(head + 8, &pn, 8); }
+        catch (...) { break; }
+        const thunk::VkStructDesc* d = thunk::vk_find_struct_by_stype(s);
+        if (!d) { vk_deep_unknown_stype_once(s); break; }
+        uint8_t* h = reinterpret_cast<uint8_t*>(st.bytes(d->size, 8));
+        try { mem->read(head, h, d->size); }
+        catch (...) { std::memset(h, 0, d->size); }
+        *reinterpret_cast<void**>(h + 8) = nullptr;
+        if (prev)
+            *reinterpret_cast<void**>(static_cast<uint8_t*>(prev) + 8) = h;
+        else
+            *slot = h;
+        prev = h;
+        head = pn;
+    }
+}
+
 size_t vk_deep_size_one(Memory* mem, uint64_t guest,
                         const thunk::VkStructDesc* d, uint32_t count,
                         int depth, bool* ok) {
@@ -347,6 +407,19 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
         if (total > kVkDeepMaxBytes) { *ok = false; return 0; }
         for (uint16_t fi = 0; fi < d->nfields; fi++) {
             const thunk::VkFieldDesc& f = d->fields[fi];
+            if (f.elem & thunk::VKM_PNEXT) {
+                // chain link: account for every known node's staging
+                uint8_t stackbuf2[512];
+                const void* he2 =
+                    vk_deep_read(mem, g, d->size, stackbuf2, sizeof(stackbuf2));
+                if (!he2) { *ok = false; return 0; }
+                uint64_t head =
+                    reinterpret_cast<uint64_t>(vk_deep_ptr_field(he2, f));
+                total = (total + 7u) & ~size_t(7);
+                total += vk_deep_chain_size(mem, head, ok);
+                if (!*ok) return 0;
+                continue;
+            }
             uint8_t stackbuf[512];
             const void* host_elem =
                 vk_deep_read(mem, g, d->size, stackbuf, sizeof(stackbuf));
@@ -381,6 +454,16 @@ void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
     catch (...) { std::memset(out, 0, d->size); return; }
     for (uint16_t fi = 0; fi < d->nfields; fi++) {
         const thunk::VkFieldDesc& f = d->fields[fi];
+        if (f.elem & thunk::VKM_PNEXT) {
+            // chain link: walk the guest chain via the generated
+            // sType→descriptor map (input-only — no node writeback)
+            void** slot = reinterpret_cast<void**>(out + f.off);
+            vk_deep_fill_chain(mem, st,
+                               reinterpret_cast<uint64_t>(
+                                   vk_deep_ptr_field(out, f)),
+                               slot);
+            continue;
+        }
         const void* p = vk_deep_ptr_field(out, f);
         uint32_t n = vk_deep_count(out, f);
         void** slot = reinterpret_cast<void**>(out + f.off);
@@ -1063,12 +1146,29 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     bool bounce_wb[kMaxArgs] = {false};
     VkStage vk_deep_stage;   // lives until after the host call
 
-    // ── VK_CMD_DEEP: descriptor-driven staging for command batches ──
+    // ── VK_CMD_DEEP / VK_CMD_DEEP_OUT: descriptor-driven staging ────
     // Replaces listed array args with staged host pointers so the plain
     // translate_ptr pass never sees them (it would bounce ONE element
     // while the host driver walks count elements past it).
+    // OUT refs (VK_CMD_DEEP_OUT): enumerations stage a 4-byte count
+    // bounce + the array; after the host call min(staged, actual)
+    // elements AND the actual count are copied back to guest memory.
     uint32_t vk_deep_done = 0;
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CMD_DEEP &&
+    struct DeepOutRec {
+        int arg = 0;
+        int count_arg_idx = -1;
+        uint64_t guest_array = 0;
+        uint64_t guest_count_ptr = 0;   // 0 = copyback-only
+        void* staged = nullptr;
+        void* staged_count = nullptr;
+        uint32_t staged_elems = 0;
+        size_t elem_size = 0;
+    };
+    DeepOutRec vk_out_recs[4];
+    int vk_n_out_recs = 0;
+    if (entry.spec &&
+        (entry.spec->policy == thunk::Policy::VK_CMD_DEEP ||
+         entry.spec->policy == thunk::Policy::VK_CMD_DEEP_OUT) &&
         impl_->mem && entry.host_fn) {
         if (const thunk::VkCmdPlan* plan =
                 thunk::vk_find_cmd_plan(entry.name.c_str())) {
@@ -1077,14 +1177,80 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             struct DeepJob { int arg = 0; uint32_t count = 0;
                              uint64_t guest = 0; bool raw = false;
                              const thunk::VkStructDesc* desc = nullptr; };
-            DeepJob jobs[4] = {};
+            DeepJob jobs[8] = {};
             int njobs = 0;
             for (uint8_t ri = 0; ri < plan->nrefs && ok; ri++) {
                 const thunk::VkPlanRef& r = plan->refs[ri];
                 if (r.arg >= kMaxArgs) continue;
+
+                // ── OUT refs: enumeration / copyback-only staging ──
+                if (r.out == 1 || r.out == 2) {
+                    DeepOutRec rec{};
+                    rec.arg = r.arg;
+                    rec.count_arg_idx = r.count_arg;
+                    rec.guest_array = args[r.arg];
+                    size_t esz = r.desc ? r.desc->size : r.elem_size;
+                    rec.elem_size = esz;
+                    if (r.out == 2 && !args[r.arg]) continue;
+                    if (r.out == 1) {
+                        // count lives behind a guest u32* pointer
+                        rec.guest_count_ptr = args[r.count_arg];
+                        uint32_t cnt = 0;
+                        if (rec.guest_count_ptr) {
+                            try { impl_->mem->read(rec.guest_count_ptr,
+                                                   &cnt, 4); }
+                            catch (...) { cnt = 0; }
+                        }
+                        if (cnt > kVkDeepMaxElems) cnt = kVkDeepMaxElems;
+                        rec.staged_elems = cnt;
+                        // count bounce is allocated AFTER reserve (fill
+                        // phase below) — never hand out arena pointers
+                        // before the final reserve
+                        need = (need + 3u) & ~size_t(3);
+                        need += 4;
+                        vk_deep_done |= 1u << r.count_arg;
+                        if (!args[r.arg] || !cnt) {
+                            vk_out_recs[vk_n_out_recs++] = rec;
+                            continue;
+                        }
+                        need = (need + 7u) & ~size_t(7);
+                        if (r.desc) {
+                            need += vk_deep_size_one(
+                                impl_->mem, rec.guest_array, r.desc,
+                                cnt, 0, &ok);
+                        } else {
+                            size_t bytes =
+                                (size_t)cnt * esz;
+                            if (bytes > kVkDeepMaxBytes) ok = false;
+                            need += bytes;
+                        }
+                    } else {
+                        // copyback-only raw bytes (GetQueryPoolResults
+                        // pData): byte count arrives in a register
+                        size_t bytes = static_cast<size_t>(
+                            args[r.count_arg]);
+                        if (bytes > kVkDeepMaxBytes) ok = false;
+                        rec.staged_elems =
+                            static_cast<uint32_t>(bytes);
+                        need += bytes;
+                    }
+                    if (!ok) break;
+                    // raw jobs carry a BYTE count (the fill loop reads/
+                    // stages exactly j.count bytes); struct jobs carry
+                    // an ELEMENT count
+                    jobs[njobs++] = {r.arg,
+                                     r.desc ? rec.staged_elems :
+                                              static_cast<uint32_t>(
+                                                  (size_t)rec.staged_elems *
+                                                  esz),
+                                     rec.guest_array,
+                                     !r.desc, r.desc};
+                    vk_out_recs[vk_n_out_recs++] = rec;
+                    continue;
+                }
+
+                // ── IN refs (existing behavior) ──────────────────────
                 uint64_t cnt_arg = args[r.count_arg];
-                size_t elem_bytes =
-                    r.desc ? r.desc->size : 8;
                 uint32_t n = r.count_in_bytes
                     ? 1   // raw: arg IS a byte count, marshalled below
                     : static_cast<uint32_t>(
@@ -1095,10 +1261,11 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 j.guest = args[r.arg];
                 j.desc = r.desc ? r.desc : nullptr;
                 if (r.count_in_bytes || !r.desc) {
-                    // raw byte buffer: stage verbatim in one block
+                    // raw buffer: stage verbatim in one block. Element
+                    // size comes from the ref (handles 8, enums 4, ...)
                     size_t bytes = r.count_in_bytes
                         ? static_cast<size_t>(cnt_arg)
-                        : static_cast<size_t>(cnt_arg) * 8;
+                        : static_cast<size_t>(cnt_arg) * r.elem_size;
                     if (bytes > kVkDeepMaxBytes) ok = false;
                     j.count = static_cast<uint32_t>(bytes);   // bytes
                     j.raw = true;
@@ -1113,7 +1280,20 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
             if (ok && need < kVkDeepMaxBytes) {
                 VkStage& st = vk_deep_stage;
-                st.buf.reserve(std::max<size_t>(need, 65536));
+                st.buf.reserve(std::max<size_t>(need + 4096, 65536));
+                // count bounces FIRST (allocation order mirrors `need`:
+                // out-refs contributed their count+array bytes in scan
+                // order before any IN-ref bytes)
+                for (int oi = 0; oi < vk_n_out_recs; oi++) {
+                    DeepOutRec& rec = vk_out_recs[oi];
+                    if (!rec.guest_count_ptr) continue;
+                    void* cb = st.bytes(4, 4);
+                    uint32_t cnt = rec.staged_elems;
+                    std::memcpy(cb, &cnt, 4);
+                    rec.staged_count = cb;
+                    args[rec.count_arg_idx] =
+                        reinterpret_cast<uint64_t>(cb);
+                }
                 for (int ji = 0; ji < njobs; ji++) {
                     DeepJob& j = jobs[ji];
                     void* dst;
@@ -1134,7 +1314,25 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     }
                     args[j.arg] = reinterpret_cast<uint64_t>(dst);
                     vk_deep_done |= 1u << j.arg;
+                    for (int oi = 0; oi < vk_n_out_recs; oi++) {
+                        if (vk_out_recs[oi].arg == j.arg)
+                            vk_out_recs[oi].staged = dst;
+                    }
                 }
+            } else if (vk_n_out_recs) {
+                // plan failed (garbage counts, oversized staging): undo
+                // the count-bounce rewrites so the generic translate
+                // path sees the ORIGINAL guest pointers for every arg.
+                for (int oi = 0; oi < vk_n_out_recs; oi++) {
+                    const DeepOutRec& rec = vk_out_recs[oi];
+                    if (rec.staged_count &&
+                        rec.count_arg_idx >= 0 && rec.count_arg_idx < kMaxArgs) {
+                        args[rec.count_arg_idx] = rec.guest_count_ptr;
+                        vk_deep_done &= ~(1u << rec.count_arg_idx);
+                    }
+                    vk_deep_done &= ~(1u << rec.arg);
+                }
+                vk_n_out_recs = 0;
             }
         }
     }
@@ -1202,6 +1400,25 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         ret = reinterpret_cast<Fn8>(entry.host_fn)(
             args[0], args[1], args[2], args[3],
             args[4], args[5], args[6], args[7]);
+    }
+
+    // ── VK_CMD_DEEP_OUT copyback: enumerations + OUT data ────────────
+    // The host wrote the actual count into our 4-byte bounce and filled
+    // min(count, staged) elements of the staged array. Publish both to
+    // guest memory. (VkStage outlives this — declared at function scope.)
+    for (int oi = 0; oi < vk_n_out_recs; oi++) {
+        const DeepOutRec& rec = vk_out_recs[oi];
+        if (rec.staged_count && rec.guest_count_ptr) {
+            uint32_t actual = 0;
+            std::memcpy(&actual, rec.staged_count, 4);
+            try { impl_->mem->write(rec.guest_count_ptr, &actual, 4); }
+            catch (...) { /* unmapped count pointer */ }
+        }
+        if (rec.staged && rec.guest_array && rec.staged_elems) {
+            size_t bytes = (size_t)rec.staged_elems * rec.elem_size;
+            try { impl_->mem->write(rec.guest_array, rec.staged, bytes); }
+            catch (...) { /* unmapped array */ }
+        }
     }
 
     // Write bounced pointer args back into guest memory. Only the byte
@@ -1483,35 +1700,16 @@ void read_guest_bytes(Memory* mem, uint64_t g, void* dst, size_t n) {
     catch (...) { std::memset(dst, 0, n); }
 }
 
-// ── pNext chain deep-marshal (Properties2/Features2/DeviceCreateInfo) ──
+// ── pNext chain deep-marshal (generated, Phase A1) ───────────────────
 // Extension structs chained via pNext are GUEST pointers; the host driver
-// walks the chain and derefs them. Known sTypes are copied into staging,
-// re-linked host-side, and written back after the call. Sizes verified
-// against the vendored vulkan_core.h (natural alignment, guest layout
-// identical). Unknown sType truncates the chain at that node.
-constexpr uint32_t kMaxPnextNodes = 8;
+// walks the chain and derefs them. Node layouts come from the GENERATED
+// sType→descriptor map (vk_find_struct_by_stype, built from vk.xml) so
+// every registry-known chainable struct is covered — not just a hand
+// table. Unknown sTypes truncate the chain at that node (one-shot
+// diagnostic). Sizes are validated against the vendored vulkan_core.h by
+// the generator's layout engine.
+constexpr uint32_t kMaxPnextNodes = kVkDeepMaxPnextNodes;
 struct VkPnextNode { uint8_t* host; uint64_t guest; size_t size; };
-size_t vk_pnext_size(int32_t sType) {
-    switch (sType) {
-    case 1000059001: return 840;  // VkPhysicalDeviceProperties2
-    case 1000059000: return 240;  // VkPhysicalDeviceFeatures2
-    case 1000196000: return 536;  // ..PhysicalDeviceDriverProperties
-    case 1000094000: return 32;   // ..PhysicalDeviceSubgroupProperties
-    case 1000225000: return 32;   // ..SubgroupSizeControlProperties(EXT)
-    case 1000150014: return 64;   // ..AccelerationStructurePropertiesKHR
-    case 1000225002: return 24;   // ..SubgroupSizeControlFeatures(EXT)
-    case 1000257000: return 32;   // ..BufferDeviceAddressFeatures(KHR)
-    case 1000150013: return 40;   // ..AccelerationStructureFeaturesKHR
-    case 1000348013: return 24;   // ..RayQueryFeaturesKHR (vendored hdr value)
-    case 1000294000: return 24;   // ..PresentIdFeaturesKHR
-    case 1000294001: return 24;   // ..PresentWaitFeaturesKHR
-    case 1000479002: return 24;   // ..PresentId2FeaturesKHR
-    case 1000480001: return 24;   // ..PresentWait2FeaturesKHR
-    case          11: return 56;  // VkCommandBufferInheritanceInfo
-    case 1000060001: return 24;   // DeviceGroupCommandBufferBeginInfo
-    default:         return 0;
-    }
-}
 // Walks the guest chain starting at `g`; fills up to kMaxPnextNodes nodes.
 uint32_t vk_marshal_pnext_chain(Memory* mem, VkStage& st, uint64_t g,
                                 VkPnextNode* nodes) {
@@ -1521,13 +1719,13 @@ uint32_t vk_marshal_pnext_chain(Memory* mem, VkStage& st, uint64_t g,
         int32_t s = 0; uint64_t pn = 0;
         try { mem->read(g, &s, 4); mem->read(g + 8, &pn, 8); }
         catch (...) { break; }
-        size_t sz = vk_pnext_size(s);
-        if (!sz) break;  // unknown extension struct — truncate chain here
-        uint8_t* h = reinterpret_cast<uint8_t*>(st.bytes(sz, 8));
-        read_guest_bytes(mem, g, h, sz);
+        const thunk::VkStructDesc* d = thunk::vk_find_struct_by_stype(s);
+        if (!d) { vk_deep_unknown_stype_once(s); break; }
+        uint8_t* h = reinterpret_cast<uint8_t*>(st.bytes(d->size, 8));
+        read_guest_bytes(mem, g, h, d->size);
         *reinterpret_cast<void**>(h + 8) = nullptr;
         if (prev) *reinterpret_cast<void**>(static_cast<uint8_t*>(prev) + 8) = h;
-        nodes[n++] = {h, g, sz};
+        nodes[n++] = {h, g, d->size};
         prev = h;
         g = pn;
     }
@@ -1536,8 +1734,17 @@ uint32_t vk_marshal_pnext_chain(Memory* mem, VkStage& st, uint64_t g,
 void vk_writeback_pnext_chain(Memory* mem, const VkPnextNode* nodes,
                               uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
-        try { mem->write(nodes[i].guest, nodes[i].host, nodes[i].size); }
-        catch (...) { /* unmapped node — result lost */ }
+        // Write back everything EXCEPT the pNext link (offsets 8..16):
+        // our staged copy carries a HOST pointer there which must never
+        // land in guest memory (it would zero/corrupt the guest chain).
+        const VkPnextNode& nd = nodes[i];
+        if (nd.size > 8) {
+            try { mem->write(nd.guest, nd.host, 8); } catch (...) {}
+        }
+        if (nd.size > 16) {
+            try { mem->write(nd.guest + 16, nd.host + 16,
+                             nd.size - 16); } catch (...) {}
+        }
     }
 }
 } // namespace
@@ -2704,8 +2911,13 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     }
     if (entry.spec && entry.name == "vkEnumerateDeviceExtensionProperties") {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        // Declarative policy (plan C3): advertise ⟺ implemented.
+        // RT needs acceleration-structure build marshalling; descriptor
+        // buffer needs a whole bindless model. Guests that don't see
+        // the strings take non-RT / conventional-binding paths.
         static const char* kHiddenExt[] = {
-            "VK_KHR_ray_query", "VK_KHR_acceleration_structure" };
+            "VK_KHR_ray_query", "VK_KHR_acceleration_structure",
+            "VK_EXT_descriptor_buffer" };
         auto hidden = [](const char* n) {
             for (const char* h : kHiddenExt)
                 if (std::strncmp(n, h, sizeof("VK_KHR_acceleration_structure")) == 0)

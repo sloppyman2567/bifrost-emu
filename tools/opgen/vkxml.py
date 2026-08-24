@@ -77,9 +77,69 @@ def classify_type(tname, handles, enum_names, bitmask_names, funcptrs):
     return 'struct'
 
 
+def parse_structure_types(root):
+    """Numeric values of every VkStructureType constant.
+
+    Sources: children of <enums name="VkStructureType"> AND <enum
+    extends="VkStructureType"> elements scattered through <extension>
+    blocks. Value encodings:
+      - value="N"                      → direct
+      - offset="N" [extnumber="M"]     → 1000000000 + (M-1)*1000 + N
+      - dir="-" negates the offset     (dir defaults to "+")
+      - alias="OTHER"                  → resolved in a second pass
+    Returns {CONST_NAME: int}.
+    """
+    def raw_value(e, extnumber_default=1):
+        if e.get('value') is not None:
+            return int(e.get('value'))
+        off = e.get('offset')
+        if off is None:
+            return None
+        ext = int(e.get('extnumber', extnumber_default))
+        sign = -1 if e.get('dir') == '-' else 1
+        return 1000000000 + (ext - 1) * 1000 + sign * int(off)
+
+    vals = {}
+    aliases = {}
+    seen_elems = []
+    # Containers of VkStructureType enum definitions:
+    #   - <enums name="VkStructureType"> children (core, explicit value=)
+    #   - <enum extends="VkStructureType"> inside <extension number=M>
+    #     (extnumber defaults to M)
+    #   - ... inside <feature> blocks (promotions; explicit extnumber=)
+    for enums in root.iter('enums'):
+        if enums.get('name') == 'VkStructureType':
+            seen_elems.extend((e, 1) for e in enums.iter('enum'))
+    containers = [(ext, int(ext.get('number') or 1))
+                  for ext in root.iter('extension')]
+    containers += [(feat, 1) for feat in root.iter('feature')]
+    for cont, dflt in containers:
+        for e in cont.iter('enum'):
+            if e.get('extends') == 'VkStructureType':
+                seen_elems.append((e, dflt))
+    for e, dflt in seen_elems:
+        nm = e.get('name')
+        if not nm:
+            continue
+        if e.get('alias'):
+            aliases[nm] = e.get('alias')
+            continue
+        v = raw_value(e, dflt)
+        if v is not None:
+            vals[nm] = v
+    for nm, target in aliases.items():
+        t = target
+        while t in aliases:
+            t = aliases[t]
+        if t in vals:
+            vals[nm] = vals[t]
+    return vals
+
+
 def parse_registry(xml_path):
     tree = ET.parse(xml_path)
     root = tree.getroot()
+    stypes = parse_structure_types(root)
 
     handles, bitmask_names, funcptrs = set(), set(), set()
     bitmask64 = set()
@@ -223,6 +283,7 @@ def parse_registry(xml_path):
         'structs': structs,
         'struct_aliases': struct_aliases,
         'union_names': union_names,
+        'stypes': stypes,
     }
     # resolve struct aliases AFTER member parsing (aliases may chain)
     def _resolve(name, depth=0):
@@ -324,6 +385,7 @@ class FieldPtr:
     elem: str            # 'struct:Name' | 'handle' | 'scalar:N' | 'ptr' | 'char'
     count: str           # 'fixed:N' | 'member:NAME' | 'nullterm'
     writable: bool       # OUT array (host writes it back)
+    name: str = ''       # member name ('pNext' marks a chain-link field)
 
 
 @dataclass
@@ -396,7 +458,7 @@ def layout_struct(name, reg, cache=None):
             else:
                 count = 'fixed:1'
             info.ptrs.append(FieldPtr(offset=offset, elem=elem, count=count,
-                                      writable=m.is_out))
+                                      writable=m.is_out, name=m.name))
             offset += 8 * (cnt if cnt else 1)
             continue
         # value member

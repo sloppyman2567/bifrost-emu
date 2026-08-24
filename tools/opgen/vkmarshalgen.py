@@ -27,17 +27,42 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vkxml import parse_registry, layout_all
 
-# Commands converted to VK_CMD_DEEP. The count parameter for each dynamic
-# array is derived AUTOMATICALLY from the registry's len="..." attribute
-# (matched against sibling parameter names) — no hand-maintained indices.
-# RAW = byte-counted void* handled specially.
-CMD_PLANS = [
-    'vkCmdSetViewport', 'vkCmdSetScissor', 'vkCmdPipelineBarrier',
-    'vkCmdClearAttachments', 'vkCmdClearColorImage',
-    'vkCmdClearDepthStencilImage', 'vkCmdCopyBuffer', 'vkCmdCopyImage',
-    'vkCmdCopyBufferToImage', 'vkCmdCopyImageToBuffer',
-    'vkCmdExecuteCommands', 'vkCmdWaitEvents', 'vkResetFences',
-]
+# Commands converted to VK_CMD_DEEP / VK_CMD_DEEP_OUT. The count parameter
+# for each dynamic array is derived AUTOMATICALLY from the registry's
+# len="..." attribute (matched against sibling parameter names) — no
+# hand-maintained indices. RAW = byte-counted void* handled specially.
+#
+# Direction is derived per pointer parameter ("auto"):
+#   - count sibling in a REGISTER            → plain IN staging (out=0)
+#   - count sibling is a POINTER (u32*)      → enumeration: the host
+#     writes the actual count through it; staged array + count are
+#     copied back after the call (out=1)
+#   - no counted sibling but the param is non-const (void* pData) →
+#     copyback-only raw staging (out=2)
+CMD_PLANS = {
+    'vkCmdSetViewport': None, 'vkCmdSetScissor': None,
+    'vkCmdPipelineBarrier': None, 'vkCmdClearAttachments': None,
+    'vkCmdClearColorImage': None, 'vkCmdClearDepthStencilImage': None,
+    'vkCmdCopyBuffer': None, 'vkCmdCopyImage': None,
+    'vkCmdCopyBufferToImage': None, 'vkCmdCopyImageToBuffer': None,
+    'vkCmdExecuteCommands': None, 'vkCmdWaitEvents': None,
+    'vkResetFences': None,
+    # A2: enumerations (OUT) + IN arrays dispatched as plain 'p' before
+    'vkEnumeratePhysicalDevices': None,
+    'vkGetSwapchainImagesKHR': None,
+    'vkGetPhysicalDeviceSurfaceFormatsKHR': None,
+    'vkGetPhysicalDeviceSurfacePresentModesKHR': None,
+    'vkGetPhysicalDeviceQueueFamilyProperties': None,
+    'vkGetQueryPoolResults': None,
+    'vkFreeCommandBuffers': None, 'vkFreeDescriptorSets': None,
+    'vkCmdBindDescriptorSets': None, 'vkCmdBindVertexBuffers': None,
+    'vkCmdUpdateBuffer': None, 'vkCmdPushConstants': None,
+    # C1 modern rows (flat top-level arrays only)
+    'vkCmdBindVertexBuffers2': None,
+    'vkCmdBindVertexBuffers2KHR': None,
+    'vkCmdSetViewportWithCount': None, 'vkCmdSetViewportWithCountKHR': None,
+    'vkCmdSetScissorWithCount': None, 'vkCmdSetScissorWithCountKHR': None,
+}
 
 HEADER = r"""// opgen_vkmarshal.hpp — GENERATED. DO NOT EDIT.
 //
@@ -61,6 +86,9 @@ enum : uint8_t {
     VKM_STRUCT = 1,     // pointee is another descriptor
     VKM_HANDLE = 2,     // opaque handle(s) — copy verbatim
     VKM_RAW = 3,        // untyped bytes (void*)
+
+    VKM_PNEXT = 0x80,   // FLAG (OR'd into elem): this field is a pNext
+                        // chain link — walk it via vk_find_struct_by_stype
 };
 
 struct VkFieldDesc {
@@ -84,7 +112,19 @@ struct VkPlanRef {
     uint8_t arg;           // register/args index of the array pointer
     uint8_t count_arg;     // register/args index holding the count
     uint8_t count_in_bytes;// 1 = count is a BYTE count (raw buffers)
-    const VkStructDesc* desc;   // nullptr for VKM_RAW-style void*
+    uint8_t out;           // 0 = input staging
+                           // 1 = enumeration: count_arg is a guest u32*
+                           //     pointer — host writes the actual count;
+                           //     copy back min(staged, actual) elements
+                           //     AND the count after the host call
+                           // 2 = copyback-only (non-const raw pData)
+    uint8_t elem_size;     // bytes per element for desc==nullptr arrays
+    const VkStructDesc* desc;   // nullptr for verbatim byte staging
+};
+
+struct VkStypeEntry {
+    int32_t stype;         // numeric VK_STRUCTURE_TYPE_* value
+    uint16_t desc;         // kVkStructs[] index of the struct layout
 };
 
 struct VkCmdPlan {
@@ -126,6 +166,26 @@ inline const VkCmdPlan* vk_find_cmd_plan(const char* name) {
     for (size_t i = 0; i < kVkCmdPlanCount; i++)
         if (__builtin_strcmp(kVkCmdPlans[i].name, name) == 0)
             return &kVkCmdPlans[i];
+    return nullptr;
+}
+
+// sType → struct-descriptor index for EVERY chainable struct in the
+// registry (sorted ascending; binary search). Unknown sTypes are not
+// present — callers truncate the chain there.
+{STYPE_TABLE}
+
+inline constexpr size_t kVkStypeCount =
+    sizeof(kVkStypeIndex) / sizeof(kVkStypeIndex[0]);
+
+inline const VkStructDesc* vk_find_struct_by_stype(int32_t stype) {
+    size_t lo = 0, hi = kVkStypeCount;
+    while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (kVkStypeIndex[mid].stype < stype) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < kVkStypeCount && kVkStypeIndex[lo].stype == stype)
+        return &kVkStructs[kVkStypeIndex[lo].desc];
     return nullptr;
 }
 
@@ -205,22 +265,41 @@ def main():
             if not p.is_ptr:
                 continue
             ln = p.len_ or ''
-            # resolve len expression to a sibling param index
+            # resolve len expression to a sibling parameter (the count
+            # may itself be a pointer for enumeration-style commands)
             cidx = None
+            count_is_ptr = False
             base = ln.split(',')[0].strip()
             for j, q in enumerate(c.params):
-                if q.name == base and q.is_ptr == 0:
+                if q.name == base:
                     cidx = j
+                    count_is_ptr = q.is_ptr > 0
                     break
+            # direction ("auto", see CMD_PLANS comment)
+            if cidx is not None and count_is_ptr:
+                out = 1     # enumeration: count written through a pointer
+            elif not p.const:
+                out = 2     # non-const data pointer: copy back after call
+            else:
+                out = 0     # plain input staging
             if cidx is None:
-                # no/unknown len: not a counted array — leave it on the
-                # generic single-element bounce path
+                if out == 2 and p.type == 'void':
+                    # uncounted OUT void* cannot be staged safely — leave
+                    # it on the generic bounce path
+                    print(f'WARN: {cmd} param {p.name}: uncounted OUT '
+                          f'pointer left generic', file=sys.stderr)
                 continue
             if p.type == 'void':
-                plist.append((pidx, cidx, None))
+                plist.append((pidx, cidx, ('raw', 1), out))
                 continue
             if p.type in reg['handles']:
-                plist.append((pidx, cidx, '<handle>'))
+                plist.append((pidx, cidx, ('raw', 8), out))
+                continue
+            from vkxml import type_size
+            tsz = type_size(p.type, reg, {})
+            if tsz is not None:
+                # scalar/enum/bitmask array — stage verbatim
+                plist.append((pidx, cidx, ('raw', tsz), out))
                 continue
             if p.type not in layouts:
                 print(f'WARN: {cmd} param {p.name}: no layout for '
@@ -228,11 +307,26 @@ def main():
                 ok = False
                 break
             want_struct(p.type)
-            plist.append((pidx, cidx, p.type))
+            plist.append((pidx, cidx, p.type, out))
         if ok:
             plans[cmd] = plist
 
-    # closure: recurse into struct-typed pointer fields
+    # ── chainable structs: EVERY struct with a resolvable sType member
+    # gets a descriptor so generated pNext-chain walking covers the full
+    # registry, not just the plan closure.
+    stype_of = {}     # struct name -> numeric sType value
+    for name, members in reg['structs'].items():
+        for m in members:
+            if m.values and m.values in reg['stypes']:
+                stype_of[name] = reg['stypes'][m.values]
+                break
+    n_chain_added = 0
+    for name in sorted(stype_of):
+        if want_struct(name):
+            n_chain_added += 1
+
+    # closure: recurse into struct-typed pointer fields (covers nested
+    # refs of both plan structs and newly-added chainable structs)
     i = 0
     while i < len(order):
         name = order[i]
@@ -241,6 +335,33 @@ def main():
         for pf in lay.ptrs:
             if pf.elem.startswith('struct:'):
                 want_struct(pf.elem.split(':', 1)[1])
+
+    # A pointer FIELD doesn't require its pointee to have a computable
+    # layout (vk.xml LUNARG funcptr members etc.) — but our descriptors
+    # must be complete. Drop any struct whose nested struct refs never
+    # registered (iterate: dropping may orphan others). Such structs are
+    # also excluded from the sType map below, so the runtime truncates
+    # guest chains at them (the safe, documented behavior).
+    pruned = []
+    changed = True
+    while changed:
+        changed = False
+        for name in list(order):
+            bad_ref = False
+            for pf in layouts[name].ptrs:
+                if pf.elem.startswith('struct:') and \
+                        pf.elem.split(':', 1)[1] not in needed:
+                    bad_ref = True
+                    break
+            if bad_ref:
+                order.remove(name)
+                needed.pop(name, None)
+                pruned.append(name)
+                changed = True
+    for name in pruned:
+        print(f'WARN: {name}: pruned (nested struct has no layout)',
+              file=sys.stderr)
+    stype_of = {k: v for k, v in stype_of.items() if k in needed}
 
     # ── field descriptors ────────────────────────────────────────────
     struct_index = {n: i for i, n in enumerate(order)}
@@ -262,6 +383,10 @@ def main():
                 elem, elem_size = 2, 8
             elif pf.elem == 'char':
                 elem, elem_size = 3, 1   # treated as verbatim bytes
+            if getattr(pf, 'name', '') == 'pNext':
+                # chain-link field — runtime walks the guest chain via
+                # vk_find_struct_by_stype instead of staging raw bytes
+                elem |= 0x80
             if pf.count == 'fixed:1':
                 count_off, fixed = 0xFFFF, 1
             elif pf.count == 'nullterm':
@@ -293,28 +418,48 @@ def main():
     plan_tables, plan_rows = [], []
     for cmd, plist in plans.items():
         refs = []
-        for (pidx, cidx, sname) in plist:
-            if sname == '<handle>':
-                refs.append(f'    {{{pidx},{cidx},0,&kVkHandleElem}},')
+        for (pidx, cidx, sname, out) in plist:
+            if isinstance(sname, tuple):
+                _, esz = sname
+                refs.append(f'    {{{pidx},{cidx},{1 if esz == 1 else 0},'
+                            f'{out},{esz},nullptr}},')
                 continue
             desc = f'&kVkStructs[{struct_index[sname]}]' if sname else 'nullptr'
-            refs.append(f'    {{{pidx},{cidx},'
-                        f'{0 if sname else 1},{desc}}},')
+            refs.append(f'    {{{pidx},{cidx},0,{out},8,{desc}}},')
         arr = f'kRefs_{cmd}'
         plan_tables.append(
             f'inline constexpr VkPlanRef {arr}[] = {{\n' +
             '\n'.join(refs) + '\n};')
         plan_rows.append(f'    {{"{cmd}", {len(plist)}, {arr}}},')
 
+    # sType → descriptor index (sorted ascending for binary search;
+    # duplicate values deduped — keep the first struct alphabetically)
+    stype_rows = sorted(
+        ((v, k) for k, v in stype_of.items() if k in struct_index),
+        key=lambda t: (t[0], t[1]))
+    seen_st = {}
+    entries = []
+    for v, k in stype_rows:
+        if v in seen_st:
+            continue
+        seen_st[v] = k
+        entries.append((v, struct_index[k]))
+    stype_table = (
+        'inline constexpr VkStypeEntry kVkStypeIndex[] = {\n' +
+        ''.join(f'    {{{v},{i}}},\n' for (v, i) in entries) +
+        '};')
+
     out = HEADER
     out = out.replace('{STRUCT_TABLES}', '\n\n'.join(tables))
     out = out.replace('{STRUCT_ROWS}', '\n'.join(rows))
     out = out.replace('{PLAN_TABLES}', '\n\n'.join(plan_tables))
     out = out.replace('{PLAN_ROWS}', '\n'.join(plan_rows))
+    out = out.replace('{STYPE_TABLE}', stype_table)
     with open(out_path, 'w') as fh:
         fh.write(out)
-    print(f'wrote {out_path}: {len(order)} struct descriptors, '
-          f'{len(plans)} command plans')
+    print(f'wrote {out_path}: {len(order)} struct descriptors '
+          f'({n_chain_added} chainable), {len(plans)} command plans, '
+          f'{len(entries)} sType entries')
 
 
 if __name__ == '__main__':
