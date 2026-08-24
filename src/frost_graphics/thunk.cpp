@@ -74,6 +74,7 @@
 //
 // See frost/thunk.hpp for the class definition and frost/graphics.hpp
 // for the FrostGraphics::thunk() accessor.
+#include <map>
 #include "frost/graphics.hpp"
 #include "frost/thunk.hpp"
 #include "frost/audio_thunk.hpp"    // 1.5.4-alpha: AudioThunk full def
@@ -128,6 +129,10 @@ struct GraphicThunkImpl {
     bool   enabled = false;
     Memory* mem    = nullptr;
     bool   initialized = false;
+    // SDL_RWFromMem/ConstMem persistent host copies: SDL keeps the mem
+    // pointer inside the RWops beyond the dispatch call, so out-of-window
+    // sources need a host copy that outlives it. Freed at shutdown.
+    std::vector<void*> rw_kept_;
     // The trampoline page: a single 64 KiB region of guest memory.
     uint64_t trampoline_base = 0;
     static constexpr uint64_t TRAMPOLINE_PAGE_SIZE =
@@ -230,6 +235,9 @@ struct GraphicThunkImpl {
     // Borrow-CPU runner installed by the Emulator to invoke stored guest
     // GLFW callbacks (see GraphicThunk::GlfwCbRunner).
     GraphicThunk::GlfwCbRunner glfw_cb_runner_;
+    // Vulkan proc-address lookup wired by the Emulator (resolves a VK
+    // symbol name to its guest trampoline via the DisplayThunk registry).
+    GraphicThunk::VkProcLookup vk_proc_lookup_;
     // Borrow-CPU / thread-spawn runner installed by the Emulator for
     // SDL_CreateThread/SDL_WaitThread (see GraphicThunk::SdlThreadRunner).
     GraphicThunk::SdlThreadRunner sdl_thread_runner_;
@@ -551,6 +559,9 @@ GraphicThunk::GraphicThunk() {
     }
 }
 GraphicThunk::~GraphicThunk() {
+    if (impl_) {
+        for (void* p : impl_->rw_kept_) std::free(p);
+    }
 #if defined(BIFROST_THUNK_HAVE_SDL2)
     if (impl_ && impl_->sdl_window) {
         SDL_DestroyWindow(impl_->sdl_window);
@@ -733,15 +744,162 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = static_cast<uint64_t>(-1);
             return 0;
         }
-        if (pol == thunk::Policy::SDL_OPEN_AUDIO) {
-            // SDL_OpenAudio(desired, obtained): the SDL_AudioSpec embeds a
-            // GUEST callback fn ptr that must never reach host SDL2. Mirror
-            // MIX_OPEN_AUDIO: return -1 so the game takes its no-audio path.
-            if (dbg().thunk_trace) {
-                fprintf(stderr, "[thunk] %s -> -1 (audio unavailable)\n",
-                        entry.name.c_str());
+        // NOTE: SDL2 audio symbols (SDL_OpenAudio/QueueAudio/etc.) are
+        // intentionally NOT registered here — they live in the AudioThunk
+        // registry (callback mode + pump thread), and the dynlinker
+        // resolves them to AudioThunk trampolines directly.
+        if (!strcmp(entry.name.c_str(), "SDL_Vulkan_GetVkGetInstanceProcAddr")) {
+            // vkQuake stores this result and calls it to load EVERY
+            // Vulkan entry point — it must be a GUEST-CALLABLE trampoline
+            // (DisplayThunk registry), never the raw host fn pointer.
+            cpu.regs[0] = impl_->vk_proc_lookup_
+                ? impl_->vk_proc_lookup_("vkGetInstanceProcAddr") : 0;
+            return 0;
+        }
+        if (pol == thunk::Policy::SDL_STUB0) {
+            // vkQuake traps: SDL_SetWindowIcon derefs a guest SDL_Surface
+            // whose `pixels` is a GUEST address (host deref = SIGSEGV).
+            // SDL_GetWindowWMInfo is FATAL-failed by vkQuake when it
+            // returns false, so it must reach the host: the window handle
+            // round-trips verbatim and the SDL_SysWMinfo buffer lives on
+            // the guest stack (inside the direct window) -> alias pass.
+            // The host pointers the host writes into it are opaque to the
+            // game (it only checks the BOOL return).
+            const char* nm = entry.name.c_str();
+            if (!strcmp(nm, "SDL_GetWindowWMInfo")) {
+                using WmFn = int (*)(void*, void*);
+                auto fn = reinterpret_cast<WmFn>(entry.host_fn);
+                uint8_t* hp = (impl_ && impl_->mem)
+                    ? impl_->mem->guest_to_host_ptr(cpu.regs[1]) : nullptr;
+                cpu.regs[0] = (fn && hp)
+                    ? static_cast<uint64_t>(fn(reinterpret_cast<void*>(
+                          cpu.regs[0]), hp))
+                    : 0;
+                return 0;
             }
-            cpu.regs[0] = static_cast<uint64_t>(-1);
+            cpu.regs[0] = 0;
+            return 0;
+        }
+        if (pol == thunk::Policy::SDL_EVENT_FILTER) {
+            // in_sdl.c probes/sets the event filter to suppress mouse
+            // motion while unfocused. Never hand the GUEST callback to
+            // host SDL2: Set returns success (filter silently ignored —
+            // events still flow via PollEvent), Get reports "no filter".
+            const char* nm = entry.name.c_str();
+            cpu.regs[0] = strcmp(nm, "SDL_SetEventFilter") == 0 ? 1 : 0;
+            return 0;
+        }
+        if (pol == thunk::Policy::NONE && impl_ && impl_->mem) {
+            // SDL2 display-mode getters RETURN a const SDL_DisplayMode*
+            // (host static memory) — no out-param. Copy the 24-byte struct
+            // into a cached guest block so the guest can deref it.
+            // SDL_DisplayMode { Uint32 format; int w, h, refresh_rate;
+            //                   void *driverdata; } = 24 bytes.
+            const char* nm = entry.name.c_str();
+            if (strcmp(nm, "SDL_GetCurrentDisplayMode") == 0 ||
+                strcmp(nm, "SDL_GetDesktopDisplayMode") == 0) {
+                // On sdl2-compat hosts the resolved impl may be SDL3-
+                // flavored: bool f(SDL_DisplayID, SDL_DisplayMode* out).
+                // ALWAYS pass an explicit output buffer — a one-arg call
+                // makes it write through whatever sits in RSI (observed:
+                // our own strcmp literal, → SIGSEGV inside libSDL2).
+                // SDL2 ABI returns const SDL_DisplayMode* (never 0/1);
+                // SDL3 ABI returns bool and fills buf.
+                using ModeFn2 = void* (*)(int, void*);
+                auto fn = reinterpret_cast<ModeFn2>(entry.host_fn);
+                if (!fn) { cpu.regs[0] = 0; return 0; }
+                alignas(8) uint8_t buf[32];
+                std::memset(buf, 0, sizeof buf);
+                void* m = fn(static_cast<int>(cpu.regs[0]), buf);
+                const void* src;
+                if (reinterpret_cast<uintptr_t>(m) <= 1) {
+                    // SDL3 flavor: bool result + filled buf.
+                    src = m ? buf : nullptr;
+                } else {
+                    src = m;  // SDL2 flavor: direct pointer
+                }
+                if (!src) { cpu.regs[0] = 0; return 0; }
+                // One reused guest block per symbol (games poll per frame).
+                static std::mutex mu;
+                static std::map<std::string, uint64_t> cache;
+                uint64_t g = 0;
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    auto it = cache.find(nm);
+                    if (it != cache.end()) {
+                        g = it->second;
+                    } else {
+                        g = impl_->mem->mmap_alloc(32);
+                        if (g) cache[nm] = g;
+                    }
+                }
+                if (!g) { cpu.regs[0] = 0; return 0; }  // alloc failed
+                try { impl_->mem->write(g, m, 24); }
+                catch (...) { cpu.regs[0] = 0; return 0; }
+                cpu.regs[0] = g;
+                return 0;
+            }
+            // SDL_RWFromMem / SDL_RWFromConstMem(mem, size): SDL KEEPS the
+            // mem pointer in the RWops and reads it on every later
+            // SDL_LoadBMP_RW/etc. A temporary per-call bounce buffer dies
+            // at dispatch return → use-after-free + heap corruption in
+            // whatever reallocates that memory. Use the stable direct-
+            // window alias when possible; otherwise take a persistent
+            // host copy (tracked, freed at thunk shutdown).
+            if (strcmp(nm, "SDL_RWFromMem") == 0 ||
+                strcmp(nm, "SDL_RWFromConstMem") == 0) {
+                using RwFn = void* (*)(void*, size_t);
+                auto fn = reinterpret_cast<RwFn>(entry.host_fn);
+                if (!fn) { cpu.regs[0] = 0; return 0; }
+                uint64_t src = cpu.regs[0];
+                size_t sz = static_cast<size_t>(cpu.regs[1]);
+                uint8_t* hp = impl_->mem->guest_to_host_ptr(src);
+                if (!hp && sz && sz < (64u << 20)) {
+                    hp = static_cast<uint8_t*>(std::malloc(sz));
+                    if (hp) {
+                        try { impl_->mem->read(src, hp, sz); }
+                        catch (...) { std::memset(hp, 0, sz); }
+                        std::lock_guard<std::mutex> lk(impl_->mu);
+                        impl_->rw_kept_.emplace_back(hp);
+                    }
+                }
+                cpu.regs[0] = reinterpret_cast<uint64_t>(fn(hp, sz));
+                return 0;
+            }
+        }
+        if (pol == thunk::Policy::SDLVK_EXT) {
+            // SDL_Vulkan_GetInstanceExtensions(window, pCount*, pNames*):
+            // pNames is the CALLER'S ARRAY to fill directly with char*
+            // (NOT a slot receiving a new char**). Fill it with guest
+            // string-cache copies of the host names.
+            using VkExtFn = int (*)(void*, unsigned*, const char**);
+            auto fn = reinterpret_cast<VkExtFn>(entry.host_fn);
+            if (!fn || !impl_->mem) { cpu.regs[0] = 0; return 0; }
+            void* win = reinterpret_cast<void*>(cpu.regs[0]);
+            uint64_t pcount = cpu.regs[1], pnames = cpu.regs[2];
+            unsigned count = 0;
+            bool ok1 = fn(win, &count, nullptr) != 0;
+            if (dbg().thunk_trace)
+                fprintf(stderr, "[thunk] SDLVK_EXT: win=%p ok=%d count=%u pnames=0x%llx\n",
+                        win, ok1 ? 1 : 0, count, (unsigned long long)pnames);
+            if (!ok1) { cpu.regs[0] = 0; return 0; }
+            if (pnames && count) {
+                std::vector<const char*> names(count, nullptr);
+                if (!fn(win, &count, names.data())) {
+                    cpu.regs[0] = 0;
+                    return 0;
+                }
+                for (unsigned i = 0; i < count; i++) {
+                    uint64_t gs = impl_->cache_host_string_(names[i]);
+                    if (dbg().thunk_trace)
+                        fprintf(stderr, "[thunk] SDLVK_EXT: names[%u]=%s -> gs=0x%llx\n",
+                                i, names[i] ? names[i] : "(null)", (unsigned long long)gs);
+                    impl_->mem->write(pnames + static_cast<uint64_t>(i) * 8,
+                                      &gs, 8);
+                }
+            }
+            if (pcount) impl_->mem->write(pcount, &count, sizeof(count));
+            cpu.regs[0] = 1;
             return 0;
         }
         if (pol == thunk::Policy::SDL_ALLOC) {
@@ -1579,6 +1737,16 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
             }
             break;
+        case thunk::SizeKind::VK_REGIONS:
+            // vkCmdBlitImage(cmd, src, srcLayout, dst, dstLayout,
+            // regionCount, pRegions): pRegions is an array of
+            // VkImageBlit2 (96 B each, no guest-pointer members — a
+            // byte-exact bounce copy is a faithful deep copy).
+            if (idx == 6) {
+                uint64_t sz = args[5] * 96;
+                if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
         case thunk::SizeKind::PITCH_H:
             // SDL_UpdateTexture: pixels buffer = pitch (args[3]) * height.
             if (idx == 2) {
@@ -1626,6 +1794,23 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         default:
             break;
         }
+        if (entry.name == "glTexImage2D" && dbg().thunk_trace) {
+            static int tex_trace_n = 0;
+            if (tex_trace_n++ < 80) {
+                fprintf(stderr,
+                        "[thunk] glTexImage2D full: target=0x%llx level=%llu "
+                        "internal=0x%llx %llux%llu border=%llu format=0x%llx "
+                        "type=0x%llx bytes=%zu\n",
+                        (unsigned long long)args[0],
+                        (unsigned long long)args[1],
+                        (unsigned long long)args[2],
+                        (unsigned long long)args[3],
+                        (unsigned long long)args[4],
+                        (unsigned long long)args[5],
+                        (unsigned long long)args[6],
+                        (unsigned long long)args[7], kBounce);
+            }
+        }
         // Reserve capacity for the padded extent BEFORE resize so the
         // allocation covers every byte the host may stride to, while
         // size() stays packed for an exact writeback.
@@ -1650,7 +1835,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     uint64_t bounce_guest[kMaxArgs] = {0};
     bool bounce_wb[kMaxArgs] = {false};
 
-    if (entry.pointer_args && impl_->mem) {
+    // VA_PTR/EL_PTR symbols own their pointer args (the binding-aware block
+    // below translates them ONLY when no VBO is bound — with a buffer bound
+    // the arg is a byte offset into that buffer and must pass through raw).
+    // The generic loop must NOT touch them: translating offset 4/12 as guest
+    // addresses turned them into host alias pointers that host GL then
+    // reinterpreted as ~2^47 byte offsets (neverball's menu GUI drew
+    // nothing). Also prevents a double translation when binding==0.
+    const bool va_ptr_owned =
+        entry.spec && (entry.spec->policy == thunk::Policy::VA_PTR ||
+                       entry.spec->policy == thunk::Policy::EL_PTR);
+    if (entry.pointer_args && impl_->mem && !va_ptr_owned) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {
                 translate_ptr(args[i], i, &bounce_bufs[i],
@@ -1878,9 +2073,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     if (dbg().thunk_trace) {
-        fprintf(stderr, "[thunk] dispatch: %s (host_fn=%p) "
+        fprintf(stderr, "[thunk] dispatch[T%lx]: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
                 "a8=0x%llx ptrs=0x%x stack=%u\n",
+                (unsigned long)pthread_self(),
                 entry.name.c_str(), entry.host_fn,
                 static_cast<unsigned long long>(args[0]),
                 static_cast<unsigned long long>(args[1]),
@@ -1929,7 +2125,43 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         is_buffer_consumer_(entry.name)) {
         sync_persistent_mappings_();
     }
-    if (entry.n_stack >= 4) {
+    if (entry.name == "glTexImage2D" && dbg().thunk_trace) {
+        static int full_tex_trace_n = 0;
+        if (full_tex_trace_n++ < 80)
+            fprintf(stderr, "[thunk] glTexImage2D call: %llx %llx %llx %llx %llx %llx %llx %llx %llx\n",
+                    (unsigned long long)args[0], (unsigned long long)args[1],
+                    (unsigned long long)args[2], (unsigned long long)args[3],
+                    (unsigned long long)args[4], (unsigned long long)args[5],
+                    (unsigned long long)args[6], (unsigned long long)args[7],
+                    (unsigned long long)args[8]);
+    }
+    // GL string queries have a single GLenum argument and a const GLubyte*
+    // return.  Do not route them through the generic integer Fn8 call: the
+    // result is a host pointer which is consumed by the string-cache path
+    // below, and an untyped variadic-shaped call is especially fragile on
+    // hosts where glGetString is dispatched through a GL ABI wrapper.
+    // Calling it with its exact prototype also keeps the pname intact.
+    if (entry.name == "glGetString") {
+        using GetStringFn = const unsigned char* (*)(unsigned int);
+        const unsigned char* s = entry.host_fn
+            ? reinterpret_cast<GetStringFn>(entry.host_fn)(
+                  static_cast<unsigned int>(args[0]))
+            : nullptr;
+        ret = reinterpret_cast<uint64_t>(s);
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] glGetString pname=0x%x host='%.*s'\n",
+                    static_cast<unsigned int>(args[0]), 48,
+                    s ? reinterpret_cast<const char*>(s) : "(null)");
+        }
+    } else if (entry.name == "glGetStringi") {
+        using GetStringIFn = const unsigned char* (*)(unsigned int, unsigned int);
+        const unsigned char* s = entry.host_fn
+            ? reinterpret_cast<GetStringIFn>(entry.host_fn)(
+                  static_cast<unsigned int>(args[0]),
+                  static_cast<unsigned int>(args[1]))
+            : nullptr;
+        ret = reinterpret_cast<uint64_t>(s);
+    } else if (entry.n_stack >= 4) {
         using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t);
@@ -1990,7 +2222,47 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (entry.name == "SDL_GL_SwapWindow" && getenv("BIFROST_FB_DUMP")) {
         static int frame_n = 0;
-        if (frame_n == 20) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                    "[fbdump] BIFROST_FB_DUMP is set — frames WILL stall for "
+                    "screenshots. Unset it for normal gameplay!\n");
+        }
+        // BIFROST_FB_DUMP="1" → default list; "300,600,900" → explicit.
+        static const int* dump_frames = nullptr;
+        static int dump_n = 0;
+        if (!dump_frames) {
+            static int list_buf[64];
+            int n = 0;
+            const char* spec = getenv("BIFROST_FB_DUMP");
+            if (spec && strcmp(spec, "1") != 0) {
+                for (const char* p = spec; *p && n < 64; ) {
+                    char* end = nullptr;
+                    long v = strtol(p, &end, 10);
+                    if (end == p) break;
+                    list_buf[n++] = static_cast<int>(v);
+                    p = end;
+                    while (*p == ',' || *p == ' ') p++;
+                }
+            }
+            if (n == 0) {
+                static const int def[] = {20, 100, 300, 600, 1000, 1500};
+                memcpy(list_buf, def, sizeof(def));
+                n = 6;
+            }
+            dump_frames = list_buf;
+            dump_n = n;
+        }
+        bool do_dump = false;
+        int dump_at = 0;
+        for (int di = 0; di < dump_n; di++)
+            if (frame_n == dump_frames[di]) {
+                dump_at = dump_frames[di];
+                do_dump = true;
+                break;
+            }
+        if (do_dump) {
             using GSzFn = void (*)(void*, int*, int*);
             auto gsz = reinterpret_cast<GSzFn>(
                 dlsym(RTLD_DEFAULT, "SDL_GL_GetDrawableSize"));
@@ -2001,9 +2273,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (gsz) gsz(reinterpret_cast<void*>(args[0]), &dw, &dh);
             if (rpx && dw > 0 && dh > 0 && impl_->mem) {
                 std::vector<uint8_t> px((size_t)dw * dh * 4);
-                rpx(0, 0, dw, dh, 0x1907 /*GL_RGBA*/, 0x1401 /*UNSIGNED_BYTE*/,
+                rpx(0, 0, dw, dh, 0x1908 /*GL_RGBA*/, 0x1401 /*UNSIGNED_BYTE*/,
                     px.data());
-                FILE* f = fopen("/tmp/opencode/fb.ppm", "wb");
+                char fbpath[64];
+                snprintf(fbpath, sizeof(fbpath), "/tmp/opencode/fb%d.ppm",
+                         dump_at);
+                FILE* f = fopen(fbpath, "wb");
                 if (f) {
                     fprintf(f, "P6\n%d %d\n255\n", dw, dh);
                     for (int i = 0; i < dw * dh; i++)
@@ -2148,6 +2423,11 @@ void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {
     impl_->glfw_last_delivered_err_code_ = 0;
     impl_->glfw_last_delivered_err_desc_.clear();
 }
+// ── set_vk_proc_lookup — guest-callable vkGetInstanceProcAddr hook ────
+void GraphicThunk::set_vk_proc_lookup(VkProcLookup lookup) {
+    if (!impl_) return;
+    impl_->vk_proc_lookup_ = std::move(lookup);
+}
 // ── set_sdl_thread_runner — SDL thread spawn/join hook ────────────────
 void GraphicThunk::set_sdl_thread_runner(SdlThreadRunner runner) {
     if (!impl_) return;
@@ -2242,6 +2522,20 @@ void GraphicThunk::register_known_symbols_() {
         if (!h && dbg().thunk_trace)
             fprintf(stderr, "[thunk] glfw: dlopen failed: %s\n", dlerror());
     }
+    // SDL symbols MUST resolve through the specific library handle:
+    // on sdl2-compat hosts libSDL3 is also in the global scope and
+    // exports same-named symbols with SDL3 ABI (e.g.
+    // SDL_GetCurrentDisplayMode(displayID, SDL_DisplayMode* out) —
+    // out-param flavor). RTLD_DEFAULT can pick those, and calling them
+    // with the SDL2 ABI writes through stale registers. A direct handle
+    // pins resolution to the real SDL2 ABI library.
+    void* sdl_handle = nullptr;
+    if (kHaveSDL) {
+        sdl_handle = dlopen("libSDL2-2.0.so.0", RTLD_LAZY | RTLD_GLOBAL);
+        if (!sdl_handle) sdl_handle = dlopen("libSDL2.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!sdl_handle && dbg().thunk_trace)
+            fprintf(stderr, "[thunk] sdl: dlopen failed: %s\n", dlerror());
+    }
     // GLFW callback delivery needs the raw host state-query fns (the
     // GLFW_POLL dispatch path reads them to decide whether guest
     // callbacks should fire). These are resolved once at init.
@@ -2323,7 +2617,11 @@ void GraphicThunk::register_known_symbols_() {
         // dispatch() before the host-fn path (the guest callback is
         // AArch64), so their host_fn is never used for the callback.
         void* host_fn = nullptr;
-        if (fd.have) host_fn = dlsym(RTLD_DEFAULT, spec.name);
+        if (spec.lib == thunk::LibFamily::SDL) {
+            host_fn = sdl_handle ? dlsym(sdl_handle, spec.name) : nullptr;
+        } else if (fd.have) {
+            host_fn = dlsym(RTLD_DEFAULT, spec.name);
+        }
         if (spec.policy == thunk::Policy::GET_PROC && !host_fn) {
             host_fn = reinterpret_cast<void*>(1);
         }

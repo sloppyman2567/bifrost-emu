@@ -63,6 +63,7 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',
                 'TF_VARYINGS',
                 'SDL_FREE', 'SDL_OPEN_AUDIO', 'SDL_ALLOC', 'JOY_GUID', 'JOY_GUID_STR',
+                'SDL_STUB0', 'SDL_EVENT_FILTER', 'SDLVK_EXT',
                 'PROXY', 'VULKAN', 'VK_GET_PROC', 'VK_CREATE_INSTANCE',
                 'VK_CREATE_DEVICE', 'VK_PRESENT', 'VK_SUBMIT',
                 'VK_CREATE_RENDERPASS', 'VK_CREATE_FRAMEBUFFER',
@@ -74,10 +75,10 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'VK_ALLOC_MEMORY', 'VK_FREE_MEMORY', 'VK_MAP_MEMORY',
                 'VK_UNMAP_MEMORY', 'VK_FLUSH_MAPPED', 'VK_INVALIDATE_MAPPED',
                 'VK_SYNC_PULL',
-                'ANDROID_WINDOW')
+                'ANDROID_WINDOW', 'VK_CMD_DEEP')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
-              'TEX3D')
+              'TEX3D', 'VK_REGIONS')
 
 HEADER = r"""// opgen_thunk.hpp — GENERATED. DO NOT EDIT.
 //
@@ -122,6 +123,7 @@ enum class SizeKind : uint8_t {
     X_DRAWSTR = 8,
     X_SETWMPROTO = 9,
     TEX3D = 10,
+    VK_REGIONS = 11,
 };
 
 struct Spec {

@@ -476,13 +476,6 @@ SDL_GetPerformanceFrequency SDL  -             -     -              -
 SDL_Delay                 SDL    i             -     -              -
 SDL_GetError              SDL    -             str   -              -
 SDL_ClearError            SDL    -             -     -              -
-SDL_OpenAudioDevice       SDL    pippi         -     -              -   # device, iscapture, desired, obtained, changes
-SDL_QueueAudio            SDL    izi           -     -              QUEUEAUDIO # dev, data, len
-SDL_GetQueuedAudioSize    SDL    i             -     -              -
-SDL_PauseAudioDevice      SDL    ii            -     -              -
-SDL_ClearQueuedAudio      SDL    i             -     -              -   # dev
-SDL_LockAudioDevice       SDL    i             -     -              -
-SDL_UnlockAudioDevice     SDL    i             -     -              -
 SDL_BuildAudioCVT         SDL    piiiiii       -     -              -   # arg0: SDL_AudioCVT* in/out
 SDL_ConvertAudio          SDL    p             -     -              -   # arg0: SDL_AudioCVT*
 SDL_LoadWAV               SDL    pppp          -     -              -   # file, spec, buf out, len out
@@ -528,8 +521,8 @@ SDL_FreeRW                SDL    i             -     -              -
 SDL_GetKeyboardState      SDL    p             -     -              -   # int* numkeys out
 SDL_GetModState           SDL    -             -     -              -
 SDL_SetModState           SDL    i             -     -              -
-SDL_GetMouseState         SDL    -             -     -              -
-SDL_GetGlobalMouseState   SDL    -             -     -              -
+SDL_GetMouseState         SDL    pp            -     -              -   # out int* x, int* y
+SDL_GetGlobalMouseState   SDL    pp            -     -              -   # out int* x, int* y
 SDL_GetCPUCount           SDL    -             -     -              -
 SDL_CreateSemaphore       SDL    i             -     -              -   # arg0: initial value
 SDL_DestroySemaphore      SDL    i             -     -              -
@@ -562,7 +555,7 @@ SDL_WaitThread            SDL    ip            -     THREAD_WAIT     -   # no-op
 SDL_WasInit                SDL    i             -     -              -
 SDL_GetVersion             SDL    p             -     -              -   # out SDL_version*
 SDL_GetNumDisplayModes     SDL    i             -     -              -
-SDL_GetDesktopDisplayMode  SDL    ip            -     -              -   # display, out SDL_DisplayMode*
+SDL_GetDesktopDisplayMode  SDL    i             -     -              -   # (int) -> const SDL_DisplayMode* (host ptr; copied by arm)
 SDL_GetDisplayMode         SDL    iip           -     -              -   # display, mode, out SDL_DisplayMode*
 SDL_GetRelativeMouseState  SDL    pp            -     -              -   # out int* x, int* y
 SDL_GetScancodeFromKey     SDL    i             -     -              -
@@ -585,9 +578,6 @@ SDL_JoystickNameForIndex   SDL    i             str   -              -
 SDL_JoystickNumAxes        SDL    i             -     -              -
 SDL_JoystickNumBalls       SDL    i             -     -              -
 SDL_JoystickNumButtons     SDL    i             -     -              -
-SDL_OpenAudio              SDL    pp            -     SDL_OPEN_AUDIO -   # guest callback in spec; never reach host
-SDL_PauseAudio             SDL    i             -     -              -
-SDL_CloseAudio             SDL    -             -     -              -
 
 # ── libglfw.so.3 / libglfw.so ──────────────────────────────────────────
 # NAME                    LIBS   ARGS          RET   POLICY         SIZE
@@ -720,22 +710,22 @@ vkCmdBindDescriptorSets     VK   iiiiipip       -     VULKAN            -
 vkCmdBindIndexBuffer        VK   iiii           -     VULKAN            -
 vkCmdBindVertexBuffers      VK   iiipp          -     VULKAN            -
 vkCmdPushConstants          VK   iiiiip         -     VULKAN            -
-vkCmdSetViewport            VK   iiip           -     VULKAN            -
-vkCmdSetScissor             VK   iiip           -     VULKAN            -
+vkCmdSetViewport  VK  iiip  -  VK_CMD_DEEP  -
+vkCmdSetScissor  VK  iiip  -  VK_CMD_DEEP  -
 vkCmdDraw                   VK   iiiii          -     VULKAN            -
 vkCmdDrawIndexed            VK   iiiiii         -     VULKAN            -
 vkCmdDispatch               VK   iiii           -     VULKAN            -
-vkCmdPipelineBarrier        VK   iiiiipipip     -     VULKAN            -
-vkCmdClearColorImage        VK   iiipip         -     VULKAN            -
-vkCmdClearDepthStencilImage VK   iiipip         -     VULKAN            -
-vkCmdClearAttachments       VK   iipip          -     VULKAN            -
+vkCmdPipelineBarrier  VK  iiiiipipip  -  VK_CMD_DEEP  -
+vkCmdClearColorImage  VK  iiipip  -  VK_CMD_DEEP  -
+vkCmdClearDepthStencilImage  VK  iiipip  -  VK_CMD_DEEP  -
+vkCmdClearAttachments  VK  iipip  -  VK_CMD_DEEP  -
 vkCmdBeginRenderPass        VK   ipi            -     VK_BEGIN_RENDERPASS -
 vkCmdNextSubpass            VK   ii             -     VULKAN            -
 vkCmdEndRenderPass          VK   i              -     VULKAN            -
-vkCmdCopyBuffer             VK   iiiip          -     VULKAN            -
-vkCmdCopyImage              VK   iiiiiip        -     VULKAN            -
-vkCmdCopyBufferToImage      VK   iiiiip         -     VULKAN            -
-vkCmdCopyImageToBuffer      VK   iiiiip         -     VULKAN            -
+vkCmdCopyBuffer  VK  iiiip  -  VK_CMD_DEEP  -
+vkCmdCopyImage  VK  iiiiiip  -  VK_CMD_DEEP  -
+vkCmdCopyBufferToImage  VK  iiiiip  -  VK_CMD_DEEP  -
+vkCmdCopyImageToBuffer  VK  iiiiip  -  VK_CMD_DEEP  -
 vkCmdUpdateBuffer           VK   iiiip          -     VULKAN            -
 vkCmdFillBuffer             VK   iiiii          -     VULKAN            -
 vkCmdResetQueryPool         VK   iiii           -     VULKAN            -
@@ -745,7 +735,7 @@ vkCmdWriteTimestamp         VK   iiii           -     VULKAN            -
 vkCmdCopyQueryPoolResults   VK   iiiiiiii       -     VULKAN            -
 vkCmdSetEvent               VK   iii            -     VULKAN            -
 vkCmdResetEvent             VK   iii            -     VULKAN            -
-vkCmdWaitEvents             VK   iipiiipipip    -     VULKAN            -
+vkCmdWaitEvents  VK  iipiiipipip  -  VK_CMD_DEEP  -
 vkQueueSubmit               VK   iipi           -     VK_SUBMIT         -
 vkCreateImage               VK   ippp           -     VULKAN            -
 vkDestroyImage              VK   iip            -     VULKAN            -
@@ -785,7 +775,7 @@ vkCreateDescriptorPool      VK   ippp           -     VK_CREATE_DESCRIPTOR_POOL 
 vkDestroyDescriptorPool     VK   iip            -     VULKAN            -
 vkCreateFence               VK   ippp           -     VULKAN            -
 vkDestroyFence              VK   iip            -     VULKAN            -
-vkResetFences               VK   iip            -     VULKAN            -
+vkResetFences  VK  iip  -  VK_CMD_DEEP  -
 vkGetFenceStatus            VK   ii             -     VULKAN            -
 vkWaitForFences             VK   iipii          -     VK_SYNC_PULL        -
 vkCreateSemaphore           VK   ippp           -     VULKAN            -
@@ -1166,8 +1156,63 @@ SDL_UpperBlit              SDL    ppii          -     -              -
 SDL_LoadFile_RW            SDL    ip            -     -              -   # stub: host-alloc return
 SDL_RWFromConstMem         SDL    pi            -     -              -
 SDL_RWsize                 SDL    i             -     -              -
-SDL_LockAudio              SDL    -             -     -              -
-SDL_UnlockAudio            SDL    -             -     -              -
 glPointParameterf          GL     if            -     -              -   # mixed FP
 glPointParameterfv         GL     ip            -     -              -   # arg1: const GLfloat *
 glStringMarkerGREMEDY      GL     ip            -     -              -   # debug marker: stub
+# ── vkQuake 1.33.1 (AArch64 port) additions ─────────────────────────
+SDL_CreateMutex             SDL    -             -     -              -
+SDL_LockMutex               SDL    i             -     -              -
+SDL_UnlockMutex             SDL    i             -     -              -
+SDL_DestroyMutex            SDL    i             -     -              -
+SDL_CreateCond              SDL    -             -     -              -
+SDL_CondWait                SDL    ii            -     -              -
+SDL_CondBroadcast           SDL    i             -     -              -
+SDL_CondWaitTimeout         SDL    iii           -     -              -
+SDL_DestroyCond             SDL    i             -     -              -
+SDL_DetachThread            SDL    i             -     -              -
+SDL_GetPerformanceFrequency SDL    -             -     -              -
+SDL_GetPerformanceCounter   SDL    -             -     -              -
+SDL_IsGameController        SDL    i             -     -              -
+SDL_GameControllerOpen      SDL    i             -     -              -
+SDL_GameControllerClose     SDL    i             -     -              -
+SDL_GameControllerGetAxis   SDL    ii            -     -              -
+SDL_GameControllerGetButton SDL    ii            -     -              -
+SDL_GameControllerGetJoystick SDL  i             -     -              -
+SDL_GameControllerNameForIndex SDL i             str   -        -
+SDL_JoystickInstanceID      SDL    i             -     -              -
+SDL_GetScancodeName         SDL    i             str   -        -
+SDL_GetPrefPath             SDL    pp            str   -        -
+SDL_GetCurrentDisplayMode   SDL    i             -     -              -
+SDL_SetWindowDisplayMode    SDL    ip            -     -              -
+SDL_GetWindowPixelFormat    SDL    i             -     -              -
+SDL_GameControllerAddMappingsFromRW SDL ii          -     -              -   # RWops host handle round-trips verbatim
+SDL_SetWindowIcon           SDL    ip            -     SDL_STUB0      -   # guest SDL_Surface.pixels is a guest ptr
+SDL_GetWindowWMInfo         SDL    ip            -     SDL_STUB0      -   # union embeds raw host pointers
+SDL_SetEventFilter          SDL    pp            -     SDL_EVENT_FILTER -
+SDL_GetEventFilter          SDL    pp            -     SDL_EVENT_FILTER -
+SDL_Vulkan_GetDrawableSize  SDL    ipp           -     -              -
+SDL_Vulkan_GetInstanceExtensions SDL ipp          -     SDLVK_EXT      -   # host char** -> guest array
+vkEnumerateInstanceExtensionProperties VK ppp      -     VULKAN         -
+vkEnumerateDeviceExtensionProperties VK  ippp       -     VULKAN         -
+vkGetPhysicalDeviceFormatProperties VK iip        -     VULKAN         -
+vkGetPhysicalDeviceImageFormatProperties VK iiiiiip -    VULKAN         -
+vkCreateBufferView          VK   ippp           -     VULKAN         -
+vkCmdSetDepthBias           VK     ifff          -     -              -
+vkCmdBlitImage              VK     iiiiiiz       -     -              VK_REGIONS
+vkCmdExecuteCommands  VK  iip  -  VK_CMD_DEEP  -   # handle array: verbatim round-trip
+# ── vkQuake runtime-fetched procs (queried via GetProcAddress) ──────
+vkEnumerateInstanceVersion  VK     p             -     VULKAN         -
+vkGetPhysicalDeviceFeatures2 VK    ip            -     VULKAN         -
+vkGetPhysicalDeviceProperties2 VK  ip            -     VULKAN         -
+vkCmdDrawIndexedIndirect    VK     iiiii         -     -              -
+vkCmdBeginDebugUtilsLabelEXT VK    ip            -     -              -   # debug labels: best-effort
+vkCmdEndDebugUtilsLabelEXT  VK     i             -     -              -
+vkSetDebugUtilsObjectNameEXT VK    ip            -     -              -
+vkCreateDebugUtilsMessengerEXT VK  iiip          -     -              -   # intercepted by name: pfnUserCallback is a GUEST ptr, never forwarded
+vkAcquireFullScreenExclusiveModeEXT VK ii         -     -              -
+vkReleaseFullScreenExclusiveModeEXT VK ii         -     -              -
+vkGetPhysicalDeviceSurfaceCapabilities2KHR VK ipp  -     VULKAN         -
+vkCreateAccelerationStructureKHR VK ippp         -     -              -   # RT path (unused default)
+vkDestroyAccelerationStructureKHR VK iip          -     -              -
+vkGetAccelerationStructureBuildSizesKHR VK iippp  -     -              -
+vkGetBufferDeviceAddressKHR VK     ip            -     -              -

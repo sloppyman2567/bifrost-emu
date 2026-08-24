@@ -13,6 +13,7 @@
 #include "frost/android_surface.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
 #include "opgen_thunk.hpp"  // 1.5.4-alpha: symbol signature table (single source of truth)
+#include "opgen_vkmarshal.hpp" // VK_CMD_DEEP: generated deep-marshal descriptors
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
 #include "core/memory.h"
@@ -243,6 +244,175 @@ size_t DisplayThunk::enumerate_symbols(const std::string& lib,
     }
     return 0;
 }
+struct VkStage {
+    std::vector<uint8_t> buf;
+    // Reserve once up front: `alloc`/`bytes`/`guest_str*` hand out pointers
+    // into `buf.data()`, and `resize` would REALLOCATE (dangling every
+    // earlier pointer) once a later string/array grows the buffer. Every
+    // size below is capped (guest_str 511 chars, string arrays/queue
+    // arrays <= 1024/16 entries), so total staging stays well under this.
+    explicit VkStage() { buf.reserve(65536); }
+    size_t put(size_t sz, size_t align) {
+        size_t off = (buf.size() + align - 1u) & ~(align - 1u);
+        buf.resize(off + sz);
+        return off;
+    }
+    template <typename T> T* alloc() {
+        return reinterpret_cast<T*>(buf.data() + put(sizeof(T), alignof(T)));
+    }
+    void* bytes(size_t sz, size_t align) {
+        return buf.data() + put(sz, align);
+    }
+    // Copy a guest string into staging. Returns the host pointer (or
+    // nullptr when the guest pointer is 0). Short strings only — a cap of
+    // 511 chars is fine for extension / app names.
+    const char* guest_str(Memory* mem, uint64_t g) {
+        if (!g) return nullptr;
+        char tmp[512];
+        size_t n = 0;
+        try {
+            while (n + 1 < sizeof(tmp)) {
+                uint8_t c = 0;
+                mem->read(g + n, &c, 1);
+                tmp[n++] = static_cast<char>(c);
+                if (c == 0) break;
+            }
+        } catch (...) { /* unmapped — truncate */ }
+        tmp[n] = 0;
+        size_t off = put(n + 1, 1);
+        std::memcpy(buf.data() + off, tmp, n + 1);
+        return reinterpret_cast<const char*>(buf.data() + off);
+    }
+    // Copy a guest array of `count` char* into staging, re-pointing each
+    // string into the staging buffer. Returns the host array pointer (or
+    // nullptr when the guest array / count is 0).
+    const char** guest_str_array(Memory* mem, uint64_t arr, uint32_t count) {
+        if (!arr || count == 0 || count > 1024) return nullptr;
+        const char** out = reinterpret_cast<const char**>(
+            bytes(static_cast<size_t>(count) * sizeof(const char*), 8));
+        for (uint32_t i = 0; i < count; i++) {
+            uint64_t p = 0;
+            try { mem->read(arr + static_cast<uint64_t>(i) * 8u, &p, 8); }
+            catch (...) { p = 0; }
+            out[i] = guest_str(mem, p);
+        }
+        return out;
+    }
+};
+
+// ── VK_CMD_DEEP: descriptor-driven deep marshal for command batches ──
+// Two passes over the guest structures: a dry size pass (so VkStage can
+// reserve exactly once — its buffer reallocates past the initial 64 KiB,
+// which would dangle every earlier pointer), then a fill pass. All
+// covered commands are INPUT-ONLY (command recording), so there is no
+// writeback. Defensive caps mirror the hand arms (≤1024 elements).
+namespace {
+constexpr size_t kVkDeepMaxElems = 1024;
+constexpr size_t kVkDeepMaxBytes = 4u << 20;   // 4 MiB staging cap
+
+// Read `size` bytes of guest memory: direct-window alias when possible,
+// otherwise copy into buf (>= size). nullptr on unmapped/garbage.
+const void* vk_deep_read(Memory* mem, uint64_t g, size_t size,
+                         void* buf, size_t bufsz) {
+    if (!g || g > (~uint64_t(0)) - size) return nullptr;
+    uint8_t* hp = mem->guest_to_host_ptr(g);
+    if (hp && mem->guest_to_host_ptr(g + size - 1)) return hp;
+    if (size > bufsz) return nullptr;
+    try { mem->read(g, buf, size); } catch (...) { return nullptr; }
+    return buf;
+}
+
+const void* vk_deep_ptr_field(const void* elem, const thunk::VkFieldDesc& f) {
+    const void* p;
+    std::memcpy(&p, reinterpret_cast<const uint8_t*>(elem) + f.off,
+                sizeof(p));
+    return p;
+}
+uint32_t vk_deep_count(const void* elem, const thunk::VkFieldDesc& f) {
+    if (f.count_off == 0xFFFF) return f.fixed_count;
+    uint32_t n;
+    std::memcpy(&n, reinterpret_cast<const uint8_t*>(elem) + f.count_off, 4);
+    return n;
+}
+
+size_t vk_deep_size_one(Memory* mem, uint64_t guest,
+                        const thunk::VkStructDesc* d, uint32_t count,
+                        int depth, bool* ok) {
+    if (!ok || depth > 4 || count > kVkDeepMaxElems) { *ok = false; return 0; }
+    size_t total = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t g = guest + (uint64_t)i * d->size;
+        total = (total + 7u) & ~size_t(7);
+        total += d->size;
+        if (total > kVkDeepMaxBytes) { *ok = false; return 0; }
+        for (uint16_t fi = 0; fi < d->nfields; fi++) {
+            const thunk::VkFieldDesc& f = d->fields[fi];
+            uint8_t stackbuf[512];
+            const void* host_elem =
+                vk_deep_read(mem, g, d->size, stackbuf, sizeof(stackbuf));
+            if (!host_elem) { *ok = false; return 0; }
+            const void* p = vk_deep_ptr_field(host_elem, f);
+            uint32_t n = vk_deep_count(host_elem, f);
+            if (!p || !n) continue;
+            if (f.elem == thunk::VKM_STRUCT && f.elem_struct >= 0) {
+                total = (total + 7u) & ~size_t(7);
+                total += vk_deep_size_one(
+                    mem, reinterpret_cast<uint64_t>(p),
+                    &thunk::kVkStructs[f.elem_struct], n, depth + 1, ok);
+            } else {
+                size_t bytes = (size_t)n * f.elem_size;
+                if (bytes > kVkDeepMaxBytes) { *ok = false; return 0; }
+                total = (total + 7u) & ~size_t(7);
+                total += bytes;
+            }
+            if (!*ok) return 0;
+        }
+    }
+    return total;
+}
+
+// Fill one element of descriptor `d` from guest `guest` into host `out`
+// (already staged). Nested arrays are allocated from the arena FIRST and
+// re-pointed, then filled recursively.
+void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
+                       const thunk::VkStructDesc* d, uint8_t* out,
+                       int depth) {
+    try { mem->read(guest, out, d->size); }
+    catch (...) { std::memset(out, 0, d->size); return; }
+    for (uint16_t fi = 0; fi < d->nfields; fi++) {
+        const thunk::VkFieldDesc& f = d->fields[fi];
+        const void* p = vk_deep_ptr_field(out, f);
+        uint32_t n = vk_deep_count(out, f);
+        void** slot = reinterpret_cast<void**>(out + f.off);
+        if (!p || !n) { *slot = nullptr; continue; }
+        size_t bytes;
+        const thunk::VkStructDesc* sub = nullptr;
+        if (f.elem == thunk::VKM_STRUCT && f.elem_struct >= 0) {
+            sub = &thunk::kVkStructs[f.elem_struct];
+            bytes = (size_t)n * sub->size;
+        } else {
+            bytes = (size_t)n * f.elem_size;
+        }
+        void* dst = st.bytes(bytes, 8);
+        if (sub) {
+            *slot = dst;
+            for (uint32_t k = 0; k < n; k++)
+                vk_deep_fill_elem(mem, st,
+                                  reinterpret_cast<uint64_t>(p) +
+                                      (uint64_t)k * sub->size,
+                                  sub,
+                                  reinterpret_cast<uint8_t*>(dst) +
+                                      (uint64_t)k * sub->size,
+                                  depth + 1);
+        } else {
+            try { mem->read(reinterpret_cast<uint64_t>(p), dst, bytes); }
+            catch (...) { std::memset(dst, 0, bytes); }
+            *slot = dst;
+        }
+    }
+}
+} // namespace
+
 int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) {
         return -ENOSYS;
@@ -258,7 +428,9 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = dbg().thunk_trace;
 
-    // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
+    
+
+// ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
     // When the THUNK_PROXY flag is set, the symbol is handled by the
     // DisplayProxy (SDL2-based software fallback). The proxy is preferred
     // over the host library: its handles (Display*, Window, GC) are guest
@@ -889,10 +1061,88 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     std::vector<uint8_t> bounce_pristine[kMaxArgs];
     uint64_t bounce_guest[kMaxArgs] = {0};
     bool bounce_wb[kMaxArgs] = {false};
+    VkStage vk_deep_stage;   // lives until after the host call
+
+    // ── VK_CMD_DEEP: descriptor-driven staging for command batches ──
+    // Replaces listed array args with staged host pointers so the plain
+    // translate_ptr pass never sees them (it would bounce ONE element
+    // while the host driver walks count elements past it).
+    uint32_t vk_deep_done = 0;
+    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CMD_DEEP &&
+        impl_->mem && entry.host_fn) {
+        if (const thunk::VkCmdPlan* plan =
+                thunk::vk_find_cmd_plan(entry.name.c_str())) {
+            bool ok = true;
+            size_t need = 0;
+            struct DeepJob { int arg = 0; uint32_t count = 0;
+                             uint64_t guest = 0; bool raw = false;
+                             const thunk::VkStructDesc* desc = nullptr; };
+            DeepJob jobs[4] = {};
+            int njobs = 0;
+            for (uint8_t ri = 0; ri < plan->nrefs && ok; ri++) {
+                const thunk::VkPlanRef& r = plan->refs[ri];
+                if (r.arg >= kMaxArgs) continue;
+                uint64_t cnt_arg = args[r.count_arg];
+                size_t elem_bytes =
+                    r.desc ? r.desc->size : 8;
+                uint32_t n = r.count_in_bytes
+                    ? 1   // raw: arg IS a byte count, marshalled below
+                    : static_cast<uint32_t>(
+                          cnt_arg > kVkDeepMaxElems ? 0 : cnt_arg);
+                if (!args[r.arg]) continue;
+                DeepJob j{};
+                j.arg = r.arg;
+                j.guest = args[r.arg];
+                j.desc = r.desc ? r.desc : nullptr;
+                if (r.count_in_bytes || !r.desc) {
+                    // raw byte buffer: stage verbatim in one block
+                    size_t bytes = r.count_in_bytes
+                        ? static_cast<size_t>(cnt_arg)
+                        : static_cast<size_t>(cnt_arg) * 8;
+                    if (bytes > kVkDeepMaxBytes) ok = false;
+                    j.count = static_cast<uint32_t>(bytes);   // bytes
+                    j.raw = true;
+                    need += bytes;
+                } else {
+                    j.count = n;
+                    need = (need + 7u) & ~size_t(7);
+                    need += vk_deep_size_one(impl_->mem, j.guest,
+                                             j.desc, j.count, 0, &ok);
+                }
+                jobs[njobs++] = j;
+            }
+            if (ok && need < kVkDeepMaxBytes) {
+                VkStage& st = vk_deep_stage;
+                st.buf.reserve(std::max<size_t>(need, 65536));
+                for (int ji = 0; ji < njobs; ji++) {
+                    DeepJob& j = jobs[ji];
+                    void* dst;
+                    if (j.raw) {
+                        dst = st.bytes(j.count, 8);
+                        try { impl_->mem->read(j.guest, dst, j.count); }
+                        catch (...) { std::memset(dst, 0, j.count); }
+                    } else {
+                        dst = st.bytes(
+                            (size_t)j.count * j.desc->size, 8);
+                        for (uint32_t k2 = 0; k2 < j.count; k2++)
+                            vk_deep_fill_elem(
+                                impl_->mem, st,
+                                j.guest + (uint64_t)k2 * j.desc->size,
+                                j.desc,
+                                reinterpret_cast<uint8_t*>(dst) +
+                                    (uint64_t)k2 * j.desc->size, 0);
+                    }
+                    args[j.arg] = reinterpret_cast<uint64_t>(dst);
+                    vk_deep_done |= 1u << j.arg;
+                }
+            }
+        }
+    }
 
     if (entry.pointer_args && impl_->mem) {
         for (int i = 0; i < kMaxArgs; i++) {
-            if (entry.pointer_args & (1u << i)) {
+            if ((entry.pointer_args & (1u << i)) &&
+                !(vk_deep_done & (1u << i))) {
                 translate_ptr(args[i], i, &bounce_bufs[i],
                               &bounce_pristine[i],
                               &bounce_guest[i], &bounce_wb[i]);
@@ -901,9 +1151,10 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     if (trace) {
-        fprintf(stderr, "[display-thunk] dispatch: %s (host_fn=%p) "
+        fprintf(stderr, "[display-thunk] dispatch[T%lx]: %s (host_fn=%p) "
                 "a0=0x%llx a1=0x%llx a2=0x%llx a3=0x%llx "
                 "a8=0x%llx ptrs=0x%x stack=%u\n",
+                (unsigned long)pthread_self(),
                 entry.name.c_str(), entry.host_fn,
                 static_cast<unsigned long long>(args[0]),
                 static_cast<unsigned long long>(args[1]),
@@ -1012,61 +1263,6 @@ namespace {
 // Per-call host staging buffer. All nested strings, struct copies and
 // pointer arrays for one Vulkan call live here; it is destroyed when the
 // call returns.
-struct VkStage {
-    std::vector<uint8_t> buf;
-    // Reserve once up front: `alloc`/`bytes`/`guest_str*` hand out pointers
-    // into `buf.data()`, and `resize` would REALLOCATE (dangling every
-    // earlier pointer) once a later string/array grows the buffer. Every
-    // size below is capped (guest_str 511 chars, string arrays/queue
-    // arrays <= 1024/16 entries), so total staging stays well under this.
-    explicit VkStage() { buf.reserve(65536); }
-    size_t put(size_t sz, size_t align) {
-        size_t off = (buf.size() + align - 1u) & ~(align - 1u);
-        buf.resize(off + sz);
-        return off;
-    }
-    template <typename T> T* alloc() {
-        return reinterpret_cast<T*>(buf.data() + put(sizeof(T), alignof(T)));
-    }
-    void* bytes(size_t sz, size_t align) {
-        return buf.data() + put(sz, align);
-    }
-    // Copy a guest string into staging. Returns the host pointer (or
-    // nullptr when the guest pointer is 0). Short strings only — a cap of
-    // 511 chars is fine for extension / app names.
-    const char* guest_str(Memory* mem, uint64_t g) {
-        if (!g) return nullptr;
-        char tmp[512];
-        size_t n = 0;
-        try {
-            while (n + 1 < sizeof(tmp)) {
-                uint8_t c = 0;
-                mem->read(g + n, &c, 1);
-                tmp[n++] = static_cast<char>(c);
-                if (c == 0) break;
-            }
-        } catch (...) { /* unmapped — truncate */ }
-        tmp[n] = 0;
-        size_t off = put(n + 1, 1);
-        std::memcpy(buf.data() + off, tmp, n + 1);
-        return reinterpret_cast<const char*>(buf.data() + off);
-    }
-    // Copy a guest array of `count` char* into staging, re-pointing each
-    // string into the staging buffer. Returns the host array pointer (or
-    // nullptr when the guest array / count is 0).
-    const char** guest_str_array(Memory* mem, uint64_t arr, uint32_t count) {
-        if (!arr || count == 0 || count > 1024) return nullptr;
-        const char** out = reinterpret_cast<const char**>(
-            bytes(static_cast<size_t>(count) * sizeof(const char*), 8));
-        for (uint32_t i = 0; i < count; i++) {
-            uint64_t p = 0;
-            try { mem->read(arr + static_cast<uint64_t>(i) * 8u, &p, 8); }
-            catch (...) { p = 0; }
-            out[i] = guest_str(mem, p);
-        }
-        return out;
-    }
-};
 // Frozen (spec-stable) layouts of the Vulkan structs we deep-copy. These
 // are plain C structs with natural alignment, so they match the AArch64
 // guest layout exactly.
@@ -1163,6 +1359,11 @@ struct VkSpecializationMapEntryH { uint32_t constantID, offset; size_t size; };
 struct VkSpecializationInfoH {
     uint32_t mapEntryCount; const VkSpecializationMapEntryH* pMapEntries;
     size_t dataSize; const void* pData;
+};
+struct VkComputePipelineCreateInfoH {
+    int32_t sType; void* pNext; uint32_t flags;
+    VkPipelineShaderStageCreateInfoH stage;
+    uint64_t basePipelineHandle; int32_t basePipelineIndex;
 };
 struct VkPipelineVertexInputStateCreateInfoH {
     int32_t sType; void* pNext; uint32_t flags;
@@ -1281,11 +1482,72 @@ void read_guest_bytes(Memory* mem, uint64_t g, void* dst, size_t n) {
     try { mem->read(g, dst, n); }
     catch (...) { std::memset(dst, 0, n); }
 }
+
+// ── pNext chain deep-marshal (Properties2/Features2/DeviceCreateInfo) ──
+// Extension structs chained via pNext are GUEST pointers; the host driver
+// walks the chain and derefs them. Known sTypes are copied into staging,
+// re-linked host-side, and written back after the call. Sizes verified
+// against the vendored vulkan_core.h (natural alignment, guest layout
+// identical). Unknown sType truncates the chain at that node.
+constexpr uint32_t kMaxPnextNodes = 8;
+struct VkPnextNode { uint8_t* host; uint64_t guest; size_t size; };
+size_t vk_pnext_size(int32_t sType) {
+    switch (sType) {
+    case 1000059001: return 840;  // VkPhysicalDeviceProperties2
+    case 1000059000: return 240;  // VkPhysicalDeviceFeatures2
+    case 1000196000: return 536;  // ..PhysicalDeviceDriverProperties
+    case 1000094000: return 32;   // ..PhysicalDeviceSubgroupProperties
+    case 1000225000: return 32;   // ..SubgroupSizeControlProperties(EXT)
+    case 1000150014: return 64;   // ..AccelerationStructurePropertiesKHR
+    case 1000225002: return 24;   // ..SubgroupSizeControlFeatures(EXT)
+    case 1000257000: return 32;   // ..BufferDeviceAddressFeatures(KHR)
+    case 1000150013: return 40;   // ..AccelerationStructureFeaturesKHR
+    case 1000348013: return 24;   // ..RayQueryFeaturesKHR (vendored hdr value)
+    case 1000294000: return 24;   // ..PresentIdFeaturesKHR
+    case 1000294001: return 24;   // ..PresentWaitFeaturesKHR
+    case 1000479002: return 24;   // ..PresentId2FeaturesKHR
+    case 1000480001: return 24;   // ..PresentWait2FeaturesKHR
+    case          11: return 56;  // VkCommandBufferInheritanceInfo
+    case 1000060001: return 24;   // DeviceGroupCommandBufferBeginInfo
+    default:         return 0;
+    }
+}
+// Walks the guest chain starting at `g`; fills up to kMaxPnextNodes nodes.
+uint32_t vk_marshal_pnext_chain(Memory* mem, VkStage& st, uint64_t g,
+                                VkPnextNode* nodes) {
+    uint32_t n = 0;
+    void* prev = nullptr;
+    while (g && n < kMaxPnextNodes) {
+        int32_t s = 0; uint64_t pn = 0;
+        try { mem->read(g, &s, 4); mem->read(g + 8, &pn, 8); }
+        catch (...) { break; }
+        size_t sz = vk_pnext_size(s);
+        if (!sz) break;  // unknown extension struct — truncate chain here
+        uint8_t* h = reinterpret_cast<uint8_t*>(st.bytes(sz, 8));
+        read_guest_bytes(mem, g, h, sz);
+        *reinterpret_cast<void**>(h + 8) = nullptr;
+        if (prev) *reinterpret_cast<void**>(static_cast<uint8_t*>(prev) + 8) = h;
+        nodes[n++] = {h, g, sz};
+        prev = h;
+        g = pn;
+    }
+    return n;
+}
+void vk_writeback_pnext_chain(Memory* mem, const VkPnextNode* nodes,
+                              uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) {
+        try { mem->write(nodes[i].guest, nodes[i].host, nodes[i].size); }
+        catch (...) { /* unmapped node — result lost */ }
+    }
+}
 } // namespace
 
 bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) {
     Memory* mem = impl_->mem;
     if (!mem) return false;
+    if (trace)
+        fprintf(stderr, "[display-thunk] vk_dispatch_[T%lx]: %s\n",
+                (unsigned long)pthread_self(), entry.name.c_str());
 
     // ── vkGetInstanceProcAddr / vkGetDeviceProcAddr ────────────────
     // The generic THUNK_GET_PROC path reads the name from arg 0 (GL
@@ -1338,10 +1600,27 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             app->pEngineName      = st.guest_str(mem, reinterpret_cast<uint64_t>(app->pEngineName));
             info->pApplicationInfo = app;
         }
+        uint64_t dbg_raw_ext_arr = reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames);
+        uint32_t dbg_ext_count = info->enabledExtensionCount;
         info->ppEnabledLayerNames = st.guest_str_array(
             mem, reinterpret_cast<uint64_t>(info->ppEnabledLayerNames), info->enabledLayerCount);
         info->ppEnabledExtensionNames = st.guest_str_array(
             mem, reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames), info->enabledExtensionCount);
+        if (trace) {
+            fprintf(stderr,
+                    "[display-thunk] vkCreateInstance: sType=%d pNext=%p app=%d "
+                    "layers=%u exts=%u raw_ext_arr=0x%llx\n",
+                    info->sType, info->pNext, info->pApplicationInfo ? 1 : 0,
+                    info->enabledLayerCount, info->enabledExtensionCount,
+                    static_cast<unsigned long long>(dbg_raw_ext_arr));
+            for (uint32_t i = 0; i < dbg_ext_count && dbg_raw_ext_arr; i++) {
+                uint64_t p = 0;
+                try { mem->read(dbg_raw_ext_arr + i * 8u, &p, 8); }
+                catch (...) { p = 0xdeaddead; }
+                fprintf(stderr, "[display-thunk]   raw ext[%u] ptr=0x%llx\n",
+                        i, static_cast<unsigned long long>(p));
+            }
+        }
         uint64_t host_instance = 0;
         // pAllocator (arg 1): always NULL. VkAllocationCallbacks contains
         // host function pointers that cannot be marshalled; passing NULL is
@@ -1398,9 +1677,32 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             catch (...) { std::memset(f, 0, kPhysicalDeviceFeaturesBytes); }
             info->pEnabledFeatures = f;
         }
+        // pNext chain (subgroup/BDA/accel/ray-query/present feature
+        // structs) are guest pointers — deep-marshal like Properties2.
+        VkPnextNode dnodes[kMaxPnextNodes];
+        uint32_t dn = vk_marshal_pnext_chain(
+            mem, st, reinterpret_cast<uint64_t>(info->pNext), dnodes);
+        // Re-point the create info at the HOST chain head (or truncate) —
+        // the raw guest pointer must never reach the driver.
+        info->pNext = dn ? dnodes[0].host : nullptr;
+        if (trace) {
+            fprintf(stderr,
+                    "[display-thunk] vkCreateDevice: qcount=%u layers=%u exts=%u "
+                    "feats=%d raw_pnext=0x%llx dn=%u\n",
+                    info->queueCreateInfoCount, info->enabledLayerCount,
+                    info->enabledExtensionCount, info->pEnabledFeatures ? 1 : 0,
+                    reinterpret_cast<unsigned long long>(info->pNext), dn);
+            for (uint32_t i = 0; i < dn; i++) {
+                int32_t s = 0;
+                std::memcpy(&s, dnodes[i].host, 4);
+                fprintf(stderr, "[display-thunk]   node[%u] stype=%d size=%zu\n",
+                        i, s, dnodes[i].size);
+            }
+        }
         uint64_t host_device = 0;
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
             cpu.regs[0], info, nullptr, &host_device);
+        vk_writeback_pnext_chain(mem, dnodes, dn);
         if (cpu.regs[3] && host_device) {
             try { mem->write(cpu.regs[3], &host_device, sizeof(host_device)); }
             catch (...) { /* out pointer unmapped — result lost */ }
@@ -2336,6 +2638,213 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (ret == 0) impl_->vk_sync_pull_all();
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) fprintf(stderr, "[display-thunk] wait+pull → %d\n", static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkGetPhysicalDeviceProperties2 / Features2 (+KHR aliases) ─────
+    // The pNext CHAIN carries guest pointers (driver/subgroup/accel
+    // properties, subgroup/BDA features) that the host driver derefs.
+    // Walk the chain by sType, copy each known node into staging,
+    // re-link host-side, call, then write every node back (the driver
+    // FILLS them). Unknown sType truncates the chain there (safe: the
+    // caller sees the node untouched instead of garbage).
+    if (entry.spec &&
+        entry.name.rfind("vkGetPhysicalDevice", 0) == 0 &&
+        (entry.name.find("Properties2") != std::string::npos ||
+         entry.name.find("Features2") != std::string::npos)) {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        uint64_t g = cpu.regs[1];
+        if (!g) { cpu.regs[0] = 0xFFFFFFFFFFFFFFFEull; return true; }
+        VkStage st;
+        VkPnextNode nodes[kMaxPnextNodes];
+        uint32_t nnodes = vk_marshal_pnext_chain(mem, st, g, nodes);
+        if (!nnodes) return false;  // not our shape — generic path
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(entry.host_fn)(
+            cpu.regs[0], nodes[0].host);
+        vk_writeback_pnext_chain(mem, nodes, nnodes);
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace)
+            fprintf(stderr, "[display-thunk] %s → %d (%u chain nodes)\n",
+                    entry.name.c_str(), static_cast<int32_t>(ret), nnodes);
+        return true;
+    }
+
+    // ── vkEnumerateDeviceExtensionProperties: hide RT extensions ──────
+    // Ray tracing needs deep-marshal arms that don't exist yet
+    // (vkCmdBuildAccelerationStructures* carry nested geometry pointer
+    // trees). Guests that see VK_KHR_ray_query demand its entry points
+    // and Sys_Error when vkGetDeviceProcAddr misses — so filter the RT
+    // extensions out of the reported list; apps fall back to non-RT
+    // rendering paths. Remove this once build-acceleration marshalling
+    // lands.
+    // ── vkCreateDebugUtilsMessengerEXT — INTERCEPTED, never forwarded ──
+    // The create info embeds pfnUserCallback, a GUEST function pointer.
+    // Forwarding the struct to the host driver would hand it a raw guest
+    // address to call as x86 (the glDebugMessageCallback rule: callbacks
+    // never cross). We accept the messenger and mint a fake handle; debug
+    // messages simply never fire.
+    if (entry.spec && entry.name == "vkCreateDebugUtilsMessengerEXT") {
+        static uint64_t dbg_messenger_ctr = 0;
+        const uint64_t handle =
+            0xD6C0FFEE00000000ull + ++dbg_messenger_ctr;
+        if (cpu.regs[3])
+            mem->write(cpu.regs[3], &handle, sizeof(handle));
+        cpu.regs[0] = 0;   // VK_SUCCESS
+        if (trace) {
+            fprintf(stderr,
+                    "[display-thunk] vkCreateDebugUtilsMessengerEXT → "
+                    "intercepted (handle=0x%llx, callbacks suppressed)\n",
+                    (unsigned long long)handle);
+        }
+        return true;
+    }
+    if (entry.spec && entry.name == "vkDestroyDebugUtilsMessengerEXT") {
+        cpu.regs[0] = 0;   // accepted no-op
+        return true;
+    }
+    if (entry.spec && entry.name == "vkEnumerateDeviceExtensionProperties") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        static const char* kHiddenExt[] = {
+            "VK_KHR_ray_query", "VK_KHR_acceleration_structure" };
+        auto hidden = [](const char* n) {
+            for (const char* h : kHiddenExt)
+                if (std::strncmp(n, h, sizeof("VK_KHR_acceleration_structure")) == 0)
+                    return true;
+            return false;
+        };
+        uint32_t count = 0;
+        if (!cpu.regs[2]) { cpu.regs[0] = 0xFFFFFFFFFFFFFFFEull; return true; }
+        try { mem->read(cpu.regs[2], &count, 4); } catch (...) { count = 0; }
+        VkStage st;
+        uint32_t actual = 0;
+        // VkExtensionProperties { char name[256]; uint32 specVersion; }
+        constexpr uint32_t kExtPropSize = 260;
+        uint8_t* props = nullptr;
+        if (cpu.regs[3] && count && count <= 1024) {
+            props = reinterpret_cast<uint8_t*>(st.bytes(count * kExtPropSize, 4));
+            auto fn = reinterpret_cast<uint64_t (*)(uint64_t, const void*, uint32_t*, void*)>(entry.host_fn);
+            uint32_t tmp = count;
+            uint64_t ret = fn(cpu.regs[0], nullptr, &tmp, props);
+            actual = tmp;
+            // Filter in place.
+            uint32_t w = 0;
+            for (uint32_t i = 0; i < actual; i++) {
+                const char* nm = reinterpret_cast<const char*>(props + i * kExtPropSize);
+                if (hidden(nm)) continue;
+                if (w != i) std::memcpy(props + w * kExtPropSize,
+                                        props + i * kExtPropSize, kExtPropSize);
+                w++;
+            }
+            try { mem->write(cpu.regs[2], &w, 4); } catch (...) {}
+            try { mem->write(cpu.regs[3], props, w * kExtPropSize); } catch (...) {}
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+            return true;
+        }
+        // Count-only query: forward verbatim (hiding only matters when
+        // the guest then fetches names).
+        auto fn2 = reinterpret_cast<uint64_t (*)(uint64_t, const void*, uint32_t*, void*)>(entry.host_fn);
+        uint32_t tmp = count;
+        uint64_t ret = fn2(cpu.regs[0], nullptr, &tmp, nullptr);
+        try { mem->write(cpu.regs[2], &tmp, 4); } catch (...) {}
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        return true;
+    }
+
+    // ── vkBeginCommandBuffer ─────────────────────────────────────────
+    // (cmdBuffer, pBeginInfo) — VkCommandBufferBeginInfo is 32 bytes:
+    // {sType, pNext, flags, pInheritanceInfo}. Secondary buffers
+    // (multithreaded recording) chain a GUEST VkCommandBufferInheritanceInfo
+    // (56 bytes: handles + pNext) that the driver derefs.
+    if (entry.spec && entry.name == "vkBeginCommandBuffer") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        VkStage st;
+        uint8_t* top = reinterpret_cast<uint8_t*>(st.bytes(32, 8));
+        read_guest_bytes(mem, cpu.regs[1], top, 32);
+        VkPnextNode nodes[kMaxPnextNodes];
+        uint32_t dn = vk_marshal_pnext_chain(
+            mem, st, *reinterpret_cast<uint64_t*>(top + 8), nodes);
+        *reinterpret_cast<void**>(top + 8) = dn ? nodes[0].host : nullptr;
+        VkPnextNode inodes[kMaxPnextNodes];
+        uint32_t din = 0;
+        uint64_t ginh = *reinterpret_cast<uint64_t*>(top + 24);
+        if (ginh) {
+            uint8_t* inh = reinterpret_cast<uint8_t*>(st.bytes(56, 8));
+            read_guest_bytes(mem, ginh, inh, 56);
+            din = vk_marshal_pnext_chain(
+                mem, st, *reinterpret_cast<uint64_t*>(inh + 8), inodes);
+            *reinterpret_cast<void**>(inh + 8) = din ? inodes[0].host : nullptr;
+            // Re-point the begin info at the HOST copy — the raw guest
+            // pointer must never reach the driver.
+            *reinterpret_cast<void**>(top + 24) = inh;
+        }
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(
+            entry.host_fn)(cpu.regs[0], top);
+        vk_writeback_pnext_chain(mem, nodes, dn);
+        vk_writeback_pnext_chain(mem, inodes, din);
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace)
+            fprintf(stderr, "[display-thunk] vkBeginCommandBuffer → %d\n",
+                    static_cast<int32_t>(ret));
+        return true;
+    }
+
+    // ── vkCreateComputePipelines ─────────────────────────────────────
+    // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
+    //  pPipelines) — each VkComputePipelineCreateInfo embeds a shader
+    // stage with a GUEST pName string and optional specialization info
+    // (map entries + data blob). Mirror of the graphics-pipeline stage
+    // marshalling. OUT handles written back to arg 5.
+    if (entry.spec && entry.name == "vkCreateComputePipelines") {
+        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
+        const uint32_t count = static_cast<uint32_t>(cpu.regs[2]);
+        if (count == 0 || count > 64 || !cpu.regs[3]) {
+            cpu.regs[0] = count == 0 ? 0u : 0xFFFFFFFDu;
+            return true;
+        }
+        VkStage st;
+        st.buf.reserve(256u * 1024u);
+        VkComputePipelineCreateInfoH* infos =
+            reinterpret_cast<VkComputePipelineCreateInfoH*>(
+                st.bytes(count * sizeof(VkComputePipelineCreateInfoH), 8));
+        read_guest_bytes(mem, cpu.regs[3], infos,
+                         count * sizeof(VkComputePipelineCreateInfoH));
+        for (uint32_t p = 0; p < count; p++) {
+            VkComputePipelineCreateInfoH* c = &infos[p];
+            c->pNext = nullptr;
+            c->stage.pNext = nullptr;
+            c->stage.pName = st.guest_str(mem, reinterpret_cast<uint64_t>(c->stage.pName));
+            if (c->stage.pSpecializationInfo) {
+                VkSpecializationInfoH gi_spec;
+                read_guest_struct(mem, reinterpret_cast<uint64_t>(c->stage.pSpecializationInfo), &gi_spec);
+                VkSpecializationInfoH* spec = st.alloc<VkSpecializationInfoH>();
+                *spec = gi_spec;
+                if (gi_spec.mapEntryCount && gi_spec.pMapEntries && gi_spec.mapEntryCount <= 256) {
+                    VkSpecializationMapEntryH* e = reinterpret_cast<VkSpecializationMapEntryH*>(
+                        st.bytes(gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH), 8));
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pMapEntries), e,
+                                     gi_spec.mapEntryCount * sizeof(VkSpecializationMapEntryH));
+                    spec->pMapEntries = e;
+                } else { spec->mapEntryCount = 0; spec->pMapEntries = nullptr; }
+                if (gi_spec.dataSize && gi_spec.pData && gi_spec.dataSize <= 4096) {
+                    void* d = st.bytes(gi_spec.dataSize, 8);
+                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi_spec.pData), d, gi_spec.dataSize);
+                    spec->pData = d;
+                } else { spec->dataSize = 0; spec->pData = nullptr; }
+                c->stage.pSpecializationInfo = spec;
+            }
+        }
+        uint64_t* pipes = reinterpret_cast<uint64_t*>(st.bytes(count * 8u, 8));
+        std::memset(pipes, 0, count * 8u);
+        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, uint32_t,
+                                                     const void*, const void*, void*)>(
+            entry.host_fn)(cpu.regs[0], cpu.regs[1], count, infos, nullptr, pipes);
+        if (cpu.regs[5]) {
+            try { mem->write(cpu.regs[5], pipes, count * 8u); } catch (...) {}
+        }
+        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
+        if (trace)
+            fprintf(stderr, "[display-thunk] vkCreateComputePipelines(n=%u) → %d\n",
+                    count, static_cast<int32_t>(ret));
         return true;
     }
 

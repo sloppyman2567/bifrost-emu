@@ -144,6 +144,15 @@ public:
         CPU& cpu, uint64_t fn,
         const int64_t* iargs, size_t n_iargs,
         const double* fargs, size_t n_fargs)>;
+    // ── Vulkan proc-address lookup (vkQuake support) ──────────────────
+    // SDL_Vulkan_GetVkGetInstanceProcAddr() must return a GUEST-CALLABLE
+    // trampoline for vkGetInstanceProcAddr — the raw host pointer would
+    // be invoked as AArch64 code and crash. The DisplayThunk owns the
+    // Vulkan symbol registry; the Emulator wires this callback so
+    // dispatch can resolve "vkGetInstanceProcAddr" to its guest
+    // trampoline at call time.
+    using VkProcLookup = std::function<uint64_t(const char* sym)>;
+    void set_vk_proc_lookup(VkProcLookup lookup);
     void set_glfw_cb_runner(GlfwCbRunner runner);
     // ── SDL thread runner (SDL_CreateThread / SDL_WaitThread) ──────────
     // 1.5.4-alpha. The game spawns worker threads (a timer thread, a

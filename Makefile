@@ -89,7 +89,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check vkxml-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
 
 all: $(TARGET)
 
@@ -126,6 +126,13 @@ $(THUNK_OUTS): $(THUNK_SPECS) $(THUNK_GEN)
 
 opgen-thunk-check:
 	python3 tools/opgen/thunkgen.py --check $(THUNK_SPECS) $(THUNK_OUTS)
+
+# Audit every VK row in the spec against the vendored Khronos vk.xml:
+# arity + pointer-position agreement (catches shifted-pointer-mask bugs
+# mechanically). Warnings list dynamically-sized params dispatched as
+# plain 'p' — the deep-marshal roadmap.
+vkxml-check:
+	python3 tools/opgen/vkxmlcheck.py $(THUNK_SPECS) tools/vulkan-headers/registry/vk.xml
 
 # FP fixed-point conversion decode table (same pattern as SIMD_DP above):
 # tools/opgen/fp_fixconv.txt is the single source of truth for which
@@ -357,7 +364,7 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check opgen-fpfixed-check $(TARGET) test-capi test-nb
+check-all: setup-tests opgen-check opgen-thunk-check vkxml-check opgen-fpfixed-check $(TARGET) test-capi test-nb
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
 
