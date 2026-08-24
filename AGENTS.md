@@ -1160,6 +1160,113 @@ glibc toolchain's libc) and the glibc cross toolchain
 missing. When touching a dynamic test: rebuild with the correct toolchain,
 not musl-`-static`.
 
+## Session History (2026-08-23) — FCVTN/FCVTXN interp fix + rudolf-cart audio (leak + queue semantics)
+
+- **FCVTN/FCVTXN in `interp_fp.cpp` were BROKEN three ways; all FIXED and
+  verified against the ARM ARM (DDI 0487) via the Stanford aarchmrs mirror +
+  cross-assembler ground truth:**
+  1. **Case labels unreachable**: the ops live in the SIMD_DP `sub_noq`
+     switch, but their opcode uses bits[20:16] (=00001) which the
+     `0xFFE0FC00` sub mask CLEARS — `fcvtn v4.2s,v2.2d` (0x0E616844) masked
+     to 0x0E606800 matches NOTHING → silent NOP in interp, DecodeError via
+     JIT CALL_INTERP. They are now an if-handler BEFORE the switch matching
+     on `op` directly with mask `0xBFFFFF00` (strips ONLY Q; U=bit29 picks
+     FCVTN vs FCVTXN) against 0x0E616800 / 0x2E616800.
+  2. **Q semantics inverted**: narrowing ops ALWAYS convert BOTH source
+     doubles (`bits(2*datasize) operand = V[n, 2*datasize]`); Q only picks
+     the destination half — Q=0 → LOW half (FCVTN zeroes high; FCVTXN
+     leaves high UNCHANGED), Q=1 (*2 variants) → HIGH half, low preserved.
+     The old code treated Q as source width and wrote v_lo for both.
+  3. **Round-to-Odd wrong**: FPRound(FPRounding_ODD) = round_up FALSE
+     (truncate toward zero), then if INEXACT force mantissa LSB to 1. A
+     nearest-even cast followed by `|1` is WRONG when the cast rounded AWAY
+     from the value (0x3FEFFFFFFFFFFFFF must give 0x3F7FFFFF, not
+     1.0f+LSB). Overflow saturates to FPMaxNormal (never ±inf). Shared
+     helper `fp_to_f32_rto()` next to fp_to_*_sat.
+  - **SCALAR `fcvtxn s,d` (0x7E616800/0xFFFFFC00) also implemented** before
+    the FP-NOP fallback — note it is ALSO matched by the scalar int↔FP
+    group `(op & 0xDF3E0C00) == 0x5E200800` (opcode 22 falls through that
+    group without returning, so ordering works, but any new opcode there
+    must not return for unknown opcodes). Scalar writes only Sd; rest of
+    Vd unchanged.
+  - Probe: `/tmp/opencode/fcvt_probe.c` (vector Q=0/Q=1 halves, RTO
+    truncate/overflow/exact/negative, both modes + BIFROST_JIT_VERIFY).
+    Inline-asm probe gotcha: EVERY asm block writing memory through "r"
+    pointers needs the "memory" clobber or GCC folds stale constants over
+    the guest's stores and the probe lies.
+
+- **rudolf-cart severe-lag regression ROOT-CAUSED to the audio rewrite;
+  three defects fixed in `audio_thunk.cpp`/`audio.cpp`:**
+  1. **Unbounded heap leak**: `Audio::write_unlocked_` accumulated EVERY
+     pushed byte into `buffer_` "for potential WAV dump" but `dump_to_wav`
+     has ZERO callers. Guests re-queuing multi-MB music per frame grew the
+     heap GBs/min → memcpy churn (SIGPROF dispatch ~98%) → memory-pressure
+     death spiral ("freeze": zero syscall progress while dispatch samples
+     continue). Now gated behind `BIFROST_AUDIO_DUMP=1` (default OFF).
+  2. **Queue-mode semantics**: SDL_GetQueuedAudioSize returned the shared
+     256 KiB SPSC ring level instead of the device backlog, so guests with
+     real-SDL refill logic (`queued < len/2`) re-queued every frame and
+     overflow drops caused crackle. New model: per-device `pending`
+     byte buffer in PumpStream (real-SDL semantics — buffer everything,
+     cap 256 MiB defensive), drained to the engine ring by `top_up_queue_`
+     from audio-thunk dispatches ON THE GUEST THREAD (no pump threads / no
+     async guest callbacks — the FIXME ban holds). QueueAudio appends to
+     pending; GetQueuedAudioSize returns pending bytes; ClearQueuedAudio
+     clears it. Verified: 34 MB wav queued once, backlog drains smoothly
+     (34.5MB→0), RSS flat, clean exit.
+  3. **SDL_PauseAudioDevice now honored** for queue devices (paused gates
+     top_up_queue_; unpause kicks a drain). Previously pause only set a
+     flag read by the DISABLED pump — music could never be muted.
+- Profiling recipe that found it all: `BIFROST_PROF=1 BIFROST_STATS_PERIOD=
+  10` → syscall histogram showed 99.6% of syscalls = 0x1000 thunk SVCs at
+  132K/s, then counter FROZE with dispatch still sampling = host-side
+  death spiral, not guest slowness. `BIFROST_THUNK_TRACE=1` named the hot
+  pair (GetTicks + GetQueuedAudioSize→constant).
+- Thunk review fixes en route: `thunk.cpp` FB_DUMP scoping build error;
+  mmap_alloc-failure guards (display-mode cache arm wrote to guest 0 on
+  alloc failure; audio SDL_GetCurrentAudioDriver returns -ENOMEM).
+
+## Session History (2026-08-23) — audio-thunk review pass (mixer + inline AAudio callbacks + handles)
+
+- **Review of the uncommitted audio diff found THREE real defects; all
+  FIXED:**
+  1. **mix_interleaved was a silent NO-OP** (audio.cpp): it saturating-added
+     onto `[tail, tail+to_mix)` — free space BEYOND the write cursor — and
+     never advanced `ring_tail_`. The consumer plays only `[head, tail)`, so
+     callback-mixed SFX was never audible, and the next plain write appended
+     at tail and overwrote the mixed bytes byte-for-byte. Fix: overlap-add
+     onto the ACTUAL queued region `[head, head+min(n, queued))` without
+     touching tail (that region is already accounted), then APPEND any
+     remainder at tail with a release store (bounded by free space). The
+     overlap portion can tear one sample against the concurrent SDL callback
+     reader — inherent to lock-free mixing, worst case a click.
+  2. **AAudio data-callback streams still used the banned host pump
+     threads**: `AAudioStreamBuilder_openStream` spawned a std::thread that
+     fired the GUEST callback through the borrow-CPU runner on the main CPU
+     ASYNC while guest code ran — the exact corruption pattern that forced
+     disabling SDL pumps. Now both SDL and AAudio use the same inline
+     deferral model (`cb_scheduled`/`next_cb_us`, fired from audio-thunk
+     dispatches via run_due_callbacks, which iterates BOTH device maps;
+     `pump_loop` deleted). AAudioStream_close's join remains as a no-op
+     guard.
+  3. **Handle minting from map size() collides after close/reopen** (open A,
+     open B, close A, open C ⇒ `.size()==1` ⇒ C aliases B's LIVE slot via
+     `map::operator[]` — leaked bounce, clobbered schedule). All families now
+     mint from monotonic counters (`next_sdl_dev_`, `next_alsa_pcm_`,
+     `next_pulse_`, `next_al_buf_`, `next_al_src_`, `next_aa_builder_`,
+     `next_aa_stream_`). SDL devices use real-SDL-style ids STARTING AT 1,
+     which also fixes the legacy `SDL_PauseAudio`/`SDL_CloseAudio` arms:
+     they look up literal dev 1 but the old scheme minted `0xA5000001`, so
+     they could never find the global device.
+- Hardening en route: `pump_due` re-finds the device after each fired guest
+  callback — a callback that closes its OWN device mid-burst would otherwise
+  leave the `PumpStream&` dangling for `s.next_cb_us += period_us` (UAF;
+  pre-existing shape, closed since the function was rewritten anyway).
+  Fidelity: obtained-spec `samples` now reports the configured
+  frames_per_cb instead of hardcoded 1024.
+- Verified: build clean (0 warnings), test_linux_audio 16/16 +
+  test_android_audio 21/21 under JIT, quick suite **206/206** ×2.
+
 ## Child DOX Index
 
 (none — single-tree emulator; parent Downloads rail indexes this folder)
@@ -2755,6 +2862,170 @@ not musl-`-static`.
   memory, vkCmdBindTransformFeedbackBuffers etc. — all table rows
   already; nested-pointer shapes beyond these are additive arms.
 
+## Session History (2026-08-22) — vkQuake (real Vulkan game) bring-up, PARTIAL
+
+- **Goal: run a real Vulkan game, not the e2e test.** vkQuake 1.33.1
+  cross-built AArch64 (glibc-dynamic) at `~/Downloads/vkquake-src/build-aarch64/vkquake`,
+  staged at `rootfs/vkquake/{vkquake,id1/pak0.pak}` (shareware pak). Run recipe:
+  ```
+  cd rootfs/vkquake && DISPLAY=:0 BIFROST_ROOT=<repo>/rootfs \
+      LD_LIBRARY_PATH=<repo>/rootfs/usr/lib/aarch64-linux-gnu \
+      timeout -s KILL 120 <repo>/bifrost-emu --no-jit ./vkquake -basedir .
+  ```
+  (bifrost-emu ignores SIGTERM — always `timeout -s KILL`. Guest stdout is
+  buffered and LOST on SIGKILL/SIGSEGV — redirect to a file AND check stderr.)
+- **FIXED this session (all verified: objdump encodings / API docs / suite):**
+  1. **Scalar SIMD ADD/SUB decode was WRONG** (interp_fp.cpp): old masks
+     `0x?EC08{4,C}00` matched UNDEFINED encodings; real `add d2,d0,d1` =
+     0x5EE18402 → masked(0xFFE0FC00)=0x5EE08400, `sub d`=0x7EE18402 →
+     0x7EE08400. Scalar three-same uses bits[11:10]=01 (vector uses 10);
+     bits[11:10]=11 is CMTST/CMEQ — do NOT "fix" masks to those patterns.
+     Every scalar add became a silent NOP → mimalloc bitmap corruption → crash.
+  2. **SDLVK_EXT arm misread SDL ABI** (thunk.cpp): pNames is the CALLER'S
+     ARRAY to fill directly, NOT a slot receiving a new char** — old code
+     wrote its mmap_alloc'd array address into names[0] (clobbering entry 0,
+     leaving entry 1 uninitialized → garbage extension strings at
+     vkCreateInstance).
+  3. **vkCreateBufferView row arity** `iiip`→`ippp` (thunk_dp.txt) — same
+     off-by-one class as the earlier vkCmdUpdateBuffer bug; pCreateInfo was
+     reaching host RADV as a raw guest pointer.
+  4. **pNext-chain deep marshal added** (display_thunk.cpp):
+     `vk_pnext_size()` sType→size table + `vk_marshal_pnext_chain()` +
+     `vk_writeback_pnext_chain()`; used by NEW arms for
+     vkGetPhysicalDeviceProperties2/Features2 (+KHR aliases) and inside
+     vkCreateDevice. LESSON learned TWICE: after marshalling you MUST
+     re-point the parent's pNext (and BeginInfo's pInheritanceInfo) at the
+     HOST copy — leaving the raw guest pointer in place crashes identically
+     to no marshal. Sizes verified vs vendored vulkan_core.h (Properties2=840,
+     DriverProps=536, SubgroupProps=32, SSCtrlProps=32, AccelProps=64,
+     Features2=240, SSCtrlFeats=24, BDA=32, AccelFeats=40, RayQueryFeats=24
+     [sType 1000348013 per vendored header], PresentId/Wait[2]=24,
+     CommandBufferInheritanceInfo=56).
+  5. **vkBeginCommandBuffer arm**: VkCommandBufferBeginInfo is 32 BYTES
+     {sType,pNext,flags,pInheritanceInfo} — secondary command buffers
+     (multithreaded recording) chain a guest InheritanceInfo (56 B); both
+     pNext chains deep-marshalled now.
+  6. **vkCreateComputePipelines arm**: mirrors graphics-pipeline stage
+     marshalling (pName strings + SpecializationInfo map entries/data blob);
+     vkQuake builds all shaders via compute pipelines.
+  7. **RT extensions hidden from vkEnumerateDeviceExtensionProperties**
+     (VK_KHR_ray_query / VK_KHR_acceleration_structure): guests that see them
+     demand vkCmdBuildAccelerationStructuresKHR via GetDeviceProcAddr and
+     Sys_Error when missing; RT build-geometry deep-marshal doesn't exist
+     yet. REMOVE this filter once RT marshalling lands.
+  8. **Display-mode getters fixed**: SDL_GetCurrentDisplayMode /
+     SDL_GetDesktopDisplayMode take ONE int and RETURN const SDL_DisplayMode*
+     (rows were `iip`/`ip` with phantom out-param); new name-based arm copies
+     the 24-byte mode struct into a cached guest block (guest cannot deref
+     host static memory).
+  9. **SDL symbols resolve through dlopen("libSDL2-2.0.so.0") handle** instead
+     of RTLD_DEFAULT (thunk.cpp register_known_symbols_).
+- **HOST ENVIRONMENT LANDMINE**: this Arch box runs sdl2-compat over
+  libSDL3.so (BOTH in the process). dlsym(RTLD_DEFAULT) can pick SDL3's
+  same-named exports with DIFFERENT ABI (SDL3 SDL_GetDesktopDisplayMode(
+  displayID, SDL_DisplayMode* out) is out-param flavor). Even with the
+  specific handle, deep compat paths crashed: guest SDL_InitSubSystem(VIDEO)
+  died writing through a stale register as an out-param INSIDE compat
+  internals (pc libSDL2 vaddr 0x28fa2, rbx=bifrost .rodata spec-string
+  "SDL_GetDesktopDisplayMode" — our own strcmp literal leaked into a stale
+  reg that an SDL3-flavored callee used as its out-param). Pre-init video +
+  intercepting InitSubSystem(VIDEO) made things WORSE (crash moved earlier)
+  — BOTH REVERTED.
+- **Current state**: boots through FULL Vulkan init (instance; RADV RX 7600
+  detected with correct Vendor/Driver strings via Properties2 chain;
+  swapchain setup; compute pipelines; multithreaded command-buffer recording;
+  QueueSubmit frame loop observed for ~90 s in the best run), then hits one
+  remaining SIGSEGV tied to the sdl2-compat environment. Suite quick 206/206,
+  vulkan_swapchain + mapbuffer + modern GL ALL PASS on live RADV — zero
+  regressions from this session's changes.
+- **NEXT STEPS**: (a) root-cause the sdl2-compat interaction — candidate:
+  pin the guest to REAL SDL2 (check whether rootfs/Debian libs provide one),
+  or call SDL_DYNAPI_entry explicitly; gdb two-stage breakpoints (break
+  SDL_Init first, then raw addrs); libSDL2 text mapping file-offset 0xd000
+  ≠ vaddr 0x10000-ish — compute offsets via info proc mappings, NOT naive
+  subtraction. (b) RT support needs vkCmdBuildAccelerationStructures
+  deep-marshal if a game hard-requires ray query.
+
+## Session History (2026-08-22) — vkQuake in-game + SDL audio routing fix (CONTINUATION)
+
+- **vkQuake now reaches IN-GAME state** (client parsing server messages,
+  CL_ParseLocalSound) after these additional fixes; remaining crash is a
+  nondeterministic RADV worker-thread fault (0x48-stride descriptor walk,
+  pc libvulkan_radeon+0x3e303) — needs its own focused session.
+- **NEW FIXES this continuation (all suite-verified):**
+  1. **SDL_GetMouseState/SDL_GetGlobalMouseState rows `-` → `pp`** — real
+     signature is (int* x, int* y) out-pointers; raw guest addrs reached
+     host SDL (crash writing coords).
+  2. **fcmgt/facge/facgt/fcmeq/fcmge (register) implemented in interp**
+     (interp_fp.cpp, sub_noq cases 0x0E20E400/0x2E20E400/0x2EA0E400/
+     0x2E20EC00/0x2EA0EC00): per-lane all-ones-or-zero, NaN→false for
+     ordered compares, FA* use absolute values. Verified encodings via
+     cross-assembler. vkQuake's math does `fcmgt v28.2s,v19.2s,v31.2s`
+     (0x2EBFE67C). JIT falls back via CALL_INTERP (classify UNKNOWN).
+  3. **SDL_RWFromMem/ConstMem UAF fixed** (thunk.cpp name-arm): SDL keeps
+     the mem pointer in the RWops beyond the dispatch call — a temporary
+     bounce buffer freed at return = heap corruption anywhere later.
+     Stable direct-window alias when possible, else persistent tracked
+     host copy (freed at thunk shutdown, impl_->rw_kept_).
+  4. **SDL audio symbols moved to AudioThunk registry** — REMOVED 13 rows
+     from thunk_dp.txt (OpenAudio[Device], QueueAudio, PauseAudio[Device],
+     CloseAudio, Lock/UnlockAudio[Device], GetAudioDeviceName, GetCurrent-
+     AudioDriver, Get/ClearQueuedAudio). WHY NOT -ENOENT fall-through:
+     the SVC chain passes the SAME symbol_id to each thunk and AudioThunk
+     only accepts its own ID range — GraphicThunk ids can't re-route.
+     First-definition-wins in dynlinker means graphic rows shadowed the
+     AudioThunk's working callback-mode arms, so SDL_OpenAudio always
+     returned -1 ("audio unavailable") → vkQuake ran with NULL sound fns.
+  5. **AudioThunk gained legacy arms**: SDL_LockAudio/UnlockAudio (no-op),
+     SDL_CloseAudio (closes implicit device 1), SDL_GetCurrentAudioDriver
+     (returns "bifrost"), + REG entries for all four.
+  - GOTCHA: removing the last row using a policy drops it from the
+    generated Policy enum — delete any code referencing it (SDL_OPEN_AUDIO
+    arm had to go too).
+- **Verified**: quick suite ALL PASS; vulkan_swapchain / linux_audio 16/16 /
+  android_audio / android_activity 29 / sdl_gl_triangle ALL PASS on live
+  DISPLAY=:0. vkQuake best run: full Vulkan init → in-game server-message
+  parsing; then nondeterministic aborts (RADV worker crash OR DecodeError
+  pc=0x0 null fn-ptr call — possibly audio-adjacent, needs investigation).
+- **NEXT**: (a) RADV 0x48-stride walk crash — get exact symbol attribution
+  with TID-tagged trace (vk_dispatch_ lines now carry T%lx); suspect our
+  UpdateDescriptorSets staging or an unmarshalled nested struct. (b) The
+  null-call may be vkQuake's snd path still half-initialized — check
+  whether SNDDMA_Init succeeds end-to-end now that OpenAudio works.
+
+
+## Session History (2026-08-22) — minecraft/neverball regression hunt (CONTINUATION 2)
+
+- **REGRESSION FOUND AND ROOT-CAUSED**: after the audio-routing fix,
+  BOTH minecraft_weekend AND neverball died seconds in with NULL-call
+  DecodeErrors (pc=0x0). Root cause: **the AudioThunk SDL pump thread
+  fired the GUEST audio callback through the borrow-CPU runner on the
+  MAIN CPU concurrently with the running guest** → state corruption →
+  arbitrary delayed crashes. The AAudio/OpenSL pump threads (Android)
+  never showed it because those tests are single-threaded/simple.
+  FIX (interim): SDL callback-device pump threads DISABLED — SDL_OpenAudio
+  succeeds but stays silent. Audio-callback correctness requires a
+  deferred-execution model (e.g. run pending callbacks inline inside
+  frequent SDL dispatches like PollEvent/Delay on the calling thread,
+  or a dedicated guest CPU context). The borrow-CPU pattern IS safe when
+  invoked from the syscall path of a suspended guest thread — the bug is
+  only ASYNC invocation from a host thread while guest code runs.
+- **With the pump disabled**: minecraft 30s+/42-47K frames stable ×4,
+  neverball 45s+ to menu stable ×2, vkQuake progressed past its null-call
+  into real rendering commands.
+- **fcvtn/fcvtxn implemented in interp** (sub_noq 0x0E616800 FCVTN /
+  0x2E616800 FCVTXN, d→s): FCVTN zeroes v_hi at Q=0; FCVTXN PRESERVES it
+  (ARM ARM; that's why FCVTXN2 exists). FCVTXN uses round-to-odd
+  approximation (sticky LSB). Encodings verified via cross-assembler
+  (fcvtn v5.2s,v3.2d = 0x0E616865).
+- **Verified**: quick suite ALL PASS; linux_audio 16/16 (queue-mode tests
+  unaffected); minecraft/neverball/vkQuake runs above.
+- **vkQuake remaining crash**: RADV worker-thread fault (0x48-stride walk,
+  pc libvulkan_radeon+0x3e303, `mov 0x40(%rcx),%rdx` iterating 72-byte
+  structs reading ptr@+0x40) — nondeterministic, needs TID-attributed
+  trace in a focused session.
+
+
 ## Session History (2026-08-22) — working audio path (Linux + Android)
 
 - **The audio thunk was rewritten from "forward to host libs" to
@@ -3069,3 +3340,193 @@ not musl-`-static`.
   `mambo_vulkan` in run_tests.sh (needs DISPLAY + Vulkan, exit 77 skip);
   default suite now **211**, quick 206. Verified live on DISPLAY=:0/RADV:
   ALL PASS, "MAMBO VULKAN TEST PASSED — ¡MAMBO!", rc=0.
+
+## Session History (2026-08-23) — scalar-pairwise FP + scalar×indexed-element FP (interp)
+
+- **rudolf-cart investigation surfaced TWO silent-NOP FP families in
+  `compiler_rt.sin`; both implemented in the FP_SCALAR case of
+  `interp_fp.cpp` just before the `[FP-NOP]` fallback:**
+  1. **Scalar pairwise FADDP/FMAXP/FMINP** (`Sd←Vn.2S`, `Dd←Vn.2D`):
+     mask `0xFFFFFC00` matches `0x7E30D800|0x7E70D800` (add),
+     `0x7E30F800|0x7E70F800` (max), `0x7EB0F800|0x7EF0F800` (min);
+     bit22=double, bit23=min. D-form lanes are `v_lo[rn]`/`v_hi[rn]`;
+     S-form BOTH lanes live in the low word of `v_lo[rn]`. NaN:
+     std::fmax/fmin semantics (one-NaN → other operand).
+  2. **Scalar × indexed-element FMLA/FMLS/FMUL/FMULX**: layout verified
+     byte-for-byte vs the cross assembler — bits[31:24]=01U11111,
+     bit23=1 (fixed), bit22=sz, bit21=L (.s index MSB), bit20=M=Rm<4>,
+     bits[19:16]=Rm<3:0>, opcode bits[15:12] (1=FMLA, 5=FMLS, 9=FMUL,
+     FMULX=9 with U=bit29), bit11=H (index LSB), bit10=0. Index:
+     `.d`→H; `.s`→{H,L} with H as MSB. FMLA/FMLS read Rd as ACCUMULATOR.
+     Match predicate `(op & 0xC0000400)==0x40000000 && bits[28:24]==11111
+     && bit23==1` — the bit23 test is REQUIRED: scalar shift/narrow-imm
+     forms (sqshrn/sshr/shl) share opcode 9 and the same space but carry
+     immh there with bit23==0.
+  - Encoding traps learned en route: `.d` forms only allow Vm v0-v15
+    (GNU as silently aliases v≥16 into different instructions); objdump
+    on a raw .word file shows ".word" — always disassemble in context;
+    the assembler's scalar-pairwise mnemonics fail in inline asm, so
+    tests emit `.word` directly (constant-folded via always_inline).
+- JIT side unchanged: both families classify UNKNOWN → CALL_INTERP, so
+  interp-only fix covers both modes ([FP-NOP] fired under JIT confirms
+  routing). New regression test `ctest/jit_fp_pw_elem.c` (18 checks,
+  "ALL PASS", .word-based inline asm) registered as `fp_pw_elem`;
+  suite now **212**, quick **207** (207/207 run). rudolf-cart autoshot:
+  zero [FP-NOP] lines after fix.
+
+## Session History (2026-08-23) — AudioEngine multi-stream rewrite + dedicated-vCPU audio pump
+
+- **Audio class REWRITTEN to the real SDL2/SDL3 model (one physical device,
+  N logical streams, mixed in the device callback).** The old design
+  funneled ALL devices into ONE shared ring gated by a global 32 KiB
+  level check: music (re-topped every frame) pinned the ring permanently
+  so sfx could never push; its pending grew until guests that auto-clear
+  on backlog called SDL_ClearQueuedAudio — which wiped the WHOLE shared
+  ring. Net: "sfx dies after minutes, music glitchy but alive"
+  (rudolf-cart). New architecture in src/audio/audio.{h,cpp}:
+  - `stream_open/close/pause/clear/write` — per-stream float rings at
+    DEVICE rate (converted+resampled at push), mixer sums non-paused
+    streams and clips once. Backpressure is PER-STREAM (full ⇒ accept 0).
+  - `stream_write` accepts PARTIAL input (whole frames whose converted
+    output fits); all-or-nothing DEADLOCKED guests that write
+    multi-second buffers in one call (audio_test wrote 1 s = 44100
+    frames > 370 ms ring → write returned 0 forever, guest spun at
+    20K syscalls/s). Partial acceptance is why test_pipe's cousin
+    `audio_test` passes again.
+  - `stream_queued_frames()` → SDL_GetQueuedAudioSize now reports the
+    HONEST backlog (thunk pending + stream ring in guest bytes).
+  - Legacy /dev/dsp path (devfs) routes through an implicit stream so it
+    plays via the same mixer; `write()` returns BYTES accepted.
+  - mix_interleaved/ring_queued_bytes/ring_free_bytes/clear_queued are
+    GONE — update any out-of-tree caller.
+- **Dedicated-vCPU audio pump (`AudioThunk::start_pump`, default ON,
+  BIFROST_AUDIO_PUMP=0 opts out)**: a host clock thread (2 ms tick)
+  fires guest data callbacks on an EXCLUSIVE cloned vCPU (arch-state
+  copy of main CPU incl. TPIDR_EL0; CPU is non-copyable — copy fields
+  manually) at per-stream period pacing with 500 ms stall resync.
+  Real SMP semantics — mirrors Android's in-process AAudio callback
+  thread; decouples callback cadence from guest API-call frequency (the
+  AAA Android requirement). When active, inline deferral from dispatch
+  arms is DISABLED (single callback mutator). Bounce is snapshotted
+  under `pump_mu` (recursive_mutex) before firing so a callback closing
+  its own device mid-fire can't UAF. SDL/AAudio open/close arms take
+  pump_mu around map mutations.
+- **CRITICAL fork contract: host threads don't survive ::fork().** A
+  forked child inherits the pump's joinable std::thread OBJECT whose
+  real thread lives only in the parent — shutdown's join() futex-waited
+  FOREVER, hanging EVERY forked guest at exit (test_pipe rc=137 after
+  "CHILD: from parent"; child stuck in futex_wait inside exit_group's
+  teardown). Fix: fork_guest's child branch calls
+  `audio_thunk->detach_pump_for_fork_child()` (detach phantom, reset,
+  start_pump() fresh for the child). ANY future emulator-owned host
+  thread needs the same treatment in fork_guest.
+- **Guest-side pacing lesson (rudolf-cart shim)**: wall-clock-paced
+  fill threads MUST schedule in MICROSECONDS — ms-truncated chunk
+  periods (23 vs 23.2199 ms) made production exceed realtime ~1%,
+  accumulating ~35 s of audio latency per HOUR ("coin sounds arrive
+  minutes late"). Real SDL avoids this because the DEVICE CLOCK drives
+  callbacks. Also: GetQueuedAudioSize-based clear-guards must be well
+  above honest ring depth (~30 chunks), or they self-delete audio.
+- rudolf-cart now overlaps music+sfx correctly with stable latency;
+  guest_sdl.c fill thread uses µs scheduling + 64-chunk stall guard.
+- Verified: quick suite **207/207**; linux_audio 16/16, android_audio
+  21/21 both modes ×pump on/off; audio_test exits cleanly; test_pipe
+  3/3 with pump on.
+
+## Session History (2026-08-23) — vk.xml registry integration (milestone 1: mechanical audit)
+
+- **vk.xml is now the mechanical ground truth for VK row signatures.**
+  New tools (analysis + CI, no runtime change to marshalling yet):
+  - `tools/opgen/vkxml.py` — minimal parser for the vendored registry
+    (`tools/vulkan-headers/registry/vk.xml`, 864 commands / 1754
+    structs / 63 handles). Handles use BOTH forms: `name=` attribute
+    (aliases) AND child `<name>` inside
+    `VK_DEFINE_(NON_DISPATCHABLE_)HANDLE(...)` — parse both.
+    `<param api="vulkansc">` duplicates are Safety-Critical variants:
+    keep params whose api list contains plain "vulkan" (exact-match the
+    comma list — "vulkansc" substring-matches!).
+  - `arg_kinds()` derives thunkgen-style letters per param:
+    i/f scalars, P = pointer to scalar/string/handle-array or void*
+    (generic bounce), S = flat struct ptr (generic bounce), D =
+    dynamically-sized/nested (needs a marshal arm). vkQueueSubmit →
+    `iiDi` correctly flags its nested arrays.
+  - `tools/opgen/vkxmlcheck.py` (+ `make vkxml-check`, in check-all):
+    audits EVERY VK row in thunk_dp.txt against vk.xml — arity and
+    pointer-position agreement. First run found **11 real errors**,
+    including the exact class that bit us before (shifted pointer mask
+    reaching host memcpy as raw guest addresses).
+- **Bugs fixed from the first audit run:**
+  1. `vkCreateDebugUtilsMessengerEXT` had pCreateInfo/pAllocator as
+     un-translated 'i' — any guest creating a debug messenger crashed
+     the host driver. It is now INTERCEPTED BY NAME in display_thunk
+     dispatch: mints a fake handle (0xD6C0FFEE00000000+n), returns
+     VK_SUCCESS, NEVER forwards (pfnUserCallback is a GUEST function
+     pointer — same rule as glDebugMessageCallback). Destroy is an
+     accepted no-op. Spec row annotated; checker DELIBERATE-exempted.
+  2. `vkCreateAccelerationStructureKHR iiip→ippp`,
+     `vkDestroyAccelerationStructureKHR iii→iip`,
+     `vkGetAccelerationStructureBuildSizesKHR iipppp→iippp` (extra arg
+     shifted everything; RT rows are unreachable while RT extensions are
+     filtered, but corrected anyway for direct GetDeviceProcAddr users).
+  3. Deliberate shapes documented in the checker's DELIBERATE table:
+     graphics/compute-pipeline arms force pAllocator=NULL at the host
+     call (display_thunk.cpp ~1978); VK_GET_PROC/PRESENT/SUBMIT own
+     their marshalling entirely.
+- Registry quirks learned: vendored vk.xml carries vulkansc duplicate
+  params (api="vulkansc") that MUST be filtered or arity doubles
+  (vkCreateSwapchainKHR appeared as 5-param); handle names hide inside
+  parenthesized child text.
+- **Warnings (39) are the deep-marshal roadmap**: dynamically-sized
+  params dispatched as plain 'p' — vkCmdPipelineBarrier (3 barrier
+  arrays!), vkCmdExecuteCommands, vkCmdCopyBufferToImage/ImageToBuffer
+  regions, vkCmdClearAttachments, enumerations' out-arrays (safe-ish:
+  count-driven writeback handled by arms or single-struct guests today),
+  etc. Each warning = a future crash if a real game passes >1-element
+  arrays through generic dispatch. Next milestone: GENERATE these
+  marshals from vk.xml struct defs instead of hand arms.
+- Verified: make vkxml-check clean (errors=0), opgen-thuck regenerated
+  (1042 symbols), build 0 warnings, quick suite **207/207**,
+  test_vulkan_swapchain rc=0 on live RADV.
+
+## Session History (2026-08-23) — vk.xml milestone 2: generated deep-marshal (VK_CMD_DEEP)
+
+- **vk.xml now GENERATES the marshalling** for the command-batch family:
+  `tools/opgen/vkmarshalgen.py` → `include/opgen_vkmarshal.hpp`
+  (11 struct descriptors + 13 command plans). Runtime consumer: new
+  `Policy::VK_CMD_DEEP` in display_thunk dispatch — a two-pass staging
+  marshal (dry size pass so VkStage reserves exactly once, then fill)
+  that replaces guest array pointers with host pointers before the host
+  call. All covered commands are INPUT-ONLY (command recording): no
+  writeback. Descriptor fields carry {offset, elem kind
+  (STRUCT/HANDLE/RAW), elem size, count-member offset} — counts are read
+  from the element itself at runtime; len expressions are resolved to
+  sibling param indices BY THE GENERATOR from vk.xml (no hand count
+  indices — the hand table had an off-by-one on PipelineBarrier's
+  memoryBarrierCount that the generator fixed automatically).
+- **Layout engine in tools/opgen/vkxml.py validated byte-for-byte against
+  the vendored vulkan_core.h**: 1698 struct layouts computed with natural
+  LP64 alignment; a generated static_assert file compiles clean for the
+  full command closure. Registry quirks handled: struct aliases (name+
+  alias attr — alias structs have NO members and must resolve to their
+  target), api="vulkansc" member duplicates (filter like params),
+  bitmasks via child <name> typedef form (VkFlags=4B/VkFlags64=8B),
+  unions = max(member) sizing with no pointer extraction, C arrays where
+  the [N] suffix is SIBLING TEXT after <name> not inside it.
+- Converted to VK_CMD_DEEP: SetViewport/SetScissor/PipelineBarrier (3
+  barrier arrays)/ClearAttachments/ClearColorImage/ClearDepthStencilImage/
+  CopyBuffer/CopyImage/CopyBufferToImage/CopyImageToBuffer/
+  ExecuteCommands+WaitEvents+ResetFences (handle arrays via the
+  kVkHandleElem sentinel descriptor).
+- **CRITICAL lifetime contract**: the VkStage arena MUST live until after
+  the host call — first version declared it inside the `if (plan)` scope
+  and mambo_vulkan SIGSEGV'd walking freed staging. Declared at dispatch
+  function scope next to the bounce arrays.
+- Defensive caps: ≤1024 elements per array, ≤4 MiB staging, depth ≤4,
+  garbage/unmapped counts fail the whole plan (falls back to generic
+  single-element bounce — never worse than before).
+- Warnings went 39 → 20 (remaining: cross-struct len expressions like
+  GetAccelerationStructureBuildSizes' pMaxPrimitiveCounts, enumeration
+  out-arrays needing query/fill semantics, GetQueryPoolResults OUT
+  buffer — all documented future work).
+- Verified: quick suite 207/207, mambo_vulkan + vulkan_swapchain rc=0 on
+  live RADV (PipelineBarrier exercised by mambo found the lifetime bug).
