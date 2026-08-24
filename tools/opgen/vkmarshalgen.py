@@ -74,6 +74,9 @@ CMD_PLANS = {
 CMD_CREATE_PLANS = {
     'vkCreateShaderModule', 'vkCreatePipelineLayout',
     'vkCreateDescriptorPool', 'vkCreateFramebuffer',
+    # Phase B batch 2: nested attachment/subpass/binding trees — the
+    # generated recursion consumes them wholesale
+    'vkCreateRenderPass', 'vkCreateDescriptorSetLayout',
 }
 # vkCmdBeginRenderPass: (cmdbuf, const Info*, contents) — same rules,
 # no allocator / no OUT handle (the role scan simply finds none).
@@ -433,6 +436,9 @@ def main():
                 elem, elem_size = 2, 8
             elif pf.elem == 'char':
                 elem, elem_size = 3, 1   # treated as verbatim bytes
+            elif pf.elem.startswith('scalar:'):
+                # typed scalar array (uint32_t*, VkDeviceSize*, ...)
+                elem, elem_size = 3, int(pf.elem.split(':', 1)[1])
             if getattr(pf, 'name', '') == 'pNext':
                 # chain-link field — runtime walks the guest chain via
                 # vk_find_struct_by_stype instead of staging raw bytes

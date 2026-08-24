@@ -3646,3 +3646,19 @@ not musl-`-static`.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
   quick suite 207/207, swapchain + mambo rc=0 ×3 each on live RADV
   (both exercise all five migrated commands end-to-end).
+
+## Session History (2026-08-24) — Phase B batch 2: RenderPass + DescriptorSetLayout generated
+
+- **vkCreateRenderPass / vkCreateDescriptorSetLayout migrated to
+  VK_CMD_DEEP create-style plans** — the attachment/subpass/reference/
+  preserve-attachment trees and pImmutableSamplers handle arrays are
+  consumed by generated SINGLE_STRUCT_IN recursion wholesale; two hand
+  arms + seven H structs DELETED (~120 lines). The hand arm's ≤32 caps
+  are replaced by the global kVkDeepMaxElems=1024 / depth≤4 caps.
+- **scalar:N field bug FIXED**: typed scalar pointer fields
+  (uint32_t* pPreserveAttachments) were emitted with elem_size=8
+  (the 'scalar:N' elem kind was never decoded in vkmarshalgen field
+  emission) → 2× over-staging; mostly harmless but a guest array at a
+  page end would zero-fill on overread. Now byte-exact.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
+  quick suite 207/207, swapchain + mambo rc=0 ×3 each on live RADV.

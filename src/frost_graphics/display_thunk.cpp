@@ -1561,35 +1561,6 @@ struct VkSubmitInfoH {
     uint32_t commandBufferCount; const void* pCommandBuffers;
     uint32_t signalSemaphoreCount; const void* pSignalSemaphores;
 };
-// VkAttachmentDescription (9 u32s, flat) / VkAttachmentReference (2 u32s).
-struct VkAttachmentDescriptionH {
-    uint32_t flags, format, samples, loadOp, storeOp,
-             stencilLoadOp, stencilStoreOp, initialLayout, finalLayout;
-};
-struct VkAttachmentReferenceH { uint32_t attachment; uint32_t layout; };
-// VkSubpassDependency (7 u32s, flat).
-struct VkSubpassDependencyH {
-    uint32_t srcSubpass, dstSubpass, srcStageMask, dstStageMask,
-             srcAccessMask, dstAccessMask, dependencyFlags;
-};
-// VkSubpassDescription — carries NESTED arrays (re-pointed in the arm).
-struct VkSubpassDescriptionH {
-    uint32_t flags, pipelineBindPoint, inputAttachmentCount;
-    const void* pInputAttachments;
-    uint32_t colorAttachmentCount;
-    const void* pColorAttachments;
-    const void* pResolveAttachments;
-    const void* pDepthStencilAttachment;
-    uint32_t preserveAttachmentCount;
-    const void* pPreserveAttachments;
-};
-// VkRenderPassCreateInfo — pAttachments/pSubpasses/pDependencies arrays.
-struct VkRenderPassCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t attachmentCount; const void* pAttachments;
-    uint32_t subpassCount; const void* pSubpasses;
-    uint32_t dependencyCount; const void* pDependencies;
-};
 // ── Graphics-pipeline stage (2026-08-21) ──────────────────────────────
 // All layouts verified byte-for-byte against the vendored
 // ctest_real/vulkan_headers vulkan_core.h (natural-alignment LP64 —
@@ -1665,14 +1636,6 @@ struct VkGraphicsPipelineCreateInfoH {
     const VkPipelineDynamicStateCreateInfoH* pDynamicState;
     uint64_t layout; uint64_t renderPass; uint32_t subpass;
     uint64_t basePipelineHandle; int32_t basePipelineIndex;
-};
-struct VkDescriptorSetLayoutCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t bindingCount;
-    const void* pBindings;
-};
-struct VkDescriptorSetLayoutBindingH {
-    uint32_t binding, descriptorType, descriptorCount, stageFlags;
-    const void* pImmutableSamplers;
 };
 struct VkDescriptorSetAllocateInfoH {
     int32_t sType; void* pNext; uint64_t descriptorPool;
@@ -2050,91 +2013,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         return true;
     }
 
-    // ── vkCreateRenderPass ─────────────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pRenderPass) — the create info
-    // carries NESTED pAttachments (VkAttachmentDescription array),
-    // pSubpasses (VkSubpassDescription array whose members ALSO nest
-    // pColorAttachments / pInputAttachments / pResolveAttachments /
-    // pDepthStencilAttachment / pPreserveAttachments), and pDependencies.
-    // Deep-copy the whole tree into staging; the OUT handle (arg 3) is
-    // written back. pAllocator (arg 2) is always NULL (host fn pointers
-    // cannot be marshalled).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_RENDERPASS) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkRenderPassCreateInfoH* info = st.alloc<VkRenderPassCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->attachmentCount && info->pAttachments && info->attachmentCount <= 32) {
-            VkAttachmentDescriptionH* a = reinterpret_cast<VkAttachmentDescriptionH*>(
-                st.bytes(static_cast<size_t>(info->attachmentCount) * sizeof(VkAttachmentDescriptionH), 4));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pAttachments), a,
-                             static_cast<size_t>(info->attachmentCount) * sizeof(VkAttachmentDescriptionH));
-            info->pAttachments = a;
-        }
-        if (info->subpassCount && info->pSubpasses && info->subpassCount <= 32) {
-            VkSubpassDescriptionH* sp = reinterpret_cast<VkSubpassDescriptionH*>(
-                st.bytes(static_cast<size_t>(info->subpassCount) * sizeof(VkSubpassDescriptionH), 8));
-            for (uint32_t i = 0; i < info->subpassCount; i++) {
-                uint64_t g = reinterpret_cast<uint64_t>(info->pSubpasses)
-                           + static_cast<uint64_t>(i) * sizeof(VkSubpassDescriptionH);
-                read_guest_struct(mem, g, &sp[i]);
-                auto repoint_refs = [&](const void*& p, uint32_t count) {
-                    if (count == 0 || count > 32) { p = nullptr; return; }
-                    VkAttachmentReferenceH* a = reinterpret_cast<VkAttachmentReferenceH*>(
-                        st.bytes(static_cast<size_t>(count) * sizeof(VkAttachmentReferenceH), 4));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
-                                     static_cast<size_t>(count) * sizeof(VkAttachmentReferenceH));
-                    p = a;
-                };
-                repoint_refs(sp[i].pInputAttachments, sp[i].inputAttachmentCount);
-                repoint_refs(sp[i].pColorAttachments, sp[i].colorAttachmentCount);
-                if (sp[i].pResolveAttachments && sp[i].colorAttachmentCount) {
-                    VkAttachmentReferenceH* a = reinterpret_cast<VkAttachmentReferenceH*>(
-                        st.bytes(static_cast<size_t>(sp[i].colorAttachmentCount) * sizeof(VkAttachmentReferenceH), 4));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(sp[i].pResolveAttachments), a,
-                                     static_cast<size_t>(sp[i].colorAttachmentCount) * sizeof(VkAttachmentReferenceH));
-                    sp[i].pResolveAttachments = a;
-                } else {
-                    sp[i].pResolveAttachments = nullptr;
-                }
-                if (sp[i].pDepthStencilAttachment) {
-                    VkAttachmentReferenceH* a = st.alloc<VkAttachmentReferenceH>();
-                    read_guest_struct(mem, reinterpret_cast<uint64_t>(sp[i].pDepthStencilAttachment), a);
-                    sp[i].pDepthStencilAttachment = a;
-                }
-                if (sp[i].preserveAttachmentCount && sp[i].pPreserveAttachments && sp[i].preserveAttachmentCount <= 32) {
-                    uint32_t* a = reinterpret_cast<uint32_t*>(
-                        st.bytes(static_cast<size_t>(sp[i].preserveAttachmentCount) * 4u, 4));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(sp[i].pPreserveAttachments), a,
-                                     static_cast<size_t>(sp[i].preserveAttachmentCount) * 4u);
-                    sp[i].pPreserveAttachments = a;
-                }
-            }
-            info->pSubpasses = sp;
-        }
-        if (info->dependencyCount && info->pDependencies && info->dependencyCount <= 32) {
-            VkSubpassDependencyH* d = reinterpret_cast<VkSubpassDependencyH*>(
-                st.bytes(static_cast<size_t>(info->dependencyCount) * sizeof(VkSubpassDependencyH), 4));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pDependencies), d,
-                             static_cast<size_t>(info->dependencyCount) * sizeof(VkSubpassDependencyH));
-            info->pDependencies = d;
-        }
-        uint64_t host_renderpass = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_renderpass);
-        if (cpu.regs[3] && host_renderpass) {
-            try { mem->write(cpu.regs[3], &host_renderpass, sizeof(host_renderpass)); }
-            catch (...) { /* out pointer unmapped — result lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateRenderPass → %d (renderpass=%p)\n",
-                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_renderpass));
-        }
-        return true;
-    }
-
     // ── vkCreateGraphicsPipelines ────────────────────────────────────────
     // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
     // pPipelines) — each VkGraphicsPipelineCreateInfo carries a tree:
@@ -2303,43 +2181,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             fprintf(stderr, "[display-thunk] vkCreateGraphicsPipelines (n=%u) → %d (pipe0=%p)\n",
                     count, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pipes[0]));
         }
-        return true;
-    }
-
-    // ── vkCreateDescriptorSetLayout ──────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pSetLayout) — pBindings is an array
-    // whose entries may each carry a pImmutableSamplers handle array.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkDescriptorSetLayoutCreateInfoH* info = st.alloc<VkDescriptorSetLayoutCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->bindingCount && info->pBindings && info->bindingCount <= 32) {
-            VkDescriptorSetLayoutBindingH* b = reinterpret_cast<VkDescriptorSetLayoutBindingH*>(
-                st.bytes(info->bindingCount * sizeof(VkDescriptorSetLayoutBindingH), 8));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pBindings), b,
-                             info->bindingCount * sizeof(VkDescriptorSetLayoutBindingH));
-            for (uint32_t i = 0; i < info->bindingCount; i++) {
-                if (b[i].descriptorCount && b[i].pImmutableSamplers && b[i].descriptorCount <= 64) {
-                    uint64_t* s = reinterpret_cast<uint64_t*>(st.bytes(b[i].descriptorCount * 8u, 8));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(b[i].pImmutableSamplers), s,
-                                     b[i].descriptorCount * 8u);
-                    b[i].pImmutableSamplers = s;
-                } else { b[i].pImmutableSamplers = nullptr; }
-            }
-            info->pBindings = b;
-        } else { info->bindingCount = 0; info->pBindings = nullptr; }
-        uint64_t host_dsl = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_dsl);
-        if (cpu.regs[3] && host_dsl) {
-            try { mem->write(cpu.regs[3], &host_dsl, sizeof(host_dsl)); }
-            catch (...) { /* out pointer unmapped */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkCreateDescriptorSetLayout → %d (dsl=%p)\n",
-                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_dsl));
         return true;
     }
 
@@ -3751,9 +3592,7 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_DEVICE:
         case thunk::Policy::VK_PRESENT:
         case thunk::Policy::VK_SUBMIT:
-        case thunk::Policy::VK_CREATE_RENDERPASS:
         case thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES:
-        case thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT:
         case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
         case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:
         case thunk::Policy::VK_ALLOC_MEMORY:

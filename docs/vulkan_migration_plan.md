@@ -95,12 +95,20 @@ vkCmdBeginRenderPass — five hand arms + five H structs DELETED, rows on
 VK_CMD_DEEP. Also fixed phantom C1 alias names (WithCount/BindVB2 are
 EXT aliases, not KHR). Gates re-run: 207/207, RADV ×3 each.
 
-Remaining hand arms (12): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
-RENDERPASS, GRAPHICS/COMPUTE_PIPELINES, PIPELINE_LAYOUT(done),
-DESCRIPTOR_SET_LAYOUT, ALLOC_DESCRIPTOR_SETS, UPDATE_DESCRIPTOR_SETS,
-ALLOC/FREE/MAP/UNMAP_MEMORY, FLUSH/INVALIDATE_MAPPED, SYNC_PULL,
-BEGIN_COMMAND_BUFFER. Next batch: RenderPass family (attachment/subpass
-trees), then DESCRIPTOR_SET_LAYOUT, then pipelines.
+**Batch 2 DONE (2026-08-24)**: vkCreateRenderPass + 
+vkCreateDescriptorSetLayout migrated off their hand arms — the
+attachment/subpass/reference/preserve trees and the
+pImmutableSamplers handle arrays are consumed wholesale by generated
+recursion. Seven more H structs deleted. Found+fixed en route:
+scalar-typed pointer fields (uint32_t* pPreserveAttachments) staged
+with elem_size 8 instead of 4 ('scalar:N' never decoded in field
+emission). Gates re-run: 207/207, RADV ×3 each.
+
+Remaining hand arms (10): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
+GRAPHICS/COMPUTE_PIPELINES, ALLOC_DESCRIPTOR_SETS,
+UPDATE_DESCRIPTOR_SETS, ALLOC/FREE/MAP/UNMAP_MEMORY,
+FLUSH/INVALIDATE_MAPPED, SYNC_PULL, BEGIN_COMMAND_BUFFER.
+Next batch: pipelines (biggest tree), then SUBMIT.
 
 ## Hard contracts (violating any = known crash class)
 

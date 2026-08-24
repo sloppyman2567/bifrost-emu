@@ -767,7 +767,7 @@ vkMapMemory                 VK   iiiiip         -     VK_MAP_MEMORY      -
 vkUnmapMemory               VK   ii             -     VK_UNMAP_MEMORY     -
 vkFlushMappedMemoryRanges   VK   iip            -     VK_FLUSH_MAPPED     -
 vkInvalidateMappedMemoryRanges VK iip           -     VK_INVALIDATE_MAPPED -
-vkCreateRenderPass          VK   ippp           -     VK_CREATE_RENDERPASS -
+vkCreateRenderPass          VK   ippp           -     VK_CMD_DEEP       -
 vkDestroyRenderPass         VK   iip            -     VULKAN            -
 vkCreateFramebuffer         VK   ippp           -     VK_CMD_DEEP -
 vkDestroyFramebuffer        VK   iip            -     VULKAN            -
@@ -780,7 +780,7 @@ vkCreateComputePipelines    VK   iiipip         -     VULKAN            -
 vkDestroyPipeline           VK   iip            -     VULKAN            -
 vkCreatePipelineLayout      VK   ippp           -     VK_CMD_DEEP -
 vkDestroyPipelineLayout     VK   iip            -     VULKAN            -
-vkCreateDescriptorSetLayout VK   ippp           -     VK_CREATE_DESCRIPTOR_SET_LAYOUT -
+vkCreateDescriptorSetLayout VK   ippp           -     VK_CMD_DEEP       -
 vkDestroyDescriptorSetLayout VK  iip            -     VULKAN            -
 vkAllocateDescriptorSets    VK   ipp            -     VK_ALLOC_DESCRIPTOR_SETS -
 vkFreeDescriptorSets        VK   iiip           -     VK_CMD_DEEP            -
