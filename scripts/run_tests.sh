@@ -30,7 +30,7 @@
 #   Dynamic      15  — dynamically-linked musl + glibc tests (need rootfs)
 #   Interactive   5  — visual/stdin REPL tests (included in standard suite)
 #
-# Standard suite = 211 tests. Quick suite = 206 (skip benchmarks).
+# Standard suite = 212 tests. Quick suite = 207 (skip benchmarks).
 # With SDL2/GL build and DISPLAY available, sdl_gl_triangle passes.
 # Without rootfs, dynamic tests skip automatically.
 #
@@ -211,6 +211,7 @@ UNIT_TESTS=(
     "simd|ctest/jit_simd.elf||5|PASS"
     "simd_misc|ctest/jit_simd_misc.elf||5|checks passed"
     "simd_sat|ctest/test_simd_sat.elf||5|ALL PASS"
+    "fp_pw_elem|ctest/jit_fp_pw_elem.elf||5|ALL PASS"
     "loop|ctest/loop.elf||5|Loop value"
     "test_fb|ctest/test_fb.elf||5|mode:"
     "test_float|ctest/test_float.elf||5|3.14"

@@ -118,6 +118,35 @@ static inline uint64_t fp_to_unsigned_sat(double v, bool is_64bit) {
     }
     return is_64bit ? static_cast<uint64_t>(v) : static_cast<uint32_t>(v);
 }
+// ── Round-to-Odd double→float narrowing (FCVTXN / FCVTXN2) ─────────
+// FPRound(FPRounding_ODD): round_up = FALSE (truncate toward zero),
+// then if the result is inexact and the retained mantissa LSB is 0,
+// increment it — i.e. truncate, then force an odd LSB when any bit
+// was discarded. Overflow saturates to FPMaxNormal (never ±inf).
+// A plain nearest-even cast followed by "|1" is WRONG when the cast
+// rounded AWAY from the exact value (e.g. 0x3FEFFFFFFFFFFFFF casts up
+// to 1.0f; OR'ing makes it larger than the input instead of
+// truncating to 0x3F7FFFFF).
+static inline float fp_to_f32_rto(double dv) {
+    float fv = static_cast<float>(dv);
+    if (!std::isfinite(dv)) return fv;               // NaN / ±inf pass through
+    if (std::isinf(fv)) {                            // overflow → FPMaxNormal
+        uint32_t u = std::signbit(fv) ? 0xFF7FFFFFu : 0x7F7FFFFFu;
+        memcpy(&fv, &u, 4);
+        return fv;
+    }
+    if (static_cast<double>(fv) != dv) {
+        // Nearest-even rounded away from zero past the exact value →
+        // step back one ulp toward zero to get the truncated value.
+        if ((fv > 0 && (double)fv > dv) || (fv < 0 && (double)fv < dv))
+            fv = std::nextafter(fv, 0.0f);
+        uint32_t u;
+        memcpy(&u, &fv, 4);
+        u |= 1;  // round-to-odd: odd LSB if any bit was discarded
+        memcpy(&fv, &u, 4);
+    }
+    return fv;
+}
 // ── Integer saturation helpers (SQADD/UQADD/SQSUB/UQSUB/SQSHL/SQABS/
 //    SQNEG/SUQADD/USQADD family, added 2026-08-22). Width-generic via
 //    `bits` (8/16/32/64); sign-extension through int64 so every width
@@ -459,6 +488,42 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             uint32_t sub = op & 0xFFE0FC00;  // bits[31:24] + bits[20:10]
             // Strip Q from sub for matching purposes
             uint32_t sub_noq = sub & ~(1u << 30);
+            // ── FP narrowing convert (FCVTN / FCVTXN, d -> s) ────────
+            // NOTE: these CANNOT go through the sub_noq switch — their
+            // opcode uses bits[20:16] (=00001), which the 0xFFE0FC00
+            // mask clears (0x0E616844 masks to 0x0E606800). Match on
+            // op directly, stripping ONLY Q (bit30 — 0xBFFFFF00);
+            // U (bit29) picks FCVTN vs FCVTXN. Verified with the cross
+            // assembler:
+            //   fcvtn  v5.2s,v3.2d = 0x0E616865 / fcvtn2 .4s 0x4E6168xx
+            //   fcvtxn v6.2s,v7.2d = 0x2E6168E6 / fcvtxn2 .4s 0x6E6168xx
+            // Narrowing semantics (same family as ADDHN/XTN): BOTH
+            // source doubles (Vn low AND high qwords) are ALWAYS
+            // converted — Q only selects the destination half:
+            //   Q=0 → result in LOW half; FCVTN zeroes the top half,
+            //     FCVTXN leaves it UNCHANGED (per ARM ARM).
+            //   Q=1 (*2 variants) → result in HIGH half, LOW preserved.
+            if ((op & 0xBFFFFF00) == 0x0E616800 ||
+                (op & 0xBFFFFF00) == 0x2E616800) {
+                const bool rto = ((op >> 29) & 1) != 0;
+                uint32_t out[2];
+                for (int i = 0; i < 2; i++) {
+                    uint64_t raw = (i == 0) ? cpu.v_lo[rn] : cpu.v_hi[rn];
+                    double dv;
+                    memcpy(&dv, &raw, 8);
+                    float fv = rto ? fp_to_f32_rto(dv)
+                                   : static_cast<float>(dv);
+                    memcpy(&out[i], &fv, 4);
+                }
+                const uint64_t res =
+                    (uint64_t)out[0] | ((uint64_t)out[1] << 32);
+                if (Q) cpu.v_hi[rd] = res;
+                else {
+                    cpu.v_lo[rd] = res;
+                    if (!rto) cpu.v_hi[rd] = 0;
+                }
+                return;
+            }
             switch (sub_noq) {
             // ── DUP (general): sf 0 0 11110 00 0 imm5 0000 0 1 Rn Rd ──
             // v0 only matched Q=0 (mask 0xFFE0FC00 val 0x0E000C00).
@@ -1289,6 +1354,50 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         }
                     }
                     memset(out + i*esize, any ? 0xFF : 0x00, esize);
+                }
+                memcpy(&cpu.v_lo[rd], out, 8);
+                if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
+                else cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── FP compare-register (FCMEQ/FCMGE/FCMGT/FACGE/FACGT) ──
+            // SIMD three-same, type=00 (single), verified with the cross
+            // assembler:
+            //   fcmeq v.4s = 0x4E20E400 / .2s = 0x0E20E400 (U=0)
+            //   fcmge      = 0x6E20E400 /     = 0x2E20E400 (U=1)
+            //   fcmgt      = 0x6EA0E400 /     = 0x2EA0E400 (U=1, bit23=1)
+            //   facge      = 0x6E20EC00 /     = 0x2E20EC00 (bits[11:10]=11)
+            //   facgt      = 0x6EA0EC00 /     = 0x2EA0EC00
+            // Per-lane all-ones if condition else 0; NaN makes ordered
+            // compares false; FA* compare absolute values.
+            // vkQuake's renderer does `fcmgt v28.2s, v19.2s, v31.2s`
+            // (0x2EBFE67C) in its math code.
+            case 0x0E20E400: case 0x2E20E400: case 0x2EA0E400:
+            case 0x2E20EC00: case 0x2EA0EC00: {
+                const int elems = Q ? 4 : 2;
+                uint8_t out[16] = {0};
+                for (int i = 0; i < elems; i++) {
+                    float a, b;
+                    // Lane i: rn lane lives in v_lo/v_hi qword i/2, half i%2
+                    uint64_t lo_a = (i < 2) ? cpu.v_lo[rn] : cpu.v_hi[rn];
+                    uint64_t lo_b = (i < 2) ? cpu.v_lo[rm] : cpu.v_hi[rm];
+                    uint32_t ua = (i & 1) ? (lo_a >> 32) : (uint32_t)lo_a;
+                    uint32_t ub = (i & 1) ? (lo_b >> 32) : (uint32_t)lo_b;
+                    memcpy(&a, &ua, 4);
+                    memcpy(&b, &ub, 4);
+                    bool res;
+                    switch (sub_noq) {
+                    case 0x0E20E400: res = a == b; break;              // FCMEQ
+                    case 0x2E20E400: res = a >= b; break;              // FCMGE
+                    case 0x2EA0E400: res = a > b; break;               // FCMGT
+                    default: {                                          // FA*
+                        float fa = std::fabs(a), fb = std::fabs(b);
+                        res = (sub_noq == 0x2E20EC00) ? (fa >= fb)
+                                                      : (fa > fb);
+                        break;
+                    }
+                    }
+                    memset(out + i * 4, res ? 0xFF : 0x00, 4);
                 }
                 memcpy(&cpu.v_lo[rd], out, 8);
                 if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
@@ -4347,6 +4456,130 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     write_fp_s(cpu, rd, r);
                 }
                 return;
+            }
+            // ── SIMD scalar INTEGER ADD/SUB (add d / sub d) ───────────
+            // Scalar three-same group: bits[28:24]=11110, bit21=1,
+            // bits[11:10]=01 (NOT the vector's 10). Verified with objdump:
+            //   add d2,d0,d1 = 0x5EE18402 → masked 0x5EE08400
+            //   sub d2,d0,d1 = 0x7EE18402 → masked 0x7EE08400
+            // (U=bit29 picks add vs sub; size must be 11.) Do NOT use the
+            // bits[11:10]=11 patterns — that space is CMTST/CMEQ
+            // (cmtst d = 0x5EE18C02, cmeq d = 0x7EE18C02). mimalloc's
+            // bitmap code does `add d2, d0, d1` then `str d2`.
+            if ((op & 0xFFE0FC00) == 0x5EE08400) {
+                cpu.v_lo[rd] = cpu.v_lo[rn] + cpu.v_lo[rm];
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            if ((op & 0xFFE0FC00) == 0x7EE08400) {
+                cpu.v_lo[rd] = cpu.v_lo[rn] - cpu.v_lo[rm];
+                cpu.v_hi[rd] = 0;
+                return;
+            }
+            // ── Scalar FCVTXN (Sd ← Dn, round-to-odd) ─────────────────
+            // fcvtxn s8,d7 = 0x7E6168E8 → masked 0x7E616800 (rn/rd
+            // stripped; U=1 and size=01 are part of the constant).
+            // Round-to-odd double→single narrowing; writes Sd (low 32
+            // bits of Vd), the rest of Vd unchanged (scalar rule).
+            // The vector forms live in the SIMD_DP section above.
+            if ((op & 0xFFFFFC00) == 0x7E616800) {
+                uint64_t raw = cpu.v_lo[rn];
+                double dv;
+                memcpy(&dv, &raw, 8);
+                float fv = fp_to_f32_rto(dv);
+                memcpy(reinterpret_cast<uint32_t*>(&cpu.v_lo[rd]), &fv, 4);
+                return;
+            }
+            // ── Scalar pairwise FADDP/FMAXP/FMINP ─────────────────────
+            //   faddp s0,v0.2s = 0x7E30D800   faddp d0,v0.2d = 0x7E70D800
+            //   fmaxp s0,v0.2s = 0x7E30F800   fmaxp d0,v0.2d = 0x7E70F800
+            //   fminp s0,v0.2s = 0x7EB0F800   fminp d0,v0.2d = 0x7EF0F800
+            // (mask 0xFFFFFC00 strips Rn/Rd; bit23=FMINP, bit22=double,
+            //  opcode bits[15:12]: D=add, F=max/min). compiler-rt's
+            // vectorized sin() emits `faddp d4,v4.2d`; previously these
+            // fell through to the silent FP-NOP fallback, corrupting sin().
+            {
+                const uint32_t pw = op & 0xFFFFFC00;
+                if (pw == 0x7E30D800 || pw == 0x7E70D800 ||
+                    pw == 0x7E30F800 || pw == 0x7E70F800 ||
+                    pw == 0x7EB0F800 || pw == 0x7EF0F800) {
+                    const bool is_add = ((op >> 12) & 0xF) == 0xD;
+                    const bool is_min = (op & 0x00800000) != 0;
+                    if (op & 0x00400000) {  // double: lanes = Vn.2D
+                        double a = read_fp_d(cpu, rn);
+                        uint64_t hi_bits = cpu.v_hi[rn];
+                        double b; memcpy(&b, &hi_bits, 8);
+                        if (is_add)      write_fp_d(cpu, rd, a + b);
+                        else if (is_min) write_fp_d(cpu, rd, std::fmin(a, b));
+                        else             write_fp_d(cpu, rd, std::fmax(a, b));
+                    } else {                // single: both lanes in Vn low word
+                        uint32_t lbits = static_cast<uint32_t>(cpu.v_lo[rn]);
+                        float a; memcpy(&a, &lbits, 4);
+                        uint32_t hbits = static_cast<uint32_t>(cpu.v_lo[rn] >> 32);
+                        float b; memcpy(&b, &hbits, 4);
+                        if (is_add)      write_fp_s(cpu, rd, a + b);
+                        else if (is_min) write_fp_s(cpu, rd, std::fminf(a, b));
+                        else             write_fp_s(cpu, rd, std::fmaxf(a, b));
+                    }
+                    return;
+                }
+            }
+            // ── Scalar × indexed-element FMLA/FMLS/FMUL/FMULX ──────────
+            //   fmla d4,d2,v3.d[1] = 0x5FC31844   fmla s4,s2,v3.s[3] = 0x5FA31844
+            //   fmls d4,d2,v3.d[1] = 0x5FC35844
+            //   fmul d4,d2,v3.d[1] = 0x5FC39844   fmul s4,s2,v3.s[3] = 0x5FA39844
+            //   fmulx d4,d2,v3.d[1]= 0x7FC39844   fmulx s4,s2,v3.s[3]= 0x7FA39844
+            // Layout (verified vs cross-assembler): bits[31:24]=01U11111,
+            // bit23=1 (fixed), bit22=sz (1=d), bit21=L (.s index MSB),
+            // bit20=M=Rm<4>, bits[19:16]=Rm<3:0>, bit11=H (index LSB),
+            // bit10=0. Index: .d → H; .s → L:H.
+            // bit10=0. Index: .d → H; .s → L:H. Discriminator vs the
+            // scalar shift/narrow-imm space (sqshrn/sshr/shl): those
+            // carry immh with bit23==0; this group always sets bit23.
+            if ((op & 0xC0000400) == 0x40000000 &&
+                ((op >> 24) & 0x1F) == 0x1F && ((op >> 23) & 1) == 1) {
+                uint8_t opc = (op >> 12) & 0xF;
+                bool is_u = (op >> 29) & 1;
+                if ((opc == 0x1 || opc == 0x5 || opc == 0x9) && !(is_u && opc != 0x9)) {
+                    bool is_dbl = (op >> 22) & 1;
+                    uint8_t rm_reg =
+                        (uint8_t)((((op >> 20) & 1) << 4) | ((op >> 16) & 0xF));
+                    unsigned idx = is_dbl ? ((op >> 11) & 1)
+                                          : ((((op >> 11) & 1) << 1) |
+                                             ((op >> 21) & 1));
+                    double elem;
+                    float elem_s;
+                    if (is_dbl) {
+                        uint64_t bits = idx ? cpu.v_hi[rm_reg]
+                                            : cpu.v_lo[rm_reg];
+                        memcpy(&elem, &bits, 8);
+                    } else {
+                        const uint64_t& src =
+                            (idx >= 2) ? cpu.v_hi[rm_reg] : cpu.v_lo[rm_reg];
+                        uint32_t w = static_cast<uint32_t>(
+                            src >> ((idx & 1) ? 32 : 0));
+                        memcpy(&elem_s, &w, 4);
+                    }
+                    if (opc == 0x9) {              // FMUL / FMULX
+                        if (is_dbl)
+                            write_fp_d(cpu, rd, read_fp_d(cpu, rn) * elem);
+                        else
+                            write_fp_s(cpu, rd, read_fp_s(cpu, rn) * elem_s);
+                    } else {                       // FMLA/FMLS: rd accumulates
+                        if (is_dbl) {
+                            double acc = read_fp_d(cpu, rd);
+                            double prod = read_fp_d(cpu, rn) * elem;
+                            write_fp_d(cpu, rd, opc == 0x1 ? acc + prod
+                                                           : acc - prod);
+                        } else {
+                            float acc = read_fp_s(cpu, rd);
+                            float prod = read_fp_s(cpu, rn) * elem_s;
+                            write_fp_s(cpu, rd, opc == 0x1 ? acc + prod
+                                                           : acc - prod);
+                        }
+                    }
+                    return;
+                }
             }
             // Unknown FP instruction — NOP (don't crash)
             {
