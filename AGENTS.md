@@ -3687,3 +3687,38 @@ not musl-`-static`.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
   (warnings 6→4), quick suite 207/207, swapchain + mambo rc=0 ×3 each
   on live RADV (both exercise graphics-pipeline creation end-to-end).
+
+## Session History (2026-08-24) — Phase B batch 4: SUBMIT(+2) + descriptor-set pair; two marshal bugs fixed
+
+- **vkQueueSubmit / vkQueueSubmit2(+KHR) / vkUpdateDescriptorSets
+  migrated to auto-derived VK_CMD_DEEP plans; vkAllocateDescriptorSets
+  via create-style plan with a NEW count source: count_arg=0xFE +
+  VkPlanRef.aux = byte offset of the count member inside the staged
+  STRUCT_IN struct (descriptorSetCount in pAllocateInfo). The OUT
+  handle-array bounce is sized by reading that member from the guest
+  struct at scan time.**
+- **BUG A (type_size-before-layouts classification)**: the CMD_PLANS
+  param scan checked scalar type_size() BEFORE the struct-layouts
+  check — type_size() resolves struct names too, so ANY struct-typed
+  array parameter was staged as FLAT RAW BYTES with its interior guest
+  pointers untranslated (VkSubmitInfo → RADV derefs raw guest
+  pCommandBuffers pointer → SIGSEGV). A2-era plans were unaffected by
+  luck (all their structs are flat PODs). Fix: layouts check FIRST.
+  This also explains phantom "need=72" undercounts during debugging.
+- **Latent b2/b3 issue (superseded commits)**: the plan-failure sweep
+  only cleared out-rec bits, leaving STRUCT_IN/NULLIFY args marked done
+  on a failed size pass — raw guest pointers then reached the host via
+  skipped generic translation. The batch-4 rewrite sweeps EVERY planned
+  arg bit unconditionally. Intermediate commits dc02fe2/0a7c8b9 can
+  crash intermittently when a plan fails; HEAD supersedes them.
+- **PCWFC push hook**: vkQueueSubmit/vkQueueSubmit2 now push mapped
+  bounces via a name check after deep staging (applies to both deep and
+  generic fallback paths), replacing the deleted hand arm's inline call.
+- Debug methodology note: stderr dispatch traces print BEFORE the host
+  call, so "last traced command" attribution is reliable, but a stale
+  binary masquerading as a bisect point cost an hour — verify the
+  binary actually contains/excludes your marker (strings) before
+  trusting a bisect result.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
+  (warnings 4), quick suite 207/207 (swapchain runs for real with
+  DISPLAY set), swapchain ×5 + mambo ×3 rc=0 on live RADV.

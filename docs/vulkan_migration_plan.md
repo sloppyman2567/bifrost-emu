@@ -112,10 +112,17 @@ OUT handle arrays with register counts (STRUCT_IN/OUT_HANDLE roles
 unified over count_arg; 0xFF sentinel = single). Two more hand arms +
 14 H structs deleted (~110 lines). Gates re-run: 207/207, RADV ×3 each.
 
-Remaining hand arms (8): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
-ALLOC_DESCRIPTOR_SETS, UPDATE_DESCRIPTOR_SETS, memory arms (permanent),
-SYNC_PULL, BEGIN_COMMAND_BUFFER. Next: SUBMIT (+SUBMIT2), then the
-descriptor-set pair.
+**Batch 4 DONE (2026-08-24)**: SUBMIT + SUBMIT2(+KHR) + 
+UPDATE_DESCRIPTOR_SETS auto-derived plans; ALLOC_DESCRIPTOR_SETS via
+count_arg=0xFE/aux (count member inside staged struct). Two bugs found:
+(A) type_size-before-layouts classification staged nested struct arrays
+as raw bytes (untranslated interior pointers → RADV SIGSEGV) — layouts
+check now first; (B) incomplete failure sweep in b2/b3 left stale done
+bits (fixed by batch-4 unconditional sweep; those intermediates can
+crash intermittently). PCWFC push moved to a name-based pre-call hook.
+Hand arms remaining (5): PRESENT, CREATE_INSTANCE/DEVICE, memory arms
+(permanent), SYNC_PULL. BEGIN_COMMAND_BUFFER could also fold into the
+generated path later (its begin-info shape fits SINGLE_STRUCT_IN).
 
 ## Hard contracts (violating any = known crash class)
 

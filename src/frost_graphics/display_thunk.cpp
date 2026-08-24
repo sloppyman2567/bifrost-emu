@@ -1263,9 +1263,30 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     rec.guest_array = args[r.arg];
                     rec.elem_size = 8;
                     uint32_t hcount = 1;
-                    if (r.count_arg != 0xFF && r.count_arg < kMaxArgs)
+                    if (r.count_arg == 0xFE) {
+                        // count = u32 member of the guest STRUCT_IN arg
+                        hcount = 0;
+                        for (uint8_t rj = 0; rj < plan->nrefs; rj++) {
+                            const thunk::VkPlanRef& r4 =
+                                plan->refs[rj];
+                            if (r4.out == 4 && args[r4.arg] &&
+                                    r4.arg < kMaxArgs) {
+                                uint32_t m = 0;
+                                try {
+                                    impl_->mem->read(
+                                        args[r4.arg] + r.aux, &m, 4);
+                                } catch (...) { m = 0; }
+                                hcount = static_cast<uint32_t>(
+                                    std::min<uint64_t>(m,
+                                                       kVkDeepMaxElems));
+                                break;
+                            }
+                        }
+                    } else if (r.count_arg != 0xFF &&
+                               r.count_arg < kMaxArgs) {
                         hcount = static_cast<uint32_t>(std::min<uint64_t>(
                             args[r.count_arg], kVkDeepMaxElems));
+                    }
                     rec.staged_elems = hcount;
                     rec.on_success_only = true;
                     need = (need + 7u) & ~size_t(7);
@@ -1437,6 +1458,15 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 vk_n_out_recs = 0;
             }
         }
+    }
+
+    // Submits execute GPU work that reads the host mappings (vkMapMemory
+    // / persistent-coherent bounces) — push them before any submit
+    // reaches the driver, on BOTH the deep path and the generic fallback.
+    if (entry.host_fn && impl_->mem &&
+        (entry.name == "vkQueueSubmit" || entry.name == "vkQueueSubmit2" ||
+         entry.name == "vkQueueSubmit2KHR")) {
+        impl_->vk_sync_push_all();
     }
 
     if (entry.pointer_args && impl_->mem) {
@@ -1614,29 +1644,6 @@ struct VkPresentInfoH {
     const void* pWaitSemaphores; uint32_t swapchainCount;
     const void* pSwapchains; const uint32_t* pImageIndices;
     int32_t* pResults;  // VkResult array (may be NULL)
-};
-// VkSubmitInfo (command-buffer submission; handles round-trip verbatim).
-struct VkSubmitInfoH {
-    int32_t sType; void* pNext; uint32_t waitSemaphoreCount;
-    const void* pWaitSemaphores; const void* pWaitDstStageMask;
-    uint32_t commandBufferCount; const void* pCommandBuffers;
-    uint32_t signalSemaphoreCount; const void* pSignalSemaphores;
-};
-struct VkDescriptorSetAllocateInfoH {
-    int32_t sType; void* pNext; uint64_t descriptorPool;
-    uint32_t descriptorSetCount; const void* pSetLayouts;
-};
-struct VkWriteDescriptorSetH {
-    int32_t sType; void* pNext; uint64_t dstSet;
-    uint32_t dstBinding, dstArrayElement, descriptorCount, descriptorType;
-    const void* pImageInfo; const void* pBufferInfo; const void* pTexelBufferView;
-};
-struct VkDescriptorImageInfoH { uint64_t sampler, imageView; uint32_t imageLayout; };
-struct VkDescriptorBufferInfoH { uint64_t buffer, offset, range; };
-struct VkCopyDescriptorSetH {
-    int32_t sType; void* pNext; uint64_t srcSet;
-    uint32_t srcBinding, srcArrayElement; uint64_t dstSet;
-    uint32_t dstBinding, dstArrayElement, descriptorCount;
 };
 // vkMapMemory bounce stage (2026-08-21): VkMemoryAllocateInfo (records the
 // allocation size for VK_WHOLE_SIZE maps) and VkMappedMemoryRange (flat —
@@ -1944,154 +1951,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         if (trace) {
             fprintf(stderr, "[display-thunk] vkQueuePresentKHR → %d\n", static_cast<int32_t>(ret));
         }
-        return true;
-    }
-
-    // ── vkQueueSubmit ─────────────────────────────────────────────────
-    // (queue, submitCount, pSubmits, fence) — each VkSubmitInfo has NESTED
-    // pWaitSemaphores / pWaitDstStageMask / pCommandBuffers /
-    // pSignalSemaphores arrays of opaque handles the host can't read from
-    // guest addresses. Re-point every array into the staging buffer; the
-    // handles themselves round-trip verbatim. No writeback (input-only).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_SUBMIT) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        uint32_t submit_count = static_cast<uint32_t>(cpu.regs[1]);
-        if (submit_count > 16) {
-            cpu.regs[0] = 0xFFFFFFFEu;  // VK_ERROR_DEVICE_LOST
-            return true;
-        }
-        VkSubmitInfoH* arr = reinterpret_cast<VkSubmitInfoH*>(
-            st.bytes(static_cast<size_t>(submit_count) * sizeof(VkSubmitInfoH), 8));
-        for (uint32_t i = 0; i < submit_count; i++) {
-            uint64_t g = cpu.regs[2] + static_cast<uint64_t>(i) * sizeof(VkSubmitInfoH);
-            read_guest_struct(mem, g, &arr[i]);
-            arr[i].pNext = nullptr;  // guest pNext chains are not host-readable
-            auto repoint_u64 = [&](const void*& p, uint32_t count) {
-                if (count == 0 || count > 16) { p = nullptr; return; }
-                uint64_t* a = reinterpret_cast<uint64_t*>(
-                    st.bytes(static_cast<size_t>(count) * 8u, 8));
-                read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
-                                 static_cast<size_t>(count) * 8u);
-                p = a;
-            };
-            auto repoint_u32 = [&](const void*& p, uint32_t count) {
-                if (count == 0 || count > 16) { p = nullptr; return; }
-                uint32_t* a = reinterpret_cast<uint32_t*>(
-                    st.bytes(static_cast<size_t>(count) * 4u, 4));
-                read_guest_bytes(mem, reinterpret_cast<uint64_t>(p), a,
-                                 static_cast<size_t>(count) * 4u);
-                p = a;
-            };
-            repoint_u64(arr[i].pWaitSemaphores, arr[i].waitSemaphoreCount);
-            repoint_u32(arr[i].pWaitDstStageMask, arr[i].waitSemaphoreCount);
-            repoint_u64(arr[i].pCommandBuffers, arr[i].commandBufferCount);
-            repoint_u64(arr[i].pSignalSemaphores, arr[i].signalSemaphoreCount);
-        }
-        // Push all vkMapMemory bounces before submit — the GPU reads the
-        // host mappings at execution time.
-        impl_->vk_sync_push_all();
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint64_t)>(entry.host_fn)(
-            cpu.regs[0], submit_count, arr, cpu.regs[3]);
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkQueueSubmit → %d\n", static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── vkAllocateDescriptorSets ─────────────────────────────────────────
-    // (device, pAllocateInfo, pDescriptorSets) — pSetLayouts nested handle
-    // array; OUT pDescriptorSets receives the allocated set handles.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkDescriptorSetAllocateInfoH* info = st.alloc<VkDescriptorSetAllocateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->descriptorSetCount && info->pSetLayouts && info->descriptorSetCount <= 32) {
-            uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(info->descriptorSetCount * 8u, 8));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pSetLayouts), a,
-                             info->descriptorSetCount * 8u);
-            info->pSetLayouts = a;
-        } else { info->descriptorSetCount = 0; info->pSetLayouts = nullptr; }
-        uint64_t* host_sets = reinterpret_cast<uint64_t*>(st.bytes(info->descriptorSetCount * 8u, 8));
-        std::memset(host_sets, 0, info->descriptorSetCount * 8u);
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, host_sets);
-        if (cpu.regs[2] && ret == 0) {
-            try { mem->write(cpu.regs[2], host_sets, info->descriptorSetCount * 8u); }
-            catch (...) { /* out array unmapped */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkAllocateDescriptorSets (n=%u) → %d\n",
-                           info->descriptorSetCount, static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── vkUpdateDescriptorSets ───────────────────────────────────────────
-    // (device, writeCount, pWrites, copyCount, pCopies) — each write carries
-    // ONE of pImageInfo / pBufferInfo / pTexelBufferView depending on
-    // descriptorType; copies are flat-after-pNext (handles round-trip).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        const uint32_t writes = static_cast<uint32_t>(cpu.regs[1]);
-        const uint32_t copies = static_cast<uint32_t>(cpu.regs[3]);
-        if (writes > 32 || copies > 32) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkWriteDescriptorSetH* w = nullptr;
-        if (writes && cpu.regs[2]) {
-            w = reinterpret_cast<VkWriteDescriptorSetH*>(st.bytes(writes * sizeof(VkWriteDescriptorSetH), 8));
-            read_guest_bytes(mem, cpu.regs[2], w, writes * sizeof(VkWriteDescriptorSetH));
-            for (uint32_t i = 0; i < writes; i++) {
-                w[i].pNext = nullptr;
-                if (w[i].descriptorCount > 64) w[i].descriptorCount = 0;
-                if (!w[i].descriptorCount) {
-                    w[i].pImageInfo = nullptr; w[i].pBufferInfo = nullptr; w[i].pTexelBufferView = nullptr;
-                    continue;
-                }
-                // DescriptorType classification (vendored enum values):
-                // image infos → 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE,
-                // 3 STORAGE_IMAGE, 10 INPUT_ATTACHMENT; texel buffer views
-                // → 4 UNIFORM_TEXEL_BUFFER, 5 STORAGE_TEXEL_BUFFER; buffer
-                // infos → 6/7/8/9 (UNIFORM/STORAGE_[BUFFER_DYNAMIC]) and
-                // any exotic type (best effort). DO NOT use a 1..6 range
-                // for images — 6 is UNIFORM_BUFFER and 4/5 are texel
-                // buffers; that misroute nulled the info pointers and
-                // crashed RADV on the first UBO write.
-                uint32_t t = w[i].descriptorType;
-                bool is_img = t == 1 || t == 2 || t == 3 || t == 10;
-                bool is_tbuf = t == 4 || t == 5;
-                if (is_img && w[i].pImageInfo) {
-                    VkDescriptorImageInfoH* a = reinterpret_cast<VkDescriptorImageInfoH*>(
-                        st.bytes(w[i].descriptorCount * sizeof(VkDescriptorImageInfoH), 8));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pImageInfo), a,
-                                     w[i].descriptorCount * sizeof(VkDescriptorImageInfoH));
-                    w[i].pImageInfo = a;
-                } else { w[i].pImageInfo = nullptr; }
-                if (!is_img && !is_tbuf && w[i].pBufferInfo) {
-                    VkDescriptorBufferInfoH* a = reinterpret_cast<VkDescriptorBufferInfoH*>(
-                        st.bytes(w[i].descriptorCount * sizeof(VkDescriptorBufferInfoH), 8));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pBufferInfo), a,
-                                     w[i].descriptorCount * sizeof(VkDescriptorBufferInfoH));
-                    w[i].pBufferInfo = a;
-                } else { w[i].pBufferInfo = nullptr; }
-                if (is_tbuf && w[i].pTexelBufferView) {
-                    uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(w[i].descriptorCount * 8u, 8));
-                    read_guest_bytes(mem, reinterpret_cast<uint64_t>(w[i].pTexelBufferView), a,
-                                     w[i].descriptorCount * 8u);
-                    w[i].pTexelBufferView = a;
-                } else { w[i].pTexelBufferView = nullptr; }
-            }
-        }
-        VkCopyDescriptorSetH* c = nullptr;
-        if (copies && cpu.regs[4]) {
-            c = reinterpret_cast<VkCopyDescriptorSetH*>(st.bytes(copies * sizeof(VkCopyDescriptorSetH), 8));
-            read_guest_bytes(mem, cpu.regs[4], c, copies * sizeof(VkCopyDescriptorSetH));
-            for (uint32_t i = 0; i < copies; i++) c[i].pNext = nullptr;
-        }
-        reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, const void*)>(entry.host_fn)(
-            cpu.regs[0], writes, w, copies, c);
-        cpu.regs[0] = 0;
-        if (trace) fprintf(stderr, "[display-thunk] vkUpdateDescriptorSets (w=%u c=%u) → 0\n", writes, copies);
         return true;
     }
 
@@ -3345,9 +3204,6 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_CREATE_INSTANCE:
         case thunk::Policy::VK_CREATE_DEVICE:
         case thunk::Policy::VK_PRESENT:
-        case thunk::Policy::VK_SUBMIT:
-        case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
-        case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:
         case thunk::Policy::VK_ALLOC_MEMORY:
         case thunk::Policy::VK_FREE_MEMORY:
         case thunk::Policy::VK_MAP_MEMORY:

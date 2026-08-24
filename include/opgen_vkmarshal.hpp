@@ -46,6 +46,8 @@ struct VkStructDesc {
 struct VkPlanRef {
     uint8_t arg;           // register/args index of the array pointer
     uint8_t count_arg;     // register/args index holding the count
+                           // (0xFF = single element; 0xFE = count is a
+                           // u32 member of the staged struct at aux)
     uint8_t count_in_bytes;// 1 = count is a BYTE count (raw buffers)
     uint8_t out;           // 0 = input staging
                            // 1 = enumeration: count_arg is a guest u32*
@@ -60,8 +62,11 @@ struct VkPlanRef {
                            // 5 = OUT_HANDLE: zeroed bounce; host writes
                            //     handle(s); copied back to the guest
                            //     pointer after a successful call
-                           //     (count_arg 0xFF = single handle)
+                           //     (count_arg 0xFF = single handle,
+                           //      0xFE = count from staged struct aux)
     uint8_t elem_size;     // bytes per element for desc==nullptr arrays
+    uint8_t aux;           // role-specific: byte offset of the count
+                           // member for out=5/count_arg=0xFE
     const VkStructDesc* desc;   // nullptr for verbatim byte staging
 };
 
@@ -76,9 +81,52 @@ struct VkCmdPlan {
     const VkPlanRef* refs;
 };
 
+inline constexpr VkFieldDesc kFields_VkMemoryBarrier[] = {
+    {8,131,8,0,65535,1},
+};
+
+inline constexpr VkFieldDesc kFields_VkBufferMemoryBarrier[] = {
+    {8,131,8,0,65535,1},
+};
+
+inline constexpr VkFieldDesc kFields_VkImageMemoryBarrier[] = {
+    {8,131,8,0,65535,1},
+};
+
+inline constexpr VkFieldDesc kFields_VkSubmitInfo[] = {
+    {8,131,8,0,65535,1},
+    {24,2,8,0,0x0010,0},
+    {32,3,8,0,0x0010,0},
+    {48,2,8,0,0x0028,0},
+    {64,2,8,0,0x0038,0},
+};
+
+inline constexpr VkFieldDesc kFields_VkSubmitInfo2[] = {
+    {8,131,8,0,65535,1},
+    {24,1,48,1284,0x0014,0},
+    {40,1,32,146,0x0020,0},
+    {56,1,48,1284,0x0030,0},
+};
+
+inline constexpr VkFieldDesc kFields_VkWriteDescriptorSet[] = {
+    {8,131,8,0,65535,1},
+    {40,1,24,1488,0x0020,0},
+    {48,1,24,1489,0x0020,0},
+    {56,2,8,0,0x0020,0},
+};
+
+inline constexpr VkFieldDesc kFields_VkCopyDescriptorSet[] = {
+    {8,131,8,0,65535,1},
+};
+
+inline constexpr VkFieldDesc kFields_VkDescriptorSetAllocateInfo[] = {
+    {8,131,8,0,65535,1},
+    {32,2,8,0,0x0018,0},
+};
+
 inline constexpr VkFieldDesc kFields_VkRenderPassBeginInfo[] = {
     {8,131,8,0,65535,1},
-    {56,1,16,1478,0x0030,0},
+    {56,1,16,1490,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkComputePipelineCreateInfo[] = {
@@ -87,12 +135,12 @@ inline constexpr VkFieldDesc kFields_VkComputePipelineCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkDescriptorPoolCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {32,1,8,1479,0x0018,0},
+    {32,1,8,1491,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDescriptorSetLayoutCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1480,0x0014,0},
+    {24,1,24,1492,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkFramebufferCreateInfo[] = {
@@ -102,29 +150,29 @@ inline constexpr VkFieldDesc kFields_VkFramebufferCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkGraphicsPipelineCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1131,0x0014,0},
-    {32,1,48,1142,65535,1},
-    {40,1,32,1110,65535,1},
-    {48,1,24,1138,65535,1},
-    {56,1,48,1148,65535,1},
-    {64,1,64,1122,65535,1},
-    {72,1,48,1112,65535,1},
-    {80,1,104,1097,65535,1},
-    {88,1,56,1086,65535,1},
-    {96,1,32,1099,65535,1},
+    {24,1,48,1144,0x0014,0},
+    {32,1,48,1155,65535,1},
+    {40,1,32,1123,65535,1},
+    {48,1,24,1151,65535,1},
+    {56,1,48,1161,65535,1},
+    {64,1,64,1135,65535,1},
+    {72,1,48,1125,65535,1},
+    {80,1,104,1110,65535,1},
+    {88,1,56,1099,65535,1},
+    {96,1,32,1112,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineLayoutCreateInfo[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0014,0},
-    {40,1,12,1481,0x0020,0},
+    {40,1,12,1493,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,36,1482,0x0014,0},
-    {40,1,72,1483,0x0020,0},
-    {56,1,28,1484,0x0030,0},
+    {24,1,36,1494,0x0014,0},
+    {40,1,72,1495,0x0020,0},
+    {56,1,28,1496,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkShaderModuleCreateInfo[] = {
@@ -134,8 +182,8 @@ inline constexpr VkFieldDesc kFields_VkShaderModuleCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureBuildGeometryInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {56,1,96,19,0x0030,0},
-    {64,1,96,19,0x0030,0},
+    {56,1,96,37,0x0030,0},
+    {64,1,96,37,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureBuildSizesInfoKHR[] = {
@@ -184,8 +232,8 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryLinearSweptS
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryMicromapDataKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1485,0x0010,0},
-    {32,1,12,1485,0x0010,0},
+    {24,1,12,1497,0x0010,0},
+    {32,1,12,1497,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryMotionTrianglesDataNV[] = {
@@ -202,7 +250,7 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryTrianglesDat
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureInfoNV[] = {
     {8,131,8,0,65535,1},
-    {32,1,168,367,0x001C,0},
+    {32,1,168,382,0x001C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureMemoryRequirementsInfoNV[] = {
@@ -215,14 +263,14 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureMotionInfoNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesDisplacementMicromapNV[] = {
     {8,131,8,0,65535,1},
-    {104,1,12,1486,0x0064,0},
-    {112,1,12,1486,0x0064,0},
+    {104,1,12,1498,0x0064,0},
+    {112,1,12,1498,0x0064,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesOpacityMicromapEXT[] = {
     {8,131,8,0,65535,1},
-    {48,1,12,1486,0x002C,0},
-    {56,1,12,1486,0x002C,0},
+    {48,1,12,1498,0x002C,0},
+    {56,1,12,1498,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesOpacityMicromapKHR[] = {
@@ -272,7 +320,7 @@ inline constexpr VkFieldDesc kFields_VkAndroidSurfaceCreateInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkAntiLagDataAMD[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,42,65535,1},
+    {24,1,32,60,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkAntiLagPresentationInfoAMD[] = {
@@ -389,13 +437,13 @@ inline constexpr VkFieldDesc kFields_VkBindHeapInfoEXT[] = {
 inline constexpr VkFieldDesc kFields_VkBindImageMemoryDeviceGroupInfo[] = {
     {8,131,8,0,65535,1},
     {24,3,4,0,0x0010,0},
-    {40,1,16,1487,0x0020,0},
+    {40,1,16,1,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkBindImageMemoryDeviceGroupInfoKHR[] = {
     {8,131,8,0,65535,1},
     {24,3,4,0,0x0010,0},
-    {40,1,16,1487,0x0020,0},
+    {40,1,16,1,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkBindImageMemoryInfo[] = {
@@ -435,9 +483,9 @@ inline constexpr VkFieldDesc kFields_VkBindMemoryStatusKHR[] = {
 inline constexpr VkFieldDesc kFields_VkBindSparseInfo[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0010,0},
-    {40,1,24,1488,0x0020,0},
-    {56,1,24,1489,0x0030,0},
-    {72,1,24,1490,0x0040,0},
+    {40,1,24,1499,0x0020,0},
+    {56,1,24,1500,0x0030,0},
+    {72,1,24,1501,0x0040,0},
     {88,2,8,0,0x0050,0},
 };
 
@@ -463,12 +511,12 @@ inline constexpr VkFieldDesc kFields_VkBlitImageCubicWeightsInfoQCOM[] = {
 
 inline constexpr VkFieldDesc kFields_VkBlitImageInfo2[] = {
     {8,131,8,0,65535,1},
-    {48,1,96,386,0x002C,0},
+    {48,1,96,401,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkBlitImageInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,96,386,0x002C,0},
+    {48,1,96,401,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkBufferCaptureDescriptorDataInfoEXT[] = {
@@ -529,10 +577,6 @@ inline constexpr VkFieldDesc kFields_VkBufferImageCopy2[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkBufferImageCopy2KHR[] = {
-    {8,131,8,0,65535,1},
-};
-
-inline constexpr VkFieldDesc kFields_VkBufferMemoryBarrier[] = {
     {8,131,8,0,65535,1},
 };
 
@@ -620,7 +664,7 @@ inline constexpr VkFieldDesc kFields_VkCommandBufferAllocateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferBeginInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,56,124,65535,1},
+    {24,1,56,141,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceConditionalRenderingInfoEXT[] = {
@@ -629,8 +673,8 @@ inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceConditionalRender
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceDescriptorHeapInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,48,66,65535,1},
-    {24,1,48,66,65535,1},
+    {16,1,48,84,65535,1},
+    {24,1,48,84,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceInfo[] = {
@@ -653,7 +697,7 @@ inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceRenderingInfoKHR[
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferInheritanceViewportScissorInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1491,65535,1},
+    {24,1,24,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkCommandBufferSubmitInfo[] = {
@@ -723,80 +767,76 @@ inline constexpr VkFieldDesc kFields_VkCopyAccelerationStructureToMemoryInfoKHR[
 
 inline constexpr VkFieldDesc kFields_VkCopyBufferInfo2[] = {
     {8,131,8,0,65535,1},
-    {40,1,40,91,0x0020,0},
+    {40,1,40,109,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyBufferInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {40,1,40,91,0x0020,0},
+    {40,1,40,109,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyBufferToImageInfo2[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,98,0x0024,0},
+    {40,1,72,116,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyBufferToImageInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,98,0x0024,0},
+    {40,1,72,116,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyCommandTransformInfoQCOM[] = {
     {8,131,8,0,65535,1},
 };
 
-inline constexpr VkFieldDesc kFields_VkCopyDescriptorSet[] = {
-    {8,131,8,0,65535,1},
-};
-
 inline constexpr VkFieldDesc kFields_VkCopyDeviceMemoryImageInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {32,1,88,269,0x0018,0},
+    {32,1,88,284,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyDeviceMemoryInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,64,268,0x0010,0},
+    {24,1,64,283,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageInfo2[] = {
     {8,131,8,0,65535,1},
-    {48,1,88,392,0x002C,0},
+    {48,1,88,407,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,88,392,0x002C,0},
+    {48,1,88,407,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToBufferInfo2[] = {
     {8,131,8,0,65535,1},
-    {48,1,72,98,0x0028,0},
+    {48,1,72,116,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToBufferInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,72,98,0x0028,0},
+    {48,1,72,116,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToImageInfo[] = {
     {8,131,8,0,65535,1},
-    {56,1,88,392,0x0034,0},
+    {56,1,88,407,0x0034,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToImageInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {56,1,88,392,0x0034,0},
+    {56,1,88,407,0x0034,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToMemoryInfo[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,423,0x0024,0},
+    {40,1,72,437,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyImageToMemoryInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,423,0x0024,0},
+    {40,1,72,437,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryIndirectInfoKHR[] = {
@@ -809,17 +849,17 @@ inline constexpr VkFieldDesc kFields_VkCopyMemoryToAccelerationStructureInfoKHR[
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToImageIndirectInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {64,1,16,1492,0x0014,0},
+    {64,1,16,1502,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToImageInfo[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,502,0x0024,0},
+    {40,1,72,515,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToImageInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,502,0x0024,0},
+    {40,1,72,515,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToMicromapInfoEXT[] = {
@@ -836,7 +876,7 @@ inline constexpr VkFieldDesc kFields_VkCopyMicromapToMemoryInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkCopyTensorInfoARM[] = {
     {8,131,8,0,65535,1},
-    {40,1,48,1352,0x0020,0},
+    {40,1,48,1363,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCuFunctionCreateInfoNVX[] = {
@@ -896,7 +936,7 @@ inline constexpr VkFieldDesc kFields_VkDataGraphOpticalFlowImageFormatProperties
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineBuiltinModelCreateInfoQCOM[] = {
     {8,131,8,0,65535,1},
-    {16,1,12,1493,65535,1},
+    {16,1,12,1503,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineCompilerControlCreateInfoARM[] = {
@@ -915,7 +955,7 @@ inline constexpr VkFieldDesc kFields_VkDataGraphPipelineConstantTensorSemiStruct
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineCreateInfoARM[] = {
     {8,131,8,0,65535,1},
-    {40,1,32,193,0x0020,0},
+    {40,1,32,209,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineDispatchInfoARM[] = {
@@ -979,8 +1019,8 @@ inline constexpr VkFieldDesc kFields_VkDataGraphPipelineSessionNeuralStatisticsC
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineShaderModuleCreateInfoARM[] = {
     {8,131,8,0,65535,1},
     {24,67,1,0,65535,1},
-    {32,1,32,1494,65535,1},
-    {48,1,32,183,0x0028,0},
+    {32,1,32,1504,65535,1},
+    {48,1,32,199,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineSingleNodeConnectionARM[] = {
@@ -989,12 +1029,12 @@ inline constexpr VkFieldDesc kFields_VkDataGraphPipelineSingleNodeConnectionARM[
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineSingleNodeCreateInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,201,0x0014,0},
+    {24,1,32,217,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDataGraphProcessingEngineCreateInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1495,0x0010,0},
+    {24,1,8,1505,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDebugMarkerMarkerInfoEXT[] = {
@@ -1021,9 +1061,9 @@ inline constexpr VkFieldDesc kFields_VkDebugUtilsMessengerCallbackDataEXT[] = {
     {8,131,8,0,65535,1},
     {24,67,1,0,65535,1},
     {40,67,1,0,65535,1},
-    {56,1,40,207,0x0030,0},
-    {72,1,40,207,0x0040,0},
-    {88,1,40,209,0x0050,0},
+    {56,1,40,223,0x0030,0},
+    {72,1,40,223,0x0040,0},
+    {88,1,40,225,0x0050,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDebugUtilsObjectNameInfoEXT[] = {
@@ -1038,7 +1078,7 @@ inline constexpr VkFieldDesc kFields_VkDebugUtilsObjectTagInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkDecompressMemoryInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {32,1,32,1496,0x0018,0},
+    {32,1,32,1506,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDedicatedAllocationBufferCreateInfoNV[] = {
@@ -1055,16 +1095,16 @@ inline constexpr VkFieldDesc kFields_VkDedicatedAllocationMemoryAllocateInfoNV[]
 
 inline constexpr VkFieldDesc kFields_VkDependencyInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,471,0x0014,0},
-    {40,1,80,101,0x0020,0},
-    {56,1,96,406,0x0030,0},
+    {24,1,48,484,0x0014,0},
+    {40,1,80,118,0x0020,0},
+    {56,1,96,420,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDependencyInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,471,0x0014,0},
-    {40,1,80,101,0x0020,0},
-    {56,1,96,406,0x0030,0},
+    {24,1,48,484,0x0014,0},
+    {40,1,80,118,0x0020,0},
+    {56,1,96,420,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDepthBiasInfoEXT[] = {
@@ -1101,11 +1141,6 @@ inline constexpr VkFieldDesc kFields_VkDescriptorPoolInlineUniformBlockCreateInf
 
 inline constexpr VkFieldDesc kFields_VkDescriptorPoolInlineUniformBlockCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-};
-
-inline constexpr VkFieldDesc kFields_VkDescriptorSetAllocateInfo[] = {
-    {8,131,8,0,65535,1},
-    {32,2,8,0,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDescriptorSetAndBindingMappingEXT[] = {
@@ -1158,12 +1193,12 @@ inline constexpr VkFieldDesc kFields_VkDescriptorSetVariableDescriptorCountLayou
 
 inline constexpr VkFieldDesc kFields_VkDescriptorUpdateTemplateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1497,0x0014,0},
+    {24,1,32,1507,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDescriptorUpdateTemplateCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1497,0x0014,0},
+    {24,1,32,1507,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceAddressBindingCallbackDataEXT[] = {
@@ -1172,20 +1207,20 @@ inline constexpr VkFieldDesc kFields_VkDeviceAddressBindingCallbackDataEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkDeviceBufferMemoryRequirements[] = {
     {8,131,8,0,65535,1},
-    {16,1,56,93,65535,1},
+    {16,1,56,111,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceBufferMemoryRequirementsKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,56,93,65535,1},
+    {16,1,56,111,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,40,278,0x0014,0},
+    {24,1,40,293,0x0014,0},
     {40,3,1,0,0x0020,0},
     {56,3,1,0,0x0030,0},
-    {64,1,220,1498,65535,1},
+    {64,1,220,1508,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceDiagnosticsConfigCreateInfoNV[] = {
@@ -1207,8 +1242,8 @@ inline constexpr VkFieldDesc kFields_VkDeviceFaultDebugInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkDeviceFaultInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1499,65535,1},
-    {32,1,24,1500,65535,1},
+    {24,1,24,1509,65535,1},
+    {32,1,24,1510,65535,1},
     {40,3,8,0,65535,1},
 };
 
@@ -1258,12 +1293,12 @@ inline constexpr VkFieldDesc kFields_VkDeviceGroupPresentInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkDeviceGroupRenderPassBeginInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1487,0x0014,0},
+    {24,1,16,1,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceGroupRenderPassBeginInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1487,0x0014,0},
+    {24,1,16,1,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceGroupSubmitInfo[] = {
@@ -1286,24 +1321,24 @@ inline constexpr VkFieldDesc kFields_VkDeviceGroupSwapchainCreateInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkDeviceImageMemoryRequirements[] = {
     {8,131,8,0,65535,1},
-    {16,1,88,395,65535,1},
+    {16,1,88,410,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceImageMemoryRequirementsKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,88,395,65535,1},
+    {16,1,88,410,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceImageSubresourceInfo[] = {
     {8,131,8,0,65535,1},
-    {16,1,88,395,65535,1},
-    {24,1,32,419,65535,1},
+    {16,1,88,410,65535,1},
+    {24,1,32,433,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceImageSubresourceInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,88,395,65535,1},
-    {24,1,32,419,65535,1},
+    {16,1,88,410,65535,1},
+    {24,1,32,433,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceMemoryCopyKHR[] = {
@@ -1332,8 +1367,8 @@ inline constexpr VkFieldDesc kFields_VkDeviceMemoryReportCallbackDataEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkDeviceObjectReservationCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,40,1084,0x0010,0},
-    {40,1,32,1114,0x0020,0},
+    {24,1,40,1097,0x0010,0},
+    {40,1,32,1127,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDevicePipelineBinaryInternalCacheControlKHR[] = {
@@ -1379,7 +1414,7 @@ inline constexpr VkFieldDesc kFields_VkDeviceSemaphoreSciSyncPoolReservationCrea
 
 inline constexpr VkFieldDesc kFields_VkDeviceTensorMemoryRequirementsARM[] = {
     {8,131,8,0,65535,1},
-    {16,1,48,1353,65535,1},
+    {16,1,48,1364,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDirectFBSurfaceCreateInfoEXT[] = {
@@ -1462,12 +1497,12 @@ inline constexpr VkFieldDesc kFields_VkDrawIndirectCount2InfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkDrmFormatModifierPropertiesList2EXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1501,0x0010,0},
+    {24,1,24,1511,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDrmFormatModifierPropertiesListEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1502,0x0010,0},
+    {24,1,16,1512,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkEventCreateInfo[] = {
@@ -1476,8 +1511,8 @@ inline constexpr VkFieldDesc kFields_VkEventCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkExecutionGraphPipelineCreateInfoAMDX[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1131,0x0014,0},
-    {32,1,32,1111,65535,1},
+    {24,1,48,1144,0x0014,0},
+    {32,1,32,1124,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkExecutionGraphPipelineScratchSizeAMDX[] = {
@@ -1654,7 +1689,7 @@ inline constexpr VkFieldDesc kFields_VkFormatProperties4KHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkFragmentShadingRateAttachmentInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,32,50,65535,1},
+    {16,1,32,68,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkFrameBoundaryEXT[] = {
@@ -1681,12 +1716,12 @@ inline constexpr VkFieldDesc kFields_VkFramebufferAttachmentImageInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkFramebufferAttachmentsCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,355,0x0010,0},
+    {24,1,48,370,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkFramebufferAttachmentsCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,355,0x0010,0},
+    {24,1,48,370,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkFramebufferMixedSamplesCombinationNV[] = {
@@ -1699,7 +1734,7 @@ inline constexpr VkFieldDesc kFields_VkGeneratedCommandsInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkGeneratedCommandsInfoNV[] = {
     {8,131,8,0,65535,1},
-    {48,1,16,1503,0x0028,0},
+    {48,1,16,1513,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkGeneratedCommandsMemoryRequirementsInfoEXT[] = {
@@ -1733,7 +1768,7 @@ inline constexpr VkFieldDesc kFields_VkGeometryTrianglesNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkGetLatencyMarkerInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,128,463,0x0010,0},
+    {24,1,128,477,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkGpaDeviceClockModeInfoAMD[] = {
@@ -1746,7 +1781,7 @@ inline constexpr VkFieldDesc kFields_VkGpaDeviceGetClockInfoAMD[] = {
 
 inline constexpr VkFieldDesc kFields_VkGpaSampleBeginInfoAMD[] = {
     {8,131,8,0,65535,1},
-    {40,1,12,1504,0x0024,0},
+    {40,1,12,1514,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkGpaSessionCreateInfoAMD[] = {
@@ -1759,15 +1794,15 @@ inline constexpr VkFieldDesc kFields_VkGraphicsPipelineLibraryCreateInfoEXT[] = 
 
 inline constexpr VkFieldDesc kFields_VkGraphicsPipelineShaderGroupsCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,376,0x0010,0},
+    {24,1,48,391,0x0010,0},
     {40,2,8,0,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkGraphicsShaderGroupCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1131,0x0010,0},
-    {32,1,48,1142,65535,1},
-    {40,1,24,1138,65535,1},
+    {24,1,48,1144,0x0010,0},
+    {32,1,48,1155,65535,1},
+    {40,1,24,1151,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkHdrMetadataEXT[] = {
@@ -1831,7 +1866,7 @@ inline constexpr VkFieldDesc kFields_VkImageCompressionPropertiesEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkImageConstraintsInfoFUCHSIA[] = {
     {8,131,8,0,65535,1},
-    {24,1,136,400,0x0010,0},
+    {24,1,136,415,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkImageCopy2[] = {
@@ -1853,12 +1888,12 @@ inline constexpr VkFieldDesc kFields_VkImageCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkImageDescriptorInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,80,429,65535,1},
+    {16,1,80,443,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkImageDrmFormatModifierExplicitCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {32,1,40,1505,0x0018,0},
+    {32,1,40,1515,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkImageDrmFormatModifierListCreateInfoEXT[] = {
@@ -1872,7 +1907,7 @@ inline constexpr VkFieldDesc kFields_VkImageDrmFormatModifierPropertiesEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkImageFormatConstraintsInfoFUCHSIA[] = {
     {8,131,8,0,65535,1},
-    {128,1,24,1350,0x0078,0},
+    {128,1,24,1361,0x0078,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkImageFormatListCreateInfo[] = {
@@ -1890,10 +1925,6 @@ inline constexpr VkFieldDesc kFields_VkImageFormatProperties2[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkImageFormatProperties2KHR[] = {
-    {8,131,8,0,65535,1},
-};
-
-inline constexpr VkFieldDesc kFields_VkImageMemoryBarrier[] = {
     {8,131,8,0,65535,1},
 };
 
@@ -2076,12 +2107,12 @@ inline constexpr VkFieldDesc kFields_VkImportSemaphoreSciSyncInfoNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkIndirectCommandsLayoutCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {48,1,40,451,0x0028,0},
+    {48,1,40,465,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkIndirectCommandsLayoutCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {32,1,88,452,0x0018,0},
+    {32,1,88,466,0x0018,0},
     {48,3,4,0,0x0028,0},
 };
 
@@ -2110,8 +2141,8 @@ inline constexpr VkFieldDesc kFields_VkIndirectExecutionSetPipelineInfoEXT[] = {
 inline constexpr VkFieldDesc kFields_VkIndirectExecutionSetShaderInfoEXT[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0010,0},
-    {32,1,32,456,0x0010,0},
-    {48,1,12,1481,0x002C,0},
+    {32,1,32,470,0x0010,0},
+    {48,1,12,1493,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkIndirectExecutionSetShaderLayoutInfoEXT[] = {
@@ -2126,7 +2157,7 @@ inline constexpr VkFieldDesc kFields_VkInitializePerformanceApiInfoINTEL[] = {
 
 inline constexpr VkFieldDesc kFields_VkInstanceCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,43,65535,1},
+    {24,1,48,61,65535,1},
     {40,3,1,0,0x0020,0},
     {56,3,1,0,0x0030,0},
 };
@@ -2154,7 +2185,7 @@ inline constexpr VkFieldDesc kFields_VkLatencyTimingsFrameReportNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkLayerSettingsCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1506,0x0010,0},
+    {24,1,32,1516,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMacOSSurfaceCreateInfoMVK[] = {
@@ -2175,10 +2206,6 @@ inline constexpr VkFieldDesc kFields_VkMemoryAllocateFlagsInfoKHR[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkMemoryAllocateInfo[] = {
-    {8,131,8,0,65535,1},
-};
-
-inline constexpr VkFieldDesc kFields_VkMemoryBarrier[] = {
     {8,131,8,0,65535,1},
 };
 
@@ -2293,7 +2320,7 @@ inline constexpr VkFieldDesc kFields_VkMemoryRangeBarrierKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkMemoryRangeBarriersInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,80,497,0x0010,0},
+    {24,1,80,510,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMemoryRequirements2[] = {
@@ -2341,8 +2368,8 @@ inline constexpr VkFieldDesc kFields_VkMetalSurfaceCreateInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkMicromapBuildInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {48,1,12,1486,0x0028,0},
-    {56,1,12,1486,0x0028,0},
+    {48,1,12,1498,0x0028,0},
+    {56,1,12,1498,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMicromapBuildSizesInfoEXT[] = {
@@ -2371,17 +2398,17 @@ inline constexpr VkFieldDesc kFields_VkMultiviewPerViewAttributesInfoNVX[] = {
 
 inline constexpr VkFieldDesc kFields_VkMultiviewPerViewRenderAreasRenderPassBeginInfoQCOM[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1487,0x0010,0},
+    {24,1,16,1,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMutableDescriptorTypeCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1507,0x0010,0},
+    {24,1,16,1517,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMutableDescriptorTypeCreateInfoVALVE[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1507,0x0010,0},
+    {24,1,16,1517,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkNativeBufferANDROID[] = {
@@ -2408,7 +2435,7 @@ inline constexpr VkFieldDesc kFields_VkNativeBufferUsageOHOS[] = {
 
 inline constexpr VkFieldDesc kFields_VkOpaqueCaptureDataCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,16,1508,65535,1},
+    {16,1,16,1518,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkOpaqueCaptureDescriptorDataCreateInfoEXT[] = {
@@ -2418,7 +2445,7 @@ inline constexpr VkFieldDesc kFields_VkOpaqueCaptureDescriptorDataCreateInfoEXT[
 
 inline constexpr VkFieldDesc kFields_VkOpticalFlowExecuteInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1487,0x0014,0},
+    {24,1,16,1,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkOpticalFlowImageFormatInfoNV[] = {
@@ -2452,7 +2479,7 @@ inline constexpr VkFieldDesc kFields_VkPartitionedAccelerationStructureInstances
 
 inline constexpr VkFieldDesc kFields_VkPastPresentationTimingEXT[] = {
     {8,131,8,0,65535,1},
-    {40,1,16,1509,0x0020,0},
+    {40,1,16,1519,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPastPresentationTimingInfoEXT[] = {
@@ -2461,7 +2488,7 @@ inline constexpr VkFieldDesc kFields_VkPastPresentationTimingInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkPastPresentationTimingPropertiesEXT[] = {
     {8,131,8,0,65535,1},
-    {40,1,72,534,0x0020,0},
+    {40,1,72,547,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPerTileBeginInfoQCOM[] = {
@@ -3042,7 +3069,7 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceExternalSemaphoreInfoKHR[] 
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceExternalTensorInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,56,1355,65535,1},
+    {24,1,56,1366,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceFaultFeaturesEXT[] = {
@@ -3183,7 +3210,7 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceGpaProperties2AMD[] = {
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceGpaPropertiesAMD[] = {
     {8,131,8,0,65535,1},
-    {40,1,28,1510,0x0024,0},
+    {40,1,28,1520,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT[] = {
@@ -3369,7 +3396,7 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredApiPropertiesKHR[] =
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredApiPropertiesListKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,760,0x0010,0},
+    {24,1,32,773,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR[] = {
@@ -4542,7 +4569,7 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceVideoEncodeIntraRefreshFeat
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceVideoEncodeQualityLevelInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,32,1458,65535,1},
+    {16,1,32,1469,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR[] = {
@@ -4645,8 +4672,8 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceZeroInitializeWorkgroupMemo
 
 inline constexpr VkFieldDesc kFields_VkPipelineBinaryCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {16,1,24,1511,65535,1},
-    {32,1,16,1094,65535,1},
+    {16,1,24,1521,65535,1},
+    {32,1,16,1107,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineBinaryDataInfoKHR[] = {
@@ -4678,7 +4705,7 @@ inline constexpr VkFieldDesc kFields_VkPipelineColorBlendAdvancedStateCreateInfo
 
 inline constexpr VkFieldDesc kFields_VkPipelineColorBlendStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {32,1,32,1512,0x001C,0},
+    {32,1,32,1522,0x001C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineColorWriteCreateInfoEXT[] = {
@@ -4717,14 +4744,14 @@ inline constexpr VkFieldDesc kFields_VkPipelineCreateInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineCreationFeedbackCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {16,1,16,1513,65535,1},
-    {32,1,16,1513,0x0018,0},
+    {16,1,16,1523,65535,1},
+    {32,1,16,1523,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineCreationFeedbackCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,16,1513,65535,1},
-    {32,1,16,1513,0x0018,0},
+    {16,1,16,1523,65535,1},
+    {32,1,16,1523,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineDepthStencilStateCreateInfo[] = {
@@ -4733,7 +4760,7 @@ inline constexpr VkFieldDesc kFields_VkPipelineDepthStencilStateCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineDiscardRectangleStateCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {32,1,16,1487,0x0018,0},
+    {32,1,16,1,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineDynamicStateCreateInfo[] = {
@@ -4873,7 +4900,7 @@ inline constexpr VkFieldDesc kFields_VkPipelineSampleLocationsStateCreateInfoEXT
 inline constexpr VkFieldDesc kFields_VkPipelineShaderStageCreateInfo[] = {
     {8,131,8,0,65535,1},
     {32,67,1,0,65535,1},
-    {40,1,32,1494,65535,1},
+    {40,1,32,1504,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineShaderStageModuleIdentifierCreateInfoEXT[] = {
@@ -4908,33 +4935,33 @@ inline constexpr VkFieldDesc kFields_VkPipelineTessellationStateCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1514,0x0010,0},
+    {24,1,8,1524,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1514,0x0010,0},
+    {24,1,8,1524,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1514,0x0010,0},
+    {24,1,8,1524,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1515,0x0014,0},
-    {40,1,16,1516,0x0020,0},
+    {24,1,12,1525,0x0014,0},
+    {40,1,16,1526,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportCoarseSampleOrderStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1517,0x0014,0},
+    {24,1,24,1527,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportDepthClampControlCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1518,65535,1},
+    {24,1,8,1528,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportDepthClipControlCreateInfoEXT[] = {
@@ -4943,28 +4970,28 @@ inline constexpr VkFieldDesc kFields_VkPipelineViewportDepthClipControlCreateInf
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportExclusiveScissorStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1487,0x0010,0},
+    {24,1,16,1,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportShadingRateImageStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1519,0x0014,0},
+    {24,1,16,1529,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1491,0x0014,0},
-    {40,1,16,1487,0x0020,0},
+    {24,1,24,0,0x0014,0},
+    {40,1,16,1,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportSwizzleStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1520,0x0014,0},
+    {24,1,16,1530,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportWScalingStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1521,0x0014,0},
+    {24,1,8,1531,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentId2KHR[] = {
@@ -4987,12 +5014,12 @@ inline constexpr VkFieldDesc kFields_VkPresentInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkPresentRegionsKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1522,0x0010,0},
+    {24,1,16,1532,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentTimesInfoGOOGLE[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1523,0x0010,0},
+    {24,1,16,1533,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentTimingInfoEXT[] = {
@@ -5005,7 +5032,7 @@ inline constexpr VkFieldDesc kFields_VkPresentTimingSurfaceCapabilitiesEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkPresentTimingsInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1156,0x0010,0},
+    {24,1,48,1169,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentWait2InfoKHR[] = {
@@ -5044,12 +5071,12 @@ inline constexpr VkFieldDesc kFields_VkPushDataInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkPushDescriptorSetInfo[] = {
     {8,131,8,0,65535,1},
-    {40,1,64,1469,0x0024,0},
+    {40,1,64,15,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPushDescriptorSetInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {40,1,64,1469,0x0024,0},
+    {40,1,64,15,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPushDescriptorSetWithTemplateInfo[] = {
@@ -5114,8 +5141,8 @@ inline constexpr VkFieldDesc kFields_VkQueueFamilyDataGraphPropertiesARM[] = {
 
 inline constexpr VkFieldDesc kFields_VkQueueFamilyDataGraphTOSAPropertiesARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1524,0x0010,0},
-    {40,1,8,1524,0x0020,0},
+    {24,1,8,1534,0x0010,0},
+    {40,1,8,1534,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkQueueFamilyGlobalPriorityProperties[] = {
@@ -5160,17 +5187,17 @@ inline constexpr VkFieldDesc kFields_VkRayTracingPipelineClusterAccelerationStru
 
 inline constexpr VkFieldDesc kFields_VkRayTracingPipelineCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1131,0x0014,0},
-    {40,1,48,1197,0x0020,0},
-    {56,1,32,1111,65535,1},
-    {64,1,24,1196,65535,1},
-    {72,1,32,1099,65535,1},
+    {24,1,48,1144,0x0014,0},
+    {40,1,48,1210,0x0020,0},
+    {56,1,32,1124,65535,1},
+    {64,1,24,1209,65535,1},
+    {72,1,32,1112,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRayTracingPipelineCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1131,0x0014,0},
-    {40,1,40,1198,0x0020,0},
+    {24,1,48,1144,0x0014,0},
+    {40,1,40,1211,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRayTracingPipelineInterfaceCreateInfoKHR[] = {
@@ -5188,7 +5215,7 @@ inline constexpr VkFieldDesc kFields_VkRayTracingShaderGroupCreateInfoNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkRefreshObjectListKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1525,0x0010,0},
+    {24,1,24,1535,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkReleaseCapturedPipelineDataInfoKHR[] = {
@@ -5217,17 +5244,17 @@ inline constexpr VkFieldDesc kFields_VkRenderPassAttachmentBeginInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreateInfo2[] = {
     {8,131,8,0,65535,1},
-    {24,1,56,45,0x0014,0},
-    {40,1,88,1300,0x0020,0},
-    {56,1,48,1298,0x0030,0},
+    {24,1,56,63,0x0014,0},
+    {40,1,88,1311,0x0020,0},
+    {56,1,48,1309,0x0030,0},
     {72,3,4,0,0x0040,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreateInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,56,45,0x0014,0},
-    {40,1,88,1300,0x0020,0},
-    {56,1,48,1298,0x0030,0},
+    {24,1,56,63,0x0014,0},
+    {40,1,88,1311,0x0020,0},
+    {56,1,48,1309,0x0030,0},
     {72,3,4,0,0x0040,0},
 };
 
@@ -5237,7 +5264,7 @@ inline constexpr VkFieldDesc kFields_VkRenderPassCreationControlEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreationFeedbackCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,4,1526,65535,1},
+    {16,1,4,1536,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapCreateInfoEXT[] = {
@@ -5246,17 +5273,17 @@ inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapCreateInfoEXT
 
 inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapOffsetEndInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1527,0x0010,0},
+    {24,1,8,1537,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassInputAttachmentAspectCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1528,0x0010,0},
+    {24,1,12,1538,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassInputAttachmentAspectCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1528,0x0010,0},
+    {24,1,12,1538,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassMultiviewCreateInfo[] = {
@@ -5281,13 +5308,13 @@ inline constexpr VkFieldDesc kFields_VkRenderPassPerformanceCountersByRegionBegi
 
 inline constexpr VkFieldDesc kFields_VkRenderPassSampleLocationsBeginInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1529,0x0010,0},
-    {40,1,48,1530,0x0020,0},
+    {24,1,48,1539,0x0010,0},
+    {40,1,48,1540,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassStripeBeginInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1218,0x0010,0},
+    {24,1,32,1231,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassStripeInfoARM[] = {
@@ -5296,12 +5323,12 @@ inline constexpr VkFieldDesc kFields_VkRenderPassStripeInfoARM[] = {
 
 inline constexpr VkFieldDesc kFields_VkRenderPassStripeSubmitInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1271,0x0010,0},
+    {24,1,48,1284,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassSubpassFeedbackCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,12,1531,65535,1},
+    {16,1,12,1541,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassTileShadingCreateInfoQCOM[] = {
@@ -5362,16 +5389,16 @@ inline constexpr VkFieldDesc kFields_VkRenderingFragmentShadingRateAttachmentInf
 
 inline constexpr VkFieldDesc kFields_VkRenderingInfo[] = {
     {8,131,8,0,65535,1},
-    {48,1,72,1226,0x002C,0},
-    {56,1,72,1226,65535,1},
-    {64,1,72,1226,65535,1},
+    {48,1,72,1239,0x002C,0},
+    {56,1,72,1239,65535,1},
+    {64,1,72,1239,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderingInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,72,1226,0x002C,0},
-    {56,1,72,1226,65535,1},
-    {64,1,72,1226,65535,1},
+    {48,1,72,1239,0x002C,0},
+    {56,1,72,1239,65535,1},
+    {64,1,72,1239,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderingInputAttachmentIndexInfo[] = {
@@ -5390,12 +5417,12 @@ inline constexpr VkFieldDesc kFields_VkRenderingInputAttachmentIndexInfoKHR[] = 
 
 inline constexpr VkFieldDesc kFields_VkResolveImageInfo2[] = {
     {8,131,8,0,65535,1},
-    {48,1,88,412,0x002C,0},
+    {48,1,88,426,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkResolveImageInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,88,412,0x002C,0},
+    {48,1,88,426,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkResolveImageModeInfoKHR[] = {
@@ -5408,7 +5435,7 @@ inline constexpr VkFieldDesc kFields_VkResourceDescriptorInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkSampleLocationsInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {32,1,8,1532,0x001C,0},
+    {32,1,8,1542,0x001C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSamplerBlockMatchWindowCreateInfoQCOM[] = {
@@ -5573,13 +5600,13 @@ inline constexpr VkFieldDesc kFields_VkShaderCreateInfoEXT[] = {
     {40,3,8,0,0x0020,0},
     {48,67,1,0,65535,1},
     {64,2,8,0,0x0038,0},
-    {80,1,12,1481,0x0048,0},
-    {88,1,32,1494,65535,1},
+    {80,1,12,1493,0x0048,0},
+    {88,1,32,1504,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkShaderDescriptorSetAndBindingMappingInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,96,227,0x0010,0},
+    {24,1,96,242,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkShaderInstrumentationCreateInfoARM[] = {
@@ -5626,26 +5653,11 @@ inline constexpr VkFieldDesc kFields_VkSparseImageMemoryRequirements2KHR[] = {
     {8,131,8,0,65535,1},
 };
 
-inline constexpr VkFieldDesc kFields_VkSubmitInfo[] = {
-    {8,131,8,0,65535,1},
-    {24,2,8,0,0x0010,0},
-    {32,3,8,0,0x0010,0},
-    {48,2,8,0,0x0028,0},
-    {64,2,8,0,0x0038,0},
-};
-
-inline constexpr VkFieldDesc kFields_VkSubmitInfo2[] = {
-    {8,131,8,0,65535,1},
-    {24,1,48,1271,0x0014,0},
-    {40,1,32,129,0x0020,0},
-    {56,1,48,1271,0x0030,0},
-};
-
 inline constexpr VkFieldDesc kFields_VkSubmitInfo2KHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1271,0x0014,0},
-    {40,1,32,129,0x0020,0},
-    {56,1,48,1271,0x0030,0},
+    {24,1,48,1284,0x0014,0},
+    {40,1,32,146,0x0020,0},
+    {56,1,48,1284,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassBeginInfo[] = {
@@ -5666,30 +5678,30 @@ inline constexpr VkFieldDesc kFields_VkSubpassDependency2KHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescription2[] = {
     {8,131,8,0,65535,1},
-    {32,1,32,50,0x001C,0},
-    {48,1,32,50,0x0028,0},
-    {56,1,32,50,0x0028,0},
-    {64,1,32,50,65535,1},
+    {32,1,32,68,0x001C,0},
+    {48,1,32,68,0x0028,0},
+    {56,1,32,68,0x0028,0},
+    {64,1,32,68,65535,1},
     {80,3,4,0,0x0048,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescription2KHR[] = {
     {8,131,8,0,65535,1},
-    {32,1,32,50,0x001C,0},
-    {48,1,32,50,0x0028,0},
-    {56,1,32,50,0x0028,0},
-    {64,1,32,50,65535,1},
+    {32,1,32,68,0x001C,0},
+    {48,1,32,68,0x0028,0},
+    {56,1,32,68,0x0028,0},
+    {64,1,32,68,65535,1},
     {80,3,4,0,0x0048,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescriptionDepthStencilResolve[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,50,65535,1},
+    {24,1,32,68,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescriptionDepthStencilResolveKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,50,65535,1},
+    {24,1,32,68,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassEndInfo[] = {
@@ -5702,7 +5714,7 @@ inline constexpr VkFieldDesc kFields_VkSubpassEndInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkSubpassFragmentDensityMapOffsetEndInfoQCOM[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1527,0x0010,0},
+    {24,1,8,1537,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassResolvePerformanceQueryEXT[] = {
@@ -5906,13 +5918,13 @@ inline constexpr VkFieldDesc kFields_VkTensorCopyARM[] = {
 
 inline constexpr VkFieldDesc kFields_VkTensorCreateInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,56,1355,65535,1},
+    {24,1,56,1366,65535,1},
     {40,3,4,0,0x0024,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkTensorDependencyInfoARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,64,1358,0x0010,0},
+    {24,1,64,1369,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkTensorDescriptionARM[] = {
@@ -6026,7 +6038,7 @@ inline constexpr VkFieldDesc kFields_VkViSurfaceCreateInfoNN[] = {
 
 inline constexpr VkFieldDesc kFields_VkVideoBeginCodingInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {48,1,32,1461,0x0028,0},
+    {48,1,32,1472,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoCapabilitiesKHR[] = {
@@ -6088,7 +6100,7 @@ inline constexpr VkFieldDesc kFields_VkVideoDecodeH264SessionParametersAddInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeH264SessionParametersCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1390,65535,1},
+    {24,1,48,1401,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeH265DpbSlotInfoKHR[] = {
@@ -6118,13 +6130,13 @@ inline constexpr VkFieldDesc kFields_VkVideoDecodeH265SessionParametersAddInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeH265SessionParametersCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {32,1,64,1395,65535,1},
+    {32,1,64,1406,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {96,1,32,1461,65535,1},
-    {112,1,32,1461,0x0068,0},
+    {96,1,32,1472,65535,1},
+    {112,1,32,1472,0x0068,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeUsageInfoKHR[] = {
@@ -6197,7 +6209,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH264NaluSliceInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH264PictureInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1412,0x0010,0},
+    {24,1,32,1423,0x0010,0},
     {32,3,8,0,65535,1},
 };
 
@@ -6225,7 +6237,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH264SessionParametersAddInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH264SessionParametersCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1418,65535,1},
+    {24,1,48,1429,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH264SessionParametersFeedbackInfoKHR[] = {
@@ -6252,7 +6264,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH265NaluSliceSegmentInfoKHR[] 
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH265PictureInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1424,0x0010,0},
+    {24,1,32,1435,0x0010,0},
     {32,3,8,0,65535,1},
 };
 
@@ -6281,7 +6293,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH265SessionParametersAddInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH265SessionParametersCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {32,1,64,1430,65535,1},
+    {32,1,64,1441,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeH265SessionParametersFeedbackInfoKHR[] = {
@@ -6294,8 +6306,8 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH265SessionParametersGetInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {96,1,32,1461,65535,1},
-    {112,1,32,1461,0x0068,0},
+    {96,1,32,1472,65535,1},
+    {112,1,32,1472,0x0068,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeIntraRefreshCapabilitiesKHR[] = {
@@ -6332,7 +6344,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeQuantizationMapSessionParamete
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeRateControlInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {32,1,40,1444,0x0018,0},
+    {32,1,40,1455,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeRateControlLayerInfoKHR[] = {
@@ -6397,7 +6409,7 @@ inline constexpr VkFieldDesc kFields_VkVideoProfileInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkVideoProfileListInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1458,0x0010,0},
+    {24,1,32,1469,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoReferenceIntraRefreshInfoKHR[] = {
@@ -6406,13 +6418,13 @@ inline constexpr VkFieldDesc kFields_VkVideoReferenceIntraRefreshInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkVideoReferenceSlotInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1457,65535,1},
+    {24,1,48,1468,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoSessionCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,32,1458,65535,1},
-    {56,1,8,1533,65535,1},
+    {24,1,32,1469,65535,1},
+    {56,1,8,1543,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkVideoSessionMemoryRequirementsKHR[] = {
@@ -6449,13 +6461,6 @@ inline constexpr VkFieldDesc kFields_VkWin32KeyedMutexAcquireReleaseInfoNV[] = {
     {40,3,4,0,0x0010,0},
     {56,2,8,0,0x0030,0},
     {64,3,8,0,0x0030,0},
-};
-
-inline constexpr VkFieldDesc kFields_VkWriteDescriptorSet[] = {
-    {8,131,8,0,65535,1},
-    {40,1,24,1534,0x0020,0},
-    {48,1,24,1535,0x0020,0},
-    {56,2,8,0,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkWriteDescriptorSetAccelerationStructureKHR[] = {
@@ -6501,27 +6506,27 @@ inline constexpr VkFieldDesc kFields_VkDescriptorSetLayoutBinding[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescription[] = {
-    {16,1,8,1536,0x0008,0},
-    {32,1,8,1536,0x0018,0},
-    {40,1,8,1536,0x0018,0},
-    {48,1,8,1536,65535,1},
+    {16,1,8,1544,0x0008,0},
+    {32,1,8,1544,0x0018,0},
+    {40,1,8,1544,0x0018,0},
+    {48,1,8,1544,65535,1},
     {64,3,4,0,0x0038,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseBufferMemoryBindInfo[] = {
-    {16,1,40,1537,0x0008,0},
+    {16,1,40,1545,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseImageOpaqueMemoryBindInfo[] = {
-    {16,1,40,1537,0x0008,0},
+    {16,1,40,1545,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseImageMemoryBindInfo[] = {
-    {16,1,64,1538,0x0008,0},
+    {16,1,64,1546,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSpecializationInfo[] = {
-    {8,1,16,1539,0x0000,0},
+    {8,1,16,1547,0x0000,0},
     {24,3,8,0,0x0010,0},
 };
 
@@ -6540,12 +6545,12 @@ inline constexpr VkFieldDesc kFields_VkHostAddressRangeConstEXT[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineBinaryKeysAndDataKHR[] = {
-    {8,1,24,1083,0x0000,0},
-    {16,1,16,1540,0x0000,0},
+    {8,1,24,1096,0x0000,0},
+    {16,1,16,1548,0x0000,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCoarseSampleOrderCustomNV[] = {
-    {16,1,12,1541,0x0008,0},
+    {16,1,12,1549,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkShadingRatePaletteNV[] = {
@@ -6553,7 +6558,7 @@ inline constexpr VkFieldDesc kFields_VkShadingRatePaletteNV[] = {
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentRegionKHR[] = {
-    {8,1,20,1542,0x0000,0},
+    {8,1,20,1550,0x0000,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineBinaryDataKHR[] = {
@@ -6565,6 +6570,24 @@ inline constexpr VkStructDesc kVkHandleElem = {
     "<handle>", 8, nullptr, 0};
 
 inline constexpr VkStructDesc kVkStructs[] = {
+    {"VkViewport", 24, nullptr, 0},
+    {"VkRect2D", 16, nullptr, 0},
+    {"VkMemoryBarrier", 24, kFields_VkMemoryBarrier, 1},
+    {"VkBufferMemoryBarrier", 56, kFields_VkBufferMemoryBarrier, 1},
+    {"VkImageMemoryBarrier", 72, kFields_VkImageMemoryBarrier, 1},
+    {"VkClearAttachment", 24, nullptr, 0},
+    {"VkClearRect", 24, nullptr, 0},
+    {"VkImageSubresourceRange", 20, nullptr, 0},
+    {"VkBufferCopy", 24, nullptr, 0},
+    {"VkImageCopy", 68, nullptr, 0},
+    {"VkBufferImageCopy", 56, nullptr, 0},
+    {"VkSurfaceFormatKHR", 8, nullptr, 0},
+    {"VkQueueFamilyProperties", 24, nullptr, 0},
+    {"VkSubmitInfo", 72, kFields_VkSubmitInfo, 5},
+    {"VkSubmitInfo2", 64, kFields_VkSubmitInfo2, 4},
+    {"VkWriteDescriptorSet", 64, kFields_VkWriteDescriptorSet, 4},
+    {"VkCopyDescriptorSet", 56, kFields_VkCopyDescriptorSet, 1},
+    {"VkDescriptorSetAllocateInfo", 40, kFields_VkDescriptorSetAllocateInfo, 2},
     {"VkRenderPassBeginInfo", 64, kFields_VkRenderPassBeginInfo, 2},
     {"VkComputePipelineCreateInfo", 96, kFields_VkComputePipelineCreateInfo, 1},
     {"VkDescriptorPoolCreateInfo", 40, kFields_VkDescriptorPoolCreateInfo, 2},
@@ -6665,7 +6688,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkBufferDeviceAddressInfoKHR", 24, kFields_VkBufferDeviceAddressInfoKHR, 1},
     {"VkBufferImageCopy2", 72, kFields_VkBufferImageCopy2, 1},
     {"VkBufferImageCopy2KHR", 72, kFields_VkBufferImageCopy2KHR, 1},
-    {"VkBufferMemoryBarrier", 56, kFields_VkBufferMemoryBarrier, 1},
     {"VkBufferMemoryBarrier2", 80, kFields_VkBufferMemoryBarrier2, 1},
     {"VkBufferMemoryBarrier2KHR", 80, kFields_VkBufferMemoryBarrier2KHR, 1},
     {"VkBufferMemoryRequirementsInfo2", 24, kFields_VkBufferMemoryRequirementsInfo2, 1},
@@ -6715,7 +6737,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkCopyBufferToImageInfo2", 48, kFields_VkCopyBufferToImageInfo2, 2},
     {"VkCopyBufferToImageInfo2KHR", 48, kFields_VkCopyBufferToImageInfo2KHR, 2},
     {"VkCopyCommandTransformInfoQCOM", 24, kFields_VkCopyCommandTransformInfoQCOM, 1},
-    {"VkCopyDescriptorSet", 56, kFields_VkCopyDescriptorSet, 1},
     {"VkCopyDeviceMemoryImageInfoKHR", 40, kFields_VkCopyDeviceMemoryImageInfoKHR, 2},
     {"VkCopyDeviceMemoryInfoKHR", 32, kFields_VkCopyDeviceMemoryInfoKHR, 2},
     {"VkCopyImageInfo2", 56, kFields_VkCopyImageInfo2, 2},
@@ -6791,7 +6812,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkDescriptorGetTensorInfoARM", 24, kFields_VkDescriptorGetTensorInfoARM, 1},
     {"VkDescriptorPoolInlineUniformBlockCreateInfo", 24, kFields_VkDescriptorPoolInlineUniformBlockCreateInfo, 1},
     {"VkDescriptorPoolInlineUniformBlockCreateInfoEXT", 24, kFields_VkDescriptorPoolInlineUniformBlockCreateInfoEXT, 1},
-    {"VkDescriptorSetAllocateInfo", 40, kFields_VkDescriptorSetAllocateInfo, 2},
     {"VkDescriptorSetAndBindingMappingEXT", 96, kFields_VkDescriptorSetAndBindingMappingEXT, 1},
     {"VkDescriptorSetBindingReferenceVALVE", 32, kFields_VkDescriptorSetBindingReferenceVALVE, 1},
     {"VkDescriptorSetLayoutBindingFlagsCreateInfo", 32, kFields_VkDescriptorSetLayoutBindingFlagsCreateInfo, 2},
@@ -6970,7 +6990,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkImageFormatListCreateInfoKHR", 32, kFields_VkImageFormatListCreateInfoKHR, 2},
     {"VkImageFormatProperties2", 48, kFields_VkImageFormatProperties2, 1},
     {"VkImageFormatProperties2KHR", 48, kFields_VkImageFormatProperties2KHR, 1},
-    {"VkImageMemoryBarrier", 72, kFields_VkImageMemoryBarrier, 1},
     {"VkImageMemoryBarrier2", 96, kFields_VkImageMemoryBarrier2, 1},
     {"VkImageMemoryBarrier2KHR", 96, kFields_VkImageMemoryBarrier2KHR, 1},
     {"VkImageMemoryRequirementsInfo2", 24, kFields_VkImageMemoryRequirementsInfo2, 1},
@@ -7035,7 +7054,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkMemoryAllocateFlagsInfo", 24, kFields_VkMemoryAllocateFlagsInfo, 1},
     {"VkMemoryAllocateFlagsInfoKHR", 24, kFields_VkMemoryAllocateFlagsInfoKHR, 1},
     {"VkMemoryAllocateInfo", 32, kFields_VkMemoryAllocateInfo, 1},
-    {"VkMemoryBarrier", 24, kFields_VkMemoryBarrier, 1},
     {"VkMemoryBarrier2", 48, kFields_VkMemoryBarrier2, 1},
     {"VkMemoryBarrier2KHR", 48, kFields_VkMemoryBarrier2KHR, 1},
     {"VkMemoryBarrierAccessFlags3KHR", 32, kFields_VkMemoryBarrierAccessFlags3KHR, 1},
@@ -7858,8 +7876,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkSparseImageFormatProperties2KHR", 40, kFields_VkSparseImageFormatProperties2KHR, 1},
     {"VkSparseImageMemoryRequirements2", 64, kFields_VkSparseImageMemoryRequirements2, 1},
     {"VkSparseImageMemoryRequirements2KHR", 64, kFields_VkSparseImageMemoryRequirements2KHR, 1},
-    {"VkSubmitInfo", 72, kFields_VkSubmitInfo, 5},
-    {"VkSubmitInfo2", 64, kFields_VkSubmitInfo2, 4},
     {"VkSubmitInfo2KHR", 64, kFields_VkSubmitInfo2KHR, 4},
     {"VkSubpassBeginInfo", 24, kFields_VkSubpassBeginInfo, 1},
     {"VkSubpassBeginInfoKHR", 24, kFields_VkSubpassBeginInfoKHR, 1},
@@ -8034,7 +8050,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkWaylandSurfaceCreateInfoKHR", 40, kFields_VkWaylandSurfaceCreateInfoKHR, 3},
     {"VkWin32KeyedMutexAcquireReleaseInfoKHR", 72, kFields_VkWin32KeyedMutexAcquireReleaseInfoKHR, 6},
     {"VkWin32KeyedMutexAcquireReleaseInfoNV", 72, kFields_VkWin32KeyedMutexAcquireReleaseInfoNV, 6},
-    {"VkWriteDescriptorSet", 64, kFields_VkWriteDescriptorSet, 4},
     {"VkWriteDescriptorSetAccelerationStructureKHR", 32, kFields_VkWriteDescriptorSetAccelerationStructureKHR, 2},
     {"VkWriteDescriptorSetAccelerationStructureNV", 32, kFields_VkWriteDescriptorSetAccelerationStructureNV, 2},
     {"VkWriteDescriptorSetInlineUniformBlock", 32, kFields_VkWriteDescriptorSetInlineUniformBlock, 2},
@@ -8043,6 +8058,8 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkWriteDescriptorSetTensorARM", 32, kFields_VkWriteDescriptorSetTensorARM, 2},
     {"VkWriteIndirectExecutionSetPipelineEXT", 32, kFields_VkWriteIndirectExecutionSetPipelineEXT, 1},
     {"VkWriteIndirectExecutionSetShaderEXT", 32, kFields_VkWriteIndirectExecutionSetShaderEXT, 1},
+    {"VkDescriptorImageInfo", 24, nullptr, 0},
+    {"VkDescriptorBufferInfo", 24, nullptr, 0},
     {"VkClearValue", 16, nullptr, 0},
     {"VkDescriptorPoolSize", 8, nullptr, 0},
     {"VkDescriptorSetLayoutBinding", 24, kFields_VkDescriptorSetLayoutBinding, 1},
@@ -8052,11 +8069,9 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkSubpassDependency", 28, nullptr, 0},
     {"VkMicromapUsageKHR", 12, nullptr, 0},
     {"VkMicromapUsageEXT", 12, nullptr, 0},
-    {"VkRect2D", 16, nullptr, 0},
     {"VkSparseBufferMemoryBindInfo", 24, kFields_VkSparseBufferMemoryBindInfo, 1},
     {"VkSparseImageOpaqueMemoryBindInfo", 24, kFields_VkSparseImageOpaqueMemoryBindInfo, 1},
     {"VkSparseImageMemoryBindInfo", 24, kFields_VkSparseImageMemoryBindInfo, 1},
-    {"VkViewport", 24, nullptr, 0},
     {"VkImageSubresourceLayers", 16, nullptr, 0},
     {"VkPhysicalDeviceDataGraphOperationSupportARM", 12, nullptr, 0},
     {"VkSpecializationInfo", 32, kFields_VkSpecializationInfo, 2},
@@ -8099,8 +8114,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkRenderPassSubpassFeedbackInfoEXT", 12, nullptr, 0},
     {"VkSampleLocationEXT", 8, nullptr, 0},
     {"VkExtensionProperties", 8, nullptr, 0},
-    {"VkDescriptorImageInfo", 24, nullptr, 0},
-    {"VkDescriptorBufferInfo", 24, nullptr, 0},
     {"VkAttachmentReference", 8, nullptr, 0},
     {"VkSparseMemoryBind", 40, nullptr, 0},
     {"VkSparseImageMemoryBind", 64, nullptr, 0},
@@ -8121,193 +8134,215 @@ inline const VkStructDesc* vk_find_struct(const char* name) {
 }
 
 inline constexpr VkPlanRef kRefs_vkCmdSetViewport[] = {
-    {3,2,0,0,24,nullptr},
+    {3,2,0,0,8,0,&kVkStructs[0]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdSetScissor[] = {
-    {3,2,0,0,16,nullptr},
+    {3,2,0,0,8,0,&kVkStructs[1]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdPipelineBarrier[] = {
-    {5,4,0,0,24,nullptr},
-    {7,6,0,0,56,nullptr},
-    {9,8,0,0,72,nullptr},
+    {5,4,0,0,8,0,&kVkStructs[2]},
+    {7,6,0,0,8,0,&kVkStructs[3]},
+    {9,8,0,0,8,0,&kVkStructs[4]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdClearAttachments[] = {
-    {2,1,0,0,24,nullptr},
-    {4,3,0,0,24,nullptr},
+    {2,1,0,0,8,0,&kVkStructs[5]},
+    {4,3,0,0,8,0,&kVkStructs[6]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdClearColorImage[] = {
-    {5,4,0,0,20,nullptr},
+    {5,4,0,0,8,0,&kVkStructs[7]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdClearDepthStencilImage[] = {
-    {5,4,0,0,20,nullptr},
+    {5,4,0,0,8,0,&kVkStructs[7]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdCopyBuffer[] = {
-    {4,3,0,0,24,nullptr},
+    {4,3,0,0,8,0,&kVkStructs[8]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdCopyImage[] = {
-    {6,5,0,0,68,nullptr},
+    {6,5,0,0,8,0,&kVkStructs[9]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdCopyBufferToImage[] = {
-    {5,4,0,0,56,nullptr},
+    {5,4,0,0,8,0,&kVkStructs[10]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdCopyImageToBuffer[] = {
-    {5,4,0,0,56,nullptr},
+    {5,4,0,0,8,0,&kVkStructs[10]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdExecuteCommands[] = {
-    {2,1,0,0,8,nullptr},
+    {2,1,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdWaitEvents[] = {
-    {2,1,0,0,8,nullptr},
-    {6,5,0,0,24,nullptr},
-    {8,7,0,0,56,nullptr},
-    {10,9,0,0,72,nullptr},
+    {2,1,0,0,8,0,nullptr},
+    {6,5,0,0,8,0,&kVkStructs[2]},
+    {8,7,0,0,8,0,&kVkStructs[3]},
+    {10,9,0,0,8,0,&kVkStructs[4]},
 };
 
 inline constexpr VkPlanRef kRefs_vkResetFences[] = {
-    {2,1,0,0,8,nullptr},
+    {2,1,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkEnumeratePhysicalDevices[] = {
-    {2,1,0,1,8,nullptr},
+    {2,1,0,1,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkGetSwapchainImagesKHR[] = {
-    {3,2,0,1,8,nullptr},
+    {3,2,0,1,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkGetPhysicalDeviceSurfaceFormatsKHR[] = {
-    {3,2,0,1,8,nullptr},
+    {3,2,0,1,8,0,&kVkStructs[11]},
 };
 
 inline constexpr VkPlanRef kRefs_vkGetPhysicalDeviceSurfacePresentModesKHR[] = {
-    {3,2,0,1,4,nullptr},
+    {3,2,0,1,4,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkGetPhysicalDeviceQueueFamilyProperties[] = {
-    {2,1,0,1,24,nullptr},
+    {2,1,0,1,8,0,&kVkStructs[12]},
 };
 
 inline constexpr VkPlanRef kRefs_vkGetQueryPoolResults[] = {
-    {5,4,1,2,1,nullptr},
+    {5,4,1,2,1,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkFreeCommandBuffers[] = {
-    {3,2,0,0,8,nullptr},
+    {3,2,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkFreeDescriptorSets[] = {
-    {3,2,0,0,8,nullptr},
+    {3,2,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdBindDescriptorSets[] = {
-    {5,4,0,0,8,nullptr},
-    {7,6,0,0,4,nullptr},
+    {5,4,0,0,8,0,nullptr},
+    {7,6,0,0,4,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdBindVertexBuffers[] = {
-    {3,2,0,0,8,nullptr},
-    {4,2,0,0,8,nullptr},
+    {3,2,0,0,8,0,nullptr},
+    {4,2,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdUpdateBuffer[] = {
-    {4,3,1,0,1,nullptr},
+    {4,3,1,0,1,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdPushConstants[] = {
-    {5,4,1,0,1,nullptr},
+    {5,4,1,0,1,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdBindVertexBuffers2[] = {
-    {3,2,0,0,8,nullptr},
-    {4,2,0,0,8,nullptr},
-    {5,2,0,0,8,nullptr},
-    {6,2,0,0,8,nullptr},
+    {3,2,0,0,8,0,nullptr},
+    {4,2,0,0,8,0,nullptr},
+    {5,2,0,0,8,0,nullptr},
+    {6,2,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdBindVertexBuffers2EXT[] = {
-    {3,2,0,0,8,nullptr},
-    {4,2,0,0,8,nullptr},
-    {5,2,0,0,8,nullptr},
-    {6,2,0,0,8,nullptr},
+    {3,2,0,0,8,0,nullptr},
+    {4,2,0,0,8,0,nullptr},
+    {5,2,0,0,8,0,nullptr},
+    {6,2,0,0,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdSetViewportWithCount[] = {
-    {2,1,0,0,24,nullptr},
+    {2,1,0,0,8,0,&kVkStructs[0]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdSetViewportWithCountEXT[] = {
-    {2,1,0,0,24,nullptr},
+    {2,1,0,0,8,0,&kVkStructs[0]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdSetScissorWithCount[] = {
-    {2,1,0,0,16,nullptr},
+    {2,1,0,0,8,0,&kVkStructs[1]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdSetScissorWithCountEXT[] = {
-    {2,1,0,0,16,nullptr},
+    {2,1,0,0,8,0,&kVkStructs[1]},
+};
+
+inline constexpr VkPlanRef kRefs_vkQueueSubmit[] = {
+    {2,1,0,0,8,0,&kVkStructs[13]},
+};
+
+inline constexpr VkPlanRef kRefs_vkQueueSubmit2[] = {
+    {2,1,0,0,8,0,&kVkStructs[14]},
+};
+
+inline constexpr VkPlanRef kRefs_vkQueueSubmit2KHR[] = {
+    {2,1,0,0,8,0,&kVkStructs[14]},
+};
+
+inline constexpr VkPlanRef kRefs_vkUpdateDescriptorSets[] = {
+    {2,1,0,0,8,0,&kVkStructs[15]},
+    {4,3,0,0,8,0,&kVkStructs[16]},
+};
+
+inline constexpr VkPlanRef kRefs_vkAllocateDescriptorSets[] = {
+    {1,255,0,4,8,0,&kVkStructs[17]},
+    {2,254,0,5,8,24,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCmdBeginRenderPass[] = {
-    {1,255,0,4,8,&kVkStructs[0]},
+    {1,255,0,4,8,0,&kVkStructs[18]},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateComputePipelines[] = {
-    {3,2,0,4,8,&kVkStructs[1]},
-    {4,0,0,3,8,nullptr},
-    {5,2,0,5,8,nullptr},
+    {3,2,0,4,8,0,&kVkStructs[19]},
+    {4,0,0,3,8,0,nullptr},
+    {5,2,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateDescriptorPool[] = {
-    {1,255,0,4,8,&kVkStructs[2]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[20]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateDescriptorSetLayout[] = {
-    {1,255,0,4,8,&kVkStructs[3]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[21]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateFramebuffer[] = {
-    {1,255,0,4,8,&kVkStructs[4]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[22]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateGraphicsPipelines[] = {
-    {3,2,0,4,8,&kVkStructs[5]},
-    {4,0,0,3,8,nullptr},
-    {5,2,0,5,8,nullptr},
+    {3,2,0,4,8,0,&kVkStructs[23]},
+    {4,0,0,3,8,0,nullptr},
+    {5,2,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreatePipelineLayout[] = {
-    {1,255,0,4,8,&kVkStructs[6]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[24]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateRenderPass[] = {
-    {1,255,0,4,8,&kVkStructs[7]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[25]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkPlanRef kRefs_vkCreateShaderModule[] = {
-    {1,255,0,4,8,&kVkStructs[8]},
-    {2,0,0,3,8,nullptr},
-    {3,255,0,5,8,nullptr},
+    {1,255,0,4,8,0,&kVkStructs[26]},
+    {2,0,0,3,8,0,nullptr},
+    {3,255,0,5,8,0,nullptr},
 };
 
 inline constexpr VkCmdPlan kVkCmdPlans[] = {
@@ -8342,6 +8377,11 @@ inline constexpr VkCmdPlan kVkCmdPlans[] = {
     {"vkCmdSetViewportWithCountEXT", 1, kRefs_vkCmdSetViewportWithCountEXT},
     {"vkCmdSetScissorWithCount", 1, kRefs_vkCmdSetScissorWithCount},
     {"vkCmdSetScissorWithCountEXT", 1, kRefs_vkCmdSetScissorWithCountEXT},
+    {"vkQueueSubmit", 1, kRefs_vkQueueSubmit},
+    {"vkQueueSubmit2", 1, kRefs_vkQueueSubmit2},
+    {"vkQueueSubmit2KHR", 1, kRefs_vkQueueSubmit2KHR},
+    {"vkUpdateDescriptorSets", 2, kRefs_vkUpdateDescriptorSets},
+    {"vkAllocateDescriptorSets", 2, kRefs_vkAllocateDescriptorSets},
     {"vkCmdBeginRenderPass", 1, kRefs_vkCmdBeginRenderPass},
     {"vkCreateComputePipelines", 3, kRefs_vkCreateComputePipelines},
     {"vkCreateDescriptorPool", 3, kRefs_vkCreateDescriptorPool},
@@ -8367,1233 +8407,1233 @@ inline const VkCmdPlan* vk_find_cmd_plan(const char* name) {
 // registry (sorted ascending; binary search). Unknown sTypes are not
 // present — callers truncate the chain there.
 inline constexpr VkStypeEntry kVkStypeIndex[] = {
-    {0,43},
-    {1,458},
-    {2,278},
-    {3,243},
-    {4,1293},
-    {5,469},
-    {6,466},
-    {7,77},
-    {8,342},
-    {9,1263},
-    {10,307},
-    {11,1172},
-    {12,93},
-    {13,109},
-    {14,395},
-    {15,429},
-    {16,8},
-    {17,1084},
-    {18,1131},
-    {19,1142},
-    {20,1110},
-    {21,1138},
-    {22,1148},
-    {23,1122},
-    {24,1112},
-    {25,1097},
-    {26,1086},
-    {27,1099},
-    {28,5},
-    {29,1},
-    {30,6},
-    {31,1246},
-    {32,3},
-    {33,2},
-    {34,226},
-    {35,1469},
-    {36,150},
-    {37,4},
-    {38,7},
-    {39,131},
-    {40,120},
-    {41,124},
-    {42,121},
-    {43,0},
-    {44,100},
-    {45,405},
-    {46,470},
-    {49,1060},
-    {50,1061},
-    {51,1062},
-    {52,1063},
-    {53,1064},
-    {54,1065},
-    {55,1066},
-    {56,1067},
-    {1000001000,1333},
-    {1000001001,1153},
-    {1000002000,291},
-    {1000002001,301},
-    {1000003000,299},
-    {1000006000,1466},
-    {1000008000,40},
-    {1000010000,519},
-    {1000010001,1336},
-    {1000010002,869},
-    {1000018000,1123},
-    {1000022000,205},
-    {1000022001,206},
-    {1000022002,204},
-    {1000023000,1458},
-    {1000023001,1380},
-    {1000023002,1457},
-    {1000023003,1463},
-    {1000023004,81},
-    {1000023005,1462},
-    {1000023006,1464},
-    {1000023007,1465},
-    {1000023008,1379},
-    {1000023009,1451},
-    {1000023010,1381},
-    {1000023011,1461},
-    {1000023012,1192},
-    {1000023013,1459},
-    {1000023014,1057},
-    {1000023015,1454},
-    {1000023016,1191},
-    {1000024000,1397},
-    {1000024001,1386},
-    {1000024002,1398},
-    {1000026000,213},
-    {1000026001,212},
-    {1000026002,214},
-    {1000028000,1033},
-    {1000028001,1034},
-    {1000028002,1124},
-    {1000029000,172},
-    {1000029001,170},
-    {1000029002,171},
-    {1000029004,173},
-    {1000030000,430},
-    {1000030001,427},
-    {1000038001,1419},
-    {1000038002,1418},
-    {1000038003,1413},
-    {1000038004,1410},
-    {1000038005,1412},
-    {1000038006,1411},
-    {1000038008,1416},
-    {1000038009,1417},
-    {1000038011,1414},
-    {1000038012,1421},
-    {1000038013,1420},
-    {1000039001,1431},
-    {1000039002,1430},
-    {1000039003,1425},
-    {1000039004,1422},
-    {1000039005,1424},
-    {1000039006,1423},
-    {1000039009,1428},
-    {1000039010,1429},
-    {1000039012,1426},
-    {1000039013,1433},
-    {1000039014,1432},
-    {1000040001,1389},
-    {1000040004,1391},
-    {1000040005,1390},
-    {1000040006,1387},
-    {1000041000,1364},
-    {1000044000,1234},
-    {1000044001,1226},
-    {1000044002,1125},
-    {1000044003,649},
-    {1000044004,126},
-    {1000044006,1233},
-    {1000044007,1232},
-    {1000044008,54},
-    {1000044009,515},
-    {1000050000,598},
-    {1000053000,1213},
-    {1000053001,814},
-    {1000053002,819},
-    {1000056000,336},
-    {1000056001,314},
-    {1000058000,1468},
-    {1000059000,685},
-    {1000059001,876},
-    {1000059002,347},
-    {1000059003,403},
-    {1000059004,736},
-    {1000059005,1189},
-    {1000059006,804},
-    {1000059007,1289},
-    {1000059008,998},
-    {1000060000,467},
-    {1000060003,259},
-    {1000060004,253},
-    {1000060005,261},
-    {1000060006,251},
-    {1000060007,257},
-    {1000060008,422},
-    {1000060009,71},
-    {1000060010,32},
-    {1000060011,258},
-    {1000060012,263},
-    {1000060013,58},
-    {1000060014,67},
-    {1000061000,1375},
-    {1000062000,1378},
-    {1000063000,944},
-    {1000066000,1019},
-    {1000067000,426},
-    {1000067001,555},
-    {1000068000,1128},
-    {1000068001,852},
-    {1000068002,854},
-    {1000070000,719},
-    {1000070001,255},
-    {1000071000,670},
-    {1000071001,329},
-    {1000071002,663},
-    {1000071003,319},
-    {1000071004,728},
-    {1000072000,332},
-    {1000072001,334},
-    {1000072002,312},
-    {1000073002,506},
-    {1000073003,486},
-    {1000074000,441},
-    {1000074001,479},
-    {1000074002,481},
-    {1000075000,1467},
-    {1000076000,679},
-    {1000076001,338},
-    {1000077000,317},
-    {1000078002,178},
-    {1000078003,1266},
-    {1000079000,446},
-    {1000079001,1264},
-    {1000080000,884},
-    {1000081000,122},
-    {1000081001,582},
-    {1000081002,137},
-    {1000082000,687},
-    {1000083000,550},
-    {1000084000,1154},
-    {1000085000,238},
-    {1000087000,1150},
-    {1000090000,1315},
-    {1000091000,298},
-    {1000091001,245},
-    {1000091002,290},
-    {1000091003,1332},
-    {1000092000,1155},
-    {1000094000,1000},
-    {1000097000,816},
-    {1000098000,1149},
-    {1000099000,643},
-    {1000099001,1098},
-    {1000101000,583},
-    {1000101001,1116},
-    {1000102000,618},
-    {1000102001,1117},
-    {1000105000,377},
-    {1000108000,748},
-    {1000108001,357},
-    {1000108002,355},
-    {1000108003,1203},
-    {1000109000,45},
-    {1000109001,50},
-    {1000109002,1300},
-    {1000109003,1298},
-    {1000109004,1205},
-    {1000109005,1296},
-    {1000109006,1304},
-    {1000110000,906},
-    {1000111000,1288},
-    {1000112000,666},
-    {1000112001,324},
-    {1000113000,310},
-    {1000114002,345},
-    {1000115000,438},
-    {1000115001,343},
-    {1000116000,839},
-    {1000116001,840},
-    {1000116002,1174},
-    {1000116003,548},
-    {1000116004,33},
-    {1000116005,544},
-    {1000116006,543},
-    {1000116007,547},
-    {1000117000,856},
-    {1000117001,1211},
-    {1000117002,435},
-    {1000117003,1136},
-    {1000119000,1008},
-    {1000119001,1316},
-    {1000119002,1322},
-    {1000120000,1038},
-    {1000121000,300},
-    {1000121001,297},
-    {1000121002,292},
-    {1000121003,296},
-    {1000121004,295},
-    {1000122000,384},
-    {1000123000,465},
-    {1000127000,477},
-    {1000127001,474},
-    {1000128000,209},
-    {1000128001,210},
-    {1000128002,207},
-    {1000128003,208},
-    {1000129000,39},
-    {1000129001,38},
-    {1000129002,36},
-    {1000129003,437},
-    {1000129004,480},
-    {1000129005,326},
-    {1000129006,35},
-    {1000130000,915},
-    {1000130001,1250},
-    {1000133000,714},
-    {1000133001,716},
-    {1000133002,372},
-    {1000133003,373},
-    {1000133004,370},
-    {1000133005,715},
-    {1000133006,371},
-    {1000134000,947},
-    {1000134001,948},
-    {1000134002,309},
-    {1000134003,308},
-    {1000134004,1133},
-    {1000135000,1363},
-    {1000135001,396},
-    {1000135002,1241},
-    {1000135003,66},
-    {1000135004,1166},
-    {1000135005,227},
-    {1000135006,1281},
-    {1000135007,524},
-    {1000135008,627},
-    {1000135009,626},
-    {1000135010,123},
-    {1000135011,1249},
-    {1000135012,450},
-    {1000135013,1314},
-    {1000135014,628},
-    {1000138000,754},
-    {1000138001,756},
-    {1000138002,1472},
-    {1000138003,224},
-    {1000141000,934},
-    {1000143000,1242},
-    {1000143001,1216},
-    {1000143002,1130},
-    {1000143003,914},
-    {1000143004,513},
-    {1000145000,1162},
-    {1000145001,878},
-    {1000145002,879},
-    {1000145003,282},
-    {1000146000,103},
-    {1000146001,408},
-    {1000146002,414},
-    {1000146003,499},
-    {1000146004,1291},
-    {1000147000,401},
-    {1000148000,563},
-    {1000148001,564},
-    {1000148002,1085},
-    {1000149000,1091},
-    {1000150000,9},
-    {1000150002,16},
-    {1000150003,17},
-    {1000150004,18},
-    {1000150005,24},
-    {1000150006,19},
-    {1000150007,1470},
-    {1000150009,31},
-    {1000150010,143},
-    {1000150011,144},
-    {1000150012,162},
-    {1000150013,556},
-    {1000150014,557},
-    {1000150015,1194},
-    {1000150016,1197},
-    {1000150017,13},
-    {1000150018,1196},
-    {1000150020,10},
-    {1000152000,1089},
-    {1000154000,980},
-    {1000154001,981},
-    {1000156000,1252},
-    {1000156001,1256},
-    {1000156002,72},
-    {1000156003,410},
-    {1000156004,917},
-    {1000156005,1254},
-    {1000157000,60},
-    {1000157001,69},
-    {1000158000,306},
-    {1000158002,735},
-    {1000158003,398},
-    {1000158004,397},
-    {1000158005,399},
-    {1000158006,305},
-    {1000160000,1373},
-    {1000160001,1285},
-    {1000161000,229},
-    {1000161001,629},
-    {1000161002,631},
-    {1000161003,234},
-    {1000161004,236},
-    {1000163000,858},
-    {1000163001,859},
-    {1000164000,1147},
-    {1000164001,996},
-    {1000164002,997},
-    {1000164005,1143},
-    {1000165000,1195},
-    {1000165001,14},
-    {1000165003,367},
-    {1000165004,368},
-    {1000165005,366},
-    {1000165006,57},
-    {1000165007,1471},
-    {1000165008,26},
-    {1000165009,904},
-    {1000165011,1198},
-    {1000165012,25},
-    {1000166000,909},
-    {1000166001,1127},
-    {1000168000,777},
-    {1000168001,232},
-    {1000170000,746},
-    {1000170001,346},
-    {1000172000,586},
-    {1000173000,654},
-    {1000174000,279},
-    {1000175000,984},
-    {1000177000,553},
-    {1000178000,442},
-    {1000178001,488},
-    {1000178002,672},
-    {1000180000,932},
-    {1000181000,935},
-    {1000183000,1088},
-    {1000184000,111},
-    {1000185000,940},
-    {1000187001,1396},
-    {1000187002,1395},
-    {1000187004,1394},
-    {1000187005,1392},
-    {1000189000,272},
-    {1000190000,1046},
-    {1000190001,1139},
-    {1000190002,1042},
-    {1000192000,1095},
-    {1000196000,646},
-    {1000197000,688},
-    {1000199000,619},
-    {1000199001,1302},
-    {1000201000,579},
-    {1000202000,807},
-    {1000202001,809},
-    {1000203000,701},
-    {1000204000,958},
-    {1000205000,1146},
-    {1000205002,655},
-    {1000206000,114},
-    {1000206001,1179},
-    {1000207000,1027},
-    {1000207001,1029},
-    {1000207002,1273},
-    {1000207003,1370},
-    {1000207004,1275},
-    {1000207005,1269},
-    {1000208000,866},
-    {1000208001,1349},
-    {1000208002,1348},
-    {1000208003,1158},
-    {1000208004,1156},
-    {1000208005,535},
-    {1000208006,536},
-    {1000208007,534},
-    {1000208008,1157},
-    {1000208009,1331},
-    {1000209000,965},
-    {1000210000,1173},
-    {1000210001,457},
-    {1000210002,545},
-    {1000210003,549},
-    {1000210004,546},
-    {1000210005,540},
-    {1000211000,1068},
-    {1000212000,832},
-    {1000213000,294},
-    {1000213001,1334},
-    {1000215000,990},
-    {1000217000,508},
-    {1000218000,693},
-    {1000218001,700},
-    {1000218002,1209},
-    {1000221000,919},
-    {1000225000,1003},
-    {1000225001,1134},
-    {1000225002,1001},
-    {1000226000,352},
-    {1000226001,1106},
-    {1000226002,709},
-    {1000226003,707},
-    {1000226004,708},
-    {1000227000,939},
-    {1000229000,575},
-    {1000231000,936},
-    {1000232000,651},
-    {1000232001,1228},
-    {1000232002,1236},
-    {1000233000,927},
-    {1000233001,250},
-    {1000233002,928},
-    {1000234000,957},
-    {1000235000,977},
-    {1000237000,798},
-    {1000238000,803},
-    {1000238001,496},
-    {1000239000,1330},
-    {1000240000,611},
-    {1000241000,924},
-    {1000241001,52},
-    {1000241002,47},
-    {1000244000,566},
-    {1000244001,95},
-    {1000244002,94},
-    {1000245000,1031},
-    {1000246000,417},
-    {1000247000,1374},
-    {1000248000,868},
-    {1000249000,589},
-    {1000249001,141},
-    {1000249002,591},
-    {1000250000,599},
-    {1000250001,1090},
-    {1000250002,359},
-    {1000251000,704},
-    {1000252000,1075},
-    {1000253000,1036},
-    {1000254000,880},
-    {1000254001,1121},
-    {1000254002,881},
-    {1000255000,1323},
-    {1000255002,1317},
-    {1000256000,379},
-    {1000257000,567},
-    {1000257002,105},
-    {1000257003,494},
-    {1000257004,270},
-    {1000259000,767},
-    {1000259001,1118},
-    {1000259002,770},
-    {1000260000,931},
-    {1000261000,726},
-    {1000265000,750},
-    {1000267000,659},
-    {1000269000,846},
-    {1000269001,1108},
-    {1000269002,1102},
-    {1000269003,1100},
-    {1000269004,1103},
-    {1000269005,1101},
-    {1000270000,722},
-    {1000270001,724},
-    {1000270002,502},
-    {1000270003,423},
-    {1000270004,159},
-    {1000270005,164},
-    {1000270006,382},
-    {1000270007,157},
-    {1000270008,1309},
-    {1000270009,380},
-    {1000271000,489},
-    {1000271001,504},
-    {1000272000,796},
-    {1000272001,797},
-    {1000272002,491},
-    {1000273000,930},
-    {1000274000,1326},
-    {1000274001,1328},
-    {1000274002,1324},
-    {1000275000,1009},
-    {1000275001,1340},
-    {1000275002,1344},
-    {1000275003,1342},
-    {1000275004,1346},
-    {1000275005,1201},
-    {1000276000,942},
-    {1000277000,640},
-    {1000277001,376},
-    {1000277002,375},
-    {1000277003,452},
-    {1000277004,449},
-    {1000277005,361},
-    {1000277006,363},
-    {1000277007,638},
-    {1000278000,753},
-    {1000278001,128},
-    {1000280000,961},
-    {1000280001,963},
-    {1000281000,1015},
-    {1000281001,1016},
-    {1000282000,125},
-    {1000282001,1222},
-    {1000283000,613},
-    {1000283001,217},
-    {1000283002,218},
-    {1000284000,641},
-    {1000284002,273},
-    {1000286000,910},
-    {1000286001,912},
-    {1000287000,1248},
-    {1000287001,605},
-    {1000287002,604},
-    {1000288000,1018},
-    {1000290000,1111},
-    {1000292000,860},
-    {1000292001,1318},
-    {1000292002,1339},
-    {1000294000,1152},
-    {1000294001,862},
-    {1000295000,874},
-    {1000295001,276},
-    {1000295002,1160},
-    {1000297000,844},
-    {1000298000,1070},
-    {1000298001,1071},
-    {1000298002,274},
-    {1000298003,133},
-    {1000298004,132},
-    {1000298005,1114},
-    {1000298007,341},
-    {1000298010,1113},
-    {1000299000,1434},
-    {1000299001,1443},
-    {1000299002,1444},
-    {1000299003,1408},
-    {1000299004,1450},
-    {1000299005,1176},
-    {1000299006,1054},
-    {1000299007,1439},
-    {1000299008,1438},
-    {1000299009,1448},
-    {1000299010,1447},
-    {1000300000,642},
-    {1000300001,244},
-    {1000302000,539},
-    {1000302001,887},
-    {1000302002,888},
-    {1000303000,740},
-    {1000304000,972},
-    {1000304001,973},
-    {1000305000,982},
-    {1000305001,983},
-    {1000307000,176},
-    {1000307001,174},
-    {1000307002,175},
-    {1000307003,602},
-    {1000307004,603},
-    {1000308000,1199},
-    {1000309000,1025},
-    {1000309001,1026},
-    {1000309002,1221},
-    {1000309003,537},
-    {1000309004,538},
-    {1000309005,289},
-    {1000310000,1171},
-    {1000311000,315},
-    {1000311001,316},
-    {1000314000,471},
-    {1000314001,101},
-    {1000314002,406},
-    {1000314003,215},
-    {1000314004,1294},
-    {1000314005,1271},
-    {1000314006,129},
-    {1000314007,1011},
-    {1000314008,1178},
-    {1000314009,113},
-    {1000316000,623},
-    {1000316001,621},
-    {1000316002,622},
-    {1000316003,219},
-    {1000316004,222},
-    {1000316005,85},
-    {1000316006,388},
-    {1000316007,428},
-    {1000316008,1245},
-    {1000316009,11},
-    {1000316010,525},
-    {1000316011,220},
-    {1000316012,221},
-    {1000318000,268},
-    {1000318001,152},
-    {1000318002,269},
-    {1000318003,151},
-    {1000318004,498},
-    {1000318005,497},
-    {1000318006,635},
-    {1000318007,74},
-    {1000318008,80},
-    {1000318009,303},
-    {1000318010,304},
-    {1000318011,287},
-    {1000318012,136},
-    {1000318013,79},
-    {1000318014,492},
-    {1000318015,12},
-    {1000320000,717},
-    {1000320001,718},
-    {1000320002,374},
-    {1000321000,946},
-    {1000322000,703},
-    {1000323000,989},
-    {1000325000,1077},
-    {1000326000,706},
-    {1000326001,705},
-    {1000326002,1105},
-    {1000327000,22},
-    {1000327001,900},
-    {1000327002,27},
-    {1000328000,806},
-    {1000328001,808},
-    {1000330000,1073},
-    {1000332000,691},
-    {1000332001,692},
-    {1000333000,149},
-    {1000335000,743},
-    {1000336000,1072},
-    {1000337000,145},
-    {1000337001,153},
-    {1000337002,147},
-    {1000337003,155},
-    {1000337004,83},
-    {1000337005,1238},
-    {1000337006,91},
-    {1000337007,392},
-    {1000337008,386},
-    {1000337009,98},
-    {1000337010,412},
-    {1000338000,733},
-    {1000338001,389},
-    {1000338002,1311},
-    {1000338003,419},
-    {1000338004,390},
-    {1000339000,562},
-    {1000340000,552},
-    {1000341000,682},
-    {1000341001,246},
-    {1000341002,248},
-    {1000342000,890},
-    {1000344000,889},
-    {1000346000,286},
-    {1000347000,901},
-    {1000347001,902},
-    {1000348013,893},
-    {1000351000,821},
-    {1000351002,517},
-    {1000352000,1049},
-    {1000352001,1377},
-    {1000352002,1376},
-    {1000353000,648},
-    {1000354000,558},
-    {1000354001,240},
-    {1000355000,617},
-    {1000355001,1145},
-    {1000356000,872},
-    {1000360000,349},
-    {1000361000,864},
-    {1000364001,507},
-    {1000364002,487},
-    {1000365001,1267},
-    {1000366001,440},
-    {1000366002,88},
-    {1000366003,89},
-    {1000366004,90},
-    {1000366005,86},
-    {1000366006,391},
-    {1000366007,400},
-    {1000366008,1350},
-    {1000366009,87},
-    {1000369000,1308},
-    {1000369001,1006},
-    {1000369002,1007},
-    {1000370000,759},
-    {1000371000,484},
-    {1000371001,673},
-    {1000372000,1115},
-    {1000372001,849},
-    {1000373000,439},
-    {1000373002,344},
-    {1000373003,1259},
-    {1000373004,447},
-    {1000373006,1265},
-    {1000373007,678},
-    {1000374002,485},
-    {1000374003,501},
-    {1000374004,674},
-    {1000375000,710},
-    {1000375001,353},
-    {1000376000,812},
-    {1000376001,1307},
-    {1000376002,514},
-    {1000377000,656},
-    {1000378000,1262},
-    {1000381000,576},
-    {1000381001,1087},
-    {1000382000,873},
-    {1000386000,899},
-    {1000387000,995},
-    {1000388000,711},
-    {1000388001,1184},
-    {1000390000,1056},
-    {1000390001,1445},
-    {1000390002,1437},
-    {1000390003,1449},
-    {1000391000,747},
-    {1000391001,431},
-    {1000392000,810},
-    {1000392001,811},
-    {1000393000,730},
-    {1000395000,992},
-    {1000395001,993},
-    {1000396000,509},
-    {1000396001,512},
-    {1000396002,167},
-    {1000396003,168},
-    {1000396004,166},
-    {1000396005,826},
-    {1000396006,828},
-    {1000396007,511},
-    {1000396008,510},
-    {1000396009,29},
-    {1000397000,644},
-    {1000397001,645},
-    {1000397002,28},
-    {1000404000,572},
-    {1000404001,573},
-    {1000404002,574},
-    {1000411000,565},
-    {1000411001,1244},
-    {1000412000,833},
-    {1000413000,779},
-    {1000413001,781},
-    {1000413002,241},
-    {1000413003,264},
-    {1000415000,941},
-    {1000416000,987},
-    {1000417000,283},
-    {1000417001,922},
-    {1000417002,923},
-    {1000417003,288},
-    {1000417004,921},
-    {1000418000,745},
-    {1000418001,433},
-    {1000420000,634},
-    {1000420001,228},
-    {1000420002,231},
-    {1000421000,615},
-    {1000422000,825},
-    {1000424000,907},
-    {1000424001,908},
-    {1000424002,1217},
-    {1000424003,1218},
-    {1000424004,1219},
-    {1000425000,696},
-    {1000425001,698},
-    {1000425002,1210},
-    {1000426000,595},
-    {1000426001,596},
-    {1000427000,799},
-    {1000427001,801},
-    {1000428000,636},
-    {1000428001,135},
-    {1000428002,1107},
-    {1000429008,898},
-    {1000429009,20},
-    {1000429010,23},
-    {1000430000,773},
-    {1000434000,968},
-    {1000435000,44},
-    {1000437000,734},
-    {1000440000,741},
-    {1000440001,742},
-    {1000440002,432},
-    {1000451000,823},
-    {1000451001,824},
-    {1000452000,523},
-    {1000452001,522},
-    {1000452002,520},
-    {1000452003,444},
-    {1000452004,483},
-    {1000452005,327},
-    {1000453000,331},
-    {1000453001,521},
-    {1000453002,1337},
-    {1000453003,870},
-    {1000455000,657},
-    {1000455001,658},
-    {1000458000,1005},
-    {1000458001,1207},
-    {1000458002,1208},
-    {1000458003,1220},
-    {1000460000,1353},
-    {1000460001,1362},
-    {1000460002,78},
-    {1000460003,1475},
-    {1000460004,1014},
-    {1000460005,1357},
-    {1000460006,1355},
-    {1000460007,1359},
-    {1000460008,1358},
-    {1000460009,1013},
-    {1000460010,285},
-    {1000460011,169},
-    {1000460012,1352},
-    {1000460013,1354},
-    {1000460014,476},
-    {1000460015,681},
-    {1000460016,340},
-    {1000460017,337},
-    {1000460018,624},
-    {1000460019,625},
-    {1000460020,223},
-    {1000460021,1351},
-    {1000460022,1361},
-    {1000460023,354},
-    {1000462000,970},
-    {1000462001,971},
-    {1000462002,1132},
-    {1000462003,1284},
-    {1000464000,830},
-    {1000464001,831},
-    {1000464002,527},
-    {1000464003,528},
-    {1000464004,529},
-    {1000464005,526},
-    {1000464010,530},
-    {1000465000,764},
-    {1000466000,850},
-    {1000468000,668},
-    {1000468001,669},
-    {1000468002,37},
-    {1000470000,783},
-    {1000470001,785},
-    {1000470003,1223},
-    {1000470004,266},
-    {1000470005,1092},
-    {1000470006,107},
-    {1000476000,560},
-    {1000476001,41},
-    {1000476002,42},
-    {1000478000,612},
-    {1000478001,15},
-    {1000479000,1319},
-    {1000479001,1151},
-    {1000479002,861},
-    {1000480000,1320},
-    {1000480001,867},
-    {1000480002,1159},
-    {1000481000,903},
-    {1000482000,975},
-    {1000482001,976},
-    {1000482002,1280},
-    {1000483000,841},
-    {1000483001,1079},
-    {1000483002,1082},
-    {1000483003,1083},
-    {1000483004,842},
-    {1000483005,1200},
-    {1000483006,1080},
-    {1000483007,1094},
-    {1000483008,275},
-    {1000483009,1081},
-    {1000484000,1024},
-    {1000484001,1369},
-    {1000485000,559},
-    {1000485001,34},
-    {1000488000,818},
-    {1000489001,1268},
-    {1000489002,677},
-    {1000489003,284},
-    {1000490000,895},
-    {1000490001,897},
-    {1000491000,592},
-    {1000491001,593},
-    {1000491002,142},
-    {1000491004,138},
-    {1000492000,661},
-    {1000492001,662},
-    {1000495000,765},
-    {1000495001,766},
-    {1000496000,464},
-    {1000497000,937},
-    {1000497001,938},
-    {1000498000,847},
-    {1000499000,653},
-    {1000504000,758},
-    {1000505000,460},
-    {1000505001,459},
-    {1000505002,1278},
-    {1000505003,369},
-    {1000505004,463},
-    {1000505005,461},
-    {1000505006,531},
-    {1000505007,1338},
-    {1000505008,462},
-    {1000506000,588},
-    {1000506001,140},
-    {1000506002,590},
-    {1000507000,185},
-    {1000507001,197},
-    {1000507002,193},
-    {1000507003,183},
-    {1000507004,198},
-    {1000507005,62},
-    {1000507006,607},
-    {1000507007,200},
-    {1000507008,192},
-    {1000507009,188},
-    {1000507010,182},
-    {1000507011,196},
-    {1000507012,195},
-    {1000507013,187},
-    {1000507014,186},
-    {1000507015,184},
-    {1000507016,203},
-    {1000507017,1181},
-    {1000507018,1182},
-    {1000507019,886},
-    {1000508000,1183},
-    {1000510000,817},
-    {1000510001,516},
-    {1000511000,581},
-    {1000512001,1384},
-    {1000512004,1385},
-    {1000512005,1382},
-    {1000513001,1407},
-    {1000513002,1402},
-    {1000513003,1400},
-    {1000513004,1051},
-    {1000513006,1405},
-    {1000513007,1406},
-    {1000513008,1403},
-    {1000513010,1401},
-    {1000514000,1050},
-    {1000514002,1399},
-    {1000515000,1058},
-    {1000515001,1456},
-    {1000516000,836},
-    {1000518000,738},
-    {1000518001,739},
-    {1000518002,1243},
-    {1000519000,1247},
-    {1000519001,601},
-    {1000519002,82},
-    {1000520000,1074},
-    {1000520001,1258},
-    {1000521000,600},
-    {1000524000,561},
-    {1000525000,1045},
-    {1000527000,1035},
-    {1000527001,49},
-    {1000528000,954},
-    {1000529000,1261},
-    {1000529001,1260},
-    {1000529002,445},
-    {1000529003,328},
-    {1000529004,675},
-    {1000530000,763},
-    {1000544000,949},
-    {1000545000,787},
-    {1000545001,789},
-    {1000545002,75},
-    {1000545003,64},
-    {1000545004,1164},
-    {1000545005,1167},
-    {1000545006,1169},
-    {1000545007,1277},
-    {1000545008,63},
-    {1000546000,633},
-    {1000547000,1022},
-    {1000547001,1023},
-    {1000547002,1367},
-    {1000547003,1366},
-    {1000547004,1368},
-    {1000549000,594},
-    {1000549002,161},
-    {1000549003,163},
-    {1000550002,211},
-    {1000551000,302},
-    {1000551001,293},
-    {1000552000,1435},
-    {1000552001,1446},
-    {1000552002,1436},
-    {1000552003,1460},
-    {1000552004,1053},
-    {1000553000,1440},
-    {1000553001,1455},
-    {1000553002,1441},
-    {1000553003,1415},
-    {1000553004,1427},
-    {1000553005,1442},
-    {1000553006,1453},
-    {1000553007,1404},
-    {1000553008,1452},
-    {1000553009,1055},
-    {1000555000,892},
-    {1000556000,323},
-    {1000556001,321},
-    {1000556002,322},
-    {1000556003,665},
-    {1000558000,978},
-    {1000559000,577},
-    {1000562000,791},
-    {1000562001,792},
-    {1000562002,761},
-    {1000562003,760},
-    {1000562004,762},
-    {1000563000,929},
-    {1000564000,979},
-    {1000565000,1356},
-    {1000565001,1360},
-    {1000567000,953},
-    {1000568000,905},
-    {1000569000,570},
-    {1000569001,571},
-    {1000569002,115},
-    {1000569003,119},
-    {1000569004,118},
-    {1000569005,117},
-    {1000569006,116},
-    {1000569007,1193},
-    {1000570000,834},
-    {1000570001,835},
-    {1000570002,1474},
-    {1000570003,533},
-    {1000570004,110},
-    {1000570005,532},
-    {1000572000,637},
-    {1000572001,639},
-    {1000572002,362},
-    {1000572003,453},
-    {1000572004,360},
-    {1000572006,448},
-    {1000572007,451},
-    {1000572008,1476},
-    {1000572009,1477},
-    {1000572010,454},
-    {1000572011,455},
-    {1000572012,456},
-    {1000572013,364},
-    {1000572014,365},
-    {1000573000,683},
-    {1000573001,684},
-    {1000573002,249},
-    {1000573003,247},
-    {1000574000,793},
-    {1000574002,473},
-    {1000575000,731},
-    {1000575001,732},
-    {1000575002,385},
-    {1000579000,956},
-    {1000580000,1163},
-    {1000580001,882},
-    {1000580002,883},
-    {1000581000,894},
-    {1000581001,896},
-    {1000582000,614},
-    {1000582001,1144},
-    {1000584000,794},
-    {1000584001,795},
-    {1000584002,1188},
-    {1000586000,1059},
-    {1000586001,1388},
-    {1000586002,1393},
-    {1000586003,1383},
-    {1000590000,721},
-    {1000590001,378},
-    {1000593000,584},
-    {1000593001,139},
-    {1000593002,585},
-    {1000596000,848},
-    {1000598000,1052},
-    {1000598001,1409},
-    {1000598002,1177},
-    {1000602000,443},
-    {1000602001,493},
-    {1000602002,482},
-    {1000605000,837},
-    {1000605001,838},
-    {1000605002,541},
-    {1000605003,542},
-    {1000605004,1215},
-    {1000607000,959},
-    {1000607001,960},
-    {1000607002,1282},
-    {1000607003,1283},
-    {1000608000,1048},
-    {1000609000,690},
-    {1000611000,694},
-    {1000611001,695},
-    {1000611002,1104},
-    {1000613000,1279},
-    {1000613001,863},
-    {1000616000,813},
-    {1000616001,1335},
-    {1000619003,1230},
-    {1000620000,1076},
-    {1000623000,827},
-    {1000623001,829},
-    {1000623002,21},
-    {1000623003,30},
-    {1000627000,926},
-    {1000628000,606},
-    {1000628001,56},
-    {1000628002,177},
-    {1000629000,608},
-    {1000629001,181},
-    {1000630000,774},
-    {1000630001,775},
-    {1000630002,1225},
-    {1000630004,1240},
-    {1000631000,610},
-    {1000631001,1180},
-    {1000631002,190},
-    {1000631003,179},
-    {1000631004,180},
-    {1000631005,191},
-    {1000631006,194},
-    {1000631007,202},
-    {1000631008,201},
-    {1000635000,966},
-    {1000635001,967},
-    {1000637000,843},
-    {1000642000,994},
-    {1000645000,134},
-    {1000645001,578},
-    {1000657000,776},
-    {1000657001,1187},
-    {1000662000,986},
-    {1000664000,1372},
-    {1000668000,351},
-    {1000668001,394},
-    {1000668002,425},
-    {1000668003,434},
-    {1000668004,660},
-    {1000668005,416},
-    {1000668006,1287},
-    {1000672000,974},
-    {1000673000,969},
-    {1000674000,1021},
-    {1000674001,1365},
-    {1000676000,189},
-    {1000676001,199},
-    {1000676002,609},
-    {1000678000,871},
-    {1000685000,1321},
-    {1000689000,587},
+    {0,61},
+    {1,472},
+    {2,293},
+    {3,258},
+    {4,13},
+    {5,483},
+    {6,480},
+    {7,95},
+    {8,357},
+    {9,1276},
+    {10,322},
+    {11,1185},
+    {12,111},
+    {13,126},
+    {14,410},
+    {15,443},
+    {16,26},
+    {17,1097},
+    {18,1144},
+    {19,1155},
+    {20,1123},
+    {21,1151},
+    {22,1161},
+    {23,1135},
+    {24,1125},
+    {25,1110},
+    {26,1099},
+    {27,1112},
+    {28,23},
+    {29,19},
+    {30,24},
+    {31,1259},
+    {32,21},
+    {33,20},
+    {34,17},
+    {35,15},
+    {36,16},
+    {37,22},
+    {38,25},
+    {39,148},
+    {40,137},
+    {41,141},
+    {42,138},
+    {43,18},
+    {44,3},
+    {45,4},
+    {46,2},
+    {49,1073},
+    {50,1074},
+    {51,1075},
+    {52,1076},
+    {53,1077},
+    {54,1078},
+    {55,1079},
+    {56,1080},
+    {1000001000,1344},
+    {1000001001,1166},
+    {1000002000,306},
+    {1000002001,316},
+    {1000003000,314},
+    {1000006000,1477},
+    {1000008000,58},
+    {1000010000,532},
+    {1000010001,1347},
+    {1000010002,882},
+    {1000018000,1136},
+    {1000022000,221},
+    {1000022001,222},
+    {1000022002,220},
+    {1000023000,1469},
+    {1000023001,1391},
+    {1000023002,1468},
+    {1000023003,1474},
+    {1000023004,99},
+    {1000023005,1473},
+    {1000023006,1475},
+    {1000023007,1476},
+    {1000023008,1390},
+    {1000023009,1462},
+    {1000023010,1392},
+    {1000023011,1472},
+    {1000023012,1205},
+    {1000023013,1470},
+    {1000023014,1070},
+    {1000023015,1465},
+    {1000023016,1204},
+    {1000024000,1408},
+    {1000024001,1397},
+    {1000024002,1409},
+    {1000026000,229},
+    {1000026001,228},
+    {1000026002,230},
+    {1000028000,1046},
+    {1000028001,1047},
+    {1000028002,1137},
+    {1000029000,188},
+    {1000029001,186},
+    {1000029002,187},
+    {1000029004,189},
+    {1000030000,444},
+    {1000030001,441},
+    {1000038001,1430},
+    {1000038002,1429},
+    {1000038003,1424},
+    {1000038004,1421},
+    {1000038005,1423},
+    {1000038006,1422},
+    {1000038008,1427},
+    {1000038009,1428},
+    {1000038011,1425},
+    {1000038012,1432},
+    {1000038013,1431},
+    {1000039001,1442},
+    {1000039002,1441},
+    {1000039003,1436},
+    {1000039004,1433},
+    {1000039005,1435},
+    {1000039006,1434},
+    {1000039009,1439},
+    {1000039010,1440},
+    {1000039012,1437},
+    {1000039013,1444},
+    {1000039014,1443},
+    {1000040001,1400},
+    {1000040004,1402},
+    {1000040005,1401},
+    {1000040006,1398},
+    {1000041000,1375},
+    {1000044000,1247},
+    {1000044001,1239},
+    {1000044002,1138},
+    {1000044003,662},
+    {1000044004,143},
+    {1000044006,1246},
+    {1000044007,1245},
+    {1000044008,72},
+    {1000044009,528},
+    {1000050000,611},
+    {1000053000,1226},
+    {1000053001,827},
+    {1000053002,832},
+    {1000056000,351},
+    {1000056001,329},
+    {1000058000,1479},
+    {1000059000,698},
+    {1000059001,889},
+    {1000059002,362},
+    {1000059003,418},
+    {1000059004,749},
+    {1000059005,1202},
+    {1000059006,817},
+    {1000059007,1302},
+    {1000059008,1011},
+    {1000060000,481},
+    {1000060003,274},
+    {1000060004,268},
+    {1000060005,276},
+    {1000060006,266},
+    {1000060007,272},
+    {1000060008,436},
+    {1000060009,89},
+    {1000060010,50},
+    {1000060011,273},
+    {1000060012,278},
+    {1000060013,76},
+    {1000060014,85},
+    {1000061000,1386},
+    {1000062000,1389},
+    {1000063000,957},
+    {1000066000,1032},
+    {1000067000,440},
+    {1000067001,568},
+    {1000068000,1141},
+    {1000068001,865},
+    {1000068002,867},
+    {1000070000,732},
+    {1000070001,270},
+    {1000071000,683},
+    {1000071001,344},
+    {1000071002,676},
+    {1000071003,334},
+    {1000071004,741},
+    {1000072000,347},
+    {1000072001,349},
+    {1000072002,327},
+    {1000073002,519},
+    {1000073003,499},
+    {1000074000,455},
+    {1000074001,492},
+    {1000074002,494},
+    {1000075000,1478},
+    {1000076000,692},
+    {1000076001,353},
+    {1000077000,332},
+    {1000078002,194},
+    {1000078003,1279},
+    {1000079000,460},
+    {1000079001,1277},
+    {1000080000,897},
+    {1000081000,139},
+    {1000081001,595},
+    {1000081002,154},
+    {1000082000,700},
+    {1000083000,563},
+    {1000084000,1167},
+    {1000085000,253},
+    {1000087000,1163},
+    {1000090000,1326},
+    {1000091000,313},
+    {1000091001,260},
+    {1000091002,305},
+    {1000091003,1343},
+    {1000092000,1168},
+    {1000094000,1013},
+    {1000097000,829},
+    {1000098000,1162},
+    {1000099000,656},
+    {1000099001,1111},
+    {1000101000,596},
+    {1000101001,1129},
+    {1000102000,631},
+    {1000102001,1130},
+    {1000105000,392},
+    {1000108000,761},
+    {1000108001,372},
+    {1000108002,370},
+    {1000108003,1216},
+    {1000109000,63},
+    {1000109001,68},
+    {1000109002,1311},
+    {1000109003,1309},
+    {1000109004,1218},
+    {1000109005,1307},
+    {1000109006,1315},
+    {1000110000,919},
+    {1000111000,1301},
+    {1000112000,679},
+    {1000112001,339},
+    {1000113000,325},
+    {1000114002,360},
+    {1000115000,452},
+    {1000115001,358},
+    {1000116000,852},
+    {1000116001,853},
+    {1000116002,1187},
+    {1000116003,561},
+    {1000116004,51},
+    {1000116005,557},
+    {1000116006,556},
+    {1000116007,560},
+    {1000117000,869},
+    {1000117001,1224},
+    {1000117002,449},
+    {1000117003,1149},
+    {1000119000,1021},
+    {1000119001,1327},
+    {1000119002,1333},
+    {1000120000,1051},
+    {1000121000,315},
+    {1000121001,312},
+    {1000121002,307},
+    {1000121003,311},
+    {1000121004,310},
+    {1000122000,399},
+    {1000123000,479},
+    {1000127000,490},
+    {1000127001,487},
+    {1000128000,225},
+    {1000128001,226},
+    {1000128002,223},
+    {1000128003,224},
+    {1000129000,57},
+    {1000129001,56},
+    {1000129002,54},
+    {1000129003,451},
+    {1000129004,493},
+    {1000129005,341},
+    {1000129006,53},
+    {1000130000,928},
+    {1000130001,1263},
+    {1000133000,727},
+    {1000133001,729},
+    {1000133002,387},
+    {1000133003,388},
+    {1000133004,385},
+    {1000133005,728},
+    {1000133006,386},
+    {1000134000,960},
+    {1000134001,961},
+    {1000134002,324},
+    {1000134003,323},
+    {1000134004,1146},
+    {1000135000,1374},
+    {1000135001,411},
+    {1000135002,1254},
+    {1000135003,84},
+    {1000135004,1179},
+    {1000135005,242},
+    {1000135006,1294},
+    {1000135007,537},
+    {1000135008,640},
+    {1000135009,639},
+    {1000135010,140},
+    {1000135011,1262},
+    {1000135012,464},
+    {1000135013,1325},
+    {1000135014,641},
+    {1000138000,767},
+    {1000138001,769},
+    {1000138002,1482},
+    {1000138003,240},
+    {1000141000,947},
+    {1000143000,1255},
+    {1000143001,1229},
+    {1000143002,1143},
+    {1000143003,927},
+    {1000143004,526},
+    {1000145000,1175},
+    {1000145001,891},
+    {1000145002,892},
+    {1000145003,297},
+    {1000146000,120},
+    {1000146001,422},
+    {1000146002,428},
+    {1000146003,512},
+    {1000146004,1304},
+    {1000147000,416},
+    {1000148000,576},
+    {1000148001,577},
+    {1000148002,1098},
+    {1000149000,1104},
+    {1000150000,27},
+    {1000150002,34},
+    {1000150003,35},
+    {1000150004,36},
+    {1000150005,42},
+    {1000150006,37},
+    {1000150007,1480},
+    {1000150009,49},
+    {1000150010,160},
+    {1000150011,161},
+    {1000150012,178},
+    {1000150013,569},
+    {1000150014,570},
+    {1000150015,1207},
+    {1000150016,1210},
+    {1000150017,31},
+    {1000150018,1209},
+    {1000150020,28},
+    {1000152000,1102},
+    {1000154000,993},
+    {1000154001,994},
+    {1000156000,1265},
+    {1000156001,1269},
+    {1000156002,90},
+    {1000156003,424},
+    {1000156004,930},
+    {1000156005,1267},
+    {1000157000,78},
+    {1000157001,87},
+    {1000158000,321},
+    {1000158002,748},
+    {1000158003,413},
+    {1000158004,412},
+    {1000158005,414},
+    {1000158006,320},
+    {1000160000,1384},
+    {1000160001,1298},
+    {1000161000,244},
+    {1000161001,642},
+    {1000161002,644},
+    {1000161003,249},
+    {1000161004,251},
+    {1000163000,871},
+    {1000163001,872},
+    {1000164000,1160},
+    {1000164001,1009},
+    {1000164002,1010},
+    {1000164005,1156},
+    {1000165000,1208},
+    {1000165001,32},
+    {1000165003,382},
+    {1000165004,383},
+    {1000165005,381},
+    {1000165006,75},
+    {1000165007,1481},
+    {1000165008,44},
+    {1000165009,917},
+    {1000165011,1211},
+    {1000165012,43},
+    {1000166000,922},
+    {1000166001,1140},
+    {1000168000,790},
+    {1000168001,247},
+    {1000170000,759},
+    {1000170001,361},
+    {1000172000,599},
+    {1000173000,667},
+    {1000174000,294},
+    {1000175000,997},
+    {1000177000,566},
+    {1000178000,456},
+    {1000178001,501},
+    {1000178002,685},
+    {1000180000,945},
+    {1000181000,948},
+    {1000183000,1101},
+    {1000184000,128},
+    {1000185000,953},
+    {1000187001,1407},
+    {1000187002,1406},
+    {1000187004,1405},
+    {1000187005,1403},
+    {1000189000,287},
+    {1000190000,1059},
+    {1000190001,1152},
+    {1000190002,1055},
+    {1000192000,1108},
+    {1000196000,659},
+    {1000197000,701},
+    {1000199000,632},
+    {1000199001,1313},
+    {1000201000,592},
+    {1000202000,820},
+    {1000202001,822},
+    {1000203000,714},
+    {1000204000,971},
+    {1000205000,1159},
+    {1000205002,668},
+    {1000206000,131},
+    {1000206001,1192},
+    {1000207000,1040},
+    {1000207001,1042},
+    {1000207002,1286},
+    {1000207003,1381},
+    {1000207004,1288},
+    {1000207005,1282},
+    {1000208000,879},
+    {1000208001,1360},
+    {1000208002,1359},
+    {1000208003,1171},
+    {1000208004,1169},
+    {1000208005,548},
+    {1000208006,549},
+    {1000208007,547},
+    {1000208008,1170},
+    {1000208009,1342},
+    {1000209000,978},
+    {1000210000,1186},
+    {1000210001,471},
+    {1000210002,558},
+    {1000210003,562},
+    {1000210004,559},
+    {1000210005,553},
+    {1000211000,1081},
+    {1000212000,845},
+    {1000213000,309},
+    {1000213001,1345},
+    {1000215000,1003},
+    {1000217000,521},
+    {1000218000,706},
+    {1000218001,713},
+    {1000218002,1222},
+    {1000221000,932},
+    {1000225000,1016},
+    {1000225001,1147},
+    {1000225002,1014},
+    {1000226000,367},
+    {1000226001,1119},
+    {1000226002,722},
+    {1000226003,720},
+    {1000226004,721},
+    {1000227000,952},
+    {1000229000,588},
+    {1000231000,949},
+    {1000232000,664},
+    {1000232001,1241},
+    {1000232002,1249},
+    {1000233000,940},
+    {1000233001,265},
+    {1000233002,941},
+    {1000234000,970},
+    {1000235000,990},
+    {1000237000,811},
+    {1000238000,816},
+    {1000238001,509},
+    {1000239000,1341},
+    {1000240000,624},
+    {1000241000,937},
+    {1000241001,70},
+    {1000241002,65},
+    {1000244000,579},
+    {1000244001,113},
+    {1000244002,112},
+    {1000245000,1044},
+    {1000246000,431},
+    {1000247000,1385},
+    {1000248000,881},
+    {1000249000,602},
+    {1000249001,158},
+    {1000249002,604},
+    {1000250000,612},
+    {1000250001,1103},
+    {1000250002,374},
+    {1000251000,717},
+    {1000252000,1088},
+    {1000253000,1049},
+    {1000254000,893},
+    {1000254001,1134},
+    {1000254002,894},
+    {1000255000,1334},
+    {1000255002,1328},
+    {1000256000,394},
+    {1000257000,580},
+    {1000257002,122},
+    {1000257003,507},
+    {1000257004,285},
+    {1000259000,780},
+    {1000259001,1131},
+    {1000259002,783},
+    {1000260000,944},
+    {1000261000,739},
+    {1000265000,763},
+    {1000267000,672},
+    {1000269000,859},
+    {1000269001,1121},
+    {1000269002,1115},
+    {1000269003,1113},
+    {1000269004,1116},
+    {1000269005,1114},
+    {1000270000,735},
+    {1000270001,737},
+    {1000270002,515},
+    {1000270003,437},
+    {1000270004,175},
+    {1000270005,180},
+    {1000270006,397},
+    {1000270007,173},
+    {1000270008,1320},
+    {1000270009,395},
+    {1000271000,502},
+    {1000271001,517},
+    {1000272000,809},
+    {1000272001,810},
+    {1000272002,504},
+    {1000273000,943},
+    {1000274000,1337},
+    {1000274001,1339},
+    {1000274002,1335},
+    {1000275000,1022},
+    {1000275001,1351},
+    {1000275002,1355},
+    {1000275003,1353},
+    {1000275004,1357},
+    {1000275005,1214},
+    {1000276000,955},
+    {1000277000,653},
+    {1000277001,391},
+    {1000277002,390},
+    {1000277003,466},
+    {1000277004,463},
+    {1000277005,376},
+    {1000277006,378},
+    {1000277007,651},
+    {1000278000,766},
+    {1000278001,145},
+    {1000280000,974},
+    {1000280001,976},
+    {1000281000,1028},
+    {1000281001,1029},
+    {1000282000,142},
+    {1000282001,1235},
+    {1000283000,626},
+    {1000283001,233},
+    {1000283002,234},
+    {1000284000,654},
+    {1000284002,288},
+    {1000286000,923},
+    {1000286001,925},
+    {1000287000,1261},
+    {1000287001,618},
+    {1000287002,617},
+    {1000288000,1031},
+    {1000290000,1124},
+    {1000292000,873},
+    {1000292001,1329},
+    {1000292002,1350},
+    {1000294000,1165},
+    {1000294001,875},
+    {1000295000,887},
+    {1000295001,291},
+    {1000295002,1173},
+    {1000297000,857},
+    {1000298000,1083},
+    {1000298001,1084},
+    {1000298002,289},
+    {1000298003,150},
+    {1000298004,149},
+    {1000298005,1127},
+    {1000298007,356},
+    {1000298010,1126},
+    {1000299000,1445},
+    {1000299001,1454},
+    {1000299002,1455},
+    {1000299003,1419},
+    {1000299004,1461},
+    {1000299005,1189},
+    {1000299006,1067},
+    {1000299007,1450},
+    {1000299008,1449},
+    {1000299009,1459},
+    {1000299010,1458},
+    {1000300000,655},
+    {1000300001,259},
+    {1000302000,552},
+    {1000302001,900},
+    {1000302002,901},
+    {1000303000,753},
+    {1000304000,985},
+    {1000304001,986},
+    {1000305000,995},
+    {1000305001,996},
+    {1000307000,192},
+    {1000307001,190},
+    {1000307002,191},
+    {1000307003,615},
+    {1000307004,616},
+    {1000308000,1212},
+    {1000309000,1038},
+    {1000309001,1039},
+    {1000309002,1234},
+    {1000309003,550},
+    {1000309004,551},
+    {1000309005,304},
+    {1000310000,1184},
+    {1000311000,330},
+    {1000311001,331},
+    {1000314000,484},
+    {1000314001,118},
+    {1000314002,420},
+    {1000314003,231},
+    {1000314004,14},
+    {1000314005,1284},
+    {1000314006,146},
+    {1000314007,1024},
+    {1000314008,1191},
+    {1000314009,130},
+    {1000316000,636},
+    {1000316001,634},
+    {1000316002,635},
+    {1000316003,235},
+    {1000316004,238},
+    {1000316005,103},
+    {1000316006,403},
+    {1000316007,442},
+    {1000316008,1258},
+    {1000316009,29},
+    {1000316010,538},
+    {1000316011,236},
+    {1000316012,237},
+    {1000318000,283},
+    {1000318001,168},
+    {1000318002,284},
+    {1000318003,167},
+    {1000318004,511},
+    {1000318005,510},
+    {1000318006,648},
+    {1000318007,92},
+    {1000318008,98},
+    {1000318009,318},
+    {1000318010,319},
+    {1000318011,302},
+    {1000318012,153},
+    {1000318013,97},
+    {1000318014,505},
+    {1000318015,30},
+    {1000320000,730},
+    {1000320001,731},
+    {1000320002,389},
+    {1000321000,959},
+    {1000322000,716},
+    {1000323000,1002},
+    {1000325000,1090},
+    {1000326000,719},
+    {1000326001,718},
+    {1000326002,1118},
+    {1000327000,40},
+    {1000327001,913},
+    {1000327002,45},
+    {1000328000,819},
+    {1000328001,821},
+    {1000330000,1086},
+    {1000332000,704},
+    {1000332001,705},
+    {1000333000,166},
+    {1000335000,756},
+    {1000336000,1085},
+    {1000337000,162},
+    {1000337001,169},
+    {1000337002,164},
+    {1000337003,171},
+    {1000337004,101},
+    {1000337005,1251},
+    {1000337006,109},
+    {1000337007,407},
+    {1000337008,401},
+    {1000337009,116},
+    {1000337010,426},
+    {1000338000,746},
+    {1000338001,404},
+    {1000338002,1322},
+    {1000338003,433},
+    {1000338004,405},
+    {1000339000,575},
+    {1000340000,565},
+    {1000341000,695},
+    {1000341001,261},
+    {1000341002,263},
+    {1000342000,903},
+    {1000344000,902},
+    {1000346000,301},
+    {1000347000,914},
+    {1000347001,915},
+    {1000348013,906},
+    {1000351000,834},
+    {1000351002,530},
+    {1000352000,1062},
+    {1000352001,1388},
+    {1000352002,1387},
+    {1000353000,661},
+    {1000354000,571},
+    {1000354001,255},
+    {1000355000,630},
+    {1000355001,1158},
+    {1000356000,885},
+    {1000360000,364},
+    {1000361000,877},
+    {1000364001,520},
+    {1000364002,500},
+    {1000365001,1280},
+    {1000366001,454},
+    {1000366002,106},
+    {1000366003,107},
+    {1000366004,108},
+    {1000366005,104},
+    {1000366006,406},
+    {1000366007,415},
+    {1000366008,1361},
+    {1000366009,105},
+    {1000369000,1319},
+    {1000369001,1019},
+    {1000369002,1020},
+    {1000370000,772},
+    {1000371000,497},
+    {1000371001,686},
+    {1000372000,1128},
+    {1000372001,862},
+    {1000373000,453},
+    {1000373002,359},
+    {1000373003,1272},
+    {1000373004,461},
+    {1000373006,1278},
+    {1000373007,691},
+    {1000374002,498},
+    {1000374003,514},
+    {1000374004,687},
+    {1000375000,723},
+    {1000375001,368},
+    {1000376000,825},
+    {1000376001,1318},
+    {1000376002,527},
+    {1000377000,669},
+    {1000378000,1275},
+    {1000381000,589},
+    {1000381001,1100},
+    {1000382000,886},
+    {1000386000,912},
+    {1000387000,1008},
+    {1000388000,724},
+    {1000388001,1197},
+    {1000390000,1069},
+    {1000390001,1456},
+    {1000390002,1448},
+    {1000390003,1460},
+    {1000391000,760},
+    {1000391001,445},
+    {1000392000,823},
+    {1000392001,824},
+    {1000393000,743},
+    {1000395000,1005},
+    {1000395001,1006},
+    {1000396000,522},
+    {1000396001,525},
+    {1000396002,183},
+    {1000396003,184},
+    {1000396004,182},
+    {1000396005,839},
+    {1000396006,841},
+    {1000396007,524},
+    {1000396008,523},
+    {1000396009,47},
+    {1000397000,657},
+    {1000397001,658},
+    {1000397002,46},
+    {1000404000,585},
+    {1000404001,586},
+    {1000404002,587},
+    {1000411000,578},
+    {1000411001,1257},
+    {1000412000,846},
+    {1000413000,792},
+    {1000413001,794},
+    {1000413002,256},
+    {1000413003,279},
+    {1000415000,954},
+    {1000416000,1000},
+    {1000417000,298},
+    {1000417001,935},
+    {1000417002,936},
+    {1000417003,303},
+    {1000417004,934},
+    {1000418000,758},
+    {1000418001,447},
+    {1000420000,647},
+    {1000420001,243},
+    {1000420002,246},
+    {1000421000,628},
+    {1000422000,838},
+    {1000424000,920},
+    {1000424001,921},
+    {1000424002,1230},
+    {1000424003,1231},
+    {1000424004,1232},
+    {1000425000,709},
+    {1000425001,711},
+    {1000425002,1223},
+    {1000426000,608},
+    {1000426001,609},
+    {1000427000,812},
+    {1000427001,814},
+    {1000428000,649},
+    {1000428001,152},
+    {1000428002,1120},
+    {1000429008,911},
+    {1000429009,38},
+    {1000429010,41},
+    {1000430000,786},
+    {1000434000,981},
+    {1000435000,62},
+    {1000437000,747},
+    {1000440000,754},
+    {1000440001,755},
+    {1000440002,446},
+    {1000451000,836},
+    {1000451001,837},
+    {1000452000,536},
+    {1000452001,535},
+    {1000452002,533},
+    {1000452003,458},
+    {1000452004,496},
+    {1000452005,342},
+    {1000453000,346},
+    {1000453001,534},
+    {1000453002,1348},
+    {1000453003,883},
+    {1000455000,670},
+    {1000455001,671},
+    {1000458000,1018},
+    {1000458001,1220},
+    {1000458002,1221},
+    {1000458003,1233},
+    {1000460000,1364},
+    {1000460001,1373},
+    {1000460002,96},
+    {1000460003,1485},
+    {1000460004,1027},
+    {1000460005,1368},
+    {1000460006,1366},
+    {1000460007,1370},
+    {1000460008,1369},
+    {1000460009,1026},
+    {1000460010,300},
+    {1000460011,185},
+    {1000460012,1363},
+    {1000460013,1365},
+    {1000460014,489},
+    {1000460015,694},
+    {1000460016,355},
+    {1000460017,352},
+    {1000460018,637},
+    {1000460019,638},
+    {1000460020,239},
+    {1000460021,1362},
+    {1000460022,1372},
+    {1000460023,369},
+    {1000462000,983},
+    {1000462001,984},
+    {1000462002,1145},
+    {1000462003,1297},
+    {1000464000,843},
+    {1000464001,844},
+    {1000464002,540},
+    {1000464003,541},
+    {1000464004,542},
+    {1000464005,539},
+    {1000464010,543},
+    {1000465000,777},
+    {1000466000,863},
+    {1000468000,681},
+    {1000468001,682},
+    {1000468002,55},
+    {1000470000,796},
+    {1000470001,798},
+    {1000470003,1236},
+    {1000470004,281},
+    {1000470005,1105},
+    {1000470006,124},
+    {1000476000,573},
+    {1000476001,59},
+    {1000476002,60},
+    {1000478000,625},
+    {1000478001,33},
+    {1000479000,1330},
+    {1000479001,1164},
+    {1000479002,874},
+    {1000480000,1331},
+    {1000480001,880},
+    {1000480002,1172},
+    {1000481000,916},
+    {1000482000,988},
+    {1000482001,989},
+    {1000482002,1293},
+    {1000483000,854},
+    {1000483001,1092},
+    {1000483002,1095},
+    {1000483003,1096},
+    {1000483004,855},
+    {1000483005,1213},
+    {1000483006,1093},
+    {1000483007,1107},
+    {1000483008,290},
+    {1000483009,1094},
+    {1000484000,1037},
+    {1000484001,1380},
+    {1000485000,572},
+    {1000485001,52},
+    {1000488000,831},
+    {1000489001,1281},
+    {1000489002,690},
+    {1000489003,299},
+    {1000490000,908},
+    {1000490001,910},
+    {1000491000,605},
+    {1000491001,606},
+    {1000491002,159},
+    {1000491004,155},
+    {1000492000,674},
+    {1000492001,675},
+    {1000495000,778},
+    {1000495001,779},
+    {1000496000,478},
+    {1000497000,950},
+    {1000497001,951},
+    {1000498000,860},
+    {1000499000,666},
+    {1000504000,771},
+    {1000505000,474},
+    {1000505001,473},
+    {1000505002,1291},
+    {1000505003,384},
+    {1000505004,477},
+    {1000505005,475},
+    {1000505006,544},
+    {1000505007,1349},
+    {1000505008,476},
+    {1000506000,601},
+    {1000506001,157},
+    {1000506002,603},
+    {1000507000,201},
+    {1000507001,213},
+    {1000507002,209},
+    {1000507003,199},
+    {1000507004,214},
+    {1000507005,80},
+    {1000507006,620},
+    {1000507007,216},
+    {1000507008,208},
+    {1000507009,204},
+    {1000507010,198},
+    {1000507011,212},
+    {1000507012,211},
+    {1000507013,203},
+    {1000507014,202},
+    {1000507015,200},
+    {1000507016,219},
+    {1000507017,1194},
+    {1000507018,1195},
+    {1000507019,899},
+    {1000508000,1196},
+    {1000510000,830},
+    {1000510001,529},
+    {1000511000,594},
+    {1000512001,1395},
+    {1000512004,1396},
+    {1000512005,1393},
+    {1000513001,1418},
+    {1000513002,1413},
+    {1000513003,1411},
+    {1000513004,1064},
+    {1000513006,1416},
+    {1000513007,1417},
+    {1000513008,1414},
+    {1000513010,1412},
+    {1000514000,1063},
+    {1000514002,1410},
+    {1000515000,1071},
+    {1000515001,1467},
+    {1000516000,849},
+    {1000518000,751},
+    {1000518001,752},
+    {1000518002,1256},
+    {1000519000,1260},
+    {1000519001,614},
+    {1000519002,100},
+    {1000520000,1087},
+    {1000520001,1271},
+    {1000521000,613},
+    {1000524000,574},
+    {1000525000,1058},
+    {1000527000,1048},
+    {1000527001,67},
+    {1000528000,967},
+    {1000529000,1274},
+    {1000529001,1273},
+    {1000529002,459},
+    {1000529003,343},
+    {1000529004,688},
+    {1000530000,776},
+    {1000544000,962},
+    {1000545000,800},
+    {1000545001,802},
+    {1000545002,93},
+    {1000545003,82},
+    {1000545004,1177},
+    {1000545005,1180},
+    {1000545006,1182},
+    {1000545007,1290},
+    {1000545008,81},
+    {1000546000,646},
+    {1000547000,1035},
+    {1000547001,1036},
+    {1000547002,1378},
+    {1000547003,1377},
+    {1000547004,1379},
+    {1000549000,607},
+    {1000549002,177},
+    {1000549003,179},
+    {1000550002,227},
+    {1000551000,317},
+    {1000551001,308},
+    {1000552000,1446},
+    {1000552001,1457},
+    {1000552002,1447},
+    {1000552003,1471},
+    {1000552004,1066},
+    {1000553000,1451},
+    {1000553001,1466},
+    {1000553002,1452},
+    {1000553003,1426},
+    {1000553004,1438},
+    {1000553005,1453},
+    {1000553006,1464},
+    {1000553007,1415},
+    {1000553008,1463},
+    {1000553009,1068},
+    {1000555000,905},
+    {1000556000,338},
+    {1000556001,336},
+    {1000556002,337},
+    {1000556003,678},
+    {1000558000,991},
+    {1000559000,590},
+    {1000562000,804},
+    {1000562001,805},
+    {1000562002,774},
+    {1000562003,773},
+    {1000562004,775},
+    {1000563000,942},
+    {1000564000,992},
+    {1000565000,1367},
+    {1000565001,1371},
+    {1000567000,966},
+    {1000568000,918},
+    {1000569000,583},
+    {1000569001,584},
+    {1000569002,132},
+    {1000569003,136},
+    {1000569004,135},
+    {1000569005,134},
+    {1000569006,133},
+    {1000569007,1206},
+    {1000570000,847},
+    {1000570001,848},
+    {1000570002,1484},
+    {1000570003,546},
+    {1000570004,127},
+    {1000570005,545},
+    {1000572000,650},
+    {1000572001,652},
+    {1000572002,377},
+    {1000572003,467},
+    {1000572004,375},
+    {1000572006,462},
+    {1000572007,465},
+    {1000572008,1486},
+    {1000572009,1487},
+    {1000572010,468},
+    {1000572011,469},
+    {1000572012,470},
+    {1000572013,379},
+    {1000572014,380},
+    {1000573000,696},
+    {1000573001,697},
+    {1000573002,264},
+    {1000573003,262},
+    {1000574000,806},
+    {1000574002,486},
+    {1000575000,744},
+    {1000575001,745},
+    {1000575002,400},
+    {1000579000,969},
+    {1000580000,1176},
+    {1000580001,895},
+    {1000580002,896},
+    {1000581000,907},
+    {1000581001,909},
+    {1000582000,627},
+    {1000582001,1157},
+    {1000584000,807},
+    {1000584001,808},
+    {1000584002,1201},
+    {1000586000,1072},
+    {1000586001,1399},
+    {1000586002,1404},
+    {1000586003,1394},
+    {1000590000,734},
+    {1000590001,393},
+    {1000593000,597},
+    {1000593001,156},
+    {1000593002,598},
+    {1000596000,861},
+    {1000598000,1065},
+    {1000598001,1420},
+    {1000598002,1190},
+    {1000602000,457},
+    {1000602001,506},
+    {1000602002,495},
+    {1000605000,850},
+    {1000605001,851},
+    {1000605002,554},
+    {1000605003,555},
+    {1000605004,1228},
+    {1000607000,972},
+    {1000607001,973},
+    {1000607002,1295},
+    {1000607003,1296},
+    {1000608000,1061},
+    {1000609000,703},
+    {1000611000,707},
+    {1000611001,708},
+    {1000611002,1117},
+    {1000613000,1292},
+    {1000613001,876},
+    {1000616000,826},
+    {1000616001,1346},
+    {1000619003,1243},
+    {1000620000,1089},
+    {1000623000,840},
+    {1000623001,842},
+    {1000623002,39},
+    {1000623003,48},
+    {1000627000,939},
+    {1000628000,619},
+    {1000628001,74},
+    {1000628002,193},
+    {1000629000,621},
+    {1000629001,197},
+    {1000630000,787},
+    {1000630001,788},
+    {1000630002,1238},
+    {1000630004,1253},
+    {1000631000,623},
+    {1000631001,1193},
+    {1000631002,206},
+    {1000631003,195},
+    {1000631004,196},
+    {1000631005,207},
+    {1000631006,210},
+    {1000631007,218},
+    {1000631008,217},
+    {1000635000,979},
+    {1000635001,980},
+    {1000637000,856},
+    {1000642000,1007},
+    {1000645000,151},
+    {1000645001,591},
+    {1000657000,789},
+    {1000657001,1200},
+    {1000662000,999},
+    {1000664000,1383},
+    {1000668000,366},
+    {1000668001,409},
+    {1000668002,439},
+    {1000668003,448},
+    {1000668004,673},
+    {1000668005,430},
+    {1000668006,1300},
+    {1000672000,987},
+    {1000673000,982},
+    {1000674000,1034},
+    {1000674001,1376},
+    {1000676000,205},
+    {1000676001,215},
+    {1000676002,622},
+    {1000678000,884},
+    {1000685000,1332},
+    {1000689000,600},
 };
 
 inline constexpr size_t kVkStypeCount =

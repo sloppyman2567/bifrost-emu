@@ -63,6 +63,11 @@ CMD_PLANS = {
     'vkCmdBindVertexBuffers2EXT': None,
     'vkCmdSetViewportWithCount': None, 'vkCmdSetViewportWithCountEXT': None,
     'vkCmdSetScissorWithCount': None, 'vkCmdSetScissorWithCountEXT': None,
+    # Phase B batch 4: submit + descriptor-update batches (auto-derived
+    # struct arrays)
+    'vkQueueSubmit': None,
+    'vkQueueSubmit2': None, 'vkQueueSubmit2KHR': None,
+    'vkUpdateDescriptorSets': None,
 }
 
 # Create-style commands (Phase B batches 1–3): create/record shape with
@@ -80,6 +85,16 @@ CMD_CREATE_PLANS = {
     # Phase B batch 3: pipeline trees (pName strings, specialization
     # blobs, state sub-structs) + OUT handle arrays
     'vkCreateGraphicsPipelines', 'vkCreateComputePipelines',
+    # Phase B batch 4: OUT array whose count lives INSIDE the staged
+    # struct (pDescriptorSets count = pAllocateInfo->descriptorSetCount)
+    'vkAllocateDescriptorSets',
+}
+
+# For out=5 refs whose count comes from a member of the staged STRUCT_IN
+# struct (count_arg=0xFE): command -> count-member name. The offset is
+# resolved against that plan's STRUCT_IN descriptor.
+CMD_OUT_COUNT_MEMBER = {
+    'vkAllocateDescriptorSets': 'descriptorSetCount',
 }
 
 HEADER = r"""// opgen_vkmarshal.hpp — GENERATED. DO NOT EDIT.
@@ -130,6 +145,8 @@ struct VkStructDesc {
 struct VkPlanRef {
     uint8_t arg;           // register/args index of the array pointer
     uint8_t count_arg;     // register/args index holding the count
+                           // (0xFF = single element; 0xFE = count is a
+                           // u32 member of the staged struct at aux)
     uint8_t count_in_bytes;// 1 = count is a BYTE count (raw buffers)
     uint8_t out;           // 0 = input staging
                            // 1 = enumeration: count_arg is a guest u32*
@@ -144,8 +161,11 @@ struct VkPlanRef {
                            // 5 = OUT_HANDLE: zeroed bounce; host writes
                            //     handle(s); copied back to the guest
                            //     pointer after a successful call
-                           //     (count_arg 0xFF = single handle)
+                           //     (count_arg 0xFF = single handle,
+                           //      0xFE = count from staged struct aux)
     uint8_t elem_size;     // bytes per element for desc==nullptr arrays
+    uint8_t aux;           // role-specific: byte offset of the count
+                           // member for out=5/count_arg=0xFE
     const VkStructDesc* desc;   // nullptr for verbatim byte staging
 };
 
@@ -322,25 +342,31 @@ def main():
             if p.type in reg['handles']:
                 plist.append((pidx, cidx, ('raw', 8), out))
                 continue
+            # NOTE: the struct-layouts check MUST come before the scalar
+            # type_size fallback — type_size() resolves struct names too,
+            # and a struct staged as flat raw bytes would hand the host
+            # driver untranslated interior guest pointers.
+            if p.type in layouts:
+                want_struct(p.type)
+                plist.append((pidx, cidx, p.type, out))
+                continue
             from vkxml import type_size
             tsz = type_size(p.type, reg, {})
             if tsz is not None:
                 # scalar/enum/bitmask array — stage verbatim
                 plist.append((pidx, cidx, ('raw', tsz), out))
                 continue
-            if p.type not in layouts:
-                print(f'WARN: {cmd} param {p.name}: no layout for '
-                      f'{p.type}', file=sys.stderr)
-                ok = False
-                break
-            want_struct(p.type)
-            plist.append((pidx, cidx, p.type, out))
+            print(f'WARN: {cmd} param {p.name}: no layout for '
+                  f'{p.type}', file=sys.stderr)
+            ok = False
+            break
         if ok:
             plans[cmd] = plist
 
     CMD_CREATE_PLANS.add('vkCmdBeginRenderPass')
 
-# ── create-style plans (see CMD_CREATE_PLANS comment) ─────────────
+    # ── create-style plans (see CMD_CREATE_PLANS comment) ─────────────
+    out_aux = {}   # cmd -> byte offset of count member (count_arg=0xFE)
     # Batch 3 extension: len-carrying params are supported —
     #   - const Struct* WITH len  -> out=4 staging an ARRAY of structs
     #     (count = sibling param named by len; count_arg=0xFF = single)
@@ -384,6 +410,20 @@ def main():
             ok = False
             break
         if ok and any(r[3] == 4 for r in plist):
+            # count-from-staged-member OUT arrays (count_arg=0xFE):
+            # resolve the count member offset against this plan's
+            # STRUCT_IN descriptor
+            member = CMD_OUT_COUNT_MEMBER.get(cmd)
+            if member:
+                struct_name = next(r[2] for r in plist if r[3] == 4)
+                co = member_offset(layouts[struct_name], member)
+                if co is None:
+                    print(f'WARN: {cmd}: cannot locate out-count member '
+                          f'{member} in {struct_name}', file=sys.stderr)
+                    continue
+                plist = [r if r[3] != 5 else
+                         (r[0], 0xFE, r[2], r[3]) for r in plist]
+                out_aux[cmd] = co
             plans[cmd] = plist
 
     # ── chainable structs: EVERY struct with a resolvable sType member
@@ -514,19 +554,21 @@ def main():
         for (pidx, cidx, sname, out) in plist:
             if out == 3:
                 # NULLIFY: no descriptor, no count
-                refs.append(f'    {{{pidx},0,0,{out},8,nullptr}},')
+                refs.append(f'    {{{pidx},0,0,{out},8,0,nullptr}},')
                 continue
             if out == 5:
-                # OUT_HANDLE(S): count_arg = len sibling (0xFF = single)
-                refs.append(f'    {{{pidx},{cidx},0,{out},8,nullptr}},')
+                # OUT_HANDLE(S): count_arg = len sibling (0xFF = single,
+                # 0xFE = count member inside the staged struct at aux)
+                aux = out_aux.get(cmd, 0)
+                refs.append(f'    {{{pidx},{cidx},0,{out},8,{aux},nullptr}},')
                 continue
             if isinstance(sname, tuple):
                 _, esz = sname
                 refs.append(f'    {{{pidx},{cidx},{1 if esz == 1 else 0},'
-                            f'{out},{esz},nullptr}},')
+                            f'{out},{esz},0,nullptr}},')
                 continue
             desc = f'&kVkStructs[{struct_index[sname]}]' if sname else 'nullptr'
-            refs.append(f'    {{{pidx},{cidx},0,{out},8,{desc}}},')
+            refs.append(f'    {{{pidx},{cidx},0,{out},8,0,{desc}}},')
         arr = f'kRefs_{cmd}'
         plan_tables.append(
             f'inline constexpr VkPlanRef {arr}[] = {{\n' +

@@ -750,7 +750,9 @@ vkCmdCopyQueryPoolResults   VK   iiiiiiii       -     VULKAN            -
 vkCmdSetEvent               VK   iii            -     VULKAN            -
 vkCmdResetEvent             VK   iii            -     VULKAN            -
 vkCmdWaitEvents  VK  iipiiipipip  -  VK_CMD_DEEP  -
-vkQueueSubmit               VK   iipi           -     VK_SUBMIT         -
+vkQueueSubmit               VK   iipi           -     VK_CMD_DEEP       -
+vkQueueSubmit2              VK   iipi           -     VK_CMD_DEEP       -
+vkQueueSubmit2KHR           VK   iipi           -     VK_CMD_DEEP       -
 vkCreateImage               VK   ippp           -     VULKAN            -
 vkDestroyImage              VK   iip            -     VULKAN            -
 vkGetImageMemoryRequirements VK  iip            -     VULKAN            -
@@ -782,9 +784,9 @@ vkCreatePipelineLayout      VK   ippp           -     VK_CMD_DEEP -
 vkDestroyPipelineLayout     VK   iip            -     VULKAN            -
 vkCreateDescriptorSetLayout VK   ippp           -     VK_CMD_DEEP       -
 vkDestroyDescriptorSetLayout VK  iip            -     VULKAN            -
-vkAllocateDescriptorSets    VK   ipp            -     VK_ALLOC_DESCRIPTOR_SETS -
+vkAllocateDescriptorSets    VK   ipp            -     VK_CMD_DEEP       -
 vkFreeDescriptorSets        VK   iiip           -     VK_CMD_DEEP            -
-vkUpdateDescriptorSets      VK   iipip          -     VK_UPDATE_DESCRIPTOR_SETS -
+vkUpdateDescriptorSets      VK   iipip          -     VK_CMD_DEEP       -
 vkCreateDescriptorPool      VK   ippp           -     VK_CMD_DEEP -
 vkDestroyDescriptorPool     VK   iip            -     VULKAN            -
 vkCreateFence               VK   ippp           -     VULKAN            -
