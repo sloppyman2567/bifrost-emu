@@ -1114,14 +1114,14 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
 
 - `make` (plain make auto-enables GL/SDL2/EGL thunking)
 - `make check-all` — the "everything" target: build + `setup-tests` +
-  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **211 pass /
+  `setup-rootfs.sh` + `./scripts/run_tests.sh` (default suite = **213 pass /
   0 fail / 0 skip**: unit + integration + toybox + real-world +
   benchmarks + dynamic + interactive). The only historical skip was
   `test_dladdr_glibc`, which must be a glibc-DYNAMIC binary or its dlopen
   stub skips with exit 77.
 - `./scripts/run_tests.sh` — the default is the FULL suite
-  (interactive + real-world are the standard default) = **211 pass /
-  0 fail / 0 skip**. Subsets: `--quick` (no benches, 205),
+  (interactive + real-world are the standard default) = **213 pass /
+  0 fail / 0 skip**. Subsets: `--quick` (no benches, 208),
   `--unit`, `--jit`, `--interp`, `--dynamic`, `--no-rootfs`. Exit 0 =
   all pass, 77 = env-dependent skip (treated as pass).
 - `./bifrost-emu ctest/jit_mvni_softfloat.elf`
@@ -3795,3 +3795,25 @@ not musl-`-static`.
   nested struct in the record path.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
   quick suite 207/207, swapchain ×3 + mambo ×3 rc=0 on live RADV.
+
+## Session History (2026-08-24) — vulkan_pnext suite test (chain-query regression net)
+
+- **New guest test `ctest_real/test_vulkan_pnext.c`** (26 checks,
+  registered as `vulkan_pnext`, headless-capable, exit 77 without host
+  Vulkan): closes the coverage gap vkQuake exposed — NO suite test
+  touched the Properties2/Features2 chain path before. Drives:
+  - Properties2 → DriverProperties → IDProperties three-node GUEST
+    chain: driver must fill every staged node (vendorID, limits,
+    driverID, NUL-terminated driverName/deviceName, deviceUUID), and
+    the GUEST pNext links + sTypes must survive (regression for the
+    writeback-stamped-host-pointers-over-guest-chain-links bug class).
+  - Guard-canary u64s bracketing every struct catch over-staging /
+    under-sizing writes (would have caught the enum-sized-array bug).
+  - Unknown-sType truncation mid-chain: bogus node → safe truncation,
+    core properties still filled, guest chain untouched.
+  - Features2 → BufferDeviceAddressFeatures: feature fields must be
+    clean bools (catches garbage staging).
+- Verified on live RADV: vendor=0x1002 "AMD Radeon RX 7600 (RADV
+  NAVI33)", driver="radv"; one-shot unknown-sType diagnostic fires for
+  the deliberate bogus node; passes headless too.
+- Suite counts now: full default **213**, --quick **208**.

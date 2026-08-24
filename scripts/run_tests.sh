@@ -395,6 +395,13 @@ INTEGRATION_TESTS=(
     # present modes, create swapchain, get images, acquire, present, teardown.
     # Exit 77 = skip when the host driver lacks VK_EXT_headless_surface.
     "vulkan_swapchain|ctest_real/test_vulkan_swapchain.elf||30|SWAPCHAIN TEST PASSED"
+    # pNext-chain query coverage (2026-08-24): Properties2 →
+    # DriverProperties → IDProperties and Features2 → BDA guest chains —
+    # driver must fill every staged node, guest chain links + guard
+    # canaries must survive, unknown sTypes truncate safely. Regression
+    # net for the enum-sized-array layout bug vkQuake exposed (no other
+    # suite test touches this path). Headless-capable; 77 = no Vulkan.
+    "vulkan_pnext|ctest_real/test_vulkan_pnext.elf||30|VK PNEXT TEST PASSED"
     # GL state tracker regression (1.5.4-alpha): verifies GLStateTracker
     # mirrors guest GL state and answers queries (glIsEnabled,
     # glGetIntegerv, glGetFloatv, glGetBooleanv) consistently. Headless —
