@@ -3759,3 +3759,39 @@ not musl-`-static`.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
   (warnings 4), quick suite 207/207, swapchain ×3 + mambo ×3 rc=0 on
   live RADV with the complete change set.
+
+## Session History (2026-08-24) — vkQuake regression hunt: enum-sized-array layout bug FIXED
+
+- **MAJOR LAYOUT BUG (silent, affects every enum-sized C array)**: vk.xml
+  writes fixed arrays as `<name>driverName</name>[<enum>
+  VK_MAX_DRIVER_NAME_SIZE</enum>]` — the parser's `\[(\d+)\]` regex only
+  matched DIGIT literals, so driverName[256]/deviceName[256]/uuid[16]-
+  style members parsed as SINGLE elements → structs UNDER-SIZED
+  (VkPhysicalDeviceDriverProperties 32 vs real 536; Properties2 568 vs
+  840). The A1 chain walker staged undersized nodes and RADV read
+  garbage fields → vkQuake crashed in GetPhysicalDeviceProperties2
+  before device selection. FIX: parse `[NAME]` suffixes through a new
+  API-constants table (<enums name="API Constants">; skip float values).
+  NOTE: itertext() strips XML tags, so the suffix is "[NAME]" not
+  "[<enum>NAME</enum>]".
+- **VALIDATION UPGRADE**: compiled static_assert of ALL 1698 generated
+  struct sizes against the vendored vulkan_core.h. Result: 23 failures
+  → after excluding C-BITFIELD structs (7 of them; vk.xml models
+  bitfields as separate members which natural-alignment layout cannot
+  express) → **3 remaining, all NV ray-tracing instance structures**
+  (unreachable: RT extensions hidden). reg['bitfield_structs'] now
+  carries the set; the marshal generator pops them from layouts so
+  plans never reference them and guest pNext chains truncate safely.
+- VkFieldDesc.elem_size widened u8→u16 (nested struct elements can
+  exceed 255 bytes: VkExtensionProperties=260 etc).
+- **vkQuake status**: with the fix it boots FURTHER THAN EVER — full
+  RADV device init (correct Properties2 chains: DriverProperties 536,
+  SubgroupSizeControl 32...), swapchain, compute+graphics pipelines,
+  command-buffer recording — then hits the KNOWN nondeterministic
+  crash during triangle-loop submit/present (RADV derefs a guest
+  pointer recorded into its own IR: `cmpl $0x3ba38c32,(%rax)`,
+  rax=0x24c1). Needs its own focused session with TID-attributed
+  traces; suspects remain descriptor-update staging or an unmarshalled
+  nested struct in the record path.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
+  quick suite 207/207, swapchain ×3 + mambo ×3 rc=0 on live RADV.

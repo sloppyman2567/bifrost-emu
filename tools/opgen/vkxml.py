@@ -146,6 +146,7 @@ def parse_registry(xml_path):
     struct_aliases = {}
     union_names = set()
     struct_elems = {}
+    bitfield_structs = set()
     for t in root.iter('type'):
         cat = t.get('category')
         nm = t.get('name')
@@ -188,6 +189,20 @@ def parse_registry(xml_path):
     for t in root.iter('type'):
         if t.get('category') == 'enum' and t.get('name'):
             enum_names.add(t.get('name'))
+
+    # API constants (<enums name="API Constants">: VK_MAX_*_SIZE etc.)
+    # — used to resolve enum-sized C array members like
+    # char driverName[<enum>VK_MAX_DRIVER_NAME_SIZE</enum>]
+    api_consts = {}
+    for enums in root.iter('enums'):
+        if enums.get('name') == 'API Constants':
+            for e in enums.iter('enum'):
+                nm, v = e.get('name'), e.get('value')
+                if nm and v is not None:
+                    try:
+                        api_consts[nm] = int(v)
+                    except ValueError:
+                        pass   # float constants (1000.0F) — unused here
 
     commands = {}
     commands_elem = root.find('commands')
@@ -255,12 +270,29 @@ def parse_registry(xml_path):
             mname = mname_el.text if mname_el is not None else ''
             # fixed C arrays: <name>color</name>[4] — the suffix is
             # SIBLING TEXT after the <name> element, not inside it.
+            # Enum-sized arrays use [<enum>VK_MAX_X_SIZE</enum>]; resolve
+            # through the API-constants table (fall back to 0 → the
+            # member stages as a scalar, which would UNDER-SIZE structs).
             arr = 0
             import re as _re
             ma = _re.search(_re.escape(mname) + r'\[(\d+)\]', text)
             if ma:
                 arr = int(ma.group(1))
+            else:
+                # NOTE: itertext() strips tags, so the suffix is
+                # "[NAME]", not "[<enum>NAME</enum>]"
+                me = _re.search(
+                    _re.escape(mname) + r'\[([A-Za-z_]\w*)\]', text)
+                if me:
+                    arr = api_consts.get(me.group(1), 0)
+                    if not arr:
+                        import sys as _sys
+                        print(f'vkxml: {sname}.{mname}: unknown array '
+                              f'constant {me.group(1)}', file=_sys.stderr)
             ptr = text.count('*')
+            import re as _re2
+            if _re2.search(_re2.escape(mname) + r':\d+', text):
+                bitfield_structs.add(sname)
             members.append(Member(
                 type=mtype_el.text if mtype_el is not None else '',
                 name=mname,
@@ -284,6 +316,7 @@ def parse_registry(xml_path):
         'struct_aliases': struct_aliases,
         'union_names': union_names,
         'stypes': stypes,
+        'bitfield_structs': bitfield_structs,
     }
     # resolve struct aliases AFTER member parsing (aliases may chain)
     def _resolve(name, depth=0):

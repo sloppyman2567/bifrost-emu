@@ -138,8 +138,8 @@ enum : uint8_t {
 
 struct VkFieldDesc {
     uint16_t off;          // byte offset of the pointer member
-    uint8_t  elem;         // VKM_*
-    uint8_t  elem_size;    // bytes per scalar/handle element
+    uint8_t  elem;         // VKM_* (+ flag bits)
+    uint16_t elem_size;    // bytes per element (struct elems can exceed 255)
     int16_t  elem_struct;  // descriptor index when elem == VKM_STRUCT
     uint16_t count_off;    // offset of u32 count member in THIS struct
                            // (0xFFFF = use fixed_count)
@@ -259,6 +259,12 @@ def main():
         'include/opgen_vkmarshal.hpp'
     reg = parse_registry(xml_path)
     layouts = layout_all(reg)
+    # Structs with C bitfields have no computable natural-alignment
+    # layout here (vk.xml models them as separate members) — remove them
+    # so plans never reference them and the sType map omits them (guest
+    # pNext chains truncate at unknown entries: safe).
+    for n in reg.get('bitfield_structs', set()):
+        layouts.pop(n, None)
 
     # ── collect needed structs (closure over plans) ──────────────────
     needed = {}       # struct name -> list of (offset, FieldPtr-like info)
