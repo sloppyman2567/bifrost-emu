@@ -681,8 +681,8 @@ Mix_FreeMusic             MIX    i             -     -              -
 # libvulkan.so.1
 vkGetInstanceProcAddr       VK   i              -     VK_GET_PROC      -
 vkGetDeviceProcAddr         VK   i              -     VK_GET_PROC      -
-vkCreateInstance            VK   ppp            -     VK_CREATE_INSTANCE -
-vkCreateDevice              VK   ippp           -     VK_CREATE_DEVICE  -
+vkCreateInstance            VK   ppp            -     VK_CMD_DEEP       -
+vkCreateDevice              VK   ippp           -     VK_CMD_DEEP       -
 vkQueuePresentKHR           VK   ip             -     VK_PRESENT        -
 vkDestroyInstance           VK   ip             -     VULKAN            -
 vkEnumeratePhysicalDevices  VK   ipp            -     VK_CMD_DEEP_OUT            -
@@ -692,8 +692,8 @@ vkGetPhysicalDeviceMemoryProperties  VK   ip   -     VULKAN            -
 vkGetPhysicalDeviceQueueFamilyProperties VK ipp  -     VK_CMD_DEEP_OUT            -
 vkDestroyDevice             VK   ip             -     VULKAN            -
 vkGetDeviceQueue            VK   iiip           -     VULKAN            -
-vkDeviceWaitIdle            VK   i              -     VK_SYNC_PULL        -
-vkQueueWaitIdle             VK   i              -     VK_SYNC_PULL        -
+vkDeviceWaitIdle            VK   i              -     VULKAN           -
+vkQueueWaitIdle             VK   i              -     VULKAN           -
 vkCreateSwapchainKHR        VK   ippp           -     VULKAN            -
 vkDestroySwapchainKHR       VK   iip            -     VULKAN            -
 vkGetSwapchainImagesKHR     VK   iipp           -     VK_CMD_DEEP_OUT            -
@@ -793,7 +793,7 @@ vkCreateFence               VK   ippp           -     VULKAN            -
 vkDestroyFence              VK   iip            -     VULKAN            -
 vkResetFences  VK  iip  -  VK_CMD_DEEP  -
 vkGetFenceStatus            VK   ii             -     VULKAN            -
-vkWaitForFences             VK   iipii          -     VK_SYNC_PULL        -
+vkWaitForFences             VK   iipii          -     VK_CMD_DEEP       -
 vkCreateSemaphore           VK   ippp           -     VULKAN            -
 vkDestroySemaphore          VK   iip            -     VULKAN            -
 vkCreateEvent               VK   ippp           -     VULKAN            -

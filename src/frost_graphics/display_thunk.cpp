@@ -442,6 +442,29 @@ size_t vk_deep_size_one(Memory* mem, uint64_t guest,
                 if (!*ok) return 0;
                 continue;
             }
+            if (f.elem & thunk::VKM_STRARR) {
+                // array of NUL-terminated strings: stage the pointer
+                // array plus every string (must mirror fill exactly)
+                uint8_t stackbuf4[512];
+                const void* he4 =
+                    vk_deep_read(mem, g, d->size, stackbuf4, sizeof(stackbuf4));
+                if (!he4) { *ok = false; return 0; }
+                const void* spa = vk_deep_ptr_field(he4, f);
+                uint32_t sn = vk_deep_count(he4, f);
+                if (!spa || !sn) continue;
+                if (sn > kVkDeepMaxElems) { *ok = false; return 0; }
+                uint64_t base = reinterpret_cast<uint64_t>(spa);
+                total = (total + 7u) & ~size_t(7);
+                total += (size_t)sn * 8;
+                for (uint32_t k = 0; k < sn; k++) {
+                    uint64_t sp2 = 0;
+                    try { mem->read(base + (uint64_t)k * 8, &sp2, 8); }
+                    catch (...) { continue; }
+                    if (!sp2) continue;
+                    total += vk_deep_guest_strlen(mem, sp2) + 1;
+                }
+                continue;
+            }
             if (f.elem & thunk::VKM_STR) {
                 uint8_t stackbuf3[512];
                 const void* he3 =
@@ -498,6 +521,32 @@ void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
                                slot);
             continue;
         }
+        if (f.elem & thunk::VKM_STRARR) {
+            // array of strings: stage the slot array, then each string
+            void** slot = reinterpret_cast<void**>(out + f.off);
+            uint64_t arr = reinterpret_cast<uint64_t>(
+                vk_deep_ptr_field(out, f));
+            uint32_t sn = vk_deep_count(out, f);
+            if (!arr || !sn || sn > kVkDeepMaxElems) {
+                *slot = nullptr;
+                continue;
+            }
+            char** slots = reinterpret_cast<char**>(st.bytes((size_t)sn * 8, 8));
+            *slot = slots;
+            for (uint32_t k = 0; k < sn; k++) {
+                uint64_t sp2 = 0;
+                try { mem->read(arr + (uint64_t)k * 8, &sp2, 8); }
+                catch (...) { sp2 = 0; }
+                if (!sp2) { slots[k] = nullptr; continue; }
+                size_t n2 = vk_deep_guest_strlen(mem, sp2);
+                char* dstp = reinterpret_cast<char*>(st.bytes(n2 + 1, 1));
+                try { mem->read(sp2, dstp, n2 + 1); }
+                catch (...) { std::memset(dstp, 0, n2 + 1); }
+                dstp[n2] = 0;
+                slots[k] = dstp;
+            }
+            continue;
+        }
         if (f.elem & thunk::VKM_STR) {
             // NUL-terminated guest string: stage strlen+1 bytes
             void** slot = reinterpret_cast<void**>(out + f.off);
@@ -542,6 +591,7 @@ void vk_deep_fill_elem(Memory* mem, VkStage& st, uint64_t guest,
         }
     }
 }
+
 } // namespace
 
 int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
@@ -1338,13 +1388,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                             need += bytes;
                         }
                     } else {
-                        // copyback-only raw bytes (GetQueryPoolResults
-                        // pData): byte count arrives in a register
-                        size_t bytes = static_cast<size_t>(
-                            args[r.count_arg]);
+                        // copyback-only staging: byte counts arrive
+                        // directly (pData/dataSize); element counts
+                        // multiply by the element size (pResults-style)
+                        uint64_t cnt = args[r.count_arg];
+                        size_t bytes = r.count_in_bytes
+                            ? static_cast<size_t>(cnt)
+                            : static_cast<size_t>(cnt) *
+                                  (r.elem_size ? r.elem_size : 1);
                         if (bytes > kVkDeepMaxBytes) ok = false;
+                        rec.elem_size = r.count_in_bytes
+                            ? 1 : (r.elem_size ? r.elem_size : 1);
                         rec.staged_elems =
-                            static_cast<uint32_t>(bytes);
+                            static_cast<uint32_t>(cnt);
                         need += bytes;
                     }
                     if (!ok) break;
@@ -1534,6 +1590,15 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             args[4], args[5], args[6], args[7]);
     }
 
+    // Completion waits pull host mappings back into the bounces so the
+    // guest sees GPU readback results (vkMapMemory PCWFC discipline).
+    if (ret == 0 && impl_->mem &&
+        (entry.name == "vkDeviceWaitIdle" ||
+         entry.name == "vkQueueWaitIdle" ||
+         entry.name == "vkWaitForFences")) {
+        impl_->vk_sync_pull_all();
+    }
+
     // ── VK_CMD_DEEP_OUT copyback: enumerations + OUT data ────────────
     // The host wrote the actual count into our 4-byte bounce and filled
     // min(count, staged) elements of the staged array. Publish both to
@@ -1613,31 +1678,6 @@ namespace {
 // Per-call host staging buffer. All nested strings, struct copies and
 // pointer arrays for one Vulkan call live here; it is destroyed when the
 // call returns.
-// Frozen (spec-stable) layouts of the Vulkan structs we deep-copy. These
-// are plain C structs with natural alignment, so they match the AArch64
-// guest layout exactly.
-struct VkAppInfoH {
-    int32_t  sType; void* pNext; const char* pApplicationName;
-    uint32_t applicationVersion; const char* pEngineName;
-    uint32_t engineVersion; uint32_t apiVersion;
-};
-struct VkInstanceCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    const VkAppInfoH* pApplicationInfo; uint32_t enabledLayerCount;
-    const char* const* ppEnabledLayerNames; uint32_t enabledExtensionCount;
-    const char* const* ppEnabledExtensionNames;
-};
-struct VkDeviceQueueCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t queueFamilyIndex;
-    uint32_t queueCount; const float* pQueuePriorities;
-};
-struct VkDeviceCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint32_t queueCreateInfoCount; const VkDeviceQueueCreateInfoH* pQueueCreateInfos;
-    uint32_t enabledLayerCount; const char* const* ppEnabledLayerNames;
-    uint32_t enabledExtensionCount; const char* const* ppEnabledExtensionNames;
-    const void* pEnabledFeatures;  // VkPhysicalDeviceFeatures (220 bytes, frozen)
-};
 // VkPresentInfoKHR (spec-stable, no padding on AArch64).
 struct VkPresentInfoH {
     int32_t sType; void* pNext; uint32_t waitSemaphoreCount;
@@ -1760,135 +1800,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                     static_cast<unsigned long long>(found));
         }
         cpu.regs[0] = found;
-        return true;
-    }
-
-    // ── vkCreateInstance ─────────────────────────────────────────────
-    // (pCreateInfo, pAllocator, pInstance) — arg 2 is the OUT handle.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_INSTANCE) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }  // VK_ERROR_INITIALIZATION_FAILED
-        VkStage st;
-        VkInstanceCreateInfoH* info = st.alloc<VkInstanceCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[0], info);
-        if (info->pApplicationInfo) {
-            VkAppInfoH* app = st.alloc<VkAppInfoH>();
-            read_guest_struct(mem, reinterpret_cast<uint64_t>(info->pApplicationInfo), app);
-            app->pApplicationName = st.guest_str(mem, reinterpret_cast<uint64_t>(app->pApplicationName));
-            app->pEngineName      = st.guest_str(mem, reinterpret_cast<uint64_t>(app->pEngineName));
-            info->pApplicationInfo = app;
-        }
-        uint64_t dbg_raw_ext_arr = reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames);
-        uint32_t dbg_ext_count = info->enabledExtensionCount;
-        info->ppEnabledLayerNames = st.guest_str_array(
-            mem, reinterpret_cast<uint64_t>(info->ppEnabledLayerNames), info->enabledLayerCount);
-        info->ppEnabledExtensionNames = st.guest_str_array(
-            mem, reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames), info->enabledExtensionCount);
-        if (trace) {
-            fprintf(stderr,
-                    "[display-thunk] vkCreateInstance: sType=%d pNext=%p app=%d "
-                    "layers=%u exts=%u raw_ext_arr=0x%llx\n",
-                    info->sType, info->pNext, info->pApplicationInfo ? 1 : 0,
-                    info->enabledLayerCount, info->enabledExtensionCount,
-                    static_cast<unsigned long long>(dbg_raw_ext_arr));
-            for (uint32_t i = 0; i < dbg_ext_count && dbg_raw_ext_arr; i++) {
-                uint64_t p = 0;
-                try { mem->read(dbg_raw_ext_arr + i * 8u, &p, 8); }
-                catch (...) { p = 0xdeaddead; }
-                fprintf(stderr, "[display-thunk]   raw ext[%u] ptr=0x%llx\n",
-                        i, static_cast<unsigned long long>(p));
-            }
-        }
-        uint64_t host_instance = 0;
-        // pAllocator (arg 1): always NULL. VkAllocationCallbacks contains
-        // host function pointers that cannot be marshalled; passing NULL is
-        // the only correct choice and is symmetric across create/destroy.
-        uint64_t ret = reinterpret_cast<uint64_t (*)(const void*, const void*, void*)>(entry.host_fn)(
-            info, nullptr, &host_instance);
-        if (cpu.regs[2] && host_instance) {
-            try { mem->write(cpu.regs[2], &host_instance, sizeof(host_instance)); }
-            catch (...) { /* out pointer unmapped — result lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateInstance → %d (instance=%p)\n",
-                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_instance));
-        }
-        return true;
-    }
-
-    // ── vkCreateDevice ───────────────────────────────────────────────
-    // (physicalDevice, pCreateInfo, pAllocator, pDevice) — arg 3 is the
-    // OUT handle.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DEVICE) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkDeviceCreateInfoH* info = st.alloc<VkDeviceCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        if (info->pQueueCreateInfos && info->queueCreateInfoCount &&
-            info->queueCreateInfoCount <= 16) {
-            VkDeviceQueueCreateInfoH* arr = reinterpret_cast<VkDeviceQueueCreateInfoH*>(
-                st.bytes(static_cast<size_t>(info->queueCreateInfoCount) * sizeof(VkDeviceQueueCreateInfoH), 8));
-            for (uint32_t i = 0; i < info->queueCreateInfoCount; i++) {
-                uint64_t g = reinterpret_cast<uint64_t>(info->pQueueCreateInfos)
-                           + static_cast<uint64_t>(i) * sizeof(VkDeviceQueueCreateInfoH);
-                read_guest_struct(mem, g, &arr[i]);
-                if (arr[i].pQueuePriorities && arr[i].queueCount && arr[i].queueCount <= 64) {
-                    float* pf = reinterpret_cast<float*>(
-                        st.bytes(static_cast<size_t>(arr[i].queueCount) * sizeof(float), 8));
-                    try {
-                        mem->read(reinterpret_cast<uint64_t>(arr[i].pQueuePriorities),
-                                  pf, static_cast<size_t>(arr[i].queueCount) * sizeof(float));
-                    } catch (...) { std::memset(pf, 0, static_cast<size_t>(arr[i].queueCount) * sizeof(float)); }
-                    arr[i].pQueuePriorities = pf;
-                }
-            }
-            info->pQueueCreateInfos = arr;
-        }
-        info->ppEnabledLayerNames = st.guest_str_array(
-            mem, reinterpret_cast<uint64_t>(info->ppEnabledLayerNames), info->enabledLayerCount);
-        info->ppEnabledExtensionNames = st.guest_str_array(
-            mem, reinterpret_cast<uint64_t>(info->ppEnabledExtensionNames), info->enabledExtensionCount);
-        if (info->pEnabledFeatures) {
-            void* f = st.bytes(kPhysicalDeviceFeaturesBytes, 8);
-            try { mem->read(reinterpret_cast<uint64_t>(info->pEnabledFeatures), f, kPhysicalDeviceFeaturesBytes); }
-            catch (...) { std::memset(f, 0, kPhysicalDeviceFeaturesBytes); }
-            info->pEnabledFeatures = f;
-        }
-        // pNext chain (subgroup/BDA/accel/ray-query/present feature
-        // structs) are guest pointers — deep-marshal like Properties2.
-        VkPnextNode dnodes[kMaxPnextNodes];
-        uint32_t dn = vk_marshal_pnext_chain(
-            mem, st, reinterpret_cast<uint64_t>(info->pNext), dnodes);
-        // Re-point the create info at the HOST chain head (or truncate) —
-        // the raw guest pointer must never reach the driver.
-        info->pNext = dn ? dnodes[0].host : nullptr;
-        if (trace) {
-            fprintf(stderr,
-                    "[display-thunk] vkCreateDevice: qcount=%u layers=%u exts=%u "
-                    "feats=%d raw_pnext=0x%llx dn=%u\n",
-                    info->queueCreateInfoCount, info->enabledLayerCount,
-                    info->enabledExtensionCount, info->pEnabledFeatures ? 1 : 0,
-                    reinterpret_cast<unsigned long long>(info->pNext), dn);
-            for (uint32_t i = 0; i < dn; i++) {
-                int32_t s = 0;
-                std::memcpy(&s, dnodes[i].host, 4);
-                fprintf(stderr, "[display-thunk]   node[%u] stype=%d size=%zu\n",
-                        i, s, dnodes[i].size);
-            }
-        }
-        uint64_t host_device = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_device);
-        vk_writeback_pnext_chain(mem, dnodes, dn);
-        if (cpu.regs[3] && host_device) {
-            try { mem->write(cpu.regs[3], &host_device, sizeof(host_device)); }
-            catch (...) { /* out pointer unmapped — result lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateDevice → %d (device=%p)\n",
-                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_device));
-        }
         return true;
     }
 
@@ -2184,37 +2095,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) fprintf(stderr, "[display-thunk] vkInvalidateMappedMemoryRanges (n=%u) → %d\n",
                            count, static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── Completion waits: pull host mappings into the bounces ────────────
-    // vkDeviceWaitIdle / vkQueueWaitIdle / vkWaitForFences — after a
-    // successful wait the GPU may have written readback data into the host
-    // mappings; refresh the bounces so the guest sees it. These symbols
-    // otherwise forward verbatim (plain int args).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_SYNC_PULL) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        uint64_t ret;
-        if (entry.spec->args[0] == 'p') {
-            // vkWaitForFences(device, fenceCount, pFences, waitAll, timeout)
-            // — bounce the fence handle array, then wait.
-            VkStage st;
-            const uint32_t nf = static_cast<uint32_t>(cpu.regs[1]);
-            if (nf && cpu.regs[2] && nf <= 64) {
-                uint64_t* f = reinterpret_cast<uint64_t*>(st.bytes(nf * 8u, 8));
-                read_guest_bytes(mem, cpu.regs[2], f, nf * 8u);
-                ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, uint64_t)>(entry.host_fn)(
-                    cpu.regs[0], nf, f, static_cast<uint32_t>(cpu.regs[3]), cpu.regs[4]);
-            } else {
-                ret = reinterpret_cast<uint64_t (*)(uint64_t, uint32_t, const void*, uint32_t, uint64_t)>(entry.host_fn)(
-                    cpu.regs[0], 0, nullptr, static_cast<uint32_t>(cpu.regs[3]), cpu.regs[4]);
-            }
-        } else {
-            ret = reinterpret_cast<uint64_t (*)(uint64_t)>(entry.host_fn)(cpu.regs[0]);
-        }
-        if (ret == 0) impl_->vk_sync_pull_all();
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] wait+pull → %d\n", static_cast<int32_t>(ret));
         return true;
     }
 
@@ -3201,8 +3081,6 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_GET_PROC:
             flags |= THUNK_VULKAN | THUNK_GET_PROC;
             break;
-        case thunk::Policy::VK_CREATE_INSTANCE:
-        case thunk::Policy::VK_CREATE_DEVICE:
         case thunk::Policy::VK_PRESENT:
         case thunk::Policy::VK_ALLOC_MEMORY:
         case thunk::Policy::VK_FREE_MEMORY:
@@ -3210,7 +3088,6 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_UNMAP_MEMORY:
         case thunk::Policy::VK_FLUSH_MAPPED:
         case thunk::Policy::VK_INVALIDATE_MAPPED:
-        case thunk::Policy::VK_SYNC_PULL:
         case thunk::Policy::VULKAN:
             flags |= THUNK_VULKAN;
             break;

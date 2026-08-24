@@ -120,9 +120,16 @@ as raw bytes (untranslated interior pointers → RADV SIGSEGV) — layouts
 check now first; (B) incomplete failure sweep in b2/b3 left stale done
 bits (fixed by batch-4 unconditional sweep; those intermediates can
 crash intermittently). PCWFC push moved to a name-based pre-call hook.
-Hand arms remaining (5): PRESENT, CREATE_INSTANCE/DEVICE, memory arms
-(permanent), SYNC_PULL. BEGIN_COMMAND_BUFFER could also fold into the
-generated path later (its begin-info shape fits SINGLE_STRUCT_IN).
+**Batch 5 DONE (2026-08-24) — Phase B COMPLETE**: vkCreateInstance /
+vkCreateDevice / vkAllocateCommandBuffers migrated (VKM_STRARR string-
+array staging added; out=2 now byte-vs-element aware; SYNC_PULL arm
+dissolved into plans + a name-gated post-call pull hook). Four more
+arms + five H structs deleted.
+
+Permanently hand-coded (declared): PRESENT (field-level OUT pResults +
+present behavior), memory family (MAP/UNMAP/FLUSH/INVALIDATE bounce +
+PCWFC bookkeeping), GET_PROC, extension filtering, debug-messenger
+interception, BEGIN_COMMAND_BUFFER (small frozen-shape arm).
 
 ## Hard contracts (violating any = known crash class)
 

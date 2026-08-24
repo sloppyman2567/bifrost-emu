@@ -68,6 +68,8 @@ CMD_PLANS = {
     'vkQueueSubmit': None,
     'vkQueueSubmit2': None, 'vkQueueSubmit2KHR': None,
     'vkUpdateDescriptorSets': None,
+    # Phase B batch 5: fence waits
+    'vkWaitForFences': None,
 }
 
 # Create-style commands (Phase B batches 1–3): create/record shape with
@@ -88,13 +90,20 @@ CMD_CREATE_PLANS = {
     # Phase B batch 4: OUT array whose count lives INSIDE the staged
     # struct (pDescriptorSets count = pAllocateInfo->descriptorSetCount)
     'vkAllocateDescriptorSets',
+    # Phase B batch 5
+    'vkCreateInstance', 'vkCreateDevice',
+    'vkAllocateCommandBuffers',
 }
+# vkQueuePresentKHR STAYS a hand arm by design (plan Phase B item 5):
+# pResults needs FIELD-level OUT semantics inside the staged struct,
+# which plans do not express — plus present-mode/PCWFC behavior.
 
 # For out=5 refs whose count comes from a member of the staged STRUCT_IN
 # struct (count_arg=0xFE): command -> count-member name. The offset is
 # resolved against that plan's STRUCT_IN descriptor.
 CMD_OUT_COUNT_MEMBER = {
     'vkAllocateDescriptorSets': 'descriptorSetCount',
+    'vkAllocateCommandBuffers': 'commandBufferCount',
 }
 
 HEADER = r"""// opgen_vkmarshal.hpp — GENERATED. DO NOT EDIT.
@@ -123,6 +132,8 @@ enum : uint8_t {
     VKM_PNEXT = 0x80,   // FLAG (OR'd into elem): this field is a pNext
                         // chain link — walk it via vk_find_struct_by_stype
     VKM_STR = 0x40,     // FLAG: NUL-terminated char* — stage strlen+1
+    VKM_STRARR = 0x20,  // FLAG: array of NUL-terminated char* — stage the
+                        // pointer array PLUS every string (elem_size 8)
 };
 
 struct VkFieldDesc {
@@ -329,6 +340,12 @@ def main():
                 out = 2     # non-const data pointer: copy back after call
             else:
                 out = 0     # plain input staging
+            byte_count = False
+            if out == 2 and cidx is not None:
+                # byte counts arrive directly (dataSize); element counts
+                # multiply by the element size (pResults)
+                cq = c.params[cidx]
+                byte_count = cq.type in ('size_t', 'VkDeviceSize')
             if cidx is None:
                 if out == 2 and p.type == 'void':
                     # uncounted OUT void* cannot be staged safely — leave
@@ -337,10 +354,10 @@ def main():
                           f'pointer left generic', file=sys.stderr)
                 continue
             if p.type == 'void':
-                plist.append((pidx, cidx, ('raw', 1), out))
+                plist.append((pidx, cidx, ('raw', 1, True), out))
                 continue
             if p.type in reg['handles']:
-                plist.append((pidx, cidx, ('raw', 8), out))
+                plist.append((pidx, cidx, ('raw', 8, byte_count), out))
                 continue
             # NOTE: the struct-layouts check MUST come before the scalar
             # type_size fallback — type_size() resolves struct names too,
@@ -354,7 +371,7 @@ def main():
             tsz = type_size(p.type, reg, {})
             if tsz is not None:
                 # scalar/enum/bitmask array — stage verbatim
-                plist.append((pidx, cidx, ('raw', tsz), out))
+                plist.append((pidx, cidx, ('raw', tsz, byte_count), out))
                 continue
             print(f'WARN: {cmd} param {p.name}: no layout for '
                   f'{p.type}', file=sys.stderr)
@@ -391,10 +408,10 @@ def main():
             cidx = sibling_index(ln) if ln else None
             if not p.const and p.type in reg['handles']:
                 plist.append((pidx, cidx if cidx is not None else 0xFF,
-                              None, 5))          # OUT handle(s)
+                              ('hnd',), 5))          # OUT handle(s)
                 continue
             if p.const and p.type == 'VkAllocationCallbacks':
-                plist.append((pidx, 0, None, 3))       # NULLIFY
+                plist.append((pidx, 0, ('hnd',), 3))       # NULLIFY
                 continue
             if p.const and p.type in layouts and \
                     (not p.len_ or cidx is not None):
@@ -508,6 +525,11 @@ def main():
             elif pf.elem == 'char' and pf.count == 'nullterm':
                 # NUL-terminated string — runtime stages strlen+1 bytes
                 elem |= 0x40
+            elif pf.elem == 'char' and pf.count.startswith('member:'):
+                # counted array of strings (ppEnabledExtensionNames &
+                # friends) — runtime stages the pointer array AND every
+                # string; elem_size stays 8 (slot stride)
+                elem, elem_size = 0x60, 8    # STR|STRARR
             if pf.count == 'fixed:1':
                 count_off, fixed = 0xFFFF, 1
             elif pf.count == 'nullterm':
@@ -563,8 +585,11 @@ def main():
                 refs.append(f'    {{{pidx},{cidx},0,{out},8,{aux},nullptr}},')
                 continue
             if isinstance(sname, tuple):
-                _, esz = sname
-                refs.append(f'    {{{pidx},{cidx},{1 if esz == 1 else 0},'
+                if sname[0] == 'hnd':
+                    refs.append(f'    {{{pidx},{cidx},0,{out},8,0,nullptr}},')
+                    continue
+                _, esz, bc = sname
+                refs.append(f'    {{{pidx},{cidx},{1 if bc else 0},'
                             f'{out},{esz},0,nullptr}},')
                 continue
             desc = f'&kVkStructs[{struct_index[sname]}]' if sname else 'nullptr'

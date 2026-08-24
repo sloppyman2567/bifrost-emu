@@ -3722,3 +3722,40 @@ not musl-`-static`.
 - Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
   (warnings 4), quick suite 207/207 (swapchain runs for real with
   DISPLAY set), swapchain ×5 + mambo ×3 rc=0 on live RADV.
+
+## Session History (2026-08-24) — Phase B batch 5 (FINAL): instance/device generated; PRESENT stays behavioral
+
+- **vkCreateInstance / vkCreateDevice / vkAllocateCommandBuffers migrated;
+  SYNC_PULL arm dissolved** (vkWaitForFences → auto handle-array plan;
+  WaitIdle rows → plain VULKAN + a name-gated POST-call pull hook:
+  `ret==0 && name ∈ {vkDeviceWaitIdle, vkQueueWaitIdle, vkWaitForFences}`
+  → vk_sync_pull_all). Four hand arms + five H structs deleted.
+  Remaining hand arms: PRESENT (behavioral by design) + the memory
+  family + BEGIN_COMMAND_BUFFER — all declared permanent/hand-coded.
+- **New generator capability VKM_STRARR (0x20 | elem 0x60)**: counted
+  arrays of NUL-terminated char* (ppEnabledExtensionNames &
+  friends, len="enabledLayerCount,null-terminated"). Size pass sums
+  slot-array + per-string strlen+1; fill allocates the slot array then
+  every string. CRITICAL ORDERING: test STRARR BEFORE STR in both
+  passes — STRARR's value CONTAINS the STR bit and the single-string
+  branch would swallow it (staged one string where an array belonged).
+- **out=2 direction now byte-vs-element aware**: byte counts come from
+  size_t/VkDeviceSize siblings (dataSize); element counts multiply by
+  elem_size (pResults-style typed OUT arrays).
+- **Process landmines hit (all recovered):**
+  1. Regex surgery on vk_deep_size_one/fill_elem corrupted both
+     functions (mis-nested braces, spliced blocks) — rebuilt them from
+     `git show HEAD:` extraction + clean insertions instead.
+  2. The arm-deletion script's case list included VK_PRESENT,
+     silently dropping QueuePresent into generic dispatch (flat bounce
+     of PresentInfo → guest pointers to RADV → crash at the triangle-
+     loop present). Symptom appeared TWO migrations away from the cause
+     because the early present still passed. When deleting arms, NEVER
+     delete switch cases for policies that keep a hand arm.
+  3. Generator-side BISECT disables left in place made later crashes
+     look like unrelated bugs (raw guest pointer derefs from my own
+     debug dump reading a non-staged arg). Always re-diff the generator
+     before interpreting crash sites.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean
+  (warnings 4), quick suite 207/207, swapchain ×3 + mambo ×3 rc=0 on
+  live RADV with the complete change set.
