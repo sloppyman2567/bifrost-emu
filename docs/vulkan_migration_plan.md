@@ -1,7 +1,8 @@
 # Vulkan Migration Plan — Generated Marshalling (Phases A → C → B)
 
-Status: **A1 ✅ DONE · A2 ✅ DONE (scoped) · C1 ✅ partial · C3 ✅ DONE ·
-A3/C2 deferred into Phase B** (see end of file). Nothing committed yet.
+Status: **A1 ✅ · A2 ✅ · C1 ✅ partial · C3 ✅ · B batch 1 ✅
+(ShaderModule/PipelineLayout/DescriptorPool/BeginRenderPass/Framebuffer
+migrated; A3 nullify landed as plan role 3)**. Committed.
 
 ## Current state (post milestone-2, commit 82f8147)
 
@@ -82,17 +83,24 @@ A3/C2 deferred into Phase B** (see end of file). Nothing committed yet.
   instance-extension rewriting in the CREATE_INSTANCE arm first, plus an
   Android-Vulkan guest test to validate. Revisit as its own milestone.
 
-## Remaining inventory (Phase B)
+## Phase B progress
 
-17 hand deep arms still in display_thunk.cpp: SUBMIT, PRESENT,
-CREATE_INSTANCE/DEVICE, RENDERPASS, FRAMEBUFFER, BEGIN_RENDERPASS,
-SHADER_MODULE, GRAPHICS/COMPUTE_PIPELINES, PIPELINE_LAYOUT,
-DESCRIPTOR_POOL, DESCRIPTOR_SET_LAYOUT, ALLOC_DESCRIPTOR_SETS,
-UPDATE_DESCRIPTOR_SETS, ALLOC/FREE/MAP/UNMAP_MEMORY,
-FLUSH/INVALIDATE_MAPPED, SYNC_PULL, BEGIN_COMMAND_BUFFER.
-Plus the command-level recursive-plan capability (nested arrays inside
-pCreateInfo-style args) which unlocks BeginRendering/PipelineBarrier2/
-Submit2 generically.
+**Batch 1 DONE (2026-08-24)**: create-style plans landed — new ref
+roles out=3 NULLIFY (implements A3), out=4 SINGLE_STRUCT_IN (stage one
+struct recursively via its descriptor), out=5 OUT_HANDLE (8-byte bounce +
+writeback). latexmath len expressions resolve their member name and
+stage byte-granular (ShaderModuleCreateInfo.pCode). Migrated:
+vkCreateShaderModule / PipelineLayout / DescriptorPool / Framebuffer /
+vkCmdBeginRenderPass — five hand arms + five H structs DELETED, rows on
+VK_CMD_DEEP. Also fixed phantom C1 alias names (WithCount/BindVB2 are
+EXT aliases, not KHR). Gates re-run: 207/207, RADV ×3 each.
+
+Remaining hand arms (12): SUBMIT, PRESENT, CREATE_INSTANCE/DEVICE,
+RENDERPASS, GRAPHICS/COMPUTE_PIPELINES, PIPELINE_LAYOUT(done),
+DESCRIPTOR_SET_LAYOUT, ALLOC_DESCRIPTOR_SETS, UPDATE_DESCRIPTOR_SETS,
+ALLOC/FREE/MAP/UNMAP_MEMORY, FLUSH/INVALIDATE_MAPPED, SYNC_PULL,
+BEGIN_COMMAND_BUFFER. Next batch: RenderPass family (attachment/subpass
+trees), then DESCRIPTOR_SET_LAYOUT, then pipelines.
 
 ## Hard contracts (violating any = known crash class)
 

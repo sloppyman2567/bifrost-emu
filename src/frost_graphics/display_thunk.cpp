@@ -1183,6 +1183,39 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 const thunk::VkPlanRef& r = plan->refs[ri];
                 if (r.arg >= kMaxArgs) continue;
 
+                // ── NULLIFY: force this arg to nullptr at the host call
+                if (r.out == 3) {
+                    args[r.arg] = 0;
+                    vk_deep_done |= 1u << r.arg;
+                    continue;
+                }
+                // ── SINGLE_STRUCT_IN: stage ONE struct recursively ──
+                if (r.out == 4) {
+                    if (!args[r.arg]) continue;
+                    need = (need + 7u) & ~size_t(7);
+                    need += vk_deep_size_one(
+                        impl_->mem, args[r.arg], r.desc, 1, 0, &ok);
+                    if (!ok) break;
+                    jobs[njobs++] = {static_cast<int>(r.arg), 1u,
+                                     args[r.arg], false, r.desc};
+                    vk_deep_done |= 1u << r.arg;
+                    continue;
+                }
+                // ── OUT_HANDLE: 8-byte bounce + post-call writeback ──
+                if (r.out == 5) {
+                    DeepOutRec rec{};
+                    rec.arg = r.arg;
+                    rec.count_arg_idx = -1;
+                    rec.guest_array = args[r.arg];
+                    rec.elem_size = 8;
+                    rec.staged_elems = 1;
+                    need = (need + 7u) & ~size_t(7);
+                    need += 8;
+                    vk_out_recs[vk_n_out_recs++] = rec;
+                    vk_deep_done |= 1u << r.arg;
+                    continue;
+                }
+
                 // ── OUT refs: enumeration / copyback-only staging ──
                 if (r.out == 1 || r.out == 2) {
                     DeepOutRec rec{};
@@ -1281,18 +1314,27 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (ok && need < kVkDeepMaxBytes) {
                 VkStage& st = vk_deep_stage;
                 st.buf.reserve(std::max<size_t>(need + 4096, 65536));
-                // count bounces FIRST (allocation order mirrors `need`:
-                // out-refs contributed their count+array bytes in scan
-                // order before any IN-ref bytes)
+                // count + OUT-handle bounces FIRST (allocation order
+                // mirrors `need`: out-refs contributed their bytes in
+                // scan order before any IN-ref bytes)
                 for (int oi = 0; oi < vk_n_out_recs; oi++) {
                     DeepOutRec& rec = vk_out_recs[oi];
-                    if (!rec.guest_count_ptr) continue;
-                    void* cb = st.bytes(4, 4);
-                    uint32_t cnt = rec.staged_elems;
-                    std::memcpy(cb, &cnt, 4);
-                    rec.staged_count = cb;
-                    args[rec.count_arg_idx] =
-                        reinterpret_cast<uint64_t>(cb);
+                    if (rec.guest_count_ptr) {
+                        void* cb = st.bytes(4, 4);
+                        uint32_t cnt = rec.staged_elems;
+                        std::memcpy(cb, &cnt, 4);
+                        rec.staged_count = cb;
+                        args[rec.count_arg_idx] =
+                            reinterpret_cast<uint64_t>(cb);
+                    } else if (rec.guest_array && rec.staged_elems == 1) {
+                        // OUT_HANDLE bounce (zeroed; host writes the
+                        // handle through it)
+                        void* hb = st.bytes(8, 8);
+                        std::memset(hb, 0, 8);
+                        rec.staged = hb;
+                        args[rec.arg] =
+                            reinterpret_cast<uint64_t>(hb);
+                    }
                 }
                 for (int ji = 0; ji < njobs; ji++) {
                     DeepJob& j = jobs[ji];
@@ -1319,18 +1361,18 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                             vk_out_recs[oi].staged = dst;
                     }
                 }
-            } else if (vk_n_out_recs) {
+            } else {
                 // plan failed (garbage counts, oversized staging): undo
-                // the count-bounce rewrites so the generic translate
-                // path sees the ORIGINAL guest pointers for every arg.
-                for (int oi = 0; oi < vk_n_out_recs; oi++) {
-                    const DeepOutRec& rec = vk_out_recs[oi];
-                    if (rec.staged_count &&
-                        rec.count_arg_idx >= 0 && rec.count_arg_idx < kMaxArgs) {
-                        args[rec.count_arg_idx] = rec.guest_count_ptr;
-                        vk_deep_done &= ~(1u << rec.count_arg_idx);
-                    }
-                    vk_deep_done &= ~(1u << rec.arg);
+                // EVERYTHING so the generic translate path sees the
+                // ORIGINAL guest pointers for every planned arg.
+                // (Count-bounce rewrites happened only in the fill
+                // phase, which never ran; args[] still hold guests.)
+                for (uint8_t ri2 = 0; ri2 < plan->nrefs; ri2++) {
+                    const thunk::VkPlanRef& r2 = plan->refs[ri2];
+                    if (r2.arg < kMaxArgs)
+                        vk_deep_done &= ~(1u << r2.arg);
+                    if (r2.out == 1 && r2.count_arg < kMaxArgs)
+                        vk_deep_done &= ~(1u << r2.count_arg);
                 }
                 vk_n_out_recs = 0;
             }
@@ -1548,26 +1590,10 @@ struct VkRenderPassCreateInfoH {
     uint32_t subpassCount; const void* pSubpasses;
     uint32_t dependencyCount; const void* pDependencies;
 };
-// VkFramebufferCreateInfo — pAttachments is an array of VkImageView handles.
-struct VkFramebufferCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags;
-    uint64_t renderPass; uint32_t attachmentCount;
-    const void* pAttachments; uint32_t width, height, layers;
-};
-// VkRenderPassBeginInfo — renderArea is by-value; pClearValues is nested.
-struct VkRenderPassBeginInfoH {
-    int32_t sType; void* pNext; uint64_t renderPass; uint64_t framebuffer;
-    int32_t renderAreaOffX, renderAreaOffY;
-    uint32_t renderAreaExtW, renderAreaExtH;
-    uint32_t clearValueCount; const void* pClearValues;
-};
 // ── Graphics-pipeline stage (2026-08-21) ──────────────────────────────
 // All layouts verified byte-for-byte against the vendored
 // ctest_real/vulkan_headers vulkan_core.h (natural-alignment LP64 —
 // identical on host x86-64 and guest AArch64).
-struct VkShaderModuleCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; size_t codeSize; const void* pCode;
-};
 struct VkPipelineShaderStageCreateInfoH {
     int32_t sType; void* pNext; uint32_t flags; uint32_t stage;
     uint64_t module; const char* pName; const void* pSpecializationInfo;
@@ -1639,17 +1665,6 @@ struct VkGraphicsPipelineCreateInfoH {
     const VkPipelineDynamicStateCreateInfoH* pDynamicState;
     uint64_t layout; uint64_t renderPass; uint32_t subpass;
     uint64_t basePipelineHandle; int32_t basePipelineIndex;
-};
-// VkPipelineLayoutCreateInfo — pSetLayouts (handle array) + flat ranges.
-struct VkPipelineLayoutCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t setLayoutCount;
-    const void* pSetLayouts; uint32_t pushConstantRangeCount;
-    const void* pPushConstantRanges;
-};
-struct VkDescriptorPoolSizeH { uint32_t type; uint32_t descriptorCount; };
-struct VkDescriptorPoolCreateInfoH {
-    int32_t sType; void* pNext; uint32_t flags; uint32_t maxSets;
-    uint32_t poolSizeCount; const VkDescriptorPoolSizeH* pPoolSizes;
 };
 struct VkDescriptorSetLayoutCreateInfoH {
     int32_t sType; void* pNext; uint32_t flags; uint32_t bindingCount;
@@ -2120,104 +2135,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         return true;
     }
 
-    // ── vkCreateFramebuffer ────────────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pFramebuffer) — pAttachments is a
-    // NESTED array of VkImageView handles; re-point into staging (handles
-    // round-trip verbatim). OUT handle (arg 3) written back.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_FRAMEBUFFER) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkFramebufferCreateInfoH* info = st.alloc<VkFramebufferCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->attachmentCount && info->pAttachments && info->attachmentCount <= 32) {
-            uint64_t* a = reinterpret_cast<uint64_t*>(
-                st.bytes(static_cast<size_t>(info->attachmentCount) * 8u, 8));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pAttachments), a,
-                             static_cast<size_t>(info->attachmentCount) * 8u);
-            info->pAttachments = a;
-        }
-        uint64_t host_framebuffer = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_framebuffer);
-        if (cpu.regs[3] && host_framebuffer) {
-            try { mem->write(cpu.regs[3], &host_framebuffer, sizeof(host_framebuffer)); }
-            catch (...) { /* out pointer unmapped — result lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateFramebuffer → %d (framebuffer=%p)\n",
-                    static_cast<int32_t>(ret), reinterpret_cast<void*>(host_framebuffer));
-        }
-        return true;
-    }
-
-    // ── vkCmdBeginRenderPass ───────────────────────────────────────────
-    // (commandBuffer, pRenderPassBegin, contents) — pClearValues is a
-    // NESTED array of VkClearValue (16 bytes each); re-point into staging.
-    // renderArea is by-value (VkRect2D, 16 bytes), no translation needed.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_BEGIN_RENDERPASS) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkRenderPassBeginInfoH* b = st.alloc<VkRenderPassBeginInfoH>();
-        read_guest_struct(mem, cpu.regs[1], b);
-        b->pNext = nullptr;
-        if (b->clearValueCount && b->pClearValues && b->clearValueCount <= 32) {
-            uint64_t* a = reinterpret_cast<uint64_t*>(
-                st.bytes(static_cast<size_t>(b->clearValueCount) * 16u, 8));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(b->pClearValues), a,
-                             static_cast<size_t>(b->clearValueCount) * 16u);
-            b->pClearValues = a;
-        }
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, uint32_t)>(entry.host_fn)(
-            cpu.regs[0], b, static_cast<uint32_t>(cpu.regs[2]));
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkCmdBeginRenderPass → %d\n", static_cast<int32_t>(ret));
-        return true;
-    }
-
-    // ── vkCreateShaderModule ─────────────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pShaderModule) — pCode is a NESTED
-    // guest pointer to codeSize bytes of SPIR-V. The staging vector MUST be
-    // reserved for codeSize BEFORE any pointer is taken: a later resize
-    // reallocates buf and dangles every pointer handed out so far (the
-    // 64 KiB default reserve would be blown by any real shader).
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_SHADER_MODULE) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkShaderModuleCreateInfoH gi;
-        read_guest_struct(mem, cpu.regs[1], &gi);
-        if (gi.codeSize > (64u << 20)) {
-            cpu.regs[0] = 0xFFFFFFFDu;  // VK_ERROR_INITIALIZATION_FAILED
-            return true;
-        }
-        VkStage st;
-        st.buf.reserve(gi.codeSize + 4096);
-        VkShaderModuleCreateInfoH* info = st.alloc<VkShaderModuleCreateInfoH>();
-        *info = gi;
-        info->pNext = nullptr;
-        if (gi.codeSize && gi.pCode) {
-            void* code = st.bytes(gi.codeSize, 4);  // SPIR-V is u32-aligned
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(gi.pCode), code, gi.codeSize);
-            info->pCode = code;
-        } else {
-            info->pCode = nullptr;
-            info->codeSize = 0;
-        }
-        uint64_t host_module = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_module);
-        if (cpu.regs[3] && host_module) {
-            try { mem->write(cpu.regs[3], &host_module, sizeof(host_module)); }
-            catch (...) { /* out pointer unmapped — result lost */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) {
-            fprintf(stderr, "[display-thunk] vkCreateShaderModule (codeSize=%zu) → %d (module=%p)\n",
-                    gi.codeSize, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_module));
-        }
-        return true;
-    }
-
     // ── vkCreateGraphicsPipelines ────────────────────────────────────────
     // (device, pipelineCache, createInfoCount, pCreateInfos, pAllocator,
     // pPipelines) — each VkGraphicsPipelineCreateInfo carries a tree:
@@ -2386,67 +2303,6 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             fprintf(stderr, "[display-thunk] vkCreateGraphicsPipelines (n=%u) → %d (pipe0=%p)\n",
                     count, static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pipes[0]));
         }
-        return true;
-    }
-
-    // ── vkCreatePipelineLayout ───────────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pPipelineLayout) — pSetLayouts is a
-    // handle array, pPushConstantRanges a flat {u32,u32,u32} array.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_PIPELINE_LAYOUT) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkPipelineLayoutCreateInfoH* info = st.alloc<VkPipelineLayoutCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->setLayoutCount && info->pSetLayouts && info->setLayoutCount <= 16) {
-            uint64_t* a = reinterpret_cast<uint64_t*>(st.bytes(info->setLayoutCount * 8u, 8));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pSetLayouts), a, info->setLayoutCount * 8u);
-            info->pSetLayouts = a;
-        } else { info->setLayoutCount = 0; info->pSetLayouts = nullptr; }
-        if (info->pushConstantRangeCount && info->pPushConstantRanges && info->pushConstantRangeCount <= 16) {
-            void* a = st.bytes(info->pushConstantRangeCount * 12u, 4);
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pPushConstantRanges), a,
-                             info->pushConstantRangeCount * 12u);
-            info->pPushConstantRanges = a;
-        } else { info->pushConstantRangeCount = 0; info->pPushConstantRanges = nullptr; }
-        uint64_t host_layout = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_layout);
-        if (cpu.regs[3] && host_layout) {
-            try { mem->write(cpu.regs[3], &host_layout, sizeof(host_layout)); }
-            catch (...) { /* out pointer unmapped */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkCreatePipelineLayout → %d (layout=%p)\n",
-                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_layout));
-        return true;
-    }
-
-    // ── vkCreateDescriptorPool ───────────────────────────────────────────
-    // (device, pCreateInfo, pAllocator, pDescriptorPool) — pPoolSizes flat.
-    if (entry.spec && entry.spec->policy == thunk::Policy::VK_CREATE_DESCRIPTOR_POOL) {
-        if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
-        VkStage st;
-        VkDescriptorPoolCreateInfoH* info = st.alloc<VkDescriptorPoolCreateInfoH>();
-        read_guest_struct(mem, cpu.regs[1], info);
-        info->pNext = nullptr;
-        if (info->poolSizeCount && info->pPoolSizes && info->poolSizeCount <= 32) {
-            VkDescriptorPoolSizeH* a = reinterpret_cast<VkDescriptorPoolSizeH*>(
-                st.bytes(info->poolSizeCount * sizeof(VkDescriptorPoolSizeH), 4));
-            read_guest_bytes(mem, reinterpret_cast<uint64_t>(info->pPoolSizes), a,
-                             info->poolSizeCount * sizeof(VkDescriptorPoolSizeH));
-            info->pPoolSizes = a;
-        } else { info->poolSizeCount = 0; info->pPoolSizes = nullptr; }
-        uint64_t host_pool = 0;
-        uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*, const void*, void*)>(entry.host_fn)(
-            cpu.regs[0], info, nullptr, &host_pool);
-        if (cpu.regs[3] && host_pool) {
-            try { mem->write(cpu.regs[3], &host_pool, sizeof(host_pool)); }
-            catch (...) { /* out pointer unmapped */ }
-        }
-        cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
-        if (trace) fprintf(stderr, "[display-thunk] vkCreateDescriptorPool → %d (pool=%p)\n",
-                           static_cast<int32_t>(ret), reinterpret_cast<void*>(host_pool));
         return true;
     }
 
@@ -3896,12 +3752,7 @@ void DisplayThunk::register_known_symbols_() {
         case thunk::Policy::VK_PRESENT:
         case thunk::Policy::VK_SUBMIT:
         case thunk::Policy::VK_CREATE_RENDERPASS:
-        case thunk::Policy::VK_CREATE_FRAMEBUFFER:
-        case thunk::Policy::VK_BEGIN_RENDERPASS:
-        case thunk::Policy::VK_CREATE_SHADER_MODULE:
         case thunk::Policy::VK_CREATE_GRAPHICS_PIPELINES:
-        case thunk::Policy::VK_CREATE_PIPELINE_LAYOUT:
-        case thunk::Policy::VK_CREATE_DESCRIPTOR_POOL:
         case thunk::Policy::VK_CREATE_DESCRIPTOR_SET_LAYOUT:
         case thunk::Policy::VK_ALLOC_DESCRIPTOR_SETS:
         case thunk::Policy::VK_UPDATE_DESCRIPTOR_SETS:

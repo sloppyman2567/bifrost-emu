@@ -3613,3 +3613,36 @@ not musl-`-static`.
 - New contracts in plan file §Hard-contracts: (7) size pass mirrors fill
   allocation-for-allocation; unknown sType → NULL link + one-shot log.
   Count bounces never allocate pre-reserve.
+
+## Session History (2026-08-24) — Phase B batch 1: create-style plans (5 hand arms deleted)
+
+- **Create-style VK_CMD_DEEP plans landed** (`vkCreateShaderModule`,
+  `vkCreatePipelineLayout`, `vkCreateDescriptorPool`, `vkCreateFramebuffer`,
+  `vkCmdBeginRenderPass` migrated off their hand arms — five arms + five
+  orphaned H structs DELETED, ~90 lines). New generator capability
+  (CMD_CREATE_PLANS in vkmarshalgen.py) derives ref roles per parameter:
+  const struct-ptr → out=4 SINGLE_STRUCT_IN, VkAllocationCallbacks →
+  out=3 NULLIFY (A3 delivered as a plan role), non-const handle* →
+  out=5 OUT_HANDLE. Runtime: single-struct refs stage via
+  vk_deep_size_one/fill_elem with count=1 (pNext chains inside work
+  automatically); OUT_HANDLE gets a zeroed 8-byte bounce armed in the
+  fill pre-pass and copied back post-call by the existing copyback loop
+  (staged_elems=1, elem_size=8).
+- **latexmath len resolution**: `len="latexmath:[\textrm{codeSize} \over
+  4]"` fields now recover the member identifier by regex, retry
+  member_offset, and stage BYTE-granular (elem_size=1) so pCode stages
+  its full byte count regardless of divisor. This also un-skipped
+  VkPipelineMultisampleStateCreateInfo.pSampleMask (over-staging is
+  harmless; host reads only ceil(samples/32) words).
+- **Plan-failure sweep fixed**: a failed size pass now clears EVERY
+  planned arg's vk_deep_done bit (jobs included), not just rec bits —
+  previously a failed mixed plan could leave SINGLE_STRUCT args marked
+  done and send raw guest pointers to the host driver.
+- **Phantom C1 alias names FIXED**: vkCmdBindVertexBuffers2KHR /
+  SetViewportWithCountKHR / SetScissorWithCountKHR do NOT exist in the
+  registry (the aliases are EXT: extended_dynamic_state). The KHR rows
+  were dead (thunkgen doesn't validate names; vkxmlcheck skipped them).
+  Renamed to EXT + added EXT plans.
+- Verified: build 0 warnings, opgen-thunk-check/vkxml-check clean,
+  quick suite 207/207, swapchain + mambo rc=0 ×3 each on live RADV
+  (both exercise all five migrated commands end-to-end).

@@ -57,12 +57,27 @@ CMD_PLANS = {
     'vkFreeCommandBuffers': None, 'vkFreeDescriptorSets': None,
     'vkCmdBindDescriptorSets': None, 'vkCmdBindVertexBuffers': None,
     'vkCmdUpdateBuffer': None, 'vkCmdPushConstants': None,
-    # C1 modern rows (flat top-level arrays only)
+    # C1 modern rows (flat top-level arrays only). NOTE: the WithCount /
+    # BindVertexBuffers2 aliases are EXT (extended_dynamic_state), not KHR.
     'vkCmdBindVertexBuffers2': None,
-    'vkCmdBindVertexBuffers2KHR': None,
-    'vkCmdSetViewportWithCount': None, 'vkCmdSetViewportWithCountKHR': None,
-    'vkCmdSetScissorWithCount': None, 'vkCmdSetScissorWithCountKHR': None,
+    'vkCmdBindVertexBuffers2EXT': None,
+    'vkCmdSetViewportWithCount': None, 'vkCmdSetViewportWithCountEXT': None,
+    'vkCmdSetScissorWithCount': None, 'vkCmdSetScissorWithCountEXT': None,
 }
+
+# Create-style commands (Phase B batch 1): shape is
+# (handle, const Info* pCreateInfo[, const VkAllocationCallbacks*],
+#  Handle* pOut). Ref roles are DERIVED per parameter:
+#   - const pointer to a described struct        -> out=4 SINGLE_STRUCT_IN
+#   - const VkAllocationCallbacks*               -> out=3 NULLIFY
+#   - non-const handle-typed pointer (no len)    -> out=5 OUT_HANDLE
+CMD_CREATE_PLANS = {
+    'vkCreateShaderModule', 'vkCreatePipelineLayout',
+    'vkCreateDescriptorPool', 'vkCreateFramebuffer',
+}
+# vkCmdBeginRenderPass: (cmdbuf, const Info*, contents) — same rules,
+# no allocator / no OUT handle (the role scan simply finds none).
+CMD_CREATE_PLANS.add('vkCmdBeginRenderPass')
 
 HEADER = r"""// opgen_vkmarshal.hpp — GENERATED. DO NOT EDIT.
 //
@@ -118,6 +133,11 @@ struct VkPlanRef {
                            //     copy back min(staged, actual) elements
                            //     AND the count after the host call
                            // 2 = copyback-only (non-const raw pData)
+                           // 3 = NULLIFY: write nullptr into this arg
+                           // 4 = SINGLE_STRUCT_IN: stage ONE struct of
+                           //     `desc` at args[arg] (recursively)
+                           // 5 = OUT_HANDLE: 8-byte bounce; value copied
+                           //     back to the guest pointer after the call
     uint8_t elem_size;     // bytes per element for desc==nullptr arrays
     const VkStructDesc* desc;   // nullptr for verbatim byte staging
 };
@@ -311,6 +331,36 @@ def main():
         if ok:
             plans[cmd] = plist
 
+    # ── create-style plans (see CMD_CREATE_PLANS comment) ─────────────
+    for cmd in sorted(CMD_CREATE_PLANS):
+        c = reg['commands'].get(cmd)
+        if c is None:
+            print(f'WARN: {cmd} not in registry', file=sys.stderr)
+            continue
+        plist = []
+        ok = True
+        for pidx, p in enumerate(c.params):
+            if not p.is_ptr:
+                continue
+            if not p.const and p.type in reg['handles']:
+                plist.append((pidx, 0, None, 5))       # OUT handle
+                continue
+            if p.const and p.type == 'VkAllocationCallbacks':
+                plist.append((pidx, 0, None, 3))       # NULLIFY
+                continue
+            if p.const and p.type in layouts and not p.len_:
+                want_struct(p.type)
+                plist.append((pidx, 0, p.type, 4))     # SINGLE_STRUCT_IN
+                continue
+            # anything else on a create-style command is unexpected —
+            # fail loudly rather than half-marshal
+            print(f'WARN: {cmd} param {p.name} ({p.type}): no create-'
+                  f'plan role — command left generic', file=sys.stderr)
+            ok = False
+            break
+        if ok and any(r[3] == 4 for r in plist):
+            plans[cmd] = plist
+
     # ── chainable structs: EVERY struct with a resolvable sType member
     # gets a descriptor so generated pNext-chain walking covers the full
     # registry, not just the plan closure.
@@ -393,7 +443,19 @@ def main():
                 count_off, fixed = 0xFFFF, 1   # single element; NUL-safe
             else:
                 mname = pf.count.split(':', 1)[1]
+                latex = 'latexmath' in mname
                 co = member_offset(lay, mname.split('.')[0])
+                if co is None and latex:
+                    # len="latexmath:[\textrm{codeSize} \over 4]" etc.:
+                    # recover the referenced member name and stage the
+                    # buffer BYTE-granular (elem_size=1) so the full
+                    # byte count is staged regardless of the divisor
+                    import re as _re
+                    for ident in _re.findall(r'[A-Za-z_]\w*', mname):
+                        co = member_offset(lay, ident)
+                        if co is not None:
+                            elem, elem_size = 3, 1
+                            break
                 if co is None:
                     print(f'WARN: {name}: cannot locate count member '
                           f'{mname}', file=sys.stderr)
@@ -419,6 +481,10 @@ def main():
     for cmd, plist in plans.items():
         refs = []
         for (pidx, cidx, sname, out) in plist:
+            if out in (3, 5):
+                # NULLIFY / OUT_HANDLE: no descriptor, no count
+                refs.append(f'    {{{pidx},0,0,{out},8,nullptr}},')
+                continue
             if isinstance(sname, tuple):
                 _, esz = sname
                 refs.append(f'    {{{pidx},{cidx},{1 if esz == 1 else 0},'
