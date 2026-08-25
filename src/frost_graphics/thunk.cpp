@@ -1351,12 +1351,6 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
         }
     };
-    auto is_buffer_consumer_ = [](const std::string& n) {
-        if (n.compare(0, 6, "glDraw") == 0) return true;  // glDraw* family
-        if (n == "glCopyBufferSubData" || n == "glGetBufferSubData") return true;
-        if (n == "glTexBuffer" || n == "glTexBufferRange") return true;
-        return false;
-    };
     if (entry.spec) {
         thunk::Policy mpol = entry.spec->policy;
         if (mpol == thunk::Policy::MAP_BUFFER) {
@@ -1649,6 +1643,15 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // glBufferSubData(target, offset, size, data): data is arg3.
             if (idx == 3) {
                 uint64_t sz = args[2];
+                if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
+            }
+            break;
+        case thunk::SizeKind::ARG6:
+            // glCompressedTexImage2D(target, level, internalformat, width,
+            // height, border, imageSize, data): data is arg7, sized by
+            // arg6 (imageSize).
+            if (idx == 7) {
+                uint64_t sz = args[6];
                 if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
             }
             break;
@@ -1959,10 +1962,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                               &bounce_guest[pi], &bounce_wb[pi]);
             }
         } else if (entry.spec->policy == thunk::Policy::EL_PTR) {
+            // Index-array arg position differs per function:
+            //   glDrawElements*/glDrawElementsInstanced -> arg3
+            //   glDrawRangeElements(mode,start,end,count,type,indices) -> arg5
+            //   glDrawRangeElementsBaseVertex(...,type,indices,base) -> arg5
+            int pi = 3;
+            if (entry.name == "glDrawRangeElements" ||
+                entry.name == "glDrawRangeElementsBaseVertex") pi = 5;
             if (impl_->gl_state_tracker_->element_array_buffer_binding() == 0 &&
-                args[3] != 0) {
-                translate_ptr(args[3], 3, &bounce_bufs[3],
-                              &bounce_guest[3], &bounce_wb[3]);
+                args[pi] != 0) {
+                translate_ptr(args[pi], pi, &bounce_bufs[pi],
+                              &bounce_guest[pi], &bounce_wb[pi]);
             }
         }
     }
@@ -2121,8 +2131,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // texbuffer), push every live persistent+coherent bounce back to the
     // host so the GPU reads the guest's per-frame writes. Coherent mapping
     // semantics: the server sees client writes at the moment it reads them.
-    if (entry.spec && !impl_->gl_buffer_mappings_.empty() &&
-        is_buffer_consumer_(entry.name)) {
+    // The consumer set is the spec's SYNC column (table-driven).
+    if (entry.spec && entry.spec->sync_before &&
+        !impl_->gl_buffer_mappings_.empty()) {
         sync_persistent_mappings_();
     }
     if (entry.name == "glTexImage2D" && dbg().thunk_trace) {
@@ -2135,13 +2146,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     (unsigned long long)args[6], (unsigned long long)args[7],
                     (unsigned long long)args[8]);
     }
-    // GL string queries have a single GLenum argument and a const GLubyte*
+    // GL string queries (GET_STRING policy) have a single GLenum argument
+    // (glGetString) or GLenum+GLuint (glGetStringi) and a const GLubyte*
     // return.  Do not route them through the generic integer Fn8 call: the
     // result is a host pointer which is consumed by the string-cache path
     // below, and an untyped variadic-shaped call is especially fragile on
     // hosts where glGetString is dispatched through a GL ABI wrapper.
     // Calling it with its exact prototype also keeps the pname intact.
-    if (entry.name == "glGetString") {
+    bool is_get_string = entry.spec &&
+                         entry.spec->policy == thunk::Policy::GET_STRING;
+    if (is_get_string && entry.spec->args &&
+        entry.spec->args[1] == '\0') {  // "i" — glGetString
         using GetStringFn = const unsigned char* (*)(unsigned int);
         const unsigned char* s = entry.host_fn
             ? reinterpret_cast<GetStringFn>(entry.host_fn)(
@@ -2149,11 +2164,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             : nullptr;
         ret = reinterpret_cast<uint64_t>(s);
         if (dbg().thunk_trace) {
-            fprintf(stderr, "[thunk] glGetString pname=0x%x host='%.*s'\n",
+            fprintf(stderr, "[thunk] %s pname=0x%x host='%.*s'\n",
+                    entry.name.c_str(),
                     static_cast<unsigned int>(args[0]), 48,
                     s ? reinterpret_cast<const char*>(s) : "(null)");
         }
-    } else if (entry.name == "glGetStringi") {
+    } else if (is_get_string) {         // "ii" — glGetStringi
         using GetStringIFn = const unsigned char* (*)(unsigned int, unsigned int);
         const unsigned char* s = entry.host_fn
             ? reinterpret_cast<GetStringIFn>(entry.host_fn)(
@@ -2323,9 +2339,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         impl_->sdl_sems_.erase(args[0]);
     }
 
-    // glDeleteBuffers(n, names): free any live mappings (persistent bounces
-    // are kept alive across unmap, so this is their only release point).
-    if (entry.name == "glDeleteBuffers" && impl_->mem) {
+    // glDeleteBuffers(n, names) [DELETE_BUFFERS policy]: free any live
+    // mappings (persistent bounces are kept alive across unmap, so this
+    // is their only release point).
+    if (entry.spec && entry.spec->policy == thunk::Policy::DELETE_BUFFERS &&
+        impl_->mem) {
         uint32_t n = static_cast<uint32_t>(args[0]);
         if (n > 0 && n < 1024 && args[1]) {
             const uint32_t* names =

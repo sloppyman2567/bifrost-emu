@@ -108,9 +108,9 @@ glDisableClientState      GL     i             -     -              -
 glVertexPointer           GL     iiip          -     VA_PTR         -   # arg3: offset (VBO) or ptr
 glColorPointer            GL     iiip          -     VA_PTR         -   # arg3: offset (VBO) or ptr
 glTexCoordPointer         GL     iiip          -     VA_PTR         -   # arg1: offset (VBO) or ptr
-glDrawArrays              GL     iii           -     -              -
-glDrawElements            GL     iiii          -     EL_PTR         -   # arg3: indices (offset or ptr)
-glGetString               GL     i             str   -              -
+glDrawArrays               GL     iii           -     -              -       SYNC
+glDrawElements             GL     iiii          -     EL_PTR         -       SYNC   # arg3: indices (offset or ptr)
+glGetString                GL     i             str   GET_STRING     -     
 glGetIntegerv             GL     ip            -     QUERY          -   # arg1: GLint *params
 glGenLists                GL     i             -     -              -
 glCallList                GL     i             -     -              -
@@ -169,8 +169,8 @@ glUseProgram              GL     i             -     -              -
 glDeleteProgram           GL     i             -     -              -
 glGetShaderiv             GL     iip           -     -              -   # arg2: GLint *params
 glGetProgramiv            GL     iip           -     -              -   # arg2: GLint *params
-glGetShaderInfoLog        GL     iiip          -     -              -   # arg3: GLchar *infoLog
-glGetProgramInfoLog       GL     iiip          -     -              -   # arg3: GLchar *infoLog
+glGetShaderInfoLog        GL     iipp          -     -              -   # arg2: GLsizei *length, arg3: GLchar *infoLog
+glGetProgramInfoLog       GL     iipp          -     -              -   # arg2: GLsizei *length, arg3: GLchar *infoLog
 glGetAttribLocation       GL     ip            -     -              -   # arg1: const GLchar *name
 glGetUniformLocation      GL     ip            -     -              -   # arg1: const GLchar *name
 glBindAttribLocation      GL     iip           -     -              -   # arg2: const GLchar *name
@@ -204,14 +204,14 @@ glUniform3iv              GL     iip           -     -              -
 glUniform4iv              GL     iip           -     -              -
 glUniformMatrix2fv        GL     iiip          -     -              -   # arg3: const GLfloat *value
 glGetUniformiv            GL     iip           -     -              -   # arg2: GLint *params
-glGetStringi              GL     ii            str   -              -
+glGetStringi               GL     ii            str   GET_STRING     -     
 glGetFloatv               GL     ip            -     QUERY          -   # arg1: GLfloat *params
 glGetBooleanv             GL     ip            -     QUERY          -   # arg1: GLboolean *params
 glGetProcAddress          GL     p             -     GET_PROC       -
 glXGetProcAddress         GL     p             -     GET_PROC       -
 glXGetProcAddressARB      GL     p             -     GET_PROC       -
 glGenBuffers              GL     ip            -     -              -   # arg1: GLuint *buffers
-glDeleteBuffers           GL     ip            -     -              -   # arg1: const GLuint *buffers
+glDeleteBuffers            GL     ip            -     DELETE_BUFFERS -        # arg1: const GLuint *buffers
 glBindBuffer              GL     ii            -     -              -
 glBufferData              GL     iizi          -     -              arg1 # arg2: const void *data (size=arg1)
 glBufferSubData           GL     iiiz          -     -              arg2 # arg3: const void *data (size=arg2)
@@ -227,7 +227,7 @@ glFramebufferRenderbuffer GL     iiii          -     -              -
 glCheckFramebufferStatus  GL     i             -     -              -
 glGenerateMipmap          GL     i             -     -              -
 glTexParameterf           GL     iif           -     -              -   # mixed: target,pname x0.., param v0
-glCompressedTexImage2D    GL     iiii  iiii p  -     -              -   # arg8: data (64 KiB bounce)
+glCompressedTexImage2D    GL     iiiiiiiz      -     -              arg6   # arg7: data, size=arg6 imageSize
 glScissor                 GL     iiii          -     -              -
 glClearDepthf             GL     f             -     -              -
 glPolygonOffset          GL     ii            -     -              -   # 2 floats; legacy int passthrough
@@ -239,13 +239,13 @@ glTexStorage2D           GL     iiii i         -     -              -   # target
 glTexStorage3D           GL     iiiiii        -     -              -   # +depth
 glTexImage3D             GL     iiii iiiii z   -     -              TEX3D  # 10 args; arg9 pixels (w*h*d*bpp)
 glBlitFramebuffer        GL     iiiiiiii      -     -              -   # src/dst rects
-glDrawArraysInstanced    GL     iiii          -     -              -   # mode,first,count,primcount
-glDrawElementsInstanced  GL     iiii i         -     EL_PTR         -   # arg3: indices (offset or ptr)
+glDrawArraysInstanced      GL     iiii          -     -              -       SYNC   # mode,first,count,primcount
+glDrawElementsInstanced    GL     iiii i        -     EL_PTR         -       SYNC   # arg3: indices (offset or ptr)
 glBindBufferBase         GL     iii           -     -              -   # target,index,buffer
 glBindBufferRange        GL     iiiii         -     -              -   # target,index,offset,size,buffer
-glGetBufferSubData       GL     iiiz          -     -              arg2 # arg3: data (size=arg2)
+glGetBufferSubData         GL     iiiz          -     -              arg2    SYNC # arg3: data (size=arg2)
 glGetBufferParameteriv    GL     iip           -     QUERY          -   # target,pname,params
-glCopyBufferSubData      GL     iiiii         -     -              -   # readTgt,writeTgt,ro,wo,size
+glCopyBufferSubData        GL     iiiii         -     -              -       SYNC   # readTgt,writeTgt,ro,wo,size
 glMapBuffer              GL     ii            -     MAP_BUFFER     -
 glMapBufferRange         GL     iiii          -     MAP_BUFFER     -
 glUnmapBuffer            GL     i             -     UNMAP_BUFFER   -
@@ -269,8 +269,8 @@ glGetActiveUniformBlockName GL     iiipp         -     -              -   # prog
 glGetActiveUniform          GL     iiipppp       -     -              -   # program,index,bufSize,len,size,type,name
 glGetActiveAttrib           GL     iiipppp       -     -              -   # program,index,bufSize,len,size,type,name
 glVertexAttribDivisor       GL     ii            -     -              -   # index, divisor
-glDrawElementsBaseVertex    GL     iiiii         -     EL_PTR         -   # arg3: indices (offset or ptr)
-glDrawRangeElements         GL     iiiiii        -     -              -   # mode,start,end,count,type,indices
+glDrawElementsBaseVertex   GL     iiiii         -     EL_PTR         -       SYNC   # arg3: indices (offset or ptr)
+glDrawRangeElements        GL     iiiiii        -     EL_PTR         -       SYNC   # mode,start,end,count,type; indices=arg5
 glPrimitiveRestartIndex     GL     i             -     -              -   # index
 glDispatchCompute           GL     iii           -     -              -   # numGroupsX,Y,Z
 glMemoryBarrier             GL     i             -     -              -   # barriers bitmask
@@ -326,8 +326,8 @@ glUseProgram              GLES   i             -     -              -
 glDeleteProgram           GLES   i             -     -              -
 glGetShaderiv             GLES   iip           -     -              -
 glGetProgramiv            GLES   iip           -     -              -
-glGetShaderInfoLog        GLES   iiip          -     -              -
-glGetProgramInfoLog       GLES   iiip          -     -              -
+glGetShaderInfoLog        GLES   iipp          -     -              -
+glGetProgramInfoLog       GLES   iipp          -     -              -
 glGetAttribLocation       GLES   ip            -     -              -
 glGetUniformLocation      GLES   ip            -     -              -
 glBindAttribLocation      GLES   iip           -     -              -
@@ -362,9 +362,9 @@ glUniform3iv              GLES   iip           -     -              -
 glUniform4iv              GLES   iip           -     -              -
 glUniformMatrix2fv        GLES   iiip          -     -              -
 glGetUniformiv            GLES   iip           -     -              -
-glGetStringi              GLES   ii            str   -              -
+glGetStringi               GLES   ii            str   GET_STRING     -     
 glGenBuffers              GLES   ip            -     -              -
-glDeleteBuffers           GLES   ip            -     -              -
+glDeleteBuffers            GLES   ip            -     DELETE_BUFFERS -     
 glBindBuffer              GLES   ii            -     -              -
 glBufferData              GLES   iizi          -     -              arg1
 glBufferSubData           GLES   iiiz          -     -              arg2
@@ -387,8 +387,8 @@ glTexParameteri           GLES   iii           -     -              -
 glTexParameterf           GLES   iif           -     -              -
 glTexImage2D              GLES   iiii  iiii z  -     -              TEX2D
 glTexSubImage2D           GLES   iiiiiiiiz     -     -              TEXSUB
-glDrawArrays              GLES   iii           -     -              -
-glDrawElements            GLES   iiii          -     EL_PTR         -
+glDrawArrays               GLES   iii           -     -              -       SYNC
+glDrawElements             GLES   iiii          -     EL_PTR         -       SYNC
 glBlendFunc               GLES   ii            -     -              -
 glBlendFuncSeparate       GLES   iiii          -     -              -
 glBlendEquation           GLES   i             -     -              -
@@ -403,7 +403,7 @@ glStencilMask             GLES   i             -     -              -
 glStencilFuncSeparate     GLES   iiii          -     -              -
 glStencilOpSeparate       GLES   iiii          -     -              -
 glStencilMaskSeparate     GLES   ii            -     -              -
-glGetString               GLES   i             str   -              -
+glGetString                GLES   i             str   GET_STRING     -     
 glGetIntegerv             GLES   ip            -     QUERY          -
 glSampleCoverage          GLES   ii            -     -              -
 
@@ -1232,3 +1232,434 @@ vkCreateAccelerationStructureKHR VK ippp         -     -              -   # RT p
 vkDestroyAccelerationStructureKHR VK iip          -     -              -
 vkGetAccelerationStructureBuildSizesKHR VK iippp  -     -              -
 vkGetBufferDeviceAddressKHR VK     ip            -     -              -
+
+# ==== BEGIN AUTOGENERATED CORE GL <=3.3 (tools/opgen/glcoverage.py) ====
+glAccum                    GL     ii            -     -              -
+glAreTexturesResident      GL     ipp           -     -              -
+glArrayElement             GL     i             -     -              -
+glBeginConditionalRender   GL     ii            -     -              -
+glBindFragDataLocationIndexed GL     iiip          -     -              -
+glBlendColor               GL     iiii          -     -              -
+glCallLists                GL     iip           -     -              -
+glClampColor               GL     ii            -     -              -
+glClearAccum               GL     iiii          -     -              -
+glClearBufferfi            GL     iiii          -     -              -
+glClearBufferfv            GL     iip           -     -              -
+glClearBufferiv            GL     iip           -     -              -
+glClearBufferuiv           GL     iip           -     -              -
+glClearIndex               GL     i             -     -              -
+glColor3b                  GL     iii           -     -              -
+glColor3bv                 GL     p             -     -              -
+glColor3fv                 GL     p             -     -              -
+glColor3i                  GL     iii           -     -              -
+glColor3iv                 GL     p             -     -              -
+glColor3s                  GL     iii           -     -              -
+glColor3sv                 GL     p             -     -              -
+glColor3ubv                GL     p             -     -              -
+glColor3ui                 GL     iii           -     -              -
+glColor3uiv                GL     p             -     -              -
+glColor3us                 GL     iii           -     -              -
+glColor3usv                GL     p             -     -              -
+glColor4b                  GL     iiii          -     -              -
+glColor4bv                 GL     p             -     -              -
+glColor4fv                 GL     p             -     -              -
+glColor4i                  GL     iiii          -     -              -
+glColor4iv                 GL     p             -     -              -
+glColor4s                  GL     iiii          -     -              -
+glColor4sv                 GL     p             -     -              -
+glColor4ubv                GL     p             -     -              -
+glColor4ui                 GL     iiii          -     -              -
+glColor4uiv                GL     p             -     -              -
+glColor4us                 GL     iiii          -     -              -
+glColor4usv                GL     p             -     -              -
+glColorMaski               GL     iiiii         -     -              -
+glColorP3ui                GL     ii            -     -              -
+glColorP3uiv               GL     ip            -     -              -
+glColorP4ui                GL     ii            -     -              -
+glColorP4uiv               GL     ip            -     -              -
+glCompressedTexImage1D     GL     iiiiiip       -     -              -
+glCompressedTexImage3D     GL     iiiiiiiip     -     -              -
+glCompressedTexSubImage1D  GL     iiiiiip       -     -              -
+glCompressedTexSubImage2D  GL     iiiiiiiip     -     -              -
+glCompressedTexSubImage3D  GL     iiiiiiiiiip   -     -              -
+glCopyPixels               GL     iiiii         -     -              -
+glCopyTexImage1D           GL     iiiiiii       -     -              -
+glCopyTexImage2D           GL     iiiiiiii      -     -              -
+glCopyTexSubImage1D        GL     iiiiii        -     -              -
+glCopyTexSubImage3D        GL     iiiiiiiii     -     -              -
+glDeleteSync               GL     i             -     -              -
+glDisablei                 GL     ii            -     -              -
+glDrawElementsInstancedBaseVertex GL     iiipii        -     -              -
+glDrawRangeElementsBaseVertex GL     iiiiipi       -     -              -
+glEdgeFlag                 GL     i             -     -              -
+glEdgeFlagPointer          GL     ip            -     -              -
+glEdgeFlagv                GL     p             -     -              -
+glEnablei                  GL     ii            -     -              -
+glEndConditionalRender     GL     -             -     -              -
+glEvalCoord1f              GL     i             -     -              -
+glEvalCoord1fv             GL     p             -     -              -
+glEvalCoord2f              GL     ii            -     -              -
+glEvalCoord2fv             GL     p             -     -              -
+glEvalMesh1                GL     iii           -     -              -
+glEvalMesh2                GL     iiiii         -     -              -
+glEvalPoint1               GL     i             -     -              -
+glEvalPoint2               GL     ii            -     -              -
+glFeedbackBuffer           GL     iip           -     -              -
+glFogCoordPointer          GL     iip           -     -              -
+glFogCoordfv               GL     p             -     -              -
+glFogiv                    GL     ip            -     -              -
+glFramebufferTexture       GL     iiii          -     -              -
+glFramebufferTexture1D     GL     iiiii         -     -              -
+glFramebufferTexture3D     GL     iiiiii        -     -              -
+glFramebufferTextureLayer  GL     iiiii         -     -              -
+glGetActiveUniformName     GL     iiipp         -     -              -
+glGetActiveUniformsiv      GL     iipip         -     -              -
+glGetAttachedShaders       GL     iipp          -     -              -
+glGetBooleani_v            GL     iip           -     -              -
+glGetBufferParameteri64v   GL     iip           -     -              -
+glGetBufferPointerv        GL     iip           -     -              -
+glGetCompressedTexImage    GL     iip           -     -              -
+glGetFragDataIndex         GL     ip            -     -              -
+glGetFragDataLocation      GL     ip            -     -              -
+glGetFramebufferAttachmentParameteriv GL     iiip          -     -              -
+glGetInteger64i_v          GL     iip           -     -              -
+glGetInteger64v            GL     ip            -     -              -
+glGetIntegeri_v            GL     iip           -     -              -
+glGetLightfv               GL     iip           -     -              -
+glGetLightiv               GL     iip           -     -              -
+glGetMapfv                 GL     iip           -     -              -
+glGetMapiv                 GL     iip           -     -              -
+glGetMaterialfv            GL     iip           -     -              -
+glGetMaterialiv            GL     iip           -     -              -
+glGetMultisamplefv         GL     iip           -     -              -
+glGetPixelMapfv            GL     ip            -     -              -
+glGetPixelMapuiv           GL     ip            -     -              -
+glGetPixelMapusv           GL     ip            -     -              -
+glGetPointerv              GL     ip            -     -              -
+glGetQueryObjecti64v       GL     iip           -     -              -
+glGetQueryObjectui64v      GL     iip           -     -              -
+glGetRenderbufferParameteriv GL     iip           -     -              -
+glGetSamplerParameterIiv   GL     iip           -     -              -
+glGetSamplerParameterIuiv  GL     iip           -     -              -
+glGetSamplerParameterfv    GL     iip           -     -              -
+glGetSamplerParameteriv    GL     iip           -     -              -
+glGetShaderSource          GL     iipp          -     -              -
+glGetSynciv                GL     iiipp         -     -              -
+glGetTexEnvfv              GL     iip           -     -              -
+glGetTexEnviv              GL     iip           -     -              -
+glGetTexGenfv              GL     iip           -     -              -
+glGetTexGeniv              GL     iip           -     -              -
+glGetTexImage              GL     iiiip         -     -              -
+glGetTexLevelParameterfv   GL     iiip          -     -              -
+glGetTexLevelParameteriv   GL     iiip          -     -              -
+glGetTexParameterIiv       GL     iip           -     -              -
+glGetTexParameterIuiv      GL     iip           -     -              -
+glGetTexParameterfv        GL     iip           -     -              -
+glGetTexParameteriv        GL     iip           -     -              -
+glGetTransformFeedbackVarying GL     iiipppp       -     -              -
+glGetUniformIndices        GL     iipp          -     -              -
+glGetUniformfv             GL     iip           -     -              -
+glGetUniformuiv            GL     iip           -     -              -
+glGetVertexAttribIiv       GL     iip           -     -              -
+glGetVertexAttribIuiv      GL     iip           -     -              -
+glGetVertexAttribPointerv  GL     iip           -     -              -
+glGetVertexAttribfv        GL     iip           -     -              -
+glGetVertexAttribiv        GL     iip           -     -              -
+glIndexMask                GL     i             -     -              -
+glIndexPointer             GL     iip           -     -              -
+glIndexf                   GL     i             -     -              -
+glIndexfv                  GL     p             -     -              -
+glIndexi                   GL     i             -     -              -
+glIndexiv                  GL     p             -     -              -
+glIndexs                   GL     i             -     -              -
+glIndexsv                  GL     p             -     -              -
+glIndexub                  GL     i             -     -              -
+glIndexubv                 GL     p             -     -              -
+glInitNames                GL     -             -     -              -
+glInterleavedArrays        GL     iip           -     -              -
+glIsBuffer                 GL     i             -     -              -
+glIsEnabledi               GL     ii            -     -              -
+glIsFramebuffer            GL     i             -     -              -
+glIsList                   GL     i             -     -              -
+glIsProgram                GL     i             -     -              -
+glIsRenderbuffer           GL     i             -     -              -
+glIsSampler                GL     i             -     -              -
+glIsShader                 GL     i             -     -              -
+glIsSync                   GL     i             -     -              -
+glIsTexture                GL     i             -     -              -
+glLightModeliv             GL     ip            -     -              -
+glLightf                   GL     iii           -     -              -
+glLighti                   GL     iii           -     -              -
+glLightiv                  GL     iip           -     -              -
+glLineStipple              GL     ii            -     -              -
+glListBase                 GL     i             -     -              -
+glLoadName                 GL     i             -     -              -
+glLoadTransposeMatrixf     GL     p             -     -              -
+glLogicOp                  GL     i             -     -              -
+glMap1f                    GL     iiiiip        -     -              -
+glMap2f                    GL     iiiiiiiiip    -     -              -
+glMapGrid1f                GL     iii           -     -              -
+glMapGrid2f                GL     iiiiii        -     -              -
+glMaterialf                GL     iii           -     -              -
+glMateriali                GL     iii           -     -              -
+glMaterialiv               GL     iip           -     -              -
+glMultTransposeMatrixf     GL     p             -     -              -
+glMultiDrawArrays          GL     ippi          -     -              -
+glMultiDrawElements        GL     ipipi         -     -              -
+glMultiDrawElementsBaseVertex GL     ipipip        -     -              -
+glMultiTexCoord1f          GL     ii            -     -              -
+glMultiTexCoord1fv         GL     ip            -     -              -
+glMultiTexCoord1i          GL     ii            -     -              -
+glMultiTexCoord1iv         GL     ip            -     -              -
+glMultiTexCoord1s          GL     ii            -     -              -
+glMultiTexCoord1sv         GL     ip            -     -              -
+glMultiTexCoord2fv         GL     ip            -     -              -
+glMultiTexCoord2i          GL     iii           -     -              -
+glMultiTexCoord2iv         GL     ip            -     -              -
+glMultiTexCoord2s          GL     iii           -     -              -
+glMultiTexCoord2sv         GL     ip            -     -              -
+glMultiTexCoord3f          GL     iiii          -     -              -
+glMultiTexCoord3fv         GL     ip            -     -              -
+glMultiTexCoord3i          GL     iiii          -     -              -
+glMultiTexCoord3iv         GL     ip            -     -              -
+glMultiTexCoord3s          GL     iiii          -     -              -
+glMultiTexCoord3sv         GL     ip            -     -              -
+glMultiTexCoord4f          GL     iiiii         -     -              -
+glMultiTexCoord4fv         GL     ip            -     -              -
+glMultiTexCoord4i          GL     iiiii         -     -              -
+glMultiTexCoord4iv         GL     ip            -     -              -
+glMultiTexCoord4s          GL     iiiii         -     -              -
+glMultiTexCoord4sv         GL     ip            -     -              -
+glMultiTexCoordP1ui        GL     iii           -     -              -
+glMultiTexCoordP1uiv       GL     iip           -     -              -
+glMultiTexCoordP2ui        GL     iii           -     -              -
+glMultiTexCoordP2uiv       GL     iip           -     -              -
+glMultiTexCoordP3ui        GL     iii           -     -              -
+glMultiTexCoordP3uiv       GL     iip           -     -              -
+glMultiTexCoordP4ui        GL     iii           -     -              -
+glMultiTexCoordP4uiv       GL     iip           -     -              -
+glNormal3b                 GL     iii           -     -              -
+glNormal3bv                GL     p             -     -              -
+glNormal3fv                GL     p             -     -              -
+glNormal3i                 GL     iii           -     -              -
+glNormal3iv                GL     p             -     -              -
+glNormal3s                 GL     iii           -     -              -
+glNormal3sv                GL     p             -     -              -
+glNormalP3ui               GL     ii            -     -              -
+glNormalP3uiv              GL     ip            -     -              -
+glPassThrough              GL     i             -     -              -
+glPixelMapfv               GL     iip           -     -              -
+glPixelMapuiv              GL     iip           -     -              -
+glPixelMapusv              GL     iip           -     -              -
+glPixelStoref              GL     ii            -     -              -
+glPixelTransferf           GL     ii            -     -              -
+glPixelTransferi           GL     ii            -     -              -
+glPixelZoom                GL     ii            -     -              -
+glPointParameteri          GL     ii            -     -              -
+glPointParameteriv         GL     ip            -     -              -
+glPopAttrib                GL     -             -     -              -
+glPopClientAttrib          GL     -             -     -              -
+glPopName                  GL     -             -     -              -
+glPrioritizeTextures       GL     ipp           -     -              -
+glProvokingVertex          GL     i             -     -              -
+glPushAttrib               GL     i             -     -              -
+glPushClientAttrib         GL     i             -     -              -
+glPushName                 GL     i             -     -              -
+glQueryCounter             GL     ii            -     -              -
+glRasterPos2f              GL     ii            -     -              -
+glRasterPos2fv             GL     p             -     -              -
+glRasterPos2i              GL     ii            -     -              -
+glRasterPos2iv             GL     p             -     -              -
+glRasterPos2s              GL     ii            -     -              -
+glRasterPos2sv             GL     p             -     -              -
+glRasterPos3f              GL     iii           -     -              -
+glRasterPos3fv             GL     p             -     -              -
+glRasterPos3i              GL     iii           -     -              -
+glRasterPos3iv             GL     p             -     -              -
+glRasterPos3s              GL     iii           -     -              -
+glRasterPos3sv             GL     p             -     -              -
+glRasterPos4f              GL     iiii          -     -              -
+glRasterPos4fv             GL     p             -     -              -
+glRasterPos4i              GL     iiii          -     -              -
+glRasterPos4iv             GL     p             -     -              -
+glRasterPos4s              GL     iiii          -     -              -
+glRasterPos4sv             GL     p             -     -              -
+glReadBuffer               GL     i             -     -              -
+glRectf                    GL     iiii          -     -              -
+glRectfv                   GL     pp            -     -              -
+glRecti                    GL     iiii          -     -              -
+glRectiv                   GL     pp            -     -              -
+glRects                    GL     iiii          -     -              -
+glRectsv                   GL     pp            -     -              -
+glRenderMode               GL     i             -     -              -
+glRenderbufferStorageMultisample GL     iiiii         -     -              -
+glSampleMaski              GL     ii            -     -              -
+glSamplerParameterIiv      GL     iip           -     -              -
+glSamplerParameterIuiv     GL     iip           -     -              -
+glSecondaryColor3b         GL     iii           -     -              -
+glSecondaryColor3bv        GL     p             -     -              -
+glSecondaryColor3f         GL     iii           -     -              -
+glSecondaryColor3fv        GL     p             -     -              -
+glSecondaryColor3i         GL     iii           -     -              -
+glSecondaryColor3iv        GL     p             -     -              -
+glSecondaryColor3s         GL     iii           -     -              -
+glSecondaryColor3sv        GL     p             -     -              -
+glSecondaryColor3ub        GL     iii           -     -              -
+glSecondaryColor3ubv       GL     p             -     -              -
+glSecondaryColor3ui        GL     iii           -     -              -
+glSecondaryColor3uiv       GL     p             -     -              -
+glSecondaryColor3us        GL     iii           -     -              -
+glSecondaryColor3usv       GL     p             -     -              -
+glSecondaryColorP3ui       GL     ii            -     -              -
+glSecondaryColorP3uiv      GL     ip            -     -              -
+glSecondaryColorPointer    GL     iiip          -     -              -
+glSelectBuffer             GL     ip            -     -              -
+glTexBuffer                GL     iii           -     -              -
+glTexCoord1f               GL     i             -     -              -
+glTexCoord1fv              GL     p             -     -              -
+glTexCoord1i               GL     i             -     -              -
+glTexCoord1iv              GL     p             -     -              -
+glTexCoord1s               GL     i             -     -              -
+glTexCoord1sv              GL     p             -     -              -
+glTexCoord2fv              GL     p             -     -              -
+glTexCoord2i               GL     ii            -     -              -
+glTexCoord2iv              GL     p             -     -              -
+glTexCoord2s               GL     ii            -     -              -
+glTexCoord2sv              GL     p             -     -              -
+glTexCoord3f               GL     iii           -     -              -
+glTexCoord3fv              GL     p             -     -              -
+glTexCoord3i               GL     iii           -     -              -
+glTexCoord3iv              GL     p             -     -              -
+glTexCoord3s               GL     iii           -     -              -
+glTexCoord3sv              GL     p             -     -              -
+glTexCoord4f               GL     iiii          -     -              -
+glTexCoord4fv              GL     p             -     -              -
+glTexCoord4i               GL     iiii          -     -              -
+glTexCoord4iv              GL     p             -     -              -
+glTexCoord4s               GL     iiii          -     -              -
+glTexCoord4sv              GL     p             -     -              -
+glTexCoordP1ui             GL     ii            -     -              -
+glTexCoordP1uiv            GL     ip            -     -              -
+glTexCoordP2ui             GL     ii            -     -              -
+glTexCoordP2uiv            GL     ip            -     -              -
+glTexCoordP3ui             GL     ii            -     -              -
+glTexCoordP3uiv            GL     ip            -     -              -
+glTexCoordP4ui             GL     ii            -     -              -
+glTexCoordP4uiv            GL     ip            -     -              -
+glTexEnvf                  GL     iii           -     -              -
+glTexEnvfv                 GL     iip           -     -              -
+glTexEnviv                 GL     iip           -     -              -
+glTexGenf                  GL     iii           -     -              -
+glTexGenfv                 GL     iip           -     -              -
+glTexGeniv                 GL     iip           -     -              -
+glTexImage2DMultisample    GL     iiiiii        -     -              -
+glTexImage3DMultisample    GL     iiiiiii       -     -              -
+glTexParameterIiv          GL     iip           -     -              -
+glTexParameterIuiv         GL     iip           -     -              -
+glTexParameterfv           GL     iip           -     -              -
+glTexParameteriv           GL     iip           -     -              -
+glUniform1uiv              GL     iip           -     -              -
+glUniform2ui               GL     iii           -     -              -
+glUniform2uiv              GL     iip           -     -              -
+glUniform3ui               GL     iiii          -     -              -
+glUniform3uiv              GL     iip           -     -              -
+glUniform4ui               GL     iiiii         -     -              -
+glUniform4uiv              GL     iip           -     -              -
+glUniformMatrix2x3fv       GL     iiip          -     -              -
+glUniformMatrix2x4fv       GL     iiip          -     -              -
+glUniformMatrix3x2fv       GL     iiip          -     -              -
+glUniformMatrix3x4fv       GL     iiip          -     -              -
+glUniformMatrix4x2fv       GL     iiip          -     -              -
+glUniformMatrix4x3fv       GL     iiip          -     -              -
+glValidateProgram          GL     i             -     -              -
+glVertex2fv                GL     p             -     -              -
+glVertex2i                 GL     ii            -     -              -
+glVertex2iv                GL     p             -     -              -
+glVertex2s                 GL     ii            -     -              -
+glVertex2sv                GL     p             -     -              -
+glVertex3i                 GL     iii           -     -              -
+glVertex3iv                GL     p             -     -              -
+glVertex3s                 GL     iii           -     -              -
+glVertex3sv                GL     p             -     -              -
+glVertex4f                 GL     iiii          -     -              -
+glVertex4fv                GL     p             -     -              -
+glVertex4i                 GL     iiii          -     -              -
+glVertex4iv                GL     p             -     -              -
+glVertex4s                 GL     iiii          -     -              -
+glVertex4sv                GL     p             -     -              -
+glVertexAttrib1f           GL     ii            -     -              -
+glVertexAttrib1fv          GL     ip            -     -              -
+glVertexAttrib1s           GL     ii            -     -              -
+glVertexAttrib1sv          GL     ip            -     -              -
+glVertexAttrib2f           GL     iii           -     -              -
+glVertexAttrib2fv          GL     ip            -     -              -
+glVertexAttrib2s           GL     iii           -     -              -
+glVertexAttrib2sv          GL     ip            -     -              -
+glVertexAttrib3f           GL     iiii          -     -              -
+glVertexAttrib3fv          GL     ip            -     -              -
+glVertexAttrib3s           GL     iiii          -     -              -
+glVertexAttrib3sv          GL     ip            -     -              -
+glVertexAttrib4Nbv         GL     ip            -     -              -
+glVertexAttrib4Niv         GL     ip            -     -              -
+glVertexAttrib4Nsv         GL     ip            -     -              -
+glVertexAttrib4Nub         GL     iiiii         -     -              -
+glVertexAttrib4Nubv        GL     ip            -     -              -
+glVertexAttrib4Nuiv        GL     ip            -     -              -
+glVertexAttrib4Nusv        GL     ip            -     -              -
+glVertexAttrib4bv          GL     ip            -     -              -
+glVertexAttrib4f           GL     iiiii         -     -              -
+glVertexAttrib4fv          GL     ip            -     -              -
+glVertexAttrib4iv          GL     ip            -     -              -
+glVertexAttrib4s           GL     iiiii         -     -              -
+glVertexAttrib4sv          GL     ip            -     -              -
+glVertexAttrib4ubv         GL     ip            -     -              -
+glVertexAttrib4uiv         GL     ip            -     -              -
+glVertexAttrib4usv         GL     ip            -     -              -
+glVertexAttribI1i          GL     ii            -     -              -
+glVertexAttribI1iv         GL     ip            -     -              -
+glVertexAttribI1ui         GL     ii            -     -              -
+glVertexAttribI1uiv        GL     ip            -     -              -
+glVertexAttribI2i          GL     iii           -     -              -
+glVertexAttribI2iv         GL     ip            -     -              -
+glVertexAttribI2ui         GL     iii           -     -              -
+glVertexAttribI2uiv        GL     ip            -     -              -
+glVertexAttribI3i          GL     iiii          -     -              -
+glVertexAttribI3iv         GL     ip            -     -              -
+glVertexAttribI3ui         GL     iiii          -     -              -
+glVertexAttribI3uiv        GL     ip            -     -              -
+glVertexAttribI4bv         GL     ip            -     -              -
+glVertexAttribI4i          GL     iiiii         -     -              -
+glVertexAttribI4iv         GL     ip            -     -              -
+glVertexAttribI4sv         GL     ip            -     -              -
+glVertexAttribI4ubv        GL     ip            -     -              -
+glVertexAttribI4ui         GL     iiiii         -     -              -
+glVertexAttribI4uiv        GL     ip            -     -              -
+glVertexAttribI4usv        GL     ip            -     -              -
+glVertexAttribP1ui         GL     iiii          -     -              -
+glVertexAttribP1uiv        GL     iiip          -     -              -
+glVertexAttribP2ui         GL     iiii          -     -              -
+glVertexAttribP2uiv        GL     iiip          -     -              -
+glVertexAttribP3ui         GL     iiii          -     -              -
+glVertexAttribP3uiv        GL     iiip          -     -              -
+glVertexAttribP4ui         GL     iiii          -     -              -
+glVertexAttribP4uiv        GL     iiip          -     -              -
+glVertexP2ui               GL     ii            -     -              -
+glVertexP2uiv              GL     ip            -     -              -
+glVertexP3ui               GL     ii            -     -              -
+glVertexP3uiv              GL     ip            -     -              -
+glVertexP4ui               GL     ii            -     -              -
+glVertexP4uiv              GL     ip            -     -              -
+glWaitSync                 GL     iii           -     -              -
+glWindowPos2f              GL     ii            -     -              -
+glWindowPos2fv             GL     p             -     -              -
+glWindowPos2i              GL     ii            -     -              -
+glWindowPos2iv             GL     p             -     -              -
+glWindowPos2s              GL     ii            -     -              -
+glWindowPos2sv             GL     p             -     -              -
+glWindowPos3f              GL     iii           -     -              -
+glWindowPos3fv             GL     p             -     -              -
+glWindowPos3i              GL     iii           -     -              -
+glWindowPos3iv             GL     p             -     -              -
+glWindowPos3s              GL     iii           -     -              -
+glWindowPos3sv             GL     p             -     -              -
+# ==== END AUTOGENERATED CORE GL ====

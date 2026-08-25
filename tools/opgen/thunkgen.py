@@ -19,12 +19,16 @@ Usage:
     python3 tools/opgen/thunkgen.py tools/opgen/thunk_dp.txt include/opgen_thunk.hpp
 
 Spec format (whitespace separated, '#' comments, blank lines ignored):
-    NAME   LIBS   ARGS...   RET   POLICY   SIZE
+    NAME   LIBS   ARGS...   RET   POLICY   SIZE   [SYNC]
   e.g.
     glClear              GL   -          -     -              -
     glBufferData         GL   iizi       -     -              arg1
     glTexImage2D         GL   iiii iiii z  -   -              TEX2D
     glShaderSource       GL   iipp       -     SHADER_SOURCE  -
+
+The optional trailing SYNC column marks buffer-consuming calls (draws,
+copies, texbuffer, buffer readback) — dispatch pushes all live
+persistent+coherent map bounces to the host BEFORE these (PCWFC).
 
 ARGS is the concatenation of every token between LIBS and RET (so a wide
 spec stays readable). RET/POLICY/SIZE are always the final three tokens.
@@ -43,7 +47,8 @@ may be elided — the thunk only needs pointer positions + stack arity.
 The emitted header defines (namespace arm64emu::thunk):
     enum class LibFamily / Policy / RetKind / SizeKind;
     struct Spec { LibFamily lib; const char* name; const char* args;
-                  RetKind ret; Policy policy; SizeKind size; };
+                  RetKind ret; Policy policy; SizeKind size;
+                            bool sync_before; };
     constexpr Spec specs[];  constexpr size_t spec_count;
 """
 import sys
@@ -53,7 +58,8 @@ VALID_LIBS = ('GL', 'GLES', 'EGL', 'SDL', 'GLFW', 'MIX',
               'VK', 'WL', 'WL_EGL', 'X11', 'X11XCB', 'XCB', 'GBM', 'XEXT',
               'GLX', 'RANDR', 'XKB', 'ANDROID')
 VALID_RET = ('-', 'str')
-VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
+VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'GET_STRING',
+                'DELETE_BUFFERS', 'TRACK_TEX',
                 'UNTRACK_TEX', 'VA_PTR', 'EL_PTR', 'PRESENT',
                 'CURSOR_CB', 'GLFW_POLL', 'KEY_CB', 'MOUSE_CB',
                 'FRAMEBUFFER_CB', 'WINDOW_SIZE_CB', 'FOCUS_CB', 'ERROR_CB',
@@ -76,7 +82,7 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'TRACK_TEX',
                 'VK_UNMAP_MEMORY', 'VK_FLUSH_MAPPED', 'VK_INVALIDATE_MAPPED',
                 'VK_SYNC_PULL',
                 'ANDROID_WINDOW', 'VK_CMD_DEEP', 'VK_CMD_DEEP_OUT')
-VALID_SIZE = ('-', 'arg1', 'arg2', 'TEX2D', 'TEXSUB', 'PITCH_H',
+VALID_SIZE = ('-', 'arg1', 'arg2', 'arg6', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
               'TEX3D', 'VK_REGIONS')
 
@@ -124,6 +130,7 @@ enum class SizeKind : uint8_t {
     X_SETWMPROTO = 9,
     TEX3D = 10,
     VK_REGIONS = 11,
+    ARG6 = 12,
 };
 
 struct Spec {
@@ -133,6 +140,7 @@ struct Spec {
     RetKind     ret;
     Policy      policy;
     SizeKind    size;
+    bool        sync_before;  // push persistent map bounces before call
 };
 
 inline constexpr Spec specs[] = {
@@ -159,6 +167,9 @@ def parse_rows(spec_path):
                       "(got: %r)" % (spec_path, lineno, line), file=sys.stderr)
                 raise SystemExit(2)
             name, lib = toks[0], toks[1]
+            sync = toks[-1] == 'SYNC'
+            if sync:
+                toks = toks[:-1]
             ret, policy, size = toks[-3], toks[-2], toks[-1]
             args = ''.join(toks[2:-3])
             if args == '-':
@@ -193,7 +204,7 @@ def parse_rows(spec_path):
                       "(give arg1/arg2/TEX2D/TEXSUB/PITCH_H)"
                       % (spec_path, lineno, name), file=sys.stderr)
                 raise SystemExit(2)
-            rows.append((name, lib, args, ret, policy, size))
+            rows.append((name, lib, args, ret, policy, size, sync))
     return rows
 
 
@@ -235,10 +246,11 @@ def main():
         return 'SizeKind::%s' % size.upper()
 
     row_lines = []
-    for (name, lib, args, ret, policy, size) in rows:
+    for (name, lib, args, ret, policy, size, sync) in rows:
         row_lines.append(
-            "    {LibFamily::%s, %s, %s, %s, %s, %s},"
-            % (lib, tok(name), tok(args), rname(ret), cname(policy), sname(size)))
+            "    {LibFamily::%s, %s, %s, %s, %s, %s, %s},"
+            % (lib, tok(name), tok(args), rname(ret), cname(policy),
+               sname(size), 'true' if sync else 'false'))
 
     header = (HEADER.replace("{LIBS}", "\n".join(lib_lines))
                    .replace("{POLICIES}", "\n".join(pol_lines))
