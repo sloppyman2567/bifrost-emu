@@ -4161,3 +4161,23 @@ not musl-`-static`.
   test_sdl_gl_triangle rc=0, test_sdl_gl_modern 17/17 (GET_STRING +
   EL_PTR draws), test_sdl_gl_mapbuffer 21/21 (DELETE_BUFFERS + PCWFC)
   on live DISPLAY=:0/RADV.
+
+## Session History (2026-08-25) — commits split; check-all "segfault" was STALE BUILD ARTIFACT
+
+- **All multi-session uncommitted work split into 4 commits**: mem
+  allocator hardening / vk remap+vk.xml layout+vendored registries /
+  GL automation stages 1-3 / docs.
+- **`make check-all` test-capi SIGSEGV chased to its lair and it was
+  NOT a code bug**: a clean `rm -rf build && make` rebuild fixes it
+  (54/54). Days of refactoring + partial incremental builds left
+  stale objects under build/ that -MMD deps did not fully catch up
+  after header/member changes (Memory gained a member mid-series).
+- LESSON (contract): after ANY multi-file refactor series — especially
+  struct member additions in core headers — do `rm -rf build && make`
+  BEFORE trusting check-all/test-capi results. A deterministic-looking
+  segfault can be pure build staleness; verify with a clean rebuild
+  FIRST (cheap) before source-level bisection.
+- ctest/test_capi.c version check de-hardcoded ("1.5.4-alpha" literal →
+  shape check) so version bumps stop breaking it.
+- Verified at final HEAD: full check-all = suite **213/213**, capi
+  **54/54**, nb **61/61**, all five generation guards clean.
