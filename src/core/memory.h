@@ -242,6 +242,12 @@ private:
     // guest-side info leaks). The base is page-aligned and within the
     // low heap region (MMAP_BASE_MIN - MMAP_BASE_MAX, inside the window).
     uint64_t mmap_next_ = 0;
+    // Above-window allocation cursor: when the 4 GiB direct window is
+    // exhausted (guests with enormous heaps), mmap_alloc hands out
+    // addresses here instead of failing. Storage comes from the sparse
+    // pages_ map (slow path — the JIT's window fast path doesn't cover
+    // these, its bounds checks fall back automatically).
+    uint64_t above_window_next_ = DIRECT_WINDOW_SIZE;
     // Per-process randomized ET_DYN load bias and main-stack top
     // (see pie_base()/stack_top() above).
     uint64_t pie_base_ = PIE_BASE_MIN;

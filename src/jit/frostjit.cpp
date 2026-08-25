@@ -58,6 +58,13 @@ bool FrostJIT::chain_skip_enabled() {
 // BL_CALL sites emit a patchable `call rel32` to the target block fn
 // directly, skipping the jit_call_helper → lookup_call_target round-trip.
 // BIFROST_NO_DIRECT_CALL=1 disables it (bisection / debugging).
+// 2026-08-24: the completion guard has a KNOWN unfixed hole — a
+// mid-callee block that ends at its own final BL whose continuation
+// equals the OUTER caller's bl_pc+4 (tail-call shapes) passes
+// `pc == x30 && pc == bl_pc+4` and resumes the caller while the callee
+// is mid-body. NOT yet linked to a concrete guest failure (the vkQuake
+// AllocBlock corruption reproduces with the direct call disabled too),
+// but keep it in mind for miscompile hunts.
 bool FrostJIT::direct_call_enabled() {
     static const bool on = (getenv("BIFROST_NO_DIRECT_CALL") == nullptr);
     return on;

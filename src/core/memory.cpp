@@ -288,6 +288,14 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         // clustered in the direct window (JIT fast path).
         for (auto it = free_ranges_.begin(); it != free_ranges_.end(); ++it) {
             if (it->second >= aligned_size) {
+                // Never hand out a range that overlaps the main-stack
+                // region — the stack is a fixed mapping, not allocator
+                // space (vkQuake: mimalloc's page-zeroing memset wiped
+                // live stack frames when a "heap" segment landed in the
+                // stack band).
+                if (it->first < stack_top_ &&
+                    it->first + it->second > stack_top_ - STACK_SIZE)
+                    continue;
                 base = it->first;
                 reused = true;
                 break;
@@ -296,6 +304,33 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         if (!reused) {
             base = mmap_next_;
             mmap_next_ += aligned_size;
+            // The bump must never place guest allocations inside the
+            // main-stack region [stack_top_ - STACK_SIZE, stack_top_).
+            // mmap_next_ starts at MMAP_BASE_MIN and grows without an
+            // upper bound; a guest with a large heap (vkQuake's mimalloc
+            // arena) marched it into the stack band and its zeroing
+            // memset destroyed live frames (saved LR = 0 → pc=0
+            // DecodeError, "AllocBlock: full"). Skip OVER the stack —
+            // Linux-like (the kernel picks a free area) and it keeps the
+            // allocation inside the 4 GiB direct window (JIT fast path).
+            const uint64_t stack_bottom = stack_top_ - STACK_SIZE;
+            if (base < stack_top_ && base + aligned_size > stack_bottom) {
+                base = stack_top_;
+                mmap_next_ = stack_top_ + aligned_size;
+            }
+            // Above-window fallback: the 4 GiB window can be exhausted
+            // by a guest with an enormous heap (vkQuake's lightmap atlas
+            // plus its upstream per-map-reload lightstyle_data leak).
+            // Pages above the window use the sparse pages_ storage —
+            // the JIT's direct-window fast path won't cover them (the
+            // bounds checks fall back to the pages_ + rwlock path), but
+            // the guest keeps running instead of cascading into failed
+            // allocations and NULL-data chaos.
+            if (base + aligned_size > DIRECT_WINDOW_SIZE) {
+                base = std::max<uint64_t>(DIRECT_WINDOW_SIZE,
+                                          above_window_next_);
+                above_window_next_ = base + aligned_size;
+            }
         }
     } else {
         // 1.5.4-alpha: Validate MAP_FIXED address range. Reject
@@ -396,6 +431,11 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     uint64_t extra_start = (old_addr + old_aligned) & ~PAGE_MASK;
     uint64_t extra_end   = (old_addr + new_aligned) & ~PAGE_MASK;
     bool can_grow_in_place = true;
+    // The stack region is a fixed mapping, not allocator space — refuse
+    // an in-place grow that would extend into it (the caller falls back
+    // to move; mmap_alloc's bump skips over the stack the same way).
+    if (extra_start < stack_top_ && extra_end > stack_top_ - STACK_SIZE)
+        can_grow_in_place = false;
     std::unique_lock<std::shared_mutex> g(mu_);
     for (const auto& kv : allocations_) {
         uint64_t other_base = kv.first;
@@ -476,33 +516,51 @@ void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
     // for reuse (keeping the guest heap inside the 4 GiB direct window,
     // which is also the JIT fast path).
 std::unique_lock<std::shared_mutex> g(mu_);
-    allocations_.erase(addr);
-    // Direct-window ranges have no pages_ entry (the window IS the storage)
-    // and never count toward total_pages_ — nothing to reclaim here. Do NOT
-    // madvise(MADV_DONTNEED) the window on free: this game reuses its ~18 MB
-    // mesh buffers every frame and overwrites ~100% of each, so dropping the
-    // pages would fault them all back through the kernel on the next write
-    // (~5 ms per 18 MB — measured). Keeping them resident means the eager
-    // bulk memset in mmap_alloc (~0.22 ms) is the only cost and the game's
-    // writes stay fault-free. Window pages are only reclaimed by the OS via
-    // its own page-reclaim pressure.
-    uint64_t start = addr & ~PAGE_MASK;
-    uint64_t end = addr + size;
-    // Free page storage in the range and decrement the live page count.
-    for (uint64_t s = start; s < end; s += PAGE_SIZE) {
-        // Direct-window addresses have no pages_ entry (the window IS the
-        // storage) — nothing to reclaim there, and they don't count
-        // toward total_pages_.
-        if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
-        uint64_t pn = s / PAGE_SIZE;
-        auto it = pages_.find(pn);
-        if (it != pages_.end()) {
-            pages_.erase(it);
-            total_pages_.fetch_sub(1, std::memory_order_relaxed);
-        }
+    // Linux-like VMA-split semantics (2026-08-24, vkQuake hardening):
+    // a munmap may cover any sub-range of one or more tracked
+    // allocations. Free exactly the tracked intersection — NEVER hand
+    // untracked space to free_ranges_: a later mmap_alloc would first-
+    // fit it and its MAP_ANONYMOUS zeroing would destroy LIVE data
+    // (garbage guest heap → corrupted BSP vertices → lightmap allocator
+    // explosion). The old code did allocations_.erase(addr) (exact
+    // match — silently missing interior/oversized munmaps) and then
+    // add_free_range(addr, size) UNCONDITIONALLY.
+    const uint64_t lo = addr & ~PAGE_MASK;
+    const uint64_t hi = (addr + size + PAGE_MASK) & ~PAGE_MASK;
+    if (hi <= lo) return;  // nothing after page rounding
+    // Collect intersecting allocations first (can't mutate while iterating).
+    std::vector<std::pair<uint64_t, uint64_t>> hits;  // [base, size)
+    for (const auto& kv : allocations_) {
+        const uint64_t b = kv.first;
+        const uint64_t e = b + kv.second;
+        if (b < hi && e > lo) hits.push_back({b, kv.second});
     }
-    // Hand the address range back to mmap_alloc for reuse.
-    add_free_range(addr, size);
+    for (const auto& h : hits) {
+        const uint64_t b = h.first;
+        const uint64_t e = b + h.second;
+        allocations_.erase(b);
+        // Page-aligned freed intersection.
+        const uint64_t flo = (lo > b) ? lo : b;
+        const uint64_t fhi = (hi < e) ? hi : e;
+        // Head/tail remainders stay tracked (VMA-split semantics).
+        if (flo > b) allocations_[b] = flo - b;
+        if (e > fhi) allocations_[fhi] = e - fhi;
+        if (fhi <= flo) continue;  // nothing left after page rounding
+        // Free page storage for the freed intersection.
+        for (uint64_t s = flo; s < fhi; s += PAGE_SIZE) {
+            // Direct-window addresses have no pages_ entry (the window
+            // IS the storage) — nothing to reclaim there, and they
+            // don't count toward total_pages_.
+            if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+            uint64_t pn = s / PAGE_SIZE;
+            auto it = pages_.find(pn);
+            if (it != pages_.end()) {
+                pages_.erase(it);
+                total_pages_.fetch_sub(1, std::memory_order_relaxed);
+            }
+        }
+        add_free_range(flo, fhi - flo);
+    }
 }
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;

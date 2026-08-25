@@ -469,8 +469,11 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             {
                 auto allocs = mem_.allocations_snapshot();
                 for (auto& [addr, size] : allocs) {
-                    if (addr >= Memory::MMAP_BASE_MIN &&
-                        addr < mem_.stack_top()) {
+                    // Heap allocations live below AND above the main-stack
+                    // region (mmap_alloc skips over the stack); none overlap
+                    // the stack itself, so no upper bound here — zeroing
+                    // must cover stale heap data on both sides.
+                    if (addr >= Memory::MMAP_BASE_MIN) {
                         // Zero out the pages at this allocation.
                         try {
                             std::vector<uint8_t> zeros(size, 0);
