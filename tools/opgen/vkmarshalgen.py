@@ -270,42 +270,52 @@ def main():
     needed = {}       # struct name -> list of (offset, FieldPtr-like info)
     order = []
     def member_offset(lay, mname):
-        # recompute offsets to find the count member's byte position
-        import re
-        off = 0
-
+        # recompute offsets to find the count member's byte position.
+        # mname may be a dotted path ('stage.dataSize') addressing a
+        # member inside a BY-VALUE embedded struct — flattened ptr
+        # fields (vkxml.layout_struct) emit counts in that form.
         def au(v, a):
             return (v + a - 1) & ~(a - 1)
-        for m in reg['structs'][lay.name]:
-            cnt = m.array_len
-            if m.is_ptr:
-                off = au(off, 8)
+
+        def walk(l, parts):
+            off = 0
+            for m in reg['structs'][l.name]:
+                cnt = m.array_len
+                if m.is_ptr:
+                    off = au(off, 8)
+                    o = off
+                    off += 8 * (cnt or 1)
+                    if not parts[1:] and m.name == parts[0]:
+                        return o
+                    continue
+                if m.type in layouts:
+                    sub = layouts[m.type]
+                    esz, eal = sub.size, sub.align
+                else:
+                    from vkxml import SCALAR_SIZES
+                    esz = SCALAR_SIZES.get(m.type)
+                    if esz is None and m.type in reg['handles']:
+                        esz = 8
+                    if esz is None and m.type in reg['enum_names']:
+                        esz = 4
+                    if esz is None and m.type in reg['bitmask_names']:
+                        esz = 8 if m.type in reg['bitmask64'] else 4
+                    eal = min(esz or 1, 8)
+                if esz is None:
+                    return None
+                off = au(off, eal)
                 o = off
-                off += 8 * (cnt or 1)
-                if m.name == mname:
+                off += esz * (cnt or 1)
+                if m.name == parts[0]:
+                    if parts[1:]:
+                        if m.type not in layouts:
+                            return None
+                        inner = walk(layouts[m.type], parts[1:])
+                        return None if inner is None else o + inner
                     return o
-                continue
-            if m.type in layouts:
-                sub = layouts[m.type]
-                esz, eal = sub.size, sub.align
-            else:
-                from vkxml import SCALAR_SIZES
-                esz = SCALAR_SIZES.get(m.type)
-                if esz is None and m.type in reg['handles']:
-                    esz = 8
-                if esz is None and m.type in reg['enum_names']:
-                    esz = 4
-                if esz is None and m.type in reg['bitmask_names']:
-                    esz = 8 if m.type in reg['bitmask64'] else 4
-                eal = min(esz or 1, 8)
-            if esz is None:
-                return None
-            off = au(off, eal)
-            o = off
-            off += esz * (cnt or 1)
-            if m.name == mname:
-                return o
-        return None
+            return None
+
+        return walk(lay, mname.split('.'))
 
     def want_struct(name):
         if name in needed:

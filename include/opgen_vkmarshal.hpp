@@ -137,16 +137,19 @@ inline constexpr VkFieldDesc kFields_VkRenderPassBeginInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkComputePipelineCreateInfo[] = {
     {8,131,8,0,65535,1},
+    {32,131,8,0,65535,1},
+    {56,67,1,0,65535,1},
+    {64,1,32,1491,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDescriptorPoolCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {32,1,8,1491,0x0018,0},
+    {32,1,8,1492,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDescriptorSetLayoutCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1492,0x0014,0},
+    {24,1,24,1493,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkDeviceCreateInfo[] = {
@@ -154,7 +157,7 @@ inline constexpr VkFieldDesc kFields_VkDeviceCreateInfo[] = {
     {24,1,40,294,0x0014,0},
     {40,96,8,0,0x0020,0},
     {56,96,8,0,0x0030,0},
-    {64,1,220,1493,65535,1},
+    {64,1,220,1494,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkFramebufferCreateInfo[] = {
@@ -186,14 +189,14 @@ inline constexpr VkFieldDesc kFields_VkInstanceCreateInfo[] = {
 inline constexpr VkFieldDesc kFields_VkPipelineLayoutCreateInfo[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0014,0},
-    {40,1,12,1494,0x0020,0},
+    {40,1,12,1495,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,36,1495,0x0014,0},
-    {40,1,72,1496,0x0020,0},
-    {56,1,28,1497,0x0030,0},
+    {24,1,36,1496,0x0014,0},
+    {40,1,72,1497,0x0020,0},
+    {56,1,28,1498,0x0030,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkShaderModuleCreateInfo[] = {
@@ -225,6 +228,8 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureCreateInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureCreateInfoNV[] = {
     {8,131,8,0,65535,1},
+    {32,131,8,0,65535,1},
+    {56,1,168,383,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureDenseGeometryFormatTrianglesDataAMDX[] = {
@@ -253,8 +258,8 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryLinearSweptS
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryMicromapDataKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1498,0x0010,0},
-    {32,1,12,1498,0x0010,0},
+    {24,1,12,1499,0x0010,0},
+    {32,1,12,1499,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureGeometryMotionTrianglesDataNV[] = {
@@ -284,14 +289,14 @@ inline constexpr VkFieldDesc kFields_VkAccelerationStructureMotionInfoNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesDisplacementMicromapNV[] = {
     {8,131,8,0,65535,1},
-    {104,1,12,1499,0x0064,0},
-    {112,1,12,1499,0x0064,0},
+    {104,1,12,1500,0x0064,0},
+    {112,1,12,1500,0x0064,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesOpacityMicromapEXT[] = {
     {8,131,8,0,65535,1},
-    {48,1,12,1499,0x002C,0},
-    {56,1,12,1499,0x002C,0},
+    {48,1,12,1500,0x002C,0},
+    {56,1,12,1500,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkAccelerationStructureTrianglesOpacityMicromapKHR[] = {
@@ -504,9 +509,9 @@ inline constexpr VkFieldDesc kFields_VkBindMemoryStatusKHR[] = {
 inline constexpr VkFieldDesc kFields_VkBindSparseInfo[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0010,0},
-    {40,1,24,1500,0x0020,0},
-    {56,1,24,1501,0x0030,0},
-    {72,1,24,1502,0x0040,0},
+    {40,1,24,1501,0x0020,0},
+    {56,1,24,1502,0x0030,0},
+    {72,1,24,1503,0x0040,0},
     {88,2,8,0,0x0050,0},
 };
 
@@ -558,10 +563,14 @@ inline constexpr VkFieldDesc kFields_VkBufferCollectionImageCreateInfoFUCHSIA[] 
 
 inline constexpr VkFieldDesc kFields_VkBufferCollectionPropertiesFUCHSIA[] = {
     {8,131,8,0,65535,1},
+    {56,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkBufferConstraintsInfoFUCHSIA[] = {
     {8,131,8,0,65535,1},
+    {24,131,8,0,65535,1},
+    {64,3,4,0,0x0010,0},
+    {88,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkBufferCopy2[] = {
@@ -639,6 +648,7 @@ inline constexpr VkFieldDesc kFields_VkBufferViewCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkBuildPartitionedAccelerationStructureInfoNV[] = {
     {8,131,8,0,65535,1},
+    {24,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkCalibratedTimestampInfoEXT[] = {
@@ -665,6 +675,7 @@ inline constexpr VkFieldDesc kFields_VkClusterAccelerationStructureClustersBotto
 
 inline constexpr VkFieldDesc kFields_VkClusterAccelerationStructureCommandsInfoNV[] = {
     {8,131,8,0,65535,1},
+    {24,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkClusterAccelerationStructureInputInfoNV[] = {
@@ -866,7 +877,7 @@ inline constexpr VkFieldDesc kFields_VkCopyMemoryToAccelerationStructureInfoKHR[
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToImageIndirectInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {64,1,16,1503,0x0014,0},
+    {64,1,16,1504,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkCopyMemoryToImageInfo[] = {
@@ -953,7 +964,7 @@ inline constexpr VkFieldDesc kFields_VkDataGraphOpticalFlowImageFormatProperties
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineBuiltinModelCreateInfoQCOM[] = {
     {8,131,8,0,65535,1},
-    {16,1,136,1504,65535,1},
+    {16,1,136,1505,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineCompilerControlCreateInfoARM[] = {
@@ -1036,7 +1047,7 @@ inline constexpr VkFieldDesc kFields_VkDataGraphPipelineSessionNeuralStatisticsC
 inline constexpr VkFieldDesc kFields_VkDataGraphPipelineShaderModuleCreateInfoARM[] = {
     {8,131,8,0,65535,1},
     {24,67,1,0,65535,1},
-    {32,1,32,1505,65535,1},
+    {32,1,32,1491,65535,1},
     {48,1,32,201,0x0028,0},
 };
 
@@ -1486,6 +1497,7 @@ inline constexpr VkFieldDesc kFields_VkDisplayPresentInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkDisplayProperties2KHR[] = {
     {8,131,8,0,65535,1},
+    {24,67,1,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkDisplaySurfaceCreateInfoKHR[] = {
@@ -1769,6 +1781,8 @@ inline constexpr VkFieldDesc kFields_VkGeometryAABBNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkGeometryNV[] = {
     {8,131,8,0,65535,1},
+    {32,131,8,0,65535,1},
+    {128,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkGeometryTrianglesNV[] = {
@@ -1876,6 +1890,7 @@ inline constexpr VkFieldDesc kFields_VkImageCompressionPropertiesEXT[] = {
 inline constexpr VkFieldDesc kFields_VkImageConstraintsInfoFUCHSIA[] = {
     {8,131,8,0,65535,1},
     {24,1,136,416,0x0010,0},
+    {40,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkImageCopy2[] = {
@@ -1916,6 +1931,8 @@ inline constexpr VkFieldDesc kFields_VkImageDrmFormatModifierPropertiesEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkImageFormatConstraintsInfoFUCHSIA[] = {
     {8,131,8,0,65535,1},
+    {24,131,8,0,65535,1},
+    {88,3,4,0,0x0010,0},
     {128,1,24,1361,0x0078,0},
 };
 
@@ -2151,7 +2168,7 @@ inline constexpr VkFieldDesc kFields_VkIndirectExecutionSetShaderInfoEXT[] = {
     {8,131,8,0,65535,1},
     {24,2,8,0,0x0010,0},
     {32,1,32,471,0x0010,0},
-    {48,1,12,1494,0x002C,0},
+    {48,1,12,1495,0x002C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkIndirectExecutionSetShaderLayoutInfoEXT[] = {
@@ -2370,8 +2387,8 @@ inline constexpr VkFieldDesc kFields_VkMetalSurfaceCreateInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkMicromapBuildInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {48,1,12,1499,0x0028,0},
-    {56,1,12,1499,0x0028,0},
+    {48,1,12,1500,0x0028,0},
+    {56,1,12,1500,0x0028,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkMicromapBuildSizesInfoEXT[] = {
@@ -3403,6 +3420,7 @@ inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredApiPropertiesListKHR
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR[] = {
     {8,131,8,0,65535,1},
+    {24,131,8,0,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPhysicalDeviceLayeredDriverPropertiesMSFT[] = {
@@ -4897,12 +4915,14 @@ inline constexpr VkFieldDesc kFields_VkPipelineRobustnessCreateInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineSampleLocationsStateCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
+    {32,131,8,0,65535,1},
+    {56,1,8,1524,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineShaderStageCreateInfo[] = {
     {8,131,8,0,65535,1},
     {32,67,1,0,65535,1},
-    {40,1,32,1505,65535,1},
+    {40,1,32,1491,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineShaderStageModuleIdentifierCreateInfoEXT[] = {
@@ -4937,33 +4957,33 @@ inline constexpr VkFieldDesc kFields_VkPipelineTessellationStateCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1524,0x0010,0},
+    {24,1,8,1525,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1524,0x0010,0},
+    {24,1,8,1525,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputDivisorStateCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1524,0x0010,0},
+    {24,1,8,1525,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineVertexInputStateCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1525,0x0014,0},
-    {40,1,16,1526,0x0020,0},
+    {24,1,12,1526,0x0014,0},
+    {40,1,16,1527,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportCoarseSampleOrderStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1527,0x0014,0},
+    {24,1,24,1528,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportDepthClampControlCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1528,65535,1},
+    {24,1,8,1529,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportDepthClipControlCreateInfoEXT[] = {
@@ -4977,7 +4997,7 @@ inline constexpr VkFieldDesc kFields_VkPipelineViewportExclusiveScissorStateCrea
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportShadingRateImageStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1529,0x0014,0},
+    {24,1,16,1530,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportStateCreateInfo[] = {
@@ -4988,12 +5008,12 @@ inline constexpr VkFieldDesc kFields_VkPipelineViewportStateCreateInfo[] = {
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportSwizzleStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1530,0x0014,0},
+    {24,1,16,1531,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPipelineViewportWScalingStateCreateInfoNV[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1531,0x0014,0},
+    {24,1,8,1532,0x0014,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentId2KHR[] = {
@@ -5016,12 +5036,12 @@ inline constexpr VkFieldDesc kFields_VkPresentInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkPresentRegionsKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1532,0x0010,0},
+    {24,1,16,1533,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentTimesInfoGOOGLE[] = {
     {8,131,8,0,65535,1},
-    {24,1,16,1533,0x0010,0},
+    {24,1,16,1534,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPresentTimingInfoEXT[] = {
@@ -5069,6 +5089,7 @@ inline constexpr VkFieldDesc kFields_VkPushConstantsInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkPushDataInfoEXT[] = {
     {8,131,8,0,65535,1},
+    {24,3,8,0,0x0018,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkPushDescriptorSetInfo[] = {
@@ -5143,8 +5164,8 @@ inline constexpr VkFieldDesc kFields_VkQueueFamilyDataGraphPropertiesARM[] = {
 
 inline constexpr VkFieldDesc kFields_VkQueueFamilyDataGraphTOSAPropertiesARM[] = {
     {8,131,8,0,65535,1},
-    {24,1,132,1534,0x0010,0},
-    {40,1,132,1534,0x0020,0},
+    {24,1,132,1535,0x0010,0},
+    {40,1,132,1535,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkQueueFamilyGlobalPriorityProperties[] = {
@@ -5217,7 +5238,7 @@ inline constexpr VkFieldDesc kFields_VkRayTracingShaderGroupCreateInfoNV[] = {
 
 inline constexpr VkFieldDesc kFields_VkRefreshObjectListKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,24,1535,0x0010,0},
+    {24,1,24,1536,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkReleaseCapturedPipelineDataInfoKHR[] = {
@@ -5266,7 +5287,7 @@ inline constexpr VkFieldDesc kFields_VkRenderPassCreationControlEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkRenderPassCreationFeedbackCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,4,1536,65535,1},
+    {16,1,4,1537,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapCreateInfoEXT[] = {
@@ -5275,17 +5296,17 @@ inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapCreateInfoEXT
 
 inline constexpr VkFieldDesc kFields_VkRenderPassFragmentDensityMapOffsetEndInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1537,0x0010,0},
+    {24,1,8,1538,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassInputAttachmentAspectCreateInfo[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1538,0x0010,0},
+    {24,1,12,1539,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassInputAttachmentAspectCreateInfoKHR[] = {
     {8,131,8,0,65535,1},
-    {24,1,12,1538,0x0010,0},
+    {24,1,12,1539,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassMultiviewCreateInfo[] = {
@@ -5310,8 +5331,8 @@ inline constexpr VkFieldDesc kFields_VkRenderPassPerformanceCountersByRegionBegi
 
 inline constexpr VkFieldDesc kFields_VkRenderPassSampleLocationsBeginInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {24,1,48,1539,0x0010,0},
-    {40,1,48,1540,0x0020,0},
+    {24,1,48,1540,0x0010,0},
+    {40,1,48,1541,0x0020,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassStripeBeginInfoARM[] = {
@@ -5330,7 +5351,7 @@ inline constexpr VkFieldDesc kFields_VkRenderPassStripeSubmitInfoARM[] = {
 
 inline constexpr VkFieldDesc kFields_VkRenderPassSubpassFeedbackCreateInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {16,1,264,1541,65535,1},
+    {16,1,264,1542,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkRenderPassTileShadingCreateInfoQCOM[] = {
@@ -5437,7 +5458,7 @@ inline constexpr VkFieldDesc kFields_VkResourceDescriptorInfoEXT[] = {
 
 inline constexpr VkFieldDesc kFields_VkSampleLocationsInfoEXT[] = {
     {8,131,8,0,65535,1},
-    {32,1,8,1542,0x001C,0},
+    {32,1,8,1524,0x001C,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSamplerBlockMatchWindowCreateInfoQCOM[] = {
@@ -5602,8 +5623,8 @@ inline constexpr VkFieldDesc kFields_VkShaderCreateInfoEXT[] = {
     {40,3,8,0,0x0020,0},
     {48,67,1,0,65535,1},
     {64,2,8,0,0x0038,0},
-    {80,1,12,1494,0x0048,0},
-    {88,1,32,1505,65535,1},
+    {80,1,12,1495,0x0048,0},
+    {88,1,32,1491,65535,1},
 };
 
 inline constexpr VkFieldDesc kFields_VkShaderDescriptorSetAndBindingMappingInfoEXT[] = {
@@ -5716,7 +5737,7 @@ inline constexpr VkFieldDesc kFields_VkSubpassEndInfoKHR[] = {
 
 inline constexpr VkFieldDesc kFields_VkSubpassFragmentDensityMapOffsetEndInfoQCOM[] = {
     {8,131,8,0,65535,1},
-    {24,1,8,1537,0x0010,0},
+    {24,1,8,1538,0x0010,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassResolvePerformanceQueryEXT[] = {
@@ -6137,6 +6158,7 @@ inline constexpr VkFieldDesc kFields_VkVideoDecodeH265SessionParametersCreateInf
 
 inline constexpr VkFieldDesc kFields_VkVideoDecodeInfoKHR[] = {
     {8,131,8,0,65535,1},
+    {56,131,8,0,65535,1},
     {96,1,32,1472,65535,1},
     {112,1,32,1472,0x0068,0},
 };
@@ -6308,6 +6330,7 @@ inline constexpr VkFieldDesc kFields_VkVideoEncodeH265SessionParametersGetInfoKH
 
 inline constexpr VkFieldDesc kFields_VkVideoEncodeInfoKHR[] = {
     {8,131,8,0,65535,1},
+    {56,131,8,0,65535,1},
     {96,1,32,1472,65535,1},
     {112,1,32,1472,0x0068,0},
 };
@@ -6503,33 +6526,33 @@ inline constexpr VkFieldDesc kFields_VkWriteIndirectExecutionSetShaderEXT[] = {
     {8,131,8,0,65535,1},
 };
 
+inline constexpr VkFieldDesc kFields_VkSpecializationInfo[] = {
+    {8,1,16,1544,0x0000,0},
+    {24,3,8,0,0x0010,0},
+};
+
 inline constexpr VkFieldDesc kFields_VkDescriptorSetLayoutBinding[] = {
     {16,2,8,0,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSubpassDescription[] = {
-    {16,1,8,1544,0x0008,0},
-    {32,1,8,1544,0x0018,0},
-    {40,1,8,1544,0x0018,0},
-    {48,1,8,1544,65535,1},
+    {16,1,8,1545,0x0008,0},
+    {32,1,8,1545,0x0018,0},
+    {40,1,8,1545,0x0018,0},
+    {48,1,8,1545,65535,1},
     {64,3,4,0,0x0038,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseBufferMemoryBindInfo[] = {
-    {16,1,40,1545,0x0008,0},
+    {16,1,40,1546,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseImageOpaqueMemoryBindInfo[] = {
-    {16,1,40,1545,0x0008,0},
+    {16,1,40,1546,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkSparseImageMemoryBindInfo[] = {
-    {16,1,64,1546,0x0008,0},
-};
-
-inline constexpr VkFieldDesc kFields_VkSpecializationInfo[] = {
-    {8,1,16,1547,0x0000,0},
-    {24,3,8,0,0x0010,0},
+    {16,1,64,1547,0x0008,0},
 };
 
 inline constexpr VkFieldDesc kFields_VkLayerSettingEXT[] = {
@@ -6563,6 +6586,16 @@ inline constexpr VkFieldDesc kFields_VkPresentRegionKHR[] = {
     {8,1,20,1550,0x0000,0},
 };
 
+inline constexpr VkFieldDesc kFields_VkAttachmentSampleLocationsEXT[] = {
+    {16,131,8,0,65535,1},
+    {40,1,8,1524,0x0008,0},
+};
+
+inline constexpr VkFieldDesc kFields_VkSubpassSampleLocationsEXT[] = {
+    {16,131,8,0,65535,1},
+    {40,1,8,1524,0x0008,0},
+};
+
 inline constexpr VkFieldDesc kFields_VkPipelineBinaryDataKHR[] = {
     {8,3,8,0,0x0000,0},
 };
@@ -6592,7 +6625,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkCommandBufferAllocateInfo", 32, kFields_VkCommandBufferAllocateInfo, 1},
     {"VkDescriptorSetAllocateInfo", 40, kFields_VkDescriptorSetAllocateInfo, 2},
     {"VkRenderPassBeginInfo", 64, kFields_VkRenderPassBeginInfo, 2},
-    {"VkComputePipelineCreateInfo", 96, kFields_VkComputePipelineCreateInfo, 1},
+    {"VkComputePipelineCreateInfo", 96, kFields_VkComputePipelineCreateInfo, 4},
     {"VkDescriptorPoolCreateInfo", 40, kFields_VkDescriptorPoolCreateInfo, 2},
     {"VkDescriptorSetLayoutCreateInfo", 32, kFields_VkDescriptorSetLayoutCreateInfo, 2},
     {"VkDeviceCreateInfo", 72, kFields_VkDeviceCreateInfo, 5},
@@ -6607,7 +6640,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkAccelerationStructureCaptureDescriptorDataInfoEXT", 32, kFields_VkAccelerationStructureCaptureDescriptorDataInfoEXT, 1},
     {"VkAccelerationStructureCreateInfo2KHR", 48, kFields_VkAccelerationStructureCreateInfo2KHR, 1},
     {"VkAccelerationStructureCreateInfoKHR", 64, kFields_VkAccelerationStructureCreateInfoKHR, 1},
-    {"VkAccelerationStructureCreateInfoNV", 64, kFields_VkAccelerationStructureCreateInfoNV, 1},
+    {"VkAccelerationStructureCreateInfoNV", 64, kFields_VkAccelerationStructureCreateInfoNV, 3},
     {"VkAccelerationStructureDenseGeometryFormatTrianglesDataAMDX", 56, kFields_VkAccelerationStructureDenseGeometryFormatTrianglesDataAMDX, 1},
     {"VkAccelerationStructureDeviceAddressInfoKHR", 24, kFields_VkAccelerationStructureDeviceAddressInfoKHR, 1},
     {"VkAccelerationStructureGeometryAabbsDataKHR", 32, kFields_VkAccelerationStructureGeometryAabbsDataKHR, 1},
@@ -6682,8 +6715,8 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkBufferCollectionBufferCreateInfoFUCHSIA", 32, kFields_VkBufferCollectionBufferCreateInfoFUCHSIA, 1},
     {"VkBufferCollectionConstraintsInfoFUCHSIA", 40, kFields_VkBufferCollectionConstraintsInfoFUCHSIA, 1},
     {"VkBufferCollectionImageCreateInfoFUCHSIA", 32, kFields_VkBufferCollectionImageCreateInfoFUCHSIA, 1},
-    {"VkBufferCollectionPropertiesFUCHSIA", 104, kFields_VkBufferCollectionPropertiesFUCHSIA, 1},
-    {"VkBufferConstraintsInfoFUCHSIA", 120, kFields_VkBufferConstraintsInfoFUCHSIA, 1},
+    {"VkBufferCollectionPropertiesFUCHSIA", 104, kFields_VkBufferCollectionPropertiesFUCHSIA, 2},
+    {"VkBufferConstraintsInfoFUCHSIA", 120, kFields_VkBufferConstraintsInfoFUCHSIA, 4},
     {"VkBufferCopy2", 40, kFields_VkBufferCopy2, 1},
     {"VkBufferCopy2KHR", 40, kFields_VkBufferCopy2KHR, 1},
     {"VkBufferCreateInfo", 56, kFields_VkBufferCreateInfo, 2},
@@ -6702,13 +6735,13 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkBufferUsageFlags2CreateInfo", 24, kFields_VkBufferUsageFlags2CreateInfo, 1},
     {"VkBufferUsageFlags2CreateInfoKHR", 24, kFields_VkBufferUsageFlags2CreateInfoKHR, 1},
     {"VkBufferViewCreateInfo", 56, kFields_VkBufferViewCreateInfo, 1},
-    {"VkBuildPartitionedAccelerationStructureInfoNV", 96, kFields_VkBuildPartitionedAccelerationStructureInfoNV, 1},
+    {"VkBuildPartitionedAccelerationStructureInfoNV", 96, kFields_VkBuildPartitionedAccelerationStructureInfoNV, 2},
     {"VkCalibratedTimestampInfoEXT", 24, kFields_VkCalibratedTimestampInfoEXT, 1},
     {"VkCalibratedTimestampInfoKHR", 24, kFields_VkCalibratedTimestampInfoKHR, 1},
     {"VkCheckpointData2NV", 32, kFields_VkCheckpointData2NV, 2},
     {"VkCheckpointDataNV", 32, kFields_VkCheckpointDataNV, 2},
     {"VkClusterAccelerationStructureClustersBottomLevelInputNV", 24, kFields_VkClusterAccelerationStructureClustersBottomLevelInputNV, 1},
-    {"VkClusterAccelerationStructureCommandsInfoNV", 200, kFields_VkClusterAccelerationStructureCommandsInfoNV, 1},
+    {"VkClusterAccelerationStructureCommandsInfoNV", 200, kFields_VkClusterAccelerationStructureCommandsInfoNV, 2},
     {"VkClusterAccelerationStructureInputInfoNV", 80, kFields_VkClusterAccelerationStructureInputInfoNV, 1},
     {"VkClusterAccelerationStructureMoveObjectsInputNV", 32, kFields_VkClusterAccelerationStructureMoveObjectsInputNV, 1},
     {"VkClusterAccelerationStructureTriangleClusterInputNV", 48, kFields_VkClusterAccelerationStructureTriangleClusterInputNV, 1},
@@ -6888,7 +6921,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkDisplayPlaneProperties2KHR", 32, kFields_VkDisplayPlaneProperties2KHR, 1},
     {"VkDisplayPowerInfoEXT", 24, kFields_VkDisplayPowerInfoEXT, 1},
     {"VkDisplayPresentInfoKHR", 56, kFields_VkDisplayPresentInfoKHR, 1},
-    {"VkDisplayProperties2KHR", 64, kFields_VkDisplayProperties2KHR, 1},
+    {"VkDisplayProperties2KHR", 64, kFields_VkDisplayProperties2KHR, 2},
     {"VkDisplaySurfaceCreateInfoKHR", 64, kFields_VkDisplaySurfaceCreateInfoKHR, 1},
     {"VkDisplaySurfaceStereoCreateInfoNV", 24, kFields_VkDisplaySurfaceStereoCreateInfoNV, 1},
     {"VkDrawIndirect2InfoKHR", 48, kFields_VkDrawIndirect2InfoKHR, 1},
@@ -6955,7 +6988,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkGeneratedCommandsPipelineInfoEXT", 24, kFields_VkGeneratedCommandsPipelineInfoEXT, 1},
     {"VkGeneratedCommandsShaderInfoEXT", 32, kFields_VkGeneratedCommandsShaderInfoEXT, 2},
     {"VkGeometryAABBNV", 40, kFields_VkGeometryAABBNV, 1},
-    {"VkGeometryNV", 168, kFields_VkGeometryNV, 1},
+    {"VkGeometryNV", 168, kFields_VkGeometryNV, 3},
     {"VkGeometryTrianglesNV", 96, kFields_VkGeometryTrianglesNV, 1},
     {"VkGetLatencyMarkerInfoNV", 32, kFields_VkGetLatencyMarkerInfoNV, 2},
     {"VkGpaDeviceClockModeInfoAMD", 32, kFields_VkGpaDeviceClockModeInfoAMD, 1},
@@ -6979,7 +7012,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkImageCaptureDescriptorDataInfoEXT", 24, kFields_VkImageCaptureDescriptorDataInfoEXT, 1},
     {"VkImageCompressionControlEXT", 32, kFields_VkImageCompressionControlEXT, 2},
     {"VkImageCompressionPropertiesEXT", 24, kFields_VkImageCompressionPropertiesEXT, 1},
-    {"VkImageConstraintsInfoFUCHSIA", 80, kFields_VkImageConstraintsInfoFUCHSIA, 2},
+    {"VkImageConstraintsInfoFUCHSIA", 80, kFields_VkImageConstraintsInfoFUCHSIA, 3},
     {"VkImageCopy2", 88, kFields_VkImageCopy2, 1},
     {"VkImageCopy2KHR", 88, kFields_VkImageCopy2KHR, 1},
     {"VkImageCreateFlags2CreateInfoKHR", 24, kFields_VkImageCreateFlags2CreateInfoKHR, 1},
@@ -6988,7 +7021,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkImageDrmFormatModifierExplicitCreateInfoEXT", 40, kFields_VkImageDrmFormatModifierExplicitCreateInfoEXT, 2},
     {"VkImageDrmFormatModifierListCreateInfoEXT", 32, kFields_VkImageDrmFormatModifierListCreateInfoEXT, 2},
     {"VkImageDrmFormatModifierPropertiesEXT", 24, kFields_VkImageDrmFormatModifierPropertiesEXT, 1},
-    {"VkImageFormatConstraintsInfoFUCHSIA", 136, kFields_VkImageFormatConstraintsInfoFUCHSIA, 2},
+    {"VkImageFormatConstraintsInfoFUCHSIA", 136, kFields_VkImageFormatConstraintsInfoFUCHSIA, 4},
     {"VkImageFormatListCreateInfo", 32, kFields_VkImageFormatListCreateInfo, 2},
     {"VkImageFormatListCreateInfoKHR", 32, kFields_VkImageFormatListCreateInfoKHR, 2},
     {"VkImageFormatProperties2", 48, kFields_VkImageFormatProperties2, 1},
@@ -7347,7 +7380,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkPhysicalDeviceInvocationMaskFeaturesHUAWEI", 24, kFields_VkPhysicalDeviceInvocationMaskFeaturesHUAWEI, 1},
     {"VkPhysicalDeviceLayeredApiPropertiesKHR", 288, kFields_VkPhysicalDeviceLayeredApiPropertiesKHR, 1},
     {"VkPhysicalDeviceLayeredApiPropertiesListKHR", 32, kFields_VkPhysicalDeviceLayeredApiPropertiesListKHR, 2},
-    {"VkPhysicalDeviceLayeredApiVulkanPropertiesKHR", 856, kFields_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR, 1},
+    {"VkPhysicalDeviceLayeredApiVulkanPropertiesKHR", 856, kFields_VkPhysicalDeviceLayeredApiVulkanPropertiesKHR, 2},
     {"VkPhysicalDeviceLayeredDriverPropertiesMSFT", 24, kFields_VkPhysicalDeviceLayeredDriverPropertiesMSFT, 1},
     {"VkPhysicalDeviceLegacyDitheringFeaturesEXT", 24, kFields_VkPhysicalDeviceLegacyDitheringFeaturesEXT, 1},
     {"VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT", 24, kFields_VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT, 1},
@@ -7715,7 +7748,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkPipelineRepresentativeFragmentTestStateCreateInfoNV", 24, kFields_VkPipelineRepresentativeFragmentTestStateCreateInfoNV, 1},
     {"VkPipelineRobustnessCreateInfo", 32, kFields_VkPipelineRobustnessCreateInfo, 1},
     {"VkPipelineRobustnessCreateInfoEXT", 32, kFields_VkPipelineRobustnessCreateInfoEXT, 1},
-    {"VkPipelineSampleLocationsStateCreateInfoEXT", 64, kFields_VkPipelineSampleLocationsStateCreateInfoEXT, 1},
+    {"VkPipelineSampleLocationsStateCreateInfoEXT", 64, kFields_VkPipelineSampleLocationsStateCreateInfoEXT, 3},
     {"VkPipelineShaderStageCreateInfo", 48, kFields_VkPipelineShaderStageCreateInfo, 3},
     {"VkPipelineShaderStageModuleIdentifierCreateInfoEXT", 32, kFields_VkPipelineShaderStageModuleIdentifierCreateInfoEXT, 2},
     {"VkPipelineShaderStageNodeCreateInfoAMDX", 32, kFields_VkPipelineShaderStageNodeCreateInfoAMDX, 2},
@@ -7751,7 +7784,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkPushConstantBankInfoNV", 24, kFields_VkPushConstantBankInfoNV, 1},
     {"VkPushConstantsInfo", 48, kFields_VkPushConstantsInfo, 2},
     {"VkPushConstantsInfoKHR", 48, kFields_VkPushConstantsInfoKHR, 2},
-    {"VkPushDataInfoEXT", 40, kFields_VkPushDataInfoEXT, 1},
+    {"VkPushDataInfoEXT", 40, kFields_VkPushDataInfoEXT, 2},
     {"VkPushDescriptorSetInfo", 48, kFields_VkPushDescriptorSetInfo, 2},
     {"VkPushDescriptorSetInfoKHR", 48, kFields_VkPushDescriptorSetInfoKHR, 2},
     {"VkPushDescriptorSetWithTemplateInfo", 48, kFields_VkPushDescriptorSetWithTemplateInfo, 2},
@@ -7980,7 +8013,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkVideoDecodeH265PictureInfoKHR", 40, kFields_VkVideoDecodeH265PictureInfoKHR, 3},
     {"VkVideoDecodeH265SessionParametersAddInfoKHR", 64, kFields_VkVideoDecodeH265SessionParametersAddInfoKHR, 4},
     {"VkVideoDecodeH265SessionParametersCreateInfoKHR", 40, kFields_VkVideoDecodeH265SessionParametersCreateInfoKHR, 2},
-    {"VkVideoDecodeInfoKHR", 120, kFields_VkVideoDecodeInfoKHR, 3},
+    {"VkVideoDecodeInfoKHR", 120, kFields_VkVideoDecodeInfoKHR, 4},
     {"VkVideoDecodeUsageInfoKHR", 24, kFields_VkVideoDecodeUsageInfoKHR, 1},
     {"VkVideoDecodeVP9PictureInfoKHR", 48, kFields_VkVideoDecodeVP9PictureInfoKHR, 2},
     {"VkVideoEncodeAV1DpbSlotInfoKHR", 24, kFields_VkVideoEncodeAV1DpbSlotInfoKHR, 2},
@@ -8017,7 +8050,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkVideoEncodeH265SessionParametersCreateInfoKHR", 40, kFields_VkVideoEncodeH265SessionParametersCreateInfoKHR, 2},
     {"VkVideoEncodeH265SessionParametersFeedbackInfoKHR", 32, kFields_VkVideoEncodeH265SessionParametersFeedbackInfoKHR, 1},
     {"VkVideoEncodeH265SessionParametersGetInfoKHR", 40, kFields_VkVideoEncodeH265SessionParametersGetInfoKHR, 1},
-    {"VkVideoEncodeInfoKHR", 128, kFields_VkVideoEncodeInfoKHR, 3},
+    {"VkVideoEncodeInfoKHR", 128, kFields_VkVideoEncodeInfoKHR, 4},
     {"VkVideoEncodeIntraRefreshCapabilitiesKHR", 40, kFields_VkVideoEncodeIntraRefreshCapabilitiesKHR, 1},
     {"VkVideoEncodeIntraRefreshInfoKHR", 24, kFields_VkVideoEncodeIntraRefreshInfoKHR, 1},
     {"VkVideoEncodeProfileRgbConversionInfoVALVE", 24, kFields_VkVideoEncodeProfileRgbConversionInfoVALVE, 1},
@@ -8063,6 +8096,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkDescriptorImageInfo", 24, nullptr, 0},
     {"VkDescriptorBufferInfo", 24, nullptr, 0},
     {"VkClearValue", 16, nullptr, 0},
+    {"VkSpecializationInfo", 32, kFields_VkSpecializationInfo, 2},
     {"VkDescriptorPoolSize", 8, nullptr, 0},
     {"VkDescriptorSetLayoutBinding", 24, kFields_VkDescriptorSetLayoutBinding, 1},
     {"VkPhysicalDeviceFeatures", 220, nullptr, 0},
@@ -8077,7 +8111,6 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkSparseImageMemoryBindInfo", 24, kFields_VkSparseImageMemoryBindInfo, 1},
     {"VkImageSubresourceLayers", 16, nullptr, 0},
     {"VkPhysicalDeviceDataGraphOperationSupportARM", 136, nullptr, 0},
-    {"VkSpecializationInfo", 32, kFields_VkSpecializationInfo, 2},
     {"VkPhysicalDeviceDataGraphProcessingEngineARM", 8, nullptr, 0},
     {"VkDecompressMemoryRegionEXT", 32, nullptr, 0},
     {"VkDescriptorUpdateTemplateEntry", 32, nullptr, 0},
@@ -8096,6 +8129,7 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkPipelineBinaryKeysAndDataKHR", 24, kFields_VkPipelineBinaryKeysAndDataKHR, 2},
     {"VkPipelineColorBlendAttachmentState", 32, nullptr, 0},
     {"VkPipelineCreationFeedback", 16, nullptr, 0},
+    {"VkSampleLocationEXT", 8, nullptr, 0},
     {"VkVertexInputBindingDivisorDescription", 8, nullptr, 0},
     {"VkVertexInputBindingDescription", 12, nullptr, 0},
     {"VkVertexInputAttributeDescription", 16, nullptr, 0},
@@ -8111,15 +8145,14 @@ inline constexpr VkStructDesc kVkStructs[] = {
     {"VkRenderPassCreationFeedbackInfoEXT", 4, nullptr, 0},
     {"VkOffset2D", 8, nullptr, 0},
     {"VkInputAttachmentAspectReference", 12, nullptr, 0},
-    {"VkAttachmentSampleLocationsEXT", 48, nullptr, 0},
-    {"VkSubpassSampleLocationsEXT", 48, nullptr, 0},
+    {"VkAttachmentSampleLocationsEXT", 48, kFields_VkAttachmentSampleLocationsEXT, 2},
+    {"VkSubpassSampleLocationsEXT", 48, kFields_VkSubpassSampleLocationsEXT, 2},
     {"VkRenderPassSubpassFeedbackInfoEXT", 264, nullptr, 0},
-    {"VkSampleLocationEXT", 8, nullptr, 0},
     {"VkExtensionProperties", 260, nullptr, 0},
+    {"VkSpecializationMapEntry", 16, nullptr, 0},
     {"VkAttachmentReference", 8, nullptr, 0},
     {"VkSparseMemoryBind", 40, nullptr, 0},
     {"VkSparseImageMemoryBind", 64, nullptr, 0},
-    {"VkSpecializationMapEntry", 16, nullptr, 0},
     {"VkPipelineBinaryDataKHR", 16, kFields_VkPipelineBinaryDataKHR, 1},
     {"VkCoarseSampleLocationNV", 12, nullptr, 0},
     {"VkRectLayerKHR", 20, nullptr, 0},

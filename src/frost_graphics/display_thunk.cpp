@@ -348,6 +348,24 @@ void vk_deep_unknown_stype_once(int32_t s) {
     }
 }
 
+// One-shot diagnostic for an element count whose AAPCS64 slot carried
+// garbage above bit 31 even AFTER masking (i.e. a real u32 count larger
+// than kVkDeepMaxElems). The plan fails closed and the generic translate
+// path handles every planned arg with its original guest pointer.
+void vk_deep_oversize_count_once(const char* name, uint8_t arg,
+                                 uint64_t raw64, uint32_t masked) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+        fprintf(stderr,
+                "[vk-deep] %s: element count arg[%u] exceeds staging cap "
+                "(raw slot=0x%016llx masked=%u) — deep-marshal plan "
+                "declined, generic bounce fallback\n",
+                name, arg,
+                static_cast<unsigned long long>(raw64),
+                masked);
+    }
+}
+
 // Bounded guest strlen (strings staged by VKM_STR fields; capped well
 // below any sane pipeline stage name).
 size_t vk_deep_guest_strlen(Memory* mem, uint64_t g) {
@@ -1390,8 +1408,24 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     } else {
                         // copyback-only staging: byte counts arrive
                         // directly (pData/dataSize); element counts
-                        // multiply by the element size (pResults-style)
+                        // multiply by the element size (pResults-style).
+                        // Same AAPCS64 rule as IN refs: mask element
+                        // counts to u32 first, fail closed on oversize —
+                        // a staged-elems < host-count mismatch would make
+                        // the host write past the staged region.
                         uint64_t cnt = args[r.count_arg];
+                        if (!r.count_in_bytes) {
+                            const uint32_t masked =
+                                static_cast<uint32_t>(cnt);
+                            if (masked > kVkDeepMaxElems) {
+                                vk_deep_oversize_count_once(
+                                    entry.name.c_str(), r.count_arg,
+                                    cnt, masked);
+                                ok = false;
+                                break;
+                            }
+                            cnt = masked;
+                        }
                         size_t bytes = r.count_in_bytes
                             ? static_cast<size_t>(cnt)
                             : static_cast<size_t>(cnt) *
@@ -1418,12 +1452,36 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     continue;
                 }
 
-                // ── IN refs (existing behavior) ──────────────────────
+                // ── IN refs ─────────────────────────────────────────
+                // CRITICAL (vkQuake RADV SIGSEGV): element counts arrive
+                // in AAPCS64 registers/stack slots read as full 64-bit
+                // words, but callers commit uint32_t args with 32-bit
+                // stores — bits [63:32] are legal stale-frame junk
+                // (vkQuake's vkCmdPipelineBarrier imageMemoryBarrierCount
+                // slot carried a code address up there). Mask to u32
+                // FIRST, then FAIL THE PLAN when the masked count exceeds
+                // the cap. Never silently stage fewer elements than the
+                // host-visible count: the driver reads uninit arena
+                // leftovers as array elements and chases garbage pNext.
+                // Byte counts (count_in_bytes) are genuine VkDeviceSize /
+                // size_t values and keep their full width; the
+                // kVkDeepMaxBytes check below fails the plan on oversize.
                 uint64_t cnt_arg = args[r.count_arg];
-                uint32_t n = r.count_in_bytes
+                if (!r.count_in_bytes) {
+                    const uint32_t masked =
+                        static_cast<uint32_t>(cnt_arg);
+                    if (masked > kVkDeepMaxElems) {
+                        vk_deep_oversize_count_once(
+                            entry.name.c_str(), r.count_arg, cnt_arg,
+                            masked);
+                        ok = false;
+                        break;
+                    }
+                    cnt_arg = masked;
+                }
+                const uint32_t n = r.count_in_bytes
                     ? 1   // raw: arg IS a byte count, marshalled below
-                    : static_cast<uint32_t>(
-                          cnt_arg > kVkDeepMaxElems ? 0 : cnt_arg);
+                    : static_cast<uint32_t>(cnt_arg);
                 if (!args[r.arg]) continue;
                 DeepJob j{};
                 j.arg = r.arg;
@@ -1945,19 +2003,47 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             }
             size = alloc_size - offset;
         }
-        // Remap of an already-mapped object: Vulkan returns the same
-        // pointer — return the existing bounce (same offset/size shape).
+        // Remap of an already-mapped object: only an IDENTICAL
+        // offset/size shape returns the existing bounce (what real drivers
+        // do). A different shape must NOT reuse the old bounce — the guest
+        // would index the OLD (possibly smaller) tracked range with the
+        // NEW offset+size and overrun the bounce allocation into
+        // neighboring window memory (guest-heap stomp). Treat it as an
+        // implicit unmap+remap: push the old bounce back to the host,
+        // release its window range, host-unmap, then fall through and
+        // build a fresh mapping.
         {
-            std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
-            auto it = impl_->vk_maps_.find(mem_handle);
-            if (it != impl_->vk_maps_.end()) {
-                uint64_t same = it->second.bounce;
-                if (cpu.regs[5]) {
-                    try { mem->write(cpu.regs[5], &same, sizeof(same)); }
-                    catch (...) { /* out pointer unmapped */ }
+            uint64_t s_host = 0, s_bounce = 0, s_size = 0;
+            bool had_stale = false;
+            {
+                std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+                auto it = impl_->vk_maps_.find(mem_handle);
+                if (it != impl_->vk_maps_.end()) {
+                    if (it->second.map_offset == offset &&
+                        it->second.map_size == size) {
+                        uint64_t same = it->second.bounce;
+                        if (cpu.regs[5]) {
+                            try { mem->write(cpu.regs[5], &same, sizeof(same)); }
+                            catch (...) { /* out pointer unmapped */ }
+                        }
+                        cpu.regs[0] = 0;
+                        return true;
+                    }
+                    s_host = it->second.host_ptr;
+                    s_bounce = it->second.bounce;
+                    s_size = it->second.map_size;
+                    impl_->vk_maps_.erase(it);
+                    had_stale = true;
                 }
-                cpu.regs[0] = 0;
-                return true;
+            }
+            if (had_stale) {
+                uint8_t* src = mem->guest_to_host_ptr(s_bounce);
+                if (src && s_host && s_size)
+                    std::memcpy(reinterpret_cast<void*>(s_host), src, s_size);
+                mem->untrack_allocation(s_bounce,
+                                        (s_size + 0xFFFu) & ~0xFFFull);
+                reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(
+                    cpu.regs[0], mem_handle);
             }
         }
         if (size == 0 || size > (1ull << 30)) {  // sanity cap: 1 GiB per map

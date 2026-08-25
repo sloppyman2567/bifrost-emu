@@ -14,6 +14,7 @@ Only understands the subset of vk.xml that exists in the vendored copy
 resolved to their target.
 """
 import re
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
@@ -507,6 +508,34 @@ def layout_struct(name, reg, cache=None):
         offset = align_up(offset, eal)
         offset += esz * (cnt if cnt else 1)
         m._offset = offset - esz * (cnt if cnt else 1)
+        # Flatten the interior pointer fields of a SINGLE by-value
+        # struct member into this layout's ptrs (offset-adjusted,
+        # dotted count-member paths). Without this, structs embedding
+        # another struct BY VALUE (VkComputePipelineCreateInfo.stage…)
+        # expose no pointer rows at all and the runtime hands raw
+        # guest interior pointers (pName/pSpecializationInfo) to the
+        # host driver. Arrays of structs by value are NOT flattened —
+        # per-element staging isn't expressible in one descriptor row.
+        if mtype_sub:
+            if not cnt:
+                base = m._offset
+                for sp in sub.ptrs:
+                    if sp.count.startswith('member:'):
+                        cntname = '%s.%s' % (
+                            m.name, sp.count.split(':', 1)[1])
+                        ncount = 'member:' + cntname
+                    else:
+                        ncount = sp.count   # fixed:N / nullterm
+                    info.ptrs.append(FieldPtr(
+                        offset=base + sp.offset,
+                        elem=sp.elem,
+                        count=ncount,
+                        writable=sp.writable,
+                        name=sp.name))
+            elif sub.ptrs:
+                print(f'{name}.{m.name}: array-of-struct by value '
+                      f'carries pointer fields — not flattened',
+                      file=sys.stderr)
     info.align = max_align
     info.size = align_up(offset, max_align)
     return info
