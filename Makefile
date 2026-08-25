@@ -89,7 +89,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check vkxml-check glxml-check glcoverage-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
 
 all: $(TARGET)
 
@@ -144,6 +144,10 @@ glxml-check:
 # matches what glcoverage.py would generate from gl.xml (drift guard).
 glcoverage-check:
 	python3 tools/opgen/glcoverage.py --check $(THUNK_SPECS) tools/gl-registry/gl.xml
+
+# Audit every EGL row against the vendored Khronos egl.xml.
+egl-check:
+	python3 tools/opgen/eglcheck.py $(THUNK_SPECS) tools/gl-registry/egl.xml
 
 # FP fixed-point conversion decode table (same pattern as SIMD_DP above):
 # tools/opgen/fp_fixconv.txt is the single source of truth for which
@@ -375,7 +379,7 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check vkxml-check glxml-check glcoverage-check opgen-fpfixed-check $(TARGET) test-capi test-nb
+check-all: setup-tests opgen-check opgen-thunk-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
 
