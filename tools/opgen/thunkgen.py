@@ -84,7 +84,8 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'GET_STRING',
                 'ANDROID_WINDOW', 'VK_CMD_DEEP', 'VK_CMD_DEEP_OUT')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'arg6', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
-              'TEX3D', 'VK_REGIONS')
+              'TEX3D', 'VK_REGIONS', 'DRAWPIXELS', 'BITMAP', 'TEXIMAGE1D',
+              'TEXSUBIMAGE1D', 'TEXSUBIMAGE3D', 'STIPPLE')
 
 HEADER = r"""// opgen_thunk.hpp — GENERATED. DO NOT EDIT.
 //
@@ -131,6 +132,12 @@ enum class SizeKind : uint8_t {
     TEX3D = 10,
     VK_REGIONS = 11,
     ARG6 = 12,
+    DRAWPIXELS = 13,
+    BITMAP = 14,
+    TEXIMAGE1D = 15,
+    TEXSUBIMAGE1D = 16,
+    TEXSUBIMAGE3D = 17,
+    STIPPLE = 18,
 };
 
 struct Spec {

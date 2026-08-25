@@ -1244,6 +1244,34 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             reinterpret_cast<Fn>(entry.host_fn)(
                 static_cast<uint32_t>(iv[0]),
                 static_cast<uint32_t>(iv[1]), fv[0]);
+        } else if (ni == 3 && entry.n_float == 4) {
+            // glBitmap(width, height, xorig, yorig, xmove, ymove, bits):
+            // two count ints + four floats + the bitmap pointer. Rows are
+            // (w+7)/8 bytes strided to UNPACK_ALIGNMENT (assume 4).
+            uint64_t bw = iv[0], bh = iv[1];
+            uint64_t brow = (bw + 7) / 8;
+            uint64_t bstride = (brow + 3) & ~(uint64_t)3;
+            uint64_t bsz = bh ? (bh - 1) * bstride + brow : 0;
+            const void* bits = nullptr;
+            std::vector<uint8_t> bbounce;
+            if (impl_->mem) {
+                uint8_t* hp = impl_->mem->guest_to_host_ptr(iv[2]);
+                if (hp) {
+                    bits = hp;
+                } else if (bsz > 0 && bsz < (1ull << 20)) {
+                    try {
+                        bbounce.resize(static_cast<size_t>(bsz));
+                        impl_->mem->read(iv[2], bbounce.data(),
+                                         static_cast<size_t>(bsz));
+                        bits = bbounce.data();
+                    } catch (...) { bits = nullptr; }
+                }
+            }
+            using Fn = void (*)(uint32_t, uint32_t, float, float, float,
+                                float, const void*);
+            reinterpret_cast<Fn>(entry.host_fn)(
+                static_cast<uint32_t>(iv[0]), static_cast<uint32_t>(iv[1]),
+                fv[0], fv[1], fv[2], fv[3], bits);
         } else {
             // Unsupported mixed shape — no-op rather than corrupt.
             if (dbg().thunk_trace) {
@@ -1629,6 +1657,24 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint64_t stride = (row_bytes + align - 1) & ~(uint64_t)(align - 1);
             return h ? (h - 1) * stride + row_bytes : 0;
         };
+        // Bytes per pixel for a GL format/type pair (channel count ×
+        // component size). Unknown combos default to 1 byte/pixel.
+        auto pixel_bps_ = [](uint64_t fmt, uint64_t type) -> uint64_t {
+            uint64_t channels = 1;
+            switch (fmt) {
+                case 0x1907: case 0x80E0: channels = 3; break;  // GL_RGB / GL_BGR
+                case 0x1908: case 0x80E1: channels = 4; break;  // GL_RGBA / GL_BGRA
+                case 0x190A: channels = 2; break;               // GL_LUMINANCE_ALPHA
+                default: break;                                  // 1 (GL_RED/GL_ALPHA/...)
+            }
+            uint64_t type_sz = 1;
+            switch (type) {
+                case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
+                case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
+                default: break;                                  // UNSIGNED_BYTE etc.
+            }
+            return channels * type_sz;
+        };
         const thunk::SizeKind sk = entry.spec ? entry.spec->size
                                               : thunk::SizeKind::NONE;
         switch (sk) {
@@ -1739,6 +1785,76 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                                w * channels * type_sz);
                 }
             }
+            break;
+        case thunk::SizeKind::DRAWPIXELS:
+            // glDrawPixels(width, height, format, type, pixels): pixels is
+            // arg4 (upload — host reads it).
+            if (idx == 4) {
+                uint64_t w = args[0], h = args[1];
+                uint64_t sz = w * h * pixel_bps_(args[2], args[3]);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h,
+                                               w * pixel_bps_(args[2], args[3]));
+                }
+            }
+            break;
+        case thunk::SizeKind::BITMAP:
+            // glBitmap(w, h, xorig, yorig, xmove, ymove, bits): bits is
+            // arg6; rows are (w+7)/8 bytes.
+            if (idx == 6) {
+                uint64_t w = args[0], h = args[1];
+                uint64_t row = (w + 7) / 8;
+                uint64_t sz = h * row;
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h, row);
+                }
+            }
+            break;
+        case thunk::SizeKind::TEXIMAGE1D:
+            // glTexImage1D(target, level, internalformat, width, border,
+            // format, type, data): data is arg7, one row of width pixels.
+            if (idx == 7) {
+                uint64_t w = args[3];
+                uint64_t sz = w * pixel_bps_(args[5], args[6]);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, 1,
+                                               w * pixel_bps_(args[5], args[6]));
+                }
+            }
+            break;
+        case thunk::SizeKind::TEXSUBIMAGE1D:
+            // glTexSubImage1D(target, level, xoffset, width, format, type,
+            // data): data is arg6, one row of width pixels.
+            if (idx == 6) {
+                uint64_t w = args[3];
+                uint64_t sz = w * pixel_bps_(args[4], args[5]);
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, 1,
+                                               w * pixel_bps_(args[4], args[5]));
+                }
+            }
+            break;
+        case thunk::SizeKind::TEXSUBIMAGE3D:
+            // glTexSubImage3D(target, level, xo, yo, zo, w, h, d, format,
+            // type, data): data is arg10.
+            if (idx == 10) {
+                uint64_t w = args[5], h = args[6], d = args[7];
+                uint64_t bps = pixel_bps_(args[8], args[9]);
+                uint64_t sz = w * h * d * bps;
+                if (sz > 0 && sz < (64ull << 20)) {
+                    kBounce = static_cast<size_t>(sz);
+                    pad_extent = pixel_extent_(true, h * d, w * bps);
+                }
+            }
+            break;
+        case thunk::SizeKind::STIPPLE:
+            // glPolygonStipple/glGetPolygonStipple(mask): fixed 32×32-bit
+            // image = 128 bytes (rows of 4 bytes match default alignment).
+            kBounce = 128;
             break;
         case thunk::SizeKind::VK_REGIONS:
             // vkCmdBlitImage(cmd, src, srcLayout, dst, dstLayout,
