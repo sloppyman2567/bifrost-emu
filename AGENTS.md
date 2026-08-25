@@ -4181,3 +4181,50 @@ not musl-`-static`.
   shape check) so version bumps stop breaking it.
 - Verified at final HEAD: full check-all = suite **213/213**, capi
   **54/54**, nb **61/61**, all five generation guards clean.
+
+## Session History (2026-08-25) — neverball guest-heap corruption: PRE-EXISTING JIT wild-write (same family as vkQuake AllocBlock)
+
+- **GL leftovers batch landed (commit 5142851)**: 7 bulk-pixel SizeKinds
+  (DRAWPIXELS/BITMAP/TEXIMAGE1D/TEXSUBIMAGE1D/TEXSUBIMAGE3D/STIPPLE),
+  +65 GLdouble-by-value rows via the already-native 'd' kind
+  ('d' was plumbed all along — glOrtho used it; only mixed int+double
+  shapes stay skipped), and the mixed-FP dispatch gained the
+  (2 ints, 4 floats, pointer) glBitmap shape with a padded bounce.
+  Table 1493 → 1558 symbols; guards clean; suite 208/208.
+- **NEW DEMON (PRE-EXISTING, verified at parent a08ec46): neverball
+  aborts with GUEST glibc "malloc(): corrupted top size" under JIT.**
+  The corruption is in GUEST heap (guest libc aborts), written by
+  JIT-generated stores:
+  - Repro: `cd rootfs/usr/games && DISPLAY=:0 BIFROST_ROOT=<repo>/rootfs
+    LD_LIBRARY_PATH=<repo>/rootfs/usr/lib/aarch64-linux-gnu timeout -s
+    KILL 60 <repo>/bifrost-emu neverball` — dies ~8 s in (after GL
+    context + extension print, during menu texture load).
+  - `--no-jit` survives indefinitely BUT the menu stays WHITE (separate
+    cosmetic issue: textures not rendering under interp — unknown cause,
+    possibly a thunk path that silently no-ops without JIT).
+  - ASAN build does NOT flag it (guest window memory isn't host-malloc'd)
+    and the corrupting write is JIT code = invisible to ASAN.
+  - Feature gates ALL still corrupt: NO_SELFLOOP, NO_PIN, NO_FLAGSKIP,
+    TIER2=0, NO_DIRECT_CALL, REGALLOC_CHECK, NO_FP_CACHE, NO_CHAIN —
+    core codegen or an un-gated path.
+  - BIFROST_JIT_VERIFY=1 logs ~24 divergences; blocks cluster in
+    ANONYMOUS executable guest memory (~0x194xxxxx / 0x225a7ec in one
+    run's layout) — NOT any file-backed module. Suspected runtime-
+    dlopened NSS/gconv modules (glibc NSS activity confirmed by the
+    crash dump's NSSMOD probes). Divergence samples: x2 jit=0x10400000
+    ref=0x10400800; x0 jit=0xffffffff ref=0x7fffff; a SIMD v_lo[0..3]
+    divergence at 0x19483340 adjacent to 0x194831cc. CAUTION: verify
+    re-executes blocks through the interpreter, so SVC-bearing anon-code
+    blocks may be non-idempotent false positives.
+  - Module attribution recipe (works): run bifrost-asan (-O1 -g build)
+    under gdb, break jit_dispatch.cpp:703, walk
+    emu.dyn_linker_ raw pointer → DynamicLinker::objects_ for bases
+    (/tmp/opencode/attr4.gdb). NOTE guest lib bases are heap-ASLR'd per
+    run — attribute within the SAME run.
+  - **This is almost certainly the same disease as vkQuake's AllocBlock
+    surfaces-array shredding** (bulk guest-heap damage, JIT-only,
+    interp-clean). One hunt kills both. NEXT SESSION: identify the anon
+    exec region definitively (attribute within ONE verify run), disassemble
+    the divergent block, BIFROST_JIT_DUMP+BIFROST_DUMP_PC it, diff against
+    interp semantics. Also check whether the white-menu-interp issue is
+    the same block failing silently.
