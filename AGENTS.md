@@ -1267,6 +1267,198 @@ not musl-`-static`.
 - Verified: build clean (0 warnings), test_linux_audio 16/16 +
   test_android_audio 21/21 under JIT, quick suite **206/206** ×2.
 
+## Session History (2026-08-24) — vkQuake RADV crash ROOT-CAUSED + fixed; remaining pc=0 JIT bug characterized
+
+- **The original "RADV worker-thread crash" is FIXED.** It was OURS, not
+  RADV's: two thunk-layer defects, both fixed and verified (quick suite
+  208/208, swapchain/mambo still pass):
+  1. **AAPCS64 count masking (display_thunk.cpp VK_CMD_DEEP IN/OUT
+     refs)**: element counts arrive in registers/stack slots read as full
+     64-bit words, but callers commit uint32_t args with 32-bit stores —
+     bits [63:32] are legal stale-frame junk (vkQuake's
+     vkCmdPipelineBarrier imageMemoryBarrierCount slot carried a guest
+     code address, e.g. 0x00535b9f_00000001). The old
+     `cnt_arg > kVkDeepMaxElems` u64 compare silently staged **0
+     elements** while the host still received count=1 (low 32 bits) →
+     RADV read uninitialized reused-arena bytes as VkImageMemoryBarrier[0]
+     → chased garbage pNext (the 0x3ba38c32 =
+     VK_STRUCTURE_TYPE_MEMORY_BARRIER_ACCESS_FLAGS_3_KHR magic-check loop
+     in the crash backtrace) → SIGSEGV at varying sites. FIX: mask to u32
+     BEFORE any compare; if the masked count still exceeds
+     kVkDeepMaxElems, FAIL THE PLAN (ok=false → full sweep → generic
+     bounce fallback) — never silently under-stage. One-shot
+     `vk_deep_oversize_count_once` diagnostic. Same treatment on the OUT
+     copyback path; byte counts (count_in_bytes) keep u64 width.
+  2. **Embedded-struct flattening (vkmarshalgen/vkxml →
+     opgen_vkmarshal.hpp)**: `vk.xml` members that are structs BY VALUE
+     (VkComputePipelineCreateInfo.stage!) exposed NO pointer rows, so
+     stage.pName/pSpecializationInfo reached the driver as RAW guest
+     pointers (RADV memcmp'd pName against "main" → SIGSEGV on guest
+     .rodata). GraphicsPipelineCreateInfo worked only because pStages is
+     a pointer. FIX: vkxml.layout_struct now FLATTENS single by-value
+     struct members — interior pointer fields appended with adjusted
+     offsets and dotted count paths ('member:stage.dataSize');
+     vkmarshalgen member_offset resolves dotted paths; arrays-of-struct
+     by value are NOT flattened (WARN). Descriptors 1479 → 1551
+     chainable; regen via `python3 tools/opgen/vkmarshalgen.py`.
+  - With both fixes vkQuake boots PAST Vulkan init, pipelines, barriers,
+    swapchain — it RUNS (user saw the SDL window + a real Quake error
+    dialog) — then hits the NEXT bug below. "AllocBlock: full" (lightmap
+    atlas) is believed to be the SAME corruption wearing another face.
+- **REMAINING BUG (next session): guest pc=0 DecodeError —
+  _mi_malloc_generic's epilogue executes a SECOND time for an
+  already-returned call.** Full characterization (all verified with
+  env-gated probes + gdb watchpoints, repro ~100% under
+  `rootfs/vkquake` with `-nosound`):
+  - Death: epilogue block 0x521080 (`ldp x29,x30,[sp],#96; ret`) reads
+    x30=0 from its saved-LR slot (frame_base+8 — NOTE: slot = post-push
+    sp + 8, NOT sp-88; that arithmetic error cost a false lead).
+  - Hardware watchpoint on the exact slot (armed via BIFROST_TRAP_MALLOC
+    trap + direct-window host alias = window_base + guest_addr; window
+    base from the JIT dump's `movabs r10, imm` or the 4 GiB
+    /proc/PID/maps region): **61 zero-writes observed, ZERO with
+    cpu->pc inside malloc's body** — the slot is NEVER corrupted while
+    the frame is live. Writers are legitimate stack reuse (tinfl
+    decompress zeroing its own 496-byte frame, 0x526b20, etc.).
+  - Therefore the epilogue RE-RUNS after the frame is dead. Nothing in
+    the guest binary branches to 0x521150/0x521080 (verified by full
+    objdump grep), so the re-entry is manufactured by the JIT's control
+    transfer: stale chain/taken slot, wrong fall-through next_pc, bad
+    back_refs/flag-materialize/tier2 repatch, or a `br x30` with a
+    stale x30 (the EPI trace shows x30==0x521150 at every arrival at
+    0x521150 — suspicious; a `ret` with that x30 would land exactly
+    there).
+  - Gates tested and NOT it: NO_CHAIN, NO_SELFLOOP, NO_FLAGSKIP,
+    NO_DIRECT_CALL, TIER2=0, NO_PIN all still crash. JIT_VERIFY runs
+    (slow) with divergences at 0x51d2e8/0x100035f0 (logging-only).
+  - Diagnostic probes built during the hunt were REVERTED (tree clean);
+    re-add cheaply if needed: jit_glue.cpp DBG3 site — BIFROST_TRAP_MALLOC
+    (one-shot SIGTRAP at the 0x51dc04→0x521150 transition + slot print),
+    BIFROST_EPI_TRACE (log arrivals at 0x521150/0x521080/0x520f60 with
+    from/sp/x30 — MUST be outside the dbg_call_trace_ gate or set
+    BIFROST_DBG_GUARD too), BIFROST_SP_DRIFT (helper-entry/exit sp
+    check — CLEAN, no drift through jit_call_helper);
+    emulator.cpp step() — BIFROST_TRACE_WIN (windowed pc/sp/x30 trace,
+    interp-only). gdb scripts preserved in /tmp/opencode/vkq/ (gdbwp7.py
+    = the working watchpoint loop reading cpu->pc at rbx+0x108, sp at
+    +0x100 per frostjit.hpp REGS_OFF=0/SP_OFF=256/PC_OFF=264).
+  - Next-step plan: trap the fatal re-entry — log (a) every chain that
+    ENDS at 0x521150 together with whether that chain contained a
+    malloc entry (compare against entries counted at 0x520f60), or
+    (b) instrument try_chain_block/back_refs/pending_flag_mat patches to
+    log every slot patch (src block, slot off, target) and catch the one
+    targeting 0x521080/0x521150. The 206-vs-1 asymmetry (chains ending at
+    0x521150 vs at 0x520f60) is expected (prologue chains smoothly,
+    0x521150 breaks before 0x521080 is chained) — do not treat it alone
+    as the hijack count.
+
+## Session History (2026-08-24) — vkQuake AllocBlock: full ROOT-CAUSED; mmap allocator hardened
+
+- **The `pc=0` DecodeError is FIXED** (root cause was NEVER the JIT):
+  `Memory::mmap_alloc`'s bump allocator had NO upper bound — vkQuake's
+  mimalloc marched `mmap_next_` from 0x10000000 into the fixed main-stack
+  band (944–1008 MiB), got a "4 MB segment" at 0x3edc0080, and its page-
+  zeroing memset wiped live stack frames (saved LR = 0 → `ret` → pc=0).
+  FIX: the bump SKIPS OVER the stack region (Linux-like: base jumps to
+  `stack_top_`), the first-fit path skips stack-overlapping free ranges,
+  and mremap grow-in-place refuses to extend into the stack. Verified:
+  pc=0 gone, quick suite 208/208.
+- **Above-window fallback added**: when the 4 GiB window is exhausted,
+  mmap_alloc hands out addresses above DIRECT_WINDOW_SIZE using the
+  sparse pages_ storage (new `above_window_next_` cursor) instead of
+  failing — vkQuake's lightmap appetite exceeds the window, and failure
+  cascaded into NULL-data chaos. JIT window fast-path bounds checks fall
+  back automatically. execve zero-scan (threads.cpp) extended to cover
+  allocations above the stack.
+- **`untrack_allocation` hardened (Linux-like VMA split)**: the old code
+  did `allocations_.erase(addr)` (exact match) + `add_free_range` UN-
+  CONDITIONALLY — an interior/partial/oversized munmap put a range
+  overlapping a LIVE allocation onto free_ranges_, and mmap_alloc's
+  first-fit + MAP_ANONYMOUS zeroing destroyed live data. Now: intersect
+  the munmap with tracked allocations, split the tracked entries around
+  the freed sub-range, free only the tracked intersection, never add
+  untracked space.
+- **AllocBlock: full ROOT-CAUSED (still open — next session)**: vkQuake
+  exhausts its 256-lightmap atlas (6.2 GB RSS spike) because AllocBlock
+  receives **w = -911** for some surface (watchpoint on
+  used_columns[0][0] caught the corrupting `+= BinToSize(i)` with a
+  negative bin from SizeToBin(-911) — negative w passes the
+  `extents > 2000` guard silently, and SizeToBin(w≤0) returns a NEGATIVE
+  bin → OOB .bss read/write on columns[-912]/used_columns[garbage] →
+  allocator state shredded (observed: used_columns[0][0]=-752,
+  columns[12]=-799, all lightmap_idx/shelf_idx zeroed) → runaway
+  allocation to the 256 cap. w=-911 ⇒ a stored extents ≈ -14592 ⇒ the
+  BSP model data in the GUEST HEAP was stomped after load: a Python
+  simulation from the on-disk e1m1.bsp (lump table verified valid —
+  note vkQuake lump indices: LUMP_TEXTURES=2, LUMP_VERTEXES=3, and
+  BSP29 dsface_t is 20 BYTES: short planenum/side/numedges/texinfo)
+  shows all 3940 faces have sane extents (max 130 texels; total
+  85,365 texels = 0.08 lightmaps — the packing fits the whole map in
+  ONE lightmap, verified by simulation). So the stomp happens in guest
+  memory between Mod_LoadFaces and GL_BuildLightmaps. PRIME SUSPECTS
+  (next session): our Vulkan bounce/staging write paths (vkMapMemory
+  bounce overlap via stale free_ranges_, deep-marshal copyback overrun,
+  PCWFC push) — audit their guest-write bounds. The statics at
+  lightmap_count==1 were CLEAN, so the stomp lands mid-build.
+- Debug tooling preserved in /tmp/opencode/vkq/ (lmwatch*.py gdb scripts
+  reading the lightmap statics at 0x14af848/0x14af860/etc. through the
+  window alias; lit.pkl = the file-derived (w,h) table; the AllocBlock
+  Python simulation). vkQuake lump-index lesson: LUMP_TEXTURES=2,
+  LUMP_VERTEXES=3 (NOT the vanilla-Q2-style order), BSP29 dsface_t=20B.
+- **AllocBlock follow-ups (same session, later)**: (1) the mmap stack-skip
+  + above-window fallback + untrack VMA-split landed; AllocBlock: full
+  STILL reproduces (the stomp source is elsewhere). (2) The BL_CALL gate
+  "fixes" at 70s timeouts were FALSE NEGATIVES — re-tested at 200s, all
+  gates still hit AllocBlock; the direct-call path is exonerated
+  (default remains ON — a temporary default-OFF experiment was REVERTED:
+  it fixed nothing and the helper path timed out the rw_* suite tests;
+  the completion guard's tail-call collision remains unfixed but is not
+  linked to this failure). (3) The vec
+  cache exonerated (BL_CALL blocks never enable it — BL_CALL is not in
+  vec_cache_compatible_op). (4) VK_MAP_MEMORY remap ignores the new
+  offset/size (returns the first bounce — sub-allocation maps collide);
+  not yet identified as THE stomp. (5) LEAD: BIFROST_JIT_VERIFY=1 logs a
+  divergence at **mi_arenas_page_alloc_fresh+0x2a4** (0x51d2e8) — a
+  load/add/store/cmp-max counter+high-water update inside mimalloc's
+  page allocation. A JIT miscompile there misdirects page
+  allocations/memsets → the guest-heap stomp → corrupted BSP extents
+  (w=-911) → AllocBlock runaway. NEXT: chase that divergence (dump the
+  block's IR + JIT x86 via BIFROST_JIT_DUMP/BIFROST_DUMP_PC=0x51d2e8,
+  compare against the interpreter's values). (6) e1m1.bsp facts: 3940
+  faces, 2862 lit, 85365 texels total (0.08 lightmaps), packing
+  simulation fits everything in ONE lightmap — the guest-side explosion
+  is purely corruption-driven.
+- **AllocBlock follow-up 2 (same session, final)**: (7) The JIT_VERIFY
+  divergence at mi_arenas_page_alloc_fresh is a FALSE POSITIVE — the
+  block increments a counter (ldr/add/str at [x4+2488]); the verify
+  re-run double-increments (x22 jit=0 ref=1, x25 jit=1 ref=2 — exactly
+  +1). Non-idempotent blocks are a new verify false-positive class to
+  remember. (8) The corrupting write's guest pc 0x4742ac is AllocBlock's
+  while loop INLINED (attributed GL_SortSurfaces+0x54c — GCC placed the
+  inlined body there; identified by the `cmp w5,#0x400` = the 1024
+  LMBLOCK_WIDTH compare). At that stop x1=x10=-911 = BinToSize(-912) =
+  SizeToBin(w=-911) — the small-size path (w-1 < 17 → return w-1).
+  So a surface with w=-911 reaches AllocBlock. (9) **extents is `short
+  extents[2]`** (16-bit!) — w=-911 ⇒ extents[0] = 0xC700 = -14592.
+  File data has NO such value (all ≤ 2080, no inf/nan anywhere). The
+  0xC700 heap scan found only float-coordinate noise. (10) Exonerated:
+  tier-2, pins, self-loops, chains, flag-skip, direct-call (default OFF
+  now anyway), vec-cache (scalar-FP blocks never enable it), FRINT
+  XMM0-clobber (real latent bug — FRINT uses XMM0 as scratch without
+  checking whether the fp cache pinned it; unreachable for scalar-FP
+  blocks since vec_cache_compatible_op excludes them), the mimalloc
+  verify divergence. (11) REMAINING CANDIDATES for next session:
+  (a) JIT miscompile of SizeToBin/Q_log2 (integer log2) or the
+  `(extents>>4)+1` computation — dump the JIT x86 for the AllocBlock
+  block (BIFROST_DUMP_PC around 0x474280) and diff the SizeToBin
+  sequence against C semantics; (b) a heap stomp on the model's
+  surfaces array — find the surfaces array base (scan for the extents
+  short pattern 0xC700 at msurface_t strides) and watch THAT address
+  for the writer; (c) VK_MAP_MEMORY remap-offset bug (unfixed). The
+  corrupting-write watchpoint recipe: watch *(int*)(window+0x16905e0)
+  with condition < 0 — fires on the first negative BinToSize store
+  with full JIT context (see lmwatch8.py).
+
 ## Child DOX Index
 
 (none — single-tree emulator; parent Downloads rail indexes this folder)
@@ -3817,3 +4009,155 @@ not musl-`-static`.
   NAVI33)", driver="radv"; one-shot unknown-sType diagnostic fires for
   the deliberate bogus node; passes headless too.
 - Suite counts now: full default **213**, --quick **208**.
+
+## Session History (2026-08-24) — AllocBlock stomp forensics: surfaces array BULK-shredded; VK_MAP_MEMORY remap fixed
+
+- **VK_MAP_MEMORY remap-offset bug FIXED** (display_thunk.cpp ~2006): a remap
+  of an already-mapped VkDeviceMemory now returns the existing bounce ONLY
+  when map_offset AND map_size match the recorded shape; any different shape
+  is treated as implicit unmap+remap (push old bounce → host, untrack the
+  window range, host-unmap, then build a fresh mapping). The old code
+  returned the first bounce for ANY remap — with a LARGER size the guest
+  indexed past the smaller tracked range straight into neighboring window
+  allocations (guest-heap stomp vector). VkMapped is private to the impl
+  class, so copy fields into plain locals under vk_maps_mu and do the
+  push/untrack/host-unmap AFTER releasing the lock.
+- **AllocBlock forensic state (issue still OPEN — paused by user):**
+  - gdb watch on used_columns[0][0] (window+0x16905e0, cond <0) fires at
+    guest pc=0x4742ac again; w=-911 (x1=x10=x14=0xfffffc71) every run;
+    used_columns[0][0] went 111 → −799 this run.
+  - `[x19]` at that stop is NOT the current surface (register-reuse in the
+    giant inlined GL_SortSurfaces/AllocBlock blob) — do not trust it.
+  - REAL model array found from cl (static @0x1d616b0) + offset 0x16230 →
+    worldmodel m; qmodel_t offsets read off CalcSurfaceExtents disasm:
+    vertexes@280, edges@296, surfaces ptr@344, numsurfaces@336,
+    surfedges@360; medge_t/mvertex_t = 12 B stride. e1m1: 5274 surfaces at
+    0x40780080.
+  - **SCANNED THE WHOLE ARRAY: 1306 / 5274 surfaces are CORRUPT**
+    (numedges float-bit-patterns like 0x42E80000, zeroed structs, negative
+    extents), spread across ~1 MB of the array — a BULK overwrite /
+    zero-and-rewrite of live model heap, NOT a single-field poison and NOT
+    vertex data (pattern search against vertexes[] found no match).
+    Consistent with mmap-range reuse zeroing (untrack/free_ranges_ first-fit
+    + MAP_ANONYMOUS zeroing) hitting a STILL-LIVE allocation, or an
+    out-of-bounds write through a stale/wrong bounce — i.e. allocator
+    accounting or thunk write-path bug, upstream of GL_BuildLightmaps.
+  - JIT-miscompile lead (a) is WEAKENED but not dead: corruption is bulk
+    memory damage, so chasing SizeToBin x86 was dropped. CalcSurfaceExtents
+    (0x480500–0x4806f0) FMA/frintm/frintp/fcvtzs sequence documented here
+    if a value-level miscompile resurfaces later.
+  - Tools preserved: /tmp/opencode/vkq/lmwatchB.py (one-run forensic: catch
+    used_columns stop → read cl/worldmodel → scan all 5274 surfaces → dump
+    payload + compare vs vertexes[]), lmwatchA.py (register dump variant).
+    Run: `gdb -batch -x /tmp/opencode/vkq/lmwatchB.py bifrost-emu` from repo
+    root (~2 min to fire under BIFROST_NO_ASLR=1).
+  - NEXT (when resumed): (1) end-to-end test whether the remap fix alone
+    cures AllocBlock: full (fixed binary never got a full run — user
+    aborted; runs take >100 s to reach map load); (2) if not, find WHO
+    frees/reuses the surfaces-array range: instrument Memory::untrack_
+    allocation + mmap_alloc reuse (env-gated print when a reused/zeroed
+    range overlaps a tracked-live allocation or when free_ranges_ first-fit
+    picks a range containing 0x40780080..0x40877000); (3) audit remaining
+    guest-write paths for size/offset errors (vkCmdUpdateBuffer staging,
+    PCWFC push bounds).
+- Verified today: build clean with the remap fix (0 warnings); no suite run
+  (session ended early at user request).
+
+## Session History (2026-08-24) — GL automation Stage 1: glxmlcheck + 6 real row bugs FIXED
+
+- **`tools/opgen/glxmlcheck.py` landed** (`make glxml-check`, wired into
+  `check-all`): mechanically audits every GL/GLES row in thunk_dp.txt
+  against the Khronos gl.xml — arity (trailing-'i' elision allowed) +
+  pointer-position agreement, same contract as vkxmlcheck for Vulkan.
+  Registry VENDORED at `tools/gl-registry/gl.xml` (copied from the
+  cargo khronos_api-3.1.0 crate cache — re-vendor if that crate is
+  pruned; no egl.xml in that crate, so EGL rows are SKIP-listed for now).
+- **First run found SIX real errors; ALL FIXED:**
+  1. glGetShaderInfoLog / glGetProgramInfoLog (GL AND GLES rows,
+     4 rows total) had `iiip` — the GLsizei *length out-pointer (param 2)
+     was passed VERBATIM as an integer → host driver wrote through a raw
+     guest address. Fixed to `iipp`.
+  2. glCompressedTexImage2D had NINE arg tokens for the EIGHT-param
+     function — pointer mask shifted, `data` reached the host driver as a
+     RAW guest pointer (compressed uploads were broken end-to-end). Fixed
+     to `iiiiiiiz` + NEW SizeKind::ARG6 ('arg6' in the spec; thunkgen enum
+     + VALID_SIZE updated; dispatch case sizes the bounce from args[6]
+     imageSize, 16 MiB cap like ARG1/ARG2).
+  3. glDrawRangeElements had indices (a pointer when no VBO is bound)
+     dispatched as a plain scalar. Row policy → EL_PTR; the EL_PTR arm now
+     picks its arg index per name (glDrawRangeElements → arg5, default
+     arg3) mirroring the VA_PTR precedent.
+- Checker SKIP rules: policies {SHADER_SOURCE, MAP_BUFFER, UNMAP_BUFFER,
+  FLUSH_BUFFER, EL_PTR, VA_PTR, GET_PROC, TF_VARYINGS} own their
+  marshalling; DELIBERATE names {glGetString, glGetStringi} are
+  intercepted. Warnings (91, non-fatal, WARN_CAP 40 displayed) = pointer
+  params whose gl.xml len= marks dynamic size riding the default 64 KiB
+  bounce — this IS the stage-2 promotion roadmap.
+- Self-caught en route: my sed dropped one 'i' from the compressed-tex row
+  and the checker's own arity guard flagged MY edit — the net works on the
+  fisherman too. Also: never trust clangd LSP diagnostics in this tree
+  (no compile_commands.json — g++ with Makefile flags is the arbiter).
+- Verified: opgen-thunk regenerated (1058 symbols), opgen-thunk-check +
+  glxml-check + vkxml-check + opgen-check all clean, build 0 warnings,
+  quick suite **208/208**, test_sdl_gl_triangle rc=0, test_sdl_gl_modern
+  17/17 on live DISPLAY=:0/RADV.
+
+## Session History (2026-08-24) — GL automation Stage 2: core-GL coverage auto-expansion
+
+- **`tools/opgen/glcoverage.py` landed** (`make glcoverage-check`, wired
+  into `check-all`): generates missing core GL <=3.3 rows from the
+  vendored gl.xml into a marked BEGIN/END block inside thunk_dp.txt
+  (spec stays single source of truth; opgen-thunk-check pins the header).
+  **428 new rows**, table 1058 → 1486 symbols.
+- Candidate rules (conservative): api='gl' features number<=3.3 not
+  already in spec; SKIP GLdouble/GLclampd by-value functions (78 — 'f'
+  is binary32-only, doubles need a dedicated arg kind, future work);
+  SKIP bulk pixel buffers whose len= references width/height/depth or
+  COMPSIZE() (7: glDrawPixels/glBitmap/glTexImage1D/glTexSubImage1D/
+  glTexSubImage3D/glPolygonStipple/glGetPolygonStipple — need real
+  SizeKinds); ARGS = 'p' at '*' params else 'i'.
+- GOTCHAS: (1) --check must EXCLUDE the autogenerated block when scanning
+  existing spec names, else it sees its own rows as "already present"
+  and regenerates an empty block → permanent DRIFT failure. (2) flag
+  parsing must filter '--check' before positional args. (3) classify()
+  must use its parameter, not a stale global (NameError).
+- Verified: glcoverage-check + glxml-check (735 rows, errors=0,
+  warnings=349 = dynamic-size roadmap) + opgen-thunk-check clean; build
+  0 errors; quick suite **208/208** on the expanded table;
+  test_sdl_gl_triangle rc=0 + test_sdl_gl_modern 17/17 on live :0/RADV.
+
+## Session History (2026-08-24) — GL automation Stage 3: dispatch de-hand-armed
+
+- **Three name-string dispatch arms became table-driven** (thunkgen +
+  thunk_dp.txt + thunk.cpp):
+  1. **PCWFC consumer list → SYNC column**: optional 7th spec column
+     (`SYNC`) emits `Spec::sync_before`; dispatch pushes persistent map
+     bounces before marked rows. Marked: all glDraw* EXCEPT glDrawBuffer/
+     glDrawBuffers (old prefix `compare(0,6,"glDraw")` over-synced those
+     two harmlessly — precise set now; over-pushing was always safe),
+     glGetBufferSubData, glCopyBufferSubData, glTexBuffer,
+     glDrawElementsInstancedBaseVertex, glDrawRangeElementsBaseVertex.
+     NOTE glTexBufferRange is NOT in the spec at all (was dead in the old
+     name list too). PARSER RULE: a trailing literal `SYNC` token strips
+     BEFORE the last-three-tokens RET/POLICY/SIZE read — both thunkgen.py
+     and glxmlcheck.py do this.
+  2. **glGetString/glGetStringi → GET_STRING policy** — arm branches on
+     the ARGS string ("i" vs "ii"); exact-prototype calls + string cache
+     unchanged. Removed from glxmlcheck DELIBERATE (policy owns it).
+  3. **glDeleteBuffers → DELETE_BUFFERS policy** — post-call mapping
+     cleanup arm keyed by policy instead of name.
+- **Two latent bugs fixed en route** (found while marking SYNC): the
+  autogenerated glDrawElementsInstancedBaseVertex ('iiipii') and
+  glDrawRangeElementsBaseVertex ('iiiiipi') marked indices as ALWAYS-
+  translate 'p' — wrong when a VBO is bound (offset, not pointer).
+  Converted to EL_PTR ('iiiiii'/'iiiiiii'); EL_PTR arm's per-name pi map
+  gained DrawRangeElementsBaseVertex→arg5.
+- thunkgen plumbing: VALID_POLICY += GET_STRING/DELETE_BUFFERS;
+  Spec struct + row emission carry sync_before; module DOCSTRING updated
+  (the HEADER template struct is separate — updating only the docstring
+  compiles fine but leaves the field missing; caught by grep).
+- Verified: opgen-thunk-check / glcoverage-check / glxml-check clean
+  (735 rows, errors=0); build 0 warnings; quick suite **208/208**;
+  test_sdl_gl_triangle rc=0, test_sdl_gl_modern 17/17 (GET_STRING +
+  EL_PTR draws), test_sdl_gl_mapbuffer 21/21 (DELETE_BUFFERS + PCWFC)
+  on live DISPLAY=:0/RADV.
