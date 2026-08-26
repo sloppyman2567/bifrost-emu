@@ -158,8 +158,8 @@ inline Op classify(uint32_t op) {
     if ((op & 0xBF00F400U) == 0x0F006000U && (size < 3)) return Op{Family::MUL_ELEM, 100, 7, "SMLSL_ELEM"};
     if ((op & 0xBF00F400U) == 0x2F006000U && (size < 3)) return Op{Family::MUL_ELEM, 101, 8, "UMLSL_ELEM"};
     if ((op & 0xBF00F400U) == 0x0F00C000U && (size < 3)) return Op{Family::MUL_ELEM, 102, 9, "SQDMULH_ELEM"};
-    if ((op & 0xBF00F400U) == 0x0F00D000U && (size < 3)) return Op{Family::MUL_ELEM, 103, 16, "SQRDMULH_ELEM"};
-    if ((op & 0xBF00F400U) == 0x0F00B000U && (size < 3)) return Op{Family::MUL_ELEM, 104, 17, "SQDMULL_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00D000U && (size < 3)) return Op{Family::MUL_ELEM, 103, 10, "SQRDMULH_ELEM"};
+    if ((op & 0xBF00F400U) == 0x0F00B000U && (size < 3)) return Op{Family::MUL_ELEM, 104, 11, "SQDMULL_ELEM"};
     if ((op & 0xBFE0FC00U) == 0x0E002C00U && (((op >> 16) & 0x1F) == 1 || ((op >> 16) & 0x1F) == 2 || ((op >> 16) & 0x1F) == 4)) return Op{Family::SMOV, 105, 0, "SMOV"};
     if ((op & 0xBF20FC00U) == 0x0E200C00U && (size < 2)) return Op{Family::SATADDSUB, 106, 0, "SQADD"};
     if ((op & 0xBF20FC00U) == 0x2E200C00U && (size < 2)) return Op{Family::SATADDSUB, 107, 1, "UQADD"};

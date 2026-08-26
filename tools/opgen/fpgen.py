@@ -85,7 +85,7 @@ def parse_rows(spec_path):
                       % (spec_path, lineno, line), file=sys.stderr)
                 raise SystemExit(2)
             name, mask, match, family = toks[0], toks[1], toks[2], toks[3]
-            irsub = int(toks[4], 16) if len(toks) > 4 else 0
+            irsub = int(toks[4], 0) if len(toks) > 4 else 0
             guard_toks = toks[5:] if len(toks) > 5 else []
             guard = ' '.join(guard_toks) if guard_toks else None
             if guard is None or guard.strip() in ('-', ''):

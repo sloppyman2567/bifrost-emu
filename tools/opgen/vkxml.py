@@ -92,7 +92,7 @@ def parse_structure_types(root):
     """
     def raw_value(e, extnumber_default=1):
         if e.get('value') is not None:
-            return int(e.get('value'))
+            return int(e.get('value'), 0)  # base 0: registry carries hex values too
         off = e.get('offset')
         if off is None:
             return None

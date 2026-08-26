@@ -29,7 +29,9 @@ XML_DEFAULT = 'tools/gl-registry/gl.xml'
 # Policies whose dispatch arms read guest registers directly and own their
 # marshalling — the generic ARGS pointer mask is not applied for them.
 OWN_MARSHALLING_POLICIES = {
-    'GET_STRING',      # exact-prototype string-cache arm\n    'DELETE_BUFFERS',  # post-call mapping cleanup\n    'SHADER_SOURCE',   # nested string-array re-marshal after generic translate
+    'GET_STRING',      # exact-prototype string-cache arm
+    'DELETE_BUFFERS',  # post-call mapping cleanup
+    'SHADER_SOURCE',   # nested string-array re-marshal after generic translate
     'MAP_BUFFER', 'UNMAP_BUFFER', 'FLUSH_BUFFER',   # window-bounce mapping
     'EL_PTR',          # conditional client-array translate at a fixed arg
     'VA_PTR',          # conditional client-array translate at a per-name arg

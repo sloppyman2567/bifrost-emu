@@ -58,6 +58,8 @@ def main():
                 continue
             toks = line.split()
             name, lib = toks[0], toks[1]
+            if toks[-1] == 'SYNC':
+                toks = toks[:-1]
             ret, policy, size = toks[-3], toks[-2], toks[-1]
             if lib != 'VK':
                 continue
