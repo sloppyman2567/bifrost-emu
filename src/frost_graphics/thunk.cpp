@@ -1385,6 +1385,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             bool is_range = (entry.name == "glMapBufferRange");
             uint32_t target = static_cast<uint32_t>(args[0]);
             uint32_t access = static_cast<uint32_t>(is_range ? args[3] : args[1]);
+            if (!is_range) {
+                // glMapBuffer takes an ACCESS ENUM, not a bitfield:
+                // GL_READ_ONLY=0x88B8 / GL_WRITE_ONLY=0x88B9 /
+                // GL_READ_WRITE=0x88BA. None of their bits overlap the
+                // GL_MAP_*_BIT masks (e.g. 0x88B9 & GL_MAP_WRITE_BIT==0),
+                // so without this normalization the writeback-on-unmap
+                // check below silently dropped every glMapBuffer write.
+                if (access == 0x88B8)      access = kGLMapReadBit;
+                else if (access == 0x88B9) access = kGLMapWriteBit;
+                else if (access == 0x88BA) access = kGLMapReadBit | kGLMapWriteBit;
+            }
             uint64_t offset = is_range ? args[1] : 0;
             uint64_t length = is_range ? args[2] : 0;
             cpu.regs[0] = 0;
