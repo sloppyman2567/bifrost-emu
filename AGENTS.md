@@ -4162,6 +4162,52 @@ not musl-`-static`.
   EL_PTR draws), test_sdl_gl_mapbuffer 21/21 (DELETE_BUFFERS + PCWFC)
   on live DISPLAY=:0/RADV.
 
+## Session History (2026-08-26) — neverball demon ROOT-CAUSED and FIXED: W-form CBZ/CBNZ 64-bit test
+
+- **The neverball heap corruption is SOLVED.** Root cause: `BRCOND_ZERO`
+  (W-form `cbz/cbnz`) emitted a 64-bit `test rax,rax`, so dirty bits
+  [63:32] flipped the branch. glibc's hand-written NEON
+  `__strlen_asimd` keeps fold state in x3's upper half across
+  `cbnz w3` (a deliberate 32-bit test); under JIT the branch took the
+  wrong path for alignment-dependent string layouts → strlen returned
+  SHORT lengths → malloc/strcpy size mismatches shredded guest heap
+  metadata ("malloc(): invalid size (unsorted)" / "free(): invalid
+  next size (fast)") ~8 s into neverball's menu load.
+- **Hunt methodology that landed it** (all tools kept): (1)
+  differential strlen hash probe (glibc-dynamic guest, JIT vs interp);
+  (2) alignment sweep — failures were exactly al=9..23 returning
+  chunk-relative lengths; (3) isolated-op inline-asm probes cleared
+  uminp/cmeq#0/shrn/fmov/rbit/clz individually (interp==JIT), killing
+  the SIMD-suspect theory; (4) minimal dirty-upper `cbnz w3` probe
+  reproduced the misbranch (JIT taken=1, interp taken=0). Verify-mode
+  lesson: the earlier `[VERIFY] PC DIVERGENCE` at __strlen_asimd+0x38
+  was REAL, not non-idempotency noise — do not dismiss PC divergences
+  inside hand-written guest asm.
+- **FIXES (both verified)**: (1) translator records `sf` on
+  BRCOND_ZERO/TST insts; both codegen sites
+  (jit_codegen_branch.cpp BRCOND_ZERO + jit_tier2.cpp BRCOND_ZERO)
+  emit `mov eax,eax` before the test when sf=0; frostjit.cpp TST emits
+  a true 32-bit TEST for W-form ANDS/TST/BICS (N flag from bit 31, was
+  stuck at 0 via REX.W SF-from-bit63 — every b.mi/b.pl/csel-mi after a
+  W logical test misbranched).
+- Verified: p12 probe correct; slprobe3 sweep 0 wrong (was 15);
+  strlen hash == interp (49680eac41dc0249); neverball exits CLEAN
+  (exit 0, zero crash signatures, first time ever under JIT);
+  quick suite **208/208 + 1 env skip**; bench_mips acc
+  `0xf800800a2c4ff835` unchanged (its hot loop is a CBZ self-loop with
+  deferred pins — unaffected by the mask).
+- Forensic tooling built this session: window-base discovery recipe
+  (scan exec/anon maps for `49 BA` movabs-imm64 whose alias shows the
+  ELF header bytes — /proc maps region-splitting defeats naive base
+  guessing; R10-at-syscall-entry does NOT work, R10 is clobbered);
+  leftover TEMP DEBUG probes inside deliver_signal (signal.cpp ~576+)
+  SEGFAULT on unmapped allocation holes during abort handling — read-
+  only probes but they hard-fault via Memory::read's fast path;
+  cleanup candidate. GraphicThunk full-bounce writeback (thunk.cpp
+  ~2346, 64 KiB stomp on above-window pointers, DisplayThunk-fixed
+  class) remains a LATENT shredder; four unguarded 4 KiB ifunc/init
+  scratch stacks remain the top live hazard (audit-only findings).
+
 ## Session History (2026-08-25) — commits split; check-all "segfault" was STALE BUILD ARTIFACT
 
 - **All multi-session uncommitted work split into 4 commits**: mem
@@ -4228,3 +4274,125 @@ not musl-`-static`.
     the divergent block, BIFROST_JIT_DUMP+BIFROST_DUMP_PC it, diff against
     interp semantics. Also check whether the white-menu-interp issue is
     the same block failing silently.
+
+## Session History (2026-08-25) — JIT heap-corruption hunt II: shift+ADCS fixed, MEMFULL built, culprit narrowed
+
+- **TWO REAL JIT MISCOMPILES FIXED (both value-dependent, both verified):**
+  1. **32-bit variable-shift count masking**: LSLV/LSRV/ASRV W-forms took the count mod 64
+     (`and rcx,0x3f` + REX.W) instead of mod 32 — any W-shift with count ≥ 32 miscompiled.
+     glibc `_int_malloc`'s binmap update `lsl w8,w2,w8` with bin idx 107 produced 0 instead of
+     0x800 → shredded binmap → overlapping chunks → "corrupted top size"/"invalid size".
+     Fix: translator sets `width=32` for all !sf variable shifts (ir_translate.cpp:~343);
+     codegen emits true 32-bit forms (count hardware-masked mod 32, upper container zeroed).
+     This bug was LIVE during all previous bisection sessions and POISONED THEM (any single-gate
+     fix was masked). `_int_malloc` verify divergences gone after fix.
+  2. **ADCS/SBCS width hardcoded 0** (ir_translate.cpp ~207): every 32-bit adcs/sbcs ran as
+     64-bit ADC/SBB → x86 CF from bit 63 (never set for W inputs) → ARM C stuck at 0.
+     Fix: pass `d.sf ? 64 : 32`. Regression tests added to ctest/jit_carry.c
+     (adcs32_chain/sbcs32_chain via inline asm with early-clobber &; test VERIFIED to fail
+     on buggy build, pass on fixed). NOTE: adcs w does not appear in neverball/libc/libpng/zlib,
+     so this was latent, not the neverball killer.
+- **Also fixed:** alGenBuffers/alGenSources wrote 8 bytes into 4-byte-strided guest arrays
+  (wr64→wr32); glMapBuffer access ENUM (GL_WRITE_ONLY=0x88B9) failed the GL_MAP_WRITE_BIT test →
+  unmap dropped all writes (normalize legacy enums); opgen.py/fpgen.py parsed IRSUB column as hex
+  ("10"/"11" → 16/17) breaking SQRDMULH_ELEM/SQDMULL_ELEM subops (+ will-call-interp mirror mismatch);
+  Memory::untrack claim in external audit was FALSE (sizes already consistent).
+- **NEW TOOLING (all env-gated, kept):**
+  - `BIFROST_JIT_VERIFY_EVERY=N`: re-verify each block on its first N run_block dispatches
+    (default 1 = old behavior). Data-dependent miscompiles pass first-dispatch verify.
+  - SIMD_ST16 stores tracked in store_infos (width 16) + memverify covers them.
+  - `BIFROST_JIT_VERIFY_MEMFULL=1` + `BIFROST_MEMFULL_START/END`: full-range byte diff of
+    guest memory between JIT post-state and interpreter re-run state, with jit/ref hexdump.
+    THIS WORKS AND IS THE PRIMARY WEAPON. Range must be mapped or it silently disarms
+    (armed/fail prints added).
+  - `BIFROST_WRITE_TRACE=<file>`: logs every Memory::write (addr,size,tid) — CAVEAT: JIT inline
+    window stores BYPASS Memory::write, so JIT-side streams are incomplete; diffing JIT vs INTERP
+    write streams is therefore NOT meaningful past the engine split point (~line 13839 =
+    end of loader/init-array phase where BOTH runs use the interpreter).
+  - `BIFROST_ALLOC_TRACE=1`, `BIFROST_SCRATCH_TRACE=1`: allocation/placement prints.
+- **VERIFICATION-BLIND-SPOT LESSONS (all confirmed empirically):**
+  - Chained entries bypass run_block entirely → never verified regardless of VERIFY_EVERY.
+    ALWAYS combine deep verify with BIFROST_NO_CHAIN=1 BIFROST_NO_SELFLOOP=1.
+  - Blocks containing BL_CALL produce STRUCTURAL false positives under verify (JIT swallows the
+    callee; ref steps N instructions) — expect PC divergences + register noise from them;
+    do not chase. Same for blocks entered mid-function.
+  - Non-idempotent memory (e.g. __libc_start_call_main's TLS sp-chain self-modification at
+    tpidr-0x628/-0x620) produces plausible-looking MEM divergences — check idempotency before
+    chasing.
+  - __libc_start_call_main block @ startup: v_lo[3..5] "garbage vs zeros" divergence is the
+    whole-game-inside-jit_call_helper structural artifact. NOT a bug.
+- **EXHAUSTIVELY ELIMINATED as the neverball/vkQuake corruption source** (neverball dies
+  ~8s in, glibc "malloc(): invalid size (unsorted)" / "free(): invalid size"; interp clean):
+  tier2 regions, chains, self-loops, pins, flag-skip, vec-cache, fp-cache, direct-call,
+  thread/shared-JIT modes, DSE, opt, exitchain, wex, MALLOC_INTERP, audio pump, MRS,
+  window aliasing, CALL_INTERP handoff, vec prologue, ADCS (pre-fix it WAS broken but not
+  reachable), audio-device-open path (FAIL_OPEN still corrupts). Deep verify (every block,
+  200 dispatches, full 64MB heap diff) catches NOTHING yet the game dies ⇒ the corruption
+  occurs (a) beyond verification coverage, (b) outside the diffed range (stack 0x3effxxxx /
+  heap >0x14000000), or (c) in HOST-SIDE writers invisible to replay (thunks/signal frames/
+  borrow-runner) — though pure-host-writer theories conflict with gate-independence.
+- **CONFUSION SOURCES TO NOT REPEAT:** BIFROST_NO_ASLR omitted in some runs → library bases move
+  (libc seen at 0x1062d000/0x19ce2000/0x2f928000) — ALWAYS set NO_ASLR for cross-run comparisons.
+  neverball's own /root/.neverball/neverball.log APPENDS across runs → lseek(SEEK_END) sizes
+  differ benignly; truncate before differential runs. --no-jit CLI arg shifts argv → prefer
+  BIFROST_NO_JIT=1 env for identical argv. gdb disables HOST ASLR → JIT code-buffer addresses
+  stable across gdb runs but NOT comparable to non-gdb runs. /tmp fills up with traces
+  (46M-line write traces) — clean before builds.
+- **NEXT SESSION PLAN (in order):**
+  1. Extend MEMFULL range to cover the guest STACK band (0x3E000000..0x3F000000) and heap above
+     0x14000000; accept stack false-positives by filtering sp-relative deltas.
+  2. Identify the ANON-EXEC module whose blocks diverge (seen at 0x25d6388/0x2602220/0x28b2dd1c
+     in various runs — late-dlopen'd NSS/gconv/glib module?) — correlate with DYNLINK_TRACE.
+  3. If MEMFULL still silent at higher coverage: instrument JIT inline window stores behind an
+     env flag (trace hook in the ST16/LD16 fast paths) to make JIT stores visible to traces.
+  4. Re-test vkQuake AllocBlock with the guarded callback stacks (128KB, PROT_NONE guards via
+     Memory::mmap_alloc_callback_stack) — pump-thread scratch overflow was suspected and fixed
+     defensively but did NOT cure neverball alone.
+- **GUARDED SCRATCH STACKS LANDED (defensive, kept):**
+  Memory::mmap_alloc_callback_stack(usable) = mmap_alloc + mprotect PROT_NONE guard pages both
+  sides; call_guest_function and the wire_thunk_glfw_cb_runner site now allocate 128 KiB guarded
+  stacks (were 8 KiB mid-heap, overflow-prone). The pump thread writes PCM bounces adjacent to
+  these — bounce placement vs guard interaction produced one loud SIGSEGV (progress: silent
+  corruption → loud fault). Four more scratch sites (4096B IFUNC resolvers, 8192B
+  set_guest_call_args at emulator.cpp ~1674) remain unguarded-but-shallow.
+
+## Session History (2026-08-25) — static contract audit: EXTR/BFM/CLZ fold + thunk fixes
+
+- **Two parallel READ-ONLY subagent audits** (translator↔codegen IR field contracts; thunk
+  guest-writes + generator parsing) found **five more definite bugs**, ALL FIXED same session:
+  1. **EXTR W-form unmasked Xm** (ir_translate.cpp ~412/416): the SHL/SHR decomposition of
+     `extr w` fed FULL 64-bit Xm into the low-part SHR — garbage bits [32:63] OR'd into the
+     32-bit result. Fix: explicit `d.sf ? 64 : 32` width on all decomposition SHL/SHR emits
+     (the fixed W-shift path masks count mod 32 + zeroes upper container).
+  2. **BFM insert W-form unmasked Rn** (~446/462): identical disease in the rotate
+     decomposition — garbage Xn[32:63] landed INSIDE the mask window of `bfi w`. Same fix.
+     These two are prime candidates for the neverball/vkQuake corruption itself (dirty-upper
+     W-form bitfield ops are everywhere in game code) — retest pending.
+  3. **CLZ constant-fold ignored width** (ir_optimize.cpp): folds always computed 64-bit CLZ;
+     ARM `clz w` = 32 for zero and counts from bit 31. Reachable via XZR sources and tier-2
+     FWD propagation. Fold now width-aware; dead RBIT/REV16/REV32 folds deleted (never
+     emitted — SWAR-decomposed in ir_lower.cpp).
+  4. **pa_simple_new double-dereference** (audio_thunk.cpp ~945): treated PulseAudio's
+     `int *error` as `int **` → rd64(errp) then write-through-garbage-pointer = arbitrary
+     guest-memory corruption class. Now `wr32(I, errp, 0)` directly.
+  5. **SDL_PauseAudioDevice off-by-one** (~698): `name[15]=='D'` always false ('D' is [14])
+     → device handle ignored, paused wrong device.
+- Hygiene: CLZ native emission gated on has_lzcnt() (BSF-decode silent corruption on non-ABM
+  CPUs); scalar SIMD SHL unallocated encoding now falls to CALL_INTERP instead of silent
+  shift-by-0 NOP; glxmlcheck.py literal-\n comment bug (DELETE_BUFFERS/SHADER_SOURCE never
+  exempted); vkxmlcheck/eglcheck now strip SYNC column; vkxml.py hex value= crash;
+  opgen.py dead var removed.
+- **Regression tests**: ctest/jit_bfext.c (8 checks: extr W dirty-upper, bfi W dirty-upper,
+  clz w/x zero+one, positive sanity) — inline asm with volatile inputs AND early-clobber "&"
+  outputs (GCC legally aliased an input into an early-written output without &). Registered
+  in run_tests.sh after carry. Suite totals are DYNAMIC — no count bumps needed.
+- **AUDIT METHODOLOGY (keep for future)**: spawn parallel read-only explore subagents with a
+  table-driven contract spec ("for each IROp: fields codegen consumes vs what every emit site
+  passes") — found 5 real bugs in one pass with zero runtime debugging. Clean-audited list
+  covers ADDS/SUBS/ADCS/SBCS/SBFM/UBFM/CSEL/CCMP/UDIV/SDIV/MUL-family/LDP-STP/SIMD families/
+  FP families/thunk write sizes/generator parsers — see session transcript for full table.
+- Validation: clean rebuild, bfext 8/8 under JIT + interp, carry still PASS,
+  quick suite 209/209, all five generation guards clean.
+- Neverball still dies ~8s with "malloc(): invalid size" (pre-existing demon, unchanged by
+  these fixes) — the dedicated hunt continues separately (see earlier entry today: MEMFULL
+  verifier, VERIFY_EVERY, elimination list).
