@@ -290,6 +290,11 @@ public:
     // runtime-guard pattern as has_sse41() — pcmpgtq would SIGILL on
     // pre-Westmere hosts without the check.
     bool has_sse42() const { return cpu_features_.sse42; }
+    // LZCNT gating (native CLZ codegen): F3 0F BD decodes as BSF on
+    // hosts without ABM/LZCNT — BSF leaves the dest UNCHANGED on zero
+    // input instead of returning the operand width, silently corrupting
+    // clz-of-zero. Same runtime-guard pattern as has_sse41().
+    bool has_lzcnt() const { return cpu_features_.lzcnt; }
     // 1.5.4-alpha: crypto instruction set detection.
     bool has_aesni()     const { return cpu_features_.has_aesni(); }
     bool has_pclmulqdq() const { return cpu_features_.has_pclmulqdq(); }
@@ -768,7 +773,7 @@ private:
         struct StoreInfo {
             uint8_t  arm_reg;   // 0..31 (or 32 for XZR — never stored, so N/A)
             int64_t  offset;    // signed displacement
-            uint8_t  width;     // 1, 2, 4, or 8
+            uint8_t  width;     // 1, 2, 4, 8, or 16 (SIMD_ST16 16-byte chunk)
             // Set when the base ARM reg was modified to a known IMM within the block.
             bool     use_absolute = false;
             uint64_t absolute_addr = 0;

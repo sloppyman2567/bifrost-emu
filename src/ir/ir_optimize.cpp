@@ -179,35 +179,20 @@ static bool fold_unop(IROp op, uint64_t a, uint64_t width, uint64_t& out) {
             out = a & mask_for_width(static_cast<int>(width));
             return true;
         case IROp::CLZ: {
-            // Count leading zeros by scanning from the high bit down.
-            for (int i = 63; i >= 0; i--) {
-                if ((a >> i) & 1) { out = 63 - i; return true; }
+            // Count leading zeros within the operand width (ARM `clz w`
+            // counts from bit 31 and returns 32 for zero input; the JIT
+            // native path subtracts 32 when inst.width == 32). The
+            // translator always sets width (64/32) on CLZ emits.
+            int bits = width ? static_cast<int>(width) : 64;
+            for (int i = bits - 1; i >= 0; i--) {
+                if ((a >> i) & 1) { out = (bits - 1) - i; return true; }
             }
-            out = 64; return true;
+            out = bits; return true;
         }
-        case IROp::RBIT: {
-            uint64_t r = 0;
-            for (int i = 0; i < 64; i++) if ((a >> i) & 1) r |= (1ULL << (63 - i));
-            out = r; return true;
-        }
-        case IROp::REV16: {
-            uint64_t r = 0;
-            for (int i = 0; i < 4; i++) {
-                uint16_t h = static_cast<uint16_t>((a >> (i * 16)) & 0xFFFF);
-                uint16_t s = static_cast<uint16_t>(((h & 0xFF) << 8) | ((h >> 8) & 0xFF));
-                r |= static_cast<uint64_t>(s) << (i * 16);
-            }
-            out = r; return true;
-        }
-        case IROp::REV32: {
-            uint64_t r = 0;
-            for (int i = 0; i < 2; i++) {
-                uint32_t w = static_cast<uint32_t>((a >> (i * 32)) & 0xFFFFFFFF);
-                uint32_t s = __builtin_bswap32(w);
-                r |= static_cast<uint64_t>(s) << (i * 32);
-            }
-            out = r; return true;
-        }
+        // NOTE: RBIT/REV16/REV32 have no constant folds here — the
+        // translator never emits those IROps (they are SWAR-decomposed
+        // in ir_lower.cpp before optimization ever sees them); only
+        // REV64 is emitted directly.
         case IROp::REV64:
             out = __builtin_bswap64(a); return true;
         default: return false;

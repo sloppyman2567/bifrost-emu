@@ -204,8 +204,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             bool set_flags = (d.cls == InstClass::ADCS_REG || d.cls == InstClass::SBCS_REG);
             uint16_t r = g_alloc.alloc();
             if (set_flags) {
+                // Width MUST be passed for W-forms: the JIT picks its
+                // 32-bit ADC/SBB path (flags from bit 31 + zero-extended
+                // dest) off inst.width. Hardcoding 0 made every 32-bit
+                // adcs/sbcs execute as 64-bit — x86 CF came out of bit 63
+                // (never set for W-sized inputs), so ARM C was stuck at 0.
                 emit(block, is_sub ? IROp::SBCS : IROp::ADCS, r, a, b,
-                     0, 0, is_sub ? 1 : 0);
+                     d.sf ? 64 : 32, 0, is_sub ? 1 : 0);
             } else {
                 // No-flag ADC/SBC: decompose into CSEL + ADD (+ NOT for SBC).
                 //
@@ -293,7 +298,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             if (is_ands) {
                 // TST sets flags from a & b. ANDS also writes Rd.
+                // Record sf: the codegen must use a 32-bit TEST for W-forms
+                // (x86 SF comes from bit 63 of the 64-bit test, so a W-form
+                // ANDS/TST would leave ARM N stuck at 0 and misroute every
+                // b.mi/b.pl/csel-mi consumer).
                 emit(block, IROp::TST, 0, a, b);
+                block.insts.back().sf = d.sf;
             }
             uint16_t r = g_alloc.alloc();
             emit(block, op, r, a, b);
@@ -338,9 +348,13 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 emit(block, IROp::SEXT, sext, a, 0, 32);
                 a = sext;
             }
-            // 32-bit ROR: set width=32 so the JIT uses 32-bit ROR
-            // (64-bit ROR on a zero-extended 32-bit value loses wrap bits).
-            uint8_t width = (d.cls == InstClass::ROR && !d.sf) ? 32 : 0;
+            // Any 32-bit variable shift: set width=32 so the JIT uses the
+            // x86 32-bit shift form. ARM LSLV/LSRV/ASRV/RORV take the count
+            // mod 32 for W ops; a 64-bit x86 shift masked to 6 bits
+            // miscompiles counts >= 32 (e.g. glibc _int_malloc's
+            // `1u << (bin % 32)` binmap update with bin >= 32+11 produced 0
+            // instead of 0x800 and shredded the guest heap).
+            uint8_t width = !d.sf ? 32 : 0;
             uint16_t r = g_alloc.alloc();
             emit(block, op, r, a, s, width);
             r = zext_if_32bit(block, r, d.sf);
@@ -394,14 +408,17 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 // Rd = Rm (low 64 bits of the concatenation).
                 result = rm_v;
             } else {
-                // hi_part = Rn << (width - lsb)
+                // Pass the explicit width so W-form shifts stay inside 32
+                // bits (ARM masks operands to the operation width; the
+                // interpreter does `rn &= rm &= 0xFFFFFFFF` at sf=0).
+                // Without it a dirty Xm[63:32] shifts down into the result.
                 uint16_t sh_hi = load_imm(block, static_cast<uint64_t>(width - lsb));
                 uint16_t hi = g_alloc.alloc();
-                emit(block, IROp::SHL, hi, rn_v, sh_hi);
+                emit(block, IROp::SHL, hi, rn_v, sh_hi, d.sf ? 64 : 32);
                 // lo_part = Rm >> lsb
                 uint16_t sh_lo = load_imm(block, static_cast<uint64_t>(lsb));
                 uint16_t lo = g_alloc.alloc();
-                emit(block, IROp::SHR, lo, rm_v, sh_lo);
+                emit(block, IROp::SHR, lo, rm_v, sh_lo, d.sf ? 64 : 32);
                 // result = hi | lo
                 result = g_alloc.alloc();
                 emit(block, IROp::OR, result, hi, lo);
@@ -435,7 +452,11 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             }
             uint64_t notmask = ~mask & ((width == 32) ? 0xFFFFFFFFULL : ~0ULL);
             // rotated = (Rn << (width - immr)) | (Rn >> immr)
-            // Use SHL and SHR with immediate amounts (JIT handles these natively).
+            // Use SHL and SHR with immediate amounts (JIT handles these
+            // natively). Pass the explicit width so W-form shifts stay
+            // inside 32 bits — ARM masks Rn to the operation width, and
+            // an unmasked Xn[63:32] rotates down INTO the mask window,
+            // corrupting the inserted field.
             uint16_t rot_hi, rot_lo, rotated;
             if (immr == 0) {
                 rotated = rn_v;  // no rotation needed
@@ -443,9 +464,9 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 uint16_t sh_hi = load_imm(block, width - immr);
                 uint16_t sh_lo = load_imm(block, immr);
                 rot_hi = g_alloc.alloc();
-                emit(block, IROp::SHL, rot_hi, rn_v, sh_hi);
+                emit(block, IROp::SHL, rot_hi, rn_v, sh_hi, d.sf ? 64 : 32);
                 rot_lo = g_alloc.alloc();
-                emit(block, IROp::SHR, rot_lo, rn_v, sh_lo);
+                emit(block, IROp::SHR, rot_lo, rn_v, sh_lo, d.sf ? 64 : 32);
                 rotated = g_alloc.alloc();
                 emit(block, IROp::OR, rotated, rot_hi, rot_lo);
             }
@@ -721,6 +742,12 @@ bool translate_to_ir(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
             uint64_t target = cur_pc + d.imm;
             uint8_t cond = (d.cls == InstClass::CBZ) ? 0 /*EQ*/ : 1 /*NE*/;
             emit(block, IROp::BRCOND_ZERO, 0, val, 0, 0, cond, 0, target, cur_pc);
+            // Record sf: W-form CBZ/CBNZ test ONLY the low 32 bits. The
+            // codegen's test is 64-bit, so without masking, dirty bits
+            // [63:32] (routine in hand-written asm like glibc's
+            // __strlen_asimd, which keeps fold state across `cbnz w3`)
+            // flip the branch and corrupt the result.
+            block.insts.back().sf = d.sf;
             block.ends_with_branch = true;
             return true;
         }

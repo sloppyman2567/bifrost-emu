@@ -1524,18 +1524,45 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
                 }
             } else if (inst.op == IROp::SIMD_ST16) {
                 // 16-byte vector store (LDR/STR Q, LDP/STP Q, LD1/ST1).
-                // Invisible to the store_infos verifier: the MEM compare only
-                // handles widths 1/2/4/8, and the register verify can't see a
-                // wrong-address vector store (registers stay correct). Flag the
-                // block so MEMFULL's full-memory diff covers it (the inflate
-                // copy loop's `stp q29,q28` / `stur q30` corrupted memory here).
-                if (!has_call_like) entry.has_unresolved_store = true;
-                static bool trace_simdst16_ = (getenv("BIFROST_TRACE_SIMDST16") != nullptr);
-                if (trace_simdst16_) {
-                    fprintf(stderr, "[SIMDST16] block @ 0x%llx: SIMD_ST16 src2=%d flags_op=%u imm=%lld\n",
-                            static_cast<unsigned long long>(start_pc),
-                            inst.src2, inst.flags_op ? inst.flags_op : 1,
-                            static_cast<long long>(inst.imm));
+                // Track it like STORE_MEM so the verify save/restore +
+                // VERIFY_MEM diff cover vector stores: a wrong-address or
+                // wrong-data `stp q` corrupts the guest heap while leaving
+                // every register intact — invisible to register verify
+                // (the inflate copy loop's stp q29,q28 was exactly this).
+                // One StoreInfo per 16-byte chunk (flags_op = nregs).
+                uint8_t b = (inst.src1 < 4096) ? vreg_base[inst.src1] : 0xFF;
+                uint32_t nregs = inst.flags_op ? inst.flags_op : 1;
+                bool resolvable = (b <= 31);
+                if (resolvable && (modified_so_far & (1u << b)) &&
+                    !arm_reg_known[b]) {
+                    resolvable = false;
+                }
+                if (!resolvable) {
+                    if (!has_call_like) entry.has_unresolved_store = true;
+                    static bool trace_simdst16_ = (getenv("BIFROST_TRACE_SIMDST16") != nullptr);
+                    if (trace_simdst16_) {
+                        fprintf(stderr, "[SIMDST16] block @ 0x%llx: UNTRACKED SIMD_ST16 src2=%d flags_op=%u imm=%lld\n",
+                                static_cast<unsigned long long>(start_pc),
+                                inst.src2, inst.flags_op ? inst.flags_op : 1,
+                                static_cast<long long>(inst.imm));
+                    }
+                } else {
+                    int64_t off = vreg_off[inst.src1] + static_cast<int64_t>(inst.imm);
+                    for (uint32_t ci = 0; ci < nregs; ci++) {
+                        BlockEntry::StoreInfo si;
+                        si.arm_reg = b;
+                        si.offset  = off + 16 * ci;
+                        si.width   = 16;
+                        si.use_absolute = false;
+                        if ((modified_so_far & (1u << b)) && arm_reg_known[b]) {
+                            si.use_absolute = true;
+                            si.absolute_addr = arm_reg_val[b] + static_cast<uint64_t>(si.offset);
+                        }
+                        if (!entry.store_infos) {
+                            entry.store_infos = std::make_shared<std::vector<BlockEntry::StoreInfo>>();
+                        }
+                        entry.store_infos->push_back(si);
+                    }
                 }
             } else if (inst.op == IROp::STORE_REG) {
                 // Mark the dest ARM reg as modified FROM THIS POINT ON.

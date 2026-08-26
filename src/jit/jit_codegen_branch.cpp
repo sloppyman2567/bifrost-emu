@@ -158,6 +158,14 @@ int FrostJIT::compile_ir_branch(const IRInst& inst) {
             }
             // Save RFLAGS (CBZ/CBNZ don't modify architectural flags).
             emit_pushfq();
+            // W-form (cbz/cbnz W) tests ONLY the low 32 bits. The guest
+            // register's upper half may be dirty (hand-written asm like
+            // glibc __strlen_asimd keeps fold state across `cbnz w3`),
+            // so mask RAX before the 64-bit test — mov eax,eax zeroes
+            // bits [63:32].
+            if (!inst.sf) {
+                emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
+            }
             // test rax, rax
             emit_test_reg(RAX, RAX);
             // jcc to taken target

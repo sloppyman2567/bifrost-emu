@@ -136,6 +136,40 @@ int main(void) {
     CHECK((uint64_t)(big_diff >> 64) == 0 &&
           (uint64_t)big_diff == 0xFFFFFFFFFFFFFFFFULL, "sbc_chain");
 
+    /* 14. 32-bit ADCS chain — the JIT must use its W-form ADC path
+     * (carry out of bit 31). Compilers rarely emit `adcs w`, so drive
+     * it with inline asm: adds wraps lo (C=1); adcs consumes it AND
+     * overflows 32 bits itself (C_out=1); a third adcs observes that
+     * carry. With the old width=0 bug every adcs w ran as a 64-bit
+     * ADC whose CF (bit 63) never fires — C_out stuck at 0, so top
+     * came out 0 instead of 1. */
+    {
+        volatile uint32_t vlo = 0xFFFFFFFFu, vae = 5u, vff = 0xFFFFFFFFu;
+        uint32_t lo = vlo, ae = vae, ff = vff, z = 0u;
+        uint32_t mid = 0, top = 0;
+        asm volatile(
+            "adds %w[lo], %w[lo], %w[ae]\n"    /* lo = 4,       C=1 */
+            "mov  %w[mid], %w[ff]\n"
+            "adcs %w[mid], %w[mid], %w[z]\n"   /* mid = FF..+0+C → 0, C_out=1 */
+            "adcs %w[top], %w[z], %w[z]\n"     /* top = 0+0+C_out = 1        */
+            : [lo]"+r"(lo), [mid]"=&r"(mid), [top]"=&r"(top)
+            : [ae]"r"(ae), [ff]"r"(ff), [z]"r"(z)
+            : "cc");
+        CHECK(lo == 4 && mid == 0 && top == 1, "adcs32_chain");
+    }
+    /* 15. 32-bit SBCS value check: subs borrow (1-2, C=0) then sbcs
+     * consumes it: mid = 0-0-1+0 = 0xFFFFFFFF. */
+    {
+        uint32_t a = 1, b = 2, z = 0u, mid = 0;
+        asm volatile(
+            "subs %w[a], %w[a], %w[b]\n"       /* 1-2 = -1, C=0 */
+            "sbcs %w[mid], %w[z], %w[z]\n"     /* 0-0-1+C = -1  */
+            : [a]"+r"(a), [b]"+r"(b), [mid]"=&r"(mid)
+            : [z]"r"(z)
+            : "cc");
+        CHECK(a == 0xFFFFFFFFu && mid == 0xFFFFFFFFu, "sbcs32_chain");
+    }
+
     printf("carry: %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

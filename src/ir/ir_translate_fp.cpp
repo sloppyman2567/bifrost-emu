@@ -524,7 +524,11 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                 if ((op & 0xFF00FC00) == 0x5F005400) {
                     sshift_op = IROp::SIMD_SHL;
                     sshift = imm - 64;
-                    if (sshift < 0) sshift = 0;
+                    // shift < 1 is an UNALLOCATED SHL encoding (the
+                    // interpreter DecodeErrors it) — route it to the
+                    // CALL_INTERP fallback below, do NOT clamp to a
+                    // silent shift-by-0.
+                    if (sshift < 1) sshift = 64;
                 } else if ((op & 0xFF00FC00) == 0x7F000400) {
                     sshift_op = IROp::SIMD_USHR;
                     sshift = 128 - imm;

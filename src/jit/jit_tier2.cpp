@@ -1276,6 +1276,11 @@ uint64_t (*FrostJIT::compile_tier2_region(Emulator& emu, const Tier2Trace& trace
                     int s1 = ensure_vreg(inst.src1, RAX);
                     if (s1 != RAX) emit_mov_reg(RAX, s1);
                     if (reg_vreg_[RAX] >= 0) drop_vreg(reg_vreg_[RAX]);
+                    // W-form tests only the low 32 bits (see the matching
+                    // fix in jit_codegen_branch.cpp) — mask dirty uppers.
+                    if (!inst.sf) {
+                        emit_byte(0x89); emit_byte(0xC0);  // mov eax, eax
+                    }
                     emit_test_reg(RAX, RAX);
                     uint8_t cc = (inst.cond == 0) ? 4 /*JE*/ : 5 /*JNE*/;
                     jcc = emit_jcc_rel32_placeholder(cc);

@@ -510,6 +510,22 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             // the wrong value.
             clobber_flags();
             force_two_vregs_to(inst.src1, RAX, inst.src2, RCX);
+            if (inst.sf == 0) {
+                // W-form ANDS/TST: the N flag must come from bit 31, so
+                // use a 32-bit TEST (no REX.W). A 64-bit test reads SF
+                // from bit 63, which is always 0 on zero-extended W
+                // operands — ARM N was stuck at 0 and every b.mi/b.pl/
+                // csel-mi consumer misbranched.
+                uint8_t rexx = 0;
+                if (RCX >= 8) rexx |= 4;  // rex.r (reg field = RCX)
+                if (RAX >= 8) rexx |= 1;  // rex.b (rm field = RAX)
+                if (rexx) emit_byte(0x40 | rexx);
+                emit_byte(0x85);
+                emit_byte(modrm(3, RCX & 7, RAX & 7));
+                flags_in_host_ = true;
+                flags_from_sub_ = false;
+                return false;
+            }
             emit_test_reg(RAX, RCX);
             flags_in_host_ = true;
             flags_from_sub_ = false;

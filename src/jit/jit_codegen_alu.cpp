@@ -195,17 +195,19 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
                         d = alloc_reg_excluding(s1, -1);
                         if (d != s1) emit_mov_reg(d, s1);
                     }
-                    bool is_32bit_ror = (inst.op == IROp::ROR && inst.width == 32);
-                    if (is_32bit_ror) {
+                    bool is_32bit = (inst.width == 32);
+                    int kind = (inst.op == IROp::SHL) ? 4
+                             : (inst.op == IROp::SHR) ? 5
+                             : (inst.op == IROp::SAR) ? 7 : 1;
+                    if (is_32bit) {
+                        // 32-bit op: count mod 32 (ARM W-shift semantics),
+                        // 32-bit form (no REX.W) so upper container zeroes.
                         uint8_t c = static_cast<uint8_t>(cnt & 0x1F);
-                        if (c) {  // ror r32d, imm8 (no REX.W), count mod 32
+                        if (c) {  // shl/shr/sar/ror r32d, imm8
                             if (d >= 8) emit_byte(0x41);
-                            emit_byte(0xC1); emit_byte(modrm(3, 1, d & 7)); emit_byte(c);
+                            emit_byte(0xC1); emit_byte(modrm(3, kind, d & 7)); emit_byte(c);
                         }
                     } else {
-                        int kind = (inst.op == IROp::SHL) ? 4
-                                 : (inst.op == IROp::SHR) ? 5
-                                 : (inst.op == IROp::SAR) ? 7 : 1;
                         emit_shift_imm8(d, kind, static_cast<uint8_t>(cnt & 0x3F));
                     }
                     if (inst.dest == inst.src1) {
@@ -245,21 +247,24 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             // emit_shift: mask CL to 6 bits (x86 shift counts are mod 64)
             // and emit `d = d shift_cl` for the current inst.op.
             auto emit_shift = [&](int d) {
-                // For 32-bit ROR: mask CL to 5 bits and use 32-bit ROR
-                // (no REX.W) so rotation stays within the lower 32 bits.
-                // 64-bit ROR on a zero-extended 32-bit value loses wrap bits.
-                bool is_32bit_ror = (inst.op == IROp::ROR && inst.width == 32);
-                if (is_32bit_ror) {
+                bool is_32bit = (inst.width == 32);
+                int kind = (inst.op == IROp::SHL) ? 4
+                         : (inst.op == IROp::SHR) ? 5
+                         : (inst.op == IROp::SAR) ? 7 : 1;
+                if (is_32bit) {
+                    // 32-bit op: ARM LSLV/LSRV/ASRV/RORV take the count mod
+                    // 32, so mask CL to 5 bits and use the 32-bit form (no
+                    // REX.W) — it also zeroes the upper container, matching
+                    // AArch64 W-write semantics. (A 64-bit shift masked to
+                    // 6 bits silently miscompiles counts >= 32: glibc
+                    // _int_malloc's binmap `lsl w8,w2,w8` with bin 107
+                    // produced 0 instead of 0x800 → shredded guest heap.)
                     emit_and_cl_imm8(0x1F);  // mask to 5 bits for 32-bit
-                    // Emit 32-bit ROR: no REX.W prefix.
                     emit_byte(rex(false, false, false, d >= 8));
                     emit_byte(0xD3);
-                    emit_byte(modrm(3, 1, d & 7));
+                    emit_byte(modrm(3, kind, d & 7));
                 } else {
                     emit_and_cl_imm8(0x3F);
-                    int kind = (inst.op == IROp::SHL) ? 4
-                             : (inst.op == IROp::SHR) ? 5
-                             : (inst.op == IROp::SAR) ? 7 : 1;
                     emit_shift_cl(d, kind);
                 }
             };
@@ -346,6 +351,14 @@ int FrostJIT::compile_ir_alu(const IRInst& inst) {
             return 0;
         }
         case IROp::CLZ: {
+            // lzcnt (F3 0F BD) decodes as BSF on hosts without ABM —
+            // and BSF leaves dest unchanged on zero input instead of
+            // returning the full width. Fall back to the interpreter on
+            // such hosts (same runtime-guard pattern as FRINT's SSE4.1).
+            if (!has_lzcnt()) {
+                emit_call_interp(inst.arm_pc, false);
+                return 0;
+            }
             // lzcnt rax, rax overwrites RAX, destroying
             // src1's cached value. If src1 is a scratch vreg holding a snapshot
             // of an arch reg (from LOAD_REG), later readers would reload from

@@ -192,6 +192,7 @@ UNIT_TESTS=(
     "bitfield|ctest/jit_bitfield.elf||5|PASS"
     "block_split|ctest/jit_block_split.elf||5|PASS"
     "carry|ctest/jit_carry.elf||5|PASS"
+    "bfext|ctest/jit_bfext.elf||5|PASS"
     "cls|ctest/jit_cls.elf||5|PASS"
     "csel|ctest/jit_csel.elf||5|PASS"
     "extend|ctest/jit_extend.elf||5|PASS"
