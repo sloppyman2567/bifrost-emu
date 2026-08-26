@@ -153,7 +153,15 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             uint64_t effective_hint = (flags & BIFROST_MAP_FIXED) ? addr : 0;
-            uint64_t mapped = mem_.mmap_alloc(length, effective_hint);
+            // MAP_NORESERVE (0x4000 on AArch64 asm-generic — NOT 0x40!)
+            // / PROT_NONE mappings are VIRTUAL reservations on real
+            // Linux — they cost no memory until touched. Route them
+            // through the lazy path: no eager page materialization, no
+            // charge against MAX_TOTAL_PAGES at reserve time (per-fault
+            // OOM checks still apply). vkQuake's mimalloc reserves
+            // GiB-scale arenas this way.
+            bool virt_reserve = (flags & 0x4000) || prot == 0;
+            uint64_t mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve);
             // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid
             // range, or OOM page-limit). Returning that 0 to the guest
             // reads as a *successful* mapping at address 0 (musl only

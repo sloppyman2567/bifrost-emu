@@ -6,11 +6,70 @@
 // touching the mutex at all.
 #include "core/memory.h"
 #include <algorithm>
+#include <atomic>
 #include <fcntl.h>
 #include <shared_mutex>
 #include <sys/mman.h>
+#include <thread>
 #include <unistd.h>
 namespace arm64emu {
+
+// BIFROST_MEMSTATS=N (vkQuake AllocBlock leak hunt): background reporter
+// printing live guest allocation count/bytes + host RSS every N seconds,
+// plus the top live allocations by size. Flat curve = no allocator-side
+// leak; linear growth names the leaking pool via its addresses.
+static std::atomic<uint64_t> g_memstats_cum_alloc{0}, g_memstats_cum_free{0};
+void Memory::memstats_reporter(uint64_t period_secs) {
+    uint64_t t = 0;
+    while (true) {
+        std::this_thread::sleep_for(
+            std::chrono::seconds(static_cast<int64_t>(period_secs)));
+        t += period_secs;
+        {
+            std::shared_lock<std::shared_mutex> g(mu_);
+            uint64_t live_bytes = 0;
+            // Top-5 largest live allocations (address, size MB).
+            std::pair<uint64_t, uint64_t> top[5] = {};
+            for (const auto& kv : allocations_) {
+                live_bytes += kv.second;
+                for (int i = 0; i < 5; i++) {
+                    if (kv.second > top[i].second) {
+                        for (int j = 4; j > i; j--) top[j] = top[j - 1];
+                        top[i] = kv;
+                        break;
+                    }
+                }
+            }
+            long rss_pages = 0;
+            if (FILE* f = fopen("/proc/self/statm", "r")) {
+                unsigned long tot = 0, res = 0;
+                if (fscanf(f, "%lu %lu", &tot, &res) == 2)
+                    rss_pages = static_cast<long>(res);
+                fclose(f);
+            }
+            fprintf(stderr,
+                    "[memstats] t=%llus live=%zu allocs %.1f MB "
+                    "cum_alloc=%.1f MB cum_free=%.1f MB rss=%ld MB | top:",
+                    (unsigned long long)t, allocations_.size(),
+                    static_cast<double>(live_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(
+                        g_memstats_cum_alloc.load(std::memory_order_relaxed)) /
+                        (1024.0 * 1024.0),
+                    static_cast<double>(
+                        g_memstats_cum_free.load(std::memory_order_relaxed)) /
+                        (1024.0 * 1024.0),
+                    rss_pages * 4 / 1024);
+            for (int i = 0; i < 5; i++) {
+                if (!top[i].second) break;
+                fprintf(stderr, " [0x%llx +%.2fMB]",
+                        (unsigned long long)top[i].first,
+                        static_cast<double>(top[i].second) / (1024.0 * 1024.0));
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+}
+
 Memory::Memory() {
     // Allocate a 4 GiB direct-access window for the JIT. This is a lazy
     // mmap — Linux only allocates physical pages on first access (demand
@@ -36,6 +95,16 @@ Memory::Memory() {
     mmap_next_ = MMAP_BASE_MIN + random_offset(MMAP_BASE_MAX - MMAP_BASE_MIN);
     pie_base_ = PIE_BASE_MIN + random_offset(PIE_JITTER);
     stack_top_ = STACK_TOP - random_offset(STACK_JITTER);
+    if (getenv("BIFROST_MEMGUARD") && direct_window_) {
+        fprintf(stderr, "[memguard] window=%p stack_top=0x%llx\n",
+                static_cast<void*>(direct_window_),
+                (unsigned long long)stack_top_);
+    }
+    if (const char* ms = getenv("BIFROST_MEMSTATS")) {
+        uint64_t period = strtoull(ms, nullptr, 10);
+        if (period == 0) period = 5;
+        std::thread(&Memory::memstats_reporter, this, period).detach();
+    }
 }
 
 bool Memory::aslr_disabled() {
@@ -285,16 +354,21 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
         remaining -= take;
     }
 }
-uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
+uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve) {
     // BIFROST_ALLOC_TRACE=1: print every mmap_alloc (addr,size) — used to
     // audit placement/overlap of thunk bounces vs callback scratch stacks.
     static const bool alloc_trace_ = getenv("BIFROST_ALLOC_TRACE") != nullptr;
     if (alloc_trace_)
         fprintf(stderr, "[alloc] mmap_alloc(%zu) ...", (size_t)size);
     if (size == 0) size = PAGE_SIZE;
-    // 1.5.4-alpha: Per-allocation size cap. Prevents a malicious guest
-    // from requesting SIZE_MAX and OOMing the host.
-    if (size > MAX_MMAP_LENGTH) return 0;  // caller maps 0 to -ENOMEM
+    // 1.5.4-alpha: Per-allocation length cap. Prevents a malicious guest
+    // from requesting SIZE_MAX and OOMing the host. MAP_NORESERVE
+    // reservations are exempt: they are VIRTUAL on real Linux (cost
+    // nothing until touched), and touch-time faults still run the page
+    // cap. Rejecting them made vkQuake's mimalloc fall through its whole
+    // arena-size cascade (8 GiB → 4 → 2 → 1 GiB) opening an arena per
+    // fallback level.
+    if (!noreserve && size > MAX_MMAP_LENGTH) return 0;  // caller maps 0 to -ENOMEM
     std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t base = hint;
     uint64_t aligned_size = (size + PAGE_MASK) & ~PAGE_MASK;
@@ -375,7 +449,27 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
             if (pages_.find(pn) == pages_.end()) num_new_pages++;
         }
     }
-    if (would_exceed_page_limit(num_new_pages)) return 0;
+    if (would_exceed_page_limit(noreserve ? 0 : num_new_pages)) return 0;
+    // BIFROST_MEMGUARD=1 (vkQuake AllocBlock hunt): scream if the chosen
+    // range overlaps ANY allocation still tracked as live. Should be
+    // impossible — free_ranges_ must never contain tracked-live space —
+    // so a hit here means accounting drift somewhere (untrack/mremap/
+    // clone_for_fork) and directly explains "zero-and-rewrite of live
+    // guest heap" corruption.
+    static const bool memguard_ = getenv("BIFROST_MEMGUARD") != nullptr;
+    if (memguard_) {
+        const uint64_t glo = base, ghi = base + aligned_size;
+        for (const auto& kv : allocations_) {
+            if (kv.first < ghi && kv.first + kv.second > glo) {
+                fprintf(stderr,
+                        "[memguard] LIVE-OVERLAP new=[0x%llx..0x%llx) "
+                        "live=[0x%llx..0x%llx)\n",
+                        (unsigned long long)glo, (unsigned long long)ghi,
+                        (unsigned long long)kv.first,
+                        (unsigned long long)(kv.first + kv.second));
+            }
+        }
+    }
     // Consume the taken free range (leave the tail for later reuse).
     if (reused) remove_free_range(base, aligned_size);
     // A MAP_FIXED allocation reclaims any free range it overlaps.
@@ -401,6 +495,15 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
         if (direct_window_ && start < DIRECT_WINDOW_SIZE) {
             continue;
         }
+        // MAP_NORESERVE / PROT_NONE reservations are VIRTUAL on real
+        // Linux — cost nothing until touched. Do NOT materialize their
+        // pages eagerly; read()/write() demand-fault them one at a time
+        // (each fault still runs the OOM check). vkQuake's bundled
+        // mimalloc reserves GiB-scale arenas this way: eager materialize
+        // + page-cap accounting turned every reserve into a live-GiB
+        // charge, exhausted MAX_TOTAL_PAGES, and forced mimalloc into a
+        // multi-arena fallback cascade that shredded its own heap.
+        if (noreserve) continue;
         auto it = pages_.find(pn);
         if (it == pages_.end()) {
             pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
@@ -413,6 +516,7 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     // Track total pages atomically (relaxed — no cross-thread sync needed).
     total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
     allocations_[base] = aligned_size;
+    g_memstats_cum_alloc.fetch_add(aligned_size, std::memory_order_relaxed);
     if (alloc_trace_)
         fprintf(stderr, " [0x%llx..0x%llx)\n",
                 (unsigned long long)base,
@@ -591,6 +695,7 @@ std::unique_lock<std::shared_mutex> g(mu_);
         if (flo > b) allocations_[b] = flo - b;
         if (e > fhi) allocations_[fhi] = e - fhi;
         if (fhi <= flo) continue;  // nothing left after page rounding
+        g_memstats_cum_free.fetch_add(fhi - flo, std::memory_order_relaxed);
         // Free page storage for the freed intersection.
         for (uint64_t s = flo; s < fhi; s += PAGE_SIZE) {
             // Direct-window addresses have no pages_ entry (the window

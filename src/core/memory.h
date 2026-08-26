@@ -128,7 +128,8 @@ public:
     // When `hint` is non-zero, the allocation is placed at exactly `hint`
     // (MAP_FIXED semantic). Existing pages at that address are REPLACED
     // with fresh zeroed pages — matches Linux kernel behavior.
-    uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0);
+    uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0,
+                        bool noreserve = false);
     // Grow (or shrink) an allocation. When growth would collide with
     // another tracked allocation, a fresh region is allocated and the
     // data is copied (mirrors musl's mremap contract).
@@ -264,6 +265,8 @@ private:
     // Page-aligned random offset in [0, range) from /dev/urandom; falls
     // back to host stack-address entropy, then 0 (fixed layout).
     static uint64_t random_offset(uint64_t range);
+    // BIFROST_MEMSTATS=N: background leak reporter (see memory.cpp).
+    void memstats_reporter(uint64_t period_secs);
     // 1.5.4-alpha: Total page count for OOM protection. Tracked
     // incrementally (incremented on page allocation, decremented on
     // munmap) to avoid O(pages_.size()) scans on the hot path.
