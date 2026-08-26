@@ -368,11 +368,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.sigmask = saved.sigmask;
                     cpu.running = saved.running;
                 };
-                // Allocate a small scratch stack for the resolver (4 KiB
-                // is plenty — resolvers are leaf-ish functions that don't
-                // recurse deeply).
-                uint64_t scratch_stack = mem_.mmap_alloc(4096);
-                uint64_t stack_top = scratch_stack + 4096;
+                // Guarded scratch stack for the resolver ([GUARD][usable]
+                // [GUARD], PROT_NONE guards): overflow faults loudly
+                // instead of silently corrupting adjacent chunks.
+                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                uint64_t stack_top = scratch_stack + 64 * 1024;
                 // Sentinel return address — when PC == this, the resolver
                 // has RET'd. Use 0x1000 (in the zero page, unmapped for
                 // execution but a recognizable sentinel).
@@ -486,9 +486,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.tpidr_el0 = dyn_linker_->thread_pointer();
                     cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
-                // Scratch stack for the constructor.
-                uint64_t scratch_stack = mem_.mmap_alloc(4096);
-                uint64_t stack_top = scratch_stack + 4096;
+                // Guarded scratch stack for the constructor (PROT_NONE
+                // guard pages both sides).
+                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                uint64_t stack_top = scratch_stack + 64 * 1024;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
                 cpu.pc = fn_addr;
                 cpu.sp = stack_top;
@@ -580,8 +581,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.tpidr_el0 = dyn_linker_->thread_pointer();
                     cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
-                uint64_t scratch_stack = mem_.mmap_alloc(4096);
-                uint64_t stack_top = scratch_stack + 4096;
+                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                uint64_t stack_top = scratch_stack + 64 * 1024;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
                 cpu.pc = fn_addr;
                 cpu.sp = stack_top;
@@ -1641,7 +1642,7 @@ void Emulator::ensure_thunk_linker_() {
         std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
-        uint64_t scratch=mem_.mmap_alloc(4096); uint64_t top=scratch+4096; constexpr uint64_t SR=0x1000;
+        uint64_t scratch=mem_.mmap_alloc_callback_stack(64 * 1024); uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=a; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=1'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
@@ -1658,7 +1659,7 @@ void Emulator::ensure_thunk_linker_() {
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
-        uint64_t scratch=mem_.mmap_alloc(4096); uint64_t top=scratch+4096; constexpr uint64_t SR=0x1000;
+        uint64_t scratch=mem_.mmap_alloc_callback_stack(64 * 1024); uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=10'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(getenv("BIFROST_DYNLINK_TRACE")) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
@@ -1671,8 +1672,8 @@ void Emulator::ensure_thunk_linker_() {
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
-        static thread_local uint64_t ss=0; if(!ss){ ss=mem_.mmap_alloc(8192); }
-        uint64_t top=ss+8192; constexpr uint64_t SR=0x1000;
+        static thread_local uint64_t ss=0; if(!ss){ ss=mem_.mmap_alloc_callback_stack(64 * 1024); }
+        uint64_t top=ss+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=fn; cpu.sp=top; cpu.regs[0]=a0; cpu.regs[1]=a1; cpu.regs[2]=a2; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=50'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}

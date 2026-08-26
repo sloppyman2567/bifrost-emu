@@ -1637,6 +1637,28 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return 0;
     }
 
+    // SizeKinds whose pointer arg is a pure HOST INPUT (upload/read):
+    // the host never writes through that bounce, so marking it
+    // need_wb would copy stale bounce bytes back over live guest
+    // memory after the call. Download/query kinds (READPIXELS,
+    // STIPPLE, X_*) still write back normally.
+    auto input_only_size = [](thunk::SizeKind sk) {
+        switch (sk) {
+            case thunk::SizeKind::ARG1: case thunk::SizeKind::ARG2:
+            case thunk::SizeKind::ARG6:
+            case thunk::SizeKind::TEX2D: case thunk::SizeKind::TEXSUB:
+            case thunk::SizeKind::TEX3D:
+            case thunk::SizeKind::TEXIMAGE1D: case thunk::SizeKind::TEXSUBIMAGE1D:
+            case thunk::SizeKind::TEXSUBIMAGE3D:
+            case thunk::SizeKind::DRAWPIXELS: case thunk::SizeKind::BITMAP:
+            case thunk::SizeKind::QUEUEAUDIO: case thunk::SizeKind::PITCH_H:
+            case thunk::SizeKind::VK_REGIONS:
+                return true;
+            default:
+                return false;
+        }
+    };
+
     auto translate_ptr = [&](uint64_t& a, int idx,
                              std::vector<uint8_t>* bounce,
                              uint64_t* guest_orig,
@@ -1956,7 +1978,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             std::fill(bounce->begin(), bounce->end(), 0);
         }
         *guest_orig = a;
-        *need_wb = true;
+        *need_wb = !input_only_size(sk);
         a = reinterpret_cast<uint64_t>(bounce->data());
         (void)idx;
     };
@@ -2235,17 +2257,59 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // that dispatch() will write back to guest memory.
         handled_by_tracker = impl_->gl_state_tracker_->try_handle_query(entry.name, args, cpu);
     }
+    // ── Writeback with LIVE-RANGE CLAMP (heap-shredder fix) ───────────
+    // Each bounced pointer arg is written back only up to the end of the
+    // enclosing tracked guest allocation, and never at all when no live
+    // allocation encloses it (untracked space must not be written).
+    // Bounce targets are almost always ABOVE the 4 GiB direct window —
+    // that is exactly when guests whose allocator outgrows the window
+    // (vkQuake/mimalloc arenas) have live data there, and the old
+    // unconditional full-bounce writeback sprayed up to 64 KiB of stale
+    // bytes over adjacent live allocations per thunk call.
+    auto safe_writeback_all = [&]() {
+        if (!impl_->mem) return;
+        static int wb_skip_diag = 4, wb_clamp_diag = 4;
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (!bounce_wb[i] || !bounce_guest[i]) continue;
+            const uint64_t g = bounce_guest[i];
+            const size_t want = bounce_bufs[i].size();
+            size_t wb = 0;
+            bool in_live = false;
+            for (const auto& kv : impl_->mem->allocations_snapshot()) {
+                if (g >= kv.first && g - kv.first < kv.second) {
+                    uint64_t room = kv.second - (g - kv.first);
+                    wb = (want <= room) ? want : static_cast<size_t>(room);
+                    in_live = true;
+                    break;
+                }
+            }
+            if (!in_live) {
+                if (wb_skip_diag > 0) {
+                    --wb_skip_diag;
+                    fprintf(stderr,
+                            "[thunk] wb-skip %s arg%d @0x%llx: target "
+                            "UNTRACKED, %zu B writeback dropped\n",
+                            entry.name.c_str(), i,
+                            (unsigned long long)g, want);
+                }
+                continue;
+            }
+            if (wb != want && wb_clamp_diag > 0) {
+                --wb_clamp_diag;
+                fprintf(stderr,
+                        "[thunk] wb-clamp %s arg%d @0x%llx: %zu → %zu B "
+                        "(live allocation end)\n",
+                        entry.name.c_str(), i, (unsigned long long)g,
+                        want, wb);
+            }
+            impl_->mem->write(g, bounce_bufs[i].data(), wb);
+        }
+    };
+
     if (handled_by_tracker) {
         // Skip host call, but still write back any bounced pointer args
         // so the guest sees the query result.
-        if (impl_->mem) {
-            for (int i = 0; i < kMaxArgs; i++) {
-                if (bounce_wb[i] && bounce_guest[i]) {
-                    impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
-                                      bounce_bufs[i].size());
-                }
-            }
-        }
+        safe_writeback_all();
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] dispatch: %s handled by GL state tracker\n",
                     entry.name.c_str());
@@ -2343,15 +2407,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             args[4], args[5], args[6], args[7]);
     }
 
-    // Write bounced pointer args back into guest memory.
-    if (impl_->mem) {
-        for (int i = 0; i < kMaxArgs; i++) {
-            if (bounce_wb[i] && bounce_guest[i]) {
-                impl_->mem->write(bounce_guest[i], bounce_bufs[i].data(),
-                                  bounce_bufs[i].size());
-            }
-        }
-    }
+    // Write bounced pointer args back into guest memory (clamped to the
+    // enclosing live allocation — see safe_writeback_all above).
+    safe_writeback_all();
 
     static int gui_dbg_n_ = -1;
     if (gui_dbg_n_ < 0) gui_dbg_n_ = getenv("BIFROST_GUI_DBG") ? 4000 : 0;
