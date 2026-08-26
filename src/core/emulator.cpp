@@ -1512,12 +1512,32 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             }
             // Reusable scratch stack (thread-local: one per guest thread,
             // so concurrent polls from multiple vCPUs can't clobber).
+            //
+            // 64 KiB + 4 KiB head margin (2026-08-25): the old 8 KiB
+            // scratch was allocated MID-HEAP next to live malloc chunks.
+            // Guest callbacks invoked from host threads (the audio-pump
+            // vCPU, GLFW/audio thunks) routinely need more than 8 KiB of
+            // guest stack (SDL audio mixers nest deeply); the overflow
+            // descended into the NEIGHBORING CHUNKS and shredded glibc's
+            // heap ("malloc(): invalid size" / "free(): invalid size" /
+            // AllocBlock shredding in vkQuake). The corruption was
+            // invisible to every verification mode because it comes from
+            // a host-side thread, not from any verified guest block.
+            // Layout: [PROT_NONE guard][128 KiB usable][guard] — overflow
+            // faults loudly instead of trashing live chunks.
             static thread_local uint64_t scratch_stack = 0;
+            static thread_local uint64_t scratch_top = 0;
             if (scratch_stack == 0) {
-                scratch_stack = mem_.mmap_alloc(8192);
+                scratch_stack = mem_.mmap_alloc_callback_stack(128 * 1024);
                 if (scratch_stack == 0) return 0;
+                scratch_top = scratch_stack + 128 * 1024;
+                if (getenv("BIFROST_SCRATCH_TRACE"))
+                    fprintf(stderr, "[scratch] cpu=%p usable=[0x%llx..0x%llx)\n",
+                            (void*)&cpu,
+                            (unsigned long long)scratch_stack,
+                            (unsigned long long)scratch_top);
             }
-            uint64_t stack_top = scratch_stack + 8192;
+            uint64_t stack_top = scratch_top;
             constexpr uint64_t SENTINEL_LR = 0x1000;
             cpu.pc = fn;
             cpu.sp = stack_top;
@@ -1572,6 +1592,9 @@ void Emulator::wire_thunk_audio_runner_() {
                      return call_guest_function(cpu, fn, iargs, n,
                                                 nullptr, 0);
                  });
+    // The pump fires guest callbacks on a second vCPU — glibc must take
+    // malloc locks from now on (see AudioThunk::start_pump).
+    athunk->set_libc_single_threaded_addr(libc_single_threaded_addr_);
     // Dedicated-vCPU audio pump: guest callbacks fire on a hardware-like
     // clock (AAA Android requirement), not piggybacked on dispatches.
     athunk->start_pump();
@@ -1714,11 +1737,28 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     // Scratch stack (thread-local so concurrent guest threads can't
     // clobber each other's callee frame).
     static thread_local uint64_t scratch_stack = 0;
+    // 64 KiB usable + 4 KiB head margin (2026-08-25): the old 8 KiB
+    // scratch sat MID-HEAP next to live malloc chunks. Host-thread
+    // callbacks (the audio pump's cloned vCPU firing SDL audio mixers)
+    // need more guest stack than 8 KiB; the overflow descended into the
+    // NEIGHBORING CHUNKS and shredded glibc's heap ("malloc(): invalid
+    // size" in neverball, AllocBlock chunk shredding in vkQuake). The
+    // corruption is invisible to every verification mode because it
+    // comes from a host-side thread, never from a verified guest block.
+    constexpr uint64_t CB_SCRATCH_USABLE = 128 * 1024;
     if (scratch_stack == 0) {
-        scratch_stack = mem_.mmap_alloc(8192);
+        // Guarded isolated layout: [PROT_NONE guard][usable][guard] —
+        // overflow faults loudly instead of trashing live chunks.
+        // Returns the usable base (guard page below already skipped).
+        scratch_stack = mem_.mmap_alloc_callback_stack(CB_SCRATCH_USABLE);
         if (scratch_stack == 0) return 0;
+        if (getenv("BIFROST_SCRATCH_TRACE"))
+            fprintf(stderr, "[scratch] cpu=%p usable=[0x%llx..0x%llx)\n",
+                    (void*)&cpu,
+                    (unsigned long long)scratch_stack,
+                    (unsigned long long)(scratch_stack + CB_SCRATCH_USABLE));
     }
-    uint64_t stack_top = scratch_stack + 8192;
+    uint64_t stack_top = scratch_stack + CB_SCRATCH_USABLE;
     constexpr uint64_t SENTINEL_LR = 0x1000;
     cpu.pc = fn;
     cpu.sp = stack_top;

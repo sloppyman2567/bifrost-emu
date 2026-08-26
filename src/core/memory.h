@@ -136,6 +136,15 @@ public:
     // Remove an allocation from tracking AND reclaim its pages + address
     // range so a future mmap_alloc can reuse it (Linux munmap semantics).
     void untrack_allocation(uint64_t addr, uint64_t size);
+    // Isolated callback-stack allocation (2026-08-25): usable_size bytes
+    // with a PROT_NONE guard page on BOTH sides, placed like a normal
+    // mmap_alloc block. Host-thread guest callbacks (audio pump, GLFW /
+    // SDL / Android runners) execute on these stacks; any overflow hits
+    // the guard and faults loudly instead of silently shredding the
+    // neighboring malloc chunks (neverball "malloc(): invalid size",
+    // vkQuake AllocBlock shredding). Returns the usable base; the caller
+    // sets sp = base + usable_size_rounded.
+    uint64_t mmap_alloc_callback_stack(uint64_t usable_size);
     // Exact-address lookup in the allocation map (start → page-aligned
     // size). Returns {false, 0} when `addr` is not a tracked allocation
     // start. Use this instead of allocations_snapshot() for point

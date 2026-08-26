@@ -103,6 +103,10 @@ struct AudioThunkImpl {
     // ids starting at 1 — the legacy SDL_PauseAudio/SDL_CloseAudio arms
     // address the global device as literal 1.
     uint64_t next_sdl_dev_ = 0;
+    // Guest VA of __libc_single_threaded (set by Emulator::wire_...);
+    // cleared when the pump starts so glibc takes malloc locks while the
+    // pump vCPU fires callbacks concurrently with the main thread.
+    uint64_t libc_st_addr_ = 0;
     uint64_t next_alsa_pcm_ = 0;
     uint64_t next_pulse_ = 0;
     uint64_t next_al_buf_ = 0;
@@ -254,6 +258,10 @@ void AudioThunk::wire(Audio* engine, CPU* cb_cpu, AudioCbRunner runner) {
 // on. Concurrency with the main guest thread is genuine SMP: the game is
 // responsible for synchronizing its shared state, exactly as it would be
 // on a real device.
+void AudioThunk::set_libc_single_threaded_addr(uint64_t addr) {
+    if (impl_) impl_->libc_st_addr_ = addr;
+}
+
 void AudioThunk::start_pump() {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return;
     if (!impl_->runner || !impl_->cb_cpu || !impl_->engine) return;
@@ -283,6 +291,18 @@ void AudioThunk::start_pump() {
     }
     impl_->pump_enabled = true;
     impl_->pump_go = true;
+    // The pump fires guest callbacks on a SECOND vCPU. glibc must treat
+    // the process as multi-threaded from now on or malloc runs LOCK-FREE
+    // in both threads — the callback's alloc/free races the main
+    // thread's and shreds the heap (neverball "malloc(): invalid size",
+    // ~8s in; vkQuake AllocBlock shredding). Mirrors what
+    // spawn_sdl_thread does for SDL-created guest threads.
+    if (impl_->libc_st_addr_) {
+        impl_->mem->store<uint32_t>(impl_->libc_st_addr_, 0);
+        if (dbg().thunk_trace)
+            fprintf(stderr, "[audio] pump: cleared __libc_single_threaded @0x%llx\n",
+                    (unsigned long long)impl_->libc_st_addr_);
+    }
     auto* impl = impl_.get();
     impl->pump_thread = std::thread([impl]() {
         AudioThunkImpl& I = *impl;
@@ -613,6 +633,17 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         const bool is_dev = (name == "SDL_OpenAudioDevice");
         const uint64_t desired  = is_dev ? R(2) : R(0);
         const uint64_t obtained = is_dev ? R(3) : R(1);
+        // BIFROST_AUDIO_FAIL_OPEN=1: report "no device" (return 0) so the
+        // guest disables audio through its own graceful path — used to
+        // isolate the heap corruption that fires when audio is active.
+        static const bool fail_open_ = getenv("BIFROST_AUDIO_FAIL_OPEN") != nullptr;
+        if (fail_open_) {
+            if (obtained) {
+                uint8_t z[32] = {0};
+                I.mem->write(obtained, z, 32);
+            }
+            tr(0); return 0;   // SDL_OpenAudioDevice: 0 = no device
+        }
         if (!desired || !I.engine) { tr(-1); return -1; }
         const int32_t  freq = (int32_t)rd32(I, desired + 0);
         const uint16_t ftag = rd16(I, desired + 4);
@@ -637,6 +668,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             // Callbacks are fired INLINE from audio-thunk dispatches on
             // the guest thread (see run_due_callbacks) — never from a
             // host pump thread (the old pump corrupted guest state).
+        // TEMP BISECT (BIFROST_AUDIO_NO_CB=1): open the device but never
+        // fire callbacks — separates device-open path from callback path.
+        if (getenv("BIFROST_AUDIO_NO_CB")) { tr(0); return 0; }
             slot.cb_scheduled = true;
             slot.next_cb_us = 0;   // due immediately; pacing takes over
         }
@@ -684,7 +718,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "SDL_PauseAudioDevice" || name == "SDL_PauseAudio") {
-        uint64_t dev = (name[15] == 'D') ? R(0) : 1;   // SDL_PauseAudio uses dev 1
+        // "SDL_PauseAudioDevice" has 'D' at index 14 (SDL_PauseAudio
+        // uses the implicit device 1).
+        uint64_t dev = (name[14] == 'D') ? R(0) : 1;
         uint8_t pause = (uint8_t)R(1);
         auto it = I.sdl_devs_.find(dev);
         if (it != I.sdl_devs_.end()) {
@@ -915,7 +951,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ══ PulseAudio simple API ═══════════════════════════════════════
     if (name == "pa_simple_new") {
-        // (server, dev, dir, streamname, spec*, map*, attr*, error**)
+        // (server, dev, dir, streamname, spec*, map*, attr*, int *error)
         const uint64_t spec = R(4), errp = R(7);
         const uint64_t h = 0xA7000000ull + ++I.next_pulse_;
         auto& ps = I.pulse_streams_[h];
@@ -931,7 +967,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (pr) ps.rate = pr;
             if (pc) ps.ch = pc;
         }
-        if (errp) { uint64_t z = rd64(I, errp); if (z) wr32(I, z, 0); }
+        // libpulse-simple's last param is `int *error` (ONE pointer
+        // level) — success means *error = 0. Never dereference errp
+        // itself; that wrote through garbage guest memory.
+        if (errp) wr32(I, errp, 0);
         tr((int64_t)h); return (int64_t)h;
     }
     if (name == "pa_simple_write") {
@@ -998,7 +1037,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (int i = 0; i < n && ids; i++) {
             uint64_t id = 0xA9000000ull + ++I.next_al_buf_;
             I.al_bufs_[id] = AudioThunkImpl::AlBuffer{};
-            wr64(I, ids + (uint64_t)i * 4, (uint32_t)id);
+            wr32(I, ids + (uint64_t)i * 4, (uint32_t)id);
         }
         tr(0); return 0;
     }
@@ -1041,7 +1080,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (int i = 0; i < n && ids; i++) {
             uint64_t id = 0xA9800000ull + ++I.next_al_src_;
             I.al_srcs_[id] = AudioThunkImpl::AlSource{};
-            wr64(I, ids + (uint64_t)i * 4, (uint32_t)id);
+            wr32(I, ids + (uint64_t)i * 4, (uint32_t)id);
         }
         tr(0); return 0;
     }

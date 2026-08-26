@@ -139,6 +139,22 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
 }
 void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
     if (n == 0) return;
+    // BIFROST_WRITE_TRACE=1: log every host-side write call (addr,size).
+    // Used to diff the write streams of a JIT run vs an interpreter run —
+    // host-side writers (thunks, stdio shims, signal frames) are invisible
+    // to all block-level verification, so a thunk that writes N bytes too
+    // many can only be caught by this differential trace.
+    static const int wt_fd = [] {
+        const char* s = getenv("BIFROST_WRITE_TRACE");
+        return s ? ::open(s, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
+    }();
+    static thread_local const long wt_tid = wt_fd >= 0 ? ::syscall((long)186) : 0;
+    if (wt_fd >= 0) {
+        char rec[80];
+        int len = snprintf(rec, sizeof(rec), "w %llx %zx t%ld\n",
+                           (unsigned long long)addr, n, wt_tid);
+        (void)::write(wt_fd, rec, len);
+    }
     // Fast path: direct window for addresses < 4 GiB.
     // BUGFIX: avoid integer overflow. `addr + n` can wrap to a small
     // value when addr is near UINT64_MAX, causing the check to pass
@@ -270,6 +286,11 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
     }
 }
 uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
+    // BIFROST_ALLOC_TRACE=1: print every mmap_alloc (addr,size) — used to
+    // audit placement/overlap of thunk bounces vs callback scratch stacks.
+    static const bool alloc_trace_ = getenv("BIFROST_ALLOC_TRACE") != nullptr;
+    if (alloc_trace_)
+        fprintf(stderr, "[alloc] mmap_alloc(%zu) ...", (size_t)size);
     if (size == 0) size = PAGE_SIZE;
     // 1.5.4-alpha: Per-allocation size cap. Prevents a malicious guest
     // from requesting SIZE_MAX and OOMing the host.
@@ -392,7 +413,31 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint) {
     // Track total pages atomically (relaxed — no cross-thread sync needed).
     total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
     allocations_[base] = aligned_size;
+    if (alloc_trace_)
+        fprintf(stderr, " [0x%llx..0x%llx)\n",
+                (unsigned long long)base,
+                (unsigned long long)(base + aligned_size));
     return base;
+}
+// ── mmap_alloc_callback_stack — guarded scratch stack for host-thread ──
+// guest callbacks. Layout: [GUARD][usable][GUARD]. The guards are
+// mprotect(PROT_NONE) pages inside the direct window, so any overflow
+// faults immediately (guest SIGSEGV) instead of silently corrupting the
+// neighboring malloc chunks. See the neverball/vkQuake heap-corruption
+// hunt (2026-08-25): the audio pump's callback descended >72 KB through
+// adjacent 4/8/64 KB scratch stacks and shredded live chunks.
+uint64_t Memory::mmap_alloc_callback_stack(uint64_t usable_size) {
+    constexpr uint64_t P = PAGE_SIZE;
+    uint64_t usable = (usable_size + P - 1) & ~(P - 1);
+    // Base allocation covers [guard][usable][guard].
+    uint64_t base = mmap_alloc(usable + 2 * P);
+    if (base == 0) return 0;
+    if (direct_window_) {
+        // Guards are per-page PROT_NONE holes inside the RW window.
+        mprotect(direct_window_ + base, P, PROT_NONE);
+        mprotect(direct_window_ + base + P + usable, P, PROT_NONE);
+    }
+    return base + P;  // usable base; sp starts at base + P + usable
 }
 uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_size) {
     if (new_size == 0) new_size = PAGE_SIZE;

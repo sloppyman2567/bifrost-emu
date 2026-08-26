@@ -77,6 +77,12 @@ public:
     // pointer is borrowed (owned by Emulator); runner may be null, in
     // which case guest audio callbacks are dropped.
     void wire(Audio* engine, CPU* cb_cpu, AudioCbRunner runner);
+    // Guest VA of libc's __libc_single_threaded word. The pump fires
+    // guest callbacks on a second vCPU; glibc must know the process is
+    // multi-threaded or malloc runs LOCK-FREE in both threads and the
+    // heap corrupts (neverball "malloc(): invalid size"). The Emulator
+    // sets this right after wire(); start_pump() clears the word.
+    void set_libc_single_threaded_addr(uint64_t addr);
     // Start the dedicated-vCPU audio pump (AAA Android path): a host
     // clock thread fires guest data callbacks on an EXCLUSIVE cloned
     // vCPU at device-like cadence, decoupled from whatever the guest
