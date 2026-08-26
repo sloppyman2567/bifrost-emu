@@ -419,7 +419,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
     // to run exactly one iteration of the loop, matching the
     // interpreter's `instr_count` step count.
     static bool verify_ = (getenv("BIFROST_JIT_VERIFY") != nullptr);
-    if (verify_ && !entry.verified_once) {
+    // BIFROST_JIT_VERIFY_EVERY=N: re-verify each block on its first N
+    // run_block dispatches (default 1 = legacy first-dispatch-only).
+    // Data-dependent miscompiles (e.g. a shift-count bug that needs
+    // operand >= 32 to manifest) pass first-dispatch verify and then
+    // corrupt memory invisibly — the neverball/vkQuake heap-corruption
+    // hunt needed N in the hundreds to catch them.
+    static uint64_t verify_every_ = [] {
+        const char* s = getenv("BIFROST_JIT_VERIFY_EVERY");
+        return s ? strtoull(s, nullptr, 0) : 1;
+    }();
+    if (verify_ && entry.exec_count < verify_every_) {
         // Mark this block as verified so subsequent dispatches skip the
         // expensive per-block divergence check. This is essential for
         // self-loop blocks, where verify mode must un-patch the self-loop
@@ -564,6 +574,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                         case 2: val = emu.mem().load<uint16_t>(addr); break;
                         case 4: val = emu.mem().load<uint32_t>(addr); break;
                         case 8: val = emu.mem().load<uint64_t>(addr); break;
+                        case 16:
+                            val = emu.mem().load<uint64_t>(addr) |
+                                  (emu.mem().load<uint64_t>(addr + 8) << 8);
+                            break;
                         default: continue;
                     }
                 } catch (...) {
@@ -578,25 +592,82 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // Save guest umask BEFORE the JIT runs (for stateful-syscall
         // verify correctness — umask is stateful, so running it twice
         // gives different results without save/restore).
+        // ── BIFROST_JIT_VERIFY_MEMFULL=1: full-range memory diff ──────
+        // Compares EVERY byte in a configurable guest range between the
+        // JIT's post-block state and the interpreter's post-rerun state.
+        // Catches wrong-address stores of ANY kind (dynamic base regs,
+        // SIMD_ST16, corrupted computed addresses) that the store_infos-
+        // based MEM check cannot see — its blind spots were exactly where
+        // the neverball/vkQuake heap corruption hid.
+        //
+        // Range: BIFROST_MEMFULL_START/BIFROST_MEMFULL_END (guest VAs,
+        // default 0x10000000..0x14000000 = the low guest heap band).
+        // Cost: ~3 passes over the range per verified dispatch — keep
+        // VERIFY_EVERY modest. Snapshot here (pre-JIT); compare+restore
+        // at the memverify site after both executions.
+        static bool memfull_ = (getenv("BIFROST_JIT_VERIFY_MEMFULL") != nullptr);
+        static uint64_t mf_start_ = [] {
+            const char* s = getenv("BIFROST_MEMFULL_START");
+            return s ? strtoull(s, nullptr, 0) : 0x10000000ULL;
+        }();
+        static uint64_t mf_end_ = [] {
+            const char* s = getenv("BIFROST_MEMFULL_END");
+            return s ? strtoull(s, nullptr, 0) : 0x14000000ULL;
+        }();
+        const size_t mf_bytes = (size_t)(mf_end_ - mf_start_);
+        std::vector<uint8_t> mf_snap_(memfull_ ? mf_bytes : 0);
+        std::vector<uint8_t> mf_jit_(memfull_ ? mf_bytes : 0);
+        bool mf_pending_ = false;
+        if (memfull_ && mf_bytes > 0) {
+            try {
+                emu.mem().read(mf_start_, mf_snap_.data(), mf_bytes);
+                mf_pending_ = true;
+                static bool mf_armed_printed_ = false;
+                if (!mf_armed_printed_) {
+                    fprintf(stderr, "[MEMFULL] armed: range [0x%llx..0x%llx) (%zu KiB)\n",
+                            (unsigned long long)mf_start_, (unsigned long long)mf_end_,
+                            mf_bytes / 1024);
+                    mf_armed_printed_ = true;
+                }
+            } catch (...) {
+                static bool mf_fail_printed_ = false;
+                if (!mf_fail_printed_) {
+                    fprintf(stderr, "[MEMFULL] READ FAILED for [0x%llx..0x%llx) — disabled\n",
+                            (unsigned long long)mf_start_, (unsigned long long)mf_end_);
+                    mf_fail_printed_ = true;
+                }
+            }
+        }
         mode_t saved_umask = emu.guest_umask();
         uint64_t jit_next = entry.fn(&cpu, &emu);
         cpu.pc = jit_next;
         // Save the JIT's umask value, restore pre-JIT for the interpreter.
         mode_t jit_umask = emu.guest_umask();
         emu.set_guest_umask(saved_umask);
+        // Capture the JIT's full-range post-state NOW (before any restore
+        // touches memory) — this is the MEMFULL "jit side" of the diff.
+        if (memfull_ && mf_pending_) {
+            try {
+                emu.mem().read(mf_start_, mf_jit_.data(), mf_bytes);
+            } catch (...) { mf_pending_ = false; }
+        }
         // Capture the JIT's written values at the STORE addresses (so we can
         // restore them after the interpreter runs — the next block expects
         // memory to be in the JIT's state, matching the JIT's cpu state).
         for (int i = 0; i < saved_mem_count; i++) {
             uint64_t v = 0;
-            try {
-                switch (saved_mem[i].width) {
-                    case 1: v = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
-                    case 2: v = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
-                    case 4: v = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
-                    case 8: v = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
-                }
-            } catch (...) { /* skip */ }
+                try {
+                    switch (saved_mem[i].width) {
+                        case 1: v = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
+                        case 2: v = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
+                        case 4: v = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
+                        case 8: v = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
+                        case 16:
+                            v = emu.mem().load<uint64_t>(saved_mem[i].addr) |
+                                (emu.mem().load<uint64_t>(saved_mem[i].addr + 8) << 8);
+                            break;
+                    }
+                } catch (...) { /* skip */ }
             jit_written[i].addr  = saved_mem[i].addr;
             jit_written[i].width = saved_mem[i].width;
             jit_written[i].value = v;
@@ -615,6 +686,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                                 static_cast<uint32_t>(saved_mem[i].value)); break;
                     case 8: emu.mem().store<uint64_t>(saved_mem[i].addr,
                                 saved_mem[i].value); break;
+                    case 16:
+                        emu.mem().store<uint64_t>(saved_mem[i].addr,
+                                saved_mem[i].value & ~0ULL);
+                        emu.mem().store<uint64_t>(saved_mem[i].addr + 8,
+                                saved_mem[i].value >> 8);
+                        break;
                 }
             } catch (...) {
                 // Ignore — the JIT wrote here, so the address is writable
@@ -755,6 +832,50 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // masks (it restores JIT memory afterwards). Register verify alone
         // won't catch a JIT that computes a correct register but stores it
         // to the wrong address or with a corrupted value.
+        // ── MEMFULL compare + restore (after interp re-run) ───────────
+        // The interpreter has re-run on the restored tracked addresses;
+        // the full range now holds the INTERPRETER's post-state while
+        // mf_jit_ holds the JIT's captured post-state. Any difference =
+        // a store one engine made and the other didn't (or made
+        // elsewhere) — the wrong-address-store detector.
+        static int mf_reports_ = 0;
+        if (memfull_ && mf_pending_) {
+            try {
+                emu.mem().read(mf_start_, mf_jit_.data(), mf_bytes);
+                std::vector<uint8_t> mf_ref(mf_bytes);
+                emu.mem().read(mf_start_, mf_ref.data(), mf_bytes);
+                uint64_t diffs = 0; size_t first = 0;
+                for (size_t i = 0; i < mf_bytes; i++) {
+                    if (mf_jit_[i] != mf_ref[i]) {
+                        if (diffs == 0) first = i;
+                        diffs++;
+                    }
+                }
+                if (diffs) {
+                    fprintf(stderr,
+                            "[MEMFULL] block @ 0x%llx: %llu differing bytes in "
+                            "[0x%llx..0x%llx), first @ guest 0x%llx jit=%02x ref=%02x\n",
+                            (unsigned long long)pc, (unsigned long long)diffs,
+                            (unsigned long long)mf_start_, (unsigned long long)mf_end_,
+                            (unsigned long long)(mf_start_ + first),
+                            mf_jit_[first], mf_ref[first]);
+                    size_t b0 = (first >= 16) ? first - 16 : 0;
+                    fprintf(stderr, "[MEMFULL]   jit:");
+                    for (size_t i = b0; i < first + 16 && i < mf_bytes; i++)
+                        fprintf(stderr, " %02x", mf_jit_[i]);
+                    fprintf(stderr, "\n[MEMFULL]   ref:");
+                    for (size_t i = b0; i < first + 16 && i < mf_bytes; i++)
+                        fprintf(stderr, " %02x", mf_ref[i]);
+                    fprintf(stderr, "\n");
+                    if (++mf_reports_ <= 8)
+                        fprintf(stderr,
+                                "[MEMFULL] *** REAL FULL-MEMORY DIVERGENCE ***\n");
+                }
+                // Restore the JIT's post-state over the whole range so
+                // subsequent blocks continue on JIT-consistent memory.
+                emu.mem().write(mf_start_, mf_jit_.data(), mf_bytes);
+            } catch (...) {}
+        }
         static bool memverify_ = (getenv("BIFROST_JIT_VERIFY_MEM") != nullptr);
         if (memverify_) {
             for (int i = 0; i < saved_mem_count; i++) {
@@ -766,6 +887,10 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                         case 2: ref_val = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
                         case 4: ref_val = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
                         case 8: ref_val = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
+                        case 16:
+                            ref_val = emu.mem().load<uint64_t>(saved_mem[i].addr) |
+                                      (emu.mem().load<uint64_t>(saved_mem[i].addr + 8) << 8);
+                            break;
                         default: ok = false;
                     }
                 } catch (...) { ok = false; }
@@ -776,6 +901,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                             saved_mem[i].width,
                             static_cast<unsigned long long>(jit_written[i].value),
                             static_cast<unsigned long long>(ref_val));
+                    fprintf(stderr, "[VERIFY-MEM] *** REAL MEMORY DIVERGENCE — JIT wrote different bytes than interpreter ***\n");
                 }
             }
         }
@@ -796,6 +922,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                                 static_cast<uint32_t>(jit_written[i].value)); break;
                     case 8: emu.mem().store<uint64_t>(jit_written[i].addr,
                                 jit_written[i].value); break;
+                    case 16:
+                        emu.mem().store<uint64_t>(jit_written[i].addr,
+                                jit_written[i].value & ~0ULL);
+                        emu.mem().store<uint64_t>(jit_written[i].addr + 8,
+                                jit_written[i].value >> 8);
+                        break;
                 }
             } catch (...) {
                 // Ignore — best-effort restore.
