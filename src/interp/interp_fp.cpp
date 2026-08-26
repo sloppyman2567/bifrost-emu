@@ -503,8 +503,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             //   Q=0 → result in LOW half; FCVTN zeroes the top half,
             //     FCVTXN leaves it UNCHANGED (per ARM ARM).
             //   Q=1 (*2 variants) → result in HIGH half, LOW preserved.
-            if ((op & 0xBFFFFF00) == 0x0E616800 ||
-                (op & 0xBFFFFF00) == 0x2E616800) {
+            // Mask 0xBFFFFC00 strips Q (bit30) AND Rn/Rd (bits 9:0).
+            // The old 0xBFFFFF00 kept Rn bits [9:8], so every source
+            // register >= v8 silently missed (vkQuake's
+            // `fcvtn v31.2s,v21.2d` = 0x0e616bbf DecodeError'd).
+            if ((op & 0xBFFFFC00) == 0x0E616800 ||
+                (op & 0xBFFFFC00) == 0x2E616800) {
                 const bool rto = ((op >> 29) & 1) != 0;
                 uint32_t out[2];
                 for (int i = 0; i < 2; i++) {
