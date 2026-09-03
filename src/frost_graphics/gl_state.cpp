@@ -290,7 +290,10 @@ bool GLStateTracker::get_integerv_locked(uint32_t pname, int32_t& out_val) const
             out_val = static_cast<int32_t>(element_array_buffer_binding_);
             return true;
         case GL::TEXTURE_BINDING_2D: {
-            uint32_t key = (active_texture_ << 16) | (0x8069 & 0xFFFF);
+            // Key must use the bind TARGET (GL_TEXTURE_2D), not the
+            // query pname (GL_TEXTURE_BINDING_2D) — set_texture_binding
+            // keys on target, so 0x8069 here never matched.
+            uint32_t key = (active_texture_ << 16) | (GL::TEXTURE_2D & 0xFFFF);
             auto it = texture_bindings_.find(key);
             out_val = (it != texture_bindings_.end()) ? static_cast<int32_t>(it->second) : 0;
             return true;
@@ -352,12 +355,10 @@ bool GLStateTracker::try_handle_get_booleanv(uint32_t pname, uint8_t* out_ptr) c
 
     switch (pname) {
         case GL::COLOR_WRITEMASK: {
-            std::lock_guard<std::mutex> g(mu_);
-            out_ptr[0] = GL::TRUE;
-            out_ptr[1] = GL::TRUE;
-            out_ptr[2] = GL::TRUE;
-            out_ptr[3] = GL::TRUE;
-            return true;
+            // Untracked: glColorMask has no tracker setter, so a
+            // hardcoded TRUE×4 lies after the guest masks channels.
+            // Return false and let the host GL answer authoritatively.
+            return false;
         }
         default: {
             uint8_t val = 0;
@@ -400,12 +401,10 @@ bool GLStateTracker::try_handle_get_integerv(uint32_t pname, int32_t* out_ptr) c
             return true;
         }
         case GL::COLOR_WRITEMASK: {
-            std::lock_guard<std::mutex> g(mu_);
-            out_ptr[0] = GL::TRUE;
-            out_ptr[1] = GL::TRUE;
-            out_ptr[2] = GL::TRUE;
-            out_ptr[3] = GL::TRUE;
-            return true;
+            // Untracked: glColorMask has no tracker setter, so a
+            // hardcoded TRUE×4 lies after the guest masks channels.
+            // Return false and let the host GL answer authoritatively.
+            return false;
         }
         case GL::STENCIL_VALUE_MASK:
         case GL::STENCIL_REF:
@@ -460,12 +459,12 @@ bool GLStateTracker::try_handle_get_integerv(uint32_t pname, int32_t* out_ptr) c
         case GL::FRONT_FACE:
             { std::lock_guard<std::mutex> g(mu_); out_ptr[0] = static_cast<int32_t>(front_face_); return true; }
         case GL::COLOR_CLEAR_VALUE: {
-            // GLint variant of the clear-color query: convert floats to ints.
+            // GLint variant: round like DEPTH_RANGE above, don't truncate.
             std::lock_guard<std::mutex> g(mu_);
-            out_ptr[0] = static_cast<int32_t>(clear_color_[0]);
-            out_ptr[1] = static_cast<int32_t>(clear_color_[1]);
-            out_ptr[2] = static_cast<int32_t>(clear_color_[2]);
-            out_ptr[3] = static_cast<int32_t>(clear_color_[3]);
+            out_ptr[0] = static_cast<int32_t>(std::lround(clear_color_[0]));
+            out_ptr[1] = static_cast<int32_t>(std::lround(clear_color_[1]));
+            out_ptr[2] = static_cast<int32_t>(std::lround(clear_color_[2]));
+            out_ptr[3] = static_cast<int32_t>(std::lround(clear_color_[3]));
             return true;
         }
         default: {

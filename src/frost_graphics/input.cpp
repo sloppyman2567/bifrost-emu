@@ -370,7 +370,11 @@ struct FrostInputImpl {
         : event_queue(EVENT_CAP), js_queue(JS_CAP),
           startup_time(std::chrono::steady_clock::now()) {}
     // ── Update modifier state from SDL2 key mods ───────────────────────
+    // Bitmask is indexed by table position, NOT by linux keycode: codes
+    // run up to 100 (KEY_RIGHTALT), which overflows a 16-bit mask and is
+    // UB as a 32-bit shift. Headless builds (no SDL) take the no-op.
     void update_modifiers(uint16_t mods) {
+#if defined(BIFROST_USE_SDL2)
         struct ModMap { uint16_t sdl_bit; uint16_t linux_code; };
         static constexpr ModMap kModMap[] = {
             { KMOD_LCTRL,  linux_input::KEY_LEFTCTRL },
@@ -381,20 +385,23 @@ struct FrostInputImpl {
             { KMOD_RALT,   linux_input::KEY_RIGHTALT },
             { KMOD_CAPS,   linux_input::KEY_CAPSLOCK },
         };
-        uint16_t new_state = 0;
-        for (const auto& m : kModMap) {
-            if (mods & m.sdl_bit) new_state |= (1u << m.linux_code);
+        uint8_t new_state = 0;
+        for (size_t i = 0; i < sizeof(kModMap) / sizeof(kModMap[0]); i++) {
+            if (mods & kModMap[i].sdl_bit) new_state |= (uint8_t)(1u << i);
         }
         // Emit EV_KEY for modifiers that changed.
-        for (const auto& m : kModMap) {
-            bool was_set = modifier_state & (1u << m.linux_code);
-            bool now_set = new_state & (1u << m.linux_code);
+        for (size_t i = 0; i < sizeof(kModMap) / sizeof(kModMap[0]); i++) {
+            bool was_set = (modifier_state & (1u << i)) != 0;
+            bool now_set = (new_state & (1u << i)) != 0;
             if (was_set != now_set) {
-                push_event(linux_input::EV_KEY, m.linux_code,
+                push_event(linux_input::EV_KEY, kModMap[i].linux_code,
                            now_set ? 1 : 0);
             }
         }
         modifier_state = new_state;
+#else
+        (void)mods;
+#endif
     }
     // ── Push an input_event (24 bytes) into the event queue ─────────
     void push_event(uint16_t type, uint16_t code, int32_t value) {

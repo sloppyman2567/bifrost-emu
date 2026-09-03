@@ -133,6 +133,7 @@ static uint64_t bifrost_dlsym(uint64_t handle, const char* name) {
 #define GL_ARRAY_BUFFER_BINDING    0x8894
 #define GL_ELEMENT_ARRAY_BUFFER_BINDING 0x8895
 #define GL_TEXTURE_BINDING_2D      0x8069
+#define GL_TEXTURE_2D              0x0DE1
 #define GL_CURRENT_PROGRAM         0x8B8D
 #define GL_MAX_TEXTURE_SIZE        0x0D33
 #define GL_MAX_VERTEX_ATTRIBS      0x8869
@@ -458,7 +459,9 @@ int main(void) {
     /* ── Test 7: glActiveTexture + glBindTexture ──────────────────────── */
     printf("test_gl_state: [7] glActiveTexture / glBindTexture\n");
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(0x8069, 42);
+    /* target is GL_TEXTURE_2D (0x0DE1) — 0x8069 is the get-pname, never
+     * a bind target. */
+    glBindTexture(GL_TEXTURE_2D, 42);
     {
         int unit = 0;
         glGetIntegerv(GL_ACTIVE_TEXTURE, &unit);
@@ -471,7 +474,7 @@ int main(void) {
     }
     /* Switch back to TEXTURE0 and bind a different texture. */
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(0x8069, 99);
+    glBindTexture(GL_TEXTURE_2D, 99);
     {
         int tex = 0;
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex);

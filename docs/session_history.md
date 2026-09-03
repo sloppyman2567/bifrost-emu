@@ -3428,3 +3428,29 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   via string bounce, real surface commit forwarding. ALMOST derailed by
   popping the predecessor's leftover stash into the tree (cross-wire
   xchg experiment) — removed; their WIP stash left untouched.
+
+## Session History (2026-09-03) — Wayland input end-to-end + graphics thunk review
+
+- Wayland input was dead in `test_wayland_input interactive`: the live
+  loop called dispatch_pending + flush + sleep, but dispatch_pending only
+  dispatches already-read events — nothing ever polled/read the socket.
+  Fixed with the real client cycle (prepare/poll/read) each tick, on top
+  of the earlier get_fd fix (published guest fd so guest poll wakes).
+  Loop is wall-clock now (was iteration-counted: finished early under
+  input); interactive capped at 20s. Verified live with clicks/keys.
+- Companion display fixes (committed as 405a6eb): wl_display_connect
+  tries the host bridge before any SDL window (kills the phantom window
+  the compositor flagged not-responding); thunk skips SDL init for the 17
+  bridge symbols; X11 proxy queues SDL key/mouse/wheel/close as XEvents
+  (pending/nextevent/checkmask/queued all pump first); flush after
+  surface commit, xdg ack_configure and xdg pong.
+- Graphics thunk review (subagent audit, every claim re-verified):
+  display-mode write used `m` not `src` (SDL3 crash); glBitmap arm asked
+  ni==3, spec yields ni==2, bits now from x2; RWFromMem nullptr guard;
+  SDLVK_EXT count cap 64; SDL_calloc overflow check; init recheck under
+  lock; input modifier mask now index-based + headless-safe; texture
+  binding query key 0x8069 -> 0x0DE1 (test was passing the get-pname as
+  bind target — fixed the test too); COLOR_WRITEMASK forwards to host;
+  clear-color int query uses lround. Races (string cache, glfw maps,
+  error string, persistent snapshot) and DrawRangeElements EBO policy
+  noted, left for a dedicated pass. Quick suite 211/211 green.

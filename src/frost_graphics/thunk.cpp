@@ -584,6 +584,7 @@ bool GraphicThunk::init(Memory& mem) {
     if (!impl_->enabled) return false;
     if (impl_->initialized) return true;
     std::lock_guard<std::mutex> g(impl_->mu);
+    if (impl_->initialized) return true;  // raced init: first one won
     impl_->mem = &mem;
     // Allocate a 64 KiB page for trampolines. mmap_alloc returns a
     // fresh, zeroed region. The page is mapped RWX in guest memory
@@ -841,7 +842,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     }
                 }
                 if (!g) { cpu.regs[0] = 0; return 0; }  // alloc failed
-                try { impl_->mem->write(g, m, 24); }
+                try { impl_->mem->write(g, src, 24); }
                 catch (...) { cpu.regs[0] = 0; return 0; }
                 cpu.regs[0] = g;
                 return 0;
@@ -870,6 +871,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         impl_->rw_kept_.emplace_back(hp);
                     }
                 }
+                if (!hp) { cpu.regs[0] = 0; return 0; }
                 cpu.regs[0] = reinterpret_cast<uint64_t>(fn(hp, sz));
                 return 0;
             }
@@ -890,6 +892,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 fprintf(stderr, "[thunk] SDLVK_EXT: win=%p ok=%d count=%u pnames=0x%llx\n",
                         win, ok1 ? 1 : 0, count, (unsigned long long)pnames);
             if (!ok1) { cpu.regs[0] = 0; return 0; }
+            if (count > 64) { cpu.regs[0] = 0; return 0; }
             if (pnames && count) {
                 std::vector<const char*> names(count, nullptr);
                 if (!fn(win, &count, names.data())) {
@@ -920,7 +923,9 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 if (!strcmp(nm, "SDL_malloc")) {
                     ret = impl_->mem->mmap_alloc(cpu.regs[0]);
                 } else if (!strcmp(nm, "SDL_calloc")) {
-                    ret = impl_->mem->mmap_alloc(cpu.regs[0] * cpu.regs[1]);
+                    uint64_t sz = 0;
+                    if (!__builtin_mul_overflow(cpu.regs[0], cpu.regs[1], &sz))
+                        ret = impl_->mem->mmap_alloc(sz);
                 } else { // SDL_realloc(ptr, size)
                     uint64_t oldp = cpu.regs[0], newsz = cpu.regs[1];
                     ret = impl_->mem->mmap_alloc(newsz);
@@ -1268,24 +1273,28 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             reinterpret_cast<Fn>(entry.host_fn)(
                 static_cast<uint32_t>(iv[0]),
                 static_cast<uint32_t>(iv[1]), fv[0]);
-        } else if (ni == 3 && entry.n_float == 4) {
+        } else if (ni == 2 && entry.n_float == 4) {
             // glBitmap(width, height, xorig, yorig, xmove, ymove, bits):
-            // two count ints + four floats + the bitmap pointer. Rows are
-            // (w+7)/8 bytes strided to UNPACK_ALIGNMENT (assume 4).
+            // two count ints in x0/x1, four floats in v0..v3, and the
+            // bitmap pointer in x2 (aapcs64: next free GPR after x0/x1 —
+            // floats travel in SIMD regs, not GPRs). The old arm asked
+            // for ni==3, which the iiffffz spec never produces, so every
+            // glBitmap fell into the unsupported no-op below.
             uint64_t bw = iv[0], bh = iv[1];
             uint64_t brow = (bw + 7) / 8;
             uint64_t bstride = (brow + 3) & ~(uint64_t)3;
             uint64_t bsz = bh ? (bh - 1) * bstride + brow : 0;
+            uint64_t bits_guest = cpu.regs[2];
             const void* bits = nullptr;
             std::vector<uint8_t> bbounce;
             if (impl_->mem) {
-                uint8_t* hp = impl_->mem->guest_to_host_ptr(iv[2]);
+                uint8_t* hp = impl_->mem->guest_to_host_ptr(bits_guest);
                 if (hp) {
                     bits = hp;
                 } else if (bsz > 0 && bsz < (1ull << 20)) {
                     try {
                         bbounce.resize(static_cast<size_t>(bsz));
-                        impl_->mem->read(iv[2], bbounce.data(),
+                        impl_->mem->read(bits_guest, bbounce.data(),
                                          static_cast<size_t>(bsz));
                         bits = bbounce.data();
                     } catch (...) { bits = nullptr; }
