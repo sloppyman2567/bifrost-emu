@@ -20,6 +20,48 @@ typedef uint64_t (*wl_display_connect_t)(const char*);
 typedef int      (*wl_display_fd_t)(uint64_t);
 typedef int      (*wl_display_op_t)(uint64_t);
 typedef void     (*wl_display_disconnect_t)(uint64_t);
+typedef uint64_t (*wl_display_get_registry_t)(uint64_t);
+typedef uint64_t (*wl_marshal_ctor_t)(uint64_t, uint32_t, void*, ...);
+typedef int      (*wl_add_listener_t)(uint64_t, void*, uint64_t);
+typedef void     (*wl_proxy_destroy_t)(uint64_t);
+
+struct wl_iface {
+    const char* name;
+    int version;
+};
+
+static int n_globals = 0;
+static uint32_t comp_name = 0;
+static uint32_t comp_version = 0;
+static char comp_iface[64];
+
+static void on_global(uint64_t data, uint64_t reg, uint32_t name,
+                      const char* iface, uint32_t version) {
+    (void)data; (void)reg;
+    n_globals++;
+    if (iface) {
+        const char* p = iface;
+        int i = 0;
+        while (i < 63 && p[i]) { comp_iface[i] = p[i]; i++; }
+        comp_iface[i] = 0;
+        /* strcmp for wl_compositor without libc help. */
+        const char* want = "wl_compositor";
+        int j = 0;
+        while (want[j] && comp_iface[j] == want[j]) j++;
+        if (!want[j] && !comp_iface[j]) {
+            comp_name = name;
+            comp_version = version;
+        }
+    }
+}
+
+static void on_remove(uint64_t data, uint64_t reg, uint32_t name) {
+    (void)data; (void)reg; (void)name;
+}
+
+static void* reg_listener[2] = {(void*)on_global, (void*)on_remove};
+static struct wl_iface compositor_iface = {"wl_compositor", 0};
+static struct wl_iface surface_iface = {"wl_surface", 0};
 
 static uint64_t bifrost_dlopen(const char* name, uint64_t flags) {
     register uint64_t x0 __asm__("x0") = (uint64_t)(uintptr_t)name;
@@ -58,12 +100,20 @@ int main(void) {
     wl_display_op_t wl_display_roundtrip;
     wl_display_op_t wl_display_dispatch_pending;
     wl_display_disconnect_t wl_display_disconnect;
+    wl_display_get_registry_t wl_display_get_registry;
+    wl_marshal_ctor_t wl_proxy_marshal_constructor;
+    wl_add_listener_t wl_proxy_add_listener;
+    wl_proxy_destroy_t wl_proxy_destroy;
     LOAD(hwl, wl_display_connect_t, wl_display_connect);
     LOAD(hwl, wl_display_fd_t, wl_display_get_fd);
     LOAD(hwl, wl_display_op_t, wl_display_flush);
     LOAD(hwl, wl_display_op_t, wl_display_roundtrip);
     LOAD(hwl, wl_display_op_t, wl_display_dispatch_pending);
     LOAD(hwl, wl_display_disconnect_t, wl_display_disconnect);
+    LOAD(hwl, wl_display_get_registry_t, wl_display_get_registry);
+    LOAD(hwl, wl_marshal_ctor_t, wl_proxy_marshal_constructor);
+    LOAD(hwl, wl_add_listener_t, wl_proxy_add_listener);
+    LOAD(hwl, wl_proxy_destroy_t, wl_proxy_destroy);
 
     uint64_t disp = wl_display_connect(0);
     if (!disp) {
@@ -91,6 +141,47 @@ int main(void) {
         printf("FAIL: dispatch_pending failed\n");
         return 1;
     }
+
+    /* Registry dialog: get_registry, listen, roundtrip (globals arrive
+     * as guest callbacks), bind wl_compositor, create a surface. */
+    uint64_t reg = wl_display_get_registry(disp);
+    if (!reg) {
+        printf("FAIL: get_registry returned 0\n");
+        return 1;
+    }
+    if (wl_proxy_add_listener(reg, reg_listener, 0) != 0) {
+        printf("FAIL: add_listener failed\n");
+        return 1;
+    }
+    if (wl_display_roundtrip(disp) < 0) {
+        printf("FAIL: registry roundtrip failed\n");
+        return 1;
+    }
+    printf("test_wayland_bridge: globals=%d\n", n_globals);
+    if (n_globals <= 0) {
+        printf("FAIL: no globals delivered\n");
+        return 1;
+    }
+    if (!comp_name) {
+        printf("FAIL: no wl_compositor advertised\n");
+        return 1;
+    }
+    compositor_iface.version = (int)comp_version;
+    uint64_t comp = wl_proxy_marshal_constructor(reg, 0, &compositor_iface,
+                                                 comp_name, comp_version);
+    if (!comp) {
+        printf("FAIL: bind wl_compositor failed\n");
+        return 1;
+    }
+    surface_iface.version = 1;
+    uint64_t surf = wl_proxy_marshal_constructor(comp, 0, &surface_iface);
+    if (!surf) {
+        printf("FAIL: create_surface failed\n");
+        return 1;
+    }
+    wl_proxy_destroy(surf);
+    wl_proxy_destroy(comp);
+    wl_proxy_destroy(reg);
     wl_display_disconnect(disp);
     printf("test_wayland_bridge: ALL PASS\n");
     return 0;

@@ -60,6 +60,11 @@ public:
     size_t enumerate_symbols(const std::string& lib,
         const std::function<void(const std::string&, uint64_t)>& cb) const;
     int64_t dispatch(CPU& cpu, uint32_t symbol_id);
+    // Guest Wayland listener delivery: fn(data, proxy, ...) via the
+    // emulator's borrow-CPU helper (same shape as the GLFW runner).
+    using WlCbRunner = std::function<uint64_t(
+        CPU& cpu, uint64_t fn, const int64_t* iargs, size_t n_iargs)>;
+    void set_wl_cb_runner(WlCbRunner runner);
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
     // Android --android driver: ensure the host SDL window exists eagerly
@@ -94,6 +99,7 @@ public:
     void write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id);
     void register_known_symbols_();
     uint64_t proxy_dispatch_(CPU& cpu, const std::string& sym_name);
+    void deliver_wl_events_(CPU& cpu);
     bool vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace);
     DisplayProxy* proxy();
 };

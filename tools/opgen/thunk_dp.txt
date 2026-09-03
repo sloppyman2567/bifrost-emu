@@ -818,6 +818,7 @@ vkGetPhysicalDeviceSurfaceFormatsKHR    VK   iipp  -     VK_CMD_DEEP_OUT        
 vkGetPhysicalDeviceSurfacePresentModesKHR VK iipp -     VK_CMD_DEEP_OUT            -
 # libwayland-client.so.0
 wl_display_connect          WL   p              -     PROXY             -
+wl_display_get_registry     WL   p              -     PROXY             -
 wl_display_connect_to_fd    WL   i              -     PROXY             -
 wl_display_disconnect       WL   i              -     PROXY             -
 wl_display_get_fd           WL   i              -     PROXY             -

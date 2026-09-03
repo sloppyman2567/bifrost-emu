@@ -278,7 +278,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 if (athunk->enabled()) { athunk->init(mem_); wire_thunk_audio_runner_(); }
             }
             if (auto* dthunk = graphics_.display_thunk()) {
-                if (dthunk->enabled()) dthunk->init(mem_);
+                if (dthunk->enabled()) {
+                    dthunk->init(mem_);
+                    wire_thunk_wl_cb_runner_();
+                }
             }
             // Extend the thunk resolver to consult all three thunks.
             // Each thunk has its own per-library symbol enumeration; we
@@ -738,7 +741,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (athunk->enabled()) { athunk->init(mem_); wire_thunk_audio_runner_(); }
         }
         if (auto* dthunk = graphics_.display_thunk()) {
-            if (dthunk->enabled()) dthunk->init(mem_);
+            if (dthunk->enabled()) {
+                dthunk->init(mem_);
+                wire_thunk_wl_cb_runner_();
+            }
         }
         GraphicThunk* gthunk = graphics_.thunk();
         AudioThunk*   athunk = graphics_.audio_thunk();
@@ -1639,6 +1645,19 @@ void Emulator::wire_thunk_audio_runner_() {
     athunk->start_pump();
 }
 
+// ── wire_thunk_wl_cb_runner_ — Wayland listener delivery ──────────
+// wl_proxy_add_listener stores guest callbacks; host events queue during
+// dispatch and deliver here through the shared borrow-CPU helper.
+void Emulator::wire_thunk_wl_cb_runner_() {
+    auto* dthunk = graphics_.display_thunk();
+    if (!dthunk || !dthunk->enabled()) return;
+    dthunk->set_wl_cb_runner(
+        [this](CPU& cpu, uint64_t fn, const int64_t* iargs,
+               size_t n) -> uint64_t {
+            return call_guest_function(cpu, fn, iargs, n, nullptr, 0);
+        });
+}
+
 void Emulator::ensure_thunk_linker_() {
     if (dyn_linker_) return;
     dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
@@ -1653,7 +1672,10 @@ void Emulator::ensure_thunk_linker_() {
         if (at->enabled()) { at->init(mem_); wire_thunk_audio_runner_(); }
     }
     if (auto* dt = graphics_.display_thunk()) {
-        if (dt->enabled()) dt->init(mem_);
+        if (dt->enabled()) {
+            dt->init(mem_);
+            wire_thunk_wl_cb_runner_();
+        }
     }
     GraphicThunk* gthunk = graphics_.thunk();
     AudioThunk* athunk = graphics_.audio_thunk();

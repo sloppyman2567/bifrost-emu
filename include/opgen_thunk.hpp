@@ -798,6 +798,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::VK, "vkGetPhysicalDeviceSurfaceFormatsKHR", "iipp", RetKind::PLAIN, Policy::VK_CMD_DEEP_OUT, SizeKind::NONE, false},
     {LibFamily::VK, "vkGetPhysicalDeviceSurfacePresentModesKHR", "iipp", RetKind::PLAIN, Policy::VK_CMD_DEEP_OUT, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_connect", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
+    {LibFamily::WL, "wl_display_get_registry", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_connect_to_fd", "i", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_disconnect", "i", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_get_fd", "i", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},

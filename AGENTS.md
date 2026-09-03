@@ -867,7 +867,12 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `VK_CREATE_RENDERPASS`/`VK_CREATE_FRAMEBUFFER`/`VK_BEGIN_RENDERPASS`;
   size kinds
   `X_DRAWSTR`/`X_SETWMPROTO`). The hand-rolled `REG_VK*/REG_WL*/REG_X11*`
-  macro ladders in `display_thunk.cpp` are GONE. `DisplayThunk::
+  macro ladders in `display_thunk.cpp` are GONE. Wayland requests
+  marshal through the host array forms driven by the `opgen_wl`
+  signature tables (`iface` + `created` fields); created objects map
+  back to guest handles with interface+version tracked, and guest
+  listeners deliver after dispatch via a borrow-CPU runner (fd-passing
+  stays unsupported). `DisplayThunk::
   register_known_symbols_` iterates `thunk::specs`, filters to the display
   families, derives the legacy ABI shape (`pointer_args`/`n_stack`/
   `n_float`/`flags`) from the ARGS column, and registers each symbol under

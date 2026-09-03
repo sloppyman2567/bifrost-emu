@@ -48,6 +48,15 @@ struct DisplayThunkImpl {
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
     // DisplayProxy for X11/Wayland fallback (1.5.4-alpha).
     std::unique_ptr<DisplayProxy> proxy_;
+    // Wayland guest listeners (wl_proxy_add_listener): proxy handle ->
+    // {guest fn addrs per event, data}. Delivered after dispatch via
+    // the borrow-CPU runner (queue-then-deliver, never re-entrant).
+    struct WlListener {
+        std::vector<uint64_t> fns;
+        uint64_t data = 0;
+    };
+    std::unordered_map<uint64_t, WlListener> wl_listeners_;
+    DisplayThunk::WlCbRunner wl_cb_runner_;
     // Guest-visible scratch page for host→guest string returns
     // (XGetAtomName, glGetString, …). Ring-allocated.
     uint64_t string_cache_base = 0;
@@ -2360,6 +2369,57 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     // handle it with the corrected pointer masks.
     return false;
 }
+void DisplayThunk::set_wl_cb_runner(WlCbRunner runner) {
+    if (!impl_) return;
+    impl_->wl_cb_runner_ = std::move(runner);
+}
+
+// Drain queued Wayland events into guest listeners (queue-then-deliver:
+// host trampolines push during dispatch, we run guest code only after
+// the host call returns — same reentrancy rule as GLFW_POLL).
+void DisplayThunk::deliver_wl_events_(CPU& cpu) {
+    if (!impl_ || !impl_->wl_cb_runner_ || !impl_->proxy_) return;
+    DisplayProxy::WlEvent ev;
+    while (impl_->proxy_->wl_pop_event(ev)) {
+        auto lit = impl_->wl_listeners_.find(ev.proxy);
+        if (lit == impl_->wl_listeners_.end()) continue;
+        std::string iface = impl_->proxy_->wl_iface(ev.proxy);
+        const arm64emu::wl::Message* msg =
+            arm64emu::wl::find(true, iface.c_str(), ev.ev);
+        if (!msg) continue;
+        if (ev.ev >= lit->second.fns.size()) continue;
+        uint64_t fn = lit->second.fns[ev.ev];
+        if (!fn) continue;
+        // iargs = {data, proxy} + decoded event args in sig order.
+        // Slots: ev.a, ev.b, ev.c then ev.s (strings bounce to guest).
+        int64_t iargs[10];
+        size_t n = 0;
+        iargs[n++] = static_cast<int64_t>(lit->second.data);
+        iargs[n++] = static_cast<int64_t>(ev.proxy);
+        uint64_t slots[3] = {ev.a, ev.b, ev.c};
+        int si = 0;
+        for (const char* p = msg->sig; *p && n < 10; p++) {
+            char c = *p >= 'A' && *p <= 'Z' ? *p - 'A' + 'a' : *p;
+            if (c == 's') {
+                iargs[n++] = static_cast<int64_t>(
+                    impl_->proxy_->wl_str_bounce(ev.s.c_str()));
+            } else if (c == 'o') {
+                iargs[n++] = static_cast<int64_t>(ev.proxy);
+            } else if (si < 3) {
+                iargs[n++] = static_cast<int64_t>(slots[si++]);
+            } else {
+                iargs[n++] = 0;
+            }
+        }
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] wl event %s:%u -> 0x%llx\n",
+                    iface.c_str(), ev.ev,
+                    static_cast<unsigned long long>(fn));
+        }
+        impl_->wl_cb_runner_(cpu, fn, iargs, n);
+    }
+}
+
 // Called when a symbol has the THUNK_PROXY flag. The DisplayProxy provides
 // a SDL2-based software fallback for X11/Wayland functions when the host
 // libraries are unavailable or have no display.
@@ -3065,17 +3125,20 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     if (sym_name == "wl_display_dispatch") {
         cpu.regs[0] = static_cast<uint64_t>(
             static_cast<int64_t>(proxy->wl_display_dispatch(cpu.regs[0])));
+        deliver_wl_events_(cpu);
         return 0;
     }
     if (sym_name == "wl_display_dispatch_pending") {
         cpu.regs[0] = static_cast<uint64_t>(
             static_cast<int64_t>(
                 proxy->wl_display_dispatch_pending(cpu.regs[0])));
+        deliver_wl_events_(cpu);
         return 0;
     }
     if (sym_name == "wl_display_roundtrip") {
         cpu.regs[0] = static_cast<uint64_t>(
             static_cast<int64_t>(proxy->wl_display_roundtrip(cpu.regs[0])));
+        deliver_wl_events_(cpu);
         return 0;
     }
     if (sym_name == "wl_display_read_events") {
@@ -3096,6 +3159,76 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
     }
     if (sym_name == "wl_proxy_destroy") {
         proxy->wl_proxy_destroy(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "wl_display_get_registry") {
+        cpu.regs[0] = proxy->wl_display_get_registry(cpu.regs[0]);
+        return 0;
+    }
+    // ── Wayland request marshalling (signature-driven) ─────────
+    // Variadic guest layout: x0=proxy, w1=opcode, then x2=interface
+    // (constructors) or first vararg, x3..x7, guest stack. The proxy
+    // decodes per the opgen_wl table and forwards via the host array
+    // forms; constructors map the new object back to a guest handle.
+    if (sym_name == "wl_proxy_marshal") {
+        // Plain marshal has no interface param: varargs start at x2.
+        uint64_t regs[6] = {cpu.regs[2], cpu.regs[3], cpu.regs[4],
+                            cpu.regs[5], cpu.regs[6], cpu.regs[7]};
+        proxy->wl_marshal(cpu.regs[0],
+                          static_cast<uint32_t>(cpu.regs[1]),
+                          0 /*ifstruct*/, false, 0, regs, 6, cpu.sp);
+        cpu.regs[0] = 0;
+        return 0;
+    }
+    if (sym_name == "wl_proxy_marshal_constructor") {
+        uint64_t regs[5] = {cpu.regs[3], cpu.regs[4], cpu.regs[5],
+                            cpu.regs[6], cpu.regs[7]};
+        cpu.regs[0] = proxy->wl_marshal(
+            cpu.regs[0], static_cast<uint32_t>(cpu.regs[1]),
+            cpu.regs[2], false, 0, regs, 5, cpu.sp);
+        return 0;
+    }
+    if (sym_name == "wl_proxy_marshal_constructor_versioned") {
+        uint64_t regs[4] = {cpu.regs[4], cpu.regs[5],
+                            cpu.regs[6], cpu.regs[7]};
+        cpu.regs[0] = proxy->wl_marshal(
+            cpu.regs[0], static_cast<uint32_t>(cpu.regs[1]),
+            cpu.regs[2], true, static_cast<uint32_t>(cpu.regs[3]),
+            regs, 4, cpu.sp);
+        return 0;
+    }
+    // ── Wayland listener registration ──────────────────────────
+    // Stores the guest fn table (event_count entries) + data; installs
+    // the host registry listener when applicable. Events queue during
+    // dispatch and deliver afterwards (never re-entrant).
+    if (sym_name == "wl_proxy_add_listener") {
+        uint64_t proxy_h = cpu.regs[0];
+        uint64_t listener = cpu.regs[1];
+        uint64_t data = cpu.regs[2];
+        std::string iface = proxy->wl_iface(proxy_h);
+        size_t nev = iface.empty()
+                         ? 0
+                         : arm64emu::wl::event_count(iface.c_str());
+        DisplayThunkImpl::WlListener lst;
+        lst.data = data;
+        if (listener && nev > 0 && nev <= 16 && impl_->mem) {
+            for (size_t i = 0; i < nev; i++) {
+                uint64_t fn = 0;
+                try {
+                    impl_->mem->read(listener + i * 8, &fn, 8);
+                } catch (...) { break; }
+                lst.fns.push_back(fn);
+            }
+        }
+        if (!lst.fns.empty()) impl_->wl_listeners_[proxy_h] = lst;
+        if (iface == "wl_registry") {
+            proxy->wl_registry_listen(proxy->wl_host(proxy_h));
+        }
+        if (dbg().thunk_trace) {
+            fprintf(stderr, "[thunk] wl_proxy_add_listener %s: %zu fns\n",
+                    iface.c_str(), lst.fns.size());
+        }
         cpu.regs[0] = 0;
         return 0;
     }

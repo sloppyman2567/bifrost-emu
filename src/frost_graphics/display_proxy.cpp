@@ -9,6 +9,7 @@
 // each guest address so we can recover our proxy state on entry.
 #include "frost/display_proxy.hpp"
 #include "core/memory.h"
+#include "opgen_wl.hpp"
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
@@ -219,7 +220,18 @@ bool DisplayProxy::wl_bridge_init_() {
 void* DisplayProxy::wl_host(uint64_t guest_addr) const {
     if (guest_addr == 0) return nullptr;
     auto it = wl_objs_.find(guest_addr);
-    return it != wl_objs_.end() ? it->second : nullptr;
+    return it != wl_objs_.end() ? it->second.host : nullptr;
+}
+std::string DisplayProxy::wl_iface(uint64_t guest_addr) const {
+    auto it = wl_objs_.find(guest_addr);
+    return it != wl_objs_.end() ? it->second.iface : std::string();
+}
+uint64_t DisplayProxy::wl_guest_for_host(const void* host) const {
+    if (!host) return 0;
+    for (const auto& kv : wl_objs_) {
+        if (kv.second.host == host) return kv.first;
+    }
+    return 0;
 }
 uint64_t DisplayProxy::wl_display_connect(const char* name) {
     if (!ready()) return 0;
@@ -231,7 +243,7 @@ uint64_t DisplayProxy::wl_display_connect(const char* name) {
     if (wl_bridge_init_()) {
         using ConnectFn = void* (*)(const char*);
         void* host = reinterpret_cast<ConnectFn>(wlfn_connect_)(name);
-        if (host) wl_objs_[guest] = host;
+        if (host) wl_objs_[guest] = WlObj{host, "wl_display", 1};
     }
     return guest;
 }
@@ -240,7 +252,7 @@ void DisplayProxy::wl_display_disconnect(uint64_t display_guest) {
     if (it != wl_objs_.end()) {
         if (wlfn_disconnect_) {
             using DiscFn = void (*)(void*);
-            reinterpret_cast<DiscFn>(wlfn_disconnect_)(it->second);
+            reinterpret_cast<DiscFn>(wlfn_disconnect_)(it->second.host);
         }
         wl_objs_.erase(it);
     }
@@ -299,11 +311,256 @@ void DisplayProxy::wl_proxy_destroy(uint64_t proxy_guest) {
     if (it != wl_objs_.end()) {
         if (wlfn_proxy_destroy_) {
             using Fn = void (*)(void*);
-            reinterpret_cast<Fn>(wlfn_proxy_destroy_)(it->second);
+            reinterpret_cast<Fn>(wlfn_proxy_destroy_)(it->second.host);
         }
         wl_objs_.erase(it);
     }
     free_handle(proxy_guest);
+}
+
+// ── Wayland generic marshal (opgen_wl signature-driven) ────────────
+// libwayland wire types: int32/uint32/wl_fixed (4 bytes), pointers and
+// fds (8-byte slots in wl_argument). Guest varargs arrive in regs[0..4]
+// (= x3..x7) then the guest stack at sp, 8 bytes each.
+namespace {
+// Host wl_argument layout (see wayland-util.h): 32-bit values in the
+// low half, pointers native. We only ever fill 8-byte slots.
+struct WlArg { uint64_t v = 0; };
+}  // namespace
+
+uint64_t DisplayProxy::wl_display_get_registry(uint64_t display_guest) {
+    // NOTE: wl_display_get_registry is inline in the real headers (a
+    // marshal_constructor for wl_display op 1) — there is no host symbol
+    // to dlsym. Route through the generic marshaller (no varargs).
+    return wl_marshal(display_guest, 1, 0, false, 0, nullptr, 0, 0);
+}
+
+bool DisplayProxy::wl_pop_event(WlEvent& out) {
+    if (wl_pending_.empty()) return false;
+    out = wl_pending_.front();
+    wl_pending_.erase(wl_pending_.begin());
+    return true;
+}
+
+uint64_t DisplayProxy::wl_str_bounce(const char* s) {
+    if (!s || !mem_) return 0;
+    if (!wl_str_bounce_) {
+        wl_str_bounce_ = mem_->mmap_alloc(4096);
+        if (!wl_str_bounce_) return 0;
+    }
+    size_t n = strlen(s) + 1;
+    if (n > 4096) n = 4096;
+    mem_->write(wl_str_bounce_, s, n);
+    return wl_str_bounce_;
+}
+
+uint64_t DisplayProxy::wl_marshal(uint64_t proxy_guest, uint32_t opcode,
+                                  uint64_t ifstruct, bool is_versioned,
+                                  uint32_t version,
+                                  const uint64_t* regs, int nregs,
+                                  uint64_t sp) {
+    void* host = wl_host(proxy_guest);
+    std::string ifname = wl_iface(proxy_guest);
+    if (!host || ifname.empty() || !wl_bridge_init_() || !mem_) return 0;
+    const arm64emu::wl::Message* msg =
+        arm64emu::wl::find(false, ifname.c_str(), opcode);
+    if (!msg) {
+        fprintf(stderr, "[display-thunk] wl_marshal: unknown %s op %u\n",
+                ifname.c_str(), opcode);
+        return 0;
+    }
+    // New-object interface: from the opgen_wl `created` field — except
+    // bind (wl_registry op 0), whose new_id carries no interface in the
+    // XML by design (it arrives as the C-level wl_interface* instead).
+    std::string new_iface = msg->created;
+    bool is_bind = !strcmp(ifname.c_str(), "wl_registry") && opcode == 0;
+    if (is_bind && new_iface.empty()) new_iface = "<bind>";
+    // Decode varargs per signature. 'h' (fd) needs fd translation
+    // (phase 2) — bail loud instead of sending garbage.
+    WlArg args[16];
+    int nargs = 0, r = 0;
+    auto next_vararg = [&](uint64_t& out) -> bool {
+        if (r < nregs) {
+            out = regs[r++];
+            return true;
+        }
+        uint64_t slot = 0;
+        try {
+            mem_->read(sp + (uint64_t)(r - 5) * 8, &slot, 8);
+        } catch (...) { return false; }
+        r++;
+        out = slot;
+        return true;
+    };
+    // When the request creates an object, the host constructor call
+    // allocates the id itself — no guest arg is consumed for 'n'.
+    // (Plain marshal of a pre-existing id still passes it through.)
+    bool skip_new_id = !new_iface.empty();
+    for (const char* p = msg->sig; *p && nargs < 16; p++) {
+        char c = *p >= 'A' && *p <= 'Z' ? *p - 'A' + 'a' : *p;
+        if (c == 'n' && skip_new_id) continue;
+        uint64_t v = 0;
+        if (!next_vararg(v)) return 0;
+        if (c == 'h') {
+            fprintf(stderr, "[display-thunk] wl_marshal: fd arg in %s op %u unsupported\n",
+                    ifname.c_str(), opcode);
+            return 0;
+        }
+        if (c == 's') {
+            // Strings are copied into the message by the host lib, so a
+            // direct guest alias is safe for the duration of the call.
+            uint8_t* hp = v ? mem_->guest_to_host_ptr(v) : nullptr;
+            v = reinterpret_cast<uint64_t>(hp);
+        } else if (c == 'o') {
+            // Object args travel as mapped host pointers (null stays null).
+            auto it = wl_objs_.find(v);
+            v = (v && it != wl_objs_.end())
+                    ? reinterpret_cast<uint64_t>(it->second.host)
+                    : 0;
+        } else if (c == 'a') {
+            // wl_array {size, alloc, data}: rebuild with a host-visible
+            // data pointer; the host lib copies `size` bytes out.
+            struct Arr { uint64_t size, alloc, data; };
+            Arr src{0, 0, 0}, dst{0, 0, 0};
+            if (v) {
+                try { mem_->read(v, &src, sizeof(src)); }
+                catch (...) { return 0; }
+                uint8_t* hp = mem_->guest_to_host_ptr(src.data);
+                if (!hp) return 0;
+                dst.size = src.size;
+                dst.alloc = src.size;
+                dst.data = reinterpret_cast<uint64_t>(hp);
+            }
+            // Host copies synchronously; thread-local outlives the call.
+            static thread_local Arr live;
+            live = dst;
+            v = reinterpret_cast<uint64_t>(&live);
+        } else {
+            v &= 0xFFFFFFFFULL;  // i/u/f travel 32-bit
+        }
+        args[nargs++].v = v;
+    }
+    if (new_iface.empty()) {
+        // No object created: plain fire-and-forget request.
+        void* fn = dlsym(wl_client_, "wl_proxy_marshal_array");
+        if (!fn) return 0;
+        using Fn = void (*)(void*, uint32_t, void*);
+        reinterpret_cast<Fn>(fn)(host, opcode, args);
+        return 0;
+    }
+    // Object-creating request. The new object's interface is `created`,
+    // except bind (wl_registry op 0), whose interface arrives as the
+    // guest wl_interface* (name at +0) in `ifstruct`.
+    std::string real_iface = new_iface == "<bind>" ? "" : new_iface;
+    if (is_bind && ifstruct) {
+        uint64_t namep = 0;
+        try { mem_->read(ifstruct, &namep, 8); }
+        catch (...) { return 0; }
+        if (namep) {
+            char name[128] = {0};
+            try {
+                for (size_t i = 0; i < sizeof(name) - 1; i++) {
+                    uint8_t ch = 0;
+                    mem_->read(namep + i, &ch, 1);
+                    name[i] = static_cast<char>(ch);
+                    if (!ch) break;
+                }
+            } catch (...) { return 0; }
+            if (name[0]) real_iface = name;
+        }
+    }
+    // Constructor version: explicit `version` (versioned shape); else
+    // bind takes it from the next vararg (name, version), while other
+    // creations inherit the parent object's bound version (falling back
+    // to the interface struct's when the parent has none recorded).
+    uint32_t ver = version;
+    if (!is_versioned) {
+        if (!strcmp(ifname.c_str(), "wl_registry")) {
+            uint64_t vv = 0;
+            if (!next_vararg(vv)) return 0;
+            ver = static_cast<uint32_t>(vv);
+        } else {
+            auto pit = wl_objs_.find(proxy_guest);
+            ver = (pit != wl_objs_.end() && pit->second.version)
+                      ? pit->second.version
+                      : 0;
+            if (!ver && ifstruct) {
+                uint32_t iv = 0;
+                try { mem_->read(ifstruct + 8, &iv, 4); }
+                catch (...) { return 0; }
+                ver = iv;
+            }
+            if (!ver) {
+                fprintf(stderr, "[display-thunk] wl_marshal: no version for %s op %u\n",
+                        ifname.c_str(), opcode);
+                return 0;
+            }
+        }
+    }
+    void* cfn = is_versioned
+        ? dlsym(wl_client_, "wl_proxy_marshal_array_constructor_versioned")
+        : dlsym(wl_client_, "wl_proxy_marshal_array_constructor");
+    if (!cfn) return 0;
+    std::string sym = real_iface + "_interface";
+    void* host_iface = dlsym(wl_client_, sym.c_str());
+    if (!host_iface) {
+        fprintf(stderr, "[display-thunk] wl_marshal: no host %s\n", sym.c_str());
+        return 0;
+    }
+    void* obj = nullptr;
+    if (is_versioned) {
+        using Fn = void* (*)(void*, uint32_t, void*, const void*, uint32_t);
+        obj = reinterpret_cast<Fn>(cfn)(host, opcode, args,
+                                        host_iface, ver);
+    } else {
+        using Fn = void* (*)(void*, uint32_t, void*, const void*);
+        obj = reinterpret_cast<Fn>(cfn)(host, opcode, args, host_iface);
+    }
+    if (!obj) return 0;
+    uint64_t guest = alloc_handle(3);
+    if (!guest) return 0;
+    wl_objs_[guest] = WlObj{obj, real_iface, ver};
+    return guest;
+}
+
+// Host registry listener: the two wl_registry events, queued for guest
+// delivery after dispatch/roundtrip returns (mirrors the GLFW_POLL
+// deliver-after-poll pattern — never re-enter the guest mid-dispatch).
+namespace {
+DisplayProxy* g_wl_sink = nullptr;
+void wl_reg_global(void* data, void* reg, uint32_t name,
+                   const char* iface, uint32_t version) {
+    (void)data;
+    if (!g_wl_sink) return;
+    DisplayProxy::WlEvent ev;
+    ev.proxy = g_wl_sink->wl_guest_for_host(reg);
+    ev.ev = 0;
+    ev.a = name;
+    ev.s = iface ? iface : "";
+    ev.b = version;
+    g_wl_sink->wl_push_event(ev);
+}
+void wl_reg_remove(void* data, void* reg, uint32_t name) {
+    (void)data;
+    if (!g_wl_sink) return;
+    DisplayProxy::WlEvent ev;
+    ev.proxy = g_wl_sink->wl_guest_for_host(reg);
+    ev.ev = 1;
+    ev.a = name;
+    g_wl_sink->wl_push_event(ev);
+}
+struct WlRegListener { void* fns[2]; };
+}  // namespace
+
+bool DisplayProxy::wl_registry_listen(void* host_registry) {
+    if (!host_registry || !wl_bridge_init_()) return false;
+    void* fn = dlsym(wl_client_, "wl_proxy_add_listener");
+    if (!fn) return false;
+    static WlRegListener listener = {{reinterpret_cast<void*>(wl_reg_global),
+                                      reinterpret_cast<void*>(wl_reg_remove)}};
+    g_wl_sink = this;
+    using Fn = int (*)(void*, void**, void*);
+    return reinterpret_cast<Fn>(fn)(host_registry, listener.fns, nullptr) == 0;
 }
 uint64_t DisplayProxy::wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version) {
     (void)display_guest; (void)interface; (void)version;

@@ -158,6 +158,37 @@ public:
     void wl_proxy_destroy(uint64_t proxy_guest);
     // Host object for a guest handle, or nullptr for stub handles.
     void* wl_host(uint64_t guest_addr) const;
+    // Guest handle owning a host object (for event attribution), or 0.
+    uint64_t wl_guest_for_host(const void* host) const;
+    // Interface name bound to a mapped object ("" when unknown/stub).
+    std::string wl_iface(uint64_t guest_addr) const;
+    uint64_t wl_display_get_registry(uint64_t display_guest);
+    // Generic request marshaller driven by the opgen_wl signature table.
+    // `regs` points at the first vararg (x3, or x4 for the versioned
+    // shape); remaining varargs spill to the guest stack at sp.
+    // `ifstruct` is the guest wl_interface* for constructor calls
+    // (name at +0 selects the created type for bind).
+    // Returns the guest handle of the created object for constructors,
+    // 0 otherwise (and 0 with a loud-miss note when the pair is unknown
+    // or needs fd-passing, which stays unsupported).
+    uint64_t wl_marshal(uint64_t proxy_guest, uint32_t opcode,
+                        uint64_t ifstruct, bool is_versioned,
+                        uint32_t version, const uint64_t* regs, int nregs,
+                        uint64_t sp);
+    // Pending inbound events queued by the host listener trampolines,
+    // drained by DisplayThunk after dispatch/roundtrip.
+    struct WlEvent {
+        uint64_t proxy = 0;
+        uint32_t ev = 0;
+        uint64_t a = 0, b = 0, c = 0;
+        std::string s;
+    };
+    bool wl_pop_event(WlEvent& out);
+    void wl_push_event(const WlEvent& ev) { wl_pending_.push_back(ev); }
+    // Guest-visible scratch for event strings (sticky bounce).
+    uint64_t wl_str_bounce(const char* s);
+    // Host registry listener support (installed once per host registry).
+    bool wl_registry_listen(void* host_registry);
     uint64_t wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version);
     void wl_surface_commit(uint64_t surface_guest);
     void wl_surface_destroy(uint64_t surface_guest);
@@ -209,10 +240,21 @@ private:
     void* wlfn_prepare_read_ = nullptr;
     void* wlfn_cancel_read_ = nullptr;
     void* wlfn_proxy_destroy_ = nullptr;
-    // Guest handle -> host wl_display*/wl_proxy*. Absent = stub handle
-    // (old behavior: return 0). Populated by wl_display_connect when a
-    // compositor answers, dropped by disconnect/destroy.
-    std::unordered_map<uint64_t, void*> wl_objs_;
+    // Guest handle -> {host wl_display*/wl_proxy*, interface name}.
+    // Absent = stub handle (old behavior: return 0). Populated by
+    // wl_display_connect / marshal constructors, dropped by
+    // disconnect/destroy.
+    struct WlObj {
+        void* host = nullptr;
+        std::string iface;
+        uint32_t version = 0;  // bound/created version (for creations)
+    };
+    std::unordered_map<uint64_t, WlObj> wl_objs_;
+    // Inbound event queue (host listener trampolines push, thunk drains).
+    std::vector<WlEvent> wl_pending_;
+    // Sticky guest bounce for event strings.
+    uint64_t wl_str_bounce_ = 0;
+    void* wl_registry_host_listener_ = nullptr;  // installed once
     bool wl_bridge_init_();
 };
 } // namespace arm64emu

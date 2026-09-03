@@ -48,6 +48,10 @@ struct Message {
     uint32_t    opcode;  // index within its kind (requests/events separate)
     const char* sig;     // arg types, "" when argless
     bool        is_event;
+    // New-object interface for constructor-style requests (bind,
+    // create_surface, ...): the type the created id maps to. "" when
+    // the request creates nothing.
+    const char* created;
 };
 
 inline constexpr Message kMessages[] = {
@@ -56,6 +60,21 @@ inline constexpr Message kMessages[] = {
 
 inline constexpr size_t kMessageCount =
     sizeof(kMessages) / sizeof(kMessages[0]);
+
+// Number of events an interface defines (listener struct length).
+// constexpr so listener setup stays table-driven, not hand-counted.
+inline constexpr size_t event_count(const char* iface) {
+    size_t n = 0;
+    for (size_t i = 0; i < kMessageCount; i++) {
+        const Message& m = kMessages[i];
+        if (!m.is_event) continue;
+        const char* a = m.iface;
+        const char* b = iface;
+        while (*a && *a == *b) { a++; b++; }
+        if (*a == *b) n++;
+    }
+    return n;
+}
 
 // Find a message signature by interface + opcode. Returns nullptr when
 // the pair is unknown (caller falls back to the loud-miss path).
@@ -86,22 +105,25 @@ def parse(xml_path):
         for kind, is_event in (("request", False), ("event", True)):
             for idx, msg in enumerate(iface.findall(kind)):
                 sig = []
+                created = ""
                 for arg in msg.findall("arg"):
                     letter = TYPE_LETTER.get(arg.get("type") or "", "?")
                     if arg.get("allow-null") in ("true", "1"):
                         letter = letter.upper()
                     sig.append(letter)
+                    if arg.get("type") == "new_id" and arg.get("interface"):
+                        created = arg.get("interface")
                 messages.append((iname, msg.get("name"), idx,
-                                 "".join(sig), is_event))
+                                 "".join(sig), is_event, created))
     return messages
 
 
 def emit(messages):
     rows = []
-    for iname, mname, opcode, sig, is_event in messages:
+    for iname, mname, opcode, sig, is_event, created in messages:
         rows.append(
             f'    {{"{iname}", "{mname}", {opcode}u, "{sig}", '
-            f'{"true" if is_event else "false"}}},')
+            f'{"true" if is_event else "false"}, "{created}"}},')
     return HEADER.replace("{ROWS}", "\n".join(rows))
 
 

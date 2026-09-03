@@ -3393,3 +3393,22 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   standalone ldp/umov/memcpy/overlap repros all pass; NOT a umov, cache,
   tier2, or snapshot artifact (each ruled out by experiment). trail in
   transcript; resume with per-lane ground-truth print if it ever bites.
+
+## Session History (2026-09-03) — Wayland host bridge (real compositor)
+
+- DisplayProxy talks to a real compositor now: `wl_display_connect`
+  upgrades to host libwayland when reachable (stub fallback headless);
+  get_fd/flush/dispatch/pending/roundtrip/read/prepare/cancel +
+  proxy_destroy forward. `wl_proxy_marshal(_constructor[_versioned])`
+  decode guest varargs from the `opgen_wl` tables (new `created` field
+  for the created type; bind special-cased — its new_id carries no
+  interface in the XML) and forward through the host array forms;
+  created objects map to guest handles with interface+version tracked.
+  `wl_proxy_add_listener` stores guest fn tables; host registry
+  trampolines queue events, delivered after dispatch via a borrow-CPU
+  runner wired like the GLFW one. fd-passing stays unsupported.
+  `wlgen` gained `event_count` + `created`; `wl_display_get_registry`
+  row added (it is inline upstream — no host symbol to dlsym).
+  `test_wayland_bridge.elf` does connect → registry → 67 globals →
+  bind compositor → create surface → destroy → disconnect, all
+  asserted. suite 210 green.
