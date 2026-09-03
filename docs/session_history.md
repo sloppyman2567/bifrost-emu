@@ -3376,3 +3376,20 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   self-overwrite, v_lo-high canonicalization on single fp stores — verify
   sweep 31/31 silent. one `test_dlopen_mt` 139 seen once under suite load,
   green on rerun (flaky, not chased).
+
+## Session History (2026-09-03) — taken-path GPR flush (zlib x19/x22)
+
+- real JIT bug, caught by the hardened checker: `emit_taken_path_epilogue`
+  never flushed dirty GPR vregs (the vec-cache sibling got its `false` flag
+  long ago; GPRs were forgotten). values computed before a conditional
+  branch (zlib inflate's umov x22/x19 feeding a CBZ) were dropped on the
+  taken exit while the fall-through epilogue still wrote them — the
+  successor read stale homes. one-line fix (`flush_all_vregs()` in the
+  taken epilogue, cold path only). zlib block healed, suite 209 green,
+  neverball 95 s with zero fatal lines.
+- OPEN (benign, parked): glibc memcpy-loop block shows deterministic v_lo
+  disagreements (all four lanes read exactly one loop advance stale)
+  with matching GPRs, clean codegen, and no live effect (game completes).
+  standalone ldp/umov/memcpy/overlap repros all pass; NOT a umov, cache,
+  tier2, or snapshot artifact (each ruled out by experiment). trail in
+  transcript; resume with per-lane ground-truth print if it ever bites.

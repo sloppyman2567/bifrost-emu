@@ -41,6 +41,14 @@ void FrostJIT::emit_taken_path_epilogue() {
     // silently drop the writeback from the fall-through epilogue (the vec
     // cache's dirty state is a codegen-time concept, not a runtime one).
     vec_cache_writeback_all(false);
+    // Flush dirty GPR vregs: the taken exit returns to the dispatcher
+    // (or a chained successor that reloads from home slots), so every
+    // value computed before the branch must be written home. Without
+    // this, a dirty vreg in a non-RAX reg (e.g. umov results feeding a
+    // CBZ) is silently dropped on the taken path while the fall-through
+    // epilogue still writes it — zlib's inflate loop read stale x22/x19
+    // and died in a null call. Cold path: loop exits and returns only.
+    flush_all_vregs();
     emit_store(CPU_REG, PC_OFF, RAX);
     emit_mov_reg(RDI, CPU_REG);   // mov rdi, rbx (for dispatcher OR chain target)
     emit_load(RSI, RBP, emu_slot_off()); // rsi = emu
