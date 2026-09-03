@@ -3609,3 +3609,31 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Still open: write arms report full success when the ring accepted 0
   frames; pump vCPU shares main-thread TPIDR_EL0 (TLS aliasing);
   `#define R(i)` never #undef'd.
+
+## Session History (2026-09-03) — rudolf-cart "music at 2x pitch" diagnosis
+
+- User report: in-game music sounds an octave too high, sfx fine. NO code
+  change resulted — the chain is exonerated end to end (details below).
+- Verified the asset: `music.wav` is honest 44100 Hz stereo S16 (~199 s);
+  guest `SDL_AudioSpec` layout matches SDL2 exactly, so our spec read is
+  right; the game's shim forwards music bytes untouched.
+- Measured OUR chain with guest-side probes (scratch, not committed):
+  440 Hz sine in → 440 Hz out, both at 1.4 MB and at the game's 35 MB
+  scale with pause/unpause + half-backlog requeue (the exact
+  `loopMusic` pattern). Host grants 44100/stereo/S16; mixer healthy.
+- Measured the USER'S live 63 s race via a temporary mixer-output
+  capture (probe removed afterwards): long-term average spectrum of the
+  speaker-bound audio tracks `music.wav` band-for-band (50 Hz–12.8 kHz,
+  within a few dB; +6 dB at 800–1600 Hz is the coin sfx) — NO octave
+  shift. Music plays at 1x through our chain during real gameplay.
+- Lesson (hard-won): plain cross-correlation is USELESS as a music
+  detector here — the loop is so repetitive it can't even match the song
+  against itself (conf 0.045 on an exact self-hit). Every "no music in
+  capture" reading from correlation was void; spectrum comparison is the
+  loop-proof tool. The sine probes (exact-frequency FFT) were the
+  reliable instruments throughout.
+- Leading hypothesis for what the user heard: overlapping copies — their
+  terminal history shows two `nohup ... &` background game launches never
+  killed, so up to three simultaneous offset copies of the song (comb/
+  chorus) while playing. No stale processes remain now; awaiting a fresh
+  single-instance playtest to confirm.
