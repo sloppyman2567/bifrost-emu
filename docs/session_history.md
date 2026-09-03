@@ -3342,7 +3342,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   these fixes) — the dedicated hunt continues separately (see earlier entry today: MEMFULL
   verifier, VERIFY_EVERY, elimination list).
 
-## Session History (2026-09-03) — shared crash reporter + AGENTS.md split
+## Session History (2026-09-02 22:56 EDT) — shared crash reporter + AGENTS.md split
 
 - new `src/core/crash_report.{h,cpp}`: one short `[crash]` line per fatal
   guest crash (reason, pc + module via `find_object_by_addr`, sp/x30/fault)
@@ -3360,7 +3360,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   crash-reporter note) stay in AGENTS.md. committed as
   `8126b7a` (reporter) + `515a805` (module + last-svc).
 
-## Session History (2026-09-03) — neverball null call was missing rootfs libs
+## Session History (2026-09-02 23:56 EDT) — neverball null call was missing rootfs libs
 
 - neverball died at startup with `decode error pc=0` (x30=0x41a634,
   last=thunk sym=280). same death under `--no-jit`, so NOT a JIT bug.
@@ -3377,7 +3377,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   sweep 31/31 silent. one `test_dlopen_mt` 139 seen once under suite load,
   green on rerun (flaky, not chased).
 
-## Session History (2026-09-03) — taken-path GPR flush (zlib x19/x22)
+## Session History (2026-09-03 00:35 EDT) — taken-path GPR flush (zlib x19/x22)
 
 - real JIT bug, caught by the hardened checker: `emit_taken_path_epilogue`
   never flushed dirty GPR vregs (the vec-cache sibling got its `false` flag
@@ -3394,7 +3394,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   tier2, or snapshot artifact (each ruled out by experiment). trail in
   transcript; resume with per-lane ground-truth print if it ever bites.
 
-## Session History (2026-09-03) — Wayland host bridge (real compositor)
+## Session History (2026-09-03 00:39 EDT) — Wayland host bridge (real compositor)
 
 - DisplayProxy talks to a real compositor now: `wl_display_connect`
   upgrades to host libwayland when reachable (stub fallback headless);
@@ -3413,7 +3413,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   bind compositor → create surface → destroy → disconnect, all
   asserted. suite 210 green.
 
-## Session History (2026-09-03) — dlopen_mt thread-safety + Wayland input
+## Session History (2026-09-03 02:16 EDT) — dlopen_mt thread-safety + Wayland input
 
 - `test_dlopen_mt` crashed ~50% (silent host SIGSEGV, worse under load).
   gdb caught free() inside iterate_phdr: guest callbacks mutate
