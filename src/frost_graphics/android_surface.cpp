@@ -454,7 +454,14 @@ int AndroidSurfaceManager::queue_get_event(uint64_t queue,
     if (pending_.empty()) return -11;  // -EWOULDBLOCK
     InputEvent ev = pending_.front();
     pending_.pop_front();
-    *out_event = alloc_event_slot_(ev);
+    uint64_t h = alloc_event_slot_(ev);
+    if (h == 0) {
+        // slots full: drop newest, keep live handles intact.
+        // requeue at front so a later finishEvent can make room.
+        pending_.push_front(ev);
+        return -12;  // -ENOMEM
+    }
+    *out_event = h;
     return 0;
 }
 
@@ -479,11 +486,9 @@ uint64_t AndroidSurfaceManager::alloc_event_slot_(const InputEvent& ev) {
             return kEventBase | i;
         }
     }
-    // All slots busy: recycle slot 0 rather than dropping the event —
-    // a stalled app that never calls finishEvent degrades gracefully.
-    slots_[0].used = true;
-    slots_[0].ev = ev;
-    return kEventBase | 0;
+    // all slots busy (app never calls finishEvent): drop the new event
+    // instead of overwriting a live handle. caller requeues + ENOMEM.
+    return 0;
 }
 
 const AndroidSurfaceManager::InputEvent*
@@ -698,6 +703,7 @@ void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
     }
     case SDL_KEYDOWN:
     case SDL_KEYUP: {
+        if (e->type == SDL_KEYDOWN && e->key.repeat) return;  // no auto-repeat downs
         int32_t meta = 0;
         int32_t kc = sdl_key_to_android(static_cast<int32_t>(e->key.keysym.sym),
                                         &meta);
@@ -708,12 +714,14 @@ void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
         ev.key_code = kc;
         ev.scan_code = e->key.keysym.scancode;
         ev.meta_state = meta;
+        ev.repeat_count = 0;
         break;
     }
     default:
         return;
     }
     std::lock_guard<std::mutex> lk(mu_);
+    if (pending_.size() >= 256) pending_.pop_front();  // cap: drop oldest
     next_time_ms_ += 16;
     ev.down_time_ms = next_time_ms_;
     ev.event_time_ms = next_time_ms_;
@@ -723,14 +731,13 @@ void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
     // Track size changes so the driver can fire onNativeWindowResized /
     // onContentRectChanged exactly once per resize.
-    static thread_local int32_t last_w = -1, last_h = -1;
     SDL_Event e;
     while (SDL_PollEvent(&e)) translate_sdl_event_(cpu, &e);
     if (!cpu || !mem_ || surface_handle_ == 0) return;
-    if (last_w < 0) { last_w = width_; last_h = height_; return; }
-    if (width_ != last_w || height_ != last_h) {
-        last_w = width_;
-        last_h = height_;
+    if (last_pump_w_ < 0) { last_pump_w_ = width_; last_pump_h_ = height_; return; }
+    if (width_ != last_pump_w_ || height_ != last_pump_h_) {
+        last_pump_w_ = width_;
+        last_pump_h_ = height_;
         int32_t rect[4] = {0, 0, width_, height_};
         mem_->write(rect_addr_, rect, sizeof(rect));
         int64_t win = static_cast<int64_t>(surface_handle_);

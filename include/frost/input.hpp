@@ -117,8 +117,8 @@ public:
     //   - InputDevice::Event: 24-byte input_event records
     //   - InputDevice::Js:    8-byte js_event records
     //   - InputDevice::Mouse: 4-byte ImPS/2 packets (not yet implemented)
-    // Returns bytes read (multiple of the record size), 0 if the queue
-    // is empty, or -1 on error.
+    // Returns bytes read (multiple of the record size), -EAGAIN if the queue
+    // is empty, or negative errno on error.
     ssize_t read(uint8_t* buf, size_t n, InputDevice dev = InputDevice::Event,
                  bool blocking = false);
     // Drain pending events without delivering them. Used when the
@@ -128,6 +128,8 @@ public:
     uint64_t event_count() const;
     // Number of events currently in the queue (for FIONREAD).
     size_t queue_size() const;
+    // Number of js events currently queued (for FIONREAD on js0).
+    size_t js_queue_size() const;
     // Whether any game controllers are connected (diagnostic).
     bool has_game_controller() const;
     // Number of game controllers currently open.

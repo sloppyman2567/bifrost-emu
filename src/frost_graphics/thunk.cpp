@@ -236,6 +236,7 @@ struct GraphicThunkImpl {
     // host fns, not the entries' (which are trampolines).
     void* glfw_get_cursor_pos_fn_ = nullptr;
     void* glfw_get_key_fn_ = nullptr;
+    void* glfw_get_key_scancode_fn_ = nullptr;
     void* glfw_get_mouse_button_fn_ = nullptr;
     void* glfw_get_window_size_fn_ = nullptr;
     void* glfw_get_framebuffer_size_fn_ = nullptr;
@@ -433,10 +434,12 @@ struct GraphicThunkImpl {
         }
         using GetPosFn = void (*)(void*, double*, double*);
         using GetKeyFn = int (*)(void*, int);
+        using GetScancodeFn = int (*)(int);
         using GetSizeFn = void (*)(void*, int*, int*);
         using GetAttribFn = int (*)(void*, int);
         auto getpos = reinterpret_cast<GetPosFn>(glfw_get_cursor_pos_fn_);
         auto getkey = reinterpret_cast<GetKeyFn>(glfw_get_key_fn_);
+        auto getscan = reinterpret_cast<GetScancodeFn>(glfw_get_key_scancode_fn_);
         auto getbtn = reinterpret_cast<GetKeyFn>(glfw_get_mouse_button_fn_);
         auto getsz  = reinterpret_cast<GetSizeFn>(glfw_get_window_size_fn_);
         auto getfbs = reinterpret_cast<GetSizeFn>(glfw_get_framebuffer_size_fn_);
@@ -505,12 +508,15 @@ struct GraphicThunkImpl {
                 if (lastv.size() < (size_t)GLFW_KEY_LAST) continue;  // raced unregister
                 // glfwGetKey only accepts keys >= GLFW_KEY_SPACE (32);
                 // polling 0-31 makes host GLFW fire "Invalid key" errors.
+                // note: mods stay 0 (polling cannot observe them) and only
+                // PRESS/RELEASE edges fire (no GLFW_REPEAT synthesis).
                 for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++) {
                     int cur = getkey(w, k);
                     uint8_t pressed = (cur == GLFW_PRESS) ? 1 : 0;
                     if (lastv[k] != pressed) {
                         lastv[k] = pressed;
-                        iargs[0] = window; iargs[1] = k; iargs[2] = 0;  // scancode
+                        int sc = getscan ? getscan(k) : 0;
+                        iargs[0] = window; iargs[1] = k; iargs[2] = sc;
                         iargs[3] = pressed ? GLFW_PRESS : GLFW_RELEASE; // action
                         iargs[4] = 0;                                   // mods
                         if (dbg().thunk_trace)
@@ -3056,6 +3062,8 @@ void GraphicThunk::register_known_symbols_() {
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetCursorPos") : nullptr;
     impl_->glfw_get_key_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetKey") : nullptr;
+    impl_->glfw_get_key_scancode_fn_ =
+        kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetKeyScancode") : nullptr;
     impl_->glfw_get_mouse_button_fn_ =
         kHaveGL ? dlsym(RTLD_DEFAULT, "glfwGetMouseButton") : nullptr;
     impl_->glfw_get_window_size_fn_ =

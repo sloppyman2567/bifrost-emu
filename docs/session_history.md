@@ -3716,3 +3716,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   (bounded 5 s, bails after 200 ms without progress so headless runs
   never stall), then destroys the stream — no leak, no cutoff.
 - Verified: clean build, mambo + linux audio green.
+
+## Session History (2026-09-03) — input stack review fixes
+
+- reviewed FrostInput + /dev/input + GLFW callbacks + android input. fixed: (1) a-z keycodes were sequential, now positional per input-event-codes.h (b=48 q=16 etc, kills key_m/shift + key_n/backslash collisions); scancode + utf8 maps use same table. (2) dpad down/left unswapped. (3) TEXTINPUT no longer double-emits (KEYDOWN already covers it). (4) open_controllers now holds mu. (5) empty read respects O_NONBLOCK (blocking -> 0, nonblock -> -EAGAIN); small buffer -> -EINVAL. (6) js FIONREAD uses js queue via new js_queue_size(). (7) evdev ioctls match type+nr ignoring len (EVIOCGNAME(256) etc work); EVIOCGBIT returns real key/rel/abs bits; EVIOCGABS min/max -32768..32767. (8) android slot-full drops new event + ENOMEM instead of overwriting live handle; pending_ capped at 256; key repeat filtered; resize tracking per-manager not thread_local. (9) glfw key cb passes real glfwGetKeyScancode; mods=0 + no-repeat documented.
+- verified: clean build, --quick 214/214 (input_test + gamepad_test green after blocking-read fix).

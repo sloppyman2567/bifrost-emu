@@ -104,8 +104,8 @@ namespace linux_input {
     constexpr uint16_t BTN_THUMBL    = 0x13d;
     constexpr uint16_t BTN_THUMBR    = 0x13e;
     constexpr uint16_t BTN_DPAD_UP    = 0x220;
-    constexpr uint16_t BTN_DPAD_DOWN  = 0x222;
-    constexpr uint16_t BTN_DPAD_LEFT  = 0x221;
+    constexpr uint16_t BTN_DPAD_DOWN  = 0x221;
+    constexpr uint16_t BTN_DPAD_LEFT  = 0x222;
     constexpr uint16_t BTN_DPAD_RIGHT = 0x223;
     // Common keyboard keys (subset).
     constexpr uint16_t KEY_RESERVED = 0;
@@ -135,31 +135,31 @@ namespace linux_input {
     constexpr uint16_t KEY_8        = 9;
     constexpr uint16_t KEY_9        = 10;
     constexpr uint16_t KEY_A        = 30;
-    constexpr uint16_t KEY_B        = 31;
-    constexpr uint16_t KEY_C        = 32;
-    constexpr uint16_t KEY_D        = 33;
-    constexpr uint16_t KEY_E        = 34;
-    constexpr uint16_t KEY_F        = 35;
-    constexpr uint16_t KEY_G        = 36;
-    constexpr uint16_t KEY_H        = 37;
-    constexpr uint16_t KEY_I        = 38;
-    constexpr uint16_t KEY_J        = 39;
-    constexpr uint16_t KEY_K        = 40;
-    constexpr uint16_t KEY_L        = 41;
-    constexpr uint16_t KEY_M        = 42;
-    constexpr uint16_t KEY_N        = 43;
-    constexpr uint16_t KEY_O        = 44;
-    constexpr uint16_t KEY_P        = 45;
-    constexpr uint16_t KEY_Q        = 46;
-    constexpr uint16_t KEY_R        = 47;
-    constexpr uint16_t KEY_S        = 48;
-    constexpr uint16_t KEY_T        = 49;
-    constexpr uint16_t KEY_U        = 50;
-    constexpr uint16_t KEY_V        = 51;
-    constexpr uint16_t KEY_W        = 52;
-    constexpr uint16_t KEY_X        = 53;
-    constexpr uint16_t KEY_Y        = 54;
-    constexpr uint16_t KEY_Z        = 55;
+    constexpr uint16_t KEY_B        = 48;
+    constexpr uint16_t KEY_C        = 46;
+    constexpr uint16_t KEY_D        = 32;
+    constexpr uint16_t KEY_E        = 18;
+    constexpr uint16_t KEY_F        = 33;
+    constexpr uint16_t KEY_G        = 34;
+    constexpr uint16_t KEY_H        = 35;
+    constexpr uint16_t KEY_I        = 23;
+    constexpr uint16_t KEY_J        = 36;
+    constexpr uint16_t KEY_K        = 37;
+    constexpr uint16_t KEY_L        = 38;
+    constexpr uint16_t KEY_M        = 50;
+    constexpr uint16_t KEY_N        = 49;
+    constexpr uint16_t KEY_O        = 24;
+    constexpr uint16_t KEY_P        = 25;
+    constexpr uint16_t KEY_Q        = 16;
+    constexpr uint16_t KEY_R        = 19;
+    constexpr uint16_t KEY_S        = 31;
+    constexpr uint16_t KEY_T        = 20;
+    constexpr uint16_t KEY_U        = 22;
+    constexpr uint16_t KEY_V        = 47;
+    constexpr uint16_t KEY_W        = 17;
+    constexpr uint16_t KEY_X        = 45;
+    constexpr uint16_t KEY_Y        = 21;
+    constexpr uint16_t KEY_Z        = 44;
     constexpr uint16_t KEY_MINUS    = 12;
     constexpr uint16_t KEY_EQUAL    = 13;
     constexpr uint16_t KEY_LEFTBRACE   = 26;
@@ -209,8 +209,36 @@ static_assert(sizeof(js_event_) == 8, "js_event_ must be 8 bytes");
 // ── SDL2 → Linux input event translation tables ────────────────────────
 #if defined(BIFROST_USE_SDL2)
 static uint16_t sdl_scancode_to_linux(SDL_Scancode sc) {
-    if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) {
-        return 30 + (sc - SDL_SCANCODE_A);
+    // linux keycodes are positional (qwerty), not alphabetical.
+    // map each sdl scancode explicitly (values from linux/input-event-codes.h).
+    switch (sc) {
+        case SDL_SCANCODE_A: return linux_input::KEY_A;
+        case SDL_SCANCODE_B: return linux_input::KEY_B;
+        case SDL_SCANCODE_C: return linux_input::KEY_C;
+        case SDL_SCANCODE_D: return linux_input::KEY_D;
+        case SDL_SCANCODE_E: return linux_input::KEY_E;
+        case SDL_SCANCODE_F: return linux_input::KEY_F;
+        case SDL_SCANCODE_G: return linux_input::KEY_G;
+        case SDL_SCANCODE_H: return linux_input::KEY_H;
+        case SDL_SCANCODE_I: return linux_input::KEY_I;
+        case SDL_SCANCODE_J: return linux_input::KEY_J;
+        case SDL_SCANCODE_K: return linux_input::KEY_K;
+        case SDL_SCANCODE_L: return linux_input::KEY_L;
+        case SDL_SCANCODE_M: return linux_input::KEY_M;
+        case SDL_SCANCODE_N: return linux_input::KEY_N;
+        case SDL_SCANCODE_O: return linux_input::KEY_O;
+        case SDL_SCANCODE_P: return linux_input::KEY_P;
+        case SDL_SCANCODE_Q: return linux_input::KEY_Q;
+        case SDL_SCANCODE_R: return linux_input::KEY_R;
+        case SDL_SCANCODE_S: return linux_input::KEY_S;
+        case SDL_SCANCODE_T: return linux_input::KEY_T;
+        case SDL_SCANCODE_U: return linux_input::KEY_U;
+        case SDL_SCANCODE_V: return linux_input::KEY_V;
+        case SDL_SCANCODE_W: return linux_input::KEY_W;
+        case SDL_SCANCODE_X: return linux_input::KEY_X;
+        case SDL_SCANCODE_Y: return linux_input::KEY_Y;
+        case SDL_SCANCODE_Z: return linux_input::KEY_Z;
+        default: break;
     }
     if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_9) {
         return 2 + (sc - SDL_SCANCODE_1);
@@ -501,6 +529,11 @@ struct FrostInputImpl {
         js_head = (js_head + 1) % JS_CAP;
         return true;
     }
+    size_t js_queue_size() const {
+        std::lock_guard<std::mutex> g(mu);
+        if (js_head <= js_tail) return js_tail - js_head;
+        return JS_CAP - (js_head - js_tail);
+    }
     // ── Open all connected game controllers ─────────────────────────
     void open_controllers() {
 #if defined(BIFROST_USE_SDL2)
@@ -519,6 +552,7 @@ struct FrostInputImpl {
             if (SDL_IsGameController(i)) {
                 SDL_GameController* gc = SDL_GameControllerOpen(i);
                 if (gc) {
+                    std::lock_guard<std::mutex> g(mu);
                     controllers.push_back(static_cast<void*>(gc));
                     controller_count++;
                     if (getenv("BIFROST_INPUT_TRACE")) {
@@ -555,6 +589,18 @@ struct KeycodeResult {
 // Convert a UTF-8 character to a Linux keycode. Returns {0, false} if the
 // character has no direct keycode mapping (e.g., non-Latin scripts).
 static KeycodeResult utf8_char_to_linux_keycode(uint32_t cp) {
+    // positional qwerty map for letters (not alphabetical order).
+    static constexpr uint16_t kLetterMap[26] = {
+        linux_input::KEY_A, linux_input::KEY_B, linux_input::KEY_C,
+        linux_input::KEY_D, linux_input::KEY_E, linux_input::KEY_F,
+        linux_input::KEY_G, linux_input::KEY_H, linux_input::KEY_I,
+        linux_input::KEY_J, linux_input::KEY_K, linux_input::KEY_L,
+        linux_input::KEY_M, linux_input::KEY_N, linux_input::KEY_O,
+        linux_input::KEY_P, linux_input::KEY_Q, linux_input::KEY_R,
+        linux_input::KEY_S, linux_input::KEY_T, linux_input::KEY_U,
+        linux_input::KEY_V, linux_input::KEY_W, linux_input::KEY_X,
+        linux_input::KEY_Y, linux_input::KEY_Z,
+    };
     // Digits: same keycode regardless of Shift.
     if (cp >= '0' && cp <= '9') {
         uint16_t code = (cp == '0') ? linux_input::KEY_0
@@ -563,11 +609,11 @@ static KeycodeResult utf8_char_to_linux_keycode(uint32_t cp) {
     }
     // Lowercase letters: same keycode, no Shift.
     if (cp >= 'a' && cp <= 'z') {
-        return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'a')), false};
+        return {kLetterMap[cp - 'a'], false};
     }
     // Uppercase letters: same physical key as lowercase, need Shift.
     if (cp >= 'A' && cp <= 'Z') {
-        return {static_cast<uint16_t>(linux_input::KEY_A + (cp - 'A')), true};
+        return {kLetterMap[cp - 'A'], true};
     }
     // Shifted digit/symbol row.
     struct ShiftMap { uint32_t cp; uint16_t code; };
@@ -623,7 +669,9 @@ static KeycodeResult utf8_char_to_linux_keycode(uint32_t cp) {
 // converted to a keycode and emitted as press+release. Shift is emitted
 // as a modifier for characters that require it. Returns the number of
 // characters emitted.
-static size_t emit_text_as_keyevents(FrostInputImpl* impl, const char* utf8, size_t len) {
+static size_t emit_text_as_keyevents([[maybe_unused]] FrostInputImpl* impl,
+                                     [[maybe_unused]] const char* utf8,
+                                     [[maybe_unused]] size_t len) {
     size_t emitted = 0;
     for (size_t i = 0; i < len && utf8[i]; ) {
         uint32_t cp = 0;
@@ -738,16 +786,9 @@ bool FrostInput::poll() {
                 break;
             }
             case SDL_TEXTINPUT: {
-                // SDL_TEXTINPUT provides properly composed Unicode text
-                // (handles IME, keyboard layouts, dead keys, etc.).
-                // Convert each character to EV_KEY press+release pairs
-                // so guests that read /dev/input/eventX get text input.
-                const char* text = ev.text.text;
-                if (text && text[0]) {
-                    size_t emitted = emit_text_as_keyevents(
-                        impl_.get(), text, strlen(text));
-                    (void)emitted;
-                }
+                // no-op: evdev has no text events. SDL_KEYDOWN already
+                // emitted EV_KEY for this press; synthesizing another
+                // press+release here double-types every character.
                 break;
             }
             case SDL_MOUSEBUTTONDOWN:
@@ -907,10 +948,12 @@ bool FrostInput::poll() {
 // ── read() — dequeue events into the guest buffer ──────────────────────
 ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking) {
     if (!impl_) return -ENODEV;
-    (void)blocking;  // blocking not yet supported
+    // blocking guests get 0 when empty (we cannot sleep the emulator);
+    // non-blocking guests get -EAGAIN so poll/select loops work.
+    auto empty_rc = [&]() -> ssize_t { return blocking ? 0 : -EAGAIN; };
     switch (dev) {
         case InputDevice::Event: {
-            if (n < sizeof(input_event_)) return 0;
+            if (n < sizeof(input_event_)) return -EINVAL;
             size_t max = n / sizeof(input_event_);
             size_t got = 0;
             auto* out = reinterpret_cast<input_event_*>(buf);
@@ -919,10 +962,11 @@ ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking)
                 if (!impl_->pop_event(ev)) break;
                 out[got++] = ev;
             }
+            if (got == 0) return empty_rc();
             return static_cast<ssize_t>(got * sizeof(input_event_));
         }
         case InputDevice::Js: {
-            if (n < sizeof(js_event_)) return 0;
+            if (n < sizeof(js_event_)) return -EINVAL;
             size_t max = n / sizeof(js_event_);
             size_t got = 0;
             auto* out = reinterpret_cast<js_event_*>(buf);
@@ -931,6 +975,7 @@ ssize_t FrostInput::read(uint8_t* buf, size_t n, InputDevice dev, bool blocking)
                 if (!impl_->pop_js(ev)) break;
                 out[got++] = ev;
             }
+            if (got == 0) return empty_rc();
             return static_cast<ssize_t>(got * sizeof(js_event_));
         }
         case InputDevice::Mouse:
@@ -959,6 +1004,10 @@ uint64_t FrostInput::event_count() const {
 size_t FrostInput::queue_size() const {
     if (!impl_) return 0;
     return impl_->queue_size();
+}
+size_t FrostInput::js_queue_size() const {
+    if (!impl_) return 0;
+    return impl_->js_queue_size();
 }
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;

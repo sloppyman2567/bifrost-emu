@@ -331,6 +331,7 @@ public:
     struct Slot { bool used = false; InputEvent ev; };
     Slot slots_[32];
     uint64_t next_time_ms_ = 1000;
+    int32_t last_pump_w_ = -1, last_pump_h_ = -1;
 
     uint64_t alloc_event_slot_(const InputEvent& ev);  // caller holds mu_
 };
