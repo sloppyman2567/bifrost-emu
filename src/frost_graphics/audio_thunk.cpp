@@ -970,7 +970,11 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                              it->second.fmt, it->second.rate,
                                              it->second.ch, tmp.data(), bytes)
                     : -1;
-                rc = (fr >= 0) ? frames : -EIO;
+                // Honest frame count: partial acceptance (ring full) is a
+                // short write, not a full success — the guest advances its
+                // pointer by what we report, so claiming `frames` here
+                // skips the dropped remainder (chipmunk playback).
+                rc = (fr >= 0) ? fr : -EIO;
             } else rc = frames;
         }
         tr(rc); return rc;
@@ -1054,7 +1058,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                          it->second.fmt, it->second.rate,
                                          it->second.ch, tmp.data(), bytes)
                 : -1;
-            rc = (fr >= 0) ? 0 : -EIO;
+            // Honest result: pa_simple_write returns 0/-errno. Nothing
+            // accepted (ring full) is -EAGAIN (retry), not a silent drop.
+            rc = (fr < 0) ? -EIO : (fr == 0 && bytes != 0 ? -EAGAIN : 0);
         }
         tr(rc); return rc;
     }
@@ -1375,7 +1381,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                                          it->second.fmt, it->second.rate,
                                          it->second.ch, tmp.data(), bytes)
                 : -1;
-            rc = (fr >= 0) ? frames : -EIO;
+            // Honest frame count (AAudio returns frames written or a
+            // negative error): partial acceptance is a short write, so
+            // the guest retries the remainder instead of skipping it.
+            rc = (fr >= 0) ? fr : -EIO;
         }
         tr(rc); return rc;
     }
@@ -1587,7 +1596,9 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ══ fallback: generic host-fn dispatch (legacy rows) ════════════
     return thunk_dispatch_generic(cpu, entry.host_fn, entry.name, trace);
-}// ── register_known_symbols_ ────────────────────────────────────────────
+}
+#undef R   // dispatch-local register shorthand; must not leak below
+// ── register_known_symbols_ ────────────────────────────────────────────
 // Every row resolves to a trampoline; dispatch() routes ALL of them to
 // AudioEngine arms (host audio libs are never called). Rows still exist for
 // symbols guests dlsym at startup so resolution never fails. Synthetic

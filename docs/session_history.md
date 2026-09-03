@@ -3661,3 +3661,19 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   committed): same 8 s tone drains in 1.9 s wall on old code (4.25x)
   vs 7.6 s wall fixed (~1.05x). Suite: linux 16/16 + android 21/21
   (JIT and --no-jit) and `audio_test.elf` all green.
+
+## Session History (2026-09-03) — honest audio write returns + R hygiene
+
+- Follow-up to the partial-write fix: the three direct-write arms still
+  claimed full success on partial acceptance. `snd_pcm_writei` and
+  `AAudioStream_write` now return the frames actually accepted (short
+  write → guest retries the remainder instead of skipping it);
+  `pa_simple_write` returns `-EAGAIN` when zero bytes fit (was silent
+  drop + fake 0). OpenAL/OpenSL/SDL paths needed nothing (keep-what-
+  fits / full backlog buffering already honest).
+- `#define R(i)` (dispatch-local register shorthand in `audio_thunk.cpp`)
+  now `#undef`d at the end of `dispatch()` instead of leaking to the
+  rest of the file.
+- Verified: clean build, linux 16/16 + android 21/21 green.
+- Still open: pump vCPU shares main-thread TPIDR_EL0 (TLS aliasing) —
+  big surgery, parked until a game breaks over it.
