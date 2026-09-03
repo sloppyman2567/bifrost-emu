@@ -1313,7 +1313,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
 
     // ── Integer/pointer path with optional stack args ────────────────
-    constexpr int kMaxArgs = 12;
+    // 16-arg ceiling: glCopyImageSubData takes 15 (8 reg + 7 stack).
+    // Anything past the ceiling reads as 0 (silent corruption), so the
+    // cap must cover the widest table row.
+    constexpr int kMaxArgs = 16;
     uint64_t args[kMaxArgs] = {0};
     for (int i = 0; i < 8; i++) args[i] = cpu.regs[i];
     // AAPCS64: args 8+ live on the guest stack at SP, 8-byte slots.
@@ -2392,6 +2395,16 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                   static_cast<unsigned int>(args[1]))
             : nullptr;
         ret = reinterpret_cast<uint64_t>(s);
+    } else if (entry.n_stack >= 7) {
+        using Fn15 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t, uint64_t,
+                                   uint64_t, uint64_t, uint64_t);
+        ret = reinterpret_cast<Fn15>(entry.host_fn)(
+            args[0], args[1], args[2], args[3],
+            args[4], args[5], args[6], args[7],
+            args[8], args[9], args[10], args[11],
+            args[12], args[13], args[14]);
     } else if (entry.n_stack >= 4) {
         using Fn12 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
                                    uint64_t, uint64_t, uint64_t, uint64_t,

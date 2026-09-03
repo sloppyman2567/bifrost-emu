@@ -56,6 +56,10 @@
 #define GL_QUERY_RESULT        0x8866
 #define GL_QUERY_RESULT_AVAILABLE 0x8867
 #define GL_TEXTURE_2D          0x0DE1
+#define GL_RGBA8               0x8058
+#define GL_RGBA                0x1908
+#define GL_UNSIGNED_BYTE       0x1401
+#define GL_TEXTURE_MIN_FILTER  0x2801
 #define GL_MAX_COMPUTE_WORK_GROUP_COUNT 0x91BE
 #define GL_DEPTH_TEST          0x0B71
 #define GL_NEAREST             0x2600
@@ -130,6 +134,11 @@ typedef void (*glGetIntegerv_t)(unsigned, int*);
 typedef unsigned (*glGetError_t)(void);
 typedef void (*glGenTextures_t)(int, uint32_t*);
 typedef void (*glBindTexture_t)(unsigned, uint32_t);
+typedef void (*glTexImage2D_t)(unsigned, int, int, int, int, int, unsigned,
+    unsigned, const void*);
+typedef void (*glTexParameteri_t)(unsigned, unsigned, int);
+typedef void (*glCopyImageSubData_t)(unsigned, unsigned, int, int, int, int,
+    unsigned, unsigned, int, int, int, int, int, int, int);
 
 static uint64_t bifrost_dlopen(const char* path, uint64_t mode) {
     register uint64_t x0 __asm__("x0") = (uint64_t)(uintptr_t)path;
@@ -167,6 +176,11 @@ int main(void) {
     uint64_t hgl = bifrost_dlopen("libGL.so.1", 1);
     if (!hgl) hgl = bifrost_dlopen("libGL.so", 1);
     if (!hgl) { printf("test_sdl_gl_modern: SKIP (libGL)\n"); return 77; }
+    /* GLES-family rows (e.g. glCopyImageSubData) resolve via a GLES
+     * handle; the host needs no GLES library (registration is static). */
+    uint64_t hgles = bifrost_dlopen("libGLESv2.so.2", 1);
+    if (!hgles) hgles = bifrost_dlopen("libGLESv2.so", 1);
+    if (!hgles) { printf("test_sdl_gl_modern: SKIP (libGLESv2)\n"); return 77; }
 
     SDL_Init_t SDL_Init; SDL_Quit_t SDL_Quit;
     SDL_CreateWindow_t SDL_CreateWindow; SDL_DestroyWindow_t SDL_DestroyWindow;
@@ -265,13 +279,20 @@ int main(void) {
     LOAD(hgl, glGetError_t, glGetError);
     LOAD(hgl, glGenTextures_t, glGenTextures);
     LOAD(hgl, glBindTexture_t, glBindTexture);
+    glTexImage2D_t glTexImage2D; glCopyImageSubData_t glCopyImageSubData;
+    LOAD(hgl, glTexImage2D_t, glTexImage2D);
+    glTexParameteri_t glTexParameteri;
+    LOAD(hgl, glTexParameteri_t, glTexParameteri);
+    LOAD(hgles, glCopyImageSubData_t, glCopyImageSubData);
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("test_sdl_gl_modern: SKIP (SDL_Init: %s)\n",
                SDL_GetError() ? SDL_GetError() : "?");
         return 77;
     }
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    /* 4.3 core: needed so glCopyImageSubData (4.3 entry point) runs
+     * for real instead of erroring INVALID_OPERATION on any args. */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     void* win = SDL_CreateWindow("bifrost modern", 0x2FFF0000, 0x2FFF0000,
@@ -421,6 +442,30 @@ int main(void) {
      * (host ignores it / sets an error we clear) — it exercises the row. */
     glDispatchCompute(1, 1, 1);
     glGetError();
+
+    /* ── 15-arg glCopyImageSubData (kMaxArgs widening) ──────────────
+     * All 15 args (8 reg + 7 stack) must arrive intact. Pre-fix, args
+     * 12-14 (srcWidth/Height/Depth) read as 0 → GL_INVALID_VALUE. On a
+     * <4.3 context the call itself is INVALID_OPERATION — accept either
+     * that or success, but never INVALID_VALUE. */
+    {
+        uint32_t src = 0, dst = 0;
+        glGenTextures(1, &src);
+        glGenTextures(1, &dst);
+        glBindTexture(GL_TEXTURE_2D, src);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, dst);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glCopyImageSubData(src, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           dst, GL_TEXTURE_2D, 0, 0, 0, 0,
+                           4, 4, 1);
+        unsigned e_copy = glGetError();
+        chk(e_copy == 0, "glCopyImageSubData 15 args intact");
+    }
 
     chk(glGetError() == 0, "no GL error after modern-feature calls");
 
