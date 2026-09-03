@@ -44,6 +44,11 @@ inline float load_sample(uint32_t fmt, const uint8_t* p) {
             if (v & 0x800000) v -= 0x1000000;
             return v / 8388608.0f;
         }
+        case PCM_FMT_S32: {
+            int32_t v;
+            memcpy(&v, p, 4);
+            return v / 2147483648.0f;
+        }
         case PCM_FMT_F32: {
             float v;
             memcpy(&v, p, 4);

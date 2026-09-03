@@ -506,18 +506,19 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto sdl_fmt_map = [](uint16_t f) -> uint32_t {
         switch (f & 0xFF1F) {
             case 0x0008: return PCM_FMT_U8;
-            case 0x0020: case 0x8020: return PCM_FMT_S16;  // S32 → narrow
+            case 0x8020: return PCM_FMT_S32;   // AUDIO_S32LSB: real 32-bit,
+                                               // converted by the engine
             case 0x0120: case 0x8120: case 0x9120: return PCM_FMT_F32;
             case 0x8030: return PCM_FMT_S24;
             default: return PCM_FMT_S16;                   // S16 variants
         }
     };
+    // Guest bytes per sample — the engine's own helper, so accounting can
+    // never disagree with conversion (the old local copy said 2 for S24
+    // while the engine converts 4-byte containers).
     auto fmt_size = [](uint32_t f) -> uint8_t {
-        switch (f) {
-            case PCM_FMT_U8: return 1;
-            case PCM_FMT_F32: return 4;
-            default: return 2;   // S16 + S24-in-32
-        }
+        uint8_t s = pcm_fmt_size(f);
+        return s ? s : 2;
     };
     // Drain a device's queue-mode backlog into ITS OWN engine stream
     // (real-SDL semantics: each logical device has an independent queue;
@@ -528,11 +529,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // pin the ring level and silently kill every other device).
     // Called from audio-thunk dispatches on the guest thread — no pump
     // threads, no async guest callbacks.
-    auto top_up_queue = [&I](AudioThunkImpl::PumpStream& s) {
+    auto top_up_queue = [&I, &fmt_size](AudioThunkImpl::PumpStream& s) {
         if (!I.engine || !s.engine_stream) return;
         constexpr size_t kChunk = 16 * 1024;
-        const size_t frame_sz =
-            (size_t)(s.fmt == PCM_FMT_U8 ? 1 : (s.fmt == PCM_FMT_F32 ? 4 : 2)) * s.ch;
+        const size_t frame_sz = (size_t)fmt_size(s.fmt) * s.ch;
         while (!s.paused.load(std::memory_order_relaxed) &&
                s.pending_off < s.pending.size()) {
             size_t n = std::min(kChunk, s.pending.size() - s.pending_off);
@@ -826,9 +826,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             r = (int64_t)(it->second.pending.size() - it->second.pending_off);
             if (it->second.engine_stream && I.engine) {
                 const size_t frame_sz =
-                    (size_t)(it->second.fmt == PCM_FMT_U8 ? 1
-                             : (it->second.fmt == PCM_FMT_F32 ? 4 : 2)) *
-                    it->second.ch;
+                    (size_t)fmt_size(it->second.fmt) * it->second.ch;
                 r += (int64_t)(I.engine->stream_queued_frames(
                                    it->second.engine_stream) * frame_sz);
             }
@@ -926,9 +924,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) {
-            switch ((int)R(2)) {   // snd_pcm_format_t
+            switch ((int)R(2)) {   // snd_pcm_format_t (values from alsa/pcm.h)
                 case 1:  it->second.fmt = PCM_FMT_U8; break;   // U8
-                case 6:  it->second.fmt = PCM_FMT_S24; break;  // S24_LE
+                case 6:  case 7: it->second.fmt = PCM_FMT_S24; break;  // S24_LE/BE
+                case 10: case 11: it->second.fmt = PCM_FMT_S32; break; // S32_LE/BE
                 case 14: case 15: it->second.fmt = PCM_FMT_F32; break; // FLOAT_LE/BE
                 default: it->second.fmt = PCM_FMT_S16; break;  // S16_* / others
             }
@@ -956,8 +955,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (it != I.alsa_pcms_.end() && I.engine) {
             uint64_t buf = R(1);
             int64_t frames = (int64_t)R(2);
-            size_t fsz = (it->second.fmt == PCM_FMT_U8 ? 1 :
-                          it->second.fmt == PCM_FMT_S16 ? 2 : 4);
+            size_t fsz = fmt_size(it->second.fmt);
             size_t bytes = (size_t)frames * it->second.ch * fsz;
             if (buf && bytes) {
                 std::vector<uint8_t> tmp(bytes);
@@ -1019,9 +1017,15 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             uint32_t pf = rd32(I, spec + 0);
             uint32_t pr = rd32(I, spec + 4);
             uint8_t  pc = 0; I.mem->read(spec + 8, &pc, 1);
-            switch (pf) {
+            switch (pf) {   // pa_sample_format_t (values from pulse/sample.h)
                 case 0: ps.fmt = PCM_FMT_U8; break;       // PA_SAMPLE_U8
-                case 5: ps.fmt = PCM_FMT_F32; break;      // PA_SAMPLE_FLOAT32LE
+                case 5: case 6: ps.fmt = PCM_FMT_F32; break;  // FLOAT32LE/BE
+                case 7: case 8: ps.fmt = PCM_FMT_S32; break;  // S32LE/BE
+                case 11: case 12: ps.fmt = PCM_FMT_S24; break; // S24_32LE/BE
+                                                              // (32-bit
+                                                              // containers;
+                                                              // packed S24LE/BE
+                                                              // unsupported)
                 default: ps.fmt = PCM_FMT_S16; break;     // S16LE/BE + others
             }
             if (pr) ps.rate = pr;

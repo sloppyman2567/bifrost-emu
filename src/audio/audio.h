@@ -32,12 +32,14 @@ enum PcmFormat : uint32_t {
     PCM_FMT_S16 = 2,   // signed 16-bit host-endian
     PCM_FMT_S24 = 3,   // signed 24-bit in 4-byte container (low 3 bytes)
     PCM_FMT_F32 = 4,   // IEEE float32
+    PCM_FMT_S32 = 5,   // signed 32-bit host-endian
 };
 inline uint8_t pcm_fmt_size(uint32_t f) {
     switch (f) {
         case PCM_FMT_U8: return 1;
         case PCM_FMT_S16: return 2;
         case PCM_FMT_F32: return 4;
+        case PCM_FMT_S32: return 4;  // 32-bit container
         case PCM_FMT_S24: return 4;  // 24-in-32 container
         default: return 0;
     }

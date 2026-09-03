@@ -3583,3 +3583,29 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   narrowing + S24 size inconsistency; write arms report full success when
   the ring accepted 0 frames; pump vCPU shares main-thread TPIDR_EL0
   (TLS aliasing); `#define R(i)` never #undef'd.
+
+## Session History (2026-09-03) — audio S32 playback + S24 size fix
+
+- Fixed the S32-at-2x-speed bug properly: new `PCM_FMT_S32` engine format
+  (`src/audio/audio.h` tag + size, `load_sample` conversion in
+  `src/audio/audio.cpp`) instead of mislabeling S32 bytes as S16. Safe:
+  the physical device already opens in F32 mode for 4-byte formats, so
+  S32 flows input→float→device with no device-side change.
+- Thunk maps SDL `AUDIO_S32LSB` (0x8020), ALSA `S32_LE/BE` (10/11), and
+  Pulse `S32LE/BE` (7/8) to it — numbers verified against
+  `/usr/include/alsa/pcm.h` and `/usr/include/pulse/sample.h`, not
+  memory. Also added the missing BE/adjacent rows the headers confirm:
+  ALSA S24_BE (7), Pulse FLOAT32BE (6), Pulse S24_32LE/BE (11/12, real
+  32-bit containers; packed S24LE/BE stays unsupported and documented).
+- Killed the three hand-rolled "bytes per sample" copies in
+  `audio_thunk.cpp` (top_up_queue/QueueAudio used 2 for S24, writei used
+  4, engine converts 4): everything funnels through `pcm_fmt_size` now
+  via the local `fmt_size` wrapper (unknown → 2 fallback preserved), so
+  accounting can never disagree with conversion again.
+- Verified: clean build (the one `-Warray-bounds` warning reproduces on
+  the clean tree — pre-existing, not ours), `test_linux_audio` 16/16 and
+  `test_android_audio` 21/21 pass under BOTH JIT and `--no-jit`, plus
+  `audio_test.elf` fine.
+- Still open: write arms report full success when the ring accepted 0
+  frames; pump vCPU shares main-thread TPIDR_EL0 (TLS aliasing);
+  `#define R(i)` never #undef'd.
