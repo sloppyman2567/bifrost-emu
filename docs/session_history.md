@@ -3552,3 +3552,34 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Verified: clean build, `test_linux_audio` 16/16 and
   `test_android_audio` 21/21 pass under BOTH JIT and `--no-jit`, plus
   `audio_test.elf` writes its PCM fine.
+
+## Session History (2026-09-03) — audio-thunk locking overhaul
+
+- Closed the biggest leftover from the audio review: dispatch maps had no
+  locking vs the pump thread / across guest threads (concurrent std::map
+  read+write/erase = UB). All in `src/frost_graphics/audio_thunk.cpp`.
+- `AudioThunkImpl::mu` is now a `recursive_mutex` (was plain `mutex`), so
+  arms can hold it across helpers that re-lock it (`resolve` via
+  `make_vtable`, same-thread runner reentry) without self-deadlock.
+- SDL/AAudio stream maps (`sdl_devs_`, `aa_streams_`) are now guarded by
+  `pump_mu` in EVERY dispatch arm (open holds it through engine-open so
+  the slot ref stays valid; pause/queue/getqueued/clear/write/getters all
+  take it). Fixed lock discipline: callbacks fire BEFORE the map find
+  (QueueAudio/GetQueued) or the iterator is re-found after guest code
+  runs (Pause-resume) — a callback closing its own device can no longer
+  dangle a caller's iterator. Handle counters now increment under lock.
+- `run_due_callbacks` rewritten: per-period args are snapshotted under
+  `pump_mu`, `next_cb_us` advances BEFORE firing (a concurrent thread can
+  never double-fire the same period), guest code runs with the lock
+  RELEASED, and the push re-checks liveness then uses the snapshot.
+  Same snapshot-outside-runner shape applied to `__osl_bq_enqueue`.
+- ALSA/Pulse/OpenAL/AAudio-builder/OpenSL arms (+ handle counters and the
+  shared static string buffers) guarded by `mu`. Lock order is always
+  mu → pump_mu → mem/engine locks, never reverse.
+- Verified: clean build (0 warnings), `test_linux_audio` 16/16 and
+  `test_android_audio` 21/21 pass under BOTH JIT and `--no-jit`, plus
+  `audio_test.elf` fine.
+- Still open (documented, NOT fixed): S32-labeled-as-S16 with no
+  narrowing + S24 size inconsistency; write arms report full success when
+  the ring accepted 0 frames; pump vCPU shares main-thread TPIDR_EL0
+  (TLS aliasing); `#define R(i)` never #undef'd.

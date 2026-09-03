@@ -45,7 +45,10 @@ struct AudioThunkImpl {
         AudioThunk::TRAMPOLINE_SIZE * AudioThunk::MAX_SYMBOLS;  // 16 KiB
     std::vector<ThunkLibTable> libs_;
     std::vector<std::pair<uint32_t, uint32_t>> id_to_idx_;
-    std::mutex mu;
+    // Recursive: dispatch arms hold this across map access while helpers
+    // they call (resolve via make_vtable, runner-reentrant dispatches on
+    // the same thread) lock it again.
+    std::recursive_mutex mu;
     // ── dedicated-vCPU audio pump ─────────────────────────────────────
     // A host clock thread fires guest data callbacks on an EXCLUSIVE
     // cloned vCPU (pump_cpu) at device cadence — real SMP semantics,
@@ -229,7 +232,7 @@ bool AudioThunk::enabled() const { return impl_ && impl_->enabled; }
 bool AudioThunk::init(Memory& mem) {
     if (!impl_->enabled) return false;
     if (impl_->initialized) return true;
-    std::lock_guard<std::mutex> g(impl_->mu);
+    std::lock_guard<std::recursive_mutex> g(impl_->mu);
     impl_->mem = &mem;
     impl_->trampoline_base = mem.mmap_alloc(AudioThunkImpl::TRAMPOLINE_PAGE_SIZE);
     if (impl_->trampoline_base == 0) {
@@ -436,7 +439,7 @@ void AudioThunk::write_trampoline_(Memory& mem, uint64_t addr, uint32_t sym_id) 
 }
 uint64_t AudioThunk::resolve(const std::string& lib, const std::string& sym) {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
-    std::lock_guard<std::mutex> g(impl_->mu);
+    std::lock_guard<std::recursive_mutex> g(impl_->mu);
     auto* lt = find_lib(impl_->libs_, lib);
     if (!lt) return 0;
     for (const auto& e : lt->entries) {
@@ -447,7 +450,7 @@ uint64_t AudioThunk::resolve(const std::string& lib, const std::string& sym) {
 size_t AudioThunk::enumerate_symbols(const std::string& lib,
     const std::function<void(const std::string&, uint64_t)>& cb) const {
     if (!impl_ || !impl_->enabled || !impl_->initialized) return 0;
-    std::lock_guard<std::mutex> g(impl_->mu);
+    std::lock_guard<std::recursive_mutex> g(impl_->mu);
     auto* lt = find_lib(const_cast<std::vector<ThunkLibTable>&>(impl_->libs_), lib);
     if (!lt) return 0;
     for (const auto& e : lt->entries) {
@@ -565,68 +568,85 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         }();
-        // Snapshot device handles: a guest callback may itself call
-        // SDL_CloseAudioDevice / AAudioStream_close etc., mutating the
-        // maps mid-iteration.
+        // Snapshot device handles under lock: a guest callback may itself
+        // call SDL_CloseAudioDevice / AAudioStream_close etc., mutating
+        // the maps mid-iteration, and the pump thread scans them
+        // concurrently. Each firing snapshots its args under pump_mu,
+        // advances next_cb_us BEFORE running guest code (so a concurrent
+        // thread can never double-fire the same period), and re-checks
+        // liveness under lock before pushing.
         auto pump_due = [&I, &now_us, &fill_cb_args](
                             std::map<uint64_t, AudioThunkImpl::PumpStream>&
                                 devs,
                             uint64_t h) {
-            auto dit = devs.find(h);
-            if (dit == devs.end()) return;
-            AudioThunkImpl::PumpStream* sp = &dit->second;
-            AudioThunkImpl::PumpStream& s = *sp;   // node-stable until erase
-            if (!s.cb_fn || !s.bounce || !s.cb_scheduled) return;
-            if (s.paused.load(std::memory_order_relaxed)) {
-                s.next_cb_us = now_us;   // resume on unpause, no burst
-                return;
-            }
-            const size_t cb_bytes =
-                (size_t)s.frames_per_cb * s.ch * s.size;
-            if (!cb_bytes) return;
-            const uint64_t period_us = std::max<uint64_t>(
-                (uint64_t)cb_bytes * 1000000ULL /
-                    ((uint64_t)s.rate * s.ch * s.size),
-                1000);
-            int fired = 0;
-            while (now_us >= s.next_cb_us && fired++ < 4) {
-                if (now_us - s.next_cb_us > 500000ULL) {
-                    // Fell far behind (long stall) — resync, don't burst.
-                    s.next_cb_us = now_us;
-                    break;
+            for (int iter = 0; iter < 4; iter++) {
+                uint64_t cb_fn = 0, bounce = 0;
+                int64_t ia[4]; size_t na = 0;
+                size_t cb_bytes = 0;
+                uint32_t fmt = PCM_FMT_S16, rate = 44100;
+                uint8_t ch = 2;
+                int estream = 0;
+                {
+                    std::lock_guard<std::recursive_mutex> g(I.pump_mu);
+                    auto dit = devs.find(h);
+                    if (dit == devs.end()) return;
+                    AudioThunkImpl::PumpStream& s = dit->second;
+                    if (!s.cb_fn || !s.bounce || !s.cb_scheduled) return;
+                    if (s.paused.load(std::memory_order_relaxed)) {
+                        s.next_cb_us = now_us;   // resume on unpause, no burst
+                        return;
+                    }
+                    cb_bytes = (size_t)s.frames_per_cb * s.ch * s.size;
+                    if (!cb_bytes) return;
+                    const uint64_t period_us = std::max<uint64_t>(
+                        (uint64_t)cb_bytes * 1000000ULL /
+                            ((uint64_t)s.rate * s.ch * s.size),
+                        1000);
+                    if (now_us < s.next_cb_us) return;
+                    if (now_us - s.next_cb_us > 500000ULL) {
+                        // Fell far behind (long stall) — resync, don't burst.
+                        s.next_cb_us = now_us;
+                        return;
+                    }
+                    fill_cb_args(s, ia, na, cb_bytes);
+                    cb_fn = s.cb_fn; bounce = s.bounce;
+                    fmt = s.fmt; rate = s.rate; ch = s.ch;
+                    estream = s.engine_stream;
+                    s.next_cb_us += period_us;
                 }
-                int64_t ia[4];
-                size_t na;
-                fill_cb_args(s, ia, na, cb_bytes);
-                const uint64_t cb_fn = s.cb_fn;
+                // Fire OUTSIDE the lock: guest code may call back into
+                // audio-thunk dispatches (recursive_mutex tolerates the
+                // same thread; other threads must never block on guest).
                 I.runner(*I.cb_cpu, cb_fn, ia, na);
-                // The callback may have closed its own device — the map
-                // node (and s) is gone; stop touching it.
-                dit = devs.find(h);
-                if (dit == devs.end()) return;
-                sp = &dit->second;   // rebind (same node unless erased)
+                // The callback may have closed its own device — re-check
+                // liveness before touching the bounce or the stream.
+                // The push uses the snapshot (the layout the callback
+                // just rendered); the find is purely a liveness check.
+                std::lock_guard<std::recursive_mutex> g(I.pump_mu);
+                if (devs.find(h) == devs.end()) return;
                 try {
                     std::vector<uint8_t> tmp(cb_bytes);
-                    I.mem->read(s.bounce, tmp.data(), cb_bytes);
-                    // Push into THIS device's own stream — the engine
-                    // mixer sums all streams, so callback audio layers
-                    // over other devices the way real SDL mixes.
-                    if (s.engine_stream)
-                        I.engine->stream_write(s.engine_stream, s.fmt,
-                                               s.rate, s.ch, tmp.data(),
-                                               cb_bytes);
+                    I.mem->read(bounce, tmp.data(), cb_bytes);
+                    if (estream)
+                        I.engine->stream_write(estream, fmt, rate, ch,
+                                               tmp.data(), cb_bytes);
                 } catch (...) { /* unmapped bounce — skip period */ }
-                s.next_cb_us += period_us;
             }
         };
         std::vector<uint64_t> handles;
-        handles.reserve(I.sdl_devs_.size());
-        for (auto& [h, s] : I.sdl_devs_) { (void)s; handles.push_back(h); }
+        {
+            std::lock_guard<std::recursive_mutex> g(I.pump_mu);
+            handles.reserve(I.sdl_devs_.size());
+            for (auto& [h, s] : I.sdl_devs_) { (void)s; handles.push_back(h); }
+        }
         for (uint64_t h : handles)
             pump_due(I.sdl_devs_, h);   // re-finds; no-op if closed meanwhile
         handles.clear();
-        handles.reserve(I.aa_streams_.size());
-        for (auto& [h, s] : I.aa_streams_) { (void)s; handles.push_back(h); }
+        {
+            std::lock_guard<std::recursive_mutex> g(I.pump_mu);
+            handles.reserve(I.aa_streams_.size());
+            for (auto& [h, s] : I.aa_streams_) { (void)s; handles.push_back(h); }
+        }
         for (uint64_t h : handles)
             pump_due(I.aa_streams_, h);
     };
@@ -660,8 +680,11 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         const uint64_t cb_ud = rd64(I, desired + 24);
         const uint32_t fmt = sdl_fmt_map(ftag);
         const uint8_t  sz  = fmt_size(fmt);
-        const uint64_t h = ++I.next_sdl_dev_;   // real SDL: first id = 1
+        // Hold pump_mu for the whole arm: the pump thread scans this map
+        // concurrently, and `slot` must stay valid through engine open.
+        // Lock order is always pump_mu → mem/engine locks, never reverse.
         std::unique_lock<std::recursive_mutex> pmu(I.pump_mu);
+        const uint64_t h = ++I.next_sdl_dev_;   // real SDL: first id = 1
         auto& slot = I.sdl_devs_[h];
         slot.fmt = fmt; slot.rate = (freq > 0) ? (uint32_t)freq : 44100;
         slot.ch = ch; slot.size = sz;
@@ -680,7 +703,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             slot.cb_scheduled = true;
             slot.next_cb_us = 0;   // due immediately; pacing takes over
         }
-        pmu.unlock();
+        // pmu still held: slot stays valid through engine open + obtained.
         slot.engine_stream = I.engine
             ? I.engine->stream_open(fmt, slot.rate, slot.ch) : 0;
         if (I.engine && !slot.engine_stream) {
@@ -730,6 +753,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         const bool is_dev = (name[14] == 'D');
         uint64_t dev = is_dev ? R(0) : 1;
         uint8_t pause = (uint8_t)(is_dev ? R(1) : R(0));
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.sdl_devs_.find(dev);
         if (it != I.sdl_devs_.end()) {
             it->second.paused = pause != 0;
@@ -739,13 +763,16 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 I.engine->stream_pause(it->second.engine_stream, pause != 0);
             if (!pause) {
                 // Resume cleanly: no callback burst, drain backlog now.
+                // run_due_callbacks runs guest code that may close THIS
+                // device — re-find before touching the iterator again.
                 it->second.next_cb_us =
                     (uint64_t)std::chrono::duration_cast<
                         std::chrono::microseconds>(
                         std::chrono::steady_clock::now().time_since_epoch())
                             .count();
                 run_due_callbacks();
-                top_up_queue(it->second);
+                it = I.sdl_devs_.find(dev);
+                if (it != I.sdl_devs_.end()) top_up_queue(it->second);
             }
         }
         tr(0); return 0;
@@ -753,10 +780,14 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (name == "SDL_QueueAudio") {
         uint64_t dev = R(0), data = R(1);
         uint32_t len = (uint32_t)R(2);
+        // Fire callbacks BEFORE the find: guest code may close devices.
+        // Everything below only touches this device (no runner calls),
+        // so the iterator stays valid under the lock.
+        run_due_callbacks();
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.sdl_devs_.find(dev);
         int64_t rc = -1;
         if (it != I.sdl_devs_.end() && data && len && I.engine) {
-            run_due_callbacks();
             // Real-SDL semantics: buffer the whole request on the device
             // backlog and let top_up_queue_ feed the ring in order. No
             // samples are dropped, and GetQueuedAudioSize reports the
@@ -780,10 +811,12 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "SDL_GetQueuedAudioSize") {
         uint64_t dev = R(0);
+        // Same ordering as QueueAudio: callbacks first, then locked find.
+        run_due_callbacks();
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.sdl_devs_.find(dev);
         int64_t r = 0;
         if (it != I.sdl_devs_.end()) {
-            run_due_callbacks();
             top_up_queue(it->second);
             // Honest unplayed backlog: our pending buffer PLUS whatever
             // already sits in the device's engine stream ring (converted
@@ -804,6 +837,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "SDL_ClearQueuedAudio") {
         uint64_t dev = R(0);
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.sdl_devs_.find(dev);
         if (it != I.sdl_devs_.end()) {
             it->second.pending.clear();
@@ -846,6 +880,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "SDL_GetCurrentAudioDriver") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         static uint64_t drvbuf = 0;
         if (!drvbuf) drvbuf = I.mem->mmap_alloc(32);
         if (!drvbuf) { tr(-ENOMEM); return -ENOMEM; }
@@ -855,6 +890,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "SDL_GetNumAudioDevices") { tr(0); return 1; }
     if (name == "SDL_GetAudioDeviceName") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         static uint64_t namebuf = 0;
         if (!namebuf) namebuf = I.mem->mmap_alloc(64);
         const char* n = "bifrost-audio";
@@ -864,6 +900,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ══ ALSA (subset games actually use) ════════════════════════════
     if (name == "snd_pcm_open") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t pcmp = R(0);
         std::string dev = rd_cstr(I, R(1));
         if (!pcmp) { tr(-EFAULT); return -EFAULT; }
@@ -886,6 +923,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_pcm_hw_params_set_format") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) {
             switch ((int)R(2)) {   // snd_pcm_format_t
@@ -898,11 +936,13 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_pcm_hw_params_set_channels") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) it->second.ch = (uint8_t)R(2);
         tr(0); return 0;
     }
     if (name == "snd_pcm_hw_params_set_rate") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) it->second.rate = (uint32_t)R(2);
         uint64_t dir = R(3);
@@ -910,6 +950,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_pcm_writei") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         int64_t rc = -EIO;
         if (it != I.alsa_pcms_.end() && I.engine) {
@@ -948,6 +989,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_pcm_close") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) {
             if (it->second.engine_stream && I.engine)
@@ -957,6 +999,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "snd_strerror") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         static uint64_t strbuf = 0;
         if (!strbuf) strbuf = I.mem->mmap_alloc(64);
         const char* s = "audio-thunk";
@@ -967,6 +1010,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ══ PulseAudio simple API ═══════════════════════════════════════
     if (name == "pa_simple_new") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         // (server, dev, dir, streamname, spec*, map*, attr*, int *error)
         const uint64_t spec = R(4), errp = R(7);
         const uint64_t h = 0xA7000000ull + ++I.next_pulse_;
@@ -990,6 +1034,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr((int64_t)h); return (int64_t)h;
     }
     if (name == "pa_simple_write") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.pulse_streams_.find(R(0));
         int64_t rc = -EIO;
         if (it != I.pulse_streams_.end() && I.engine) {
@@ -1011,6 +1056,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "pa_simple_drain" || name == "pa_simple_flush") { tr(0); return 0; }
     if (name == "pa_simple_free") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.pulse_streams_.find(R(0));
         if (it != I.pulse_streams_.end()) {
             if (it->second.engine_stream && I.engine)
@@ -1021,6 +1067,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "pa_simple_get_latency") { tr(0); return 0; }
     if (name == "pa_strerror") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         static uint64_t pbuf = 0;
         if (!pbuf) pbuf = I.mem->mmap_alloc(64);
         const char* s = "audio-thunk";
@@ -1032,6 +1079,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (name == "alcOpenDevice") { tr(0xA8000001); return 0xA8000001; }
     if (name == "alcCloseDevice") { tr(1); return 1; }
     if (name == "alcCreateContext") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         const uint64_t h = 0xA8100000ull + ++I.al_ctx_;
         tr((int64_t)h); return (int64_t)h;
     }
@@ -1040,6 +1088,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         name == "alcSuspendContext" || name == "alcGetError" ||
         name == "alGetError") { tr(0); return 0; }
     if (name == "alcGetString" || name == "alGetString") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         static uint64_t abuf = 0;
         if (!abuf) abuf = I.mem->mmap_alloc(128);
         const char* s = "bifrost-emu Software";
@@ -1056,6 +1105,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alGenBuffers") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         int n = (int)R(0);
         uint64_t ids = R(1);
         for (int i = 0; i < n && ids; i++) {
@@ -1066,6 +1116,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alDeleteBuffers") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         int n = (int)R(0);
         uint64_t ids = R(1);
         for (int i = 0; i < n && ids; i++) {
@@ -1075,6 +1126,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alBufferData") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint32_t bid = (uint32_t)R(0);
         uint32_t alfmt = (uint32_t)R(1);
         uint64_t data = R(2);
@@ -1099,6 +1151,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alGenSources") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         int n = (int)R(0);
         uint64_t ids = R(1);
         for (int i = 0; i < n && ids; i++) {
@@ -1109,6 +1162,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alDeleteSources") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         int n = (int)R(0);
         uint64_t ids = R(1);
         for (int i = 0; i < n && ids; i++) {
@@ -1121,6 +1175,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alSourceQueueBuffers") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.al_srcs_.find(R(0));
         if (it != I.al_srcs_.end()) {
             int n = (int)R(1);
@@ -1131,6 +1186,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alSourcePlay") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.al_srcs_.find(R(0));
         if (it != I.al_srcs_.end() && I.engine) {
             auto& src = it->second;
@@ -1155,6 +1211,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alSourceStop") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.al_srcs_.find(R(0));
         if (it != I.al_srcs_.end()) {
             it->second.queue.clear();
@@ -1164,6 +1221,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "alSourceUnqueueBuffers") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.al_srcs_.find(R(0));
         int processed = 0;
         if (it != I.al_srcs_.end()) {
@@ -1186,6 +1244,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
 
     // ══ AAudio (Android) ════════════════════════════════════════════
     if (name == "AAudioStreamBuilder_new") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t out = R(0);
         const uint64_t h = 0xAA000000ull + ++I.next_aa_builder_;
         I.aa_builders_[h] = AudioThunkImpl::AaBuilder{};
@@ -1193,41 +1252,52 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_delete") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         I.aa_builders_.erase(R(0));
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setFormat") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
         if (it != I.aa_builders_.end()) it->second.fmt = (int32_t)R(1);
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setChannelCount") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
         if (it != I.aa_builders_.end()) it->second.ch = (int32_t)R(1);
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setSampleRate") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
         if (it != I.aa_builders_.end()) it->second.rate = (int32_t)R(1);
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setDataCallback") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
         if (it != I.aa_builders_.end()) { it->second.cb_fn = R(1); it->second.cb_ud = R(2); }
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setErrorCallback") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.aa_builders_.find(R(0));
         if (it != I.aa_builders_.end()) { it->second.err_fn = R(1); it->second.err_ud = R(2); }
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_openStream") {
-        auto bit = I.aa_builders_.find(R(0));
         uint64_t out = R(1);
-        if (bit == I.aa_builders_.end() || !out) { tr(-22); return -22; }
-        const AudioThunkImpl::AaBuilder& b = bit->second;
-        const uint64_t h = 0xAA100000ull + ++I.next_aa_stream_;
+        AudioThunkImpl::AaBuilder b;
+        {
+            std::lock_guard<std::recursive_mutex> g(I.mu);
+            auto bit = I.aa_builders_.find(R(0));
+            if (bit == I.aa_builders_.end() || !out) { tr(-22); return -22; }
+            b = bit->second;   // copy: another thread may delete the builder
+        }
+        // Hold pump_mu for the whole arm (same shape as SDL_OpenAudioDevice).
         std::unique_lock<std::recursive_mutex> pmu(I.pump_mu);
+        const uint64_t h = 0xAA100000ull + ++I.next_aa_stream_;
         auto& s = I.aa_streams_[h];
         s.fmt = (b.fmt == 2) ? PCM_FMT_F32 : PCM_FMT_S16;   // AAUDIO_FORMAT_FLOAT=2, I16=1
         s.size = (s.fmt == PCM_FMT_F32) ? 4 : 2;
@@ -1250,10 +1320,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         s.engine_stream = I.engine
             ? I.engine->stream_open(s.fmt, s.rate, s.ch) : 0;
-        pmu.unlock();
         tr(0); return 0;   // AAUDIO_OK
     }
     if (name == "AAudioStream_requestStart") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         if (it != I.aa_streams_.end()) {
             it->second.paused = false;
@@ -1263,6 +1333,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "AAudioStream_requestPause" || name == "AAudioStream_requestStop") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         if (it != I.aa_streams_.end()) {
             it->second.paused = true;
@@ -1286,6 +1357,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "AAudioStream_write") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t rc = -EIO;
         if (it != I.aa_streams_.end() && I.engine) {
@@ -1304,6 +1376,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(rc); return rc;
     }
     if (name == "AAudioStream_getState") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t st = (it != I.aa_streams_.end() && !it->second.paused &&
                       !it->second.stop.load()) ? 4 /*Started*/ : 10 /*Stopped*/;
@@ -1311,16 +1384,19 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "AAudioStream_waitForStateChange") { tr(0); return 0; }
     if (name == "AAudioStream_getFormat") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t f = (it != I.aa_streams_.end() && it->second.fmt == PCM_FMT_F32) ? 2 : 1;
         tr(f); return f;
     }
     if (name == "AAudioStream_getChannelCount") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t c = it != I.aa_streams_.end() ? it->second.ch : 2;
         tr(c); return c;
     }
     if (name == "AAudioStream_getSampleRate") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t r = it != I.aa_streams_.end() ? (int64_t)it->second.rate : 48000;
         tr(r); return r;
@@ -1328,6 +1404,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (name == "AAudioStream_getBufferSizeInFrames" ||
         name == "AAudioStream_getFramesPerBurst" ||
         name == "AAudioStream_getFramesPerDataCallback") {
+        std::lock_guard<std::recursive_mutex> pmu(I.pump_mu);
         auto it = I.aa_streams_.find(R(0));
         int64_t r = it != I.aa_streams_.end() ? it->second.frames_per_cb : 1024;
         tr(r); return r;
@@ -1358,6 +1435,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         return true;
     };
     if (name == "slCreateEngine") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t out = R(0);
         if (!out) { tr(-22); return -22; }
         auto obj = std::make_unique<AudioThunkImpl::SlObject>();
@@ -1374,11 +1452,13 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;   // SL_RESULT_SUCCESS
     }
     if (name == "__osl_realize") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.sl_by_word_.find(R(0));
         if (it != I.sl_by_word_.end()) it->second->realized = true;
         tr(0); return 0;
     }
     if (name == "__osl_destroy") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.sl_by_word_.find(R(0));
         if (it != I.sl_by_word_.end()) {
             it->second->realized = false;
@@ -1388,6 +1468,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "__osl_getinterface") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         // (itf_word, SLInterfaceID iid*, void** out)
         auto it = I.sl_by_word_.find(R(0));
         uint64_t iid = R(1), outp = R(2);
@@ -1428,6 +1509,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "__osl_eng_createmix") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t out = R(1);
         if (!out) { tr(1); return 1; }
         auto obj = std::make_unique<AudioThunkImpl::SlObject>();
@@ -1441,6 +1523,7 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "__osl_eng_createplayer") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         uint64_t out = R(1);
         if (!out) { tr(1); return 1; }
         auto obj = std::make_unique<AudioThunkImpl::SlObject>();
@@ -1454,33 +1537,41 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         tr(0); return 0;
     }
     if (name == "__osl_bq_enqueue") {
-        auto it = I.sl_bq_by_word_.find(R(0));
+        uint64_t self = R(0);
+        uint64_t cb_fn = 0, cb_ctx = 0;
         int64_t rc = 1;   // SL_RESULT_PARAMETER_INVALID
-        if (it != I.sl_bq_by_word_.end() && I.engine) {
-            uint64_t data = R(1);
-            size_t bytes = (size_t)R(2);
-            std::vector<uint8_t> tmp(bytes);
-            I.mem->read(data, tmp.data(), bytes);
-            AudioThunkImpl::SlObject* o = it->second;
-            // Players configure format via SLDataSource; default S16/44100/2.
-            // Per-player engine stream: concurrent players mix in the
-            // device callback (real OpenSL semantics).
-            if (!o->engine_stream)
-                o->engine_stream = I.engine->stream_open(PCM_FMT_S16, 44100, 2);
-            if (o->engine_stream)
-                I.engine->stream_write(o->engine_stream, PCM_FMT_S16, 44100,
-                                       2, tmp.data(), bytes);
-            rc = 0;   // SL_RESULT_SUCCESS
-            // Fire the registered callback INLINE (guest thread): mirrors
-            // BufferQueue semantics closely enough for streaming players.
-            if (o->bq_cb_fn && I.runner && I.cb_cpu) {
-                int64_t ia[2] = { (int64_t)R(0), (int64_t)o->bq_cb_ctx };
-                I.runner(*I.cb_cpu, o->bq_cb_fn, ia, 2);
+        {
+            std::lock_guard<std::recursive_mutex> g(I.mu);
+            auto it = I.sl_bq_by_word_.find(self);
+            if (it != I.sl_bq_by_word_.end() && I.engine) {
+                uint64_t data = R(1);
+                size_t bytes = (size_t)R(2);
+                std::vector<uint8_t> tmp(bytes);
+                I.mem->read(data, tmp.data(), bytes);
+                AudioThunkImpl::SlObject* o = it->second;
+                // Players configure format via SLDataSource; default S16/44100/2.
+                // Per-player engine stream: concurrent players mix in the
+                // device callback (real OpenSL semantics).
+                if (!o->engine_stream)
+                    o->engine_stream = I.engine->stream_open(PCM_FMT_S16, 44100, 2);
+                if (o->engine_stream)
+                    I.engine->stream_write(o->engine_stream, PCM_FMT_S16, 44100,
+                                           2, tmp.data(), bytes);
+                rc = 0;   // SL_RESULT_SUCCESS
+                cb_fn = o->bq_cb_fn;
+                cb_ctx = o->bq_cb_ctx;
             }
+        }
+        // Fire the registered callback OUTSIDE the lock (guest code may
+        // call back into audio-thunk dispatches).
+        if (rc == 0 && cb_fn && I.runner && I.cb_cpu) {
+            int64_t ia[2] = { (int64_t)self, (int64_t)cb_ctx };
+            I.runner(*I.cb_cpu, cb_fn, ia, 2);
         }
         tr(rc); return rc;
     }
     if (name == "__osl_bq_register") {
+        std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.sl_bq_by_word_.find(R(0));
         if (it != I.sl_bq_by_word_.end()) {
             it->second->bq_cb_fn = R(1);
