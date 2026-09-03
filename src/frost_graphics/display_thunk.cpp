@@ -1174,16 +1174,20 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     entry.name.c_str(), ni, entry.n_float,
                     static_cast<long long>(iv[0]), fv[0]);
         }
+        // NOTE: the first int arg is usually a 64-bit handle
+        // (VkCommandBuffer, ...), so it must stay uint64_t. an int32_t
+        // cast here chops the upper 32 bits and segfaults the host
+        // driver (vkCmdSetDepthBias with a truncated cmd buffer).
         if (ni == 1 && entry.n_float == 1) {
-            using Fn = void (*)(int32_t, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0]);
+            using Fn = void (*)(uint64_t, float); reinterpret_cast<Fn>(entry.host_fn)(iv[0], fv[0]);
         } else if (ni == 1 && entry.n_float == 2) {
-            using Fn = void (*)(int32_t, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1]);
+            using Fn = void (*)(uint64_t, float, float); reinterpret_cast<Fn>(entry.host_fn)(iv[0], fv[0], fv[1]);
         } else if (ni == 1 && entry.n_float == 3) {
-            using Fn = void (*)(int32_t, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2]);
+            using Fn = void (*)(uint64_t, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(iv[0], fv[0], fv[1], fv[2]);
         } else if (ni == 1 && entry.n_float >= 4) {
-            using Fn = void (*)(int32_t, float, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<int32_t>(iv[0]), fv[0], fv[1], fv[2], fv[3]);
+            using Fn = void (*)(uint64_t, float, float, float, float); reinterpret_cast<Fn>(entry.host_fn)(iv[0], fv[0], fv[1], fv[2], fv[3]);
         } else if (ni == 2 && entry.n_float == 1) {
-            using Fn = void (*)(uint32_t, uint32_t, float); reinterpret_cast<Fn>(entry.host_fn)(static_cast<uint32_t>(iv[0]), static_cast<uint32_t>(iv[1]), fv[0]);
+            using Fn = void (*)(uint64_t, uint32_t, float); reinterpret_cast<Fn>(entry.host_fn)(iv[0], static_cast<uint32_t>(iv[1]), fv[0]);
         } else {
             if (trace) {
                 fprintf(stderr, "[display-thunk] dispatch: %s unsupported mixed ABI (int×%u fp×%u) — call dropped\n",

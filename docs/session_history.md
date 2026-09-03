@@ -3728,3 +3728,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - descriptor gating: confirmed generated VK_CMD_DEEP stages pImageInfo/pBufferInfo/pTexelBufferView unconditionally bounded by descriptorCount (driver ignores unused per spec); no manual gating re-added. AGENTS.md note updated to match.
 - input: EVIOCGKEY returns live pressed-key bitmap (tracked in push_event via new FrostInput::key_bitmap); shared SDL-pump single-drain rule documented in FrostInput::poll + pump_host_events.
 - verified: clean build (0 errors), opgen-check (110 ops) + opgen-thunk-check (1807 symbols) up to date, --quick 214/214, input/gamepad pass, swapchain passed under JIT + --no-jit.
+
+## Session History (2026-09-03) — vulkan mixed int+float handle truncation (vkquake)
+
+- vkquake segfaulted in host vkCmdSetDepthBias via DisplayThunk::dispatch. root cause: the MIXED_FP arms cast arg0 to int32_t, but for vulkan arg0 is usually a 64-bit handle (VkCommandBuffer) — upper 32 bits chopped, garbage pointer to the driver. widened all five arms (ni==1 x float1-4, ni==2 x float) to uint64_t first param (safe for genuinely-32-bit args: low 32 identical on x86-64). GL mixed path untouched (first args there are small ints/enums).
+- verified: past SetDepthBias; game now reaches frame recording then segfaults in libvulkan_radeon at vkCmdDrawIndexedIndirect/vkCmdBindPipeline — next bug is in pipeline/descriptor/buffer marshalling, parked as bring-up milestone. swapchain test still passes (quick suite not re-run for this one-liner; build clean).
