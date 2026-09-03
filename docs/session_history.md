@@ -3506,3 +3506,23 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   reservation, reads can't fault) + bounce fallback; persistent push
   re-validates liveness under mu. New test_thunk_mt race smoke
   (4x500 proc-address stability + string paths, 3/3 clean runs).
+
+## Session History (2026-09-03) — plan GO: EBO policies, races, hardening
+
+- Phase 1/1b all committed (5f755d2, 1bb8a60, c628d7a) + history (8f505c7).
+  check-all: 219 pass / 0 fail / 1 env skip (suite grew 211 -> 214 with
+  gles_ebo, vao, thunk_mt, then full-suite count).
+- Two findings worth keeping: (1) dlsym serves the global table
+  first-wins, so GLES rows are untestable unless libGLESv2 is dlopened
+  first — test_sdl_gles_ebo does exactly that. A global-first dlsym for
+  thunk libs is arguably wrong (handle scope ignored); left as known
+  behavior, not changed. (2) glcoverage.py regenerates marked spec
+  blocks purely from gl.xml and flattens any hand policy inside them —
+  all hand-tuned rows (EL_PTR/ARRAY/INDIRECT_PTR, GL_DEBUG_CB) now live
+  outside the marks next to the reference rows; regen is a no-op. The
+  indirect offset-20 lesson: commands are 20 bytes; the native probe
+  agreed with the thunk before the scenario was fixed.
+- Leftovers / known limits: no-EBO client-array multidraw untestable on
+  core profiles (INVALID_OPERATION either way); cross-instance
+  host_err_sink routing stays single-emulator; thunk dtor assumes
+  quiesced dispatch.
