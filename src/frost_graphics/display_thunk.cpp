@@ -3048,6 +3048,57 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         cpu.regs[0] = 0;
         return 0;
     }
+    // ── Wayland host bridge: display lifecycle + proxy teardown ──
+    // Forwards to the host compositor when wl_display_connect secured a
+    // real connection; stub handles keep the old return-0 behavior, so
+    // headless runs are unaffected.
+    if (sym_name == "wl_display_get_fd") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_get_fd(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_flush") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_flush(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_dispatch") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_dispatch(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_dispatch_pending") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(
+                proxy->wl_display_dispatch_pending(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_roundtrip") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_roundtrip(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_read_events") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_read_events(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_prepare_read") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(
+                proxy->wl_display_prepare_read(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_display_cancel_read") {
+        cpu.regs[0] = static_cast<uint64_t>(
+            static_cast<int64_t>(proxy->wl_display_cancel_read(cpu.regs[0])));
+        return 0;
+    }
+    if (sym_name == "wl_proxy_destroy") {
+        proxy->wl_proxy_destroy(cpu.regs[0]);
+        cpu.regs[0] = 0;
+        return 0;
+    }
     // Unimplemented proxy symbol: one always-on note per symbol (then
     // silent). Without this, games needing the symbol misbehave with no
     // hint; `make proxy-check` lists the full backlog. Trace keeps the

@@ -12,6 +12,7 @@
 #include <SDL2/SDL.h>
 #include <cstdio>
 #include <cstring>
+#include <dlfcn.h>
 namespace arm64emu {
 struct HandleHdr {
     uint32_t type;
@@ -197,13 +198,112 @@ int DisplayProxy::XFlush(uint64_t display_guest) {
     return 0;
 }
 // ── Wayland proxy (minimal) ─────────────────────────────────────────
+bool DisplayProxy::wl_bridge_init_() {
+    if (wl_client_) return wlfn_connect_ != nullptr;
+    wl_client_ = dlopen("libwayland-client.so.0", RTLD_LAZY);
+    if (!wl_client_) wl_client_ = dlopen("libwayland-client.so", RTLD_LAZY);
+    if (!wl_client_) return false;
+    wlfn_connect_ = dlsym(wl_client_, "wl_display_connect");
+    wlfn_disconnect_ = dlsym(wl_client_, "wl_display_disconnect");
+    wlfn_flush_ = dlsym(wl_client_, "wl_display_flush");
+    wlfn_get_fd_ = dlsym(wl_client_, "wl_display_get_fd");
+    wlfn_dispatch_ = dlsym(wl_client_, "wl_display_dispatch");
+    wlfn_dispatch_pending_ = dlsym(wl_client_, "wl_display_dispatch_pending");
+    wlfn_roundtrip_ = dlsym(wl_client_, "wl_display_roundtrip");
+    wlfn_read_events_ = dlsym(wl_client_, "wl_display_read_events");
+    wlfn_prepare_read_ = dlsym(wl_client_, "wl_display_prepare_read");
+    wlfn_cancel_read_ = dlsym(wl_client_, "wl_display_cancel_read");
+    wlfn_proxy_destroy_ = dlsym(wl_client_, "wl_proxy_destroy");
+    return wlfn_connect_ != nullptr;
+}
+void* DisplayProxy::wl_host(uint64_t guest_addr) const {
+    if (guest_addr == 0) return nullptr;
+    auto it = wl_objs_.find(guest_addr);
+    return it != wl_objs_.end() ? it->second : nullptr;
+}
 uint64_t DisplayProxy::wl_display_connect(const char* name) {
-    (void)name;
     if (!ready()) return 0;
-    return alloc_handle(3);
+    uint64_t guest = alloc_handle(3);
+    if (!guest) return 0;
+    // Prefer a real host compositor connection; fall back to the stub
+    // handle when headless (old behavior — downstream stubs ignore the
+    // display either way, so this is strictly more capable).
+    if (wl_bridge_init_()) {
+        using ConnectFn = void* (*)(const char*);
+        void* host = reinterpret_cast<ConnectFn>(wlfn_connect_)(name);
+        if (host) wl_objs_[guest] = host;
+    }
+    return guest;
 }
 void DisplayProxy::wl_display_disconnect(uint64_t display_guest) {
+    auto it = wl_objs_.find(display_guest);
+    if (it != wl_objs_.end()) {
+        if (wlfn_disconnect_) {
+            using DiscFn = void (*)(void*);
+            reinterpret_cast<DiscFn>(wlfn_disconnect_)(it->second);
+        }
+        wl_objs_.erase(it);
+    }
     free_handle(display_guest);
+}
+int DisplayProxy::wl_display_get_fd(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_get_fd_) return -1;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_get_fd_)(host);
+}
+int DisplayProxy::wl_display_flush(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_flush_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_flush_)(host);
+}
+int DisplayProxy::wl_display_dispatch(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_dispatch_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_dispatch_)(host);
+}
+int DisplayProxy::wl_display_dispatch_pending(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_dispatch_pending_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_dispatch_pending_)(host);
+}
+int DisplayProxy::wl_display_roundtrip(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_roundtrip_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_roundtrip_)(host);
+}
+int DisplayProxy::wl_display_read_events(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_read_events_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_read_events_)(host);
+}
+int DisplayProxy::wl_display_prepare_read(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_prepare_read_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_prepare_read_)(host);
+}
+int DisplayProxy::wl_display_cancel_read(uint64_t display_guest) {
+    void* host = wl_host(display_guest);
+    if (!host || !wlfn_cancel_read_) return 0;
+    using Fn = int (*)(void*);
+    return reinterpret_cast<Fn>(wlfn_cancel_read_)(host);
+}
+void DisplayProxy::wl_proxy_destroy(uint64_t proxy_guest) {
+    auto it = wl_objs_.find(proxy_guest);
+    if (it != wl_objs_.end()) {
+        if (wlfn_proxy_destroy_) {
+            using Fn = void (*)(void*);
+            reinterpret_cast<Fn>(wlfn_proxy_destroy_)(it->second);
+        }
+        wl_objs_.erase(it);
+    }
+    free_handle(proxy_guest);
 }
 uint64_t DisplayProxy::wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version) {
     (void)display_guest; (void)interface; (void)version;

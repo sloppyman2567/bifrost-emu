@@ -10,6 +10,8 @@
 // translates them automatically via guest_to_host_ptr().
 #pragma once
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
 namespace arm64emu {
 class Memory;
@@ -140,6 +142,22 @@ public:
     int wl_egl_window_resize(uint64_t window_guest, int x, int y, int width, int height);
     uint64_t wl_display_connect(const char* name);
     void wl_display_disconnect(uint64_t display_guest);
+    // ── Wayland host bridge (real compositor forwarding) ─────────
+    // Lifecycle/event-loop calls forward to host libwayland when the
+    // display handle carries a host object (see wl_display_connect);
+    // stub handles keep the old return-0 behavior. No-ops stay safe
+    // headless: without a compositor every handle is a stub.
+    int wl_display_get_fd(uint64_t display_guest);
+    int wl_display_flush(uint64_t display_guest);
+    int wl_display_dispatch(uint64_t display_guest);
+    int wl_display_dispatch_pending(uint64_t display_guest);
+    int wl_display_roundtrip(uint64_t display_guest);
+    int wl_display_read_events(uint64_t display_guest);
+    int wl_display_prepare_read(uint64_t display_guest);
+    int wl_display_cancel_read(uint64_t display_guest);
+    void wl_proxy_destroy(uint64_t proxy_guest);
+    // Host object for a guest handle, or nullptr for stub handles.
+    void* wl_host(uint64_t guest_addr) const;
     uint64_t wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version);
     void wl_surface_commit(uint64_t surface_guest);
     void wl_surface_destroy(uint64_t surface_guest);
@@ -175,7 +193,26 @@ private:
     static constexpr uint32_t H_RANDR_CRTC = 13;
     static constexpr uint32_t H_RANDR_OUTPUT= 14;
     static constexpr uint32_t H_RANDR_MODE = 15;
-    static constexpr uint32_t H_XKB        = 16;
+    static constexpr uint32_t H_XKB         = 16;
     static constexpr uint32_t H_SHM_IMAGE  = 17;
+    // ── Wayland host bridge state ──────────────────────────────────
+    void* wl_client_ = nullptr;  // dlopen'd libwayland-client (lazy)
+    // Resolved host entry points (null until bridge init succeeds).
+    void* wlfn_connect_ = nullptr;
+    void* wlfn_disconnect_ = nullptr;
+    void* wlfn_flush_ = nullptr;
+    void* wlfn_get_fd_ = nullptr;
+    void* wlfn_dispatch_ = nullptr;
+    void* wlfn_dispatch_pending_ = nullptr;
+    void* wlfn_roundtrip_ = nullptr;
+    void* wlfn_read_events_ = nullptr;
+    void* wlfn_prepare_read_ = nullptr;
+    void* wlfn_cancel_read_ = nullptr;
+    void* wlfn_proxy_destroy_ = nullptr;
+    // Guest handle -> host wl_display*/wl_proxy*. Absent = stub handle
+    // (old behavior: return 0). Populated by wl_display_connect when a
+    // compositor answers, dropped by disconnect/destroy.
+    std::unordered_map<uint64_t, void*> wl_objs_;
+    bool wl_bridge_init_();
 };
 } // namespace arm64emu

@@ -375,6 +375,10 @@ INTEGRATION_TESTS=(
     # (Matikanetannhauser) + one-shot mambo sound via the ALSA arm. Needs
     # DISPLAY + host Vulkan; exit 77 = skip without them.
     "mambo_vulkan|ctest_real/test_mambo_vulkan.elf||40|MAMBO VULKAN TEST PASSED"
+    # Wayland host bridge: real compositor connect + fd + flush +
+    # roundtrip + dispatch_pending + disconnect. Needs WAYLAND_DISPLAY;
+    # exit 77 = skip headless.
+    "wayland_bridge|ctest_real/test_wayland_bridge.elf||30|ALL PASS"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing
