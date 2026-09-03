@@ -65,6 +65,9 @@ public:
     using WlCbRunner = std::function<uint64_t(
         CPU& cpu, uint64_t fn, const int64_t* iargs, size_t n_iargs)>;
     void set_wl_cb_runner(WlCbRunner runner);
+    // Guest-fd -> host-fd translation for wl fd-passing (forwards to
+    // the proxy; mirrors AndroidSurfaceManager's resolver).
+    void set_wl_fd_resolver(std::function<int(int)> r);
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
     // Android --android driver: ensure the host SDL window exists eagerly

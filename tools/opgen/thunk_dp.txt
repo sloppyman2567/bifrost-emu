@@ -830,6 +830,7 @@ wl_display_flush            WL   p              -     PROXY             -
 wl_display_read_events      WL   p              -     PROXY             -
 wl_display_prepare_read     WL   p              -     PROXY             -
 wl_display_cancel_read      WL   p              -     PROXY             -
+wl_surface_commit           WL   p              -     PROXY             -
 wl_proxy_marshal            WL   -              -     PROXY             -   # variadic — stub
 wl_proxy_create             WL   pi             -     PROXY             -
 wl_proxy_destroy            WL   p              -     PROXY             -

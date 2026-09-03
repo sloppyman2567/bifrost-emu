@@ -166,6 +166,10 @@ DisplayProxy* DisplayThunk::proxy() {
     if (!impl_ || !impl_->initialized) return nullptr;
     return impl_->proxy_.get();
 }
+void DisplayThunk::set_wl_fd_resolver(std::function<int(int)> r) {
+    if (!impl_ || !impl_->proxy_) return;
+    impl_->proxy_->set_fd_resolver(std::move(r));
+}
 void* DisplayThunk::ensure_android_window() {
     if (!impl_ || !impl_->mem) return nullptr;
     if (!impl_->proxy_) {
@@ -2391,12 +2395,13 @@ void DisplayThunk::deliver_wl_events_(CPU& cpu) {
         uint64_t fn = lit->second.fns[ev.ev];
         if (!fn) continue;
         // iargs = {data, proxy} + decoded event args in sig order.
-        // Slots: ev.a, ev.b, ev.c then ev.s (strings bounce to guest).
+        // Int slots ev.a..ev.d, ev.s bounced for strings, ev.obj mapped
+        // for object args (falls back to the event proxy).
         int64_t iargs[10];
         size_t n = 0;
         iargs[n++] = static_cast<int64_t>(lit->second.data);
         iargs[n++] = static_cast<int64_t>(ev.proxy);
-        uint64_t slots[3] = {ev.a, ev.b, ev.c};
+        uint64_t slots[4] = {ev.a, ev.b, ev.c, ev.d};
         int si = 0;
         for (const char* p = msg->sig; *p && n < 10; p++) {
             char c = *p >= 'A' && *p <= 'Z' ? *p - 'A' + 'a' : *p;
@@ -2404,8 +2409,11 @@ void DisplayThunk::deliver_wl_events_(CPU& cpu) {
                 iargs[n++] = static_cast<int64_t>(
                     impl_->proxy_->wl_str_bounce(ev.s.c_str()));
             } else if (c == 'o') {
-                iargs[n++] = static_cast<int64_t>(ev.proxy);
-            } else if (si < 3) {
+                uint64_t g = ev.has_obj
+                                 ? impl_->proxy_->wl_guest_for_host(ev.obj)
+                                 : ev.proxy;
+                iargs[n++] = static_cast<int64_t>(g ? g : ev.proxy);
+            } else if (si < 4) {
                 iargs[n++] = static_cast<int64_t>(slots[si++]);
             } else {
                 iargs[n++] = 0;
@@ -3166,6 +3174,10 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         cpu.regs[0] = proxy->wl_display_get_registry(cpu.regs[0]);
         return 0;
     }
+    if (sym_name == "wl_proxy_get_class") {
+        cpu.regs[0] = proxy->wl_class_name(cpu.regs[0]);
+        return 0;
+    }
     // ── Wayland request marshalling (signature-driven) ─────────
     // Variadic guest layout: x0=proxy, w1=opcode, then x2=interface
     // (constructors) or first vararg, x3..x7, guest stack. The proxy
@@ -3224,6 +3236,9 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         if (!lst.fns.empty()) impl_->wl_listeners_[proxy_h] = lst;
         if (iface == "wl_registry") {
             proxy->wl_registry_listen(proxy->wl_host(proxy_h));
+        } else if (iface == "wl_pointer" || iface == "wl_keyboard" ||
+                   iface == "wl_callback" || iface == "wl_touch") {
+            proxy->wl_listen_for(proxy->wl_host(proxy_h), proxy_h, iface);
         }
         if (dbg().thunk_trace) {
             fprintf(stderr, "[thunk] wl_proxy_add_listener %s: %zu fns\n",

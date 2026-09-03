@@ -810,6 +810,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::WL, "wl_display_read_events", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_prepare_read", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_display_cancel_read", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
+    {LibFamily::WL, "wl_surface_commit", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_proxy_marshal", "", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_proxy_create", "pi", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},
     {LibFamily::WL, "wl_proxy_destroy", "p", RetKind::PLAIN, Policy::PROXY, SizeKind::NONE, false},

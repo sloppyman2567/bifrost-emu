@@ -342,6 +342,16 @@ bool DisplayProxy::wl_pop_event(WlEvent& out) {
     return true;
 }
 
+uint64_t DisplayProxy::wl_class_name(uint64_t proxy_guest) {
+    void* host = wl_host(proxy_guest);
+    if (!host || !wl_bridge_init_()) return 0;
+    void* fn = dlsym(wl_client_, "wl_proxy_get_class");
+    if (!fn) return 0;
+    using Fn = const char* (*)(void*);
+    const char* name = reinterpret_cast<Fn>(fn)(host);
+    return wl_str_bounce(name);
+}
+
 uint64_t DisplayProxy::wl_str_bounce(const char* s) {
     if (!s || !mem_) return 0;
     if (!wl_str_bounce_) {
@@ -402,9 +412,20 @@ uint64_t DisplayProxy::wl_marshal(uint64_t proxy_guest, uint32_t opcode,
         uint64_t v = 0;
         if (!next_vararg(v)) return 0;
         if (c == 'h') {
-            fprintf(stderr, "[display-thunk] wl_marshal: fd arg in %s op %u unsupported\n",
-                    ifname.c_str(), opcode);
-            return 0;
+            // fd-passing: translate the guest fd to the host fd. The
+            // host lib sends it over the compositor socket (SCM_RIGHTS).
+            if (!fd_resolver_) {
+                fprintf(stderr, "[display-thunk] wl_marshal: fd arg in %s op %u, no resolver\n",
+                        ifname.c_str(), opcode);
+                return 0;
+            }
+            int host_fd = fd_resolver_(static_cast<int>(v & 0xFFFFFFFFULL));
+            if (host_fd < 0) {
+                fprintf(stderr, "[display-thunk] wl_marshal: bad guest fd in %s op %u\n",
+                        ifname.c_str(), opcode);
+                return 0;
+            }
+            v = static_cast<uint64_t>(host_fd);
         }
         if (c == 's') {
             // Strings are copied into the message by the host lib, so a
@@ -448,53 +469,86 @@ uint64_t DisplayProxy::wl_marshal(uint64_t proxy_guest, uint32_t opcode,
         reinterpret_cast<Fn>(fn)(host, opcode, args);
         return 0;
     }
-    // Object-creating request. The new object's interface is `created`,
-    // except bind (wl_registry op 0), whose interface arrives as the
-    // guest wl_interface* (name at +0) in `ifstruct`.
-    std::string real_iface = new_iface == "<bind>" ? "" : new_iface;
-    if (is_bind && ifstruct) {
+    // bind (wl_registry op 0) takes a dedicated path below: current
+    // host libwayland validates bind as (name:uint, interface:string,
+    // version:uint, id) while the vendored XML still describes the old
+    // (uint, new_id) shape, so the generic walker cannot express it.
+    if (is_bind) {
+        if (!ifstruct) return 0;
         uint64_t namep = 0;
         try { mem_->read(ifstruct, &namep, 8); }
         catch (...) { return 0; }
+        char iname[128] = {0};
         if (namep) {
-            char name[128] = {0};
             try {
-                for (size_t i = 0; i < sizeof(name) - 1; i++) {
+                for (size_t i = 0; i < sizeof(iname) - 1; i++) {
                     uint8_t ch = 0;
                     mem_->read(namep + i, &ch, 1);
-                    name[i] = static_cast<char>(ch);
+                    iname[i] = static_cast<char>(ch);
                     if (!ch) break;
                 }
             } catch (...) { return 0; }
-            if (name[0]) real_iface = name;
         }
+        if (!iname[0]) return 0;
+        // bind varargs are ALWAYS [name, version] starting at regs[0]
+        // (x3, or x4 in the versioned shape — the caller already offset).
+        // Version: explicit (versioned shape) else regs[1].
+        if (1 >= nregs) return 0;
+        uint64_t bv = regs[0];
+        uint32_t ver = version;
+        if (!is_versioned) ver = static_cast<uint32_t>(regs[1]);
+        // Interface name string for the wire (host copies it out).
+        static thread_local char wire_iface[128];
+        strncpy(wire_iface, iname, sizeof(wire_iface) - 1);
+        wire_iface[sizeof(wire_iface) - 1] = 0;
+        WlArg bargs[3];
+        bargs[0].v = bv & 0xFFFFFFFFULL;
+        bargs[1].v = reinterpret_cast<uint64_t>(wire_iface);
+        bargs[2].v = ver;
+        std::string sym = std::string(iname) + "_interface";
+        void* host_iface = dlsym(wl_client_, sym.c_str());
+        void* cfn = is_versioned
+            ? dlsym(wl_client_, "wl_proxy_marshal_array_constructor_versioned")
+            : dlsym(wl_client_, "wl_proxy_marshal_array_constructor");
+        if (!cfn || !host_iface) return 0;
+        void* obj = nullptr;
+        if (is_versioned) {
+            using Fn = void* (*)(void*, uint32_t, void*, const void*, uint32_t);
+            obj = reinterpret_cast<Fn>(cfn)(host, opcode, bargs,
+                                            host_iface, ver);
+        } else {
+            using Fn = void* (*)(void*, uint32_t, void*, const void*);
+            obj = reinterpret_cast<Fn>(cfn)(host, opcode, bargs, host_iface);
+        }
+        if (!obj) return 0;
+        uint64_t guest = alloc_handle(3);
+        if (!guest) return 0;
+        wl_objs_[guest] = WlObj{obj, iname, ver};
+        return guest;
     }
+    // Object-creating request. The new object's interface is `created`
+    // (bind returned early above with its own path).
+    std::string real_iface = new_iface;
     // Constructor version: explicit `version` (versioned shape); else
     // bind takes it from the next vararg (name, version), while other
     // creations inherit the parent object's bound version (falling back
     // to the interface struct's when the parent has none recorded).
     uint32_t ver = version;
     if (!is_versioned) {
-        if (!strcmp(ifname.c_str(), "wl_registry")) {
-            uint64_t vv = 0;
-            if (!next_vararg(vv)) return 0;
-            ver = static_cast<uint32_t>(vv);
-        } else {
-            auto pit = wl_objs_.find(proxy_guest);
-            ver = (pit != wl_objs_.end() && pit->second.version)
-                      ? pit->second.version
-                      : 0;
-            if (!ver && ifstruct) {
-                uint32_t iv = 0;
-                try { mem_->read(ifstruct + 8, &iv, 4); }
-                catch (...) { return 0; }
-                ver = iv;
-            }
-            if (!ver) {
-                fprintf(stderr, "[display-thunk] wl_marshal: no version for %s op %u\n",
-                        ifname.c_str(), opcode);
-                return 0;
-            }
+        auto pit = wl_objs_.find(proxy_guest);
+        ver = (pit != wl_objs_.end() && pit->second.version)
+                  ? pit->second.version
+                  : 0;
+        if (!ver && ifstruct) {
+            uint32_t iv = 0;
+            try { mem_->read(ifstruct + 8, &iv, 4); }
+            catch (...) { return 0; }
+            ver = iv;
+        }
+        if (!ver) {
+            fprintf(stderr, "[display-thunk] wl_marshal: no version for %s op %u\n",
+                    ifname.c_str(), opcode);
+            return 0;
         }
     }
     void* cfn = is_versioned
@@ -528,6 +582,39 @@ uint64_t DisplayProxy::wl_marshal(uint64_t proxy_guest, uint32_t opcode,
 // deliver-after-poll pattern — never re-enter the guest mid-dispatch).
 namespace {
 DisplayProxy* g_wl_sink = nullptr;
+}  // namespace
+
+void DisplayProxy::wl_note_proxy(int kind, uint64_t guest_proxy) {
+    if (!g_wl_sink) return;
+    if (kind == 0)
+        g_wl_sink->wl_ptr_proxy_ = guest_proxy;
+    else if (kind == 1)
+        g_wl_sink->wl_kb_proxy_ = guest_proxy;
+    else if (kind == 2)
+        g_wl_sink->wl_cb_proxy_ = guest_proxy;
+}
+
+void DisplayProxy::wl_note_event(int kind, uint32_t ev, uint64_t a,
+                                 uint64_t b, uint64_t c, uint64_t d,
+                                 void* obj, bool has_obj) {
+    if (!g_wl_sink) return;
+    DisplayProxy::WlEvent e;
+    e.proxy = kind == 0   ? g_wl_sink->wl_ptr_proxy_
+              : kind == 1 ? g_wl_sink->wl_kb_proxy_
+                          : g_wl_sink->wl_cb_proxy_;
+    e.ev = ev;
+    e.a = a;
+    e.b = b;
+    e.c = c;
+    e.d = d;
+    e.obj = obj;
+    e.has_obj = has_obj;
+    g_wl_sink->wl_push_event(e);
+}
+
+namespace {
+// Static host trampolines funnel through the public emitters above
+// (they cannot touch private state directly).
 void wl_reg_global(void* data, void* reg, uint32_t name,
                    const char* iface, uint32_t version) {
     (void)data;
@@ -549,6 +636,54 @@ void wl_reg_remove(void* data, void* reg, uint32_t name) {
     ev.a = name;
     g_wl_sink->wl_push_event(ev);
 }
+void wl_ptr_enter(void*, void* surf, uint32_t s, int32_t x, int32_t y) {
+    DisplayProxy::wl_note_event(0, 0, s, (uint32_t)x, (uint32_t)y, 0, surf, surf != nullptr);
+}
+void wl_ptr_leave(void*, void* surf, uint32_t s) {
+    DisplayProxy::wl_note_event(0, 1, s, 0, 0, 0, surf, surf != nullptr);
+}
+void wl_ptr_motion(void*, uint32_t t, int32_t x, int32_t y) {
+    DisplayProxy::wl_note_event(0, 2, t, (uint32_t)x, (uint32_t)y, 0, nullptr, false);
+}
+void wl_ptr_button(void*, uint32_t s, uint32_t t, uint32_t b, uint32_t st) {
+    DisplayProxy::wl_note_event(0, 3, s, t, b, st, nullptr, false);
+}
+void wl_ptr_axis(void*, uint32_t t, uint32_t ax, int32_t v) {
+    DisplayProxy::wl_note_event(0, 4, t, ax, (uint32_t)v, 0, nullptr, false);
+}
+void wl_ptr_frame(void*) {
+    DisplayProxy::wl_note_event(0, 5, 0, 0, 0, 0, nullptr, false);
+}
+void wl_ptr_axis_src(void*, uint32_t a) {
+    DisplayProxy::wl_note_event(0, 6, a, 0, 0, 0, nullptr, false);
+}
+void wl_ptr_axis_stop(void*, uint32_t t, uint32_t a) {
+    DisplayProxy::wl_note_event(0, 7, t, a, 0, 0, nullptr, false);
+}
+void wl_ptr_axis_disc(void*, uint32_t a, int32_t d) {
+    DisplayProxy::wl_note_event(0, 8, a, (uint32_t)d, 0, 0, nullptr, false);
+}
+void wl_kb_key(void*, uint32_t s, uint32_t t, uint32_t k, uint32_t st) {
+    DisplayProxy::wl_note_event(1, 3, s, t, k, st, nullptr, false);
+}
+void wl_kb_mods(void*, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    (void)e;
+    DisplayProxy::wl_note_event(1, 4, a, b, c, d, nullptr, false);
+}
+void wl_kb_repeat(void*, int32_t r, int32_t d) {
+    DisplayProxy::wl_note_event(1, 5, (uint32_t)r, (uint32_t)d, 0, 0, nullptr, false);
+}
+void wl_cb_done(void*, uint32_t t) {
+    DisplayProxy::wl_note_event(2, 0, t, 0, 0, 0, nullptr, false);
+}
+// Swallow slots for listener positions we don't deliver yet (keymap
+// with its fd, enter/leave with array/object args). A NULL function
+// pointer here makes host libwayland abort on dispatch — a quiet no-op
+// keeps the connection alive until the real handlers land. Signatures
+// match the events (extra args would be UB to ignore through a cast).
+void wl_kb_keymap_noop(void*, void*, uint32_t, int, uint32_t) {}
+void wl_kb_enter_noop(void*, void*, uint32_t, void*, void*) {}
+void wl_kb_leave_noop(void*, void*, uint32_t, void*) {}
 struct WlRegListener { void* fns[2]; };
 }  // namespace
 
@@ -562,13 +697,73 @@ bool DisplayProxy::wl_registry_listen(void* host_registry) {
     using Fn = int (*)(void*, void**, void*);
     return reinterpret_cast<Fn>(fn)(host_registry, listener.fns, nullptr) == 0;
 }
+
+namespace {
+struct WlPtrListener { void* fns[9]; };
+struct WlCbListener { void* fns[1]; };
+}  // namespace
+
+bool DisplayProxy::wl_listen_for(void* host_obj, uint64_t guest_proxy,
+                                 const std::string& iface) {
+    if (!host_obj || !wl_bridge_init_()) return false;
+    void* fn = dlsym(wl_client_, "wl_proxy_add_listener");
+    if (!fn) return false;
+    using AddFn = int (*)(void*, void**, void*);
+    auto add = reinterpret_cast<AddFn>(fn);
+    g_wl_sink = this;
+    if (iface == "wl_pointer") {
+        static WlPtrListener l = {{
+            reinterpret_cast<void*>(wl_ptr_enter),
+            reinterpret_cast<void*>(wl_ptr_leave),
+            reinterpret_cast<void*>(wl_ptr_motion),
+            reinterpret_cast<void*>(wl_ptr_button),
+            reinterpret_cast<void*>(wl_ptr_axis),
+            reinterpret_cast<void*>(wl_ptr_frame),
+            reinterpret_cast<void*>(wl_ptr_axis_src),
+            reinterpret_cast<void*>(wl_ptr_axis_stop),
+            reinterpret_cast<void*>(wl_ptr_axis_disc),
+        }};
+        wl_ptr_proxy_ = guest_proxy;
+        return add(host_obj, l.fns, nullptr) == 0;
+    }
+    if (iface == "wl_keyboard") {
+        // keymap (fd) + enter/leave (array/object) swallow quietly;
+        // key/modifiers/repeat deliver. NULL slots would abort the
+        // host on dispatch, so every position gets a function.
+        static void* fns[6] = {reinterpret_cast<void*>(wl_kb_keymap_noop),
+                               reinterpret_cast<void*>(wl_kb_enter_noop),
+                               reinterpret_cast<void*>(wl_kb_leave_noop),
+                               reinterpret_cast<void*>(wl_kb_key),
+                               reinterpret_cast<void*>(wl_kb_mods),
+                               reinterpret_cast<void*>(wl_kb_repeat)};
+        wl_kb_proxy_ = guest_proxy;
+        return add(host_obj, fns, nullptr) == 0;
+    }
+    if (iface == "wl_callback") {
+        static WlCbListener l = {{reinterpret_cast<void*>(wl_cb_done)}};
+        wl_cb_proxy_ = guest_proxy;
+        return add(host_obj, l.fns, nullptr) == 0;
+    }
+    return false;
+}
+
 uint64_t DisplayProxy::wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version) {
     (void)display_guest; (void)interface; (void)version;
     if (!ready()) return 0;
     return alloc_handle(4);
 }
 void DisplayProxy::wl_surface_commit(uint64_t surface_guest) {
-    (void)surface_guest;
+    // Real surfaces commit to the host compositor (drives frame
+    // callbacks); stub handles keep the SDL present path.
+    void* host = wl_host(surface_guest);
+    if (host && wl_bridge_init_()) {
+        void* fn = dlsym(wl_client_, "wl_surface_commit");
+        if (fn) {
+            using Fn = void (*)(void*);
+            reinterpret_cast<Fn>(fn)(host);
+            return;
+        }
+    }
     present();
 }
 void DisplayProxy::wl_surface_destroy(uint64_t surface_guest) {
