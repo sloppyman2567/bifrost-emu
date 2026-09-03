@@ -14,6 +14,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+// Host wire structs for the hand-built xdg interfaces (xdg-shell has no
+// host .so; we synthesize wl_interfaces from the vendored XML at runtime).
+struct wl_interface;
 namespace arm64emu {
 class Memory;
 class DisplayProxy {
@@ -183,29 +186,67 @@ public:
                         uint64_t sp);
     // Pending inbound events queued by the host listener trampolines,
     // drained by DisplayThunk after dispatch/roundtrip.
+    // widened for full sig decode: up to 8 int/fixed words, 2 strings,
+    // 2 objects, one array blob, one host fd. keeps every event the
+    // table describes without silent truncation.
     struct WlEvent {
         uint64_t proxy = 0;
         uint32_t ev = 0;
-        uint64_t a = 0, b = 0, c = 0, d = 0;
+        uint64_t ints[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        uint8_t n_ints = 0;
         std::string s;
-        // Non-proxy object arg (e.g. enter's surface), if any.
+        std::string s2;
+        uint8_t n_strs = 0;
+        // Non-proxy object args in sig order (e.g. enter's surface+offer).
         void* obj = nullptr;
         bool has_obj = false;
+        void* obj2 = nullptr;
+        bool has_obj2 = false;
+        // Array arg payload (wl_array content copy), if any.
+        std::vector<uint8_t> arr;
+        bool has_arr = false;
+        // Host fd from the compositor (keymap, data send), -1 when none.
+        // published to a guest fd at delivery time via fd_publisher_.
+        int host_fd = -1;
     };
     bool wl_pop_event(WlEvent& out);
-    void wl_push_event(const WlEvent& ev) { wl_pending_.push_back(ev); }
+    void wl_push_event(const WlEvent& ev);
+    uint64_t wl_dropped() const { return wl_dropped_; }
+    // Host fd -> guest fd publisher (wired by the emulator; dup + wrap
+    // in HostNode + fds_.allocate). returns guest fd or -1.
+    using FdPublisher = std::function<int(int host_fd)>;
+    void set_fd_publisher(FdPublisher p) { fd_publisher_ = std::move(p); }
     // Guest-visible scratch for event strings (sticky bounce).
     uint64_t wl_str_bounce(const char* s);
+    // Second sticky string slot so two-string events survive delivery.
+    uint64_t wl_str_bounce2(const char* s);
+    // Guest-visible scratch for event arrays (sticky bounce).
+    // lays out struct wl_array { size, alloc, data } + payload.
+    uint64_t wl_arr_bounce(const uint8_t* data, size_t n);
     // Class name of a mapped object as a guest string address (0 when
     // unmapped). Bounced, valid until the next string goes through.
     uint64_t wl_class_name(uint64_t proxy_guest);
     // Host registry listener support (installed once per host registry).
     bool wl_registry_listen(void* host_registry);
-    // Install the static host listener for pointer/keyboard/callback
-    // objects (keymap/array events stay unsupported). Records the guest
-    // proxy for event attribution (single object per kind in practice).
+    // Hand-built xdg_shell wire interfaces (v1 view) for marshal +
+    // listeners. nullptr for non-xdg names.
+    const wl_interface* wl_xdg_iface(const std::string& name);
+    // Reply to an xdg_wm_base ping on its host object (auto-pong keeps
+    // the compositor from killing slow clients).
+    void wl_xdg_pong_host(void* host_base, uint32_t serial);
+    // Install the static host listener for pointer/keyboard/touch/
+    // output/seat/callback objects. Records the guest proxy for event
+    // attribution (single object per kind in practice).
     bool wl_listen_for(void* host_obj, uint64_t guest_proxy,
                        const std::string& iface);
+    // Full event push for new trampolines (touch/output/seat/data/xdg).
+    // kind: 0=pointer 1=keyboard 2=callback 3=touch 4=output 5=seat
+    // 6=data_offer 7=xdg_wm_base 8=xdg_surface 9=xdg_toplevel.
+    static void wl_note_full(int kind, uint32_t ev, const uint64_t* ints,
+                             uint8_t n_ints, const char* s, const char* s2,
+                             void* obj, bool has_obj, void* obj2,
+                             bool has_obj2, const uint8_t* arr, size_t arr_n,
+                             int host_fd);
     // Static host trampolines funnel through here (they cannot touch
     // private state directly): record the feeding proxy (kind 0/1/2 =
     // pointer/keyboard/callback) and push an attributed event.
@@ -216,8 +257,29 @@ public:
     uint64_t wl_surface_create(uint64_t display_guest, const char* interface, uint32_t version);
     void wl_surface_commit(uint64_t surface_guest);
     void wl_surface_destroy(uint64_t surface_guest);
+    // Ensure the SDL2 window exists (stub fallback path). Returns ready().
+    bool ensure_sdl();
 private:
     bool init_sdl2_();
+    // Push queued wayland requests to the compositor on every known
+    // display connection. Used after commit/ack/pong marshals so a guest
+    // that only calls dispatch_pending can never starve the compositor
+    // (the classic "not responding" cause).
+    void wl_flush_all_();
+    // Drain host SDL2 events into the X11 event queue (plus quit flag).
+    // Called from present() and every XPending/XNextEvent-family entry so
+    // an X11 guest that never calls XFlush still pumps the host window.
+    void x_pump_();
+    struct XQEv { uint8_t b[192]; };
+    std::vector<XQEv> x_queue_;
+    // Last display/window seen (event attribution) + per-window select mask.
+    uint64_t x_last_display_ = 0;
+    uint64_t x_last_window_ = 0;
+    std::unordered_map<uint64_t, long> x_select_mask_;
+    // Display guest handle -> published guest fd for wl_display_get_fd.
+    // Published once via fd_publisher_ (dup + HostNode + allocate) so the
+    // guest polls a real guest fd instead of a colliding raw host number.
+    std::unordered_map<uint64_t, int> wl_fd_guest_;
     struct HandleEntry {
         uint64_t guest_addr;
         uint32_t type;
@@ -276,15 +338,27 @@ private:
     std::unordered_map<uint64_t, WlObj> wl_objs_;
     // Inbound event queue (host listener trampolines push, thunk drains).
     std::vector<WlEvent> wl_pending_;
+    uint64_t wl_dropped_ = 0;
     FdResolver fd_resolver_;
+    FdPublisher fd_publisher_;
+    // Guest bounce for event arrays (sticky, like strings).
+    uint64_t wl_arr_bounce_ = 0;
+    size_t wl_arr_size_ = 0;
     // Sticky guest bounce for event strings.
     uint64_t wl_str_bounce_ = 0;
     void* wl_registry_host_listener_ = nullptr;  // installed once
-    // Guest proxy currently feeding each input listener (single
-    // pointer/keyboard/callback in practice; last install wins).
+    // Guest proxy currently feeding each listener (single object per
+    // kind in practice; last install wins).
     uint64_t wl_ptr_proxy_ = 0;
     uint64_t wl_kb_proxy_ = 0;
     uint64_t wl_cb_proxy_ = 0;
+    uint64_t wl_touch_proxy_ = 0;
+    uint64_t wl_output_proxy_ = 0;
+    uint64_t wl_seat_proxy_ = 0;
+    uint64_t wl_data_offer_proxy_ = 0;
+    uint64_t wl_xdg_base_proxy_ = 0;
+    uint64_t wl_xdg_surf_proxy_ = 0;
+    uint64_t wl_xdg_top_proxy_ = 0;
     bool wl_bridge_init_();
 };
 } // namespace arm64emu

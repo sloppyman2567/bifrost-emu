@@ -22,6 +22,9 @@
 #include "frost/android_surface.hpp"// 2026-08: Android activity
 #include "frost/audio_thunk.hpp"  // 1.5.4-alpha: AudioThunk
 #include "frost/display_thunk.hpp"// 1.5.4-alpha: DisplayThunk
+#include "yggdrasil/host_node.hpp"  // wl fd publisher wraps duped host fds
+#include <fcntl.h>
+#include <unistd.h>
 #include "jit/frostjit.hpp"
 #include <algorithm>
 #include <atomic>
@@ -282,6 +285,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 if (dthunk->enabled()) {
                     dthunk->init(mem_);
                     wire_thunk_wl_cb_runner_();
+                    wire_thunk_wl_fd_publisher_();
                     dthunk->set_wl_fd_resolver([this](int gfd) -> int {
                         auto n = fds_.get(gfd);
                         if (!n) return -1;
@@ -762,6 +766,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (dthunk->enabled()) {
                 dthunk->init(mem_);
                 wire_thunk_wl_cb_runner_();
+                wire_thunk_wl_fd_publisher_();
                 dthunk->set_wl_fd_resolver([this](int gfd) -> int {
                     auto n = fds_.get(gfd);
                     if (!n) return -1;
@@ -1681,6 +1686,24 @@ void Emulator::wire_thunk_wl_cb_runner_() {
         });
 }
 
+// ── wire_thunk_wl_fd_publisher_ — host fd -> guest fd ────────────
+// inbound wayland fds (keymap, data send) arrive as host fds from the
+// compositor. dup (the compositor keeps its copy; HostNode closes ours)
+// then wrap + allocate a guest fd so the guest can mmap/read it.
+void Emulator::wire_thunk_wl_fd_publisher_() {
+    auto* dthunk = graphics_.display_thunk();
+    if (!dthunk || !dthunk->enabled()) return;
+    dthunk->set_wl_fd_publisher([this](int host_fd) -> int {
+        if (host_fd < 0) return -1;
+        int duped = ::dup(host_fd);
+        if (duped < 0) return -1;
+        auto node = std::make_shared<yggdrasil::HostNode>(duped, O_RDONLY);
+        int gfd = fds_.allocate(node);
+        if (gfd < 0) ::close(duped);
+        return gfd;
+    });
+}
+
 void Emulator::ensure_thunk_linker_() {
     if (dyn_linker_) return;
     dyn_linker_ = std::make_unique<DynamicLinker>(mem_);
@@ -1698,6 +1721,7 @@ void Emulator::ensure_thunk_linker_() {
         if (dt->enabled()) {
             dt->init(mem_);
             wire_thunk_wl_cb_runner_();
+            wire_thunk_wl_fd_publisher_();
             dt->set_wl_fd_resolver([this](int gfd) -> int {
                 auto n = fds_.get(gfd);
                 if (!n) return -1;
@@ -1850,6 +1874,20 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     uint64_t stack_top = scratch_stack + CB_SCRATCH_USABLE;
     constexpr uint64_t SENTINEL_LR = 0x1000;
     cpu.pc = fn;
+    // AAPCS64: x0..x7 in regs, the rest on the stack at sp (16-aligned).
+    // Wayland geometry listeners need 10 words (data, proxy + 8); the
+    // old clamp silently dropped arg9+ and the callee read stack garbage
+    // (host SIGSEGV via a window-aliased raw read, not a catchable
+    // guest fault).
+    size_t n_stack = (n_iargs > 8) ? n_iargs - 8 : 0;
+    if (n_stack) {
+        size_t bytes = (n_stack * 8 + 15) & ~size_t(15);
+        stack_top -= bytes;
+        for (size_t i = 0; i < n_stack; i++) {
+            uint64_t v = static_cast<uint64_t>(iargs[8 + i]);
+            mem_.write(stack_top + i * 8, &v, sizeof(v));
+        }
+    }
     cpu.sp = stack_top;
     if (n_iargs > 8) n_iargs = 8;
     if (n_fargs > 8) n_fargs = 8;

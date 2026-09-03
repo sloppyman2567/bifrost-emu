@@ -379,6 +379,11 @@ INTEGRATION_TESTS=(
     # roundtrip + dispatch_pending + disconnect. Needs WAYLAND_DISPLAY;
     # exit 77 = skip headless.
     "wayland_bridge|ctest_real/test_wayland_bridge.elf||30|ALL PASS"
+    # Wayland input/output payloads: seat caps, keymap fd+mmap content,
+    # output geometry/mode/scale with real non-null listeners (10-word
+    # geometry exercises the call_guest_function stack spill).
+    # Needs WAYLAND_DISPLAY; exit 77 = skip headless.
+    "wayland_input|ctest_real/test_wayland_input.elf||30|ALL PASS"
     # Modern GL 3.3+/4.x "AAA future-proofing" rows (2026-08-15): uniform
     # blocks (GetUniformBlockIndex/Binding/GetActiveUniformBlockiv/Name),
     # shader introspection (GetActiveUniform/GetActiveAttrib), instancing

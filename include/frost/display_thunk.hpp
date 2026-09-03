@@ -68,6 +68,10 @@ public:
     // Guest-fd -> host-fd translation for wl fd-passing (forwards to
     // the proxy; mirrors AndroidSurfaceManager's resolver).
     void set_wl_fd_resolver(std::function<int(int)> r);
+    // Host-fd -> guest-fd publisher for inbound keymap/data fds.
+    // forwards to the proxy; wired by the emulator (dup + HostNode).
+    using WlFdPublisher = std::function<int(int host_fd)>;
+    void set_wl_fd_publisher(WlFdPublisher p);
     size_t symbol_count() const;
     uint64_t trampoline_base() const;
     // Android --android driver: ensure the host SDL window exists eagerly

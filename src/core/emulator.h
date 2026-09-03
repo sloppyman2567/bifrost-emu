@@ -593,6 +593,7 @@ private:
     // and static-ELF paths.
     void wire_thunk_glfw_cb_runner_();
     void wire_thunk_wl_cb_runner_();
+    void wire_thunk_wl_fd_publisher_();
     void wire_thunk_android_runner_();
     // AudioThunk engine + borrow-CPU callback runner wiring (1.5.5-alpha).
     void wire_thunk_audio_runner_();

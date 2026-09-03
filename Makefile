@@ -134,10 +134,10 @@ proxy-check:
 	python3 tools/opgen/proxycheck.py
 
 # Wayland protocol signature table (same pattern as the SIMD_DP decode
-# tables): tools/wayland-xml/wayland.xml (vendored, like the Khronos
-# registries) is the single source of truth for per-message arg
+# tables): tools/wayland-xml/wayland.xml + xdg-shell.xml (vendored, like
+# the Khronos registries) are the source of truth for per-message arg
 # signatures consumed by the DisplayProxy marshal work.
-WL_XML := tools/wayland-xml/wayland.xml
+WL_XML := tools/wayland-xml/wayland.xml tools/wayland-xml/xdg-shell.xml
 WL_GEN := tools/opgen/wlgen.py
 WL_OUT := include/opgen_wl.hpp
 

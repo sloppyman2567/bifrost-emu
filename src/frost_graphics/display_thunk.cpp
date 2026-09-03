@@ -25,6 +25,8 @@ static_assert(arm64emu::wl::find(false, "wl_surface", 1u) != nullptr,
 #include "core/cpu.h"
 #include "core/memory.h"
 #include <dlfcn.h>
+#include <unistd.h>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <cstring>
@@ -57,6 +59,7 @@ struct DisplayThunkImpl {
     };
     std::unordered_map<uint64_t, WlListener> wl_listeners_;
     DisplayThunk::WlCbRunner wl_cb_runner_;
+    DisplayThunk::WlFdPublisher wl_fd_publisher_;
     // Guest-visible scratch page for host→guest string returns
     // (XGetAtomName, glGetString, …). Ring-allocated.
     uint64_t string_cache_base = 0;
@@ -152,6 +155,7 @@ bool DisplayThunk::init(Memory& mem) {
     // libraries are unavailable or have no display.
     impl_->proxy_ = std::make_unique<DisplayProxy>();
     impl_->proxy_->set_memory(&mem);
+    if (impl_->wl_fd_publisher_) impl_->proxy_->set_fd_publisher(impl_->wl_fd_publisher_);
     register_known_symbols_();
     impl_->initialized = true;
     if (dbg().thunk_trace) {
@@ -169,6 +173,11 @@ DisplayProxy* DisplayThunk::proxy() {
 void DisplayThunk::set_wl_fd_resolver(std::function<int(int)> r) {
     if (!impl_ || !impl_->proxy_) return;
     impl_->proxy_->set_fd_resolver(std::move(r));
+}
+void DisplayThunk::set_wl_fd_publisher(WlFdPublisher p) {
+    if (!impl_) return;
+    impl_->wl_fd_publisher_ = std::move(p);
+    if (impl_->proxy_) impl_->proxy_->set_fd_publisher(impl_->wl_fd_publisher_);
 }
 void* DisplayThunk::ensure_android_window() {
     if (!impl_ || !impl_->mem) return nullptr;
@@ -2381,40 +2390,125 @@ void DisplayThunk::set_wl_cb_runner(WlCbRunner runner) {
 // Drain queued Wayland events into guest listeners (queue-then-deliver:
 // host trampolines push during dispatch, we run guest code only after
 // the host call returns — same reentrancy rule as GLFW_POLL).
+// generic sig decode: i/u/f raw 32-bit, s strings bounced, o objects
+// mapped, a arrays bounced as wl_array, h fds published to guest fds,
+// n new-id slots arrive as 0. supports 2 strings / 2 objects per event
+// (output geometry, data enter) which the old 4-slot path truncated.
 void DisplayThunk::deliver_wl_events_(CPU& cpu) {
     if (!impl_ || !impl_->wl_cb_runner_ || !impl_->proxy_) return;
     DisplayProxy::WlEvent ev;
     while (impl_->proxy_->wl_pop_event(ev)) {
         auto lit = impl_->wl_listeners_.find(ev.proxy);
-        if (lit == impl_->wl_listeners_.end()) continue;
+        if (lit == impl_->wl_listeners_.end()) {
+            if (ev.host_fd >= 0) ::close(ev.host_fd);
+            continue;
+        }
         std::string iface = impl_->proxy_->wl_iface(ev.proxy);
         const arm64emu::wl::Message* msg =
             arm64emu::wl::find(true, iface.c_str(), ev.ev);
-        if (!msg) continue;
-        if (ev.ev >= lit->second.fns.size()) continue;
-        uint64_t fn = lit->second.fns[ev.ev];
-        if (!fn) continue;
+        // copy callback + data before running guest code: the guest
+        // may add/remove listeners inside the callback, invalidating
+        // the iterator for the next loop round.
+        uint64_t data = lit->second.data;
+        uint64_t fn = 0;
+        size_t nfns = lit->second.fns.size();
+        if (ev.ev < nfns) fn = lit->second.fns[ev.ev];
+        if (!fn) {
+            if (ev.host_fd >= 0) ::close(ev.host_fd);
+            continue;
+        }
         // iargs = {data, proxy} + decoded event args in sig order.
-        // Int slots ev.a..ev.d, ev.s bounced for strings, ev.obj mapped
-        // for object args (falls back to the event proxy).
-        int64_t iargs[10];
+        int64_t iargs[12];
         size_t n = 0;
-        iargs[n++] = static_cast<int64_t>(lit->second.data);
+        iargs[n++] = static_cast<int64_t>(data);
         iargs[n++] = static_cast<int64_t>(ev.proxy);
-        uint64_t slots[4] = {ev.a, ev.b, ev.c, ev.d};
-        int si = 0;
-        for (const char* p = msg->sig; *p && n < 10; p++) {
-            char c = *p >= 'A' && *p <= 'Z' ? *p - 'A' + 'a' : *p;
-            if (c == 's') {
+        if (!msg) {
+            // unknown iface (xdg and friends have no table row yet):
+            // best-effort raw delivery so a game with a host listener
+            // still gets something instead of silence. one-shot note.
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true))
+                fprintf(stderr,
+                        "[thunk] wl event %s:%u has no signature, "
+                        "raw fallback\n",
+                        iface.c_str(), ev.ev);
+            for (size_t i = 0; i < ev.n_ints && n < 12; i++)
+                iargs[n++] = static_cast<int64_t>(ev.ints[i]);
+            if (ev.n_strs && n < 12)
                 iargs[n++] = static_cast<int64_t>(
                     impl_->proxy_->wl_str_bounce(ev.s.c_str()));
+            if (ev.has_obj && n < 12) {
+                uint64_t g =
+                    impl_->proxy_->wl_guest_for_host(ev.obj);
+                iargs[n++] = static_cast<int64_t>(g ? g : ev.proxy);
+            }
+            if (ev.has_arr && n < 12)
+                iargs[n++] = static_cast<int64_t>(
+                    impl_->proxy_->wl_arr_bounce(ev.arr.data(),
+                                                 ev.arr.size()));
+            if (ev.host_fd >= 0) {
+                int gfd = -1;
+                if (impl_->wl_fd_publisher_)
+                    gfd = impl_->wl_fd_publisher_(ev.host_fd);
+                ::close(ev.host_fd);
+                if (n < 12) iargs[n++] = gfd;
+            }
+            impl_->wl_cb_runner_(cpu, fn, iargs, n);
+            continue;
+        }
+        size_t ii = 0, si = 0, oi = 0;
+        bool fd_used = false;
+        for (const char* p = msg->sig; *p && n < 12; p++) {
+            char c = *p >= 'A' && *p <= 'Z' ? *p - 'A' + 'a' : *p;
+            if (c == 's') {
+                const std::string& str = (si == 0) ? ev.s : ev.s2;
+                si++;
+                iargs[n++] = static_cast<int64_t>(
+                    impl_->proxy_->wl_str_bounce(str.c_str()));
+                // second string needs its own page half.
+                if (si == 2 && n > 0)
+                    iargs[n - 1] = static_cast<int64_t>(
+                        impl_->proxy_->wl_str_bounce2(str.c_str()));
             } else if (c == 'o') {
-                uint64_t g = ev.has_obj
-                                 ? impl_->proxy_->wl_guest_for_host(ev.obj)
+                void* obj = nullptr;
+                bool has = false;
+                if (oi == 0) {
+                    obj = ev.obj;
+                    has = ev.has_obj;
+                } else {
+                    obj = ev.obj2;
+                    has = ev.has_obj2;
+                }
+                oi++;
+                uint64_t g = has ? impl_->proxy_->wl_guest_for_host(obj)
                                  : ev.proxy;
                 iargs[n++] = static_cast<int64_t>(g ? g : ev.proxy);
-            } else if (si < 4) {
-                iargs[n++] = static_cast<int64_t>(slots[si++]);
+            } else if (c == 'a') {
+                uint64_t g = 0;
+                if (ev.has_arr)
+                    g = impl_->proxy_->wl_arr_bounce(ev.arr.data(),
+                                                     ev.arr.size());
+                iargs[n++] = static_cast<int64_t>(g);
+            } else if (c == 'h') {
+                int gfd = -1;
+                if (ev.host_fd >= 0 && !fd_used) {
+                    if (impl_->wl_fd_publisher_)
+                        gfd = impl_->wl_fd_publisher_(ev.host_fd);
+                    else if (dbg().thunk_trace)
+                        fprintf(stderr,
+                                "[thunk] wl event %s:%u fd %d dropped "
+                                "(no publisher)\n",
+                                iface.c_str(), ev.ev, ev.host_fd);
+                    // host lib keeps its copy; close ours only when the
+                    // publisher duped it (publisher owns the dup).
+                    ::close(ev.host_fd);
+                    fd_used = true;
+                }
+                iargs[n++] = static_cast<int64_t>(gfd);
+            } else if (c == 'n') {
+                iargs[n++] = 0;
+            } else if (ii < 8) {
+                iargs[n++] = static_cast<int64_t>(ev.ints[ii++]);
             } else {
                 iargs[n++] = 0;
             }
@@ -2436,13 +2530,34 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         cpu.regs[0] = 0;
         return 0;
     }
-    // Lazy-init: only create the SDL2 window when an X11/Wayland call is
-    // actually made. This avoids SDL_Init interfering with the emulator's
-    // signal handlers for tests that don't use display functions.
-    if (!impl_->proxy_->ready()) {
-        impl_->proxy_->init(640, 480, impl_->mem);
+    // Lazy-init: only create the SDL2 window for symbols that need it
+    // (X11 + software stubs). Wayland bridge symbols talk straight to
+    // the host compositor and must not spawn a phantom SDL window that
+    // is never pumped (compositor flags it not-responding, and clicks
+    // into the wrong window do nothing).
+    static const char* kNoSdlSyms[] = {
+        "wl_display_connect", "wl_display_disconnect", "wl_display_get_fd",
+        "wl_display_flush", "wl_display_dispatch",
+        "wl_display_dispatch_pending", "wl_display_roundtrip",
+        "wl_display_read_events", "wl_display_prepare_read",
+        "wl_display_cancel_read", "wl_proxy_destroy",
+        "wl_display_get_registry", "wl_proxy_get_class",
+        "wl_proxy_marshal", "wl_proxy_marshal_constructor",
+        "wl_proxy_marshal_constructor_versioned", "wl_proxy_add_listener",
+    };
+    bool need_sdl = true;
+    for (const char* s : kNoSdlSyms) {
+        if (sym_name == s) { need_sdl = false; break; }
     }
-    if (!impl_->proxy_->ready()) {
+    if (need_sdl) {
+        if (!impl_->proxy_->ready()) {
+            impl_->proxy_->init(640, 480, impl_->mem);
+        }
+        if (!impl_->proxy_->ready()) {
+            cpu.regs[0] = 0;
+            return 0;
+        }
+    } else if (!impl_->proxy_) {
         cpu.regs[0] = 0;
         return 0;
     }
@@ -3224,20 +3339,33 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
                          : arm64emu::wl::event_count(iface.c_str());
         DisplayThunkImpl::WlListener lst;
         lst.data = data;
-        if (listener && nev > 0 && nev <= 16 && impl_->mem) {
-            for (size_t i = 0; i < nev; i++) {
+        // known iface: read exactly nev. unknown (xdg et al, nev==0):
+        // read up to 16, stop at first fault. this keeps a future host
+        // listener delivering instead of dropping for lack of a row.
+        size_t want = (nev > 0 && nev <= 16) ? nev : 16;
+        if (listener && impl_->mem) {
+            for (size_t i = 0; i < want; i++) {
                 uint64_t fn = 0;
                 try {
                     impl_->mem->read(listener + i * 8, &fn, 8);
                 } catch (...) { break; }
                 lst.fns.push_back(fn);
             }
+            if (nev == 0) {
+                // trim trailing nulls from the blind read; keep at
+                // least one entry so delivery has a target.
+                while (!lst.fns.empty() && lst.fns.back() == 0)
+                    lst.fns.pop_back();
+            }
         }
         if (!lst.fns.empty()) impl_->wl_listeners_[proxy_h] = lst;
         if (iface == "wl_registry") {
             proxy->wl_registry_listen(proxy->wl_host(proxy_h));
         } else if (iface == "wl_pointer" || iface == "wl_keyboard" ||
-                   iface == "wl_callback" || iface == "wl_touch") {
+                   iface == "wl_callback" || iface == "wl_touch" ||
+                   iface == "wl_output" || iface == "wl_seat" ||
+                   iface == "wl_data_offer" || iface == "xdg_wm_base" ||
+                   iface == "xdg_surface" || iface == "xdg_toplevel") {
             proxy->wl_listen_for(proxy->wl_host(proxy_h), proxy_h, iface);
         }
         if (dbg().thunk_trace) {
