@@ -429,7 +429,12 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         const char* s = getenv("BIFROST_JIT_VERIFY_EVERY");
         return s ? strtoull(s, nullptr, 0) : 1;
     }();
-    if (verify_ && entry.exec_count < verify_every_) {
+    // Quarantine: blocks whose ref re-run is unsound skip verify and run
+    // once, normally. SVC re-executes kernel side effects; calls step the
+    // ref INTO the callee while the JIT called-and-continued; unresolved
+    // stores escape the snapshot and corrupt live state (the ccmp abort).
+    if (verify_ && entry.exec_count < verify_every_ &&
+        !entry.has_svc && !entry.has_call && !entry.has_unresolved_store) {
         // Mark this block as verified so subsequent dispatches skip the
         // expensive per-block divergence check. This is essential for
         // self-loop blocks, where verify mode must un-patch the self-loop
@@ -731,6 +736,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
             fprintf(stderr, "[VERIFY] block @ 0x%llx: PC DIVERGENCE [logging only — may be false-positive]\n",
                     static_cast<unsigned long long>(pc));
         }
+        // Containment: if the PCs split, the ref walked elsewhere and every
+        // compare below is garbage (this is what turned a logged ccmp split
+        // into pages of noise). The split line is already logged above; the
+        // JIT-state restores at the end still run unconditionally.
+        if (ref.pc == jit_next) {
         // PCs match — compare register state.
         // pstate comparison note: only meaningful when this block READS
         // pstate as an input (reads_pstate_before_set, from the same
@@ -808,8 +818,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // elsewhere) — the wrong-address-store detector.
         static int mf_reports_ = 0;
         if (memfull_ && mf_pending_) {
+            // NOTE: no re-read into mf_jit_ here — it holds the post-JIT
+            // capture from above. (An earlier re-read overwrote it with
+            // post-interp bytes, diffing the buffer against itself so the
+            // check could never fire.)
             try {
-                emu.mem().read(mf_start_, mf_jit_.data(), mf_bytes);
                 std::vector<uint8_t> mf_ref(mf_bytes);
                 emu.mem().read(mf_start_, mf_ref.data(), mf_bytes);
                 uint64_t diffs = 0; size_t first = 0;
@@ -869,6 +882,7 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                 }
             }
         }
+        }  // end pc-match containment (restores below always run)
         // Restore the JIT's written values at every STORE_MEM address so
         // memory is consistent with the JIT's cpu state for the NEXT block.
         // (The interpreter overwrote these with its own values during the

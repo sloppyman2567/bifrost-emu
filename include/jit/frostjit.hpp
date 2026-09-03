@@ -722,6 +722,11 @@ private:
         // The verify re-run must NOT re-execute such blocks (the syscall has
         // host side effects), so the full-memory verifier (MEMFULL) skips them.
         bool    has_svc = false;
+        // True if the block calls out mid-block (BL/BLR callee or CALL_INTERP
+        // fallback). The fixed-step interp re-run steps INTO the callee while
+        // the JIT ran it as a call-and-continue, so end PCs never match and
+        // the callee's stores escape the snapshot — quarantined like SVC.
+        bool    has_call = false;
         // Self-loop chaining: when the block's BRCOND taken target equals its
         // own start PC, a 5-byte `jmp rel32` slot is emitted on the taken path.
         // After the block is fully compiled, translate_block patches this slot

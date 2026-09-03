@@ -1381,8 +1381,12 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     entry.verified_once = has_bl_call || has_call_interp || has_inlined_leaf;
     // SVC presence: the verify-mode interp re-run re-executes the syscall —
     // non-idempotent syscalls (read/poll/...) return different values the
-    // second time, so verify must treat SVC blocks as artifacts, not bugs.
+    // second time, so verify quarantines SVC blocks (see run_block gate).
     entry.has_svc = has_svc;
+    // Calls mid-block break the fixed-step re-run the same way (it steps
+    // INTO the callee while the JIT called-and-continued), so they share
+    // the quarantine.
+    entry.has_call = has_bl_call || has_call_interp;
     // 1.5.5-alpha: cross-block flag-materialize skip. Reads-pstate status is
     // exactly flags_loop_carried_ (the pre-scan above: a flag consumer
     // before any setter ⇒ the block needs pstate as an INPUT). Predecessors
