@@ -3359,3 +3359,20 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   (`docs/session_history.md`, order preserved); live contracts (incl. the
   crash-reporter note) stay in AGENTS.md. committed as
   `8126b7a` (reporter) + `515a805` (module + last-svc).
+
+## Session History (2026-09-03) — neverball null call was missing rootfs libs
+
+- neverball died at startup with `decode error pc=0` (x30=0x41a634,
+  last=thunk sym=280). same death under `--no-jit`, so NOT a JIT bug.
+  root cause: `find_library` never searched `$ROOT/usr/lib/aarch64-linux-gnu`,
+  so libSDL2_ttf/vorbis/openhmd fell through to an empty host thunk (TTF_*
+  resolved NULL, 0/0 symbols) and the game called NULL. fix: search the
+  rootfs multiarch triplet dirs (6-line change in `dynamic_linker.cpp`).
+  SDL2 itself stays host-thunked (absent from rootfs multiarch — no
+  behavior flip). after the fix the game runs 2+ minutes clean (it swallows
+  SIGTERM via signal forwarding, so kill by PID not `timeout`).
+- side findings (verify-harness work): fixed 16-byte snapshot truncation,
+  svc/call/unresolved-store quarantine, pc-split containment, MEMFULL
+  self-overwrite, v_lo-high canonicalization on single fp stores — verify
+  sweep 31/31 silent. one `test_dlopen_mt` 139 seen once under suite load,
+  green on rerun (flaky, not chased).

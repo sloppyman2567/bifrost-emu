@@ -2621,6 +2621,12 @@ std::vector<uint8_t> DynamicLinker::find_library(const std::string& soname,
             dirs.push_back(r + "/lib64");
             dirs.push_back(r + "/usr/lib");
             dirs.push_back(r + "/usr/lib64");
+            // Debian/Ubuntu multiarch triplet dirs (neverball's
+            // libSDL2_ttf/vorbis/openhmd live here — without these the
+            // loader fell through to host x86_64 libs or empty thunks
+            // and the game died calling NULL).
+            dirs.push_back(r + "/lib/aarch64-linux-gnu");
+            dirs.push_back(r + "/usr/lib/aarch64-linux-gnu");
         }
     }
     // 2. LD_LIBRARY_PATH.
