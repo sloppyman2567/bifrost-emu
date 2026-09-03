@@ -3741,3 +3741,9 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - shipped (trace-gated diagnostics, zero cost when off): deep-plan entry log, OUT-handle writeback log (first handle), vkCreate/vkAllocate failure log.
 - process lesson: verify new strings are in the binary before traced runs (ran diagnostics on a stale build for several runs after filtering make output through grep).
 - verified: quick 214/214, swapchain passes.
+
+## Session History (2026-09-03) — vkquake stale-x27 root cause (code-found) + trap mode
+
+- root cause found by reading guest code (no more runs needed): the fatal bind is Sky_DrawSky+0x698 (bl vkCmdBindDescriptorSets@plt) with x5=x27, but x27's rebuild (`add x27,sp,#0xa0` at 0x432e6c) is skipped via back-edge 0x4333a0->0x432eec (fallthrough 0x4333a4->0x432f08 also skips it). stale x27 = Task_Worker's task-table pointer (`x20+x26*8` at 0x525ba4, via its `blr x1` task dispatch at 0x525c58). whether the stale value is benign depends on worker scheduling/stack reuse — emulation timing hits the fatal interleaving reliably after ~30 good frames; all our subsystems (marshalling layouts byte-checked, OUT writebacks confirmed live, heap clean, both modes, isolated pump) audited clean.
+- shipped: BIFROST_TRAP_CORRUPT=1 hunt mode (trap dump: regs/pc/sp + fp-chain + fault insns + stack + array bytes, then SIGTRAP with all threads intact) — that dump chain is what cracked it (pc->trampoline, fp->Task_Worker, objdump->bind site->back-edge). plus trace-gated deep-plan/OUT-writeback/creation-failure logs, misaligned-bind empty guard, descriptor/cmd handle registry (currently audit-only after its enforcement black-screened the game on false positives — record hook read count at +24 not +28).
+- verified: quick 214/214, swapchain passes. vkquake renders 30+ frames; final crash is guest stale-state, not our marshalling.

@@ -26,6 +26,7 @@ static_assert(arm64emu::wl::find(false, "wl_surface", 1u) != nullptr,
 #include "core/memory.h"
 #include <dlfcn.h>
 #include <unistd.h>
+#include <csignal>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -85,6 +86,15 @@ struct DisplayThunkImpl {
     std::unordered_map<uint64_t, VkMapped> vk_maps_;    // memory handle → map
     std::unordered_map<uint64_t, uint64_t> vk_allocs_;  // handle → alloc size
     std::mutex vk_maps_mu;
+    // Handle registry for stale-handle fail-closed validation (vkquake:
+    // single corrupt bind/cmd per ~10k good calls after 30+ good frames).
+    // Every guest-visible descriptor set / command buffer is born in our
+    // dispatch (alloc OUT writeback), so the registry is complete; a use
+    // of an unknown handle is a stale/UAF handle → skip/empty the call
+    // with a loud warn instead of segfaulting the host driver.
+    std::unordered_set<uint64_t> vk_desc_sets_;
+    std::unordered_set<uint64_t> vk_cmd_bufs_;
+    std::mutex vk_handles_mu;
     // Cached host vkUnmapMemory (resolved in register_known_symbols_ from
     // the VK family handle). The map/unmap/free arms need it directly:
     // calling the MAP arm's own entry.host_fn as a 2-arg unmap invokes
@@ -415,6 +425,10 @@ void vk_deep_misaligned_once(const char* name, uint8_t arg, uint64_t ptr) {
                 "— corrupt guest pointer, binding empty\n",
                 name, arg, static_cast<unsigned long long>(ptr));
     }
+    // Always log the thread (even after the one-shot): consecutive
+    // corruptions on different threads point at shared machinery.
+    fprintf(stderr, "[vk-deep] misaligned context: T%lx\n",
+            (unsigned long)pthread_self());
 }
 
 // Bounded guest strlen (strings staged by VKM_STR fields; capped well
@@ -1554,6 +1568,68 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     if (r.count_arg < kMaxArgs) args[r.count_arg] = 0;
                     args[r.arg] = 0;
                     vk_deep_done |= 1u << r.arg;
+                    // Hunt mode (BIFROST_TRAP_CORRUPT=1): dump guest state
+                    // and trap for the debugger instead of limping on.
+                    // Catches the FIRST corruption with all threads and
+                    // stacks intact (the game dies much later otherwise).
+                    static const bool trap = [] {
+                        const char* e = getenv("BIFROST_TRAP_CORRUPT");
+                        return e && e[0] != '0';
+                    }();
+                    if (trap) {
+                        fprintf(stderr, "[vk-deep] TRAP pc=0x%llx sp=0x%llx "
+                                "x0..x7=0x%llx 0x%llx 0x%llx 0x%llx "
+                                "0x%llx 0x%llx 0x%llx 0x%llx\n",
+                                (unsigned long long)cpu.pc,
+                                (unsigned long long)cpu.sp,
+                                (unsigned long long)cpu.regs[0],
+                                (unsigned long long)cpu.regs[1],
+                                (unsigned long long)cpu.regs[2],
+                                (unsigned long long)cpu.regs[3],
+                                (unsigned long long)cpu.regs[4],
+                                (unsigned long long)cpu.regs[5],
+                                (unsigned long long)cpu.regs[6],
+                                (unsigned long long)cpu.regs[7]);
+                        fprintf(stderr, "[vk-deep] TRAP lr=0x%llx fp=0x%llx\n",
+                                (unsigned long long)cpu.regs[30],
+                                (unsigned long long)cpu.regs[29]);
+                        uint64_t fp = cpu.regs[29];
+                        for (int i = 0; i < 16 && fp && !(fp & 1u); i++) {
+                            uint64_t ra = 0, pfp = 0;
+                            try {
+                                impl_->mem->read(fp, &pfp, 8);
+                                impl_->mem->read(fp + 8, &ra, 8);
+                            } catch (...) { break; }
+                            fprintf(stderr, "  guest[%2d] fp=0x%llx ra=0x%llx\n",
+                                    i, (unsigned long long)fp,
+                                    (unsigned long long)ra);
+                            if (pfp <= fp) break;
+                            fp = pfp;
+                        }
+                        // Fault context for offline decode: faulting
+                        // instructions, guest stack top, and the corrupt
+                        // array neighborhood (args[5]=x5, count=args[4]).
+                        auto hexdump = [&](const char* tag, uint64_t base,
+                                           size_t len) {
+                            fprintf(stderr, "  %s @0x%llx:", tag,
+                                    (unsigned long long)base);
+                            for (size_t k = 0; k < len; k++) {
+                                uint8_t b = 0;
+                                try { impl_->mem->read(base + k, &b, 1); }
+                                catch (...) {
+                                    fprintf(stderr, " ??");
+                                    continue;
+                                }
+                                fprintf(stderr, " %02x", b);
+                            }
+                            fprintf(stderr, "\n");
+                        };
+                        hexdump("insn", cpu.pc - 32, 48);
+                        hexdump("stack", cpu.sp, 64);
+                        hexdump("array", cpu.regs[5] & ~7ULL, 32);
+                        fflush(stderr);
+                        raise(SIGTRAP);
+                    }
                     continue;
                 }
                 DeepJob j{};
@@ -1681,6 +1757,54 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
+    // ── Stale-handle validation: AUDIT-ONLY ──────────────────────────
+    // Enforcement (empty/skip) is DISABLED until the registry is proven
+    // to have zero false positives — a broken record hook once skipped
+    // 44k valid calls and black-screened the game. Warns stay loud;
+    // behavior is unchanged from pre-registry. (The misaligned-array
+    // guard above is separate, narrow, and stays enforced.)
+    auto vk_known = [&](const std::unordered_set<uint64_t>& s, uint64_t h) {
+        if (!h) return false;
+        std::lock_guard<std::mutex> g(impl_->vk_handles_mu);
+        return s.find(h) != s.end();
+    };
+    if (entry.name == "vkFreeDescriptorSets" ||
+        entry.name == "vkFreeCommandBuffers") {
+        // plan {3,2}: staged handle array at args[3], count at args[2].
+        // (Bookkeeping only — no behavior change.)
+        uint32_t n = static_cast<uint32_t>(args[2]);
+        if (n > 1024) n = 1024;
+        const uint64_t* arr = reinterpret_cast<const uint64_t*>(args[3]);
+        if (arr && n) {
+            std::lock_guard<std::mutex> g(impl_->vk_handles_mu);
+            auto& s = (entry.name == "vkFreeDescriptorSets")
+                          ? impl_->vk_desc_sets_
+                          : impl_->vk_cmd_bufs_;
+            for (uint32_t k = 0; k < n; k++) s.erase(arr[k]);
+            if (trace)
+                fprintf(stderr, "[vk-reg] -%u %s\n", n,
+                        entry.name.c_str());
+        }
+    }
+    if (entry.name == "vkCmdBindDescriptorSets") {
+        uint32_t n = static_cast<uint32_t>(args[4]);
+        const uint64_t* arr = reinterpret_cast<const uint64_t*>(args[5]);
+        bool bad = (n > 0 && !arr);
+        for (uint32_t k = 0; !bad && k < n && k < 1024; k++)
+            bad = !vk_known(impl_->vk_desc_sets_, arr[k]);
+        if (bad) {
+            fprintf(stderr, "[vk-deep] %s: stale descriptor set "
+                    "(audit-only, call proceeds)\n", entry.name.c_str());
+        }
+    }
+    if (entry.name.compare(0, 5, "vkCmd", 5) == 0) {
+        if (!vk_known(impl_->vk_cmd_bufs_, args[0])) {
+            fprintf(stderr, "[vk-deep] %s: stale command buffer 0x%llx "
+                    "(audit-only, call proceeds)\n", entry.name.c_str(),
+                    (unsigned long long)args[0]);
+        }
+    }
+
     uint64_t ret = 0;
     if (entry.n_stack >= 7) {
         using Fn15 = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t,
@@ -1770,6 +1894,27 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         static_cast<unsigned long long>(rec.guest_array),
                         static_cast<unsigned long long>(first));
             }
+            // Handle registry: every guest-visible descriptor set /
+            // command buffer is born here. Recorded for fail-closed
+            // use-site validation.
+            if (rec.on_success_only && rec.elem_size == 8 &&
+                (entry.name == "vkAllocateDescriptorSets" ||
+                 entry.name == "vkAllocateCommandBuffers")) {
+                std::lock_guard<std::mutex> g(impl_->vk_handles_mu);
+                const uint64_t* hs =
+                    reinterpret_cast<const uint64_t*>(rec.staged);
+                auto& s = (entry.name == "vkAllocateDescriptorSets")
+                              ? impl_->vk_desc_sets_
+                              : impl_->vk_cmd_bufs_;
+                for (uint32_t k = 0; k < rec.staged_elems; k++)
+                    if (hs[k]) s.insert(hs[k]);
+                if (trace && rec.staged_elems) {
+                    fprintf(stderr, "[vk-reg] +%u %s (first=0x%llx)\n",
+                            rec.staged_elems,
+                            entry.name.c_str(),
+                            (unsigned long long)hs[0]);
+                }
+            }
         }
     }
 
@@ -1824,6 +1969,38 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
          entry.name.compare(0, 10, "vkAllocate") == 0)) {
         fprintf(stderr, "[display-thunk] %s → %d\n",
                 entry.name.c_str(), static_cast<int32_t>(ret));
+    }
+
+    // Handle registry (generic path): vkAllocateCommandBuffers is VULKAN
+    // policy so it never enters the deep block; record post-writeback so
+    // the registry sees exactly what the guest sees. Count is
+    // commandBufferCount (u32 at +28 in VkCommandBufferAllocateInfo; +24
+    // is the level enum — reading that records nothing). The array may
+    // have bounced (bounce_guest holds the original guest address).
+    if (ret == 0 && entry.name == "vkAllocateCommandBuffers" && impl_->mem) {
+        uint64_t g_info = bounce_guest[1] ? bounce_guest[1] : args[1];
+        uint64_t g_arr = bounce_guest[2] ? bounce_guest[2] : args[2];
+        uint32_t n = 0;
+        try { impl_->mem->read(g_info + 28, &n, 4); } catch (...) { n = 0; }
+        if (n > 1024) n = 1024;
+        if (g_arr && n) {
+            std::lock_guard<std::mutex> g(impl_->vk_handles_mu);
+            for (uint32_t k = 0; k < n; k++) {
+                uint64_t h = 0;
+                try { impl_->mem->read(g_arr + (uint64_t)k * 8, &h, 8); }
+                catch (...) { break; }
+                if (h) impl_->vk_cmd_bufs_.insert(h);
+            }
+            if (trace) {
+                uint64_t first = 0;
+                try { impl_->mem->read(g_arr, &first, 8); } catch (...) {}
+                fprintf(stderr, "[vk-reg] +%u cmds (first=0x%llx)\n", n,
+                        (unsigned long long)first);
+            }
+        } else if (trace) {
+            fprintf(stderr, "[vk-reg] alloc-cmds recorded NOTHING (n=%u)\n",
+                    n);
+        }
     }
 
     cpu.regs[0] = ret;
