@@ -3637,3 +3637,27 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   killed, so up to three simultaneous offset copies of the song (comb/
   chorus) while playing. No stale processes remain now; awaiting a fresh
   single-instance playtest to confirm.
+
+## Session History (2026-09-03) — audio partial-write over-report (real 2x fix)
+
+- User confirmed single-instance and music STILL fast — overlap theory
+  dead. Fresh clue from them: sfx fine, asset verified normal in mpv,
+  "music is the first sound". Dev-tagged trace of their race showed
+  dev1's backlog draining 35.04 MB → 31.39 MB in ~9 s wall (~406 KB/s
+  vs the 176400 B/s realtime rate, ~2.3x).
+- Root cause in `Audio::push_frames_locked_` (`src/audio/audio.cpp`):
+  on the partial-acceptance path it wrote `accept_in` frames to the ring
+  but returned/accounted `frames_in` (requested) — return value,
+  `bytes_pushed_`, and the WAV-dump buffer all used the wrong count.
+  The comment even promised "Returns INPUT frames accepted". Callers
+  (`top_up_queue`'s `pending_off`, legacy `/dev/dsp` byte count) advanced
+  past samples that were never played → skips → fast playback. Triggers
+  whenever pushes exceed per-poll drain (high-fps games topping up a
+  nearly-full ring every frame); paced small pushes (sfx fill thread)
+  and slow-polling probes always fit whole, which is why sfx and all
+  repro probes sounded exact and masked it.
+- Fix (3 lines): return/account `accept_in` instead of `frames_in`.
+- Verified by dose-response on a scratch tight-poll probe (not
+  committed): same 8 s tone drains in 1.9 s wall on old code (4.25x)
+  vs 7.6 s wall fixed (~1.05x). Suite: linux 16/16 + android 21/21
+  (JIT and --no-jit) and `audio_test.elf` all green.

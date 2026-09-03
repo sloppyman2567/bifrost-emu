@@ -282,7 +282,7 @@ ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
     for (size_t i = 0; i < conv_.size(); i++)
         s.ring[(s.tail * channels_ + i) & mask] = conv_[i];
     s.tail += out_frames;
-    bytes_pushed_.fetch_add(frames_in * frame_sz_in, std::memory_order_relaxed);
+    bytes_pushed_.fetch_add(accept_in * frame_sz_in, std::memory_order_relaxed);
     // Optional WAV dump records the guest's own bytes (pre-conversion),
     // matching the old headless behavior.
     static const bool wav_dump = [] {
@@ -290,8 +290,8 @@ ssize_t Audio::push_frames_locked_(Stream& s, uint32_t fmt, uint32_t rate,
         return e && e[0] == '1';
     }();
     if (wav_dump)
-        buffer_.insert(buffer_.end(), data, data + frames_in * frame_sz_in);
-    return static_cast<ssize_t>(frames_in);
+        buffer_.insert(buffer_.end(), data, data + accept_in * frame_sz_in);
+    return static_cast<ssize_t>(accept_in);
 }
 
 ssize_t Audio::read(uint8_t* buf, size_t len) {
