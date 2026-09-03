@@ -549,11 +549,11 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // the JIT and the interpreter see the SAME original memory state
         // for those addresses, eliminating the false positive.
         //
-        // Each entry: (addr, width, original_value).
-        // We cap at 64 stores per block — beyond that, we accept false
-        // positives (no real-world block exceeds this; the cap is just
-        // a safety bound to avoid unbounded stack allocation).
-        struct SavedMem { uint64_t addr; uint8_t width; uint64_t value; };
+        // Each entry: (addr, width, original bytes). The bytes array
+        // holds the FULL width (up to 16) — an earlier u64 slot silently
+        // truncated 16-byte stores (STP/Q-reg) via a << 8 pack and wrote
+        // scrambled bytes back on restore, failing every neon test.
+        struct SavedMem { uint64_t addr; uint8_t width; uint8_t bytes[16]; };
         SavedMem saved_mem[64];      // original values (pre-JIT)
         SavedMem jit_written[64];    // JIT's written values (post-JIT)
         int saved_mem_count = 0;
@@ -567,25 +567,17 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
                     ? si.absolute_addr
                     : ((si.arm_reg == 31) ? saved.sp : saved.regs[si.arm_reg])
                         + static_cast<uint64_t>(si.offset);
-                uint64_t val  = 0;
+                if (si.width != 1 && si.width != 2 && si.width != 4 &&
+                    si.width != 8 && si.width != 16)
+                    continue;
+                saved_mem[saved_mem_count].addr  = addr;
+                saved_mem[saved_mem_count].width = si.width;
                 try {
-                    switch (si.width) {
-                        case 1: val = emu.mem().load<uint8_t>(addr);  break;
-                        case 2: val = emu.mem().load<uint16_t>(addr); break;
-                        case 4: val = emu.mem().load<uint32_t>(addr); break;
-                        case 8: val = emu.mem().load<uint64_t>(addr); break;
-                        case 16:
-                            val = emu.mem().load<uint64_t>(addr) |
-                                  (emu.mem().load<uint64_t>(addr + 8) << 8);
-                            break;
-                        default: continue;
-                    }
+                    emu.mem().read(addr, saved_mem[saved_mem_count].bytes,
+                                   si.width);
                 } catch (...) {
                     continue;
                 }
-                saved_mem[saved_mem_count].addr  = addr;
-                saved_mem[saved_mem_count].width = si.width;
-                saved_mem[saved_mem_count].value = val;
                 saved_mem_count++;
             }
         }
@@ -655,44 +647,20 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // restore them after the interpreter runs — the next block expects
         // memory to be in the JIT's state, matching the JIT's cpu state).
         for (int i = 0; i < saved_mem_count; i++) {
-            uint64_t v = 0;
-                try {
-                    switch (saved_mem[i].width) {
-                        case 1: v = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
-                        case 2: v = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
-                        case 4: v = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
-                        case 8: v = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
-                        case 16:
-                            v = emu.mem().load<uint64_t>(saved_mem[i].addr) |
-                                (emu.mem().load<uint64_t>(saved_mem[i].addr + 8) << 8);
-                            break;
-                    }
-                } catch (...) { /* skip */ }
             jit_written[i].addr  = saved_mem[i].addr;
             jit_written[i].width = saved_mem[i].width;
-            jit_written[i].value = v;
+            try {
+                emu.mem().read(saved_mem[i].addr, jit_written[i].bytes,
+                               saved_mem[i].width);
+            } catch (...) { /* skip */ }
         }
         // Restore the original memory values at every STORE_MEM address
         // so the interpreter sees the pre-JIT memory state (eliminating
         // the false-positive divergence from read-then-write patterns).
         for (int i = 0; i < saved_mem_count; i++) {
             try {
-                switch (saved_mem[i].width) {
-                    case 1: emu.mem().store<uint8_t>(saved_mem[i].addr,
-                                static_cast<uint8_t>(saved_mem[i].value)); break;
-                    case 2: emu.mem().store<uint16_t>(saved_mem[i].addr,
-                                static_cast<uint16_t>(saved_mem[i].value)); break;
-                    case 4: emu.mem().store<uint32_t>(saved_mem[i].addr,
-                                static_cast<uint32_t>(saved_mem[i].value)); break;
-                    case 8: emu.mem().store<uint64_t>(saved_mem[i].addr,
-                                saved_mem[i].value); break;
-                    case 16:
-                        emu.mem().store<uint64_t>(saved_mem[i].addr,
-                                saved_mem[i].value & ~0ULL);
-                        emu.mem().store<uint64_t>(saved_mem[i].addr + 8,
-                                saved_mem[i].value >> 8);
-                        break;
-                }
+                emu.mem().write(saved_mem[i].addr, saved_mem[i].bytes,
+                                saved_mem[i].width);
             } catch (...) {
                 // Ignore — the JIT wrote here, so the address is writable
                 // from the JIT's perspective. If the restore fails, the
@@ -879,28 +847,24 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         static bool memverify_ = (getenv("BIFROST_JIT_VERIFY_MEM") != nullptr);
         if (memverify_) {
             for (int i = 0; i < saved_mem_count; i++) {
-                uint64_t ref_val = 0;
+                uint8_t ref_bytes[16] = {0};
                 bool ok = true;
                 try {
-                    switch (saved_mem[i].width) {
-                        case 1: ref_val = emu.mem().load<uint8_t>(saved_mem[i].addr);  break;
-                        case 2: ref_val = emu.mem().load<uint16_t>(saved_mem[i].addr); break;
-                        case 4: ref_val = emu.mem().load<uint32_t>(saved_mem[i].addr); break;
-                        case 8: ref_val = emu.mem().load<uint64_t>(saved_mem[i].addr); break;
-                        case 16:
-                            ref_val = emu.mem().load<uint64_t>(saved_mem[i].addr) |
-                                      (emu.mem().load<uint64_t>(saved_mem[i].addr + 8) << 8);
-                            break;
-                        default: ok = false;
-                    }
+                    emu.mem().read(saved_mem[i].addr, ref_bytes,
+                                   saved_mem[i].width);
                 } catch (...) { ok = false; }
-                if (ok && ref_val != jit_written[i].value) {
-                    fprintf(stderr, "[VERIFY-MEM] block @ 0x%llx addr=0x%llx width=%d jit=0x%llx ref=0x%llx\n",
+                if (ok && memcmp(ref_bytes, jit_written[i].bytes,
+                                 saved_mem[i].width) != 0) {
+                    fprintf(stderr, "[VERIFY-MEM] block @ 0x%llx addr=0x%llx width=%d jit=",
                             static_cast<unsigned long long>(pc),
                             static_cast<unsigned long long>(saved_mem[i].addr),
-                            saved_mem[i].width,
-                            static_cast<unsigned long long>(jit_written[i].value),
-                            static_cast<unsigned long long>(ref_val));
+                            saved_mem[i].width);
+                    for (int b = 0; b < saved_mem[i].width; b++)
+                        fprintf(stderr, "%02x", jit_written[i].bytes[b]);
+                    fprintf(stderr, " ref=");
+                    for (int b = 0; b < saved_mem[i].width; b++)
+                        fprintf(stderr, "%02x", ref_bytes[b]);
+                    fprintf(stderr, "\n");
                     fprintf(stderr, "[VERIFY-MEM] *** REAL MEMORY DIVERGENCE — JIT wrote different bytes than interpreter ***\n");
                 }
             }
@@ -913,22 +877,8 @@ uint64_t FrostJIT::run_block(CPU& cpu, Emulator& emu) {
         // causing cascading false-positive divergences.)
         for (int i = 0; i < saved_mem_count; i++) {
             try {
-                switch (jit_written[i].width) {
-                    case 1: emu.mem().store<uint8_t>(jit_written[i].addr,
-                                static_cast<uint8_t>(jit_written[i].value)); break;
-                    case 2: emu.mem().store<uint16_t>(jit_written[i].addr,
-                                static_cast<uint16_t>(jit_written[i].value)); break;
-                    case 4: emu.mem().store<uint32_t>(jit_written[i].addr,
-                                static_cast<uint32_t>(jit_written[i].value)); break;
-                    case 8: emu.mem().store<uint64_t>(jit_written[i].addr,
-                                jit_written[i].value); break;
-                    case 16:
-                        emu.mem().store<uint64_t>(jit_written[i].addr,
-                                jit_written[i].value & ~0ULL);
-                        emu.mem().store<uint64_t>(jit_written[i].addr + 8,
-                                jit_written[i].value >> 8);
-                        break;
-                }
+                emu.mem().write(jit_written[i].addr, jit_written[i].bytes,
+                                jit_written[i].width);
             } catch (...) {
                 // Ignore — best-effort restore.
             }
