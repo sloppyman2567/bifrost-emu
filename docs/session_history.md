@@ -3478,3 +3478,31 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   mapping, crash unlikely).
 - Verify: make clean, opgen checks clean, quick suite 211 pass / 0 fail /
   1 env skip; wayland bridge/input, gl_state, sdl triangle all PASS.
+
+## Session History (2026-09-03) — draw-row EBO policies + dispatch races (plan GO)
+
+- Draw rows: 7 single-draw rows (2 GL + 5 GLES) spelled indices `p`/`-`
+  mistranslated nonzero EBO offsets; now `i`/EL_PTR. Two review
+  detours paid off: (1) dlsym serves the global table first-wins, so a
+  GLES-second test silently exercises GL rows — new test_sdl_gles_ebo
+  dlopens libGLESv2 FIRST (offset-12 readback: FAIL pre-fix, PASS
+  post-fix, proven both ways); (2) indirect commands are 20 bytes, so
+  cmd2 sits at offset 20, not 16 — the native host probe agreed with the
+  thunk, the scenario was wrong.
+- New EL_PTR_ARRAY (multidraw nest: outer bounce + per-element
+  offset-vs-client) + INDIRECT_PTR (raw iff DRAW_INDIRECT_BUFFER bound,
+  now tracked) policies; new GL indirect rows. Negative control for
+  indirect: `-` rows fail (bounce addr as offset), INDIRECT_PTR passes.
+  Multidraw+EBO is accidentally correct pre-fix on core (outer bounce
+  contents + inners-as-offsets); the test guards the new arm. vao test
+  carries multidraw + 2-command indirect (offset 20) readbacks; suite
+  grew 211 -> 214, all green.
+- Races: leaf state_mu over string-cache ring (slot-select under lock,
+  mem->write outside), tex sizes, glfw maps, error slot; deliver
+  snapshots under lock with guest/host calls outside; display-mode cache
+  moved off function-statics (cross-instance leak); error trampoline
+  locked (cross-instance routing stays documented single-emulator
+  limit). Phase 3: getproc alias capped at 255B (window is a full
+  reservation, reads can't fault) + bounce fallback; persistent push
+  re-validates liveness under mu. New test_thunk_mt race smoke
+  (4x500 proc-address stability + string paths, 3/3 clean runs).
