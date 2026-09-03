@@ -3412,3 +3412,19 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   `test_wayland_bridge.elf` does connect → registry → 67 globals →
   bind compositor → create surface → destroy → disconnect, all
   asserted. suite 210 green.
+
+## Session History (2026-09-03) — dlopen_mt thread-safety + Wayland input
+
+- `test_dlopen_mt` crashed ~50% (silent host SIGSEGV, worse under load).
+  gdb caught free() inside iterate_phdr: guest callbacks mutate
+  objects_ while iterating it (use-after-free on vector reallocation).
+  fixed with a pre-callback snapshot. second crash (operator new in
+  mmap_alloc) was the borrow-CPU scratch stack leaked per call (OOM
+  march); now thread-local reused. BIFROST_DYNLINK_TRACE moved into
+  debug_flags.h (contract: no ad-hoc getenv in hot contended paths).
+  12/12 under parallel-build load + suite green.
+- Wayland gaps closed: fd-passing via fd-resolver plumbing, seat
+  pointer/keyboard/callback listeners with queue-then-deliver, get_class
+  via string bounce, real surface commit forwarding. ALMOST derailed by
+  popping the predecessor's leftover stash into the tree (cross-wire
+  xchg experiment) — removed; their WIP stash left untouched.
