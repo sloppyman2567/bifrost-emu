@@ -402,6 +402,21 @@ void vk_deep_oversize_count_once(const char* name, uint8_t arg,
     }
 }
 
+// One-shot diagnostic for a misaligned u64-handle array pointer (e.g. an
+// odd pDescriptorSets). Guest handle arrays are always 8-aligned; a
+// misaligned address is a corrupt pointer (vkQuake hands one bad bind in
+// ~13k after 30+ good frames). The caller degrades it to an empty array
+// (count 0 + null) so the host sees a legal no-op instead of faulting.
+void vk_deep_misaligned_once(const char* name, uint8_t arg, uint64_t ptr) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true)) {
+        fprintf(stderr,
+                "[vk-deep] %s: handle array arg[%u] misaligned (ptr=0x%llx) "
+                "— corrupt guest pointer, binding empty\n",
+                name, arg, static_cast<unsigned long long>(ptr));
+    }
+}
+
 // Bounded guest strlen (strings staged by VKM_STR fields; capped well
 // below any sane pipeline stage name).
 size_t vk_deep_guest_strlen(Memory* mem, uint64_t g) {
@@ -1332,6 +1347,9 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         impl_->mem && entry.host_fn) {
         if (const thunk::VkCmdPlan* plan =
                 thunk::vk_find_cmd_plan(entry.name.c_str())) {
+            if (trace)
+                fprintf(stderr, "[display-thunk] %s: deep plan (%u refs)\n",
+                        entry.name.c_str(), plan->nrefs);
             bool ok = true;
             size_t need = 0;
             struct DeepJob { int arg = 0; uint32_t count = 0;
@@ -1525,6 +1543,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     ? 1   // raw: arg IS a byte count, marshalled below
                     : static_cast<uint32_t>(cnt_arg);
                 if (!args[r.arg]) continue;
+                // Misaligned u64-handle array: corrupt guest pointer
+                // (never legitimately odd). Degrade to an empty array
+                // (count 0 + null) — the host sees a legal no-op instead
+                // of faulting on garbage. See vk_deep_misaligned_once.
+                if (!r.desc && !r.count_in_bytes && r.elem_size == 8 &&
+                    (args[r.arg] & 7u)) {
+                    vk_deep_misaligned_once(entry.name.c_str(), r.arg,
+                                            args[r.arg]);
+                    if (r.count_arg < kMaxArgs) args[r.count_arg] = 0;
+                    args[r.arg] = 0;
+                    vk_deep_done |= 1u << r.arg;
+                    continue;
+                }
                 DeepJob j{};
                 j.arg = r.arg;
                 j.guest = args[r.arg];
@@ -1726,6 +1757,19 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             size_t bytes = (size_t)rec.staged_elems * rec.elem_size;
             try { impl_->mem->write(rec.guest_array, rec.staged, bytes); }
             catch (...) { /* unmapped array */ }
+            // Trace-gated OUT writeback log: shows what the guest actually
+            // receives (e.g. descriptor-set handles). A zero/stale handle
+            // here crashes the driver at first USE, far from this line.
+            if (trace && rec.on_success_only && rec.elem_size == 8 &&
+                rec.staged_elems <= 16) {
+                uint64_t first = 0;
+                std::memcpy(&first, rec.staged, 8);
+                fprintf(stderr, "[display-thunk] %s: wrote back %u handle(s) "
+                        "to guest 0x%llx (first=0x%llx)\n",
+                        entry.name.c_str(), rec.staged_elems,
+                        static_cast<unsigned long long>(rec.guest_array),
+                        static_cast<unsigned long long>(first));
+            }
         }
     }
 
@@ -1769,6 +1813,17 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (ret) {
             ret = impl_->cache_host_string_(reinterpret_cast<const char*>(ret));
         }
+    }
+
+    // Trace-gated VkResult logging for object creation/allocation: a failed
+    // create (non-zero) hands the guest a garbage handle that segfaults the
+    // driver at first USE (bind/draw), far from the real break. Logging the
+    // result at the source names the culprit immediately.
+    if (trace && ret != 0 &&
+        (entry.name.compare(0, 8, "vkCreate") == 0 ||
+         entry.name.compare(0, 10, "vkAllocate") == 0)) {
+        fprintf(stderr, "[display-thunk] %s → %d\n",
+                entry.name.c_str(), static_cast<int32_t>(ret));
     }
 
     cpu.regs[0] = ret;
