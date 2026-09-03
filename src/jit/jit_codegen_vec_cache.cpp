@@ -487,19 +487,44 @@ void FrostJIT::fp_store_operand(int xmm, int vreg, bool is_double) {
     uint8_t prefix = is_double ? 0xF2 : 0xF3;
     int xd = vec_xmm(vreg);
     if (xd >= 0) {
-        // movsd/movss xmm_d, xmm  (reg-reg; REX for XMM8-15).
-        // 0F 11 is the STORE form: ModRM.reg = SOURCE, ModRM.rm = DEST,
-        // so the REX.R/REX.B extension bits follow the source (xmm) /
-        // dest (xd) respectively — NOT xd/xmm.
-        emit_byte(prefix);
-        emit_byte(rex(false, xmm >= 8, false, xd >= 8));
-        emit_byte(0x0F); emit_byte(0x11);
-        emit_byte(modrm(3, xmm & 7, xd & 7));
+        if (!is_double) {
+            // Single: canonicalize xd[63:32] = 0 (interp write_fp_s zeroes
+            // v_lo high). A bare movss MERGES and leaves stale high bits,
+            // which writeback stores to memory (verify v_lo mismatch).
+            // Scratch t in XMM0-2 minus the src — pins live in XMM3-15 and
+            // scalar scratch is XMM0-2, so t never collides with xd.
+            int t = (xmm == 0) ? 1 : 0;  // t < 8 always; t != xmm always
+            emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF);
+            emit_byte(modrm(3, t & 7, t & 7));                       // pxor t,t
+            emit_byte(0xF3);
+            emit_byte(rex(false, false, false, xmm >= 8));
+            emit_byte(0x0F); emit_byte(0x10);
+            emit_byte(modrm(3, t & 7, xmm & 7));                     // movss t,xmm
+            emit_byte(rex(false, xd >= 8, false, false));
+            emit_byte(0x0F); emit_byte(0x28);
+            emit_byte(modrm(3, xd & 7, t & 7));                      // movaps xd,t
+        } else {
+            // movsd/movss xmm_d, xmm  (reg-reg; REX for XMM8-15).
+            // 0F 11 is the STORE form: ModRM.reg = SOURCE, ModRM.rm = DEST,
+            // so the REX.R/REX.B extension bits follow the source (xmm) /
+            // dest (xd) respectively — NOT xd/xmm.
+            emit_byte(prefix);
+            emit_byte(rex(false, xmm >= 8, false, xd >= 8));
+            emit_byte(0x0F); emit_byte(0x11);
+            emit_byte(modrm(3, xmm & 7, xd & 7));
+        }
         vec_cache_mark_dirty(vreg);
     } else {
         emit_byte(prefix);
         emit_byte(0x0F); emit_byte(0x11);
         emit_modrm_disp(xmm, CPU_REG, V_LO_OFF + vreg * 8);
+        if (!is_double) {
+            // Same canonicalization for the memory path: movss m32 leaves
+            // the old high dword in place — zero it explicitly.
+            emit_byte(0xC7);
+            emit_modrm_disp(0, CPU_REG, V_LO_OFF + vreg * 8 + 4);
+            emit_u32(0);
+        }
     }
 }
 
