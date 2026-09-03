@@ -729,6 +729,9 @@ void AndroidSurfaceManager::translate_sdl_event_(CPU* /*cpu*/,
 }
 
 void AndroidSurfaceManager::pump_host_events(CPU* cpu) {
+    // NOTE: this drains the process-global SDL event queue, as does
+    // FrostInput::poll. the two managers are never live together
+    // (android apk vs linux elf), so no demux is needed (see note there).
     // Track size changes so the driver can fire onNativeWindowResized /
     // onContentRectChanged exactly once per resize.
     SDL_Event e;

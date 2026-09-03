@@ -127,10 +127,13 @@ int InputNode::ioctl(uint32_t request, uint64_t argp, Memory& mem) {
             mem.store<uint8_t>(argp, 0);
             return 1;
         }
-        if (nr == 0x18) {  // EVIOCGKEY: no tracked state, report none pressed
+        if (nr == 0x18) {  // EVIOCGKEY: live pressed-key bitmap
             uint32_t need = KEY_MAX / 8 + 1;
             uint32_t out = (len == 0 || len > need) ? need : len;
-            for (uint32_t i = 0; i < out; ++i) mem.store<uint8_t>(argp + i, 0);
+            uint8_t bmp[96] = {};
+            input_->key_bitmap(bmp, sizeof(bmp));
+            for (uint32_t i = 0; i < out; ++i)
+                mem.store<uint8_t>(argp + i, i < sizeof(bmp) ? bmp[i] : 0);
             return static_cast<int>(need);
         }
         if (nr == 0x19) {  // EVIOCGLED

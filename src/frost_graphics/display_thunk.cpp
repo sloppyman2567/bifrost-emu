@@ -1922,7 +1922,28 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         VkStage st;
         VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();
         read_guest_struct(mem, cpu.regs[1], pi);
-        pi->pNext = nullptr;  // verbatim guest pNext chains are not host-readable
+        // fail closed on oversize counts: leaving guest pointers in
+        // place would let the host deref guest addresses (crash).
+        // VK_ERROR_OUT_OF_HOST_MEMORY = -1.
+        if (pi->waitSemaphoreCount > 16 || pi->swapchainCount > 16 ||
+            pi->swapchainCount == 0) {
+            cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-1));
+            return true;
+        }
+        // stage known pNext nodes instead of silently dropping the chain.
+        // unknown stypes truncate with a one-shot diagnostic (safe).
+        if (pi->pNext) {
+            bool ok = true;
+            size_t cn = vk_deep_chain_size(mem,
+                reinterpret_cast<uint64_t>(pi->pNext), &ok);
+            (void)cn;
+            void* staged = nullptr;
+            vk_deep_fill_chain(mem, st,
+                reinterpret_cast<uint64_t>(pi->pNext), &staged);
+            pi->pNext = staged;
+        } else {
+            pi->pNext = nullptr;
+        }
         if (pi->waitSemaphoreCount && pi->pWaitSemaphores && pi->waitSemaphoreCount <= 16) {
             uint64_t* arr = reinterpret_cast<uint64_t*>(
                 st.bytes(static_cast<size_t>(pi->waitSemaphoreCount) * 8u, 8));

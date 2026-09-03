@@ -3721,3 +3721,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - reviewed FrostInput + /dev/input + GLFW callbacks + android input. fixed: (1) a-z keycodes were sequential, now positional per input-event-codes.h (b=48 q=16 etc, kills key_m/shift + key_n/backslash collisions); scancode + utf8 maps use same table. (2) dpad down/left unswapped. (3) TEXTINPUT no longer double-emits (KEYDOWN already covers it). (4) open_controllers now holds mu. (5) empty read respects O_NONBLOCK (blocking -> 0, nonblock -> -EAGAIN); small buffer -> -EINVAL. (6) js FIONREAD uses js queue via new js_queue_size(). (7) evdev ioctls match type+nr ignoring len (EVIOCGNAME(256) etc work); EVIOCGBIT returns real key/rel/abs bits; EVIOCGABS min/max -32768..32767. (8) android slot-full drops new event + ENOMEM instead of overwriting live handle; pending_ capped at 256; key repeat filtered; resize tracking per-manager not thread_local. (9) glfw key cb passes real glfwGetKeyScancode; mods=0 + no-repeat documented.
 - verified: clean build, --quick 214/214 (input_test + gamepad_test green after blocking-read fix).
+
+## Session History (2026-09-03) — vulkan present + input key-state hardening
+
+- vulkan present (display_thunk.cpp): fail closed on swapchainCount/waitSemaphoreCount > 16 (VK_ERROR_OUT_OF_HOST_MEMORY, never calls host with guest pointers); swapchainCount == 0 rejected. pNext now staged via vk_deep_fill_chain (known nodes) instead of silently nulled; unknown stypes truncate with one-shot diagnostic.
+- descriptor gating: confirmed generated VK_CMD_DEEP stages pImageInfo/pBufferInfo/pTexelBufferView unconditionally bounded by descriptorCount (driver ignores unused per spec); no manual gating re-added. AGENTS.md note updated to match.
+- input: EVIOCGKEY returns live pressed-key bitmap (tracked in push_event via new FrostInput::key_bitmap); shared SDL-pump single-drain rule documented in FrostInput::poll + pump_host_events.
+- verified: clean build (0 errors), opgen-check (110 ops) + opgen-thunk-check (1807 symbols) up to date, --quick 214/214, input/gamepad pass, swapchain passed under JIT + --no-jit.

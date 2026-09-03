@@ -130,6 +130,9 @@ public:
     size_t queue_size() const;
     // Number of js events currently queued (for FIONREAD on js0).
     size_t js_queue_size() const;
+    // Live pressed-key bitmap for EVIOCGKEY (KEY_MAX 0x2ff → 96 bytes).
+    // copies min(n, 96) bytes, zero-fills the rest.
+    void key_bitmap(uint8_t* out, size_t n) const;
     // Whether any game controllers are connected (diagnostic).
     bool has_game_controller() const;
     // Number of game controllers currently open.

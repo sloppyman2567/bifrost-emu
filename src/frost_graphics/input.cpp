@@ -392,6 +392,10 @@ struct FrostInputImpl {
     // EV_KEY events for modifier keys and filter GUI grab combos from
     // text input.
     uint16_t modifier_state = 0;
+    // Live pressed-key bitmap for EVIOCGKEY (KEY_MAX 0x2ff → 96 bytes).
+    // set on EV_KEY press/repeat, cleared on release.
+    static constexpr size_t KEY_BMP = 0x2ff / 8 + 1;
+    uint8_t key_bmp[KEY_BMP] = {};
     // Counter for SYN_DROPPED rate-limiting.
     uint32_t syn_dropped_counter = 0;
     FrostInputImpl()
@@ -460,6 +464,11 @@ struct FrostInputImpl {
         last_code = code;
         last_value = value;
         last_valid = true;
+        // track live pressed state for EVIOCGKEY (press/repeat=set).
+        if (type == linux_input::EV_KEY && code < KEY_BMP * 8u) {
+            if (value) key_bmp[code / 8u] |= static_cast<uint8_t>(1u << (code % 8u));
+            else key_bmp[code / 8u] &= static_cast<uint8_t>(~(1u << (code % 8u)));
+        }
         input_event_& ev = event_queue[event_tail];
         ev.tv_sec  = static_cast<int64_t>(secs.count());
         ev.tv_usec = static_cast<int64_t>(usecs.count());
@@ -735,6 +744,11 @@ bool FrostInput::active() const {
     return impl_ && impl_->sdl_active;
 }
 bool FrostInput::poll() {
+    // NOTE: this drains the process-global SDL event queue, as does
+    // AndroidSurfaceManager::pump_host_events. the two managers are never
+    // live together (linux elf vs android apk), so no demux is needed.
+    // if that ever changes, pump once here and fan out instead of adding
+    // a second SDL_PollEvent loop (second poller steals the first's events).
     if (!impl_ || !impl_->sdl_active) return true;
 #if defined(BIFROST_USE_SDL2)
     SDL_Event ev;
@@ -1008,6 +1022,13 @@ size_t FrostInput::queue_size() const {
 size_t FrostInput::js_queue_size() const {
     if (!impl_) return 0;
     return impl_->js_queue_size();
+}
+void FrostInput::key_bitmap(uint8_t* out, size_t n) const {
+    if (!impl_ || !out || n == 0) return;
+    std::lock_guard<std::mutex> g(impl_->mu);
+    size_t copy = n < FrostInputImpl::KEY_BMP ? n : FrostInputImpl::KEY_BMP;
+    std::memcpy(out, impl_->key_bmp, copy);
+    if (n > copy) std::memset(out + copy, 0, n - copy);
 }
 bool FrostInput::has_game_controller() const {
     if (!impl_) return false;

@@ -973,11 +973,18 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   `VK_CREATE_PIPELINE_LAYOUT`, `VK_CREATE_DESCRIPTOR_POOL`,
   `VK_CREATE_DESCRIPTOR_SET_LAYOUT` (+ pImmutableSamplers),
   `VK_ALLOC_DESCRIPTOR_SETS` (OUT set-handle array), and
-  `VK_UPDATE_DESCRIPTOR_SETS`. DescriptorType classification in the
-  update arm: image infos = types 1/2/3/10, texel buffer views = 4/5,
-  buffer infos = 6/7/8/9 — do NOT use a 1..6 range for images (6 is
-  UNIFORM_BUFFER; the misroute nulled the info pointers and segfaulted
-  RADV on the first UBO write). ALL H-struct layouts were verified
+  `VK_UPDATE_DESCRIPTOR_SETS`. the old hand-rolled update arm classified by
+  DescriptorType (image infos = types 1/2/3/10, texel views = 4/5, buffer
+  infos = 6/7/8/9 — the 1..6 range misroute nulled UBO pointers and
+  segfaulted RADV) is GONE: vkUpdateDescriptorSets now goes through the
+  generated VK_CMD_DEEP path, which stages pImageInfo/pBufferInfo/
+  pTexelBufferView unconditionally (bounded by descriptorCount). unused
+  pointers stage as zeros and the driver ignores them per spec, so no
+  per-type gating is needed. do NOT re-add manual gating. present
+  (VK_PRESENT) stays hand-rolled: fail closed on swapchainCount/
+  waitSemaphoreCount > 16 (VK_ERROR_OUT_OF_HOST_MEMORY, never call the
+  host with guest pointers) and stage known pNext nodes via
+  vk_deep_fill_chain (unknown stypes truncate with diagnostic). ALL H-struct layouts were verified
   byte-for-byte against the vendored vulkan_core.h via a static_assert
   checker (offsetof+sizeof per field) before being added — keep that
   discipline for any new struct. Two latent table bugs fixed:
