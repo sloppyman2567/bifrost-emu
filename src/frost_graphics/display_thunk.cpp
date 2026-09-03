@@ -85,6 +85,12 @@ struct DisplayThunkImpl {
     std::unordered_map<uint64_t, VkMapped> vk_maps_;    // memory handle → map
     std::unordered_map<uint64_t, uint64_t> vk_allocs_;  // handle → alloc size
     std::mutex vk_maps_mu;
+    // Cached host vkUnmapMemory (resolved in register_known_symbols_ from
+    // the VK family handle). The map/unmap/free arms need it directly:
+    // calling the MAP arm's own entry.host_fn as a 2-arg unmap invokes
+    // vkMapMemory with garbage regs (ppData write through a garbage
+    // pointer). Written once before initialized=true; never rewritten.
+    void* vk_unmap_host_ = nullptr;
     // Push all bounces back into the host mappings (before submits/presents).
     void vk_sync_push_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
@@ -1997,6 +2003,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     if (entry.spec && entry.spec->policy == thunk::Policy::VK_FREE_MEMORY) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
         const uint64_t mem_handle = cpu.regs[1];
+        bool was_mapped = false;
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
             auto it = impl_->vk_maps_.find(mem_handle);
@@ -2007,9 +2014,15 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 mem->untrack_allocation(it->second.bounce,
                                         (it->second.map_size + 0xFFFu) & ~0xFFFull);
                 impl_->vk_maps_.erase(it);
+                was_mapped = true;
             }
             impl_->vk_allocs_.erase(mem_handle);
         }
+        // Spec requires unmap-before-free; do the host unmap first when a
+        // live mapping existed (else the host mapping leaks / driver UB).
+        if (was_mapped && impl_->vk_unmap_host_)
+            reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                impl_->vk_unmap_host_)(cpu.regs[0], mem_handle);
         reinterpret_cast<uint64_t (*)(uint64_t, uint64_t, const void*)>(entry.host_fn)(
             cpu.regs[0], mem_handle, nullptr);
         cpu.regs[0] = 0;
@@ -2084,8 +2097,12 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                     std::memcpy(reinterpret_cast<void*>(s_host), src, s_size);
                 mem->untrack_allocation(s_bounce,
                                         (s_size + 0xFFFu) & ~0xFFFull);
-                reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(
-                    cpu.regs[0], mem_handle);
+                // Host-unmap via the cached vkUnmapMemory — NEVER the MAP
+                // arm's entry.host_fn (that's vkMapMemory; calling it with
+                // 2 args feeds garbage offset/size/flags/ppData).
+                if (impl_->vk_unmap_host_)
+                    reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                        impl_->vk_unmap_host_)(cpu.regs[0], mem_handle);
             }
         }
         if (size == 0 || size > (1ull << 30)) {  // sanity cap: 1 GiB per map
@@ -2104,11 +2121,24 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         uint64_t bounce = mem->mmap_alloc(size);
         if (bounce == 0 || bounce == ~0ull) {
             // No window space — unmap on the host and report failure.
-            reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(entry.host_fn)(cpu.regs[0], mem_handle);
+            if (impl_->vk_unmap_host_)
+                reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                    impl_->vk_unmap_host_)(cpu.regs[0], mem_handle);
             cpu.regs[0] = 0xFFFFFFFBu;
             return true;
         }
         uint8_t* dst = mem->guest_to_host_ptr(bounce);
+        if (!dst) {
+            // Window alloc succeeded above the direct window (exhausted
+            // 4 GiB): no guest-derefable address — release and fail like
+            // a failed alloc instead of memcpy through null.
+            mem->untrack_allocation(bounce, (size + 0xFFFu) & ~0xFFFull);
+            if (impl_->vk_unmap_host_)
+                reinterpret_cast<uint64_t (*)(uint64_t, uint64_t)>(
+                    impl_->vk_unmap_host_)(cpu.regs[0], mem_handle);
+            cpu.regs[0] = 0xFFFFFFFBu;
+            return true;
+        }
         std::memcpy(dst, host_ptr, size);  // seed: host → bounce
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
@@ -2175,7 +2205,9 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
                 if (off < m.map_offset) continue;
                 off -= m.map_offset;
-                if (off >= m.map_size || off + sz > m.map_size) continue;
+                // No `off + sz` here: the sum wraps in u64 and a crafted
+                // range would pass. off < map_size is established above.
+                if (off >= m.map_size || sz > m.map_size - off) continue;
                 uint8_t* src = mem->guest_to_host_ptr(m.bounce + off);
                 if (src) std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
             }
@@ -2215,7 +2247,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 if (sz == ~0ull) sz = m.map_size - (off - m.map_offset);
                 if (off < m.map_offset) continue;
                 off -= m.map_offset;
-                if (off >= m.map_size || off + sz > m.map_size) continue;
+                // Same no-wrap form as the flush arm above.
+                if (off >= m.map_size || sz > m.map_size - off) continue;
                 uint8_t* dst = mem->guest_to_host_ptr(m.bounce + off);
                 if (dst) std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);
             }
@@ -3545,6 +3578,10 @@ void DisplayThunk::register_known_symbols_() {
                                pointer_args, n_stack, n_float, flags, &spec);
         }
     }
+    // Cache the host vkUnmapMemory for the map/unmap/free arms (they must
+    // never call the MAP arm's entry.host_fn as a 2-arg unmap).
+    if (kFamilies[0].handle)
+        impl_->vk_unmap_host_ = dlsym(kFamilies[0].handle, "vkUnmapMemory");
 }
 
 } // namespace arm64emu
