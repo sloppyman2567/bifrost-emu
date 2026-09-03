@@ -203,6 +203,13 @@ struct GraphicThunkImpl {
     std::unordered_map<uint64_t, GlfwWindowCbs> glfw_cbs_;
     // Error callback is global (no window): void(int code, const char* desc).
     uint64_t glfw_error_cb_ = 0;
+    // GL_KHR_debug callback is global (no window): void(source, type, id,
+    // severity, length, message, userParam). Stored, never handed to host
+    // GL (guest address as x86-64 code = SIGSEGV on first driver message).
+    // Delivery is a future milestone; NULL is passed to the host so the
+    // driver stays quiet instead of crashing.
+    uint64_t gl_debug_cb_ = 0;
+    uint64_t gl_debug_param_ = 0;
     // Last delivered host state per window for change detection. The
     // first poll only seeds (no spurious callback at startup), matching
     // GLFW semantics: callbacks fire on real events only.
@@ -1097,6 +1104,23 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         entry.name.c_str(),
                         static_cast<unsigned long long>(window),
                         static_cast<unsigned long long>(guest_cb));
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
+        // ── GL_KHR_debug callback (GL_DEBUG_CB) ────────────────────
+        // glDebugMessageCallback(cb, userParam): the callback is AArch64
+        // code the host GL driver cannot invoke. Store it (delivery is a
+        // future milestone) and do NOT call the host setter — handing a
+        // guest address to host GL crashes on the first driver message.
+        // The host context keeps debug output disabled (the default).
+        if (pol == thunk::Policy::GL_DEBUG_CB) {
+            impl_->gl_debug_cb_ = cpu.regs[0];
+            impl_->gl_debug_param_ = cpu.regs[1];
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] glDebugMessageCallback cb=0x%llx param=0x%llx (stored, host untouched)\n",
+                        static_cast<unsigned long long>(cpu.regs[0]),
+                        static_cast<unsigned long long>(cpu.regs[1]));
             }
             cpu.regs[0] = 0;
             return 0;

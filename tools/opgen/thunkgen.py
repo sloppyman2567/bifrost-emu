@@ -81,7 +81,8 @@ VALID_POLICY = ('-', 'SHADER_SOURCE', 'QUERY', 'GET_PROC', 'GET_STRING',
                 'VK_ALLOC_MEMORY', 'VK_FREE_MEMORY', 'VK_MAP_MEMORY',
                 'VK_UNMAP_MEMORY', 'VK_FLUSH_MAPPED', 'VK_INVALIDATE_MAPPED',
                 'VK_SYNC_PULL',
-                'ANDROID_WINDOW', 'VK_CMD_DEEP', 'VK_CMD_DEEP_OUT')
+                'ANDROID_WINDOW', 'VK_CMD_DEEP', 'VK_CMD_DEEP_OUT',
+                'GL_DEBUG_CB')
 VALID_SIZE = ('-', 'arg1', 'arg2', 'arg6', 'TEX2D', 'TEXSUB', 'PITCH_H',
               'READPIXELS', 'QUEUEAUDIO', 'X_DRAWSTR', 'X_SETWMPROTO',
               'TEX3D', 'VK_REGIONS', 'DRAWPIXELS', 'BITMAP', 'TEXIMAGE1D',

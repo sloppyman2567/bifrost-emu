@@ -383,6 +383,10 @@ INTEGRATION_TESTS=(
     # texture, and the nested-string glTransformFeedbackVaryings arm.
     # Needs DISPLAY + host GL >= 3.3. Exit 77 = skip when unavailable.
     "sdl_gl_modern|ctest_real/test_sdl_gl_modern.elf||40|ALL PASS"
+    # KHR_debug callback interception: the guest callback is stored, NULL
+    # goes to the host (a guest address handed to host GL would crash on
+    # the first driver message). Needs DISPLAY + host GL. Exit 77 = skip.
+    "sdl_gl_debugcb|ctest_real/test_sdl_gl_debugcb.elf||30|ALL PASS"
     # Vulkan host-path smoke test (1.5.3): dlopen(libvulkan.so.1) via the
     # internal dlopen syscall → vkGetInstanceProcAddr → create instance
     # (deep-marshalled VkApplicationInfo + extension string array) →

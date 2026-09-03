@@ -53,6 +53,11 @@
 #                            so the PHYSICAL framebuffer is exactly the
 #                            size the guest requested (1280x720 stays
 #                            1280x720 instead of 2560x1440 on 2x displays)
+#             GL_DEBUG_CB  glDebugMessageCallback(cb, user): store the
+#                            guest cb + param, pass NULL to the host (a
+#                            guest address handed to host GL would crash
+#                            on first driver message). delivery is a
+#                            future milestone, like vkMapMemory was.
 # SIZE    : bounce-size policy for the z argument(s):
 #             -       default 64 KiB
 #             arg1    size = guest arg1 (glBufferData: data is arg2)
@@ -1771,7 +1776,7 @@ glCopyTexImage2D           GLES   iiiiiiii      -     -              -
 glCopyTexSubImage2D        GLES   iiiiiiii      -     -              -     
 glCopyTexSubImage3D        GLES   iiiiiiiii     -     -              -     
 glCreateShaderProgramv     GLES   iip           -     -              -     
-glDebugMessageCallback     GLES   ip            -     -              -     
+glDebugMessageCallback     GLES   ip            -     GL_DEBUG_CB    -     
 glDebugMessageControl      GLES   iiiipi        -     -              -     
 glDebugMessageInsert       GLES   iiiiip        -     -              -     
 glDeleteProgramPipelines   GLES   ip            -     -              -     

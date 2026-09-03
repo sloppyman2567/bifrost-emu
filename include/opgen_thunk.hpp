@@ -87,6 +87,7 @@ enum class Policy : uint8_t {
     SDL_STUB0 = 45,
     SDL_EVENT_FILTER = 46,
     SDLVK_EXT = 47,
+    GL_DEBUG_CB = 48,
 };
 
 enum class RetKind : uint8_t {
@@ -1718,7 +1719,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::GLES, "glCopyTexSubImage2D", "iiiiiiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glCopyTexSubImage3D", "iiiiiiiii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glCreateShaderProgramv", "iip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
-    {LibFamily::GLES, "glDebugMessageCallback", "ip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
+    {LibFamily::GLES, "glDebugMessageCallback", "ip", RetKind::PLAIN, Policy::GL_DEBUG_CB, SizeKind::NONE, false},
     {LibFamily::GLES, "glDebugMessageControl", "iiiipi", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glDebugMessageInsert", "iiiiip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::GLES, "glDeleteProgramPipelines", "ip", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
