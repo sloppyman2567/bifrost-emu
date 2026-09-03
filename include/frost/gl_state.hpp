@@ -208,11 +208,13 @@ public:
     void set_program(uint32_t program);
     void set_array_buffer_binding(uint32_t buffer);
     void set_element_array_buffer_binding(uint32_t buffer);
+    void set_draw_indirect_buffer_binding(uint32_t buffer);
     // 1.5.4-alpha: used to decide whether the final arg of
     // glVertexAttribPointer / glDrawElements is a VBO byte offset (buffer
     // bound) or a real guest pointer (client-side vertex/index arrays).
     uint32_t array_buffer_binding() const;
     uint32_t element_array_buffer_binding() const;
+    uint32_t draw_indirect_buffer_binding() const;
     // 2026-08: general target→buffer binding map (glMapBuffer/glUnmapBuffer
     // need to know which buffer is bound to an arbitrary target, e.g.
     // GL_COPY_READ_BUFFER / GL_PIXEL_UNPACK_BUFFER / GL_UNIFORM_BUFFER).
@@ -310,6 +312,7 @@ private:
     uint32_t current_program_ = 0;
     uint32_t array_buffer_binding_ = 0;
     uint32_t element_array_buffer_binding_ = 0;
+    uint32_t draw_indirect_buffer_binding_ = 0;
     // General target→buffer binding map (any target, not just the two the
     // legacy accessors cover). Populated by the glBindBuffer/Base/Range
     // handlers; consulted by the glMapBuffer/glUnmapBuffer bounce logic.

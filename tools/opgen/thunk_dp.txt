@@ -36,6 +36,13 @@
 #                            bound (array buffer), else leave as byte offset
 #             EL_PTR         glDrawElements: translate arg3 iff no element
 #                            array buffer bound, else leave as byte offset
+#             EL_PTR_ARRAY   glMultiDrawElements(*BaseVertex): bounce the
+#                            outer count/indices arrays; each inner indices
+#                            element is a byte offset iff an element array
+#                            buffer is bound, else a translated client ptr
+#             INDIRECT_PTR   glDraw*Indirect: the indirect struct arg is a
+#                            byte offset iff DRAW_INDIRECT_BUFFER is bound,
+#                            else a translated client struct
 #             PRESENT        frame-present/swap: BIFROST_FRAME_TRACE counter
 #             ERROR_CB       glfwSetErrorCallback (global, single arg): store
 #                            the guest cb; deliver after GLFW_POLL with dedup
@@ -114,7 +121,9 @@ glVertexPointer           GL     iiip          -     VA_PTR         -   # arg3: 
 glColorPointer            GL     iiip          -     VA_PTR         -   # arg3: offset (VBO) or ptr
 glTexCoordPointer         GL     iiip          -     VA_PTR         -   # arg1: offset (VBO) or ptr
 glDrawArrays               GL     iii           -     -              -       SYNC
+glDrawArraysIndirect       GL     ip            -     INDIRECT_PTR   -       SYNC   # arg1: indirect struct (offset or ptr)
 glDrawElements             GL     iiii          -     EL_PTR         -       SYNC   # arg3: indices (offset or ptr)
+glDrawElementsIndirect     GL     iip           -     INDIRECT_PTR   -       SYNC   # arg2: indirect struct (offset or ptr)
 glGetString                GL     i             str   GET_STRING     -     
 glGetIntegerv             GL     ip            -     QUERY          -   # arg1: GLint *params
 glGenLists                GL     i             -     -              -
@@ -1303,9 +1312,9 @@ glCopyTexSubImage3D        GL     iiiiiiiii     -     -              -
 glDeleteSync               GL     i             -     -              -     
 glDepthRange               GL     dd            -     -              -     
 glDisablei                 GL     ii            -     -              -     
-glDrawElementsInstancedBaseVertex GL     iiipii        -     -              -     
+glDrawElementsInstancedBaseVertex GL     iiiiii        -     EL_PTR         -       SYNC
 glDrawPixels               GL     iiiiz         -     -              DRAWPIXELS
-glDrawRangeElementsBaseVertex GL     iiiiipi       -     -              -     
+glDrawRangeElementsBaseVertex GL     iiiiiii       -     EL_PTR         -       SYNC
 glEdgeFlag                 GL     i             -     -              -     
 glEdgeFlagPointer          GL     ip            -     -              -     
 glEdgeFlagv                GL     p             -     -              -     
@@ -1439,8 +1448,8 @@ glMultMatrixd              GL     p             -     -              -
 glMultTransposeMatrixd     GL     p             -     -              -     
 glMultTransposeMatrixf     GL     p             -     -              -     
 glMultiDrawArrays          GL     ippi          -     -              -     
-glMultiDrawElements        GL     ipipi         -     -              -     
-glMultiDrawElementsBaseVertex GL     ipipip        -     -              -     
+glMultiDrawElements        GL     ipipi         -     EL_PTR_ARRAY   -       SYNC
+glMultiDrawElementsBaseVertex GL     ipipip        -     EL_PTR_ARRAY   -       SYNC
 glMultiTexCoord1dv         GL     ip            -     -              -     
 glMultiTexCoord1f          GL     ii            -     -              -     
 glMultiTexCoord1fv         GL     ip            -     -              -     
@@ -1789,15 +1798,15 @@ glDeleteTransformFeedbacks GLES   ip            -     -              -
 glDisablei                 GLES   ii            -     -              -     
 glDispatchCompute          GLES   iii           -     -              -     
 glDispatchComputeIndirect  GLES   i             -     -              -     
-glDrawArraysIndirect       GLES   ip            -     -              -     
+glDrawArraysIndirect       GLES   ip            -     INDIRECT_PTR   -       SYNC
 glDrawArraysInstanced      GLES   iiii          -     -              -     
 glDrawBuffers              GLES   ip            -     -              -     
-glDrawElementsBaseVertex   GLES   iiipi         -     -              -     
-glDrawElementsIndirect     GLES   iip           -     -              -     
-glDrawElementsInstanced    GLES   iiipi         -     -              -     
-glDrawElementsInstancedBaseVertex GLES   iiipii        -     -              -     
-glDrawRangeElements        GLES   iiiiip        -     -              -     
-glDrawRangeElementsBaseVertex GLES   iiiiipi       -     -              -     
+glDrawElementsBaseVertex   GLES   iiiii         -     EL_PTR         -       SYNC
+glDrawElementsIndirect     GLES   iip           -     INDIRECT_PTR   -       SYNC
+glDrawElementsInstanced    GLES   iiiii         -     EL_PTR         -       SYNC
+glDrawElementsInstancedBaseVertex GLES   iiiiii        -     EL_PTR         -       SYNC
+glDrawRangeElements        GLES   iiiiii        -     EL_PTR         -       SYNC
+glDrawRangeElementsBaseVertex GLES   iiiiiii       -     EL_PTR         -       SYNC
 glEnablei                  GLES   ii            -     -              -     
 glEndQuery                 GLES   i             -     -              -     
 glEndTransformFeedback     GLES   -             -     -              -     

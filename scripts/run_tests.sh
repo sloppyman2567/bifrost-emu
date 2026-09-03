@@ -346,6 +346,14 @@ INTEGRATION_TESTS=(
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
+    # GLES draw-row EBO offsets via GraphicThunk (needs DISPLAY + ES 3.x).
+    # EBO-bound nonzero-offset draw through the GLES EL_PTR rows with a
+    # readback pin; control offset-0 draw isolates ES setup failures.
+    # Exit 77 = skip when SDL/ES3 unavailable.
+    "sdl_gles_ebo|ctest_real/test_sdl_gles_ebo.elf||30|ALL PASS"
+    # VAO + EBO + multidraw + indirect draws with readback pins
+    # (needs DISPLAY + host GL). Exit 77 = skip when SDL/GL unavailable.
+    "sdl_gl_vao|ctest_real/test_sdl_gl_vao.elf||60|ALL PASS"
     # glMapBuffer/glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange
     # bounce (2026-08): verifies the guest gets a guest-window bounce that
     # seeds from the host buffer (GL_MAP_READ_BIT), writebacks on unmap

@@ -41,6 +41,7 @@ void GLStateTracker::reset() {
     current_program_ = 0;
     array_buffer_binding_ = 0;
     element_array_buffer_binding_ = 0;
+    draw_indirect_buffer_binding_ = 0;
     texture_bindings_.clear();
     pixel_store_unpack_alignment_ = 4;
     pixel_store_pack_alignment_ = 4;
@@ -199,6 +200,11 @@ void GLStateTracker::set_element_array_buffer_binding(uint32_t buffer) {
     element_array_buffer_binding_ = buffer;
 }
 
+void GLStateTracker::set_draw_indirect_buffer_binding(uint32_t buffer) {
+    std::lock_guard<std::mutex> g(mu_);
+    draw_indirect_buffer_binding_ = buffer;
+}
+
 uint32_t GLStateTracker::array_buffer_binding() const {
     std::lock_guard<std::mutex> g(mu_);
     return array_buffer_binding_;
@@ -207,6 +213,11 @@ uint32_t GLStateTracker::array_buffer_binding() const {
 uint32_t GLStateTracker::element_array_buffer_binding() const {
     std::lock_guard<std::mutex> g(mu_);
     return element_array_buffer_binding_;
+}
+
+uint32_t GLStateTracker::draw_indirect_buffer_binding() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return draw_indirect_buffer_binding_;
 }
 
 void GLStateTracker::set_buffer_binding(uint32_t target, uint32_t buffer) {
@@ -734,6 +745,8 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
             set_array_buffer_binding(buffer);
         } else if (target == 0x8893) { // GL_ELEMENT_ARRAY_BUFFER
             set_element_array_buffer_binding(buffer);
+        } else if (target == 0x8F3F) { // GL_DRAW_INDIRECT_BUFFER
+            set_draw_indirect_buffer_binding(buffer);
         }
         return;
     }

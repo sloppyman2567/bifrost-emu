@@ -2026,13 +2026,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // VA_PTR/EL_PTR symbols own their pointer args (the binding-aware block
     // below translates them ONLY when no VBO is bound — with a buffer bound
     // the arg is a byte offset into that buffer and must pass through raw).
-    // The generic loop must NOT touch them: translating offset 4/12 as guest
-    // addresses turned them into host alias pointers that host GL then
-    // reinterpreted as ~2^47 byte offsets (neverball's menu GUI drew
-    // nothing). Also prevents a double translation when binding==0.
+    // EL_PTR_ARRAY/INDIRECT_PTR own theirs the same way (nested/indirect
+    // arms below). The generic loop must NOT touch them: translating offset
+    // 4/12 as guest addresses turned them into host alias pointers that
+    // host GL then reinterpreted as ~2^47 byte offsets (neverball's menu
+    // GUI drew nothing). Also prevents a double translation when
+    // binding==0.
     const bool va_ptr_owned =
         entry.spec && (entry.spec->policy == thunk::Policy::VA_PTR ||
-                       entry.spec->policy == thunk::Policy::EL_PTR);
+                       entry.spec->policy == thunk::Policy::EL_PTR ||
+                       entry.spec->policy == thunk::Policy::EL_PTR_ARRAY ||
+                       entry.spec->policy == thunk::Policy::INDIRECT_PTR);
     if (entry.pointer_args && impl_->mem && !va_ptr_owned) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {
@@ -2159,6 +2163,130 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 translate_ptr(args[pi], pi, &bounce_bufs[pi],
                               &bounce_guest[pi], &bounce_wb[pi]);
             }
+        } else if (entry.spec->policy == thunk::Policy::EL_PTR_ARRAY) {
+            // glMultiDrawElements(mode, count[], type, indices[], primcount)
+            // [+ basevertex[]]: bounce the outer arrays; each inner
+            // indices element is a byte offset iff an EBO is bound, else
+            // a translated client pointer sized by count[i]*index_size.
+            // Input-only: no writeback of the index data.
+            do {
+                uint64_t n64 = args[4];
+                if (n64 == 0 || n64 > 256 || !impl_->mem) break;
+                uint32_t n = static_cast<uint32_t>(n64);
+                uint32_t isz = 1;
+                switch (static_cast<uint32_t>(args[2])) {
+                case 0x1401: isz = 1; break;  // UNSIGNED_BYTE
+                case 0x1403: isz = 2; break;  // UNSIGNED_SHORT
+                case 0x1405: isz = 4; break;  // UNSIGNED_INT
+                default: break;
+                }
+                bool ebo = impl_->gl_state_tracker_->
+                    element_array_buffer_binding() != 0;
+                // BaseVertex form has a 6th arg: int32 basevertex array.
+                bool has_bv = entry.spec->args &&
+                    strlen(entry.spec->args) == 6;
+                // Frame-lived staging: the generic emission below reads
+                // args[] synchronously, so thread-locals outlive the call.
+                // (Vector move transfers element buffers without
+                // reallocating, so inner data pointers stay stable.)
+                static thread_local std::vector<uint8_t> live_counts;
+                static thread_local std::vector<uint64_t> live_outer;
+                static thread_local std::vector<std::vector<uint8_t>> live_in;
+                static thread_local std::vector<uint8_t> live_bv;
+                // Outer count array (int32[], always a guest pointer).
+                live_counts.resize((size_t)n * 4);
+                {
+                    uint8_t* hp = impl_->mem->guest_to_host_ptr(args[1]);
+                    if (hp) {
+                        memcpy(live_counts.data(), hp, (size_t)n * 4);
+                    } else {
+                        try {
+                            impl_->mem->read(args[1], live_counts.data(),
+                                             (size_t)n * 4);
+                        } catch (...) { break; }
+                    }
+                }
+                const uint32_t* counts =
+                    reinterpret_cast<const uint32_t*>(live_counts.data());
+                // Outer indices array (guest ptr[]).
+                std::vector<uint64_t> guest_ptrs(n, 0);
+                try {
+                    impl_->mem->read(args[3], guest_ptrs.data(),
+                                     (size_t)n * 8);
+                } catch (...) { break; }
+                live_in.clear();
+                live_in.resize(n);
+                live_outer.assign(n, 0);
+                bool ok = true;
+                for (uint32_t i = 0; i < n; i++) {
+                    if (ebo || guest_ptrs[i] == 0) {
+                        live_outer[i] = guest_ptrs[i];  // offset or NULL
+                        continue;
+                    }
+                    uint64_t bytes = (uint64_t)counts[i] * isz;
+                    if (bytes == 0 || bytes > (1ull << 20)) {
+                        live_outer[i] = 0;
+                        continue;
+                    }
+                    uint8_t* hp = impl_->mem->guest_to_host_ptr(
+                        guest_ptrs[i]);
+                    if (hp) {
+                        live_outer[i] = reinterpret_cast<uint64_t>(hp);
+                    } else {
+                        live_in[i].resize((size_t)bytes);
+                        try {
+                            impl_->mem->read(guest_ptrs[i],
+                                             live_in[i].data(),
+                                             (size_t)bytes);
+                        } catch (...) { ok = false; break; }
+                        live_outer[i] = reinterpret_cast<uint64_t>(
+                            live_in[i].data());
+                    }
+                }
+                if (!ok) break;
+                args[1] = reinterpret_cast<uint64_t>(live_counts.data());
+                args[3] = reinterpret_cast<uint64_t>(live_outer.data());
+                if (has_bv) {
+                    // Basevertex int32 array (always a guest pointer).
+                    live_bv.resize((size_t)n * 4);
+                    uint8_t* hp = impl_->mem->guest_to_host_ptr(args[5]);
+                    if (hp) {
+                        memcpy(live_bv.data(), hp, (size_t)n * 4);
+                    } else {
+                        try {
+                            impl_->mem->read(args[5], live_bv.data(),
+                                             (size_t)n * 4);
+                        } catch (...) { break; }
+                    }
+                    args[5] = reinterpret_cast<uint64_t>(live_bv.data());
+                }
+            } while (0);
+        } else if (entry.spec->policy == thunk::Policy::INDIRECT_PTR) {
+            // glDrawArraysIndirect(mode, indirect) / glDrawElementsIndirect
+            // (mode, type, indirect): 16/20-byte command struct. Offset
+            // into DRAW_INDIRECT_BUFFER when bound, else a translated
+            // client struct.
+            do {
+                bool is_elem = entry.name == "glDrawElementsIndirect";
+                int pi = is_elem ? 2 : 1;
+                size_t sz = is_elem ? 20 : 16;
+                if (impl_->gl_state_tracker_->
+                        draw_indirect_buffer_binding() != 0 ||
+                    args[pi] == 0)
+                    break;  // bound offset or NULL: pass through raw
+                uint8_t* hp = impl_->mem ?
+                    impl_->mem->guest_to_host_ptr(args[pi]) : nullptr;
+                if (hp) {
+                    args[pi] = reinterpret_cast<uint64_t>(hp);
+                    break;
+                }
+                static thread_local std::vector<uint8_t> live_ind;
+                live_ind.resize(sz);
+                try {
+                    impl_->mem->read(args[pi], live_ind.data(), sz);
+                } catch (...) { break; }
+                args[pi] = reinterpret_cast<uint64_t>(live_ind.data());
+            } while (0);
         }
     }
 

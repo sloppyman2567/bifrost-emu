@@ -26,6 +26,9 @@
 #define GL_STATIC_DRAW      0x88E4
 #define GL_FLOAT            0x1406
 #define GL_UNSIGNED_INT     0x1405
+#define GL_RGBA             0x1908
+#define GL_UNSIGNED_BYTE    0x1401
+#define GL_DRAW_INDIRECT_BUFFER 0x8F3F
 #define GL_VERTEX_SHADER    0x8B31
 #define GL_FRAGMENT_SHADER  0x8B30
 #define GL_COMPILE_STATUS   0x8B81
@@ -62,6 +65,11 @@ typedef void (*glBufferData_t)(unsigned, long, const void*, unsigned);
 typedef void (*glEnableVertexAttribArray_t)(unsigned);
 typedef void (*glVertexAttribPointer_t)(unsigned, int, unsigned, unsigned char, int, const void*);
 typedef void (*glDrawElements_t)(unsigned, int, unsigned, const void*);
+typedef void (*glDrawElementsBaseVertex_t)(unsigned, int, unsigned, const void*, int);
+typedef void (*glMultiDrawElements_t)(unsigned, const int*, unsigned, const void* const*, int);
+typedef void (*glDrawElementsIndirect_t)(unsigned, unsigned, const void*);
+typedef void (*glGetBufferSubData_t)(unsigned, long, long, void*);
+typedef void (*glReadPixels_t)(int, int, int, int, unsigned, unsigned, void*);
 typedef unsigned (*glCreateShader_t)(unsigned);
 typedef void (*glShaderSource_t)(unsigned, int, const char* const*, const int*);
 typedef void (*glCompileShader_t)(unsigned);
@@ -142,6 +150,14 @@ int main(void) {
         printf("test_sdl_gl_vao: SKIP (libGL thunk unavailable)\n");
         return 77;
     }
+    /* GLES handle: resolves the GLES-family draw rows (registration is
+     * static; needs no host GLES library). */
+    uint64_t hgles = bifrost_dlopen("libGLESv2.so.2", 1);
+    if (!hgles) hgles = bifrost_dlopen("libGLESv2.so", 1);
+    if (!hgles) {
+        printf("test_sdl_gl_vao: SKIP (libGLESv2 thunk unavailable)\n");
+        return 77;
+    }
     printf("test_sdl_gl_vao: dlopen OK sdl=%llx gl=%llx\n",
            (unsigned long long)hsdl, (unsigned long long)hgl);
 
@@ -170,6 +186,12 @@ int main(void) {
     glEnableVertexAttribArray_t glEnableVertexAttribArray;
     glVertexAttribPointer_t glVertexAttribPointer;
     glDrawElements_t glDrawElements;
+    glDrawElementsBaseVertex_t glDrawElementsBaseVertex;
+    glDrawElementsBaseVertex_t glesDrawElementsBaseVertex;
+    glMultiDrawElements_t glMultiDrawElements;
+    glDrawElementsIndirect_t glDrawElementsIndirect;
+    glGetBufferSubData_t glGetBufferSubData;
+    glReadPixels_t glReadPixels;
     glCreateShader_t glCreateShader; glShaderSource_t glShaderSource;
     glCompileShader_t glCompileShader; glGetShaderiv_t glGetShaderiv;
     glGetShaderInfoLog_t glGetShaderInfoLog;
@@ -191,6 +213,18 @@ int main(void) {
     LOAD(hgl, glEnableVertexAttribArray_t, glEnableVertexAttribArray);
     LOAD(hgl, glVertexAttribPointer_t, glVertexAttribPointer);
     LOAD(hgl, glDrawElements_t, glDrawElements);
+    LOAD(hgl, glDrawElementsBaseVertex_t, glDrawElementsBaseVertex);
+    /* LOAD stringifies the var name, so resolve the GLES twin by hand. */
+    glesDrawElementsBaseVertex =
+        (glDrawElementsBaseVertex_t)(uintptr_t)bifrost_dlsym(hgles, "glDrawElementsBaseVertex");
+    if (!glesDrawElementsBaseVertex) {
+        printf("FAIL: dlsym glDrawElementsBaseVertex (gles)\n");
+        return 1;
+    }
+    LOAD(hgl, glMultiDrawElements_t, glMultiDrawElements);
+    LOAD(hgl, glDrawElementsIndirect_t, glDrawElementsIndirect);
+    LOAD(hgl, glGetBufferSubData_t, glGetBufferSubData);
+    LOAD(hgl, glReadPixels_t, glReadPixels);
     LOAD(hgl, glCreateShader_t, glCreateShader); LOAD(hgl, glShaderSource_t, glShaderSource);
     LOAD(hgl, glCompileShader_t, glCompileShader); LOAD(hgl, glGetShaderiv_t, glGetShaderiv);
     LOAD(hgl, glGetShaderInfoLog_t, glGetShaderInfoLog);
@@ -209,8 +243,9 @@ int main(void) {
                SDL_GetError() ? SDL_GetError() : "?");
         return 77;
     }
-    /* Request a core 3.3 context so VAOs are mandatory. */
-    SDL_GL_SetAttribute(17 /* MAJOR */, 3);
+    /* Request a core 4.3 context: VAOs are mandatory and
+     * glDrawElementsIndirect (4.0+) runs for real. */
+    SDL_GL_SetAttribute(17 /* MAJOR */, 4);
     SDL_GL_SetAttribute(18 /* MINOR */, 3);
     SDL_GL_SetAttribute(0x17 /* CONTEXT_PROFILE_MASK */, 1 /* CORE */);
 
@@ -337,6 +372,99 @@ int main(void) {
         if (glerr != 0) break;
         SDL_GL_SwapWindow(win);
         SDL_Delay(16);
+    }
+
+    /* Bound-EBO nonzero-offset draws with readback. Pixel (400,140) is
+     * covered only by triangle 1 (indices 0,1,2); pixel (200,300) only
+     * by triangle 2 (indices 0,2,3 at index byte offset 12). */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUniform4f(color_loc, 1.0f, 0.0f, 0.0f, 1.0f);
+    /* GLES BaseVertex row (was p-typed): offset 12 must pass through. */
+    glesDrawElementsBaseVertex(GL_TRIANGLES, 3, GL_UNSIGNED_INT,
+                               (const void*)12, 0);
+    glFlush();
+    {
+        unsigned char px[4] = {0, 0, 0, 0};
+        glReadPixels(200, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("test_sdl_gl_vao: gles ebo-offset pixel r=%u g=%u b=%u\n",
+               px[0], px[1], px[2]);
+        if (!(px[0] > 128 && px[1] < 64 && px[2] < 64)) {
+            printf("FAIL: GLES bound-EBO offset-12 triangle missing\n");
+            return 1;
+        }
+    }
+    /* Multidraw: both triangles in one call, offsets {0, 12}. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUniform4f(color_loc, 0.0f, 1.0f, 0.0f, 1.0f);
+    {
+        static const int counts[2] = { 3, 3 };
+        static const void* offs[2] = { (const void*)0, (const void*)12 };
+        glMultiDrawElements(GL_TRIANGLES, counts, GL_UNSIGNED_INT, offs, 2);
+    }
+    glFlush();
+    {
+        unsigned char px[4] = {0, 0, 0, 0};
+        glReadPixels(400, 140, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        if (!(px[1] > 128 && px[0] < 64 && px[2] < 64)) {
+            printf("FAIL: multidraw triangle 1 missing (r=%u g=%u b=%u)\n",
+                   px[0], px[1], px[2]);
+            return 1;
+        }
+        glReadPixels(200, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        if (!(px[1] > 128 && px[0] < 64 && px[2] < 64)) {
+            printf("FAIL: multidraw triangle 2 missing (r=%u g=%u b=%u)\n",
+                   px[0], px[1], px[2]);
+            return 1;
+        }
+        printf("test_sdl_gl_vao: multidraw pixels ok\n");
+    }
+    /* Indirect: two 20-byte command structs; drawing at indirect byte
+     * offset 20 proves the offset passes through raw (a bounced address
+     * would garbage the draw). Second command draws triangle 1. */
+    {
+        static const unsigned cmds[10] = { 3, 1, 3, 0, 0, 3, 1, 0, 0, 0 };
+        unsigned ibo = 0;
+        glGenBuffers(1, &ibo);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, ibo);
+        glBufferData(GL_DRAW_INDIRECT_BUFFER, (long)sizeof(cmds), cmds,
+                     GL_STATIC_DRAW);
+        {
+            unsigned back[10] = {0};
+            glGetBufferSubData(GL_DRAW_INDIRECT_BUFFER, 0, (long)sizeof(back), back);
+            printf("test_sdl_gl_vao: indirect buf %u %u %u %u %u | %u %u %u %u %u\n",
+                   back[0], back[1], back[2], back[3], back[4],
+                   back[5], back[6], back[7], back[8], back[9]);
+        }
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUniform4f(color_loc, 0.0f, 1.0f, 0.0f, 1.0f);
+        glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+                               (const void*)20);
+        glFlush();
+        {
+            unsigned char px0[4] = {0, 0, 0, 0};
+            glReadPixels(400, 140, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px0);
+            printf("test_sdl_gl_vao: indirect off20-only pixel r=%u g=%u b=%u\n",
+                   px0[0], px0[1], px0[2]);
+            if (!(px0[1] > 128 && px0[0] < 64 && px0[2] < 64)) {
+                printf("FAIL: indirect-offset-20 draw missing\n");
+                return 1;
+            }
+        }
+        glUniform4f(color_loc, 1.0f, 0.0f, 0.0f, 1.0f);
+        glDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT,
+                               (const void*)0);
+        glFlush();
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        unsigned char px[4] = {0, 0, 0, 0};
+        glReadPixels(200, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("test_sdl_gl_vao: indirect t2 pixel r=%u g=%u b=%u\n",
+               px[0], px[1], px[2]);
+        if (!(px[0] > 128 && px[1] < 64 && px[2] < 64)) {
+            printf("FAIL: indirect triangle 2 missing\n");
+            return 1;
+        }
+        glDeleteBuffers(1, &ibo);
     }
 
 done:
