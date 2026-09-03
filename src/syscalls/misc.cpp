@@ -1010,7 +1010,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
         //   - non-zero: caller-allocated (normal pthread_create path)
         //   - 0: allocate a new block (rare)
         case 0x1001: {
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[tls-alloc] syscall 0x1001 called: "
                         "a0=0x%llx\n", static_cast<unsigned long long>(a0));
             }
@@ -1162,7 +1162,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             try {
                 mem_.store<uint64_t>(tcb + TCB_DTV_OFFSET, 0);
             } catch (...) {}
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[tls-alloc] TCB @0x%llx (total_tls=%llu, "
                         "lib=%llu, main=%llu, %s)\n",
                         static_cast<unsigned long long>(tcb),
@@ -1183,13 +1183,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             // Read the library path from guest memory.
             std::string path = yggdrasil::Yggdrasil::read_path(mem_, a0);
             if (path.empty()) {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dbg().dynlink_trace) {
                     fprintf(stderr, "[dlopen] empty path\n");
                 }
                 ret_host(0);
                 return 0;
             }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dlopen] path='%s' mode=0x%llx\n",
                         path.c_str(), static_cast<unsigned long long>(a1));
             }
@@ -1201,13 +1201,13 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             uint64_t handle = dl->load_library(cpu, path);
             if (handle == 0) {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dbg().dynlink_trace) {
                     fprintf(stderr, "[dlopen] failed: %s\n", dl->error().c_str());
                 }
                 ret_host(0);
                 return 0;
             }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dlopen] OK handle=0x%llx\n",
                         static_cast<unsigned long long>(handle));
             }
@@ -1223,7 +1223,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!dl) { ret_host(0); return 0; }
             std::string symname = yggdrasil::Yggdrasil::read_path(mem_, a1);
             if (symname.empty()) {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dbg().dynlink_trace) {
                     fprintf(stderr, "[dlsym] empty symbol name\n");
                 }
                 dl->set_last_error("empty symbol name");
@@ -1243,7 +1243,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (addr == 0) {
                 dl->set_last_error("symbol '" + symname + "' not found");
             }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dlsym] '%s' handle=0x%llx → 0x%llx\n",
                         symname.c_str(),
                         static_cast<unsigned long long>(a0),
@@ -1259,7 +1259,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             auto* dl = emu.dyn_linker_.get();
             if (!dl || a0 == 0) { ret_host(static_cast<int64_t>(-1)); return 0; }
             int rc = dl->close_library(cpu, a0);
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dlclose] handle=0x%llx → %d\n",
                         static_cast<unsigned long long>(a0), rc);
             }
@@ -1284,7 +1284,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.store<uint64_t>(a1 + 16, info.dli_sname);
                 mem_.store<uint64_t>(a1 + 24, info.dli_saddr);
             } catch (...) { ret_host(0); return 0; }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dladdr] addr=0x%llx → found=%d fbase=0x%llx sname=0x%llx\n",
                         static_cast<unsigned long long>(a0), found,
                         static_cast<unsigned long long>(info.dli_fbase),
@@ -1304,7 +1304,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!dl || a0 == 0) { ret_host(0); return 0; }
             const LoadedObject* obj = dl->find_object_by_addr(a0);
             uint64_t base = obj ? obj->base_addr : 0;
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[_dl_find_dso] addr=0x%llx → base=0x%llx (%s)\n",
                         static_cast<unsigned long long>(a0),
                         static_cast<unsigned long long>(base),
@@ -1325,7 +1325,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             auto* dl = emu.dyn_linker_.get();
             if (!dl || a0 == 0) { ret_host(0); return 0; }
             int rc = dl->iterate_phdr(cpu, a0, a1);
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[dl_iterate_phdr] callback=0x%llx data=0x%llx → %d\n",
                         static_cast<unsigned long long>(a0),
                         static_cast<unsigned long long>(a1), rc);
@@ -1359,7 +1359,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (!dl || a0 == 0 || a1 == 0) { ret_host(-1); return 0; }
             const LoadedObject* obj = dl->find_object_by_addr(a0);
             if (!obj || obj->eh_frame_hdr_addr == 0) {
-                if (getenv("BIFROST_DYNLINK_TRACE")) {
+                if (dbg().dynlink_trace) {
                     fprintf(stderr, "[_dl_find_object] addr=0x%llx → not found"
                             " (obj=%p)\n",
                             static_cast<unsigned long long>(a0), (void*)obj);
@@ -1376,7 +1376,7 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 mem_.store<uint64_t>(a1 + 32, obj->eh_frame_hdr_addr);
                 mem_.store<uint64_t>(a1 + 40, sframe);
             } catch (...) { ret_host(-1); return 0; }
-            if (getenv("BIFROST_DYNLINK_TRACE")) {
+            if (dbg().dynlink_trace) {
                 fprintf(stderr, "[_dl_find_object] addr=0x%llx → %s eh_frame=0x%llx"
                         " start=0x%llx end=0x%llx\n",
                         static_cast<unsigned long long>(a0), obj->name.c_str(),

@@ -4250,16 +4250,31 @@ int DynamicLinker::iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_p
     // since dlerror and dl_iterate_phdr don't run concurrently.
     uint64_t info_buf = dlerror_buf_ptr_ != 0 ? dlerror_buf_ptr_ : 0;
     if (info_buf == 0) return 0;  // shim not set up
-    int total = 0;
+    // Snapshot first: the guest callback below can dlopen/dlclose, which
+    // mutates objects_ (vector reallocation). Holding a reference across
+    // the call is use-after-free (the dlopen_mt crash: free() inside
+    // iterate_phdr). A stale snapshot entry is harmless by comparison.
+    struct ObjSnap {
+        uint64_t base;
+        std::string name;
+        uint64_t tls_mod_id;
+    };
+    std::vector<ObjSnap> snap;
+    snap.reserve(objects_.size());
     for (const auto& obj : objects_) {
         if (obj.base_addr == 0 && !obj.is_main) continue;
         // Skip the synthetic ld-linux shim — it's not a real object.
         if (obj.name == "<ld-linux-shim>") continue;
+        snap.push_back({obj.base_addr,
+                        obj.name.empty() ? "<main>" : obj.name,
+                        obj.tls_mod_id});
+    }
+    int total = 0;
+    for (const auto& s : snap) {
         // Write the dl_phdr_info struct to guest memory.
         uint64_t name_ptr = info_buf + 64;  // name goes after the struct
         // Write the name string.
-        std::string name = obj.name;
-        if (name.empty()) name = "<main>";
+        const std::string& name = s.name;
         size_t name_len = std::min(name.size(), static_cast<size_t>(255));
         try {
             mem_.write(name_ptr, reinterpret_cast<const uint8_t*>(name.data()), name_len);
@@ -4275,13 +4290,13 @@ int DynamicLinker::iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_p
             //   +40: u64 dlpi_subs              (total unloads)
             //   +48: size_t dlpi_tls_modid      (TLS module ID)
             //   +56: void *dlpi_tls_data        (TLS data pointer)
-            mem_.store<uint64_t>(info_buf + 0,  obj.base_addr);       // dlpi_addr
+            mem_.store<uint64_t>(info_buf + 0,  s.base);             // dlpi_addr
             mem_.store<uint64_t>(info_buf + 8,  name_ptr);             // dlpi_name
             mem_.store<uint64_t>(info_buf + 16, 0);                    // dlpi_phdr
             mem_.store<uint16_t>(info_buf + 24, 0);                    // dlpi_phnum
-            mem_.store<uint64_t>(info_buf + 32, objects_.size());      // dlpi_adds
+            mem_.store<uint64_t>(info_buf + 32, snap.size());          // dlpi_adds
             mem_.store<uint64_t>(info_buf + 40, 0);                    // dlpi_subs
-            mem_.store<uint64_t>(info_buf + 48, obj.tls_mod_id);       // dlpi_tls_modid
+            mem_.store<uint64_t>(info_buf + 48, s.tls_mod_id);         // dlpi_tls_modid
             mem_.store<uint64_t>(info_buf + 56, 0);                    // dlpi_tls_data
         } catch (...) { continue; }
         // Call the guest callback: x0 = info, x1 = sizeof(dl_phdr_info), x2 = data
@@ -4289,7 +4304,7 @@ int DynamicLinker::iterate_phdr(CPU& cpu, uint64_t callback_ptr, uint64_t data_p
         uint64_t rc = guest_call_args_(cpu, callback_ptr, info_buf, 64, data_ptr);
         if (dynlink_trace_enabled()) {
             fprintf(stderr, "[dl_iterate_phdr] callback for '%s' returned %lld\n",
-                    obj.name.c_str(), static_cast<long long>(rc));
+                    s.name.c_str(), static_cast<long long>(rc));
         }
         total += static_cast<int>(rc);
         if (rc != 0) break;  // callback returns non-zero to stop iteration

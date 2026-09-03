@@ -12,6 +12,7 @@
 // The syscall() body lives in src/syscalls/syscalls.cpp. Thread spawn/join
 // lives in src/core/thread_mgr.cpp. Each is a friend of Emulator.
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include "bifrost/version.hpp"
 #include "core/crash_report.h"
 #include "core/memory.h"
@@ -281,6 +282,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 if (dthunk->enabled()) {
                     dthunk->init(mem_);
                     wire_thunk_wl_cb_runner_();
+                    dthunk->set_wl_fd_resolver([this](int gfd) -> int {
+                        auto n = fds_.get(gfd);
+                        if (!n) return -1;
+                        return n->host_fd();
+                    });
                 }
             }
             // Extend the thunk resolver to consult all three thunks.
@@ -513,14 +519,14 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                         steps++;
                     }
                 } catch (const std::exception& e) {
-                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    if (dbg().dynlink_trace) {
                         fprintf(stderr, "[%s] init_array @ 0x%llx threw: %s\n",
                                 CODENAME,
                                 static_cast<unsigned long long>(fn_addr),
                                 e.what());
                     }
                 }
-                if (steps >= INIT_LIMIT && getenv("BIFROST_DYNLINK_TRACE")) {
+                if (steps >= INIT_LIMIT && dbg().dynlink_trace) {
                     fprintf(stderr, "[%s] init_array @ 0x%llx ran >%llu "
                             "instructions; aborting (likely infinite loop)\n",
                             CODENAME,
@@ -585,7 +591,19 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.tpidr_el0 = dyn_linker_->thread_pointer();
                     cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
-                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                // Reusable scratch stack (thread-local, one per guest
+                // thread). The old code mmap'd a fresh 64 KiB stack on
+                // EVERY call and never freed it: dl_iterate_phdr-heavy
+                // guests (dlopen_mt: 8 threads × callbacks × iterations)
+                // marched the heap into OOM, and a 0 return put the
+                // guest stack at 0x10000 (wild writes). Mirrors the
+                // thread-local reuse in the static-ELF guest_call_args_
+                // below.
+                static thread_local uint64_t scratch_stack = 0;
+                if (scratch_stack == 0) {
+                    scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                    if (scratch_stack == 0) return 0;
+                }
                 uint64_t stack_top = scratch_stack + 64 * 1024;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
                 cpu.pc = fn_addr;
@@ -607,7 +625,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     }
                     result = cpu.regs[0];
                 } catch (const std::exception& e) {
-                    if (getenv("BIFROST_DYNLINK_TRACE")) {
+                    if (dbg().dynlink_trace) {
                         fprintf(stderr, "[%s] guest_call @ 0x%llx threw: %s\n",
                                 CODENAME,
                                 static_cast<unsigned long long>(fn_addr),
@@ -615,7 +633,7 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     }
                     result = 0;
                 }
-                if (steps >= CALL_LIMIT && getenv("BIFROST_DYNLINK_TRACE")) {
+                if (steps >= CALL_LIMIT && dbg().dynlink_trace) {
                     fprintf(stderr, "[%s] guest_call @ 0x%llx ran >%llu "
                             "instructions; aborting\n",
                             CODENAME,
@@ -744,6 +762,11 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             if (dthunk->enabled()) {
                 dthunk->init(mem_);
                 wire_thunk_wl_cb_runner_();
+                dthunk->set_wl_fd_resolver([this](int gfd) -> int {
+                    auto n = fds_.get(gfd);
+                    if (!n) return -1;
+                    return n->host_fd();
+                });
             }
         }
         GraphicThunk* gthunk = graphics_.thunk();
@@ -950,7 +973,7 @@ uint64_t Emulator::load_vdso() {
     }
     vdso_base_ = base;
     vdso_size_ = max_vaddr_end;
-    if (getenv("BIFROST_DYNLINK_TRACE")) {
+    if (dbg().dynlink_trace) {
         fprintf(stderr, "[vdso] loaded at 0x%llx (size=%llu, %zu segments)\n",
                 static_cast<unsigned long long>(base),
                 static_cast<unsigned long long>(max_vaddr_end),
@@ -1675,6 +1698,11 @@ void Emulator::ensure_thunk_linker_() {
         if (dt->enabled()) {
             dt->init(mem_);
             wire_thunk_wl_cb_runner_();
+            dt->set_wl_fd_resolver([this](int gfd) -> int {
+                auto n = fds_.get(gfd);
+                if (!n) return -1;
+                return n->host_fd();
+            });
         }
     }
     GraphicThunk* gthunk = graphics_.thunk();
@@ -1722,7 +1750,7 @@ void Emulator::ensure_thunk_linker_() {
         uint64_t scratch=mem_.mmap_alloc_callback_stack(64 * 1024); uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=10'000'000; uint64_t steps=0;
-        try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(getenv("BIFROST_DYNLINK_TRACE")) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
+        try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(dbg().dynlink_trace) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
         restore();
     });
     dyn_linker_->set_guest_call_args([this](CPU& cpu, uint64_t fn, uint64_t a0, uint64_t a1, uint64_t a2) -> uint64_t {
