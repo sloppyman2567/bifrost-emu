@@ -108,6 +108,11 @@ extern "C" void jit_vdso_clock_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu,
 void jit_thunk_svc(arm64emu::Emulator* emu, arm64emu::CPU* cpu) {
     arm64emu::note_syscall(arm64emu::GraphicThunk::SYSCALL_NUMBER);
     uint32_t sym_id = static_cast<uint32_t>(cpu->regs[9]);
+    // last-call record for crash reports (this path bypasses Emulator::syscall).
+    cpu->last_svc_num = arm64emu::GraphicThunk::SYSCALL_NUMBER;
+    cpu->last_svc_pc = cpu->pc;
+    cpu->last_thunk_sym = sym_id;
+    cpu->has_last_svc = true;
     auto* gthunk = emu->graphics().thunk();
     if (gthunk && gthunk->enabled()) {
         int64_t r = gthunk->dispatch(*cpu, sym_id);

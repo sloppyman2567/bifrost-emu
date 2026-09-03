@@ -24,6 +24,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "frost/thunk.hpp"
 #include "syscalls/syscalls.h"
 #include <cerrno>
 #include <cstdio>
@@ -47,6 +48,8 @@ const char* syscall_name(uint64_t num) {
         case 56: return "openat";       case 57: return "close";
         case 61: return "getdents64";   case 62: return "lseek";
         case 63: return "read";         case 64: return "write";
+        case 65: return "readv";        case 66: return "writev";
+        case 67: return "pread64";      case 68: return "pwrite64";
         case 72: return "pselect6";     case 73: return "ppoll";
         case 78: return "readlinkat";   case 79: return "fstatat";
         case 80: return "fstat";        case 93: return "exit";
@@ -75,6 +78,11 @@ const char* syscall_name(uint64_t num) {
 void note_syscall(uint64_t num) {
     if (num < SYSCALL_HIST_MAX)
         g_syscall_hist[num].fetch_add(1, std::memory_order_relaxed);
+}
+const char* syscall_name_for_crash(uint64_t num) {
+    if (num == GraphicThunk::SYSCALL_NUMBER) return "thunk";
+    const char* n = syscall_name(num);
+    return n ? n : "?";
 }
 void dump_syscall_histogram(double dt) {
     // Copy out then sort a top-N by count.
@@ -115,6 +123,13 @@ void dump_syscall_histogram(double dt) {
 void Emulator::syscall(CPU& cpu) {
     uint64_t num = cpu.regs[8];
     note_syscall(num);
+    // last-call record for crash reports (cheap: 3 stores, no atomic).
+    cpu.last_svc_num = num;
+    cpu.last_svc_pc = cpu.pc;
+    cpu.last_thunk_sym = (num == GraphicThunk::SYSCALL_NUMBER)
+                             ? static_cast<uint64_t>(cpu.regs[9] & 0xFFFFFFFFu)
+                             : 0;
+    cpu.has_last_svc = true;
     // C API svc hook: lets embedders observe/intercept every guest syscall
     // BEFORE the vDSO clock fast-path and normal dispatch. Returning 1
     // overrides the result (x0) and skips emulator handling.

@@ -13,6 +13,7 @@
 // lives in src/core/thread_mgr.cpp. Each is a friend of Emulator.
 #include "core/emulator.h"
 #include "bifrost/version.hpp"
+#include "core/crash_report.h"
 #include "core/memory.h"
 #include "frontend/dynamic_linker.h"
 #include "frontend/vdso_bytes.h"      // embedded AArch64 vDSO (1.5.4-alpha)
@@ -1086,6 +1087,20 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     for (auto v : auxv) push(v);
     return sp;
 }
+// resolve pc to module name + offset for crash logs. copies the
+// name out so the pointer stays valid. never throws.
+static void resolve_crash_module(DynamicLinker* dl, uint64_t pc,
+                                 std::string& out_name, uint64_t& out_off) {
+    out_name.clear();
+    out_off = 0;
+    if (!dl) return;
+    try {
+        const LoadedObject* obj = dl->find_object_by_addr(pc);
+        if (!obj) return;
+        out_name = obj->name;
+        out_off = pc - obj->base_addr;
+    } catch (...) {}
+}
 // ── Run loop ──────────────────────────────────────────────────────────
 int Emulator::run() {
     uint64_t count = 0;
@@ -1194,6 +1209,13 @@ int Emulator::run() {
                 count++;
                 continue;
             }
+            {
+                std::string mod;
+                uint64_t off = 0;
+                resolve_crash_module(dyn_linker_.get(), main_cpu_.pc, mod, off);
+                report_crash(main_cpu_, mem_, "unmapped memory", e.addr, nullptr,
+                             mod.empty() ? nullptr : mod.c_str(), off);
+            }
             break;
         } catch (DecodeError& e) {
             // pointer calls and genuinely illegal instructions.
@@ -1231,6 +1253,14 @@ int Emulator::run() {
                 // No handler — default disposition terminates with SIGSEGV
                 // (exit code 128+11=139). deliver_signal already set
                 // cpu.running=false and cpu.exit_code=139.
+                // throw site is quiet by default, so this is the crash line.
+                {
+                    std::string mod;
+                    uint64_t off = 0;
+                    resolve_crash_module(dyn_linker_.get(), fault_pc, mod, off);
+                    report_crash(main_cpu_, mem_, "sigsegv null pc", fault_pc, nullptr,
+                                 mod.empty() ? nullptr : mod.c_str(), off);
+                }
                 break;
             }
             // Genuinely illegal instruction at a valid PC → SIGILL.
@@ -1242,6 +1272,14 @@ int Emulator::run() {
                 continue;
             }
             // No SIGILL handler — terminate with SIGILL (exit 128+4=132).
+            // throw site is quiet by default, so this is the crash line.
+            {
+                std::string mod;
+                uint64_t off = 0;
+                resolve_crash_module(dyn_linker_.get(), fault_pc, mod, off);
+                report_crash(main_cpu_, mem_, "sigill illegal inst", fault_pc, nullptr,
+                             mod.empty() ? nullptr : mod.c_str(), off);
+            }
             break;
         }
         count++;

@@ -11,6 +11,7 @@
 // This file is a friend of Emulator (see core/emulator.h) so it can
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
 #include "core/emulator.h"
+#include "core/crash_report.h"
 #include "core/memory.h"
 #include "core/signal.h"   // exit_robust_list helper
 #include "frontend/dynamic_linker.h"  // allocate_thread_tls (SDL threads)
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <exception>
 #include <mutex>
+#include <string>
 #include <thread>
 namespace arm64emu {
 // Forward-declare the robust-list exit helper (defined in
@@ -90,9 +92,18 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
             }
             if ((count & 0xFFFFF) == 0) {
                 if (!emu->mem().is_mapped(cpu.pc, 4)) {
-                    fprintf(stderr,
-                        "[%s] thread %d: PC ran into unmapped memory at 0x%llx\n",
-                        CODENAME, cpu.tid, static_cast<unsigned long long>(cpu.pc));
+                    std::string mod;
+                    uint64_t off = 0;
+                    try {
+                        if (auto* dl = emu->dyn_linker()) {
+                            if (const LoadedObject* obj = dl->find_object_by_addr(cpu.pc)) {
+                                mod = obj->name;
+                                off = cpu.pc - obj->base_addr;
+                            }
+                        }
+                    } catch (...) {}
+                    report_crash(cpu, emu->mem(), "thread pc unmapped", cpu.pc, nullptr,
+                                 mod.empty() ? nullptr : mod.c_str(), off);
                     break;
                 }
             }
@@ -108,13 +119,23 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
         if (!deliver_signal(*emu, cpu, emu->signals(), signo, si_code, fault_pc)) {
             // No handler installed — default disposition terminates the
             // thread. deliver_signal already set cpu.running=false and
-            // cpu.exit_code=128+signo.
-            fprintf(stderr,
-                "[%s] thread %d: %s at pc=0x%llx (no handler — terminating)\n",
-                CODENAME, cpu.tid,
-                (signo == BIFROST_SIGSEGV) ? "SIGSEGV (NULL deref)"
-                                            : "SIGILL (illegal instruction)",
-                static_cast<unsigned long long>(fault_pc));
+            // cpu.exit_code=128+signo. throw site is quiet by default,
+            // so this is the crash line.
+            std::string mod;
+            uint64_t off = 0;
+            try {
+                if (auto* dl = emu->dyn_linker()) {
+                    if (const LoadedObject* obj = dl->find_object_by_addr(fault_pc)) {
+                        mod = obj->name;
+                        off = fault_pc - obj->base_addr;
+                    }
+                }
+            } catch (...) {}
+            report_crash(cpu, emu->mem(),
+                         (signo == BIFROST_SIGSEGV) ? "thread sigsegv null pc"
+                                                    : "thread sigill illegal inst",
+                         fault_pc, nullptr,
+                         mod.empty() ? nullptr : mod.c_str(), off);
         }
     } catch (const std::exception& e) {
         fprintf(stderr, "[%s] thread %d: exception: %s\n",

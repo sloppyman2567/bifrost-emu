@@ -22,6 +22,9 @@ constexpr int64_t SYSCALL_NOT_HANDLED = INT64_MIN;
 // Used by Emulator::syscall and the JIT thunk fast path so the
 // BIFROST_STATS_PERIOD printout keeps counting thunk calls.
 void note_syscall(uint64_t num);
+// Short name for a syscall number ("write", "mmap", "thunk", "?" when
+// unknown). For crash-report lines. Never returns nullptr.
+const char* syscall_name_for_crash(uint64_t num);
 // ── Syscall helper macros ─────────────────────────────────────────────
 // These reduce the 30+ duplicated `ret_host(static_cast<uint64_t>(static_cast<int64_t>(-X)))`
 // patterns across all syscall files. They make the code more readable and

@@ -192,6 +192,14 @@ public:
     // prompt would do nothing visible — the signal is silently dropped
     // and the shell stays blocked on read().
     bool sigint_ignored = false;
+    // ── Last-syscall record (crash attribution) ──────────────────────
+    // Set on every Emulator::syscall and JIT thunk call. Lets the crash
+    // reporter print what the guest last asked the kernel/thunk for.
+    // Not copied across clone (child starts clean — see below).
+    uint64_t last_svc_num = 0;    // syscall number (0x1000 = graphics thunk)
+    uint64_t last_svc_pc = 0;     // guest pc at the call (return addr under JIT)
+    uint64_t last_thunk_sym = 0;  // thunk symbol id (x9) when num == 0x1000
+    bool     has_last_svc = false;
     struct AltStack {
         uint64_t sp    = 0;     // base address
         uint64_t size  = 0;     // size in bytes
@@ -273,6 +281,11 @@ public:
         rseq_addr = 0;
         rseq_sig = 0;
         sigmask = src.sigmask;
+        // last-svc record: child starts clean (no syscalls yet).
+        last_svc_num = 0;
+        last_svc_pc = 0;
+        last_thunk_sym = 0;
+        has_last_svc = false;
         // sigpending, altstack: reset by caller (per Linux semantics)
         // pending queue: untouched (each CPU has its own, empty at init)
         excl_tag_valid = false;    // fresh exclusive monitor
