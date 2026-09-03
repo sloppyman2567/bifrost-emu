@@ -3429,7 +3429,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   popping the predecessor's leftover stash into the tree (cross-wire
   xchg experiment) — removed; their WIP stash left untouched.
 
-## Session History (2026-09-03) — Wayland input end-to-end (guest fd, no phantom SDL, X11 queue, flush)
+## Session History (2026-09-03 07:27 EDT) — Wayland input end-to-end (guest fd, no phantom SDL, X11 queue, flush)
 
 - Symptom: Wayland window ignored cursor/keyboard, compositor eventually
   flagged it not-responding. Four ranked causes found: (1) get_fd handed
@@ -3456,7 +3456,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   20s. Verified live: motion/button/key count up after clicking the red
   window. Non-interactive part still ALL PASS.
 
-## Session History (2026-09-03) — graphics thunk review round
+## Session History (2026-09-03 07:40 EDT) — graphics thunk review round
 
 - Subagent audit of thunk.cpp/gl_state/graphics/input (17 claims);
   every one re-verified against the code before touching. Fixed (6e57400):
@@ -3479,7 +3479,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Verify: make clean, opgen checks clean, quick suite 211 pass / 0 fail /
   1 env skip; wayland bridge/input, gl_state, sdl triangle all PASS.
 
-## Session History (2026-09-03) — draw-row EBO policies + dispatch races (plan GO)
+## Session History (2026-09-03 08:22 EDT) — draw-row EBO policies + dispatch races (plan GO)
 
 - Draw rows: 7 single-draw rows (2 GL + 5 GLES) spelled indices `p`/`-`
   mistranslated nonzero EBO offsets; now `i`/EL_PTR. Two review
@@ -3507,7 +3507,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   re-validates liveness under mu. New test_thunk_mt race smoke
   (4x500 proc-address stability + string paths, 3/3 clean runs).
 
-## Session History (2026-09-03) — plan GO: EBO policies, races, hardening
+## Session History (2026-09-03 08:26 EDT) — plan GO: EBO policies, races, hardening
 
 - Phase 1/1b all committed (5f755d2, 1bb8a60, c628d7a) + history (8f505c7).
   check-all: 219 pass / 0 fail / 1 env skip (suite grew 211 -> 214 with
