@@ -3677,3 +3677,33 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Verified: clean build, linux 16/16 + android 21/21 green.
 - Still open: pump vCPU shares main-thread TPIDR_EL0 (TLS aliasing) —
   big surgery, parked until a game breaks over it.
+
+## Session History (2026-09-03) — blocking ALSA/Pulse writes (mambo audio)
+
+- The honest short-write change regressed blocking guests: real
+  `snd_pcm_writei`/`pa_simple_write` BLOCK until all bytes are accepted,
+  never report 0-with-data-pending — and the mambo test's `w<=0 → break`
+  loop (correct for blocking ALSA) stopped feeding after the first full
+  ring, cutting the tune to ~0.4 s (test flag still passed, speakers
+  didn't). New `stream_write_wait` helper: bounded 2 s wait (1 ms
+  slices) for full acceptance; `writei` returns frames actually accepted,
+  Pulse returns 0 / `-EAGAIN` only when nothing fit. AAudio keeps honest
+  short-writes (its contract requires guests to handle them).
+- Verified: clean build, linux 16/16 + mambo fully queued and passing.
+
+## Session History (2026-09-03) — Vulkan thunk review fixes
+
+- Reviewed `display_thunk.cpp` (3550 lines + spec table, two-scout pass,
+  every finding hand-verified). Fixed: (1) map/unmap/free arms called
+  the MAP arm's `entry.host_fn` (vkMapMemory) as a 2-arg unmap — garbage
+  offset/size/flags/ppData to the host; host `vkUnmapMemory` is now
+  resolved once at registration and cached. (2) `off + sz > map_size`
+  u64 wrap in flush/invalidate → `sz > map_size - off`. (3) free of a
+  still-mapped allocation now host-unmaps first (spec order). (4) null
+  bounce guard on the map seed path (window-exhausted alloc → clean
+  failure, not memcpy through null).
+- Reported, NOT fixed: present-count fail-open (>16), pNext-chain deep
+  copy, descriptor-type gating gone (AGENTS.md note stale), two minors,
+  stale AGENTS.md Vulkan claims (H-structs, caps, named arms).
+- Verified: clean build, swapchain PASSED under JIT + interp, instance/
+  device + mambo green (pnext skips by design).

@@ -31,6 +31,7 @@
 #include <mutex>
 #include <chrono>
 #include <thread>
+#include <unistd.h>   // usleep (blocking-write backoff)
 namespace arm64emu {
 
 struct AudioThunkImpl {
@@ -520,6 +521,41 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         uint8_t s = pcm_fmt_size(f);
         return s ? s : 2;
     };
+    // Blocking write with bounded wait (ALSA writei / Pulse simple
+    // semantics: the real calls BLOCK until all bytes are accepted, they
+    // never report a short 0-with-data-pending — guests like the mambo
+    // test treat w<=0 as fatal and stop feeding). Returns total BYTES
+    // accepted (short only on budget expiry or dead stream). Frame
+    // aligned: advances by whole accepted frames only.
+    auto stream_write_wait = [&I, &fmt_size](int estream, uint32_t fmt,
+                                             uint32_t rate, uint8_t ch,
+                                             const uint8_t* data,
+                                             size_t bytes) -> size_t {
+        if (!I.engine || !estream || !data || !bytes) return 0;
+        const size_t fsz = (size_t)fmt_size(fmt) * ch;
+        if (!fsz || !rate || !ch) return 0;
+        size_t off = 0;
+        const uint64_t deadline =
+            (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count() +
+            2000000ull;   // 2 s budget: ~20x a 16 KiB chunk's drain time
+        for (;;) {
+            ssize_t fr = I.engine->stream_write(estream, fmt, rate, ch,
+                                                data + off, bytes - off);
+            if (fr < 0) break;   // dead stream — keep partial progress
+            off += (size_t)fr * fsz;
+            if (off >= bytes) break;
+            uint64_t now =
+                (uint64_t)std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            if (now >= deadline) break;
+            usleep(1000);   // let the host mixer drain the ring
+        }
+        return off;
+    };
     // Drain a device's queue-mode backlog into ITS OWN engine stream
     // (real-SDL semantics: each logical device has an independent queue;
     // the engine mixer sums all devices). Backpressure is per-stream —
@@ -965,16 +1001,16 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 if (!it->second.engine_stream)
                     it->second.engine_stream = I.engine->stream_open(
                         it->second.fmt, it->second.rate, it->second.ch);
-                ssize_t fr = it->second.engine_stream
-                    ? I.engine->stream_write(it->second.engine_stream,
-                                             it->second.fmt, it->second.rate,
-                                             it->second.ch, tmp.data(), bytes)
-                    : -1;
-                // Honest frame count: partial acceptance (ring full) is a
-                // short write, not a full success — the guest advances its
-                // pointer by what we report, so claiming `frames` here
-                // skips the dropped remainder (chipmunk playback).
-                rc = (fr >= 0) ? fr : -EIO;
+                // Blocking semantics: wait out a full ring (bounded) so
+                // the guest's pointer advances only past played frames.
+                // A short return here would skip the remainder (chipmunk).
+                size_t acc = it->second.engine_stream
+                    ? stream_write_wait(it->second.engine_stream,
+                                        it->second.fmt, it->second.rate,
+                                        it->second.ch, tmp.data(), bytes)
+                    : 0;
+                rc = it->second.engine_stream
+                    ? (int64_t)(acc / ((size_t)fsz * it->second.ch)) : -EIO;
             } else rc = frames;
         }
         tr(rc); return rc;
@@ -1053,14 +1089,17 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             if (!it->second.engine_stream)
                 it->second.engine_stream = I.engine->stream_open(
                     it->second.fmt, it->second.rate, it->second.ch);
-            ssize_t fr = it->second.engine_stream
-                ? I.engine->stream_write(it->second.engine_stream,
-                                         it->second.fmt, it->second.rate,
-                                         it->second.ch, tmp.data(), bytes)
-                : -1;
-            // Honest result: pa_simple_write returns 0/-errno. Nothing
-            // accepted (ring full) is -EAGAIN (retry), not a silent drop.
-            rc = (fr < 0) ? -EIO : (fr == 0 && bytes != 0 ? -EAGAIN : 0);
+            // Blocking semantics like writei above: pa_simple is a
+            // synchronous API — wait out a full ring (bounded) instead
+            // of dropping. Empty acceptance after the budget is -EAGAIN.
+            size_t acc = it->second.engine_stream
+                ? stream_write_wait(it->second.engine_stream,
+                                    it->second.fmt, it->second.rate,
+                                    it->second.ch, tmp.data(), bytes)
+                : 0;
+            if (!it->second.engine_stream) rc = -EIO;
+            else if (acc == 0 && bytes != 0) rc = -EAGAIN;
+            else rc = 0;
         }
         tr(rc); return rc;
     }
