@@ -89,7 +89,7 @@ ifeq ($(USE_THUNK_GL),1)
     endif
 endif
 
-.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
+.PHONY: all opgen opgen-check opgen-thunk opgen-thunk-check proxy-check wlgen wlgen-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed opgen-fpfixed-check test clean install uninstall lib debug setup setup-tests check-all test-capi test-nb
 
 all: $(TARGET)
 
@@ -126,6 +126,28 @@ $(THUNK_OUTS): $(THUNK_SPECS) $(THUNK_GEN)
 
 opgen-thunk-check:
 	python3 tools/opgen/thunkgen.py --check $(THUNK_SPECS) $(THUNK_OUTS)
+
+# DisplayProxy coverage audit: PROXY-policy spec rows vs hand-written
+# proxy_dispatch_ handlers. Informational only (missing handlers are a
+# demand-driven backlog, not drift) — prints the backlog, always exits 0.
+proxy-check:
+	python3 tools/opgen/proxycheck.py
+
+# Wayland protocol signature table (same pattern as the SIMD_DP decode
+# tables): tools/wayland-xml/wayland.xml (vendored, like the Khronos
+# registries) is the single source of truth for per-message arg
+# signatures consumed by the DisplayProxy marshal work.
+WL_XML := tools/wayland-xml/wayland.xml
+WL_GEN := tools/opgen/wlgen.py
+WL_OUT := include/opgen_wl.hpp
+
+wlgen: $(WL_OUT)
+
+$(WL_OUT): $(WL_XML) $(WL_GEN)
+	python3 tools/opgen/wlgen.py $(WL_XML) $@
+
+wlgen-check:
+	python3 tools/opgen/wlgen.py --check $(WL_XML) $(WL_OUT)
 
 # Audit every VK row in the spec against the vendored Khronos vk.xml:
 # arity + pointer-position agreement (catches shifted-pointer-mask bugs
@@ -379,7 +401,7 @@ setup-tests:
 # `make check-all` is the "everything" target: build, fetch toolchain,
 # cross-compile tests, set up rootfs, and run the full test suite.
 # This is what CI should run for a complete validation pass.
-check-all: setup-tests opgen-check opgen-thunk-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
+check-all: setup-tests opgen-check opgen-thunk-check wlgen-check vkxml-check glxml-check glcoverage-check egl-check opgen-fpfixed-check $(TARGET) test-capi test-nb
 	@./scripts/setup-rootfs.sh 2>/dev/null || true
 	@./scripts/run_tests.sh
 

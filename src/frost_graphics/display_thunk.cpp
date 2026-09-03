@@ -13,6 +13,13 @@
 #include "frost/android_surface.hpp"
 #include "thunk_common.hpp" // shared SymbolEntry (single definition — see header)
 #include "opgen_thunk.hpp"  // 1.5.4-alpha: symbol signature table (single source of truth)
+#include "opgen_wl.hpp"     // wayland protocol message signatures (wlgen)
+// Compile-time guard: the generated message table is parsed content,
+// not dead text. wl_surface.attach (opcode 1, object+2 ints) is the
+// canary — if wlgen ever emits garbage, this fails the build.
+static_assert(arm64emu::wl::kMessageCount > 0, "wlgen emitted no messages");
+static_assert(arm64emu::wl::find(false, "wl_surface", 1u) != nullptr,
+              "wl_surface.attach missing from wlgen table");
 #include "opgen_vkmarshal.hpp" // VK_CMD_DEEP: generated deep-marshal descriptors
 #include "debug_flags.h"    // dbg() — cached trace gates (BIFROST_THUNK_TRACE)
 #include "core/cpu.h"
@@ -22,6 +29,7 @@
 #include <string>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 namespace arm64emu {
 
@@ -3039,6 +3047,17 @@ uint64_t DisplayThunk::proxy_dispatch_(CPU& cpu, const std::string& sym_name) {
         proxy->XkbFreeKeyboard(cpu.regs[0]);
         cpu.regs[0] = 0;
         return 0;
+    }
+    // Unimplemented proxy symbol: one always-on note per symbol (then
+    // silent). Without this, games needing the symbol misbehave with no
+    // hint; `make proxy-check` lists the full backlog. Trace keeps the
+    // per-call line for debugging.
+    {
+        static std::unordered_set<std::string> warned_;
+        if (warned_.insert(sym_name).second) {
+            fprintf(stderr, "[display-thunk] proxy: '%s' unimplemented, returning 0\n",
+                    sym_name.c_str());
+        }
     }
     if (trace) {
         fprintf(stderr, "[display-thunk] proxy_dispatch: unknown symbol '%s'\n",
