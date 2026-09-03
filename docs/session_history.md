@@ -3526,3 +3526,29 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   core profiles (INVALID_OPERATION either way); cross-instance
   host_err_sink routing stays single-emulator; thunk dtor assumes
   quiesced dispatch.
+
+## Session History (2026-09-03) — audio-thunk review + 3 fixes
+
+- Reviewed `src/frost_graphics/audio_thunk.cpp` (1615 lines) at the user's
+  request; both 0x1000 call sites (`src/syscalls/misc.cpp`, `src/jit/
+  jit_interp.cpp:jit_thunk_svc`) already follow the documented audio
+  return-value polarity (write x0 whenever dispatch != -ENOENT) — no bug.
+- Fixed THREE real issues in `audio_thunk.cpp`: (1) pump thread pushed
+  STALE bounce bytes — it read the bounce before firing the guest
+  callback, so every period played pre-callback data (one period late);
+  now snapshots only args under lock and re-reads the bounce after the
+  callback returns (matches the inline path); (2) legacy 1-arg
+  `SDL_PauseAudio` read pause_on from R(1) (garbage) instead of R(0);
+  (3) handle/engine-stream leaks — `snd_pcm_close`, `pa_simple_free`,
+  and `alDeleteSources` never erased their map entries nor closed their
+  engine streams, and `AAudioStreamBuilder_delete` had no arm (builder
+  entry leaked); all four now release properly.
+- Left alone on purpose (documented, NOT fixed): dispatch maps lack
+  locking vs the pump thread / across guest threads (std::map
+  read+write/erase race); S32-labeled-as-S16 with no narrowing + S24
+  size inconsistency between arms; write arms report full success when
+  the ring accepted 0 frames; pump vCPU shares main-thread TPIDR_EL0
+  (TLS aliasing); `#define R(i)` never #undef'd.
+- Verified: clean build, `test_linux_audio` 16/16 and
+  `test_android_audio` 21/21 pass under BOTH JIT and `--no-jit`, plus
+  `audio_test.elf` writes its PCM fine.

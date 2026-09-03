@@ -314,12 +314,14 @@ void AudioThunk::start_pump() {
         while (I.pump_go.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             const uint64_t now_us = now_us_fn();
-            // Snapshot ONE due callback under the pump lock (bounce bytes
-            // are read here too — worst case they hold last period's data
-            // on the very first fire, matching real-device warmup).
-            uint64_t fn = 0, h = 0;
+            // Snapshot ONE due callback under the pump lock. Only the
+            // callback arguments are snapshotted here — the bounce bytes
+            // are read AFTER the guest callback runs (it renders into the
+            // bounce), otherwise every period would push pre-callback
+            // (stale) data.
+            uint64_t fn = 0, h = 0, bounce = 0;
+            size_t cb_bytes_snap = 0;
             int64_t ia[4]; size_t na = 0;
-            std::vector<uint8_t> buf;
             bool aaudio = false;
             int engine_stream = 0;
             uint32_t fmt = PCM_FMT_S16; uint32_t rate = 44100; uint8_t ch = 2;
@@ -344,6 +346,8 @@ void AudioThunk::start_pump() {
                         fn = s.cb_fn; h = hh; aaudio = s.aaudio;
                         fmt = s.fmt; rate = s.rate; ch = s.ch;
                         engine_stream = s.engine_stream;
+                        bounce = s.bounce;
+                        cb_bytes_snap = cb_bytes;
                         if (s.aaudio) {
                             ia[0] = (int64_t)s.stream_arg;
                             ia[1] = (int64_t)s.cb_ud;
@@ -356,10 +360,6 @@ void AudioThunk::start_pump() {
                             ia[2] = (int64_t)cb_bytes;
                             na = 3;
                         }
-                        buf.resize(cb_bytes);
-                        try {
-                            I.mem->read(s.bounce, buf.data(), cb_bytes);
-                        } catch (...) { buf.assign(cb_bytes, 0); }
                         const uint64_t period_us = std::max<uint64_t>(
                             (uint64_t)cb_bytes * 1000000ULL /
                                 ((uint64_t)s.rate * s.ch * s.size),
@@ -377,9 +377,11 @@ void AudioThunk::start_pump() {
             // the guest's own threads are untouched by the mechanics.
             I.runner(*I.pump_cpu, fn, ia, na);
             // The callback may have closed its own device — re-check
-            // before pushing samples into its stream.
+            // before pushing samples into its stream. The bounce is read
+            // HERE (after the callback rendered into it), never before.
             std::lock_guard<std::recursive_mutex> g(I.pump_mu);
-            if (buf.empty() || !engine_stream || !I.engine) continue;
+            if (!bounce || !cb_bytes_snap || !engine_stream || !I.engine)
+                continue;
             bool alive = false;
             auto still = [&](auto& devs) {
                 auto it = devs.find(h);
@@ -387,9 +389,13 @@ void AudioThunk::start_pump() {
             };
             still(I.sdl_devs_);
             if (!alive) still(I.aa_streams_);
-            if (alive)
+            if (!alive) continue;
+            try {
+                std::vector<uint8_t> buf(cb_bytes_snap);
+                I.mem->read(bounce, buf.data(), cb_bytes_snap);
                 I.engine->stream_write(engine_stream, fmt, rate, ch,
                                        buf.data(), buf.size());
+            } catch (...) { /* unmapped bounce — skip period */ }
         }
     });
     if (dbg().thunk_trace) {
@@ -719,9 +725,11 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "SDL_PauseAudioDevice" || name == "SDL_PauseAudio") {
         // "SDL_PauseAudioDevice" has 'D' at index 14 (SDL_PauseAudio
-        // uses the implicit device 1).
-        uint64_t dev = (name[14] == 'D') ? R(0) : 1;
-        uint8_t pause = (uint8_t)R(1);
+        // uses the implicit device 1). The legacy 1-arg form carries
+        // pause_on in R(0); the device form in R(1).
+        const bool is_dev = (name[14] == 'D');
+        uint64_t dev = is_dev ? R(0) : 1;
+        uint8_t pause = (uint8_t)(is_dev ? R(1) : R(0));
         auto it = I.sdl_devs_.find(dev);
         if (it != I.sdl_devs_.end()) {
             it->second.paused = pause != 0;
@@ -936,8 +944,16 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     }
     if (name == "snd_pcm_drain" || name == "snd_pcm_drop" ||
         name == "snd_pcm_pause" || name == "snd_pcm_recover" ||
-        name == "snd_pcm_prepare" || name == "snd_pcm_start" ||
-        name == "snd_pcm_close") {
+        name == "snd_pcm_prepare" || name == "snd_pcm_start") {
+        tr(0); return 0;
+    }
+    if (name == "snd_pcm_close") {
+        auto it = I.alsa_pcms_.find(R(0));
+        if (it != I.alsa_pcms_.end()) {
+            if (it->second.engine_stream && I.engine)
+                I.engine->stream_close(it->second.engine_stream);
+            I.alsa_pcms_.erase(it);
+        }
         tr(0); return 0;
     }
     if (name == "snd_strerror") {
@@ -993,8 +1009,16 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         }
         tr(rc); return rc;
     }
-    if (name == "pa_simple_drain" || name == "pa_simple_flush" ||
-        name == "pa_simple_free") { tr(0); return 0; }
+    if (name == "pa_simple_drain" || name == "pa_simple_flush") { tr(0); return 0; }
+    if (name == "pa_simple_free") {
+        auto it = I.pulse_streams_.find(R(0));
+        if (it != I.pulse_streams_.end()) {
+            if (it->second.engine_stream && I.engine)
+                I.engine->stream_close(it->second.engine_stream);
+            I.pulse_streams_.erase(it);
+        }
+        tr(0); return 0;
+    }
     if (name == "pa_simple_get_latency") { tr(0); return 0; }
     if (name == "pa_strerror") {
         static uint64_t pbuf = 0;
@@ -1087,7 +1111,13 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     if (name == "alDeleteSources") {
         int n = (int)R(0);
         uint64_t ids = R(1);
-        for (int i = 0; i < n && ids; i++) I.al_srcs_.erase(rd32(I, ids + (uint64_t)i * 4));
+        for (int i = 0; i < n && ids; i++) {
+            auto it = I.al_srcs_.find(rd32(I, ids + (uint64_t)i * 4));
+            if (it == I.al_srcs_.end()) continue;
+            if (it->second.engine_stream && I.engine)
+                I.engine->stream_close(it->second.engine_stream);
+            I.al_srcs_.erase(it);
+        }
         tr(0); return 0;
     }
     if (name == "alSourceQueueBuffers") {
@@ -1160,6 +1190,10 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         const uint64_t h = 0xAA000000ull + ++I.next_aa_builder_;
         I.aa_builders_[h] = AudioThunkImpl::AaBuilder{};
         if (out) wr64(I, out, h);
+        tr(0); return 0;
+    }
+    if (name == "AAudioStreamBuilder_delete") {
+        I.aa_builders_.erase(R(0));
         tr(0); return 0;
     }
     if (name == "AAudioStreamBuilder_setFormat") {
