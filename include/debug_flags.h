@@ -42,6 +42,10 @@ struct DebugFlags {
     // ── graphics-thunk traces ────────────────────────────────────────
     bool thunk_trace = false;  // BIFROST_THUNK_TRACE — GL/GLFW/SDL thunk dispatch
     bool frame_trace = false;  // BIFROST_FRAME_TRACE — per-present frame counter
+    // ── crash / decode diagnostics ───────────────────────────────────
+    bool crash_dump = false;  // BIFROST_CRASH_DUMP  — detailed crash report
+    bool dbg_guard  = false;  // BIFROST_DBG_GUARD   — decode-error backtraces
+    bool trace_crash = false;  // BIFROST_TRACE_CRASH — BRK #1000 regs dump
     // ── capture sinks (paths) ────────────────────────────────────────
     std::string xseqlog;  // BIFROST_XSEQLOG — X wire sequence capture file
     std::string xcap;     // BIFROST_XCAP    — X capture output root
@@ -80,6 +84,9 @@ struct DebugFlags {
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");
+        f.crash_dump = all || env("BIFROST_CRASH_DUMP");
+        f.dbg_guard  = all || env("BIFROST_DBG_GUARD");
+        f.trace_crash = all || env("BIFROST_TRACE_CRASH");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
         return f;

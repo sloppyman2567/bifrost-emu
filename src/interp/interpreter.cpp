@@ -9,6 +9,7 @@
 //   2. Add the execute case here
 //   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
 #include "core/emulator.h"
+#include "core/crash_report.h"
 #include "decoder.hpp"
 #include "debug_flags.h"
 #include "frontend/dynamic_linker.h"
@@ -60,27 +61,14 @@ static uint64_t set_sub_flags(CPU& cpu, uint64_t a, uint64_t b, int width,
     }
     return res;
 }
-// Temporary decode-error crash diagnostic (BIFROST_DBG_GUARD=1): dump the
-// guest x29 frame chain so a NULL-function-pointer call (pc=0 DecodeError)
-// can be traced back to its caller.
+// throw-site reporter: quiet by default so guests that handle SIGILL
+// (trap patterns) stay silent. fatal paths log via report_crash in the
+// run-loop/thread no-handler branches. with detail flags on, log here
+// too — this is the only line for deaths that escape through JIT
+// frames (terminate) and never reach the run loop.
 void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst) {
-    if (!getenv("BIFROST_DBG_GUARD")) return;
-    fprintf(stderr, "[DECODE] pc=0x%llx sp=0x%llx x30=0x%llx x29=0x%llx inst=0x%08x\n",
-            (unsigned long long)cpu.pc, (unsigned long long)cpu.sp,
-            (unsigned long long)cpu.regs[30], (unsigned long long)cpu.regs[29],
-            inst);
-    uint64_t fp_v = cpu.regs[29];
-    for (int fr = 0; fr < 24 && fp_v != 0 && fp_v != ~0ULL; fr++) {
-        uint64_t next_fp = 0, lr = 0;
-        try {
-            mem.read(fp_v, &next_fp, 8);
-            mem.read(fp_v + 8, &lr, 8);
-        } catch (...) { break; }
-        fprintf(stderr, "  #%d fp=0x%llx lr=0x%llx\n", fr,
-                (unsigned long long)fp_v, (unsigned long long)lr);
-        if (next_fp <= fp_v && next_fp != 0) break;
-        fp_v = next_fp;
-    }
+    if (!dbg().dbg_guard && !dbg().crash_dump && !dbg().trace_crash) return;
+    report_crash(cpu, mem, "decode error", cpu.pc, &inst);
 }
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;

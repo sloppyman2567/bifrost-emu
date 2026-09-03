@@ -11,7 +11,9 @@
 // (declared in src/core/emulator.h) so it has full access to mem_,
 // brk_verbose_, syscall(), etc.
 #include "core/emulator.h"
+#include "core/crash_report.h"
 #include "decoder.hpp"
+#include "debug_flags.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,11 +124,16 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                         imm, static_cast<unsigned long long>(cpu.pc));
                 fflush(stderr);
             }
+            // shared crash path: short line always via report_crash,
+            // full regs detail only with crash flags.
+            if (imm == 1000) {
+                report_crash(cpu, mem_, "brk #1000", cpu.regs[0], nullptr);
+            }
             // Debug aid: when musl's a_crash() fires (BRK #1000),
             // dump registers + chunk header so we can see what
             // malloc/free was unhappy about. x0 typically holds
             // the chunk pointer in musl's mallocng sanity path.
-            if (imm == 1000 && getenv("BIFROST_TRACE_CRASH")) {
+            if (imm == 1000 && (dbg().trace_crash || dbg().crash_dump)) {
                 fprintf(stderr, "[emu] regs at BRK #1000:\n");
                 for (int i = 0; i < 31; i++) {
                     fprintf(stderr, "  x%d=0x%llx", i,

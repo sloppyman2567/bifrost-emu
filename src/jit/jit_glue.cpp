@@ -4,6 +4,7 @@
 // This file holds the JIT-specific Emulator methods that need to see
 // FrostJIT's full definition (held via unique_ptr in Emulator).
 #include "core/emulator.h"
+#include "debug_flags.h"
 #include "jit/frostjit.hpp"
 #include "syscalls/syscalls.h"
 #include <csignal>
@@ -371,7 +372,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
     // DecodeError. A legit callee must never be cut off; like run_block's
     // watchdog this is a pure codegen-bug safety valve.
     thread_local uint64_t tls_call_blocks_ = 0;
-    static const bool dbg_call_trace_ = (getenv("BIFROST_DBG_GUARD") != nullptr);
+    static const bool dbg_call_trace_ = dbg().dbg_guard;
     uint64_t dbg2_count = 0;
     while (cpu->running && cpu->pc != return_pc) {
         if (__builtin_expect(++tls_call_blocks_ > FrostJIT::GLOBAL_BLOCK_LIMIT, 0)) {
@@ -424,7 +425,7 @@ extern "C" uint64_t jit_call_helper(CPU* cpu, Emulator* emu, uint64_t target_pc)
                 continue;
             }
         }
-        if (getenv("BIFROST_DBG_GUARD")) {
+        if (dbg().dbg_guard) {
             fprintf(stderr, "[STEP] pc=0x%llx sp=0x%llx x30=0x%llx\n",
                     (unsigned long long)cpu->pc, (unsigned long long)cpu->sp,
                     (unsigned long long)cpu->regs[30]);
