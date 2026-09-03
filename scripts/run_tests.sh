@@ -230,6 +230,9 @@ UNIT_TESTS=(
     "test_pthread_mutex|ctest/test_pthread_mutex.elf||10|ALL PASS"
     "test_pthread_cond|ctest/test_pthread_cond.elf||10|ALL PASS"
     "test_pthread_rwlock|ctest/test_pthread_rwlock.elf||10|ALL PASS"
+    # Concurrent GraphicThunk dispatch (4 threads hammering proc-address
+    # + string-cache paths). Guards the state_mu hardening.
+    "test_thunk_mt|ctest/test_thunk_mt.elf||30|ALL PASS"
     "test_sem|ctest/test_sem.elf||10|ALL PASS"
     "test_pthread_once|ctest/test_pthread_once.elf||10|ALL PASS"
     "test_producer_consumer|ctest/test_producer_consumer.elf||10|ALL PASS"

@@ -180,6 +180,18 @@ struct GraphicThunkImpl {
     // safe). The dispatch() path is lock-free after init() — it only
     // reads id_to_idx_, which is set once and never resized.
     std::mutex mu;
+    // Leaf lock for mutable dispatch-time state (string-cache ring,
+    // sdl_tex_sizes_, glfw_cbs_ + last-state maps, error slots,
+    // display-mode cache). Rules: never held across the guest
+    // borrow-CPU runner (re-entrant dispatch), host GL/SDL calls, or
+    // Memory::* (own locks) — snapshot under it, act outside, like the
+    // sync/UNMAP/wake sites already do. Separate from mu so registry
+    // paths never interact with per-call state.
+    std::mutex state_mu;
+    // Display-mode guest blocks, one per symbol (replaces the old
+    // function-static cache, which handed one Memory's guest address to
+    // a second emulator instance in-process).
+    std::unordered_map<std::string, uint64_t> display_mode_cache_;
     // 1.5.4-alpha: GL state tracker for consistent query results.
     std::unique_ptr<GLStateTracker> gl_state_tracker_;
     // 1.5.4-alpha: SDL_Texture* → {w, h} so SDL_UpdateTexture's guest
@@ -302,31 +314,40 @@ struct GraphicThunkImpl {
     uint64_t cache_host_bytes_(const void* bytes, size_t len) {
         if (!mem || !string_cache_base || !bytes || len == 0) return 0;
         if (len > STRING_CACHE_SIZE) len = STRING_CACHE_SIZE;
-        // First-fit a freed slot large enough to hold the blob, so an
-        // SDL_free of a previously cached string actually reuses the space.
-        for (auto it = string_cache_freed_.begin();
-             it != string_cache_freed_.end(); ++it) {
-            if (it->second >= len) {
-                uint32_t off = it->first;
-                string_cache_freed_.erase(it);
-                mem->write(string_cache_base + off, bytes, len);
+        // Slot selection under the leaf lock; the mem->write happens
+        // outside it (Memory has its own locks).
+        uint32_t off = 0;
+        bool hit = false;
+        {
+            std::lock_guard<std::mutex> lk(state_mu);
+            // First-fit a freed slot large enough to hold the blob, so an
+            // SDL_free of a previously cached string actually reuses space.
+            for (auto it = string_cache_freed_.begin();
+                 it != string_cache_freed_.end(); ++it) {
+                if (it->second >= len) {
+                    off = it->first;
+                    string_cache_freed_.erase(it);
+                    string_cache_live_[off] = static_cast<uint32_t>(len);
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) {
+                if (string_cache_off + len > STRING_CACHE_SIZE) {
+                    string_cache_off = 0;
+                    // Bump wrap: every prior slot is stale — drop the
+                    // tracking so reuse can't resurrect old data.
+                    string_cache_live_.clear();
+                    string_cache_freed_.clear();
+                }
+                off = string_cache_off;
                 string_cache_live_[off] = static_cast<uint32_t>(len);
-                return string_cache_base + off;
+                string_cache_off = static_cast<uint32_t>(
+                    (string_cache_off + len + 7u) & ~7u);
             }
         }
-        if (string_cache_off + len > STRING_CACHE_SIZE) {
-            string_cache_off = 0;
-            // Bump wrap: every prior slot is stale — drop the tracking
-            // (live and freed) so freed-slot reuse can't resurrect old data.
-            string_cache_live_.clear();
-            string_cache_freed_.clear();
-        }
-        uint64_t guest = string_cache_base + string_cache_off;
-        mem->write(guest, bytes, len);
-        string_cache_live_[string_cache_off] = static_cast<uint32_t>(len);
-        string_cache_off = static_cast<uint32_t>(
-            (string_cache_off + len + 7u) & ~7u);
-        return guest;
+        mem->write(string_cache_base + off, bytes, len);
+        return string_cache_base + off;
     }
     uint64_t cache_host_string_(const char* host_str) {
         if (!host_str) return 0;
@@ -342,6 +363,7 @@ struct GraphicThunkImpl {
         if (guest < string_cache_base) return;
         uint64_t off = guest - string_cache_base;
         if (off >= STRING_CACHE_SIZE) return;
+        std::lock_guard<std::mutex> lk(state_mu);
         auto it = string_cache_live_.find(static_cast<uint32_t>(off));
         if (it == string_cache_live_.end()) return;
         string_cache_freed_.push_back({it->first, it->second});
@@ -360,23 +382,42 @@ struct GraphicThunkImpl {
         // the last delivery. The game polls glfwGetKey for keys < 32
         // (invalid in GLFW), which host GLFW flags as an error on every
         // poll — forwarding each would spam the guest error callback.
-        if (glfw_error_cb_ && glfw_last_error_code_ != 0 &&
-            (glfw_last_error_code_ != glfw_last_delivered_err_code_ ||
-             glfw_last_error_desc_ != glfw_last_delivered_err_desc_)) {
+        // The slot is copied+cleared under the leaf lock (the host
+        // trampoline writes it from any thread); everything after runs
+        // unlocked.
+        uint64_t error_cb = 0;
+        int err_code = 0;
+        std::string err_desc;
+        int last_code = 0;
+        std::string last_desc;
+        {
+            std::lock_guard<std::mutex> lk(state_mu);
+            error_cb = glfw_error_cb_;
+            err_code = glfw_last_error_code_;
+            err_desc = glfw_last_error_desc_;
+            last_code = glfw_last_delivered_err_code_;
+            last_desc = glfw_last_delivered_err_desc_;
+            glfw_last_error_code_ = 0;
+            glfw_last_error_desc_.clear();
+        }
+        if (error_cb && err_code != 0 &&
+            (err_code != last_code || err_desc != last_desc)) {
             int64_t iargs[2];
-            iargs[0] = glfw_last_error_code_;
-            iargs[1] = cache_host_string_(glfw_last_error_desc_.c_str());
+            iargs[0] = err_code;
+            iargs[1] = cache_host_string_(err_desc.c_str());
             if (dbg().thunk_trace)
                 fprintf(stderr, "[thunk] error cb → 0x%llx (%d, \"%s\")\n",
-                        static_cast<unsigned long long>(glfw_error_cb_),
-                        glfw_last_error_code_, glfw_last_error_desc_.c_str());
-            glfw_cb_runner_(cpu, glfw_error_cb_, iargs, 2, nullptr, 0);
-            glfw_last_delivered_err_code_ = glfw_last_error_code_;
-            glfw_last_delivered_err_desc_ = glfw_last_error_desc_;
+                        static_cast<unsigned long long>(error_cb),
+                        err_code, err_desc.c_str());
+            glfw_cb_runner_(cpu, error_cb, iargs, 2, nullptr, 0);
+            std::lock_guard<std::mutex> lk(state_mu);
+            glfw_last_delivered_err_code_ = err_code;
+            glfw_last_delivered_err_desc_ = err_desc;
         }
-        glfw_last_error_code_ = 0;
-        glfw_last_error_desc_.clear();
-        if (glfw_cbs_.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(state_mu);
+            if (glfw_cbs_.empty()) return;
+        }
         // Reentrancy: the runner below executes GUEST code, which can
         // re-enter the thunk (glfwSetKeyCallback unregistering itself —
         // the one-shot "press any key" pattern — or a nested poll). That
@@ -385,8 +426,11 @@ struct GraphicThunkImpl {
         // a snapshot of the callback registrations, and never hold a
         // reference into the last-state maps across a runner call.
         std::vector<std::pair<uint64_t, GlfwWindowCbs>> cbs_snapshot;
-        cbs_snapshot.reserve(glfw_cbs_.size());
-        for (const auto& kv : glfw_cbs_) cbs_snapshot.push_back(kv);
+        {
+            std::lock_guard<std::mutex> lk(state_mu);
+            cbs_snapshot.reserve(glfw_cbs_.size());
+            for (const auto& kv : glfw_cbs_) cbs_snapshot.push_back(kv);
+        }
         using GetPosFn = void (*)(void*, double*, double*);
         using GetKeyFn = int (*)(void*, int);
         using GetSizeFn = void (*)(void*, int*, int*);
@@ -412,11 +456,18 @@ struct GraphicThunkImpl {
             if (cbs.cursor && getpos) {
                 double x = 0.0, y = 0.0;
                 getpos(w, &x, &y);
-                auto it = glfw_cursor_last_.find(window);
-                if (it == glfw_cursor_last_.end()) {
-                    glfw_cursor_last_[window] = {x, y};  // seed
-                } else if (it->second.first != x || it->second.second != y) {
-                    it->second = {x, y};
+                bool fire = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    auto it = glfw_cursor_last_.find(window);
+                    if (it == glfw_cursor_last_.end()) {
+                        glfw_cursor_last_[window] = {x, y};  // seed
+                    } else if (it->second.first != x || it->second.second != y) {
+                        it->second = {x, y};
+                        fire = true;
+                    }
+                }
+                if (fire) {
                     int64_t warg = static_cast<int64_t>(window);
                     fargs[0] = x; fargs[1] = y;
                     if (dbg().thunk_trace)
@@ -427,20 +478,31 @@ struct GraphicThunkImpl {
             }
             // ── Keyboard state ─────────────────────────────────────────
             if (cbs.key && getkey) {
-                auto it = glfw_key_last_.find(window);
-                if (it == glfw_key_last_.end()) {
+                bool seeded = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    if (glfw_key_last_.find(window) == glfw_key_last_.end())
+                        seeded = true;
+                }
+                if (seeded) {
                     // First poll: seed current state, don't fire (GLFW
                     // semantics — no spurious PRESS for keys already held).
                     std::vector<uint8_t> seed(GLFW_KEY_LAST, 0);
                     for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++)
                         seed[k] = (getkey(w, k) == GLFW_PRESS) ? 1 : 0;
+                    std::lock_guard<std::mutex> lk(state_mu);
                     glfw_key_last_[window] = std::move(seed);
                     continue;
                 }
                 // Copy the per-key state by value: the runner below can
                 // re-enter delivery and insert into this map (rehash →
                 // a held reference would dangle). Write back after.
-                auto lastv = it->second;
+                std::vector<uint8_t> lastv;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    lastv = glfw_key_last_[window];
+                }
+                if (lastv.size() < (size_t)GLFW_KEY_LAST) continue;  // raced unregister
                 // glfwGetKey only accepts keys >= GLFW_KEY_SPACE (32);
                 // polling 0-31 makes host GLFW fire "Invalid key" errors.
                 for (int k = GLFW_KEY_SPACE; k < GLFW_KEY_LAST; k++) {
@@ -458,20 +520,33 @@ struct GraphicThunkImpl {
                         glfw_cb_runner_(cpu, cbs.key, iargs, 5, nullptr, 0);
                     }
                 }
-                glfw_key_last_[window] = std::move(lastv);
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    glfw_key_last_[window] = std::move(lastv);
+                }
             }
             // ── Mouse button state ─────────────────────────────────────
             if (cbs.mouse && getbtn) {
-                auto it = glfw_mouse_last_.find(window);
-                if (it == glfw_mouse_last_.end()) {
+                bool seeded = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    if (glfw_mouse_last_.find(window) == glfw_mouse_last_.end())
+                        seeded = true;
+                }
+                if (seeded) {
                     // First poll: seed current state, don't fire.
                     uint32_t seed = 0;
                     for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST; b++)
                         if (getbtn(w, b) == GLFW_PRESS) seed |= (1u << b);
+                    std::lock_guard<std::mutex> lk(state_mu);
                     glfw_mouse_last_[window] = seed;
                     continue;
                 }
-                uint32_t last = it->second;
+                uint32_t last;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    last = glfw_mouse_last_[window];
+                }
                 for (int b = 0; b <= GLFW_MOUSE_BUTTON_LAST; b++) {
                     int cur = getbtn(w, b);
                     uint8_t pressed = (cur == GLFW_PRESS) ? 1 : 0;
@@ -489,18 +564,28 @@ struct GraphicThunkImpl {
                     }
                 }
                 // By-key write-back (the runner may have re-entered and
-                // rehashed this map — never hold `it` across it).
-                glfw_mouse_last_[window] = last;
+                // rehashed this map — never hold an iterator across it).
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    glfw_mouse_last_[window] = last;
+                }
             }
             // ── Framebuffer size ───────────────────────────────────────
             if (cbs.framebuffer && getfbs) {
                 int fbw = 0, fbh = 0;
                 getfbs(w, &fbw, &fbh);
-                auto it = glfw_fb_last_.find(window);
-                if (it == glfw_fb_last_.end()) {
-                    glfw_fb_last_[window] = {fbw, fbh};  // seed
-                } else if (it->second.first != fbw || it->second.second != fbh) {
-                    it->second = {fbw, fbh};
+                bool fire = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    auto it = glfw_fb_last_.find(window);
+                    if (it == glfw_fb_last_.end()) {
+                        glfw_fb_last_[window] = {fbw, fbh};  // seed
+                    } else if (it->second.first != fbw || it->second.second != fbh) {
+                        it->second = {fbw, fbh};
+                        fire = true;
+                    }
+                }
+                if (fire) {
                     iargs[0] = window; iargs[1] = fbw; iargs[2] = fbh;
                     if (dbg().thunk_trace)
                         fprintf(stderr, "[thunk] fb cb → 0x%llx (%d, %d)\n",
@@ -512,11 +597,18 @@ struct GraphicThunkImpl {
             if (cbs.window_size && getsz) {
                 int ww = 0, wh = 0;
                 getsz(w, &ww, &wh);
-                auto it = glfw_winsz_last_.find(window);
-                if (it == glfw_winsz_last_.end()) {
-                    glfw_winsz_last_[window] = {ww, wh};  // seed
-                } else if (it->second.first != ww || it->second.second != wh) {
-                    it->second = {ww, wh};
+                bool fire = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    auto it = glfw_winsz_last_.find(window);
+                    if (it == glfw_winsz_last_.end()) {
+                        glfw_winsz_last_[window] = {ww, wh};  // seed
+                    } else if (it->second.first != ww || it->second.second != wh) {
+                        it->second = {ww, wh};
+                        fire = true;
+                    }
+                }
+                if (fire) {
                     iargs[0] = window; iargs[1] = ww; iargs[2] = wh;
                     if (dbg().thunk_trace)
                         fprintf(stderr, "[thunk] winsz cb → 0x%llx (%d, %d)\n",
@@ -527,11 +619,18 @@ struct GraphicThunkImpl {
             // ── Window focus ───────────────────────────────────────────
             if (cbs.focus && getat) {
                 bool focused = getat(w, GLFW_FOCUSED) != 0;
-                auto it = glfw_focus_last_.find(window);
-                if (it == glfw_focus_last_.end()) {
-                    glfw_focus_last_[window] = focused;  // seed
-                } else if (it->second != focused) {
-                    it->second = focused;
+                bool fire = false;
+                {
+                    std::lock_guard<std::mutex> lk(state_mu);
+                    auto it = glfw_focus_last_.find(window);
+                    if (it == glfw_focus_last_.end()) {
+                        glfw_focus_last_[window] = focused;  // seed
+                    } else if (it->second != focused) {
+                        it->second = focused;
+                        fire = true;
+                    }
+                }
+                if (fire) {
                     iargs[0] = window; iargs[1] = focused ? 1 : 0;
                     if (dbg().thunk_trace)
                         fprintf(stderr, "[thunk] focus cb → 0x%llx (%d)\n",
@@ -828,17 +927,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
                 if (!src) { cpu.regs[0] = 0; return 0; }
                 // One reused guest block per symbol (games poll per frame).
-                static std::mutex mu;
-                static std::map<std::string, uint64_t> cache;
+                // Instance field (was function-static: leaked one Memory's
+                // guest address into a second emulator in-process).
                 uint64_t g = 0;
                 {
-                    std::lock_guard<std::mutex> lk(mu);
-                    auto it = cache.find(nm);
-                    if (it != cache.end()) {
+                    std::lock_guard<std::mutex> lk(impl_->state_mu);
+                    auto it = impl_->display_mode_cache_.find(nm);
+                    if (it != impl_->display_mode_cache_.end()) {
                         g = it->second;
                     } else {
                         g = impl_->mem->mmap_alloc(32);
-                        if (g) cache[nm] = g;
+                        if (g) impl_->display_mode_cache_[nm] = g;
                     }
                 }
                 if (!g) { cpu.regs[0] = 0; return 0; }  // alloc failed
@@ -1072,7 +1171,10 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             pol == thunk::Policy::ERROR_CB) {
             if (pol == thunk::Policy::ERROR_CB) {
                 // Global callback, single arg: glfwSetErrorCallback(cb).
-                impl_->glfw_error_cb_ = cpu.regs[0];
+                {
+                    std::lock_guard<std::mutex> lk(impl_->state_mu);
+                    impl_->glfw_error_cb_ = cpu.regs[0];
+                }
                 if (dbg().thunk_trace) {
                     fprintf(stderr, "[thunk] glfwSetErrorCallback cb=0x%llx\n",
                             static_cast<unsigned long long>(cpu.regs[0]));
@@ -1082,25 +1184,28 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
             uint64_t window = cpu.regs[0];
             uint64_t guest_cb = cpu.regs[1];
-            auto& cbs = impl_->glfw_cbs_[window];
-            uint64_t* slot = nullptr;
-            switch (pol) {
-                case thunk::Policy::CURSOR_CB:       slot = &cbs.cursor; break;
-                case thunk::Policy::KEY_CB:          slot = &cbs.key; break;
-                case thunk::Policy::MOUSE_CB:        slot = &cbs.mouse; break;
-                case thunk::Policy::FRAMEBUFFER_CB:  slot = &cbs.framebuffer; break;
-                case thunk::Policy::WINDOW_SIZE_CB:  slot = &cbs.window_size; break;
-                case thunk::Policy::FOCUS_CB:        slot = &cbs.focus; break;
-                default: break;
-            }
-            if (slot) {
-                *slot = guest_cb;
-                if (guest_cb == 0) {
-                    // Unregister: drop the window entry if all slots empty.
-                    if (cbs.cursor == 0 && cbs.key == 0 && cbs.mouse == 0 &&
-                        cbs.framebuffer == 0 && cbs.window_size == 0 &&
-                        cbs.focus == 0) {
-                        impl_->glfw_cbs_.erase(window);
+            {
+                std::lock_guard<std::mutex> lk(impl_->state_mu);
+                auto& cbs = impl_->glfw_cbs_[window];
+                uint64_t* slot = nullptr;
+                switch (pol) {
+                    case thunk::Policy::CURSOR_CB:       slot = &cbs.cursor; break;
+                    case thunk::Policy::KEY_CB:          slot = &cbs.key; break;
+                    case thunk::Policy::MOUSE_CB:        slot = &cbs.mouse; break;
+                    case thunk::Policy::FRAMEBUFFER_CB:  slot = &cbs.framebuffer; break;
+                    case thunk::Policy::WINDOW_SIZE_CB:  slot = &cbs.window_size; break;
+                    case thunk::Policy::FOCUS_CB:        slot = &cbs.focus; break;
+                    default: break;
+                }
+                if (slot) {
+                    *slot = guest_cb;
+                    if (guest_cb == 0) {
+                        // Unregister: drop the window entry if all slots empty.
+                        if (cbs.cursor == 0 && cbs.key == 0 && cbs.mouse == 0 &&
+                            cbs.framebuffer == 0 && cbs.window_size == 0 &&
+                            cbs.focus == 0) {
+                            impl_->glfw_cbs_.erase(window);
+                        }
                     }
                 }
             }
@@ -1120,8 +1225,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // guest address to host GL crashes on the first driver message.
         // The host context keeps debug output disabled (the default).
         if (pol == thunk::Policy::GL_DEBUG_CB) {
-            impl_->gl_debug_cb_ = cpu.regs[0];
-            impl_->gl_debug_param_ = cpu.regs[1];
+            {
+                std::lock_guard<std::mutex> lk(impl_->state_mu);
+                impl_->gl_debug_cb_ = cpu.regs[0];
+                impl_->gl_debug_param_ = cpu.regs[1];
+            }
             if (dbg().thunk_trace) {
                 fprintf(stderr, "[thunk] glDebugMessageCallback cb=0x%llx param=0x%llx (stored, host untouched)\n",
                         static_cast<unsigned long long>(cpu.regs[0]),
@@ -1393,7 +1501,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto sync_persistent_mappings_ = [&]() {
         if (impl_->gl_buffer_mappings_.empty() || !impl_->gl_buffer_subdata_fn_)
             return;
-        std::vector<GraphicThunkImpl::BufferMapping> snaps;
+        // Snapshot (buffer id + mapping) under mu; each push re-checks
+        // liveness under mu first: a concurrent UNMAP/DELETE erases and
+        // hands the bounce range back for reuse, and pushing from reused
+        // pages would upload another allocation's bytes to the GPU.
+        std::vector<std::pair<uint32_t, GraphicThunkImpl::BufferMapping>> snaps;
         {
             std::lock_guard<std::mutex> g(impl_->mu);
             for (const auto& kv : impl_->gl_buffer_mappings_) {
@@ -1401,13 +1513,20 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 if ((m.access & (kGLMapPersistentBit | kGLMapCoherentBit |
                                  kGLMapWriteBit)) ==
                     (kGLMapPersistentBit | kGLMapCoherentBit | kGLMapWriteBit)) {
-                    snaps.push_back(m);
+                    snaps.emplace_back(kv.first, m);
                 }
             }
         }
         if (snaps.empty()) return;
         using SubFn = void (*)(uint32_t, uint64_t, uint64_t, const void*);
-        for (const auto& m : snaps) {
+        for (const auto& [buffer, m] : snaps) {
+            {
+                std::lock_guard<std::mutex> g(impl_->mu);
+                auto it = impl_->gl_buffer_mappings_.find(buffer);
+                if (it == impl_->gl_buffer_mappings_.end() ||
+                    it->second.bounce != m.bounce || it->second.size != m.size)
+                    continue;  // unmapped/freed/re-mapped since snapshot
+            }
             uint8_t* hp = impl_->mem->guest_to_host_ptr(m.bounce);
             if (hp) {
                 reinterpret_cast<SubFn>(impl_->gl_buffer_subdata_fn_)(
@@ -1622,8 +1741,17 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         if (args[0] && impl_->mem) {
             uint8_t* hp = impl_->mem->guest_to_host_ptr(args[0]);
             if (hp) {
-                name = reinterpret_cast<const char*>(hp);
-            } else {
+                // Window alias reads can't fault (full reservation), but
+                // an unterminated guest pointer would run into garbage:
+                // accept it only with a NUL inside 255 bytes, else fall
+                // through to the bounded copy below.
+                size_t n = 0;
+                while (n < sizeof(namebuf) - 1 && hp[n]) n++;
+                if (hp[n] == 0) {
+                    name = reinterpret_cast<const char*>(hp);
+                }
+            }
+            if (!name) {
                 size_t n = 0;
                 for (; n + 1 < sizeof(namebuf); n++) {
                     uint8_t c = 0;
@@ -1938,9 +2066,14 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         case thunk::SizeKind::PITCH_H:
             // SDL_UpdateTexture: pixels buffer = pitch (args[3]) * height.
             if (idx == 2) {
-                auto it = impl_->sdl_tex_sizes_.find(args[0]);
-                if (it != impl_->sdl_tex_sizes_.end()) {
-                    uint64_t sz = args[3] * it->second.second;
+                uint64_t h = 0;
+                {
+                    std::lock_guard<std::mutex> lk(impl_->state_mu);
+                    auto it = impl_->sdl_tex_sizes_.find(args[0]);
+                    if (it != impl_->sdl_tex_sizes_.end()) h = it->second.second;
+                }
+                if (h) {
+                    uint64_t sz = args[3] * h;
                     if (sz > 0 && sz < (16ull << 20)) kBounce = static_cast<size_t>(sz);
                 }
             }
@@ -2677,9 +2810,11 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // (TRACK_TEX records on create, UNTRACK_TEX drops on destroy).
     if (entry.spec) {
         if (entry.spec->policy == thunk::Policy::TRACK_TEX) {
+            std::lock_guard<std::mutex> lk(impl_->state_mu);
             impl_->sdl_tex_sizes_[ret] = {static_cast<uint32_t>(args[3]),
                                           static_cast<uint32_t>(args[4])};
         } else if (entry.spec->policy == thunk::Policy::UNTRACK_TEX) {
+            std::lock_guard<std::mutex> lk(impl_->state_mu);
             impl_->sdl_tex_sizes_.erase(args[0]);
         }
     }
@@ -2791,6 +2926,7 @@ void GraphicThunk::set_glfw_cb_runner(GlfwCbRunner runner) {
     impl_->glfw_cb_runner_ = std::move(runner);
     // Fresh registration: drop stale last-delivered state so a newly-
     // wired runner doesn't skip the first motion/size event.
+    std::lock_guard<std::mutex> lk(impl_->state_mu);
     impl_->glfw_cursor_last_.clear();
     impl_->glfw_key_last_.clear();
     impl_->glfw_mouse_last_.clear();
@@ -2959,13 +3095,20 @@ void GraphicThunk::register_known_symbols_() {
     // pointer to the impl (single emulator per process).
     static GraphicThunkImpl* host_err_sink = nullptr;
     host_err_sink = impl_.get();
-    impl_->glfw_last_error_code_ = 0;
-    impl_->glfw_last_error_desc_.clear();
+    {
+        std::lock_guard<std::mutex> lk(impl_->state_mu);
+        impl_->glfw_last_error_code_ = 0;
+        impl_->glfw_last_error_desc_.clear();
+    }
     if (impl_->glfw_set_error_callback_fn_) {
         using SetErrCbFn = void (*)(void (*)(int, const char*));
         auto setcb = reinterpret_cast<SetErrCbFn>(impl_->glfw_set_error_callback_fn_);
         setcb([](int code, const char* desc) {
             if (!host_err_sink) return;
+            // Fires on an arbitrary host thread: leaf-lock the slot.
+            // Cross-instance routing (second emulator overwrites the
+            // global) stays a documented single-emulator limit.
+            std::lock_guard<std::mutex> lk(host_err_sink->state_mu);
             host_err_sink->glfw_last_error_code_ = code;
             host_err_sink->glfw_last_error_desc_ =
                 desc ? desc : std::string();
