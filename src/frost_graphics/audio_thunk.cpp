@@ -1030,8 +1030,23 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         std::lock_guard<std::recursive_mutex> g(I.mu);
         auto it = I.alsa_pcms_.find(R(0));
         if (it != I.alsa_pcms_.end()) {
-            if (it->second.engine_stream && I.engine)
-                I.engine->stream_close(it->second.engine_stream);
+            if (it->second.engine_stream && I.engine) {
+                // Drain-on-close: let the already-queued tail play out
+                // before destroying the stream, or the end of the sound
+                // is cut off. Bounded, and bails early if the mixer
+                // isn't draining (e.g. headless — no silent 5 s stall).
+                int estream = it->second.engine_stream;
+                size_t last = SIZE_MAX;
+                int still = 0;
+                for (int i = 0; i < 500; i++) {   // 500 x 10 ms = 5 s max
+                    size_t q = I.engine->stream_queued_frames(estream);
+                    if (q == 0) break;
+                    if (q == last && ++still >= 20) break;
+                    if (q != last) { last = q; still = 0; }
+                    usleep(10000);
+                }
+                I.engine->stream_close(estream);
+            }
             I.alsa_pcms_.erase(it);
         }
         tr(0); return 0;

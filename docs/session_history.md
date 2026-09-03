@@ -3707,3 +3707,12 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   stale AGENTS.md Vulkan claims (H-structs, caps, named arms).
 - Verified: clean build, swapchain PASSED under JIT + interp, instance/
   device + mambo green (pnext skips by design).
+
+## Session History (2026-09-03) — ALSA drain-on-close (mambo tail cut)
+
+- Follow-up to the close-leak fix: destroying the engine stream in
+  `snd_pcm_close` discarded the still-queued tail, cutting sounds off
+  at the end (mambo lost its "bo"). Close now drains the ring first
+  (bounded 5 s, bails after 200 ms without progress so headless runs
+  never stall), then destroys the stream — no leak, no cutoff.
+- Verified: clean build, mambo + linux audio green.
