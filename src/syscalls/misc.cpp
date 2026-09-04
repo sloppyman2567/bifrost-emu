@@ -1048,10 +1048,11 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 lib_size = (lib_size + 15) & ~15ULL;
             }
-            // TLS_TCB_SIZE: matches allocate_static_tls. The TCB header
-            // (tcbhead_t) occupies [TP, TP + tcb_size). Round up to main
-            // exe's TLS alignment so local-exec TPREL offsets match.
-            constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;
+            // TLS_TCB_SIZE: matches allocate_static_tls. tcbhead_t is
+            // {dtv, private} = 16 bytes per upstream
+            // sysdeps/aarch64/nptl/tls.h. Round up to main exe's TLS
+            // alignment so local-exec TPREL offsets match.
+            constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;
             uint64_t tcb_size = (main_align > 1)
                 ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
                 : TLS_TCB_SIZE_BASE;

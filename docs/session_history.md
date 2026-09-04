@@ -3882,6 +3882,11 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - Verified with a scratch glibc dlopen-TLS test (lib with `__thread` int + long[4]): init/set/multi-lane reads all correct on main thread under jit + interp.
 - Verified: `--dynamic` **15/15**, `--quick` **216/216**.
 
+## Session History (2026-09-04) — tcb size ground truth (0x10, not 0x20)
+
+- **Research:** upstream `sysdeps/aarch64/nptl/tls.h` defines `tcbhead_t = {dtv, private}` — two pointers, 16 bytes. So the startup `0x10` was right and the per-thread/handler `0x20` was 16B of harmless slack, not a skew bug. The thread-test hang during this work was proven (by revert + heap-corruption trace) to be the lib-area growth bug, never the TCB — the revert was a red herring. All three sites (`allocate_static_tls`, `allocate_thread_tls`, `0x1001` handler) now use `0x10` with the upstream citation.
+- Verified: `--dynamic` **15/15**, `--quick` **216/216**.
+
 ## Session History (2026-09-04) — scalar integer addp (dlopen-tls follow-up)
 
 - **Gap (`interp_fp.cpp`):** vectorized long sums lower to `addp Dd,Vn.2d` (integer scalar pairwise, `0x5EF1B800` family verified via cross-as — only the `.2d` form exists), which fell to the FP-NOP fallback and read back stale `d31` (sum {1,2,3,4} → 3). Now `Dd = Vn.d[0] + Vn.d[1]` (wrapping, hi zeroed). JIT already routes the word to interp (`ftype > 1` gate), so both engines are correct via the fallback.

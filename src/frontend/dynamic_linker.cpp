@@ -3198,7 +3198,7 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
     // No surplus added here: the TP anchor is the frozen startup lib area
     // (lib_tls_size_); surplus lives trailing (positive tp) outside it.
     // Dynamic libs are skipped above so the recompute matches exactly.
-    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;  // match pre-batch behavior
+    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t)={dtv,private} per upstream sysdeps/aarch64/nptl/tls.h
     uint64_t tcb_size = (main_align > 1)
         ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
         : TLS_TCB_SIZE_BASE;
