@@ -149,6 +149,11 @@ struct LoadedObject {
     // were applied to the original .tdata location but NOT the TLS
     // block copy, so the TLS block had pre-relocation (wrong) values.
     uint64_t   tls_block_offset = 0;
+    // Set for libraries loaded via dlopen AFTER startup: their TLS is
+    // carved from the startup surplus (see below), never from the
+    // startup lib area, so allocate_thread_tls() must exclude them
+    // when recomputing the startup lib_size (TP anchor stays frozen).
+    bool       tls_dynamic = false;
 };
 class DynamicLinker {
 public:
@@ -253,7 +258,14 @@ public:
     // the CALLING thread's CPU (parked inside the syscall handler)
     // instead of racing over main_cpu_. The startup path (link()) passes
     // main_cpu_, which is idle at load time.
-    uint64_t load_library(CPU& cpu, const std::string& path);
+    uint64_t load_library(CPU& cpu, const std::string& path,
+                          const std::string& parent_runpath = "",
+                          const std::string& parent_rpath = "");
+    // Ensure the ld-linux shim (dlerror buffer, TLSDESC resolver, dlopen
+    // hook page) exists. The startup path registers it via link(); the
+    // static-ELF path never calls link(), so the first dlopen must do it
+    // lazily. Idempotent. Takes loader_lock() internally.
+    bool ensure_shim() { return register_ld_linux_shim_(); }
     // Decrement the refcount of a dlopen'd library. When the refcount
     // reaches 0, the library's DT_FINI_ARRAY is invoked (in reverse
     // order) and the library is marked for unload. The memory is NOT
@@ -429,6 +441,12 @@ private:
     uint64_t lib_tls_size_ = 0;     // lib TLS size (negative TP region)
     uint64_t tcb_size_ = 0;         // TCB header size (tcbhead_t, rounded to align)
     uint64_t next_tls_mod_id_ = 1;  // 1-based; 0 reserved
+    // Surplus for dlopen'd TLS (variant-I glibc path): reserved inside the
+    // template at startup so late libs get real backing on ALL threads.
+    // Carved monotonically; exhaustion falls back to unbacked (old behavior).
+    static constexpr uint64_t TLS_DLOPEN_SURPLUS = 1024;
+    uint64_t tls_surplus_used_ = 0;
+    uint64_t tls_surplus_base_ = 0;  // template offset where surplus starts (= startup lib_size)
     bool is_musl_ = false;          // true if linked against musl (variant-II TLS)
     uint64_t dlopen_hook_ptr_ = 0;  // dlopen hook struct addr (shim data area)
     uint64_t libc_single_threaded_addr_ = 0;  // guest VA of __libc_single_threaded

@@ -3043,7 +3043,10 @@ void DynamicLinker::allocate_static_tls() {
             total += obj.tls.memsz;
         }
         total = (total + max_align - 1) & ~(max_align - 1);
-        static_tls_size_ = total;
+    // static_tls_size_ covers the surplus too, so GLRO-sized guest thread
+    // blocks (0x1001 caller-alloc path) fit positive-tp dlopen slots;
+    // lib_tls_size_ (the TP anchor) stays frozen at L0.
+    static_tls_size_ = total + TLS_DLOPEN_SURPLUS;
         lib_tls_size_ = total;  // variant-II: all TLS is "negative TP"
         tcb_size_ = 0;          // no TCB header for musl variant-II
         static_tls_base_ = mem_.mmap_alloc(total + 16);
@@ -3078,6 +3081,12 @@ void DynamicLinker::allocate_static_tls() {
     // See the long comment above for the full rationale.
     constexpr uint64_t TLS_TCB_SIZE_BASE = 0x10;  // sizeof(tcbhead_t) = tcb + dtv
     uint64_t tcb_size = (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1);
+    // Reserve the dlopen surplus AFTER the block (trailing, not in TP
+    // math): the TP anchor (lib_tls_size_) stays exactly L0 so the guest's
+    // own TCB computation (block + its PT_TLS sum) keeps agreeing with our
+    // offsets. Growing the lib area instead shifted TP against guest
+    // blocks and corrupted the heap in thread tests. Surplus tp offsets
+    // are positive (past main TLS), valid on every thread.
     lib_tls_size_ = lib_size;
     tcb_size_ = tcb_size;
     // Total static TLS block = lib + TCB + main.
@@ -3087,8 +3096,11 @@ void DynamicLinker::allocate_static_tls() {
     if (main_align > max_align) max_align = main_align;
     total = (total + max_align - 1) & ~(max_align - 1);
     static_tls_size_ = total;
-    // Allocate guest memory for the template block.
-    static_tls_base_ = mem_.mmap_alloc(total + 16);  // +16 slack
+    // Template block carries a trailing dlopen surplus (NOT in TP math):
+    // static_tls_size_ covers it so GLRO-sized guest blocks fit, while
+    // lib_tls_size_ (the TP anchor) stays frozen.
+    tls_surplus_base_ = total;
+    static_tls_base_ = mem_.mmap_alloc(total + TLS_DLOPEN_SURPLUS + 16);  // +16 slack
     if (static_tls_base_ == 0) {
         error_ = "failed to allocate static TLS block";
         return;
@@ -3167,6 +3179,12 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
     uint64_t main_align = 1;
     for (const auto& obj : objects_) {
         if (!obj.tls.present || obj.tls.memsz == 0) continue;
+        // Dynamic (dlopen'd) libs live in the startup surplus, outside the
+        // startup lib area: excluding them keeps the recomputed lib_size
+        // equal to the frozen startup anchor (lib_tls_size_), so new
+        // threads get the same TP as the main thread. Their template bytes
+        // are still copied below via stored block offsets.
+        if (obj.tls_dynamic) continue;
         if (obj.is_main) {
             main_memsz = obj.tls.memsz;
             main_align = obj.tls.align ? obj.tls.align : 16;
@@ -3177,7 +3195,10 @@ uint64_t DynamicLinker::allocate_thread_tls(Memory& mem) {
         }
     }
     lib_size = (lib_size + 15) & ~15ULL;
-    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;
+    // No surplus added here: the TP anchor is the frozen startup lib area
+    // (lib_tls_size_); surplus lives trailing (positive tp) outside it.
+    // Dynamic libs are skipped above so the recompute matches exactly.
+    constexpr uint64_t TLS_TCB_SIZE_BASE = 0x20;  // match pre-batch behavior
     uint64_t tcb_size = (main_align > 1)
         ? (TLS_TCB_SIZE_BASE + main_align - 1) & ~(main_align - 1)
         : TLS_TCB_SIZE_BASE;
@@ -3578,7 +3599,9 @@ uint64_t DynamicLinker::resolve_symbol(const std::string& name) const {
 // existing handle and bumps the refcount (matching glibc's _dl_open
 // fast path). This prevents loading the same .so twice and ensures
 // dlopen("libm.so.6") returns the same handle as dlopen("/lib/libm.so.6").
-uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
+uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path,
+                                     const std::string& parent_runpath,
+                                     const std::string& parent_rpath) {
     std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     // ── Dedup: check if already loaded by path ────────────────────
     // Extract the basename (soname) from the path for dedup. glibc's
@@ -3611,7 +3634,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
     // If the path is a bare soname (no /), try standard search paths.
     if (path.find('/') == std::string::npos) {
         std::string found_path;
-        auto data = find_library(path, found_path);
+        auto data = find_library(path, found_path, parent_runpath, parent_rpath);
         constexpr uint16_t EM_AARCH64 = 183;
         bool aarch64_elf = data.size() >= 20
             && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
@@ -3640,7 +3663,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
         // soname search (e.g. /lib/libm.so.6 → aarch64 libm on the
         // toolchain search path).
         std::string found_path;
-        auto data = find_library(basename, found_path);
+        auto data = find_library(basename, found_path, parent_runpath, parent_rpath);
         constexpr uint16_t EM_AARCH64 = 183;
         bool aarch64_elf = data.size() >= 20
             && data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F'
@@ -3674,7 +3697,7 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
         // Host absolute path resolved to a non-guest ELF (common when
         // BIFROST_ROOT lacks the lib and /lib/libm.so.6 is x86_64).
         std::string found_path;
-        auto alt = find_library(basename, found_path);
+        auto alt = find_library(basename, found_path, parent_runpath, parent_rpath);
         bool alt_ok = alt.size() >= 20
             && alt[0] == 0x7f && alt[1] == 'E' && alt[2] == 'L' && alt[3] == 'F'
             && alt[18] == (EM_AARCH64 & 0xFF) && alt[19] == (EM_AARCH64 >> 8);
@@ -3714,6 +3737,11 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
         error_ = "load_library: wrong ELF machine for '" + path + "'";
         return 0;
     }
+    // Static-ELF processes never ran link() so the ld-linux shim
+    // (dlerror buffer, TLSDESC resolver, dlopen hooks) doesn't exist yet.
+    // Register it lazily before relocations need it. No-op on the dynamic
+    // path (already registered, early-returns).
+    ensure_shim();
     uint64_t max_end = 0;
     if (data.size() >= 56) {
         uint64_t e_phoff; uint16_t e_phentsize, e_phnum;
@@ -3754,12 +3782,43 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
     if (obj.tls.present && obj.tls.memsz > 0) {
         obj.tls_mod_id = next_tls_mod_id_++;
         if (!is_musl_) {
-            // Variant-I (glibc): lib TLS at negative TP offsets
+            // Variant-I (glibc): carve backing from the startup surplus so
+            // the lib gets real storage on ALL threads (main uses the
+            // template directly; new threads copy it). The startup TP
+            // anchor (lib_tls_size_) NEVER grows — tp offsets stay valid
+            // for every thread. Exhaustion falls back to unbacked numbering.
             uint64_t a = obj.tls.align ? obj.tls.align : 16;
-            lib_tls_size_ = (lib_tls_size_ + a - 1) & ~(a - 1);
-            obj.tls_tp_offset = -static_cast<int64_t>(lib_tls_size_ + obj.tls.memsz);
-            lib_tls_size_ += obj.tls.memsz;
-            obj.tls_block_offset = static_tls_size_ - lib_tls_size_;
+            uint64_t slot = tls_surplus_base_ +
+                            ((tls_surplus_used_ + a - 1) & ~(a - 1));
+            uint64_t need = (slot - tls_surplus_base_) + obj.tls.memsz;
+            if (static_tls_base_ != 0 && need <= TLS_DLOPEN_SURPLUS) {
+                obj.tls_block_offset = slot;
+                // Template slot sits at TP-space [slot-L', slot-L'+memsz).
+                obj.tls_tp_offset = static_cast<int64_t>(slot) -
+                                    static_cast<int64_t>(lib_tls_size_);
+                obj.tls_dynamic = true;
+                tls_surplus_used_ = need;
+                // Back the slot: zero, then copy .tdata from the lib.
+                uint64_t dst = static_tls_base_ + obj.tls_block_offset;
+                try {
+                    std::vector<uint8_t> z(obj.tls.memsz, 0);
+                    mem_.write(dst, z.data(), z.size());
+                    if (obj.tls.filesz > 0) {
+                        uint64_t src = base + obj.tls.vaddr;
+                        std::vector<uint8_t> t(obj.tls.filesz);
+                        mem_.read(src, t.data(), t.size());
+                        mem_.write(dst, t.data(), t.size());
+                    }
+                } catch (...) {}
+            } else {
+                // No surplus left (or no startup template): unbacked numbering
+                // (old behavior) so at least mod IDs stay unique.
+                uint64_t a2 = obj.tls.align ? obj.tls.align : 16;
+                lib_tls_size_ = (lib_tls_size_ + a2 - 1) & ~(a2 - 1);
+                obj.tls_tp_offset = -static_cast<int64_t>(lib_tls_size_ + obj.tls.memsz);
+                lib_tls_size_ += obj.tls.memsz;
+                obj.tls_block_offset = static_tls_size_ - lib_tls_size_;
+            }
         }
     }
     objects_.push_back(std::move(obj));
@@ -3788,7 +3847,9 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                         if (!o.soname.empty() && o.soname == soname) { found = true; break; }
                     }
                     if (found) continue;
-                    uint64_t dep_base = load_library(cpu, soname);
+                    uint64_t dep_base = load_library(cpu, soname,
+                                                     objects_[parent_idx].runpath,
+                                                     objects_[parent_idx].rpath);
                     if (dep_base == 0) {
                         fprintf(stderr, "[%s] dlopen: could not load dependency "
                                 "%s (continuing)\n", CODENAME, soname.c_str());

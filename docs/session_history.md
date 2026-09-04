@@ -3873,3 +3873,11 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **`make check-all` failed at `test-capi` (host SIGSEGV in `resolve_symbol` lock):** bisected clean worktrees — baseline `60b7d54` 54/54, every session commit green in isolation, including HEAD. Root cause was stale objects in the session tree (headers changed `Memory`/`PageCache`/`DebugFlags` layout mid-session; incremental `make` left a mixed-ABI `libbifrost.a`). `make clean && make -j` fixed it. Lesson: after header-layout changes, clean-rebuild before trusting `test-capi`/`test-nb` (the `cb26a53` stale-build note says the same).
 - Full validation after clean rebuild: `test-capi` **54/54**, `test-nb` **61/61**, full `./scripts/run_tests.sh` **221/221**, opgen guards green.
+
+## Session History (2026-09-04) — dlopen tls surplus + shim + runpath (thread-test hunt)
+
+- **Static-elf shim (`dynamic_linker.h/cpp`):** `ensure_thunk_linker_()` never ran `link()`, so first dlopen had no shim (TLSDESC resolver null, dlerror/iterate dead). New `ensure_shim()` (idempotent) called from `load_library_from_data`; dynamic path unaffected.
+- **RUNPATH (`dynamic_linker.*`):** `load_library()` dropped parent paths; deps with `$ORIGIN` failed under dlopen but worked at startup. Signature now threads `parent_runpath/rpath` (defaulted) into all `find_library` calls; dep loads pass the parent's own paths.
+- **dlopen TLS surplus (the hunt):** dlopened TLS had tp numbering but no backing (OOB on main thread). First attempt grew the startup lib area — broke guest/host geometry agreement (guest TCB = block + its own PT_TLS sum) and hung all pthread tests with heap corruption. Final design keeps the TP anchor frozen: 1 KiB surplus reserved TRAILING (positive tp, past main TLS), carved monotonically (`tls_dynamic` flag; `allocate_thread_tls` excludes dynamic libs from its anchor recompute so new-thread TP matches main). TCB 0x10-vs-0x20 "fix" reverted — the mismatch is load-bearing, both sides stay as they were.
+- Verified with a scratch glibc dlopen-TLS test (lib with `__thread` int + long[4]): init/set/multi-lane reads all correct on main thread under jit + interp. Its vectorized sum loop exposed a SEPARATE pre-existing gap (`addp d31,v30.2d` 0x5EF1BBDF → FP-NOP, lanes read fine) — recorded, not fixed here.
+- Verified: `--dynamic` **15/15**, `--quick` **216/216**.
