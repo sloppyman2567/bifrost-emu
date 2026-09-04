@@ -165,8 +165,12 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 case 1: sse_op = 0x5E; break;  // div (divsd)
                 case 2: sse_op = 0x58; break;  // add (addsd)
                 case 3: sse_op = 0x5C; break;  // sub (subsd)
-                case 4: sse_op = 0x5F; break;  // max (maxsd) — FMAX
-                case 5: sse_op = 0x5D; break;  // min (minsd) — FMIN
+                // FMAX/FMIN propagate nan, but maxsd/minsd return the
+                // numeric operand (numnum semantics = FMAXNM). Route
+                // through interp so jit matches arm.
+                case 4: case 5:
+                    emit_call_interp(inst.arm_pc, false);
+                    return true;
                 case 6: sse_op = 0x5F; break;  // max (maxsd) — FMAXNM
                 case 7: sse_op = 0x5D; break;  // min (minsd) — FMINNM
                 case 8: sse_op = 0x59; break;  // mul (mulsd) — FNMUL (negate after)

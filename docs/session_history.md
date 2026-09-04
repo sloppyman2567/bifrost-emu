@@ -3812,3 +3812,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Atomic CAS page-cross + unaligned (`memory.cpp`):** slow path did `memcpy(page+off,4/8)` without split — `addr=page_end-2` overran vector. Fast path did unaligned `atomic<>` (ub/torn). Fix: fast path requires `(addr&3)==0` / `(addr&7)==0`, slow path assembles cross-page words byte-by-byte with missing pages as zero.
 - **Fork drops cursors (`memory.cpp:clone_for_fork`):** copied `mmap_next_/allocs/free/total` but not `above_window_next_/pie_base_/stack_top_`. Child stack-guard checks diverged. Now copied.
 - Verified: `make -j` clean, `jit_simd_pairmin` 19/19 jit + interp, `jit_int_fp_conv` all pass, `./scripts/run_tests.sh --quick` **216/216**.
+
+## Session History (2026-09-04) — fmax/fmin nan: interp propagate + jit fallback
+
+- **Scalar FMAX/FMIN aliased to FMAXNM (`interp_fp.cpp`, `jit_codegen_fparith.cpp`):** both used `fmax/fmin` / `maxsd/minsd` (numnum: nan suppressed). ARM FMAX/FMIN propagate nan, NM variants suppress. Fix: interp 4/5 return quiet nan if either input nan, 6/7 keep `fmax/fmin`; jit 4/5 now `CALL_INTERP`, 6/7 stay native; `instr_will_call_interp` gate mirrors 4/5 as interp.
+- Verified: `make -j` clean, quick **216/216**, `JIT_VERIFY` int_fp_conv pass.

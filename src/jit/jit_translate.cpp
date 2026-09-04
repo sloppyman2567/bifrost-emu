@@ -112,9 +112,14 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             if (fp_decode::is_fcmp(op))
                 return fp_gate >= 0 && !(fp_gate & 0x02);
             // FP 2-source (FADD/FSUB/FMUL/FDIV/FMAX/FMIN/FMAXNM/FMINNM/FNMUL).
+            // FMAX/FMIN (opc 4/5) propagate nan but maxsd/minsd suppress
+            // it, so codegen routes them via CALL_INTERP — predict interp.
             if (((op >> 21) & 1) == 1 && ((op >> 10) & 0x3) == 0b10
-                && (op & 0xFF000000) == 0x1E000000 && ((op >> 12) & 0xF) <= 8)
+                && (op & 0xFF000000) == 0x1E000000 && ((op >> 12) & 0xF) <= 8) {
+                uint8_t opc2 = (op >> 12) & 0xF;
+                if (opc2 == 4 || opc2 == 5) return true;
                 return fp_gate >= 0 && !(fp_gate & 0x04);
+            }
             // FABD (scalar/vector, S/D via bit22).
             if ((op & 0xFF00FC00) == 0x7E00D400)
                 return fp_gate >= 0 && !(fp_gate & 0x04);
