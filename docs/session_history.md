@@ -3862,3 +3862,9 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **execve reset (`syscalls/threads.cpp`, `core/signal.h`):** old image's brk/handlers/pending/altstack survived. Now brk/brk_start from new `end_addr` (under `brk_mu_`), `SignalTable::reset_exec()` clears handlers + frames, cpu pending queue + `sigpending` + altstack cleared. sigmask preserved per POSIX.
 - **dlopen JMPREL (`dynamic_linker.cpp`):** JUMP_SLOT dropped addend (`addr` vs startup `S+A`), TLSDESC-in-plt missing (Qt). Both mirrored from startup path. Full TLS-backing realloc + RUNPATH + static-shim remain deferred (bigger, riskier).
 - Verified: `make -j` clean, `jit_frint` pass jit + interp + `JIT_VERIFY`, quick **216/216**.
+
+## Session History (2026-09-04) — mremap shrink reclaim + grow oom accounting
+
+- **Shrink leak (`memory.cpp:mremap_grow`):** tail pages + address range never freed, marched the page cap on realloc-shrink loops. Now reclaims tail pages (above-window), returns range to free list, bumps page epoch.
+- **Grow accounting:** in-place path created above-window pages without OOM check or `total_pages_` charge (host exhaust via mremap loop). Now counts need first, returns 0 on exceed, charges created pages.
+- Verified: `make -j` clean, quick **216/216**.

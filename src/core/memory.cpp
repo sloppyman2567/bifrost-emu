@@ -551,15 +551,28 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (new_size == 0) new_size = PAGE_SIZE;
     uint64_t old_aligned = (old_size + PAGE_MASK) & ~PAGE_MASK;
     uint64_t new_aligned = (new_size + PAGE_MASK) & ~PAGE_MASK;
-    // Shrink: keep the same address, just record the smaller size.
-    // We don't actually unmap the freed tail pages, but that's fine —
-    // the guest won't access them, and we never reclaim address space
-    // anyway (bump allocator).
+    // Shrink: keep the same address, reclaim the tail pages + address
+    // range so repeated realloc-shrink doesn't march the page cap.
     if (new_aligned <= old_aligned) {
         std::unique_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
+            uint64_t freed = it->second > new_aligned ? it->second - new_aligned : 0;
             it->second = new_aligned;
+            if (freed > 0) {
+                uint64_t fstart = old_addr + new_aligned;
+                uint64_t fend = fstart + freed;
+                for (uint64_t s = fstart; s < fend; s += PAGE_SIZE) {
+                    if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+                    auto pit = pages_.find(s / PAGE_SIZE);
+                    if (pit != pages_.end()) {
+                        pages_.erase(pit);
+                        total_pages_.fetch_sub(1, std::memory_order_relaxed);
+                    }
+                }
+                add_free_range(fstart, freed);
+                page_epoch_.fetch_add(1, std::memory_order_relaxed);
+            }
         } else {
             allocations_[old_addr] = new_aligned;
         }
@@ -601,8 +614,17 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
         }
     }
     if (can_grow_in_place) {
+        // OOM check first: count above-window pages that would be added.
+        // (Window pages need no pages_ entry and don't count.)
+        size_t need = 0;
+        for (uint64_t s = extra_start; s < extra_end; s += PAGE_SIZE) {
+            if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+            if (pages_.find(s / PAGE_SIZE) == pages_.end()) need++;
+        }
+        if (would_exceed_page_limit(need)) return 0;  // keep old mapping
         // Inline the map_range logic so we keep holding the unique lock
         // (map_range would otherwise re-acquire it → deadlock).
+        size_t added = 0;
         for (uint64_t s = extra_start; s < extra_end; s += PAGE_SIZE) {
             uint64_t pn = s / PAGE_SIZE;
             if (direct_window_ && s < DIRECT_WINDOW_SIZE) {
@@ -611,11 +633,13 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
             auto it = pages_.find(pn);
             if (it == pages_.end()) {
                 pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
+                added++;
             }
             // else: preserve existing page data — mremap_grow is
             // extending the mapping, not zeroing it. musl's realloc
             // expects the old data to be preserved at the start.
         }
+        total_pages_.fetch_add(added, std::memory_order_relaxed);
         auto it = allocations_.find(old_addr);
         if (it != allocations_.end()) {
             it->second = new_aligned;
