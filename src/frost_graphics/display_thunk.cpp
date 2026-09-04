@@ -2250,13 +2250,22 @@ void vk_writeback_pnext_chain(Memory* mem, const VkPnextNode* nodes,
                               uint32_t n) {
     auto live = mem->allocations_snapshot();
     auto room = [&](uint64_t g, size_t want) -> size_t {
+        if (!want) return 0;
         for (const auto& kv : live) {
             if (g >= kv.first && g - kv.first < kv.second) {
                 uint64_t r = kv.second - (g - kv.first);
                 return (want <= r) ? want : static_cast<size_t>(r);
             }
         }
-        return 0;
+        // untracked base (stack/brk): allow up to next tracked neighbor.
+        size_t allow = want;
+        for (const auto& kv : live) {
+            if (kv.first > g) {
+                uint64_t gp = kv.first - g;
+                if (gp < allow) allow = static_cast<size_t>(gp);
+            }
+        }
+        return allow;
     };
     for (uint32_t i = 0; i < n; i++) {
         // Write back everything EXCEPT the pNext link (offsets 8..16):

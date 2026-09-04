@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/syscall.h>
 #include <vulkan/vulkan_core.h>
 
