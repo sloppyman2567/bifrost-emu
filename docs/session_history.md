@@ -3837,3 +3837,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Absolute-path dlopen hole (`dynamic_linker.cpp:3637,3666`):** bare soname had thunk fallback, absolute missing + wrong-arch paths did not. `dlopen("/usr/lib/x86_64/libGL.so.1")` failed while `dlopen("libGL.so.1")` thunked. Fix: same `is_thunk_supported_lib_(basename)` check in both absolute routes, registering under basename so bare/abs dedup.
 - Verified: `make -j` clean, quick **216/216**.
+
+## Session History (2026-09-04) — dynlink main range via map_size
+
+- **Main blind spot (`dynamic_linker.cpp:find_object_by_addr`):** skipped `base==0`, main fallback only `addr<16m`. ET_EXEC mains >=16m missed dladdr/0x1006/0x1008. Fix: range check `[base,base+map_size)` for all objects with known size (thunks have 0, never match); 16m fallback only for size-unknown mains. Same for `object_relative_offset`.
+- Verified: `make -j` clean, quick **216/216** incl `test_dladdr` + `test_dladdr_glibc`.

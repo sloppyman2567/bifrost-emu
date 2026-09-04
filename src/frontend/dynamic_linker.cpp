@@ -4094,15 +4094,15 @@ uint64_t DynamicLinker::resolve_symbol_in(uint64_t handle,
 const LoadedObject* DynamicLinker::find_object_by_addr(uint64_t addr) const {
     std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     for (const auto& obj : objects_) {
-        if (obj.base_addr == 0) continue;  // skip main binary (base 0)
+        if (obj.map_size == 0) continue;  // thunk libs / unknown: no range
         if (addr >= obj.base_addr && addr < obj.base_addr + obj.map_size) {
             return &obj;
         }
     }
-    // Check the main binary (base 0, map_size unknown — check a reasonable
-    // range for the main binary's text/data segments).
+    // Fallback for main objects without a known size (old records):
+    // check a reasonable range for text/data segments.
     for (const auto& obj : objects_) {
-        if (obj.is_main && addr < 0x10000000) {
+        if (obj.is_main && obj.map_size == 0 && addr < 0x10000000) {
             return &obj;
         }
     }
@@ -4114,7 +4114,7 @@ const LoadedObject* DynamicLinker::find_object_by_addr(uint64_t addr) const {
 uint64_t DynamicLinker::object_relative_offset(uint64_t addr, const std::string& name_fragment) const {
     std::lock_guard<std::recursive_mutex> lk(loader_mu_);
     for (const auto& obj : objects_) {
-        if (obj.base_addr == 0) continue;
+        if (obj.map_size == 0) continue;
         if (addr >= obj.base_addr && addr < obj.base_addr + obj.map_size) {
             if (obj.name.find(name_fragment) != std::string::npos) {
                 return addr - obj.base_addr;
