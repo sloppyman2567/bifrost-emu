@@ -9,6 +9,7 @@
 #include "core/memory.h"
 #include "core/cpu.h"
 #include "core/signal.h"
+#include "debug_flags.h"
 #include "syscalls/syscalls.h"
 #include <errno.h>
 #include <cstdio>
@@ -172,7 +173,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
-             if (getenv("BIFROST_TRACE_MMAP")) {
+             if (dbg().trace_mmap) {
                 fprintf(stderr, "[mmap(pc=0x%llx addr=0x%llx, len=%lu, prot=%lu, flags=0x%llx, fd=%lld, off=%llu) → 0x%llx]\n",
                         (unsigned long long)cpu.pc,
                         (unsigned long long)addr,
@@ -246,7 +247,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // there and free() crashed with BRK #1000 (get_meta). Now
             // munmap frees the pages (page-cap reflects live memory) and
             // returns the address range to the free list for reuse.
-            if (getenv("BIFROST_TRACE_MMAP")) {
+            if (dbg().trace_mmap) {
                 fprintf(stderr, "[munmap(0x%llx, %lu)]\n",
                         (unsigned long long)a0,
                         (unsigned long)a1);
@@ -302,7 +303,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
-                if (getenv("BIFROST_TRACE_MMAP")) {
+                if (dbg().trace_mmap) {
                     fprintf(stderr, "[mremap(0,0,%lu) → 0x%llx]\n",
                             (unsigned long)new_size,
                             (unsigned long long)mapped);
@@ -315,7 +316,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
-            if (getenv("BIFROST_TRACE_MMAP")) {
+            if (dbg().trace_mmap) {
                 fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
                         (unsigned long long)old_addr,
                         (unsigned long)old_size,
@@ -331,7 +332,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             return 0;
         }
         case 233: { // madvise
-            if (getenv("BIFROST_TRACE_MADVISE")) {
+            if (dbg().trace_madvise) {
                 fprintf(stderr, "[madvise(0x%llx, %lu, %lld)]\n",
                         (unsigned long long)a0,
                         (unsigned long)a1, (long long)(int64_t)a2);

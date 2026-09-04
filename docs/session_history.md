@@ -3849,3 +3849,9 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Thunk handle collision (`dynamic_linker.cpp:register_thunk_library_`):** all libs shared `0x6000000000`, close/dlsym hit first. Now `base + n*16m` unique per lib, size 0 so addr lookup still skips.
 - **Futex wake race (`threads.cpp:FUTEX_WAKE`):** lock-free `waiters==0` skip could miss increment under lock -> hang. Now always takes slot mutex and rechecks. Costs ~50ns uncontended, correctness wins.
 - Verified: `make -j` clean, quick **216/216**.
+
+## Session History (2026-09-04) — dead handlers + cached trace flags
+
+- **Dead dups (`interp_fp.cpp`):** second UMINP (`0x2E20AC00`) + TBL (`0x0E002000/3000`) handlers unreachable, first switch already returns. Deleted, no behavior change.
+- **Hot getenv (`debug_flags.h`, `interp_fp.cpp`, `syscalls/mem.cpp`):** `NAN_TRACE` per fp write, `SIMD_TRACE/COLLECT` per unhandled op, `TRACE_MMAP` per mmap/munmap/mremap, `TRACE_MADVISE` per madvise now cached in `dbg()` instead of per-call `getenv`.
+- Verified: `make -j` clean, quick **216/216**.

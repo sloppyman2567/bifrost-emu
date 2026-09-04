@@ -47,6 +47,11 @@ struct DebugFlags {
     bool dbg_guard  = false;  // BIFROST_DBG_GUARD   — decode-error backtraces
     bool trace_crash = false;  // BIFROST_TRACE_CRASH — BRK #1000 regs dump
     bool dynlink_trace = false;  // BIFROST_DYNLINK_TRACE — loader/dlsym lines
+    bool nan_trace = false;  // BIFROST_NAN_TRACE — nan writes in fp helpers
+    bool simd_trace = false;  // BIFROST_SIMD_TRACE — unhandled simd log
+    bool simd_collect = false;  // BIFROST_SIMD_COLLECT — enumerate-and-nop mode
+    bool trace_mmap = false;  // BIFROST_TRACE_MMAP — mmap/munmap/mremap lines
+    bool trace_madvise = false;  // BIFROST_TRACE_MADVISE — madvise lines
     // ── capture sinks (paths) ────────────────────────────────────────
     std::string xseqlog;  // BIFROST_XSEQLOG — X wire sequence capture file
     std::string xcap;     // BIFROST_XCAP    — X capture output root
@@ -89,6 +94,11 @@ struct DebugFlags {
         f.dbg_guard  = all || env("BIFROST_DBG_GUARD");
         f.trace_crash = all || env("BIFROST_TRACE_CRASH");
         f.dynlink_trace = all || env("BIFROST_DYNLINK_TRACE");
+        f.nan_trace = all || env("BIFROST_NAN_TRACE");
+        f.simd_trace = all || env("BIFROST_SIMD_TRACE");
+        f.simd_collect = all || env("BIFROST_SIMD_COLLECT");
+        f.trace_mmap = all || env("BIFROST_TRACE_MMAP");
+        f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
         return f;

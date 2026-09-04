@@ -13,6 +13,7 @@
 // the interpreter had before the split.
 #include "core/emulator.h"
 #include "decoder.hpp"
+#include "debug_flags.h"
 #include "interp/interp_crypto.hpp"
 #include "opgen_fpfixed.hpp"
 #include <cmath>
@@ -39,16 +40,14 @@ static inline float read_fp_s(const CPU& cpu, int r) {
 }
 static inline void write_fp_d(CPU& cpu, int r, double d) {
     if (r < 0 || r > 31) return;  // defensive: prevent OOB write
-    static bool nan_dbg_ = (getenv("BIFROST_NAN_TRACE") != nullptr);
-    if (nan_dbg_ && std::isnan(d))
+    if (dbg().nan_trace && std::isnan(d))
         fprintf(stderr, "[NAN-D] r%d = %.17g pc=0x%llx\n", r, d, (unsigned long long)cpu.pc);
     uint64_t bits; memcpy(&bits, &d, 8);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
 }
 static inline void write_fp_s(CPU& cpu, int r, float f) {
     if (r < 0 || r > 31) return;  // defensive: prevent OOB write
-    static bool nan_dbg_ = (getenv("BIFROST_NAN_TRACE") != nullptr);
-    if (nan_dbg_ && std::isnan(f))
+    if (dbg().nan_trace && std::isnan(f))
         fprintf(stderr, "[NAN-S] r%d = %.9g pc=0x%llx\n", r, f, (unsigned long long)cpu.pc);
     uint32_t bits; memcpy(&bits, &f, 4);
     cpu.v_lo[r] = bits; cpu.v_hi[r] = 0;
@@ -2948,42 +2947,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     memcpy(&cpu.v_hi[rd], vd + 8, 8);
                     return;
                 }
-                // TBL / TBX (vector, table lookup): Vd[i] =
-                // table[index[i]] where `table` is the concatenation of
-                // (len+1) consecutive vector registers starting at Vn.
-                // Index is an unsigned byte; out-of-range → 0 (TBL) or
-                // unchanged Vd[i] (TBX). Q selects 8 (Q=0, v_lo only) vs
-                // 16 (Q=1) byte lanes.
-                //   TBL Vd.8B, {Vn.8B}, Vm.8B        — 0x0E002000 (1 reg)
-                //   TBL Vd.16B, {Vn.16B,..}, Vm.16B  — Q=1 → 0x4E002000
-                //   TBX same but bit[12]=1 → 0x0E003000 / 0x4E003000
-                // Register count = (bits[14:13]) + 1 (1..4).
-                if (sub3_noq == 0x0E002000 || sub3_noq == 0x0E003000) {
-                    bool is_tbx = sub3_noq == 0x0E003000;
-                    int nregs = ((op >> 13) & 0x3) + 1;   // bits[14:13]
-                    int lanes = Q ? 16 : 8;               // 8B or 16B
-                    int tbl_bytes = nregs * lanes;        // concatenated table
-                    uint8_t table[4 * 16];
-                    for (int r = 0; r < nregs; r++) {
-                        int reg = (rn + r) & 31;
-                        memcpy(table + r * lanes, &cpu.v_lo[reg], 8);
-                        if (Q) memcpy(table + r * lanes + 8, &cpu.v_hi[reg], 8);
-                    }
-                    uint8_t idx[16], out[16];
-                    memcpy(idx, &cpu.v_lo[rm], 8);
-                    if (Q) memcpy(idx + 8, &cpu.v_hi[rm], 8);
-                    memcpy(out, &cpu.v_lo[rd], 8);
-                    if (Q) memcpy(out + 8, &cpu.v_hi[rd], 8);
-                    for (int i = 0; i < lanes; i++) {
-                        uint8_t ix = idx[i];
-                        if (ix < tbl_bytes) out[i] = table[ix];
-                        else if (!is_tbx) out[i] = 0;   // TBL: zero, TBX: keep
-                    }
-                    memcpy(&cpu.v_lo[rd], out, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], out + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
                 // ── Saturating integer arithmetic (three-same) ────────
                 // Encodings verified against the cross assembler:
                 //   SQADD/UQADD   sub3_noq 0x0E200C00 / 0x2E200C00
@@ -3366,35 +3329,6 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     else cpu.v_hi[rd] = 0;
                     return;
                 }
-                // UMINP (vector, pairwise unsigned min): Vd[i] =
-                // min(Vn[2i], Vn[2i+1]) for the low half, then
-                // min(Vm[2i], Vm[2i+1]) for the high half.
-                if (sub3_noq == 0x2E20AC00) {  // UMINP 8B/16B, 4H/8H, 2S/4S
-                    int esize = 1 << size;
-                    int elems_per_src = (Q ? 16 : 8) / esize;
-                    int half = elems_per_src / 2;
-                    uint8_t vn[16], vm[16], vd[16];
-                    memcpy(vn, &cpu.v_lo[rn], 8);
-                    if (Q) memcpy(vn + 8, &cpu.v_hi[rn], 8);
-                    memcpy(vm, &cpu.v_lo[rm], 8);
-                    if (Q) memcpy(vm + 8, &cpu.v_hi[rm], 8);
-                    for (int i = 0; i < half; i++) {
-                        uint64_t a = 0, b = 0;
-                        memcpy(&a, vn + (2 * i) * esize, esize);
-                        memcpy(&b, vn + (2 * i + 1) * esize, esize);
-                        uint64_t r = a < b ? a : b;
-                        memcpy(vd + i * esize, &r, esize);
-                        a = b = 0;
-                        memcpy(&a, vm + (2 * i) * esize, esize);
-                        memcpy(&b, vm + (2 * i + 1) * esize, esize);
-                        r = a < b ? a : b;
-                        memcpy(vd + (half + i) * esize, &r, esize);
-                    }
-                    memcpy(&cpu.v_lo[rd], vd, 8);
-                    if (Q) memcpy(&cpu.v_hi[rd], vd + 8, 8);
-                    else cpu.v_hi[rd] = 0;
-                    return;
-                }
                 // ── FP by-element (FMUL/FMLA/FMLS/FMULX × element) ──
                 // FMUL Vd.4S, Vn.4S, Vm.S[index]: multiply Vn by the scalar
                 // lane of Vm selected by the index field.
@@ -3642,7 +3576,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // so missing SIMD coverage becomes a loud, fixable failure
             // instead of silent corruption. Log the opcode first for
             // debugging (also via BIFROST_SIMD_TRACE=1).
-            if (getenv("BIFROST_SIMD_TRACE")) {
+            if (dbg().simd_trace) {
                 static uint64_t simd_unhandled_count_ = 0;
                 if (simd_unhandled_count_ < 50) {
                     fprintf(stderr, "[SIMD] unhandled op=0x%08x pc=0x%llx (Q=%d U=%d size=%d)\n",
@@ -3656,7 +3590,7 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // so the guest keeps running. Produces the full list of missing
             // SIMD coverage in a single run instead of one SIGILL at a time.
             // TEMPORARY — removed after coverage sweep.
-            if (getenv("BIFROST_SIMD_COLLECT")) {
+            if (dbg().simd_collect) {
                 static std::set<uint32_t> simd_collected_;
                 if (simd_collected_.insert(op).second)
                     fprintf(stderr, "[SIMD-COL] op=0x%08x pc=0x%llx (Q=%d U=%d size=%d)\n",
