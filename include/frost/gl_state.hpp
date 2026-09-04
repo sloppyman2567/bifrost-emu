@@ -230,6 +230,12 @@ public:
     uint32_t array_buffer_binding() const;
     uint32_t element_array_buffer_binding() const;
     uint32_t draw_indirect_buffer_binding() const;
+    // VAO-modeled element binding for elision: buffer captured under the
+    // currently bound VAO (or 0 when that VAO has no record). known=false
+    // when the current VAO itself is unknown.
+    uint32_t vao_element_binding(bool& known) const;
+    void unbind_buffers(const uint32_t* names, size_t n);
+    void unbind_vao_elements(uint32_t vao);
     // 2026-08: general target→buffer binding map (glMapBuffer/glUnmapBuffer
     // need to know which buffer is bound to an arbitrary target, e.g.
     // GL_COPY_READ_BUFFER / GL_PIXEL_UNPACK_BUFFER / GL_UNIFORM_BUFFER).
@@ -335,13 +341,17 @@ private:
     // never correctness.
     std::atomic<uint32_t> vao_binding_{0};
     std::atomic<bool> vao_known_{true};
-    uint32_t array_buffer_binding_ = 0;
+    std::atomic<uint32_t> array_buffer_binding_{0};
     uint32_t element_array_buffer_binding_ = 0;
     uint32_t draw_indirect_buffer_binding_ = 0;
     // General target→buffer binding map (any target, not just the two the
     // legacy accessors cover). Populated by the glBindBuffer/Base/Range
     // handlers; consulted by the glMapBuffer/glUnmapBuffer bounce logic.
     std::unordered_map<uint32_t, uint32_t> buffer_bindings_;
+    // Per-VAO element-array bindings for elision (ELEMENT_ARRAY_BUFFER is
+    // VAO state: switching VAOs restores it without any BindBuffer call).
+    // vao -> buffer. Unknown VAOs simply have no entry (no elision).
+    std::unordered_map<uint32_t, uint32_t> vao_element_;
     // Per-texture-unit bindings: unit -> target -> texture name.
     // Flat map: (unit << 16) | target -> texture name. Plus a lock-free
     // last-key cache: texture binds repeat the same (unit, target) with

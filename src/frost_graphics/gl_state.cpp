@@ -39,7 +39,7 @@ void GLStateTracker::reset() {
     stencil_front_ = {};
     stencil_back_ = {};
     current_program_.store(0, std::memory_order_relaxed);
-    array_buffer_binding_ = 0;
+    array_buffer_binding_.store(0, std::memory_order_relaxed);
     element_array_buffer_binding_ = 0;
     draw_indirect_buffer_binding_ = 0;
     texture_bindings_.clear();
@@ -261,7 +261,10 @@ void GLStateTracker::unbind_vaos(const uint32_t* names, size_t n) {
     if (!names) return;
     std::lock_guard<std::mutex> g(mu_);
     for (size_t k = 0; k < n; k++) {
-        if (names[k] && vao_binding_.load(std::memory_order_relaxed) == names[k]) vao_binding_.store(0, std::memory_order_relaxed);
+        if (names[k] && vao_binding_.load(std::memory_order_relaxed) == names[k]) {
+            vao_binding_.store(0, std::memory_order_relaxed);
+        }
+        if (names[k]) vao_element_.erase(names[k]);
     }
 }
 
@@ -271,13 +274,14 @@ void GLStateTracker::mark_vao_unknown() {
 }
 
 void GLStateTracker::set_array_buffer_binding(uint32_t buffer) {
-    std::lock_guard<std::mutex> g(mu_);
-    array_buffer_binding_ = buffer;
+    array_buffer_binding_.store(buffer, std::memory_order_relaxed);
 }
 
 void GLStateTracker::set_element_array_buffer_binding(uint32_t buffer) {
     std::lock_guard<std::mutex> g(mu_);
     element_array_buffer_binding_ = buffer;
+    if (vao_known_.load(std::memory_order_relaxed))
+        vao_element_[vao_binding_.load(std::memory_order_relaxed)] = buffer;
 }
 
 void GLStateTracker::set_draw_indirect_buffer_binding(uint32_t buffer) {
@@ -286,8 +290,7 @@ void GLStateTracker::set_draw_indirect_buffer_binding(uint32_t buffer) {
 }
 
 uint32_t GLStateTracker::array_buffer_binding() const {
-    std::lock_guard<std::mutex> g(mu_);
-    return array_buffer_binding_;
+    return array_buffer_binding_.load(std::memory_order_relaxed);
 }
 
 uint32_t GLStateTracker::element_array_buffer_binding() const {
@@ -884,6 +887,46 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
         set_depth_range(n, f);
         return;
     }
+}
+
+// VAO-modeled element binding for elision. Single lock for the VAO +
+// per-VAO lookup so a VAO switch racing between the two cannot mix them
+// (GL is single-threaded in practice; this is belt and braces).
+uint32_t GLStateTracker::vao_element_binding(bool& known) const {
+    std::lock_guard<std::mutex> g(mu_);
+    known = vao_known_.load(std::memory_order_relaxed);
+    if (!known) return 0;
+    auto it = vao_element_.find(vao_binding_.load(std::memory_order_relaxed));
+    if (it == vao_element_.end()) { known = false; return 0; }
+    return it->second;
+}
+
+// Deleting a bound buffer unbinds it everywhere it is recorded: the
+// array member, every per-VAO element entry, and the general map (which
+// the map-bounce logic reads — previously went stale on delete).
+void GLStateTracker::unbind_buffers(const uint32_t* names, size_t n) {
+    if (!names) return;
+    std::lock_guard<std::mutex> g(mu_);
+    for (size_t k = 0; k < n; k++) {
+        uint32_t dead = names[k];
+        if (!dead) continue;
+        if (array_buffer_binding_.load(std::memory_order_relaxed) == dead)
+            array_buffer_binding_.store(0, std::memory_order_relaxed);
+        if (element_array_buffer_binding_ == dead)
+            element_array_buffer_binding_ = 0;
+        for (auto& kv : vao_element_) {
+            if (kv.second == dead) kv.second = 0;
+        }
+        for (auto it = buffer_bindings_.begin(); it != buffer_bindings_.end(); ) {
+            if (it->second == dead) it = buffer_bindings_.erase(it);
+            else ++it;
+        }
+    }
+}
+
+void GLStateTracker::unbind_vao_elements(uint32_t vao) {
+    std::lock_guard<std::mutex> g(mu_);
+    vao_element_.erase(vao);
 }
 
 } // namespace arm64emu

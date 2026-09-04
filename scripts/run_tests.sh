@@ -349,6 +349,11 @@ INTEGRATION_TESTS=(
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
+    # Bind-elision regression (needs DISPLAY + host GL 3.x).
+    # Redundant ARRAY/ELEMENT binds + VAO switches + delete/reuse must
+    # render identical pixels with elision on (default) — pixel-checked
+    # via glReadPixels. Exit 77 = skip when SDL/GL unavailable.
+    "sdl_gl_elide|ctest_real/test_sdl_gl_elide.elf||30|ELIDE TEST PASSED"
     # GLES draw-row EBO offsets via GraphicThunk (needs DISPLAY + ES 3.x).
     # EBO-bound nonzero-offset draw through the GLES EL_PTR rows with a
     # readback pin; control offset-0 draw isolates ES setup failures.

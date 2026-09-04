@@ -2425,6 +2425,20 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             bool known = false;
             uint32_t bound = trk->vao_binding(known);
             elided = (known && bound == static_cast<uint32_t>(args[0]));
+        } else if (entry.name == "glBindBuffer") {
+            // ARRAY_BUFFER is global state; ELEMENT_ARRAY_BUFFER is VAO
+            // state (per-VAO capture — a VAO switch restores it with no
+            // BindBuffer call). Other/indexed targets never elide: the
+            // general map is last-index-wins, not exact per index.
+            uint32_t target = static_cast<uint32_t>(args[0]);
+            uint32_t buf = static_cast<uint32_t>(args[1]);
+            if (target == 0x8892) {  // GL_ARRAY_BUFFER
+                elided = (trk->array_buffer_binding() == buf);
+            } else if (target == 0x8893) {  // GL_ELEMENT_ARRAY_BUFFER
+                bool known = false;
+                uint32_t cur = trk->vao_element_binding(known);
+                elided = (known && cur == buf);
+            }
         }
         if (elided) {
             if (dbg().thunk_trace) {
@@ -3134,6 +3148,12 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
             for (auto& m : freed)
                 impl_->mem->untrack_allocation(m.bounce, m.size);
+            // Mirror into the state tracker: deleting a bound buffer
+            // unbinds it (else a later re-generated name would observe a
+            // stale "already bound" and get elided). args[1] is host-
+            // readable here (bounce or window alias).
+            if (impl_->gl_state_tracker_)
+                impl_->gl_state_tracker_->unbind_buffers(names, n);
         }
     }
 
