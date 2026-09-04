@@ -4278,11 +4278,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                                                  : static_cast<double>(read_fp_s(cpu, rn));
                             double scaled = std::ldexp(a, fbits);
                             if (is_unsigned) {
-                                double hi = is_double ? 18446744073709551616.0
-                                                      : 4294967296.0;
-                                uint64_t out = (std::isnan(a) || scaled < 0.0) ? 0
-                                           : (scaled >= hi) ? (is_double ? ~0ULL : 0xFFFFFFFFu)
-                                           : static_cast<uint64_t>(scaled);
+                                // Route via helper: direct cast of
+                                // [2^63,2^64) hits x86 cvttsd2si sentinel.
+                                uint64_t out = fp_to_unsigned_sat(scaled, is_double);
                                 // Write to Sd zeroes the upper 32 bits (matches
                                 // the two-register-misc FCVTZS handler below).
                                 cpu.v_lo[rd] = is_double ? out : (out & 0xFFFFFFFFULL);

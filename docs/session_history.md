@@ -3817,3 +3817,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Scalar FMAX/FMIN aliased to FMAXNM (`interp_fp.cpp`, `jit_codegen_fparith.cpp`):** both used `fmax/fmin` / `maxsd/minsd` (numnum: nan suppressed). ARM FMAX/FMIN propagate nan, NM variants suppress. Fix: interp 4/5 return quiet nan if either input nan, 6/7 keep `fmax/fmin`; jit 4/5 now `CALL_INTERP`, 6/7 stay native; `instr_will_call_interp` gate mirrors 4/5 as interp.
 - Verified: `make -j` clean, quick **216/216**, `JIT_VERIFY` int_fp_conv pass.
+
+## Session History (2026-09-04) — fixed-point fp-dest unsigned saturation via helper
+
+- **AdvSIMD-scalar FCVTZU to FP dest (`interp_fp.cpp:4280`):** hand-rolled `static_cast<uint64_t>(scaled)` for `[2^63,2^64)` hits x86 `cvttsd2si` sentinel (returns `0x8000...` not the value). Now routes via `fp_to_unsigned_sat` subtract trick. Signed path already range-checked, left alone.
+- Verified: `make -j` clean, `jit_int_fp_conv` jit + interp pass, quick **216/216**.
