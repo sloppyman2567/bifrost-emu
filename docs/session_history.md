@@ -3924,3 +3924,7 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **ConstMap/CopyMap truncation (`ir_optimize.cpp`):** key methods took `uint8_t` while vregs are `uint16_t` — vreg >255 aliased and FWD could miscompile. Widened to `uint16_t` (no-op below 256).
 - **SIG_IGN across execve (`signal.h`):** `reset_exec()` cleared ignored dispositions too; now preserves `SIG_IGN` per POSIX.
 - Verified: `fp_pw_elem` + `frint` under `JIT_VERIFY`, regalloc-check probes, FWD probes, `--quick` **216/216**, `--dynamic` **15/15**.
+
+## Session History (2026-09-04) — final full seal (clean tree)
+
+- `make clean && make check-all` from scratch: opgen guards green, `test-capi` **54/54**, `test-nb` **61/61**, full suite **221/221**. Session total ~20 fixes, zero regressions.
