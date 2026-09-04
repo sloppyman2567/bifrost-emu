@@ -124,8 +124,11 @@ static bool instr_will_call_interp(const DecodedInst& d) {
             if ((op & 0xFF00FC00) == 0x7E00D400)
                 return fp_gate >= 0 && !(fp_gate & 0x04);
             // FP 1-source: FABS/FNEG/FSQRT (1..3) and FRINT* (0x08..0x0F).
+            // FRINTA (0x0C, ir mode 6) has no x86 mode and falls back to
+            // CALL_INTERP — predict interp so the splitter agrees.
             if (fp_decode::is_fp_1source(op)) {
                 uint8_t fp1 = fp_decode::fp_1source_opcode(op);
+                if (fp1 == 0x0C) return true;
                 if ((fp1 >= 1 && fp1 <= 3) || (fp1 >= 0x08 && fp1 <= 0x0F))
                     return fp_gate >= 0 && !(fp_gate & 0x08);
             }

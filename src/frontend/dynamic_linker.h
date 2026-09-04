@@ -264,8 +264,12 @@ public:
     // Ensure the ld-linux shim (dlerror buffer, TLSDESC resolver, dlopen
     // hook page) exists. The startup path registers it via link(); the
     // static-ELF path never calls link(), so the first dlopen must do it
-    // lazily. Idempotent. Takes loader_lock() internally.
-    bool ensure_shim() { return register_ld_linux_shim_(); }
+    // lazily. Idempotent. Takes loader_lock() (recursive: safe under the
+    // lock load_library already holds).
+    bool ensure_shim() {
+        std::lock_guard<std::recursive_mutex> lk(loader_mu_);
+        return register_ld_linux_shim_();
+    }
     // Decrement the refcount of a dlopen'd library. When the refcount
     // reaches 0, the library's DT_FINI_ARRAY is invoked (in reverse
     // order) and the library is marked for unload. The memory is NOT

@@ -1037,6 +1037,10 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (dl) {
                 for (const auto& obj : dl->objects()) {
                     if (!obj.tls.present || obj.tls.memsz == 0) continue;
+                    // Skip dynamic libs: they live in the startup surplus,
+                    // outside the frozen TP anchor (mirrors
+                    // allocate_thread_tls, which must compute the same TP).
+                    if (obj.tls_dynamic) continue;
                     if (obj.is_main) {
                         main_memsz = obj.tls.memsz;
                         main_align = obj.tls.align ? obj.tls.align : 16;

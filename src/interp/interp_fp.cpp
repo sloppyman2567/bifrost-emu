@@ -4474,16 +4474,27 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                         uint64_t hi_bits = cpu.v_hi[rn];
                         double b; memcpy(&b, &hi_bits, 8);
                         if (is_add)      write_fp_d(cpu, rd, a + b);
-                        else if (is_min) write_fp_d(cpu, rd, std::fmin(a, b));
-                        else             write_fp_d(cpu, rd, std::fmax(a, b));
+                        // FMAXP/FMINP propagate NaN like FMAX/FMIN (they are
+                        // the non-NM forms; FMAXNMP/FMINNMP are separate
+                        // encodings verified via cross-as).
+                        else if (is_min) write_fp_d(cpu, rd, (std::isnan(a) || std::isnan(b))
+                                            ? std::numeric_limits<double>::quiet_NaN()
+                                            : std::fmin(a, b));
+                        else             write_fp_d(cpu, rd, (std::isnan(a) || std::isnan(b))
+                                            ? std::numeric_limits<double>::quiet_NaN()
+                                            : std::fmax(a, b));
                     } else {                // single: both lanes in Vn low word
                         uint32_t lbits = static_cast<uint32_t>(cpu.v_lo[rn]);
                         float a; memcpy(&a, &lbits, 4);
                         uint32_t hbits = static_cast<uint32_t>(cpu.v_lo[rn] >> 32);
                         float b; memcpy(&b, &hbits, 4);
                         if (is_add)      write_fp_s(cpu, rd, a + b);
-                        else if (is_min) write_fp_s(cpu, rd, std::fminf(a, b));
-                        else             write_fp_s(cpu, rd, std::fmaxf(a, b));
+                        else if (is_min) write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
+                                            ? std::numeric_limits<float>::quiet_NaN()
+                                            : std::fminf(a, b));
+                        else             write_fp_s(cpu, rd, (std::isnan(a) || std::isnan(b))
+                                            ? std::numeric_limits<float>::quiet_NaN()
+                                            : std::fmaxf(a, b));
                     }
                     return;
                 }

@@ -3043,10 +3043,7 @@ void DynamicLinker::allocate_static_tls() {
             total += obj.tls.memsz;
         }
         total = (total + max_align - 1) & ~(max_align - 1);
-    // static_tls_size_ covers the surplus too, so GLRO-sized guest thread
-    // blocks (0x1001 caller-alloc path) fit positive-tp dlopen slots;
-    // lib_tls_size_ (the TP anchor) stays frozen at L0.
-    static_tls_size_ = total + TLS_DLOPEN_SURPLUS;
+        static_tls_size_ = total;
         lib_tls_size_ = total;  // variant-II: all TLS is "negative TP"
         tcb_size_ = 0;          // no TCB header for musl variant-II
         static_tls_base_ = mem_.mmap_alloc(total + 16);
@@ -3095,10 +3092,11 @@ void DynamicLinker::allocate_static_tls() {
     uint64_t max_align = 16;
     if (main_align > max_align) max_align = main_align;
     total = (total + max_align - 1) & ~(max_align - 1);
-    static_tls_size_ = total;
-    // Template block carries a trailing dlopen surplus (NOT in TP math):
-    // static_tls_size_ covers it so GLRO-sized guest blocks fit, while
-    // lib_tls_size_ (the TP anchor) stays frozen.
+    // static_tls_size_ covers the surplus too, so GLRO-sized guest thread
+    // blocks (0x1001 caller-alloc path) fit positive-tp dlopen slots;
+    // lib_tls_size_ (the TP anchor) stays frozen at L0. Surplus starts at
+    // template offset `total`.
+    static_tls_size_ = total + TLS_DLOPEN_SURPLUS;
     tls_surplus_base_ = total;
     static_tls_base_ = mem_.mmap_alloc(total + TLS_DLOPEN_SURPLUS + 16);  // +16 slack
     if (static_tls_base_ == 0) {

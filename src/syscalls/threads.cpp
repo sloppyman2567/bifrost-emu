@@ -836,14 +836,16 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
+                    // Take the slot mutex before reading waiters (trace
+                    // included): all waiters mutations happen under it.
+                    std::unique_lock<std::mutex> lk(slot->mu);
                     if (dbg().futex_trace) {
                         fprintf(stderr, "[FUTX t%d] WAKE op=%u addr=%#llx want=%d waiters=%d pc=0x%llx lr=0x%llx\n",
                                 cpu.tid, (unsigned)op, (unsigned long long)uaddr,
                                 to_wake, slot->waiters, (unsigned long long)cpu.pc,
                                 (unsigned long long)cpu.regs[30]);
                     }
-                    // There are waiters — take the slot mutex and notify.
-                    std::unique_lock<std::mutex> lk(slot->mu);
+                    // There are waiters — notify (lock already held).
                     if (slot->waiters == 0) {
                         ret_host(0);
                         return 0;

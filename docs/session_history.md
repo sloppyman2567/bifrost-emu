@@ -3906,3 +3906,14 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Thread kill (`emulator.h`, `thread_mgr.cpp`, `syscalls/threads.cpp`):** old threads kept running the old image after execve. New `kill_other_threads(caller)` stops + joins every other guest thread (victims run the normal exit path, so counts stay exact) with a `wake_all_futexes()` assist so futex sleepers can't hang the join; runs before memory teardown so exit paths read valid state. Caller (main or threaded) survives as the new main.
 - **Cursors (`memory.h`):** new `reset_allocator_cursors()` puts bump cursors back to fresh-process layout (old heap was untracked into reusable `free_ranges_`, which stays valid).
 - Verified: toybox `sh -c` + `exec` probes pass, `--quick` **216/216**, `--dynamic` **15/15**.
+
+## Session History (2026-09-04) — subagent review findings (5 real bugs)
+
+- Two review subagents swept the session diffs. Confirmed: pagecache/atomic/fork/mremap/execve/signal/futex/find_object/thunk/runpath/jmprel/pread/dup2/tcb/fmax/frinta/addp/sigsuspend/frame fixes all correct; `release_futex_if_empty` race latent (no callers — left alone).
+- **TLS size misplacement (`dynamic_linker.cpp`):** the `+SURPLUS` had landed in the musl branch (declared-but-unbacked) instead of variant-I. Moved to the right branch; musl restored.
+- **0x1001 anchor (`syscalls/misc.cpp`):** recompute summed dynamic libs while `allocate_thread_tls` skips them — anchors diverged after any dlopen-with-TLS. Now skips too.
+- **Shim lock (`dynamic_linker.h`):** `ensure_shim()` claimed locking but didn't; now takes `loader_mu_` (recursive, safe under `load_library`).
+- **Wake trace (`threads.cpp`):** trace read `waiters` lock-free; now read under slot mutex.
+- **FRINTA gate (`jit_translate.cpp`):** ir mode 6 fell back but the gate predicted native; `0x0C` now predicts interp (missed block-split only, no miscompile).
+- **FMAXP/FMINP NaN (`interp_fp.cpp`, `ctest/jit_fp_pw_elem.c`):** scalar pairwise used number semantics, but `fmaxnmp` exists as a separate encoding (verified via cross-as) so the plain forms propagate like FMAX/FMIN. Handler + test expectations fixed (`5.0` → NaN).
+- Verified: `fp_pw_elem` 18/18 jit + interp + `JIT_VERIFY`, `--quick` **216/216**, `--dynamic` **15/15**.

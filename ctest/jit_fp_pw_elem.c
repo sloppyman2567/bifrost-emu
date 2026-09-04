@@ -21,6 +21,12 @@ static void check(const char *name, double got, double want) {
            ok ? "ok" : "FAIL");
     if (!ok) fails++;
 }
+static void check_nan(const char *name, double got) {
+    int ok = __builtin_isnan(got);
+    printf("%-24s got %.17g want NaN %s\n", name, got,
+           ok ? "ok" : "FAIL");
+    if (!ok) fails++;
+}
 
 /* ---- scalar pairwise: op writes d19 from v18.2d / v18.2s ---- */
 #define PW_FN(name, WORD)                                         \
@@ -55,10 +61,11 @@ static void test_pairwise(void) {
     memcpy(&rf, &(uint64_t){pw_fminp_s(ff)}, 4); check("fminp s(10.5,-3.25)", rf, -3.25);
     dd[0] = -5.0; dd[1] = -2.0;
     memcpy(&r, &(uint64_t){pw_fminp_d(dd)}, 8); check("fminp d(-5,-2)", r, -5.0);
-    /* NaN rules: one-NaN -> other operand */
+    /* NaN rules: FMAXP/FMINP propagate like FMAX/FMIN (they are the
+     * non-NM forms; FMAXNMP/FMINNMP are separate encodings). */
     dd[0] = 5.0; dd[1] = __builtin_nan("");
-    memcpy(&r, &(uint64_t){pw_fmaxp_d(dd)}, 8); check("fmaxp d(5,NaN)", r, 5.0);
-    memcpy(&r, &(uint64_t){pw_fminp_d(dd)}, 8); check("fminp d(5,NaN)", r, 5.0);
+    memcpy(&r, &(uint64_t){pw_fmaxp_d(dd)}, 8); check_nan("fmaxp d(5,NaN)", r);
+    memcpy(&r, &(uint64_t){pw_fminp_d(dd)}, 8); check_nan("fminp d(5,NaN)", r);
 }
 
 /* ---- scalar x indexed element: rm=v18(=10010b), rn=v2, rd=v4 ---- */
