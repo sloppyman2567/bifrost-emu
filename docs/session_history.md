@@ -3842,3 +3842,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Main blind spot (`dynamic_linker.cpp:find_object_by_addr`):** skipped `base==0`, main fallback only `addr<16m`. ET_EXEC mains >=16m missed dladdr/0x1006/0x1008. Fix: range check `[base,base+map_size)` for all objects with known size (thunks have 0, never match); 16m fallback only for size-unknown mains. Same for `object_relative_offset`.
 - Verified: `make -j` clean, quick **216/216** incl `test_dladdr` + `test_dladdr_glibc`.
+
+## Session History (2026-09-04) — signal drain + thunk handles + futex wake
+
+- **Host signal drain (`signal.cpp:drain_host_signals`):** delivered all queued at once, each overwriting pc. Now breaks after first delivered, rest wait for post-sigreturn drain (mirrors `drain_pending_signals`).
+- **Thunk handle collision (`dynamic_linker.cpp:register_thunk_library_`):** all libs shared `0x6000000000`, close/dlsym hit first. Now `base + n*16m` unique per lib, size 0 so addr lookup still skips.
+- **Futex wake race (`threads.cpp:FUTEX_WAKE`):** lock-free `waiters==0` skip could miss increment under lock -> hang. Now always takes slot mutex and rechecks. Costs ~50ns uncontended, correctness wins.
+- Verified: `make -j` clean, quick **216/216**.

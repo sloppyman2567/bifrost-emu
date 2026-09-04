@@ -769,6 +769,10 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         }
         if (deliver_signal(*this, cpu, signals_, sig)) {
             any_delivered = true;
+            // Handler frame set up, pc changed — stop here and let the
+            // handler run. Further queued signals wait for the next
+            // drain after sigreturn (mirrors drain_pending_signals).
+            break;
         }
         // Re-read tail in case the producer added more signals while
         // we were delivering one.

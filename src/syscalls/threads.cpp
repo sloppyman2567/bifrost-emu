@@ -804,48 +804,27 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 case 1:  // FUTEX_WAKE
                 case 10: // FUTEX_WAKE_BITSET
                 {
-                    // 1.5.4-alpha fast path: skip the slot mutex when
-                    // there are no waiters. This is the common case for
-                    // pthread_mutex_unlock on an uncontended lock — the
-                    // thread calls FUTEX_WAKE(1) but no one is waiting.
-                    // Skipping the slot mutex saves ~50ns per unlock on
-                    // 8-vCPU guests.
-                    //
-                    // We still take the shard mutex (via get_futex) to
-                    // look up the slot, but we DON'T take the slot's own
-                    // mutex if waiters == 0. The waiters field is read
-                    // without the lock — this is a benign race: a waiter
-                    // might be in the process of incrementing it, in
-                    // which case we'd miss the wake. That's fine because
-                    // the waiter will loop and re-check the futex word,
-                    // and FUTEX_WAIT has its own retry logic.
-                    //
-                    // Safety: cv.notify_one()/notify_all() can be called
-                    // without holding the mutex (per C++ standard). The
-                    // waiter must check the condition in a loop, which
-                    // FUTEX_WAIT does.
+                    // WAKE must hold the slot mutex while reading
+                    // waiters: a waiter increments it under the same
+                    // mutex after re-checking the futex word. A
+                    // lock-free read can see 0 just before the
+                    // increment lands, skip the notify, and leave the
+                    // waiter sleeping forever. Correctness over ~50ns.
                     Emulator::FutexSlot* slot = get_futex(uaddr);
                     int to_wake = static_cast<int>(val);
                     if (to_wake <= 0) { ret_host(0); return 0; }
-                    int fwaiters = slot->waiters;
                     if (dbg().futex_trace) {
                         fprintf(stderr, "[FUTX t%d] WAKE op=%u addr=%#llx want=%d waiters=%d pc=0x%llx lr=0x%llx\n",
                                 cpu.tid, (unsigned)op, (unsigned long long)uaddr,
-                                to_wake, fwaiters, (unsigned long long)cpu.pc,
+                                to_wake, slot->waiters, (unsigned long long)cpu.pc,
                                 (unsigned long long)cpu.regs[30]);
-                    }
-                    // Read waiters without the lock — see comment above.
-                    // Use an atomic read to avoid torn reads on architectures
-                    // where int isn't atomic by default (not an issue on
-                    // x86_64/AArch64, but defensive).
-                    int waiters = __atomic_load_n(&slot->waiters, __ATOMIC_ACQUIRE);
-                    if (waiters == 0) {
-                        // No one to wake — skip the slot mutex.
-                        ret_host(0);
-                        return 0;
                     }
                     // There are waiters — take the slot mutex and notify.
                     std::unique_lock<std::mutex> lk(slot->mu);
+                    if (slot->waiters == 0) {
+                        ret_host(0);
+                        return 0;
+                    }
                     int woken = std::min(to_wake, slot->waiters);
                     if (woken >= slot->waiters) {
                         slot->cv.notify_all();

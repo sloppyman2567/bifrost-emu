@@ -2841,9 +2841,14 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
     // address — it's just a sentinel for the LoadedObject record.
     // The "real" addresses live in the thunk's trampoline page.
     constexpr uint64_t THUNK_LIB_BASE = 0x6000000000ULL;
+    constexpr uint64_t THUNK_LIB_STRIDE = 0x1000000ULL;  // 16m per lib
+    // Unique synthetic base per thunk lib: sharing one base made
+    // close/dlsym-by-handle always hit the first thunk lib.
+    // map_size stays 0 (no mapping), so find_object_by_addr skips us.
+    uint64_t thunk_base = THUNK_LIB_BASE + objects_.size() * THUNK_LIB_STRIDE;
     LoadedObject obj;
     obj.name = soname;
-    obj.base_addr = THUNK_LIB_BASE;  // synthetic; never dereferenced
+    obj.base_addr = thunk_base;  // synthetic; never dereferenced
     obj.is_main = false;
     obj.dyn_addr = 0;     // no PT_DYNAMIC
     obj.symtab_addr = 0;  // no .dynsym
@@ -2868,7 +2873,7 @@ uint64_t DynamicLinker::register_thunk_library_(const std::string& soname) {
                 "%zu/%zu symbols\n",
                 soname.c_str(), added, syms.size());
     }
-    return THUNK_LIB_BASE;
+    return thunk_base;
 }
 // ── is_thunk_supported_lib_ ────────────────────────────────────────────
 // Returns true if `soname` matches the naming pattern of a library that
