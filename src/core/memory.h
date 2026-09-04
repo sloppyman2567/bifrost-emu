@@ -137,6 +137,15 @@ public:
     // Remove an allocation from tracking AND reclaim its pages + address
     // range so a future mmap_alloc can reuse it (Linux munmap semantics).
     void untrack_allocation(uint64_t addr, uint64_t size);
+    // Linux MADV_DONTNEED semantics (2026-09-03, vkQuake AllocBlock hunt):
+    // zero the covered bytes WITHOUT unmapping (address space stays).
+    // vkQuake's bundled mimalloc decommits freed segments with DONTNEED
+    // and reuses them as "initially zero" pages; our old no-op kept stale
+    // data, so reused-as-zero metadata/pages held garbage and the heap
+    // shredded itself (bulk-corrupted msurface_t array → extents=-14592
+    // → AllocBlock: full). Zero in place (never erase pages_ entries —
+    // erasing would dangle cached PageCache pointers).
+    void madvise_dontneed(uint64_t addr, uint64_t len);
     // Isolated callback-stack allocation (2026-08-25): usable_size bytes
     // with a PROT_NONE guard page on BOTH sides, placed like a normal
     // mmap_alloc block. Host-thread guest callbacks (audio pump, GLFW /

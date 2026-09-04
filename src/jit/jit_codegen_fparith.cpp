@@ -394,29 +394,86 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                 size_t done_path = code_buf_used_;
                 patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
             } else {
-                // Signed FP→int honoring the ARM FCVT rounding mode.
+                // signed fp->int with arm saturation (mirrors interp
+                // fp_to_signed_sat): nan -> 0, >=hi -> max, <lo -> min.
+                // raw cvtt returns the indefinite 0x8000... sentinel for
+                // any out-of-range input, so post-clamp can't tell +ovf
+                // from -ovf. range-check the rounded value first.
+                bool is_64bit_dest = (inst.flags_op != 0);
+                // round N/P/M to an fp integer in xmm1 (explicit roundss/sd
+                // mode so host mxcsr can't leak in); Z converts xmm0 direct.
+                int rsrc = 0;
                 if (rmode == 0) {
-                    // N (nearest-even): CVTSD2SI/SS uses the MXCSR rounding
-                    // mode (default round-to-nearest-even), matching
-                    // std::llrint under the default host rounding mode.
-                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2D);
-                    emit_byte(0xC0);  // cvtsd2si rax, xmm0
-                } else if (rmode == 1 || rmode == 2) {
-                    // P (ceil, +inf) / M (floor, -inf): round to an FP
-                    // integer in the target direction (roundsd/roundss),
-                    // then truncate to int. x86 imm8: 1 = -inf, 2 = +inf;
-                    // ARM rmode: 1=P(+inf) → 2, 2=M(-inf) → 1.
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
-                    emit_byte(is_double ? 0x0B : 0x0A);   // roundsd / roundss
-                    emit_byte(0xC8);                       // xmm1, xmm0
-                    emit_byte(rmode == 2 ? 1 : 2);         // -inf / +inf
-                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
-                    emit_byte(0xC1);  // cvttsd2si rax, xmm1
+                    emit_byte(is_double ? 0x0B : 0x0A);
+                    emit_byte(0xC8); emit_byte(0);  // round nearest-even xmm1,xmm0
+                    rsrc = 1;
+                } else if (rmode == 1 || rmode == 2) {
+                    emit_byte(0x66); emit_byte(0x0F); emit_byte(0x3A);
+                    emit_byte(is_double ? 0x0B : 0x0A);
+                    emit_byte(0xC8);
+                    emit_byte(rmode == 2 ? 1 : 2);  // M->floor, P->ceil
+                    rsrc = 1;
                 } else {
-                    // Z (toward zero): truncate (existing CVTTSD2SI).
-                    emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
-                    emit_byte(0xC0);  // rax, xmm0
+                    rsrc = 0;
                 }
+                // fp limits for this dest width + src precision.
+                uint64_t hi_bits, lo_bits;
+                if (is_64bit_dest) {
+                    if (is_double) { hi_bits = 0x43E0000000000000ULL; lo_bits = 0xC3E0000000000000ULL; }
+                    else { hi_bits = 0x5F000000ULL; lo_bits = 0xDF000000ULL; }
+                } else {
+                    if (is_double) { hi_bits = 0x41E0000000000000ULL; lo_bits = 0xC1E0000000000000ULL; }
+                    else { hi_bits = 0x4F000000ULL; lo_bits = 0xCF000000ULL; }
+                }
+                auto emit_const_to_xmm2 = [&](uint64_t bits) {
+                    if (is_double) {
+                        emit_mov_imm64(RCX, bits);
+                        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E);
+                        emit_byte(0xD1);  // movq xmm2, rcx
+                    } else {
+                        emit_mov_imm32_zext(RCX, static_cast<uint32_t>(bits));
+                        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E);
+                        emit_byte(0xD1);  // movq xmm2, rcx (low32 = float bits)
+                    }
+                };
+                auto emit_ucomi = [&](int a, int b) {
+                    if (is_double) emit_byte(0x66);
+                    emit_byte(0x0F); emit_byte(0x2E);
+                    emit_byte(modrm(3, a & 7, b & 7));
+                };
+                // nan -> 0 (ucomi self sets PF=1 only when unordered).
+                emit_ucomi(rsrc, rsrc);
+                size_t jp_nan = emit_jcc_rel32_placeholder(0xA);  // JP
+                // >= hi -> max.
+                emit_const_to_xmm2(hi_bits);
+                emit_ucomi(rsrc, 2);
+                size_t jae_max = emit_jcc_rel32_placeholder(0x3);  // JAE
+                // < lo -> min.
+                emit_const_to_xmm2(lo_bits);
+                emit_ucomi(rsrc, 2);
+                size_t jb_min = emit_jcc_rel32_placeholder(0x2);  // JB
+                // in range: truncate.
+                emit_byte(prefix); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C);
+                emit_byte(static_cast<uint8_t>(0xC0 | (rsrc & 7)));  // cvtt rax, xmmR
+                size_t jmp_done = emit_jmp_rel32_placeholder();
+                size_t zero_path = code_buf_used_;
+                patch_jcc_rel32(jp_nan, static_cast<int32_t>(zero_path - (jp_nan + 6)));
+                emit_byte(0x31); emit_byte(0xC0);  // xor eax, eax -> 0
+                size_t jmp_z = emit_jmp_rel32_placeholder();
+                size_t max_path = code_buf_used_;
+                patch_jcc_rel32(jae_max, static_cast<int32_t>(max_path - (jae_max + 6)));
+                if (is_64bit_dest) emit_mov_imm64(RAX, 0x7FFFFFFFFFFFFFFFULL);
+                else emit_mov_imm32_zext(RAX, 0x7FFFFFFFu);
+                size_t jmp_mx = emit_jmp_rel32_placeholder();
+                size_t min_path = code_buf_used_;
+                patch_jcc_rel32(jb_min, static_cast<int32_t>(min_path - (jb_min + 6)));
+                if (is_64bit_dest) emit_mov_imm64(RAX, 0x8000000000000000ULL);
+                else emit_mov_imm32_zext(RAX, 0x80000000u);
+                size_t done_path = code_buf_used_;
+                patch_jmp_rel32(jmp_done, static_cast<int32_t>(done_path - (jmp_done + 5)));
+                patch_jmp_rel32(jmp_z, static_cast<int32_t>(done_path - (jmp_z + 5)));
+                patch_jmp_rel32(jmp_mx, static_cast<int32_t>(done_path - (jmp_mx + 5)));
             }
             // Store result to cpu.regs[dest]
             store_reg_to_vreg(inst.dest, RAX);

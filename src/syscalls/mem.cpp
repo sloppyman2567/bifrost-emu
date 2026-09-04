@@ -326,7 +326,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             ret_host(0);
             return 0;
         }
-        case 233: { // madvise - no-op
+        case 233: { // madvise
+            if (getenv("BIFROST_TRACE_MADVISE")) {
+                fprintf(stderr, "[madvise(0x%llx, %lu, %lld)]\n",
+                        (unsigned long long)a0,
+                        (unsigned long)a1, (long long)(int64_t)a2);
+            }
+            // MADV_DONTNEED (4): Linux discards the pages — the next
+            // access reads zeros. vkQuake's mimalloc decommits freed
+            // segments this way and reuses them as initially-zero pages;
+            // a no-op here kept stale data and shredded its heap
+            // (AllocBlock: full). Other advices stay no-op (pure hints).
+            if ((int64_t)a2 == 4 /* MADV_DONTNEED */)
+                mem_.madvise_dontneed(a0, a1);
             ret_host(0);
             return 0;
         }

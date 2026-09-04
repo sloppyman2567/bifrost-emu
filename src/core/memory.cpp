@@ -712,6 +712,35 @@ std::unique_lock<std::shared_mutex> g(mu_);
         add_free_range(flo, fhi - flo);
     }
 }
+void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
+    if (len == 0) return;
+    // Saturate the end against overflow (cf. is_mapped's end guard).
+    uint64_t end = addr + len;
+    if (end < addr) end = UINT64_MAX;
+    // Direct-window part: the window IS the storage — memset zeros.
+    if (direct_window_ && addr < DIRECT_WINDOW_SIZE) {
+        uint64_t wend = std::min(end, static_cast<uint64_t>(DIRECT_WINDOW_SIZE));
+        if (wend > addr) std::memset(direct_window_ + addr, 0, wend - addr);
+        if (end <= DIRECT_WINDOW_SIZE) return;
+        addr = DIRECT_WINDOW_SIZE;
+    }
+    // Sparse pages_: zero covered bytes in place. Never erase entries —
+    // a cached PageCache pointer into an erased vector would dangle
+    // (same reason untrack's page reclaim is munmap-only). Absent pages
+    // already read as zero (demand paging), so nothing to do for them.
+    // Linux ignores unmapped holes inside the range; so do we.
+    std::unique_lock<std::shared_mutex> g(mu_);
+    for (uint64_t pb = addr & ~PAGE_MASK; pb < end; pb += PAGE_SIZE) {
+        uint64_t page_end = pb + PAGE_SIZE;
+        if (page_end <= pb) break;  // overflow guard (pb near UINT64_MAX)
+        uint64_t lo = (pb > addr) ? pb : addr;
+        uint64_t hi = (page_end < end) ? page_end : end;
+        if (hi <= lo) continue;
+        auto it = pages_.find(pb / PAGE_SIZE);
+        if (it != pages_.end())
+            std::memset(it->second.data() + (lo - pb), 0, hi - lo);
+    }
+}
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
     if (size == 0) return;
     // Merge with a previous adjacent free range.

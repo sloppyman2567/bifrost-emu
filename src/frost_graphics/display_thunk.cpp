@@ -101,13 +101,39 @@ struct DisplayThunkImpl {
     // vkMapMemory with garbage regs (ppData write through a garbage
     // pointer). Written once before initialized=true; never rewritten.
     void* vk_unmap_host_ = nullptr;
+    // live bytes available at guest addr inside a tracked allocation.
+    // untracked bases (stack/brk/elf via map_range) are allowed up to the
+    // next tracked neighbor so a write never sprays into tracked heap.
+    // 0 = nothing safe (must not touch).
+    size_t live_room(const std::vector<std::pair<uint64_t,uint64_t>>& live,
+                     uint64_t g, size_t want) {
+        if (!want) return 0;
+        for (const auto& kv : live) {
+            if (g >= kv.first && g - kv.first < kv.second) {
+                uint64_t room = kv.second - (g - kv.first);
+                return (want <= room) ? want : static_cast<size_t>(room);
+            }
+        }
+        size_t allow = want;
+        for (const auto& kv : live) {
+            if (kv.first > g) {
+                uint64_t gap = kv.first - g;
+                if (gap < allow) allow = static_cast<size_t>(gap);
+            }
+        }
+        return allow;
+    }
     // Push all bounces back into the host mappings (before submits/presents).
     void vk_sync_push_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
+        auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
+            if (!m.map_size || !m.host_ptr) continue;
+            if (!live_room(live, m.bounce, static_cast<size_t>(m.map_size)))
+                continue;  // stale bounce: never push from reused heap
             uint8_t* src = mem->guest_to_host_ptr(m.bounce);
-            if (src && m.host_ptr && m.map_size)
+            if (src)
                 std::memcpy(reinterpret_cast<void*>(m.host_ptr), src, m.map_size);
         }
     }
@@ -115,10 +141,14 @@ struct DisplayThunkImpl {
     // GPU may have written readback data into the host mapping).
     void vk_sync_pull_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
+        auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
+            if (!m.map_size || !m.host_ptr) continue;
+            if (!live_room(live, m.bounce, static_cast<size_t>(m.map_size)))
+                continue;  // stale bounce: never pull into reused heap
             uint8_t* dst = mem->guest_to_host_ptr(m.bounce);
-            if (dst && m.host_ptr && m.map_size)
+            if (dst)
                 std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr), m.map_size);
         }
     }
@@ -692,7 +722,65 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = dbg().thunk_trace;
 
-    
+    // TEMP DEBUG (2026-09-03, vkQuake AllocBlock hunt): extents sanity at
+    // every vkDeviceWaitIdle (GL_WaitForDeviceIdle; build start + idle
+    // transitions). REMOVE after root-causing.
+    if (entry.name == "vkDeviceWaitIdle" && getenv("BIFROST_VKQ_DUMP") && impl_->mem) {
+        static int wait_n = 0;
+        int my_n = ++wait_n;
+        auto vrd32 = [&](uint64_t g, int32_t& out) {
+            try { impl_->mem->read(g, &out, 4); return true; }
+            catch (...) { return false; }
+        };
+        auto vrd64 = [&](uint64_t g, uint64_t& out) {
+            try { impl_->mem->read(g, &out, 8); return true; }
+            catch (...) { return false; }
+        };
+        int models = 0, insane = 0, total = 0;
+        char firstmodel[65] = {0};
+        for (int j = 1; j < 64; j++) {
+            uint64_t m = 0;
+            if (!vrd64(0x1d616b0 + 0x16228 + (uint64_t)j * 8, m)) break;
+            if (!m) break;
+            models++;
+            if (j == 1) {
+                for (int cn = 0; cn < 64; cn++) {
+                    uint8_t ch = 0;
+                    try { impl_->mem->read(m + (uint64_t)cn, &ch, 1); }
+                    catch (...) { break; }
+                    if (!ch) break;
+                    firstmodel[cn] = (char)ch;
+                }
+            }
+            int32_t mns = -1;
+            uint64_t msp = 0;
+            vrd32(m + 336, mns);
+            vrd64(m + 344, msp);
+            if (mns < 0 || mns > 100000 || !msp) {
+                fprintf(stderr, "[vkq-wait %d] model[%d]=0x%llx HEADER-SUSPECT ns=%d sp=0x%llx\n",
+                        my_n, j, (unsigned long long)m, mns, (unsigned long long)msp);
+                insane++;
+                continue;
+            }
+            total += mns;
+            std::vector<uint8_t> buf(200);
+            for (int i = 0; i < mns; i++) {
+                uint64_t b = msp + (uint64_t)i * 200;
+                try { impl_->mem->read(b, buf.data(), 200); }
+                catch (...) { insane++; break; }
+                int32_t ne = 0;
+                int16_t e0 = 0, e1 = 0;
+                memcpy(&ne, buf.data() + 24, 4);
+                memcpy(&e0, buf.data() + 32, 2);
+                memcpy(&e1, buf.data() + 34, 2);
+                if (ne < 0 || ne > 100000 || e0 < 0 || e0 > 2000 || e1 < 0 || e1 > 2000)
+                    insane++;
+            }
+        }
+        fprintf(stderr, "[vkq-wait %d] models=%d surfs=%d insane=%d first='%s'\n",
+                my_n, models, total, insane, firstmodel);
+    }
+
 
 // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
     // When the THUNK_PROXY flag is set, the symbol is handled by the
@@ -1286,6 +1374,11 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                              std::vector<uint8_t>* pristine,
                              uint64_t* guest_orig, bool* need_wb) {
         if (a == 0 || !impl_->mem) return;
+        // Always record the original guest address: post-call hooks
+        // (e.g. the vkAllocateCommandBuffers handle registry) need it,
+        // and the direct branch below overwrites `a` with the host
+        // address (reading that back as guest silently yields nothing).
+        if (guest_orig) *guest_orig = a;
         uint8_t* host_ptr = impl_->mem->guest_to_host_ptr(a);
         if (host_ptr) { a = reinterpret_cast<uint64_t>(host_ptr); return; }
         // High-stack / sparse-page pointer: bounce through a host buffer.
@@ -1593,6 +1686,29 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         fprintf(stderr, "[vk-deep] TRAP lr=0x%llx fp=0x%llx\n",
                                 (unsigned long long)cpu.regs[30],
                                 (unsigned long long)cpu.regs[29]);
+                        // Full reg file (x8-x28): reconstructs the 0x4333a0
+                        // branch inputs (w16=[x21,#56] vs w4) and Task_Worker
+                        // x27 provenance (x20+x26*8) offline.
+                        for (int r = 8; r < 29; r += 4) {
+                            fprintf(stderr, "[vk-deep] TRAP x%d..x%d="
+                                    "0x%llx 0x%llx 0x%llx 0x%llx\n",
+                                    r, r + 3,
+                                    (unsigned long long)cpu.regs[r],
+                                    (unsigned long long)cpu.regs[r + 1],
+                                    (unsigned long long)cpu.regs[r + 2],
+                                    (unsigned long long)cpu.regs[r + 3]);
+                        }
+                        {
+                            // w16 input: u32 at [x21,#56].
+                            uint32_t w16 = 0;
+                            try {
+                                impl_->mem->read(cpu.regs[21] + 56, &w16, 4);
+                            } catch (...) {}
+                            fprintf(stderr, "[vk-deep] TRAP w4=0x%x w16=0x%x "
+                                    "(b.ne taken=%d)\n",
+                                    (uint32_t)cpu.regs[4], w16,
+                                    w16 != (uint32_t)cpu.regs[4]);
+                        }
                         uint64_t fp = cpu.regs[29];
                         for (int i = 0; i < 16 && fp && !(fp & 1u); i++) {
                             uint64_t ra = 0, pfp = 0;
@@ -1757,12 +1873,12 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 entry.pointer_args, entry.n_stack);
     }
 
-    // ── Stale-handle validation: AUDIT-ONLY ──────────────────────────
-    // Enforcement (empty/skip) is DISABLED until the registry is proven
-    // to have zero false positives — a broken record hook once skipped
-    // 44k valid calls and black-screened the game. Warns stay loud;
-    // behavior is unchanged from pre-registry. (The misaligned-array
-    // guard above is separate, narrow, and stays enforced.)
+    // ── Stale-handle fail-closed validation ──────────────────────────
+    // The registry is proven accurate (audit: 1 true flag in 90s, zero
+    // false positives after the direct-path guest_orig fix), so
+    // enforcement is back ON: empty the bind / skip the (void) record
+    // call with a loud warn instead of segfaulting the host driver.
+    bool vk_skip_call = false;
     auto vk_known = [&](const std::unordered_set<uint64_t>& s, uint64_t h) {
         if (!h) return false;
         std::lock_guard<std::mutex> g(impl_->vk_handles_mu);
@@ -1793,16 +1909,25 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         for (uint32_t k = 0; !bad && k < n && k < 1024; k++)
             bad = !vk_known(impl_->vk_desc_sets_, arr[k]);
         if (bad) {
-            fprintf(stderr, "[vk-deep] %s: stale descriptor set "
-                    "(audit-only, call proceeds)\n", entry.name.c_str());
+            fprintf(stderr, "[vk-deep] %s: stale descriptor set — "
+                    "binding empty\n", entry.name.c_str());
+            args[4] = 0;
+            args[5] = 0;
         }
     }
     if (entry.name.compare(0, 5, "vkCmd", 5) == 0) {
+        // All vkCmd* return void: skipping a stale-cmd call only drops
+        // one recording step (stale prior state stays bound).
         if (!vk_known(impl_->vk_cmd_bufs_, args[0])) {
-            fprintf(stderr, "[vk-deep] %s: stale command buffer 0x%llx "
-                    "(audit-only, call proceeds)\n", entry.name.c_str(),
+            fprintf(stderr, "[vk-deep] %s: stale command buffer 0x%llx — "
+                    "skipping call\n", entry.name.c_str(),
                     (unsigned long long)args[0]);
+            vk_skip_call = true;
         }
+    }
+    if (vk_skip_call) {
+        cpu.regs[0] = 0;
+        return 0;
     }
 
     uint64_t ret = 0;
@@ -1867,20 +1992,28 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // ── VK_CMD_DEEP_OUT copyback: enumerations + OUT data ────────────
     // The host wrote the actual count into our 4-byte bounce and filled
     // min(count, staged) elements of the staged array. Publish both to
-    // guest memory. (VkStage outlives this — declared at function scope.)
-    for (int oi = 0; oi < vk_n_out_recs; oi++) {
-        const DeepOutRec& rec = vk_out_recs[oi];
-        if (rec.on_success_only && ret != 0) continue;  // OUT handles
-        if (rec.staged_count && rec.guest_count_ptr) {
-            uint32_t actual = 0;
-            std::memcpy(&actual, rec.staged_count, 4);
-            try { impl_->mem->write(rec.guest_count_ptr, &actual, 4); }
-            catch (...) { /* unmapped count pointer */ }
-        }
-        if (rec.staged && rec.guest_array && rec.staged_elems) {
-            size_t bytes = (size_t)rec.staged_elems * rec.elem_size;
-            try { impl_->mem->write(rec.guest_array, rec.staged, bytes); }
-            catch (...) { /* unmapped array */ }
+    // guest memory, clamped to the enclosing live allocation so a stale
+    // count can never spray neighbor heap. (VkStage outlives this.)
+    {
+        auto out_live = impl_->mem ? impl_->mem->allocations_snapshot()
+                                   : std::vector<std::pair<uint64_t,uint64_t>>();
+        for (int oi = 0; oi < vk_n_out_recs; oi++) {
+            const DeepOutRec& rec = vk_out_recs[oi];
+            if (rec.on_success_only && ret != 0) continue;  // OUT handles
+            if (rec.staged_count && rec.guest_count_ptr) {
+                uint32_t actual = 0;
+                std::memcpy(&actual, rec.staged_count, 4);
+                if (impl_->live_room(out_live, rec.guest_count_ptr, 4) == 4) {
+                    try { impl_->mem->write(rec.guest_count_ptr, &actual, 4); }
+                    catch (...) { /* unmapped count pointer */ }
+                }
+            }
+            if (rec.staged && rec.guest_array && rec.staged_elems) {
+                size_t bytes = (size_t)rec.staged_elems * rec.elem_size;
+                size_t have = impl_->live_room(out_live, rec.guest_array, bytes);
+                if (!have) continue;
+                try { impl_->mem->write(rec.guest_array, rec.staged, have); }
+                catch (...) { /* unmapped array */ }
             // Trace-gated OUT writeback log: shows what the guest actually
             // receives (e.g. descriptor-set handles). A zero/stale handle
             // here crashes the driver at first USE, far from this line.
@@ -1916,7 +2049,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
             }
         }
-    }
+    }}
 
     // Write bounced pointer args back into guest memory. Only the byte
     // range the host actually modified is written back — writing the full
@@ -1928,7 +2061,13 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // unmapped guest address; Memory::write throws UnmappedMemory there, so
     // guard the writeback or the exception escapes dispatch into the
     // syscall handler.
+    // bounced diff writeback with live-range clamp (mirror of the gl
+    // safe_writeback_all heap-shredder fix in thunk.cpp): only bytes inside
+    // a tracked live allocation go back, clamped to its end. without this
+    // a 64k default bounce over a small out object sprays neighbor heap.
     if (impl_->mem) {
+        auto live = impl_->mem->allocations_snapshot();
+        static int dwb_skip_diag = 4, dwb_clamp_diag = 4;
         for (int i = 0; i < kMaxArgs; i++) {
             if (bounce_wb[i] && bounce_guest[i]) {
                 const auto& after = bounce_bufs[i];
@@ -1942,12 +2081,36 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     }
                 }
                 if (last <= first) continue;  // host didn't touch it
+                const uint64_t g = bounce_guest[i];
+                size_t room = impl_->live_room(live, g, last);
+                if (first >= room) {
+                    if (dwb_skip_diag > 0) {
+                        --dwb_skip_diag;
+                        fprintf(stderr,
+                                "[display-thunk] wb-skip %s arg%d @0x%llx: target "
+                                "no-safe-room, %zu b dropped\n",
+                                entry.name.c_str(), i,
+                                (unsigned long long)g, last - first);
+                    }
+                    continue;
+                }
+                if (last > room) {
+                    if (dwb_clamp_diag > 0) {
+                        --dwb_clamp_diag;
+                        fprintf(stderr,
+                                "[display-thunk] wb-clamp %s arg%d @0x%llx: %zu -> %llu b "
+                                "(live end)\n",
+                                entry.name.c_str(), i,
+                                (unsigned long long)g, last - first,
+                                (unsigned long long)(room - first));
+                    }
+                    last = room;
+                }
                 try {
-                    impl_->mem->write(bounce_guest[i] + first,
+                    impl_->mem->write(g + first,
                                       after.data() + first, last - first);
                 } catch (...) {
-                    // Best-effort: the host call already happened; don't let
-                    // a bad writeback corrupt the emulator's control flow.
+                    // best-effort: host call already happened, don't break flow.
                 }
             }
         }
@@ -2085,17 +2248,31 @@ uint32_t vk_marshal_pnext_chain(Memory* mem, VkStage& st, uint64_t g,
 }
 void vk_writeback_pnext_chain(Memory* mem, const VkPnextNode* nodes,
                               uint32_t n) {
+    auto live = mem->allocations_snapshot();
+    auto room = [&](uint64_t g, size_t want) -> size_t {
+        for (const auto& kv : live) {
+            if (g >= kv.first && g - kv.first < kv.second) {
+                uint64_t r = kv.second - (g - kv.first);
+                return (want <= r) ? want : static_cast<size_t>(r);
+            }
+        }
+        return 0;
+    };
     for (uint32_t i = 0; i < n; i++) {
         // Write back everything EXCEPT the pNext link (offsets 8..16):
         // our staged copy carries a HOST pointer there which must never
         // land in guest memory (it would zero/corrupt the guest chain).
         const VkPnextNode& nd = nodes[i];
         if (nd.size > 8) {
-            try { mem->write(nd.guest, nd.host, 8); } catch (...) {}
+            if (room(nd.guest, 8) == 8) {
+                try { mem->write(nd.guest, nd.host, 8); } catch (...) {}
+            }
         }
         if (nd.size > 16) {
-            try { mem->write(nd.guest + 16, nd.host + 16,
-                             nd.size - 16); } catch (...) {}
+            size_t have = room(nd.guest + 16, nd.size - 16);
+            if (have) {
+                try { mem->write(nd.guest + 16, nd.host + 16, have); } catch (...) {}
+            }
         }
     }
 }
@@ -2218,8 +2395,21 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         uint64_t ret = reinterpret_cast<uint64_t (*)(uint64_t, const void*)>(entry.host_fn)(
             cpu.regs[0], pi);
         if (results_guest && results_host) {
-            try { mem->write(results_guest, results_host, static_cast<size_t>(pi->swapchainCount) * 4u); }
-            catch (...) { /* out pointer unmapped — results lost */ }
+            size_t want = static_cast<size_t>(pi->swapchainCount) * 4u;
+            auto rlive = mem->allocations_snapshot();
+            size_t have = 0;
+            for (const auto& kv : rlive) {
+                if (results_guest >= kv.first &&
+                    results_guest - kv.first < kv.second) {
+                    uint64_t room = kv.second - (results_guest - kv.first);
+                    have = (want <= room) ? want : static_cast<size_t>(room);
+                    break;
+                }
+            }
+            if (have) {
+                try { mem->write(results_guest, results_host, have); }
+                catch (...) { /* out pointer unmapped — results lost */ }
+            }
         }
         cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(ret));
         if (trace) {
@@ -2452,6 +2642,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
         read_guest_bytes(mem, cpu.regs[2], rr, count * sizeof(VkMappedMemoryRangeH));
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto flive = mem->allocations_snapshot();
             for (uint32_t i = 0; i < count; i++) {
                 rr[i].pNext = nullptr;
                 auto it = impl_->vk_maps_.find(rr[i].memory);
@@ -2465,6 +2656,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 // No `off + sz` here: the sum wraps in u64 and a crafted
                 // range would pass. off < map_size is established above.
                 if (off >= m.map_size || sz > m.map_size - off) continue;
+                if (!impl_->live_room(flive, m.bounce + off, static_cast<size_t>(sz)))
+                    continue;  // stale bounce: never push from reused heap
                 uint8_t* src = mem->guest_to_host_ptr(m.bounce + off);
                 if (src) std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
             }
@@ -2495,6 +2688,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             cpu.regs[0], count, rr);
         {
             std::lock_guard<std::mutex> g(impl_->vk_maps_mu);
+            auto ilive = mem->allocations_snapshot();
             for (uint32_t i = 0; i < count; i++) {
                 auto it = impl_->vk_maps_.find(rr[i].memory);
                 if (it == impl_->vk_maps_.end()) continue;
@@ -2506,6 +2700,8 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 off -= m.map_offset;
                 // Same no-wrap form as the flush arm above.
                 if (off >= m.map_size || sz > m.map_size - off) continue;
+                if (!impl_->live_room(ilive, m.bounce + off, static_cast<size_t>(sz)))
+                    continue;  // stale bounce: never pull into reused heap
                 uint8_t* dst = mem->guest_to_host_ptr(m.bounce + off);
                 if (dst) std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);
             }
