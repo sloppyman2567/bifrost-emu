@@ -3643,6 +3643,12 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
         if (aarch64_elf) {
             return load_library_from_data(cpu, path, data);
         }
+        // Same thunk fallback as the bare-soname path: an absolute
+        // host-arch path (e.g. /usr/lib/x86_64/libGL.so.1) should
+        // thunk when the soname names a supported api.
+        if (thunk_resolver_ && is_thunk_supported_lib_(basename)) {
+            return register_thunk_library_(basename);
+        }
         set_last_error("cannot open '" + resolved + "'");
         error_ = "load_library: cannot open '" + resolved + "'";
         return 0;
@@ -3669,6 +3675,11 @@ uint64_t DynamicLinker::load_library(CPU& cpu, const std::string& path) {
             && alt[18] == (EM_AARCH64 & 0xFF) && alt[19] == (EM_AARCH64 >> 8);
         if (alt_ok) {
             return load_library_from_data(cpu, path, alt);
+        }
+        // Same thunk fallback: host-arch file at an absolute path
+        // thunks when the basename names a supported api.
+        if (thunk_resolver_ && is_thunk_supported_lib_(basename)) {
+            return register_thunk_library_(basename);
         }
     }
     return load_library_from_data(cpu, path, data);

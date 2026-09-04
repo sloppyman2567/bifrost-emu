@@ -3832,3 +3832,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Vector FMAX/FMIN (`interp_fp.cpp:953`, `jit_codegen_simd.cpp:487`):** same alias as scalar — `fmax/fmin` + `maxps/minps` suppress nan, ARM FMAX/FMIN propagate. Fix mirrors scalar: interp 4/5 return quiet nan, 6/7 keep number; jit 4/5 `CALL_INTERP`. Pairwise FMAXP/FMINP left as number — `fp_pw_elem` proves it (`fmaxp(5,nan)=5`).
 - Verified: `make -j` clean, quick **216/216** (initial pairwise change broke `fp_pw_elem`, reverted).
+
+## Session History (2026-09-04) — dynlink abs-path thunk fallback
+
+- **Absolute-path dlopen hole (`dynamic_linker.cpp:3637,3666`):** bare soname had thunk fallback, absolute missing + wrong-arch paths did not. `dlopen("/usr/lib/x86_64/libGL.so.1")` failed while `dlopen("libGL.so.1")` thunked. Fix: same `is_thunk_supported_lib_(basename)` check in both absolute routes, registering under basename so bare/abs dedup.
+- Verified: `make -j` clean, quick **216/216**.
