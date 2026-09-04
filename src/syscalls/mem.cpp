@@ -47,13 +47,11 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // Sanity-check the length: real Linux rejects absurdly large
             // mmaps based on RLIMIT_AS and available address space. Without
             // this, a buggy/malicious guest passing length = SIZE_MAX could
-            // OOM the host. We use a generous 64 GiB cap — way more than
-            // any reasonable program needs, but small enough to prevent
-            // runaway allocations. (Game engines typically mmap 1-4 GiB
-            // for texture streaming pools; databases rarely exceed 32 GiB
-            // for shared buffers.)
-            constexpr uint64_t MAX_MMAP_LENGTH = 64ULL * 1024 * 1024 * 1024;
-            if (length > MAX_MMAP_LENGTH) {
+            // OOM the host. We use a generous 64 GiB sanity cap here — the
+            // strict per-allocation cap (Memory::MAX_MMAP_LENGTH = 4 GiB,
+            // virtual reserves exempt) is enforced inside mmap_alloc below.
+            constexpr uint64_t MAX_MMAP_SANITY = 64ULL * 1024 * 1024 * 1024;
+            if (length > MAX_MMAP_SANITY) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM));
                 return 0;
             }
@@ -68,7 +66,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // allocation. Game engines and allocators use this flag to
             // reserve address ranges without overwriting mappings.
             if (flags & BIFROST_MAP_FIXED_NOREPLACE) {
-                // Check if [addr, addr+length) overlaps any existing allocation.
+                // Check if [addr, addr+length) overlaps any existing allocation
+                // or the brk heap (brk pages are tracked via map_range, not
+                // the allocation map, so check the brk range explicitly).
+                // NOTE: do NOT use is_mapped() here — it returns true for
+                // any address inside the 4 GiB direct window (the window IS
+                // the storage), which would reject every noreplace mmap.
                 auto allocs = mem_.allocations_snapshot();
                 for (const auto& [base, size] : allocs) {
                     uint64_t other_end = base + size;
@@ -77,6 +80,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
                         return 0;
                     }
+                }
+                if (addr < brk_ && brk_start_ < addr + length) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
+                    return 0;
                 }
                 // No overlap: place at the exact address (treat like MAP_FIXED
                 // from here on, but with no overwrite of existing pages since
@@ -96,12 +103,23 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     if (host_fd >= 0) {
                         struct stat st;
                         if (::fstat(host_fd, &st) == 0) {
-                            std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
+                            uint64_t avail = (st.st_size > (off_t)a5) ? (uint64_t)(st.st_size - (off_t)a5) : 0;
+                            uint64_t want = std::min<uint64_t>(length, avail);
+                            // Chunked preload so large libs/data files don't
+                            // allocate a single huge host bounce (OOM).
+                            uint64_t off = 0;
+                            std::vector<uint8_t> chunk(64 * 1024);
                             off_t old = ::lseek(host_fd, 0, SEEK_CUR);
-                            ::lseek(host_fd, a5, SEEK_SET);
-                            ssize_t n = ::read(host_fd, buf.data(), buf.size());
+                            while (off < want) {
+                                size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
+                                ::lseek(host_fd, (off_t)(a5 + off), SEEK_SET);
+                                ssize_t n = ::read(host_fd, chunk.data(), take);
+                                if (n <= 0) break;
+                                mem_.write(addr + off, chunk.data(), (size_t)n);
+                                off += (uint64_t)n;
+                                if ((size_t)n < take) break;
+                            }
                             ::lseek(host_fd, old, SEEK_SET);
-                            if (n > 0) mem_.write(addr, buf.data(), n);
                         }
                     }
                     if (graphics_.ready() && graphics_.owns_fd(static_cast<int>(a4))) {
@@ -146,10 +164,14 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     brk_ = mmap_end;
                 }
             }
-            // PROT_NONE with MAP_FIXED: these are guard pages. Don't
-            // zero existing pages (preserves musl's metadata). Just
-            // return success.
+            // PROT_NONE with MAP_FIXED: these are guard pages. Track the
+            // reservation so later overlap checks see it, but don't zero
+            // existing pages (preserves musl's metadata).
             if (prot == 0 && (flags & 0x10)) { // PROT_NONE + MAP_FIXED
+                if (mem_.mmap_alloc(length, addr, true) == 0) {
+                    ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                    return 0;
+                }
                 ret_host(addr);
                 return 0;
             }
@@ -215,12 +237,21 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (host_fd >= 0) {
                     struct stat st;
                     if (::fstat(host_fd, &st) == 0) {
-                        std::vector<uint8_t> buf(std::min<uint64_t>(length, st.st_size));
+                        uint64_t avail = (st.st_size > (off_t)a5) ? (uint64_t)(st.st_size - (off_t)a5) : 0;
+                        uint64_t want = std::min<uint64_t>(length, avail);
+                        uint64_t off = 0;
+                        std::vector<uint8_t> chunk(64 * 1024);
                         off_t old = ::lseek(host_fd, 0, SEEK_CUR);
-                        ::lseek(host_fd, a5, SEEK_SET);
-                        ssize_t n = ::read(host_fd, buf.data(), buf.size());
+                        while (off < want) {
+                            size_t take = (size_t)std::min<uint64_t>(want - off, chunk.size());
+                            ::lseek(host_fd, (off_t)(a5 + off), SEEK_SET);
+                            ssize_t n = ::read(host_fd, chunk.data(), take);
+                            if (n <= 0) break;
+                            mem_.write(mapped + off, chunk.data(), (size_t)n);
+                            off += (uint64_t)n;
+                            if ((size_t)n < take) break;
+                        }
                         ::lseek(host_fd, old, SEEK_SET);
-                        if (n > 0) mem_.write(mapped, buf.data(), n);
                     }
                 }
                 // If the guest is mmap'ing the graphics framebuffer fd,

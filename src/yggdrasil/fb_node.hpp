@@ -22,6 +22,7 @@ public:
     int     ioctl(uint32_t request, uint64_t argp, ::arm64emu::Memory& mem) override;
     bool    seekable() const override { return true; }
     int     flags() const override { return flags_; }
+    void    set_flags(int f) override { flags_ = f; }
     int host_fd() const override { return fd_; }
 private:
     int fd_;

@@ -1767,19 +1767,12 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     }
                 }
             } else {
-                // plan failed (garbage counts, oversized staging): undo
-                // EVERYTHING so the generic translate path sees the
-                // ORIGINAL guest pointers for every planned arg.
-                // (Count-bounce rewrites happened only in the fill
-                // phase, which never ran; args[] still hold guests.)
-                for (uint8_t ri2 = 0; ri2 < plan->nrefs; ri2++) {
-                    const thunk::VkPlanRef& r2 = plan->refs[ri2];
-                    if (r2.arg < kMaxArgs)
-                        vk_deep_done &= ~(1u << r2.arg);
-                    if (r2.out == 1 && r2.count_arg < kMaxArgs)
-                        vk_deep_done &= ~(1u << r2.count_arg);
-                }
-                vk_n_out_recs = 0;
+                // plan failed (garbage counts, oversized staging): fail
+                // closed. Falling through to generic translate would hand
+                // nested guest pointers to the host driver (SIGSEGV).
+                // VK_ERROR_OUT_OF_HOST_MEMORY = -1.
+                cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-1));
+                return 0;
             }
         }
     }
@@ -2092,7 +2085,9 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // policy so it never enters the deep block; record post-writeback so
     // the registry sees exactly what the guest sees. Count is
     // commandBufferCount (u32 at +28 in VkCommandBufferAllocateInfo; +24
-    // is the level enum — reading that records nothing). The array may
+    // is the level enum — reading that records nothing). The OUT array is
+    // args[2] (pCommandBuffers): this call takes only (device, info,
+    // array) — pool-allocated objects have no pAllocator. The array may
     // have bounced (bounce_guest holds the original guest address).
     if (ret == 0 && entry.name == "vkAllocateCommandBuffers" && impl_->mem) {
         uint64_t g_info = bounce_guest[1] ? bounce_guest[1] : args[1];
@@ -2747,7 +2742,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
             "VK_EXT_descriptor_buffer" };
         auto hidden = [](const char* n) {
             for (const char* h : kHiddenExt)
-                if (std::strncmp(n, h, sizeof("VK_KHR_acceleration_structure")) == 0)
+                if (std::strcmp(n, h) == 0)
                     return true;
             return false;
         };

@@ -69,6 +69,10 @@ public:
     virtual bool seekable() const { return true; }
     // Hint for fcntl F_GETFL — default to O_RDWR.
     virtual int flags() const { return O_RDWR; }
+    // Update cached flags for fcntl F_SETFL. Base is no-op; nodes with
+    // a flags_ member override to store it so F_GETFL reflects it
+    // even when there is no host fd (virtual nodes).
+    virtual void set_flags(int) {}
     // Return the host file descriptor for passthrough operations
     // (getdents64, etc.). Returns -1 if this Node has no host fd.
     virtual int host_fd() const { return -1; }

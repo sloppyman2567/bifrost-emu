@@ -341,6 +341,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // Read the ELF file.
             FILE* f = fopen(path.c_str(), "rb");
             bool is_aarch64 = false;
+            bool file_existed = (f != nullptr);
             std::vector<uint8_t> elf_data;
             if (f) {
                 fseek(f, 0, SEEK_END);
@@ -360,6 +361,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                     }
                 }
                 fclose(f);
+                f = nullptr;
             }
             if (!is_aarch64) {
                 // ── Multi-call binary redirect ────────────────────────
@@ -384,7 +386,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 }
                 if (basename == elf_basename) {
                     // Same binary — return the original error.
-                    if (f) {
+                    if (file_existed) {
                         ret_err(ENOEXEC);
                     } else {
                         ret_err(ENOENT);
@@ -394,7 +396,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Try to re-exec the current ELF with argv[0] = basename.
                 FILE* ef = fopen(elf_path.c_str(), "rb");
                 if (!ef) {
-                    if (f) {
+                    if (file_existed) {
                         ret_err(ENOEXEC);
                     } else {
                         ret_err(ENOENT);
@@ -784,30 +786,71 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                                 auto now_sys = std::chrono::system_clock::now();
                                 if (abs_sys <= now_sys) {
                                     slot->waiters--;
-                                    ret_host(0);
+                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
                                     return 0;
                                 }
                                 auto rel = std::chrono::duration_cast<
                                     std::chrono::nanoseconds>(abs_sys - now_sys);
-                                slot->cv.wait_for(lk, rel);
+                                auto st = slot->cv.wait_for(lk, rel);
+                                slot->waiters--;
+                                if (st == std::cv_status::timeout) {
+                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                } else {
+                                    ret_host(0);
+                                }
+                                return 0;
                             } else {
                                 // CLOCK_MONOTONIC absolute deadline.
-                                // Construct a steady_clock time_point whose
-                                // time_since_epoch() == (sec, nsec). This
-                                // works because steady_clock's epoch is
-                                // implementation-defined but stable, and
-                                // the guest's CLOCK_MONOTONIC counts from
-                                // boot — close enough for emulator use.
-                                using steady_tp = std::chrono::steady_clock::time_point;
-                                steady_tp abs_mono{std::chrono::nanoseconds(
-                                    sec * 1000000000ULL + nsec)};
-                                slot->cv.wait_until(lk, abs_mono);
+                                // Do NOT build a steady_clock time_point from
+                                // (sec,nsec): steady_clock's epoch is arbitrary
+                                // and unrelated to CLOCK_MONOTONIC (boot).
+                                // Convert to a relative duration via the real
+                                // monotonic clock, then wait_for.
+                                struct timespec now_ts;
+                                ::clock_gettime(CLOCK_MONOTONIC, &now_ts);
+                                // tv_sec is signed: negative = past deadline.
+                                // Cap huge sec before *1e9 (2^63/1e9).
+                                int64_t s_sec = static_cast<int64_t>(sec);
+                                if (s_sec < 0) {
+                                    slot->waiters--;
+                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    return 0;
+                                }
+                                if ((uint64_t)s_sec >= 9223372036ULL) {
+                                    slot->cv.wait(lk);
+                                    slot->waiters--;
+                                    ret_host(0);
+                                    return 0;
+                                }
+                                int64_t now_ns = (int64_t)now_ts.tv_sec * 1000000000LL + now_ts.tv_nsec;
+                                int64_t end_ns = (int64_t)sec * 1000000000LL + (int64_t)nsec;
+                                int64_t rel_ns = end_ns - now_ns;
+                                if (rel_ns <= 0) {
+                                    slot->waiters--;
+                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                    return 0;
+                                }
+                                auto st = slot->cv.wait_for(lk, std::chrono::nanoseconds(rel_ns));
+                                slot->waiters--;
+                                if (st == std::cv_status::timeout) {
+                                    ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                                } else {
+                                    ret_host(0);
+                                }
+                                return 0;
                             }
                         } else {
                             // FUTEX_WAIT: timeout is relative.
                             auto duration = std::chrono::seconds(sec) +
                                             std::chrono::nanoseconds(nsec);
-                            slot->cv.wait_for(lk, duration);
+                            auto st = slot->cv.wait_for(lk, duration);
+                            slot->waiters--;
+                            if (st == std::cv_status::timeout) {
+                                ret_host(static_cast<uint64_t>(-ETIMEDOUT));
+                            } else {
+                                ret_host(0);
+                            }
+                            return 0;
                         }
                     }
                     slot->waiters--;

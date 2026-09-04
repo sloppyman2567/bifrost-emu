@@ -63,9 +63,13 @@ void report_crash(const CPU& cpu, const Memory& mem, const char* reason,
     fprintf(stderr, "  stack @0x%llx:\n", (unsigned long long)cpu.sp);
     for (int i = 0; i < 16; i++) {
         uint64_t v = 0;
-        try {
-            mem.read(cpu.sp + (uint64_t)i * 8, &v, 8);
-        } catch (...) { v = 0; }
+        uint64_t a = 0;
+        uint64_t off = (uint64_t)i * 8;
+        if (!__builtin_add_overflow(cpu.sp, off, &a)) {
+            try {
+                mem.read(a, &v, 8);
+            } catch (...) { v = 0; }
+        }
         fprintf(stderr, "   [sp+0x%02x] 0x%llx\n", i * 8, (unsigned long long)v);
     }
 
@@ -77,9 +81,11 @@ void report_crash(const CPU& cpu, const Memory& mem, const char* reason,
     for (int fr = 1; fr < 24; fr++) {
         if (fp == 0 || fp == ~0ULL) break;
         uint64_t next_fp = 0, lr = 0;
+        uint64_t fp8 = 0;
+        if (__builtin_add_overflow(fp, 8, &fp8)) break;
         try {
             mem.read(fp, &next_fp, 8);
-            mem.read(fp + 8, &lr, 8);
+            mem.read(fp8, &lr, 8);
         } catch (...) { break; }
         fprintf(stderr, "   #%d fp=0x%llx lr=0x%llx\n",
                 fr, (unsigned long long)fp, (unsigned long long)lr);

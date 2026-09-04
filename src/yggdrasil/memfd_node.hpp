@@ -45,6 +45,7 @@ public:
     int     fstat(struct stat* st) override;
     bool    seekable() const override { return true; }
     int     flags() const override { return flags_; }
+    void    set_flags(int f) override { flags_ = f; }
     int host_fd() const override { return fd_; }
 private:
     MemfdNode(int fd, int flags,

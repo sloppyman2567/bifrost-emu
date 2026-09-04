@@ -830,7 +830,7 @@ bool Emulator::drain_pending_signals(CPU& cpu) {
         // queue. Since we already popped it, we have to push it back.
         // To avoid reordering, we stop draining on the first blocked
         // signal we encounter.
-        if (sig.signo >= 1 && sig.signo <= 63 &&
+        if (sig.signo >= 1 && sig.signo <= 64 &&
             SignalTable::is_blocked(cpu, sig.signo)) {
             // Re-push and stop.
             cpu.push_pending(sig.signo, sig.si_code, sig.fault_addr);

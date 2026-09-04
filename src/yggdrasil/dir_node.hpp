@@ -71,6 +71,7 @@ public:
     }
     bool is_dir() const override { return true; }
     int  flags() const override { return flags_; }
+    void set_flags(int f) override { flags_ = f; }
     // getdents reads from the current pos_ and advances it. The `off`
     // parameter (from the syscall layer) is ignored — we use the
     // internal pos_ so that lseek + getdents work correctly together.

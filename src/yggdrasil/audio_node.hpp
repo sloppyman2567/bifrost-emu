@@ -20,6 +20,7 @@ public:
     int     fstat(struct stat* st) override;
     bool    seekable() const override { return false; }
     int     flags() const override { return flags_; }
+    void    set_flags(int f) override { flags_ = f; }
     ::arm64emu::Audio* audio_backend() const { return audio_; }
 private:
     ::arm64emu::Audio* audio_;

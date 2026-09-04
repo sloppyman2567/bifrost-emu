@@ -70,7 +70,7 @@ void Memory::memstats_reporter(uint64_t period_secs) {
     }
 }
 
-Memory::Memory() {
+Memory::Memory(bool start_reporter) {
     // Allocate a 4 GiB direct-access window for the JIT. This is a lazy
     // mmap — Linux only allocates physical pages on first access (demand
     // paging). The window is PROT_READ|PROT_WRITE.
@@ -100,10 +100,12 @@ Memory::Memory() {
                 static_cast<void*>(direct_window_),
                 (unsigned long long)stack_top_);
     }
-    if (const char* ms = getenv("BIFROST_MEMSTATS")) {
+    if (start_reporter) {
+        if (const char* ms = getenv("BIFROST_MEMSTATS")) {
         uint64_t period = strtoull(ms, nullptr, 10);
         if (period == 0) period = 5;
         std::thread(&Memory::memstats_reporter, this, period).detach();
+        }
     }
 }
 
@@ -162,6 +164,12 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
     std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t start = addr & ~PAGE_MASK;
     uint64_t end = addr + size;
+    size_t missing = 0;
+    for (uint64_t s = start; s < end; s += PAGE_SIZE) {
+        if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
+        if (pages_.find(s / PAGE_SIZE) == pages_.end()) missing++;
+    }
+    if (missing && would_exceed_page_limit(missing)) return;
     for (; start < end; start += PAGE_SIZE) {
         uint64_t pn = start / PAGE_SIZE;
         // For addresses in the direct window (< 4 GiB), the window IS
@@ -172,6 +180,7 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
         auto it = pages_.find(pn);
         if (it == pages_.end()) {
             pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0));
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -544,6 +553,9 @@ uint64_t Memory::mmap_alloc_callback_stack(uint64_t usable_size) {
         // Guards are per-page PROT_NONE holes inside the RW window.
         mprotect(direct_window_ + base, P, PROT_NONE);
         mprotect(direct_window_ + base + P + usable, P, PROT_NONE);
+        std::unique_lock<std::shared_mutex> g(mu_);
+        guard_pages_.insert(base / P);
+        guard_pages_.insert((base + P + usable) / P);
     }
     return base + P;  // usable base; sp starts at base + P + usable
 }
@@ -751,9 +763,18 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
     uint64_t end = addr + len;
     if (end < addr) end = UINT64_MAX;
     // Direct-window part: the window IS the storage — memset zeros.
+    // Skip PROT_NONE callback-stack guard pages (host would SIGSEGV).
     if (direct_window_ && addr < DIRECT_WINDOW_SIZE) {
         uint64_t wend = std::min(end, static_cast<uint64_t>(DIRECT_WINDOW_SIZE));
-        if (wend > addr) std::memset(direct_window_ + addr, 0, wend - addr);
+        {
+            std::shared_lock<std::shared_mutex> g(mu_);
+            for (uint64_t s = addr & ~PAGE_MASK; s < wend; s += PAGE_SIZE) {
+                if (guard_pages_.count(s / PAGE_SIZE)) continue;
+                uint64_t lo = (s > addr) ? s : addr;
+                uint64_t hi = std::min(s + PAGE_SIZE, wend);
+                if (hi > lo) std::memset(direct_window_ + lo, 0, hi - lo);
+            }
+        }
         if (end <= DIRECT_WINDOW_SIZE) return;
         addr = DIRECT_WINDOW_SIZE;
     }
@@ -815,10 +836,9 @@ void Memory::remove_free_range(uint64_t addr, uint64_t size) {
         uint64_t right_size = (hi < r_hi) ? r_hi - hi : 0;
         uint64_t keep_lo = left_size ? r_lo : 0;
         uint64_t keep_size = left_size;
-        free_ranges_.erase(it);
+        it = free_ranges_.erase(it);
         if (keep_size) free_ranges_[keep_lo] = keep_size;
         if (right_size) free_ranges_[right_lo] = right_size;
-        it = free_ranges_.lower_bound(hi);
     }
 }
 bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
@@ -974,6 +994,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
             if (end < base || end > DIRECT_WINDOW_SIZE) end = DIRECT_WINDOW_SIZE;
             for (uint64_t a = base & ~PAGE_MASK; a < end; a += PAGE_SIZE) {
                 uint64_t pn = a / PAGE_SIZE;
+                if (guard_pages_.count(pn)) continue;
                 if (pn < copied.size() && !copied[pn]) {
                     const uint8_t* page = direct_window_ + a;
                     out.push_back({a, std::vector<uint8_t>(page, page + PAGE_SIZE)});
@@ -988,6 +1009,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
         const uint64_t num_pages = DIRECT_WINDOW_SIZE / PAGE_SIZE;
         for (uint64_t p = 0; p < num_pages; p++) {
             if (copied[p]) continue;
+            if (guard_pages_.count(p)) continue;
             const uint8_t* page = direct_window_ + p * PAGE_SIZE;
             // Quick check: if the first 64 bytes are all zero, skip
             // (most pages are zero). This is a heuristic — we might
@@ -1012,7 +1034,7 @@ std::vector<Memory::PageSnapshot> Memory::snapshot_pages() const {
     return out;
 }
 std::unique_ptr<Memory> Memory::clone_for_fork() const {
-    auto child = std::make_unique<Memory>();
+    auto child = std::make_unique<Memory>(false);
     // Copy the direct window base (child gets its own mmap'd window
     // from its constructor). Then copy all mapped pages.
     auto snapshots = snapshot_pages();
@@ -1031,6 +1053,9 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
     // parent. Without this, a child that calls mmap(NULL, ...) after
     // fork could get an address that overlaps with the parent's
     // (now-copied) data — silently corrupting the child's heap.
+    // free_ranges_ is copied too (same address-space reuse). guard_pages_
+    // is intentionally NOT copied: the child gets a fresh RW window with
+    // no mprotect'd guards, so those pages are readable there.
     {
         std::shared_lock<std::shared_mutex> g(mu_);
         child->mmap_next_ = mmap_next_;

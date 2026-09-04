@@ -204,7 +204,7 @@ public:
     // SIGKILL (signo=9) is bit 8, etc. This matches what
     // rt_sigprocmask/rt_sigpending read/write in guest memory.
     static bool is_blocked(const CPU& cpu, int signo) {
-        if (signo < 1 || signo > 63) return false;
+        if (signo < 1 || signo > 64) return false;
         return (cpu.sigmask >> (signo - 1)) & 1;
     }
     // Apply a rt_sigprocmask `how` operation to `cpu.sigmask`. Returns 0

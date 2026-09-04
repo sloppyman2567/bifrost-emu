@@ -1684,7 +1684,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                             m.target, m.offset, m.size, host_ptr);
                     }
                 }
-                if (found && !persistent) impl_->mem->untrack_allocation(m.bounce, m.size);
+                if (found && !persistent && m.bounce) impl_->mem->untrack_allocation(m.bounce, m.size);
                 if (dbg().thunk_trace)
                     fprintf(stderr, "[thunk] glUnmapBuffer: buffer=%u target=0x%x "
                             "%s%s\n", buffer, target, found ? "ok" : "(not mapped)",
@@ -1872,8 +1872,8 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             }
             uint64_t type_sz = 1;
             switch (type) {
-                case 0x1403: case 0x1405: type_sz = 2; break;   // SHORT / FLOAT16
-                case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // FLOAT/INT/UINT
+                case 0x1403: case 0x140B: type_sz = 2; break;   // SHORT / HALF_FLOAT
+                case 0x1405: case 0x1406: case 0x1404: case 0x140C: type_sz = 4; break; // UINT/FLOAT/INT
                 default: break;                                  // UNSIGNED_BYTE etc.
             }
             return channels * type_sz;
@@ -2446,15 +2446,28 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         continue;
                     }
                     uint64_t bytes = (uint64_t)counts[i] * isz;
-                    if (bytes == 0 || bytes > (1ull << 20)) {
+                    if (bytes == 0) {
                         live_outer[i] = 0;
                         continue;
                     }
-                    uint8_t* hp = impl_->mem->guest_to_host_ptr(
-                        guest_ptrs[i]);
+                    uint8_t* hp = nullptr;
+                    // Alias only if the WHOLE buffer sits in the window —
+                    // guest_to_host_ptr checks the start address only.
+                    if (guest_ptrs[i] < Memory::DIRECT_WINDOW_SIZE &&
+                        bytes <= Memory::DIRECT_WINDOW_SIZE - guest_ptrs[i])
+                        hp = impl_->mem->guest_to_host_ptr(guest_ptrs[i]);
                     if (hp) {
+                        // Direct-window alias: host reads guest memory
+                        // directly, no bounce size cap needed.
                         live_outer[i] = reinterpret_cast<uint64_t>(hp);
                     } else {
+                        // Bounce path only: cap to avoid a huge host alloc.
+                        // Bogus counts fail closed (NULL + count would
+                        // make the host over-read).
+                        if (bytes > (16ull << 20)) {
+                            cpu.regs[0] = 0;
+                            return 0;
+                        }
                         live_in[i].resize((size_t)bytes);
                         try {
                             impl_->mem->read(guest_ptrs[i],
@@ -2959,7 +2972,7 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                 }
             }
             for (auto& m : freed)
-                impl_->mem->untrack_allocation(m.bounce, m.size);
+                if (m.bounce) impl_->mem->untrack_allocation(m.bounce, m.size);
             // Mirror into the state tracker: deleting a bound buffer
             // unbinds it (else a later re-generated name would observe a
             // stale "already bound" and get elided). args[1] is host-

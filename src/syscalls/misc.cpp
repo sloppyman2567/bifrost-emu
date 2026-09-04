@@ -791,16 +791,8 @@ int64_t syscall_misc(Emulator& emu, CPU& cpu, uint64_t num) {
             if (r < 0) { cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(r)); return 0; }
             ret_host(static_cast<uint64_t>(r)); return 0;
         }
-        case 69: { // preadv2(fd, iov, iovcnt, offset, flags) — AArch64 69
-            // AArch64 syscall 69 is preadv2 (NOT readv — that's syscall 65,
-            // already handled in fs.cpp). The old code here dispatched 69
-            // to readv(), which silently mis-handled any preadv2 call.
-            // preadv2 is rare in user-space; return ENOSYS for now. If a
-            // guest program needs it, implement it by mirroring fs.cpp's
-            // readv handler with the offset argument.
-            ret_err(ENOSYS);
-            return 0;
-        }
+        // NOTE: AArch64 69 is preadv (handled in fs.cpp). Do not add a
+        // case 69 here — it would be dead code (fs.cpp wins dispatch).
         case 71: { // sendfile(out_fd, in_fd, offset, count) — AArch64 71
             // BUGFIX: previously called ::sendfile(guest_fd, guest_fd, ...)
             // directly, bypassing FdTable. Resolve both fds via FdTable so

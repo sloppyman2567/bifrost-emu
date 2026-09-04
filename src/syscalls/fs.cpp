@@ -900,12 +900,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
             // For all other paths, call the host readlinkat so symlinks
             // and regular files behave correctly.
             if (a1 != 0) {
-                // Read the path string from guest memory, bounded by a
-                // fixed max length. The old code checked `off > 256`
-                // AFTER the byte load, allowing a 257-byte read past the
-                // NUL terminator. Fixed: check BEFORE load, and use a
-                // named constant for the max path length.
-                constexpr size_t MAX_PATH_SCAN = 256;
+                // Read the path string from guest memory, bounded by
+                // PATH_MAX (4096 incl nul). Reuse the same limit as
+                // Yggdrasil::read_path so long paths don't truncate.
+                constexpr size_t MAX_PATH_SCAN = 4096;
                 std::vector<uint8_t> path_bytes;
                 path_bytes.reserve(MAX_PATH_SCAN);
                 for (size_t off = 0; off < MAX_PATH_SCAN; off++) {
@@ -1034,13 +1032,13 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
                     return 0;
                 }
                 case F_SETFL: {  // 4 — set file status flags (O_NONBLOCK etc.)
+                    int settable = a2 & (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME);
                     if (hfd >= 0) {
-                        // Only apply flags that can be changed via F_SETFL:
-                        // O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME.
-                        int settable = a2 & (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME);
+                        // Host first: on failure guest state must not change.
                         int r = ::fcntl(hfd, F_SETFL, settable);
                         if (r < 0) { ret_errno(); return 0; }
                     }
+                    node->set_flags((node->flags() & ~ (O_APPEND | O_NONBLOCK | O_ASYNC | O_DIRECT | O_NOATIME)) | settable);
                     ret_host(0);
                     return 0;
                 }
@@ -1155,13 +1153,10 @@ int64_t syscall_fs(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 49: { // chdir(path) — AArch64 49
             std::string guest_path = yggdrasil::Yggdrasil::read_path(mem_, a0);
-            // Update the guest-side cwd first (resolves relative paths
-            // against the current cwd). Then call host chdir on the
-            // remapped path so any subsequent host-relative opens work.
-            emu.vfs_.apply_chdir(guest_path);
             std::string path = yggdrasil::Yggdrasil::remap_path(guest_path);
             int r = ::chdir(path.c_str());
             if (r < 0) { ret_errno(); return 0; }
+            emu.vfs_.apply_chdir(guest_path);
             ret_host(r);
             return 0;
         }

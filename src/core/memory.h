@@ -29,6 +29,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 namespace arm64emu {
 class Memory {
@@ -78,7 +79,7 @@ public:
     static constexpr uint64_t PIE_BASE_MIN = 0x400000ULL;
     static constexpr uint64_t PIE_JITTER = 128ull * 1024 * 1024;
     static constexpr uint64_t STACK_JITTER = 16ull * 1024 * 1024;
-    Memory();
+    Memory(bool start_reporter = true);
     ~Memory();
     Memory(const Memory&) = delete;
     Memory& operator=(const Memory&) = delete;
@@ -193,9 +194,10 @@ public:
     void store_64(uint64_t addr, uint64_t v) { store<uint64_t>(addr, v); }
     // ── Diagnostics ───────────────────────────────────────────────────
     size_t page_count() const;
-    const std::unordered_map<uint64_t, std::vector<uint8_t>>& pages_map_public() const {
-        return pages_;
-    }
+    // NOTE: no pages_map_public() accessor — returning the pages_ map by
+    // value deep-copies every 4 KiB page (allocations + memcpy under lock);
+    // returning a const& races with mutators. Callers should use
+    // allocations_snapshot()/snapshot_pages() instead.
     // Snapshot of currently-tracked allocations (start → page-aligned size).
     // Used by /proc/self/maps to produce a real memory layout instead of
     // a hardcoded one. Returns a copy under the lock so callers can iterate
@@ -309,6 +311,14 @@ private:
     // 1.5.4-alpha: Check page count against MAX_TOTAL_PAGES.
     // Returns true if the allocation would exceed the limit.
     bool would_exceed_page_limit(size_t num_pages) const;
+    // Guard pages for callback scratch stacks (PROT_NONE inside the
+    // window). Host must never touch them via memset/memcpy (snapshot,
+    // madvise, reuse zeroing) — track page numbers to skip.
+    bool is_guard_page(uint64_t page_no) const {
+        std::shared_lock<std::shared_mutex> g(mu_);
+        return guard_pages_.count(page_no) != 0;
+    }
+    std::unordered_set<uint64_t> guard_pages_;
     // 1.5.4-alpha: Add an address range to the free list, merging it with
     // any adjacent free ranges (kept sorted by start address).
     void add_free_range(uint64_t addr, uint64_t size);

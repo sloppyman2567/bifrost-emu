@@ -63,7 +63,7 @@ const char* syscall_name(uint64_t num) {
         case 214: return "brk";         case 215: return "munmap";
         case 220: return "clone";       case 221: return "execve";
         case 222: return "mmap";        case 435: return "clone3";
-        case 226: return "mprotect";    case 229: return "mremap";
+        case 226: return "mprotect";    case 216: return "mremap";
         case 232: return "mincore";     case 233: return "madvise";
         case 113: return "clock_gettime"; case 114: return "clock_getres";
         case 172: return "getpid";      case 173: return "gettid";

@@ -28,6 +28,7 @@ public:
     int     ioctl(uint32_t request, uint64_t argp, Memory& mem) override;
     bool    seekable() const override { return false; }
     int     flags() const override { return flags_; }
+    void    set_flags(int f) override { flags_ = f; }
     int host_fd() const override { return -1; }
 private:
     ::arm64emu::FrostInput* input_;

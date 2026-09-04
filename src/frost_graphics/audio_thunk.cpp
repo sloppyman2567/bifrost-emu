@@ -726,16 +726,13 @@ int64_t AudioThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         slot.ch = ch; slot.size = sz;
         slot.cb_fn = cb_fn; slot.cb_ud = cb_ud;
         slot.frames_per_cb = samples_per_cb ? samples_per_cb : 1024;
-        if (cb_fn) {
+        if (cb_fn && !getenv("BIFROST_AUDIO_NO_CB")) {
             slot.bounce_bytes = (size_t)slot.frames_per_cb * slot.ch * slot.size;
             slot.bounce = I.mem->mmap_alloc(slot.bounce_bytes);
             if (!slot.bounce) { I.sdl_devs_.erase(h); tr(-ENOMEM); return -ENOMEM; }
             // Callbacks are fired INLINE from audio-thunk dispatches on
             // the guest thread (see run_due_callbacks) — never from a
             // host pump thread (the old pump corrupted guest state).
-        // TEMP BISECT (BIFROST_AUDIO_NO_CB=1): open the device but never
-        // fire callbacks — separates device-open path from callback path.
-        if (getenv("BIFROST_AUDIO_NO_CB")) { tr(0); return 0; }
             slot.cb_scheduled = true;
             slot.next_cb_us = 0;   // due immediately; pacing takes over
         }
