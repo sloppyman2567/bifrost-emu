@@ -3868,3 +3868,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Shrink leak (`memory.cpp:mremap_grow`):** tail pages + address range never freed, marched the page cap on realloc-shrink loops. Now reclaims tail pages (above-window), returns range to free list, bumps page epoch.
 - **Grow accounting:** in-place path created above-window pages without OOM check or `total_pages_` charge (host exhaust via mremap loop). Now counts need first, returns 0 on exceed, charges created pages.
 - Verified: `make -j` clean, quick **216/216**.
+
+## Session History (2026-09-04) — full check-all green + stale-build lesson
+
+- **`make check-all` failed at `test-capi` (host SIGSEGV in `resolve_symbol` lock):** bisected clean worktrees — baseline `60b7d54` 54/54, every session commit green in isolation, including HEAD. Root cause was stale objects in the session tree (headers changed `Memory`/`PageCache`/`DebugFlags` layout mid-session; incremental `make` left a mixed-ABI `libbifrost.a`). `make clean && make -j` fixed it. Lesson: after header-layout changes, clean-rebuild before trusting `test-capi`/`test-nb` (the `cb26a53` stale-build note says the same).
+- Full validation after clean rebuild: `test-capi` **54/54**, `test-nb` **61/61**, full `./scripts/run_tests.sh` **221/221**, opgen guards green.
