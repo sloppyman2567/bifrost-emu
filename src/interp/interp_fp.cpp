@@ -4453,6 +4453,17 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // fell through to the silent FP-NOP fallback, corrupting sin().
             {
                 const uint32_t pw = op & 0xFFFFFC00;
+                // Integer scalar ADDP (add pair): Dd = Vn.d[0] + Vn.d[1]
+                // (wrapping). Encoding verified via cross-assembler:
+                // `addp d0, v0.2d` = 0x5EF1B800 (only .2d form exists;
+                // combiner/loop code like long sums lowers to it).
+                // Previously fell to the FP-NOP fallback (stale d31 read
+                // back, e.g. sum {1,2,3,4} returned 3).
+                if (pw == 0x5EF1B800) {
+                    cpu.v_lo[rd] = cpu.v_lo[rn] + cpu.v_hi[rn];
+                    cpu.v_hi[rd] = 0;
+                    return;
+                }
                 if (pw == 0x7E30D800 || pw == 0x7E70D800 ||
                     pw == 0x7E30F800 || pw == 0x7E70F800 ||
                     pw == 0x7EB0F800 || pw == 0x7EF0F800) {

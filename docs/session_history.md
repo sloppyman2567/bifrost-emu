@@ -3879,5 +3879,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Static-elf shim (`dynamic_linker.h/cpp`):** `ensure_thunk_linker_()` never ran `link()`, so first dlopen had no shim (TLSDESC resolver null, dlerror/iterate dead). New `ensure_shim()` (idempotent) called from `load_library_from_data`; dynamic path unaffected.
 - **RUNPATH (`dynamic_linker.*`):** `load_library()` dropped parent paths; deps with `$ORIGIN` failed under dlopen but worked at startup. Signature now threads `parent_runpath/rpath` (defaulted) into all `find_library` calls; dep loads pass the parent's own paths.
 - **dlopen TLS surplus (the hunt):** dlopened TLS had tp numbering but no backing (OOB on main thread). First attempt grew the startup lib area — broke guest/host geometry agreement (guest TCB = block + its own PT_TLS sum) and hung all pthread tests with heap corruption. Final design keeps the TP anchor frozen: 1 KiB surplus reserved TRAILING (positive tp, past main TLS), carved monotonically (`tls_dynamic` flag; `allocate_thread_tls` excludes dynamic libs from its anchor recompute so new-thread TP matches main). TCB 0x10-vs-0x20 "fix" reverted — the mismatch is load-bearing, both sides stay as they were.
-- Verified with a scratch glibc dlopen-TLS test (lib with `__thread` int + long[4]): init/set/multi-lane reads all correct on main thread under jit + interp. Its vectorized sum loop exposed a SEPARATE pre-existing gap (`addp d31,v30.2d` 0x5EF1BBDF → FP-NOP, lanes read fine) — recorded, not fixed here.
+- Verified with a scratch glibc dlopen-TLS test (lib with `__thread` int + long[4]): init/set/multi-lane reads all correct on main thread under jit + interp.
 - Verified: `--dynamic` **15/15**, `--quick` **216/216**.
+
+## Session History (2026-09-04) — scalar integer addp (dlopen-tls follow-up)
+
+- **Gap (`interp_fp.cpp`):** vectorized long sums lower to `addp Dd,Vn.2d` (integer scalar pairwise, `0x5EF1B800` family verified via cross-as — only the `.2d` form exists), which fell to the FP-NOP fallback and read back stale `d31` (sum {1,2,3,4} → 3). Now `Dd = Vn.d[0] + Vn.d[1]` (wrapping, hi zeroed). JIT already routes the word to interp (`ftype > 1` gate), so both engines are correct via the fallback.
+- Verified: scratch tls sum test `lanes 1 2 3 4 sum=10` under jit + interp + `JIT_VERIFY`, `--quick` **216/216**.
