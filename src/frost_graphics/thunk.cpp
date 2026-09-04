@@ -2366,6 +2366,75 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                        entry.spec->policy == thunk::Policy::EL_PTR ||
                        entry.spec->policy == thunk::Policy::EL_PTR_ARRAY ||
                        entry.spec->policy == thunk::Policy::INDIRECT_PTR);
+    // ── DELETE_TRACK: mirror deletes into the state tracker ──────
+    // Deleting a bound object unbinds it; without mirroring, name reuse
+    // would observe a stale "already bound" and elide a real bind.
+    // Rare calls (resource teardown, not per-frame). Falls through.
+    if (entry.spec && entry.spec->policy == thunk::Policy::DELETE_TRACK &&
+        impl_->gl_state_tracker_ && impl_->mem) {
+        auto* trk = impl_->gl_state_tracker_.get();
+        if (entry.name == "glDeleteTextures") {
+            uint64_t n = args[0] & 0xFFFFFFFFu;
+            if (n > 0 && n <= 4096 && args[1]) {
+                std::vector<uint32_t> ids(static_cast<size_t>(n));
+                try {
+                    impl_->mem->read(args[1], ids.data(), n * 4);
+                    trk->unbind_textures(ids.data(), static_cast<size_t>(n));
+                } catch (...) { trk->clear_texture_bindings(); }
+            } else if (n > 0) {
+                trk->clear_texture_bindings();
+            }
+        } else if (entry.name == "glDeleteProgram") {
+            trk->unbind_program(static_cast<uint32_t>(args[0]));
+        } else if (entry.name == "glDeleteVertexArrays") {
+            uint64_t n = args[0] & 0xFFFFFFFFu;
+            if (n > 0 && n <= 4096 && args[1]) {
+                std::vector<uint32_t> ids(static_cast<size_t>(n));
+                try {
+                    impl_->mem->read(args[1], ids.data(), n * 4);
+                    trk->unbind_vaos(ids.data(), static_cast<size_t>(n));
+                } catch (...) { trk->mark_vao_unknown(); }
+            } else if (n > 0) {
+                trk->mark_vao_unknown();
+            }
+        }
+        // Fall through to the generic path for the real call.
+    }
+    // ── ELIDE_BIND: skip redundant binding-point writes ────────────
+    // The game rebinds already-bound objects per draw (measured ~74%
+    // state-redundant). Eliding saves the whole ~75ns round trip. ONLY
+    // functions whose effect is exactly "binding point = name" with no
+    // capture semantics (buffer binds excluded: ARRAY/element state is
+    // captured into VAOs at attrib-pointer time). All return void.
+    // BIFROST_NO_ELIDE=1 disables. Single-context assumption (same as
+    // the tracker itself).
+    static const bool no_elide_ = getenv("BIFROST_NO_ELIDE") != nullptr;
+    if (!no_elide_ && entry.spec &&
+        entry.spec->policy == thunk::Policy::ELIDE_BIND &&
+        impl_->gl_state_tracker_) {
+        auto* trk = impl_->gl_state_tracker_.get();
+        bool elided = false;
+        if (entry.name == "glUseProgram") {
+            elided = (trk->current_program() == static_cast<uint32_t>(args[0]));
+        } else if (entry.name == "glActiveTexture") {
+            elided = (trk->active_texture() == static_cast<uint32_t>(args[0]));
+        } else if (entry.name == "glBindTexture") {
+            elided = (trk->texture_binding(static_cast<uint32_t>(args[0])) ==
+                      static_cast<uint32_t>(args[1]));
+        } else if (entry.name == "glBindVertexArray") {
+            bool known = false;
+            uint32_t bound = trk->vao_binding(known);
+            elided = (known && bound == static_cast<uint32_t>(args[0]));
+        }
+        if (elided) {
+            if (dbg().thunk_trace) {
+                fprintf(stderr, "[thunk] elide %s (redundant)\n",
+                        entry.name.c_str());
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
+    }
     if (entry.pointer_args && impl_->mem && !va_ptr_owned) {
         for (int i = 0; i < kMaxArgs; i++) {
             if (entry.pointer_args & (1u << i)) {

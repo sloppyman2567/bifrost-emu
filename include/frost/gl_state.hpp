@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 #include <array>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
@@ -206,6 +207,20 @@ public:
                                  uint32_t zfail, uint32_t zpass);
     void set_stencil_mask_separate(uint32_t face, uint32_t mask);
     void set_program(uint32_t program);
+    // Redundant-bind elision support: exact-state getters plus VAO binding
+    // and delete-mirroring. Elision is only valid because every GL call
+    // flows through dispatch (single context assumed — contexts have
+    // per-context state and would need a keyed tracker).
+    uint32_t current_program() const;
+    uint32_t active_texture() const;
+    uint32_t texture_binding(uint32_t target) const;
+    void set_vao_binding(uint32_t vao);
+    uint32_t vao_binding(bool& known) const;
+    void unbind_textures(const uint32_t* names, size_t n);
+    void clear_texture_bindings();
+    void unbind_program(uint32_t prog);
+    void unbind_vaos(const uint32_t* names, size_t n);
+    void mark_vao_unknown();
     void set_array_buffer_binding(uint32_t buffer);
     void set_element_array_buffer_binding(uint32_t buffer);
     void set_draw_indirect_buffer_binding(uint32_t buffer);
@@ -294,7 +309,11 @@ private:
     Viewport viewport_ = {0, 0, 640, 480};
     float line_width_ = 1.0f;
     float point_size_ = 1.0f;
-    uint32_t active_texture_ = 0x84C0; // GL_TEXTURE0
+    // Hot elision states are lock-free atomics (relaxed): the elision
+    // check runs per bind call and a mutex there costs ~15ns of the
+    // ~75ns round trip. GL is single-threaded in every current target,
+    // so relaxed is exact in practice; the map paths below keep mu_.
+    std::atomic<uint32_t> active_texture_{0x84C0}; // GL_TEXTURE0
     uint32_t blend_src_rgb_ = 0x0302; // GL_SRC_ALPHA
     uint32_t blend_dst_rgb_ = 0x0303; // GL_ONE_MINUS_SRC_ALPHA
     uint32_t blend_src_alpha_ = 0x0302;
@@ -309,7 +328,13 @@ private:
     Scissor scissor_ = {0, 0, 0, 0};
     StencilState stencil_front_;
     StencilState stencil_back_;
-    uint32_t current_program_ = 0;
+    std::atomic<uint32_t> current_program_{0};
+    // VAO binding point (glBindVertexArray). 0 = default VAO. unknown_ flag
+    // covers any gap in observation (e.g. a failed delete-array read) —
+    // elision only fires when known, so doubt always costs a host call,
+    // never correctness.
+    std::atomic<uint32_t> vao_binding_{0};
+    std::atomic<bool> vao_known_{true};
     uint32_t array_buffer_binding_ = 0;
     uint32_t element_array_buffer_binding_ = 0;
     uint32_t draw_indirect_buffer_binding_ = 0;
@@ -318,8 +343,13 @@ private:
     // handlers; consulted by the glMapBuffer/glUnmapBuffer bounce logic.
     std::unordered_map<uint32_t, uint32_t> buffer_bindings_;
     // Per-texture-unit bindings: unit -> target -> texture name.
-    // Flat map: (unit << 16) | target -> texture name.
+    // Flat map: (unit << 16) | target -> texture name. Plus a lock-free
+    // last-key cache: texture binds repeat the same (unit, target) with
+    // varying names, and the map+mutex costs ~25ns of the ~75ns round
+    // trip on every check. Invalidated (key=~0) on any unbind/clear.
     std::unordered_map<uint32_t, uint32_t> texture_bindings_;
+    mutable std::atomic<uint64_t> tex_last_key_{~0ULL};
+    mutable std::atomic<uint32_t> tex_last_val_{0};
     // Pixel store / hint state.
     int pixel_store_unpack_alignment_ = 4;
     int pixel_store_pack_alignment_ = 4;

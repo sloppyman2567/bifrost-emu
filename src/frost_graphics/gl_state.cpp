@@ -23,7 +23,7 @@ void GLStateTracker::reset() {
     viewport_ = {0, 0, 640, 480};
     line_width_ = 1.0f;
     point_size_ = 1.0f;
-    active_texture_ = GL::TEXTURE0;
+    active_texture_.store(GL::TEXTURE0, std::memory_order_relaxed);
     blend_src_rgb_ = GL::SRC_ALPHA;
     blend_dst_rgb_ = GL::ONE_MINUS_SRC_ALPHA;
     blend_src_alpha_ = GL::SRC_ALPHA;
@@ -38,7 +38,7 @@ void GLStateTracker::reset() {
     scissor_ = {0, 0, 0, 0};
     stencil_front_ = {};
     stencil_back_ = {};
-    current_program_ = 0;
+    current_program_.store(0, std::memory_order_relaxed);
     array_buffer_binding_ = 0;
     element_array_buffer_binding_ = 0;
     draw_indirect_buffer_binding_ = 0;
@@ -90,7 +90,7 @@ void GLStateTracker::set_point_size(float s) {
 
 void GLStateTracker::set_active_texture(uint32_t unit) {
     std::lock_guard<std::mutex> g(mu_);
-    active_texture_ = unit;
+    active_texture_.store(unit, std::memory_order_relaxed);
 }
 
 void GLStateTracker::set_blend_func(uint32_t src, uint32_t dst) {
@@ -187,7 +187,87 @@ void GLStateTracker::set_stencil_mask_separate(uint32_t face, uint32_t mask) {
 
 void GLStateTracker::set_program(uint32_t program) {
     std::lock_guard<std::mutex> g(mu_);
-    current_program_ = program;
+    current_program_.store(program, std::memory_order_relaxed);
+}
+
+// ── Redundant-bind elision support ────────────────────────────────
+// Getters snapshot under one lock each; the dispatch check-then-call
+// sequence assumes the single-context game pattern (all GL calls flow
+// through dispatch on one context — true for every current target).
+uint32_t GLStateTracker::current_program() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return current_program_.load(std::memory_order_relaxed);
+}
+
+uint32_t GLStateTracker::active_texture() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return active_texture_.load(std::memory_order_relaxed);
+}
+
+uint32_t GLStateTracker::texture_binding(uint32_t target) const {
+    uint64_t unit = active_texture_.load(std::memory_order_relaxed);
+    uint64_t key = (unit << 32) | target;
+    if (tex_last_key_.load(std::memory_order_relaxed) == key)
+        return tex_last_val_.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> g(mu_);
+    uint32_t mkey = (static_cast<uint32_t>(unit) << 16) | (target & 0xFFFF);
+    auto it = texture_bindings_.find(mkey);
+    uint32_t v = it != texture_bindings_.end() ? it->second : 0;
+    tex_last_key_.store(key, std::memory_order_relaxed);
+    tex_last_val_.store(v, std::memory_order_relaxed);
+    return v;
+}
+
+void GLStateTracker::set_vao_binding(uint32_t vao) {
+    std::lock_guard<std::mutex> g(mu_);
+    vao_binding_.store(vao, std::memory_order_relaxed);
+    vao_known_.store(true, std::memory_order_relaxed);
+}
+
+uint32_t GLStateTracker::vao_binding(bool& known) const {
+    std::lock_guard<std::mutex> g(mu_);
+    known = vao_known_.load(std::memory_order_relaxed);
+    return vao_binding_.load(std::memory_order_relaxed);
+}
+
+// Deleting a bound object unbinds it (→ 0). Walk every unit map entry;
+// counts are tiny (units × targets), so the linear scan is fine.
+void GLStateTracker::unbind_textures(const uint32_t* names, size_t n) {
+    if (!names) return;
+    std::lock_guard<std::mutex> g(mu_);
+    tex_last_key_.store(~0ULL, std::memory_order_relaxed);
+    for (size_t k = 0; k < n; k++) {
+        uint32_t dead = names[k];
+        if (!dead) continue;
+        for (auto& kv : texture_bindings_) {
+            if (kv.second == dead) kv.second = 0;
+        }
+    }
+}
+
+void GLStateTracker::clear_texture_bindings() {
+    std::lock_guard<std::mutex> g(mu_);
+    tex_last_key_.store(~0ULL, std::memory_order_relaxed);
+    texture_bindings_.clear();
+}
+
+void GLStateTracker::unbind_program(uint32_t prog) {
+    if (!prog) return;
+    std::lock_guard<std::mutex> g(mu_);
+    if (current_program_.load(std::memory_order_relaxed) == prog) current_program_.store(0, std::memory_order_relaxed);
+}
+
+void GLStateTracker::unbind_vaos(const uint32_t* names, size_t n) {
+    if (!names) return;
+    std::lock_guard<std::mutex> g(mu_);
+    for (size_t k = 0; k < n; k++) {
+        if (names[k] && vao_binding_.load(std::memory_order_relaxed) == names[k]) vao_binding_.store(0, std::memory_order_relaxed);
+    }
+}
+
+void GLStateTracker::mark_vao_unknown() {
+    std::lock_guard<std::mutex> g(mu_);
+    vao_known_.store(false, std::memory_order_relaxed);
 }
 
 void GLStateTracker::set_array_buffer_binding(uint32_t buffer) {
@@ -233,8 +313,12 @@ uint32_t GLStateTracker::buffer_binding(uint32_t target) const {
 
 void GLStateTracker::set_texture_binding(uint32_t target, uint32_t texture) {
     std::lock_guard<std::mutex> g(mu_);
-    uint32_t key = (active_texture_ << 16) | (target & 0xFFFF);
+    uint32_t unit = active_texture_.load(std::memory_order_relaxed);
+    uint32_t key = (unit << 16) | (target & 0xFFFF);
     texture_bindings_[key] = texture;
+    tex_last_key_.store((static_cast<uint64_t>(unit) << 32) | target,
+                        std::memory_order_relaxed);
+    tex_last_val_.store(texture, std::memory_order_relaxed);
 }
 
 void GLStateTracker::set_pixel_store_i(uint32_t pname, int param) {
@@ -292,7 +376,8 @@ bool GLStateTracker::is_enabled_locked(uint32_t cap) const {
 bool GLStateTracker::get_integerv_locked(uint32_t pname, int32_t& out_val) const {
     switch (pname) {
         case GL::ACTIVE_TEXTURE:
-            out_val = static_cast<int32_t>(active_texture_);
+            out_val = static_cast<int32_t>(
+                active_texture_.load(std::memory_order_relaxed));
             return true;
         case GL::ARRAY_BUFFER_BINDING:
             out_val = static_cast<int32_t>(array_buffer_binding_);
@@ -304,13 +389,13 @@ bool GLStateTracker::get_integerv_locked(uint32_t pname, int32_t& out_val) const
             // Key must use the bind TARGET (GL_TEXTURE_2D), not the
             // query pname (GL_TEXTURE_BINDING_2D) — set_texture_binding
             // keys on target, so 0x8069 here never matched.
-            uint32_t key = (active_texture_ << 16) | (GL::TEXTURE_2D & 0xFFFF);
+            uint32_t key = (active_texture_.load(std::memory_order_relaxed) << 16) | (GL::TEXTURE_2D & 0xFFFF);
             auto it = texture_bindings_.find(key);
             out_val = (it != texture_bindings_.end()) ? static_cast<int32_t>(it->second) : 0;
             return true;
         }
         case GL::CURRENT_PROGRAM:
-            out_val = static_cast<int32_t>(current_program_);
+            out_val = static_cast<int32_t>(current_program_.load(std::memory_order_relaxed));
             return true;
         // NOTE: implementation limits and framebuffer formats (MAX_*,
         // *_BITS, SAMPLES, …) are deliberately NOT intercepted — the
@@ -577,9 +662,10 @@ bool GLStateTracker::tracks_state(const std::string& name) {
         "glCullFace", "glFrontFace", "glPolygonMode", "glScissor",
         "glStencilFunc", "glStencilOp", "glStencilMask",
         "glStencilFuncSeparate", "glStencilOpSeparate",
-        "glStencilMaskSeparate", "glUseProgram", "glBindBuffer",
+        "glStencilMaskSeparate",         "glUseProgram", "glBindBuffer",
         "glBindBufferBase", "glBindBufferRange",
         "glBindTexture", "glBindFramebuffer", "glBindRenderbuffer",
+        "glBindVertexArray",
         "glPixelStorei", "glHint", "glDepthRangef",
     };
     return kTracked.count(name) != 0;
@@ -766,6 +852,10 @@ void GLStateTracker::track_state_change(const std::string& name, const uint64_t 
     if (name == "glBindTexture") {
         set_texture_binding(static_cast<uint32_t>(args[0]),
                             static_cast<uint32_t>(args[1]));
+        return;
+    }
+    if (name == "glBindVertexArray") {
+        set_vao_binding(static_cast<uint32_t>(args[0]));
         return;
     }
     if (name == "glBindFramebuffer") {

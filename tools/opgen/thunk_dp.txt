@@ -110,8 +110,8 @@ glRotatef                 GL     ffff          -     -              -
 glTranslatef              GL     fff           -     -              -
 glScalef                  GL     fff           -     -              -
 glGenTextures             GL     ip            -     -              -   # arg1: GLuint *textures
-glDeleteTextures          GL     ip            -     -              -   # arg1: const GLuint *textures
-glBindTexture             GL     ii            -     -              -
+glDeleteTextures         GL     ip             -     DELETE_TRACK   -      # arg1: const GLuint *textures
+glBindTexture            GL     ii             -     ELIDE_BIND     -    
 glTexParameteri           GL     iii           -     -              -
 glTexImage2D              GL     iiiiiiiiz     -     -              TEX2D  # arg8: pixels
 glTexSubImage2D           GL     iiiiiiiiz     -     -              TEXSUB # arg8: pixels
@@ -168,7 +168,7 @@ glLightfv                 GL     iip           -     -              -   # arg2: 
 glMaterialfv              GL     iip           -     -              -   # arg2: const GLfloat *params
 glNormal3f                GL     fff           -     -              -
 glTexCoord2f              GL     ff            -     -              -
-glActiveTexture           GL     i             -     -              -
+glActiveTexture          GL     i              -     ELIDE_BIND     -    
 glClientActiveTexture     GL     i             -     -              -
 glMultiTexCoord2f         GL     iii           -     -              -   # target,s,t; legacy int passthrough
 glCreateShader            GL     i             -     -              -
@@ -179,8 +179,8 @@ glCreateProgram           GL     -             -     -              -
 glAttachShader            GL     ii            -     -              -
 glDetachShader            GL     ii            -     -              -
 glLinkProgram             GL     i             -     -              -
-glUseProgram              GL     i             -     -              -
-glDeleteProgram           GL     i             -     -              -
+glUseProgram             GL     i              -     ELIDE_BIND     -    
+glDeleteProgram          GL     i              -     DELETE_TRACK   -    
 glGetShaderiv             GL     iip           -     -              -   # arg2: GLint *params
 glGetProgramiv            GL     iip           -     -              -   # arg2: GLint *params
 glGetShaderInfoLog        GL     iipp          -     -              -   # arg2: GLsizei *length, arg3: GLchar *infoLog
@@ -203,8 +203,8 @@ glEnableVertexAttribArray GL     i             -     -              -
 glDisableVertexAttribArray GL    i             -     -              -
 glVertexAttribPointer     GL     iiiii         -     VA_PTR         -   # arg5: offset or client ptr
 glGenVertexArrays         GL     ip            -     -              -   # arg1: GLuint *arrays
-glBindVertexArray         GL     i             -     -              -
-glDeleteVertexArrays      GL     ip            -     -              -   # arg1: const GLuint *arrays
+glBindVertexArray        GL     i              -     ELIDE_BIND     -    
+glDeleteVertexArrays     GL     ip             -     DELETE_TRACK   -      # arg1: const GLuint *arrays
 glIsVertexArray           GL     i             -     -              -
 glVertexAttribIPointer    GL     iiiii         -     VA_PTR         -   # arg5: offset or client ptr
 glPolygonMode             GL     ii            -     -              -
@@ -226,7 +226,7 @@ glXGetProcAddress         GL     p             -     GET_PROC       -
 glXGetProcAddressARB      GL     p             -     GET_PROC       -
 glGenBuffers              GL     ip            -     -              -   # arg1: GLuint *buffers
 glDeleteBuffers            GL     ip            -     DELETE_BUFFERS -        # arg1: const GLuint *buffers
-glBindBuffer              GL     ii            -     -              -
+glBindBuffer             GL     ii             -     ELIDE_BIND     -    
 glBufferData              GL     iizi          -     -              arg1 # arg2: const void *data (size=arg1)
 glBufferSubData           GL     iiiz          -     -              arg2 # arg3: const void *data (size=arg2)
 glGenFramebuffers         GL     ip            -     -              -   # arg1: GLuint *framebuffers
@@ -343,8 +343,8 @@ glCreateProgram           GLES   -             -     -              -
 glAttachShader            GLES   ii            -     -              -
 glDetachShader            GLES   ii            -     -              -
 glLinkProgram             GLES   i             -     -              -
-glUseProgram              GLES   i             -     -              -
-glDeleteProgram           GLES   i             -     -              -
+glUseProgram             GLES   i              -     ELIDE_BIND     -    
+glDeleteProgram          GLES   i              -     DELETE_TRACK   -    
 glGetShaderiv             GLES   iip           -     -              -
 glGetProgramiv            GLES   iip           -     -              -
 glGetShaderInfoLog        GLES   iipp          -     -              -
@@ -369,8 +369,8 @@ glVertexAttribPointer     GLES   iiiii         -     VA_PTR         -
 glGetFloatv               GLES   ip            -     QUERY          -
 glGetBooleanv             GLES   ip            -     QUERY          -
 glGenVertexArrays         GLES   ip            -     -              -
-glBindVertexArray         GLES   i             -     -              -
-glDeleteVertexArrays      GLES   ip            -     -              -
+glBindVertexArray        GLES   i              -     ELIDE_BIND     -    
+glDeleteVertexArrays     GLES   ip             -     DELETE_TRACK   -    
 glIsVertexArray           GLES   i             -     -              -
 glVertexAttribIPointer    GLES   iiiii         -     VA_PTR         -
 glUniform2i               GLES   iii           -     -              -
@@ -386,7 +386,7 @@ glGetUniformiv            GLES   iip           -     -              -
 glGetStringi               GLES   ii            str   GET_STRING     -     
 glGenBuffers              GLES   ip            -     -              -
 glDeleteBuffers            GLES   ip            -     DELETE_BUFFERS -     
-glBindBuffer              GLES   ii            -     -              -
+glBindBuffer             GLES   ii             -     ELIDE_BIND     -    
 glBufferData              GLES   iizi          -     -              arg1
 glBufferSubData           GLES   iiiz          -     -              arg2
 glGenFramebuffers         GLES   ip            -     -              -
@@ -400,9 +400,9 @@ glRenderbufferStorage     GLES   iiii          -     -              -
 glFramebufferRenderbuffer GLES   iiii          -     -              -
 glCheckFramebufferStatus  GLES   i             -     -              -
 glGenTextures             GLES   ip            -     -              -
-glDeleteTextures          GLES   ip            -     -              -
-glBindTexture             GLES   ii            -     -              -
-glActiveTexture           GLES   i             -     -              -
+glDeleteTextures         GLES   ip             -     DELETE_TRACK   -    
+glBindTexture            GLES   ii             -     ELIDE_BIND     -    
+glActiveTexture          GLES   i              -     ELIDE_BIND     -    
 glGenerateMipmap          GLES   i             -     -              -
 glTexParameteri           GLES   iii           -     -              -
 glTexParameterf           GLES   iif           -     -              -
