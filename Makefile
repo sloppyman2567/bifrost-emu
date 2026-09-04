@@ -1,4 +1,4 @@
-# bifrost-emu Makefile (1.5.4-alpha)
+# bifrost-emu Makefile (1.5.5-alpha)
 #
 # Auto-discovers all .cpp files under src/ and compiles them into the
 # final bifrost-emu binary. Library builds (libbifrost.a) compile the
@@ -18,7 +18,7 @@
 #   CXXFLAGS       C++ compiler flags
 #   LDFLAGS        Linker flags
 #
-# Directory layout (1.5.4-alpha):
+# Directory layout (1.5.5-alpha):
 #
 #   src/core/         — Emulator, Memory, CPU, SignalTable, thread_mgr
 #   src/yggdrasil/          — Yggdrasil VFS (Node + FdTable + procfs + devfs)
@@ -64,6 +64,13 @@ else
     $(warning "libffi not found — native bridge adapter (api/native_bridge.cpp) disabled; install libffi-dev")
 endif
 LIB_OBJECTS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(LIB_SOURCES))
+# api/*.o files generate .d files via the pattern rule below, but DEPS above
+# only covered OBJECTS (src/* + main) — the api objects' deps were never
+# included, so a header layout change left stale api objects in libbifrost.a
+# (false test-capi segfault; always needed a clean rebuild). fold them in.
+DEPS += $(LIB_OBJECTS:.o=.d)
+# host test objects get their own .d files from the explicit recipes below.
+DEPS += $(OBJDIR)/test_capi_host.d $(OBJDIR)/test_nb_host.d
 
 HEADERS  := $(shell find include src -name '*.hpp' -o -name '*.h')
 
@@ -411,7 +418,7 @@ check-all: setup-tests opgen-check opgen-thunk-check wlgen-check vkxml-check glx
 test-capi: lib $(TARGET)
 	@echo "=== Building host C API test ==="
 	@mkdir -p build
-	@$(CXX) -O1 -g -Iapi -x c -c ctest/test_capi.c -o build/test_capi_host.o
+	@$(CXX) -O1 -g -MMD -MP -MF build/test_capi_host.d -Iapi -x c -c ctest/test_capi.c -o build/test_capi_host.o
 	@$(CXX) build/test_capi_host.o libbifrost.a -o build/test_capi_host $(LDFLAGS)
 	@echo "=== Running host C API test ==="
 	@./build/test_capi_host
@@ -432,7 +439,7 @@ $(NB_TESTLIB): ctest/nb_lib.c
 test-nb: lib $(TARGET) $(NB_TESTLIB)
 	@echo "=== Building host native bridge test ==="
 	@mkdir -p build
-	@$(CXX) -O1 -g -Iapi -x c -c ctest/test_nb.c -o build/test_nb_host.o
+	@$(CXX) -O1 -g -MMD -MP -MF build/test_nb_host.d -Iapi -x c -c ctest/test_nb.c -o build/test_nb_host.o
 	@$(CXX) build/test_nb_host.o libbifrost.a -o build/test_nb_host $(LDFLAGS)
 	@echo "=== Running host native bridge test ==="
 	@./build/test_nb_host

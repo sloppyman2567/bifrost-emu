@@ -20,7 +20,7 @@
 // libbifrost is Unlicense. Describing the same wire ABI for
 // interoperability is not a copy of AOSP's implementation.
 //
-// Version: 1.5.4-alpha.
+// Version: 1.5.5-alpha.
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
@@ -34,7 +34,7 @@ typedef struct bifrost_emu bifrost_emu_t;
 
 // Type of JNI call, as defined by ART (kJNICallTypeRegular /
 // kJNICallTypeCriticalNative). Regular is the normal marshalled call;
-// CriticalNative skips the JNIEnv*/jobject preamble. 1.5.4-alpha supports
+// CriticalNative skips the JNIEnv*/jobject preamble. 1.5.5-alpha supports
 // Regular only.
 typedef enum {
     kJNICallTypeRegular       = 1,
