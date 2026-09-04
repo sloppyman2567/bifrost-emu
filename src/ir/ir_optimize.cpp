@@ -212,13 +212,15 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
     // correctness bugs (CAS writes wrong desired value, etc.).
     // FWD is a ~5.6% speedup on compute loops — we skip it only for
     // blocks with atomics, which are rare in compute workloads.
-    static bool enable_fwd_ = (getenv("BIFROST_ENABLE_FWD") != nullptr);
+    static bool fwd_off_ = (getenv("BIFROST_NO_FWD") != nullptr);
+    // (legacy BIFROST_ENABLE_FWD=1 is accepted and means on, which is now
+    // the default — it only matters if some script still exports it.)
     // The tier-2 walker forces FWD on for region blocks: without the
     // STORE_REG→LOAD_REG forwarding, real guest invariant chains (threaded
     // through a GPR) keep a memory round-trip on every step and LICM can
     // never hoist them. FWD is verified correct (2026-08-15 fix + suites);
     // forcing it here only affects region IR, never the standalone JIT.
-    bool fwd_requested = enable_fwd_ || force_fwd;
+    bool fwd_requested = !fwd_off_ || force_fwd;
     bool block_has_atomics = false;
     if (fwd_requested) {
         for (const auto& inst : block.insts) {
@@ -383,9 +385,8 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 // (invalidate_vreg_in_cache). This fixes the previous
                 // correctness bug that crashed `toybox ls /`.
                 //
-                // Enable with BIFROST_ENABLE_FWD=1 (bench_mips gets ~5.6%
-                // speedup). Without FWD, the JIT still achieves 571 MIPS.
-                // Disabled for blocks containing ATOMIC/LL/SC ops (see
+                // On by default (BIFROST_NO_FWD=1 opts out; bench_mips gets
+                // ~10% from it). Disabled for blocks containing ATOMIC/LL/SC ops (see
                 // block_has_atomics above).
                 auto it = fwd_enabled ? arm_reg_cache.find(ar) : arm_reg_cache.end();
                 if (it != arm_reg_cache.end()) {
@@ -711,6 +712,18 @@ void optimize_ir(IRBlock& block, bool force_fwd) {
                 last_def[inst.dest] = i;
                 break;
             }
+            case IROp::SIMD_SMOV: {
+                // Same direct-write shape as SIMD_UMOV (set_vreg_reg to an
+                // arch-reg dest, bypassing STORE_REG) — same cache update
+                // or a later LOAD_REG of `dest` reads the pre-SMOV value.
+                // This broke `test_simd_sat`'s smov case under FWD=1.
+                invalidate_vreg_in_cache(inst.dest);
+                if (inst.dest <= 31) arm_reg_cache[inst.dest] = inst.dest;
+                consts.clear(inst.dest);
+                copies.clear(inst.dest);
+                last_def[inst.dest] = i;
+                break;
+            }
             case IROp::FP_I2F_FIXED: {
                 // Same as FP_I2F: writes to v_lo[dest] (FP reg file),
                 // not to an ARM reg vreg. Just invalidate dest's cache
@@ -954,6 +967,22 @@ void dump_ir(const IRBlock& block, FILE* out) {
                     case IROp::SIMD_PERMUTE: return "SIMD_PERMUTE";
                     case IROp::SIMD_PAIRMIN: return "SIMD_PAIRMIN";
                     case IROp::FP_CSEL: return "FP_CSEL";
+                    case IROp::BRCOND_SKIP: return "BRCOND_SKIP";
+                    case IROp::BL_CALL: return "BL_CALL";
+                    case IROp::BLR_CALL: return "BLR_CALL";
+                    case IROp::SIMD_UMOV: return "SIMD_UMOV";
+                    case IROp::SIMD_SMOV: return "SIMD_SMOV";
+                    case IROp::SIMD_SATADDSUB: return "SIMD_SATADDSUB";
+                    case IROp::SIMD_LD16: return "SIMD_LD16";
+                    case IROp::SIMD_ST16: return "SIMD_ST16";
+                    case IROp::SIMD_FP_ARITH: return "SIMD_FP_ARITH";
+                    case IROp::SIMD_FP_FMA: return "SIMD_FP_FMA";
+                    case IROp::SIMD_ABDL: return "SIMD_ABDL";
+                    case IROp::SIMD_ABD: return "SIMD_ABD";
+                    case IROp::SIMD_ADDW: return "SIMD_ADDW";
+                    case IROp::SIMD_ADDHN: return "SIMD_ADDHN";
+                    case IROp::SIMD_SHRN_SAT: return "SIMD_SHRN_SAT";
+                    case IROp::SIMD_MUL_ELEM: return "SIMD_MUL_ELEM";
                     default: return "?";
                     }
                     return "?";

@@ -163,17 +163,19 @@ guest apps (including SDL2+OpenGL demos) can run without QEMU.
   Verified: cneg3 (was `want=248` for i=0), all cneg/scalarabs repros,
   203/203 suite, `BIFROST_JIT_VERIFY=1`+`JIT_VERIFY_MEM`, `REGALLOC_CHECK`,
   `ENABLE_FWD=1` all clean. Interp was already correct.
-- FWD (`BIFROST_ENABLE_FWD=1`, the `arm_reg_cache` load-forwarding in
-  `ir_optimize.cpp`) is disabled by default: it had a "subtle correctness bug"
-  since the original author (commit 1257f7b). The original regalloc clobber bug
-  is fixed (jit_helpers.cpp `emit_fmov_helper` spills RAX before reuse), but
-  ANY op that writes an ARM reg vreg DIRECTLY (bypassing STORE_REG) — currently
-  `FP_F2I`, `FP_F2I_FIXED`, and `SIMD_UMOV` (jit_codegen_simd.cpp
-  `set_vreg_reg(inst.dest, d)`) — MUST also update `arm_reg_cache[dest]=dest`
-  in `optimize_ir`, or a later LOAD_REG of `dest` substitutes a stale cached
-  vreg. If you add another such op, mirror the SIMD_UMOV case
-  (ir_optimize.cpp) or FWD will silently corrupt values (this broke jit_neon's
-  umov tests). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
+- FWD (the `arm_reg_cache` load-forwarding in `ir_optimize.cpp`) is enabled
+  by default since 2026-09-04 (`BIFROST_NO_FWD=1` opts out; legacy
+  `BIFROST_ENABLE_FWD=1` is accepted and means on): it had a "subtle
+  correctness bug" since the original author (commit 1257f7b). The original
+  regalloc clobber bug is fixed (jit_helpers.cpp `emit_fmov_helper` spills
+  RAX before reuse), but ANY op that writes an ARM reg vreg DIRECTLY
+  (bypassing STORE_REG) — currently `FP_F2I`, `FP_F2I_FIXED`, `SIMD_UMOV`,
+  and `SIMD_SMOV` (jit_codegen_simd.cpp `set_vreg_reg(inst.dest, d)`) —
+  MUST also update `arm_reg_cache[dest]=dest` in `optimize_ir`, or a later
+  LOAD_REG of `dest` substitutes a stale cached vreg. If you add another
+  such op, mirror the SIMD_UMOV case (ir_optimize.cpp) or FWD will silently
+  corrupt values (this broke jit_neon's umov tests, and test_simd_sat's smov
+  case blocked the default-flip). Verified 198/198 under FWD=1; it gives only ~4% on chunkmesh_mesh
   (the real cost there is regalloc spill/reload bloat, not round-trips).
   **FIXED (2026-08-14): the deterministic corruption under `BIFROST_ENABLE_FWD=1`
   (bench_mips printed ~1 GB of spaces + `done: acc=0x0c5a4000` instead of

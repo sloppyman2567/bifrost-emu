@@ -245,7 +245,14 @@ void Config::apply_env() {
         if (parse_bool(v, b)) jit_enabled = !b;
     }
     env_bool("BIFROST_JIT_VERIFY",     jit_verify);
-    env_bool("BIFROST_ENABLE_FWD",     jit_fwd);
+    // FWD is on by default; BIFROST_NO_FWD=1 opts out. Legacy
+    // BIFROST_ENABLE_FWD=1 is accepted and also means on.
+    if (const char* v = getenv("BIFROST_NO_FWD")) {
+        bool b;
+        if (parse_bool(v, b)) jit_fwd = !b;
+    } else {
+        env_bool("BIFROST_ENABLE_FWD", jit_fwd);
+    }
     // BIFROST_NO_THREAD_JIT inverts jit_thread_jit
     if (const char* v = getenv("BIFROST_NO_THREAD_JIT")) {
         bool b;

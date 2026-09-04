@@ -77,7 +77,7 @@ struct Config {
     bool     jit_enabled       = true;
     uint64_t jit_threshold     = 0;        // 0 = JIT from start
     bool     jit_verify        = false;    // BIFROST_JIT_VERIFY
-    bool     jit_fwd           = false;    // BIFROST_ENABLE_FWD
+    bool     jit_fwd           = true;     // BIFROST_NO_FWD (inverted)
     bool     jit_thread_jit    = true;     // BIFROST_NO_THREAD_JIT (inverted)
     bool     jit_no_chain      = false;    // BIFROST_NO_CHAIN
     bool     jit_no_selfloop   = false;    // BIFROST_NO_SELFLOOP
