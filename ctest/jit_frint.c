@@ -67,13 +67,11 @@ int main(void) {
     CHECK(d_frintz(-3.7) == -3.0, "d_frintz_neg3.7");
     CHECK(d_frintz(-3.2) == -3.0, "d_frintz_neg3.2");
 
-    /* round() (libm — GCC -O2 emits `frinta`, which uses FPCR rounding
-     * mode. With default FPCR = round-to-nearest-ties-to-even. Note:
-     * C standard says round() is ties-AWAY-from-zero, but GCC optimizes
-     * it to frinta assuming default FPCR. This is a GCC codegen quirk,
-     * not an emulator bug — we correctly emulate frinta. */
+    /* round() (libm — GCC -O2 emits `frinta`, ties-away from zero
+     * per the ARM ARM, independent of FPCR. C round() is also
+     * ties-away, so this matches: 2.5->3.0. */
     CHECK(d_round(3.5) == 4.0, "d_round_3.5");
-    CHECK(d_round(2.5) == 2.0, "d_round_2.5_ties_even");  /* frinta: 2.5→2.0 (even) */
+    CHECK(d_round(2.5) == 3.0, "d_round_2.5_ties_away");  /* frinta: 2.5→3.0 (away) */
     CHECK(d_round(-3.5) == -4.0, "d_round_neg3.5");
 
     /* ── Single-precision FRINT variants ─────────────────────────── */

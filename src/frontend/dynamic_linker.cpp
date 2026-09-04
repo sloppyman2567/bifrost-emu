@@ -3909,7 +3909,15 @@ uint64_t DynamicLinker::load_library_from_data(CPU& cpu,
                             std::string name = read_guest_cstr(mem_, nobj.strtab_addr + s.st_name);
                             if (!name.empty()) addr = resolve_symbol(name);
                         }
-                        if (addr) mem_.store<uint64_t>(target, addr);
+                        if (addr) mem_.store<uint64_t>(target, addr + A);
+                    } else if (type == R_AARCH64_TLSDESC_) {
+                        // Mirror the startup JMPREL path: Qt places TLSDESC
+                        // at the end of .rela.plt.
+                        int64_t tp_off = tlsdesc_tp_offset(nobj, sym, A);
+                        uint64_t resolver = shim_base_ + SHIM_CODE_PAGE_OFF_ +
+                                            tlsdesc_resolver_off_;
+                        mem_.store<uint64_t>(target, resolver);
+                        mem_.store<uint64_t>(target + 8, static_cast<uint64_t>(tp_off));
                     } else if (type == R_AARCH64_IRELATIVE_) {
                         // ifunc in PLT
                         uint64_t resolver_addr = nobj.base_addr + A;

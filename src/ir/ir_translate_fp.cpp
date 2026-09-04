@@ -226,7 +226,7 @@ bool translate_fp(IRBlock& block, const DecodedInst& d, uint64_t cur_pc) {
                         case 0x09: frint_mode = 1; break;  // FRINTP (+inf/ceil)
                         case 0x0A: frint_mode = 2; break;  // FRINTM (-inf/floor)
                         case 0x0B: frint_mode = 3; break;  // FRINTZ (truncate)
-                        case 0x0C: frint_mode = 4; break;  // FRINTA (FPCR)
+                        case 0x0C: frint_mode = 6; break;  // FRINTA (ties-away; jit falls back, no x86 mode)
                         case 0x0E: frint_mode = 5; break;  // FRINTX (FPCR+inexact)
                         case 0x0F: frint_mode = 4; break;  // FRINTI (FPCR)
                         default: frint_mode = 0; break;    // 0x0D unused

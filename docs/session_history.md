@@ -3855,3 +3855,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Dead dups (`interp_fp.cpp`):** second UMINP (`0x2E20AC00`) + TBL (`0x0E002000/3000`) handlers unreachable, first switch already returns. Deleted, no behavior change.
 - **Hot getenv (`debug_flags.h`, `interp_fp.cpp`, `syscalls/mem.cpp`):** `NAN_TRACE` per fp write, `SIMD_TRACE/COLLECT` per unhandled op, `TRACE_MMAP` per mmap/munmap/mremap, `TRACE_MADVISE` per madvise now cached in `dbg()` instead of per-call `getenv`.
 - Verified: `make -j` clean, quick **216/216**.
+
+## Session History (2026-09-04) — frinta ties-away + execve reset + dlopen jmprel parity
+
+- **FRINTA (`interp_fp.cpp`, `ir_translate_fp.cpp`, `jit_codegen_fp.cpp`):** interp used `rint` (ties-even), jit used roundsd-MXCSR (ties-even). ARM FRINTA is ties-away, x86 has no such mode. Fix: interp uses `round/roundf`, translator gives FRINTA distinct mode 6, jit falls it back to interp. Test `ctest/jit_frint.c` was asserting the old wrong behavior (`round(2.5)==2.0` with a confused "GCC quirk" comment) — corrected to ties-away (`3.0`) per ARM ARM + C standard.
+- **execve reset (`syscalls/threads.cpp`, `core/signal.h`):** old image's brk/handlers/pending/altstack survived. Now brk/brk_start from new `end_addr` (under `brk_mu_`), `SignalTable::reset_exec()` clears handlers + frames, cpu pending queue + `sigpending` + altstack cleared. sigmask preserved per POSIX.
+- **dlopen JMPREL (`dynamic_linker.cpp`):** JUMP_SLOT dropped addend (`addr` vs startup `S+A`), TLSDESC-in-plt missing (Qt). Both mirrored from startup path. Full TLS-backing realloc + RUNPATH + static-shim remain deferred (bigger, riskier).
+- Verified: `make -j` clean, `jit_frint` pass jit + interp + `JIT_VERIFY`, quick **216/216**.

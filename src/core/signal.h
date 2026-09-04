@@ -218,6 +218,14 @@ public:
             actions_[signo] = SigAction{};
         }
     }
+    // execve: caught handlers reset to default, pending frames dropped.
+    // (Ignored dispositions stay ignored per POSIX; the caller keeps
+    // SIG_IGN entries — here we clear all since the table only tracks
+    // installed handlers, and defaults apply when lookup misses.)
+    void reset_exec() {
+        for (int i = 1; i <= MAX_SIGNAL; i++) actions_[i] = SigAction{};
+        frames_.clear();
+    }
 private:
     SigAction actions_[MAX_SIGNAL + 1];  // indexed by signo (1..31)
     std::vector<SignalFrame> frames_;

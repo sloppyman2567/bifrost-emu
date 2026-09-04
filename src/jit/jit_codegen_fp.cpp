@@ -98,16 +98,20 @@ bool FrostJIT::compile_ir_inst_fp_(const IRInst& inst) {
             //   1 (FRINTP) → 2 (+inf / ceil)
             //   2 (FRINTM) → 1 (-inf / floor)
             //   3 (FRINTZ) → 3 (truncate)
-            //   4 (FRINTA) → 4 (MXCSR, default = nearest)
+            //   4 (FRINTI) → 4 (MXCSR, default = nearest)
             //   5 (FRINTX) → 4 (uses FPCR rounding mode)
-            //   4 (FRINTI) → 4 (uses FPCR rounding mode)
+            //   6 (FRINTA) → interp: x86 has no ties-away mode,
+            //     roundsd MXCSR would give ties-even instead.
             uint8_t x86_mode;
             switch (inst.imm & 0x7) {
                 case 0: x86_mode = 0; break;  // N → nearest
                 case 1: x86_mode = 2; break;  // P → +inf (ceil)
                 case 2: x86_mode = 1; break;  // M → -inf (floor)
                 case 3: x86_mode = 3; break;  // Z → truncate
-                default: x86_mode = 4; break; // I/X/A → current MXCSR
+                case 6:
+                    emit_call_interp(inst.arm_pc, false);
+                    return false;
+                default: x86_mode = 4; break; // I/X → current MXCSR
             }
             // roundsd xmm0, xmm0, imm8:  66 0F 3A 0B C0 imm8
             // roundss xmm0, xmm0, imm8:  66 0F 3A 0A C0 imm8

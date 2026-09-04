@@ -489,6 +489,22 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             // map new PT_LOAD segments. Old mappings remain but are
             // overwritten by the new binary's segments.
             auto info = ElfLoader::load(mem_, elf_data);
+            // execve resets process state: brk to the new image end,
+            // caught signal handlers to default, pending signals and
+            // altstack cleared. (sigmask preserved per POSIX.)
+            {
+                uint64_t new_brk = (info.end_addr + 0xFFFULL) & ~0xFFFULL;
+                std::lock_guard<std::mutex> g(emu.brk_mu_);
+                emu.brk_ = new_brk;
+                emu.brk_start_ = new_brk;
+            }
+            signals_.reset_exec();
+            cpu.sigpending = 0;
+            {
+                CPU::PendingSig tmp;
+                while (cpu.pop_pending(tmp)) {}
+            }
+            cpu.altstack = CPU::AltStack{};
             // Set up a new initial stack.
             const uint64_t STACK_TOP = mem_.stack_top();
             // The stack is already mapped from the parent; just reset SP.
