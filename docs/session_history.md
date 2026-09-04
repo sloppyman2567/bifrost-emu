@@ -3822,3 +3822,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **AdvSIMD-scalar FCVTZU to FP dest (`interp_fp.cpp:4280`):** hand-rolled `static_cast<uint64_t>(scaled)` for `[2^63,2^64)` hits x86 `cvttsd2si` sentinel (returns `0x8000...` not the value). Now routes via `fp_to_unsigned_sat` subtract trick. Signed path already range-checked, left alone.
 - Verified: `make -j` clean, `jit_int_fp_conv` jit + interp pass, quick **216/216**.
+
+## Session History (2026-09-04) — mremap oom guard on move path
+
+- **Move path (`memory.cpp:mremap_grow`, `syscalls/mem.cpp:313`):** `mmap_alloc` fail returned 0, then `write(0)` threw `UnmappedMemory` -> guest SIGSEGV instead of `-ENOMEM`, and old mapping state unclear. Fix: `mremap_grow` returns 0 early keeping old mapping, syscall maps 0 to `-ENOMEM` like the `(0,0)` path.
+- Verified: `make -j` clean, quick **216/216**.

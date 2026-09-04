@@ -637,6 +637,7 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     // because mmap_alloc/read/write all acquire it themselves.
     g.unlock();
     uint64_t new_addr = mmap_alloc(new_size, 0);
+    if (new_addr == 0) return 0;  // oom: keep old mapping intact
     if (old_size > 0) {
         std::vector<uint8_t> buf(old_size);
         read(old_addr, buf.data(), old_size);

@@ -311,6 +311,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             uint64_t result = mem_.mremap_grow(old_addr, old_size, new_size);
+            if (result == 0) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
+                return 0;
+            }
             if (getenv("BIFROST_TRACE_MMAP")) {
                 fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
                         (unsigned long long)old_addr,
