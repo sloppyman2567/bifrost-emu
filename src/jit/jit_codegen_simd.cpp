@@ -484,8 +484,13 @@ bool FrostJIT::compile_ir_simd(const IRInst& inst) {
                 case 1: op_byte = 0x5C; break;  // sub
                 case 2: case 0xB: op_byte = 0x59; break;  // mul / fmulx
                 case 3: op_byte = 0x5E; break;  // div
-                case 4: case 6: op_byte = 0x5F; break;  // max / maxnm
-                case 5: case 7: op_byte = 0x5D; break;  // min / minnm
+                // FMAX/FMIN propagate nan but maxps/minps suppress it
+                // (numnum = FMAXNM). Route via interp like scalar.
+                case 4: case 5:
+                    emit_call_interp(inst.arm_pc, false);
+                    return true;
+                case 6: op_byte = 0x5F; break;  // maxnm
+                case 7: op_byte = 0x5D; break;  // minnm
                 case 0xD: op_byte = 0x5C; is_sub_for_fabd = true; break;  // fabd
                 default:
                     emit_call_interp(inst.arm_pc, false);

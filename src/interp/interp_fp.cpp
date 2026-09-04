@@ -950,8 +950,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             case 0x1: r = a - b; break;             // FSUB
                             case 0x2: r = a * b; break;             // FMUL
                             case 0x3: r = a / b; break;             // FDIV
-                            case 0x4: r = std::fmax(a, b); break;   // FMAX
-                            case 0x5: r = std::fmin(a, b); break;   // FMIN
+                            case 0x4: r = (std::isnan(a) || std::isnan(b))  // FMAX
+                                          ? std::numeric_limits<double>::quiet_NaN()
+                                          : std::fmax(a, b); break;
+                            case 0x5: r = (std::isnan(a) || std::isnan(b))  // FMIN
+                                          ? std::numeric_limits<double>::quiet_NaN()
+                                          : std::fmin(a, b); break;
                             case 0x6: r = std::fmax(a, b); break;   // FMAXNM
                             case 0x7: r = std::fmin(a, b); break;   // FMINNM
                             case 0xB: r = a * b; break;             // FMULX (≈FMUL for non-special)
@@ -986,8 +990,12 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                             case 0x1: r = a - b; break;             // FSUB
                             case 0x2: r = a * b; break;             // FMUL
                             case 0x3: r = a / b; break;             // FDIV
-                            case 0x4: r = std::fmax(a, b); break;   // FMAX
-                            case 0x5: r = std::fmin(a, b); break;   // FMIN
+                            case 0x4: r = (std::isnan(a) || std::isnan(b))  // FMAX
+                                          ? std::numeric_limits<float>::quiet_NaN()
+                                          : std::fmax(a, b); break;
+                            case 0x5: r = (std::isnan(a) || std::isnan(b))  // FMIN
+                                          ? std::numeric_limits<float>::quiet_NaN()
+                                          : std::fmin(a, b); break;
                             case 0x6: r = std::fmax(a, b); break;   // FMAXNM
                             case 0x7: r = std::fmin(a, b); break;   // FMINNM
                             case 0xB: r = a * b; break;             // FMULX

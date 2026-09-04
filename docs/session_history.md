@@ -3827,3 +3827,8 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Move path (`memory.cpp:mremap_grow`, `syscalls/mem.cpp:313`):** `mmap_alloc` fail returned 0, then `write(0)` threw `UnmappedMemory` -> guest SIGSEGV instead of `-ENOMEM`, and old mapping state unclear. Fix: `mremap_grow` returns 0 early keeping old mapping, syscall maps 0 to `-ENOMEM` like the `(0,0)` path.
 - Verified: `make -j` clean, quick **216/216**.
+
+## Session History (2026-09-04) — vector fmax/fmin nan: interp propagate + jit fallback
+
+- **Vector FMAX/FMIN (`interp_fp.cpp:953`, `jit_codegen_simd.cpp:487`):** same alias as scalar — `fmax/fmin` + `maxps/minps` suppress nan, ARM FMAX/FMIN propagate. Fix mirrors scalar: interp 4/5 return quiet nan, 6/7 keep number; jit 4/5 `CALL_INTERP`. Pairwise FMAXP/FMINP left as number — `fp_pw_elem` proves it (`fmaxp(5,nan)=5`).
+- Verified: `make -j` clean, quick **216/216** (initial pairwise change broke `fp_pw_elem`, reverted).
