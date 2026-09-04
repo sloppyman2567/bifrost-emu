@@ -20,9 +20,9 @@
 //     emits LOAD_REG / STORE_REG ops. This is what lets the optimizer
 //     cache values across instructions.
 //   - 32-bit ARM64 ops (sf=0) emit an explicit ZEXT after the ALU op
-//     so the high 32 bits are zeroed. The optimizer peephole removes
-//     redundant ZEXTs after ops that already zero-extend (ADD with
-//     32-bit dest on x86, etc.) when generating x86.
+//     so the high 32 bits are zeroed. The ZEXT-removal peephole is
+//     currently DISABLED (ir_optimize.cpp Pass 3: codegen uses 64-bit
+//     ops that don't zero-extend), so ZEXTs are kept.
 #include "ir/ir.h"        // emit/load_imm/swar helpers + g_alloc
 #include "ir/ir.hpp"      // public IR types
 #include "core/emulator.h"  // for cond_true()

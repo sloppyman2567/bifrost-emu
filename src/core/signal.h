@@ -225,11 +225,13 @@ public:
         }
     }
     // execve: caught handlers reset to default, pending frames dropped.
-    // (Ignored dispositions stay ignored per POSIX; the caller keeps
-    // SIG_IGN entries — here we clear all since the table only tracks
-    // installed handlers, and defaults apply when lookup misses.)
+    // SIG_IGN dispositions stay ignored per POSIX (only installed
+    // non-ignored handlers are cleared).
     void reset_exec() {
-        for (int i = 1; i <= MAX_SIGNAL; i++) actions_[i] = SigAction{};
+        for (int i = 1; i <= MAX_SIGNAL; i++) {
+            if (actions_[i].installed && actions_[i].handler == 1) continue;
+            actions_[i] = SigAction{};
+        }
         frames_.clear();
     }
 private:

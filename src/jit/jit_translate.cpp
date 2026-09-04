@@ -402,7 +402,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // 2026-08-15 measurement was a NET LOSS. Inlining the 15-instr grad3 leaf
     // into the minecraft game's noise3 caller blocks grew the x86 ~2x (7370
     // vs 3541 bytes for the same loop region) because the leaf's FP regs
-    // (s0-s3) contend with the caller's live set inside the 9-host-reg pool —
+    // (s0-s3) contend with the caller's live set inside the 10-host-reg pool —
     // a BL_CALL flushes once around the call, but an inlined body spills
     // throughout. Game heightmap: 26.5ms/column → 37.4ms/column (-41%). Even
     // the ideal mirror workload (pure-ALU leaf, dedicated loop) was ~6%
@@ -598,7 +598,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     // Interp-only blocks are cached (so we skip the re-decode cost on
     // cache hits) and run exactly instr_count interpreter steps.
     // blocks with >32 instructions have too much
-    // register pressure for the 9-host-reg allocator. The __multf3
+    // register pressure for the 10-host-reg allocator. The __multf3
     // 82-instruction softfloat block generates ~246 vregs, causing
     // spill/reload correctness bugs. Run long blocks via interpreter.
     // ── interp_only decision ────────────────────────────────────────

@@ -5,9 +5,10 @@
 // (src/jit/frostjit.cpp) via decoder.hpp.
 //
 // When adding a new instruction:
-//   1. Add the decode in decoder.cpp (sets InstClass)
-//   2. Add the execute case here
-//   3. Add JIT codegen in src/jit/frostjit.cpp (compile_ir_inst)
+//   1. Add the decode in src/frontend/decoder.cpp (sets InstClass)
+//   2. Add the execute case here (or execute_fp / execute_branch)
+//   3. Add IR translate in src/ir/ir_translate*.cpp + codegen in
+//      src/jit/jit_codegen_*.cpp + gate in src/jit/jit_translate.cpp
 #include "core/emulator.h"
 #include "core/crash_report.h"
 #include "decoder.hpp"
@@ -199,7 +200,8 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
         // ── BIFROST_CLASS_PROF: dynamic per-class instruction histogram ─
         // Run the guest in interpreter mode (BIFROST_NO_JIT=1) with this
         // set to see which instruction classes dominate. Prints every
-        // 20M instructions. Array sized past SYS_NOP (last enum value).
+        // 20M instructions. Array sized to 128, covering through FP_SCALAR
+        // (the true last enum value; SYS_NOP is no longer last).
         {
             static uint64_t class_counts_[128] = {0};
             static bool class_prof_en_ = (std::getenv("BIFROST_CLASS_PROF") != nullptr);
@@ -1072,10 +1074,11 @@ void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
             }
             // ── Load/store pair (STP/LDP, all modes) ──────────────────
             // Encoding: opc 101 V mode L imm7 Rt2 Rn Rt
-            //   mode (bits 24:23): 01=post, 10=offset, 11=pre (bit 25 is 0
-            //   for post/offset; bit 25 = 1 for pre, but pre-index STP/LDP
-            //   currently gets misclassified as ORR — known issue, same as
-            //   — the hierarchical decoder now handles this.)
+            //   mode (bits 24:23): 01=post, 10=offset, 11=pre. Pre-index
+            //   (mode==3) was historically caught by logical-shifted-
+            //   register in the v0 flat decoder; the hierarchical outer
+            //   switch on bits[28:24] now separates pair (0x09) from
+            //   logical (0x0A).
             case InstClass::STP:
             case InstClass::LDP: {
                 uint8_t opc = (d.raw >> 30) & 3;

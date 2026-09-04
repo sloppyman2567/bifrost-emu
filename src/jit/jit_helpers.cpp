@@ -111,11 +111,10 @@ void FrostJIT::emit_call_interp(uint64_t arm_pc, bool ends_block) {
     // jit_interp_step is a real host function call; per the SysV ABI all
     // XMM0-15 are caller-saved and would clobber the guest vectors pinned
     // in XMM3-15. Write them back to cpu.v_lo/v_hi before the call and
-    // reload them after. In a cache-active block the interp call is always
-    // a GPR-only op (every vector op has a cached fast path), so the
-    // writeback+reload round-trip is lossless — and it also makes any
-    // future escaped-SIMD interp call safe (the reload picks up whatever
-    // the interpreter wrote to cpu.v_lo/v_hi).
+    // reload them after. In a cache-active block the interp call is
+    // EXPECTED to be GPR-only (the pre-scan requires all vector ops
+    // cache-aware); writeback+reload defensively covers any escaped-SIMD
+    // CALL_INTERP by reloading cpu.v_lo/v_hi after.
     if (vec_cache_active_) {
         vec_cache_writeback_all();
     }

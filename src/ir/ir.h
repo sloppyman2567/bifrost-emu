@@ -133,8 +133,9 @@ inline void store_fp_reg(IRBlock& b, uint8_t ar, uint8_t v) {
     b.insts.push_back(inst);
 }
 // Zero-extend a value to 32 bits (sf=0) or pass-through (sf=1).
-// We always emit the op; the optimizer peephole removes redundant ZEXTs
-// after ops whose x86 encoding already zero-extends.
+// We always emit the op and keep it: the ZEXT-removal peephole is
+// currently DISABLED (ir_optimize.cpp Pass 3) because codegen uses
+// 64-bit ops that don't zero-extend.
 inline uint16_t zext_if_32bit(IRBlock& b, uint16_t v, bool sf) {
     if (sf) return v;
     uint16_t r = g_alloc.alloc();

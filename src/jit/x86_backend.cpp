@@ -681,21 +681,23 @@ extern "C" {
     }
 }
 // ── Register allocator ──────────────────────────────────────────────────
-// Maps vregs to x86 registers for the duration of a block. Vregs 0-31
-// are architectural (live in cpu.regs[]/sp); vregs 33+ are scratch
-// (live on the stack at [RBP - 8*(v-30)]).
+// Maps vregs to x86 registers for the duration of a block. Vregs 0-30
+// are arch GPRs (cpu.regs[]), 31=SP, 32=XZR, 33+ are scratch (stack
+// slots pre-assigned -8*(v-32), lazy slots past that; chain-skip uses
+// the unified 0x8000 frame).
 //
 // Allocator state:
 //   vreg_home_[v] = x86 reg holding v, or -1 if not cached.
 //   reg_vreg_[r]  = vreg currently in x86 reg r, or -1.
 //   vreg_dirty_[v] = true if the cached value differs from cpu.regs[]/stack.
 //
-// Available x86 regs (9 total):
+// Available x86 regs (10 total):
 //   Caller-saved (clobbered by C calls): RAX, RCX, RDX, R8, R9, R11
-//   Callee-saved (preserved by C calls): R12, R13, R15
-// Reserved: RBX=CPU, R14=EMU, R10=window, RBP=frame, RSP=stack.
-// constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15};
-// (defined in frostjit.hpp; vregs cached in R12/R13/R15 survive CALL_INTERP)
+//   Callee-saved (preserved by C calls): R12, R13, R14, R15
+// Reserved: RBX=CPU, R10=window, RBP=frame, RSP=stack. Emu lives in the
+// frame slot, not R14 (1.5.4-alpha).
+// constexpr int FrostJIT::ALLOC_REGS[] = {RAX,RCX,RDX,R8,R9,R11,R12,R13,R15,R14};
+// (defined in frostjit.hpp; vregs cached in R12-R15 survive CALL_INTERP)
 // ── emit_load_mem / emit_store_mem ─────────────────────────────────────
 // Memory access through the direct window (R10) when the address is in
 // the low 4 GiB; falls back to the C helper (jit_load_mem_slow /

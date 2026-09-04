@@ -4,10 +4,10 @@
 // ftruncate/chmod/fchmod/utimensat/unlink/symlink/link/truncate/fallocate/
 // sendfile/getcwd.
 //
-// All case bodies are extracted verbatim from the original syscalls.cpp
-//  EXCEPT case 56 (openat), which has been rewritten to
-// use the Yggdrasil VFS abstraction (src/yggdrasil/) instead of inline
-// /proc//dev/ else-if chains.
+// Many case bodies were rewritten to the Yggdrasil VFS abstraction
+// (src/yggdrasil/) instead of inline /proc//dev/ else-if chains:
+// openat, read/write, close/dup/pipe, vectored + stat/getdents/fcntl
+// paths (see VFS-aware + BUGFIX notes throughout).
 //
 // References to private Emulator members (mem_, elf_path_, graphics_)
 // work via the friend declaration in core/emulator.h.

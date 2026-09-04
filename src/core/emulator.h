@@ -227,7 +227,7 @@ public:
     // Also: when a FutexSlot's waiters transitions to 0, the slot is
     // erased from its shard (reclaim memory for freed mutexes). The
     // caller (FUTEX_WAIT/WAKE) is responsible for calling
-    // release_futex(addr) when waiters hits 0.
+    // release_futex_if_empty(addr) when waiters hits 0.
     struct FutexSlot {
         std::mutex mu;
         std::condition_variable cv;
@@ -375,13 +375,10 @@ private:
     struct GuestThread {
         CPU cpu;
         std::thread host_thread;
-        // Per-thread FrostJIT instance. Each spawned thread gets its own
-        // 64 MiB code cache + block cache + regalloc state, so JIT
-        // execution is fully lock-free (no contention with other threads
-        // or with the main thread's JIT). Translation work is duplicated
-        // across threads, but the simplicity and lock-free execution
-        // outweigh the memory cost for typical 1-8 thread guests.
-        // nullptr if JIT is disabled (thread uses interpreter only).
+        // Per-thread FrostJIT instance (only with BIFROST_NO_SHARED_JIT=1;
+        // default shares the main JIT to save 64 MiB/thread, serializing
+        // run_block via blocks_mutex_). nullptr if JIT is disabled
+        // (thread uses interpreter only).
         std::unique_ptr<FrostJIT> jit;
         uint64_t stack_top = 0;
         uint64_t stack_size = 0;
@@ -450,9 +447,10 @@ private:
     // x86_backend.cpp. They access excl_monitor_shards_ directly.
     // No friend declaration needed — the functions are in the global
     // namespace (extern "C") and access the shards via the public
-    // excl_shard_idx + the shard array (both in the private section,
-    // but extern "C" functions can't be friends in standard C++).
-    // Instead, we provide a public accessor.
+    // excl_shard_idx + the shard array. The x86 JIT helpers
+    // (jit_ldxr/stxr/stlr, extern "C" in x86_backend.cpp) reach the
+    // shards via the public excl_shard_idx_pub() /
+    // excl_monitor_shard_pub() accessors below.
     // ── Fork children (clone without CLONE_VM) ───────────────────────
     std::mutex fork_children_mu_;
     std::vector<std::unique_ptr<ForkChild>> fork_children_;

@@ -116,7 +116,8 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
             e.label = "[interp]";
             out.push_back(e);
         }
-        // All mmap_alloc'd regions (excluding the heap which is above).
+        // All mmap_alloc'd regions (excluding the brk heap already
+        // emitted above).
         for (const auto& kv : mem_.allocations_snapshot()) {
             uint64_t a = kv.first, s = kv.second;
             // Skip the heap region (already emitted above).
@@ -213,14 +214,13 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
     // the binary's entry is passed via AT_ENTRY in auxv.
     //
     // Two paths are supported:
-    //   (a) If BIFROST_NATIVE_DYNLINK=1, we use our own DynamicLinker
-    //       to process DT_NEEDED, apply relocations, and resolve
-    //       symbols — no guest-side ld.so needed. Faster and works
-    //       even when the host doesn't have the exact aarch64 ld.so.
-    //   (b) Otherwise, load the guest-side dynamic linker (ld-musl /
-    //       ld-linux) and let it run its own code to do dynamic linking.
-    //       This works for simple dynamically-linked musl binaries but
-    //       not yet for glibc.
+    //   (a) Default: our own DynamicLinker processes DT_NEEDED, applies
+    //       relocations, and resolves symbols — no guest-side ld.so
+    //       needed. Faster and works even when the host doesn't have the
+    //       exact aarch64 ld.so.
+    //   (b) With BIFROST_NO_NATIVE_DYNLINK=1, load the guest-side dynamic
+    //       linker (ld-musl / ld-linux) and let it run its own code
+    //       (debug path).
     uint64_t interp_base = 0;
     if (!info.interp.empty()) {
         // First, try the native (in-emulator) dynamic linker. This is

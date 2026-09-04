@@ -21,20 +21,12 @@
 //      lazy PLT binding works (the resolver is a guest-side stub that
 //      calls back into the emulator via a syscall).
 //
-// TLS model:
-//   We use the "static TLS" model — all PT_TLS blocks are allocated
-//   up-front at load time, laid out contiguously in the TP-relative
-//   region. This matches what musl/glibc do for initially-loaded
-//   libraries (i.e., not dlopen'd ones). The TPIDR_EL0 register points
-//   to the end of the static TLS block (TP = &static_tls_block[size]);
-//   each thread gets its own copy via clone(CLONE_SETTLS).
-//
-//   Layout (TP-relative offsets):
-//     [0 .. libc_tls_size)         — libc's TLS block (TP-offset = -libc_tls_size)
-//     [libc_tls_size .. total)     — main binary's TLS block (TP-offset = -total)
-//   The TCB (thread control block) lives at TP+0 (16 bytes for musl,
-//   8 bytes for glibc). We leave it zeroed; libc's __libc_setup_tls
-//   will overwrite it.
+// TLS model (static TLS for initially-loaded libraries):
+//   variant-I (glibc): TP = base + lib_size; lib TLS at negative TP
+//     offsets, main-exe TLS at positive offsets past the TCB;
+//   variant-II (musl): TP = base + size; everything at negative offsets.
+//   See thread_pointer()/lib_tls_size_/TLS_DLOPEN_SURPLUS for the split,
+//   plus a trailing dlopen surplus (positive tp, past main TLS).
 //
 // Limitations:
 //   - R_AARCH64_COPY is implemented via a deferred second pass (the

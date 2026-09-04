@@ -5,8 +5,9 @@
 // of each block (initially `ret` + 4 NOPs) to `jmp rel32` → next
 // block's entry, so straight-line code skips the C dispatcher.
 //
-// chain_target_pc_ == 0 means "not chainable" (indirect branch, SVC,
-// conditional branch — runtime-dependent next PC).
+// chain_target_pc_ == 0 means "no fall-through chain" (indirect branch,
+// SVC, unresolved). Conditional branches chain via their taken-path slot
+// (taken_chain_target_pc_/taken_chain_patch_off_).
 //
 // Back-reference index: maps target_pc → list of source_pcs whose
 // chain_target_pc equals target_pc. Maintained incrementally at

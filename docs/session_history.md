@@ -3917,3 +3917,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **FRINTA gate (`jit_translate.cpp`):** ir mode 6 fell back but the gate predicted native; `0x0C` now predicts interp (missed block-split only, no miscompile).
 - **FMAXP/FMINP NaN (`interp_fp.cpp`, `ctest/jit_fp_pw_elem.c`):** scalar pairwise used number semantics, but `fmaxnmp` exists as a separate encoding (verified via cross-as) so the plain forms propagate like FMAX/FMIN. Handler + test expectations fixed (`5.0` → NaN).
 - Verified: `fp_pw_elem` 18/18 jit + interp + `JIT_VERIFY`, `--quick` **216/216**, `--dynamic` **15/15**.
+
+## Session History (2026-09-04) — subagent comment audit (2 real bugs + ~30 fixes)
+
+- Three audit subagents swept comments in jit/ir, interp/decoder, syscalls/core/vfs/dynlink. Applied ~30 corrections (stale reg counts 9→10, XZR/slot formulas, disabled peephole ×3, chainable branches, actual-vs-heuristic demotion, method index, crypto header/K constants/Q/TBL scope/SHA halves, CAS/LDXR bit numbers, CRC fields, Q lane counts, TBL 1-4 regs, NOP-policy notes, dbg OR-polarity, lock model, pages_ contents, pstate bits, GuestThread JIT, futex name, extern-C claim, fork/thread_entry design, exit path, dynlink env names, maps comment, syscall contract, fs rewrite note, TLS layout).
+- **ConstMap/CopyMap truncation (`ir_optimize.cpp`):** key methods took `uint8_t` while vregs are `uint16_t` — vreg >255 aliased and FWD could miscompile. Widened to `uint16_t` (no-op below 256).
+- **SIG_IGN across execve (`signal.h`):** `reset_exec()` cleared ignored dispositions too; now preserves `SIG_IGN` per POSIX.
+- Verified: `fp_pw_elem` + `frint` under `JIT_VERIFY`, regalloc-check probes, FWD probes, `--quick` **216/216**, `--dynamic` **15/15**.

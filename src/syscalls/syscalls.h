@@ -1,8 +1,8 @@
 // syscalls/syscalls.h — internal syscall handler declarations.
 //
 // Each subsystem (fs, mem, threads, time, ioctls) exports a handler that
-// takes the syscall number + args and returns either:
-//   - the syscall return value (already set in cpu.regs[0] if applicable)
+// takes the syscall number + args and returns a status:
+//   - 0 if handled (result already in cpu.regs[0])
 //   - SYSCALL_NOT_HANDLED if this subsystem doesn't handle `num`
 //
 // The main dispatcher in syscalls.cpp calls each handler in turn; the

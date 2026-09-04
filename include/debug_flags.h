@@ -3,9 +3,9 @@
 // All bifrost_* diagnostic switches are parsed ONCE at first use and cached,
 // so the hot syscall/interp paths never call getenv() repeatedly.
 //
-// Setting BIFROST_TRACE=1 enables the whole diagnostic trace suite; the
-// fine-grained BIFROST_* switches still act as overrides (any of them taking
-// precedence over the blanket mode). Path-typed switches (capture sinks) are
+// Setting BIFROST_TRACE=1 OR-enables the whole diagnostic trace suite;
+// the fine-grained BIFROST_* switches only add (they cannot disable a
+// flag under blanket mode). Path-typed switches (capture sinks) are
 // cached as strings.
 #pragma once
 

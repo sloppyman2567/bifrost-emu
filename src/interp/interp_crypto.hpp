@@ -1,4 +1,5 @@
-// interp/interp_crypto.cpp — ARMv8 Crypto Extensions (1.5.4-alpha).
+// interp/interp_crypto.hpp — ARMv8 Crypto Extensions (1.5.4-alpha).
+// Included by interp_fp.cpp, not a separate TU.
 //
 // Implements the AES, SHA1, SHA256, and PMULL/PMULL2 instructions from
 // the ARMv8 Crypto Extensions. These are essential for:
@@ -7,14 +8,13 @@
 //   - Hash-based checksums (SHA1, SHA256)
 //   - CRC32 acceleration (PMULL-based CRC for headers)
 //
-// All instructions operate on 128-bit vectors (Vd.16B / Vn.16B). The
-// implementation is table-driven: the AES S-box, inverse S-box, and
-// the GF(2^8) multiplication tables are precomputed at startup.
+// AES/PMULL/SHA-vector ops use 128-bit vectors; SHA1H is a 32-bit scalar
+// (Sd,Sn). The AES S-box / inverse S-box are hardcoded (FIPS-197);
+// GF(2^8) multiply is computed on the fly in aes_gmul() — no startup
+// table build.
 //
-// The host x86 CPU's AES-NI / SHA / PCLMULQDQ instructions could be
-// used for hardware acceleration — that's a future optimization. For
-// now, software tables give correct results at interpreter speed; the
-// JIT will fall back to CALL_INTERP for these (correctness > speed).
+// AES/PMULL are native in the JIT (jit_codegen_simd.cpp); only
+// SHA1/SHA256 fall back to CALL_INTERP here.
 //
 // Encoding reference (verified against binutils `sha1c q0,s1,v2.4s` etc.):
 //   AESE    Vd.16B, Vn.16B        0x4E284800  mask 0xFFFFFC00
@@ -212,15 +212,11 @@ static inline uint32_t sha1_maj(uint32_t b, uint32_t c, uint32_t d) { return (b 
 //     T = ROL(A, 5) + f(B,C,D) + E + W[i] + K
 //     E = D; D = C; C = ROL(B, 30); B = A; A = T
 //   K = 0x5A827999 for SHA1C (rounds 0..19)
-//   K = 0x6ED9EBA1 for SHA1P/SHA1M (rounds 20..39 / 40..59)
-//   (the SHA1P/SHA1M instructions don't change K — caller handles that)
+//   K = 0x6ED9EBA1 for SHA1P (rounds 20..39)
+//   K = 0x8F1BBCDC for SHA1M (rounds 40..59)
+//   (sha1_round picks K by RoundKind.)
 //
 // Note: The ARM ARM SHA1hash pseudocode uses K per-instruction:
-//   SHA1C  uses K=0x5A827999 (Ch rounds)
-//   SHA1P  uses K=0x6ED9EBA1 (Parity rounds)
-//   SHA1M  uses K=0x9E3779B9? No — actually K=0x8F1BBCDC (Maj rounds)
-// Wait, let me recheck. The ARM ARM SHA1hash uses a fixed K per
-// instruction based on the opcode. Verified against the spec:
 //   SHA1C: K = 0x5A827999
 //   SHA1P: K = 0x6ED9EBA1
 //   SHA1M: K = 0x8F1BBCDC
@@ -382,7 +378,8 @@ static inline __uint128_t pmull_64(uint64_t a, uint64_t b) {
 // executed). Returns false if it's not a crypto instruction (so the
 // caller can fall through to the regular SIMD_DP sub-dispatch).
 //
-// All crypto instructions require Q=1 (128-bit operands).
+// AES/PMULL/SHA-vector ops use 128-bit vectors; SHA1H is a 32-bit
+// scalar (Sd,Sn). No Q gate here — the caller routes.
 static inline bool exec_crypto(uint32_t op, CPU& cpu) {
     uint8_t rd = op & 0x1F;
     uint8_t rn = (op >> 5) & 0x1F;
@@ -505,10 +502,11 @@ static inline bool exec_crypto(uint32_t op, CPU& cpu) {
         return true;
     }
     // ── SHA256H/SHA256H2 (0x5E004000/0x5E005000) ──────────────────
-    // 4-round SHA-256 hash update. Qd and Qn are the two halves of the
-    // hash state, Vm.4S = 4 (W[i] + K[i]) values.
-    //   SHA256H:  Qd={C,D,G,H}, Qn={A,B,E,F} → Qd = new {C,D,G,H}
-    //   SHA256H2: Qd={A,B,E,F}, Qn={C,D,G,H} → Qd = new {A,B,E,F}
+    // 4-round SHA-256 hash update. Qd holds {A,B,C,D} (dst), Qn holds
+    // {E,F,G,H} (ro); Vm.4S = 4 (W[i] + K[i]) values. SHA256H2 swaps
+    // the halves. Matches ARM SHA256hash.
+    //   SHA256H:  Qd={A,B,C,D}, Qn={E,F,G,H} → Qd updated
+    //   SHA256H2: halves swapped → Qd updated
     // Qn is read-only (unchanged).
     if ((op & 0xFFE0FC00) == 0x5E004000) {  // SHA256H
         uint32_t vd[4], vn[4], vm[4];

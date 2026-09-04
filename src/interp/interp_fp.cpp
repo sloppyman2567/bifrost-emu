@@ -881,7 +881,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // with bit[23]=1 (FP), bit[21]=1, bits[15:12]=opcode,
             // bits[11:10]=0b01. ftype in bits[23:22] (but bit23 is always
             // 1 here, so effectively bit22: 0=single, 1=double). Q (bit30)
-            // selects .2s/.2d (Q=0, 2 lanes) vs .4s (Q=1, 4 lanes).
+            // selects .2s (Q=0, 2 lanes) vs .4s (Q=1, 4 lanes) for single,
+            // .1d (Q=0, 1 lane) vs .2d (Q=1, 2 lanes) for double.
             // Without this, NEON-vectorized FP (libc memcpy/memset with
             // NEON, image/audio processing) silently produces wrong
             // results — the instruction falls through to the default.
@@ -1011,8 +1012,8 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                 return;
             }
             // ── TBL/TBX (Table Lookup) ──
-            // AArch64 TBL/TBX permute bytes from one or two source
-            // vectors using indices from a third vector. Each byte
+            // AArch64 TBL/TBX permute bytes from 1-4 source vectors
+            // using indices from a third vector. Each byte
             // index in the index vector selects a byte from the
             // concatenated source(s). Indices >= the source length:
             //   TBL: result byte = 0
@@ -2037,14 +2038,14 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
             // Shift = (2 * esize_bits) - immh:immb (same as USHR, but
             // the shift is arithmetic — the sign bit is propagated).
             //
-            // The MOVI/shift ambiguity check above (line ~1981) catches
+            // The MOVI/shift ambiguity check above catches
             // this encoding only when immh == 0 (MOVI); for immh != 0
             // (actual SSHR), control fell through past the USHR handler
             // (which has U=1, 0x2F...) and past the SHL handler (which
             // has a different low byte, 0x0F005400), landing in the
-            // generic "unknown instruction" NOP path. Result: every
-            // vector SSHR-by-immediate was silently a no-op, leaving
-            // Vd unchanged. This broke `sshr v0.8h, v0.8h, #2` etc.
+            // unhandled-SIMD DecodeError path (silent NOP pre-1.5).
+            // Result: every vector SSHR-by-immediate was silently a no-op,
+            // leaving Vd unchanged. This broke `sshr v0.8h, v0.8h, #2` etc.
             // under both interpreter and JIT (the JIT routes SIMD_SHL/
             // SIMD_USHR/SIMD_SSHR to CALL_INTERP for the executor).
             if ((op & 0xBF00FC00) == 0x0F000400) {
@@ -4556,7 +4557,9 @@ void Emulator::execute_fp(uint32_t inst, uint64_t& next_pc, CPU& cpu, const Deco
                     return;
                 }
             }
-            // Unknown FP instruction — NOP (don't crash)
+            // Unknown FP_SCALAR — NOP + log (don't crash). NOTE: this diverges
+            // from the SIMD_DP policy above (DecodeError → SIGILL); unify
+            // to DecodeError if a missing scalar op ever hides here.
             {
                 static uint64_t fp_nop_count_ = 0;
                 if (fp_nop_count_ < 20) {

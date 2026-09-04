@@ -11,9 +11,10 @@
 //   4. Store-load forwarding — if a STORE_REG writes a vreg that is
 //                           immediately read back by the next LOAD_REG,
 //                           reuse the vreg.
-//   5. Peephole           — ZEXT after an op that already zero-extends
-//                           (ADD/SUB/AND/OR/XOR/SHL/SHR on 32-bit)
-//                           is removed.
+//   5. Peephole           — DISABLED: ZEXT after an op that already
+//                           zero-extends would be removed, but codegen
+//                           uses 64-bit ops that DON'T zero-extend, so
+//                           removing it would be incorrect (see Pass 3).
 //
 // These passes together eliminate most of the redundant work that the
 // naive translator produces when each ARM64 instruction reloads its
@@ -32,30 +33,32 @@ namespace arm64emu {
 // folding, invalidated by any non-constant op or by CALL_INTERP/SVC.
 struct ConstMap {
     std::unordered_map<uint16_t, uint64_t> vals;
-    bool has(uint8_t v) const { return vals.find(v) != vals.end(); }
-    uint64_t get(uint8_t v) const { return vals.at(v); }
-    void set(uint8_t v, uint64_t val) { vals[v] = val; }
-    void clear(uint8_t v) { vals.erase(v); }
+    bool has(uint16_t v) const { return vals.find(v) != vals.end(); }
+    uint64_t get(uint16_t v) const { return vals.at(v); }
+    void set(uint16_t v, uint64_t val) { vals[v] = val; }
+    void clear(uint16_t v) { vals.erase(v); }
     void clear_all() { vals.clear(); }
 };
 // ── Copy map ───────────────────────────────────────────────────────────
 // Maps vreg → vreg it's a copy of. Transitive lookups handled by find().
+// Keys are full uint16_t vregs: the monotonic allocator exceeds 255 in any
+// non-trivial block, and 8-bit keys would alias v with v+256k.
 struct CopyMap {
-    std::unordered_map<uint16_t, uint8_t> parent;
-    uint8_t find(uint8_t v) {
+    std::unordered_map<uint16_t, uint16_t> parent;
+    uint16_t find(uint16_t v) {
         // Path-compressing find.
         auto it = parent.find(v);
         if (it == parent.end()) return v;
-        uint8_t root = find(it->second);
+        uint16_t root = find(it->second);
         if (it->second != root) parent[v] = root;
         return root;
     }
-    void set(uint8_t v, uint8_t src) { parent[v] = src; }
-    void clear(uint8_t v) { parent.erase(v); }
+    void set(uint16_t v, uint16_t src) { parent[v] = src; }
+    void clear(uint16_t v) { parent.erase(v); }
     void clear_all() { parent.clear(); }
     // Invalidate all copies where `src` is the source vreg.
     // Called when `src` is modified — any copy of `src` becomes stale.
-    void clear_source(uint8_t src) {
+    void clear_source(uint16_t src) {
         for (auto it = parent.begin(); it != parent.end(); ) {
             if (it->second == src) it = parent.erase(it);
             else ++it;

@@ -4,9 +4,10 @@
 // the thread_entry trampoline that runs a cloned guest thread on a host
 // OS thread until the guest calls exit/exit_group.
 //
-// Also implements fork_guest() for clone() without CLONE_VM: snapshots
-// the guest memory and runs the child in a host thread with its own
-// Memory object.
+// Also implements fork_guest() via host fork(): CoW duplicate of the
+// emulator; the child disables the JIT, fixes g_active_emu_, and
+// returns 0 into the syscall handler (parent wait4s via host wait4).
+// find_fork_child/reap_fork_child are stubs.
 //
 // This file is a friend of Emulator (see core/emulator.h) so it can
 // access private state: threads_, threads_mu_, next_tid_, alive_threads_.
@@ -26,12 +27,8 @@
 #include <string>
 #include <thread>
 namespace arm64emu {
-// Forward-declare the robust-list exit helper (defined in
-// src/syscalls/threads.cpp). We can't include threads.cpp directly; the
-// helper is file-static there. Instead, we re-implement a minimal inline
-// version here to avoid cross-TU coupling. The syscall-side version is
-// the authoritative one; this is a duplicate kept in sync.
-// (Defined as a lambda below to keep it local.)
+// The robust-list exit walk is inlined in thread_entry below; the
+// syscall-side version in threads.cpp is authoritative — keep in sync.
 void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // The child's CPU state was set up by spawn_thread() before the
     // host thread was created. We just run it to completion.
@@ -442,8 +439,8 @@ CPU* Emulator::find_cpu_by_tid(int tid) {
 // force the child to use the interpreter by setting jit_enabled_ = false.
 // We also flush stdio buffers before forking to prevent duplicate output.
 //
-// The child process exits via _exit() (not return from main) to avoid
-// running atexit handlers that would double-clean the parent's resources.
+// The child returns 0 from fork_guest into the syscall handler and
+// continues in the normal run loop; no _exit() here.
 int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
                          uint64_t flags, uint64_t ptid_ptr,
                          uint64_t ctid_ptr, uint64_t tls) {

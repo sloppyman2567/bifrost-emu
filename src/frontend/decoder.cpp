@@ -191,11 +191,9 @@ bool decode(DecodedInst& d, uint32_t inst) {
         bool is_cas = ((inst >> 21) & 1) && ((inst >> 23) & 1);
         if (is_cas) {
             d.size    = (inst >> 30) & 3;
-            // bit. Bit 22 is the A (acquire) bit. The field was named
-            // `acquire` but actually held the release bit. Keep the name
-            // for now (callers check d.acquire for "ordered" semantics)
-            // but document the truth.
-            d.acquire = (inst >> 23) & 1;  // actually the L (release) bit
+            // Bit 23 is L (ordered); the field is named `acquire` for
+            // "ordered" semantics. Bit 22 is o0/is_load (see below).
+            d.acquire = (inst >> 23) & 1;
             d.is_load = 1;  // CAS always returns old value
             d.rs      = (inst >> 16) & 0x1F;
             d.atom_op = 0xC;  // CAS (hardcoded — group 0x08 has different opc encoding)
@@ -212,10 +210,10 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.rt        = inst & 0x1F;
         d.rt2       = (inst >> 10) & 0x1F;  // Rt2 (pair-exclusive second register)
         d.excl_low6 = (inst >> 10) & 0x3F;
-        switch (d.excl_low6) {
-            // exclusive instruction has excl_low6 == 0x0F; STXR/LDXR use
-            // 0x1F, STLXR/LDAXR/STLR/LDAR use 0x3F). The old case was
-            // unreachable dead code.
+            switch (d.excl_low6) {
+            // excl_low6 0x1F: LDXR/STXR (acquire=0) or LDAXR/STLXR
+            // (acquire=1); 0x3F: LDAR/STLR (acquire=1) or LDAXR/STLXR
+            // (acquire=0).
             case 0x1F:
                 // STXR/LDXR family (with Rs at bits[20:16]).
                 // d.is_load distinguishes LDXR (1) from STXR (0).
@@ -892,9 +890,8 @@ bool decode(DecodedInst& d, uint32_t inst) {
                     case 10: d.cls = InstClass::ASR;  return true;
                     case 11: d.cls = InstClass::ROR;  return true;
                     // CRC32 instructions (opcodes 0x10-0x1F).
-                    // Encoding: bits[20:16]=size(00=B,01=H,10=W,11=X),
-                    // bit[21]=1 for CRC32C (castagnoli), 0 for CRC32.
-                    // We use dp_opcode to carry the full opcode + size info.
+                    // dp_opcode bits[15:10] selects B/H/W/X + C (bit13);
+                    // Rm bits[20:16] is the data register, not size.
                     case 0x10: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 0; return true; // CRC32B
                     case 0x11: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 1; return true; // CRC32H
                     case 0x12: d.cls = InstClass::CRC32;  d.is_sub = 0; d.imm = 2; return true; // CRC32W

@@ -1,10 +1,10 @@
 // core/memory.h — sparse paged 64-bit memory model (thread-safe).
 //
-// All public methods take a shared lock internally so they can be called
-// concurrently from multiple guest threads (vCPUs). The lock is fine-
-// grained (single mutex for the page map; per-page data is not locked
-// because guest code is responsible for its own atomicity via LDXR/STXR
-// or LSE atomics).
+// Slow-path methods take mu_ internally (shared for lookup, exclusive
+// for mutate) so they can be called concurrently from multiple guest
+// threads (vCPUs). The <4 GiB direct-window fast path takes no lock.
+// Per-page data is not locked because guest code is responsible for
+// its own atomicity via LDXR/STXR or LSE atomics.
 //
 // The Memory model has two storage tiers:
 //   1. A 4 GiB "direct window" (mmap'd) covering the low 4 GiB of the
@@ -236,8 +236,9 @@ public:
     // pages in this range are stored DIRECTLY in the window (not in
     // pages_). The interpreter's read()/write() also use the window for
     // addresses < 4 GiB, so there's no sync issue — the window IS the
-    // storage. pages_ is only used for addresses ≥ 4 GiB (stack, high
-    // mmap region).
+    // storage. pages_ is only used for addresses ≥ 4 GiB (trampoline,
+    // interpreter, explicit high MAP_FIXED / above-window overflow);
+    // heap + main stack live in the window.
     static constexpr uint64_t DIRECT_WINDOW_SIZE = 4ULL * 1024 * 1024 * 1024;  // 4 GiB
     uint8_t* direct_window_ = nullptr;
     uint8_t* direct_window() const { return direct_window_; }

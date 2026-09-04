@@ -20,6 +20,10 @@
 //   clobber_host_reg     — evict occupant of a host reg if dirty
 //   force_vreg_to_reg    — move/load vreg v into a specific host reg
 //   force_two_vregs_to   — same for two vregs (handles aliasing)
+//   ensure_two_vregs / force_two_vregs_to helpers, load_vreg_to_reg_fast
+//   (tiered fast path), vreg_last_use_this_op / next_use_after /
+//   vreg_fast_keep_candidate (liveness), load_vreg_to_reg /
+//   store_reg_to_vreg, verify_dirty_host_regs_ + check_* guards
 #include "jit/frostjit.hpp"
 #include <cstdio>
 #include <cstring>

@@ -31,7 +31,7 @@ public:
     uint64_t regs[32] = {0};
     uint64_t sp = 0;
     uint64_t pc = 0;
-    uint32_t pstate = 0;        // bits: 31=N, 30=Z, 29=C, 28=V (lowest 4 of NZCV)
+    uint32_t pstate = 0;        // NZCV in bits 31:28 (N=31,Z=30,C=29,V=28)
     bool     running = true;
     int      exit_code = 0;
     // SIMD/FP register file. Each Vn is 128 bits (16 bytes). We store as
