@@ -150,6 +150,12 @@ struct SignalFrame {
     uint64_t v_hi[32];    // bits 127:64 of each V register
     uint32_t fpcr;
     uint32_t fpsr;
+    // TLS + exclusive state: a handler calling pthread funcs or LDXR/STXR
+    // would otherwise corrupt TP / succeed a stale reservation across
+    // sigreturn. Real hardware clears exclusives on exception entry and
+    // the kernel restores TP from sigcontext.
+    uint64_t tpidr_el0 = 0;
+    uint64_t tpidrro_el0 = 0;
 };
 // Per-signal action recorded by rt_sigaction.
 struct SigAction {

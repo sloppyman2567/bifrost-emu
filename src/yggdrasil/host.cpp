@@ -65,17 +65,19 @@ std::unique_ptr<Node> Yggdrasil::open_host(const std::string& guest_path,
 // ── HostNode method implementations ───────────────────────────────────
 // host_fd() is inline in host_node.hpp
 ssize_t HostNode::read(uint64_t off, void* buf, size_t n) {
+    // pread when positioned: lseek+read races on shared fds (two guest
+    // threads sharing an fd would scramble each other's file offset).
     if (off != UINT64_MAX) {
-        ssize_t r = ::lseek(fd_, off, SEEK_SET);
-        if (r < 0) return -errno;
+        ssize_t r = ::pread(fd_, buf, n, static_cast<off_t>(off));
+        return r < 0 ? -errno : r;
     }
     ssize_t r = ::read(fd_, buf, n);
     return r < 0 ? -errno : r;
 }
 ssize_t HostNode::write(uint64_t off, const void* buf, size_t n) {
     if (off != UINT64_MAX) {
-        ssize_t r = ::lseek(fd_, off, SEEK_SET);
-        if (r < 0) return -errno;
+        ssize_t r = ::pwrite(fd_, buf, n, static_cast<off_t>(off));
+        return r < 0 ? -errno : r;
     }
     ssize_t r = ::write(fd_, buf, n);
     return r < 0 ? -errno : r;

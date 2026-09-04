@@ -3886,3 +3886,12 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 
 - **Gap (`interp_fp.cpp`):** vectorized long sums lower to `addp Dd,Vn.2d` (integer scalar pairwise, `0x5EF1B800` family verified via cross-as — only the `.2d` form exists), which fell to the FP-NOP fallback and read back stale `d31` (sum {1,2,3,4} → 3). Now `Dd = Vn.d[0] + Vn.d[1]` (wrapping, hi zeroed). JIT already routes the word to interp (`ftype > 1` gate), so both engines are correct via the fallback.
 - Verified: scratch tls sum test `lanes 1 2 3 4 sum=10` under jit + interp + `JIT_VERIFY`, `--quick` **216/216**.
+
+## Session History (2026-09-04) — signal + vfs correctness sweep
+
+- **sigsuspend RT (`misc_signal.cpp`):** host mask loop was `1..31`, dropping timer/cancel wakes at 32..64. Now `1..64`.
+- **SignalFrame TP (`signal.h/cpp`, `misc_signal.cpp`):** delivery saved everything but TP; a handler calling pthread funcs corrupted TLS across sigreturn. Frame now carries `tpidr_el0/tpidrro_el0` (saved + restored), and delivery does `excl_clear()` like hardware exception entry.
+- **HostNode race (`yggdrasil/host.cpp`):** positioned reads/writes did `lseek` + `read/write`, scrambling shared-fd offsets across threads. Now `pread/pwrite`.
+- **dup2 validation (`yggdrasil.cpp`):** negative `new_fd` entered the map and made `is_open(-1)` true. Now `-EBADF`.
+- Skipped (documented): spurious `rt_sigreturn` still returns 0 (SIGSEGV risks breaking odd guests); `/dev/*random` still 256B-per-open (infinite stream needs node semantics change).
+- Verified: `--quick` **216/216**, `--dynamic` **15/15**.

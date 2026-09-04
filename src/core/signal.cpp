@@ -527,6 +527,11 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     memcpy(frame.v_hi, cpu.v_hi, sizeof(frame.v_hi));
     frame.fpcr = cpu.fpcr;
     frame.fpsr = cpu.fpsr;
+    frame.tpidr_el0 = cpu.tpidr_el0;
+    frame.tpidrro_el0 = cpu.tpidrro_el0;
+    // Hardware clears the exclusive monitor on exception entry: a stale
+    // LDXR reservation must not succeed across handler execution.
+    cpu.excl_clear();
     if (on_altstack) {
         SignalTable::set_altstack_active(cpu, true);
     }

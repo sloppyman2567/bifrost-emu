@@ -89,6 +89,7 @@ int FdTable::dup(int fd, int min_fd) {
     return new_fd;
 }
 int FdTable::dup2(int fd, int new_fd) {
+    if (new_fd < 0) return -EBADF;
     std::lock_guard<std::mutex> g(mu_);
     auto it = table_.find(fd);
     if (it == table_.end()) return -EBADF;

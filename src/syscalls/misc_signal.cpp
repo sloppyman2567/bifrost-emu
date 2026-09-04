@@ -64,7 +64,9 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
             if (emu.handle_eintr(cpu)) return 0;
             sigset_t host_mask;
             sigemptyset(&host_mask);
-            for (int signo = 1; signo <= 31; signo++) {
+            // Full 1..64: the guest mask is 64-bit (RT signals live at
+            // 32..64); the old 1..31 loop dropped timer/cancel wakes.
+            for (int signo = 1; signo <= 64; signo++) {
                 if ((guest_mask >> (signo - 1)) & 1)
                     sigaddset(&host_mask, signo);
             }
@@ -120,6 +122,8 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 memcpy(cpu.v_hi, frame.v_hi, sizeof(cpu.v_hi));
                 cpu.fpcr = frame.fpcr;
                 cpu.fpsr = frame.fpsr;
+                cpu.tpidr_el0 = frame.tpidr_el0;
+                cpu.tpidrro_el0 = frame.tpidrro_el0;
                 if (frame.on_altstack)
                     SignalTable::set_altstack_active(cpu, false);
                 if (cpu.sigpending != 0)
