@@ -294,10 +294,11 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
             // proper unsigned conversion via the
             // "subtract 2^63, convert signed, add 2^63" trick.
             //
-            // sf (flags_op) is unused by the JIT — the JIT always emits
-            // 64-bit CVTTSD2SI rax. 32-bit dest truncation (sf=0) is
-            // handled by an explicit IROp::ZEXT emitted by ir_translate.cpp
-            // after FP_F2I, which zero-extends the low 32 bits per AArch64
+            // sf (flags_op) selects the 32/64-bit saturation limits for the
+            // range pre-check; conversion itself is always 64-bit CVTT, and
+            // 32-bit dest truncation (sf=0) is handled by an explicit
+            // IROp::ZEXT emitted by ir_translate.cpp after FP_F2I, which
+            // zero-extends the low 32 bits per AArch64
             // 32-bit register write semantics.
             //
             // For the unsigned path, the 2^63 constant must match the FP
@@ -319,8 +320,10 @@ bool FrostJIT::compile_ir_fparith(const IRInst& inst) {
                     emit_call_interp(inst.arm_pc, false);
                     return true;
                 }
-            } else if (rmode == 1 || rmode == 2) {
-                // P/M rounding uses roundsd/roundss (SSE4.1).
+            } else if (rmode != 3) {
+                // N/P/M rounding uses roundsd/roundss (SSE4.1): N rounds
+                // explicitly (nearest-even, MXCSR-independent) so the
+                // saturation pre-check below sees the rounded value.
                 if (!has_sse41()) {
                     emit_call_interp(inst.arm_pc, false);
                     return true;

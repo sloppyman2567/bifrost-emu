@@ -3795,3 +3795,13 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **Self-caught along the way:** my first row patch missed the `glBindBuffer` rows (different column spacing) — policy read 0 and zero elisions fired; found via a one-shot probe, fixed with a spacing-tolerant match (since removed). Also fixed two edit-soup brace/namespace slips the same way (build-caught).
 - **New regression test `test_sdl_gl_elide` (11 checks, in suite):** redundant ARRAY binds + per-VAO ELEMENT binds + VAO switches + delete/name-reuse, pixel-verified via glReadPixels. Notably the first version failed on edge-straddling sample pixels with elision ON *and* OFF — test bug, not emulation (moved to triangle centroids). Passes both modes.
 - Verified: quick **216/216** (new test included), triangle/swapchain/pnext green, minecraft error-free.
+
+## Session History (2026-09-04) — subagent review fixes (4 real bugs)
+
+- Spawned a review subagent over `fcc3a93..HEAD`. Verdict: ship-with-fixes. Fixed all four:
+  1. **VAO switch left the legacy global ELEMENT binding stale:** EL_PTR draw path + `ELEMENT_ARRAY_BUFFER_BINDING` queries read the global, but only per-VAO state updated on switches — a client-array draw under a no-EBO VAO could hand a guest pointer to the host as a byte offset. `set_vao_binding` now refreshes the legacy global from the per-VAO map (unknown → 0).
+  2. **Signed FP_F2I `rmode==0` emitted SSE4.1 `roundsd` without the `has_sse41()` gate** (pre-SSE4.1 hosts would SIGILL on any `fcvtns`). Gate extended to all non-Z modes.
+  3. **`reset()` left VAO/buffer/texture state behind** (elision could fire on dead bindings, map-bounce could resolve deleted buffers). Now clears VAO + per-VAO map + buffer maps + texture maps.
+  4. **Removed the TEMP vkQuake AllocBlock debug dumps** (`SDL_ShowSimpleMessageBox` post-mortem + per-`vkDeviceWaitIdle` scan, ~13KB of hardcoded-address code).
+- Plus review nits: stale `flags_op unused` comment corrected, GL writeback wrapped in try/catch like its display twin.
+- Verified: quick **216/216**, elide/triangle/swapchain/pnext/sat/fcvt repros all pass.

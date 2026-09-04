@@ -42,6 +42,11 @@ void GLStateTracker::reset() {
     array_buffer_binding_.store(0, std::memory_order_relaxed);
     element_array_buffer_binding_ = 0;
     draw_indirect_buffer_binding_ = 0;
+    buffer_bindings_.clear();
+    vao_binding_.store(0, std::memory_order_relaxed);
+    vao_known_.store(true, std::memory_order_relaxed);
+    vao_element_.clear();
+    tex_last_key_.store(~0ULL, std::memory_order_relaxed);
     texture_bindings_.clear();
     pixel_store_unpack_alignment_ = 4;
     pixel_store_pack_alignment_ = 4;
@@ -222,6 +227,12 @@ void GLStateTracker::set_vao_binding(uint32_t vao) {
     std::lock_guard<std::mutex> g(mu_);
     vao_binding_.store(vao, std::memory_order_relaxed);
     vao_known_.store(true, std::memory_order_relaxed);
+    // A VAO switch restores that VAO's element binding with no
+    // BindBuffer call — mirror it into the legacy global so the EL_PTR
+    // draw path and ELEMENT_ARRAY_BUFFER_BINDING queries (which read
+    // the global, not the per-VAO map) stay exact. Unknown VAO → 0.
+    auto it = vao_element_.find(vao);
+    element_array_buffer_binding_ = (it != vao_element_.end()) ? it->second : 0;
 }
 
 uint32_t GLStateTracker::vao_binding(bool& known) const {

@@ -727,67 +727,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     const auto& entry = impl_->libs_[lib_idx].entries[ent_idx];
     bool trace = dbg().thunk_trace;
 
-    // TEMP DEBUG (2026-09-03, vkQuake AllocBlock hunt): extents sanity at
-    // every vkDeviceWaitIdle (GL_WaitForDeviceIdle; build start + idle
-    // transitions). REMOVE after root-causing.
-    if (entry.name == "vkDeviceWaitIdle" && getenv("BIFROST_VKQ_DUMP") && impl_->mem) {
-        static int wait_n = 0;
-        int my_n = ++wait_n;
-        auto vrd32 = [&](uint64_t g, int32_t& out) {
-            try { impl_->mem->read(g, &out, 4); return true; }
-            catch (...) { return false; }
-        };
-        auto vrd64 = [&](uint64_t g, uint64_t& out) {
-            try { impl_->mem->read(g, &out, 8); return true; }
-            catch (...) { return false; }
-        };
-        int models = 0, insane = 0, total = 0;
-        char firstmodel[65] = {0};
-        for (int j = 1; j < 64; j++) {
-            uint64_t m = 0;
-            if (!vrd64(0x1d616b0 + 0x16228 + (uint64_t)j * 8, m)) break;
-            if (!m) break;
-            models++;
-            if (j == 1) {
-                for (int cn = 0; cn < 64; cn++) {
-                    uint8_t ch = 0;
-                    try { impl_->mem->read(m + (uint64_t)cn, &ch, 1); }
-                    catch (...) { break; }
-                    if (!ch) break;
-                    firstmodel[cn] = (char)ch;
-                }
-            }
-            int32_t mns = -1;
-            uint64_t msp = 0;
-            vrd32(m + 336, mns);
-            vrd64(m + 344, msp);
-            if (mns < 0 || mns > 100000 || !msp) {
-                fprintf(stderr, "[vkq-wait %d] model[%d]=0x%llx HEADER-SUSPECT ns=%d sp=0x%llx\n",
-                        my_n, j, (unsigned long long)m, mns, (unsigned long long)msp);
-                insane++;
-                continue;
-            }
-            total += mns;
-            std::vector<uint8_t> buf(200);
-            for (int i = 0; i < mns; i++) {
-                uint64_t b = msp + (uint64_t)i * 200;
-                try { impl_->mem->read(b, buf.data(), 200); }
-                catch (...) { insane++; break; }
-                int32_t ne = 0;
-                int16_t e0 = 0, e1 = 0;
-                memcpy(&ne, buf.data() + 24, 4);
-                memcpy(&e0, buf.data() + 32, 2);
-                memcpy(&e1, buf.data() + 34, 2);
-                if (ne < 0 || ne > 100000 || e0 < 0 || e0 > 2000 || e1 < 0 || e1 > 2000)
-                    insane++;
-            }
-        }
-        fprintf(stderr, "[vkq-wait %d] models=%d surfs=%d insane=%d first='%s'\n",
-                my_n, models, total, insane, firstmodel);
-    }
-
-
-// ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
+    // ── Proxy dispatch: route X11/Wayland calls to DisplayProxy ──────
     // When the THUNK_PROXY flag is set, the symbol is handled by the
     // DisplayProxy (SDL2-based software fallback). The proxy is preferred
     // over the host library: its handles (Display*, Window, GC) are guest
