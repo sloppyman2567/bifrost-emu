@@ -2762,13 +2762,23 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     auto safe_writeback_all = [&]() {
         if (!impl_->mem) return;
         static int wb_skip_diag = 4, wb_clamp_diag = 4;
+        // one snapshot per dispatch, not per arg — and none at all when
+        // every pointer aliased the window (the common case: no bounce
+        // means no writeback, so the map copy + lock is pure overhead
+        // at ~10M thunk calls/s).
+        bool any_wb = false;
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (bounce_wb[i] && bounce_guest[i]) { any_wb = true; break; }
+        }
+        if (!any_wb) return;
+        auto live = impl_->mem->allocations_snapshot();
         for (int i = 0; i < kMaxArgs; i++) {
             if (!bounce_wb[i] || !bounce_guest[i]) continue;
             const uint64_t g = bounce_guest[i];
             const size_t want = bounce_bufs[i].size();
             size_t wb = 0;
             bool in_live = false;
-            for (const auto& kv : impl_->mem->allocations_snapshot()) {
+            for (const auto& kv : live) {
                 if (g >= kv.first && g - kv.first < kv.second) {
                     uint64_t room = kv.second - (g - kv.first);
                     wb = (want <= room) ? want : static_cast<size_t>(room);

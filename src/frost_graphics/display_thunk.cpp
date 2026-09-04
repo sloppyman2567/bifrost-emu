@@ -124,8 +124,11 @@ struct DisplayThunkImpl {
         return allow;
     }
     // Push all bounces back into the host mappings (before submits/presents).
+    // No snapshot when nothing is mapped: the map copy + lock is pure
+    // overhead at ~10M thunk calls/s and the common case is empty.
     void vk_sync_push_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
+        if (vk_maps_.empty()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
@@ -139,8 +142,10 @@ struct DisplayThunkImpl {
     }
     // Pull host mappings into the bounces (after completion waits — the
     // GPU may have written readback data into the host mapping).
+    // Same empty-map fast path as the push side.
     void vk_sync_pull_all() {
         std::lock_guard<std::mutex> g(vk_maps_mu);
+        if (vk_maps_.empty()) return;
         auto live = mem->allocations_snapshot();
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
@@ -1994,7 +1999,8 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // min(count, staged) elements of the staged array. Publish both to
     // guest memory, clamped to the enclosing live allocation so a stale
     // count can never spray neighbor heap. (VkStage outlives this.)
-    {
+    // No snapshot when there are no OUT records (the common case).
+    if (vk_n_out_recs > 0) {
         auto out_live = impl_->mem ? impl_->mem->allocations_snapshot()
                                    : std::vector<std::pair<uint64_t,uint64_t>>();
         for (int oi = 0; oi < vk_n_out_recs; oi++) {
@@ -2065,7 +2071,14 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
     // safe_writeback_all heap-shredder fix in thunk.cpp): only bytes inside
     // a tracked live allocation go back, clamped to its end. without this
     // a 64k default bounce over a small out object sprays neighbor heap.
+    // Snapshot only when some arg actually bounced (window aliases need
+    // no writeback, so the map copy + lock is pure overhead otherwise).
     if (impl_->mem) {
+        bool any_bounced = false;
+        for (int i = 0; i < kMaxArgs; i++) {
+            if (bounce_wb[i] && bounce_guest[i]) { any_bounced = true; break; }
+        }
+        if (any_bounced) {
         auto live = impl_->mem->allocations_snapshot();
         static int dwb_skip_diag = 4, dwb_clamp_diag = 4;
         for (int i = 0; i < kMaxArgs; i++) {
@@ -2113,6 +2126,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     // best-effort: host call already happened, don't break flow.
                 }
             }
+        }
         }
     }
 
