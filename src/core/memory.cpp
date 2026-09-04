@@ -247,7 +247,8 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
             fprintf(stderr, "[chunk] W 0x%llx n=%zu pcache=%d\n",
                     (unsigned long long)cur, take,
                     pc && pn == pc->write_page);
-        if (pc && __builtin_expect(pn == pc->write_page, 1)) {
+        if (pc && __builtin_expect(pn == pc->write_page &&
+                                    pc->write_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
             memcpy(pc->write_ptr + off, p, take);
         } else {
             std::vector<uint8_t>* page = nullptr;
@@ -268,6 +269,7 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
             if (pc) {
                 pc->write_page = pn;
                 pc->write_ptr = page->data();
+                pc->write_epoch = page_epoch_.load(std::memory_order_relaxed);
             }
         }
         p += take;
@@ -312,7 +314,8 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
                 }
             }
         }
-        if (pc && __builtin_expect(pn == pc->read_page, 1)) {
+        if (pc && __builtin_expect(pn == pc->read_page &&
+                                   pc->read_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
             memcpy(p, pc->read_ptr + off, take);
         } else {
             // 1.5.4-alpha: FEX-style demand paging. On real Linux, reads
@@ -347,6 +350,7 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
             if (pc) {
                 pc->read_page = pn;
                 pc->read_ptr = page->data();
+                pc->read_epoch = page_epoch_.load(std::memory_order_relaxed);
             }
         }
         p += take;
@@ -711,6 +715,10 @@ std::unique_lock<std::shared_mutex> g(mu_);
         }
         add_free_range(flo, fhi - flo);
     }
+    // Any pages_ erase invalidates cached raw pointers held by per-cpu
+    // PageCache entries. Bump the epoch so stale entries miss instead
+    // of uaf into freed vector storage.
+    page_epoch_.fetch_add(1, std::memory_order_relaxed);
 }
 void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
     if (len == 0) return;
@@ -805,57 +813,101 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
     // exclusively — no other process can touch it, and we serialize
     // cross-vCPU access via the shared_mutex below for the pages_ path.
     if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
-        4 <= DIRECT_WINDOW_SIZE - addr) {
+        4 <= DIRECT_WINDOW_SIZE - addr && (addr & 3) == 0) {
         // Page-aligned check: the entire 4-byte word must be within the
         // window (already checked above). Use an atomic CAS on the
         // underlying storage. This is safe because the window is private
-        // to this process.
+        // to this process. Unaligned addrs fall through to the locked
+        // slow path: std::atomic on unaligned storage is ub/torn.
         std::atomic<uint32_t>* slot =
             reinterpret_cast<std::atomic<uint32_t>*>(direct_window_ + addr);
         return slot->compare_exchange_strong(expected, desired,
                                               std::memory_order_acq_rel);
     }
     std::unique_lock<std::shared_mutex> g(mu_);
-    auto it = pages_.find(addr / PAGE_SIZE);
-    if (it == pages_.end()) {
-        if (expected != 0) return false;
-        it = pages_.emplace(addr / PAGE_SIZE,
-                            std::vector<uint8_t>(PAGE_SIZE, 0)).first;
-    }
     uint64_t off = addr & PAGE_MASK;
-    uint32_t cur;
-    memcpy(&cur, it->second.data() + off, 4);
-    if (cur == expected) {
-        memcpy(it->second.data() + off, &desired, 4);
-        return true;
+    if (off + 4 <= PAGE_SIZE) {
+        auto it = pages_.find(addr / PAGE_SIZE);
+        if (it == pages_.end()) {
+            if (expected != 0) return false;
+            it = pages_.emplace(addr / PAGE_SIZE,
+                                std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+        }
+        uint32_t cur;
+        memcpy(&cur, it->second.data() + off, 4);
+        if (cur == expected) {
+            memcpy(it->second.data() + off, &desired, 4);
+            return true;
+        }
+        return false;
     }
-    return false;
+    // Cross-page word: assemble byte-by-byte so we never overrun the
+    // first page's vector. Missing pages read as zero.
+    uint32_t cur = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t a = addr + i;
+        auto it = pages_.find(a / PAGE_SIZE);
+        uint8_t b = (it == pages_.end()) ? 0 : it->second[a & PAGE_MASK];
+        cur |= static_cast<uint32_t>(b) << (i * 8);
+    }
+    if (cur != expected) return false;
+    for (int i = 0; i < 4; i++) {
+        uint64_t a = addr + i;
+        auto it = pages_.find(a / PAGE_SIZE);
+        if (it == pages_.end()) {
+            it = pages_.emplace(a / PAGE_SIZE,
+                                std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+        }
+        it->second[a & PAGE_MASK] = static_cast<uint8_t>(desired >> (i * 8));
+    }
+    return true;
 }
 bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
     // See atomic_cas_32 for the direct-window rationale.
-    // BUGFIX: same integer-overflow guard as atomic_cas_32.
+    // BUGFIX: same integer-overflow guard as atomic_cas_32, plus
+    // alignment gate (unaligned atomic is ub -> slow path).
     if (direct_window_ && addr < DIRECT_WINDOW_SIZE &&
-        8 <= DIRECT_WINDOW_SIZE - addr) {
+        8 <= DIRECT_WINDOW_SIZE - addr && (addr & 7) == 0) {
         std::atomic<uint64_t>* slot =
             reinterpret_cast<std::atomic<uint64_t>*>(direct_window_ + addr);
         return slot->compare_exchange_strong(expected, desired,
                                               std::memory_order_acq_rel);
     }
     std::unique_lock<std::shared_mutex> g(mu_);
-    auto it = pages_.find(addr / PAGE_SIZE);
-    if (it == pages_.end()) {
-        if (expected != 0) return false;
-        it = pages_.emplace(addr / PAGE_SIZE,
-                            std::vector<uint8_t>(PAGE_SIZE, 0)).first;
-    }
     uint64_t off = addr & PAGE_MASK;
-    uint64_t cur;
-    memcpy(&cur, it->second.data() + off, 8);
-    if (cur == expected) {
-        memcpy(it->second.data() + off, &desired, 8);
-        return true;
+    if (off + 8 <= PAGE_SIZE) {
+        auto it = pages_.find(addr / PAGE_SIZE);
+        if (it == pages_.end()) {
+            if (expected != 0) return false;
+            it = pages_.emplace(addr / PAGE_SIZE,
+                                std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+        }
+        uint64_t cur;
+        memcpy(&cur, it->second.data() + off, 8);
+        if (cur == expected) {
+            memcpy(it->second.data() + off, &desired, 8);
+            return true;
+        }
+        return false;
     }
-    return false;
+    uint64_t cur = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t a = addr + i;
+        auto it = pages_.find(a / PAGE_SIZE);
+        uint8_t b = (it == pages_.end()) ? 0 : it->second[a & PAGE_MASK];
+        cur |= static_cast<uint64_t>(b) << (i * 8);
+    }
+    if (cur != expected) return false;
+    for (int i = 0; i < 8; i++) {
+        uint64_t a = addr + i;
+        auto it = pages_.find(a / PAGE_SIZE);
+        if (it == pages_.end()) {
+            it = pages_.emplace(a / PAGE_SIZE,
+                                std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+        }
+        it->second[a & PAGE_MASK] = static_cast<uint8_t>(desired >> (i * 8));
+    }
+    return true;
 }
 size_t Memory::page_count() const {
     std::shared_lock<std::shared_mutex> g(mu_);
@@ -957,6 +1009,9 @@ std::unique_ptr<Memory> Memory::clone_for_fork() const {
     {
         std::shared_lock<std::shared_mutex> g(mu_);
         child->mmap_next_ = mmap_next_;
+        child->above_window_next_ = above_window_next_;
+        child->pie_base_ = pie_base_;
+        child->stack_top_ = stack_top_;
         for (const auto& [base, size] : allocations_) {
             child->allocations_[base] = size;
         }

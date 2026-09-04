@@ -3805,3 +3805,10 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
   4. **Removed the TEMP vkQuake AllocBlock debug dumps** (`SDL_ShowSimpleMessageBox` post-mortem + per-`vkDeviceWaitIdle` scan, ~13KB of hardcoded-address code).
 - Plus review nits: stale `flags_op unused` comment corrected, GL writeback wrapped in try/catch like its display twin.
 - Verified: quick **216/216**, elide/triangle/swapchain/pnext/sat/fcvt repros all pass.
+
+## Session History (2026-09-04) — memory hardening: pagecache epoch + atomic split + fork fields
+
+- **PageCache UAF (`src/core/memory.h`, `memory.cpp`):** cached `read_ptr/write_ptr` are raw pointers into `pages_` vectors; `untrack_allocation` erased vectors leaving them dangling. `madvise_dontneed` already avoided erase for this reason. Fix: `page_epoch_` counter bumped on untrack, cached entries carry epoch and miss on mismatch.
+- **Atomic CAS page-cross + unaligned (`memory.cpp`):** slow path did `memcpy(page+off,4/8)` without split — `addr=page_end-2` overran vector. Fast path did unaligned `atomic<>` (ub/torn). Fix: fast path requires `(addr&3)==0` / `(addr&7)==0`, slow path assembles cross-page words byte-by-byte with missing pages as zero.
+- **Fork drops cursors (`memory.cpp:clone_for_fork`):** copied `mmap_next_/allocs/free/total` but not `above_window_next_/pie_base_/stack_top_`. Child stack-guard checks diverged. Now copied.
+- Verified: `make -j` clean, `jit_simd_pairmin` 19/19 jit + interp, `jit_int_fp_conv` all pass, `./scripts/run_tests.sh --quick` **216/216**.

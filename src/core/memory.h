@@ -91,17 +91,24 @@ public:
     // ── Page cache (per-thread, lock-free) ────────────────────────────
     // Each CPU keeps its own PageCache so the hot path avoids the page
     // map mutex. The cache stores a raw pointer into the vector's data;
-    // this is stable because std::vector<uint8_t> objects inside the
-    // unordered_map are heap-allocated and don't move when the map rehashes.
+    // this is stable across map rehash (nodes don't move) but NOT across
+    // erase (munmap). Each cached entry carries the page_epoch_ value
+    // from when it was cached; untrack_allocation bumps the epoch so
+    // stale pointers miss instead of uaf.
     struct PageCache {
         // UINT64_MAX = sentinel "no cached page" — can never collide with
         // a real page number because that would require a guest address
         // near 2^64 * 4096 (overflow).
         uint64_t       read_page  = UINT64_MAX;
         const uint8_t* read_ptr   = nullptr;
+        uint64_t       read_epoch = 0;
         uint64_t       write_page = UINT64_MAX;
         uint8_t*       write_ptr  = nullptr;
+        uint64_t       write_epoch = 0;
     };
+    uint64_t page_epoch() const {
+        return page_epoch_.load(std::memory_order_relaxed);
+    }
     // ── Mapping ───────────────────────────────────────────────────────
     void map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
@@ -281,6 +288,10 @@ private:
     // munmap) to avoid O(pages_.size()) scans on the hot path.
     // Mutable because read() (a const method) auto-allocates pages.
     mutable std::atomic<size_t> total_pages_{0};
+    // Page-cache epoch: bumped whenever pages_ entries are erased
+    // (munmap). Cached raw pointers carry the epoch value; a mismatch
+    // means the vector may have been freed -> treat as miss.
+    mutable std::atomic<uint64_t> page_epoch_{0};
     // 1.5.4-alpha: Validate that an address range doesn't overlap
     // kernel space or the NULL page region. Returns true if the range
     // is valid for guest allocation.
