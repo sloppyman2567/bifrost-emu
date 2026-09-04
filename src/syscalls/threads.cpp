@@ -454,6 +454,13 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
             if (emu.jit()) {
                 emu.jit()->jit_disabled_.store(true, std::memory_order_relaxed);
             }
+            // Linux kills all other threads on execve; the caller survives
+            // as the new main. Join them BEFORE tearing down memory so
+            // their exit paths (robust list, clear_child_tid) still read
+            // valid guest state. Fresh cursors: the old heap is gone, so
+            // new mmaps start from a fresh-process layout.
+            emu.kill_other_threads(cpu);
+            mem_.reset_allocator_cursors();
             // simulate execve's memory image replacement. On real Linux,
             // execve() removes ALL old mappings (heap, mmap, etc.) and
             // only the new binary's PT_LOAD segments + stack remain.

@@ -574,6 +574,15 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
+    // execve: stop + join every guest thread except the caller, mirroring
+    // Linux (other threads die, caller survives as the new main). Each
+    // victim runs the normal thread exit path (robust cleanup, alive
+    // decrement), so no count fixups here. Futex sleepers are woken so
+    // join can't hang on them; threads stuck in uninterruptible host
+    // calls are a best-effort limitation (same as join_threads).
+    void kill_other_threads(CPU& caller);
+    // Wake every futex waiter in every shard (execve kill assist).
+    void wake_all_futexes();
     // 1.5.4-alpha: stop + join every SDL worker thread. Real Linux
     // exit_group kills ALL threads; our exit_group handler only clears
     // the calling CPU's running flag. SDL threads spawned via

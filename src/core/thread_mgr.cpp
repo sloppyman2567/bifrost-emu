@@ -348,6 +348,40 @@ void Emulator::join_threads() {
     }
     threads_.clear();
 }
+void Emulator::wake_all_futexes() {
+    for (size_t i = 0; i < FUTEX_SHARDS; i++) {
+        std::lock_guard<std::mutex> g(futex_shards_[i].mu);
+        for (auto& kv : futex_shards_[i].slots) {
+            std::lock_guard<std::mutex> lk(kv.second->mu);
+            if (kv.second->waiters > 0) kv.second->cv.notify_all();
+        }
+    }
+}
+void Emulator::kill_other_threads(CPU& caller) {
+    // Snapshot victims under the lock; stop + join outside it (a victim
+    // in thread exit takes futex shard locks; joining under threads_mu_
+    // while another path takes threads_mu_ inside would deadlock).
+    std::vector<std::unique_ptr<GuestThread>> victims;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        auto it = threads_.begin();
+        while (it != threads_.end()) {
+            if (&(*it)->cpu == &caller) { ++it; continue; }
+            (*it)->cpu.running = false;
+            victims.push_back(std::move(*it));
+            it = threads_.erase(it);
+        }
+    }
+    if (victims.empty()) return;
+    // Wake futex sleepers so they observe running==false instead of
+    // sleeping through the join below.
+    wake_all_futexes();
+    for (auto& gt : victims) {
+        if (gt->host_thread.joinable()) gt->host_thread.join();
+        // No alive_threads_ fixup: each victim runs the normal thread
+        // exit path (robust cleanup + decrement) on its way out.
+    }
+}
 void Emulator::stop_sdl_threads() {
     // Snapshot the SDL threads under the lock so we can set running=false
     // on each WITHOUT holding the lock while joining (the thread entry

@@ -3895,3 +3895,9 @@ moved out of AGENTS.md to keep the agent context lean. live rules stay in AGENTS
 - **dup2 validation (`yggdrasil.cpp`):** negative `new_fd` entered the map and made `is_open(-1)` true. Now `-EBADF`.
 - Skipped (documented): spurious `rt_sigreturn` still returns 0 (SIGSEGV risks breaking odd guests); `/dev/*random` still 256B-per-open (infinite stream needs node semantics change).
 - Verified: `--quick` **216/216**, `--dynamic` **15/15**.
+
+## Session History (2026-09-04) — execve kills other threads + fresh mmap cursors
+
+- **Thread kill (`emulator.h`, `thread_mgr.cpp`, `syscalls/threads.cpp`):** old threads kept running the old image after execve. New `kill_other_threads(caller)` stops + joins every other guest thread (victims run the normal exit path, so counts stay exact) with a `wake_all_futexes()` assist so futex sleepers can't hang the join; runs before memory teardown so exit paths read valid state. Caller (main or threaded) survives as the new main.
+- **Cursors (`memory.h`):** new `reset_allocator_cursors()` puts bump cursors back to fresh-process layout (old heap was untracked into reusable `free_ranges_`, which stays valid).
+- Verified: toybox `sh -c` + `exec` probes pass, `--quick` **216/216**, `--dynamic` **15/15**.

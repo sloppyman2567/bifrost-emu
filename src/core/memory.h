@@ -144,6 +144,15 @@ public:
     // Remove an allocation from tracking AND reclaim its pages + address
     // range so a future mmap_alloc can reuse it (Linux munmap semantics).
     void untrack_allocation(uint64_t addr, uint64_t size);
+    // Reset the bump cursors after execve: the old image's heap is gone
+    // (its ranges were untracked into free_ranges_, which stays valid),
+    // so new mmaps start from a fresh-process layout instead of after
+    // the previous image's high-water mark.
+    void reset_allocator_cursors() {
+        std::unique_lock<std::shared_mutex> g(mu_);
+        mmap_next_ = MMAP_BASE_MIN;
+        above_window_next_ = DIRECT_WINDOW_SIZE;
+    }
     // Linux MADV_DONTNEED semantics (2026-09-03, vkQuake AllocBlock hunt):
     // zero the covered bytes WITHOUT unmapping (address space stays).
     // vkQuake's bundled mimalloc decommits freed segments with DONTNEED
