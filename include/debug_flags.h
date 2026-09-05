@@ -55,6 +55,10 @@ struct DebugFlags {
     // ── capture sinks (paths) ────────────────────────────────────────
     std::string xseqlog;  // BIFROST_XSEQLOG — X wire sequence capture file
     std::string xcap;     // BIFROST_XCAP    — X capture output root
+    // ── watch range ────────────────────────────────────────────────
+    std::string watch;  // BIFROST_WATCH — addr[:size] hex; log every
+                        // Memory::write overlapping it with the current
+                        // interp pc (heap wild-write hunt; --no-jit).
 
     // Return the process-wide flags, parsed lazily on first use.
     static const DebugFlags& get() {
@@ -101,6 +105,7 @@ struct DebugFlags {
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
+        if (const char* p = std::getenv("BIFROST_WATCH"))   f.watch   = p;
         return f;
     }
 };

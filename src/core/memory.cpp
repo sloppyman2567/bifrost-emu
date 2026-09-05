@@ -7,12 +7,43 @@
 #include "core/memory.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <fcntl.h>
 #include <shared_mutex>
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
 namespace arm64emu {
+
+// BIFROST_WATCH=addr[:size] (hex): log every Memory::write overlapping the
+// range with the current interp pc (heap wild-write hunt; use --no-jit so
+// all guest stores flow through write()). Parsed once; a single cached
+// branch when unset.
+namespace {
+thread_local uint64_t t_watch_pc = 0;
+struct WatchRange {
+    bool on = false;
+    uint64_t lo = 0, hi = 0;
+};
+const WatchRange& watch_range() {
+    static const WatchRange w = [] {
+        WatchRange r;
+        const char* s = getenv("BIFROST_WATCH");
+        if (!s || !*s) return r;
+        char* end = nullptr;
+        uint64_t addr = strtoull(s, &end, 0);
+        uint64_t size = 64;
+        if (end && *end == ':') size = strtoull(end + 1, nullptr, 0);
+        if (size == 0) size = 64;
+        r.on = true;
+        r.lo = addr;
+        r.hi = addr + size;
+        return r;
+    }();
+    return w;
+}
+}  // namespace
+void Memory::note_interp_pc(uint64_t pc) { t_watch_pc = pc; }
 
 // BIFROST_MEMSTATS=N (vkQuake AllocBlock leak hunt): background reporter
 // printing live guest allocation count/bytes + host RSS every N seconds,
@@ -217,6 +248,14 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
 }
 void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
     if (n == 0) return;
+    // BIFROST_WATCH: attribute stores overlapping the watch range.
+    {
+        const WatchRange& wr = watch_range();
+        if (wr.on && addr < wr.hi && addr + n > wr.lo)
+            fprintf(stderr, "[watch] w 0x%llx n=%zu pc=0x%llx\n",
+                    (unsigned long long)addr, n,
+                    (unsigned long long)t_watch_pc);
+    }
     // BIFROST_WRITE_TRACE=1: log every host-side write call (addr,size).
     // Used to diff the write streams of a JIT run vs an interpreter run —
     // host-side writers (thunks, stdio shims, signal frames) are invisible

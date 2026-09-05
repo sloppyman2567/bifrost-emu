@@ -116,6 +116,9 @@ public:
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);
     void read(uint64_t addr, void* dst, size_t n, PageCache* pc = nullptr) const;
+    // BIFROST_WATCH support: interpreter snapshots its pc here so the
+    // watch check in write() can attribute host+guest stores.
+    static void note_interp_pc(uint64_t pc);
     // Convenience templates for fixed-width LE access.
     template<typename T> T load(uint64_t addr) const {
         T v; read(addr, &v, sizeof(T)); return v;
