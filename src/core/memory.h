@@ -138,6 +138,14 @@ public:
     // with fresh zeroed pages — matches Linux kernel behavior.
     uint64_t mmap_alloc(uint64_t size, uint64_t hint = 0,
                         bool noreserve = false);
+    // Atomic MAP_FIXED replace: evict overlapping allocations, restore host
+    // prot on reclaimed guard pages, reclaim free ranges, and track the new
+    // mapping under one mu_ hold (no untrack/alloc gap for racing mmaps).
+    // zero_contents=false preserves window bytes (PROT_NONE guard / musl
+    // brk metadata); true gives fresh-zero anonymous semantics. Returns the
+    // address on success, 0 on failure (caller maps to -ENOMEM).
+    uint64_t mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve,
+                                bool zero_contents);
     // Grow (or shrink) an allocation. When growth would collide with
     // another tracked allocation, a fresh region is allocated and the
     // data is copied (mirrors musl's mremap contract).
