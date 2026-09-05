@@ -57,14 +57,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             constexpr uint64_t BIFROST_MAP_FIXED          = 0x10;
             constexpr uint64_t BIFROST_MAP_FIXED_NOREPLACE = 0x100000;
-            // Linux requires a page-aligned addr for MAP_FIXED /
-            // MAP_FIXED_NOREPLACE (otherwise -EINVAL). Check here so the
-            // allocator never sees an unaligned fixed base.
-            if ((flags & (BIFROST_MAP_FIXED | BIFROST_MAP_FIXED_NOREPLACE)) &&
-                (addr & Memory::PAGE_MASK) != 0) {
-                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
-                return 0;
-            }
             // ── MAP_FIXED_NOREPLACE ─────────────────────────────────────
             // BUGFIX: previously MAP_FIXED_NOREPLACE was silently ignored
             // (treated as a non-FIXED mmap), so the kernel could place the
@@ -172,21 +164,11 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     brk_ = mmap_end;
                 }
             }
-            // MAP_FIXED replaces any existing user mapping in the requested
-            // range atomically (see Memory::mmap_fixed_replace). For an
-            // interior overlap the old split-off code left stale
-            // allocations/pages live, and a later reuse/zero treated part
-            // of a live object as reclaimed space (vkQuake surfaces array
-            // -> "AllocBlock: full").
-            //
-            // brk/map_range memory is intentionally not in allocations_, so
-            // the helper preserves the special brk carve-out above while
-            // making fixed mappings over normal mmap allocations Linux-like.
             // PROT_NONE with MAP_FIXED: these are guard pages. Track the
             // reservation so later overlap checks see it, but don't zero
             // existing pages (preserves musl's metadata).
-            if (prot == 0 && (flags & BIFROST_MAP_FIXED)) { // PROT_NONE + MAP_FIXED
-                if (mem_.mmap_fixed_replace(addr, length, true, false) == 0) {
+            if (prot == 0 && (flags & 0x10)) { // PROT_NONE + MAP_FIXED
+                if (mem_.mmap_alloc(length, addr, true) == 0) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
@@ -202,14 +184,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
             // OOM checks still apply). vkQuake's mimalloc reserves
             // GiB-scale arenas this way.
             bool virt_reserve = (flags & 0x4000) || prot == 0;
-            uint64_t mapped;
-            if (flags & BIFROST_MAP_FIXED) {
-                // Atomic replace with fresh-zero anonymous semantics
-                // (PROT_NONE already returned above, so prot != 0 here).
-                mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve, prot != 0);
-            } else {
-                mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve);
-            }
+            uint64_t mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve);
             // BUGFIX: mmap_alloc returns 0 on failure (size cap, invalid
             // range, or OOM page-limit). Returning that 0 to the guest
             // reads as a *successful* mapping at address 0 (musl only
