@@ -235,6 +235,21 @@ UNIT_TESTS=(
     "test_thunk_mt|ctest/test_thunk_mt.elf||30|ALL PASS"
     "test_sem|ctest/test_sem.elf||10|ALL PASS"
     "test_pthread_once|ctest/test_pthread_once.elf||10|ALL PASS"
+    # exit_group must not hang on siblings blocked in host syscalls
+    # (read/nanosleep): the emulator kicks each vCPU to interrupt the
+    # blocking call so shutdown completes. A hang fails via the timeout.
+    "test_exit_blocked|ctest/test_exit_blocked.elf||10"
+    # Dedicated signal-delivery regression (1.5.5-alpha): rt_sigaction
+    # aliasing, sigsuspend pre-suspend mask restore, and cross-thread
+    # delivery through the per-CPU pending queue + per-CPU signal frames.
+    "test_signal_semantics|ctest/test_signal_semantics.elf||20|ALL PASS"
+    # fork() with live guest threads: the child must not inherit joinable
+    # host std::threads for threads that no longer exist.
+    "test_fork_threads|ctest/test_fork_threads.elf||20|ALL PASS"
+    # Memory range-safety (1.5.5-alpha): wrapping munmap rejected,
+    # MAP_FIXED_NOREPLACE refuses the stack, huge madvise returns promptly,
+    # and above-window MAP_FIXED r/w cycles run concurrently.
+    "test_mem_guard|ctest/test_mem_guard.elf||20|ALL PASS"
     "test_producer_consumer|ctest/test_producer_consumer.elf||10|ALL PASS"
     # High-contention atomic stress test (8 threads). Validates CAS, LL/SC
     # (mutex), and LDADD atomics under game-scale contention.
@@ -269,6 +284,14 @@ UNIT_TESTS=(
     # volatile int op between), NaN bitwise selection, +0.0/-0.0 bit-exact,
     # and real C ternaries.
     "jit_fcsel|ctest/jit_fcsel.elf||5|fcsel: PASS"
+    # PRFM (prefetch) must be a NOP (it was decoded as a load and clobbered
+    # the prfop field's register number); LDAPR/LDAPRB/LDAPRH (ARMv8.3 RCpc
+    # acquire loads) were misdecoded as an LSE CAS.
+    "jit_prfm_ldapr|ctest/jit_prfm_ldapr.elf||5|checks passed"
+    # Compatibility syscalls: permissive no-ops (NUMA/ioprio/timeofday/
+    # vhangup/swapoff) and explicit -ENOSYS/-EPERM stubs (fanotify/bpf/
+    # userfaultfd/mqueue/quotactl).
+    "test_misc_extended|ctest/test_misc_extended.elf||5|ALL TESTS PASSED"
 )
 
 # Integration tests (ctest_real/ — real-world test programs)
@@ -346,6 +369,10 @@ INTEGRATION_TESTS=(
     "input_test|ctest_real/test_input.elf||5|test_input: done"
     "gamepad_test|ctest_real/test_gamepad.elf||5|test_gamepad: done"
     "sdl_demo|ctest_real/test_sdl_demo.elf||15|drew 60 frames"
+    # SDL_CreateThread / WaitThread / DetachThread lifecycle via the thunk:
+    # status+data round-trip, 8 concurrent create/wait pairs, and detach
+    # (record reaped, guest stack stays valid). Exit 77 = skip without SDL.
+    "sdl_thread|ctest_real/test_sdl_thread.elf||30|ALL PASS"
     # SDL2 + OpenGL triangle via GraphicThunk (needs DISPLAY + host GL).
     # Exit 77 = skip when SDL/GL unavailable.
     "sdl_gl_triangle|ctest_real/test_sdl_gl_triangle.elf||30|ALL PASS"
