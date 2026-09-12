@@ -50,6 +50,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/timex.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/xattr.h>
@@ -195,6 +196,78 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
             int r = ::fremovexattr(static_cast<int>(a0), name.c_str());
             if (r < 0) { ret_errno(); return 0; }
             ret_host(0); return 0;
+        }
+        // ── Compatibility syscalls: no-op / permissive stubs ──────────
+        // These are either privileged operations a user-mode guest cannot
+        // perform, policy hooks meaningless for a single-user/single-node
+        // emulated process, or facilities the emulator deliberately does
+        // not implement. Returning the "nothing to do" value keeps feature
+        // probes and best-effort setup paths working instead of forcing
+        // every caller through the generic -ENOSYS fallback.
+        //
+        // NUMA policy (234-239): AArch64 uses the generic ABI, so these
+        // exist even on single-node machines where they succeed trivially.
+        // mbind/set_mempolicy accept the request, get_mempolicy reports
+        // MPOL_DEFAULT, and the migration calls report that every page was
+        // already fine (0 unmoved).
+        case 234: { ret_host(0); return 0; }  // remap_file_pages (deprecated)
+        case 235: { ret_host(0); return 0; }  // mbind: accepted, no-op
+        case 237: { ret_host(0); return 0; }  // set_mempolicy: accepted
+        case 236: {  // get_mempolicy(policy, nodemask, maxnode, addr, flags)
+            if (a0) {
+                try { mem_.store<int>(a0, 0); }  // MPOL_DEFAULT
+                catch (...) { ret_err(EFAULT); return 0; }
+            }
+            if (a1) {  // zero the node mask
+                size_t bytes = ((a2 + 63) / 64) * 8;
+                if (bytes > 1024) bytes = 1024;
+                try {
+                    for (size_t i = 0; i < bytes; i++) mem_.store<uint8_t>(a1 + i, 0);
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0); return 0;
+        }
+        case 238: { ret_host(0); return 0; }  // migrate_pages: 0 unmoved
+        case 239: { ret_host(0); return 0; }  // move_pages: 0 = all moved
+        // I/O priority (30/31): scheduling hint only, nothing to do.
+        case 30: { ret_host(0); return 0; }   // ioprio_set
+        case 31: { ret_host(0); return 0; }   // ioprio_get: IOPRIO_CLASS_NONE
+        // Time adjustments (170/171/266): we must not touch the host clock
+        // (it would affect the whole machine), so accept and report success.
+        // The guest's clock still advances through clock_gettime/vDSO.
+        case 170: { ret_host(0); return 0; }  // settimeofday
+        case 171:     // adjtimex(struct timex*) -> TIME_OK
+        case 266: {   // clock_adjtime(clkid, struct timex*)
+            uint64_t xa = (num == 266) ? a1 : a0;
+            if (xa) {
+                size_t n = sizeof(struct timex);
+                try {
+                    for (size_t i = 0; i < n; i++) mem_.store<uint8_t>(xa + i, 0);
+                } catch (...) { ret_err(EFAULT); return 0; }
+            }
+            ret_host(0); return 0;
+        }
+        // vhangup (58)/swapoff (225): no controlling tty / no swap devices.
+        case 58: case 225: { ret_host(0); return 0; }
+        // Quotas, module/kexec, BPF, userfaultfd, secretmem, mount_setattr,
+        // dcookie, restart_syscall: genuinely unsupported, report it so the
+        // caller can pick a fallback. -EPERM where the operation is
+        // privilege-gated, -ENOSYS where the facility is absent.
+        case 60: case 443: { ret_err(ENOSYS); return 0; }  // quotactl(_fd)
+        case 104: case 105: case 106: { ret_err(EPERM); return 0; }  // modules
+        case 294: { ret_err(ENOSYS); return 0; }  // kexec_file_load
+        case 280: { ret_err(ENOSYS); return 0; }  // bpf
+        case 282: { ret_err(ENOSYS); return 0; }  // userfaultfd
+        case 447: { ret_err(ENOSYS); return 0; }  // memfd_secret
+        case 442: { ret_err(ENOSYS); return 0; }  // mount_setattr
+        case 18:  { ret_err(ENOSYS); return 0; }  // lookup_dcookie (obsolete)
+        case 128: { ret_err(ENOSYS); return 0; }  // restart_syscall
+        // POSIX message queues (181-185) and async I/O (0-4): unsupported.
+        case 181: case 182: case 183: case 184: case 185: {
+            ret_err(ENOSYS); return 0;
+        }
+        case 0: case 1: case 2: case 3: case 4: {
+            ret_err(ENOSYS); return 0;
         }
         // ── POSIX interval timers (102-103, 107-112) ──────────────────
         // getitimer/setitimer (102/103) are widely used by signal-based
@@ -957,10 +1030,11 @@ int64_t syscall_misc_extended(Emulator& emu, CPU& cpu, uint64_t num) {
         //    the dispatch chain). Removed duplicate here.
         // ── signalfd (282 via old) / signalfd4 (74) ───────────────────
         // 74 is in misc_io.cpp; nothing to do here.
-        // ── fanotify_init (300) / fanotify_mark (301) ─────────────────
-        // Filesystem event monitoring. Stub: -ENOSYS (guests fall back
-        // to inotify, which we support at cases 26-28).
-        case 300: case 301: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
+        // ── fanotify_init (262) / fanotify_mark (263) ─────────────────
+        // asm-generic numbers (the old 300/301 were the x86_64 numbers and
+        // were never reachable on AArch64). Filesystem event monitoring.
+        // Stub: -ENOSYS (guests fall back to inotify, cases 26-28).
+        case 262: case 263: { ret_host(static_cast<int64_t>(-ENOSYS)); return 0; }
         // ── perf_event_open (241) — handled at the top of this switch
         //    (case 241 returns -ENOSYS). Removed duplicate here.
         // ── landlock_create_ruleset (444) / landlock_add_rule (445) /
