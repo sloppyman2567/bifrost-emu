@@ -698,6 +698,15 @@ bool decode(DecodedInst& d, uint32_t inst) {
             d.size      = (inst >> 30) & 3;
             d.opc_ls    = (inst >> 22) & 3;
             d.is_vec    = (inst >> 26) & 1;
+            // PRFUM: size==11, opc_ls==0b10, non-vector — a prefetch hint,
+            // NOT a load. Decoding it as LDR_UNS read memory and wrote the
+            // (nonexistent) result back into the prfop field's register
+            // number (e.g. `prfm pstl1keep,[x0,#8]` clobbered x16) and could
+            // fault on an address the guest only intended to hint.
+            if (!d.is_vec && d.size == 3 && d.opc_ls == 0x2) {
+                d.cls = InstClass::HINT;
+                return true;
+            }
             int16_t imm9 = static_cast<int16_t>(arm64emu::sign_extend((inst >> 12) & 0x1FF, 9));
             d.rn        = (inst >> 5) & 0x1F;
             d.rt        = inst & 0x1F;
@@ -712,6 +721,24 @@ bool decode(DecodedInst& d, uint32_t inst) {
         switch (mode_b) {
             case 0b00: {  // LSE atomics — only valid when V=0
                 if (bit26) return false;
+                // LDAPR/LDAPRB/LDAPRH (ARMv8.3 RCpc acquire load). Its fixed
+                // pattern is size:111000:10:11111:1100:00 (bits[29:24]=111000,
+                // bits[23:22]=10, bits[21:16]=111111, bits[15:10]=110000), i.e.
+                // (inst & 0x3FFFFC00) == 0x38BFC000. Without this check the
+                // encoding fell into the LSE atomic path with atom_op=0xC (CAS)
+                // and silently compared/swapped memory — corruption, not a
+                // load. RCpc is weaker than LDAR, so modelling it as a plain
+                // acquire (non-exclusive) load is architecturally safe.
+                if ((inst & 0x3FFFFC00) == 0x38BFC000) {
+                    d.size      = (inst >> 30) & 3;
+                    d.is_load   = 1;
+                    d.acquire   = 1;
+                    d.excl_low6 = 0x3F;  // LDAR form: no monitor reservation
+                    d.rn        = (inst >> 5) & 0x1F;
+                    d.rt        = inst & 0x1F;
+                    d.cls       = InstClass::LDAR;
+                    return true;
+                }
                 d.size    = (inst >> 30) & 3;
                 d.acquire = (inst >> 23) & 1;
                 d.is_load = (inst >> 22) & 1;
@@ -726,6 +753,12 @@ bool decode(DecodedInst& d, uint32_t inst) {
                 d.size    = (inst >> 30) & 3;
                 d.opc_ls  = (inst >> 22) & 3;
                 d.is_vec  = (inst >> 26) & 1;
+                // PRFM (register): size==11, opc_ls==0b10, non-vector —
+                // prefetch hint, must be a NOP (see the unscaled form).
+                if (!d.is_vec && d.size == 3 && d.opc_ls == 0x2) {
+                    d.cls = InstClass::HINT;
+                    return true;
+                }
                 d.rm      = (inst >> 16) & 0x1F;
                 d.extend  = (inst >> 13) & 7;
                 d.shift   = (inst >> 12) & 1;
@@ -748,6 +781,13 @@ bool decode(DecodedInst& d, uint32_t inst) {
         d.size    = (inst >> 30) & 3;
         d.opc_ls  = (inst >> 22) & 3;
         d.is_vec  = (inst >> 26) & 1;
+        // PRFM (unsigned immediate): size==11, opc_ls==0b10, non-vector.
+        // The normal load path would treat it as LDRSW-like and clobber the
+        // prfop field's register number. Prefetch is a hint → NOP.
+        if (!d.is_vec && d.size == 3 && d.opc_ls == 0x2) {
+            d.cls = InstClass::HINT;
+            return true;
+        }
         uint16_t imm12 = (inst >> 10) & 0xFFF;
         d.rn      = (inst >> 5) & 0x1F;
         d.rt      = inst & 0x1F;
