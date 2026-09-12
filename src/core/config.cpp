@@ -3,6 +3,7 @@
 // Tiny TOML-subset parser (~200 LOC) + env-var bridge + validators.
 // See include/bifrost/config.hpp for the format spec.
 #include "bifrost/config.hpp"
+#include "bifrost/version.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -282,7 +283,7 @@ void Config::apply_env() {
 // ── Config::dump ───────────────────────────────────────────────────────
 void Config::dump(std::string& out) const {
     std::ostringstream ss;
-    ss << "# bifrost-emu config (1.5.4-alpha)\n\n";
+    ss << "# bifrost-emu config (" << VERSION << ")\n\n";
     ss << "[jit]\n";
     ss << "enabled     = " << (jit_enabled     ? "true" : "false") << "\n";
     ss << "threshold   = " << jit_threshold    << "\n";
