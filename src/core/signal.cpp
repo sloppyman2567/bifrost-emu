@@ -146,15 +146,41 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
     if (is_uncatchable(signo)) {
         return -EINVAL;
     }
-    // Write the previous action to old_act_addr (if requested).
+    // Read the NEW action first. `act` and `oldact` are allowed to alias
+    // (POSIX swap pattern, e.g. sigaction(sig, &sa, &sa)); reading after
+    // writing the old action would return the old action and turn the
+    // swap into a no-op. This mirrors the rt_sigprocmask aliasing fix.
     // Layout of struct k_sigaction on AArch64 (32 bytes total):
     //   +0   sa_handler  (8 bytes)
     //   +8   sa_flags    (8 bytes)
-    //   +16  sa_restorer (8 bytes)  — always 0 on AArch64 (no restorer;
-    //                                the kernel provides the trampoline)
+    //   +16  sa_restorer (8 bytes)  — always 0 on AArch64 (no restorer)
     //   +24  sa_mask     (8 bytes)
+    SigAction na;
+    bool have_new = false;
+    if (act_addr != 0) {
+        uint8_t buf[KSIGACTION_SIZE] = {0};
+        try {
+            mem.read(act_addr, buf, KSIGACTION_SIZE);
+        } catch (...) {
+            return -EFAULT;
+        }
+        memcpy(&na.handler, buf + 0,  8);
+        memcpy(&na.flags,   buf + 8,  8);
+        memcpy(&na.mask,    buf + 24, 8);
+        na.flags &= SA_SUPPORTED_FLAGS;
+        na.installed = true;
+        have_new = true;
+    }
+    // Commit the table update under the lock, then write the old action to
+    // guest memory OUTSIDE it (guest memory has its own lock; keep the
+    // critical section minimal so no lock ordering can invert).
+    SigAction old;
+    {
+        std::lock_guard<std::mutex> g(mu_);
+        old = actions_[signo];
+        if (have_new) actions_[signo] = na;
+    }
     if (old_act_addr != 0) {
-        const SigAction& old = actions_[signo];
         uint8_t buf[KSIGACTION_SIZE] = {0};
         memcpy(buf + 0,  &old.handler, 8);
         memcpy(buf + 8,  &old.flags,   8);
@@ -167,40 +193,23 @@ int SignalTable::install(Memory& mem, int signo, uint64_t act_addr,
             return -EFAULT;
         }
     }
-    // Read the new action (if provided). act_addr == 0 is a query-only
-    // call: per POSIX, "If act is NULL, then the signal handler is not
-    // changed." Don't touch the installed handler.
-    if (act_addr == 0) {
-        return 0;
-    }
-    uint8_t buf[KSIGACTION_SIZE] = {0};
-    try {
-        mem.read(act_addr, buf, KSIGACTION_SIZE);
-    } catch (...) {
-        return -EFAULT;
-    }
-    SigAction& na = actions_[signo];
-    memcpy(&na.handler, buf + 0,  8);
-    memcpy(&na.flags,   buf + 8,  8);
-    memcpy(&na.mask,    buf + 24, 8);
-    na.flags &= SA_SUPPORTED_FLAGS;
-    na.installed = true;
     return 0;
 }
-const SigAction* SignalTable::lookup(int signo) const {
-    if (signo < 1 || signo > MAX_SIGNAL) return nullptr;
-    if (!actions_[signo].installed) return nullptr;
-    return &actions_[signo];
+std::optional<SigAction> SignalTable::lookup(int signo) const {
+    if (signo < 1 || signo > MAX_SIGNAL) return std::nullopt;
+    std::lock_guard<std::mutex> g(mu_);
+    if (!actions_[signo].installed) return std::nullopt;
+    return actions_[signo];
 }
-SignalFrame& SignalTable::push_frame(int signo) {
-    frames_.emplace_back();
-    frames_.back().signo = signo;
-    return frames_.back();
+SignalFrame& SignalTable::push_frame(CPU& cpu, int signo) {
+    cpu.sig_frames.emplace_back();
+    cpu.sig_frames.back().signo = signo;
+    return cpu.sig_frames.back();
 }
-bool SignalTable::pop_frame(SignalFrame& out) {
-    if (frames_.empty()) return false;
-    out = frames_.back();
-    frames_.pop_back();
+bool SignalTable::pop_frame(CPU& cpu, SignalFrame& out) {
+    if (cpu.sig_frames.empty()) return false;
+    out = cpu.sig_frames.back();
+    cpu.sig_frames.pop_back();
     return true;
 }
 // ── rt_sigprocmask ─────────────────────────────────────────────────────
@@ -419,19 +428,20 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     // delivered when rt_sigprocmask unblocks them. SIGKILL/SIGSTOP are
     // always delivered immediately.
     if (SignalTable::is_blocked(cpu, signo) && !is_uncatchable(signo)) {
-        cpu.sigpending |= sig_bit(signo);
+        cpu.sigpending.fetch_or(sig_bit(signo), std::memory_order_relaxed);
         if (trace) {
             fprintf(stderr, "[signal] signo=%d is blocked — queued as "
                     "pending (sigpending=0x%llx)\n",
                     signo,
-                    static_cast<unsigned long long>(cpu.sigpending));
+                    static_cast<unsigned long long>(
+                        cpu.sigpending.load(std::memory_order_relaxed)));
         }
         return false;
     }
-    const SigAction* act = sigtab.lookup(signo);
+    std::optional<SigAction> act = sigtab.lookup(signo);
     if (trace) {
-        fprintf(stderr, "[signal] signo=%d: act=%p", signo,
-                static_cast<const void*>(act));
+        fprintf(stderr, "[signal] signo=%d: act=%s", signo,
+                act ? "installed" : "none");
         if (act) {
             fprintf(stderr, " handler=0x%llx installed=%d",
                     static_cast<unsigned long long>(act->handler),
@@ -509,13 +519,20 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
     const uint64_t info_addr = (target_sp - FRAME_RESERVE) & ~0xFULL;
     const uint64_t uc_addr   = info_addr + SIGINFO_SIZE;
     const uint64_t new_sp    = info_addr;
-    // Snapshot the mask so rt_sigreturn can restore it.
-    const uint64_t saved_mask = cpu.sigmask;
+    // Snapshot the mask so rt_sigreturn can restore it. During
+    // sigsuspend(2) the kernel restores the mask that was in effect
+    // BEFORE the call, not the temporary mask the guest passed.
+    const uint64_t saved_mask = cpu.sigsuspend_active
+                                    ? cpu.sigsuspend_saved_mask
+                                    : cpu.sigmask;
     // Build the guest-visible siginfo_t and ucontext_t.
     build_siginfo(emu.mem(), info_addr, signo, si_code, fault_addr);
     build_ucontext(emu.mem(), uc_addr, cpu, saved_mask, fault_addr);
     // Save full CPU state in our internal frame for rt_sigreturn.
-    SignalFrame& frame = sigtab.push_frame(signo);
+    SignalFrame& frame = sigtab.push_frame(cpu, signo);
+    // The pending sigsuspend (if any) has now been satisfied: its saved
+    // mask is captured in this frame.
+    cpu.sigsuspend_active = false;
     memcpy(frame.regs, cpu.regs, sizeof(frame.regs));
     frame.sp          = cpu.sp;
     frame.pc          = cpu.pc;
@@ -577,7 +594,7 @@ bool deliver_signal(Emulator& emu, CPU& cpu, SignalTable& sigtab, int signo,
 // PC. Multiple pending signals are delivered one at a time as the run
 // loop calls us again.
 int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
-    uint64_t pending = cpu.sigpending;
+    uint64_t pending = cpu.sigpending.load(std::memory_order_relaxed);
     while (pending) {
         // sigpending uses 1-based bit numbering (bit `signo-1`), so the
         // 0-based ctzll result IS `signo - 1`. Add 1 to recover signo.
@@ -589,7 +606,7 @@ int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
         if (SignalTable::is_blocked(cpu, signo) && !is_uncatchable(signo)) {
             continue;
         }
-        cpu.sigpending &= ~sig_bit(signo);
+        cpu.sigpending.fetch_and(~sig_bit(signo), std::memory_order_relaxed);
         if (signal_trace_enabled()) {
             fprintf(stderr, "[signal] delivering pending signal %d "
                     "(unblocked)\n", signo);
@@ -600,53 +617,35 @@ int deliver_pending_signals(Emulator& emu, CPU& cpu, SignalTable& sigtab) {
     return 0;
 }
 // ── Host-to-guest signal forwarding ───────────────────────────────────
+void Emulator::kick_signal_handler(int signo) {
+    // Async-signal-safe no-op. The ONLY effect we need is that delivery
+    // interrupts the host syscall this guest vCPU is blocked in, so it
+    // returns EINTR and the run loop can observe cpu.running==false.
+    (void)signo;
+}
 void Emulator::host_signal_handler(int signo) {
     // Called from the host kernel in a signal context. We can't call
     // deliver_signal() from here (it would touch guest memory and mutexes
-    // — not async-signal-safe). Instead, enqueue the signal number in a
-    // lock-free SPSC ring; the run loop drains the queue between
-    // instructions.
+    // — not async-signal-safe). Instead enqueue the signal number in the
+    // lock-free MPMC queue; every vCPU's run loop drains it.
     if (g_active_emu_) {
         g_active_emu_->queue_host_signal(signo);
     }
 }
 void Emulator::queue_host_signal(int signo) {
-    // Lock-free MPSC enqueue.
-    //
-    // BUGFIX: the previous code claimed this was SPSC and used a plain
-    // relaxed-load + release-store on `tail`. That's correct only if a
-    // SINGLE host thread can be inside the handler at any moment. But on
-    // a multi-vCPU guest, every spawned host thread can receive a
-    // forwarded signal simultaneously — sigfillset(&sa.sa_mask) only
-    // blocks signals on the calling thread during the handler, NOT across
-    // threads. Two threads could both read the same `t`, both write to
-    // `signals[t % CAP]`, and both store `t+1` — losing one signal and
-    // leaving a torn slot.
-    //
-    // Fix: claim a slot via fetch_add on `tail` (atomic, so each producer
-    // gets a unique slot), then bounds-check against `head` and drop
-    // (with a counter bump) if the queue is full. The slot write happens
-    // before the release-store (which is now implicit in the fetch_add's
-    // acq_rel ordering); the consumer's acquire-load of `tail` synchronizes.
-    const size_t t = host_signal_queue_.tail.fetch_add(1, std::memory_order_acq_rel);
-    const size_t h = host_signal_queue_.head.load(std::memory_order_acquire);
-    const size_t used = t - h;  // wraparound-safe (unsigned arithmetic)
-    if (used >= HOST_SIGNAL_QUEUE_CAP) {
-        // Queue full — drop. POSIX allows signal loss when the queue
-        // is full; this is acceptable. We log to stderr only if signal
-        // tracing is enabled (avoid async-signal-unsafe I/O otherwise).
+    // Lock-free MPMC enqueue (async-signal-safe: atomics only, no locks).
+    // Every vCPU's host thread can be in a forwarded-signal handler at
+    // once; the queue's per-slot sequence numbers make each producer claim
+    // a unique slot and publish it only after the write is complete, so a
+    // consumer can never observe a torn or unwritten slot.
+    if (!host_signal_queue_.push(signo)) {
+        // Queue full — drop. POSIX allows signal loss when the queue is
+        // full. Only log if tracing is on (write() is async-signal-safe).
         if (signal_trace_enabled()) {
-            // write() is async-signal-safe per POSIX.
             const char msg[] = "[signal] host signal queue full — dropping\n";
             write(2, msg, sizeof(msg) - 1);
         }
-        // Note: we already incremented tail; the consumer will skip the
-        // claimed slot by checking used >= CAP on its side. We mark the
-        // slot with -1 to signal "skipped".
-        host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = -1;
-        return;
     }
-    host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
 }
 // ── Guard-page fault reporter (BIFROST_GUARD_ALLOCS=1) ─────────────────
 // A guest OOB store past a guarded allocation lands on a PROT_NONE page
@@ -778,6 +777,17 @@ void Emulator::install_host_signal_handlers() {
     for (int sig : forwarded) {
         ::sigaction(sig, &sa, nullptr);
     }
+    // Internal kick: a no-op handler whose only job is to make a host
+    // syscall blocked on this thread return EINTR, so kill_other_threads /
+    // join_threads / ~Emulator can't hang on a vCPU parked in read(),
+    // nanosleep(), poll(), wait4(), etc. SA_RESTART is NOT set (we WANT the
+    // EINTR). Never queued/forwarded — the guest cannot observe it.
+    struct sigaction ka;
+    memset(&ka, 0, sizeof(ka));
+    ka.sa_handler = &Emulator::kick_signal_handler;
+    ka.sa_flags = 0;
+    sigfillset(&ka.sa_mask);
+    ::sigaction(KICK_SIGNAL, &ka, nullptr);
     // SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGABRT/SIGSYS are NOT
     // forwarded via host handlers — they're delivered synchronously by
     // the emulator when it detects the corresponding guest fault.
@@ -799,35 +809,14 @@ void Emulator::install_host_signal_handlers() {
     map_sigreturn_trampoline(mem_);
 }
 bool Emulator::drain_host_signals(CPU& cpu) {
-    // Lock-free MPSC dequeue. Atomically advance the head index and
-    // process signals in order.
-    //
-    // Memory ordering: the consumer's slot read must happen-before its
-    // head.store, so we use release ordering on the head.store. The
-    // producer's head.load uses acquire (in queue_host_signal) to
-    // synchronize with this store — ensuring the producer doesn't
-    // overwrite a slot the consumer is still reading.
-    //
-    // BUGFIX: slot value -1 means "dropped due to queue full" (the
-    // producer claimed the slot via fetch_add but then found the queue
-    // was past capacity). Skip these.
+    // Lock-free MPMC dequeue. Each pop() atomically claims a distinct slot
+    // whose producer has already published the signal — so multiple vCPUs
+    // draining concurrently never process the same slot (the old
+    // load-then-store on head allowed exactly that).
     const bool trace = signal_trace_enabled();
     bool any_delivered = false;
-    size_t h = host_signal_queue_.head.load(std::memory_order_relaxed);
-    size_t t = host_signal_queue_.tail.load(std::memory_order_acquire);
-    while (h != t) {
-        const int sig = host_signal_queue_.signals[h % HOST_SIGNAL_QUEUE_CAP];
-        // Release ordering ensures the slot read above is visible to the
-        // producer before it sees the advanced head index.
-        host_signal_queue_.head.store(h + 1, std::memory_order_release);
-        h = h + 1;
-        // Skip dropped-signal sentinels (queue overflow).
-        if (sig == -1) {
-            // Re-read tail in case the producer added more signals while
-            // we were iterating.
-            t = host_signal_queue_.tail.load(std::memory_order_acquire);
-            continue;
-        }
+    int sig;
+    while (host_signal_queue_.pop(sig)) {
         if (trace) {
             // fprintf is safe here — we're in the run loop, not a signal handler.
             fprintf(stderr, "[signal] drain_host_signals: sig=%d\n", sig);
@@ -835,7 +824,7 @@ bool Emulator::drain_host_signals(CPU& cpu) {
         // Drop signals that have no handler and a non-terminating
         // default (SIGCHLD, SIGURG, SIGWINCH, SIGCONT). This matches
         // the kernel behavior of "ignore by default" for these.
-        const SigAction* act = signals_.lookup(sig);
+        const std::optional<SigAction> act = signals_.lookup(sig);
         if (!act && (sig == BIFROST_SIGCHLD || sig == BIFROST_SIGURG ||
                      sig == BIFROST_SIGWINCH || sig == BIFROST_SIGCONT)) {
             continue;
@@ -855,9 +844,6 @@ bool Emulator::drain_host_signals(CPU& cpu) {
             // drain after sigreturn (mirrors drain_pending_signals).
             break;
         }
-        // Re-read tail in case the producer added more signals while
-        // we were delivering one.
-        t = host_signal_queue_.tail.load(std::memory_order_acquire);
     }
     return any_delivered;
 }

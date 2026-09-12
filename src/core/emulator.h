@@ -290,7 +290,10 @@ public:
     }
     void decrement_alive_threads() { alive_threads_.fetch_sub(1); }
     // Per-thread lookup (for tgkill, etc.)
-    CPU* find_cpu_by_tid(int tid);
+    // Return a shared_ptr to the target CPU so a concurrent
+    // kill_other_threads()/reap cannot free it while the caller uses it.
+    // For the main thread the pointer aliases main_cpu_ (no-op deleter).
+    std::shared_ptr<CPU> find_cpu_by_tid(int tid);
     // Public accessor for JIT fast LL/SC helpers.
     struct ExclMonitorShardAccess {
         std::mutex mu;
@@ -397,8 +400,14 @@ private:
         uint64_t stack_size = 0;
         uint64_t tls_base = 0;
         int tid = 0;
+        // Set by thread_entry as its final action. reap_finished_threads()
+        // joins + erases finished threads. Because threads are owned via
+        // shared_ptr, an in-flight user (find_cpu_by_tid / invalidate_jit_*)
+        // keeps the object alive until it releases, so reaping cannot
+        // free state another vCPU is still touching.
+        std::atomic<bool> finished{false};
     };
-    std::vector<std::unique_ptr<GuestThread>> threads_;
+    std::vector<std::shared_ptr<GuestThread>> threads_;
     std::mutex threads_mu_;
     std::atomic<int> next_tid_{2};
     std::atomic<int> alive_threads_{0};
@@ -423,14 +432,30 @@ private:
         uint64_t tls = 0;        // per-thread TLS block base (TPIDR_EL0)
         uint64_t handle_addr = 0;  // guest VA of the SDL_Thread* handle
         uint64_t tid = 0;
+        // Join + guest-resource-free coordination between SDL_WaitThread,
+        // a detached thread's reaper, and stop_sdl_threads(). Lock order:
+        // finish_mu is a leaf (never held while taking sdl_threads_mu_).
+        std::mutex finish_mu;
+        bool reaped = false;                 // guarded by finish_mu
+        std::atomic<bool> finished{false};   // set at sdl_thread_entry exit
     };
-    std::unordered_map<uint64_t, std::unique_ptr<SdlThread>> sdl_threads_;
+    // shared_ptr so wait/detach/stop can each pin the record instead of
+    // holding a raw pointer across an unlock (the old double-join/UAF).
+    std::unordered_map<uint64_t, std::shared_ptr<SdlThread>> sdl_threads_;
+    // Detached threads: no waiter will ever join them, so they move here and
+    // reap_retired_sdl_threads() joins them once `finished` and frees their
+    // guest stack/handle. (Previously detach leaked the record AND left the
+    // guest stack live while the detached host thread ran on it.)
+    std::vector<std::shared_ptr<SdlThread>> retired_sdl_threads_;
     std::mutex sdl_threads_mu_;
     uint64_t spawn_sdl_thread(uint64_t fn, uint64_t data);
     int64_t wait_sdl_thread(uint64_t handle, uint64_t status_ptr);
-    // SDL_DetachThread: the guest promises never to wait on `handle`, so the
-    // emulator detaches its host thread and stops tracking it (the record is
-    // leaked until process exit so the still-running entry can use it safely).
+    void reap_retired_sdl_threads();
+    // SDL_DetachThread: the guest promises never to wait on `handle`. The
+    // record moves to retired_sdl_threads_; reap_retired_sdl_threads()
+    // joins it once it finishes and frees its guest stack/handle (and
+    // stop_sdl_threads covers shutdown), so nothing leaks and the guest
+    // stack stays valid while the detached thread runs.
     void detach_sdl_thread(uint64_t handle);
     void wire_thunk_sdl_thread_runner_();
     // Guest VA of libc's __libc_single_threaded BSS word (set by the
@@ -460,6 +485,12 @@ private:
     static size_t excl_shard_idx(uint64_t addr) {
         return (addr >> 3) & (EXCL_MONITOR_SHARDS - 1);
     }
+    // Remove `cpu` from every shard's reservation lists. MUST be called
+    // from thread_entry before the GuestThread can be destroyed: an LDXR
+    // leaves a raw CPU* registered until another CPU stores to that
+    // address, so freeing the CPU first leaves a dangling pointer that a
+    // later store dereferences (heap-use-after-free; found via ASan).
+    void excl_remove_cpu(CPU* cpu);
     // jit_ldxr/jit_stxr/jit_stlr are extern "C" functions defined in
     // x86_backend.cpp. They access excl_monitor_shards_ directly.
     // No friend declaration needed — the functions are in the global
@@ -522,24 +553,92 @@ private:
     // ── Signal delivery ───────────────────────────────────────────────
     SignalTable signals_;
     // ── Host-to-guest signal forwarding ───────────────────────────────
-    // BUGFIX: the old code used std::mutex to protect host_signal_queue_.
-    // std::mutex::lock is NOT async-signal-safe — calling it from a host
-    // signal handler is undefined behavior (can deadlock if the main
-    // thread holds the mutex when the signal arrives). We now use a
-    // fixed-size lock-free SPSC ring buffer: the host signal handler
-    // (producer) writes to tail with memory_order_release; the run loop
-    // (consumer) reads from head with memory_order_acquire. No locks,
-    // no UB.
-    static constexpr size_t HOST_SIGNAL_QUEUE_CAP = 64;
+    // Producers are host signal handlers (async-signal context, so no
+    // locks), and consumers are every vCPU's drain. A bounded lock-free
+    // MPMC queue (Vyukov): each slot carries a sequence number, so a
+    // producer only publishes after writing its slot and a consumer only
+    // claims a slot after the producer released it. The previous
+    // fetch_add(tail)-then-write-slot design published `tail` BEFORE the
+    // slot store (consumer could read stale/torn data), and its
+    // load+store on `head` let two consumers drain the same slot.
+    static constexpr size_t HOST_SIGNAL_QUEUE_CAP = 64;  // power of two
     struct HostSignalQueue {
-        std::atomic<size_t> head{0};  // consumer index
-        std::atomic<size_t> tail{0};  // producer index
-        int signals[HOST_SIGNAL_QUEUE_CAP];
+        struct Cell {
+            std::atomic<size_t> seq;
+            int sig;
+        };
+        Cell cells[HOST_SIGNAL_QUEUE_CAP];
+        HostSignalQueue() {
+            for (size_t i = 0; i < HOST_SIGNAL_QUEUE_CAP; i++) {
+                cells[i].seq.store(i, std::memory_order_relaxed);
+                cells[i].sig = 0;
+            }
+        }
+        // Enqueue from a signal handler. Returns false if the queue is
+        // full (signal dropped — POSIX allows loss on overflow).
+        bool push(int signo) {
+            size_t pos = tail_.load(std::memory_order_relaxed);
+            for (;;) {
+                Cell& c = cells[pos & (HOST_SIGNAL_QUEUE_CAP - 1)];
+                const size_t seq = c.seq.load(std::memory_order_acquire);
+                const long diff = static_cast<long>(seq) - static_cast<long>(pos);
+                if (diff == 0) {
+                    if (tail_.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed)) {
+                        c.sig = signo;
+                        c.seq.store(pos + 1, std::memory_order_release);
+                        return true;
+                    }
+                } else if (diff < 0) {
+                    return false;
+                } else {
+                    pos = tail_.load(std::memory_order_relaxed);
+                }
+            }
+        }
+        // Dequeue one signal. Returns false if empty.
+        bool pop(int& out) {
+            size_t pos = head_.load(std::memory_order_relaxed);
+            for (;;) {
+                Cell& c = cells[pos & (HOST_SIGNAL_QUEUE_CAP - 1)];
+                const size_t seq = c.seq.load(std::memory_order_acquire);
+                const long diff =
+                    static_cast<long>(seq) - static_cast<long>(pos + 1);
+                if (diff == 0) {
+                    if (head_.compare_exchange_weak(pos, pos + 1,
+                            std::memory_order_relaxed)) {
+                        out = c.sig;
+                        c.seq.store(pos + HOST_SIGNAL_QUEUE_CAP,
+                                    std::memory_order_release);
+                        return true;
+                    }
+                } else if (diff < 0) {
+                    return false;
+                } else {
+                    pos = head_.load(std::memory_order_relaxed);
+                }
+            }
+        }
+    private:
+        std::atomic<size_t> head_{0};
+        std::atomic<size_t> tail_{0};
     };
     HostSignalQueue host_signal_queue_;
     static Emulator* g_active_emu_;  // for host signal handler (single active emu)
     static void host_signal_handler(int signo);
     void queue_host_signal(int signo);
+    // Internal host signal used ONLY to interrupt a vCPU blocked in a host
+    // syscall (read/nanosleep/poll/wait/…) so it can observe
+    // cpu.running==false and exit at shutdown. It is never forwarded to the
+    // guest (QEMU solves the same problem with its per-vCPU "kick").
+    // SIGPWR is chosen because it is not in the forwarded set; fall back to
+    // the raw number if the header lacks it.
+#ifdef SIGPWR
+    static constexpr int KICK_SIGNAL = SIGPWR;
+#else
+    static constexpr int KICK_SIGNAL = 30;
+#endif
+    static void kick_signal_handler(int signo);
     // ── frostJIT ──────────────────────────────────────────────────────
     std::unique_ptr<FrostJIT> jit_;
     bool jit_enabled_ = false;
@@ -589,6 +688,11 @@ private:
     int  spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                       uint64_t entry_pc, uint64_t arg, uint64_t tls);
     void join_threads();
+    // Join + erase finished guest threads. Snapshots under threads_mu_,
+    // joins OUTSIDE it (a finishing thread takes threads_mu_ on some exit
+    // paths). Safe now that guest threads are shared_ptr-owned: any
+    // in-flight find_cpu_by_tid/invalidate holder pins the object.
+    void reap_finished_threads();
     // execve: stop + join every guest thread except the caller, mirroring
     // Linux (other threads die, caller survives as the new main). Each
     // victim runs the normal thread exit path (robust cleanup, alive

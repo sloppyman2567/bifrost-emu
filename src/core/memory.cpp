@@ -209,8 +209,8 @@ bool Memory::would_exceed_page_limit(size_t num_pages) const {
     return total_pages_.load(std::memory_order_relaxed) + num_pages
            > MAX_TOTAL_PAGES;
 }
-void Memory::map_range(uint64_t addr, uint64_t size) {
-    if (size == 0) return;
+bool Memory::map_range(uint64_t addr, uint64_t size) {
+    if (size == 0) return true;
     std::unique_lock<std::shared_mutex> g(mu_);
     uint64_t start = addr & ~PAGE_MASK;
     uint64_t end = addr + size;
@@ -219,7 +219,7 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
         if (direct_window_ && s < DIRECT_WINDOW_SIZE) continue;
         if (pages_.find(s / PAGE_SIZE) == pages_.end()) missing++;
     }
-    if (missing && would_exceed_page_limit(missing)) return;
+    if (missing && would_exceed_page_limit(missing)) return false;
     for (; start < end; start += PAGE_SIZE) {
         uint64_t pn = start / PAGE_SIZE;
         // For addresses in the direct window (< 4 GiB), the window IS
@@ -233,6 +233,7 @@ void Memory::map_range(uint64_t addr, uint64_t size) {
             total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
     }
+    return true;
 }
 // TEMP DEBUG: trace guest reads/writes in the failing memalign chunk header.
 namespace {
@@ -374,28 +375,36 @@ void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
             fprintf(stderr, "[chunk] W 0x%llx n=%zu pcache=%d\n",
                     (unsigned long long)cur, take,
                     pc && pn == pc->write_page);
-        if (pc && __builtin_expect(pn == pc->write_page &&
-                                    pc->write_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
-            memcpy(pc->write_ptr + off, p, take);
-        } else {
-            std::vector<uint8_t>* page = nullptr;
-            {
-                std::unique_lock<std::shared_mutex> g(mu_);
-                auto it = pages_.find(pn);
-                if (it == pages_.end()) {
-                    // 1.5.4-alpha: OOM protection for write path.
-                    if (would_exceed_page_limit(1)) {
-                        throw UnmappedMemory(cur, true);
-                    }
-                    it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
-                    total_pages_.fetch_add(1, std::memory_order_relaxed);
-                }
-                page = &it->second;
+        // Sparse-page path (>4 GiB). Hold mu_ for the whole access: a
+        // concurrent munmap can erase this page's vector, so a cached raw
+        // pointer must be validated AND dereferenced while no mutator can
+        // run (erase takes the unique lock; we hold shared). The 4 GiB
+        // direct window never reaches here, so the lock cost is off the
+        // normal heap/stack hot path.
+        bool cached_hit = false;
+        {
+            std::shared_lock<std::shared_mutex> g(mu_);
+            if (pc && __builtin_expect(pn == pc->write_page &&
+                        pc->write_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
+                memcpy(pc->write_ptr + off, p, take);
+                cached_hit = true;
             }
-            memcpy(page->data() + off, p, take);
+        }
+        if (!cached_hit) {
+            std::unique_lock<std::shared_mutex> g(mu_);
+            auto it = pages_.find(pn);
+            if (it == pages_.end()) {
+                // 1.5.4-alpha: OOM protection for write path.
+                if (would_exceed_page_limit(1)) {
+                    throw UnmappedMemory(cur, true);
+                }
+                it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+                total_pages_.fetch_add(1, std::memory_order_relaxed);
+            }
+            memcpy(it->second.data() + off, p, take);
             if (pc) {
                 pc->write_page = pn;
-                pc->write_ptr = page->data();
+                pc->write_ptr = it->second.data();
                 pc->write_epoch = page_epoch_.load(std::memory_order_relaxed);
             }
         }
@@ -441,10 +450,16 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
                 }
             }
         }
-        if (pc && __builtin_expect(pn == pc->read_page &&
-                                   pc->read_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
-            memcpy(p, pc->read_ptr + off, take);
-        } else {
+        bool cached_hit = false;
+        {
+            std::shared_lock<std::shared_mutex> g(mu_);
+            if (pc && __builtin_expect(pn == pc->read_page &&
+                        pc->read_epoch == page_epoch_.load(std::memory_order_relaxed), 1)) {
+                memcpy(p, pc->read_ptr + off, take);
+                cached_hit = true;
+            }
+        }
+        if (!cached_hit) {
             // 1.5.4-alpha: FEX-style demand paging. On real Linux, reads
             // to unmapped pages in the user address space trigger a page
             // fault, and the kernel zero-fills the page (for anonymous
@@ -456,27 +471,23 @@ void Memory::read(uint64_t addr, void* dst, size_t n, PageCache* pc) const {
             // We still throw for addresses below PAGE_SIZE (the NULL page
             // region) — genuine NULL pointer dereferences should fault.
             if (cur < PAGE_SIZE) throw UnmappedMemory(cur, false);
-            const std::vector<uint8_t>* page = nullptr;
-            {
-                std::unique_lock<std::shared_mutex> g(mu_);
-                auto it = pages_.find(pn);
-                if (it == pages_.end()) {
-                    // 1.5.4-alpha: OOM protection for demand paging.
-                    // If auto-allocation would exceed the page limit,
-                    // throw UnmappedMemory (causing SIGSEGV delivery)
-                    // instead of letting the host OOM.
-                    if (would_exceed_page_limit(1)) {
-                        throw UnmappedMemory(cur, false);
-                    }
-                    it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
-                    total_pages_.fetch_add(1, std::memory_order_relaxed);
+            std::unique_lock<std::shared_mutex> g(mu_);
+            auto it = pages_.find(pn);
+            if (it == pages_.end()) {
+                // 1.5.4-alpha: OOM protection for demand paging.
+                // If auto-allocation would exceed the page limit,
+                // throw UnmappedMemory (causing SIGSEGV delivery)
+                // instead of letting the host OOM.
+                if (would_exceed_page_limit(1)) {
+                    throw UnmappedMemory(cur, false);
                 }
-                page = &it->second;
+                it = pages_.emplace(pn, std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+                total_pages_.fetch_add(1, std::memory_order_relaxed);
             }
-            memcpy(p, page->data() + off, take);
+            memcpy(p, it->second.data() + off, take);
             if (pc) {
                 pc->read_page = pn;
-                pc->read_ptr = page->data();
+                pc->read_ptr = it->second.data();
                 pc->read_epoch = page_epoch_.load(std::memory_order_relaxed);
             }
         }
@@ -563,6 +574,11 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve) {
         // addresses in the NULL page region or kernel space.
         if (!is_valid_guest_range(base, aligned_size)) return 0;
         mmap_next_ = std::max(mmap_next_, base + aligned_size);
+        // A fixed mapping above the window must also advance the
+        // above-window bump cursor, or a later mmap_alloc(NULL,…) can
+        // hand out an address overlapping it.
+        if (base + aligned_size > DIRECT_WINDOW_SIZE)
+            above_window_next_ = std::max(above_window_next_, base + aligned_size);
     }
     // 1.5.4-alpha: OOM protection. Check page count before allocating.
     // Count only pages that would actually be added (non-window pages not
@@ -786,6 +802,10 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
     total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
     allocations_[lo] = aligned_size;
     mmap_next_ = std::max(mmap_next_, hi);
+    // Keep the above-window bump cursor ahead of fixed high mappings so a
+    // later mmap_alloc(NULL,…) can't return an address inside them.
+    if (hi > DIRECT_WINDOW_SIZE)
+        above_window_next_ = std::max(above_window_next_, hi);
     g_memstats_cum_alloc.fetch_add(aligned_size, std::memory_order_relaxed);
     // Any pages_/prot change invalidates cached raw pointers.
     page_epoch_.fetch_add(1, std::memory_order_relaxed);
@@ -823,7 +843,8 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (new_aligned <= old_aligned) {
         std::unique_lock<std::shared_mutex> g(mu_);
         auto it = allocations_.find(old_addr);
-        if (it != allocations_.end()) {
+        if (it == allocations_.end()) return old_addr;  // untracked: no-op
+        {
             uint64_t freed = it->second > new_aligned ? it->second - new_aligned : 0;
             it->second = new_aligned;
             if (freed > 0) {
@@ -840,8 +861,6 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
                 add_free_range(fstart, freed);
                 page_epoch_.fetch_add(1, std::memory_order_relaxed);
             }
-        } else {
-            allocations_[old_addr] = new_aligned;
         }
         return old_addr;
     }
@@ -870,6 +889,11 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     if (extra_start < stack_top_ && extra_end > stack_top_ - STACK_SIZE)
         can_grow_in_place = false;
     std::unique_lock<std::shared_mutex> g(mu_);
+    // Only grow IN PLACE when old_addr is a tracked allocation. Otherwise
+    // the caller passed an address we don't own; fall through to the
+    // fresh-allocation path instead of injecting a bogus tracking key.
+    if (allocations_.find(old_addr) == allocations_.end())
+        can_grow_in_place = false;
     for (const auto& kv : allocations_) {
         uint64_t other_base = kv.first;
         uint64_t other_size = kv.second;
@@ -907,16 +931,15 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
             // expects the old data to be preserved at the start.
         }
         total_pages_.fetch_add(added, std::memory_order_relaxed);
-        auto it = allocations_.find(old_addr);
-        if (it != allocations_.end()) {
-            it->second = new_aligned;
-        } else {
-            allocations_[old_addr] = new_aligned;
-        }
+        // can_grow_in_place guarantees old_addr is tracked.
+        allocations_[old_addr] = new_aligned;
         // BUGFIX: bump mmap_next_ past the grown region. Without this,
         // a subsequent mmap_alloc(NULL,...) would return an address
         // inside the grown (and possibly already-freed) region.
         mmap_next_ = std::max(mmap_next_, old_addr + new_aligned);
+        // Same for the above-window cursor when the grown region is high.
+        if (old_addr + new_aligned > DIRECT_WINDOW_SIZE)
+            above_window_next_ = std::max(above_window_next_, old_addr + new_aligned);
         // The grown region now belongs to this allocation — remove any
         // reclaimed free range it overlaps (mremap grows into space that
         // a prior munmap may have returned to the pool).
@@ -940,6 +963,11 @@ uint64_t Memory::mremap_grow(uint64_t old_addr, uint64_t old_size, uint64_t new_
     return new_addr;
 }
 void Memory::untrack_allocation(uint64_t addr, uint64_t size) {
+    // munmap(addr, 0) is a no-op. Without this guard the page-rounding
+    // below would compute hi = lo + PAGE_SIZE for an UNALIGNED addr and
+    // free the page containing it (Linux rejects unaligned munmap with
+    // EINVAL; musl always aligns, but be defensive).
+    if (size == 0) return;
     // BUGFIX: must hold a *unique* lock to mutate allocations_. The old
     // code used shared_lock, which is a data race (UB) if another thread
     // is concurrently reading allocations_ via mremap_grow().
@@ -971,7 +999,19 @@ std::unique_lock<std::shared_mutex> g(mu_);
     // match — silently missing interior/oversized munmaps) and then
     // add_free_range(addr, size) UNCONDITIONALLY.
     const uint64_t lo = addr & ~PAGE_MASK;
-    const uint64_t hi = (addr + size + PAGE_MASK) & ~PAGE_MASK;
+    // Reject wrapping ranges BEFORE page-rounding. addr + size + PAGE_MASK
+    // can overflow to a small value (silently skipping the free) or, with
+    // a huge size, match every tracked allocation and free live memory.
+    // Linux returns -EINVAL for a wrapping munmap; the syscall layer
+    // enforces that, and this is defense in depth for internal callers.
+    uint64_t end;
+    if (__builtin_add_overflow(addr, size, &end)) return;
+    uint64_t hi;
+    if (__builtin_add_overflow(end, static_cast<uint64_t>(PAGE_MASK), &hi)) {
+        hi = ~static_cast<uint64_t>(0);  // saturate: covers the rest
+    } else {
+        hi &= ~PAGE_MASK;
+    }
     if (hi <= lo) return;  // nothing after page rounding
     // Collect intersecting allocations first (can't mutate while iterating).
     std::vector<std::pair<uint64_t, uint64_t>> hits;  // [base, size)
@@ -1039,15 +1079,20 @@ void Memory::madvise_dontneed(uint64_t addr, uint64_t len) {
     // already read as zero (demand paging), so nothing to do for them.
     // Linux ignores unmapped holes inside the range; so do we.
     std::unique_lock<std::shared_mutex> g(mu_);
-    for (uint64_t pb = addr & ~PAGE_MASK; pb < end; pb += PAGE_SIZE) {
+    // Iterate the pages that EXIST rather than every page in [addr, end).
+    // A guest can pass an enormous len; the direct-window path above is
+    // bounded by the 4 GiB window, but this loop used to walk one page at
+    // a time and could spin for ~2^52 iterations (host hang). Absent
+    // pages already read as zero, so they need no work.
+    for (auto& kv : pages_) {
+        uint64_t pb = kv.first * PAGE_SIZE;
         uint64_t page_end = pb + PAGE_SIZE;
-        if (page_end <= pb) break;  // overflow guard (pb near UINT64_MAX)
+        if (page_end <= pb) continue;                 // overflow guard
+        if (page_end <= addr || pb >= end) continue;  // outside range
         uint64_t lo = (pb > addr) ? pb : addr;
         uint64_t hi = (page_end < end) ? page_end : end;
         if (hi <= lo) continue;
-        auto it = pages_.find(pb / PAGE_SIZE);
-        if (it != pages_.end())
-            std::memset(it->second.data() + (lo - pb), 0, hi - lo);
+        std::memset(kv.second.data() + (lo - pb), 0, hi - lo);
     }
 }
 void Memory::add_free_range(uint64_t addr, uint64_t size) {
@@ -1130,8 +1175,10 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
         auto it = pages_.find(addr / PAGE_SIZE);
         if (it == pages_.end()) {
             if (expected != 0) return false;
+            if (would_exceed_page_limit(1)) return false;  // OOM: CAS fails
             it = pages_.emplace(addr / PAGE_SIZE,
                                 std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
         uint32_t cur;
         memcpy(&cur, it->second.data() + off, 4);
@@ -1151,12 +1198,24 @@ bool Memory::atomic_cas_32(uint64_t addr, uint32_t expected, uint32_t desired) {
         cur |= static_cast<uint32_t>(b) << (i * 8);
     }
     if (cur != expected) return false;
+    // Pre-check the page cap for the pages this write would create (dead
+    // code today — no atomic_cas_* callers — but keep it consistent with
+    // read/write so wiring LSE atomics later can't bypass the cap).
+    {
+        size_t missing = 0;
+        for (int i = 0; i < 4; i++) {
+            uint64_t a = addr + i;
+            if (pages_.find(a / PAGE_SIZE) == pages_.end()) missing++;
+        }
+        if (missing && would_exceed_page_limit(missing)) return false;
+    }
     for (int i = 0; i < 4; i++) {
         uint64_t a = addr + i;
         auto it = pages_.find(a / PAGE_SIZE);
         if (it == pages_.end()) {
             it = pages_.emplace(a / PAGE_SIZE,
                                 std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
         it->second[a & PAGE_MASK] = static_cast<uint8_t>(desired >> (i * 8));
     }
@@ -1179,8 +1238,10 @@ bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
         auto it = pages_.find(addr / PAGE_SIZE);
         if (it == pages_.end()) {
             if (expected != 0) return false;
+            if (would_exceed_page_limit(1)) return false;  // OOM: CAS fails
             it = pages_.emplace(addr / PAGE_SIZE,
                                 std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
         uint64_t cur;
         memcpy(&cur, it->second.data() + off, 8);
@@ -1198,12 +1259,21 @@ bool Memory::atomic_cas_64(uint64_t addr, uint64_t expected, uint64_t desired) {
         cur |= static_cast<uint64_t>(b) << (i * 8);
     }
     if (cur != expected) return false;
+    {
+        size_t missing = 0;
+        for (int i = 0; i < 8; i++) {
+            uint64_t a = addr + i;
+            if (pages_.find(a / PAGE_SIZE) == pages_.end()) missing++;
+        }
+        if (missing && would_exceed_page_limit(missing)) return false;
+    }
     for (int i = 0; i < 8; i++) {
         uint64_t a = addr + i;
         auto it = pages_.find(a / PAGE_SIZE);
         if (it == pages_.end()) {
             it = pages_.emplace(a / PAGE_SIZE,
                                 std::vector<uint8_t>(PAGE_SIZE, 0)).first;
+            total_pages_.fetch_add(1, std::memory_order_relaxed);
         }
         it->second[a & PAGE_MASK] = static_cast<uint8_t>(desired >> (i * 8));
     }

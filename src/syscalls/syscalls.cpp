@@ -160,16 +160,27 @@ void Emulator::syscall(CPU& cpu) {
     // this, signals would only be drained every 4096 instructions in
     // the run loop, which can be hundreds of milliseconds under the
     // interpreter.
-    drain_host_signals(cpu);
-    // (SIGTERM, SIGKILL, etc.) with no handler, cpu.running is now false
-    // and cpu.exit_code is set. We must NOT execute the syscall — the
-    // guest has been killed. Continuing would execute the syscall (e.g.,
-    // close(fd)) and then return to the JIT, which would run the `ret`
-    // block. The ret block reads x30, but if the signal delivery
-    // corrupted the call chain (e.g., by setting up a signal frame for
-    // a different signal), x30 could be wrong, causing a SIGSEGV at
-    // pc=0. More importantly, executing syscalls after the guest is
-    // dead is wrong — the guest should not observe any side effects.
+    //
+    // CRITICAL: if a handler frame was set up, do NOT execute the syscall.
+    // deliver_signal() rewrote x0/x1/x2 (signo/siginfo/ucontext), x30 (the
+    // trampoline) and pc (the handler) — the CPU no longer holds syscall
+    // arguments, and dispatching would both run the wrong syscall and
+    // clobber x0, so the handler would observe a garbage first argument.
+    // The interpreter/JIT propagate the handler pc and run it.
+    if (drain_host_signals(cpu)) return;
+    // Cross-thread (tgkill/tkill/kill) signals land in this CPU's pending
+    // queue and are normally drained at the run loop's 4K-instruction
+    // boundary. But a JIT self-loop that calls syscalls (e.g. a worker
+    // spinning on getpid/nanosleep) chains through native SVC without ever
+    // returning to the run loop, so it would never observe the signal.
+    // Drain here too (mirroring host signals) and skip the syscall when a
+    // handler frame was set up.
+    if (drain_pending_signals(cpu)) return;
+    // If a signal with no handler killed the thread (SIGTERM/SIGKILL
+    // default disposition) deliver_signal set cpu.running=false. We must
+    // NOT execute the syscall — the guest has been killed. Continuing
+    // would execute the syscall (e.g., close(fd)) and then return to the
+    // JIT, which would run the `ret` block on a corrupted call chain.
     if (!cpu.running) return;
     // Optional syscall trace via BIFROST_SYSCALL_TRACE env var.
     // Cache both flags in thread-local statics so we only call getenv

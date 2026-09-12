@@ -21,9 +21,11 @@
 #include "frost/audio_thunk.hpp"
 #include "bifrost/version.hpp"
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
 #include <exception>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,26 +37,30 @@ namespace arm64emu {
 // with paths that take threads_mu_ while holding a blocks lock (none
 // today — this ordering keeps it that way).
 void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size) {
-    std::vector<FrostJIT*> jits;
+    std::vector<std::shared_ptr<GuestThread>> per_thread;
+    FrostJIT* main_jit = nullptr;
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        if (jit_) jits.push_back(jit_.get());
+        main_jit = jit_.get();
         for (auto& gt : threads_) {
-            if (gt && gt->jit) jits.push_back(gt->jit.get());
+            if (gt && gt->jit) per_thread.push_back(gt);
         }
     }
-    for (FrostJIT* j : jits) j->invalidate_range(addr, size);
+    if (main_jit) main_jit->invalidate_range(addr, size);
+    for (auto& gt : per_thread) gt->jit->invalidate_range(addr, size);
 }
 void Emulator::invalidate_jit_all() {
-    std::vector<FrostJIT*> jits;
+    std::vector<std::shared_ptr<GuestThread>> per_thread;
+    FrostJIT* main_jit = nullptr;
     {
         std::lock_guard<std::mutex> g(threads_mu_);
-        if (jit_) jits.push_back(jit_.get());
+        main_jit = jit_.get();
         for (auto& gt : threads_) {
-            if (gt && gt->jit) jits.push_back(gt->jit.get());
+            if (gt && gt->jit) per_thread.push_back(gt);
         }
     }
-    for (FrostJIT* j : jits) j->invalidate_all();
+    if (main_jit) main_jit->invalidate_all();
+    for (auto& gt : per_thread) gt->jit->invalidate_all();
 }
 // The robust-list exit walk is inlined in thread_entry below; the
 // syscall-side version in threads.cpp is authoritative — keep in sync.
@@ -230,11 +236,18 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     // acquire it (CAS 0→tid failed, FUTEX_WAIT val=tid blocked
     // forever because no one would ever unlock).
     if (cpu.clear_child_tid) {
-        emu->mem().store<uint32_t>(cpu.clear_child_tid, 0);
-        auto* slot = emu->get_futex(cpu.clear_child_tid);
-        {
-            std::lock_guard<std::mutex> lk(slot->mu);
-            slot->cv.notify_all();
+        // Must not throw: this cleanup is outside the run loop's try
+        // block. An unmapped/vanished ctid page used to escape as
+        // std::terminate (and skip decrement_alive_threads).
+        try {
+            emu->mem().store<uint32_t>(cpu.clear_child_tid, 0);
+            auto* slot = emu->get_futex(cpu.clear_child_tid);
+            {
+                std::lock_guard<std::mutex> lk(slot->mu);
+                slot->cv.notify_all();
+            }
+        } catch (...) {
+            // Guest tore down the ctid page before exit — nothing to wake.
         }
     }
     // set_tid_address_ptr is now redundant with clear_child_tid (they
@@ -249,7 +262,17 @@ void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
     cpu.rseq_registered = false;
     cpu.rseq_addr = 0;
     cpu.rseq_sig = 0;
+    // Drop any LL/SC reservation this CPU still holds in the global
+    // exclusive monitor. LDXR registers a raw CPU* that is otherwise only
+    // removed by a later store to the same address; if the GuestThread is
+    // reaped first, that store dereferences a freed CPU (ASan: heap-use-
+    // after-free in interpreter.cpp's STXR/STLR reservation invalidation).
+    // Must complete before `finished` so the reaper can't free us first.
+    emu->excl_remove_cpu(&cpu);
     emu->decrement_alive_threads();
+    // Final action: mark reapable, then return. Must be the LAST statement
+    // (reap_finished_threads may join and drop the last shared_ptr).
+    gt->finished.store(true, std::memory_order_release);
 }
 int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
                            uint64_t entry_pc, uint64_t arg, uint64_t tls) {
@@ -259,7 +282,12 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     // or register set up by the parent before clone(). We accept the parameter
     // to keep the API forward-compatible with a future clone-with-arg variant.
     (void)arg;
-    auto gt = std::make_unique<GuestThread>();
+    // Reap exited threads before allocating a new one, bounding per-thread
+    // state (decode cache + optional JIT) under thread churn. Safe now that
+    // thread_entry drops its exclusive-monitor reservation before it can be
+    // reaped (the dangling CPU* that corrupted the host heap).
+    reap_finished_threads();
+    auto gt = std::make_shared<GuestThread>();
     // Initialize the child CPU. The child inherits the parent's register
     // state (like clone() does on Linux) except:
     //   x0 = 0   (child return value)
@@ -298,7 +326,7 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
     //   (2) If the parent was ON the altstack when it called clone,
     //       the child would believe it's already on an altstack and
     //       deliver future signals to a stack it doesn't own.
-    gt->cpu.sigpending = 0;
+    gt->cpu.sigpending.store(0);
     gt->cpu.altstack = CPU::AltStack{};
     // Clear the per-vCPU decode cache so the child doesn't inherit
     // stale entries from the parent (the cache entries are keyed by PC,
@@ -358,21 +386,77 @@ int Emulator::spawn_thread(CPU& parent_cpu, uint64_t flags, uint64_t stack_top,
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
     }
     GuestThread* gtp = gt.get();
+    // Start the host thread and install its handle BEFORE publishing the
+    // GuestThread to threads_. std::thread's constructor starts the thread
+    // immediately, so the guest can run to completion and set `finished`
+    // before the handle assignment; publishing first let a concurrent
+    // reap_finished_threads()/kill_other_threads() observe (and join) a
+    // half-assigned std::thread — host-heap corruption. Installing the
+    // handle first means any published GuestThread is fully initialised.
+    gtp->host_thread = std::thread(thread_entry, this, gtp);
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         threads_.push_back(std::move(gt));
     }
-    gtp->host_thread = std::thread(thread_entry, this, gtp);
     return child_tid;
 }
 void Emulator::join_threads() {
-    std::lock_guard<std::mutex> g(threads_mu_);
-    for (auto& gt : threads_) {
-        if (gt->host_thread.joinable()) {
-            gt->host_thread.join();
+    // Snapshot under the lock, then join OUTSIDE it. A finishing worker
+    // can take threads_mu_ on some exit paths (find_cpu_by_tid,
+    // invalidate_jit_range) — joining while holding it deadlocks. Same
+    // reasoning as kill_other_threads' comment.
+    std::vector<std::shared_ptr<GuestThread>> victims;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        victims.swap(threads_);
+    }
+    for (auto& gt : victims) {
+        if (gt->host_thread.joinable())
+            ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
+    }
+    for (auto& gt : victims) {
+        if (gt->host_thread.joinable()) gt->host_thread.join();
+    }
+}
+void Emulator::reap_finished_threads() {
+    // Detached SDL threads are joined + freed here too.
+    reap_retired_sdl_threads();
+    // Collect finished threads under the lock, then join outside it. The
+    // shared_ptr in `dead` pins each GuestThread (and its CPU/JIT) until
+    // its host thread has fully returned, so a concurrent find_cpu_by_tid
+    // or invalidate_jit_* holder can never touch freed state.
+    std::vector<std::shared_ptr<GuestThread>> dead;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        auto it = threads_.begin();
+        while (it != threads_.end()) {
+            if ((*it)->finished.load(std::memory_order_acquire)) {
+                dead.push_back(std::move(*it));
+                it = threads_.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
-    threads_.clear();
+    for (auto& gt : dead) {
+        if (gt->host_thread.joinable()) gt->host_thread.join();
+    }
+}
+void Emulator::excl_remove_cpu(CPU* cpu) {
+    for (size_t i = 0; i < EXCL_MONITOR_SHARDS; i++) {
+        ExclMonitorShard& shard = excl_monitor_shards_[i];
+        std::lock_guard<std::mutex> g(shard.mu);
+        for (auto it = shard.reservations.begin();
+             it != shard.reservations.end();) {
+            auto& vec = it->second;
+            vec.erase(std::remove(vec.begin(), vec.end(), cpu), vec.end());
+            if (vec.empty()) {
+                it = shard.reservations.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 void Emulator::wake_all_futexes() {
     for (size_t i = 0; i < FUTEX_SHARDS; i++) {
@@ -387,7 +471,7 @@ void Emulator::kill_other_threads(CPU& caller) {
     // Snapshot victims under the lock; stop + join outside it (a victim
     // in thread exit takes futex shard locks; joining under threads_mu_
     // while another path takes threads_mu_ inside would deadlock).
-    std::vector<std::unique_ptr<GuestThread>> victims;
+    std::vector<std::shared_ptr<GuestThread>> victims;
     {
         std::lock_guard<std::mutex> g(threads_mu_);
         auto it = threads_.begin();
@@ -402,6 +486,12 @@ void Emulator::kill_other_threads(CPU& caller) {
     // Wake futex sleepers so they observe running==false instead of
     // sleeping through the join below.
     wake_all_futexes();
+    // Interrupt any victim blocked in a host syscall (read/nanosleep/…)
+    // so it returns EINTR and exits instead of hanging the join.
+    for (auto& gt : victims) {
+        if (gt->host_thread.joinable())
+            ::pthread_kill(gt->host_thread.native_handle(), KICK_SIGNAL);
+    }
     for (auto& gt : victims) {
         if (gt->host_thread.joinable()) gt->host_thread.join();
         // No alive_threads_ fixup: each victim runs the normal thread
@@ -409,50 +499,79 @@ void Emulator::kill_other_threads(CPU& caller) {
     }
 }
 void Emulator::stop_sdl_threads() {
-    // Snapshot the SDL threads under the lock so we can set running=false
-    // on each WITHOUT holding the lock while joining (the thread entry
-    // takes sdl_threads_mu_ in wait_sdl_thread, so joining under it could
-    // deadlock).
-    std::vector<SdlThread*> pts;
+    // Snapshot the SDL threads (live + detached) under the lock, PINNING each
+    // with a shared_ptr, then stop+join outside it (the thread entry takes
+    // sdl_threads_mu_ in wait_sdl_thread, so joining under it could deadlock).
+    std::vector<std::shared_ptr<SdlThread>> pts;
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);
-        pts.reserve(sdl_threads_.size());
-        for (auto& [h, st] : sdl_threads_) {
-            pts.push_back(st.get());
-        }
+        pts.reserve(sdl_threads_.size() + retired_sdl_threads_.size());
+        for (auto& [h, st] : sdl_threads_) pts.push_back(st);
+        for (auto& st : retired_sdl_threads_) pts.push_back(st);
     }
     if (pts.empty()) return;
     // Ask each SDL thread to stop: its interpreter loop exits on the next
     // step() return when cpu.running is false.
-    for (SdlThread* st : pts) {
-        st->cpu.running = false;
-    }
+    for (auto& st : pts) st->cpu.running = false;
     // Wake any thread blocked inside a host SDL wait (SDL_SemWait): post
     // every host SDL semaphore the guest created so the host call returns
     // and the loop can observe running==false.
     if (GraphicThunk* th = graphics_.thunk()) {
         th->wake_sdl_semaphores();
     }
-    // Join each host thread now that it's signalled to stop. The worker
-    // blocked in host SDL_SemWait returns (we just posted), the timer's
-    // SDL_Delay(1) returns on its own, and the one-shot event thread has
-    // already finished. Joining outside sdl_threads_mu_ avoids the
-    // wait_sdl_thread lock ordering.
-    for (SdlThread* st : pts) {
-        if (st->host_thread.joinable()) {
-            st->host_thread.join();
-        }
+    // Interrupt host syscalls, then join + free exactly once per record.
+    for (auto& st : pts) {
+        if (st->host_thread.joinable())
+            ::pthread_kill(st->host_thread.native_handle(), KICK_SIGNAL);
+    }
+    for (auto& st : pts) {
+        std::lock_guard<std::mutex> fg(st->finish_mu);
+        if (st->reaped) continue;
+        st->reaped = true;
+        if (st->host_thread.joinable()) st->host_thread.join();
+        if (st->stack_top && st->stack_size)
+            mem_.untrack_allocation(st->stack_top - st->stack_size, st->stack_size);
+        if (st->handle_addr) mem_.untrack_allocation(st->handle_addr, 32);
     }
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);
         sdl_threads_.clear();
+        retired_sdl_threads_.clear();
     }
 }
-CPU* Emulator::find_cpu_by_tid(int tid) {
-    if (tid == 1) return &main_cpu_;
+void Emulator::reap_retired_sdl_threads() {
+    // Join detached threads that have finished and free their guest
+    // resources. Keeps a detached thread's stack/handle/record from leaking
+    // (the old detach release()d + leaked the record and never reclaimed the
+    // guest stack).
+    std::vector<std::shared_ptr<SdlThread>> ready;
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        auto it = retired_sdl_threads_.begin();
+        while (it != retired_sdl_threads_.end()) {
+            if ((*it)->finished.load(std::memory_order_acquire)) {
+                ready.push_back(std::move(*it));
+                it = retired_sdl_threads_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& st : ready) {
+        std::lock_guard<std::mutex> fg(st->finish_mu);
+        if (st->reaped) continue;
+        st->reaped = true;
+        if (st->host_thread.joinable()) st->host_thread.join();
+        if (st->stack_top && st->stack_size)
+            mem_.untrack_allocation(st->stack_top - st->stack_size, st->stack_size);
+        if (st->handle_addr) mem_.untrack_allocation(st->handle_addr, 32);
+    }
+}
+std::shared_ptr<CPU> Emulator::find_cpu_by_tid(int tid) {
+    if (tid == 1) return std::shared_ptr<CPU>(&main_cpu_, [](CPU*){});
     std::lock_guard<std::mutex> g(threads_mu_);
     for (auto& gt : threads_) {
-        if (gt->tid == tid) return &gt->cpu;
+        if (gt->tid == tid) return std::shared_ptr<CPU>(gt, &gt->cpu);
     }
     return nullptr;
 }
@@ -541,6 +660,30 @@ int Emulator::fork_guest(CPU& parent_cpu, uint64_t child_stack,
         // Fix: call install_host_signal_handlers() which sets
         // g_active_emu_ = this (the child's own Emulator).
         install_host_signal_handlers();
+        // After fork(), only the calling thread exists in the child. Host
+        // threads the parent owned (guest vCPUs, SDL workers, the stats
+        // reporter) did NOT survive; their std::thread objects are still
+        // joinable but refer to nonexistent threads, so join()/detach()
+        // can throw and destroying them calls std::terminate. Leak the
+        // handles instead — a forked child normally execve()s immediately,
+        // and a child that doesn't gets a clean single-threaded state
+        // (alive_threads_=0 re-enables the single-thread futex fast path).
+        {
+            std::lock_guard<std::mutex> gt_lock(threads_mu_);
+            (void)new std::vector<std::shared_ptr<GuestThread>>(std::move(threads_));
+        }
+        {
+            std::lock_guard<std::mutex> st_lock(sdl_threads_mu_);
+            (void)new std::unordered_map<uint64_t, std::shared_ptr<SdlThread>>(
+                std::move(sdl_threads_));
+            (void)new std::vector<std::shared_ptr<SdlThread>>(
+                std::move(retired_sdl_threads_));
+        }
+        if (stats_reporter_thread_.joinable()) {
+            stats_reporter_stop_.store(true, std::memory_order_relaxed);
+            (void)new std::thread(std::move(stats_reporter_thread_));
+        }
+        alive_threads_.store(0);
         // Host threads don't survive fork(): release thunk-owned pump
         // threads (audio etc.) so their shutdown join() can't hang the
         // child, and let them spawn fresh ones.
@@ -648,6 +791,9 @@ void sdl_thread_entry(Emulator* emu, Emulator::SdlThread* st) {
         }
     }
     emu->decrement_alive_threads();
+    // Final action: mark host-side completion so the reaper (detached
+    // threads) or a racing stop can join us without a half-dead record.
+    st->finished.store(true, std::memory_order_release);
 }
 uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
     // Allocate a guest stack. 256 KiB is plenty for the game's worker
@@ -671,7 +817,7 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
         std::vector<uint8_t> zeros(HANDLE_SIZE, 0);
         mem_.write(handle, zeros.data(), HANDLE_SIZE);
     }
-    auto st = std::make_unique<SdlThread>();
+    auto st = std::make_shared<SdlThread>();
     st->cpu.regs[0] = data;               // SDL_ThreadFunction(void* data)
     st->cpu.pc = fn;
     st->cpu.sp = stack + STACK_SIZE;
@@ -693,16 +839,20 @@ uint64_t Emulator::spawn_sdl_thread(uint64_t fn, uint64_t data) {
         mem_.store<uint32_t>(libc_single_threaded_addr_, 0);
     }
     SdlThread* stp = st.get();
+    // Start the host thread and install its handle BEFORE publishing to the
+    // map: std::thread's ctor starts the thread immediately, so a wait/
+    // detach/stop could otherwise observe a half-assigned std::thread.
+    stp->host_thread = std::thread(sdl_thread_entry, this, stp);
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);
         sdl_threads_[handle] = std::move(st);
     }
-    stp->host_thread = std::thread(sdl_thread_entry, this, stp);
     return handle;
 }
 int64_t Emulator::wait_sdl_thread(uint64_t handle, uint64_t status_ptr) {
-    // Find the thread by its guest handle.
-    SdlThread* st = nullptr;
+    // Find the thread by its guest handle, PINNING the record (shared_ptr)
+    // so a concurrent detach/stop can't free it while we wait/join.
+    std::shared_ptr<SdlThread> st;
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);
         auto it = sdl_threads_.find(handle);
@@ -713,7 +863,7 @@ int64_t Emulator::wait_sdl_thread(uint64_t handle, uint64_t status_ptr) {
             }
             return 0;
         }
-        st = it->second.get();
+        st = it->second;  // pin
     }
     // Block until the done flag is set. The thread entry futex-wakes this
     // word after the guest function returns.
@@ -746,34 +896,35 @@ int64_t Emulator::wait_sdl_thread(uint64_t handle, uint64_t status_ptr) {
     // first destroys its std::thread member while still joinable →
     // std::terminate ("terminate called without an active exception").
     // The join is cheap: the thread is one instruction from returning.
-    uint64_t stack_top = st->stack_top, stack_size = st->stack_size;
-    if (st->host_thread.joinable()) st->host_thread.join();
+    // Join + free guest resources exactly once. stop_sdl_threads()
+    // (shutdown) and the detached-thread reaper may act on the same record;
+    // finish_mu + reaped make exactly one of them join/free.
+    {
+        std::lock_guard<std::mutex> fg(st->finish_mu);
+        if (!st->reaped) {
+            st->reaped = true;
+            if (st->host_thread.joinable()) st->host_thread.join();
+            if (st->stack_top && st->stack_size)
+                mem_.untrack_allocation(st->stack_top - st->stack_size, st->stack_size);
+            if (st->handle_addr) mem_.untrack_allocation(st->handle_addr, 32);
+        }
+    }
     {
         std::lock_guard<std::mutex> g(sdl_threads_mu_);
         sdl_threads_.erase(handle);
     }
-    if (stack_top && stack_size) {
-        mem_.untrack_allocation(stack_top - stack_size, stack_size);
-    }
-    if (handle) mem_.untrack_allocation(handle, 32);
     return 0;
 }
 void Emulator::detach_sdl_thread(uint64_t handle) {
-    SdlThread* keep = nullptr;
-    {
-        std::lock_guard<std::mutex> g(sdl_threads_mu_);
-        auto it = sdl_threads_.find(handle);
-        if (it == sdl_threads_.end()) return;  // unknown/NULL: SDL no-op
-        // Take the record out of the map but intentionally LEAK it: the
-        // host thread may still be inside sdl_thread_entry, which holds this
-        // pointer. SDL detach means no waiter will ever free the thread, and
-        // process exit reclaims the record + its stack/TLS.
-        keep = it->second.release();
-        sdl_threads_.erase(it);
-    }
-    // Detach the host thread so a later ~std::thread (on a still-joinable
-    // thread) can't call std::terminate. The guest handle was already
-    // dropped, so a stray SDL_WaitThread is a no-op.
-    if (keep->host_thread.joinable()) keep->host_thread.detach();
+    std::lock_guard<std::mutex> g(sdl_threads_mu_);
+    auto it = sdl_threads_.find(handle);
+    if (it == sdl_threads_.end()) return;  // unknown/NULL: SDL no-op
+    // Move to the retired list: no waiter will join it, so the run-loop
+    // reaper joins it once `finished` and frees the guest stack/handle (and
+    // stop_sdl_threads covers shutdown). This REPLACES the old
+    // release()-and-leak, which left the guest stack live while the detached
+    // thread ran on it and raced a concurrent SDL_WaitThread's join.
+    retired_sdl_threads_.push_back(std::move(it->second));
+    sdl_threads_.erase(it);
 }
 } // namespace arm64emu

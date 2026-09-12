@@ -53,6 +53,8 @@
 #include "core/cpu.h"
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 namespace arm64emu {
@@ -130,33 +132,8 @@ constexpr uint64_t TRAMPOLINE_ADDR = 0x7000000000ULL;
 //
 // Total size: 32 bytes. Matches the kernel's struct k_sigaction.
 constexpr size_t KSIGACTION_SIZE = 32;
-// Saved CPU state for signal delivery.
-struct SignalFrame {
-    uint64_t regs[31];   // X0..X30
-    uint64_t sp;
-    uint64_t pc;
-    uint32_t pstate;
-    int      signo;       // which signal this frame is for
-    uint64_t saved_mask;  // signal mask to restore on rt_sigreturn
-    uint64_t fault_addr;  // si_addr for SIGSEGV/SIGBUS
-    int      si_code;     // si_code for siginfo_t
-    bool     on_altstack; // was the handler entered on the altstack?
-    // BUGFIX: FP/SIMD state was NOT preserved across signal handlers.
-    // Handlers using NEON (crypto, DSP, image processing) would see
-    // corrupted V registers. Now we save/restore the full FP file +
-    // FPCR/FPSR. The guest-visible ucontext_t also gets an fpsimd_context
-    // written into its 4 KiB reserved area (see build_ucontext).
-    uint64_t v_lo[32];    // bits 63:0 of each V register
-    uint64_t v_hi[32];    // bits 127:64 of each V register
-    uint32_t fpcr;
-    uint32_t fpsr;
-    // TLS + exclusive state: a handler calling pthread funcs or LDXR/STXR
-    // would otherwise corrupt TP / succeed a stale reservation across
-    // sigreturn. Real hardware clears exclusives on exception entry and
-    // the kernel restores TP from sigcontext.
-    uint64_t tpidr_el0 = 0;
-    uint64_t tpidrro_el0 = 0;
-};
+// SignalFrame is per-thread and lives in CPU (core/cpu.h) — see that
+// header for the definition.
 // Per-signal action recorded by rt_sigaction.
 struct SigAction {
     uint64_t handler    = 0;       // 0 = SIG_DFL, 1 = SIG_IGN, else handler addr
@@ -184,16 +161,17 @@ public:
     // at address `act_addr`. If `old_act_addr` is non-zero, write the
     // previous action there. Returns 0 on success, -errno on failure.
     int install(Memory& mem, int signo, uint64_t act_addr, uint64_t old_act_addr);
-    // Look up the installed action for `signo`. Returns nullptr if no
-    // handler is installed (caller should apply default behavior).
-    const SigAction* lookup(int signo) const;
-    // Push a signal frame onto the internal stack and return a reference
-    // to it. The caller fills in the saved CPU state.
-    SignalFrame& push_frame(int signo);
-    // Pop the most recent signal frame.
-    bool pop_frame(SignalFrame& out);
-    bool has_pending() const { return !frames_.empty(); }
-    size_t frame_count() const { return frames_.size(); }
+    // Look up the installed action for `signo`. Returns std::nullopt if no
+    // handler is installed (caller should apply default behavior). The
+    // action is returned by value so a concurrent rt_sigaction/SA_RESETHAND
+    // cannot invalidate the caller's view (the table is process-wide and
+    // shared by all vCPUs).
+    std::optional<SigAction> lookup(int signo) const;
+    // Push a signal frame onto this CPU's handler-call stack. Frames are
+    // per-thread (owned by the CPU), so no lock is involved.
+    SignalFrame& push_frame(CPU& cpu, int signo);
+    // Pop the most recent signal frame for this CPU.
+    bool pop_frame(CPU& cpu, SignalFrame& out);
     // ── Per-CPU signal mask & altstack ──────────────────────────────
     // The signal mask and altstack are per-CPU state (in CPU::sigmask
     // and CPU::altstack). These helpers take a CPU& and operate on the
@@ -220,23 +198,34 @@ public:
     }
     // Clear a handler (SA_RESETHAND one-shot behavior).
     void clear_handler(int signo) {
-        if (signo >= 1 && signo <= MAX_SIGNAL) {
-            actions_[signo] = SigAction{};
-        }
+        if (signo < 1 || signo > MAX_SIGNAL) return;
+        std::lock_guard<std::mutex> g(mu_);
+        actions_[signo] = SigAction{};
     }
-    // execve: caught handlers reset to default, pending frames dropped.
-    // SIG_IGN dispositions stay ignored per POSIX (only installed
-    // non-ignored handlers are cleared).
-    void reset_exec() {
-        for (int i = 1; i <= MAX_SIGNAL; i++) {
-            if (actions_[i].installed && actions_[i].handler == 1) continue;
-            actions_[i] = SigAction{};
+    // execve: caught handlers reset to default, this thread's pending
+    // frames dropped. SIG_IGN dispositions stay ignored per POSIX (only
+    // installed non-ignored handlers are cleared). Other threads are
+    // killed by execve, so their frames go away with them.
+    void reset_exec(CPU& cpu) {
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            for (int i = 1; i <= MAX_SIGNAL; i++) {
+                if (actions_[i].installed && actions_[i].handler == 1) continue;
+                actions_[i] = SigAction{};
+            }
         }
-        frames_.clear();
+        cpu.sig_frames.clear();
+        // A new image cannot be inside a sigsuspend(2) call.
+        cpu.sigsuspend_active = false;
+        cpu.sigsuspend_saved_mask = 0;
     }
 private:
-    SigAction actions_[MAX_SIGNAL + 1];  // indexed by signo (1..31)
-    std::vector<SignalFrame> frames_;
+    // Process-wide dispositions, shared by all vCPUs. Guarded by mu_:
+    // rt_sigaction writes while deliver_signal reads, and a stale pointer
+    // into this array (the old lookup() contract) could dangle across a
+    // concurrent SA_RESETHAND reset.
+    mutable std::mutex mu_;
+    SigAction actions_[MAX_SIGNAL + 1];  // indexed by signo (1..64)
 };
 // Map the sigreturn trampoline into the guest's address space.
 // Writes the 8-byte AArch64 sequence:

@@ -507,8 +507,8 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 emu.brk_ = new_brk;
                 emu.brk_start_ = new_brk;
             }
-            signals_.reset_exec();
-            cpu.sigpending = 0;
+            signals_.reset_exec(cpu);
+            cpu.sigpending.store(0);
             {
                 CPU::PendingSig tmp;
                 while (cpu.pop_pending(tmp)) {}
@@ -1109,7 +1109,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 // the target's feet). Now we queue and let the target
                 // drain itself, matching the kernel's per-task
                 // task->pending queue semantics.
-                CPU* target = emu.find_cpu_by_tid(tid);
+                auto target = emu.find_cpu_by_tid(tid);
                 if (target) {
                     if (!target->push_pending(sig, SI_USER_EMU, 0)) {
                         // Queue full — fall back to setting the bit in
@@ -1118,7 +1118,7 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                         // will pick it up. (This matches kernel behavior
                         // when task->pending is full — the signal is
                         // recorded in sigpending but loses siginfo.)
-                        target->sigpending |= (1ULL << (sig - 1));
+                        target->sigpending.fetch_or(1ULL << (sig - 1));
                     }
                 } else {
                     // Target thread doesn't exist — ESRCH.
@@ -1138,10 +1138,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 deliver_signal(emu, cpu, signals_, sig);
             } else {
                 // Cross-thread: queue on target (see tgkill above).
-                CPU* target = emu.find_cpu_by_tid(tid);
+                auto target = emu.find_cpu_by_tid(tid);
                 if (target) {
                     if (!target->push_pending(sig, SI_USER_EMU, 0)) {
-                        target->sigpending |= (1ULL << (sig - 1));
+                        target->sigpending.fetch_or(1ULL << (sig - 1));
                     }
                 } else {
                     ret_err(ESRCH);
@@ -1174,10 +1174,10 @@ int64_t syscall_threads(Emulator& emu, CPU& cpu, uint64_t num) {
                 } else {
                     // Cross-thread: queue on main thread's pending queue
                     // (see tgkill above for rationale).
-                    CPU* main = emu.find_cpu_by_tid(1);
+                    auto main = emu.find_cpu_by_tid(1);
                     if (main) {
                         if (!main->push_pending(sig, SI_USER_EMU, 0)) {
-                            main->sigpending |= (1ULL << (sig - 1));
+                            main->sigpending.fetch_or(1ULL << (sig - 1));
                         }
                     }
                 }

@@ -111,7 +111,9 @@ public:
         return page_epoch_.load(std::memory_order_relaxed);
     }
     // ── Mapping ───────────────────────────────────────────────────────
-    void map_range(uint64_t addr, uint64_t size);
+    // Map (materialize zeroed pages for) [addr, addr+size). Returns false
+    // if it would exceed the page cap (nothing is mapped in that case).
+    bool map_range(uint64_t addr, uint64_t size);
     bool is_mapped(uint64_t addr, uint64_t size) const;
     // ── Bulk read/write ───────────────────────────────────────────────
     void write(uint64_t addr, const void* src, size_t n, PageCache* pc = nullptr);

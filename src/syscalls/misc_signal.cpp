@@ -29,9 +29,9 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 try {
                     if (a3 == 4) {
                         mem_.store<uint32_t>(a0,
-                            static_cast<uint32_t>(cpu.sigpending));
+                            static_cast<uint32_t>(cpu.sigpending.load()));
                     } else {
-                        mem_.store<uint64_t>(a0, cpu.sigpending);
+                        mem_.store<uint64_t>(a0, cpu.sigpending.load());
                     }
                 }
                 catch (...) { ret_err(EFAULT); return 0; }
@@ -54,10 +54,16 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 catch (...) { ret_err(EFAULT); return 0; }
             }
             const uint64_t saved_sigmask = cpu.sigmask;
+            // A caught signal must leave the handler running (and
+            // rt_sigreturn restoring) the PRE-sigsuspend mask, not the
+            // temporary mask passed to this call. deliver_signal reads
+            // these when it builds the frame.
+            cpu.sigsuspend_saved_mask = saved_sigmask;
+            cpu.sigsuspend_active = true;
             cpu.sigmask = guest_mask & ~((1ULL << (BIFROST_SIGKILL - 1)) |
                                           (1ULL << (BIFROST_SIGSTOP - 1)));
             cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(-EINTR));
-            if (cpu.sigpending != 0) {
+            if (cpu.sigpending.load() != 0) {
                 if (deliver_pending_signals(emu, cpu, signals_) > 0)
                     return 0;
             }
@@ -72,7 +78,10 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
             }
             ::sigsuspend(&host_mask);
             const bool delivered = emu.handle_eintr(cpu);
-            if (!delivered) cpu.sigmask = saved_sigmask;
+            if (!delivered) {
+                cpu.sigmask = saved_sigmask;
+                cpu.sigsuspend_active = false;
+            }
             return 0;
         }
         case 134: { // rt_sigaction(signo, new_act, old_act, sigsetsize)
@@ -97,10 +106,10 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                         static_cast<unsigned long long>(new_mask_val),
                         r,
                         static_cast<unsigned long long>(cpu.sigmask),
-                        static_cast<unsigned long long>(cpu.sigpending));
+                        static_cast<unsigned long long>(cpu.sigpending.load()));
             }
             bool signal_delivered = false;
-            if (r == 0 && cpu.sigpending != 0) {
+            if (r == 0 && cpu.sigpending.load() != 0) {
                 cpu.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(r));
                 if (deliver_pending_signals(emu, cpu, signals_) > 0)
                     signal_delivered = true;
@@ -111,7 +120,7 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
         }
         case 139: { // rt_sigreturn — restore CPU state from signal frame
             SignalFrame frame;
-            if (signals_.pop_frame(frame)) {
+            if (signals_.pop_frame(cpu, frame)) {
                 memcpy(cpu.regs, frame.regs, sizeof(frame.regs));
                 cpu.regs[31] = 0;
                 cpu.sp     = frame.sp;
@@ -126,7 +135,7 @@ int64_t syscall_misc_signal(Emulator& emu, CPU& cpu, uint64_t num) {
                 cpu.tpidrro_el0 = frame.tpidrro_el0;
                 if (frame.on_altstack)
                     SignalTable::set_altstack_active(cpu, false);
-                if (cpu.sigpending != 0)
+                if (cpu.sigpending.load() != 0)
                     deliver_pending_signals(emu, cpu, signals_);
                 return 0;
             }

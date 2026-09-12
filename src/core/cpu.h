@@ -20,6 +20,33 @@
 #include <mutex>
 #include <vector>
 namespace arm64emu {
+// Saved CPU state for one signal delivery. Signal frames are PER-THREAD
+// (each thread owns its own handler-call stack), so the stack lives in CPU,
+// not in the process-wide SignalTable. The definition lives here rather
+// than signal.h to avoid a cpu.h <-> signal.h include cycle.
+struct SignalFrame {
+    uint64_t regs[31];   // X0..X30
+    uint64_t sp;
+    uint64_t pc;
+    uint32_t pstate;
+    int      signo;       // which signal this frame is for
+    uint64_t saved_mask;  // signal mask to restore on rt_sigreturn
+    uint64_t fault_addr;  // si_addr for SIGSEGV/SIGBUS
+    int      si_code;     // si_code for siginfo_t
+    bool     on_altstack; // was the handler entered on the altstack?
+    // FP/SIMD state must survive handler execution: handlers using NEON
+    // (crypto, DSP, image processing) would otherwise see corrupted V regs.
+    uint64_t v_lo[32];    // bits 63:0 of each V register
+    uint64_t v_hi[32];    // bits 127:64 of each V register
+    uint32_t fpcr;
+    uint32_t fpsr;
+    // TLS + exclusive state: a handler calling pthread funcs or LDXR/STXR
+    // would otherwise corrupt TP / succeed a stale reservation across
+    // sigreturn. Real hardware clears exclusives on exception entry and
+    // the kernel restores TP from sigcontext.
+    uint64_t tpidr_el0 = 0;
+    uint64_t tpidrro_el0 = 0;
+};
 class CPU {
 public:
     // We store 32 entries; regs[31] is always 0 (XZR). This lets us index
@@ -134,7 +161,25 @@ public:
     // when `signo` is blocked/pending — this matches the Linux kernel
     // sigset_t layout that rt_sigprocmask/rt_sigpending read/write.
     uint64_t sigmask = 0;       // blocked-signal bitmask (bit `signo-1` set = blocked)
-    uint64_t sigpending = 0;    // pending-signal bitmask (bit `signo-1` set = pending)
+    // Pending-signal bitmask (bit `signo-1` set = pending). ATOMIC: the
+    // owning thread manipulates it (deliver_signal/deliver_pending_signals/
+    // rt_sigprocmask), but a cross-thread tgkill/tkill/kill queue-overflow
+    // fallback sets a bit too (see threads.cpp). A plain RMW there raced the
+    // owner's accesses — use fetch_or/fetch_and/load/store.
+    std::atomic<uint64_t> sigpending{0};
+    // Per-thread handler-call stack for signal delivery. Pushed by
+    // deliver_signal, popped by rt_sigreturn. Owned by this CPU (only its
+    // own host thread touches it), so no lock is needed — sharing one
+    // process-wide vector was a data race (concurrent emplace_back +
+    // reallocation dangled the returned SignalFrame& across vCPUs).
+    std::vector<SignalFrame> sig_frames;
+    // sigsuspend(2) temporarily installs a new mask. When a signal is
+    // delivered, Linux restores the PRE-sigsuspend mask before running the
+    // handler, so the handler frame (and rt_sigreturn) must save the
+    // original mask, not the temporary one. These fields bridge the
+    // syscall to deliver_signal.
+    uint64_t sigsuspend_saved_mask = 0;
+    bool     sigsuspend_active = false;
     // ── Per-CPU pending-signal queue ─────────────────────────────────
     // to call deliver_signal() directly on the target CPU while the
     // target's host thread was concurrently executing on it — a textbook
@@ -281,6 +326,9 @@ public:
         rseq_addr = 0;
         rseq_sig = 0;
         sigmask = src.sigmask;
+        // A cloned thread does not inherit an in-progress sigsuspend.
+        sigsuspend_saved_mask = 0;
+        sigsuspend_active = false;
         // last-svc record: child starts clean (no syscalls yet).
         last_svc_num = 0;
         last_svc_pc = 0;

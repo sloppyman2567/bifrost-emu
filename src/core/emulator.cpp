@@ -56,6 +56,20 @@ Emulator::~Emulator() {
     // SDL threads so their joinable std::threads aren't destroyed here.
     // Idempotent — run() already cleared sdl_threads_ in the normal path.
     stop_sdl_threads();
+    // Same for guest vCPU threads: ask every still-running worker to stop,
+    // wake futex sleepers so they observe running==false, then join. A
+    // joinable std::thread destroyed without join() calls std::terminate.
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        for (auto& gt : threads_) gt->cpu.running = false;
+    }
+    wake_all_futexes();
+    join_threads();
+    // Stop + join the periodic reporter (it captures `this`).
+    if (stats_reporter_thread_.joinable()) {
+        stats_reporter_stop_.store(true, std::memory_order_relaxed);
+        stats_reporter_thread_.join();
+    }
     // Stop audio callback pump threads BEFORE the memory/CPU teardown.
     if (auto* at = graphics_.audio_thunk()) at->shutdown();
 }
@@ -384,8 +398,17 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 };
                 // Guarded scratch stack for the resolver ([GUARD][usable]
                 // [GUARD], PROT_NONE guards): overflow faults loudly
-                // instead of silently corrupting adjacent chunks.
-                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                // instead of silently corrupting adjacent chunks. Reused
+                // per host thread (keyed by owner so a second Emulator on
+                // the same thread doesn't reuse an unmapped window);
+                // allocating fresh here leaked 64 KiB + guards per call.
+                static thread_local uint64_t scratch_stack = 0;
+                static thread_local const Emulator* scratch_owner = nullptr;
+                if (scratch_stack == 0 || scratch_owner != this) {
+                    scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                    scratch_owner = this;
+                    if (scratch_stack == 0) { restore(); return 0; }
+                }
                 uint64_t stack_top = scratch_stack + 64 * 1024;
                 // Sentinel return address — when PC == this, the resolver
                 // has RET'd. Use 0x1000 (in the zero page, unmapped for
@@ -501,8 +524,15 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                     cpu.tpidrro_el0 = cpu.tpidr_el0;
                 }
                 // Guarded scratch stack for the constructor (PROT_NONE
-                // guard pages both sides).
-                uint64_t scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                // guard pages both sides). Reused per host thread (see the
+                // ifunc resolver above).
+                static thread_local uint64_t scratch_stack = 0;
+                static thread_local const Emulator* scratch_owner = nullptr;
+                if (scratch_stack == 0 || scratch_owner != this) {
+                    scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                    scratch_owner = this;
+                    if (scratch_stack == 0) { restore(); return; }
+                }
                 uint64_t stack_top = scratch_stack + 64 * 1024;
                 constexpr uint64_t SENTINEL_LR = 0x1000;
                 cpu.pc = fn_addr;
@@ -604,8 +634,10 @@ void Emulator::load_elf_file(const std::string& path, std::vector<std::string>& 
                 // thread-local reuse in the static-ELF guest_call_args_
                 // below.
                 static thread_local uint64_t scratch_stack = 0;
-                if (scratch_stack == 0) {
+                static thread_local const Emulator* scratch_owner = nullptr;
+                if (scratch_stack == 0 || scratch_owner != this) {
                     scratch_stack = mem_.mmap_alloc_callback_stack(64 * 1024);
+                    scratch_owner = this;
                     if (scratch_stack == 0) return 0;
                 }
                 uint64_t stack_top = scratch_stack + 64 * 1024;
@@ -1077,8 +1109,18 @@ uint64_t Emulator::build_initial_stack(uint64_t stack_top,
     const uint64_t HWCAP_CRC32   = 1ULL << 7;
     const uint64_t HWCAP_ATOMICS = 1ULL << 8;
     uint64_t hwcap = HWCAP_FP | HWCAP_ASIMD | HWCAP_CRC32 | HWCAP_ATOMICS;
-    // AT_EXECFN: pointer to the program name string on the stack
-    uint64_t execfn_addr = argv_addrs[0];
+    // AT_EXECFN: pointer to the program name string on the stack.
+    // argc==0 is permitted by the C API (argv empty) — indexing [0] would
+    // be UB, so synthesize an empty string when there is no argv0.
+    uint64_t execfn_addr;
+    if (!argv_addrs.empty()) {
+        execfn_addr = argv_addrs[0];
+    } else {
+        sp -= 1;
+        const char empty[1] = {'\0'};
+        mem_.write(sp, empty, 1);
+        execfn_addr = sp;
+    }
     // AT_PLATFORM: aarch64 string (some libc ifunc resolvers consult it).
     sp -= 8;
     const char platform_str[] = "aarch64";
@@ -1428,6 +1470,9 @@ int Emulator::run() {
             }
         }
         if ((count & 0xFFFFF) == 0) {
+            // Reap guest threads that have exited, so per-thread state
+            // (decode cache + optional JIT) doesn't accumulate.
+            reap_finished_threads();
             if (!mem_.is_mapped(main_cpu_.pc, 4)) {
                 throw EmuError("PC ran into unmapped memory at 0x"
                     + to_hex(main_cpu_.pc));
@@ -1616,9 +1661,11 @@ void Emulator::wire_thunk_glfw_cb_runner_() {
             // faults loudly instead of trashing live chunks.
             static thread_local uint64_t scratch_stack = 0;
             static thread_local uint64_t scratch_top = 0;
-            if (scratch_stack == 0) {
+            static thread_local const Emulator* scratch_owner = nullptr;
+            if (scratch_stack == 0 || scratch_owner != this) {
                 scratch_stack = mem_.mmap_alloc_callback_stack(128 * 1024);
                 if (scratch_stack == 0) return 0;
+                scratch_owner = this;
                 scratch_top = scratch_stack + 128 * 1024;
                 if (getenv("BIFROST_SCRATCH_TRACE"))
                     fprintf(stderr, "[scratch] cpu=%p usable=[0x%llx..0x%llx)\n",
@@ -1770,7 +1817,9 @@ void Emulator::ensure_thunk_linker_() {
         std::memcpy(s.v_lo, cpu.v_lo, sizeof(s.v_lo)); std::memcpy(s.v_hi, cpu.v_hi, sizeof(s.v_hi));
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
-        uint64_t scratch=mem_.mmap_alloc_callback_stack(64 * 1024); uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
+        static thread_local uint64_t scratch=0; static thread_local const Emulator* scratch_owner=nullptr;
+        if (scratch==0 || scratch_owner!=this) { scratch=mem_.mmap_alloc_callback_stack(64*1024); scratch_owner=this; if(scratch==0){ restore(); return 0; } }
+        uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=a; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=1'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(...) {}
@@ -1787,7 +1836,9 @@ void Emulator::ensure_thunk_linker_() {
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
-        uint64_t scratch=mem_.mmap_alloc_callback_stack(64 * 1024); uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
+        static thread_local uint64_t scratch=0; static thread_local const Emulator* scratch_owner=nullptr;
+        if (scratch==0 || scratch_owner!=this) { scratch=mem_.mmap_alloc_callback_stack(64*1024); scratch_owner=this; if(scratch==0){ restore(); return; } }
+        uint64_t top=scratch+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=fn; cpu.sp=top; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=10'000'000; uint64_t steps=0;
         try { while(cpu.running && cpu.pc!=SR && steps<LIM){ step(cpu); steps++; } } catch(const std::exception& e){ if(dbg().dynlink_trace) fprintf(stderr,"[%s] init 0x%llx: %s\n", CODENAME, (unsigned long long)fn, e.what()); }
@@ -1800,7 +1851,8 @@ void Emulator::ensure_thunk_linker_() {
         s.fpcr=cpu.fpcr; s.fpsr=cpu.fpsr; s.tpidr_el0=cpu.tpidr_el0; s.tpidrro_el0=cpu.tpidrro_el0; s.sigmask=cpu.sigmask; s.running=cpu.running;
         auto restore=[&](){ std::memcpy(cpu.regs, s.regs, sizeof(s.regs)); cpu.sp=s.sp; cpu.pc=s.pc; cpu.pstate=s.pstate; std::memcpy(cpu.v_lo, s.v_lo, sizeof(s.v_lo)); std::memcpy(cpu.v_hi, s.v_hi, sizeof(s.v_hi)); cpu.fpcr=s.fpcr; cpu.fpsr=s.fpsr; cpu.tpidr_el0=s.tpidr_el0; cpu.tpidrro_el0=s.tpidrro_el0; cpu.sigmask=s.sigmask; cpu.running=s.running; };
         if(dyn_linker_ && dyn_linker_->static_tls_size()>0 && cpu.tpidr_el0==0){ cpu.tpidr_el0=dyn_linker_->thread_pointer(); cpu.tpidrro_el0=cpu.tpidr_el0; }
-        static thread_local uint64_t ss=0; if(!ss){ ss=mem_.mmap_alloc_callback_stack(64 * 1024); }
+        static thread_local uint64_t ss=0; static thread_local const Emulator* ss_owner=nullptr;
+        if(!ss || ss_owner!=this){ ss=mem_.mmap_alloc_callback_stack(64*1024); ss_owner=this; if(!ss){ restore(); return 0; } }
         uint64_t top=ss+64*1024; constexpr uint64_t SR=0x1000;
         cpu.pc=fn; cpu.sp=top; cpu.regs[0]=a0; cpu.regs[1]=a1; cpu.regs[2]=a2; cpu.regs[30]=SR; cpu.running=true; cpu.pstate=0;
         constexpr uint64_t LIM=50'000'000; uint64_t steps=0;
@@ -1866,6 +1918,7 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     // Scratch stack (thread-local so concurrent guest threads can't
     // clobber each other's callee frame).
     static thread_local uint64_t scratch_stack = 0;
+    static thread_local const Emulator* scratch_owner = nullptr;
     // 64 KiB usable + 4 KiB head margin (2026-08-25): the old 8 KiB
     // scratch sat MID-HEAP next to live malloc chunks. Host-thread
     // callbacks (the audio pump's cloned vCPU firing SDL audio mixers)
@@ -1875,12 +1928,13 @@ uint64_t Emulator::call_guest_function(CPU& cpu, uint64_t fn,
     // corruption is invisible to every verification mode because it
     // comes from a host-side thread, never from a verified guest block.
     constexpr uint64_t CB_SCRATCH_USABLE = 128 * 1024;
-    if (scratch_stack == 0) {
+    if (scratch_stack == 0 || scratch_owner != this) {
         // Guarded isolated layout: [PROT_NONE guard][usable][guard] —
         // overflow faults loudly instead of trashing live chunks.
         // Returns the usable base (guard page below already skipped).
         scratch_stack = mem_.mmap_alloc_callback_stack(CB_SCRATCH_USABLE);
         if (scratch_stack == 0) return 0;
+        scratch_owner = this;
         if (getenv("BIFROST_SCRATCH_TRACE"))
             fprintf(stderr, "[scratch] cpu=%p usable=[0x%llx..0x%llx)\n",
                     (void*)&cpu,

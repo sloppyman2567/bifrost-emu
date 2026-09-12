@@ -65,6 +65,12 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
                 return 0;
             }
+            // A wrapping length produces a tiny addr+length and bypasses
+            // every overlap check below. Reject it (Linux -EINVAL).
+            if ((flags & BIFROST_MAP_FIXED_NOREPLACE) && addr + length < addr) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
             // ── MAP_FIXED_NOREPLACE ─────────────────────────────────────
             // BUGFIX: previously MAP_FIXED_NOREPLACE was silently ignored
             // (treated as a non-FIXED mmap), so the kernel could place the
@@ -92,6 +98,19 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 if (addr < brk_ && brk_start_ < addr + length) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
                     return 0;
+                }
+                // The main stack is a VMA too, but it is registered via
+                // map_range (not allocations_), so the snapshot check
+                // above misses it. Refuse to place a NOREPLACE mapping
+                // over the live stack (Linux returns -EEXIST on the stack
+                // VMA); otherwise the guest gets a mapping it writes
+                // through, shredding its own frames.
+                {
+                    uint64_t stack_lo = mem_.stack_top() - Memory::STACK_SIZE;
+                    if (addr < mem_.stack_top() && stack_lo < addr + length) {
+                        ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EEXIST)));
+                        return 0;
+                    }
                 }
                 // No overlap: place at the exact address (treat like MAP_FIXED
                 // from here on, but with no overwrite of existing pages since
@@ -312,6 +331,14 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long long)a0,
                         (unsigned long)a1);
             }
+            // Linux rejects a wrapping length with -EINVAL (addr+len
+            // overflow). Without this, the page rounding in
+            // untrack_allocation could cover the entire address space and
+            // free live mappings.
+            if (a0 + a1 < a0) {
+                ret_host(static_cast<uint64_t>(static_cast<int64_t>(-EINVAL)));
+                return 0;
+            }
             mem_.untrack_allocation(a0, a1);
             // Unmapped bytes are gone — drop JIT translations of the range
             // so a later reuse of these addresses can't run stale code.
@@ -452,7 +479,13 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 return 0;
             }
             if (new_brk > brk_) {
-                mem_.map_range(brk_, new_brk - brk_);
+                // Refuse (and report the OLD break) if materializing the
+                // new pages would exceed the page cap — otherwise brk
+                // would report success for memory that was never mapped.
+                if (!mem_.map_range(brk_, new_brk - brk_)) {
+                    ret_host(brk_);
+                    return 0;
+                }
             }
             brk_ = new_brk;
             ret_host(brk_);
