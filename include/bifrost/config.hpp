@@ -45,12 +45,6 @@
 //   sample_size = 2         # bytes per sample (16-bit signed)
 //   dump = ""               # WAV path on exit
 //
-//   [thunk]
-//   graphics = false        # BIFROST_THUNK_GRAPHICS
-//   audio = false           # new in 1.5.4-alpha
-//   display = false         # new in 1.5.4-alpha
-//   trace = false           # BIFROST_THUNK_TRACE
-//
 //   [paths]
 //   rootfs = ""             # BIFROST_ROOT
 //   cwd = "/"               # guest-side cwd
@@ -93,11 +87,6 @@ struct Config {
     uint8_t  audio_channels    = 2;
     uint8_t  audio_sample_size = 2;
     std::string audio_dump_path;          // WAV path on exit
-    // ── [thunk] ──────────────────────────────────────────────────────
-    bool     thunk_graphics    = false;
-    bool     thunk_audio       = false;
-    bool     thunk_display     = false;
-    bool     thunk_trace       = false;
     // ── [paths] ──────────────────────────────────────────────────────
     std::string rootfs_path;              // BIFROST_ROOT (empty = no sandbox)
     std::string guest_cwd     = "/";

@@ -141,13 +141,6 @@ bool Config::load_from_string(const std::string& text, std::string& err) {
             if (key == "sample_size") { int64_t v; if (!parse_int(raw_val, v)) return false; audio_sample_size = static_cast<uint8_t>(v); return true; }
             if (key == "dump")        { std::string v = raw_val; unquote(v); audio_dump_path = v; return true; }
         }
-        // [thunk]
-        if (section == "thunk") {
-            if (key == "graphics") { bool v; if (!parse_bool(raw_val, v)) return false; thunk_graphics = v; return true; }
-            if (key == "audio")    { bool v; if (!parse_bool(raw_val, v)) return false; thunk_audio = v; return true; }
-            if (key == "display")  { bool v; if (!parse_bool(raw_val, v)) return false; thunk_display = v; return true; }
-            if (key == "trace")    { bool v; if (!parse_bool(raw_val, v)) return false; thunk_trace = v; return true; }
-        }
         // [paths]
         if (section == "paths") {
             if (key == "rootfs")   { std::string v = raw_val; unquote(v); rootfs_path = v; return true; }
@@ -267,11 +260,6 @@ void Config::apply_env() {
         int64_t n;
         if (parse_int(v, n) && n >= 0) jit_threshold = static_cast<uint64_t>(n);
     }
-    // [thunk]
-    env_bool("BIFROST_THUNK_GRAPHICS", thunk_graphics);
-    env_bool("BIFROST_THUNK_AUDIO",    thunk_audio);
-    env_bool("BIFROST_THUNK_DISPLAY",  thunk_display);
-    env_bool("BIFROST_THUNK_TRACE",    thunk_trace);
     // [paths]
     env_str ("BIFROST_ROOT",           rootfs_path);
     // [signal]
@@ -306,12 +294,6 @@ void Config::dump(std::string& out) const {
     ss << "channels    = " << static_cast<int>(audio_channels) << "\n";
     ss << "sample_size = " << static_cast<int>(audio_sample_size) << "\n";
     ss << "dump        = \"" << audio_dump_path << "\"\n";
-    ss << "\n";
-    ss << "[thunk]\n";
-    ss << "graphics = " << (thunk_graphics ? "true" : "false") << "\n";
-    ss << "audio    = " << (thunk_audio    ? "true" : "false") << "\n";
-    ss << "display  = " << (thunk_display  ? "true" : "false") << "\n";
-    ss << "trace    = " << (thunk_trace    ? "true" : "false") << "\n";
     ss << "\n";
     ss << "[paths]\n";
     ss << "rootfs = \"" << rootfs_path << "\"\n";

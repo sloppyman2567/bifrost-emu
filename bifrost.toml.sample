@@ -44,13 +44,6 @@ channels    = 2           # stereo
 sample_size = 2           # bytes per sample (16-bit signed)
 dump        = ""          # write WAV here on exit (empty = no dump)
 
-# ── Thunking (forward guest library calls to host) ────────────────────
-[thunk]
-graphics = false          # BIFROST_THUNK_GRAPHICS — forward GL/EGL/SDL2
-audio    = false          # BIFROST_THUNK_AUDIO — forward ALSA/PulseAudio
-display  = false          # BIFROST_THUNK_DISPLAY — forward Vulkan/Wayland
-trace    = false          # BIFROST_THUNK_TRACE — log every thunked call
-
 # ── Filesystem paths ──────────────────────────────────────────────────
 [paths]
 rootfs = ""               # BIFROST_ROOT — chroot-like sandbox path
