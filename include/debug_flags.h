@@ -23,8 +23,6 @@ struct DebugFlags {
     bool xwrcheck = false;  // BIFROST_XWRCHECK   — X write-corruption checks
     bool xrecv    = false;  // BIFROST_XRECV_TRACE— X receive traces
     bool xdelay   = false;  // BIFROST_XDELAY     — X delayed-delivery sim
-    bool xcb_cw   = false;  // BIFROST_XCB_CW     — xcb_create_window reg dump
-    bool xcb_img  = false;  // BIFROST_XCB_IMG    — xcb image tracing
     // ── poll / futex / thread diagnostics ────────────────────────────
     bool ppoll      = false;  // BIFROST_PPOLL_TRACE — ppoll entry/revents
     bool ppoll_peek = false;  // BIFROST_PPOLL_PEEK  — msgs peek before/after
@@ -36,7 +34,6 @@ struct DebugFlags {
     bool exec_trace = false;  // BIFROST_EXEC_TRACE  — thread exec tracing
     // ── loader / interpreter traces ──────────────────────────────────
     bool ld2  = false;  // BIFROST_LD2_DBG  — second-run dynamic-linker
-    bool nss  = false;  // BIFROST_NSS_TRACE
     // ── JIT codegen diagnostics ──────────────────────────────────────
     bool regalloc_stats = false;  // BIFROST_REGALLOC_STATS — per-block spill/reload density
     // ── graphics-thunk traces ────────────────────────────────────────
@@ -88,8 +85,6 @@ struct DebugFlags {
         f.xwrcheck  = all || env("BIFROST_XWRCHECK");
         f.xrecv     = all || env("BIFROST_XRECV_TRACE");
         f.xdelay    = all || env("BIFROST_XDELAY");
-        f.xcb_cw    = all || env("BIFROST_XCB_CW");
-        f.xcb_img   = all || env("BIFROST_XCB_IMG");
         f.ppoll       = all || env("BIFROST_PPOLL_TRACE");
         f.ppoll_peek  = all || env("BIFROST_PPOLL_PEEK");
         f.futex_trace = all || env("BIFROST_FUTEX_TRACE");
@@ -99,7 +94,6 @@ struct DebugFlags {
         f.btraw     = all || env("BIFROST_BTRAW");
         f.exec_trace= all || env("BIFROST_EXEC_TRACE");
         f.ld2       = all || env("BIFROST_LD2_DBG");
-        f.nss       = all || env("BIFROST_NSS_TRACE");
         f.regalloc_stats = all || env("BIFROST_REGALLOC_STATS");
         f.thunk_trace = all || env("BIFROST_THUNK_TRACE");
         f.frame_trace = all || env("BIFROST_FRAME_TRACE");

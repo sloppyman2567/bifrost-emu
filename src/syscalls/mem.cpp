@@ -253,21 +253,6 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (long long)(int64_t)a4,
                         (unsigned long long)a5,
                         (unsigned long long)mapped);
-                if (length > (1u << 20)) {
-                    // TEMP DEBUG: who makes a big mmap?
-                    uint64_t fp = cpu.regs[29];
-                    for (int i = 0; i < 24 && fp && (fp & 1) == 0; i++) {
-                        uint64_t ra = 0, pfp = 0;
-                        try {
-                            emu.mem().read(fp, &pfp, 8);
-                            emu.mem().read(fp + 8, &ra, 8);
-                        } catch (...) { break; }
-                        fprintf(stderr, "  bigmmap[%2d] fp=0x%llx ra=0x%llx\n",
-                                i, (unsigned long long)fp, (unsigned long long)ra);
-                        if (pfp <= fp) break;
-                        fp = pfp;
-                    }
-                }
             }
             // Note: musl's mallocng uses MAP_FIXED with PROT_NONE to carve
             // pages from the brk region, then calls mprotect to make them
