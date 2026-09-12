@@ -89,9 +89,10 @@ enum class Policy : uint8_t {
     PROXY = 47,
     ANDROID_WINDOW = 48,
     SDL_ALLOC = 49,
-    SDL_STUB0 = 50,
-    SDL_EVENT_FILTER = 51,
-    SDLVK_EXT = 52,
+    THREAD_DETACH = 50,
+    SDL_STUB0 = 51,
+    SDL_EVENT_FILTER = 52,
+    SDLVK_EXT = 53,
 };
 
 enum class RetKind : uint8_t {
@@ -1160,7 +1161,7 @@ inline constexpr Spec specs[] = {
     {LibFamily::SDL, "SDL_CondBroadcast", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::SDL, "SDL_CondWaitTimeout", "iii", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::SDL, "SDL_DestroyCond", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
-    {LibFamily::SDL, "SDL_DetachThread", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
+    {LibFamily::SDL, "SDL_DetachThread", "i", RetKind::PLAIN, Policy::THREAD_DETACH, SizeKind::NONE, false},
     {LibFamily::SDL, "SDL_GetPerformanceFrequency", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::SDL, "SDL_GetPerformanceCounter", "", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},
     {LibFamily::SDL, "SDL_IsGameController", "i", RetKind::PLAIN, Policy::NONE, SizeKind::NONE, false},

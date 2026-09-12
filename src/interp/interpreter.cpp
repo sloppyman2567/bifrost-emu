@@ -73,9 +73,9 @@ void dump_decode_error(const CPU& cpu, const Memory& mem, uint32_t inst) {
 }
 void Emulator::execute(uint32_t inst, uint64_t& next_pc, CPU& cpu) {
     auto* pcache = &cpu.page_cache;
-    // BIFROST_WATCH support: snapshot pc so Memory::write can attribute
-    // stores (one cached branch when unset).
-    if (!dbg().watch.empty()) Memory::note_interp_pc(cpu.pc);
+    // BIFROST_WATCH / BIFROST_WRITE_TRACE support: snapshot pc so
+    // Memory::write can attribute stores (one cached branch when unset).
+    if (dbg().need_store_pc()) Memory::note_interp_pc(cpu.pc);
     // ── TEMP: NSS trace ─────────────────────────────────────────
     {
         static bool nss_trace_ = dbg().nss;

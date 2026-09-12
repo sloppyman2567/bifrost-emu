@@ -192,8 +192,21 @@ public:
     FdTable&        fds()      { return fds_; }
     const std::string& elf_path() const { return elf_path_; }
     CPU&            main_cpu() { return main_cpu_; }
+    // Async-signal-safe access to the active emulator (the guard-fault
+    // reporter in signal.cpp runs in a host signal context and cannot use
+    // instance globals directly). Single active emulator per host process.
+    static Emulator* active_emulator() { return g_active_emu_; }
     FrostJIT*       jit() { return jit_.get(); }
     void            enable_jit();
+    // SMC / mapping invalidation (see FrostJIT::invalidate_range/all):
+    // drops JIT translations overlapping [addr, addr+size) (or everything)
+    // on the main JIT and every per-thread JIT. Collects JIT pointers
+    // under threads_mu_ first, then invalidates without holding it (each
+    // FrostJIT takes its own blocks_mutex_). No-op when the JIT is off.
+    // Defined in src/core/thread_mgr.cpp. Called for IC cache maintenance
+    // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
+    void invalidate_jit_range(uint64_t addr, uint64_t size);
+    void invalidate_jit_all();
     // Defined in src/jit/jit_glue.cpp so the FrostJIT definition is visible.
     void jit_step(CPU& cpu);
     void print_jit_stats();
@@ -415,6 +428,10 @@ private:
     std::mutex sdl_threads_mu_;
     uint64_t spawn_sdl_thread(uint64_t fn, uint64_t data);
     int64_t wait_sdl_thread(uint64_t handle, uint64_t status_ptr);
+    // SDL_DetachThread: the guest promises never to wait on `handle`, so the
+    // emulator detaches its host thread and stops tracking it (the record is
+    // leaked until process exit so the still-running entry can use it safely).
+    void detach_sdl_thread(uint64_t handle);
     void wire_thunk_sdl_thread_runner_();
     // Guest VA of libc's __libc_single_threaded BSS word (set by the
     // dynamic linker during link(); 0 for musl). spawn_thread flips it

@@ -38,9 +38,19 @@ bool FrostJIT::patch_chain(size_t chain_patch_off, const uint8_t* target_fn) {
     // is cheap if the buffer is already writable (e.g., during translate_block).
     // If W^X is disabled, this is a no-op.
     make_writable();
-    // Overwrite the 5 bytes with `jmp rel32` (0xE9 + 4-byte displacement).
-    code_buf_[chain_patch_off] = 0xE9;
+    // Thread-safe publication: write the 4 displacement bytes FIRST, then
+    // the opcode byte LAST with release ordering. An executing thread
+    // fetching these 5 bytes concurrently then observes either:
+    //   - the old opcode (ret/0xC3 or NOP/0x90) → runs the unpatched
+    //     slot (returns to the dispatcher — safe), or
+    //   - 0xE9 with a fully-written rel32 → jumps to the target (safe).
+    // A torn rel32 with a premature 0xE9 (the old order: opcode first)
+    // jumps to a wild address. x86 stores are TSO-ordered and the fence
+    // constrains the compiler, so the opcode store is globally observed
+    // after the rel32 stores. Single-byte stores are atomic on x86.
     memcpy(code_buf_ + chain_patch_off + 1, &rel, 4);
+    std::atomic_thread_fence(std::memory_order_release);
+    code_buf_[chain_patch_off] = 0xE9;
     // Memory barrier — ensures the writer's stores are globally visible
     // before any other thread (or the same core's instruction fetch)
     // observes the patched bytes. x86 stores are already TSO, but the
@@ -146,8 +156,11 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
                             patched_any = true;
                         }
                         int32_t rel = static_cast<int32_t>(itm->code_len - 5);
-                        code_buf_[itm->code_off] = 0xE9;  // jmp rel32
+                        // Ordered publication (rel32 first, opcode last) —
+                        // same torn-fetch rationale as patch_chain above.
                         memcpy(code_buf_ + itm->code_off + 1, &rel, 4);
+                        std::atomic_thread_fence(std::memory_order_release);
+                        code_buf_[itm->code_off] = 0xE9;  // jmp rel32
                     }
                     itm = mats.erase(itm);
                 }
@@ -194,5 +207,95 @@ void FrostJIT::chain_back_references(uint64_t target_pc) {
             try_patch(kv.first);
         }
     }
+}
+void FrostJIT::invalidate_range(uint64_t addr, uint64_t size) {
+    if (size == 0) return;
+    const uint64_t lo = addr;
+    const uint64_t hi = addr + size;  // wraps only for absurd ranges; callers pass sane values
+    if (hi <= lo) { invalidate_all(); return; }
+    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
+    std::unique_lock<std::shared_mutex> g(blocks_mutex_);
+    // 1. Collect victims: blocks whose [pc, pc+instr_count*4) overlaps [lo, hi).
+    std::vector<uint64_t> victims;
+    victims.reserve(4);
+    auto ranges_overlap = [&](uint64_t b, uint64_t e) { return b < hi && e > lo; };
+    for (const auto& kv : blocks_) {
+        const uint64_t b = kv.first;
+        const uint64_t e = b + static_cast<uint64_t>(kv.second.instr_count) * 4;
+        if (ranges_overlap(b, e)) { victims.push_back(b); continue; }
+        // Inlined BL-leaf callees live outside the caller's contiguous
+        // range — check those too.
+        for (const auto& r : kv.second.inlined_ranges_) {
+            if (ranges_overlap(r.first, r.first + static_cast<uint64_t>(r.second) * 4)) {
+                victims.push_back(b);
+                break;
+            }
+        }
+    }
+    if (victims.empty()) return;
+    auto unpatch_slot = [&](size_t off) {
+        if (off + 5 > CODE_BUF_SIZE) return;
+        if (code_buf_[off] != 0xE9) return;  // not patched — leave alone
+        code_buf_[off] = unpatched;  // single-byte atomic store
+    };
+    make_writable();
+    for (uint64_t vpc : victims) {
+        // 2. Unpatch predecessors chained to this victim.
+        auto bref = back_refs_.find(vpc);
+        if (bref != back_refs_.end()) {
+            for (uint64_t src_pc : bref->second) {
+                auto sit = blocks_.find(src_pc);
+                if (sit == blocks_.end()) continue;
+                BlockEntry& se = sit->second;
+                if (se.chained && se.chain_target_pc == vpc) {
+                    unpatch_slot(se.chain_patch_off);
+                    se.chained = false;
+                }
+                if (se.taken_chained && se.has_taken_chain_slot
+                    && se.taken_chain_target_pc == vpc) {
+                    unpatch_slot(se.taken_chain_patch_off);
+                    se.taken_chained = false;
+                }
+            }
+            back_refs_.erase(bref);
+        }
+        // 3. Erase the victim (code bytes leak — never reused, see header).
+        // Keep pending_call_sites_ so a later retranslate re-patches
+        // still-slow-path callers to the fresh fn.
+        blocks_.erase(vpc);
+        // 4. Drop this thread's fast-path entries for the victim.
+        if (tls_last_block_.pc == vpc) tls_last_block_ = LastBlockCache{};
+        int slot = static_cast<int>(((vpc >> 2) ^ (vpc >> 17)) & (INLINE_CACHE_SLOTS - 1));
+        if (tls_inline_cache_[slot].pc == vpc) tls_inline_cache_[slot] = InlineCacheEntry{};
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    make_executable();
+}
+void FrostJIT::invalidate_all() {
+    const uint8_t unpatched = chain_skip_enabled() ? 0x90 : 0xC3;
+    std::unique_lock<std::shared_mutex> g(blocks_mutex_);
+    if (blocks_.empty()) return;
+    make_writable();
+    for (auto& kv : blocks_) {
+        BlockEntry& e = kv.second;
+        if (e.chained && e.chain_patch_off + 5 <= CODE_BUF_SIZE
+            && code_buf_[e.chain_patch_off] == 0xE9) {
+            code_buf_[e.chain_patch_off] = unpatched;
+            e.chained = false;
+        }
+        if (e.taken_chained && e.has_taken_chain_slot
+            && e.taken_chain_patch_off + 5 <= CODE_BUF_SIZE
+            && code_buf_[e.taken_chain_patch_off] == 0xE9) {
+            code_buf_[e.taken_chain_patch_off] = unpatched;
+            e.taken_chained = false;
+        }
+    }
+    blocks_.clear();
+    back_refs_.clear();
+    // Keep pending_call_sites_ (see invalidate_range rationale).
+    tls_last_block_ = LastBlockCache{};
+    for (int i = 0; i < INLINE_CACHE_SLOTS; i++) tls_inline_cache_[i] = InlineCacheEntry{};
+    std::atomic_thread_fence(std::memory_order_release);
+    make_executable();
 }
 } // namespace arm64emu

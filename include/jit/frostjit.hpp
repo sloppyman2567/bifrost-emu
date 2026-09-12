@@ -493,6 +493,29 @@ public:
     // deadlocking. Per-thread state (watchdog, hotness) is thread-local.
     std::shared_mutex blocks_mutex_;  // protects blocks_, back_refs_, code_buf_ writes
     void flush_cache();
+    // ── SMC / mapping invalidation ──────────────────────────────────
+    // Erase every cached block whose guest range [pc, pc+instr_count*4)
+    // overlaps [addr, addr+size), and unpatch any predecessor chain slot
+    // (fall-through or taken) that targeted an erased block back to its
+    // unpatched ret/NOP pattern (single-byte opcode store — atomic, so a
+    // concurrent executor observes either the old jmp or a clean slot,
+    // never a torn one). Code bytes are leaked, never reused, so a stale
+    // fn pointer can at worst run old code, never crash on recycled bytes.
+    // Also drops matching entries from this thread's last-block/inline
+    // caches (other threads' TLS entries are best-effort: a stale TLS hit
+    // runs the leaked old bytes; guests must synchronize SMC with
+    // IC maintenance + cross-thread barriers, same as real ARM).
+    // Takes blocks_mutex_ exclusive. Called for IC cache maintenance
+    // (interp MSR_SYS CRn==7), munmap, and MAP_FIXED-replace mmap.
+    // Raw guest stores without IC maintenance are NOT hooked (the JIT
+    // fast path bypasses Memory::write) — on real ARM their visibility
+    // is UNPREDICTABLE without IC+ISB, so stale execution there matches
+    // the architecture instead of diverging from it.
+    void invalidate_range(uint64_t addr, uint64_t size);
+    // Erase the whole block cache (IC IALLU, Xt==XZR form). Same
+    // slot-unpatch/TLS-drop discipline as invalidate_range, applied to
+    // every block. Rare — full O(N) scan.
+    void invalidate_all();
     size_t code_buf_used()  const { return code_buf_used_; }
     size_t code_buf_size()  const { return CODE_BUF_SIZE; }
     size_t cache_entries()  const { return blocks_.size(); }
@@ -821,6 +844,12 @@ private:
             size_t   code_len;    // length of the region (cmc + pushfq/bit-extract/store)
         };
         std::vector<PendingFlagMat> pending_flag_mat_;
+        // Inlined BL-leaf callee ranges: (callee_pc, instr_count) pairs for
+        // every leaf inlined into this block (ir counts them in instr_count
+        // but they live at the callee address, not contiguous with the
+        // caller). invalidate_range checks these too — an SMC on an
+        // inlined leaf must drop its inliner.
+        std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     };
     std::unordered_map<uint64_t, BlockEntry> blocks_;
     // Back-reference index: maps target_pc → list of source_pcs whose
@@ -1472,6 +1501,9 @@ private:
     // dead materializes when the targets translate clean. Cleared at
     // translate_block start.
     std::vector<BlockEntry::PendingFlagMat> pending_flag_mat_;
+    // Inlined BL-leaf callee ranges built per-block, moved into the
+    // BlockEntry at registration. Cleared at translate_block start.
+    std::vector<std::pair<uint64_t, int>> inlined_ranges_;
     uint64_t current_start_pc_ = 0;      // start PC of the block being translated
     // ── XMM vector register cache (1.5.4-alpha) ───────────────────
     // Guest vector regs (0-31) pinned into host XMM3-15 across the whole

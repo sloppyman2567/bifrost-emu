@@ -190,6 +190,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                     ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                     return 0;
                 }
+                // Fixed replace discards old bytes — stale JIT translations
+                // of the replaced range must go (see invalidate_range).
+                emu.invalidate_jit_range(addr, length);
                 ret_host(addr);
                 return 0;
             }
@@ -207,6 +210,7 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 // Atomic replace with fresh-zero anonymous semantics
                 // (PROT_NONE already returned above, so prot != 0 here).
                 mapped = mem_.mmap_fixed_replace(addr, length, virt_reserve, prot != 0);
+                if (mapped != 0) emu.invalidate_jit_range(addr, length);
             } else {
                 mapped = mem_.mmap_alloc(length, effective_hint, virt_reserve);
             }
@@ -309,6 +313,9 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                         (unsigned long)a1);
             }
             mem_.untrack_allocation(a0, a1);
+            // Unmapped bytes are gone — drop JIT translations of the range
+            // so a later reuse of these addresses can't run stale code.
+            emu.invalidate_jit_range(a0, a1);
             ret_host(0);
             return 0;
         }
@@ -372,6 +379,10 @@ int64_t syscall_mem(Emulator& emu, CPU& cpu, uint64_t num) {
                 ret_host(static_cast<uint64_t>(static_cast<int64_t>(-ENOMEM)));
                 return 0;
             }
+            // A move leaves stale bytes at the old range and fresh copies
+            // at the new one — invalidate both so neither runs stale code.
+            emu.invalidate_jit_range(old_addr, old_size);
+            if (result != old_addr) emu.invalidate_jit_range(result, new_size);
             if (dbg().trace_mmap) {
                 fprintf(stderr, "[mremap(0x%llx, %lu → %lu) → 0x%llx]\n",
                         (unsigned long long)old_addr,

@@ -38,6 +38,7 @@
 #include <cerrno>
 #include <cstring>
 #include <csignal>
+#include <ucontext.h>
 namespace arm64emu {
 // Static instance pointer for the host signal handler. Only one Emulator
 // can be "active" for host signal forwarding at a time — bifrost-emu runs
@@ -647,6 +648,68 @@ void Emulator::queue_host_signal(int signo) {
     }
     host_signal_queue_.signals[t % HOST_SIGNAL_QUEUE_CAP] = signo;
 }
+// ── Guard-page fault reporter (BIFROST_GUARD_ALLOCS=1) ─────────────────
+// A guest OOB store past a guarded allocation lands on a PROT_NONE page
+// inside the direct window; the host takes SIGSEGV/SIGBUS. Report the
+// guest address + current guest pc and die loudly. Writes are hand-rolled
+// (no snprintf) so the handler stays async-signal-safe. Anything outside
+// the window is a genuine host fault — restore the default disposition
+// and re-raise so nothing is masked.
+static void guard_sig_write(const char* s, size_t n) { (void)!::write(2, s, n); }
+static char* guard_sig_str(char* p, const char* s) { while (*s) *p++ = *s++; return p; }
+static char* guard_sig_hex(char* p, uint64_t v) {
+    *p++ = '0'; *p++ = 'x';
+    char tmp[16]; int i = 0;
+    if (v == 0) tmp[i++] = '0';
+    while (v) {
+        int d = static_cast<int>(v & 0xf);
+        tmp[i++] = static_cast<char>(d < 10 ? '0' + d : 'a' + d - 10);
+        v >>= 4;
+    }
+    while (i) *p++ = tmp[--i];
+    return p;
+}
+static void guard_fault_handler(int signo, siginfo_t* info, void* ctx) {
+    Emulator* emu = Emulator::active_emulator();
+    uint8_t* win = emu ? emu->mem().direct_window() : nullptr;
+    uintptr_t a = reinterpret_cast<uintptr_t>(info->si_addr);
+    if (win && a >= reinterpret_cast<uintptr_t>(win) &&
+        a < reinterpret_cast<uintptr_t>(win) + Memory::DIRECT_WINDOW_SIZE) {
+        const CPU& cpu = emu->main_cpu();
+        // x86-64 error code bit 1 = write access (host-only tool).
+        bool is_write = false;
+        if (ctx) {
+            ucontext_t* uc = static_cast<ucontext_t*>(ctx);
+            is_write = (uc->uc_mcontext.gregs[REG_ERR] & 0x2) != 0;
+        }
+        char buf[1200]; char* p = buf;
+        p = guard_sig_str(p, "[guard] OOB guest ");
+        p = guard_sig_str(p, is_write ? "WRITE at " : "READ at ");
+        p = guard_sig_hex(p, static_cast<uint64_t>(a - reinterpret_cast<uintptr_t>(win)));
+        p = guard_sig_str(p, " pc=");
+        p = guard_sig_hex(p, cpu.pc);
+        p = guard_sig_str(p, " tid=");
+        p = guard_sig_hex(p, static_cast<uint64_t>(static_cast<uint32_t>(cpu.tid)));
+        *p++ = '\n';
+        for (int i = 0; i < 31; ++i) {
+            p = guard_sig_str(p, "  x");
+            if (i >= 10) *p++ = static_cast<char>('0' + i / 10);
+            *p++ = static_cast<char>('0' + i % 10);
+            *p++ = '=';
+            p = guard_sig_hex(p, cpu.regs[i]);
+            *p++ = (i % 4 == 3) ? '\n' : ' ';
+        }
+        p = guard_sig_str(p, "  sp=");   p = guard_sig_hex(p, cpu.sp);
+        p = guard_sig_str(p, " lr=");    p = guard_sig_hex(p, cpu.regs[30]);
+        p = guard_sig_str(p, " tp=");    p = guard_sig_hex(p, cpu.tpidr_el0);
+        *p++ = '\n';
+        guard_sig_write(buf, static_cast<size_t>(p - buf));
+        ::_exit(139);
+    }
+    // Not a window guard fault: real host fault. Preserve prior behavior.
+    ::signal(signo, SIG_DFL);
+    ::raise(signo);
+}
 void Emulator::install_host_signal_handlers() {
     g_active_emu_ = this;
     init_signal_trace_flag();
@@ -718,6 +781,19 @@ void Emulator::install_host_signal_handlers() {
     // SIGSEGV/SIGBUS/SIGFPE/SIGILL/SIGTRAP/SIGABRT/SIGSYS are NOT
     // forwarded via host handlers — they're delivered synchronously by
     // the emulator when it detects the corresponding guest fault.
+    // EXCEPTION: in BIFROST_GUARD_ALLOCS mode a host SIGSEGV/SIGBUS can
+    // only come from a direct-window PROT_NONE guard page (the allocator
+    // guards); install the reporter so the offending guest store is named
+    // instead of a bare crash.
+    if (getenv("BIFROST_GUARD_ALLOCS")) {
+        struct sigaction ga;
+        memset(&ga, 0, sizeof(ga));
+        ga.sa_sigaction = &guard_fault_handler;
+        ga.sa_flags = SA_SIGINFO;
+        sigemptyset(&ga.sa_mask);
+        ::sigaction(SIGSEGV, &ga, nullptr);
+        ::sigaction(SIGBUS, &ga, nullptr);
+    }
     // Pre-map the sigreturn trampoline so the first signal delivery
     // doesn't pay a map_range cost on the hot path. Idempotent.
     map_sigreturn_trampoline(mem_);

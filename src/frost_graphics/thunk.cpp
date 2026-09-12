@@ -1111,6 +1111,19 @@ int64_t GraphicThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
             cpu.regs[0] = 0;
             return 0;
         }
+        if (pol == thunk::Policy::THREAD_DETACH) {
+            // SDL_DetachThread(thread): the guest promises never to wait on
+            // this thread. The handle is a GUEST-emulated thread handle, not
+            // a host SDL_Thread*, so forwarding it to host SDL would be type
+            // confusion on guest memory. Tell the emulator instead so it can
+            // detach its own host thread (a later ~std::thread on a joinable
+            // thread calls std::terminate).
+            if (impl_->sdl_thread_runner_) {
+                impl_->sdl_thread_runner_(cpu, 2, cpu.regs[0], 0, 0);
+            }
+            cpu.regs[0] = 0;
+            return 0;
+        }
     }
 
     if (!entry.host_fn) {

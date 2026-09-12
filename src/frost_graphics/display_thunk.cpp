@@ -123,6 +123,24 @@ struct DisplayThunkImpl {
         }
         return allow;
     }
+    // Strict variant for mmap_alloc'd bounces: an address that is NOT inside
+    // ANY tracked allocation (freed / untracked / reused) is never safe to
+    // touch — return 0. live_room's untracked allowance exists only for
+    // guest stack/brk structs (pNext writeback), which are never bounces; a
+    // stale bounce is always mmap_alloc'd, so "not tracked" means the range
+    // was handed back and may now hold a live guest allocation. Mirrors the
+    // gl safe_writeback_all skip-untracked rule (thunk.cpp).
+    size_t tracked_room(const std::vector<std::pair<uint64_t,uint64_t>>& live,
+                        uint64_t g, size_t want) {
+        if (!want) return 0;
+        for (const auto& kv : live) {
+            if (g >= kv.first && g - kv.first < kv.second) {
+                uint64_t room = kv.second - (g - kv.first);
+                return (want <= room) ? want : static_cast<size_t>(room);
+            }
+        }
+        return 0;
+    }
     // Push all bounces back into the host mappings (before submits/presents).
     // No snapshot when nothing is mapped: the map copy + lock is pure
     // overhead at ~10M thunk calls/s and the common case is empty.
@@ -133,7 +151,7 @@ struct DisplayThunkImpl {
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
             if (!m.map_size || !m.host_ptr) continue;
-            if (!live_room(live, m.bounce, static_cast<size_t>(m.map_size)))
+            if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never push from reused heap
             uint8_t* src = mem->guest_to_host_ptr(m.bounce);
             if (src)
@@ -150,7 +168,7 @@ struct DisplayThunkImpl {
         for (auto& kv : vk_maps_) {
             const VkMapped& m = kv.second;
             if (!m.map_size || !m.host_ptr) continue;
-            if (!live_room(live, m.bounce, static_cast<size_t>(m.map_size)))
+            if (!tracked_room(live, m.bounce, static_cast<size_t>(m.map_size)))
                 continue;  // stale bounce: never pull into reused heap
             uint8_t* dst = mem->guest_to_host_ptr(m.bounce);
             if (dst)
@@ -1430,6 +1448,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     need += vk_deep_size_one(
                         impl_->mem, args[r.arg], r.desc, scount, 0, &ok);
                     if (!ok) break;
+                    if (njobs >= 8) { ok = false; break; }
                     jobs[njobs++] = {static_cast<int>(r.arg), scount,
                                      args[r.arg], false, r.desc};
                     vk_deep_done |= 1u << r.arg;
@@ -1471,6 +1490,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     rec.on_success_only = true;
                     need = (need + 7u) & ~size_t(7);
                     need += (size_t)hcount * 8;
+                    if (vk_n_out_recs >= 4) { ok = false; break; }
                     vk_out_recs[vk_n_out_recs++] = rec;
                     vk_deep_done |= 1u << r.arg;
                     continue;
@@ -1503,6 +1523,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         need += 4;
                         vk_deep_done |= 1u << r.count_arg;
                         if (!args[r.arg] || !cnt) {
+                            if (vk_n_out_recs >= 4) { ok = false; break; }
                             vk_out_recs[vk_n_out_recs++] = rec;
                             continue;
                         }
@@ -1550,6 +1571,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                         need += bytes;
                     }
                     if (!ok) break;
+                    if (njobs >= 8 || vk_n_out_recs >= 4) { ok = false; break; }
                     // raw jobs carry a BYTE count (the fill loop reads/
                     // stages exactly j.count bytes); struct jobs carry
                     // an ELEMENT count
@@ -1713,6 +1735,7 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
                     need += vk_deep_size_one(impl_->mem, j.guest,
                                              j.desc, j.count, 0, &ok);
                 }
+                if (njobs >= 8) { ok = false; break; }
                 jobs[njobs++] = j;
             }
             if (ok && need < kVkDeepMaxBytes) {
@@ -1857,9 +1880,31 @@ int64_t DisplayThunk::dispatch(CPU& cpu, uint32_t symbol_id) {
         // All vkCmd* return void: skipping a stale-cmd call only drops
         // one recording step (stale prior state stays bound).
         if (!vk_known(impl_->vk_cmd_bufs_, args[0])) {
-            fprintf(stderr, "[vk-deep] %s: stale command buffer 0x%llx — "
-                    "skipping call\n", entry.name.c_str(),
-                    (unsigned long long)args[0]);
+            // Real driver command-buffer handles are 8-aligned host
+            // pointers (RADV e.g. 0x55e2_2f2c_4280, verified by
+            // BIFROST_THUNK_TRACE). An odd value is guest-heap corruption
+            // (the handle got byte-shifted), NOT a missed registration —
+            // report it as such so a stray "stale" doesn't misdirect the
+            // hunt, and under BIFROST_TRAP_CORRUPT stop at the FIRST
+            // corruption with guest pc/lr intact (the game otherwise dies
+            // much later, far from the writer).
+            const bool corrupt_shape = (args[0] & 7u) != 0;
+            fprintf(stderr,
+                    "[vk-deep] %s: %s command buffer 0x%llx "
+                    "(pc=0x%llx lr=0x%llx) — skipping call\n",
+                    entry.name.c_str(),
+                    corrupt_shape ? "CORRUPT/unaligned" : "stale",
+                    (unsigned long long)args[0],
+                    (unsigned long long)cpu.pc,
+                    (unsigned long long)cpu.regs[30]);
+            static const bool trap_corrupt = [] {
+                const char* e = getenv("BIFROST_TRAP_CORRUPT");
+                return e && e[0] != '0';
+            }();
+            if (corrupt_shape && trap_corrupt) {
+                fflush(stderr);
+                raise(SIGTRAP);
+            }
             vk_skip_call = true;
         }
     }
@@ -2291,23 +2336,33 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
     if (entry.spec && entry.spec->policy == thunk::Policy::VK_PRESENT) {
         if (!entry.host_fn) { cpu.regs[0] = 0xFFFFFFFDu; return true; }
         VkStage st;
-        VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();
-        read_guest_struct(mem, cpu.regs[1], pi);
+        // Read/validate the guest struct BEFORE staging: the pNext chain
+        // size must be known so st.buf.reserve() can happen before `pi`
+        // (and every staged array) is handed out — a later realloc would
+        // dangle them all.
+        VkPresentInfoH tmp{};
+        read_guest_struct(mem, cpu.regs[1], &tmp);
         // fail closed on oversize counts: leaving guest pointers in
         // place would let the host deref guest addresses (crash).
         // VK_ERROR_OUT_OF_HOST_MEMORY = -1.
-        if (pi->waitSemaphoreCount > 16 || pi->swapchainCount > 16 ||
-            pi->swapchainCount == 0) {
+        if (tmp.waitSemaphoreCount > 16 || tmp.swapchainCount > 16 ||
+            tmp.swapchainCount == 0) {
             cpu.regs[0] = static_cast<uint64_t>(static_cast<uint32_t>(-1));
             return true;
         }
+        size_t chain_need = 0;
+        if (tmp.pNext) {
+            bool ok = true;
+            chain_need = vk_deep_chain_size(mem,
+                reinterpret_cast<uint64_t>(tmp.pNext), &ok);
+            if (!ok) chain_need = kVkDeepMaxBytes;
+        }
+        st.buf.reserve(std::max<size_t>(chain_need + 4096, 65536));
+        VkPresentInfoH* pi = st.alloc<VkPresentInfoH>();
+        *pi = tmp;
         // stage known pNext nodes instead of silently dropping the chain.
         // unknown stypes truncate with a one-shot diagnostic (safe).
         if (pi->pNext) {
-            bool ok = true;
-            size_t cn = vk_deep_chain_size(mem,
-                reinterpret_cast<uint64_t>(pi->pNext), &ok);
-            (void)cn;
             void* staged = nullptr;
             vk_deep_fill_chain(mem, st,
                 reinterpret_cast<uint64_t>(pi->pNext), &staged);
@@ -2614,7 +2669,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 // No `off + sz` here: the sum wraps in u64 and a crafted
                 // range would pass. off < map_size is established above.
                 if (off >= m.map_size || sz > m.map_size - off) continue;
-                if (!impl_->live_room(flive, m.bounce + off, static_cast<size_t>(sz)))
+                if (!impl_->tracked_room(flive, m.bounce + off, static_cast<size_t>(sz)))
                     continue;  // stale bounce: never push from reused heap
                 uint8_t* src = mem->guest_to_host_ptr(m.bounce + off);
                 if (src) std::memcpy(reinterpret_cast<void*>(m.host_ptr + off), src, sz);
@@ -2658,7 +2713,7 @@ bool DisplayThunk::vk_dispatch_(CPU& cpu, const SymbolEntry& entry, bool trace) 
                 off -= m.map_offset;
                 // Same no-wrap form as the flush arm above.
                 if (off >= m.map_size || sz > m.map_size - off) continue;
-                if (!impl_->live_room(ilive, m.bounce + off, static_cast<size_t>(sz)))
+                if (!impl_->tracked_room(ilive, m.bounce + off, static_cast<size_t>(sz)))
                     continue;  // stale bounce: never pull into reused heap
                 uint8_t* dst = mem->guest_to_host_ptr(m.bounce + off);
                 if (dst) std::memcpy(dst, reinterpret_cast<const void*>(m.host_ptr + off), sz);

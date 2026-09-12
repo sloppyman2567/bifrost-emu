@@ -26,7 +26,36 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 namespace arm64emu {
+// SMC / mapping invalidation fan-out (see emulator.h). Pointer snapshot
+// under threads_mu_, invalidation after release: a target thread may be
+// inside run_block (which takes blocks_mutex_ briefly on its slow path),
+// so holding threads_mu_ across invalidate_range risks lock-order issues
+// with paths that take threads_mu_ while holding a blocks lock (none
+// today — this ordering keeps it that way).
+void Emulator::invalidate_jit_range(uint64_t addr, uint64_t size) {
+    std::vector<FrostJIT*> jits;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        if (jit_) jits.push_back(jit_.get());
+        for (auto& gt : threads_) {
+            if (gt && gt->jit) jits.push_back(gt->jit.get());
+        }
+    }
+    for (FrostJIT* j : jits) j->invalidate_range(addr, size);
+}
+void Emulator::invalidate_jit_all() {
+    std::vector<FrostJIT*> jits;
+    {
+        std::lock_guard<std::mutex> g(threads_mu_);
+        if (jit_) jits.push_back(jit_.get());
+        for (auto& gt : threads_) {
+            if (gt && gt->jit) jits.push_back(gt->jit.get());
+        }
+    }
+    for (FrostJIT* j : jits) j->invalidate_all();
+}
 // The robust-list exit walk is inlined in thread_entry below; the
 // syscall-side version in threads.cpp is authoritative — keep in sync.
 void thread_entry(Emulator* emu, Emulator::GuestThread* gt) {
@@ -728,5 +757,23 @@ int64_t Emulator::wait_sdl_thread(uint64_t handle, uint64_t status_ptr) {
     }
     if (handle) mem_.untrack_allocation(handle, 32);
     return 0;
+}
+void Emulator::detach_sdl_thread(uint64_t handle) {
+    SdlThread* keep = nullptr;
+    {
+        std::lock_guard<std::mutex> g(sdl_threads_mu_);
+        auto it = sdl_threads_.find(handle);
+        if (it == sdl_threads_.end()) return;  // unknown/NULL: SDL no-op
+        // Take the record out of the map but intentionally LEAK it: the
+        // host thread may still be inside sdl_thread_entry, which holds this
+        // pointer. SDL detach means no waiter will ever free the thread, and
+        // process exit reclaims the record + its stack/TLS.
+        keep = it->second.release();
+        sdl_threads_.erase(it);
+    }
+    // Detach the host thread so a later ~std::thread (on a still-joinable
+    // thread) can't call std::terminate. The guest handle was already
+    // dropped, so a stray SDL_WaitThread is a no-op.
+    if (keep->host_thread.joinable()) keep->host_thread.detach();
 }
 } // namespace arm64emu

@@ -578,6 +578,7 @@ extern "C" {
     void jit_store_mem16_slow(Emulator* emu, CPU* cpu, uint64_t addr, int src) {
         uint64_t buf[2] = {cpu->v_lo[src & 31], cpu->v_hi[src & 31]};
         try {
+            Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, buf, 16);
         } catch (UnmappedMemory& e) {
             (void)e;
@@ -591,6 +592,7 @@ extern "C" {
                     static_cast<unsigned long long>(addr), static_cast<unsigned long long>(val), width);
         }
         try {
+            Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             (void)e;
@@ -632,9 +634,13 @@ extern "C" {
         std::lock_guard<std::mutex> g(shard->mu);
         bool ok = cpu->excl_check(addr, width);
         if (ok) {
-            try {
-                emu->mem().write(addr, &val, width);
-            } catch (UnmappedMemory& e) {
+        try {
+            // Attribute the store to the current guest pc for BIFROST_WATCH
+            // (the JIT normally bypasses Memory::write; forced-slow stores
+            // should still carry a pc).
+            Memory::note_interp_pc(cpu->pc);
+            emu->mem().write(addr, &val, width);
+        } catch (UnmappedMemory& e) {
                 (void)e;
                 deliver_signal(*emu, *cpu, emu->signals(), BIFROST_SIGSEGV);
                 return 1;
@@ -663,6 +669,7 @@ extern "C" {
         auto shard = reinterpret_cast<Emulator::ExclMonitorShardAccess*>(emu->excl_monitor_shard_pub(addr));
         std::lock_guard<std::mutex> g(shard->mu);
         try {
+            Memory::note_interp_pc(cpu->pc);  // BIFROST_WRITE_TRACE attribution
             emu->mem().write(addr, &val, width);
         } catch (UnmappedMemory& e) {
             (void)e;
@@ -792,12 +799,19 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
         emit_byte(0x8D);
         emit_modrm_disp(idx, addr_reg, off);
     }
-    // Limit check: lim = limit. Limit is < 2^32 → 32-bit zero-extending mov.
-    int lim = (idx != R9) ? R9 : R8;
-    uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
-    emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
-    emit_cmp_reg(idx, lim);
-    size_t jbe_patch = emit_jcc_rel32_placeholder(6);
+    // BIFROST_JIT_SLOW_STORES=1: route EVERY store through the C slow path
+    // (jit_store_mem_slow → Memory::write) so BIFROST_WATCH can observe JIT
+    // stores with a pc (diagnostic; very slow).
+    static const bool slow_stores_ = getenv("BIFROST_JIT_SLOW_STORES") != nullptr;
+    size_t jbe_patch = 0;
+    if (!slow_stores_) {
+        // Limit check: lim = limit. Limit is < 2^32 → 32-bit zero-extending mov.
+        int lim = (idx != R9) ? R9 : R8;
+        uint64_t limit = Memory::DIRECT_WINDOW_SIZE - w;
+        emit_mov_imm32_zext(lim, static_cast<uint32_t>(limit));
+        emit_cmp_reg(idx, lim);
+        jbe_patch = emit_jcc_rel32_placeholder(6);
+    }
     // Slow path: call jit_store_mem_slow(emu, cpu, addr, val, width).
     // 2 pushes (src, R10) — EVEN, so emit_call_aligned needs no sub/add.
     //
@@ -812,6 +826,7 @@ void FrostJIT::emit_store_mem(int addr_reg, int32_t off, int src_reg, int w) {
     emit_call_aligned(&jit_store_mem_slow, /*num_pushed=*/2);
     emit_pop(WIN_REG);             // restore R10
     emit_pop(src_reg);             // restore val
+    if (slow_stores_) return;      // forced-slow: no fast path
     size_t jmp_past = emit_jmp_rel32_placeholder();
     // Fast path: direct window store, indexed by the address (sum).
     int32_t fast_rel = static_cast<int32_t>(code_buf_used_ - (jbe_patch + 6));

@@ -326,6 +326,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
     taken_chain_patch_off_ = 0;
     taken_chain_target_pc_ = 0;
     pending_flag_mat_.clear();
+    inlined_ranges_.clear();
     chain_entry_off_ = 0;
     num_stack_slots_ = 0;
     vec_cache_reset();
@@ -499,6 +500,7 @@ uint64_t (*FrostJIT::translate_block(Emulator& emu, uint64_t start_pc))(CPU*, Em
                     instr_count += leaf_count;
                     ir_block.count = instr_count;
                     has_inlined_leaf = true;
+                    inlined_ranges_.emplace_back(target, leaf_count);
                     block_profile.leaf_inlined++;
                     if (getenv("BIFROST_DEBUG_INLINE"))
                         fprintf(stderr, "[leaf] INLINED bl@0x%llx -> 0x%llx (%d instrs)\n",
@@ -1406,6 +1408,8 @@ emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC);
     // available at compile time, no retroactive patch needed.)
     entry.pending_flag_mat_ = std::move(pending_flag_mat_);
     pending_flag_mat_.clear();
+    entry.inlined_ranges_ = std::move(inlined_ranges_);
+    inlined_ranges_.clear();
     // Record self-loop info: if the block has a selfloop slot, patch it
     // to jump back to the block body start (skipping epilogue+dispatcher+
     // prologue). This is the single biggest win for tight loops.

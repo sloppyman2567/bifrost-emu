@@ -1217,7 +1217,7 @@ SDL_CondWait                SDL    ii            -     -              -
 SDL_CondBroadcast           SDL    i             -     -              -
 SDL_CondWaitTimeout         SDL    iii           -     -              -
 SDL_DestroyCond             SDL    i             -     -              -
-SDL_DetachThread            SDL    i             -     -              -
+SDL_DetachThread            SDL    i             -     THREAD_DETACH  -
 SDL_GetPerformanceFrequency SDL    -             -     -              -
 SDL_GetPerformanceCounter   SDL    -             -     -              -
 SDL_IsGameController        SDL    i             -     -              -

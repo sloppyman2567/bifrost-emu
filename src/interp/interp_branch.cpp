@@ -308,6 +308,21 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
             uint8_t rt  = d.rt;
             uint64_t v = (rt == 31) ? 0 : cpu.regs[rt];
             if (op0 == 3 && op1 == 3) {
+                if (crn == 7) {
+                    // EL0 cache maintenance (IC IVAU / DC CVAC et al):
+                    // the guest modified code and is publishing it. Drop
+                    // JIT translations so the new bytes execute. DC-only
+                    // ops invalidate conservatively too (rare; correctness
+                    // over precision — matching exact CRm/op2 is fragile
+                    // across ARM revisions). DC ZVA zeroing is NOT modeled
+                    // (DCZID_EL0 reports it prohibited, so guests must not
+                    // emit it). rt==31 carries no address (IALLU form) →
+                    // full flush; otherwise invalidate one 64-byte line
+                    // (CTR_EL0 IminLine=4 → 64-byte lines).
+                    if (rt == 31) invalidate_jit_all();
+                    else invalidate_jit_range(v & ~63ULL, 64);
+                    return;
+                }
                 if (crn == 4 && crm == 2 && op2 == 0) {
                     // NZCV
                     cpu.set_flag_n(v & (1u << 31));
@@ -330,6 +345,12 @@ void Emulator::execute_branch(uint32_t inst, uint64_t& next_pc, CPU& cpu, const 
                 }
                 // Other EL0-accessible sysregs we don't model: NOP.
                 return;
+            }
+            // EL1 cache maintenance (IC IALLU / DC CISW et al, op0==1):
+            // same invalidation as the EL0 forms above. rt==31 → full.
+            if (crn == 7) {
+                if (rt == 31) invalidate_jit_all();
+                else invalidate_jit_range(v & ~63ULL, 64);
             }
             // EL1+ sysregs: NOP in user mode.
             return;

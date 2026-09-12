@@ -52,13 +52,22 @@ struct DebugFlags {
     bool simd_collect = false;  // BIFROST_SIMD_COLLECT — enumerate-and-nop mode
     bool trace_mmap = false;  // BIFROST_TRACE_MMAP — mmap/munmap/mremap lines
     bool trace_madvise = false;  // BIFROST_TRACE_MADVISE — madvise lines
+    bool watch_trap = false;  // BIFROST_WATCH_TRAP — SIGTRAP (host) on the
+                              // first write hitting the BIFROST_WATCH range
     // ── capture sinks (paths) ────────────────────────────────────────
     std::string xseqlog;  // BIFROST_XSEQLOG — X wire sequence capture file
     std::string xcap;     // BIFROST_XCAP    — X capture output root
-    // ── watch range ────────────────────────────────────────────────
+    // ── watch / store-log ──────────────────────────────────────────
     std::string watch;  // BIFROST_WATCH — addr[:size] hex; log every
                         // Memory::write overlapping it with the current
                         // interp pc (heap wild-write hunt; --no-jit).
+    std::string write_trace;  // BIFROST_WRITE_TRACE=path — complete guest
+                              // store log (addr/size/tid/guest pc/value)
+    std::string write_trace_range;  // BIFROST_WRITE_TRACE_RANGE=lo:hi hex
+                                    // filter; empty = log everything
+
+    // True when a store-time guest pc is needed (watch or store log active).
+    bool need_store_pc() const { return !watch.empty() || !write_trace.empty(); }
 
     // Return the process-wide flags, parsed lazily on first use.
     static const DebugFlags& get() {
@@ -103,9 +112,12 @@ struct DebugFlags {
         f.simd_collect = all || env("BIFROST_SIMD_COLLECT");
         f.trace_mmap = all || env("BIFROST_TRACE_MMAP");
         f.trace_madvise = all || env("BIFROST_TRACE_MADVISE");
+        f.watch_trap = all || env("BIFROST_WATCH_TRAP");
         if (const char* p = std::getenv("BIFROST_XSEQLOG")) f.xseqlog = p;
         if (const char* p = std::getenv("BIFROST_XCAP"))    f.xcap    = p;
         if (const char* p = std::getenv("BIFROST_WATCH"))   f.watch   = p;
+        if (const char* p = std::getenv("BIFROST_WRITE_TRACE")) f.write_trace = p;
+        if (const char* p = std::getenv("BIFROST_WRITE_TRACE_RANGE")) f.write_trace_range = p;
         return f;
     }
 };

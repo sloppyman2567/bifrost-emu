@@ -926,6 +926,22 @@ std::vector<std::string> Emulator::build_default_guest_env() {
             envs.push_back(std::string(propagate[i]) + "=" + v);
         }
     }
+    // BIFROST_GUEST_ENV="KEY=VAL;KEY2=VAL2": debug passthrough so host env
+    // vars the curated list doesn't cover (e.g. MIMALLOC_*) can reach the
+    // guest. Split on ';'.
+    if (const char* extra = getenv("BIFROST_GUEST_ENV")) {
+        std::string s(extra);
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            size_t semi = s.find(';', pos);
+            std::string kv = s.substr(pos, semi == std::string::npos
+                                                ? std::string::npos
+                                                : semi - pos);
+            if (!kv.empty()) envs.push_back(kv);
+            if (semi == std::string::npos) break;
+            pos = semi + 1;
+        }
+    }
     return envs;
 }
 // ── vDSO loader (1.5.4-alpha) ───────────────────────────────────────
@@ -1940,6 +1956,11 @@ void Emulator::wire_thunk_sdl_thread_runner_() {
             if (op == 1) {
                 // wait: a0=thread handle, a1=status ptr (may be 0)
                 wait_sdl_thread(a0, a1);
+                return 0;
+            }
+            if (op == 2) {
+                // detach: a0=thread handle
+                detach_sdl_thread(a0);
                 return 0;
             }
             return 0;

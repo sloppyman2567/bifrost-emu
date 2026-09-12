@@ -759,6 +759,13 @@ bool FrostJIT::compile_ir_inst(const IRInst& inst) {
             int s = ensure_vreg(inst.src1, RAX);
             if (s != RAX) emit_mov_reg(RAX, s);
             int32_t off = -1;
+            if (crn == 7) {
+                // Cache maintenance (IC IVAU / DC et al): the interp
+                // MSR_SYS hook invalidates JIT translations for the
+                // published line. Route there instead of NOP-ing.
+                emit_call_interp(inst.arm_pc, false);
+                return false;
+            }
             if (op1 == 3 && crn == 13 && crm == 0 && op2 == 2) {
                 off = 808;  // TPIDR_EL0
             } else if (op1 == 3 && crn == 4 && crm == 2 && op2 == 0) {

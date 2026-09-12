@@ -249,7 +249,7 @@ enum class IROp : uint8_t {
     // TABLE, Vm (rm) is the INDEX vector (interp_fp.cpp case 0x0E000000).
     //   Vd[i] = table[index[i]]; out-of-range -> 0 (TBL) / keep old (TBX).
     //   src1 = table vreg (rn, first of nregs); src2 = index vreg (rm).
-    //   cond = (is_tbx << 1) | Q; flags_op = number of table regs
+    //   flags_op = (is_tbx << 1) | Q; imm = number of table regs
     //          (1 = TBL1/TBX1, 2 = TBL2/TBX2)
     SIMD_TBL,
     // Native SIMD INS (element, vector -> element, 1.5.4-alpha). Copies one
@@ -275,7 +275,8 @@ enum class IROp : uint8_t {
     // Element-wise min/max of adjacent pairs within each source (the
     // interp's pairwise block in interp_fp.cpp is the semantic reference).
     // Q=1: Vd = pairwise(Vn) ++ pairwise(Vm) (first half then second half);
-    // Q=0: Vd = pairwise(Vn) only, 4 result bytes, rest zero.
+    // Q=0: Vd low 8 bytes = {pairwise(Vn), pairwise(Vm)} (both sources
+    // contribute; Vm half is NOT zeroed — real-ARM semantics).
     //   src1 = source A (rn), src2 = source B (rm)
     //   width = element size in bytes (1, 2, 4 — size==3 has no valid
     //           encoding, gas rejects .1d/.2d)
@@ -359,11 +360,9 @@ enum class IROp : uint8_t {
                    // 0=N(nearest), 1=P(+inf), 2=M(-inf), 3=Z(0), 4=I(current), 5=X(exact)
     // Native FP fused multiply-add (via x86 vfmadd or decomposition)
     // FMADD:  v_lo[dest] =  v_lo[src2] * v_lo[src1] + v_lo[acc]; width=ftype
-    // FMSUB:  v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]  (= acc - src1*src2)
-    // FNMADD: v_lo[dest] = -v_lo[src2] * v_lo[src1] + v_lo[acc]  (same numerical
-    //         result as FMSUB, but IEEE 754 sign rules differ on NaN/signed-zero
-    //         inputs — must be modeled as a fused op, not decomposed)
-    // FNMSUB: v_lo[dest] = -v_lo[src2] * v_lo[src1] - v_lo[acc]  (= -(src1*src2 + acc))
+    // FMSUB:  v_lo[dest] =  v_lo[acc] - v_lo[src2] * v_lo[src1]; width=ftype
+    // FNMADD: v_lo[dest] = -(v_lo[src2] * v_lo[src1] + v_lo[acc]); width=ftype
+    // FNMSUB: v_lo[dest] =  v_lo[src2] * v_lo[src1] - v_lo[acc]; width=ftype
     //
     // On x86 with FMA3 (Haswell+, 2013+): emit vfmadd231ss/sd (FMADD),
     // vfmsub231ss/sd (FMSUB), vfnmadd231ss/sd (FNMADD), vfnmsub231ss/sd

@@ -5,6 +5,7 @@
 // read/write paths short-circuit to the direct window (low 4 GiB) without
 // touching the mutex at all.
 #include "core/memory.h"
+#include "debug_flags.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -38,6 +39,24 @@ const WatchRange& watch_range() {
         r.on = true;
         r.lo = addr;
         r.hi = addr + size;
+        return r;
+    }();
+    return w;
+}
+// BIFROST_WRITE_TRACE_RANGE=lo:hi (hex): restrict the store log to one
+// region. Parsed once; `on == false` means log every write.
+const WatchRange& trace_range() {
+    static const WatchRange w = [] {
+        WatchRange r;
+        const std::string& s = dbg().write_trace_range;
+        if (s.empty()) return r;
+        char* end = nullptr;
+        uint64_t lo = strtoull(s.c_str(), &end, 0);
+        uint64_t hi = ~0ull;
+        if (end && *end == ':') hi = strtoull(end + 1, nullptr, 0);
+        r.on = true;
+        r.lo = lo;
+        r.hi = hi;
         return r;
     }();
     return w;
@@ -248,29 +267,89 @@ bool Memory::is_mapped(uint64_t addr, uint64_t size) const {
 }
 void Memory::write(uint64_t addr, const void* src, size_t n, PageCache* pc) {
     if (n == 0) return;
-    // BIFROST_WATCH: attribute stores overlapping the watch range.
+    // BIFROST_WATCH: attribute stores overlapping the watch range. Log the
+    // first 8 bytes of the written value too — the heap-stomp hunt needs to
+    // spot the offending VALUE (e.g. a negative extents 0xC700 or a shifted
+    // handle), not just the address.
     {
         const WatchRange& wr = watch_range();
-        if (wr.on && addr < wr.hi && addr + n > wr.lo)
-            fprintf(stderr, "[watch] w 0x%llx n=%zu pc=0x%llx\n",
+        // BIFROST_WATCH_EXTENTS: temporary vkQuake hunt — log ONLY the four
+        // CalcSurfaceExtents extent/texturemin stores (guest pcs) with the
+        // value, so the run isn't drowned by unrelated scalar stores and can
+        // actually reach the AllocBlock fault.
+        // BIFROST_WATCH_VAL=0xc700: log any write whose first 8 bytes contain
+        // the 16-bit value anywhere (the stomp that writes the corrupt
+        // extents). Near-zero volume, so the run reaches the fault.
+        static const uint32_t watch_val_ = []() -> uint32_t {
+            const char* s = getenv("BIFROST_WATCH_VAL");
+            return s ? static_cast<uint32_t>(strtoul(s, nullptr, 0)) : 0;
+        }();
+        bool val_match = false;
+        if (watch_val_) {
+            uint64_t vv = 0;
+            size_t vn = n < 8 ? n : 8;
+            std::memcpy(&vv, src, vn);
+            for (size_t b = 0; b + 2 <= vn; b++)
+                if (static_cast<uint16_t>(vv >> (b * 8)) == watch_val_) { val_match = true; break; }
+        }
+        // BIFROST_WATCH_BADEXT: value-agnostic extents/stomp hunt. With
+        // BIFROST_JIT_SLOW_STORES=1 every store lands here, so flag any
+        // 2-byte store of a value that could drive AllocBlock (|v| > 4096;
+        // legitimate extents/texturemins for small maps are tiny). No guess
+        // about the exact corrupt value.
+        static const bool bad_ext_ = getenv("BIFROST_WATCH_BADEXT") != nullptr;
+        bool bad_ext = false;
+        if (bad_ext_ && n == 2) {
+            int16_t sv;
+            std::memcpy(&sv, src, 2);
+            if (sv < -4096 || sv > 4096) bad_ext = true;
+        }
+        // n<=8 only by default: the heap-stomp hunt cares about scalar
+        // stores (handles, extents, pointers); logging every large memcpy
+        // drowns the trace. BIFROST_WATCH_TRAP widens to every width so the
+        // offending store is caught regardless of size.
+        const bool range_hit = wr.on && addr < wr.hi && addr + n > wr.lo;
+        if (val_match || bad_ext || (range_hit && (n <= 8 || dbg().watch_trap))) {
+            uint64_t v0 = 0;
+            size_t vn = n < 8 ? n : 8;
+            std::memcpy(&v0, src, vn);
+            fprintf(stderr, "[watch] w 0x%llx n=%zu v=0x%llx pc=0x%llx\n",
                     (unsigned long long)addr, n,
+                    (unsigned long long)v0,
                     (unsigned long long)t_watch_pc);
+            fflush(stderr);
+        }
+        // BIFROST_WATCH_TRAP: stop dead at the first write into the watched
+        // range. The guest pc has just been printed — that IS the stomping
+        // store. Host SIGILL here is intentional (loud, unambiguous).
+        if (range_hit && dbg().watch_trap) __builtin_trap();
     }
-    // BIFROST_WRITE_TRACE=1: log every host-side write call (addr,size).
-    // Used to diff the write streams of a JIT run vs an interpreter run —
-    // host-side writers (thunks, stdio shims, signal frames) are invisible
-    // to all block-level verification, so a thunk that writes N bytes too
-    // many can only be caught by this differential trace.
+    // BIFROST_WRITE_TRACE=<path>: log every guest store (addr, size, tid,
+    // guest pc, value). With an interpreter run plus BIFROST_JIT_SLOW_STORES
+    // on a JIT run this is a COMPLETE store stream (JIT inline-window stores
+    // bypass write() otherwise), so a clean-vs-bad differential localizes a
+    // stomp to the exact writing instruction. BIFROST_WRITE_TRACE_RANGE=lo:hi
+    // narrows the log to one region.
     static const int wt_fd = [] {
-        const char* s = getenv("BIFROST_WRITE_TRACE");
-        return s ? ::open(s, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
+        if (dbg().write_trace.empty()) return -1;
+        return ::open(dbg().write_trace.c_str(),
+                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     }();
     static thread_local const long wt_tid = wt_fd >= 0 ? ::syscall((long)186) : 0;
     if (wt_fd >= 0) {
-        char rec[80];
-        int len = snprintf(rec, sizeof(rec), "w %llx %zx t%ld\n",
-                           (unsigned long long)addr, n, wt_tid);
-        (void)::write(wt_fd, rec, len);
+        const WatchRange& tr = trace_range();
+        if (!tr.on || (addr < tr.hi && addr + n > tr.lo)) {
+            uint64_t v0 = 0;
+            size_t vn = n < 8 ? n : 8;
+            std::memcpy(&v0, src, vn);
+            char rec[128];
+            int len = snprintf(rec, sizeof(rec),
+                               "w 0x%llx n=0x%zx t%ld pc=0x%llx v=0x%llx\n",
+                               (unsigned long long)addr, n, wt_tid,
+                               (unsigned long long)t_watch_pc,
+                               (unsigned long long)v0);
+            (void)::write(wt_fd, rec, len);
+        }
     }
     // Fast path: direct window for addresses < 4 GiB.
     // BUGFIX: avoid integer overflow. `addr + n` can wrap to a small
@@ -567,6 +646,30 @@ uint64_t Memory::mmap_alloc(uint64_t size, uint64_t hint, bool noreserve) {
     }
     // Track total pages atomically (relaxed — no cross-thread sync needed).
     total_pages_.fetch_add(pages_added, std::memory_order_relaxed);
+    // BIFROST_GUARD_ALLOCS=1: append a PROT_NONE guard page right after
+    // each bump-path window allocation so an out-of-bounds guest access
+    // faults at the offending store (reported by the guard-fault handler
+    // in signal.cpp) instead of silently shredding the next chunk. Only
+    // anonymous bump allocations are guarded: reused ranges, MAP_FIXED
+    // hints, above-window and MAP_NORESERVE mappings are left alone (their
+    // tail page may belong to a live neighbour). The guard page is never
+    // entered into allocations_/free_ranges_ — deliberately leaked for the
+    // debug run so it can never be handed out while PROT_NONE. It IS in
+    // guard_pages_, so snapshot/madvise/reuse skip it, and
+    // mmap_fixed_replace restores it if a later MAP_FIXED covers it.
+    static const bool guard_allocs_ = getenv("BIFROST_GUARD_ALLOCS") != nullptr;
+    if (guard_allocs_ && !reused && hint == 0 && !noreserve && direct_window_ &&
+        base + aligned_size + PAGE_SIZE <= DIRECT_WINDOW_SIZE) {
+        const uint64_t gpage = base + aligned_size;  // page-aligned
+        const uint64_t stack_bottom = stack_top_ - STACK_SIZE;
+        const bool over_stack = gpage < stack_top_ && gpage + PAGE_SIZE > stack_bottom;
+        if (!over_stack &&
+            ::mprotect(direct_window_ + gpage, PAGE_SIZE, PROT_NONE) == 0) {
+            guard_pages_.insert(gpage / PAGE_SIZE);
+            // Reserve the guard VA so the bump allocator never reuses it.
+            if (gpage + PAGE_SIZE > mmap_next_) mmap_next_ = gpage + PAGE_SIZE;
+        }
+    }
     allocations_[base] = aligned_size;
     g_memstats_cum_alloc.fetch_add(aligned_size, std::memory_order_relaxed);
     if (alloc_trace_)
@@ -617,6 +720,19 @@ uint64_t Memory::mmap_fixed_replace(uint64_t addr, uint64_t size, bool noreserve
     for (const auto& h : hits) {
         const uint64_t b = h.first;
         const uint64_t e = b + h.second;
+        // BIFROST_MAPFIX_TRACE: log every live allocation a MAP_FIXED
+        // replaces (mimalloc commits/decommits arenas this way; an eviction
+        // of a live large allocation is the heap-overlap suspect).
+        static const bool mapfix_trace_ =
+            getenv("BIFROST_MAPFIX_TRACE") != nullptr;
+        if (mapfix_trace_)
+            fprintf(stderr,
+                    "[mapfix] fixed [0x%llx..0x%llx) %s evicts live "
+                    "[0x%llx..0x%llx) len=%llu\n",
+                    (unsigned long long)lo, (unsigned long long)hi,
+                    zero_contents ? "zero" : "keep",
+                    (unsigned long long)b, (unsigned long long)e,
+                    (unsigned long long)h.second);
         allocations_.erase(b);
         const uint64_t flo = (lo > b) ? lo : b;
         const uint64_t fhi = (hi < e) ? hi : e;
